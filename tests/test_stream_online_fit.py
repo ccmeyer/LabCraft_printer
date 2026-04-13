@@ -257,3 +257,69 @@ def test_fit_online_stream_flow_phase_is_json_serializable():
 
     assert isinstance(encoded, str)
     assert "warning_min_points_only" in encoded
+
+
+def test_fit_online_stream_flow_phase_applies_conservative_settling_aware_late12_rule():
+    blocks = []
+    delays = _delay_schedule(15, step_us=100)
+    volumes = [
+        12.0,
+        14.0,
+        16.0,
+        18.0,
+        20.0,
+        22.0,
+        22.7,
+        23.4,
+        24.1,
+        24.8,
+        28.0,
+        31.2,
+        34.4,
+        37.6,
+        40.8,
+    ]
+    for delay_from_emergence_us, volume_nl in zip(delays, volumes):
+        blocks.append((delay_from_emergence_us, [volume_nl], None))
+    measurements, delay_summaries = _flow_dataset_from_blocks(blocks)
+
+    default_result = mod.fit_online_stream_flow_phase(
+        measurements=measurements,
+        delay_summaries=delay_summaries,
+    )
+    disabled_result = mod.fit_online_stream_flow_phase(
+        measurements=measurements,
+        delay_summaries=delay_summaries,
+        quality_policy={"settling_aware_fit_enabled": False},
+    )
+
+    assert default_result["settling_aware_fit_enabled"] is True
+    assert default_result["settling_aware_fit_applied"] is True
+    assert default_result["settling_aware_fit_rule_name"] == "conservative_frontloaded_late12"
+    assert default_result["flow_fit_point_count"] == 12
+    assert default_result["flow_fit_delay_start_from_emergence_us"] == 950
+    assert default_result["flow_rate_nl_per_us"] > disabled_result["flow_rate_nl_per_us"]
+    assert default_result["settling_aware_fit_early_vs_late_pct"] > 2.0
+    assert default_result["settling_aware_fit_mid_dev"] < 0.0
+    assert "flow_fit_settling_aware_late12_applied" in default_result["warnings"]
+
+    assert disabled_result["settling_aware_fit_enabled"] is False
+    assert disabled_result["settling_aware_fit_applied"] is False
+    assert disabled_result["flow_fit_point_count"] == 14
+
+
+def test_fit_online_stream_flow_phase_leaves_linear_trace_on_global_fit_when_rule_enabled():
+    blocks = []
+    for delay_from_emergence_us in _delay_schedule(13):
+        volume_nl = (0.02 * delay_from_emergence_us) + 1.5
+        blocks.append((delay_from_emergence_us, [volume_nl], None))
+    measurements, delay_summaries = _flow_dataset_from_blocks(blocks)
+
+    result = mod.fit_online_stream_flow_phase(
+        measurements=measurements,
+        delay_summaries=delay_summaries,
+    )
+
+    assert result["settling_aware_fit_enabled"] is True
+    assert result["settling_aware_fit_applied"] is False
+    assert result["flow_fit_point_count"] == 13

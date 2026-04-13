@@ -6393,7 +6393,9 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         return int(self.flow_plan.get("target_delay_count") or self.flow_plan.get("point_count") or 0)
 
     def _flow_fit_quality_policy(self) -> dict:
-        return dict(self.flow_plan or {})
+        policy = dict(self.flow_plan or {})
+        policy.update(dict(self.analysis_config or {}))
+        return policy
 
     def _flow_extension_confidence_floor(self) -> float:
         try:

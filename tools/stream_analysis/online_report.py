@@ -537,8 +537,12 @@ def _replay_online_stream_run_from_frame_rows(
     tail_fit_artifact: dict,
     frame_rows: list[dict],
     correction_context: dict | None = None,
+    flow_fit_policy_override: dict | None = None,
 ) -> dict:
     stored_tail_plan = dict(tail_fit_artifact.get("tail_plan") or {})
+    quality_policy = dict(plan_snapshot.get("analysis_config") or {})
+    if isinstance(flow_fit_policy_override, dict):
+        quality_policy.update(dict(flow_fit_policy_override))
     flow_measurements = online_replay_mod._accepted_measurements(
         frame_rows,
         phases=("flow_rate",),
@@ -550,6 +554,7 @@ def _replay_online_stream_run_from_frame_rows(
     replay_flow_fit = online_fit_mod.fit_online_stream_flow_phase(
         measurements=flow_measurements,
         delay_summaries=flow_delay_summaries,
+        quality_policy=quality_policy,
     )
 
     baseline_width_px = _float_or_none(replay_flow_fit.get("steady_width_baseline_px"))
@@ -596,6 +601,7 @@ def _replay_corrected_online_stream_run(
     run_dir: Path,
     *,
     correction_cache: dict | None = None,
+    flow_fit_policy_override: dict | None = None,
 ) -> dict:
     plan_snapshot = _load_json(run_dir / "plan_snapshot.json")
     flow_fit_artifact = _load_json(run_dir / "flow_fit.json")
@@ -621,6 +627,7 @@ def _replay_corrected_online_stream_run(
         tail_fit_artifact=tail_fit_artifact,
         frame_rows=corrected_frame_rows,
         correction_context=correction_context,
+        flow_fit_policy_override=flow_fit_policy_override,
     )
 
 
@@ -629,6 +636,7 @@ def _replay_runtime_rgb_fix_online_stream_run(
     run_dir: Path,
     *,
     correction_cache: dict | None = None,
+    flow_fit_policy_override: dict | None = None,
 ) -> dict:
     plan_snapshot = _load_json(run_dir / "plan_snapshot.json")
     flow_fit_artifact = _load_json(run_dir / "flow_fit.json")
@@ -653,6 +661,7 @@ def _replay_runtime_rgb_fix_online_stream_run(
         tail_fit_artifact=tail_fit_artifact,
         frame_rows=corrected_frame_rows,
         correction_context=correction_context,
+        flow_fit_policy_override=flow_fit_policy_override,
     )
 
 
@@ -985,6 +994,7 @@ def _run_context(
     density_g_per_ml: float | int = 1.0,
     correction_mode: str | None = None,
     correction_cache: dict | None = None,
+    flow_fit_policy_override: dict | None = None,
 ) -> dict:
     correction_mode = _normalized_correction_mode(correction_mode)
     run_id = _clean_text(metadata_row.get("Dataset name"))
@@ -997,6 +1007,7 @@ def _run_context(
             experiment_root,
             run_dir,
             correction_cache=correction_cache,
+            flow_fit_policy_override=flow_fit_policy_override,
         )
         frame_rows = list(corrected_replay.get("frame_rows") or [])
         fit = dict(corrected_replay.get("fit") or {})
@@ -1007,6 +1018,7 @@ def _run_context(
             experiment_root,
             run_dir,
             correction_cache=correction_cache,
+            flow_fit_policy_override=flow_fit_policy_override,
         )
         frame_rows = list(corrected_replay.get("frame_rows") or [])
         fit = dict(corrected_replay.get("fit") or {})
@@ -1147,6 +1159,7 @@ def _export_report_from_contexts(
     density_g_per_ml: float | int = 1.0,
     correction_mode: str | None = None,
     correction_rule: dict | None = None,
+    flow_fit_policy_override: dict | None = None,
 ) -> dict:
     stage_dir = Path(stage_dir).expanduser().resolve()
     stage_dir.mkdir(parents=True, exist_ok=True)
@@ -1210,6 +1223,9 @@ def _export_report_from_contexts(
         "gravimetric_density_g_per_ml": float(_validate_density_g_per_ml(density_g_per_ml)),
         "correction_mode": correction_mode,
         "correction_rule": None if correction_rule is None else dict(correction_rule),
+        "flow_fit_policy_override": (
+            None if flow_fit_policy_override is None else dict(flow_fit_policy_override)
+        ),
         "run_count": len(rendered_summary_rows),
         "condition_count": len(rendered_condition_rows),
         "paths": {
@@ -1778,10 +1794,16 @@ def export_online_stream_experiment_report(
     run_id: str | None = None,
     density_g_per_ml: float | int = 1.0,
     correction_mode: str | None = None,
+    settling_aware_fit_enabled: bool | None = None,
 ):
     experiment_root = dataset_mod.resolve_experiment_root(experiment_root)
     density_g_per_ml = _validate_density_g_per_ml(density_g_per_ml)
     correction_mode = _normalized_correction_mode(correction_mode)
+    flow_fit_policy_override = (
+        None
+        if settling_aware_fit_enabled is None
+        else {"settling_aware_fit_enabled": bool(settling_aware_fit_enabled)}
+    )
     stage_dir = (
         Path(output_root).expanduser().resolve()
         if output_root is not None
@@ -1813,6 +1835,7 @@ def export_online_stream_experiment_report(
             density_g_per_ml=density_g_per_ml,
             correction_mode=correction_mode,
             correction_cache=correction_cache,
+            flow_fit_policy_override=flow_fit_policy_override,
         )
         for row in metadata_rows
     ]
@@ -1823,6 +1846,7 @@ def export_online_stream_experiment_report(
         run_id_filter=run_id,
         density_g_per_ml=density_g_per_ml,
         correction_mode=correction_mode,
+        flow_fit_policy_override=flow_fit_policy_override,
         correction_rule=(
             dict(chroma_proto_mod.SELECTED_V2_RULE)
             if correction_mode == CORRECTION_MODE_CHROMA_EDGE_V2

@@ -18,6 +18,9 @@ def _resolved_analysis_config(config: dict | None = None) -> dict:
     merged = dict(online_cal_mod.DEFAULT_ONLINE_STREAM_ANALYSIS_CONFIG)
     for key, default_value in online_cal_mod.DEFAULT_ONLINE_STREAM_ANALYSIS_CONFIG.items():
         if isinstance(config, dict) and key in config:
+            if isinstance(default_value, bool):
+                merged[key] = bool(config.get(key))
+                continue
             if isinstance(default_value, float):
                 try:
                     merged[key] = float(config.get(key))

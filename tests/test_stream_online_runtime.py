@@ -502,6 +502,7 @@ def test_attached_optical_summary_is_inactive_far_from_lower_fov_even_with_poor_
         lower_row_fraction=0.25,
         config=mod._resolved_analysis_config(None),
         geometry_assessable=True,
+        frame_color_order="bgr",
     )
 
     assert optical["flow_optical_confidence_active"] is False
@@ -530,6 +531,7 @@ def test_attached_optical_summary_lowers_confidence_when_active_near_lower_fov()
         lower_row_fraction=0.25,
         config=mod._resolved_analysis_config(None),
         geometry_assessable=True,
+        frame_color_order="bgr",
     )
 
     assert optical["flow_optical_confidence_active"] is True

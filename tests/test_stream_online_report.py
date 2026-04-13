@@ -309,3 +309,65 @@ def test_export_online_stream_report_default_path_does_not_use_chroma_correction
     assert payload["correction_mode"] is None
     assert payload["correction_rule"] is None
     assert Path(payload["output_root"]).name == mod.STAGE_DIRNAME
+
+
+def test_export_online_stream_report_runtime_rgb_fix_passes_settling_override(tmp_path, monkeypatch):
+    pytest.importorskip("matplotlib")
+
+    exp_dir = tmp_path / "Stream_report_runtime_rgb_fix-20260413_120000"
+    process_root = exp_dir / "calibration_recordings" / dataset_mod.ONLINE_STREAM_PROCESS_NAME
+    run_dir = process_root / "run_001"
+    run = _make_online_run(
+        process_root,
+        run_id="run_001",
+        replicate_index=1,
+        gravimetric_nl=90.0,
+        predicted_volume_nl=84.0,
+        tail_start_delay_us=4200,
+        first_detachment_delay_us=4400,
+    )
+    _write_metadata_csv(exp_dir, [run["metadata_row"]])
+
+    captured = {}
+
+    def _fake_runtime_rgb_fix_replay(*args, **kwargs):
+        captured["flow_fit_policy_override"] = kwargs.get("flow_fit_policy_override")
+        return {
+            "frame_rows": list(mod._iter_jsonl(run_dir / "frames.jsonl")),
+            "fit": {
+                "fit_status": "ok",
+                "flow_rate_nl_per_us": 0.02,
+                "flow_intercept_nl": 2.0,
+                "steady_rate_ci95_low_nl_per_us": 0.019,
+                "steady_rate_ci95_high_nl_per_us": 0.021,
+                "steady_rate_ci95_relative_width": 0.10,
+                "settling_aware_fit_enabled": False,
+                "settling_aware_fit_applied": False,
+            },
+            "tail_result": {
+                "predicted_volume_nl": 86.0,
+                "tail_phase": {
+                    "status": "ok",
+                    "tail_start_selection_method": "earliest_transition_before_confirmed_collapse",
+                    "tail_start_delay_from_emergence_us": 4200,
+                    "confirmed_collapse_delay_from_emergence_us": 4300,
+                    "last_plateau_delay_from_emergence_us": 4100,
+                    "landmark_reason": "separated_from_nozzle",
+                },
+            },
+            "correction_context": {
+                "frame_color_order": "bgr",
+            },
+        }
+
+    monkeypatch.setattr(mod, "_replay_runtime_rgb_fix_online_stream_run", _fake_runtime_rgb_fix_replay)
+
+    payload = mod.export_online_stream_experiment_report(
+        exp_dir,
+        correction_mode="runtime_rgb_fix",
+        settling_aware_fit_enabled=False,
+    )
+
+    assert captured["flow_fit_policy_override"] == {"settling_aware_fit_enabled": False}
+    assert payload["correction_mode"] == "runtime_rgb_fix"
+    assert payload["flow_fit_policy_override"] == {"settling_aware_fit_enabled": False}

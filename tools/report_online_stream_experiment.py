@@ -39,6 +39,24 @@ def main(argv: list[str] | None = None) -> int:
         default=1.0,
         help="Gravimetric fluid density in g/mL used to convert mg to nL. Defaults to 1.0.",
     )
+    parser.add_argument(
+        "--correction-mode",
+        choices=["none", "chroma_edge_v2", "runtime_rgb_fix"],
+        default="none",
+        help=(
+            "Optional replay correction mode. Use runtime_rgb_fix to recompute from saved images "
+            "with the corrected runtime path."
+        ),
+    )
+    parser.add_argument(
+        "--settling-aware-fit",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Enable or disable the conservative settling-aware late-window flow-fit rule when "
+            "the report is recomputed. Defaults to the runtime/replay default."
+        ),
+    )
     args = parser.parse_args(argv)
 
     payload = online_report_mod.export_online_stream_experiment_report(
@@ -46,6 +64,8 @@ def main(argv: list[str] | None = None) -> int:
         output_root=args.output_root,
         run_id=args.run_id,
         density_g_per_ml=args.density_g_per_ml,
+        correction_mode=(None if args.correction_mode == "none" else args.correction_mode),
+        settling_aware_fit_enabled=args.settling_aware_fit,
     )
     dataset_mod._print_json(payload)
     return 0

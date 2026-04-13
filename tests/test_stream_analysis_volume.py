@@ -70,6 +70,16 @@ def test_um3_to_nl_converts_expected():
     assert mod._um3_to_nl(1_000_000.0) == 1.0
 
 
+def test_row_volume_uses_inclusive_edge_span():
+    edge_row = {"x_left_px": 50, "x_right_px": 60}
+
+    expected_radius_px = 5.5
+    expected_radius_um = expected_radius_px * float(mod.PIXEL_SIZE_UM)
+    expected_um3 = math.pi * (expected_radius_um**2) * float(mod.PIXEL_SIZE_UM)
+
+    assert math.isclose(mod._row_volume_um3(edge_row), expected_um3, rel_tol=1e-9)
+
+
 def test_component_volume_rows_sum_when_components_overlap_in_y():
     component_rows = [
         {

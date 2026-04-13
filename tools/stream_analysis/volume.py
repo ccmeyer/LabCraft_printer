@@ -113,7 +113,9 @@ def _capture_key(row: dict):
 
 
 def _row_volume_um3(edge_row: dict):
-    radius_px = max(0.0, (float(edge_row["x_right_px"]) - float(edge_row["x_left_px"])) / 2.0)
+    # Edge traces are inclusive pixel bounds, so convert the occupied span to
+    # diameter with a +1 px width before halving to a radius.
+    radius_px = max(0.0, (float(edge_row["x_right_px"]) - float(edge_row["x_left_px"]) + 1.0) / 2.0)
     radius_um = radius_px * float(PIXEL_SIZE_UM)
     return math.pi * (radius_um**2) * float(PIXEL_SIZE_UM)
 

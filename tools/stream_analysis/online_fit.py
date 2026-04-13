@@ -19,6 +19,11 @@ DEFAULT_ONLINE_FLOW_FIT_POLICY = {
     "min_delays_for_outlier_prune": 4,
     "outlier_local_deviation_floor_nl": 0.75,
     "outlier_improvement_fraction_min": 0.20,
+    "settling_aware_fit_enabled": True,
+    "settling_aware_early_window_points": 6,
+    "settling_aware_late_window_points": 12,
+    "settling_aware_early_vs_late_pct_min": 2.0,
+    "settling_aware_mid_dev_max": 0.0,
 }
 
 _CENTRAL_RATE_TOL = 1e-12
@@ -70,6 +75,9 @@ def _resolved_quality_policy(policy: dict | None = None) -> dict:
     merged = dict(DEFAULT_ONLINE_FLOW_FIT_POLICY)
     for key, default_value in DEFAULT_ONLINE_FLOW_FIT_POLICY.items():
         if not isinstance(policy, dict) or key not in policy:
+            continue
+        if isinstance(default_value, bool):
+            merged[key] = bool(policy.get(key))
             continue
         if isinstance(default_value, int):
             merged[key] = max(0, _to_int(policy.get(key), default_value))
@@ -498,6 +506,101 @@ def _local_interpolation_deviation_candidates(points: list[dict]) -> list[dict]:
     return candidates
 
 
+def _normalized_trace_mid_dev(points: list[dict]) -> float | None:
+    if len(points) < 3:
+        return None
+    x_values = np.asarray(
+        [_to_float_or_none(point.get("delay_from_emergence_us")) for point in points],
+        dtype=float,
+    )
+    y_values = np.asarray(
+        [_to_float_or_none(point.get("median_visible_volume_nl")) for point in points],
+        dtype=float,
+    )
+    if (
+        np.any(~np.isfinite(x_values))
+        or np.any(~np.isfinite(y_values))
+        or float(x_values[-1]) <= float(x_values[0])
+        or float(y_values[-1]) == float(y_values[0])
+    ):
+        return None
+    normalized_x = (x_values - float(x_values[0])) / float(float(x_values[-1]) - float(x_values[0]))
+    normalized_y = (y_values - float(y_values[0])) / float(float(y_values[-1]) - float(y_values[0]))
+    return float(np.interp(0.5, normalized_x, normalized_y) - 0.5)
+
+
+def _maybe_apply_settling_aware_late_window(
+    accepted_delay_points: list[dict],
+    *,
+    global_fit_metrics: dict | None,
+    policy: dict,
+) -> dict:
+    late_window_points = int(
+        max(
+            int(policy["min_accepted_delays"]),
+            int(policy["settling_aware_late_window_points"]),
+        )
+    )
+    early_window_points = int(max(2, _to_int(policy.get("settling_aware_early_window_points"), 6)))
+    result = {
+        "rule_name": "conservative_frontloaded_late12",
+        "enabled": bool(policy.get("settling_aware_fit_enabled")),
+        "applied": False,
+        "fit_points": [dict(point) for point in list(accepted_delay_points or [])],
+        "fit_metrics": dict(global_fit_metrics or {}),
+        "early_vs_late_pct": None,
+        "mid_dev": _normalized_trace_mid_dev(accepted_delay_points),
+        "base_flow_rate_nl_per_us": _to_float_or_none(
+            None if global_fit_metrics is None else global_fit_metrics.get("flow_rate_nl_per_us")
+        ),
+        "rate_delta_pct_vs_base": None,
+    }
+    if not bool(policy.get("settling_aware_fit_enabled")):
+        return result
+    if len(accepted_delay_points) < int(late_window_points) or len(accepted_delay_points) < int(early_window_points):
+        return result
+
+    early_fit_metrics = _fit_window_metrics(
+        [dict(point) for point in accepted_delay_points[:early_window_points]],
+        policy=policy,
+    )
+    late_fit_points = [dict(point) for point in accepted_delay_points[-late_window_points:]]
+    late_fit_metrics = _fit_window_metrics(late_fit_points, policy=policy)
+    if early_fit_metrics is None or late_fit_metrics is None:
+        return result
+
+    early_rate = _to_float_or_none(early_fit_metrics.get("flow_rate_nl_per_us"))
+    late_rate = _to_float_or_none(late_fit_metrics.get("flow_rate_nl_per_us"))
+    if early_rate in (None, 0.0) or late_rate in (None, 0.0):
+        return result
+
+    early_vs_late_pct = float((float(early_rate) / float(late_rate) - 1.0) * 100.0)
+    result["early_vs_late_pct"] = early_vs_late_pct
+    if (
+        result["mid_dev"] is None
+        or float(early_vs_late_pct) <= float(policy["settling_aware_early_vs_late_pct_min"])
+        or float(result["mid_dev"]) >= float(policy["settling_aware_mid_dev_max"])
+    ):
+        return result
+
+    result["applied"] = True
+    result["fit_points"] = late_fit_points
+    result["fit_metrics"] = dict(late_fit_metrics or {})
+    if (
+        result["base_flow_rate_nl_per_us"] not in (None, 0.0)
+        and _to_float_or_none(late_fit_metrics.get("flow_rate_nl_per_us")) is not None
+    ):
+        result["rate_delta_pct_vs_base"] = float(
+            (
+                float(late_fit_metrics["flow_rate_nl_per_us"])
+                / float(result["base_flow_rate_nl_per_us"])
+                - 1.0
+            )
+            * 100.0
+        )
+    return result
+
+
 def _maybe_prune_flow_fit_outlier(
     points: list[dict],
     *,
@@ -670,6 +773,13 @@ def fit_online_stream_flow_phase(
         "flow_fit_dropped_outlier_delay_us": None,
         "flow_fit_dropped_outlier_delay_from_emergence_us": None,
         "flow_fit_dropped_outlier_local_deviation_nl": None,
+        "settling_aware_fit_enabled": bool(policy["settling_aware_fit_enabled"]),
+        "settling_aware_fit_applied": False,
+        "settling_aware_fit_rule_name": "conservative_frontloaded_late12",
+        "settling_aware_fit_early_vs_late_pct": None,
+        "settling_aware_fit_mid_dev": None,
+        "settling_aware_fit_rate_delta_pct_vs_base": None,
+        "settling_aware_fit_base_flow_rate_nl_per_us": None,
         "warnings": [],
     }
 
@@ -685,9 +795,9 @@ def fit_online_stream_flow_phase(
         accepted_delay_points,
         policy=policy,
     )
-    fit_points = [dict(point) for point in prune_result["points"]]
-    fit_metrics = _fit_window_metrics(fit_points, policy=policy)
-    if fit_metrics is None:
+    global_fit_points = [dict(point) for point in prune_result["points"]]
+    global_fit_metrics = _fit_window_metrics(global_fit_points, policy=policy)
+    if global_fit_metrics is None:
         warnings = ["flow_fit_failed"]
         if str(prune_result.get("flow_fit_outlier_prune_status")) == "dropped_isolated_point":
             warnings.append("flow_fit_outlier_pruned")
@@ -709,6 +819,31 @@ def fit_online_stream_flow_phase(
                 "warnings": _unique_strings(warnings),
             },
         }
+
+    settling_fit = _maybe_apply_settling_aware_late_window(
+        accepted_delay_points,
+        global_fit_metrics=global_fit_metrics,
+        policy=policy,
+    )
+    fit_points = [dict(point) for point in global_fit_points]
+    fit_metrics = dict(global_fit_metrics or {})
+    flow_fit_outlier_prune_status = str(
+        prune_result.get("flow_fit_outlier_prune_status") or "not_attempted"
+    )
+    flow_fit_dropped_outlier_delay_us = _to_int(prune_result.get("flow_fit_dropped_outlier_delay_us"))
+    flow_fit_dropped_outlier_delay_from_emergence_us = _to_int(
+        prune_result.get("flow_fit_dropped_outlier_delay_from_emergence_us")
+    )
+    flow_fit_dropped_outlier_local_deviation_nl = _to_float_or_none(
+        prune_result.get("flow_fit_dropped_outlier_local_deviation_nl")
+    )
+    if bool(settling_fit.get("applied")):
+        fit_points = [dict(point) for point in settling_fit["fit_points"]]
+        fit_metrics = dict(settling_fit["fit_metrics"] or global_fit_metrics or {})
+        flow_fit_outlier_prune_status = "skipped_settling_aware_late_window"
+        flow_fit_dropped_outlier_delay_us = None
+        flow_fit_dropped_outlier_delay_from_emergence_us = None
+        flow_fit_dropped_outlier_local_deviation_nl = None
 
     confidence = _steady_fit_confidence_from_points(
         fit_points,
@@ -751,6 +886,8 @@ def fit_online_stream_flow_phase(
         warnings.append("flow_fit_late_coverage_not_reached")
     if not bool(late_slope.get("late_slope_stable")):
         warnings.append("flow_fit_late_slope_unstable")
+    if bool(settling_fit.get("applied")):
+        warnings.append("flow_fit_settling_aware_late12_applied")
 
     return {
         **base_result,
@@ -762,17 +899,20 @@ def fit_online_stream_flow_phase(
         "flow_fit_point_count": int(len(fit_points)),
         "flow_fit_delay_start_from_emergence_us": int(fit_points[0]["delay_from_emergence_us"]),
         "flow_fit_delay_end_from_emergence_us": int(fit_points[-1]["delay_from_emergence_us"]),
-        "flow_fit_outlier_prune_status": str(
-            prune_result.get("flow_fit_outlier_prune_status") or "not_attempted"
+        "flow_fit_outlier_prune_status": flow_fit_outlier_prune_status,
+        "flow_fit_dropped_outlier_delay_us": flow_fit_dropped_outlier_delay_us,
+        "flow_fit_dropped_outlier_delay_from_emergence_us": flow_fit_dropped_outlier_delay_from_emergence_us,
+        "flow_fit_dropped_outlier_local_deviation_nl": flow_fit_dropped_outlier_local_deviation_nl,
+        "settling_aware_fit_enabled": bool(policy["settling_aware_fit_enabled"]),
+        "settling_aware_fit_applied": bool(settling_fit.get("applied")),
+        "settling_aware_fit_rule_name": str(settling_fit.get("rule_name") or "conservative_frontloaded_late12"),
+        "settling_aware_fit_early_vs_late_pct": _to_float_or_none(settling_fit.get("early_vs_late_pct")),
+        "settling_aware_fit_mid_dev": _to_float_or_none(settling_fit.get("mid_dev")),
+        "settling_aware_fit_rate_delta_pct_vs_base": _to_float_or_none(
+            settling_fit.get("rate_delta_pct_vs_base")
         ),
-        "flow_fit_dropped_outlier_delay_us": _to_int(
-            prune_result.get("flow_fit_dropped_outlier_delay_us")
-        ),
-        "flow_fit_dropped_outlier_delay_from_emergence_us": _to_int(
-            prune_result.get("flow_fit_dropped_outlier_delay_from_emergence_us")
-        ),
-        "flow_fit_dropped_outlier_local_deviation_nl": _to_float_or_none(
-            prune_result.get("flow_fit_dropped_outlier_local_deviation_nl")
+        "settling_aware_fit_base_flow_rate_nl_per_us": _to_float_or_none(
+            settling_fit.get("base_flow_rate_nl_per_us")
         ),
         "warnings": _unique_strings(warnings),
     }

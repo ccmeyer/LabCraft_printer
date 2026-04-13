@@ -36,6 +36,7 @@ DEFAULT_ONLINE_STREAM_POLICY = {
 }
 
 DEFAULT_ONLINE_STREAM_ANALYSIS_CONFIG = {
+    "settling_aware_fit_enabled": True,
     "nozzle_guard_px": 2,
     "min_component_area_px": 120,
     "attached_bottom_guard_px": 96,
@@ -119,6 +120,9 @@ def _resolved_analysis_config(config: dict | None = None) -> dict:
     merged = dict(DEFAULT_ONLINE_STREAM_ANALYSIS_CONFIG)
     for key, default_value in DEFAULT_ONLINE_STREAM_ANALYSIS_CONFIG.items():
         if isinstance(config, dict) and key in config:
+            if isinstance(default_value, bool):
+                merged[key] = bool(config.get(key))
+                continue
             if isinstance(default_value, float):
                 try:
                     merged[key] = float(config.get(key))
