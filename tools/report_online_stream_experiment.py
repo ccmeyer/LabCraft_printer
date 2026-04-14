@@ -57,6 +57,15 @@ def main(argv: list[str] | None = None) -> int:
             "the report is recomputed. Defaults to the runtime/replay default."
         ),
     )
+    parser.add_argument(
+        "--tail-settling-rule",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Enable or disable the settling-aware tail-start rule when the report is recomputed. "
+            "Defaults to the runtime/replay default."
+        ),
+    )
     args = parser.parse_args(argv)
 
     payload = online_report_mod.export_online_stream_experiment_report(
@@ -66,6 +75,7 @@ def main(argv: list[str] | None = None) -> int:
         density_g_per_ml=args.density_g_per_ml,
         correction_mode=(None if args.correction_mode == "none" else args.correction_mode),
         settling_aware_fit_enabled=args.settling_aware_fit,
+        tail_settling_rule_enabled=args.tail_settling_rule,
     )
     dataset_mod._print_json(payload)
     return 0

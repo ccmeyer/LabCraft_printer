@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import tools.report_online_stream_experiment as report_cli_mod
 from tools.stream_analysis import dataset as dataset_mod
 from tools.stream_analysis import online_report as mod
 
@@ -371,3 +372,81 @@ def test_export_online_stream_report_runtime_rgb_fix_passes_settling_override(tm
     assert captured["flow_fit_policy_override"] == {"settling_aware_fit_enabled": False}
     assert payload["correction_mode"] == "runtime_rgb_fix"
     assert payload["flow_fit_policy_override"] == {"settling_aware_fit_enabled": False}
+
+
+def test_export_online_stream_report_writes_tail_settling_diagnostics(tmp_path):
+    pytest.importorskip("matplotlib")
+
+    exp_dir = tmp_path / "Stream_report_tail_settling-20260413_121500"
+    process_root = exp_dir / "calibration_recordings" / dataset_mod.ONLINE_STREAM_PROCESS_NAME
+    run = _make_online_run(
+        process_root,
+        run_id="run_001",
+        replicate_index=1,
+        gravimetric_nl=90.0,
+        predicted_volume_nl=86.0,
+        tail_start_delay_us=4400,
+        first_detachment_delay_us=4500,
+    )
+    _write_metadata_csv(exp_dir, [run["metadata_row"]])
+
+    tail_fit_path = (
+        process_root / "run_001" / "tail_fit.json"
+    )
+    tail_payload = json.loads(tail_fit_path.read_text(encoding="utf-8"))
+    tail_payload["result"]["tail_phase"].update(
+        {
+            "tail_start_selection_method": mod.online_tail_mod.TAIL_SETTLING_SELECTION_METHOD,
+            "initial_confirmed_collapse_delay_from_emergence_us": 4300,
+            "confirmed_collapse_delay_from_emergence_us": 4400,
+            "tail_settling_rule_applied": True,
+            "tail_settling_rule_reason": "applied",
+            "tail_settling_candidate_delay_from_emergence_us": 4400,
+            "tail_settling_trace_window_end_delay_from_emergence_us": 4500,
+            "tail_settling_progress_threshold": 0.9,
+        }
+    )
+    _write_json(tail_fit_path, tail_payload)
+
+    payload = mod.export_online_stream_experiment_report(exp_dir)
+
+    with Path(payload["paths"]["run_summary_csv"]).open("r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["tail_start_selection_method"] == mod.online_tail_mod.TAIL_SETTLING_SELECTION_METHOD
+    assert row["initial_confirmed_collapse_delay_from_emergence_us"] == "4300"
+    assert row["confirmed_collapse_delay_from_emergence_us"] == "4400"
+    assert row["tail_settling_rule_applied"] == "True"
+    assert row["tail_settling_rule_reason"] == "applied"
+    assert row["tail_settling_candidate_delay_from_emergence_us"] == "4400"
+    assert row["tail_settling_trace_window_end_delay_from_emergence_us"] == "4500"
+    assert row["tail_settling_progress_threshold"] == "0.9"
+
+
+def test_report_online_stream_experiment_cli_passes_tail_settling_toggle(monkeypatch, tmp_path):
+    captured = {}
+
+    def _fake_export(experiment_root, **kwargs):
+        captured["experiment_root"] = experiment_root
+        captured["kwargs"] = kwargs
+        return {"ok": True}
+
+    monkeypatch.setattr(report_cli_mod.online_report_mod, "export_online_stream_experiment_report", _fake_export)
+
+    rc = report_cli_mod.main(
+        [
+            "--experiment-root",
+            str(tmp_path / "exp"),
+            "--correction-mode",
+            "runtime_rgb_fix",
+            "--no-settling-aware-fit",
+            "--no-tail-settling-rule",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["kwargs"]["correction_mode"] == "runtime_rgb_fix"
+    assert captured["kwargs"]["settling_aware_fit_enabled"] is False
+    assert captured["kwargs"]["tail_settling_rule_enabled"] is False

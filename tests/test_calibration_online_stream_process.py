@@ -2002,6 +2002,51 @@ def test_online_stream_plan_tail_phase_runs_for_warning_quality_flow_fit(tmp_pat
     assert snapshot["tail_plan"] == proc._tail_plan
 
 
+def test_online_stream_plan_tail_phase_passes_tail_settling_toggle(tmp_path, monkeypatch):
+    proc = _flow_proc(tmp_path)
+    proc.onPlanFlowPhase()
+    _seed_tail_flow_context(proc)
+    proc.analysis_config["tail_settling_rule_enabled"] = False
+    captured = {}
+    original = calibration_model.online_tail_mod.plan_online_stream_tail_phase
+
+    def _wrapped_plan(**kwargs):
+        captured["analysis_config"] = dict(kwargs.get("analysis_config") or {})
+        return original(**kwargs)
+
+    monkeypatch.setattr(calibration_model.online_tail_mod, "plan_online_stream_tail_phase", _wrapped_plan)
+
+    proc.onPlanTailPhase()
+
+    assert captured["analysis_config"]["tail_settling_rule_enabled"] is False
+    assert proc._tail_plan["analysis_config"]["tail_settling_rule_enabled"] is False
+
+
+def test_online_stream_preview_tail_resolve_result_passes_tail_settling_toggle(tmp_path, monkeypatch):
+    proc = _flow_proc(tmp_path)
+    proc.onPlanFlowPhase()
+    _seed_tail_flow_context(proc)
+    proc.analysis_config["tail_settling_rule_enabled"] = False
+    proc.onPlanTailPhase()
+    captured = {}
+
+    def _fake_resolve(**kwargs):
+        captured["analysis_config"] = dict(kwargs.get("analysis_config") or {})
+        return {
+            "phase": "online_stream_calibration",
+            "tail_phase": {"status": "captured", "warnings": []},
+            "predicted_stream_duration_us": None,
+            "predicted_volume_nl": None,
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(calibration_model.online_tail_mod, "resolve_online_stream_tail_result", _fake_resolve)
+
+    proc._preview_tail_resolve_result()
+
+    assert captured["analysis_config"]["tail_settling_rule_enabled"] is False
+
+
 def test_online_stream_plan_tail_phase_reserves_backtrack_budget_for_tail_search(tmp_path):
     proc = _flow_proc(tmp_path)
     proc.onPlanFlowPhase()

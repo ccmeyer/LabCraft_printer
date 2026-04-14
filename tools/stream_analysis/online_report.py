@@ -43,6 +43,7 @@ RUN_SUMMARY_COLUMNS = [
     "steady_rate_ci95_high_nl_per_us",
     "steady_rate_ci95_relative_width",
     "tail_start_delay_from_emergence_us",
+    "initial_confirmed_collapse_delay_from_emergence_us",
     "confirmed_collapse_delay_from_emergence_us",
     "last_plateau_delay_from_emergence_us",
     "first_tail_bottom_guard_delay_from_emergence_us",
@@ -62,6 +63,11 @@ RUN_SUMMARY_COLUMNS = [
     "tail_phase_status",
     "tail_start_selection_method",
     "landmark_reason",
+    "tail_settling_rule_applied",
+    "tail_settling_rule_reason",
+    "tail_settling_candidate_delay_from_emergence_us",
+    "tail_settling_trace_window_end_delay_from_emergence_us",
+    "tail_settling_progress_threshold",
     "analysis_warnings",
     "run_report_png",
 ]
@@ -583,6 +589,7 @@ def _replay_online_stream_run_from_frame_rows(
         backtrack_summaries=backtrack_summaries,
         trigger_bracket=trigger_bracket,
         flow_delay_summaries=flow_delay_summaries,
+        analysis_config=quality_policy,
     )
     return {
         "plan_snapshot": plan_snapshot,
@@ -895,6 +902,9 @@ def _context_from_replay(
     clearance_points = _points_from_rows(flow_rows + tail_rows, y_key="attached_bottom_clearance_px", accepted_only=False)
 
     tail_start_delay = _int_or_none(tail_phase.get("tail_start_delay_from_emergence_us"))
+    initial_confirmed_collapse_delay = _int_or_none(
+        tail_phase.get("initial_confirmed_collapse_delay_from_emergence_us")
+    )
     confirmed_collapse_delay = _int_or_none(tail_phase.get("confirmed_collapse_delay_from_emergence_us"))
     last_plateau_delay = _int_or_none(tail_phase.get("last_plateau_delay_from_emergence_us"))
     first_tail_bottom_guard_delay = _first_delay(
@@ -936,6 +946,7 @@ def _context_from_replay(
         "steady_rate_ci95_high_nl_per_us": _float_or_none(fit.get("steady_rate_ci95_high_nl_per_us")),
         "steady_rate_ci95_relative_width": _float_or_none(fit.get("steady_rate_ci95_relative_width")),
         "tail_start_delay_from_emergence_us": tail_start_delay,
+        "initial_confirmed_collapse_delay_from_emergence_us": initial_confirmed_collapse_delay,
         "confirmed_collapse_delay_from_emergence_us": confirmed_collapse_delay,
         "last_plateau_delay_from_emergence_us": last_plateau_delay,
         "first_tail_bottom_guard_delay_from_emergence_us": first_tail_bottom_guard_delay,
@@ -961,6 +972,17 @@ def _context_from_replay(
         "tail_phase_status": _clean_text(tail_phase.get("status")),
         "tail_start_selection_method": _clean_text(tail_phase.get("tail_start_selection_method")),
         "landmark_reason": _clean_text(tail_phase.get("landmark_reason")),
+        "tail_settling_rule_applied": bool(tail_phase.get("tail_settling_rule_applied")),
+        "tail_settling_rule_reason": _clean_text(tail_phase.get("tail_settling_rule_reason")),
+        "tail_settling_candidate_delay_from_emergence_us": _int_or_none(
+            tail_phase.get("tail_settling_candidate_delay_from_emergence_us")
+        ),
+        "tail_settling_trace_window_end_delay_from_emergence_us": _int_or_none(
+            tail_phase.get("tail_settling_trace_window_end_delay_from_emergence_us")
+        ),
+        "tail_settling_progress_threshold": _float_or_none(
+            tail_phase.get("tail_settling_progress_threshold")
+        ),
         "analysis_warnings": _clean_text(metadata_row.get("Analysis Warnings")),
         "run_report_png": None,
     }
@@ -1294,6 +1316,7 @@ def _plot_run_report(context: dict, output_path: Path):
     x_candidates.extend(
         [
             _float_or_none(summary_row.get("tail_start_delay_from_emergence_us")),
+            _float_or_none(summary_row.get("initial_confirmed_collapse_delay_from_emergence_us")),
             _float_or_none(summary_row.get("confirmed_collapse_delay_from_emergence_us")),
             _float_or_none(summary_row.get("last_plateau_delay_from_emergence_us")),
             _float_or_none(summary_row.get("gravimetric_equality_delay_us")),
@@ -1382,6 +1405,9 @@ def _plot_run_report(context: dict, output_path: Path):
     grav_low = _float_or_none(summary_row.get("gravimetric_equality_delay_low_us"))
     grav_high = _float_or_none(summary_row.get("gravimetric_equality_delay_high_us"))
     tail_start_delay = _float_or_none(summary_row.get("tail_start_delay_from_emergence_us"))
+    initial_confirmed_collapse_delay = _float_or_none(
+        summary_row.get("initial_confirmed_collapse_delay_from_emergence_us")
+    )
     confirmed_collapse_delay = _float_or_none(summary_row.get("confirmed_collapse_delay_from_emergence_us"))
     last_plateau_delay = _float_or_none(summary_row.get("last_plateau_delay_from_emergence_us"))
     first_detachment_delay = _float_or_none(summary_row.get("first_tail_detachment_delay_from_emergence_us"))
@@ -1451,6 +1477,15 @@ def _plot_run_report(context: dict, output_path: Path):
 
     common_guides = [
         (tail_start_delay, "tail start", "#7c3aed", "--", 1.5),
+        (
+            initial_confirmed_collapse_delay
+            if initial_confirmed_collapse_delay != confirmed_collapse_delay
+            else None,
+            "initial confirmed collapse",
+            "#f97316",
+            ":",
+            1.0,
+        ),
         (confirmed_collapse_delay, "confirmed collapse", "#dc2626", "-.", 1.2),
         (last_plateau_delay, "last plateau", "#0f766e", ":", 1.2),
         (first_detachment_delay, "first detachment-like landmark", "#b91c1c", "--", 1.2),
@@ -1795,15 +1830,17 @@ def export_online_stream_experiment_report(
     density_g_per_ml: float | int = 1.0,
     correction_mode: str | None = None,
     settling_aware_fit_enabled: bool | None = None,
+    tail_settling_rule_enabled: bool | None = None,
 ):
     experiment_root = dataset_mod.resolve_experiment_root(experiment_root)
     density_g_per_ml = _validate_density_g_per_ml(density_g_per_ml)
     correction_mode = _normalized_correction_mode(correction_mode)
-    flow_fit_policy_override = (
-        None
-        if settling_aware_fit_enabled is None
-        else {"settling_aware_fit_enabled": bool(settling_aware_fit_enabled)}
-    )
+    analysis_config_override = {}
+    if settling_aware_fit_enabled is not None:
+        analysis_config_override["settling_aware_fit_enabled"] = bool(settling_aware_fit_enabled)
+    if tail_settling_rule_enabled is not None:
+        analysis_config_override["tail_settling_rule_enabled"] = bool(tail_settling_rule_enabled)
+    flow_fit_policy_override = analysis_config_override or None
     stage_dir = (
         Path(output_root).expanduser().resolve()
         if output_root is not None

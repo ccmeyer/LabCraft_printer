@@ -2,10 +2,19 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
+
 from tools.stream_analysis import online_calibration as online_cal_mod
 
 
 SEARCH_METHOD = "separation_landmark_backtrack_v1"
+TAIL_SETTLING_SELECTION_METHOD = "settling_progress90_after_long_shoulder"
+TAIL_SETTLING_PROGRESS_THRESHOLD = 0.90
+TAIL_SETTLING_INTERP_STEP_US = 25
+TAIL_SETTLING_MIN_SAVGOL_WINDOW = 5
+TAIL_SETTLING_MAX_SAVGOL_WINDOW = 7
+TAIL_SETTLING_MIN_COLLAPSE_WINDOW_US = 150
+TAIL_SETTLING_MIN_DELAY_SHIFT_US = 50
 
 DEFAULT_ONLINE_TAIL_POLICY = {
     "scout_landmark_width_frac": 0.95,
@@ -114,6 +123,23 @@ def _resolved_policy(policy: dict | None = None) -> dict:
             merged[key] = max(0, _to_int(provided.get(key), default_value))
         else:
             merged[key] = float(provided.get(key))
+    return merged
+
+
+def _resolved_analysis_config(config: dict | None = None) -> dict:
+    merged = dict(online_cal_mod.DEFAULT_ONLINE_STREAM_ANALYSIS_CONFIG)
+    for key, default_value in online_cal_mod.DEFAULT_ONLINE_STREAM_ANALYSIS_CONFIG.items():
+        if isinstance(config, dict) and key in config:
+            if isinstance(default_value, bool):
+                merged[key] = bool(config.get(key))
+                continue
+            if isinstance(default_value, float):
+                try:
+                    merged[key] = float(config.get(key))
+                except Exception:
+                    merged[key] = float(default_value)
+            else:
+                merged[key] = _to_int(config.get(key), default_value)
     return merged
 
 
@@ -365,6 +391,238 @@ def _confirmed_collapse_reason_for_summary(summary: dict | None) -> str | None:
     if bool(row.get("resolver_collapse_candidate")):
         return "confirmed_width_collapse"
     return None
+
+
+def _trace_rows_in_delay_range(
+    rows: list[dict] | None,
+    *,
+    start_delay_from_emergence_us: int | None = None,
+    end_delay_from_emergence_us: int | None = None,
+    require_width: bool = False,
+) -> list[dict]:
+    selected = []
+    for item in list(rows or []):
+        row = dict(item or {})
+        delay_from_emergence_us = _to_int(row.get("delay_from_emergence_us"))
+        if delay_from_emergence_us is None:
+            continue
+        if (
+            start_delay_from_emergence_us is not None
+            and int(delay_from_emergence_us) < int(start_delay_from_emergence_us)
+        ):
+            continue
+        if (
+            end_delay_from_emergence_us is not None
+            and int(delay_from_emergence_us) > int(end_delay_from_emergence_us)
+        ):
+            continue
+        width_px = _to_float_or_none(row.get("median_width_px"))
+        if require_width and (not bool(row.get("tail_width_usable")) or width_px is None):
+            continue
+        row["median_width_px"] = width_px
+        selected.append(row)
+    selected.sort(key=lambda item: _to_int(item.get("delay_from_emergence_us"), 10**9))
+    return selected
+
+
+def _tail_settling_trace_window_end(
+    rows: list[dict] | None,
+    *,
+    start_delay_from_emergence_us: int | None,
+) -> int | None:
+    candidates = _trace_rows_in_delay_range(
+        rows,
+        start_delay_from_emergence_us=start_delay_from_emergence_us,
+        require_width=False,
+    )
+    if not candidates:
+        return None
+    for row in candidates:
+        if bool(row.get("separated_from_nozzle_landmark")) or bool(
+            row.get("attached_width_unavailable_landmark")
+        ):
+            return _to_int(row.get("delay_from_emergence_us"))
+    usable_candidates = [
+        _to_int(row.get("delay_from_emergence_us"))
+        for row in candidates
+        if bool(row.get("tail_width_usable")) and _to_float_or_none(row.get("median_width_px")) is not None
+    ]
+    if usable_candidates:
+        return int(max(usable_candidates))
+    return _to_int(candidates[-1].get("delay_from_emergence_us"))
+
+
+def _odd_window_length(sample_count: int) -> int | None:
+    if int(sample_count) < int(TAIL_SETTLING_MIN_SAVGOL_WINDOW):
+        return None
+    window = min(int(TAIL_SETTLING_MAX_SAVGOL_WINDOW), int(sample_count))
+    if window % 2 == 0:
+        window -= 1
+    if window < int(TAIL_SETTLING_MIN_SAVGOL_WINDOW):
+        return None
+    return int(window)
+
+
+def _savgol_or_passthrough(values: list[float]) -> tuple[list[float], int | None]:
+    clean_values = [float(value) for value in list(values or [])]
+    if not clean_values:
+        return [], None
+    window = _odd_window_length(len(clean_values))
+    if window is None:
+        return list(clean_values), None
+    try:
+        from scipy.signal import savgol_filter
+
+        smoothed = savgol_filter(
+            np.asarray(clean_values, dtype=float),
+            window_length=int(window),
+            polyorder=min(2, int(window) - 1),
+            mode="interp",
+        )
+        return [float(value) for value in np.asarray(smoothed, dtype=float).tolist()], int(window)
+    except Exception:
+        return list(clean_values), None
+
+
+def _resample_tail_width_trace(rows: list[dict] | None, *, step_us: int) -> list[dict]:
+    usable_rows = _trace_rows_in_delay_range(rows, require_width=True)
+    if len(usable_rows) < 2:
+        return []
+    delays = np.asarray(
+        [_to_int(row.get("delay_from_emergence_us")) for row in usable_rows],
+        dtype=float,
+    )
+    widths = np.asarray(
+        [_to_float_or_none(row.get("median_width_px")) for row in usable_rows],
+        dtype=float,
+    )
+    if len(delays) < 2 or float(delays[-1]) <= float(delays[0]):
+        return []
+    grid = np.arange(float(delays[0]), float(delays[-1]) + float(step_us), float(step_us), dtype=float)
+    if len(grid) == 0 or float(grid[-1]) < float(delays[-1]):
+        grid = np.append(grid, float(delays[-1]))
+    else:
+        grid[-1] = float(delays[-1])
+    interpolated_widths = np.interp(grid, delays, widths)
+    smoothed_widths, window_length = _savgol_or_passthrough(interpolated_widths.tolist())
+    smoothed_array = np.asarray(smoothed_widths, dtype=float)
+    if len(smoothed_array) != len(grid):
+        smoothed_array = np.asarray(interpolated_widths, dtype=float)
+        window_length = None
+    if len(grid) >= 2:
+        derivatives = np.gradient(smoothed_array, grid)
+    else:
+        derivatives = np.zeros_like(smoothed_array)
+    samples = []
+    for index, delay_from_emergence_us in enumerate(grid.tolist()):
+        samples.append(
+            {
+                "delay_from_emergence_us": int(round(float(delay_from_emergence_us))),
+                "interpolated_width_px": float(interpolated_widths[index]),
+                "smoothed_width_px": float(smoothed_array[index]),
+                "smoothed_width_derivative_px_per_us": float(derivatives[index]),
+            }
+        )
+    return {
+        "samples": samples,
+        "window_length": window_length,
+    }
+
+
+def _tail_settling_candidate(
+    *,
+    local_trace: list[dict] | None,
+    last_plateau_row: dict | None,
+    initial_confirmed_collapse_delay_from_emergence_us: int | None,
+) -> dict:
+    diagnostics = {
+        "tail_settling_candidate_delay_from_emergence_us": None,
+        "tail_settling_trace_window_end_delay_from_emergence_us": None,
+        "tail_settling_progress_threshold": float(TAIL_SETTLING_PROGRESS_THRESHOLD),
+        "tail_settling_progress_window_length": None,
+        "tail_settling_candidate_reason": "ineligible_missing_plateau",
+    }
+    plateau_delay_from_emergence_us = _to_int(
+        None if last_plateau_row is None else last_plateau_row.get("delay_from_emergence_us")
+    )
+    plateau_width_px = _to_float_or_none(
+        None if last_plateau_row is None else last_plateau_row.get("median_width_px")
+    )
+    if plateau_delay_from_emergence_us is None or plateau_width_px is None:
+        return diagnostics
+
+    trace_window_end_delay_from_emergence_us = _tail_settling_trace_window_end(
+        local_trace,
+        start_delay_from_emergence_us=plateau_delay_from_emergence_us,
+    )
+    if (
+        trace_window_end_delay_from_emergence_us is not None
+        and initial_confirmed_collapse_delay_from_emergence_us is not None
+    ):
+        trace_window_end_delay_from_emergence_us = min(
+            int(trace_window_end_delay_from_emergence_us),
+            int(initial_confirmed_collapse_delay_from_emergence_us),
+        )
+    diagnostics["tail_settling_trace_window_end_delay_from_emergence_us"] = (
+        None
+        if trace_window_end_delay_from_emergence_us is None
+        else int(trace_window_end_delay_from_emergence_us)
+    )
+    if trace_window_end_delay_from_emergence_us is None:
+        diagnostics["tail_settling_candidate_reason"] = "missing_extended_trace_window"
+        return diagnostics
+
+    usable_window_rows = _trace_rows_in_delay_range(
+        local_trace,
+        start_delay_from_emergence_us=plateau_delay_from_emergence_us,
+        end_delay_from_emergence_us=trace_window_end_delay_from_emergence_us,
+        require_width=True,
+    )
+    if len(usable_window_rows) < 2:
+        diagnostics["tail_settling_candidate_reason"] = "insufficient_extended_width_trace"
+        return diagnostics
+
+    resampled = _resample_tail_width_trace(
+        usable_window_rows,
+        step_us=int(TAIL_SETTLING_INTERP_STEP_US),
+    )
+    samples = list(dict(resampled or {}).get("samples") or [])
+    diagnostics["tail_settling_progress_window_length"] = dict(resampled or {}).get("window_length")
+    if len(samples) < 2:
+        diagnostics["tail_settling_candidate_reason"] = "insufficient_resampled_trace"
+        return diagnostics
+
+    min_smoothed_width_px = min(float(sample["smoothed_width_px"]) for sample in samples)
+    total_drop_px = float(plateau_width_px) - float(min_smoothed_width_px)
+    if total_drop_px <= 0.0:
+        diagnostics["tail_settling_candidate_reason"] = "nonpositive_extended_drop"
+        return diagnostics
+
+    candidate_delay_from_emergence_us = None
+    for sample in samples:
+        progress = (
+            float(plateau_width_px) - float(sample["smoothed_width_px"])
+        ) / float(total_drop_px)
+        progress = max(0.0, min(1.0, float(progress)))
+        sample["collapse_progress"] = float(progress)
+        if (
+            candidate_delay_from_emergence_us is None
+            and float(progress) >= float(TAIL_SETTLING_PROGRESS_THRESHOLD)
+            and float(sample.get("smoothed_width_derivative_px_per_us") or 0.0) < 0.0
+        ):
+            candidate_delay_from_emergence_us = int(sample["delay_from_emergence_us"])
+
+    diagnostics["tail_settling_candidate_delay_from_emergence_us"] = (
+        None
+        if candidate_delay_from_emergence_us is None
+        else int(candidate_delay_from_emergence_us)
+    )
+    diagnostics["tail_settling_candidate_reason"] = (
+        "progress_threshold_crossing"
+        if candidate_delay_from_emergence_us is not None
+        else "missing_progress_threshold_crossing"
+    )
+    return diagnostics
 
 
 def select_online_stream_tail_left_anchor(
@@ -628,16 +886,19 @@ def plan_online_stream_tail_phase(
     capture_budget: dict | None,
     flow_delay_summaries: list[dict] | None = None,
     policy: dict | None = None,
+    analysis_config: dict | None = None,
 ) -> dict:
     fit = dict(flow_fit_result or {})
     normalized_priors = online_cal_mod.normalize_online_stream_prior(priors)
     resolved_policy = _resolved_policy(policy)
+    resolved_analysis_config = _resolved_analysis_config(analysis_config)
     steady_width_baseline_px = _to_float_or_none(fit.get("steady_width_baseline_px"))
     fit_status = str(fit.get("fit_status") or "")
     if steady_width_baseline_px is None or fit_status.startswith("unresolved"):
         return {
             "run_tail": False,
             "skip_reason": "missing_flow_baseline",
+            "analysis_config": _copy_jsonish(resolved_analysis_config),
             "steady_width_baseline_px": steady_width_baseline_px,
             "tail_retarget_count": 0,
             "retargeted_coarse_start_delay_us": None,
@@ -652,6 +913,7 @@ def plan_online_stream_tail_phase(
         return {
             "run_tail": False,
             "skip_reason": "missing_flow_tail_anchor",
+            "analysis_config": _copy_jsonish(resolved_analysis_config),
             "steady_width_baseline_px": float(steady_width_baseline_px),
             "tail_retarget_count": 0,
             "retargeted_coarse_start_delay_us": None,
@@ -694,6 +956,7 @@ def plan_online_stream_tail_phase(
         return {
             "run_tail": False,
             "skip_reason": "capture_budget_exhausted",
+            "analysis_config": _copy_jsonish(resolved_analysis_config),
             "steady_width_baseline_px": float(steady_width_baseline_px),
             "search_method": SEARCH_METHOD,
             "planned_scout_delay_count": int(max_scout_delay_count),
@@ -724,6 +987,7 @@ def plan_online_stream_tail_phase(
         "run_tail": True,
         "skip_reason": None,
         "search_method": SEARCH_METHOD,
+        "analysis_config": _copy_jsonish(resolved_analysis_config),
         "steady_width_baseline_px": float(steady_width_baseline_px),
         "plan_source": "last_flow_delay_anchor",
         "prior_condition_match": str(normalized_priors.get("condition_match") or "none"),
@@ -1027,6 +1291,7 @@ def resolve_online_stream_tail_result(
     refine_summaries: list[dict] | None = None,
     trigger_bracket: dict | None,
     flow_delay_summaries: list[dict] | None = None,
+    analysis_config: dict | None = None,
     phase: str = "online_stream_calibration",
 ) -> dict:
     fit = dict(flow_fit_result or {})
@@ -1041,6 +1306,10 @@ def resolve_online_stream_tail_result(
     ]
     bracket = dict(trigger_bracket or {})
     resolved_policy = _resolved_policy(plan.get("policy") if isinstance(plan.get("policy"), dict) else None)
+    combined_analysis_config = dict(plan.get("analysis_config") or {})
+    if isinstance(analysis_config, dict):
+        combined_analysis_config.update(dict(analysis_config))
+    resolved_analysis_config = _resolved_analysis_config(combined_analysis_config)
 
     scout_rows = _classify_trace_rows(scout_rows, policy=resolved_policy)
     backtrack_rows = _classify_trace_rows(backtrack_rows, policy=resolved_policy)
@@ -1218,6 +1487,21 @@ def resolve_online_stream_tail_result(
             )
             tail_start_selection_method = "plateau_confirmed_collapse_midpoint"
 
+    initial_confirmed_collapse_delay_from_emergence_us = _to_int(
+        None if confirmed_collapse_row is None else confirmed_collapse_row.get("delay_from_emergence_us")
+    )
+    initial_confirmed_collapse_reason = _confirmed_collapse_reason_for_summary(confirmed_collapse_row)
+    initial_collapse_window_us = None
+    if (
+        last_plateau_row is not None
+        and initial_confirmed_collapse_delay_from_emergence_us is not None
+        and _to_int(last_plateau_row.get("delay_from_emergence_us")) is not None
+    ):
+        initial_collapse_window_us = int(
+            int(initial_confirmed_collapse_delay_from_emergence_us)
+            - int(_to_int(last_plateau_row.get("delay_from_emergence_us")))
+        )
+
     warnings = _unique_strings(
         list(plan.get("warnings") or [])
         + list(bracket.get("warnings") or [])
@@ -1273,6 +1557,58 @@ def resolve_online_stream_tail_result(
         termination_reason = termination_reason or "no_scout_landmark"
         if "unresolved_no_landmark" not in warnings:
             warnings.append("unresolved_no_landmark")
+
+    tail_settling_rule_applied = False
+    tail_settling_rule_reason = "disabled"
+    tail_settling_diagnostics = {
+        "tail_settling_candidate_delay_from_emergence_us": None,
+        "tail_settling_trace_window_end_delay_from_emergence_us": None,
+        "tail_settling_progress_threshold": float(TAIL_SETTLING_PROGRESS_THRESHOLD),
+    }
+    if bool(resolved_analysis_config.get("tail_settling_rule_enabled")):
+        tail_settling_rule_reason = "selection_method_ineligible"
+        if (
+            tail_phase_status == "captured"
+            and tail_start_delay_from_emergence_us is not None
+            and tail_start_selection_method == "earliest_transition_before_confirmed_collapse"
+            and str(landmark_reason or "") == "separated_from_nozzle"
+        ):
+            if initial_collapse_window_us is None:
+                tail_settling_rule_reason = "missing_collapse_window"
+            elif int(initial_collapse_window_us) < int(TAIL_SETTLING_MIN_COLLAPSE_WINDOW_US):
+                tail_settling_rule_reason = "collapse_window_too_short"
+            else:
+                tail_settling_diagnostics = _tail_settling_candidate(
+                    local_trace=local_trace,
+                    last_plateau_row=last_plateau_row,
+                    initial_confirmed_collapse_delay_from_emergence_us=initial_confirmed_collapse_delay_from_emergence_us,
+                )
+                candidate_delay_from_emergence_us = _to_int(
+                    tail_settling_diagnostics.get("tail_settling_candidate_delay_from_emergence_us")
+                )
+                if candidate_delay_from_emergence_us is None:
+                    tail_settling_rule_reason = str(
+                        tail_settling_diagnostics.get("tail_settling_candidate_reason")
+                        or "missing_candidate"
+                    )
+                elif int(candidate_delay_from_emergence_us) < int(tail_start_delay_from_emergence_us) + int(
+                    TAIL_SETTLING_MIN_DELAY_SHIFT_US
+                ):
+                    tail_settling_rule_reason = "candidate_shift_below_min"
+                else:
+                    tail_settling_rule_applied = True
+                    tail_settling_rule_reason = "applied"
+                    tail_start_delay_from_emergence_us = int(candidate_delay_from_emergence_us)
+                    tail_start_selection_method = TAIL_SETTLING_SELECTION_METHOD
+                    tail_start_evidence = "tail_settling_progress90"
+                    if confirmed_collapse_row is None:
+                        confirmed_collapse_row = {}
+                    confirmed_collapse_row = {
+                        **dict(confirmed_collapse_row or {}),
+                        "delay_from_emergence_us": int(candidate_delay_from_emergence_us),
+                    }
+    else:
+        tail_settling_rule_reason = "disabled"
 
     predicted_stream_duration_us = None
     predicted_volume_nl = None
@@ -1335,13 +1671,18 @@ def resolve_online_stream_tail_result(
     confirmed_collapse_delay_from_emergence_us = _to_int(
         None if confirmed_collapse_row is None else confirmed_collapse_row.get("delay_from_emergence_us")
     )
-    confirmed_collapse_reason = _confirmed_collapse_reason_for_summary(confirmed_collapse_row)
+    confirmed_collapse_reason = (
+        TAIL_SETTLING_SELECTION_METHOD
+        if bool(tail_settling_rule_applied)
+        else _confirmed_collapse_reason_for_summary(confirmed_collapse_row)
+    )
     last_plateau_delay_from_emergence_us = _to_int(
         None if last_plateau_row is None else last_plateau_row.get("delay_from_emergence_us")
     )
     tail_phase = {
         "status": str(tail_phase_status or "unresolved_no_landmark"),
         "plan": _copy_jsonish(plan),
+        "analysis_config": _copy_jsonish(resolved_analysis_config),
         "search_method": SEARCH_METHOD,
         "max_scout_delay_count": _to_int(plan.get("max_scout_delay_count")),
         "fine_prepad_us": _to_int(plan.get("fine_prepad_us")),
@@ -1370,11 +1711,14 @@ def resolve_online_stream_tail_result(
         "refine_delay_summaries": _copy_jsonish(backtrack_rows),
         "landmark_delay_from_emergence_us": landmark_delay_from_emergence_us,
         "landmark_reason": landmark_reason or (None if landmark_summary is None else landmark_summary.get("landmark_reason")),
+        "initial_confirmed_collapse_delay_from_emergence_us": initial_confirmed_collapse_delay_from_emergence_us,
+        "initial_confirmed_collapse_reason": initial_confirmed_collapse_reason,
         "confirmed_collapse_delay_from_emergence_us": confirmed_collapse_delay_from_emergence_us,
         "confirmed_collapse_reason": confirmed_collapse_reason,
         "right_bracket_delay_from_emergence_us": right_bracket_delay_from_emergence_us,
         "right_bracket_reason": right_bracket_reason,
         "last_plateau_delay_from_emergence_us": last_plateau_delay_from_emergence_us,
+        "initial_collapse_window_us": initial_collapse_window_us,
         "left_bracket_extended": bool(left_bracket_extended),
         "left_bracket_confirmed": bool(last_plateau_row is not None),
         "tail_backtrack_compressed": bool(plan.get("tail_backtrack_compressed")),
@@ -1390,6 +1734,17 @@ def resolve_online_stream_tail_result(
         "fine_window_end_delay_from_emergence_us": backtrack_window_end_delay_from_emergence_us,
         "tail_start_evidence": tail_start_evidence,
         "tail_start_selection_method": tail_start_selection_method,
+        "tail_settling_rule_applied": bool(tail_settling_rule_applied),
+        "tail_settling_rule_reason": str(tail_settling_rule_reason),
+        "tail_settling_candidate_delay_from_emergence_us": _to_int(
+            tail_settling_diagnostics.get("tail_settling_candidate_delay_from_emergence_us")
+        ),
+        "tail_settling_trace_window_end_delay_from_emergence_us": _to_int(
+            tail_settling_diagnostics.get("tail_settling_trace_window_end_delay_from_emergence_us")
+        ),
+        "tail_settling_progress_threshold": _to_float_or_none(
+            tail_settling_diagnostics.get("tail_settling_progress_threshold")
+        ),
         "trigger_delay_from_emergence_us": landmark_delay_from_emergence_us,
         "trigger_reason": landmark_reason or (None if landmark_summary is None else landmark_summary.get("landmark_reason")),
         "last_nontrigger_delay_from_emergence_us": last_plateau_delay_from_emergence_us,

@@ -6466,6 +6466,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 emergence_time_us=int(self.emergence_time_us),
                 capture_budget=dict(self.capture_budget or {}),
                 flow_delay_summaries=list(self._flow_delay_summaries or []),
+                analysis_config=dict(self.analysis_config or {}),
             )
             or {}
         )
@@ -8135,6 +8136,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             backtrack_summaries=list(self._tail_backtrack_delay_summaries),
             flow_delay_summaries=list(self._flow_delay_summaries),
             trigger_bracket=self._build_tail_trigger_bracket(),
+            analysis_config=dict(self.analysis_config or {}),
         )
 
     def _maybe_extend_tail_left_bracket(self) -> bool:
@@ -8197,6 +8199,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 emergence_time_us=int(self.emergence_time_us),
                 capture_budget=dict(self.capture_budget or {}),
                 flow_delay_summaries=list(self._flow_delay_summaries),
+                analysis_config=dict(self.analysis_config or {}),
             )
             or {}
         )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import sys
 from pathlib import Path
 
 import pytest
@@ -459,6 +460,123 @@ def test_sparse_online_tail_replay_ignores_bottom_of_fov_signals_without_landmar
     result = _replay_tail_result(rows_by_delay)
 
     assert result["tail_phase"]["status"] == "unresolved_no_landmark"
+
+
+def test_sparse_online_tail_replay_applies_settling_rule_to_long_separated_shoulder(monkeypatch):
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_build_sparse_flow_fit",
+        lambda rows_by_delay: (
+            {
+                "fit_status": "ok",
+                "steady_width_baseline_px": 74.0,
+                "flow_rate_nl_per_us": 0.02,
+                "flow_intercept_nl": 0.0,
+            },
+            [
+                {
+                    "delay_us": 650,
+                    "delay_from_emergence_us": 650,
+                    "attempted_replicates": 1,
+                    "accepted_replicates": 1,
+                    "rejected_replicates": 0,
+                    "median_width_px": 74.0,
+                    "delay_accepted": True,
+                    "warnings": [],
+                },
+                {
+                    "delay_us": 850,
+                    "delay_from_emergence_us": 850,
+                    "attempted_replicates": 1,
+                    "accepted_replicates": 1,
+                    "rejected_replicates": 0,
+                    "median_width_px": 74.0,
+                    "delay_accepted": True,
+                    "warnings": [],
+                },
+                {
+                    "delay_us": 1000,
+                    "delay_from_emergence_us": 1000,
+                    "attempted_replicates": 1,
+                    "accepted_replicates": 1,
+                    "rejected_replicates": 0,
+                    "median_width_px": 74.0,
+                    "delay_accepted": True,
+                    "warnings": [],
+                },
+            ],
+        ),
+    )
+
+    rows_by_delay = {
+        1000: {
+            "flash_delay_us": 1000,
+            "silhouette_status": "ok",
+            "attached_near_nozzle_width_median_px": 74.1,
+            "total_visible_volume_nl": 19.0,
+            "min_accepted_fluid_distance_from_bottom_px": 166.0,
+        },
+        1050: {
+            "flash_delay_us": 1050,
+            "silhouette_status": "ok",
+            "attached_near_nozzle_width_median_px": 73.0,
+            "total_visible_volume_nl": 20.1,
+            "min_accepted_fluid_distance_from_bottom_px": 164.0,
+        },
+        1100: {
+            "flash_delay_us": 1100,
+            "silhouette_status": "ok",
+            "attached_near_nozzle_width_median_px": 72.8,
+            "total_visible_volume_nl": 21.2,
+            "min_accepted_fluid_distance_from_bottom_px": 162.0,
+        },
+        1150: {
+            "flash_delay_us": 1150,
+            "silhouette_status": "ok",
+            "attached_near_nozzle_width_median_px": 72.0,
+            "total_visible_volume_nl": 22.3,
+            "min_accepted_fluid_distance_from_bottom_px": 160.0,
+        },
+        1200: {
+            "flash_delay_us": 1200,
+            "silhouette_status": "ok",
+            "attached_near_nozzle_width_median_px": 71.8,
+            "total_visible_volume_nl": 23.3,
+            "min_accepted_fluid_distance_from_bottom_px": 158.0,
+        },
+        1250: {
+            "flash_delay_us": 1250,
+            "silhouette_status": "ok",
+            "attached_near_nozzle_width_median_px": 71.7,
+            "total_visible_volume_nl": 24.2,
+            "min_accepted_fluid_distance_from_bottom_px": 156.0,
+        },
+        1300: {
+            "flash_delay_us": 1300,
+            "silhouette_status": "ok",
+            "attached_near_nozzle_width_median_px": 71.0,
+            "total_visible_volume_nl": 25.0,
+            "min_accepted_fluid_distance_from_bottom_px": 154.0,
+        },
+        1500: {
+            "flash_delay_us": 1500,
+            "silhouette_status": "rejected_qc",
+            "attached_near_nozzle_width_median_px": None,
+            "total_visible_volume_nl": 27.0,
+            "min_accepted_fluid_distance_from_bottom_px": 152.0,
+            "selected_component_top_y_px": 110.0,
+            "cutoff_y_px": 70.0,
+        },
+    }
+
+    result = _replay_tail_result(rows_by_delay)
+
+    assert result["tail_phase"]["status"] == "captured"
+    assert result["tail_phase"]["tail_settling_rule_applied"] is True
+    assert result["tail_phase"]["tail_start_selection_method"] == online_tail_mod.TAIL_SETTLING_SELECTION_METHOD
+    assert result["tail_phase"]["initial_confirmed_collapse_delay_from_emergence_us"] == 1150
+    assert result["tail_phase"]["tail_start_delay_from_emergence_us"] == 1150
+    assert result["tail_phase"]["confirmed_collapse_delay_from_emergence_us"] == 1150
 
 
 def test_sparse_online_tail_replay_matches_dense_offline_tail_start_with_scout_backtrack():

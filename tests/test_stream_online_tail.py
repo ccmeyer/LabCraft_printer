@@ -829,6 +829,219 @@ def test_resolve_online_stream_tail_result_uses_midpoint_when_width_unavailable_
     assert resolved["tail_phase"]["confirmed_collapse_delay_from_emergence_us"] is None
 
 
+def test_resolve_online_stream_tail_result_applies_settling_rule_to_long_separated_shoulder():
+    resolved = mod.resolve_online_stream_tail_result(
+        flow_fit_result=_flow_fit_result(),
+        tail_plan={
+            "steady_width_baseline_px": 74.0,
+            "scout_anchor_delay_us": 4250,
+            "backtrack_step_us": 50,
+            "analysis_config": {"tail_settling_rule_enabled": True},
+        },
+        scout_summaries=[
+            mod.summarize_online_stream_tail_delay(
+                [
+                    _tail_frame_row(
+                        delay_us=4650,
+                        delay_from_emergence_us=1450,
+                        width_px=None,
+                        tail_width_usable=False,
+                        separated_from_nozzle_landmark=True,
+                        tail_landmark_usable=True,
+                    )
+                ],
+                baseline_width_px=74.0,
+            )
+        ],
+        backtrack_summaries=[
+            mod.summarize_online_stream_tail_delay(
+                [_tail_frame_row(delay_us=4300, delay_from_emergence_us=1100, phase="tail_backtrack", width_px=74.1)],
+                baseline_width_px=74.0,
+            ),
+            mod.summarize_online_stream_tail_delay(
+                [_tail_frame_row(delay_us=4350, delay_from_emergence_us=1150, phase="tail_backtrack", width_px=73.0)],
+                baseline_width_px=74.0,
+            ),
+            mod.summarize_online_stream_tail_delay(
+                [_tail_frame_row(delay_us=4400, delay_from_emergence_us=1200, phase="tail_backtrack", width_px=72.8)],
+                baseline_width_px=74.0,
+            ),
+            mod.summarize_online_stream_tail_delay(
+                [_tail_frame_row(delay_us=4450, delay_from_emergence_us=1250, phase="tail_backtrack", width_px=72.0)],
+                baseline_width_px=74.0,
+            ),
+            mod.summarize_online_stream_tail_delay(
+                [_tail_frame_row(delay_us=4500, delay_from_emergence_us=1300, phase="tail_backtrack", width_px=71.8)],
+                baseline_width_px=74.0,
+            ),
+            mod.summarize_online_stream_tail_delay(
+                [_tail_frame_row(delay_us=4550, delay_from_emergence_us=1350, phase="tail_backtrack", width_px=71.7)],
+                baseline_width_px=74.0,
+            ),
+            mod.summarize_online_stream_tail_delay(
+                [_tail_frame_row(delay_us=4600, delay_from_emergence_us=1400, phase="tail_backtrack", width_px=71.0)],
+                baseline_width_px=74.0,
+            ),
+            mod.summarize_online_stream_tail_delay(
+                [
+                    _tail_frame_row(
+                        delay_us=4650,
+                        delay_from_emergence_us=1450,
+                        phase="tail_backtrack",
+                        width_px=None,
+                        tail_width_usable=False,
+                        separated_from_nozzle_landmark=True,
+                        tail_landmark_usable=True,
+                    )
+                ],
+                baseline_width_px=74.0,
+            ),
+        ],
+        flow_delay_summaries=[_flow_delay_summary(delay_us=4250, delay_from_emergence_us=1050)],
+        trigger_bracket={
+            "tail_phase_status": "",
+            "termination_reason": "",
+            "landmark_delay_us": 4650,
+            "backtrack_left_delay_us": 4250,
+            "landmark_reason": "separated_from_nozzle",
+        },
+    )
+
+    tail_phase = resolved["tail_phase"]
+    assert tail_phase["tail_start_selection_method"] == mod.TAIL_SETTLING_SELECTION_METHOD
+    assert tail_phase["tail_settling_rule_applied"] is True
+    assert tail_phase["tail_settling_rule_reason"] == "applied"
+    assert tail_phase["tail_start_delay_from_emergence_us"] == 1250
+    assert tail_phase["initial_confirmed_collapse_delay_from_emergence_us"] == 1250
+    assert tail_phase["confirmed_collapse_delay_from_emergence_us"] == 1250
+    assert tail_phase["tail_settling_candidate_delay_from_emergence_us"] == 1250
+    assert tail_phase["tail_settling_trace_window_end_delay_from_emergence_us"] == 1250
+
+
+def test_resolve_online_stream_tail_result_leaves_short_separated_collapse_on_existing_rule():
+    resolved = mod.resolve_online_stream_tail_result(
+        flow_fit_result=_flow_fit_result(),
+        tail_plan={
+            "steady_width_baseline_px": 74.0,
+            "scout_anchor_delay_us": 4250,
+            "backtrack_step_us": 50,
+            "analysis_config": {"tail_settling_rule_enabled": True},
+        },
+        scout_summaries=[
+            mod.summarize_online_stream_tail_delay(
+                [
+                    _tail_frame_row(
+                        delay_us=4750,
+                        delay_from_emergence_us=1550,
+                        width_px=None,
+                        tail_width_usable=False,
+                        separated_from_nozzle_landmark=True,
+                        tail_landmark_usable=True,
+                    )
+                ],
+                baseline_width_px=74.0,
+            )
+        ],
+        backtrack_summaries=[
+            mod.summarize_online_stream_tail_delay(
+                [_tail_frame_row(delay_us=4300, delay_from_emergence_us=1100, phase="tail_backtrack", width_px=74.1)],
+                baseline_width_px=74.0,
+            ),
+            mod.summarize_online_stream_tail_delay(
+                [_tail_frame_row(delay_us=4350, delay_from_emergence_us=1150, phase="tail_backtrack", width_px=73.0)],
+                baseline_width_px=74.0,
+            ),
+            mod.summarize_online_stream_tail_delay(
+                [_tail_frame_row(delay_us=4400, delay_from_emergence_us=1200, phase="tail_backtrack", width_px=72.0)],
+                baseline_width_px=74.0,
+            ),
+            mod.summarize_online_stream_tail_delay(
+                [_tail_frame_row(delay_us=4450, delay_from_emergence_us=1250, phase="tail_backtrack", width_px=71.5)],
+                baseline_width_px=74.0,
+            ),
+        ],
+        flow_delay_summaries=[_flow_delay_summary(delay_us=4250, delay_from_emergence_us=1050)],
+        trigger_bracket={
+            "tail_phase_status": "",
+            "termination_reason": "",
+            "landmark_delay_us": 4750,
+            "backtrack_left_delay_us": 4250,
+            "landmark_reason": "separated_from_nozzle",
+        },
+    )
+
+    tail_phase = resolved["tail_phase"]
+    assert tail_phase["tail_settling_rule_applied"] is False
+    assert tail_phase["tail_settling_rule_reason"] == "collapse_window_too_short"
+    assert tail_phase["tail_start_selection_method"] == "earliest_transition_before_confirmed_collapse"
+    assert tail_phase["tail_start_delay_from_emergence_us"] == 1150
+    assert tail_phase["initial_confirmed_collapse_delay_from_emergence_us"] == 1200
+    assert tail_phase["confirmed_collapse_delay_from_emergence_us"] == 1200
+
+
+def test_resolve_online_stream_tail_result_does_not_apply_settling_rule_to_backup_landmark():
+    resolved = mod.resolve_online_stream_tail_result(
+        flow_fit_result=_flow_fit_result(),
+        tail_plan={
+            "steady_width_baseline_px": 74.0,
+            "scout_anchor_delay_us": 4250,
+            "backtrack_step_us": 50,
+            "analysis_config": {"tail_settling_rule_enabled": True},
+        },
+        scout_summaries=[
+            mod.summarize_online_stream_tail_delay(
+                [_tail_frame_row(delay_us=4700, delay_from_emergence_us=1500, width_px=69.0)],
+                baseline_width_px=74.0,
+            )
+        ],
+        backtrack_summaries=[
+            mod.summarize_online_stream_tail_delay(
+                [_tail_frame_row(delay_us=4300, delay_from_emergence_us=1100, phase="tail_backtrack", width_px=74.1)],
+                baseline_width_px=74.0,
+            ),
+            mod.summarize_online_stream_tail_delay(
+                [_tail_frame_row(delay_us=4350, delay_from_emergence_us=1150, phase="tail_backtrack", width_px=73.0)],
+                baseline_width_px=74.0,
+            ),
+            mod.summarize_online_stream_tail_delay(
+                [_tail_frame_row(delay_us=4400, delay_from_emergence_us=1200, phase="tail_backtrack", width_px=72.8)],
+                baseline_width_px=74.0,
+            ),
+            mod.summarize_online_stream_tail_delay(
+                [_tail_frame_row(delay_us=4450, delay_from_emergence_us=1250, phase="tail_backtrack", width_px=72.0)],
+                baseline_width_px=74.0,
+            ),
+            mod.summarize_online_stream_tail_delay(
+                [_tail_frame_row(delay_us=4500, delay_from_emergence_us=1300, phase="tail_backtrack", width_px=71.8)],
+                baseline_width_px=74.0,
+            ),
+            mod.summarize_online_stream_tail_delay(
+                [_tail_frame_row(delay_us=4550, delay_from_emergence_us=1350, phase="tail_backtrack", width_px=71.7)],
+                baseline_width_px=74.0,
+            ),
+            mod.summarize_online_stream_tail_delay(
+                [_tail_frame_row(delay_us=4600, delay_from_emergence_us=1400, phase="tail_backtrack", width_px=71.0)],
+                baseline_width_px=74.0,
+            ),
+        ],
+        flow_delay_summaries=[_flow_delay_summary(delay_us=4250, delay_from_emergence_us=1050)],
+        trigger_bracket={
+            "tail_phase_status": "",
+            "termination_reason": "",
+            "landmark_delay_us": 4700,
+            "backtrack_left_delay_us": 4250,
+            "landmark_reason": "strong_width_collapse_backup",
+        },
+    )
+
+    tail_phase = resolved["tail_phase"]
+    assert tail_phase["tail_settling_rule_applied"] is False
+    assert tail_phase["tail_settling_rule_reason"] == "selection_method_ineligible"
+    assert tail_phase["landmark_reason"] == "strong_width_collapse_backup"
+    assert tail_phase["tail_start_selection_method"] == "earliest_transition_before_confirmed_collapse"
+    assert tail_phase["confirmed_collapse_delay_from_emergence_us"] == 1250
+
+
 def test_build_online_stream_tail_fit_artifact_and_outputs_are_json_serializable():
     artifact = mod.build_online_stream_tail_fit_artifact(
         condition={"print_pressure_psi": 0.42},
