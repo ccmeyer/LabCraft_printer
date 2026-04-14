@@ -1706,6 +1706,43 @@ def test_stream_capture_panel_state_locks_manual_controls_and_suppresses_verdict
     assert dialog.stream_capture_starting_mass_spin.value() == pytest.approx(0.0)
 
 
+def test_stream_capture_blocking_session_locks_tabs_until_idle(monkeypatch, qapp):
+    dialog, manager, _controller = _build_view_dialog(monkeypatch, qapp)
+
+    dialog.calibration_tabs.setCurrentIndex(2)
+    qapp.processEvents()
+
+    manager.state.update(
+        {
+            "status": "error",
+            "status_message": "Stream capture failed.",
+            "error_message": "camera return blocked",
+        }
+    )
+    manager.streamCaptureStateChanged.emit(dict(manager.state))
+    qapp.processEvents()
+
+    assert dialog.calibration_tabs.isTabEnabled(0) is False
+    assert dialog.calibration_tabs.isTabEnabled(1) is False
+    assert dialog.calibration_tabs.isTabEnabled(2) is True
+
+    manager.state.update(
+        {
+            "status": "idle",
+            "status_message": "Ready to begin stream gravimetric capture.",
+            "error_message": "",
+        }
+    )
+    manager.streamCaptureStateChanged.emit(dict(manager.state))
+    qapp.processEvents()
+
+    assert dialog.calibration_tabs.isTabEnabled(0) is True
+    assert dialog.calibration_tabs.isTabEnabled(1) is True
+    assert dialog.calibration_tabs.isTabEnabled(2) is True
+
+    dialog.deleteLater()
+
+
 def test_stream_capture_pending_mass_entry_restores_after_dialog_reopen(monkeypatch, qapp):
     dialog, manager, controller = _build_view_dialog(monkeypatch, qapp)
 

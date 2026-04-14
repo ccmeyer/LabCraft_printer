@@ -163,6 +163,24 @@ def test_droplet_imager_disables_manual_flash_and_stops_timer_on_fault(monkeypat
     dialog.deleteLater()
 
 
+def test_flash_fault_disables_shared_nozzle_buttons_in_both_tabs(monkeypatch, qapp):
+    dialog, cam = _build_droplet_dialog(monkeypatch, qapp)
+
+    cam.flash_fault_latched = True
+    cam.flash_fault_reason = "line_stuck_high"
+    dialog.update_flash_info()
+    qapp.processEvents()
+
+    assert dialog.calibrate_nozzle_button.isEnabled() is False
+    assert dialog.calibrate_nozzle_stream_button.isEnabled() is False
+    assert dialog.calibrate_focus_button.isEnabled() is False
+    assert dialog.calibrate_focus_stream_button.isEnabled() is False
+    assert dialog.calibrate_emergence_button.isEnabled() is False
+    assert dialog.calibrate_emergence_stream_button.isEnabled() is False
+
+    dialog.deleteLater()
+
+
 def test_flash_fault_keeps_active_online_stream_stop_button_enabled(monkeypatch, qapp):
     dialog, cam = _build_droplet_dialog(monkeypatch, qapp)
     dialog.model.calibration_manager.activeCalibration = SimpleNamespace(

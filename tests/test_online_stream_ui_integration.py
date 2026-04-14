@@ -96,6 +96,7 @@ class _CalibrationManagerStub:
 class _ControllerStub:
     def __init__(self):
         self.start_online_stream_calls = 0
+        self.start_nozzle_calls = 0
         self.stop_calibration_calls = 0
 
     def start_read_camera(self):
@@ -103,6 +104,9 @@ class _ControllerStub:
 
     def capture_droplet_image(self, throughput_mode=False):
         return None
+
+    def start_nozzle_calibration(self):
+        self.start_nozzle_calls += 1
 
     def start_online_stream_calibration(self):
         self.start_online_stream_calls += 1
@@ -170,6 +174,27 @@ def test_online_stream_toggle_starts_and_stops_via_controller(monkeypatch, qapp)
 
     assert controller.stop_calibration_calls == 1
     assert dialog.calibrate_online_stream_button.text() == "Calibrate Stream Volume"
+
+    dialog.deleteLater()
+
+
+def test_shared_nozzle_buttons_mirror_start_and_stop_text(monkeypatch, qapp):
+    dialog, manager, controller = _build_dialog(monkeypatch, qapp)
+
+    dialog.calibrate_nozzle_stream_button.click()
+    qapp.processEvents()
+
+    assert controller.start_nozzle_calls == 1
+    assert dialog.calibrate_nozzle_button.text() == "Stop Calibration"
+    assert dialog.calibrate_nozzle_stream_button.text() == "Stop Calibration"
+
+    manager.activeCalibration = object()
+    dialog.calibrate_nozzle_button.click()
+    qapp.processEvents()
+
+    assert controller.stop_calibration_calls == 1
+    assert dialog.calibrate_nozzle_button.text() == "Calibrate Nozzle Position"
+    assert dialog.calibrate_nozzle_stream_button.text() == "Calibrate Nozzle Position"
 
     dialog.deleteLater()
 
@@ -256,6 +281,56 @@ def test_online_stream_stream_capture_lockout_overrides_ready_state(monkeypatch,
 
     assert dialog.calibrate_online_stream_button.isEnabled() is False
     assert "stream gravimetric capture" in dialog.calibrate_online_stream_button.toolTip().lower()
+
+    dialog.deleteLater()
+
+
+def test_tabs_lock_during_active_calibration_and_unlock_when_idle(monkeypatch, qapp):
+    dialog, manager, _controller = _build_dialog(monkeypatch, qapp)
+
+    dialog.calibration_tabs.setCurrentIndex(1)
+    qapp.processEvents()
+
+    manager.activeCalibration = object()
+    dialog._refresh_manual_control_lock_state()
+    qapp.processEvents()
+
+    assert dialog.calibration_tabs.isTabEnabled(0) is False
+    assert dialog.calibration_tabs.isTabEnabled(1) is True
+    assert dialog.calibration_tabs.isTabEnabled(2) is False
+
+    manager.activeCalibration = None
+    dialog._refresh_manual_control_lock_state()
+    qapp.processEvents()
+
+    assert dialog.calibration_tabs.isTabEnabled(0) is True
+    assert dialog.calibration_tabs.isTabEnabled(1) is True
+    assert dialog.calibration_tabs.isTabEnabled(2) is True
+
+    dialog.deleteLater()
+
+
+def test_tabs_lock_during_pulsewidth_sweep_and_unlock_afterwards(monkeypatch, qapp):
+    dialog, manager, _controller = _build_dialog(monkeypatch, qapp)
+
+    dialog.calibration_tabs.setCurrentIndex(2)
+    qapp.processEvents()
+
+    monkeypatch.setattr(manager, "is_pulsewidth_sweep_active", lambda: True)
+    dialog._refresh_calibration_tab_lock_state()
+    qapp.processEvents()
+
+    assert dialog.calibration_tabs.isTabEnabled(0) is False
+    assert dialog.calibration_tabs.isTabEnabled(1) is False
+    assert dialog.calibration_tabs.isTabEnabled(2) is True
+
+    monkeypatch.setattr(manager, "is_pulsewidth_sweep_active", lambda: False)
+    dialog._refresh_calibration_tab_lock_state()
+    qapp.processEvents()
+
+    assert dialog.calibration_tabs.isTabEnabled(0) is True
+    assert dialog.calibration_tabs.isTabEnabled(1) is True
+    assert dialog.calibration_tabs.isTabEnabled(2) is True
 
     dialog.deleteLater()
 

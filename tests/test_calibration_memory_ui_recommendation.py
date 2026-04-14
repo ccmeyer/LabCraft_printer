@@ -403,8 +403,30 @@ def test_real_dialog_uses_three_column_layout_with_controls_left_and_results_rig
     assert dialog.bridge_group.parentWidget() is dialog.info_panel
     assert dialog.machine_position_group.parentWidget() is dialog.info_panel
     assert dialog.status_group.parentWidget() is dialog.info_panel
-    assert dialog.manual_group.parentWidget() is dialog.control_panel
-    assert dialog.calib_group.parentWidget() is dialog.control_panel
+    assert dialog.calibration_tabs.parentWidget() is dialog.control_panel
+    assert dialog.run_options_group.parentWidget() is dialog.control_panel
+    assert dialog.manual_group.parentWidget() is dialog.debug_tab
+    assert dialog.calib_group.parentWidget() is dialog.droplet_tab
+    assert dialog.stream_calib_group.parentWidget() is dialog.stream_tab
+    assert dialog.stream_capture_group.parentWidget() is dialog.debug_tab
+    assert dialog.record_calibration_checkbox.parentWidget() is dialog.run_options_group
+    assert dialog.enable_calibration_memory_checkbox.parentWidget() is dialog.run_options_group
+    assert dialog.calibration_tabs.count() == 3
+    assert [dialog.calibration_tabs.tabText(idx) for idx in range(dialog.calibration_tabs.count())] == [
+        "Droplet",
+        "Stream",
+        "Debug / Specialty",
+    ]
+    assert dialog.calibration_tabs.currentIndex() == 0
+    assert dialog.droplet_tab.isAncestorOf(dialog.start_pressure_spin) is True
+    assert dialog.droplet_tab.isAncestorOf(dialog.num_pressure_tests_spin) is True
+    assert dialog.stream_tab.isAncestorOf(dialog.start_pressure_spin) is False
+    assert dialog.stream_tab.isAncestorOf(dialog.num_pressure_tests_spin) is False
+    assert dialog.stream_tab.isAncestorOf(dialog.calibrate_online_stream_button) is True
+    assert dialog.droplet_tab.isAncestorOf(dialog.calibrate_online_stream_button) is False
+    assert dialog.debug_tab.isAncestorOf(dialog.flash_button) is True
+    assert dialog.debug_tab.isAncestorOf(dialog.calibrate_timecourse_button) is True
+    assert dialog.debug_tab.isAncestorOf(dialog.stream_capture_group) is True
     assert dialog.info_panel.sizePolicy().horizontalPolicy() == calibration_view.QtWidgets.QSizePolicy.Fixed
     assert dialog.control_panel.sizePolicy().horizontalPolicy() == calibration_view.QtWidgets.QSizePolicy.Fixed
     assert dialog.analysis_panel.sizePolicy().horizontalPolicy() == calibration_view.QtWidgets.QSizePolicy.Expanding
@@ -419,5 +441,24 @@ def test_real_dialog_uses_three_column_layout_with_controls_left_and_results_rig
     assert not hasattr(dialog, "acquire_prebreakup_dataset_button")
     assert not hasattr(dialog, "prebreakup_step_spin")
     assert not hasattr(dialog, "prebreakup_dataset_plan_edit")
+
+    dialog.deleteLater()
+
+
+def test_real_dialog_creates_duplicate_shared_buttons_for_droplet_and_stream_tabs(monkeypatch, qapp):
+    dialog = _build_real_dialog_for_layout(monkeypatch, qapp)
+
+    assert dialog.droplet_tab.isAncestorOf(dialog.prime_head_button) is True
+    assert dialog.stream_tab.isAncestorOf(dialog.prime_head_stream_button) is True
+    assert dialog.droplet_tab.isAncestorOf(dialog.calibrate_nozzle_button) is True
+    assert dialog.stream_tab.isAncestorOf(dialog.calibrate_nozzle_stream_button) is True
+    assert dialog.droplet_tab.isAncestorOf(dialog.calibrate_focus_button) is True
+    assert dialog.stream_tab.isAncestorOf(dialog.calibrate_focus_stream_button) is True
+    assert dialog.droplet_tab.isAncestorOf(dialog.calibrate_emergence_button) is True
+    assert dialog.stream_tab.isAncestorOf(dialog.calibrate_emergence_stream_button) is True
+    assert dialog.prime_head_button.text() == dialog.prime_head_stream_button.text()
+    assert dialog.calibrate_nozzle_button.text() == dialog.calibrate_nozzle_stream_button.text()
+    assert dialog.calibrate_focus_button.text() == dialog.calibrate_focus_stream_button.text()
+    assert dialog.calibrate_emergence_button.text() == dialog.calibrate_emergence_stream_button.text()
 
     dialog.deleteLater()

@@ -790,6 +790,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._manual_spinbox_typed_drafts = {}
         self._managed_manual_spinboxes = []
         self._manual_controls_locked = False
+        self._calibration_action_buttons = {}
+        self._calibration_action_defaults = {}
         self._startup_focus_initialized = False
         self._stream_capture_last_status = None
         self._stream_capture_mass_dialog = None
@@ -831,7 +833,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         info_panel_v.setContentsMargins(6, 6, 6, 6)
         info_panel_v.setSpacing(8)
 
-        # ---------- LEFT CONTROL PANEL (fixed width): manual + calibration ----------
+        # ---------- LEFT CONTROL PANEL (fixed width): workflow tabs + run options ----------
         self.control_panel = QtWidgets.QWidget()
         control_panel_v = QtWidgets.QVBoxLayout(self.control_panel)
         control_panel_v.setContentsMargins(6, 6, 6, 6)
@@ -843,7 +845,20 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.control_panel_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.control_panel_scroll.setWidget(self.control_panel)
 
-        # --- Group 1: Manual Controls ---
+        self.calibration_tabs = QtWidgets.QTabWidget()
+        self.droplet_tab = QtWidgets.QWidget()
+        self.stream_tab = QtWidgets.QWidget()
+        self.debug_tab = QtWidgets.QWidget()
+        for tab_page in (self.droplet_tab, self.stream_tab, self.debug_tab):
+            tab_layout = QtWidgets.QVBoxLayout(tab_page)
+            tab_layout.setContentsMargins(0, 0, 0, 0)
+            tab_layout.setSpacing(8)
+        self.calibration_tabs.addTab(self.droplet_tab, "Droplet")
+        self.calibration_tabs.addTab(self.stream_tab, "Stream")
+        self.calibration_tabs.addTab(self.debug_tab, "Debug / Specialty")
+        self.calibration_tabs.currentChanged.connect(self._refresh_calibration_tab_lock_state)
+
+        # --- Debug tab: Manual Controls ---
         self.manual_group = QtWidgets.QGroupBox("Manual Controls")
         manual_grid = QtWidgets.QGridLayout(self.manual_group)
         manual_grid.setHorizontalSpacing(8)
@@ -918,12 +933,32 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.benchmark_profile_button.clicked.connect(self.apply_benchmark_capture_profile)
         manual_grid.addWidget(self.benchmark_profile_button, row, 0, 1, 2); row += 1
 
-        # --- Group 2: Calibration (with Starting Pressure) ---
-        self.calib_group = QtWidgets.QGroupBox("Calibration")
+        # --- Droplet tab: standard droplet workflow ---
+        self.calib_group = QtWidgets.QGroupBox("Droplet Calibration")
         calib_grid = QtWidgets.QGridLayout(self.calib_group)
         calib_grid.setHorizontalSpacing(8)
         calib_grid.setVerticalSpacing(6)
         crow = 0
+
+        self.prime_head_button = QtWidgets.QPushButton("Prime Printer Head")
+        self.prime_head_button.clicked.connect(self.toggle_start_head_prime_calibration)
+        self._register_calibration_action_button("head_prime", self.prime_head_button)
+        calib_grid.addWidget(self.prime_head_button, crow, 0, 1, 2); crow += 1
+
+        self.calibrate_nozzle_button = QtWidgets.QPushButton("Calibrate Nozzle Position")
+        self.calibrate_nozzle_button.clicked.connect(self.toggle_start_nozzle_calibration)
+        self._register_calibration_action_button("nozzle_position", self.calibrate_nozzle_button)
+        calib_grid.addWidget(self.calibrate_nozzle_button, crow, 0, 1, 2); crow += 1
+
+        self.calibrate_focus_button = QtWidgets.QPushButton("Calibrate Nozzle Focus")
+        self.calibrate_focus_button.clicked.connect(self.toggle_start_focus_calibration)
+        self._register_calibration_action_button("nozzle_focus", self.calibrate_focus_button)
+        calib_grid.addWidget(self.calibrate_focus_button, crow, 0, 1, 2); crow += 1
+
+        self.calibrate_emergence_button = QtWidgets.QPushButton("Calibrate Droplet Emergence")
+        self.calibrate_emergence_button.clicked.connect(self.toggle_start_emergence_calibration)
+        self._register_calibration_action_button("droplet_emergence", self.calibrate_emergence_button)
+        calib_grid.addWidget(self.calibrate_emergence_button, crow, 0, 1, 2); crow += 1
 
         # Starting Pressure (psi)
         self.start_pressure_label = QtWidgets.QLabel("Starting Pressure (psi):")
@@ -949,52 +984,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         calib_grid.addWidget(self.num_pressure_tests_label, crow, 0)
         calib_grid.addWidget(self.num_pressure_tests_spin,  crow, 1); crow += 1
 
-        self.record_calibration_checkbox = QtWidgets.QCheckBox("Record Calibration Runs")
-        self.record_calibration_checkbox.setToolTip(
-            "When enabled, calibration runs save captures/events/analysis to calibration_recordings."
-        )
-        try:
-            rec_enabled = bool(self.model.calibration_manager.get_record_mode_enabled())
-        except Exception:
-            rec_enabled = bool(getattr(self.model.calibration_manager, "record_mode_enabled", True))
-        self.record_calibration_checkbox.setChecked(rec_enabled)
-        calib_grid.addWidget(self.record_calibration_checkbox, crow, 0, 1, 2); crow += 1
-
-        self.enable_calibration_memory_checkbox = QtWidgets.QCheckBox("Enable Calibration Memory")
-        self.enable_calibration_memory_checkbox.setToolTip(
-            "When disabled, prior lookup and calibration-memory sidecar writes are skipped."
-        )
-        try:
-            memory_enabled = bool(self.model.calibration_manager.get_calibration_memory_enabled())
-        except Exception:
-            memory_enabled = True
-        self.enable_calibration_memory_checkbox.setChecked(memory_enabled)
-        calib_grid.addWidget(self.enable_calibration_memory_checkbox, crow, 0, 1, 2); crow += 1
-
-        # Calibration buttons
-
-        self.prime_head_button = QtWidgets.QPushButton("Prime Printer Head")
-        self.prime_head_button.clicked.connect(self.toggle_start_head_prime_calibration)
-        calib_grid.addWidget(self.prime_head_button, crow, 0, 1, 2); crow += 1
-
-        self.calibrate_nozzle_button = QtWidgets.QPushButton("Calibrate Nozzle Position")
-        self.calibrate_nozzle_button.clicked.connect(self.toggle_start_nozzle_calibration)
-        calib_grid.addWidget(self.calibrate_nozzle_button, crow, 0, 1, 2); crow += 1
-
-        self.calibrate_focus_button = QtWidgets.QPushButton("Calibrate Nozzle Focus")
-        self.calibrate_focus_button.clicked.connect(self.toggle_start_focus_calibration)
-        calib_grid.addWidget(self.calibrate_focus_button, crow, 0, 1, 2); crow += 1
-
-        self.calibrate_emergence_button = QtWidgets.QPushButton("Calibrate Droplet Emergence")
-        self.calibrate_emergence_button.clicked.connect(self.toggle_start_emergence_calibration)
-        calib_grid.addWidget(self.calibrate_emergence_button, crow, 0, 1, 2); crow += 1
-
-        # self.calibrate_pressure_button = QtWidgets.QPushButton("Calibrate Pressure")
-        # self.calibrate_pressure_button.clicked.connect(self.toggle_start_pressure_calibration)
-        # calib_grid.addWidget(self.calibrate_pressure_button, crow, 0, 1, 2); crow += 1
-
         self.calibrate_pressure_scan_button = QtWidgets.QPushButton("Scan Pressures")
         self.calibrate_pressure_scan_button.clicked.connect(self.toggle_start_pressure_scan_calibration)
+        self._register_calibration_action_button("pressure_scan", self.calibrate_pressure_scan_button)
         calib_grid.addWidget(self.calibrate_pressure_scan_button, crow, 0, 1, 2); crow += 1
 
         # self.calibrate_trajectory_button = QtWidgets.QPushButton("Calibrate Droplet Trajectory")
@@ -1003,6 +995,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         self.scan_trajectory_button = QtWidgets.QPushButton("Scan Trajectory Pressures")
         self.scan_trajectory_button.clicked.connect(self.toggle_start_pressure_trajectory_calibration)
+        self._register_calibration_action_button("pressure_trajectory", self.scan_trajectory_button)
         calib_grid.addWidget(self.scan_trajectory_button, crow, 0, 1, 2); crow += 1
 
         # self.calibrate_droplet_search_button = QtWidgets.QPushButton("Search for Droplets")
@@ -1011,25 +1004,66 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         self.calibrate_pressure_sweep_button = QtWidgets.QPushButton("Pressure Sweep Characterization")
         self.calibrate_pressure_sweep_button.clicked.connect(self.toggle_start_pressure_sweep_calibration)
+        self._register_calibration_action_button(
+            "pressure_sweep_characterization",
+            self.calibrate_pressure_sweep_button,
+        )
         calib_grid.addWidget(self.calibrate_pressure_sweep_button, crow, 0, 1, 2); crow += 1
-
-        self.calibrate_characterization_button = QtWidgets.QPushButton("Manually Characterize Droplets")
-        self.calibrate_characterization_button.clicked.connect(self.toggle_start_characterization_calibration)
-        calib_grid.addWidget(self.calibrate_characterization_button, crow, 0, 1, 2); crow += 1
-
-        self.calibrate_timecourse_button = QtWidgets.QPushButton("Droplet Timecourse Imaging")
-        self.calibrate_timecourse_button.clicked.connect(self.toggle_start_timecourse_calibration)
-        calib_grid.addWidget(self.calibrate_timecourse_button, crow, 0, 1, 2); crow += 1
-
-        self.calibrate_online_stream_button = QtWidgets.QPushButton("Calibrate Stream Volume")
-        self.calibrate_online_stream_button.clicked.connect(self.toggle_start_online_stream_calibration)
-        calib_grid.addWidget(self.calibrate_online_stream_button, crow, 0, 1, 2); crow += 1
 
         self.calibrate_all_button = QtWidgets.QPushButton("Calibrate All")
         self.calibrate_all_button.clicked.connect(self.toggle_start_all_calibration)
+        self._register_calibration_action_button("calibrate_all", self.calibrate_all_button)
         calib_grid.addWidget(self.calibrate_all_button, crow, 0, 1, 2); crow += 1
 
-        # ---- Pulse-Width Sweep controls ----
+        self.calibrate_characterization_button = QtWidgets.QPushButton("Manually Characterize Droplets")
+        self.calibrate_characterization_button.clicked.connect(self.toggle_start_characterization_calibration)
+        self._register_calibration_action_button(
+            "droplet_characterization",
+            self.calibrate_characterization_button,
+        )
+        calib_grid.addWidget(self.calibrate_characterization_button, crow, 0, 1, 2); crow += 1
+
+        # --- Stream tab: standard stream workflow ---
+        self.stream_calib_group = QtWidgets.QGroupBox("Stream Calibration")
+        stream_calib_grid = QtWidgets.QGridLayout(self.stream_calib_group)
+        stream_calib_grid.setHorizontalSpacing(8)
+        stream_calib_grid.setVerticalSpacing(6)
+        stream_crow = 0
+
+        self.prime_head_stream_button = QtWidgets.QPushButton("Prime Printer Head")
+        self.prime_head_stream_button.clicked.connect(self.toggle_start_head_prime_calibration)
+        self._register_calibration_action_button("head_prime", self.prime_head_stream_button)
+        stream_calib_grid.addWidget(self.prime_head_stream_button, stream_crow, 0, 1, 2); stream_crow += 1
+
+        self.calibrate_nozzle_stream_button = QtWidgets.QPushButton("Calibrate Nozzle Position")
+        self.calibrate_nozzle_stream_button.clicked.connect(self.toggle_start_nozzle_calibration)
+        self._register_calibration_action_button("nozzle_position", self.calibrate_nozzle_stream_button)
+        stream_calib_grid.addWidget(self.calibrate_nozzle_stream_button, stream_crow, 0, 1, 2); stream_crow += 1
+
+        self.calibrate_focus_stream_button = QtWidgets.QPushButton("Calibrate Nozzle Focus")
+        self.calibrate_focus_stream_button.clicked.connect(self.toggle_start_focus_calibration)
+        self._register_calibration_action_button("nozzle_focus", self.calibrate_focus_stream_button)
+        stream_calib_grid.addWidget(self.calibrate_focus_stream_button, stream_crow, 0, 1, 2); stream_crow += 1
+
+        self.calibrate_emergence_stream_button = QtWidgets.QPushButton("Calibrate Droplet Emergence")
+        self.calibrate_emergence_stream_button.clicked.connect(self.toggle_start_emergence_calibration)
+        self._register_calibration_action_button("droplet_emergence", self.calibrate_emergence_stream_button)
+        stream_calib_grid.addWidget(self.calibrate_emergence_stream_button, stream_crow, 0, 1, 2); stream_crow += 1
+
+        self.calibrate_online_stream_button = QtWidgets.QPushButton("Calibrate Stream Volume")
+        self.calibrate_online_stream_button.clicked.connect(self.toggle_start_online_stream_calibration)
+        self._register_calibration_action_button(
+            "online_stream_calibration",
+            self.calibrate_online_stream_button,
+        )
+        stream_calib_grid.addWidget(self.calibrate_online_stream_button, stream_crow, 0, 1, 2); stream_crow += 1
+
+        # --- Debug tab: Pulse Width Sweep ---
+        self.pw_sweep_group = QtWidgets.QGroupBox("Pulse Width Sweep")
+        pw_grid = QtWidgets.QGridLayout(self.pw_sweep_group)
+        pw_grid.setHorizontalSpacing(8)
+        pw_grid.setVerticalSpacing(6)
+        pw_row = 0
         self.pw_start_label = QtWidgets.QLabel("PW Start (µs):")
         self.pw_start_spin  = QtWidgets.QSpinBox()
         self.pw_start_spin.setRange(0, 10000)
@@ -1049,47 +1083,35 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.pw_end_spin.setValue(1800)
         self.pw_step_spin.setValue(50)
 
-        calib_grid.addWidget(self.pw_start_label, crow, 0)
-        calib_grid.addWidget(self.pw_start_spin,  crow, 1); crow += 1
-        calib_grid.addWidget(self.pw_end_label,   crow, 0)
-        calib_grid.addWidget(self.pw_end_spin,    crow, 1); crow += 1
-        calib_grid.addWidget(self.pw_step_label,  crow, 0)
-        calib_grid.addWidget(self.pw_step_spin,   crow, 1); crow += 1
+        pw_grid.addWidget(self.pw_start_label, pw_row, 0)
+        pw_grid.addWidget(self.pw_start_spin,  pw_row, 1); pw_row += 1
+        pw_grid.addWidget(self.pw_end_label,   pw_row, 0)
+        pw_grid.addWidget(self.pw_end_spin,    pw_row, 1); pw_row += 1
+        pw_grid.addWidget(self.pw_step_label,  pw_row, 0)
+        pw_grid.addWidget(self.pw_step_spin,   pw_row, 1); pw_row += 1
 
         self.calibrate_all_pw_button = QtWidgets.QPushButton("Calibrate All (PW Range)")
         self.calibrate_all_pw_button.clicked.connect(self.toggle_start_pw_sweep)
-        calib_grid.addWidget(self.calibrate_all_pw_button, crow, 0, 1, 2); crow += 1
+        self._register_calibration_action_button("pulsewidth_sweep", self.calibrate_all_pw_button)
+        pw_grid.addWidget(self.calibrate_all_pw_button, pw_row, 0, 1, 2); pw_row += 1
 
-        for button in (
-            self.flash_button,
-            self.benchmark_profile_button,
-            self.prime_head_button,
-            self.calibrate_nozzle_button,
-            self.calibrate_focus_button,
-            self.calibrate_emergence_button,
-            self.calibrate_pressure_scan_button,
-            self.scan_trajectory_button,
-            self.calibrate_pressure_sweep_button,
-            self.calibrate_characterization_button,
-            self.calibrate_timecourse_button,
-            self.calibrate_online_stream_button,
-            self.calibrate_all_button,
-            self.calibrate_all_pw_button,
-        ):
-            button.setMinimumHeight(32)
+        self.timecourse_group = QtWidgets.QGroupBox("Droplet Timecourse")
+        timecourse_v = QtWidgets.QVBoxLayout(self.timecourse_group)
+        timecourse_v.setContentsMargins(8, 8, 8, 8)
+        timecourse_v.setSpacing(6)
+        self.calibrate_timecourse_button = QtWidgets.QPushButton("Droplet Timecourse Imaging")
+        self.calibrate_timecourse_button.clicked.connect(self.toggle_start_timecourse_calibration)
+        self._register_calibration_action_button("droplet_timecourse", self.calibrate_timecourse_button)
+        timecourse_v.addWidget(self.calibrate_timecourse_button)
 
         self._calibration_readiness_button_specs = (
-            ("pressure_scan", "calibrate_pressure_scan_button"),
-            ("trajectory_pressure_scan", "scan_trajectory_button"),
-            ("droplet_characterization", "calibrate_characterization_button"),
-            ("pressure_sweep_characterization", "calibrate_pressure_sweep_button"),
-            ("online_stream_calibration", "calibrate_online_stream_button"),
+            ("pressure_scan", "pressure_scan"),
+            ("trajectory_pressure_scan", "pressure_trajectory"),
+            ("droplet_characterization", "droplet_characterization"),
+            ("pressure_sweep_characterization", "pressure_sweep_characterization"),
+            ("online_stream_calibration", "online_stream_calibration"),
         )
         self._last_calibration_readiness = {}
-
-        # Add groups to control panel
-        control_panel_v.addWidget(self.manual_group)
-        control_panel_v.addWidget(self.calib_group)
 
         self.stream_capture_group = QtWidgets.QGroupBox("Stream Gravimetric Capture")
         stream_grid = QtWidgets.QGridLayout(self.stream_capture_group)
@@ -1142,7 +1164,51 @@ class DropletImagingDialog(QtWidgets.QDialog):
         stream_grid.addWidget(self.stream_capture_begin_button, srow, 0, 1, 2); srow += 1
         stream_grid.addWidget(self.stream_capture_discard_button, srow, 0, 1, 2); srow += 1
 
-        control_panel_v.addWidget(self.stream_capture_group)
+        self.run_options_group = QtWidgets.QGroupBox("Run Options")
+        run_options_v = QtWidgets.QVBoxLayout(self.run_options_group)
+        run_options_v.setContentsMargins(8, 8, 8, 8)
+        run_options_v.setSpacing(6)
+
+        self.record_calibration_checkbox = QtWidgets.QCheckBox("Record Calibration Runs")
+        self.record_calibration_checkbox.setToolTip(
+            "When enabled, calibration runs save captures/events/analysis to calibration_recordings."
+        )
+        try:
+            rec_enabled = bool(self.model.calibration_manager.get_record_mode_enabled())
+        except Exception:
+            rec_enabled = bool(getattr(self.model.calibration_manager, "record_mode_enabled", True))
+        self.record_calibration_checkbox.setChecked(rec_enabled)
+        run_options_v.addWidget(self.record_calibration_checkbox)
+
+        self.enable_calibration_memory_checkbox = QtWidgets.QCheckBox("Enable Calibration Memory")
+        self.enable_calibration_memory_checkbox.setToolTip(
+            "When disabled, prior lookup and calibration-memory sidecar writes are skipped."
+        )
+        try:
+            memory_enabled = bool(self.model.calibration_manager.get_calibration_memory_enabled())
+        except Exception:
+            memory_enabled = True
+        self.enable_calibration_memory_checkbox.setChecked(memory_enabled)
+        run_options_v.addWidget(self.enable_calibration_memory_checkbox)
+
+        for button in (self.flash_button, self.benchmark_profile_button):
+            button.setMinimumHeight(32)
+        for buttons in self._calibration_action_buttons.values():
+            for button in buttons:
+                button.setMinimumHeight(32)
+
+        self.droplet_tab.layout().addWidget(self.calib_group)
+        self.droplet_tab.layout().addStretch(1)
+        self.stream_tab.layout().addWidget(self.stream_calib_group)
+        self.stream_tab.layout().addStretch(1)
+        self.debug_tab.layout().addWidget(self.manual_group)
+        self.debug_tab.layout().addWidget(self.pw_sweep_group)
+        self.debug_tab.layout().addWidget(self.timecourse_group)
+        self.debug_tab.layout().addWidget(self.stream_capture_group)
+        self.debug_tab.layout().addStretch(1)
+
+        control_panel_v.addWidget(self.calibration_tabs)
+        control_panel_v.addWidget(self.run_options_group)
         control_panel_v.addStretch(1)
 
         self.recommendation_group = QtWidgets.QGroupBox("Calibration Memory Recommendation")
@@ -1657,6 +1723,58 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if hasattr(self, "manual_edit_focus_frame"):
             QTimer.singleShot(0, lambda: DropletImagingDialog._refresh_manual_spinbox_focus_frame(self))
 
+    def _register_calibration_action_button(self, action_key: str, button: QtWidgets.QPushButton, *, default_text: str | None = None):
+        key = str(action_key)
+        self._calibration_action_buttons.setdefault(key, []).append(button)
+        self._calibration_action_defaults.setdefault(key, str(default_text or button.text()))
+        button.setProperty("calibration_action_key", key)
+        return button
+
+    def _get_calibration_action_buttons(self, action_key: str):
+        return list(getattr(self, "_calibration_action_buttons", {}).get(str(action_key), []))
+
+    def _set_calibration_action_text(self, action_key: str, text: str | None = None, *, use_default: bool = False):
+        key = str(action_key)
+        if use_default:
+            text = getattr(self, "_calibration_action_defaults", {}).get(key, "")
+        if text is None:
+            return
+        for button in self._get_calibration_action_buttons(key):
+            button.setText(str(text))
+
+    def _set_calibration_action_enabled(self, action_key: str, enabled: bool):
+        for button in self._get_calibration_action_buttons(action_key):
+            button.setEnabled(bool(enabled))
+
+    def _set_calibration_action_state(
+        self,
+        action_key: str,
+        ready: bool,
+        missing: list[str] | None = None,
+        *,
+        tooltip_override: str | None = None,
+    ):
+        for button in self._get_calibration_action_buttons(action_key):
+            self._set_btn_state(
+                button,
+                ready,
+                missing,
+                tooltip_override=tooltip_override,
+            )
+
+    def _refresh_calibration_tab_lock_state(self, *_args):
+        tabs = getattr(self, "calibration_tabs", None)
+        if tabs is None:
+            return
+        tab_bar = tabs.tabBar()
+        lock_tabs = (
+            DropletImagingDialog._is_calibration_busy(self)
+            or self._stream_capture_blocks_new_starts(self._get_stream_capture_state())
+        )
+        current_index = tabs.currentIndex()
+        for idx in range(tabs.count()):
+            tab_bar.setTabEnabled(idx, (not lock_tabs) or idx == current_index)
+
     def _is_calibration_busy(self):
         manager = getattr(getattr(self, "model", None), "calibration_manager", None)
         if manager is None:
@@ -1745,13 +1863,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         return str(getattr(active, "phase_name", "") or "") == "online_stream_calibration"
 
     def _recompute_online_stream_button_state(self):
-        button = getattr(self, "calibrate_online_stream_button", None)
-        if button is None:
+        if not self._get_calibration_action_buttons("online_stream_calibration"):
             return
 
         if self._is_online_stream_calibration_active():
-            self._set_btn_state(
-                button,
+            self._set_calibration_action_state(
+                "online_stream_calibration",
                 True,
                 tooltip_override="Stop the active online stream calibration.",
             )
@@ -1765,21 +1882,21 @@ class DropletImagingDialog(QtWidgets.QDialog):
         stream_capture_blocked = self._stream_capture_blocks_new_starts(self._get_stream_capture_state())
 
         if flash_fault_latched:
-            self._set_btn_state(
-                button,
+            self._set_calibration_action_state(
+                "online_stream_calibration",
                 False,
                 tooltip_override="Unavailable while flash safety fault is latched.",
             )
             return
         if stream_capture_blocked:
-            self._set_btn_state(
-                button,
+            self._set_calibration_action_state(
+                "online_stream_calibration",
                 False,
                 tooltip_override="Unavailable while a stream gravimetric capture session is open.",
             )
             return
 
-        self._set_btn_state(button, ready, missing)
+        self._set_calibration_action_state("online_stream_calibration", ready, missing)
 
     def _apply_flash_safety_ui_state(self):
         fault_latched = self._is_flash_fault_latched()
@@ -1806,26 +1923,27 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.flash_safety_label.setText("Flash session disarmed.")
             self.flash_safety_label.setStyleSheet("color: #555555;")
 
-        for widget_name in (
-            "flash_button",
-            "benchmark_profile_button",
-            "prime_head_button",
-            "calibrate_nozzle_button",
-            "calibrate_focus_button",
-            "calibrate_emergence_button",
-            "calibrate_pressure_scan_button",
-            "scan_trajectory_button",
-            "calibrate_pressure_sweep_button",
-            "calibrate_characterization_button",
-            "calibrate_timecourse_button",
-            "calibrate_online_stream_button",
-            "calibrate_all_button",
-            "calibrate_all_pw_button",
-            "repeat_capture_button",
-        ):
-            widget = getattr(self, widget_name, None)
-            if widget is not None and fault_latched:
-                widget.setEnabled(False)
+        if fault_latched:
+            flash_widgets = ("flash_button", "benchmark_profile_button", "repeat_capture_button")
+            for widget_name in flash_widgets:
+                widget = getattr(self, widget_name, None)
+                if widget is not None:
+                    widget.setEnabled(False)
+            for action_key in (
+                "head_prime",
+                "nozzle_position",
+                "nozzle_focus",
+                "droplet_emergence",
+                "pressure_scan",
+                "pressure_trajectory",
+                "pressure_sweep_characterization",
+                "droplet_characterization",
+                "droplet_timecourse",
+                "online_stream_calibration",
+                "calibrate_all",
+                "pulsewidth_sweep",
+            ):
+                self._set_calibration_action_enabled(action_key, False)
 
         if not fault_latched:
             self._refresh_manual_control_lock_state()
@@ -1877,6 +1995,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._sync_stream_capture_panel_state()
 
         self._recompute_online_stream_button_state()
+        self._refresh_calibration_tab_lock_state()
 
     def eventFilter(self, watched, event):
         spinbox = self._manual_spinbox_focus_targets.get(watched)
@@ -2684,25 +2803,22 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.stream_capture_online_mode_checkbox.setEnabled(status == "idle")
 
         block_new_starts = self._stream_capture_blocks_new_starts(state)
-        for widget_name in (
-            "prime_head_button",
-            "calibrate_nozzle_button",
-            "calibrate_focus_button",
-            "calibrate_emergence_button",
-            "calibrate_pressure_scan_button",
-            "scan_trajectory_button",
-            "calibrate_pressure_sweep_button",
-            "calibrate_characterization_button",
-            "calibrate_timecourse_button",
-            "calibrate_online_stream_button",
-            "calibrate_all_button",
-            "calibrate_all_pw_button",
+        for action_key in (
+            "head_prime",
+            "nozzle_position",
+            "nozzle_focus",
+            "droplet_emergence",
+            "pressure_scan",
+            "pressure_trajectory",
+            "pressure_sweep_characterization",
+            "droplet_characterization",
+            "droplet_timecourse",
+            "online_stream_calibration",
+            "calibrate_all",
+            "pulsewidth_sweep",
         ):
-            widget = getattr(self, widget_name, None)
-            if widget is None:
-                continue
             if block_new_starts:
-                widget.setEnabled(False)
+                self._set_calibration_action_enabled(action_key, False)
         if (not block_new_starts) and (not flash_fault_latched):
             self._enable_non_readiness_calibration_buttons()
             self._apply_cached_calibration_readiness()
@@ -2713,6 +2829,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.record_calibration_checkbox.setEnabled(not stream_busy and not block_new_starts)
 
         self._stream_capture_last_status = status
+        self._refresh_calibration_tab_lock_state()
 
     def begin_stream_gravimetric_capture(self):
         capture_mode = (
@@ -2821,8 +2938,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         self.update_stage_and_log("Calibration Queue Completed","green")
         self.reset_calibration_buttons()
-        self.calibrate_all_button.setText("Calibrate All")
-        self.calibrate_all_pw_button.setText("Calibrate All (PW Range)")
         self._refresh_manual_control_lock_state()
 
     def on_calibration_error(self, error_message):
@@ -2831,8 +2946,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         self.update_stage_and_log("Calibration Error", "red")
         self.reset_calibration_buttons()
-        self.calibrate_all_button.setText("Calibrate All")
-        self.calibrate_all_pw_button.setText("Calibrate All (PW Range)")
         self._refresh_manual_control_lock_state()
         QtWidgets.QMessageBox.warning(self, "Calibration Error", error_message)
         try:
@@ -2889,18 +3002,21 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         Resets the calibration buttons to their default state.
         """
-        self.prime_head_button.setText("Prime Printer Head")
-        self.calibrate_nozzle_button.setText("Calibrate Nozzle Position")
-        self.calibrate_focus_button.setText("Calibrate Nozzle Focus")
-        self.calibrate_emergence_button.setText("Calibrate Droplet Emergence")
-        # self.calibrate_pressure_button.setText("Calibrate Pressure")
-        # self.calibrate_droplet_search_button.setText("Search for Droplets")
-        self.calibrate_pressure_scan_button.setText("Scan Pressures")
-        self.scan_trajectory_button.setText("Scan Trajectory Pressures")
-        self.calibrate_timecourse_button.setText("Droplet Timecourse Imaging")
-        self.calibrate_online_stream_button.setText("Calibrate Stream Volume")
-        self.calibrate_characterization_button.setText("Manually Characterize Droplets")
-        self.calibrate_pressure_sweep_button.setText("Pressure Sweep Characterization")
+        for action_key in (
+            "head_prime",
+            "nozzle_position",
+            "nozzle_focus",
+            "droplet_emergence",
+            "pressure_scan",
+            "pressure_trajectory",
+            "pressure_sweep_characterization",
+            "droplet_characterization",
+            "droplet_timecourse",
+            "online_stream_calibration",
+            "calibrate_all",
+            "pulsewidth_sweep",
+        ):
+            self._set_calibration_action_text(action_key, use_default=True)
 
     def toggle_start_head_prime_calibration(self):
         """
@@ -2908,11 +3024,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         if self.model.calibration_manager.activeCalibration is not None:
             print('Stopping calibration')
-            self.prime_head_button.setText("Prime Printer Head")
+            self._set_calibration_action_text("head_prime", use_default=True)
             self.controller.stop_calibration()
         else:
             print('Starting calibration')
-            self.prime_head_button.setText("Stop Calibration")
+            self._set_calibration_action_text("head_prime", "Stop Calibration")
             self.controller.start_head_prime_calibration()
         self._refresh_manual_control_lock_state()
 
@@ -2922,11 +3038,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         if self.model.calibration_manager.activeCalibration is not None:
             print('Stopping calibration')
-            self.calibrate_nozzle_button.setText("Calibrate Nozzle Position")
+            self._set_calibration_action_text("nozzle_position", use_default=True)
             self.controller.stop_calibration()
         else:
             print('Starting calibration')
-            self.calibrate_nozzle_button.setText("Stop Calibration")
+            self._set_calibration_action_text("nozzle_position", "Stop Calibration")
             self.controller.start_nozzle_calibration()
         self._refresh_manual_control_lock_state()
 
@@ -2936,11 +3052,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         if self.model.calibration_manager.activeCalibration is not None:
             print('Stopping calibration')
-            self.calibrate_focus_button.setText("Calibrate Nozzle Focus")
+            self._set_calibration_action_text("nozzle_focus", use_default=True)
             self.controller.stop_calibration()
         else:
             print('Starting calibration')
-            self.calibrate_focus_button.setText("Stop Calibration")
+            self._set_calibration_action_text("nozzle_focus", "Stop Calibration")
             self.controller.start_nozzle_focus_calibration()
         self._refresh_manual_control_lock_state()
 
@@ -2950,11 +3066,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         if self.model.calibration_manager.activeCalibration is not None:
             print('Stopping calibration')
-            self.calibrate_emergence_button.setText("Calibrate Droplet Emergence")
+            self._set_calibration_action_text("droplet_emergence", use_default=True)
             self.controller.stop_calibration()
         else:
             print('Starting calibration')
-            self.calibrate_emergence_button.setText("Stop Calibration")
+            self._set_calibration_action_text("droplet_emergence", "Stop Calibration")
             self.controller.start_droplet_emergence_calibration()
         self._refresh_manual_control_lock_state()
 
@@ -2977,11 +3093,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         if self.model.calibration_manager.activeCalibration is not None:
             # Stop any running calibration
-            self.calibrate_pressure_scan_button.setText("Scan Pressures")
+            self._set_calibration_action_text("pressure_scan", use_default=True)
             self.controller.stop_calibration()
         else:
             # Launch
-            self.calibrate_pressure_scan_button.setText("Stop Calibration")
+            self._set_calibration_action_text("pressure_scan", "Stop Calibration")
             self.controller.start_pressure_scan_calibration()
         self._refresh_manual_control_lock_state()
 
@@ -2991,11 +3107,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         if self.model.calibration_manager.activeCalibration is not None:
             print('Stopping calibration')
-            self.scan_trajectory_button.setText("Scan Trajectory Pressures")
+            self._set_calibration_action_text("pressure_trajectory", use_default=True)
             self.controller.stop_calibration()
         else:
             print('Starting calibration')
-            self.scan_trajectory_button.setText("Stop Calibration")
+            self._set_calibration_action_text("pressure_trajectory", "Stop Calibration")
             self.controller.start_pressure_trajectory_calibration()
         self._refresh_manual_control_lock_state()
 
@@ -3018,11 +3134,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         if self.model.calibration_manager.activeCalibration is not None:
             print('Stopping calibration')
-            self.calibrate_characterization_button.setText("Characterize Droplets")
+            self._set_calibration_action_text("droplet_characterization", use_default=True)
             self.controller.stop_calibration()
         else:
             print('Starting calibration')
-            self.calibrate_characterization_button.setText("Stop Calibration")
+            self._set_calibration_action_text("droplet_characterization", "Stop Calibration")
             self.controller.start_droplet_characterization_calibration()
         self._refresh_manual_control_lock_state()
 
@@ -3032,11 +3148,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         if self.model.calibration_manager.activeCalibration is not None:
             print('Stopping calibration')
-            self.calibrate_pressure_sweep_button.setText("Pressure Sweep Characterization")
+            self._set_calibration_action_text("pressure_sweep_characterization", use_default=True)
             self.controller.stop_calibration()
         else:
             print('Starting calibration')
-            self.calibrate_pressure_sweep_button.setText("Stop Calibration")
+            self._set_calibration_action_text("pressure_sweep_characterization", "Stop Calibration")
             self.controller.start_pressure_sweep_characterization()
         self._refresh_manual_control_lock_state()
 
@@ -3046,11 +3162,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         if self.model.calibration_manager.activeCalibration is not None:
             print('Stopping calibration')
-            self.calibrate_timecourse_button.setText("Droplet Timecourse Imaging")
+            self._set_calibration_action_text("droplet_timecourse", use_default=True)
             self.controller.stop_calibration()
         else:
             print('Starting calibration')
-            self.calibrate_timecourse_button.setText("Stop Calibration")
+            self._set_calibration_action_text("droplet_timecourse", "Stop Calibration")
             self.controller.start_droplet_timecourse_process()
         self._refresh_manual_control_lock_state()
 
@@ -3060,11 +3176,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         if self.model.calibration_manager.activeCalibration is not None:
             print('Stopping calibration')
-            self.calibrate_online_stream_button.setText("Calibrate Stream Volume")
+            self._set_calibration_action_text("online_stream_calibration", use_default=True)
             self.controller.stop_calibration()
         else:
             print('Starting calibration')
-            self.calibrate_online_stream_button.setText("Stop Calibration")
+            self._set_calibration_action_text("online_stream_calibration", "Stop Calibration")
             self.controller.start_online_stream_calibration()
         self._refresh_manual_control_lock_state()
 
@@ -3074,11 +3190,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         if len(self.model.calibration_manager.calibration_queue) > 0 or self.model.calibration_manager.activeCalibration is not None:
             print('Stopping calibration')
-            self.calibrate_all_button.setText("Calibrate All")
+            self._set_calibration_action_text("calibrate_all", use_default=True)
             self.controller.stop_calibration()
         else:
             print('Starting calibration')
-            self.calibrate_all_button.setText("Stop Calibration")
+            self._set_calibration_action_text("calibrate_all", "Stop Calibration")
             self.controller.start_all_calibrations()
         self._refresh_manual_control_lock_state()
 
@@ -3091,7 +3207,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         # If a sweep is active, stop it
         if mgr.is_pulsewidth_sweep_active():
-            self.calibrate_all_pw_button.setText("Calibrate All (PW Range)")
+            self._set_calibration_action_text("pulsewidth_sweep", use_default=True)
             mgr.stop_pulsewidth_sweep()
             self._refresh_manual_control_lock_state()
             return
@@ -3119,7 +3235,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             return
 
         # Update button and kick off sweep
-        self.calibrate_all_pw_button.setText("Stop PW Range")
+        self._set_calibration_action_text("pulsewidth_sweep", "Stop PW Range")
         mgr.start_pulsewidth_sweep(pw_start, pw_end, pw_step)
         self._refresh_manual_control_lock_state()
 
@@ -3136,31 +3252,30 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
     def _apply_cached_calibration_readiness(self):
         readiness = dict(getattr(self, "_last_calibration_readiness", {}) or {})
-        for key, widget_name in getattr(self, "_calibration_readiness_button_specs", ()):
-            button = getattr(self, widget_name, None)
-            if button is None:
-                continue
+        for key, action_key in getattr(self, "_calibration_readiness_button_specs", ()):
             if str(key) == "online_stream_calibration":
                 self._recompute_online_stream_button_state()
                 continue
             info = dict(readiness.get(str(key), {}) or {})
             if not info:
                 continue
-            self._set_btn_state(button, bool(info.get("ready")), info.get("missing"))
+            self._set_calibration_action_state(
+                action_key,
+                bool(info.get("ready")),
+                info.get("missing"),
+            )
 
     def _enable_non_readiness_calibration_buttons(self):
-        for widget_name in (
-            "prime_head_button",
-            "calibrate_nozzle_button",
-            "calibrate_focus_button",
-            "calibrate_emergence_button",
-            "calibrate_timecourse_button",
-            "calibrate_all_button",
-            "calibrate_all_pw_button",
+        for action_key in (
+            "head_prime",
+            "nozzle_position",
+            "nozzle_focus",
+            "droplet_emergence",
+            "droplet_timecourse",
+            "calibrate_all",
+            "pulsewidth_sweep",
         ):
-            button = getattr(self, widget_name, None)
-            if button is not None:
-                button.setEnabled(True)
+            self._set_calibration_action_enabled(action_key, True)
 
     def _get_start_p(self) -> float:
         return float(self.start_pressure_spin.value())
