@@ -841,7 +841,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         control_panel_v.setContentsMargins(6, 6, 6, 6)
         control_panel_v.setSpacing(8)
 
-        quick_controls_expanded = bool(type(self)._quick_controls_expanded_default)
+        quick_controls_expanded = self._get_saved_acquisition_controls_expanded()
         (
             self.acquisition_controls_section,
             self.acquisition_controls_toggle,
@@ -860,7 +860,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.debug_tab = QtWidgets.QWidget()
         for tab_page in (self.droplet_tab, self.stream_tab):
             tab_layout = QtWidgets.QVBoxLayout(tab_page)
-            tab_layout.setContentsMargins(0, 0, 0, 0)
+            tab_layout.setContentsMargins(0, 6, 0, 0)
             tab_layout.setSpacing(8)
         debug_tab_layout = QtWidgets.QVBoxLayout(self.debug_tab)
         debug_tab_layout.setContentsMargins(0, 0, 0, 0)
@@ -1278,7 +1278,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.debug_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.debug_tab_content = QtWidgets.QWidget()
         debug_content_v = QtWidgets.QVBoxLayout(self.debug_tab_content)
-        debug_content_v.setContentsMargins(0, 0, 0, 0)
+        debug_content_v.setContentsMargins(0, 6, 0, 0)
         debug_content_v.setSpacing(8)
         debug_content_v.addWidget(self.manual_group)
         debug_content_v.addWidget(self.pw_sweep_group)
@@ -2133,16 +2133,23 @@ class DropletImagingDialog(QtWidgets.QDialog):
         header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(8)
 
+        left_divider = QtWidgets.QFrame()
+        left_divider.setFrameShape(QtWidgets.QFrame.HLine)
+        left_divider.setFrameShadow(QtWidgets.QFrame.Plain)
+        left_divider.setStyleSheet("color: #d6d6d6;")
+
         label = QtWidgets.QLabel(str(title))
+        label.setAlignment(QtCore.Qt.AlignCenter)
         label.setStyleSheet("color: #666666; font-weight: 600;")
 
-        divider = QtWidgets.QFrame()
-        divider.setFrameShape(QtWidgets.QFrame.HLine)
-        divider.setFrameShadow(QtWidgets.QFrame.Plain)
-        divider.setStyleSheet("color: #d6d6d6;")
+        right_divider = QtWidgets.QFrame()
+        right_divider.setFrameShape(QtWidgets.QFrame.HLine)
+        right_divider.setFrameShadow(QtWidgets.QFrame.Plain)
+        right_divider.setStyleSheet("color: #d6d6d6;")
 
+        header_layout.addWidget(left_divider, 1)
         header_layout.addWidget(label, 0)
-        header_layout.addWidget(divider, 1)
+        header_layout.addWidget(right_divider, 1)
         return header
 
     def _create_collapsible_section(self, title, *, expanded=False):
@@ -2177,6 +2184,20 @@ class DropletImagingDialog(QtWidgets.QDialog):
         outer_layout.addWidget(content)
         return container, toggle, content, content_layout
 
+    def _get_saved_acquisition_controls_expanded(self):
+        try:
+            if hasattr(self, "main_window"):
+                return bool(
+                    getattr(
+                        self.main_window,
+                        "_droplet_imaging_quick_controls_expanded",
+                        type(self)._quick_controls_expanded_default,
+                    )
+                )
+        except Exception:
+            pass
+        return bool(type(self)._quick_controls_expanded_default)
+
     def _set_acquisition_controls_expanded(self, expanded):
         expanded = bool(expanded)
         if hasattr(self, "acquisition_controls_content"):
@@ -2186,6 +2207,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 QtCore.Qt.DownArrow if expanded else QtCore.Qt.RightArrow
             )
         type(self)._quick_controls_expanded_default = expanded
+        try:
+            if hasattr(self, "main_window"):
+                setattr(self.main_window, "_droplet_imaging_quick_controls_expanded", expanded)
+        except Exception:
+            pass
 
     def _chart_color(self, key, fallback):
         return QColor(self.color_dict.get(key, fallback))

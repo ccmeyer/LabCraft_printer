@@ -337,9 +337,11 @@ def test_apply_previewed_droplet_volume_refreshes_recommendation(monkeypatch, qa
     assert refresh_calls == [True]
 
 
-def _build_real_dialog_for_layout(monkeypatch, qapp, *, reset_quick_controls=True):
+def _build_real_dialog_for_layout(monkeypatch, qapp, *, reset_quick_controls=True, main_window=None):
     if reset_quick_controls:
         monkeypatch.setattr(DropletImagingDialog, "_quick_controls_expanded_default", False, raising=False)
+        if main_window is not None and hasattr(main_window, "_droplet_imaging_quick_controls_expanded"):
+            delattr(main_window, "_droplet_imaging_quick_controls_expanded")
     for method_name in (
         "setup_shortcuts",
         "start_droplet_camera",
@@ -387,7 +389,8 @@ def _build_real_dialog_for_layout(monkeypatch, qapp, *, reset_quick_controls=Tru
         machine_model=machine_model,
     )
     controller = SimpleNamespace(start_read_camera=lambda: None)
-    main_window = SimpleNamespace(color_dict={})
+    if main_window is None:
+        main_window = SimpleNamespace(color_dict={})
     dialog = DropletImagingDialog(main_window, model, controller)
     return dialog
 
@@ -423,6 +426,9 @@ def test_real_dialog_uses_three_column_layout_with_controls_left_and_results_rig
         "Debug / Specialty",
     ]
     assert dialog.calibration_tabs.currentIndex() == 0
+    assert dialog.droplet_tab.layout().contentsMargins().top() > 0
+    assert dialog.stream_tab.layout().contentsMargins().top() > 0
+    assert dialog.debug_tab_content.layout().contentsMargins().top() > 0
     assert dialog.droplet_tab.isAncestorOf(dialog.start_pressure_spin) is True
     assert dialog.droplet_tab.isAncestorOf(dialog.num_pressure_tests_spin) is True
     assert dialog.stream_tab.isAncestorOf(dialog.start_pressure_spin) is False
@@ -438,6 +444,10 @@ def test_real_dialog_uses_three_column_layout_with_controls_left_and_results_rig
     assert dialog.debug_tab.isAncestorOf(dialog.stream_capture_group) is True
     assert dialog.droplet_tab.isAncestorOf(dialog.calib_group) is False
     assert dialog.stream_tab.isAncestorOf(dialog.stream_calib_group) is False
+    droplet_header = dialog.droplet_tab.layout().itemAt(0).widget()
+    stream_header = dialog.stream_tab.layout().itemAt(0).widget()
+    assert droplet_header.layout().count() == 3
+    assert stream_header.layout().count() == 3
     assert dialog.info_panel.sizePolicy().horizontalPolicy() == calibration_view.QtWidgets.QSizePolicy.Fixed
     assert dialog.control_panel.sizePolicy().horizontalPolicy() == calibration_view.QtWidgets.QSizePolicy.Fixed
     assert dialog.analysis_panel.sizePolicy().horizontalPolicy() == calibration_view.QtWidgets.QSizePolicy.Expanding
@@ -457,7 +467,8 @@ def test_real_dialog_uses_three_column_layout_with_controls_left_and_results_rig
 
 
 def test_real_dialog_quick_controls_start_collapsed_and_remember_last_state(monkeypatch, qapp):
-    dialog = _build_real_dialog_for_layout(monkeypatch, qapp)
+    main_window = SimpleNamespace(color_dict={})
+    dialog = _build_real_dialog_for_layout(monkeypatch, qapp, main_window=main_window)
 
     assert dialog.acquisition_controls_toggle.isChecked() is False
     assert dialog.acquisition_controls_content.isHidden() is True
@@ -467,11 +478,17 @@ def test_real_dialog_quick_controls_start_collapsed_and_remember_last_state(monk
 
     assert dialog.acquisition_controls_toggle.isChecked() is True
     assert dialog.acquisition_controls_content.isHidden() is False
+    assert getattr(main_window, "_droplet_imaging_quick_controls_expanded") is True
 
     dialog.deleteLater()
     qapp.processEvents()
 
-    reopened = _build_real_dialog_for_layout(monkeypatch, qapp, reset_quick_controls=False)
+    reopened = _build_real_dialog_for_layout(
+        monkeypatch,
+        qapp,
+        reset_quick_controls=False,
+        main_window=main_window,
+    )
 
     assert reopened.acquisition_controls_toggle.isChecked() is True
     assert reopened.acquisition_controls_content.isHidden() is False
