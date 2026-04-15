@@ -427,12 +427,17 @@ class CalibrationProcessRecorder:
     """
 
     SCHEMA_VERSION = 1
+    CAPTURE_WRITE_DRAIN_TIMEOUT_S = 5.0
 
     def __init__(self, model):
         self.model = model
         self._lock = threading.Lock()
+        self._capture_write_condition = threading.Condition(self._lock)
         self._active = None
         self._last = None
+        self._capture_write_queue = None
+        self._capture_write_stop_evt = None
+        self._capture_write_thread = None
 
     @staticmethod
     def _now_utc() -> str:
@@ -463,6 +468,15 @@ class CalibrationProcessRecorder:
             return cv2.cvtColor(arr, cv2.COLOR_RGBA2BGRA)
         raise ValueError(f"Unsupported image shape for write: {arr.shape}")
 
+    @staticmethod
+    def _copy_image_for_queue(image):
+        arr = np.asarray(image)
+        if arr.ndim == 2:
+            return arr.copy()
+        if arr.ndim == 3 and arr.shape[2] in (3, 4):
+            return arr.copy()
+        raise ValueError(f"Unsupported image shape for write: {arr.shape}")
+
     def _default_root_dir(self) -> str:
         exp = getattr(self.model, "experiment_model", None)
         exp_dir = getattr(exp, "experiment_dir_path", None)
@@ -487,6 +501,125 @@ class CalibrationProcessRecorder:
             if not self._last:
                 return None
             return self._last["run_dir"]
+
+    def _append_event_locked(
+        self,
+        run: dict,
+        event_type: str,
+        payload: dict | None = None,
+        *,
+        state_name: str | None = None,
+        level: str = "info",
+    ) -> dict:
+        run["event_index"] = int(run.get("event_index", 0)) + 1
+        evt = {
+            "schema_version": int(self.SCHEMA_VERSION),
+            "event_id": str(uuid.uuid4()),
+            "event_index": int(run["event_index"]),
+            "ts_utc": self._now_utc(),
+            "run_id": run["run_id"],
+            "process_name": run["process_name"],
+            "phase_name": run["phase_name"],
+            "event_type": str(event_type),
+            "state_name": str(state_name or ""),
+            "level": str(level),
+            "payload": payload or {},
+        }
+        self._append_jsonl(run["events_path"], evt)
+        return evt
+
+    def _append_recorder_warning_locked(self, run: dict, warning: dict):
+        warnings = [dict(item or {}) for item in list(run.get("recorder_warnings") or [])]
+        warnings.append(dict(warning or {}))
+        run["recorder_warnings"] = warnings
+        run["recorder_warning_count"] = int(len(warnings))
+
+    def _append_capture_write_failure_locked(self, run: dict, failure: dict):
+        failures = [dict(item or {}) for item in list(run.get("capture_write_failures") or [])]
+        failures.append(dict(failure or {}))
+        run["capture_write_failures"] = failures
+        run["capture_write_failure_count"] = int(len(failures))
+
+    def _capture_write_worker(self, run: dict):
+        while True:
+            stop_evt = self._capture_write_stop_evt
+            work_queue = self._capture_write_queue
+            if stop_evt is None or work_queue is None:
+                break
+            try:
+                if stop_evt.is_set():
+                    job = work_queue.get_nowait()
+                else:
+                    job = work_queue.get(timeout=0.1)
+            except queue.Empty:
+                if stop_evt is not None and stop_evt.is_set():
+                    break
+                continue
+
+            capture_ref = dict(job.get("capture_ref") or {})
+            try:
+                out = self._prepare_image_for_write(job.get("image"))
+                ok = cv2.imwrite(str(job.get("abspath")), out)
+                if not ok:
+                    raise IOError(f"Failed to write capture image: {job.get('abspath')}")
+                event_payload = {
+                    "capture_id": capture_ref.get("capture_id"),
+                    "capture_role": capture_ref.get("capture_role"),
+                    "image_relpath": capture_ref.get("image_relpath"),
+                    "metadata": dict(job.get("metadata") or {}),
+                }
+                with self._lock:
+                    self._append_event_locked(run, "capture_saved", event_payload)
+            except Exception as exc:
+                failure_payload = {
+                    "capture_id": capture_ref.get("capture_id"),
+                    "capture_role": capture_ref.get("capture_role"),
+                    "image_relpath": capture_ref.get("image_relpath"),
+                    "metadata": dict(job.get("metadata") or {}),
+                    "error_message": str(exc),
+                }
+                with self._lock:
+                    self._append_capture_write_failure_locked(run, failure_payload)
+                    self._append_event_locked(
+                        run,
+                        "capture_save_failed",
+                        failure_payload,
+                        level="warning",
+                    )
+            finally:
+                try:
+                    work_queue.task_done()
+                except Exception:
+                    pass
+                with self._capture_write_condition:
+                    pending = int(run.get("pending_capture_write_count", 0)) - 1
+                    run["pending_capture_write_count"] = int(max(0, pending))
+                    self._capture_write_condition.notify_all()
+
+    def _wait_for_pending_capture_writes(self, run: dict, *, timeout_s: float):
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        with self._capture_write_condition:
+            while True:
+                pending = int(run.get("pending_capture_write_count", 0))
+                if pending <= 0:
+                    return True, 0
+                remaining = float(deadline - time.monotonic())
+                if remaining <= 0.0:
+                    return False, pending
+                self._capture_write_condition.wait(timeout=remaining)
+
+    def _stop_capture_write_worker(self):
+        with self._lock:
+            stop_evt = self._capture_write_stop_evt
+            thread = self._capture_write_thread
+        if stop_evt is not None:
+            stop_evt.set()
+        if thread is not None:
+            thread.join()
+        with self._lock:
+            self._capture_write_thread = None
+            self._capture_write_stop_evt = None
+            self._capture_write_queue = None
 
     def start_run(self, process_name: str, phase_name: str, *, extra_meta: dict | None = None):
         with self._lock:
@@ -520,6 +653,10 @@ class CalibrationProcessRecorder:
                 "ended_at_utc": None,
                 "outcome": "running",
                 "error_message": "",
+                "recorder_warning_count": 0,
+                "recorder_warnings": [],
+                "capture_write_failure_count": 0,
+                "capture_write_failures": [],
             }
             if isinstance(extra_meta, dict):
                 meta.update(extra_meta)
@@ -540,9 +677,27 @@ class CalibrationProcessRecorder:
             self._write_json_atomic(run["meta_path"], meta)
             self._write_json_atomic(run["verdict_path"], verdict)
 
+            run["pending_capture_write_count"] = 0
+            run["recorder_warning_count"] = 0
+            run["recorder_warnings"] = []
+            run["capture_write_failure_count"] = 0
+            run["capture_write_failures"] = []
+
+            self._capture_write_queue = queue.Queue()
+            self._capture_write_stop_evt = threading.Event()
+            self._capture_write_thread = threading.Thread(
+                target=self._capture_write_worker,
+                args=(run,),
+                daemon=True,
+            )
             self._active = run
             self._last = dict(run)
-            return run_dir
+            thread = self._capture_write_thread
+            run_dir_out = run_dir
+
+        if thread is not None:
+            thread.start()
+        return run_dir_out
 
     def append_event(
         self,
@@ -555,22 +710,13 @@ class CalibrationProcessRecorder:
         with self._lock:
             if not self._active:
                 return None
-            self._active["event_index"] += 1
-            evt = {
-                "schema_version": int(self.SCHEMA_VERSION),
-                "event_id": str(uuid.uuid4()),
-                "event_index": int(self._active["event_index"]),
-                "ts_utc": self._now_utc(),
-                "run_id": self._active["run_id"],
-                "process_name": self._active["process_name"],
-                "phase_name": self._active["phase_name"],
-                "event_type": str(event_type),
-                "state_name": str(state_name or ""),
-                "level": str(level),
-                "payload": payload or {},
-            }
-            self._append_jsonl(self._active["events_path"], evt)
-            return evt
+            return self._append_event_locked(
+                self._active,
+                str(event_type),
+                payload or {},
+                state_name=state_name,
+                level=level,
+            )
 
     def append_analysis(self, record: dict) -> dict | None:
         with self._lock:
@@ -597,21 +743,17 @@ class CalibrationProcessRecorder:
         with self._lock:
             if not self._active:
                 return None
-            self._active["capture_index"] += 1
-            idx = int(self._active["capture_index"])
+            run = self._active
+            run["capture_index"] = int(run.get("capture_index", 0)) + 1
+            idx = int(run["capture_index"])
             capture_id = f"cap_{idx:06d}"
             ext = str(file_ext or "jpg").lstrip(".").lower()
             filename = f"{capture_id}_{str(role)}.{ext}"
-            abspath = os.path.join(self._active["captures_dir"], filename)
+            abspath = os.path.join(run["captures_dir"], filename)
             relpath = os.path.join("captures", filename).replace("\\", "/")
-
-            out = self._prepare_image_for_write(image)
-            ok = cv2.imwrite(abspath, out)
-            if not ok:
-                raise IOError(f"Failed to write capture image: {abspath}")
-
-            h = int(out.shape[0]) if hasattr(out, "shape") and len(out.shape) >= 2 else None
-            w = int(out.shape[1]) if hasattr(out, "shape") and len(out.shape) >= 2 else None
+            queued_image = self._copy_image_for_queue(image)
+            h = int(queued_image.shape[0]) if hasattr(queued_image, "shape") and len(queued_image.shape) >= 2 else None
+            w = int(queued_image.shape[1]) if hasattr(queued_image, "shape") and len(queued_image.shape) >= 2 else None
             info = {
                 "capture_id": capture_id,
                 "capture_index": idx,
@@ -623,6 +765,23 @@ class CalibrationProcessRecorder:
             }
             if isinstance(metadata, dict):
                 info.update(metadata)
+            run["pending_capture_write_count"] = int(run.get("pending_capture_write_count", 0)) + 1
+            write_queue = self._capture_write_queue
+            job = {
+                "capture_ref": dict(info),
+                "metadata": dict(metadata or {}),
+                "image": queued_image,
+                "abspath": abspath,
+            }
+            if write_queue is None:
+                run["pending_capture_write_count"] = int(max(0, run["pending_capture_write_count"] - 1))
+                raise RuntimeError("Capture writer queue is unavailable.")
+            try:
+                write_queue.put_nowait(job)
+            except Exception:
+                run["pending_capture_write_count"] = int(max(0, run["pending_capture_write_count"] - 1))
+                self._capture_write_condition.notify_all()
+                raise
             return info
 
     def finalize_run(self, outcome: str, *, error_message: str = ""):
@@ -631,6 +790,29 @@ class CalibrationProcessRecorder:
                 return
             run = self._active
             meta_path = run["meta_path"]
+
+        drained, pending = self._wait_for_pending_capture_writes(
+            run,
+            timeout_s=float(self.CAPTURE_WRITE_DRAIN_TIMEOUT_S),
+        )
+        if not drained:
+            with self._lock:
+                warning_payload = {
+                    "kind": "capture_write_drain_timeout",
+                    "pending_capture_write_count": int(pending),
+                    "drain_timeout_s": float(self.CAPTURE_WRITE_DRAIN_TIMEOUT_S),
+                }
+                self._append_recorder_warning_locked(run, warning_payload)
+                self._append_event_locked(
+                    run,
+                    "capture_write_drain_timeout",
+                    warning_payload,
+                    level="warning",
+                )
+
+        self._stop_capture_write_worker()
+
+        with self._lock:
             try:
                 with open(meta_path, "r", encoding="utf-8") as f:
                     meta = json.load(f)
@@ -645,6 +827,12 @@ class CalibrationProcessRecorder:
             meta["ended_at_utc"] = self._now_utc()
             meta["outcome"] = str(outcome)
             meta["error_message"] = str(error_message or "")
+            meta["recorder_warning_count"] = int(run.get("recorder_warning_count", 0))
+            meta["recorder_warnings"] = [dict(item or {}) for item in list(run.get("recorder_warnings") or [])]
+            meta["capture_write_failure_count"] = int(run.get("capture_write_failure_count", 0))
+            meta["capture_write_failures"] = [
+                dict(item or {}) for item in list(run.get("capture_write_failures") or [])
+            ]
             self._write_json_atomic(meta_path, meta)
             self._last = dict(run)
             self._active = None
@@ -2454,22 +2642,11 @@ class CalibrationManager(QObject):
         if image is None:
             return None
         try:
-            rec = recorder.save_capture_image(
+            return recorder.save_capture_image(
                 image,
                 role=str(role),
                 metadata=metadata or {},
             )
-            if rec is not None:
-                recorder.append_event(
-                    "capture_saved",
-                    {
-                        "capture_id": rec.get("capture_id"),
-                        "capture_role": rec.get("capture_role"),
-                        "image_relpath": rec.get("image_relpath"),
-                        "metadata": metadata or {},
-                    },
-                )
-            return rec
         except Exception as e:
             print(f"[CalibrationRecorder] Failed to save capture image: {e}")
             return None
@@ -8490,7 +8667,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             f"flow {flow_mode} delay={int(self._current_delay_us)} us, "
             f"rep {int(self._flow_replicate_index + 1)}/{int(self.flow_plan.get('replicates_per_delay') or 1)}"
         )
-        needs_num_droplets_arm = not bool(self._flow_num_droplets_armed)
+        needs_num_droplets_arm = not bool(getattr(self, "_flow_num_droplets_armed", False))
         settings = {
             "flash_delay": int(self._current_delay_us),
         }

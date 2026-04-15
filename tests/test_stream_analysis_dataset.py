@@ -57,6 +57,7 @@ def _make_run(
     outcome: str = "completed",
     capture_count: int = 2,
     first_delay_us: int = 4750,
+    capture_saved_after_result: bool = False,
 ):
     run_dir = process_root / run_id
     captures_dir = run_dir / "captures"
@@ -93,45 +94,53 @@ def _make_run(
         image_name = f"cap_{capture_index:06d}_raw_frame.jpg"
         image_relpath = f"captures/{image_name}"
         (captures_dir / image_name).write_bytes(b"frame")
-        events.extend(
-            [
-                {
-                    "event_index": (capture_index * 3) - 1,
-                    "event_type": "stage_changed",
-                    "payload": {"message": f"Setting flash_delay = {flash_delay_us} us"},
+        saved_event_index = capture_index * 3
+        result_event_index = (capture_index * 3) + 1
+        if capture_saved_after_result:
+            result_event_index = capture_index * 3
+            saved_event_index = (capture_index * 3) + 1
+        saved_event = {
+            "event_index": saved_event_index,
+            "event_type": "capture_saved",
+            "payload": {
+                "capture_id": f"cap_{capture_index:06d}",
+                "capture_role": "raw_frame",
+                "image_relpath": image_relpath,
+                "metadata": {
+                    "stage_text": f"Capturing timecourse frame @ {flash_delay_us} us",
                 },
-                {
-                    "event_index": capture_index * 3,
-                    "event_type": "capture_saved",
-                    "payload": {
-                        "capture_id": f"cap_{capture_index:06d}",
-                        "capture_role": "raw_frame",
-                        "image_relpath": image_relpath,
-                        "metadata": {
-                            "stage_text": f"Capturing timecourse frame @ {flash_delay_us} us",
-                        },
-                    },
+            },
+        }
+        result_event = {
+            "event_index": result_event_index,
+            "event_type": "capture_result",
+            "payload": {
+                "status": "success",
+                "stage_text": f"Capturing timecourse frame @ {flash_delay_us} us",
+                "capture_ref": {
+                    "capture_id": f"cap_{capture_index:06d}",
+                    "capture_index": capture_index,
+                    "capture_role": "raw_frame",
+                    "image_relpath": image_relpath,
+                    "width": 1088,
+                    "height": 1456,
+                    "captured_at_utc": f"2026-03-28T06:05:{20 + capture_index:02d}.000000Z",
+                    "stage_text": f"Capturing timecourse frame @ {flash_delay_us} us",
                 },
-                {
-                    "event_index": (capture_index * 3) + 1,
-                    "event_type": "capture_result",
-                    "payload": {
-                        "status": "success",
-                        "stage_text": f"Capturing timecourse frame @ {flash_delay_us} us",
-                        "capture_ref": {
-                            "capture_id": f"cap_{capture_index:06d}",
-                            "capture_index": capture_index,
-                            "capture_role": "raw_frame",
-                            "image_relpath": image_relpath,
-                            "width": 1088,
-                            "height": 1456,
-                            "captured_at_utc": f"2026-03-28T06:05:{20 + capture_index:02d}.000000Z",
-                            "stage_text": f"Capturing timecourse frame @ {flash_delay_us} us",
-                        },
-                    },
-                },
-            ]
-        )
+            },
+        }
+        per_capture_events = [
+            {
+                "event_index": (capture_index * 3) - 1,
+                "event_type": "stage_changed",
+                "payload": {"message": f"Setting flash_delay = {flash_delay_us} us"},
+            },
+        ]
+        if capture_saved_after_result:
+            per_capture_events.extend([result_event, saved_event])
+        else:
+            per_capture_events.extend([saved_event, result_event])
+        events.extend(per_capture_events)
 
     _write_jsonl(run_dir / "events.jsonl", events)
     _write_jsonl(run_dir / "analysis.jsonl", [{"kind": "calibration_data_updated"}])
@@ -366,6 +375,24 @@ def test_build_frame_index_parses_flash_delay_and_timecourse(tmp_path):
     assert frame_index["frames"][1]["image_exists"] is True
     assert frame_index["frames"][1]["image_abs_path"].endswith("cap_000002_raw_frame.jpg")
     assert mod.resolve_experiment_root(exp_dir) == exp_dir.resolve()
+
+
+def test_build_frame_index_handles_capture_saved_after_capture_result(tmp_path):
+    process_root = tmp_path / "calibration_recordings" / mod.PROCESS_NAME
+    process_root.mkdir(parents=True, exist_ok=True)
+    run_dir = _make_run(
+        process_root,
+        run_id="run_async_ordering",
+        capture_saved_after_result=True,
+    )
+
+    frame_index = mod.build_frame_index(run_dir, run_id=run_dir.name)
+
+    assert frame_index["run_id"] == run_dir.name
+    assert len(frame_index["frames"]) == 2
+    assert frame_index["frames"][0]["flash_delay_us"] == 4750
+    assert frame_index["frames"][0]["image_relpath"] == "captures/cap_000001_raw_frame.jpg"
+    assert frame_index["frames"][0]["image_exists"] is True
 
 
 def test_build_stage0_inventory_defaults_to_csv_matched_runs(tmp_path):
