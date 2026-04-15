@@ -750,6 +750,13 @@ class CharacterizationHistoryDialog(QtWidgets.QDialog):
 
 class DropletImagingDialog(QtWidgets.QDialog):
     _quick_controls_expanded_default = False
+    _info_panel_section_default_states = {
+        "summary": True,
+        "bridge": True,
+        "recommendation": False,
+        "machine_position": False,
+        "status": True,
+    }
 
     def __init__(self, main_window, model, controller):
         super().__init__()
@@ -834,6 +841,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         info_panel_v = QtWidgets.QVBoxLayout(self.info_panel)
         info_panel_v.setContentsMargins(6, 6, 6, 6)
         info_panel_v.setSpacing(8)
+        self.info_panel_scroll = QtWidgets.QScrollArea()
+        self.info_panel_scroll.setWidgetResizable(True)
+        self.info_panel_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.info_panel_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.info_panel_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.info_panel_scroll.setWidget(self.info_panel)
 
         # ---------- LEFT CONTROL PANEL (fixed width): workflow tabs + run options ----------
         self.control_panel = QtWidgets.QWidget()
@@ -1309,7 +1322,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         control_panel_v.addWidget(self.calibration_tabs, 1)
         control_panel_v.addWidget(self.run_options_group)
 
-        self.recommendation_group = QtWidgets.QGroupBox("Calibration Memory Recommendation")
+        self.recommendation_group = QtWidgets.QWidget()
         recommendation_v = QtWidgets.QVBoxLayout(self.recommendation_group)
         recommendation_v.setContentsMargins(8, 8, 8, 8)
         recommendation_v.setSpacing(6)
@@ -1345,12 +1358,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         recommendation_v.addWidget(self.memory_recommendation_mode_label)
         recommendation_v.addLayout(recommendation_btn_h)
 
-        info_panel_v.addWidget(self.recommendation_group)
-
         # --- Group 3: Characterization Results ---
-        self.summary_group = QtWidgets.QGroupBox("Characterization Results")
-        self.summary_group.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
+        self.summary_group = QtWidgets.QWidget()
+        self.summary_group.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
         summary_v = QtWidgets.QVBoxLayout(self.summary_group)
+        summary_v.setContentsMargins(8, 8, 8, 8)
+        summary_v.setSpacing(6)
 
         self._summary_muted_brush = _build_summary_muted_brush(self.color_dict)
         self.summary_toolbar = QtWidgets.QHBoxLayout()
@@ -1405,13 +1418,13 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.summary_table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
 
         self.summary_table.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
-        self.summary_table.setMinimumHeight(220)
         self.summary_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.summary_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.summary_table.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
         self.summary_table.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
 
         _configure_characterization_table_view(self.summary_table, self.summary_table_model)
+        self.summary_table.setMinimumHeight(280)
         summary_v.addWidget(self.summary_table, 1)
 
         self.summary_detail_widget = QtWidgets.QWidget()
@@ -1434,14 +1447,18 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.load_selected_button.setEnabled(False)
         self.load_selected_button.setToolTip("Select a row above, then click to apply its PW and pressure.")
         self.load_selected_button.clicked.connect(self.load_selected_summary_row)
-        summary_v.addWidget(self.load_selected_button)
-
-        info_panel_v.addWidget(self.summary_group, 1)
+        summary_footer = QtWidgets.QHBoxLayout()
+        summary_footer.setContentsMargins(0, 0, 0, 0)
+        summary_footer.addStretch(1)
+        summary_footer.addWidget(self.load_selected_button)
+        summary_v.addLayout(summary_footer)
 
         # --- Group 4: Design ↔ Calibration Bridge ---
-        self.bridge_group = QtWidgets.QGroupBox("Design ↔ Calibration Bridge")
-        self.bridge_group.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
+        self.bridge_group = QtWidgets.QWidget()
+        self.bridge_group.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
         bridge_v = QtWidgets.QVBoxLayout(self.bridge_group)
+        bridge_v.setContentsMargins(8, 8, 8, 8)
+        bridge_v.setSpacing(6)
 
         self.bridge_reagent_label = QtWidgets.QLabel("Reagent: —")
         self.bridge_design_dv_label = QtWidgets.QLabel("Design droplet volume (nL): —")
@@ -1450,6 +1467,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         preview_h = QtWidgets.QHBoxLayout()
         self.bridge_preview_btn = QtWidgets.QPushButton("Preview from last characterization")
+        self.bridge_preview_btn.setMinimumHeight(32)
         self.bridge_preview_btn.clicked.connect(self._bridge_preview_from_last_char)
         preview_h.addWidget(self.bridge_preview_btn)
 
@@ -1459,8 +1477,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         ])
         self.bridge_table.horizontalHeader().setStretchLastSection(True)
         self.bridge_table.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.AdjustToContents)
+        self.bridge_table.setMinimumHeight(220)
+        self.bridge_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.bridge_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
 
         self.bridge_apply_btn = QtWidgets.QPushButton("Apply new droplet volume to design")
+        self.bridge_apply_btn.setMinimumHeight(32)
         self.bridge_apply_btn.setEnabled(False)
         self.bridge_apply_btn.clicked.connect(self._apply_previewed_droplet_volume)
         self.bridge_apply_btn.setToolTip("Update droplet counts & concentration key using this droplet size")
@@ -1472,8 +1494,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
         bridge_v.addLayout(preview_h)
         bridge_v.addWidget(self.bridge_table, 1)
         bridge_v.addWidget(self.bridge_apply_btn)
-
-        info_panel_v.addWidget(self.bridge_group, 1)
 
         self.diff_widget = QWidget()
         self.diff_layout = QGridLayout(self.diff_widget)
@@ -1504,18 +1524,19 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.diff_layout.addWidget(positions['diff'],   r, 2)
             r += 1
 
-        self.machine_position_group = QtWidgets.QGroupBox("Machine Position")
+        self.machine_position_group = QtWidgets.QWidget()
         self.machine_position_group.setObjectName("machine_position_group")
         machine_position_v = QtWidgets.QVBoxLayout(self.machine_position_group)
         machine_position_v.setContentsMargins(8, 8, 8, 8)
         machine_position_v.setSpacing(6)
         machine_position_v.addWidget(self.diff_widget)
-        info_panel_v.addWidget(self.machine_position_group)
 
         # --- Group 5: Calibration Status ---
-        self.status_group = QtWidgets.QGroupBox("Calibration Status")
-        self.status_group.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
+        self.status_group = QtWidgets.QWidget()
+        self.status_group.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
         status_v = QtWidgets.QVBoxLayout(self.status_group)
+        status_v.setContentsMargins(8, 8, 8, 8)
+        status_v.setSpacing(6)
 
         self.stageLabel = QtWidgets.QLabel("Status: Idle")
         status_v.addWidget(self.stageLabel)
@@ -1530,13 +1551,57 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.stage_table.setAlternatingRowColors(True)
         self.stage_table.horizontalHeader().setStretchLastSection(True)
         self.stage_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
-        self.stage_table.setMinimumHeight(100)
+        self.stage_table.setMinimumHeight(140)
         status_v.addWidget(self.stage_table, 1)
 
-        info_panel_v.addWidget(self.status_group, 1)
+        (
+            self.summary_section,
+            self.summary_section_toggle,
+            self.summary_section_content,
+        ) = self._create_info_panel_section("summary", "Characterization Results", self.summary_group)
+        (
+            self.bridge_section,
+            self.bridge_section_toggle,
+            self.bridge_section_content,
+        ) = self._create_info_panel_section("bridge", "Design ↔ Calibration Bridge", self.bridge_group)
+        (
+            self.recommendation_section,
+            self.recommendation_section_toggle,
+            self.recommendation_section_content,
+        ) = self._create_info_panel_section(
+            "recommendation",
+            "Calibration Memory Recommendation",
+            self.recommendation_group,
+        )
+        (
+            self.machine_position_section,
+            self.machine_position_section_toggle,
+            self.machine_position_section_content,
+        ) = self._create_info_panel_section(
+            "machine_position",
+            "Machine Position",
+            self.machine_position_group,
+        )
+        (
+            self.status_section,
+            self.status_section_toggle,
+            self.status_section_content,
+        ) = self._create_info_panel_section("status", "Calibration Status", self.status_group)
+
+        self.info_panel_sections = (
+            self.summary_section,
+            self.bridge_section,
+            self.recommendation_section,
+            self.machine_position_section,
+            self.status_section,
+        )
+        for section in self.info_panel_sections:
+            info_panel_v.addWidget(section)
+        info_panel_v.addStretch(1)
 
         # Keep the side panels stable so buttons and labels remain readable.
-        self.info_panel.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
+        self.info_panel.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
+        self.info_panel_scroll.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
         self.control_panel.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
         self.info_panel.adjustSize()
         self.control_panel.adjustSize()
@@ -1598,8 +1663,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.layout.setStretchFactor(self.control_panel, 0)
         self.layout.addWidget(self.analysis_panel, 1)
         self.layout.setStretchFactor(self.analysis_panel, 1)
-        self.layout.addWidget(self.info_panel, 0)
-        self.layout.setStretchFactor(self.info_panel, 0)
+        self.layout.addWidget(self.info_panel_scroll, 0)
+        self.layout.setStretchFactor(self.info_panel_scroll, 0)
         self._set_equal_panel_widths()
 
         # ---------------- Connections ----------------
@@ -2149,7 +2214,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.controller.set_relative_coordinates(dX, dY, dZ, manual=False)
 
     def _set_equal_panel_widths(self):
-        if not all(hasattr(self, name) for name in ("control_panel", "analysis_panel", "info_panel")):
+        if not all(hasattr(self, name) for name in ("control_panel", "analysis_panel", "info_panel", "info_panel_scroll")):
             return
 
         margins = self.layout.contentsMargins()
@@ -2158,12 +2223,15 @@ class DropletImagingDialog(QtWidgets.QDialog):
             0,
             self.width() - margins.left() - margins.right() - (2 * spacing),
         )
-        side_width = max(380, min(460, available_width // 4 if available_width > 0 else 380))
+        control_width = max(380, min(460, available_width // 4 if available_width > 0 else 380))
+        info_width = max(460, min(640, available_width // 3 if available_width > 0 else 460))
 
-        self.control_panel.setMinimumWidth(side_width)
-        self.control_panel.setMaximumWidth(side_width)
-        self.info_panel.setMinimumWidth(side_width)
-        self.info_panel.setMaximumWidth(side_width)
+        self.control_panel.setMinimumWidth(control_width)
+        self.control_panel.setMaximumWidth(control_width)
+        self.info_panel.setMinimumWidth(info_width)
+        self.info_panel.setMaximumWidth(info_width)
+        self.info_panel_scroll.setMinimumWidth(info_width)
+        self.info_panel_scroll.setMaximumWidth(info_width)
         self.analysis_panel.setMinimumWidth(560)
         self.analysis_panel.setMaximumWidth(16777215)
         self.analysis_panel.updateGeometry()
@@ -2253,6 +2321,85 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 setattr(self.main_window, "_droplet_imaging_quick_controls_expanded", expanded)
         except Exception:
             pass
+
+    def _get_saved_info_panel_section_states(self):
+        states = dict(type(self)._info_panel_section_default_states)
+        try:
+            if hasattr(self, "main_window"):
+                raw = dict(
+                    getattr(
+                        self.main_window,
+                        "_droplet_imaging_info_panel_sections_expanded",
+                        {},
+                    )
+                    or {}
+                )
+                for key in states:
+                    if key in raw:
+                        states[key] = bool(raw[key])
+        except Exception:
+            pass
+        return states
+
+    def _get_saved_info_panel_section_expanded(self, key):
+        return bool(self._get_saved_info_panel_section_states().get(str(key), False))
+
+    def _set_info_panel_section_expanded(self, key, expanded, *, content_widget=None, toggle_button=None):
+        expanded = bool(expanded)
+        if content_widget is not None:
+            content_widget.setVisible(expanded)
+        if toggle_button is not None:
+            toggle_button.setArrowType(QtCore.Qt.DownArrow if expanded else QtCore.Qt.RightArrow)
+        try:
+            if hasattr(self, "main_window"):
+                states = self._get_saved_info_panel_section_states()
+                states[str(key)] = expanded
+                setattr(self.main_window, "_droplet_imaging_info_panel_sections_expanded", states)
+        except Exception:
+            pass
+
+    def _create_info_panel_section(self, key, title, body_widget):
+        expanded = self._get_saved_info_panel_section_expanded(key)
+        container = QtWidgets.QWidget()
+        outer_layout = QtWidgets.QVBoxLayout(container)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(4)
+
+        toggle = QtWidgets.QToolButton()
+        toggle.setText(str(title))
+        toggle.setCheckable(True)
+        toggle.setChecked(expanded)
+        toggle.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+        toggle.setArrowType(QtCore.Qt.DownArrow if expanded else QtCore.Qt.RightArrow)
+        toggle.setStyleSheet(
+            "QToolButton {"
+            " font-weight: 600;"
+            " border: none;"
+            " padding: 4px 0px;"
+            " text-align: left;"
+            "}"
+        )
+
+        content = QtWidgets.QWidget()
+        content_layout = QtWidgets.QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+        content_layout.addWidget(body_widget)
+        content.setVisible(expanded)
+
+        toggle.toggled.connect(
+            lambda checked, section_key=str(key), section_content=content, section_toggle=toggle:
+            self._set_info_panel_section_expanded(
+                section_key,
+                checked,
+                content_widget=section_content,
+                toggle_button=section_toggle,
+            )
+        )
+
+        outer_layout.addWidget(toggle)
+        outer_layout.addWidget(content)
+        return container, toggle, content
 
     def _chart_color(self, key, fallback):
         return QColor(self.color_dict.get(key, fallback))

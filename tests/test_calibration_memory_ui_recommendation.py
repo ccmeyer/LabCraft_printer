@@ -340,8 +340,11 @@ def test_apply_previewed_droplet_volume_refreshes_recommendation(monkeypatch, qa
 def _build_real_dialog_for_layout(monkeypatch, qapp, *, reset_quick_controls=True, main_window=None):
     if reset_quick_controls:
         monkeypatch.setattr(DropletImagingDialog, "_quick_controls_expanded_default", False, raising=False)
-        if main_window is not None and hasattr(main_window, "_droplet_imaging_quick_controls_expanded"):
-            delattr(main_window, "_droplet_imaging_quick_controls_expanded")
+        if main_window is not None:
+            if hasattr(main_window, "_droplet_imaging_quick_controls_expanded"):
+                delattr(main_window, "_droplet_imaging_quick_controls_expanded")
+            if hasattr(main_window, "_droplet_imaging_info_panel_sections_expanded"):
+                delattr(main_window, "_droplet_imaging_info_panel_sections_expanded")
     for method_name in (
         "setup_shortcuts",
         "start_droplet_camera",
@@ -402,12 +405,23 @@ def test_real_dialog_uses_three_column_layout_with_controls_left_and_results_rig
     assert dialog.layout.count() == 3
     assert dialog.layout.itemAt(0).widget() is dialog.control_panel
     assert dialog.layout.itemAt(1).widget() is dialog.analysis_panel
-    assert dialog.layout.itemAt(2).widget() is dialog.info_panel
-    assert dialog.recommendation_group.parentWidget() is dialog.info_panel
-    assert dialog.summary_group.parentWidget() is dialog.info_panel
-    assert dialog.bridge_group.parentWidget() is dialog.info_panel
-    assert dialog.machine_position_group.parentWidget() is dialog.info_panel
-    assert dialog.status_group.parentWidget() is dialog.info_panel
+    assert dialog.layout.itemAt(2).widget() is dialog.info_panel_scroll
+    assert dialog.info_panel_scroll.widget() is dialog.info_panel
+    assert dialog.info_panel.layout().itemAt(0).widget() is dialog.summary_section
+    assert dialog.info_panel.layout().itemAt(1).widget() is dialog.bridge_section
+    assert dialog.info_panel.layout().itemAt(2).widget() is dialog.recommendation_section
+    assert dialog.info_panel.layout().itemAt(3).widget() is dialog.machine_position_section
+    assert dialog.info_panel.layout().itemAt(4).widget() is dialog.status_section
+    assert dialog.summary_group.parentWidget() is dialog.summary_section_content
+    assert dialog.bridge_group.parentWidget() is dialog.bridge_section_content
+    assert dialog.recommendation_group.parentWidget() is dialog.recommendation_section_content
+    assert dialog.machine_position_group.parentWidget() is dialog.machine_position_section_content
+    assert dialog.status_group.parentWidget() is dialog.status_section_content
+    assert dialog.summary_section_toggle.isChecked() is True
+    assert dialog.bridge_section_toggle.isChecked() is True
+    assert dialog.recommendation_section_toggle.isChecked() is False
+    assert dialog.machine_position_section_toggle.isChecked() is False
+    assert dialog.status_section_toggle.isChecked() is True
     assert dialog.control_panel.layout().itemAt(0).widget() is dialog.acquisition_controls_section
     assert dialog.calibration_tabs.parentWidget() is dialog.control_panel
     assert dialog.run_options_group.parentWidget() is dialog.control_panel
@@ -455,11 +469,15 @@ def test_real_dialog_uses_three_column_layout_with_controls_left_and_results_rig
     assert droplet_header.layout().count() == 3
     assert stream_header.layout().count() == 3
     assert dialog.info_panel.sizePolicy().horizontalPolicy() == calibration_view.QtWidgets.QSizePolicy.Fixed
+    assert dialog.info_panel_scroll.sizePolicy().horizontalPolicy() == calibration_view.QtWidgets.QSizePolicy.Fixed
     assert dialog.control_panel.sizePolicy().horizontalPolicy() == calibration_view.QtWidgets.QSizePolicy.Fixed
     assert dialog.analysis_panel.sizePolicy().horizontalPolicy() == calibration_view.QtWidgets.QSizePolicy.Expanding
     assert dialog.analysis_panel.minimumWidth() >= 560
     assert dialog.control_panel.maximumWidth() <= 460
-    assert dialog.info_panel.maximumWidth() <= 460
+    assert dialog.info_panel.maximumWidth() >= dialog.control_panel.maximumWidth()
+    assert dialog.summary_table.minimumHeight() >= 280
+    assert dialog.bridge_table.minimumHeight() >= 220
+    assert dialog.stage_table.minimumHeight() >= 140
     assert dialog.flash_button.minimumHeight() >= 32
     assert dialog.calibrate_all_button.minimumHeight() >= 32
     assert dialog.memory_recommendation_apply_btn.minimumHeight() >= 32
@@ -498,6 +516,43 @@ def test_real_dialog_quick_controls_start_collapsed_and_remember_last_state(monk
 
     assert reopened.acquisition_controls_toggle.isChecked() is True
     assert reopened.acquisition_controls_content.isHidden() is False
+
+    reopened.deleteLater()
+
+
+def test_real_dialog_info_panel_sections_remember_last_state(monkeypatch, qapp):
+    main_window = SimpleNamespace(color_dict={})
+    dialog = _build_real_dialog_for_layout(monkeypatch, qapp, main_window=main_window)
+
+    assert dialog.recommendation_section_toggle.isChecked() is False
+    assert dialog.machine_position_section_toggle.isChecked() is False
+
+    dialog.recommendation_section_toggle.click()
+    dialog.machine_position_section_toggle.click()
+    dialog.summary_section_toggle.click()
+    qapp.processEvents()
+
+    stored = getattr(main_window, "_droplet_imaging_info_panel_sections_expanded")
+    assert stored["recommendation"] is True
+    assert stored["machine_position"] is True
+    assert stored["summary"] is False
+
+    dialog.deleteLater()
+    qapp.processEvents()
+
+    reopened = _build_real_dialog_for_layout(
+        monkeypatch,
+        qapp,
+        reset_quick_controls=False,
+        main_window=main_window,
+    )
+
+    assert reopened.recommendation_section_toggle.isChecked() is True
+    assert reopened.machine_position_section_toggle.isChecked() is True
+    assert reopened.summary_section_toggle.isChecked() is False
+    assert reopened.recommendation_section_content.isHidden() is False
+    assert reopened.machine_position_section_content.isHidden() is False
+    assert reopened.summary_section_content.isHidden() is True
 
     reopened.deleteLater()
 

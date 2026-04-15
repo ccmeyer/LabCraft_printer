@@ -393,7 +393,7 @@ def test_online_stream_debug_widgets_are_created_in_analysis_and_info_panels(mon
     assert dialog.online_stream_tail_chart_view.objectName() == "online_stream_tail_chart_view"
     assert dialog.online_stream_plot_container.isHidden() is True
     assert dialog.machine_position_group.objectName() == "machine_position_group"
-    assert dialog.machine_position_group.parentWidget() is dialog.info_panel
+    assert dialog.machine_position_group.parentWidget() is dialog.machine_position_section_content
 
     dialog.deleteLater()
 
