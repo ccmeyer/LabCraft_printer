@@ -65,3 +65,4 @@ def test_data_update_stores_online_stream_under_canonical_phase_key():
     steps = mgr.data["runs"][0]["steps"]
     assert len(steps["online_stream_calibration"]) == 1
     assert steps["online_stream_calibration"][0]["phase"] == "online_stream_calibration"
+    assert len(mgr.characterizationSummaryUpdated.calls) == 1

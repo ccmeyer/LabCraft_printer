@@ -4835,7 +4835,11 @@ class CalibrationManager(QObject):
         self._save_atomic()
 
         # Notify listeners to refresh the summary table when relevant
-        if phase_key in ("pressure_sweep_characterization", "droplet_search"):
+        if phase_key in (
+            "pressure_sweep_characterization",
+            "droplet_search",
+            "online_stream_calibration",
+        ):
             try:
                 self.characterizationSummaryUpdated.emit()
             except Exception:
@@ -5108,9 +5112,95 @@ class CalibrationManager(QObject):
             return "Search"
         if phase_key == "sweep":
             return "Sweep"
+        if phase_key == "stream":
+            return "Stream"
         if not phase_key:
             return "Unknown"
         return phase_key.replace("_", " ").title()
+
+    @staticmethod
+    def _stream_summary_warning_list(raw_warnings) -> list[str]:
+        if isinstance(raw_warnings, list):
+            return [str(item) for item in raw_warnings if str(item or "").strip()]
+        if raw_warnings in (None, ""):
+            return []
+        return [str(raw_warnings)]
+
+    @staticmethod
+    def _stream_summary_invalid_reason(result: dict) -> str | None:
+        result = dict(result or {})
+        tail_phase = dict(result.get("tail_phase") or {})
+        flow_phase = dict(result.get("flow_phase") or {})
+        warnings = CalibrationManager._stream_summary_warning_list(result.get("warnings"))
+
+        for candidate in (
+            tail_phase.get("termination_reason"),
+            tail_phase.get("status"),
+            flow_phase.get("fit_status"),
+            warnings[0] if warnings else None,
+            "predicted_volume_unavailable",
+        ):
+            if candidate not in (None, ""):
+                return str(candidate)
+        return None
+
+    def _build_stream_summary_row(self, *, run: dict, run_id, run_no, focus_run_id):
+        steps = (run.get("steps") or {}).get("online_stream_calibration") or []
+        if not steps:
+            return None
+
+        step = dict(steps[-1] or {})
+        result = dict(step.get("result") or {})
+        settings = dict(step.get("settings") or {})
+        condition = dict(result.get("condition") or {})
+        flow_phase = dict(result.get("flow_phase") or {})
+        tail_phase = dict(result.get("tail_phase") or {})
+        warnings = self._stream_summary_warning_list(result.get("warnings"))
+
+        ts = step.get("timestamp")
+        pw = condition.get("print_pulse_width_us")
+        if pw is None:
+            pw = settings.get("print_width")
+        pressure = condition.get("print_pressure_psi")
+        if pressure is None:
+            pressure = settings.get("print_pressure")
+
+        predicted_volume_nl = result.get("predicted_volume_nl")
+        try:
+            predicted_volume_nl = (
+                float(predicted_volume_nl) if predicted_volume_nl is not None else None
+            )
+        except Exception:
+            predicted_volume_nl = None
+
+        tail_status = str(tail_phase.get("status") or "")
+        valid = bool(
+            predicted_volume_nl is not None
+            and predicted_volume_nl > 0.0
+            and tail_status.lower() == "captured"
+        )
+        invalid_reason = None if valid else self._stream_summary_invalid_reason(result)
+
+        return {
+            "run_id": run_id,
+            "run_no": run_no,
+            "phase": "stream",
+            "phase_label": self._pressure_sweep_phase_label("stream"),
+            "timestamp": ts,
+            "timestamp_display": self._format_pressure_sweep_summary_timestamp(ts),
+            "pw_us": pw,
+            "pressure_psi": pressure,
+            "mean_nL": predicted_volume_nl,
+            "cv_pct": None,
+            "valid": valid,
+            "invalid_reason": invalid_reason,
+            "is_focus_run": run_id == focus_run_id,
+            "printing_mode": "stream",
+            "predicted_stream_duration_us": result.get("predicted_stream_duration_us"),
+            "flow_fit_status": flow_phase.get("fit_status"),
+            "tail_phase_status": tail_phase.get("status"),
+            "warnings": warnings,
+        }
 
     def _get_pressure_sweep_summary_matching_runs(self):
         self.ensure_loaded()
@@ -5144,7 +5234,7 @@ class CalibrationManager(QObject):
 
         return matching[-1][1].get("run_id")
 
-    def get_pressure_sweep_summary_rows(self):
+    def get_characterization_summary_rows(self):
         _cur_stock, matching = self._get_pressure_sweep_summary_matching_runs()
         if not matching:
             return []
@@ -5179,6 +5269,7 @@ class CalibrationManager(QObject):
                         "valid": p.get("valid"),
                         "invalid_reason": p.get("invalid_reason"),
                         "is_focus_run": rid == focus_run_id,
+                        "printing_mode": "droplet",
                     })
 
             # ---- (B) Droplet-search steps: single pressure at current PW/pressure
@@ -5217,7 +5308,17 @@ class CalibrationManager(QObject):
                             None if res.get("valid", True) else (res.get("invalid_reason") or "invalid")
                         ),
                         "is_focus_run": rid == focus_run_id,
+                        "printing_mode": "droplet",
                     })
+
+            stream_row = self._build_stream_summary_row(
+                run=run,
+                run_id=rid,
+                run_no=run_no,
+                focus_run_id=focus_run_id,
+            )
+            if stream_row is not None:
+                rows.append(stream_row)
 
         # Sort: PW → Pressure → Run # → Timestamp
         def _last_if_none(val, fill):
@@ -5230,6 +5331,9 @@ class CalibrationManager(QObject):
             r["timestamp"] or ""
         ))
         return rows
+
+    def get_pressure_sweep_summary_rows(self):
+        return self.get_characterization_summary_rows()
     
 class BaseCalibrationProcess(QObject):
     supports_operator_verdict = True

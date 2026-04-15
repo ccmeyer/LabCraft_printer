@@ -94,6 +94,22 @@ def printing_mode_allowed_range_nl(mode: str) -> tuple[float, float]:
         return (40.0, 120.0)
     return (5.0, 25.0)
 
+
+def validate_ejection_volume_for_mode(volume_nl, mode: str, *, label: str = "Ejection volume") -> float:
+    try:
+        volume = float(volume_nl)
+    except Exception:
+        raise ValueError(f"{label} must be numeric.")
+
+    mode = normalize_printing_mode(mode)
+    lo, hi = printing_mode_allowed_range_nl(mode)
+    if volume < lo or volume > hi:
+        raise ValueError(
+            f"{label} {volume:.3f} nL is outside the allowed range for {mode} mode "
+            f"({lo:.1f}-{hi:.1f} nL)."
+        )
+    return volume
+
 def find_key_points(columns, line_values):
     """
     Identifies two low points and the high point between them in the data.
@@ -3158,9 +3174,17 @@ class ExperimentModel(QObject):
         units = st.get("units", opt_obj.units)
         V_final = float(self.metadata.get("final_reaction_volume_nL",
                                         self.metadata.get("target_reaction_volume_nL", 500.0)))
-        new_dv = float(new_droplet_nL)
-        if new_dv <= 0.0 or V_final <= 0.0:
-            raise ValueError("new_droplet_nL and final_reaction_volume_nL must be positive.")
+        option_mode = normalize_printing_mode(
+            getattr(opt_obj, "printing_mode", None),
+            fallback=infer_printing_mode_from_volume(getattr(opt_obj, "droplet_nL", new_droplet_nL)),
+        )
+        new_dv = validate_ejection_volume_for_mode(
+            new_droplet_nL,
+            option_mode,
+            label="Ejection volume",
+        )
+        if V_final <= 0.0:
+            raise ValueError("final_reaction_volume_nL must be positive.")
 
         delta = c_stock * new_dv / V_final
 
@@ -4259,9 +4283,19 @@ class ExperimentModel(QObject):
         """
         Set the fill droplet size and recompute experiment so all totals refresh.
         """
-        new_fill_droplet_nL = float(new_fill_droplet_nL)
-        if new_fill_droplet_nL <= 0.0:
-            raise ValueError("Fill droplet volume must be > 0.")
+        metadata = getattr(self, "metadata", {}) or {}
+        fill_mode = normalize_printing_mode(
+            metadata.get("fill_printing_mode"),
+            fallback=infer_printing_mode_from_volume(
+                metadata.get("fill_droplet_volume_nL", 10.0),
+                fallback=PRINTING_MODE_DROPLET,
+            ),
+        )
+        new_fill_droplet_nL = validate_ejection_volume_for_mode(
+            new_fill_droplet_nL,
+            fill_mode,
+            label="Fill ejection volume",
+        )
 
         old = float(self.metadata.get("fill_droplet_volume_nL", 10.0))
 

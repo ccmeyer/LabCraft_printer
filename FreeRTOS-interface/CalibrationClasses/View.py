@@ -562,7 +562,7 @@ class CharacterizationSummaryTableModel(QtCore.QAbstractTableModel):
                 },
                 {
                     "key": "mean_nL",
-                    "label": "Mean (nL)",
+                    "label": "Volume (nL)",
                     "alignment": right,
                     "display": lambda row: self._format_float(row.get("mean_nL"), 3),
                     "sort": lambda row: row.get("mean_nL"),
@@ -705,7 +705,7 @@ class CharacterizationSummaryProxyModel(QtCore.QSortFilterProxyModel):
 
     def setSourceFilter(self, source_key):
         normalized = str(source_key or "all").strip().lower()
-        if normalized not in ("all", "sweep", "search"):
+        if normalized not in ("all", "sweep", "search", "stream"):
             normalized = "all"
         if self._source_filter == normalized:
             return
@@ -750,6 +750,7 @@ class CharacterizationHistoryDialog(QtWidgets.QDialog):
         self.history_source_combo.addItem("All", "all")
         self.history_source_combo.addItem("Sweep", "sweep")
         self.history_source_combo.addItem("Search", "search")
+        self.history_source_combo.addItem("Stream", "stream")
         self.history_showing_label = QtWidgets.QLabel("")
 
         toolbar.addWidget(self.history_current_run_only_checkbox)
@@ -1467,6 +1468,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.summary_source_combo.addItem("All", "all")
         self.summary_source_combo.addItem("Sweep", "sweep")
         self.summary_source_combo.addItem("Search", "search")
+        self.summary_source_combo.addItem("Stream", "stream")
         self.summary_history_button = QtWidgets.QPushButton("History...")
         self.summary_history_button.setMinimumHeight(28)
         self.summary_count_label = QtWidgets.QLabel("Showing 0 of 0 results")
@@ -1551,12 +1553,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         bridge_v.setSpacing(6)
 
         self.bridge_reagent_label = QtWidgets.QLabel("Reagent: —")
-        self.bridge_design_dv_label = QtWidgets.QLabel("Design droplet volume (nL): —")
+        self.bridge_design_dv_label = QtWidgets.QLabel("Design ejection volume (nL): —")
         self.bridge_design_targets_label = QtWidgets.QLabel("Design targets: —")
         self.bridge_design_stock_label = QtWidgets.QLabel("Stock concentration(s): —")
 
         preview_h = QtWidgets.QHBoxLayout()
-        self.bridge_preview_btn = QtWidgets.QPushButton("Preview from last characterization")
+        self.bridge_preview_btn = QtWidgets.QPushButton("Preview from selected result")
         self.bridge_preview_btn.setMinimumHeight(32)
         self.bridge_preview_btn.clicked.connect(self._bridge_preview_from_last_char)
         preview_h.addWidget(self.bridge_preview_btn)
@@ -1571,11 +1573,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.bridge_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.bridge_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
 
-        self.bridge_apply_btn = QtWidgets.QPushButton("Apply new droplet volume to design")
+        self.bridge_apply_btn = QtWidgets.QPushButton("Apply new ejection volume to design")
         self.bridge_apply_btn.setMinimumHeight(32)
         self.bridge_apply_btn.setEnabled(False)
         self.bridge_apply_btn.clicked.connect(self._apply_previewed_droplet_volume)
-        self.bridge_apply_btn.setToolTip("Update droplet counts & concentration key using this droplet size")
+        self.bridge_apply_btn.setToolTip("Update ejection counts and the concentration key using this volume")
 
         bridge_v.addWidget(self.bridge_design_dv_label)
         bridge_v.addWidget(self.bridge_table, 1)
@@ -3870,6 +3872,96 @@ class DropletImagingDialog(QtWidgets.QDialog):
             pass
         return None
 
+    @staticmethod
+    def _normalize_printing_mode_value(value, *, fallback="droplet") -> str | None:
+        mode = str(value or "").strip().lower()
+        if mode in ("droplet", "stream"):
+            return mode
+        if fallback is None:
+            return None
+        fb = str(fallback or "").strip().lower()
+        return fb if fb in ("droplet", "stream") else "droplet"
+
+    @staticmethod
+    def _infer_printing_mode_from_volume(volume_nl, *, fallback="droplet") -> str:
+        try:
+            return "stream" if float(volume_nl) >= 40.0 else "droplet"
+        except Exception:
+            return DropletImagingDialog._normalize_printing_mode_value(fallback)
+
+    @staticmethod
+    def _printing_mode_label(mode: str | None) -> str:
+        normalized = DropletImagingDialog._normalize_printing_mode_value(mode)
+        return "Stream" if normalized == "stream" else "Droplet"
+
+    def _bridge_resolve_current_printing_mode(self) -> str | None:
+        try:
+            ph = self.model.rack_model.get_gripper_printer_head()
+        except Exception:
+            ph = None
+        if ph is not None:
+            getter = getattr(ph, "get_printing_mode", None)
+            if callable(getter):
+                try:
+                    mode = self._normalize_printing_mode_value(getter(), fallback=None)
+                    if mode in ("droplet", "stream"):
+                        return mode
+                except Exception:
+                    pass
+
+        em = getattr(self.model, "experiment_model", None)
+        reagent = self._bridge_get_current_reagent_name()
+        if em is None or not reagent:
+            return None
+
+        try:
+            fill_reagent = em.get_fill_reagent_name()
+        except Exception:
+            fill_reagent = None
+
+        if reagent == fill_reagent:
+            fill_volume = None
+            try:
+                fill_volume = em.metadata.get("fill_droplet_volume_nL")
+            except Exception:
+                pass
+            return self._normalize_printing_mode_value(
+                getattr(em, "metadata", {}).get("fill_printing_mode"),
+                fallback=self._infer_printing_mode_from_volume(fill_volume),
+            )
+
+        try:
+            key_opt = em.find_option_by_reagent_name(reagent)
+        except Exception:
+            key_opt = None
+        if key_opt:
+            _key, opt = key_opt
+            return self._normalize_printing_mode_value(
+                getattr(opt, "printing_mode", None),
+                fallback=self._infer_printing_mode_from_volume(getattr(opt, "droplet_nL", None)),
+            )
+
+        return None
+
+    def _summary_row_printing_mode(self, raw: dict | None) -> str | None:
+        if not raw:
+            return None
+        phase = str(raw.get("phase") or "").strip().lower()
+        fallback = "stream" if phase == "stream" else "droplet"
+        return self._normalize_printing_mode_value(raw.get("printing_mode"), fallback=fallback)
+
+    def _summary_row_mode_mismatch_message(self, raw: dict | None) -> str | None:
+        if not raw:
+            return None
+        current_mode = self._bridge_resolve_current_printing_mode()
+        result_mode = self._summary_row_printing_mode(raw)
+        if current_mode in (None, "") or result_mode in (None, "") or current_mode == result_mode:
+            return None
+        return (
+            f"Selected result is for {self._printing_mode_label(result_mode).lower()} mode, "
+            f"but the current reagent uses {self._printing_mode_label(current_mode).lower()} mode."
+        )
+
     def _bridge_get_current_design_droplet_volume_nL(self) -> float | None:
         em = getattr(self.model, "experiment_model", None)
         reagent = self._bridge_get_current_reagent_name()
@@ -4381,6 +4473,29 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.bridge_table.setItem(i, 6, it(_format_bridge_number(r["printed_nL_shift"], 2, signed=True)))
 
     def _bridge_preview_from_last_char(self):
+        _, raw = self._selected_summary_row()
+        if not raw:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Preview",
+                "Select a characterization result to preview.",
+            )
+            return
+
+        self._refresh_bridge_preview_from_selection()
+        if self._bridge_preview_payload is None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Preview",
+                str(self.bridge_status_label.text() or "Preview unavailable."),
+            )
+            return
+
+        mean_nL = self._selected_summary_mean_nL()
+        if mean_nL is not None:
+            self.stageLabel.setText(f"Status: Preview using selected result ({mean_nL:.3f} nL)")
+        return
+
         cm = self._bridge_get_calibration_manager()
         if cm is None:
             QtWidgets.QMessageBox.warning(self, "Preview", "No calibration manager available.")
@@ -4483,6 +4598,20 @@ class DropletImagingDialog(QtWidgets.QDialog):
             return
 
         em = self.model.experiment_model
+        raw = None
+        selected_row_getter = getattr(self, "_selected_summary_row", None)
+        if callable(selected_row_getter):
+            try:
+                _, raw = selected_row_getter()
+            except Exception:
+                raw = None
+        mismatch_message = None
+        mismatch_getter = getattr(self, "_summary_row_mode_mismatch_message", None)
+        if callable(mismatch_getter):
+            mismatch_message = mismatch_getter(raw)
+        if mismatch_message:
+            QtWidgets.QMessageBox.information(self, "Apply", mismatch_message)
+            return
 
         # --- Special case: fill reagent
         if payload.get("is_fill"):
@@ -4507,7 +4636,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.information(
                 self, "Applied (Fill)",
                 (
-                    f"Updated fill droplet volume to {out['new_fill_nL']:.3f} nL."
+                    f"Updated fill ejection volume to {out['new_fill_nL']:.3f} nL."
                     f"\nTotal fill drops: {out['total_drops_old']} → {out['total_drops_new']} "
                     f"({out['total_drops_delta']:+d})"
                 )
@@ -4553,7 +4682,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.refresh_calibration_memory_recommendation()
         QtWidgets.QMessageBox.information(
             self, "Applied",
-            f"Updated {payload['factor_name']}{('/' + payload['option_name']) if payload['option_name'] else ''} to {new_dv:.3f} nL."
+            f"Updated {payload['factor_name']}{('/' + payload['option_name']) if payload['option_name'] else ''} to {new_dv:.3f} nL ejection volume."
         )
         
     def _selected_summary_row(self):
@@ -4583,13 +4712,21 @@ class DropletImagingDialog(QtWidgets.QDialog):
     def _update_load_button_state(self):
         """Enable the Load button only when we have a usable selection."""
         _, raw = self._selected_summary_row()
+        mismatch_message = self._summary_row_mode_mismatch_message(raw)
         ok = bool(
             raw
+            and mismatch_message is None
             and raw.get("pw_us") is not None
             and raw.get("pressure_psi") is not None
             and not DropletImagingDialog._is_calibration_busy(self)
         )
         self.load_selected_button.setEnabled(ok)
+        if mismatch_message:
+            self.load_selected_button.setToolTip(mismatch_message)
+        else:
+            self.load_selected_button.setToolTip(
+                "Select a row above, then click to apply its PW and pressure."
+            )
 
     def _handle_summary_double_click(self, _item):
         """Double-click loads immediately (same as pressing the button)."""
@@ -4644,6 +4781,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
             return
         _, raw = self._selected_summary_row()
         if not raw:
+            return
+
+        mismatch_message = self._summary_row_mode_mismatch_message(raw)
+        if mismatch_message:
+            QtWidgets.QMessageBox.information(self, "Nothing to load", mismatch_message)
             return
 
         pw = raw.get("pw_us")
@@ -4815,11 +4957,35 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.summary_detail_meta_label.setText(
             f"Run {run_text if run_text is not None else '-'} | Source {source_text} | Recorded {recorded_text}"
         )
+        status_lines = []
         if raw.get("valid") is False:
             reason = raw.get("invalid_reason") or "flagged"
-            self.summary_detail_status_label.setText(f"Invalid: {reason}")
+            status_lines.append(f"Invalid: {reason}")
         else:
-            self.summary_detail_status_label.setText("Valid result")
+            status_lines.append("Valid result")
+
+        if str(raw.get("phase") or "").strip().lower() == "stream":
+            stream_parts = []
+            duration_us = raw.get("predicted_stream_duration_us")
+            if duration_us not in (None, ""):
+                stream_parts.append(f"Predicted duration {duration_us} us")
+            flow_fit_status = raw.get("flow_fit_status")
+            if flow_fit_status not in (None, ""):
+                stream_parts.append(f"Flow fit {flow_fit_status}")
+            tail_phase_status = raw.get("tail_phase_status")
+            if tail_phase_status not in (None, ""):
+                stream_parts.append(f"Tail {tail_phase_status}")
+            warnings = raw.get("warnings") or []
+            if warnings:
+                stream_parts.append(f"Warnings: {', '.join(str(item) for item in warnings)}")
+            if stream_parts:
+                status_lines.append(" | ".join(stream_parts))
+
+        mismatch_message = self._summary_row_mode_mismatch_message(raw)
+        if mismatch_message:
+            status_lines.append(mismatch_message)
+
+        self.summary_detail_status_label.setText("\n".join(status_lines))
 
     def _refresh_summary_filters(self):
         self.summary_table_proxy_model.setCurrentRunOnly(self.summary_current_run_checkbox.isChecked())
@@ -4846,7 +5012,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._apply_summary_sort(section, order)
 
     def open_characterization_history_dialog(self):
-        rows = self.model.calibration_manager.get_pressure_sweep_summary_rows()
+        mgr = self.model.calibration_manager
+        getter = getattr(mgr, "get_characterization_summary_rows", None)
+        if callable(getter):
+            rows = getter()
+        else:
+            rows = mgr.get_pressure_sweep_summary_rows()
         dialog = CharacterizationHistoryDialog(
             self,
             rows=rows,
@@ -4883,13 +5054,21 @@ class DropletImagingDialog(QtWidgets.QDialog):
     def _update_load_button_state(self):
         """Enable the Load button only when we have a usable selection."""
         _, raw = self._selected_summary_row()
+        mismatch_message = self._summary_row_mode_mismatch_message(raw)
         ok = bool(
             raw
+            and mismatch_message is None
             and raw.get("pw_us") is not None
             and raw.get("pressure_psi") is not None
             and not DropletImagingDialog._is_calibration_busy(self)
         )
         self.load_selected_button.setEnabled(ok)
+        if mismatch_message:
+            self.load_selected_button.setToolTip(mismatch_message)
+        else:
+            self.load_selected_button.setToolTip(
+                "Select a row above, then click to apply its PW and pressure."
+            )
 
     def _handle_summary_double_click(self, _index):
         """Double-click loads immediately (same as pressing the button)."""
@@ -4929,6 +5108,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
             return
         _, raw = self._selected_summary_row()
         if not raw:
+            return
+
+        mismatch_message = self._summary_row_mode_mismatch_message(raw)
+        if mismatch_message:
+            QtWidgets.QMessageBox.information(self, "Nothing to load", mismatch_message)
             return
 
         pw = raw.get("pw_us")
@@ -4998,7 +5182,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
     def populate_summary_table(self):
         mgr = self.model.calibration_manager
-        rows = mgr.get_pressure_sweep_summary_rows()
+        getter = getattr(mgr, "get_characterization_summary_rows", None)
+        if callable(getter):
+            rows = getter()
+        else:
+            rows = mgr.get_pressure_sweep_summary_rows()
         self.summary_table_model.set_rows(rows)
         self._sync_applied_summary_row_highlight()
         self._refresh_summary_filters()
@@ -5009,7 +5197,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
     def _bridge_clear_preview_with_status(self, status_text=None):
         self._bridge_preview_payload = None
         self.bridge_apply_btn.setEnabled(False)
-        self.bridge_apply_btn.setToolTip("Select a usable characterization result to preview a new droplet volume.")
+        self.bridge_apply_btn.setToolTip("Select a usable characterization result to preview a new ejection volume.")
         self.bridge_table.clearContents()
         self.bridge_table.setRowCount(0)
         if hasattr(self, "bridge_status_label"):
@@ -5025,7 +5213,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if hasattr(self, "reagent_stock_label"):
             self.reagent_stock_label.setText("Stock concentration(s): —")
         if hasattr(self, "bridge_design_dv_label"):
-            self.bridge_design_dv_label.setText("Design droplet volume (nL): —")
+            self.bridge_design_dv_label.setText("Design ejection volume (nL): —")
 
         if em is None or not reagent:
             self._sync_applied_summary_row_highlight()
@@ -5040,9 +5228,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if reagent == fill_reagent:
             try:
                 dv = float(em.metadata.get("fill_droplet_volume_nL", 10.0))
-                self.bridge_design_dv_label.setText(f"Design droplet volume (nL): {dv:.3f}  (fill)")
+                self.bridge_design_dv_label.setText(f"Design ejection volume (nL): {dv:.3f}  (fill)")
             except Exception:
-                self.bridge_design_dv_label.setText("Design droplet volume (nL): —")
+                self.bridge_design_dv_label.setText("Design ejection volume (nL): —")
             self._sync_applied_summary_row_highlight()
             self._refresh_bridge_preview_from_selection()
             self.refresh_calibration_memory_recommendation()
@@ -5059,9 +5247,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         key, opt = key_opt
         try:
-            self.bridge_design_dv_label.setText(f"Design droplet volume (nL): {float(opt.droplet_nL):.3f}")
+            self.bridge_design_dv_label.setText(f"Design ejection volume (nL): {float(opt.droplet_nL):.3f}")
         except Exception:
-            self.bridge_design_dv_label.setText("Design droplet volume (nL): —")
+            self.bridge_design_dv_label.setText("Design ejection volume (nL): —")
 
         plan = None
         try:
@@ -5097,7 +5285,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             mean_nL = None
         if mean_nL is None or mean_nL <= 0:
             self._bridge_clear_preview_with_status(
-                "Selected result does not contain a usable mean droplet volume."
+                "Selected result does not contain a usable ejection volume."
             )
             return
 
@@ -5107,6 +5295,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._bridge_clear_preview_with_status(
                 "No current reagent is available for bridge preview."
             )
+            return
+
+        mismatch_message = self._summary_row_mode_mismatch_message(raw)
+        if mismatch_message:
+            self._bridge_clear_preview_with_status(mismatch_message)
             return
 
         selected_fingerprint = self._summary_row_fingerprint(raw)
@@ -5158,7 +5351,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.bridge_apply_btn.setEnabled(True)
             self.bridge_apply_btn.setToolTip("")
             self.bridge_status_label.setText(
-                f"{status_prefix}Preview uses the selected result mean volume of {mean_nL:.3f} nL."
+                f"{status_prefix}Preview uses the selected result ejection volume of {mean_nL:.3f} nL."
             )
             return
 
@@ -5192,7 +5385,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.bridge_apply_btn.setToolTip("" if can_apply else "Apply supports single-stock reagents only right now.")
         if can_apply:
             self.bridge_status_label.setText(
-                f"{status_prefix}Preview uses the selected result mean volume of {mean_nL:.3f} nL."
+                f"{status_prefix}Preview uses the selected result ejection volume of {mean_nL:.3f} nL."
             )
         else:
             self.bridge_status_label.setText(
