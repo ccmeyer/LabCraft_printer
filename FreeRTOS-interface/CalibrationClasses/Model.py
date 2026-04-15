@@ -8009,24 +8009,26 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             if not dense_offsets or int(dense_offsets[-1]) != int(right_boundary_offset_us):
                 dense_offsets.append(int(right_boundary_offset_us))
             self._flow_target_delay_offsets_from_emergence_us = list(dense_offsets)
-            return list(
+            missing_offsets = list(
                 online_cal_mod.build_online_stream_flow_missing_offsets(
                     target_offsets_from_emergence_us=dense_offsets,
                     existing_offsets_from_emergence_us=self._flow_attempted_offsets_from_emergence_us(),
                 )
             )
+            return [] if not missing_offsets else [int(max(missing_offsets))]
         target_offsets = online_cal_mod.build_online_stream_flow_target_offsets(
             start_offset_us=int(start_offset_us),
             end_offset_us=int(right_boundary_offset_us),
             target_delay_count=int(self._flow_target_delay_count()),
         )
         self._flow_target_delay_offsets_from_emergence_us = list(target_offsets)
-        return list(
+        missing_offsets = list(
             online_cal_mod.build_online_stream_flow_missing_offsets(
                 target_offsets_from_emergence_us=target_offsets,
                 existing_offsets_from_emergence_us=self._flow_attempted_offsets_from_emergence_us(),
             )
         )
+        return [] if not missing_offsets else [int(max(missing_offsets))]
 
     def _select_next_flow_ci_candidate_offset(self) -> int | None:
         sampled_offsets = self._flow_attempted_offsets_from_emergence_us()

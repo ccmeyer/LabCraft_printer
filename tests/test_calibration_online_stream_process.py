@@ -1783,35 +1783,46 @@ def test_online_stream_advance_flow_phase_uses_confidence_floor_to_stop_extendin
             "delay_accepted": True,
             "flow_point_confidence": 0.90,
             "flow_optical_confidence_active": True,
-            "min_attached_bottom_clearance_px": 280,
-            "min_accepted_fluid_distance_from_bottom_px": 280,
+            "min_attached_bottom_clearance_px": 360,
+            "min_accepted_fluid_distance_from_bottom_px": 360,
             "warnings": [],
         },
         {
             "delay_us": 4050,
             "delay_from_emergence_us": 850,
             "delay_accepted": True,
+            "flow_point_confidence": 0.88,
+            "flow_optical_confidence_active": True,
+            "min_attached_bottom_clearance_px": 290,
+            "min_accepted_fluid_distance_from_bottom_px": 290,
+            "warnings": [],
+        },
+        {
+            "delay_us": 4150,
+            "delay_from_emergence_us": 950,
+            "delay_accepted": True,
             "flow_point_confidence": 0.40,
             "flow_optical_confidence_active": True,
-            "min_attached_bottom_clearance_px": 390,
-            "min_accepted_fluid_distance_from_bottom_px": 390,
+            "min_attached_bottom_clearance_px": 260,
+            "min_accepted_fluid_distance_from_bottom_px": 260,
             "warnings": [],
         },
     ]
+    proc._flow_captured_delay_offsets_from_emergence_us = [650, 750, 850, 950]
     proc._current_delay_frame_rows = [
         calibration_model.online_cal_mod.build_online_stream_frame_row(
             phase="flow_rate",
             status="accepted",
-            delay_us=4150,
-            delay_from_emergence_us=950,
+            delay_us=4250,
+            delay_from_emergence_us=1050,
             replicate_index=1,
             qc={"measurement_qc_pass": True},
             image_ref={"capture_id": "cap_flow_conf"},
             warnings=[],
             attached_width_px=90.0,
             visible_volume_nl=12.8,
-            attached_bottom_clearance_px=260,
-            min_accepted_fluid_distance_from_bottom_px=260,
+            attached_bottom_clearance_px=240,
+            min_accepted_fluid_distance_from_bottom_px=240,
             flow_point_confidence=0.35,
             flow_optical_confidence_active=True,
             flow_volume_geometry_ok=True,
@@ -1826,10 +1837,143 @@ def test_online_stream_advance_flow_phase_uses_confidence_floor_to_stop_extendin
 
     assert proc._flow_scout_boundary_reason == "confidence_low"
     assert proc._flow_right_boundary_fixed is True
-    assert proc._flow_right_boundary_delay_from_emergence_us == 750
-    assert getattr(proc, "_flow_confidence_boundary_delay_from_emergence_us", None) == 950
-    assert proc._flow_delay_sequence[0] == int(proc.emergence_time_us) + 650
-    assert proc._flow_delay_sequence[-1] == int(proc.emergence_time_us) + 750
+    assert proc._flow_right_boundary_delay_from_emergence_us == 850
+    assert getattr(proc, "_flow_confidence_boundary_delay_from_emergence_us", None) == 1050
+    assert proc._flow_target_delay_offsets_from_emergence_us == [650, 700, 750, 800, 850]
+    assert proc._flow_delay_sequence == [int(proc.emergence_time_us) + 800]
+
+
+def test_online_stream_advance_flow_phase_soft_boundary_span_fill_starts_from_latest_missing_target(tmp_path):
+    proc = _flow_proc(tmp_path)
+    proc._flow_mode = "scout"
+    prior_offsets = list(range(650, 2150, 100))
+    proc._flow_delay_summaries = [
+        {
+            "delay_us": int(proc.emergence_time_us) + int(offset_us),
+            "delay_from_emergence_us": int(offset_us),
+            "delay_accepted": True,
+            "flow_point_confidence": 0.95,
+            "flow_optical_confidence_active": False,
+            "min_attached_bottom_clearance_px": 420,
+            "min_accepted_fluid_distance_from_bottom_px": 420,
+            "warnings": [],
+        }
+        for offset_us in prior_offsets
+    ]
+    proc._flow_captured_delay_offsets_from_emergence_us = list(prior_offsets)
+    proc._current_delay_frame_rows = [
+        calibration_model.online_cal_mod.build_online_stream_frame_row(
+            phase="flow_rate",
+            status="accepted",
+            delay_us=int(proc.emergence_time_us) + 2150,
+            delay_from_emergence_us=2150,
+            replicate_index=1,
+            qc={"measurement_qc_pass": True},
+            image_ref={"capture_id": "cap_flow_soft_boundary"},
+            warnings=[],
+            attached_width_px=90.0,
+            visible_volume_nl=24.5,
+            attached_bottom_clearance_px=120,
+            min_accepted_fluid_distance_from_bottom_px=120,
+            flow_point_confidence=0.90,
+            flow_optical_confidence_active=False,
+            flow_volume_geometry_ok=True,
+            flow_measurement_usable=True,
+            attached_bottom_guard_hit=False,
+            detached_near_bottom_warning=False,
+        )
+    ]
+    proc._current_analysis_summary = {"status": "accepted"}
+
+    proc.onAdvanceFlowPhase()
+
+    expected_targets = calibration_model.online_cal_mod.build_online_stream_flow_target_offsets(
+        start_offset_us=650,
+        end_offset_us=2150,
+        target_delay_count=int(proc._flow_target_delay_count()),
+    )
+    assert proc._flow_mode == "span_fill"
+    assert proc._flow_scout_boundary_reason == "soft_bottom_clearance"
+    assert proc._flow_right_boundary_delay_from_emergence_us == 2150
+    assert proc._flow_target_delay_offsets_from_emergence_us == expected_targets
+    assert proc._flow_delay_sequence == [int(proc.emergence_time_us) + 2071]
+
+
+def test_online_stream_advance_flow_phase_span_fill_walks_back_through_late_targets(tmp_path):
+    proc = _flow_proc(tmp_path)
+    proc._flow_mode = "scout"
+    prior_offsets = list(range(650, 2150, 100))
+    proc._flow_delay_summaries = [
+        {
+            "delay_us": int(proc.emergence_time_us) + int(offset_us),
+            "delay_from_emergence_us": int(offset_us),
+            "delay_accepted": True,
+            "flow_point_confidence": 0.95,
+            "flow_optical_confidence_active": False,
+            "min_attached_bottom_clearance_px": 420,
+            "min_accepted_fluid_distance_from_bottom_px": 420,
+            "warnings": [],
+        }
+        for offset_us in prior_offsets
+    ]
+    proc._flow_captured_delay_offsets_from_emergence_us = list(prior_offsets)
+    proc._current_delay_frame_rows = [
+        calibration_model.online_cal_mod.build_online_stream_frame_row(
+            phase="flow_rate",
+            status="accepted",
+            delay_us=int(proc.emergence_time_us) + 2150,
+            delay_from_emergence_us=2150,
+            replicate_index=1,
+            qc={"measurement_qc_pass": True},
+            image_ref={"capture_id": "cap_flow_soft_boundary"},
+            warnings=[],
+            attached_width_px=90.0,
+            visible_volume_nl=24.5,
+            attached_bottom_clearance_px=120,
+            min_accepted_fluid_distance_from_bottom_px=120,
+            flow_point_confidence=0.90,
+            flow_optical_confidence_active=False,
+            flow_volume_geometry_ok=True,
+            flow_measurement_usable=True,
+            attached_bottom_guard_hit=False,
+            detached_near_bottom_warning=False,
+        )
+    ]
+    proc._current_analysis_summary = {"status": "accepted"}
+
+    proc.onAdvanceFlowPhase()
+
+    assert proc._flow_mode == "span_fill"
+    assert proc._flow_delay_sequence == [int(proc.emergence_time_us) + 2071]
+
+    proc._current_delay_frame_rows = [
+        calibration_model.online_cal_mod.build_online_stream_frame_row(
+            phase="flow_rate",
+            status="accepted",
+            delay_us=int(proc.emergence_time_us) + 2071,
+            delay_from_emergence_us=2071,
+            replicate_index=1,
+            qc={"measurement_qc_pass": True},
+            image_ref={"capture_id": "cap_flow_span_fill_late"},
+            warnings=[],
+            attached_width_px=90.0,
+            visible_volume_nl=23.8,
+            attached_bottom_clearance_px=170,
+            min_accepted_fluid_distance_from_bottom_px=170,
+            flow_point_confidence=0.90,
+            flow_optical_confidence_active=False,
+            flow_volume_geometry_ok=True,
+            flow_measurement_usable=True,
+            attached_bottom_guard_hit=False,
+            detached_near_bottom_warning=False,
+        )
+    ]
+    proc._current_analysis_summary = {"status": "accepted"}
+
+    proc.onAdvanceFlowPhase()
+
+    assert proc._flow_mode == "span_fill"
+    assert proc._flow_delay_sequence == [int(proc.emergence_time_us) + 1992]
 
 
 def test_online_stream_advance_flow_phase_preserves_tail_budget_once_fit_is_usable(tmp_path):
