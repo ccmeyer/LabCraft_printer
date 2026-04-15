@@ -337,7 +337,9 @@ def test_apply_previewed_droplet_volume_refreshes_recommendation(monkeypatch, qa
     assert refresh_calls == [True]
 
 
-def _build_real_dialog_for_layout(monkeypatch, qapp):
+def _build_real_dialog_for_layout(monkeypatch, qapp, *, reset_quick_controls=True):
+    if reset_quick_controls:
+        monkeypatch.setattr(DropletImagingDialog, "_quick_controls_expanded_default", False, raising=False)
     for method_name in (
         "setup_shortcuts",
         "start_droplet_camera",
@@ -395,7 +397,7 @@ def test_real_dialog_uses_three_column_layout_with_controls_left_and_results_rig
 
     assert dialog.width() == 1600
     assert dialog.layout.count() == 3
-    assert dialog.layout.itemAt(0).widget() is dialog.control_panel_scroll
+    assert dialog.layout.itemAt(0).widget() is dialog.control_panel
     assert dialog.layout.itemAt(1).widget() is dialog.analysis_panel
     assert dialog.layout.itemAt(2).widget() is dialog.info_panel
     assert dialog.recommendation_group.parentWidget() is dialog.info_panel
@@ -403,12 +405,15 @@ def test_real_dialog_uses_three_column_layout_with_controls_left_and_results_rig
     assert dialog.bridge_group.parentWidget() is dialog.info_panel
     assert dialog.machine_position_group.parentWidget() is dialog.info_panel
     assert dialog.status_group.parentWidget() is dialog.info_panel
+    assert dialog.control_panel.layout().itemAt(0).widget() is dialog.acquisition_controls_section
     assert dialog.calibration_tabs.parentWidget() is dialog.control_panel
     assert dialog.run_options_group.parentWidget() is dialog.control_panel
-    assert dialog.manual_group.parentWidget() is dialog.debug_tab
-    assert dialog.calib_group.parentWidget() is dialog.droplet_tab
-    assert dialog.stream_calib_group.parentWidget() is dialog.stream_tab
-    assert dialog.stream_capture_group.parentWidget() is dialog.debug_tab
+    assert dialog.control_panel.layout().itemAt(1).widget() is dialog.calibration_tabs
+    assert dialog.control_panel.layout().itemAt(2).widget() is dialog.run_options_group
+    assert dialog.debug_scroll.parentWidget() is dialog.debug_tab
+    assert dialog.debug_scroll.widget() is dialog.debug_tab_content
+    assert dialog.manual_group.parentWidget() is dialog.debug_tab_content
+    assert dialog.stream_capture_group.parentWidget() is dialog.debug_tab_content
     assert dialog.record_calibration_checkbox.parentWidget() is dialog.run_options_group
     assert dialog.enable_calibration_memory_checkbox.parentWidget() is dialog.run_options_group
     assert dialog.calibration_tabs.count() == 3
@@ -424,9 +429,15 @@ def test_real_dialog_uses_three_column_layout_with_controls_left_and_results_rig
     assert dialog.stream_tab.isAncestorOf(dialog.num_pressure_tests_spin) is False
     assert dialog.stream_tab.isAncestorOf(dialog.calibrate_online_stream_button) is True
     assert dialog.droplet_tab.isAncestorOf(dialog.calibrate_online_stream_button) is False
-    assert dialog.debug_tab.isAncestorOf(dialog.flash_button) is True
+    assert dialog.acquisition_controls_section.isAncestorOf(dialog.flash_delay_spinbox) is True
+    assert dialog.acquisition_controls_section.isAncestorOf(dialog.print_pulse_width_spinbox) is True
+    assert dialog.acquisition_controls_section.isAncestorOf(dialog.flash_button) is True
+    assert dialog.debug_tab.isAncestorOf(dialog.flash_button) is False
+    assert dialog.debug_tab.isAncestorOf(dialog.flash_duration_spinbox) is True
     assert dialog.debug_tab.isAncestorOf(dialog.calibrate_timecourse_button) is True
     assert dialog.debug_tab.isAncestorOf(dialog.stream_capture_group) is True
+    assert dialog.droplet_tab.isAncestorOf(dialog.calib_group) is False
+    assert dialog.stream_tab.isAncestorOf(dialog.stream_calib_group) is False
     assert dialog.info_panel.sizePolicy().horizontalPolicy() == calibration_view.QtWidgets.QSizePolicy.Fixed
     assert dialog.control_panel.sizePolicy().horizontalPolicy() == calibration_view.QtWidgets.QSizePolicy.Fixed
     assert dialog.analysis_panel.sizePolicy().horizontalPolicy() == calibration_view.QtWidgets.QSizePolicy.Expanding
@@ -443,6 +454,29 @@ def test_real_dialog_uses_three_column_layout_with_controls_left_and_results_rig
     assert not hasattr(dialog, "prebreakup_dataset_plan_edit")
 
     dialog.deleteLater()
+
+
+def test_real_dialog_quick_controls_start_collapsed_and_remember_last_state(monkeypatch, qapp):
+    dialog = _build_real_dialog_for_layout(monkeypatch, qapp)
+
+    assert dialog.acquisition_controls_toggle.isChecked() is False
+    assert dialog.acquisition_controls_content.isHidden() is True
+
+    dialog.acquisition_controls_toggle.click()
+    qapp.processEvents()
+
+    assert dialog.acquisition_controls_toggle.isChecked() is True
+    assert dialog.acquisition_controls_content.isHidden() is False
+
+    dialog.deleteLater()
+    qapp.processEvents()
+
+    reopened = _build_real_dialog_for_layout(monkeypatch, qapp, reset_quick_controls=False)
+
+    assert reopened.acquisition_controls_toggle.isChecked() is True
+    assert reopened.acquisition_controls_content.isHidden() is False
+
+    reopened.deleteLater()
 
 
 def test_real_dialog_creates_duplicate_shared_buttons_for_droplet_and_stream_tabs(monkeypatch, qapp):

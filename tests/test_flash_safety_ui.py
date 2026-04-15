@@ -83,6 +83,7 @@ def _make_calibration_manager_stub():
 
 
 def _build_droplet_dialog(monkeypatch, qapp):
+    monkeypatch.setattr(DropletImagingDialog, "_quick_controls_expanded_default", False, raising=False)
     for method_name in (
         "setup_shortcuts",
         "start_droplet_camera",
@@ -137,6 +138,8 @@ def test_droplet_imager_disables_manual_flash_and_stops_timer_on_fault(monkeypat
     dialog.update_flash_info()
 
     assert dialog.flash_button.isEnabled() is False
+    assert dialog.flash_delay_spinbox.isEnabled() is False
+    assert dialog.print_pulse_width_spinbox.isEnabled() is False
     assert dialog.calibrate_online_stream_button.isEnabled() is False
     assert dialog.camera_timer.isActive() is False
     assert "Flash safety fault latched" in dialog.flash_safety_label.text()
@@ -146,6 +149,8 @@ def test_droplet_imager_disables_manual_flash_and_stops_timer_on_fault(monkeypat
     cam.flash_fault_reason = ""
     dialog.update_flash_info()
 
+    assert dialog.flash_delay_spinbox.isEnabled() is True
+    assert dialog.print_pulse_width_spinbox.isEnabled() is True
     assert dialog.calibrate_online_stream_button.isEnabled() is False
     assert "Emergence time" in dialog.calibrate_online_stream_button.toolTip()
 

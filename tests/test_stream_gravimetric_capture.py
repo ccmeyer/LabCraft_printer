@@ -607,6 +607,7 @@ def _read_jsonl_rows(path: Path):
 
 
 def _build_view_dialog(monkeypatch, qapp, *, manager=None, model=None, controller=None):
+    monkeypatch.setattr(DropletImagingDialog, "_quick_controls_expanded_default", False, raising=False)
     for method_name in (
         "setup_shortcuts",
         "start_droplet_camera",
@@ -1631,7 +1632,7 @@ def test_stream_capture_panel_state_locks_manual_controls_and_suppresses_verdict
     dialog._sync_stream_capture_panel_state()
     assert dialog.stream_capture_begin_button.isEnabled() is True
     assert dialog.stream_capture_online_mode_checkbox.isEnabled() is True
-    assert dialog.control_panel_scroll.widget() is dialog.control_panel
+    assert dialog.layout.itemAt(0).widget() is dialog.control_panel
 
     dialog.on_readiness_changed(
         {

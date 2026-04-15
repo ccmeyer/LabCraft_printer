@@ -116,6 +116,7 @@ class _ControllerStub:
 
 
 def _build_dialog(monkeypatch, qapp):
+    monkeypatch.setattr(DropletImagingDialog, "_quick_controls_expanded_default", False, raising=False)
     for method_name in (
         "setup_shortcuts",
         "start_droplet_camera",
@@ -298,6 +299,9 @@ def test_tabs_lock_during_active_calibration_and_unlock_when_idle(monkeypatch, q
     assert dialog.calibration_tabs.isTabEnabled(0) is False
     assert dialog.calibration_tabs.isTabEnabled(1) is True
     assert dialog.calibration_tabs.isTabEnabled(2) is False
+    assert dialog.flash_delay_spinbox.isEnabled() is False
+    assert dialog.print_pulse_width_spinbox.isEnabled() is False
+    assert dialog.flash_button.isEnabled() is False
 
     manager.activeCalibration = None
     dialog._refresh_manual_control_lock_state()
@@ -306,6 +310,9 @@ def test_tabs_lock_during_active_calibration_and_unlock_when_idle(monkeypatch, q
     assert dialog.calibration_tabs.isTabEnabled(0) is True
     assert dialog.calibration_tabs.isTabEnabled(1) is True
     assert dialog.calibration_tabs.isTabEnabled(2) is True
+    assert dialog.flash_delay_spinbox.isEnabled() is True
+    assert dialog.print_pulse_width_spinbox.isEnabled() is True
+    assert dialog.flash_button.isEnabled() is True
 
     dialog.deleteLater()
 

@@ -749,6 +749,8 @@ class CharacterizationHistoryDialog(QtWidgets.QDialog):
 
 
 class DropletImagingDialog(QtWidgets.QDialog):
+    _quick_controls_expanded_default = False
+
     def __init__(self, main_window, model, controller):
         super().__init__()
         print('\n---Created new droplet imaging dialog---\n')
@@ -838,25 +840,36 @@ class DropletImagingDialog(QtWidgets.QDialog):
         control_panel_v = QtWidgets.QVBoxLayout(self.control_panel)
         control_panel_v.setContentsMargins(6, 6, 6, 6)
         control_panel_v.setSpacing(8)
-        self.control_panel_scroll = QtWidgets.QScrollArea()
-        self.control_panel_scroll.setWidgetResizable(True)
-        self.control_panel_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-        self.control_panel_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.control_panel_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.control_panel_scroll.setWidget(self.control_panel)
+
+        quick_controls_expanded = bool(type(self)._quick_controls_expanded_default)
+        (
+            self.acquisition_controls_section,
+            self.acquisition_controls_toggle,
+            self.acquisition_controls_content,
+            acquisition_grid,
+        ) = self._create_collapsible_section(
+            "Acquisition Controls",
+            expanded=quick_controls_expanded,
+        )
+        self.acquisition_controls_toggle.toggled.connect(self._set_acquisition_controls_expanded)
+        self._set_acquisition_controls_expanded(quick_controls_expanded)
 
         self.calibration_tabs = QtWidgets.QTabWidget()
         self.droplet_tab = QtWidgets.QWidget()
         self.stream_tab = QtWidgets.QWidget()
         self.debug_tab = QtWidgets.QWidget()
-        for tab_page in (self.droplet_tab, self.stream_tab, self.debug_tab):
+        for tab_page in (self.droplet_tab, self.stream_tab):
             tab_layout = QtWidgets.QVBoxLayout(tab_page)
             tab_layout.setContentsMargins(0, 0, 0, 0)
             tab_layout.setSpacing(8)
+        debug_tab_layout = QtWidgets.QVBoxLayout(self.debug_tab)
+        debug_tab_layout.setContentsMargins(0, 0, 0, 0)
+        debug_tab_layout.setSpacing(0)
         self.calibration_tabs.addTab(self.droplet_tab, "Droplet")
         self.calibration_tabs.addTab(self.stream_tab, "Stream")
         self.calibration_tabs.addTab(self.debug_tab, "Debug / Specialty")
         self.calibration_tabs.currentChanged.connect(self._refresh_calibration_tab_lock_state)
+        self.calibration_tabs.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
 
         # --- Debug tab: Manual Controls ---
         self.manual_group = QtWidgets.QGroupBox("Manual Controls")
@@ -932,6 +945,31 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.benchmark_profile_button = QtWidgets.QPushButton("Apply Benchmark Capture Profile")
         self.benchmark_profile_button.clicked.connect(self.apply_benchmark_capture_profile)
         manual_grid.addWidget(self.benchmark_profile_button, row, 0, 1, 2); row += 1
+
+        manual_grid.removeWidget(self.flash_delay_label)
+        manual_grid.removeWidget(self.flash_delay_spinbox)
+        manual_grid.removeWidget(self.print_pulse_width_label)
+        manual_grid.removeWidget(self.print_pulse_width_spinbox)
+        manual_grid.removeWidget(self.flash_button)
+
+        acquisition_grid.addWidget(self.flash_delay_label, 0, 0)
+        acquisition_grid.addWidget(self.flash_delay_spinbox, 0, 1)
+        acquisition_grid.addWidget(self.print_pulse_width_label, 1, 0)
+        acquisition_grid.addWidget(self.print_pulse_width_spinbox, 1, 1)
+        acquisition_grid.addWidget(self.flash_button, 2, 0, 1, 2)
+
+        self._quick_manual_lock_widgets = (
+            self.flash_delay_spinbox,
+            self.print_pulse_width_spinbox,
+            self.flash_button,
+        )
+        self._debug_manual_lock_widgets = (
+            self.flash_duration_spinbox,
+            self.num_droplets_spinbox,
+            self.exposure_time_spinbox,
+            self.benchmark_profile_button,
+        )
+        self._manual_lock_widgets = self._quick_manual_lock_widgets + self._debug_manual_lock_widgets
 
         # --- Droplet tab: standard droplet workflow ---
         self.calib_group = QtWidgets.QGroupBox("Droplet Calibration")
@@ -1191,25 +1229,85 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.enable_calibration_memory_checkbox.setChecked(memory_enabled)
         run_options_v.addWidget(self.enable_calibration_memory_checkbox)
 
+        self.droplet_setup_widget = QtWidgets.QWidget()
+        droplet_setup_grid = QtWidgets.QGridLayout(self.droplet_setup_widget)
+        droplet_setup_grid.setContentsMargins(0, 0, 0, 0)
+        droplet_setup_grid.setHorizontalSpacing(8)
+        droplet_setup_grid.setVerticalSpacing(6)
+        droplet_setup_grid.addWidget(self.prime_head_button, 0, 0, 1, 2)
+        droplet_setup_grid.addWidget(self.calibrate_nozzle_button, 1, 0, 1, 2)
+        droplet_setup_grid.addWidget(self.calibrate_focus_button, 2, 0, 1, 2)
+        droplet_setup_grid.addWidget(self.calibrate_emergence_button, 3, 0, 1, 2)
+
+        self.droplet_workflow_widget = QtWidgets.QWidget()
+        droplet_workflow_grid = QtWidgets.QGridLayout(self.droplet_workflow_widget)
+        droplet_workflow_grid.setContentsMargins(0, 0, 0, 0)
+        droplet_workflow_grid.setHorizontalSpacing(8)
+        droplet_workflow_grid.setVerticalSpacing(6)
+        droplet_workflow_grid.addWidget(self.start_pressure_label, 0, 0)
+        droplet_workflow_grid.addWidget(self.start_pressure_spin, 0, 1)
+        droplet_workflow_grid.addWidget(self.num_pressure_tests_label, 1, 0)
+        droplet_workflow_grid.addWidget(self.num_pressure_tests_spin, 1, 1)
+        droplet_workflow_grid.addWidget(self.calibrate_pressure_scan_button, 2, 0, 1, 2)
+        droplet_workflow_grid.addWidget(self.scan_trajectory_button, 3, 0, 1, 2)
+        droplet_workflow_grid.addWidget(self.calibrate_pressure_sweep_button, 4, 0, 1, 2)
+        droplet_workflow_grid.addWidget(self.calibrate_all_button, 5, 0, 1, 2)
+        droplet_workflow_grid.addWidget(self.calibrate_characterization_button, 6, 0, 1, 2)
+
+        self.stream_setup_widget = QtWidgets.QWidget()
+        stream_setup_grid = QtWidgets.QGridLayout(self.stream_setup_widget)
+        stream_setup_grid.setContentsMargins(0, 0, 0, 0)
+        stream_setup_grid.setHorizontalSpacing(8)
+        stream_setup_grid.setVerticalSpacing(6)
+        stream_setup_grid.addWidget(self.prime_head_stream_button, 0, 0, 1, 2)
+        stream_setup_grid.addWidget(self.calibrate_nozzle_stream_button, 1, 0, 1, 2)
+        stream_setup_grid.addWidget(self.calibrate_focus_stream_button, 2, 0, 1, 2)
+        stream_setup_grid.addWidget(self.calibrate_emergence_stream_button, 3, 0, 1, 2)
+
+        self.stream_workflow_widget = QtWidgets.QWidget()
+        stream_workflow_grid = QtWidgets.QGridLayout(self.stream_workflow_widget)
+        stream_workflow_grid.setContentsMargins(0, 0, 0, 0)
+        stream_workflow_grid.setHorizontalSpacing(8)
+        stream_workflow_grid.setVerticalSpacing(6)
+        stream_workflow_grid.addWidget(self.calibrate_online_stream_button, 0, 0, 1, 2)
+
+        self.debug_scroll = QtWidgets.QScrollArea()
+        self.debug_scroll.setWidgetResizable(True)
+        self.debug_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.debug_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.debug_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.debug_tab_content = QtWidgets.QWidget()
+        debug_content_v = QtWidgets.QVBoxLayout(self.debug_tab_content)
+        debug_content_v.setContentsMargins(0, 0, 0, 0)
+        debug_content_v.setSpacing(8)
+        debug_content_v.addWidget(self.manual_group)
+        debug_content_v.addWidget(self.pw_sweep_group)
+        debug_content_v.addWidget(self.timecourse_group)
+        debug_content_v.addWidget(self.stream_capture_group)
+        debug_content_v.addStretch(1)
+        self.debug_scroll.setWidget(self.debug_tab_content)
+
         for button in (self.flash_button, self.benchmark_profile_button):
             button.setMinimumHeight(32)
         for buttons in self._calibration_action_buttons.values():
             for button in buttons:
                 button.setMinimumHeight(32)
 
-        self.droplet_tab.layout().addWidget(self.calib_group)
+        self.droplet_tab.layout().addWidget(self._create_lightweight_tab_section_header("Setup"))
+        self.droplet_tab.layout().addWidget(self.droplet_setup_widget)
+        self.droplet_tab.layout().addWidget(self._create_lightweight_tab_section_header("Workflow"))
+        self.droplet_tab.layout().addWidget(self.droplet_workflow_widget)
         self.droplet_tab.layout().addStretch(1)
-        self.stream_tab.layout().addWidget(self.stream_calib_group)
+        self.stream_tab.layout().addWidget(self._create_lightweight_tab_section_header("Setup"))
+        self.stream_tab.layout().addWidget(self.stream_setup_widget)
+        self.stream_tab.layout().addWidget(self._create_lightweight_tab_section_header("Workflow"))
+        self.stream_tab.layout().addWidget(self.stream_workflow_widget)
         self.stream_tab.layout().addStretch(1)
-        self.debug_tab.layout().addWidget(self.manual_group)
-        self.debug_tab.layout().addWidget(self.pw_sweep_group)
-        self.debug_tab.layout().addWidget(self.timecourse_group)
-        self.debug_tab.layout().addWidget(self.stream_capture_group)
-        self.debug_tab.layout().addStretch(1)
+        self.debug_tab.layout().addWidget(self.debug_scroll)
 
-        control_panel_v.addWidget(self.calibration_tabs)
+        control_panel_v.addWidget(self.acquisition_controls_section)
+        control_panel_v.addWidget(self.calibration_tabs, 1)
         control_panel_v.addWidget(self.run_options_group)
-        control_panel_v.addStretch(1)
 
         self.recommendation_group = QtWidgets.QGroupBox("Calibration Memory Recommendation")
         recommendation_v = QtWidgets.QVBoxLayout(self.recommendation_group)
@@ -1437,8 +1535,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         info_panel_v.addWidget(self.status_group, 1)
 
-        control_panel_v.addStretch(1)
-
         # Keep the side panels stable so buttons and labels remain readable.
         self.info_panel.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
         self.control_panel.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
@@ -1498,8 +1594,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.analysis_panel.setLayout(self.analysis_layout)
         self.analysis_panel.setMinimumWidth(560)
         self.analysis_panel.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
-        self.layout.addWidget(self.control_panel_scroll, 0)
-        self.layout.setStretchFactor(self.control_panel_scroll, 0)
+        self.layout.addWidget(self.control_panel, 0)
+        self.layout.setStretchFactor(self.control_panel, 0)
         self.layout.addWidget(self.analysis_panel, 1)
         self.layout.setStretchFactor(self.analysis_panel, 1)
         self.layout.addWidget(self.info_panel, 0)
@@ -1945,10 +2041,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             ):
                 self._set_calibration_action_enabled(action_key, False)
 
-        if not fault_latched:
-            self._refresh_manual_control_lock_state()
-            return
-        self._recompute_online_stream_button_state()
+        self._refresh_manual_control_lock_state()
 
     def _refresh_manual_control_lock_state(self, *_args):
         busy = DropletImagingDialog._is_calibration_busy(self)
@@ -1962,16 +2055,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._manual_controls_locked = busy
         enabled = (not busy) and (not flash_fault_latched)
 
-        for widget_name in (
-            "flash_duration_spinbox",
-            "flash_delay_spinbox",
-            "num_droplets_spinbox",
-            "print_pulse_width_spinbox",
-            "exposure_time_spinbox",
-            "flash_button",
-            "benchmark_profile_button",
-        ):
-            widget = getattr(self, widget_name, None)
+        for widget in getattr(self, "_manual_lock_widgets", ()):
             if widget is not None:
                 widget.setEnabled(enabled)
 
@@ -2024,7 +2108,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.controller.set_relative_coordinates(dX, dY, dZ, manual=False)
 
     def _set_equal_panel_widths(self):
-        if not all(hasattr(self, name) for name in ("control_panel_scroll", "control_panel", "analysis_panel", "info_panel")):
+        if not all(hasattr(self, name) for name in ("control_panel", "analysis_panel", "info_panel")):
             return
 
         margins = self.layout.contentsMargins()
@@ -2037,13 +2121,71 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         self.control_panel.setMinimumWidth(side_width)
         self.control_panel.setMaximumWidth(side_width)
-        self.control_panel_scroll.setMinimumWidth(side_width)
-        self.control_panel_scroll.setMaximumWidth(side_width)
         self.info_panel.setMinimumWidth(side_width)
         self.info_panel.setMaximumWidth(side_width)
         self.analysis_panel.setMinimumWidth(560)
         self.analysis_panel.setMaximumWidth(16777215)
         self.analysis_panel.updateGeometry()
+
+    def _create_lightweight_tab_section_header(self, title):
+        header = QtWidgets.QWidget()
+        header_layout = QtWidgets.QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(8)
+
+        label = QtWidgets.QLabel(str(title))
+        label.setStyleSheet("color: #666666; font-weight: 600;")
+
+        divider = QtWidgets.QFrame()
+        divider.setFrameShape(QtWidgets.QFrame.HLine)
+        divider.setFrameShadow(QtWidgets.QFrame.Plain)
+        divider.setStyleSheet("color: #d6d6d6;")
+
+        header_layout.addWidget(label, 0)
+        header_layout.addWidget(divider, 1)
+        return header
+
+    def _create_collapsible_section(self, title, *, expanded=False):
+        container = QtWidgets.QWidget()
+        outer_layout = QtWidgets.QVBoxLayout(container)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(4)
+
+        toggle = QtWidgets.QToolButton()
+        toggle.setText(str(title))
+        toggle.setCheckable(True)
+        toggle.setChecked(bool(expanded))
+        toggle.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+        toggle.setArrowType(QtCore.Qt.DownArrow if expanded else QtCore.Qt.RightArrow)
+        toggle.setStyleSheet(
+            "QToolButton {"
+            " font-weight: 600;"
+            " border: none;"
+            " padding: 4px 0px;"
+            " text-align: left;"
+            "}"
+        )
+
+        content = QtWidgets.QWidget()
+        content_layout = QtWidgets.QGridLayout(content)
+        content_layout.setContentsMargins(8, 0, 0, 0)
+        content_layout.setHorizontalSpacing(8)
+        content_layout.setVerticalSpacing(6)
+        content.setVisible(bool(expanded))
+
+        outer_layout.addWidget(toggle)
+        outer_layout.addWidget(content)
+        return container, toggle, content, content_layout
+
+    def _set_acquisition_controls_expanded(self, expanded):
+        expanded = bool(expanded)
+        if hasattr(self, "acquisition_controls_content"):
+            self.acquisition_controls_content.setVisible(expanded)
+        if hasattr(self, "acquisition_controls_toggle"):
+            self.acquisition_controls_toggle.setArrowType(
+                QtCore.Qt.DownArrow if expanded else QtCore.Qt.RightArrow
+            )
+        type(self)._quick_controls_expanded_default = expanded
 
     def _chart_color(self, key, fallback):
         return QColor(self.color_dict.get(key, fallback))
