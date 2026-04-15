@@ -134,8 +134,11 @@ class _ViewDropletCameraModelStub:
 class _StreamCaptureManagerStub:
     def __init__(self, state):
         self.state = dict(state)
+        self.sequence_state = {"status": "idle"}
         self.record_mode_enabled = True
         self.pending_clear_reasons = []
+        self.activeCalibration = None
+        self.calibration_queue = []
         self.analyzedImageUpdated = SignalStub()
         self.calibrationStageChanged = SignalStub()
         self.calibrationCompleted = SignalStub()
@@ -145,6 +148,7 @@ class _StreamCaptureManagerStub:
         self.characterizationSummaryUpdated = SignalStub()
         self.readinessChanged = SignalStub()
         self.streamCaptureStateChanged = SignalStub()
+        self.streamCalibrationSequenceStateChanged = SignalStub()
 
     def clear_calibration_memory_ui_recommendation_state(self):
         return None
@@ -191,10 +195,35 @@ class _StreamCaptureManagerStub:
             "returning_to_camera",
             "error",
             "stopped",
+        } or str(self.sequence_state.get("status") or "idle") in {
+            "pending_gripper_refresh",
+            "refreshing_gripper",
+            "suspending_gripper_refresh",
+            "running",
+            "pending_gripper_restore",
+            "restoring_gripper_refresh",
+            "error",
+            "stopped",
         }
 
     def clear_pending_process_verdict(self, *, reason=""):
         self.pending_clear_reasons.append(str(reason))
+
+    def get_stream_calibration_sequence_state(self):
+        return dict(self.sequence_state)
+
+    def is_stream_calibration_sequence_busy(self):
+        return str(self.sequence_state.get("status") or "idle") in {
+            "pending_gripper_refresh",
+            "refreshing_gripper",
+            "suspending_gripper_refresh",
+            "running",
+            "pending_gripper_restore",
+            "restoring_gripper_refresh",
+        }
+
+    def has_open_stream_calibration_sequence(self):
+        return str(self.sequence_state.get("status") or "idle") != "idle"
 
 
 class _ViewControllerStub:
@@ -203,6 +232,7 @@ class _ViewControllerStub:
         self.model = model
         self.moves = []
         self.stream_capture_start_calls = []
+        self.stream_calibration_sequence_start_calls = 0
         self.refuel_pressure_steps = []
         self.refuel_only_calls = []
         self.print_only_calls = []
@@ -248,12 +278,27 @@ class _ViewControllerStub:
         self.manager.streamCaptureStateChanged.emit(dict(self.manager.state))
         return True, ""
 
+    def start_stream_calibration_sequence(self):
+        self.stream_calibration_sequence_start_calls += 1
+        self.manager.sequence_state["status"] = "pending_gripper_refresh"
+        self.manager.sequence_state["status_message"] = "Refreshing gripper vacuum before stream calibration sequence."
+        self.manager.streamCalibrationSequenceStateChanged.emit(dict(self.manager.sequence_state))
+        return True, ""
+
     def begin_stream_gravimetric_capture_gripper_preamble(self):
         self.gripper_refresh_calls.append(bool(self.manager.state.get("gripper_was_open")))
         self.manager.state["status"] = "running"
         self.manager.state["status_message"] = "Running nozzle, focus, emergence, and stream capture sequence."
         self.manager.state["gripper_refresh_suspended"] = True
         self.manager.streamCaptureStateChanged.emit(dict(self.manager.state))
+        return True, ""
+
+    def begin_stream_calibration_sequence_gripper_preamble(self):
+        self.gripper_refresh_calls.append(bool(self.manager.sequence_state.get("gripper_was_open")))
+        self.manager.sequence_state["status"] = "running"
+        self.manager.sequence_state["status_message"] = "Running nozzle, focus, emergence, and stream calibration sequence."
+        self.manager.sequence_state["gripper_refresh_suspended"] = True
+        self.manager.streamCalibrationSequenceStateChanged.emit(dict(self.manager.sequence_state))
         return True, ""
 
     def finalize_stream_gravimetric_capture(self, ending_mass_mg, rep_override=None, notes=""):
@@ -302,6 +347,18 @@ class _ViewControllerStub:
             self.manager.state["status"] = "idle"
         self.manager.state["gripper_refresh_suspended"] = False
         self.manager.streamCaptureStateChanged.emit(dict(self.manager.state))
+        return True, ""
+
+    def begin_stream_calibration_sequence_gripper_restore(self):
+        self.gripper_param_updates.append(
+            (
+                int(self.manager.sequence_state.get("gripper_refresh_period_snapshot_ms") or 25000),
+                int(self.manager.sequence_state.get("gripper_pulse_duration_snapshot_ms") or 1500),
+            )
+        )
+        self.manager.sequence_state["status"] = "idle"
+        self.manager.sequence_state["gripper_refresh_suspended"] = False
+        self.manager.streamCalibrationSequenceStateChanged.emit(dict(self.manager.sequence_state))
         return True, ""
 
     def begin_stream_gravimetric_capture_loading_move(self):
@@ -472,6 +529,18 @@ def _restore_stream_capture_gripper(manager):
     ok, message = manager.begin_stream_gravimetric_capture_gripper_restore()
     assert (ok, message) == (True, "")
     ok, message = manager.mark_stream_gravimetric_capture_gripper_restored()
+    assert (ok, message) == (True, "")
+
+
+def _start_stream_calibration_sequence_with_gripper_suspend(manager):
+    manager._stream_calibration_sequence_missing_requirements = lambda: []
+    ok = manager.start_stream_calibration_sequence()
+    assert ok is True
+    ok, message = manager.begin_stream_calibration_sequence_gripper_refresh()
+    assert (ok, message) == (True, "")
+    ok, message = manager.begin_stream_calibration_sequence_gripper_suspend()
+    assert (ok, message) == (True, "")
+    ok, message = manager.mark_stream_calibration_sequence_gripper_suspended()
     assert (ok, message) == (True, "")
 
 
@@ -789,6 +858,91 @@ def test_stream_capture_queue_can_start_online_stream_calibration(tmp_path, monk
             },
         ),
     ]
+
+
+def test_stream_calibration_sequence_queue_can_start_online_stream_calibration(tmp_path, monkeypatch):
+    _model, manager = _make_manager(tmp_path)
+    started = []
+
+    def _capture_start(proc_cls, *args, **kwargs):
+        started.append((proc_cls, dict(kwargs)))
+        return True
+
+    monkeypatch.setattr(manager, "_try_start_process", _capture_start)
+    manager.calibration_queue = ["online_stream_calibration"]
+    manager._stream_calibration_sequence_state = {"status": "running"}
+
+    manager.start_calibration_queue()
+
+    assert started == [
+        (
+            OnlineStreamCalibrationProcess,
+            {
+                "_allow_stream_calibration_sequence": True,
+                "_stream_calibration_sequence_phase": "online_stream_calibration",
+            },
+        ),
+    ]
+
+
+def test_stream_calibration_sequence_suspend_queues_online_stream_mode(tmp_path, monkeypatch):
+    _model, manager = _make_manager(tmp_path)
+    queued = []
+
+    monkeypatch.setattr(manager, "start_calibration_queue", lambda: queued.append(list(manager.calibration_queue)))
+
+    _start_stream_calibration_sequence_with_gripper_suspend(manager)
+
+    assert queued == [list(manager.STREAM_CALIBRATION_SEQUENCE_QUEUE)]
+    state = manager.get_stream_calibration_sequence_state()
+    assert state["status"] == "running"
+    assert state["gripper_refresh_suspended"] is True
+
+
+def test_stream_calibration_sequence_success_restores_gripper_and_returns_idle(tmp_path, monkeypatch):
+    _model, manager = _make_manager(tmp_path)
+    monkeypatch.setattr(manager, "start_calibration_queue", lambda: None)
+    stage_calls = []
+    manager.calibrationStageChanged.connect(lambda message, color: stage_calls.append((message, color)))
+
+    _start_stream_calibration_sequence_with_gripper_suspend(manager)
+
+    manager._complete_stream_calibration_sequence_queue_success()
+    state = manager.get_stream_calibration_sequence_state()
+    assert state["status"] == "pending_gripper_restore"
+
+    ok, message = manager.begin_stream_calibration_sequence_gripper_restore()
+    assert (ok, message) == (True, "")
+    ok, message = manager.mark_stream_calibration_sequence_gripper_restored()
+    assert (ok, message) == (True, "")
+
+    state = manager.get_stream_calibration_sequence_state()
+    assert state["status"] == "idle"
+    assert stage_calls[-1] == (
+        "Stream calibration sequence completed.",
+        "green",
+    )
+
+
+def test_stream_calibration_sequence_stop_restores_gripper_and_returns_idle(tmp_path, monkeypatch):
+    _model, manager = _make_manager(tmp_path)
+    monkeypatch.setattr(manager, "start_calibration_queue", lambda: None)
+
+    _start_stream_calibration_sequence_with_gripper_suspend(manager)
+    manager.calibration_queue = list(manager.STREAM_CALIBRATION_SEQUENCE_QUEUE)
+
+    manager.stop()
+
+    state = manager.get_stream_calibration_sequence_state()
+    assert state["status"] == "pending_gripper_restore"
+
+    ok, message = manager.begin_stream_calibration_sequence_gripper_restore()
+    assert (ok, message) == (True, "")
+    ok, message = manager.mark_stream_calibration_sequence_gripper_restored()
+    assert (ok, message) == (True, "")
+
+    state = manager.get_stream_calibration_sequence_state()
+    assert state["status"] == "idle"
 
 
 def test_stream_capture_gripper_suspend_can_launch_first_internal_queue_step(tmp_path, monkeypatch):
@@ -1612,6 +1766,46 @@ def test_stream_capture_online_summary_uses_generic_dataset_labels(monkeypatch, 
     assert "Duration: 6400 us" in popup_text
     assert "Volume: 0.7901 nL" in popup_text
     assert "Timecourse:" not in popup_text
+
+
+def test_stream_calibration_sequence_followup_uses_gripper_only_without_moves(monkeypatch, qapp):
+    dialog, manager, controller = _build_view_dialog(monkeypatch, qapp)
+
+    dialog.calibrate_all_stream_button.click()
+    qapp.processEvents()
+
+    assert controller.stream_calibration_sequence_start_calls == 1
+
+    manager.sequence_state.update(
+        {
+            "status": "pending_gripper_refresh",
+            "status_message": "Refreshing gripper vacuum before stream calibration sequence.",
+            "gripper_was_open": False,
+            "gripper_pulse_duration_snapshot_ms": 1500,
+            "gripper_refresh_period_snapshot_ms": 25000,
+        }
+    )
+    manager.streamCalibrationSequenceStateChanged.emit(dict(manager.sequence_state))
+    qapp.processEvents()
+
+    assert manager.sequence_state["status"] == "running"
+    assert controller.moves == []
+
+    manager.sequence_state.update(
+        {
+            "status": "pending_gripper_restore",
+            "status_message": "Restoring gripper auto-refresh settings.",
+            "gripper_refresh_suspended": True,
+        }
+    )
+    manager.streamCalibrationSequenceStateChanged.emit(dict(manager.sequence_state))
+    qapp.processEvents()
+
+    assert manager.sequence_state["status"] == "idle"
+    assert controller.moves == []
+    assert dialog.calibrate_all_stream_button.text() == "Calibrate All"
+
+    dialog.deleteLater()
 
 
 def test_stream_capture_panel_state_locks_manual_controls_and_suppresses_verdict(monkeypatch, qapp):

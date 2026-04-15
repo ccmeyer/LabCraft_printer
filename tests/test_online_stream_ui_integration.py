@@ -67,9 +67,11 @@ class _CalibrationManagerStub:
         self.characterizationSummaryUpdated = SignalStub()
         self.readinessChanged = SignalStub()
         self.streamCaptureStateChanged = SignalStub()
+        self.streamCalibrationSequenceStateChanged = SignalStub()
         self.activeCalibration = None
         self.calibration_queue = []
         self.state = {"status": "idle"}
+        self.sequence_state = {"status": "idle"}
 
     def clear_calibration_memory_ui_recommendation_state(self):
         return None
@@ -92,10 +94,28 @@ class _CalibrationManagerStub:
     def get_stream_gravimetric_capture_state(self):
         return dict(self.state)
 
+    def is_stream_calibration_sequence_busy(self):
+        return str(self.sequence_state.get("status") or "idle") in {
+            "pending_gripper_refresh",
+            "refreshing_gripper",
+            "suspending_gripper_refresh",
+            "running",
+            "pending_gripper_restore",
+            "restoring_gripper_refresh",
+        }
+
+    def has_open_stream_calibration_sequence(self):
+        return str(self.sequence_state.get("status") or "idle") != "idle"
+
+    def get_stream_calibration_sequence_state(self):
+        return dict(self.sequence_state)
+
 
 class _ControllerStub:
-    def __init__(self):
+    def __init__(self, manager=None):
+        self.manager = manager
         self.start_online_stream_calls = 0
+        self.start_stream_calibration_sequence_calls = 0
         self.start_nozzle_calls = 0
         self.stop_calibration_calls = 0
 
@@ -110,6 +130,30 @@ class _ControllerStub:
 
     def start_online_stream_calibration(self):
         self.start_online_stream_calls += 1
+
+    def start_stream_calibration_sequence(self):
+        self.start_stream_calibration_sequence_calls += 1
+        if self.manager is not None:
+            self.manager.sequence_state["status"] = "pending_gripper_refresh"
+            self.manager.streamCalibrationSequenceStateChanged.emit(
+                dict(self.manager.sequence_state)
+            )
+
+    def begin_stream_calibration_sequence_gripper_preamble(self):
+        if self.manager is not None:
+            self.manager.sequence_state["status"] = "running"
+            self.manager.streamCalibrationSequenceStateChanged.emit(
+                dict(self.manager.sequence_state)
+            )
+        return True, ""
+
+    def begin_stream_calibration_sequence_gripper_restore(self):
+        if self.manager is not None:
+            self.manager.sequence_state["status"] = "restoring_gripper_refresh"
+            self.manager.streamCalibrationSequenceStateChanged.emit(
+                dict(self.manager.sequence_state)
+            )
+        return True, ""
 
     def stop_calibration(self):
         self.stop_calibration_calls += 1
@@ -132,7 +176,7 @@ def _build_dialog(monkeypatch, qapp, *, printing_mode=None):
         monkeypatch.setattr(DropletImagingDialog, method_name, lambda self, *args, **kwargs: None)
 
     manager = _CalibrationManagerStub()
-    controller = _ControllerStub()
+    controller = _ControllerStub(manager)
     printer_head = (
         SimpleNamespace(get_printing_mode=lambda mode=printing_mode: mode)
         if printing_mode is not None
@@ -182,6 +226,19 @@ def test_online_stream_button_is_created_and_reset_label_is_stable(monkeypatch, 
     dialog.deleteLater()
 
 
+def test_stream_calibrate_all_button_is_created_and_reset_label_is_stable(monkeypatch, qapp):
+    dialog, _manager, _controller = _build_dialog(monkeypatch, qapp)
+
+    assert dialog.calibrate_all_stream_button.text() == "Calibrate All"
+
+    dialog.calibrate_all_stream_button.setText("Stop Calibration")
+    dialog.reset_calibration_buttons()
+
+    assert dialog.calibrate_all_stream_button.text() == "Calibrate All"
+
+    dialog.deleteLater()
+
+
 def test_online_stream_toggle_starts_and_stops_via_controller(monkeypatch, qapp):
     dialog, manager, controller = _build_dialog(monkeypatch, qapp)
 
@@ -197,6 +254,31 @@ def test_online_stream_toggle_starts_and_stops_via_controller(monkeypatch, qapp)
 
     assert controller.stop_calibration_calls == 1
     assert dialog.calibrate_online_stream_button.text() == "Calibrate Stream Volume"
+
+    dialog.deleteLater()
+
+
+def test_stream_calibrate_all_toggle_starts_and_stops_via_controller(monkeypatch, qapp):
+    dialog, manager, controller = _build_dialog(monkeypatch, qapp)
+
+    dialog.calibrate_all_stream_button.click()
+    qapp.processEvents()
+
+    assert controller.start_stream_calibration_sequence_calls == 1
+    assert dialog.calibrate_all_stream_button.text() == "Stop Calibration"
+
+    manager.sequence_state["status"] = "running"
+    dialog.calibrate_all_stream_button.click()
+    qapp.processEvents()
+
+    assert controller.stop_calibration_calls == 1
+    assert dialog.calibrate_all_stream_button.text() == "Stop Calibration"
+
+    manager.sequence_state["status"] = "idle"
+    dialog._refresh_manual_control_lock_state()
+    qapp.processEvents()
+
+    assert dialog.calibrate_all_stream_button.text() == "Calibrate All"
 
     dialog.deleteLater()
 
@@ -253,6 +335,44 @@ def test_online_stream_readiness_controls_enabled_state_and_tooltip(monkeypatch,
     dialog.deleteLater()
 
 
+def test_stream_calibrate_all_ignores_emergence_only_readiness_blockers(monkeypatch, qapp):
+    dialog, _manager, _controller = _build_dialog(monkeypatch, qapp)
+
+    dialog.on_readiness_changed(
+        {
+            "online_stream_calibration": {
+                "ready": False,
+                "missing": [
+                    "Emergence time",
+                    "Emergence-derived nozzle center (image coords)",
+                ],
+            }
+        }
+    )
+    qapp.processEvents()
+
+    assert dialog.calibrate_all_stream_button.isEnabled() is True
+    assert dialog.calibrate_all_stream_button.toolTip() == ""
+
+    dialog.on_readiness_changed(
+        {
+            "online_stream_calibration": {
+                "ready": False,
+                "missing": [
+                    "Emergence time",
+                    "Active printer head",
+                ],
+            }
+        }
+    )
+    qapp.processEvents()
+
+    assert dialog.calibrate_all_stream_button.isEnabled() is False
+    assert "Active printer head" in dialog.calibrate_all_stream_button.toolTip()
+
+    dialog.deleteLater()
+
+
 def test_online_stream_flash_fault_overrides_ready_and_recovers_without_new_readiness(monkeypatch, qapp):
     dialog, manager, _controller = _build_dialog(monkeypatch, qapp)
     cam = dialog.model.droplet_camera_model
@@ -274,6 +394,8 @@ def test_online_stream_flash_fault_overrides_ready_and_recovers_without_new_read
 
     assert dialog.calibrate_online_stream_button.isEnabled() is False
     assert "flash safety fault" in dialog.calibrate_online_stream_button.toolTip().lower()
+    assert dialog.calibrate_all_stream_button.isEnabled() is False
+    assert "flash safety fault" in dialog.calibrate_all_stream_button.toolTip().lower()
 
     cam.flash_fault_latched = False
     cam.flash_fault_reason = ""
@@ -283,6 +405,8 @@ def test_online_stream_flash_fault_overrides_ready_and_recovers_without_new_read
     assert manager.activeCalibration is None
     assert dialog.calibrate_online_stream_button.isEnabled() is True
     assert dialog.calibrate_online_stream_button.toolTip() == ""
+    assert dialog.calibrate_all_stream_button.isEnabled() is True
+    assert dialog.calibrate_all_stream_button.toolTip() == ""
 
     dialog.deleteLater()
 
@@ -304,6 +428,8 @@ def test_online_stream_stream_capture_lockout_overrides_ready_state(monkeypatch,
 
     assert dialog.calibrate_online_stream_button.isEnabled() is False
     assert "stream gravimetric capture" in dialog.calibrate_online_stream_button.toolTip().lower()
+    assert dialog.calibrate_all_stream_button.isEnabled() is False
+    assert "stream gravimetric capture" in dialog.calibrate_all_stream_button.toolTip().lower()
 
     dialog.deleteLater()
 
@@ -364,6 +490,31 @@ def test_tabs_lock_during_pulsewidth_sweep_and_unlock_afterwards(monkeypatch, qa
     dialog.deleteLater()
 
 
+def test_tabs_lock_during_stream_calibration_sequence_and_unlock_when_idle(monkeypatch, qapp):
+    dialog, manager, _controller = _build_dialog(monkeypatch, qapp)
+
+    dialog.calibration_tabs.setCurrentIndex(1)
+    qapp.processEvents()
+
+    manager.sequence_state["status"] = "pending_gripper_restore"
+    dialog._refresh_manual_control_lock_state()
+    qapp.processEvents()
+
+    assert dialog.calibration_tabs.isTabEnabled(0) is False
+    assert dialog.calibration_tabs.isTabEnabled(1) is True
+    assert dialog.calibration_tabs.isTabEnabled(2) is False
+
+    manager.sequence_state["status"] = "idle"
+    dialog._refresh_manual_control_lock_state()
+    qapp.processEvents()
+
+    assert dialog.calibration_tabs.isTabEnabled(0) is True
+    assert dialog.calibration_tabs.isTabEnabled(1) is True
+    assert dialog.calibration_tabs.isTabEnabled(2) is True
+
+    dialog.deleteLater()
+
+
 def test_online_stream_running_process_keeps_stop_button_enabled_when_readiness_regresses(monkeypatch, qapp):
     dialog, manager, _controller = _build_dialog(monkeypatch, qapp)
     manager.activeCalibration = SimpleNamespace(phase_name="online_stream_calibration")
@@ -394,6 +545,32 @@ def test_online_stream_debug_widgets_are_created_in_analysis_and_info_panels(mon
     assert dialog.online_stream_plot_container.isHidden() is True
     assert dialog.machine_position_group.objectName() == "machine_position_group"
     assert dialog.machine_position_group.parentWidget() is dialog.machine_position_section_content
+
+    dialog.deleteLater()
+
+
+def test_stream_calibration_sequence_keeps_stop_button_enabled_through_restore(monkeypatch, qapp):
+    dialog, manager, _controller = _build_dialog(monkeypatch, qapp)
+
+    manager.sequence_state["status"] = "running"
+    manager.streamCalibrationSequenceStateChanged.emit(dict(manager.sequence_state))
+    qapp.processEvents()
+
+    assert dialog.calibrate_all_stream_button.isEnabled() is True
+    assert dialog.calibrate_all_stream_button.text() == "Stop Calibration"
+
+    manager.sequence_state["status"] = "pending_gripper_restore"
+    manager.streamCalibrationSequenceStateChanged.emit(dict(manager.sequence_state))
+    qapp.processEvents()
+
+    assert dialog.calibrate_all_stream_button.isEnabled() is True
+    assert dialog.calibrate_all_stream_button.text() == "Stop Calibration"
+
+    manager.sequence_state["status"] = "idle"
+    manager.streamCalibrationSequenceStateChanged.emit(dict(manager.sequence_state))
+    qapp.processEvents()
+
+    assert dialog.calibrate_all_stream_button.text() == "Calibrate All"
 
     dialog.deleteLater()
 

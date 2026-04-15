@@ -881,6 +881,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._stream_capture_gripper_restore_attempted = False
         self._stream_capture_loading_move_attempted = False
         self._stream_capture_camera_return_attempted = False
+        self._stream_calibration_sequence_gripper_preamble_attempted = False
+        self._stream_calibration_sequence_gripper_restore_attempted = False
         try:
             self.model.calibration_manager.clear_calibration_memory_ui_recommendation_state()
         except Exception:
@@ -1198,6 +1200,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
         )
         stream_calib_grid.addWidget(self.calibrate_online_stream_button, stream_crow, 0, 1, 2); stream_crow += 1
 
+        self.calibrate_all_stream_button = QtWidgets.QPushButton("Calibrate All")
+        self.calibrate_all_stream_button.clicked.connect(self.toggle_start_all_stream_calibration)
+        self._register_calibration_action_button(
+            "stream_calibrate_all",
+            self.calibrate_all_stream_button,
+        )
+        stream_calib_grid.addWidget(self.calibrate_all_stream_button, stream_crow, 0, 1, 2); stream_crow += 1
+
         # --- Debug tab: Pulse Width Sweep ---
         self.pw_sweep_group = QtWidgets.QGroupBox("Pulse Width Sweep")
         pw_grid = QtWidgets.QGridLayout(self.pw_sweep_group)
@@ -1372,6 +1382,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         stream_workflow_grid.setHorizontalSpacing(8)
         stream_workflow_grid.setVerticalSpacing(6)
         stream_workflow_grid.addWidget(self.calibrate_online_stream_button, 0, 0, 1, 2)
+        stream_workflow_grid.addWidget(self.calibrate_all_stream_button, 1, 0, 1, 2)
 
         self.debug_scroll = QtWidgets.QScrollArea()
         self.debug_scroll.setWidgetResizable(True)
@@ -1796,6 +1807,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
             stream_capture_signal.connect(self._sync_stream_capture_panel_state)
             stream_capture_signal.connect(self._refresh_manual_control_lock_state)
             stream_capture_signal.connect(self._ensure_stream_capture_followup_state)
+        stream_sequence_signal = getattr(
+            self.model.calibration_manager,
+            "streamCalibrationSequenceStateChanged",
+            None,
+        )
+        if stream_sequence_signal is not None:
+            stream_sequence_signal.connect(self._refresh_manual_control_lock_state)
+            stream_sequence_signal.connect(self._ensure_stream_calibration_sequence_followup_state)
 
         self.model.calibration_manager.readinessChanged.connect(self.on_readiness_changed)
         self.model.calibration_manager._emit_readiness()
@@ -1812,6 +1831,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._apply_flash_safety_ui_state()
         self._sync_stream_capture_panel_state()
         QTimer.singleShot(0, self._ensure_stream_capture_followup_state)
+        QTimer.singleShot(0, self._ensure_stream_calibration_sequence_followup_state)
 
     def setup_shortcuts(self):
         """Set up keyboard shortcuts using the shortcut manager."""
@@ -2091,7 +2111,24 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 stream_busy = bool(stream_busy_getter())
             except Exception:
                 stream_busy = False
-        return active is not None or bool(queue) or sweep_active or stream_busy
+        stream_sequence_busy = False
+        stream_sequence_busy_getter = getattr(
+            manager,
+            "is_stream_calibration_sequence_busy",
+            None,
+        )
+        if callable(stream_sequence_busy_getter):
+            try:
+                stream_sequence_busy = bool(stream_sequence_busy_getter())
+            except Exception:
+                stream_sequence_busy = False
+        return (
+            active is not None
+            or bool(queue)
+            or sweep_active
+            or stream_busy
+            or stream_sequence_busy
+        )
 
     def _sync_manual_controls_from_model(self, force=False):
         DropletImagingDialog._sync_manual_spinbox_value(
@@ -2158,6 +2195,40 @@ class DropletImagingDialog(QtWidgets.QDialog):
         active = getattr(manager, "activeCalibration", None)
         return str(getattr(active, "phase_name", "") or "") == "online_stream_calibration"
 
+    def _get_stream_calibration_sequence_state(self):
+        mgr = getattr(self.model, "calibration_manager", None)
+        getter = getattr(mgr, "get_stream_calibration_sequence_state", None)
+        if callable(getter):
+            try:
+                state = getter()
+            except Exception:
+                state = None
+            if isinstance(state, dict):
+                return state
+        return {
+            "status": "idle",
+            "status_message": "Ready to begin stream calibration sequence.",
+            "error_message": "",
+            "session_id": None,
+            "session_outcome": None,
+            "gripper_refresh_period_snapshot_ms": None,
+            "gripper_pulse_duration_snapshot_ms": None,
+            "gripper_was_open": None,
+            "gripper_refresh_suspended": False,
+        }
+
+    @staticmethod
+    def _filter_stream_calibration_sequence_missing(missing):
+        ignored = {
+            "Emergence time",
+            "Emergence-derived nozzle center (image coords)",
+        }
+        return [
+            str(item)
+            for item in list(missing or [])
+            if str(item) not in ignored
+        ]
+
     def _recompute_online_stream_button_state(self):
         if not self._get_calibration_action_buttons("online_stream_calibration"):
             return
@@ -2193,6 +2264,55 @@ class DropletImagingDialog(QtWidgets.QDialog):
             return
 
         self._set_calibration_action_state("online_stream_calibration", ready, missing)
+
+    def _recompute_stream_calibration_sequence_button_state(self):
+        if not self._get_calibration_action_buttons("stream_calibrate_all"):
+            return
+
+        state = self._get_stream_calibration_sequence_state()
+        status = str(state.get("status") or "idle")
+        if status != "idle":
+            self._set_calibration_action_text(
+                "stream_calibrate_all",
+                "Stop Calibration",
+            )
+            self._set_calibration_action_state(
+                "stream_calibrate_all",
+                True,
+                tooltip_override="Stop the active stream calibration sequence.",
+            )
+            return
+        self._set_calibration_action_text("stream_calibrate_all", use_default=True)
+
+        readiness = dict(getattr(self, "_last_calibration_readiness", {}) or {})
+        info = dict(readiness.get("online_stream_calibration", {}) or {})
+        missing = self._filter_stream_calibration_sequence_missing(
+            info.get("missing") or []
+        )
+        ready = len(missing) == 0
+        flash_fault_latched = self._is_flash_fault_latched()
+        stream_capture_blocked = self._stream_capture_blocks_new_starts(self._get_stream_capture_state())
+
+        if flash_fault_latched:
+            self._set_calibration_action_state(
+                "stream_calibrate_all",
+                False,
+                tooltip_override="Unavailable while flash safety fault is latched.",
+            )
+            return
+        if stream_capture_blocked:
+            self._set_calibration_action_state(
+                "stream_calibrate_all",
+                False,
+                tooltip_override="Unavailable while a stream gravimetric capture session is open.",
+            )
+            return
+
+        self._set_calibration_action_state(
+            "stream_calibrate_all",
+            ready,
+            missing,
+        )
 
     def _apply_flash_safety_ui_state(self):
         fault_latched = self._is_flash_fault_latched()
@@ -2236,6 +2356,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 "droplet_characterization",
                 "droplet_timecourse",
                 "online_stream_calibration",
+                "stream_calibrate_all",
                 "calibrate_all",
                 "pulsewidth_sweep",
             ):
@@ -2278,7 +2399,23 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if hasattr(self, "stream_capture_group"):
             self._sync_stream_capture_panel_state()
 
+        if hasattr(self, "record_calibration_checkbox"):
+            sequence_busy_getter = getattr(
+                getattr(self.model, "calibration_manager", None),
+                "is_stream_calibration_sequence_busy",
+                None,
+            )
+            sequence_busy = False
+            if callable(sequence_busy_getter):
+                try:
+                    sequence_busy = bool(sequence_busy_getter())
+                except Exception:
+                    sequence_busy = False
+            if sequence_busy:
+                self.record_calibration_checkbox.setEnabled(False)
+
         self._recompute_online_stream_button_state()
+        self._recompute_stream_calibration_sequence_button_state()
         self._refresh_calibration_tab_lock_state()
 
     def eventFilter(self, watched, event):
@@ -2984,6 +3121,18 @@ class DropletImagingDialog(QtWidgets.QDialog):
         status = str((state or {}).get("status") or "idle")
         return status != "idle"
 
+    def _begin_stream_calibration_sequence_gripper_preamble(self):
+        result = self.controller.begin_stream_calibration_sequence_gripper_preamble()
+        if isinstance(result, tuple) and result and (result[0] is False):
+            return False
+        return True
+
+    def _begin_stream_calibration_sequence_gripper_restore(self):
+        result = self.controller.begin_stream_calibration_sequence_gripper_restore()
+        if isinstance(result, tuple) and result and (result[0] is False):
+            return False
+        return True
+
     def _close_stream_capture_mass_dialog(self):
         dialog = getattr(self, "_stream_capture_mass_dialog", None)
         if dialog is None:
@@ -3111,6 +3260,27 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._stream_capture_gripper_restore_attempted = False
         if status not in {"pending_camera_return", "returning_to_camera"}:
             self._stream_capture_camera_return_attempted = False
+
+    def _ensure_stream_calibration_sequence_followup_state(self, *_args):
+        state = self._get_stream_calibration_sequence_state()
+        status = str(state.get("status") or "idle")
+
+        if status == "pending_gripper_refresh":
+            if not self._stream_calibration_sequence_gripper_preamble_attempted:
+                self._stream_calibration_sequence_gripper_preamble_attempted = True
+                self._begin_stream_calibration_sequence_gripper_preamble()
+            return
+
+        if status == "pending_gripper_restore":
+            if not self._stream_calibration_sequence_gripper_restore_attempted:
+                self._stream_calibration_sequence_gripper_restore_attempted = True
+                self._begin_stream_calibration_sequence_gripper_restore()
+            return
+
+        if status not in {"pending_gripper_refresh", "refreshing_gripper", "suspending_gripper_refresh"}:
+            self._stream_calibration_sequence_gripper_preamble_attempted = False
+        if status not in {"pending_gripper_restore", "restoring_gripper_refresh"}:
+            self._stream_calibration_sequence_gripper_restore_attempted = False
 
     def _complete_stream_gravimetric_capture_from_popup(self, ending_mass_mg: float):
         result = self.controller.finalize_stream_gravimetric_capture(
@@ -3315,6 +3485,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "droplet_characterization",
             "droplet_timecourse",
             "online_stream_calibration",
+            "stream_calibrate_all",
             "calibrate_all",
             "pulsewidth_sweep",
         ):
@@ -3325,6 +3496,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._apply_cached_calibration_readiness()
         else:
             self._recompute_online_stream_button_state()
+            self._recompute_stream_calibration_sequence_button_state()
 
         if hasattr(self, "record_calibration_checkbox"):
             self.record_calibration_checkbox.setEnabled(not stream_busy and not block_new_starts)
@@ -3514,6 +3686,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "droplet_characterization",
             "droplet_timecourse",
             "online_stream_calibration",
+            "stream_calibrate_all",
             "calibrate_all",
             "pulsewidth_sweep",
         ):
@@ -3685,6 +3858,28 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.controller.start_online_stream_calibration()
         self._refresh_manual_control_lock_state()
 
+    def toggle_start_all_stream_calibration(self):
+        """
+        Toggles whether the stream calibration sequence should be started.
+        """
+        manager = self.model.calibration_manager
+        has_open_sequence = bool(
+            getattr(manager, "has_open_stream_calibration_sequence", lambda: False)()
+        )
+        if (
+            has_open_sequence
+            or manager.activeCalibration is not None
+            or len(getattr(manager, "calibration_queue", None) or []) > 0
+        ):
+            print('Stopping calibration')
+            self._set_calibration_action_text("stream_calibrate_all", use_default=True)
+            self.controller.stop_calibration()
+        else:
+            print('Starting calibration')
+            self._set_calibration_action_text("stream_calibrate_all", "Stop Calibration")
+            self.controller.start_stream_calibration_sequence()
+        self._refresh_manual_control_lock_state()
+
     def toggle_start_all_calibration(self):
         """
         Toggles whether all calibrations should be started.
@@ -3755,7 +3950,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
         readiness = dict(getattr(self, "_last_calibration_readiness", {}) or {})
         for key, action_key in getattr(self, "_calibration_readiness_button_specs", ()):
             if str(key) == "online_stream_calibration":
-                self._recompute_online_stream_button_state()
                 continue
             info = dict(readiness.get(str(key), {}) or {})
             if not info:
@@ -3765,6 +3959,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 bool(info.get("ready")),
                 info.get("missing"),
             )
+        self._recompute_online_stream_button_state()
+        self._recompute_stream_calibration_sequence_button_state()
 
     def _enable_non_readiness_calibration_buttons(self):
         for action_key in (
