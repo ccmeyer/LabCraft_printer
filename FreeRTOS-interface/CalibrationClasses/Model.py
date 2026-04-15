@@ -9367,10 +9367,11 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             f"{phase_display_label} delay={int(self._tail_current_delay_us)} us, "
             f"rep {int(self._tail_replicate_index + 1)}/{int(self._current_tail_replicates())}"
         )
+        # Tail begins immediately after flow without an intermediate restore/disarm,
+        # so num_droplets is already armed and resending it only adds extra work.
         self._request_guarded_settings_update(
             {
                 "flash_delay": int(self._tail_current_delay_us),
-                "num_droplets": 1,
             },
             self.calibration_manager.emitSettingsChangeCompleted,
             context=f"online_stream_apply_{phase_label}_{int(self._tail_current_delay_us)}",

@@ -1107,6 +1107,122 @@ def test_online_stream_stage_text_uses_operator_facing_flow_and_tail_labels(tmp_
     assert "tail backtrack delay=" in proc.stageChanged.calls[-1][0][0]
 
 
+def test_online_stream_apply_tail_delay_scout_only_updates_flash_delay(tmp_path):
+    proc = _flow_proc(tmp_path)
+    captured = {}
+
+    def _stub(
+        settings,
+        callback,
+        *,
+        context="",
+        guard_timeout_ms=None,
+        on_timeout=None,
+        timeout_message=None,
+    ):
+        captured["settings"] = dict(settings)
+        captured["context"] = str(context)
+        return lambda: None
+
+    proc._request_guarded_settings_update = _stub
+    proc._tail_plan = {
+        "scout_first_delay_us": 4750,
+        "scout_replicates": 1,
+        "backtrack_replicates": 1,
+    }
+    proc._tail_delay_sequence = [4750]
+    proc._tail_delay_index = 0
+    proc._tail_replicate_index = 0
+    proc._tail_mode = "scout"
+
+    proc.onApplyTailDelay()
+
+    assert captured["settings"] == {"flash_delay": 4750}
+    assert captured["context"] == "online_stream_apply_tail_scout_4750"
+
+
+def test_online_stream_apply_tail_delay_backtrack_only_updates_flash_delay(tmp_path):
+    proc = _flow_proc(tmp_path)
+    captured = {}
+
+    def _stub(
+        settings,
+        callback,
+        *,
+        context="",
+        guard_timeout_ms=None,
+        on_timeout=None,
+        timeout_message=None,
+    ):
+        captured["settings"] = dict(settings)
+        captured["context"] = str(context)
+        return lambda: None
+
+    proc._request_guarded_settings_update = _stub
+    proc._tail_plan = {
+        "scout_first_delay_us": 4300,
+        "scout_replicates": 1,
+        "backtrack_replicates": 1,
+    }
+    proc._tail_delay_sequence = [4300]
+    proc._tail_delay_index = 0
+    proc._tail_replicate_index = 0
+    proc._tail_mode = "backtrack"
+
+    proc.onApplyTailDelay()
+
+    assert captured["settings"] == {"flash_delay": 4300}
+    assert captured["context"] == "online_stream_apply_tail_backtrack_4300"
+
+
+def test_online_stream_tail_apply_reuses_flow_num_droplets_arm(tmp_path):
+    proc = _flow_proc(tmp_path)
+    captured_calls = []
+
+    def _stub(
+        settings,
+        callback,
+        *,
+        context="",
+        guard_timeout_ms=None,
+        on_timeout=None,
+        timeout_message=None,
+    ):
+        captured_calls.append(
+            {
+                "settings": dict(settings),
+                "context": str(context),
+            }
+        )
+        if callable(callback):
+            callback()
+        return lambda: None
+
+    proc._request_guarded_settings_update = _stub
+    proc._flow_delay_sequence = [3850]
+    proc._flow_delay_index = 0
+    proc._flow_replicate_index = 0
+    proc._flow_mode = "scout"
+    proc._tail_plan = {
+        "scout_first_delay_us": 4750,
+        "scout_replicates": 1,
+        "backtrack_replicates": 1,
+    }
+    proc._tail_delay_sequence = [4750]
+    proc._tail_delay_index = 0
+    proc._tail_replicate_index = 0
+    proc._tail_mode = "scout"
+
+    proc.onApplyFlowDelay()
+    proc.onApplyTailDelay()
+
+    assert captured_calls[0]["settings"] == {"flash_delay": 3850, "num_droplets": 1}
+    assert captured_calls[0]["context"] == "online_stream_apply_flow_scout_3850"
+    assert proc._flow_num_droplets_armed is True
+    assert captured_calls[1]["settings"] == {"flash_delay": 4750}
+    assert captured_calls[1]["context"] == "online_stream_apply_tail_scout_4750"
+
+
 def test_online_stream_analyze_flow_frame_appends_measurement_for_accepted_frame(tmp_path, monkeypatch):
     proc = _flow_proc(tmp_path)
     proc._frames_path = str(tmp_path / "frames.jsonl")
