@@ -8,6 +8,7 @@ from tests.calibration_test_utils import SignalStub, ensure_calibration_import_s
 
 ensure_calibration_import_stubs()
 
+import CalibrationClasses.View as calibration_view
 from CalibrationClasses.Model import CalibrationManager
 from CalibrationClasses.View import DropletImagingDialog
 
@@ -63,11 +64,75 @@ def _make_run(run_id, *, stock="Water", sweep_entries=None, search_entries=None)
     }
 
 
-def _build_model_and_manager(tmp_path, runs, *, current_stock="Water", active_run_id=None):
-    experiment_model = SimpleNamespace(
-        calibration_file_path=str(tmp_path / "calibration.json"),
-        get_calibration_file_path=lambda: str(tmp_path / "calibration.json"),
+def _build_experiment_model(current_stock):
+    state = {
+        "droplet_nL": 10.0,
+        "stock_concentration": 2.5,
+        "units": "mg/mL",
+        "metadata": {"fill_droplet_volume_nL": 10.0},
+    }
+
+    def _find_option_by_reagent_name(reagent):
+        if not reagent:
+            return None
+        return ((str(reagent).lower(), None), SimpleNamespace(droplet_nL=float(state["droplet_nL"])))
+
+    def _find_key_for_reagent(reagent):
+        if not reagent:
+            raise ValueError("missing reagent")
+        return (str(reagent).lower(), None)
+
+    def _get_plan_for_key(_key):
+        return {
+            "n_stocks": 1,
+            "stocks": [
+                {
+                    "stock_concentration": float(state["stock_concentration"]),
+                    "units": str(state["units"]),
+                    "droplet_volume_nL": float(state["droplet_nL"]),
+                }
+            ],
+        }
+
+    def _preview_requantized_for_option(_key, new_droplet_nL, *, quantum=0.1):
+        new_droplet_nL = float(new_droplet_nL)
+        return {
+            "ok": True,
+            "n_stocks": 1,
+            "new_droplet_nL": new_droplet_nL,
+            "rows": [
+                {
+                    "target_final": 1.0,
+                    "achieved_final": 1.0,
+                    "error": 0.0,
+                    "drops": 1,
+                    "delta_per_drop": quantum,
+                    "printed_nL_new": new_droplet_nL,
+                    "printed_nL_shift": new_droplet_nL - float(state["droplet_nL"]),
+                    "units": str(state["units"]),
+                }
+            ],
+        }
+
+    def _apply_droplet_volume_for_option(_factor_name, _option_name, new_droplet_nL, **_kwargs):
+        state["droplet_nL"] = float(new_droplet_nL)
+        return {"new_droplet_nL": float(new_droplet_nL)}
+
+    return SimpleNamespace(
+        metadata=state["metadata"],
+        get_fill_reagent_name=lambda: "Fill",
+        find_option_by_reagent_name=_find_option_by_reagent_name,
+        find_key_for_reagent=_find_key_for_reagent,
+        get_plan_for_key=_get_plan_for_key,
+        preview_requantized_for_option=_preview_requantized_for_option,
+        apply_droplet_volume_for_option=_apply_droplet_volume_for_option,
     )
+
+
+def _build_model_and_manager(tmp_path, runs, *, current_stock="Water", active_run_id=None):
+    experiment_model = _build_experiment_model(current_stock)
+    experiment_model.calibration_file_path = str(tmp_path / "calibration.json")
+    experiment_model.get_calibration_file_path = lambda: str(tmp_path / "calibration.json")
     printer_head = SimpleNamespace(get_stock_solution=lambda: current_stock, serial="head-1")
     rack_model = SimpleNamespace(get_gripper_printer_head=lambda: printer_head)
     model = SimpleNamespace(
@@ -84,7 +149,7 @@ def _build_model_and_manager(tmp_path, runs, *, current_stock="Water", active_ru
     return model, manager
 
 
-def _build_dialog(monkeypatch, qapp, tmp_path, runs, *, current_stock="Water", active_run_id=None):
+def _build_dialog(monkeypatch, qapp, tmp_path, runs, *, current_stock="Water", active_run_id=None, main_window=None):
     for method_name in (
         "setup_shortcuts",
         "start_droplet_camera",
@@ -120,9 +185,11 @@ def _build_dialog(monkeypatch, qapp, tmp_path, runs, *, current_stock="Water", a
     )
 
     controller = SimpleNamespace(start_read_camera=lambda: None)
-    main_window = SimpleNamespace(color_dict={})
+    if main_window is None:
+        main_window = SimpleNamespace(color_dict={})
     dialog = DropletImagingDialog(main_window, model, controller)
     qapp.processEvents()
+    dialog._bridge_refresh_design_labels()
     return dialog, manager
 
 
@@ -290,7 +357,9 @@ def test_results_table_sorts_numeric_columns_and_selection_payload_survives_prox
     dialog._apply_summary_sort(cv_col, Qt.AscendingOrder)
     qapp.processEvents()
     assert _visible_summary_rows(dialog)[0]["cv_pct"] == pytest.approx(3.0)
-    assert dialog.bridge_preview_btn.text() == "Preview from selected row"
+    assert dialog.bridge_table.rowCount() == 1
+    assert dialog.bridge_apply_btn.isEnabled() is True
+    assert "12.000 nL" in dialog.bridge_status_label.text()
 
     dialog.deleteLater()
 
@@ -318,6 +387,9 @@ def test_results_detail_strip_and_load_button_reflect_selected_row(monkeypatch, 
     assert "Recorded" in dialog.summary_detail_meta_label.text()
     assert "Invalid: missing_pressure" in dialog.summary_detail_status_label.text()
     assert dialog.load_selected_button.isEnabled() is False
+    assert dialog.bridge_table.rowCount() == 1
+    assert dialog.bridge_apply_btn.isEnabled() is True
+    assert "flagged invalid" in dialog.bridge_status_label.text()
 
     flagged_search_row = next(idx for idx, row in enumerate(_visible_summary_rows(dialog)) if row["phase"] == "search")
     _select_visible_row(dialog, flagged_search_row)
@@ -326,8 +398,100 @@ def test_results_detail_strip_and_load_button_reflect_selected_row(monkeypatch, 
     assert "Source Search" in dialog.summary_detail_meta_label.text()
     assert "Invalid: ratio_limit" in dialog.summary_detail_status_label.text()
     assert dialog.load_selected_button.isEnabled() is True
+    assert dialog.bridge_table.rowCount() == 1
+    assert dialog.bridge_apply_btn.isEnabled() is True
+    assert "flagged invalid" in dialog.bridge_status_label.text()
 
     dialog.deleteLater()
+
+
+def test_bridge_requires_explicit_selection_and_starts_empty(monkeypatch, qapp, tmp_path):
+    runs = [
+        _make_run(
+            "run_focus",
+            sweep_entries=[
+                {"timestamp": "2026-03-18T09:01:00Z", "pw_us": 1400, "pressure_psi": 1.20, "mean_nL": 10.0, "cv_pct": 4.0, "valid": True},
+            ],
+        )
+    ]
+    dialog, _manager = _build_dialog(monkeypatch, qapp, tmp_path, runs, active_run_id="run_focus")
+
+    assert dialog.summary_table.selectionModel().selectedRows() == []
+    assert dialog.bridge_table.rowCount() == 0
+    assert dialog.bridge_apply_btn.isEnabled() is False
+    assert "Select a characterization result" in dialog.bridge_status_label.text()
+
+    dialog.deleteLater()
+
+
+def test_apply_marks_summary_row_and_persists_across_reopen(monkeypatch, qapp, tmp_path):
+    runs = [
+        _make_run(
+            "run_focus",
+            sweep_entries=[
+                {"timestamp": "2026-03-18T09:00:00Z", "pw_us": 1400, "pressure_psi": 1.20, "mean_nL": 10.0, "cv_pct": 4.0, "valid": True},
+                {"timestamp": "2026-03-18T09:02:00Z", "pw_us": 1450, "pressure_psi": 1.35, "mean_nL": 10.8, "cv_pct": 5.5, "valid": True},
+            ],
+        )
+    ]
+    main_window = SimpleNamespace(color_dict={})
+    info_calls = []
+    monkeypatch.setattr(
+        DropletImagingDialog,
+        "refresh_calibration_memory_recommendation",
+        lambda self, *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        DropletImagingDialog,
+        "_refresh_manual_control_lock_state",
+        lambda self, *args, **kwargs: None,
+    )
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "information", lambda *args, **kwargs: info_calls.append(True))
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "critical", lambda *args, **kwargs: None)
+
+    dialog, _manager = _build_dialog(
+        monkeypatch,
+        qapp,
+        tmp_path,
+        runs,
+        active_run_id="run_focus",
+        main_window=main_window,
+    )
+    dialog._apply_summary_sort(dialog.summary_table_model.column_index("mean_nL"), Qt.DescendingOrder)
+    qapp.processEvents()
+    _select_visible_row(dialog, 0)
+    qapp.processEvents()
+
+    _, raw = dialog._selected_summary_row()
+    source_row = raw["_source_row"]
+    dialog._apply_previewed_droplet_volume()
+    qapp.processEvents()
+
+    bg = dialog.summary_table_model.data(dialog.summary_table_model.index(source_row, 0), Qt.BackgroundRole)
+    assert bg is not None
+    assert getattr(main_window, "_droplet_imaging_applied_summary_rows")
+    assert info_calls
+
+    dialog.summary_valid_only_checkbox.setChecked(True)
+    qapp.processEvents()
+    assert dialog.summary_table_model.data(dialog.summary_table_model.index(source_row, 0), Qt.BackgroundRole) is not None
+
+    dialog.deleteLater()
+    qapp.processEvents()
+
+    reopened, _manager = _build_dialog(
+        monkeypatch,
+        qapp,
+        tmp_path,
+        runs,
+        active_run_id="run_focus",
+        main_window=main_window,
+    )
+    reopened_bg = reopened.summary_table_model.data(reopened.summary_table_model.index(source_row, 0), Qt.BackgroundRole)
+    assert reopened_bg is not None
+
+    reopened.deleteLater()
 
 
 def test_results_history_dialog_is_browse_only_and_defaults_to_all_rows(monkeypatch, qapp, tmp_path):

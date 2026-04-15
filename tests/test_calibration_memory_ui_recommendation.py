@@ -314,6 +314,7 @@ def test_apply_previewed_droplet_volume_refreshes_recommendation(monkeypatch, qa
         "option_name": None,
         "new_droplet_nL": 12.0,
         "n_stocks": 1,
+        "source_row_fingerprint": ("run-a", "sweep", "2026-03-18T09:00:00Z", 1400.0, 1.2, 12.0),
     }
     dialog.model = SimpleNamespace(
         experiment_model=SimpleNamespace(
@@ -324,6 +325,8 @@ def test_apply_previewed_droplet_volume_refreshes_recommendation(monkeypatch, qa
     dialog._bridge_clear_preview = lambda: None
     dialog._bridge_refresh_design_labels = lambda: None
     dialog.refresh_calibration_memory_recommendation = lambda: refresh_calls.append(True)
+    dialog._set_saved_applied_summary_row_fingerprint = lambda fingerprint: None
+    dialog._sync_applied_summary_row_highlight = lambda: None
     monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "information", lambda *args, **kwargs: None)
     monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "warning", lambda *args, **kwargs: None)
     monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "critical", lambda *args, **kwargs: None)
@@ -345,6 +348,8 @@ def _build_real_dialog_for_layout(monkeypatch, qapp, *, reset_quick_controls=Tru
                 delattr(main_window, "_droplet_imaging_quick_controls_expanded")
             if hasattr(main_window, "_droplet_imaging_info_panel_sections_expanded"):
                 delattr(main_window, "_droplet_imaging_info_panel_sections_expanded")
+            if hasattr(main_window, "_droplet_imaging_applied_summary_rows"):
+                delattr(main_window, "_droplet_imaging_applied_summary_rows")
     for method_name in (
         "setup_shortcuts",
         "start_droplet_camera",
@@ -422,11 +427,14 @@ def test_real_dialog_uses_three_column_layout_with_controls_left_and_results_rig
     assert dialog.recommendation_section_toggle.isChecked() is False
     assert dialog.machine_position_section_toggle.isChecked() is False
     assert dialog.status_section_toggle.isChecked() is True
-    assert dialog.control_panel.layout().itemAt(0).widget() is dialog.acquisition_controls_section
+    assert dialog.control_panel.layout().itemAt(0).widget() is dialog.reagent_title_widget
+    assert dialog.control_panel.layout().itemAt(1).widget() is dialog.acquisition_controls_section
     assert dialog.calibration_tabs.parentWidget() is dialog.control_panel
     assert dialog.run_options_group.parentWidget() is dialog.control_panel
-    assert dialog.control_panel.layout().itemAt(1).widget() is dialog.calibration_tabs
-    assert dialog.control_panel.layout().itemAt(2).widget() is dialog.run_options_group
+    assert dialog.control_panel.layout().itemAt(2).widget() is dialog.calibration_tabs
+    assert dialog.control_panel.layout().itemAt(3).widget() is dialog.run_options_group
+    assert dialog.reagent_title_label.parentWidget() is dialog.reagent_title_widget
+    assert dialog.reagent_stock_label.parentWidget() is dialog.reagent_title_widget
     assert dialog.debug_scroll.parentWidget() is dialog.debug_tab
     assert dialog.debug_scroll.widget() is dialog.debug_tab_content
     assert dialog.manual_group.parentWidget() is dialog.debug_tab_content
@@ -464,6 +472,13 @@ def test_real_dialog_uses_three_column_layout_with_controls_left_and_results_rig
     assert dialog.debug_tab.isAncestorOf(dialog.stream_capture_group) is True
     assert dialog.droplet_tab.isAncestorOf(dialog.calib_group) is False
     assert dialog.stream_tab.isAncestorOf(dialog.stream_calib_group) is False
+    assert dialog.summary_toolbar.indexOf(dialog.summary_count_label) == -1
+    assert dialog.summary_group.isAncestorOf(dialog.summary_count_label) is True
+    assert dialog.bridge_group.isAncestorOf(dialog.bridge_preview_btn) is False
+    assert dialog.bridge_group.isAncestorOf(dialog.bridge_reagent_label) is False
+    assert dialog.bridge_group.isAncestorOf(dialog.bridge_design_targets_label) is False
+    assert dialog.bridge_group.isAncestorOf(dialog.bridge_design_stock_label) is False
+    assert dialog.bridge_group.isAncestorOf(dialog.bridge_design_dv_label) is True
     droplet_header = dialog.droplet_tab.layout().itemAt(0).widget()
     stream_header = dialog.stream_tab.layout().itemAt(0).widget()
     assert droplet_header.layout().count() == 3

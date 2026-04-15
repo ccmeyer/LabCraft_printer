@@ -381,6 +381,31 @@ def _build_summary_muted_brush(color_dict):
     return QBrush(QColor(255, 255, 255, 150))
 
 
+def _summary_row_fingerprint(row):
+    row = dict(row or {})
+
+    def _normalize(value):
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return bool(value)
+        if isinstance(value, (int, float)):
+            try:
+                return round(float(value), 9)
+            except Exception:
+                return value
+        return str(value)
+
+    return (
+        _normalize(row.get("run_id")),
+        _normalize(row.get("phase")),
+        _normalize(row.get("timestamp")),
+        _normalize(row.get("pw_us")),
+        _normalize(row.get("pressure_psi")),
+        _normalize(row.get("mean_nL")),
+    )
+
+
 def _characterization_table_stylesheet():
     return (
         "QTableView {"
@@ -424,10 +449,12 @@ def _configure_characterization_table_view(table, model):
 
 
 class CharacterizationSummaryTableModel(QtCore.QAbstractTableModel):
-    def __init__(self, parent=None, *, include_recorded=False, muted_brush=None):
+    def __init__(self, parent=None, *, include_recorded=False, muted_brush=None, applied_brush=None):
         super().__init__(parent)
         self._include_recorded = bool(include_recorded)
         self._muted_brush = muted_brush or QBrush(QColor(255, 255, 255, 150))
+        self._applied_brush = applied_brush or QBrush(QColor(59, 130, 246, 64))
+        self._applied_row_fingerprint = None
         self._rows = []
         self._columns = self._build_columns()
 
@@ -542,6 +569,17 @@ class CharacterizationSummaryTableModel(QtCore.QAbstractTableModel):
         self._rows = [dict(row) for row in (rows or [])]
         self.endResetModel()
 
+    def set_applied_row_fingerprint(self, fingerprint):
+        fingerprint = None if fingerprint is None else tuple(fingerprint)
+        if fingerprint == self._applied_row_fingerprint:
+            return
+        self._applied_row_fingerprint = fingerprint
+        if self.rowCount() <= 0 or self.columnCount() <= 0:
+            return
+        top_left = self.index(0, 0)
+        bottom_right = self.index(self.rowCount() - 1, self.columnCount() - 1)
+        self.dataChanged.emit(top_left, bottom_right, [Qt.BackgroundRole])
+
     def raw_row_at(self, row):
         if row < 0 or row >= len(self._rows):
             return None
@@ -586,6 +624,9 @@ class CharacterizationSummaryTableModel(QtCore.QAbstractTableModel):
             if key == "timestamp_display":
                 return str(row.get("timestamp_display") or "")
             return None
+        if role == Qt.BackgroundRole and self._applied_row_fingerprint is not None:
+            if _summary_row_fingerprint(row) == self._applied_row_fingerprint:
+                return self._applied_brush
         if role == Qt.ForegroundRole and row.get("valid") is False:
             return self._muted_brush
         if role == Qt.FontRole and row.get("valid") is False:
@@ -853,6 +894,23 @@ class DropletImagingDialog(QtWidgets.QDialog):
         control_panel_v = QtWidgets.QVBoxLayout(self.control_panel)
         control_panel_v.setContentsMargins(6, 6, 6, 6)
         control_panel_v.setSpacing(8)
+
+        self.reagent_title_widget = QtWidgets.QWidget()
+        reagent_title_v = QtWidgets.QVBoxLayout(self.reagent_title_widget)
+        reagent_title_v.setContentsMargins(0, 0, 0, 0)
+        reagent_title_v.setSpacing(2)
+        self.reagent_title_label = QtWidgets.QLabel("No reagent selected")
+        self.reagent_title_label.setWordWrap(True)
+        self.reagent_title_label.setStyleSheet("font-size: 18px; font-weight: 700;")
+        self.reagent_stock_label = QtWidgets.QLabel("Stock concentration(s): —")
+        self.reagent_stock_label.setWordWrap(True)
+        self.reagent_stock_label.setStyleSheet(
+            f"color: {self.color_dict.get('muted_text', self.color_dict.get('light_gray', '#9ca3af'))};"
+            " font-size: 12px;"
+            " font-weight: 500;"
+        )
+        reagent_title_v.addWidget(self.reagent_title_label)
+        reagent_title_v.addWidget(self.reagent_stock_label)
 
         quick_controls_expanded = self._get_saved_acquisition_controls_expanded()
         (
@@ -1318,6 +1376,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.stream_tab.layout().addStretch(1)
         self.debug_tab.layout().addWidget(self.debug_scroll)
 
+        control_panel_v.addWidget(self.reagent_title_widget)
         control_panel_v.addWidget(self.acquisition_controls_section)
         control_panel_v.addWidget(self.calibration_tabs, 1)
         control_panel_v.addWidget(self.run_options_group)
@@ -1366,6 +1425,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         summary_v.setSpacing(6)
 
         self._summary_muted_brush = _build_summary_muted_brush(self.color_dict)
+        applied_color = QColor(self.color_dict.get("light_blue", "#3b82f6"))
+        applied_color.setAlpha(64)
+        self._summary_applied_brush = QBrush(applied_color)
         self.summary_toolbar = QtWidgets.QHBoxLayout()
         self.summary_toolbar.setSpacing(8)
         self.summary_current_run_checkbox = QtWidgets.QCheckBox("Current run only")
@@ -1386,13 +1448,13 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.summary_toolbar.addWidget(self.summary_source_combo)
         self.summary_toolbar.addWidget(self.summary_history_button)
         self.summary_toolbar.addStretch(1)
-        self.summary_toolbar.addWidget(self.summary_count_label)
         summary_v.addLayout(self.summary_toolbar)
 
         self.summary_table_model = CharacterizationSummaryTableModel(
             self,
             include_recorded=False,
             muted_brush=self._summary_muted_brush,
+            applied_brush=self._summary_applied_brush,
         )
         self.summary_table_proxy_model = CharacterizationSummaryProxyModel(self)
         self.summary_table_proxy_model.setSourceModel(self.summary_table_model)
@@ -1426,6 +1488,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         _configure_characterization_table_view(self.summary_table, self.summary_table_model)
         self.summary_table.setMinimumHeight(280)
         summary_v.addWidget(self.summary_table, 1)
+        summary_v.addWidget(self.summary_count_label)
 
         self.summary_detail_widget = QtWidgets.QWidget()
         detail_v = QtWidgets.QVBoxLayout(self.summary_detail_widget)
@@ -1447,11 +1510,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.load_selected_button.setEnabled(False)
         self.load_selected_button.setToolTip("Select a row above, then click to apply its PW and pressure.")
         self.load_selected_button.clicked.connect(self.load_selected_summary_row)
-        summary_footer = QtWidgets.QHBoxLayout()
-        summary_footer.setContentsMargins(0, 0, 0, 0)
-        summary_footer.addStretch(1)
-        summary_footer.addWidget(self.load_selected_button)
-        summary_v.addLayout(summary_footer)
+        self.load_selected_button.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        summary_v.addWidget(self.load_selected_button)
 
         # --- Group 4: Design ↔ Calibration Bridge ---
         self.bridge_group = QtWidgets.QWidget()
@@ -1487,12 +1547,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.bridge_apply_btn.clicked.connect(self._apply_previewed_droplet_volume)
         self.bridge_apply_btn.setToolTip("Update droplet counts & concentration key using this droplet size")
 
-        bridge_v.addWidget(self.bridge_reagent_label)
         bridge_v.addWidget(self.bridge_design_dv_label)
-        bridge_v.addWidget(self.bridge_design_targets_label)
-        bridge_v.addWidget(self.bridge_design_stock_label)
-        bridge_v.addLayout(preview_h)
         bridge_v.addWidget(self.bridge_table, 1)
+        self.bridge_status_label = QtWidgets.QLabel("Select a characterization result to preview design impact.")
+        self.bridge_status_label.setWordWrap(True)
+        self.bridge_status_label.setStyleSheet(
+            f"color: {self.color_dict.get('muted_text', self.color_dict.get('light_gray', '#9ca3af'))};"
+        )
+        bridge_v.addWidget(self.bridge_status_label)
         bridge_v.addWidget(self.bridge_apply_btn)
 
         self.diff_widget = QWidget()
@@ -2400,6 +2462,57 @@ class DropletImagingDialog(QtWidgets.QDialog):
         outer_layout.addWidget(toggle)
         outer_layout.addWidget(content)
         return container, toggle, content
+
+    def _get_current_reagent_context_key(self):
+        try:
+            reagent = str(self._bridge_get_current_reagent_name() or "").strip()
+        except Exception:
+            reagent = ""
+        return reagent or "__none__"
+
+    def _get_saved_applied_summary_row_fingerprints(self):
+        try:
+            if hasattr(self, "main_window"):
+                return dict(
+                    getattr(
+                        self.main_window,
+                        "_droplet_imaging_applied_summary_rows",
+                        {},
+                    )
+                    or {}
+                )
+        except Exception:
+            pass
+        return {}
+
+    def _get_saved_applied_summary_row_fingerprint(self):
+        key = self._get_current_reagent_context_key()
+        raw = self._get_saved_applied_summary_row_fingerprints().get(key)
+        if raw is None:
+            return None
+        return tuple(raw)
+
+    def _set_saved_applied_summary_row_fingerprint(self, fingerprint):
+        key = self._get_current_reagent_context_key()
+        try:
+            if hasattr(self, "main_window"):
+                mapping = self._get_saved_applied_summary_row_fingerprints()
+                if fingerprint is None:
+                    mapping.pop(key, None)
+                else:
+                    mapping[key] = tuple(fingerprint)
+                setattr(self.main_window, "_droplet_imaging_applied_summary_rows", mapping)
+        except Exception:
+            pass
+
+    def _sync_applied_summary_row_highlight(self):
+        fingerprint = self._get_saved_applied_summary_row_fingerprint()
+        if hasattr(self, "summary_table_model"):
+            self.summary_table_model.set_applied_row_fingerprint(fingerprint)
+
+    @staticmethod
+    def _summary_row_fingerprint(row):
+        return _summary_row_fingerprint(row)
 
     def _chart_color(self, key, fallback):
         return QColor(self.color_dict.get(key, fallback))
@@ -4202,9 +4315,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.bridge_table.resizeRowsToContents()
 
     def _bridge_clear_preview(self):
-        self._bridge_preview_payload = None
-        self.bridge_apply_btn.setEnabled(False)
-        self.bridge_table.setRowCount(0)
+        self._bridge_clear_preview_with_status()
 
     def _populate_bridge_preview_table(self, preview: dict):
         rows = preview.get("rows", [])
@@ -4350,6 +4461,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 except Exception:
                     pass
 
+            self._set_saved_applied_summary_row_fingerprint(payload.get("source_row_fingerprint"))
+            self._sync_applied_summary_row_highlight()
             self._bridge_clear_preview()
             self._bridge_refresh_design_labels()
             self.refresh_calibration_memory_recommendation()
@@ -4395,6 +4508,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.critical(self, "Apply failed", f"{e}")
             return
 
+        self._set_saved_applied_summary_row_fingerprint(payload.get("source_row_fingerprint"))
+        self._sync_applied_summary_row_highlight()
         self._bridge_clear_preview()
         self._bridge_refresh_design_labels()
         self.refresh_calibration_memory_recommendation()
@@ -4674,8 +4789,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.summary_table_proxy_model.setSourceFilter(self.summary_source_combo.currentData())
         self._update_summary_count_label()
         self._update_load_button_state()
-        self._update_preview_button_label()
         self._refresh_summary_detail_strip()
+        self._refresh_bridge_preview_from_selection()
 
     def _apply_summary_sort(self, column, order):
         self._summary_sort_column = column
@@ -4755,32 +4870,20 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
     def _preferred_char_mean_nL(self):
         """
-        Returns (mean_nL, source) where source in {"selected", "latest"} or (None, None)
+        Returns (mean_nL, source) where source is "selected" or (None, None)
         """
         sel = self._selected_summary_mean_nL()
         if sel is not None:
             return sel, "selected"
-        cm = self._bridge_get_calibration_manager()
-        if cm is None:
-            return None, None
-        m = cm.get_last_characterization_mean_nL()
-        try:
-            return (float(m) if m is not None else None), "latest"
-        except Exception:
-            return None, None
+        return None, None
 
     def _update_preview_button_label(self):
-        if self._selected_summary_mean_nL() is not None:
-            self.bridge_preview_btn.setText("Preview from selected row")
-            self.bridge_preview_btn.setToolTip("Uses the selected table row's mean droplet volume.")
-        else:
-            self.bridge_preview_btn.setText("Preview from last characterization")
-            self.bridge_preview_btn.setToolTip("Uses the most recent valid characterization for this stock.")
+        return None
 
     def _on_summary_selection_changed(self, *_args):
         self._update_load_button_state()
-        self._update_preview_button_label()
         self._refresh_summary_detail_strip()
+        self._refresh_bridge_preview_from_selection()
 
     def load_selected_summary_row(self):
         """Apply the selected row's PW & pressure to the machine (atomically if possible)."""
@@ -4859,10 +4962,204 @@ class DropletImagingDialog(QtWidgets.QDialog):
         mgr = self.model.calibration_manager
         rows = mgr.get_pressure_sweep_summary_rows()
         self.summary_table_model.set_rows(rows)
+        self._sync_applied_summary_row_highlight()
         self._refresh_summary_filters()
         if self._summary_sort_column is not None:
             self._apply_summary_sort(self._summary_sort_column, self._summary_sort_order)
         self.refresh_calibration_memory_recommendation()
+
+    def _bridge_clear_preview_with_status(self, status_text=None):
+        self._bridge_preview_payload = None
+        self.bridge_apply_btn.setEnabled(False)
+        self.bridge_apply_btn.setToolTip("Select a usable characterization result to preview a new droplet volume.")
+        self.bridge_table.clearContents()
+        self.bridge_table.setRowCount(0)
+        if hasattr(self, "bridge_status_label"):
+            self.bridge_status_label.setText(
+                str(status_text or "Select a characterization result to preview design impact.")
+            )
+
+    def _bridge_refresh_design_labels(self):
+        em = getattr(self.model, "experiment_model", None)
+        reagent = self._bridge_get_current_reagent_name()
+        if hasattr(self, "reagent_title_label"):
+            self.reagent_title_label.setText(reagent or "No reagent selected")
+        if hasattr(self, "reagent_stock_label"):
+            self.reagent_stock_label.setText("Stock concentration(s): —")
+        if hasattr(self, "bridge_design_dv_label"):
+            self.bridge_design_dv_label.setText("Design droplet volume (nL): —")
+
+        if em is None or not reagent:
+            self._sync_applied_summary_row_highlight()
+            self._refresh_bridge_preview_from_selection()
+            return
+
+        try:
+            fill_reagent = em.get_fill_reagent_name()
+        except Exception:
+            fill_reagent = None
+
+        if reagent == fill_reagent:
+            try:
+                dv = float(em.metadata.get("fill_droplet_volume_nL", 10.0))
+                self.bridge_design_dv_label.setText(f"Design droplet volume (nL): {dv:.3f}  (fill)")
+            except Exception:
+                self.bridge_design_dv_label.setText("Design droplet volume (nL): —")
+            self._sync_applied_summary_row_highlight()
+            self._refresh_bridge_preview_from_selection()
+            self.refresh_calibration_memory_recommendation()
+            return
+
+        try:
+            key_opt = em.find_option_by_reagent_name(reagent)
+        except Exception:
+            key_opt = None
+        if not key_opt:
+            self._sync_applied_summary_row_highlight()
+            self._refresh_bridge_preview_from_selection()
+            return
+
+        key, opt = key_opt
+        try:
+            self.bridge_design_dv_label.setText(f"Design droplet volume (nL): {float(opt.droplet_nL):.3f}")
+        except Exception:
+            self.bridge_design_dv_label.setText("Design droplet volume (nL): —")
+
+        plan = None
+        try:
+            plan = em.get_plan_for_key(key)
+        except Exception:
+            plan = None
+        if plan and hasattr(self, "reagent_stock_label"):
+            try:
+                if plan["n_stocks"] == 1:
+                    scs = [plan["stocks"][0]["stock_concentration"]]
+                else:
+                    scs = [plan["stocks"][0]["stock_concentration"], plan["stocks"][1]["stock_concentration"]]
+                units = str(plan["stocks"][0].get("units", "") or "")
+                scs_txt = ", ".join(f"{float(c):.4g}" for c in scs)
+                suffix = f" {units}" if units else ""
+                self.reagent_stock_label.setText(f"Stock concentration(s): {scs_txt}{suffix}")
+            except Exception:
+                self.reagent_stock_label.setText("Stock concentration(s): —")
+
+        self._sync_applied_summary_row_highlight()
+        self._refresh_bridge_preview_from_selection()
+
+    def _refresh_bridge_preview_from_selection(self):
+        _, raw = self._selected_summary_row()
+        if not raw:
+            self._bridge_clear_preview_with_status()
+            return
+
+        mean_nL = raw.get("mean_nL")
+        try:
+            mean_nL = float(mean_nL) if mean_nL is not None else None
+        except Exception:
+            mean_nL = None
+        if mean_nL is None or mean_nL <= 0:
+            self._bridge_clear_preview_with_status(
+                "Selected result does not contain a usable mean droplet volume."
+            )
+            return
+
+        em = getattr(self.model, "experiment_model", None)
+        reagent = self._bridge_get_current_reagent_name()
+        if em is None or not reagent:
+            self._bridge_clear_preview_with_status(
+                "No current reagent is available for bridge preview."
+            )
+            return
+
+        selected_fingerprint = self._summary_row_fingerprint(raw)
+        invalid_reason = raw.get("invalid_reason")
+        status_prefix = (
+            f"Selected result is flagged invalid ({invalid_reason or 'flagged'}); "
+            if raw.get("valid") is False
+            else ""
+        )
+
+        try:
+            fill_reagent = em.get_fill_reagent_name()
+        except Exception:
+            fill_reagent = None
+
+        if reagent == fill_reagent:
+            try:
+                preview = em.preview_fill_requantized(mean_nL)
+            except Exception as exc:
+                self._bridge_clear_preview_with_status(f"Bridge preview failed: {exc}")
+                return
+            if not preview.get("ok"):
+                self._bridge_clear_preview_with_status(
+                    str(preview.get("reason") or "Bridge preview failed.")
+                )
+                return
+
+            self.bridge_table.clearContents()
+            self.bridge_table.setRowCount(1)
+            row = preview["rows"][0]
+
+            def _it(txt):
+                return QtWidgets.QTableWidgetItem("" if txt is None else str(txt))
+
+            self.bridge_table.setItem(0, 0, _it("—"))
+            self.bridge_table.setItem(0, 1, _it("—"))
+            self.bridge_table.setItem(0, 2, _it("—"))
+            self.bridge_table.setItem(0, 3, _it(preview.get("total_drops_new")))
+            self.bridge_table.setItem(0, 4, _it(f"{mean_nL:.6g} nL/drop"))
+            self.bridge_table.setItem(0, 5, _it(f"{row['printed_nL_new']:.3f} nL"))
+            self.bridge_table.setItem(0, 6, _it(f"{row['printed_nL_shift']:+.3f} nL"))
+            self.bridge_table.resizeColumnsToContents()
+            self.bridge_table.resizeRowsToContents()
+            self._bridge_preview_payload = {
+                "is_fill": True,
+                "new_fill_nL": float(mean_nL),
+                "source_row_fingerprint": selected_fingerprint,
+            }
+            self.bridge_apply_btn.setEnabled(True)
+            self.bridge_apply_btn.setToolTip("")
+            self.bridge_status_label.setText(
+                f"{status_prefix}Preview uses the selected result mean volume of {mean_nL:.3f} nL."
+            )
+            return
+
+        try:
+            key = em.find_key_for_reagent(reagent)
+        except Exception as exc:
+            self._bridge_clear_preview_with_status(f"Bridge preview unavailable: {exc}")
+            return
+
+        try:
+            preview = em.preview_requantized_for_option(key, float(mean_nL), quantum=0.1)
+        except Exception as exc:
+            self._bridge_clear_preview_with_status(f"Bridge preview failed: {exc}")
+            return
+        if not preview.get("ok"):
+            self._bridge_clear_preview_with_status(
+                str(preview.get("reason") or "Bridge preview failed.")
+            )
+            return
+
+        self._populate_bridge_preview_table(preview)
+        self._bridge_preview_payload = {
+            "factor_name": key[0],
+            "option_name": key[1],
+            "new_droplet_nL": float(preview.get("new_droplet_nL", mean_nL)),
+            "n_stocks": int(preview.get("n_stocks", 1)),
+            "source_row_fingerprint": selected_fingerprint,
+        }
+        can_apply = self._bridge_preview_payload["n_stocks"] == 1
+        self.bridge_apply_btn.setEnabled(can_apply)
+        self.bridge_apply_btn.setToolTip("" if can_apply else "Apply supports single-stock reagents only right now.")
+        if can_apply:
+            self.bridge_status_label.setText(
+                f"{status_prefix}Preview uses the selected result mean volume of {mean_nL:.3f} nL."
+            )
+        else:
+            self.bridge_status_label.setText(
+                f"{status_prefix}Preview is shown, but apply currently supports single-stock reagents only."
+            )
 
     def center_nozzle(self):
         self.controller.center_nozzle_in_camera(position='top')
