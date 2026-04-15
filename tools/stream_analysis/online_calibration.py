@@ -45,6 +45,8 @@ DEFAULT_ONLINE_STREAM_ANALYSIS_CONFIG = {
     "near_nozzle_band_top_px": 24,
     "near_nozzle_band_height_px": 40,
     "min_band_valid_rows": 24,
+    "attached_breakup_min_detached_components": 2,
+    "attached_breakup_min_extension_roi_frac": 0.14,
     "attached_lower_centerline_row_fraction": 0.35,
     "attached_lower_centerline_min_rows": 12,
     "attached_lower_centerline_span_max_px": 50,

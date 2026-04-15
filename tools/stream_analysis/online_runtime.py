@@ -115,6 +115,62 @@ def _attached_component_clearance(stage3_metric_row: dict, attached_component_ro
     return int(int(roi_y1) - 1 - int(last_valid_y_px))
 
 
+def _attached_component_extension_below_band(
+    attached_component_row: dict | None,
+    *,
+    band_y1_px,
+):
+    if not attached_component_row or band_y1_px is None:
+        return None
+    last_valid_y_px = attached_component_row.get("last_valid_y_px")
+    if last_valid_y_px is None:
+        return None
+    return int(int(last_valid_y_px) - int(band_y1_px) + 1)
+
+
+def _attached_near_nozzle_breakup(
+    stage3_metric_row: dict,
+    attached_component_row: dict | None,
+    width_metrics: dict,
+    *,
+    config: dict,
+):
+    roi_height = stage3_metric_row.get("roi_height")
+    min_extension_px = int(config["near_nozzle_band_height_px"])
+    if roi_height not in (None, ""):
+        try:
+            min_extension_px = max(
+                int(config["near_nozzle_band_height_px"]),
+                int(
+                    round(
+                        float(roi_height)
+                        * float(config["attached_breakup_min_extension_roi_frac"])
+                    )
+                ),
+            )
+        except Exception:
+            min_extension_px = int(config["near_nozzle_band_height_px"])
+
+    detached_component_count = int(
+        stage3_metric_row.get("accepted_detached_component_count") or 0
+    )
+    extension_px = _attached_component_extension_below_band(
+        attached_component_row,
+        band_y1_px=width_metrics.get("band_y1_px"),
+    )
+    detected = bool(
+        extension_px is not None
+        and detached_component_count
+        >= int(config["attached_breakup_min_detached_components"])
+        and int(extension_px) < int(min_extension_px)
+    )
+    return {
+        "attached_near_nozzle_breakup_detected": bool(detected),
+        "attached_band_extension_px": extension_px,
+        "attached_breakup_min_extension_px": int(min_extension_px),
+    }
+
+
 def _visible_fluid_clearance_px(
     *,
     frame_metric_row: dict,
@@ -1004,6 +1060,21 @@ def analyze_online_stream_frame(
         and int(selected_component_top_y_px) <= int(cutoff_y_px) + int(config["near_nozzle_band_top_px"])
     )
     attached_width_px = width_metrics.get("attached_width_px")
+    breakup_metrics = _attached_near_nozzle_breakup(
+        stage3_metric_row,
+        attached_component_row,
+        width_metrics,
+        config=config,
+    )
+    attached_near_nozzle_breakup_detected = bool(
+        breakup_metrics.get("attached_near_nozzle_breakup_detected")
+    )
+    attached_band_extension_px = breakup_metrics.get("attached_band_extension_px")
+    attached_breakup_min_extension_px = breakup_metrics.get(
+        "attached_breakup_min_extension_px"
+    )
+    if attached_near_nozzle_breakup_detected:
+        attached_width_px = None
     visible_volume_nl = frame_metric_row.get("total_visible_volume_nl")
     attached_bottom_clearance_px = _attached_component_clearance(stage3_metric_row, attached_component_row)
     detached_warning = _detached_near_bottom_warning(
@@ -1136,6 +1207,8 @@ def analyze_online_stream_frame(
         warnings.append("silhouette_qc_failed")
     if silhouette_qc_pass and not nozzle_qc_pass:
         warnings.append("nozzle_qc_failed")
+    if attached_near_nozzle_breakup_detected:
+        warnings.append("attached_near_nozzle_breakup")
     if silhouette_qc_pass and attached_width_px is None:
         warnings.append("attached_width_unavailable")
     if silhouette_qc_pass and visible_volume_nl is None:
@@ -1165,7 +1238,11 @@ def analyze_online_stream_frame(
             warnings.append("background_image_unavailable")
 
     failure_reason = stage3_metric_row.get("failure_reason")
-    if status == "rejected_nozzle_qc":
+    if attached_near_nozzle_breakup_detected:
+        failure_reason = (
+            "attached stream terminates too close to the nozzle while detached droplets are already present"
+        )
+    elif status == "rejected_nozzle_qc":
         failure_reason = "selected component too far below nozzle cutoff"
     elif status == "rejected_width_qc":
         failure_reason = "attached near-nozzle width unavailable"
@@ -1232,6 +1309,9 @@ def analyze_online_stream_frame(
         "landmark_reason": landmark_reason,
         "detached_near_bottom_warning": bool(detached_warning),
         "near_nozzle_detached_warning": bool(near_nozzle_detached_warning),
+        "attached_near_nozzle_breakup_detected": bool(attached_near_nozzle_breakup_detected),
+        "attached_band_extension_px": attached_band_extension_px,
+        "attached_breakup_min_extension_px": attached_breakup_min_extension_px,
         "late_frame_warning": bool(late_frame_warning),
         "warnings": online_cal_mod._copy_warnings(warnings),
         "selected_component_top_y_px": selected_component_top_y_px,

@@ -362,6 +362,128 @@ def test_analyze_online_stream_frame_marks_near_nozzle_detached_warning():
     assert "near_nozzle_detached_warning" in summary["warnings"]
 
 
+def test_attached_near_nozzle_breakup_detects_short_stub_only_when_continuity_is_missing():
+    config = mod._resolved_analysis_config(None)
+
+    detected = mod._attached_near_nozzle_breakup(
+        {
+            "accepted_detached_component_count": 2,
+            "roi_height": 270,
+        },
+        {"last_valid_y_px": 140},
+        {"band_y1_px": 124},
+        config=config,
+    )
+    assert detected["attached_near_nozzle_breakup_detected"] is True
+    assert detected["attached_band_extension_px"] == 17
+    assert detected["attached_breakup_min_extension_px"] == 40
+
+    preserved = mod._attached_near_nozzle_breakup(
+        {
+            "accepted_detached_component_count": 2,
+            "roi_height": 270,
+        },
+        {"last_valid_y_px": 170},
+        {"band_y1_px": 124},
+        config=config,
+    )
+    assert preserved["attached_near_nozzle_breakup_detected"] is False
+    assert preserved["attached_band_extension_px"] == 47
+
+
+def test_analyze_online_stream_frame_rejects_short_attached_stub_with_multiple_detached_components(monkeypatch):
+    attached_mask = np.zeros((220, 80), dtype=np.uint8)
+    attached_mask[12:91, 30:50] = 255
+    attached_component = _component_from_mask(
+        attached_mask,
+        component_id="attached_primary",
+        anchor_center_x_px=110.0,
+    )
+    attached_component["component_role"] = "attached_primary"
+    attached_component["component_rank"] = 0
+
+    stage3_frame = {
+        "metric_row": {
+            "silhouette_status": "ok",
+            "tracked_nozzle_x_px": 110.0,
+            "tracked_nozzle_y_px": 60.0,
+            "tracked_confidence": 1.0,
+            "raw_mode": "segment",
+            "final_mode": "segment",
+            "segment_id": 1,
+            "shift_event_before": False,
+            "cutoff_y_px": 62,
+            "selected_component_top_y_px": 62,
+            "selected_component_bottom_y_px": 140,
+            "roi_y0": 50,
+            "roi_y1": 320,
+            "roi_height": 270,
+            "accepted_component_count": 3,
+            "accepted_detached_component_count": 2,
+            "plausible_unaccepted_component_count": 0,
+        },
+        "component_rows": [
+            {
+                "component_id": "attached_primary",
+                "component_role": "attached_primary",
+                "component_rank": 0,
+                "top_y_px": 62,
+                "bottom_y_px": 140,
+                "last_valid_y_px": 140,
+            },
+            {
+                "component_id": "detached_01",
+                "component_role": "detached_accepted",
+                "component_rank": 1,
+                "top_y_px": 176,
+                "bottom_y_px": 196,
+                "last_valid_y_px": 196,
+            },
+            {
+                "component_id": "detached_02",
+                "component_role": "detached_accepted",
+                "component_rank": 2,
+                "top_y_px": 224,
+                "bottom_y_px": 248,
+                "last_valid_y_px": 248,
+            },
+        ],
+        "accepted_components": [attached_component],
+        "roi": {"x0": 70, "y0": 50, "x1": 150, "y1": 320, "width": 80, "height": 270},
+    }
+    stage4_frame = {
+        "frame_metric_row": {
+            "total_visible_volume_nl": 18.0,
+            "detached_visible_volume_nl": 0.0,
+            "plausible_unaccepted_visible_volume_nl": 0.0,
+            "min_accepted_fluid_distance_from_bottom_px": 72,
+        },
+        "component_volume_rows": [],
+    }
+
+    monkeypatch.setattr(mod.silhouette_mod, "_analyze_stage3_gray", lambda *args, **kwargs: stage3_frame)
+    monkeypatch.setattr(mod.volume_mod, "_analyze_stage4_frame", lambda *args, **kwargs: stage4_frame)
+
+    result = mod.analyze_online_stream_frame(
+        frame_image=_blank_frame(),
+        background_image=_blank_frame(),
+        nozzle_center_px=NOZZLE_CENTER_PX,
+        delay_us=4250,
+        emergence_time_us=3200,
+        analysis_config=None,
+    )
+
+    summary = result["summary"]
+    assert summary["status"] == "rejected_width_qc"
+    assert summary["measurement_qc_pass"] is False
+    assert summary["attached_width_px"] is None
+    assert summary["attached_near_nozzle_breakup_detected"] is True
+    assert summary["attached_band_extension_px"] == 17
+    assert summary["attached_breakup_min_extension_px"] == 40
+    assert "attached_near_nozzle_breakup" in summary["warnings"]
+    assert "attached_width_unavailable" in summary["warnings"]
+
+
 def test_attached_geometry_summary_passes_straight_but_angled_stream():
     edge_rows = _edge_rows_from_centerline(
         y_start=60,
