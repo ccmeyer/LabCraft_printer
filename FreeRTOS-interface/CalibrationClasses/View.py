@@ -860,7 +860,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.debug_tab = QtWidgets.QWidget()
         for tab_page in (self.droplet_tab, self.stream_tab):
             tab_layout = QtWidgets.QVBoxLayout(tab_page)
-            tab_layout.setContentsMargins(0, 6, 0, 0)
+            tab_layout.setContentsMargins(10, 10, 10, 0)
             tab_layout.setSpacing(8)
         debug_tab_layout = QtWidgets.QVBoxLayout(self.debug_tab)
         debug_tab_layout.setContentsMargins(0, 0, 0, 0)
@@ -1278,7 +1278,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.debug_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.debug_tab_content = QtWidgets.QWidget()
         debug_content_v = QtWidgets.QVBoxLayout(self.debug_tab_content)
-        debug_content_v.setContentsMargins(0, 6, 0, 0)
+        debug_content_v.setContentsMargins(10, 10, 10, 0)
         debug_content_v.setSpacing(8)
         debug_content_v.addWidget(self.manual_group)
         debug_content_v.addWidget(self.pw_sweep_group)
@@ -2136,7 +2136,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         left_divider = QtWidgets.QFrame()
         left_divider.setFrameShape(QtWidgets.QFrame.HLine)
         left_divider.setFrameShadow(QtWidgets.QFrame.Plain)
-        left_divider.setStyleSheet("color: #d6d6d6;")
+        left_divider.setStyleSheet("color: #666666;")
 
         label = QtWidgets.QLabel(str(title))
         label.setAlignment(QtCore.Qt.AlignCenter)
@@ -2145,7 +2145,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         right_divider = QtWidgets.QFrame()
         right_divider.setFrameShape(QtWidgets.QFrame.HLine)
         right_divider.setFrameShadow(QtWidgets.QFrame.Plain)
-        right_divider.setStyleSheet("color: #d6d6d6;")
+        right_divider.setStyleSheet("color: #666666;")
 
         header_layout.addWidget(left_divider, 1)
         header_layout.addWidget(label, 0)

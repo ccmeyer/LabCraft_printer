@@ -427,8 +427,14 @@ def test_real_dialog_uses_three_column_layout_with_controls_left_and_results_rig
     ]
     assert dialog.calibration_tabs.currentIndex() == 0
     assert dialog.droplet_tab.layout().contentsMargins().top() > 0
+    assert dialog.droplet_tab.layout().contentsMargins().left() > 0
+    assert dialog.droplet_tab.layout().contentsMargins().right() > 0
     assert dialog.stream_tab.layout().contentsMargins().top() > 0
+    assert dialog.stream_tab.layout().contentsMargins().left() > 0
+    assert dialog.stream_tab.layout().contentsMargins().right() > 0
     assert dialog.debug_tab_content.layout().contentsMargins().top() > 0
+    assert dialog.debug_tab_content.layout().contentsMargins().left() > 0
+    assert dialog.debug_tab_content.layout().contentsMargins().right() > 0
     assert dialog.droplet_tab.isAncestorOf(dialog.start_pressure_spin) is True
     assert dialog.droplet_tab.isAncestorOf(dialog.num_pressure_tests_spin) is True
     assert dialog.stream_tab.isAncestorOf(dialog.start_pressure_spin) is False
