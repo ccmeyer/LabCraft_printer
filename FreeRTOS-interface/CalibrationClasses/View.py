@@ -406,6 +406,36 @@ def _summary_row_fingerprint(row):
     )
 
 
+def _format_bridge_number(value, decimals=2, *, signed=False, trim=False, suffix=""):
+    try:
+        number = float(value)
+    except Exception:
+        return "—"
+    fmt = f"{number:+.{decimals}f}" if signed else f"{number:.{decimals}f}"
+    if trim:
+        sign = ""
+        body = fmt
+        if signed and fmt[:1] in "+-":
+            sign = fmt[0]
+            body = fmt[1:]
+        body = body.rstrip("0").rstrip(".")
+        if not body:
+            body = "0"
+        fmt = f"{sign}{body}"
+    return f"{fmt}{suffix}"
+
+
+def _format_bridge_error_percent(error_value, target_value):
+    try:
+        error = float(error_value)
+        target = float(target_value)
+    except Exception:
+        return "—"
+    if abs(target) < 1e-12:
+        return "+0.00%" if abs(error) < 1e-12 else "—"
+    return f"{(error / target) * 100.0:+.2f}%"
+
+
 def _characterization_table_stylesheet():
     return (
         "QTableView {"
@@ -1533,7 +1563,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         self.bridge_table = QtWidgets.QTableWidget(0, 7, self.bridge_group)
         self.bridge_table.setHorizontalHeaderLabels([
-            "Target (final)", "Achievable (final)", "Error", "Drops", "Δ/drop", "Printed nL (new)", "Δ printed nL"
+            "Target", "Achievable", "Error (%)", "Drops", "Δ/drop", "Printed nL (new)", "Δ printed nL"
         ])
         self.bridge_table.horizontalHeader().setStretchLastSection(True)
         self.bridge_table.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.AdjustToContents)
@@ -4291,25 +4321,30 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if nstocks == 1:
             # columns: Target, Achievable, Error, Drops, Δ/drop, Printed nL (new), Δ printed nL
             for r, row in enumerate(rows):
-                self.bridge_table.setItem(r, 0, QtWidgets.QTableWidgetItem(f'{row["target_final"]:.6g} {row["units"]}'))
-                self.bridge_table.setItem(r, 1, QtWidgets.QTableWidgetItem(f'{row["achieved_final"]:.6g} {row["units"]}'))
-                self.bridge_table.setItem(r, 2, QtWidgets.QTableWidgetItem(f'{row["error"]:+.3g}'))
+                self.bridge_table.setItem(r, 0, QtWidgets.QTableWidgetItem(_format_bridge_number(row["target_final"], 2)))
+                self.bridge_table.setItem(r, 1, QtWidgets.QTableWidgetItem(_format_bridge_number(row["achieved_final"], 2)))
+                self.bridge_table.setItem(r, 2, QtWidgets.QTableWidgetItem(_format_bridge_error_percent(row["error"], row["target_final"])))
                 self.bridge_table.setItem(r, 3, QtWidgets.QTableWidgetItem(str(row["drops"])))
-                self.bridge_table.setItem(r, 4, QtWidgets.QTableWidgetItem(f'{row["delta_per_drop"]:.6g} {row["units"]}/drop'))
-                self.bridge_table.setItem(r, 5, QtWidgets.QTableWidgetItem(f'{row["printed_nL_new"]:.3f} nL'))
-                self.bridge_table.setItem(r, 6, QtWidgets.QTableWidgetItem(f'{row["printed_nL_shift"]:+.3f} nL'))
+                self.bridge_table.setItem(r, 4, QtWidgets.QTableWidgetItem(
+                    _format_bridge_number(row["delta_per_drop"], 4, trim=True, suffix=f' {row["units"]}/drop')
+                ))
+                self.bridge_table.setItem(r, 5, QtWidgets.QTableWidgetItem(_format_bridge_number(row["printed_nL_new"], 2, suffix=" nL")))
+                self.bridge_table.setItem(r, 6, QtWidgets.QTableWidgetItem(_format_bridge_number(row["printed_nL_shift"], 2, signed=True, suffix=" nL")))
         else:
             # For two-stock, show a+b and indicate tuple in 'Drops'; Δ/drop shows "d1 | d2"
             for r, row in enumerate(rows):
                 drops = row["drops"]; a, b = drops
-                dtxt = f'{row["delta_per_drop_leg1"]:.6g} | {row["delta_per_drop_leg2"]:.6g} {row["units"]}/drop'
-                self.bridge_table.setItem(r, 0, QtWidgets.QTableWidgetItem(f'{row["target_final"]:.6g} {row["units"]}'))
-                self.bridge_table.setItem(r, 1, QtWidgets.QTableWidgetItem(f'{row["achieved_final"]:.6g} {row["units"]}'))
-                self.bridge_table.setItem(r, 2, QtWidgets.QTableWidgetItem(f'{row["error"]:+.3g}'))
+                dtxt = (
+                    f'{_format_bridge_number(row["delta_per_drop_leg1"], 4, trim=True)} | '
+                    f'{_format_bridge_number(row["delta_per_drop_leg2"], 4, trim=True)} {row["units"]}/drop'
+                )
+                self.bridge_table.setItem(r, 0, QtWidgets.QTableWidgetItem(_format_bridge_number(row["target_final"], 2)))
+                self.bridge_table.setItem(r, 1, QtWidgets.QTableWidgetItem(_format_bridge_number(row["achieved_final"], 2)))
+                self.bridge_table.setItem(r, 2, QtWidgets.QTableWidgetItem(_format_bridge_error_percent(row["error"], row["target_final"])))
                 self.bridge_table.setItem(r, 3, QtWidgets.QTableWidgetItem(f'({a},{b}) = {a+b}'))
                 self.bridge_table.setItem(r, 4, QtWidgets.QTableWidgetItem(dtxt))
-                self.bridge_table.setItem(r, 5, QtWidgets.QTableWidgetItem(f'{row["printed_nL_new"]:.3f} nL'))
-                self.bridge_table.setItem(r, 6, QtWidgets.QTableWidgetItem(f'{row["printed_nL_shift"]:+.3f} nL'))
+                self.bridge_table.setItem(r, 5, QtWidgets.QTableWidgetItem(_format_bridge_number(row["printed_nL_new"], 2, suffix=" nL")))
+                self.bridge_table.setItem(r, 6, QtWidgets.QTableWidgetItem(_format_bridge_number(row["printed_nL_shift"], 2, signed=True, suffix=" nL")))
 
         self.bridge_table.resizeColumnsToContents()
         self.bridge_table.resizeRowsToContents()
@@ -4324,23 +4359,26 @@ class DropletImagingDialog(QtWidgets.QDialog):
             # small helpers
             def it(v): 
                 return QtWidgets.QTableWidgetItem("" if v is None else str(v))
-            # columns: "Target (final)", "Achievable (final)", "Error", "Drops", "Δ/drop", "Printed nL (new)", "Δ printed nL"
-            self.bridge_table.setItem(i, 0, it(f"{float(r['target_final']):.6g}"))
-            self.bridge_table.setItem(i, 1, it(f"{float(r['achieved_final']):.6g}"))
-            self.bridge_table.setItem(i, 2, it(f"{float(r['error']):+.6g}"))
+            # columns: "Target", "Achievable", "Error (%)", "Drops", "Δ/drop", "Printed nL (new)", "Δ printed nL"
+            self.bridge_table.setItem(i, 0, it(_format_bridge_number(r["target_final"], 2)))
+            self.bridge_table.setItem(i, 1, it(_format_bridge_number(r["achieved_final"], 2)))
+            self.bridge_table.setItem(i, 2, it(_format_bridge_error_percent(r["error"], r["target_final"])))
 
             drops = r.get("drops")
             drops_txt = f"{drops[0]}+{drops[1]}" if isinstance(drops, tuple) else str(int(drops))
             self.bridge_table.setItem(i, 3, it(drops_txt))
 
             if "delta_per_drop" in r:
-                d_txt = f"{float(r['delta_per_drop']):.6g}"
+                d_txt = _format_bridge_number(r["delta_per_drop"], 4, trim=True)
             else:
-                d_txt = f"{float(r['delta_per_drop_leg1']):.6g}|{float(r['delta_per_drop_leg2']):.6g}"
+                d_txt = (
+                    f'{_format_bridge_number(r["delta_per_drop_leg1"], 4, trim=True)} | '
+                    f'{_format_bridge_number(r["delta_per_drop_leg2"], 4, trim=True)}'
+                )
             self.bridge_table.setItem(i, 4, it(d_txt))
 
-            self.bridge_table.setItem(i, 5, it(f"{float(r['printed_nL_new']):.3f}"))
-            self.bridge_table.setItem(i, 6, it(f"{float(r['printed_nL_shift']):+.3f}"))
+            self.bridge_table.setItem(i, 5, it(_format_bridge_number(r["printed_nL_new"], 2)))
+            self.bridge_table.setItem(i, 6, it(_format_bridge_number(r["printed_nL_shift"], 2, signed=True)))
 
     def _bridge_preview_from_last_char(self):
         cm = self._bridge_get_calibration_manager()
@@ -4399,9 +4437,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.bridge_table.setItem(0, 1, _it("—"))
             self.bridge_table.setItem(0, 2, _it("—"))
             self.bridge_table.setItem(0, 3, _it(preview["total_drops_new"]))
-            self.bridge_table.setItem(0, 4, _it(f'{mean_nL:.6g} nL/drop'))
-            self.bridge_table.setItem(0, 5, _it(f'{row["printed_nL_new"]:.3f} nL'))
-            self.bridge_table.setItem(0, 6, _it(f'{row["printed_nL_shift"]:+.3f} nL'))
+            self.bridge_table.setItem(0, 4, _it(_format_bridge_number(mean_nL, 4, trim=True, suffix=" nL/drop")))
+            self.bridge_table.setItem(0, 5, _it(_format_bridge_number(row["printed_nL_new"], 2, suffix=" nL")))
+            self.bridge_table.setItem(0, 6, _it(_format_bridge_number(row["printed_nL_shift"], 2, signed=True, suffix=" nL")))
             self.bridge_table.resizeColumnsToContents()
             self.bridge_table.resizeRowsToContents()
 
@@ -5107,9 +5145,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.bridge_table.setItem(0, 1, _it("—"))
             self.bridge_table.setItem(0, 2, _it("—"))
             self.bridge_table.setItem(0, 3, _it(preview.get("total_drops_new")))
-            self.bridge_table.setItem(0, 4, _it(f"{mean_nL:.6g} nL/drop"))
-            self.bridge_table.setItem(0, 5, _it(f"{row['printed_nL_new']:.3f} nL"))
-            self.bridge_table.setItem(0, 6, _it(f"{row['printed_nL_shift']:+.3f} nL"))
+            self.bridge_table.setItem(0, 4, _it(_format_bridge_number(mean_nL, 4, trim=True, suffix=" nL/drop")))
+            self.bridge_table.setItem(0, 5, _it(_format_bridge_number(row["printed_nL_new"], 2, suffix=" nL")))
+            self.bridge_table.setItem(0, 6, _it(_format_bridge_number(row["printed_nL_shift"], 2, signed=True, suffix=" nL")))
             self.bridge_table.resizeColumnsToContents()
             self.bridge_table.resizeRowsToContents()
             self._bridge_preview_payload = {

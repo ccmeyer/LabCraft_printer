@@ -360,6 +360,15 @@ def test_results_table_sorts_numeric_columns_and_selection_payload_survives_prox
     assert dialog.bridge_table.rowCount() == 1
     assert dialog.bridge_apply_btn.isEnabled() is True
     assert "12.000 nL" in dialog.bridge_status_label.text()
+    assert dialog.bridge_table.horizontalHeaderItem(0).text() == "Target"
+    assert dialog.bridge_table.horizontalHeaderItem(1).text() == "Achievable"
+    assert dialog.bridge_table.horizontalHeaderItem(2).text() == "Error (%)"
+    assert dialog.bridge_table.item(0, 0).text() == "1.00"
+    assert dialog.bridge_table.item(0, 1).text() == "1.00"
+    assert dialog.bridge_table.item(0, 2).text() == "+0.00%"
+    assert dialog.bridge_table.item(0, 4).text() == "0.1"
+    assert dialog.bridge_table.item(0, 5).text() == "12.00"
+    assert dialog.bridge_table.item(0, 6).text() == "+2.00"
 
     dialog.deleteLater()
 
