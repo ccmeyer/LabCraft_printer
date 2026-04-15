@@ -544,6 +544,17 @@ def _start_stream_calibration_sequence_with_gripper_suspend(manager):
     assert (ok, message) == (True, "")
 
 
+def _start_droplet_calibration_sequence_with_gripper_suspend(manager):
+    ok = manager.start_droplet_calibration_sequence()
+    assert ok is True
+    ok, message = manager.begin_droplet_calibration_sequence_gripper_refresh()
+    assert (ok, message) == (True, "")
+    ok, message = manager.begin_droplet_calibration_sequence_gripper_suspend()
+    assert (ok, message) == (True, "")
+    ok, message = manager.mark_droplet_calibration_sequence_gripper_suspended()
+    assert (ok, message) == (True, "")
+
+
 def _write_jsonl(path: Path, rows):
     path.write_text(
         "\n".join(json.dumps(row) for row in rows) + ("\n" if rows else ""),
@@ -942,6 +953,66 @@ def test_stream_calibration_sequence_stop_restores_gripper_and_returns_idle(tmp_
     assert (ok, message) == (True, "")
 
     state = manager.get_stream_calibration_sequence_state()
+    assert state["status"] == "idle"
+
+
+def test_droplet_calibration_sequence_suspend_queues_droplet_calibrate_all(tmp_path, monkeypatch):
+    _model, manager = _make_manager(tmp_path)
+    queued = []
+
+    monkeypatch.setattr(manager, "start_calibration_queue", lambda: queued.append(list(manager.calibration_queue)))
+
+    _start_droplet_calibration_sequence_with_gripper_suspend(manager)
+
+    assert queued == [list(manager.DROPLET_CALIBRATION_SEQUENCE_QUEUE)]
+    state = manager.get_droplet_calibration_sequence_state()
+    assert state["status"] == "running"
+    assert state["gripper_refresh_suspended"] is True
+
+
+def test_droplet_calibration_sequence_success_restores_gripper_and_returns_idle(tmp_path, monkeypatch):
+    _model, manager = _make_manager(tmp_path)
+    monkeypatch.setattr(manager, "start_calibration_queue", lambda: None)
+    stage_calls = []
+    manager.calibrationStageChanged.connect(lambda message, color: stage_calls.append((message, color)))
+
+    _start_droplet_calibration_sequence_with_gripper_suspend(manager)
+
+    manager._complete_droplet_calibration_sequence_queue_success()
+    state = manager.get_droplet_calibration_sequence_state()
+    assert state["status"] == "pending_gripper_restore"
+
+    ok, message = manager.begin_droplet_calibration_sequence_gripper_restore()
+    assert (ok, message) == (True, "")
+    ok, message = manager.mark_droplet_calibration_sequence_gripper_restored()
+    assert (ok, message) == (True, "")
+
+    state = manager.get_droplet_calibration_sequence_state()
+    assert state["status"] == "idle"
+    assert stage_calls[-1] == (
+        "Droplet calibration sequence completed.",
+        "green",
+    )
+
+
+def test_droplet_calibration_sequence_stop_restores_gripper_and_returns_idle(tmp_path, monkeypatch):
+    _model, manager = _make_manager(tmp_path)
+    monkeypatch.setattr(manager, "start_calibration_queue", lambda: None)
+
+    _start_droplet_calibration_sequence_with_gripper_suspend(manager)
+    manager.calibration_queue = list(manager.DROPLET_CALIBRATION_SEQUENCE_QUEUE)
+
+    manager.stop()
+
+    state = manager.get_droplet_calibration_sequence_state()
+    assert state["status"] == "pending_gripper_restore"
+
+    ok, message = manager.begin_droplet_calibration_sequence_gripper_restore()
+    assert (ok, message) == (True, "")
+    ok, message = manager.mark_droplet_calibration_sequence_gripper_restored()
+    assert (ok, message) == (True, "")
+
+    state = manager.get_droplet_calibration_sequence_state()
     assert state["status"] == "idle"
 
 

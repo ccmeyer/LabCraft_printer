@@ -71,6 +71,7 @@ def _make_calibration_manager_stub():
         readinessChanged=SignalStub(),
         streamCaptureStateChanged=SignalStub(),
         streamCalibrationSequenceStateChanged=SignalStub(),
+        dropletCalibrationSequenceStateChanged=SignalStub(),
         clear_calibration_memory_ui_recommendation_state=lambda: None,
         get_record_mode_enabled=lambda: True,
         get_calibration_memory_enabled=lambda: True,
@@ -83,6 +84,9 @@ def _make_calibration_manager_stub():
         is_stream_calibration_sequence_busy=lambda: False,
         has_open_stream_calibration_sequence=lambda: False,
         get_stream_calibration_sequence_state=lambda: {"status": "idle"},
+        is_droplet_calibration_sequence_busy=lambda: False,
+        has_open_droplet_calibration_sequence=lambda: False,
+        get_droplet_calibration_sequence_state=lambda: {"status": "idle"},
     )
 
 
@@ -115,6 +119,9 @@ def _build_droplet_dialog(monkeypatch, qapp):
     controller = SimpleNamespace(
         start_read_camera=lambda: None,
         capture_droplet_image=lambda: None,
+        start_droplet_calibration_sequence=lambda: None,
+        begin_droplet_calibration_sequence_gripper_preamble=lambda: (True, ""),
+        begin_droplet_calibration_sequence_gripper_restore=lambda: (True, ""),
     )
     dialog = DropletImagingDialog(SimpleNamespace(color_dict={}), model, controller)
     qapp.processEvents()
@@ -146,6 +153,7 @@ def test_droplet_imager_disables_manual_flash_and_stops_timer_on_fault(monkeypat
     assert dialog.print_pulse_width_spinbox.isEnabled() is False
     assert dialog.calibrate_online_stream_button.isEnabled() is False
     assert dialog.calibrate_all_stream_button.isEnabled() is False
+    assert dialog.calibrate_all_button.isEnabled() is False
     assert dialog.camera_timer.isActive() is False
     assert "Flash safety fault latched" in dialog.flash_safety_label.text()
     assert "Close and reopen the imager" in dialog.flash_safety_label.text()
@@ -158,6 +166,7 @@ def test_droplet_imager_disables_manual_flash_and_stops_timer_on_fault(monkeypat
     assert dialog.print_pulse_width_spinbox.isEnabled() is True
     assert dialog.calibrate_online_stream_button.isEnabled() is False
     assert dialog.calibrate_all_stream_button.isEnabled() is True
+    assert dialog.calibrate_all_button.isEnabled() is True
     assert "Emergence time" in dialog.calibrate_online_stream_button.toolTip()
 
     dialog.on_readiness_changed(
@@ -171,6 +180,7 @@ def test_droplet_imager_disables_manual_flash_and_stops_timer_on_fault(monkeypat
 
     assert dialog.calibrate_online_stream_button.isEnabled() is True
     assert dialog.calibrate_all_stream_button.isEnabled() is True
+    assert dialog.calibrate_all_button.isEnabled() is True
 
     dialog.deleteLater()
 

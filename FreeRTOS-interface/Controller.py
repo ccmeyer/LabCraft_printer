@@ -1695,6 +1695,9 @@ class Controller(QObject):
     def start_online_stream_calibration(self):
         self.model.calibration_manager.start_online_stream_calibration()
 
+    def start_droplet_calibration_sequence(self):
+        return self.model.calibration_manager.start_droplet_calibration_sequence()
+
     def start_stream_calibration_sequence(self):
         return self.model.calibration_manager.start_stream_calibration_sequence()
 
@@ -1845,6 +1848,26 @@ class Controller(QObject):
             begin_restore=manager.begin_stream_calibration_sequence_gripper_restore,
             mark_restored=manager.mark_stream_calibration_sequence_gripper_restored,
             report_failure=manager.report_stream_calibration_sequence_gripper_restore_failure,
+        )
+
+    def begin_droplet_calibration_sequence_gripper_preamble(self):
+        manager = self.model.calibration_manager
+        return self._begin_gripper_refresh_suspend_sequence(
+            manager=manager,
+            state_getter=manager.get_droplet_calibration_sequence_state,
+            begin_refresh=manager.begin_droplet_calibration_sequence_gripper_refresh,
+            begin_suspend=manager.begin_droplet_calibration_sequence_gripper_suspend,
+            mark_suspended=manager.mark_droplet_calibration_sequence_gripper_suspended,
+            report_failure=manager.report_droplet_calibration_sequence_gripper_preamble_failure,
+        )
+
+    def begin_droplet_calibration_sequence_gripper_restore(self):
+        manager = self.model.calibration_manager
+        return self._begin_gripper_restore_sequence(
+            state_getter=manager.get_droplet_calibration_sequence_state,
+            begin_restore=manager.begin_droplet_calibration_sequence_gripper_restore,
+            mark_restored=manager.mark_droplet_calibration_sequence_gripper_restored,
+            report_failure=manager.report_droplet_calibration_sequence_gripper_restore_failure,
         )
 
     def finalize_stream_gravimetric_capture(self, ending_mass_mg, rep_override=None, notes=""):

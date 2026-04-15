@@ -1103,6 +1103,7 @@ class CalibrationManager(QObject):
     characterizationSummaryUpdated = Signal()  # Notify UI to rebuild the summary table
     streamCaptureStateChanged = Signal(dict)
     streamCalibrationSequenceStateChanged = Signal(dict)
+    dropletCalibrationSequenceStateChanged = Signal(dict)
 
     analyzedImageUpdated = Signal(object)
     onlineStreamDebugUpdated = Signal(dict)
@@ -1163,6 +1164,14 @@ class CalibrationManager(QObject):
     )
     STREAM_CALIBRATION_SEQUENCE_QUEUE = STREAM_CAPTURE_PREREQ_QUEUE + (
         "online_stream_calibration",
+    )
+    DROPLET_CALIBRATION_SEQUENCE_QUEUE = (
+        "nozzle_position",
+        "nozzle_focus",
+        "droplet_emergence",
+        "pressure_scan",
+        "pressure_trajectory",
+        "pressure_sweep_characterization",
     )
     STREAM_CAPTURE_PARKED_GRIPPER_REFRESH_MS = 1_000_000
     STREAM_METADATA_HEADERS = [
@@ -1245,6 +1254,7 @@ class CalibrationManager(QObject):
         self._pending_process_verdict = None
         self._stream_capture_state = {}
         self._stream_calibration_sequence_state = {}
+        self._droplet_calibration_sequence_state = {}
 
         self.calibration_queue = []
 
@@ -1252,6 +1262,7 @@ class CalibrationManager(QObject):
         self.calibrationQueueCompleted.connect(self._on_queue_completed_for_pw_sweep)
         self._reset_stream_gravimetric_capture_state()
         self._reset_stream_calibration_sequence_state()
+        self._reset_droplet_calibration_sequence_state()
 
     # ------------- Per-process recorder -------------
 
@@ -2847,11 +2858,25 @@ class CalibrationManager(QObject):
         ):
             start_kwargs["_allow_stream_calibration_sequence"] = True
             start_kwargs["_stream_calibration_sequence_phase"] = str(next_cal)
+        droplet_sequence_status = str(
+            (getattr(self, "_droplet_calibration_sequence_state", None) or {}).get("status") or "idle"
+        )
+        if (
+            droplet_sequence_status == "running"
+            and next_cal in self.DROPLET_CALIBRATION_SEQUENCE_QUEUE
+        ):
+            start_kwargs["_allow_droplet_calibration_sequence"] = True
+            start_kwargs["_droplet_calibration_sequence_phase"] = str(next_cal)
 
         if not self._try_start_process(proc_cls, **start_kwargs):
             # Stop the queue on error to avoid cascading failures.
             self.calibrationStageChanged.emit("Calibration queue stopped due to missing prerequisites.", "red")
             self.clear_calibration_queue()
+            if self.has_open_droplet_calibration_sequence():
+                self._mark_droplet_calibration_sequence_terminal_state(
+                    status="error",
+                    error_message="Calibration queue stopped due to missing prerequisites.",
+                )
             if self.has_open_stream_calibration_sequence():
                 self._mark_stream_calibration_sequence_terminal_state(
                     status="error",
@@ -2884,6 +2909,10 @@ class CalibrationManager(QObject):
         self._pw_index = -1
         self._cancel_pw_apply_wait()
         self.clear_pending_process_verdict(reason="process_stopped")
+        droplet_sequence_open = self.has_open_droplet_calibration_sequence()
+        droplet_sequence_status = str(
+            (getattr(self, "_droplet_calibration_sequence_state", None) or {}).get("status") or "idle"
+        )
         stream_sequence_open = self.has_open_stream_calibration_sequence()
         stream_sequence_status = str(
             (getattr(self, "_stream_calibration_sequence_state", None) or {}).get("status") or "idle"
@@ -2912,6 +2941,13 @@ class CalibrationManager(QObject):
         self._finalize_process_recording("stopped", error_message="Calibration terminated by user")
         if self.has_open_stream_gravimetric_capture():
             self._mark_stream_capture_terminal_state(
+                status="stopped",
+                error_message="Calibration terminated by user",
+            )
+        if droplet_sequence_open:
+            if droplet_sequence_status in {"pending_gripper_restore", "restoring_gripper_refresh"}:
+                return
+            self._mark_droplet_calibration_sequence_terminal_state(
                 status="stopped",
                 error_message="Calibration terminated by user",
             )
@@ -3265,6 +3301,53 @@ class CalibrationManager(QObject):
         raw_missing = self._process_missing(OnlineStreamCalibrationProcess)
         return self._filter_stream_calibration_sequence_missing_requirements(raw_missing)
 
+    def start_droplet_calibration_sequence(self):
+        if self.activeCalibration is not None or len(self.calibration_queue) > 0 or self.is_pulsewidth_sweep_active():
+            message = "Stop the current calibration before starting the droplet calibration sequence."
+            self.calibrationStageChanged.emit(message, "red")
+            self.calibrationError.emit(message)
+            return False
+        if self.has_open_stream_gravimetric_capture():
+            message = "Save or discard the current stream gravimetric capture session before starting the droplet calibration sequence."
+            self.calibrationStageChanged.emit(message, "red")
+            self.calibrationError.emit(message)
+            return False
+        if self.has_open_stream_calibration_sequence():
+            message = "Stop the current stream calibration sequence before starting the droplet calibration sequence."
+            self.calibrationStageChanged.emit(message, "red")
+            self.calibrationError.emit(message)
+            return False
+        if self.has_open_droplet_calibration_sequence():
+            message = "Stop the current droplet calibration sequence before starting another one."
+            self.calibrationStageChanged.emit(message, "red")
+            self.calibrationError.emit(message)
+            return False
+
+        gripper_snapshot, gripper_error = self._get_gripper_refresh_snapshot()
+        if not gripper_snapshot:
+            message = str(gripper_error or "Unable to snapshot current gripper refresh settings.")
+            self.calibrationStageChanged.emit(message, "red")
+            self.calibrationError.emit(message)
+            return False
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._droplet_calibration_sequence_state = self._build_default_droplet_calibration_sequence_state()
+        self._droplet_calibration_sequence_state.update(
+            {
+                "status": "pending_gripper_refresh",
+                "status_message": "Refreshing gripper vacuum before droplet calibration sequence.",
+                "error_message": "",
+                "session_id": f"droplet_calibration_sequence_{ts}_{uuid.uuid4().hex[:8]}",
+                "session_outcome": None,
+                "gripper_refresh_period_snapshot_ms": int(gripper_snapshot["refresh_period_ms"]),
+                "gripper_pulse_duration_snapshot_ms": int(gripper_snapshot["pulse_duration_ms"]),
+                "gripper_was_open": bool(gripper_snapshot["gripper_open"]),
+                "gripper_refresh_suspended": False,
+            }
+        )
+        self._emit_droplet_calibration_sequence_state_changed()
+        return True
+
     def start_stream_calibration_sequence(self):
         if self.activeCalibration is not None or len(self.calibration_queue) > 0 or self.is_pulsewidth_sweep_active():
             message = "Stop the current calibration before starting the stream calibration sequence."
@@ -3276,13 +3359,18 @@ class CalibrationManager(QObject):
             self.calibrationStageChanged.emit(message, "red")
             self.calibrationError.emit(message)
             return False
+        if self.has_open_droplet_calibration_sequence():
+            message = "Stop the current droplet calibration sequence before starting the stream calibration sequence."
+            self.calibrationStageChanged.emit(message, "red")
+            self.calibrationError.emit(message)
+            return False
         if self.has_open_stream_calibration_sequence():
             message = "Stop the current stream calibration sequence before starting another one."
             self.calibrationStageChanged.emit(message, "red")
             self.calibrationError.emit(message)
             return False
 
-        gripper_snapshot, gripper_error = self._get_stream_capture_gripper_snapshot()
+        gripper_snapshot, gripper_error = self._get_gripper_refresh_snapshot()
         if not gripper_snapshot:
             message = str(gripper_error or "Unable to snapshot current gripper refresh settings.")
             self.calibrationStageChanged.emit(message, "red")
@@ -3625,6 +3713,68 @@ class CalibrationManager(QObject):
             "restoring_gripper_refresh",
         }
 
+    def _build_default_droplet_calibration_sequence_state(self, *, status_message: str | None = None):
+        return {
+            "status": "idle",
+            "status_message": str(status_message or "Ready to begin droplet calibration sequence."),
+            "error_message": "",
+            "session_id": None,
+            "gripper_refresh_period_snapshot_ms": None,
+            "gripper_pulse_duration_snapshot_ms": None,
+            "gripper_was_open": None,
+            "gripper_refresh_suspended": False,
+            "session_outcome": None,
+        }
+
+    def _copy_droplet_calibration_sequence_state(self):
+        try:
+            return json.loads(json.dumps(self._droplet_calibration_sequence_state, default=numpy_encoder))
+        except Exception:
+            return dict(self._droplet_calibration_sequence_state or {})
+
+    def _emit_droplet_calibration_sequence_state_changed(self):
+        try:
+            self.dropletCalibrationSequenceStateChanged.emit(
+                self._copy_droplet_calibration_sequence_state()
+            )
+        except Exception:
+            pass
+
+    def _reset_droplet_calibration_sequence_state(self, *, status_message: str | None = None):
+        self._droplet_calibration_sequence_state = self._build_default_droplet_calibration_sequence_state(
+            status_message=status_message,
+        )
+        self._emit_droplet_calibration_sequence_state_changed()
+
+    def get_droplet_calibration_sequence_state(self):
+        if not getattr(self, "_droplet_calibration_sequence_state", None):
+            self._reset_droplet_calibration_sequence_state()
+        return self._copy_droplet_calibration_sequence_state()
+
+    def has_open_droplet_calibration_sequence(self) -> bool:
+        status = str((getattr(self, "_droplet_calibration_sequence_state", None) or {}).get("status") or "idle")
+        return status in {
+            "pending_gripper_refresh",
+            "refreshing_gripper",
+            "suspending_gripper_refresh",
+            "running",
+            "pending_gripper_restore",
+            "restoring_gripper_refresh",
+            "error",
+            "stopped",
+        }
+
+    def is_droplet_calibration_sequence_busy(self) -> bool:
+        status = str((getattr(self, "_droplet_calibration_sequence_state", None) or {}).get("status") or "idle")
+        return status in {
+            "pending_gripper_refresh",
+            "refreshing_gripper",
+            "suspending_gripper_refresh",
+            "running",
+            "pending_gripper_restore",
+            "restoring_gripper_refresh",
+        }
+
     def get_stream_gravimetric_capture_state(self):
         if not getattr(self, "_stream_capture_state", None):
             self._reset_stream_gravimetric_capture_state()
@@ -3687,9 +3837,10 @@ class CalibrationManager(QObject):
         return bool(
             self.has_open_stream_gravimetric_capture()
             or self.has_open_stream_calibration_sequence()
+            or self.has_open_droplet_calibration_sequence()
         )
 
-    def _get_stream_capture_gripper_snapshot(self):
+    def _get_gripper_refresh_snapshot(self):
         machine_model = getattr(self.model, "machine_model", None)
         if machine_model is None:
             return None, "Machine model is unavailable; cannot snapshot gripper settings."
@@ -3731,6 +3882,9 @@ class CalibrationManager(QObject):
             "pulse_duration_ms": int(pulse_duration),
             "gripper_open": bool(gripper_open),
         }, ""
+
+    def _get_stream_capture_gripper_snapshot(self):
+        return self._get_gripper_refresh_snapshot()
 
     def _current_flash_count(self):
         try:
@@ -4150,6 +4304,182 @@ class CalibrationManager(QObject):
         )
         self._stream_capture_state["error_message"] = message
         self._emit_stream_capture_state_changed()
+        return True, ""
+
+    def _queue_droplet_calibration_sequence_gripper_restore(self, *, status_message: str | None = None):
+        if not bool((self._droplet_calibration_sequence_state or {}).get("gripper_refresh_suspended")):
+            if str((self._droplet_calibration_sequence_state or {}).get("session_outcome") or "") == "completed":
+                self._reset_droplet_calibration_sequence_state(
+                    status_message="Droplet calibration sequence completed."
+                )
+                self.calibrationStageChanged.emit(
+                    "Droplet calibration sequence completed.",
+                    "green",
+                )
+            return True, ""
+
+        self._droplet_calibration_sequence_state["status"] = "pending_gripper_restore"
+        self._droplet_calibration_sequence_state["status_message"] = str(
+            status_message or "Restoring gripper auto-refresh settings."
+        )
+        self._droplet_calibration_sequence_state["error_message"] = ""
+        self._emit_droplet_calibration_sequence_state_changed()
+        return True, ""
+
+    def _mark_droplet_calibration_sequence_terminal_state(self, *, status: str, error_message: str = ""):
+        if not self.has_open_droplet_calibration_sequence():
+            return
+        message = str(error_message or f"Droplet calibration sequence {status}.")
+        current_status = str((self._droplet_calibration_sequence_state or {}).get("status") or "idle")
+        self._droplet_calibration_sequence_state["session_outcome"] = str(status or "error")
+        self._droplet_calibration_sequence_state["error_message"] = message
+
+        if bool((self._droplet_calibration_sequence_state or {}).get("gripper_refresh_suspended")):
+            self._queue_droplet_calibration_sequence_gripper_restore(
+                status_message=f"{message} Restoring gripper auto-refresh settings.",
+            )
+            return
+
+        if current_status == "pending_gripper_refresh":
+            self._reset_droplet_calibration_sequence_state()
+            return
+
+        self._droplet_calibration_sequence_state["status"] = str(status or "error")
+        self._droplet_calibration_sequence_state["status_message"] = message
+        self._emit_droplet_calibration_sequence_state_changed()
+
+    def _complete_droplet_calibration_sequence_queue_success(self):
+        if str((self._droplet_calibration_sequence_state or {}).get("status") or "") != "running":
+            return
+        self._droplet_calibration_sequence_state["session_outcome"] = "completed"
+        self._droplet_calibration_sequence_state["status"] = "pending_gripper_restore"
+        self._droplet_calibration_sequence_state["status_message"] = (
+            "Droplet calibration sequence complete. Restoring gripper auto-refresh settings."
+        )
+        self._droplet_calibration_sequence_state["error_message"] = ""
+        self._emit_droplet_calibration_sequence_state_changed()
+
+    def begin_droplet_calibration_sequence_gripper_refresh(self):
+        status = str((self._droplet_calibration_sequence_state or {}).get("status") or "idle")
+        if status != "pending_gripper_refresh":
+            return False, "Droplet calibration sequence is not ready for gripper refresh."
+        self._droplet_calibration_sequence_state["status"] = "refreshing_gripper"
+        self._droplet_calibration_sequence_state["status_message"] = (
+            "Refreshing gripper vacuum before droplet calibration sequence."
+        )
+        self._droplet_calibration_sequence_state["error_message"] = ""
+        self._emit_droplet_calibration_sequence_state_changed()
+        return True, ""
+
+    def begin_droplet_calibration_sequence_gripper_suspend(self):
+        status = str((self._droplet_calibration_sequence_state or {}).get("status") or "idle")
+        if status not in {
+            "refreshing_gripper",
+            "pending_gripper_refresh",
+            "suspending_gripper_refresh",
+            "error",
+            "stopped",
+        }:
+            return False, "Droplet calibration sequence is not ready to pause gripper refresh."
+        self._droplet_calibration_sequence_state["status"] = "suspending_gripper_refresh"
+        self._droplet_calibration_sequence_state["status_message"] = (
+            "Pausing gripper auto-refresh before droplet calibration sequence."
+        )
+        self._droplet_calibration_sequence_state["error_message"] = ""
+        self._emit_droplet_calibration_sequence_state_changed()
+        return True, ""
+
+    def mark_droplet_calibration_sequence_gripper_suspended(self):
+        status = str((self._droplet_calibration_sequence_state or {}).get("status") or "idle")
+        if status not in {
+            "suspending_gripper_refresh",
+            "pending_gripper_refresh",
+            "refreshing_gripper",
+            "error",
+            "stopped",
+        }:
+            return False, "Droplet calibration sequence is not waiting for gripper suspension."
+
+        self._droplet_calibration_sequence_state["gripper_refresh_suspended"] = True
+        self._droplet_calibration_sequence_state["error_message"] = ""
+
+        session_outcome = str((self._droplet_calibration_sequence_state or {}).get("session_outcome") or "")
+        if session_outcome in {"error", "stopped"}:
+            return self._queue_droplet_calibration_sequence_gripper_restore(
+                status_message="Restoring gripper auto-refresh settings.",
+            )
+
+        self._droplet_calibration_sequence_state["status"] = "running"
+        self._droplet_calibration_sequence_state["status_message"] = (
+            "Running droplet calibration sequence."
+        )
+        self._emit_droplet_calibration_sequence_state_changed()
+
+        self.clear_calibration_queue()
+        self.add_calibration_queue(list(self.DROPLET_CALIBRATION_SEQUENCE_QUEUE))
+        self.start_calibration_queue()
+
+        if (
+            self.activeCalibration is None
+            and len(self.calibration_queue) == 0
+            and str((self._droplet_calibration_sequence_state or {}).get("status") or "") == "running"
+        ):
+            self._mark_droplet_calibration_sequence_terminal_state(
+                status="error",
+                error_message="Droplet calibration sequence failed to launch.",
+            )
+        return True, ""
+
+    def report_droplet_calibration_sequence_gripper_preamble_failure(self, error_message=""):
+        message = str(error_message or "Failed to prepare the gripper for the droplet calibration sequence.")
+        if not self.has_open_droplet_calibration_sequence():
+            return False, "No active droplet calibration sequence."
+        self._mark_droplet_calibration_sequence_terminal_state(
+            status="error",
+            error_message=message,
+        )
+        return True, ""
+
+    def begin_droplet_calibration_sequence_gripper_restore(self):
+        status = str((self._droplet_calibration_sequence_state or {}).get("status") or "idle")
+        if status != "pending_gripper_restore":
+            return False, "Droplet calibration sequence is not waiting to restore gripper refresh."
+        self._droplet_calibration_sequence_state["status"] = "restoring_gripper_refresh"
+        self._droplet_calibration_sequence_state["status_message"] = "Restoring gripper auto-refresh settings."
+        self._emit_droplet_calibration_sequence_state_changed()
+        return True, ""
+
+    def mark_droplet_calibration_sequence_gripper_restored(self):
+        status = str((self._droplet_calibration_sequence_state or {}).get("status") or "idle")
+        if status not in {"pending_gripper_restore", "restoring_gripper_refresh"}:
+            return False, "Droplet calibration sequence is not waiting for gripper restore."
+        outcome = str((self._droplet_calibration_sequence_state or {}).get("session_outcome") or "")
+        self._droplet_calibration_sequence_state["gripper_refresh_suspended"] = False
+
+        if outcome == "completed":
+            self._reset_droplet_calibration_sequence_state(
+                status_message="Droplet calibration sequence completed."
+            )
+            self.calibrationStageChanged.emit(
+                "Droplet calibration sequence completed.",
+                "green",
+            )
+            return True, ""
+
+        self._reset_droplet_calibration_sequence_state()
+        return True, ""
+
+    def report_droplet_calibration_sequence_gripper_restore_failure(self, error_message=""):
+        message = str(error_message or "Failed to restore gripper auto-refresh settings.")
+        status = str((self._droplet_calibration_sequence_state or {}).get("status") or "idle")
+        if status not in {"pending_gripper_restore", "restoring_gripper_refresh"}:
+            return False, "Droplet calibration sequence is not waiting for gripper restore."
+        self._droplet_calibration_sequence_state["status"] = "pending_gripper_restore"
+        self._droplet_calibration_sequence_state["status_message"] = (
+            f"{message} Resolve the issue and reopen the imager to retry."
+        )
+        self._droplet_calibration_sequence_state["error_message"] = message
+        self._emit_droplet_calibration_sequence_state_changed()
         return True, ""
 
     def _queue_stream_calibration_sequence_gripper_restore(self, *, status_message: str | None = None):
@@ -4574,6 +4904,8 @@ class CalibrationManager(QObject):
             return False, "Stop the current calibration before starting a stream gravimetric capture."
         if self.has_open_stream_gravimetric_capture():
             return False, "Save or discard the existing stream gravimetric capture session first."
+        if self.has_open_droplet_calibration_sequence():
+            return False, "Stop the current droplet calibration sequence before starting a stream gravimetric capture."
         if self.has_open_stream_calibration_sequence():
             return False, "Stop the current stream calibration sequence before starting a stream gravimetric capture."
         if not self.get_record_mode_enabled():
@@ -4590,7 +4922,7 @@ class CalibrationManager(QObject):
         if starting_mass is None:
             return False, "Starting mass is required."
 
-        gripper_snapshot, gripper_error = self._get_stream_capture_gripper_snapshot()
+        gripper_snapshot, gripper_error = self._get_gripper_refresh_snapshot()
         if not gripper_snapshot:
             return False, str(gripper_error or "Unable to snapshot current gripper refresh settings.")
 
@@ -5069,6 +5401,7 @@ class CalibrationManager(QObject):
         self.activeCalibration = None
         self._emit_readiness()
         if len(self.calibration_queue) == 0:
+            self._complete_droplet_calibration_sequence_queue_success()
             self._complete_stream_capture_queue_success()
             self._complete_stream_calibration_sequence_queue_success()
         self.calibrationCompleted.emit()
@@ -5111,6 +5444,11 @@ class CalibrationManager(QObject):
         self.activeCalibration = None
         if self.has_open_stream_gravimetric_capture():
             self._mark_stream_capture_terminal_state(
+                status=normalized_status,
+                error_message=str(error_message or ""),
+            )
+        if self.has_open_droplet_calibration_sequence():
+            self._mark_droplet_calibration_sequence_terminal_state(
                 status=normalized_status,
                 error_message=str(error_message or ""),
             )
@@ -5329,6 +5667,12 @@ class CalibrationManager(QObject):
         stream_calibration_sequence_phase = str(
             kwargs.pop("_stream_calibration_sequence_phase", "") or ""
         ).strip()
+        allow_droplet_calibration_sequence = bool(
+            kwargs.pop("_allow_droplet_calibration_sequence", False)
+        )
+        droplet_calibration_sequence_phase = str(
+            kwargs.pop("_droplet_calibration_sequence_phase", "") or ""
+        ).strip()
         stream_capture_open = False
         has_open_stream_capture = getattr(self, "has_open_stream_gravimetric_capture", None)
         if callable(has_open_stream_capture):
@@ -5349,6 +5693,19 @@ class CalibrationManager(QObject):
                 )
             except Exception:
                 stream_calibration_sequence_open = False
+        droplet_calibration_sequence_open = False
+        has_open_droplet_calibration_sequence = getattr(
+            self,
+            "has_open_droplet_calibration_sequence",
+            None,
+        )
+        if callable(has_open_droplet_calibration_sequence):
+            try:
+                droplet_calibration_sequence_open = bool(
+                    has_open_droplet_calibration_sequence()
+                )
+            except Exception:
+                droplet_calibration_sequence_open = False
         phase_name = getattr(proc_cls, "phase_name", None) or getattr(proc_cls, "__name__", "unknown")
         canonical_phase_name = str(self.PHASE_ALIASES.get(str(phase_name), str(phase_name)))
         canonical_stream_capture_queue_phase = str(
@@ -5358,6 +5715,12 @@ class CalibrationManager(QObject):
             self.PHASE_ALIASES.get(
                 stream_calibration_sequence_phase,
                 stream_calibration_sequence_phase,
+            )
+        )
+        canonical_droplet_calibration_sequence_phase = str(
+            self.PHASE_ALIASES.get(
+                droplet_calibration_sequence_phase,
+                droplet_calibration_sequence_phase,
             )
         )
         stream_capture_status = str((self._stream_capture_state or {}).get("status") or "idle")
@@ -5383,6 +5746,19 @@ class CalibrationManager(QObject):
             and stream_calibration_sequence_status == "running"
             and stream_calibration_sequence_internal_process
         )
+        droplet_calibration_sequence_status = str(
+            (getattr(self, "_droplet_calibration_sequence_state", None) or {}).get("status") or "idle"
+        )
+        droplet_calibration_sequence_internal_process = (
+            canonical_droplet_calibration_sequence_phase
+            in set(self.DROPLET_CALIBRATION_SEQUENCE_QUEUE)
+            or canonical_phase_name in set(self.DROPLET_CALIBRATION_SEQUENCE_QUEUE)
+        )
+        allow_internal_droplet_calibration_sequence_start = (
+            allow_droplet_calibration_sequence
+            and droplet_calibration_sequence_status == "running"
+            and droplet_calibration_sequence_internal_process
+        )
         if stream_capture_open and not allow_internal_stream_capture_start:
             msg = "Save or discard the current stream gravimetric capture session before starting another calibration."
             self.calibrationStageChanged.emit(msg, "red")
@@ -5393,6 +5769,14 @@ class CalibrationManager(QObject):
             and not allow_internal_stream_calibration_sequence_start
         ):
             msg = "Stop the current stream calibration sequence before starting another calibration."
+            self.calibrationStageChanged.emit(msg, "red")
+            self.calibrationError.emit(msg)
+            return False
+        if (
+            droplet_calibration_sequence_open
+            and not allow_internal_droplet_calibration_sequence_start
+        ):
+            msg = "Stop the current droplet calibration sequence before starting another calibration."
             self.calibrationStageChanged.emit(msg, "red")
             self.calibrationError.emit(msg)
             return False

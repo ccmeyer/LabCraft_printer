@@ -68,10 +68,12 @@ class _CalibrationManagerStub:
         self.readinessChanged = SignalStub()
         self.streamCaptureStateChanged = SignalStub()
         self.streamCalibrationSequenceStateChanged = SignalStub()
+        self.dropletCalibrationSequenceStateChanged = SignalStub()
         self.activeCalibration = None
         self.calibration_queue = []
         self.state = {"status": "idle"}
         self.sequence_state = {"status": "idle"}
+        self.droplet_sequence_state = {"status": "idle"}
 
     def clear_calibration_memory_ui_recommendation_state(self):
         return None
@@ -110,12 +112,29 @@ class _CalibrationManagerStub:
     def get_stream_calibration_sequence_state(self):
         return dict(self.sequence_state)
 
+    def is_droplet_calibration_sequence_busy(self):
+        return str(self.droplet_sequence_state.get("status") or "idle") in {
+            "pending_gripper_refresh",
+            "refreshing_gripper",
+            "suspending_gripper_refresh",
+            "running",
+            "pending_gripper_restore",
+            "restoring_gripper_refresh",
+        }
+
+    def has_open_droplet_calibration_sequence(self):
+        return str(self.droplet_sequence_state.get("status") or "idle") != "idle"
+
+    def get_droplet_calibration_sequence_state(self):
+        return dict(self.droplet_sequence_state)
+
 
 class _ControllerStub:
     def __init__(self, manager=None):
         self.manager = manager
         self.start_online_stream_calls = 0
         self.start_stream_calibration_sequence_calls = 0
+        self.start_droplet_calibration_sequence_calls = 0
         self.start_nozzle_calls = 0
         self.stop_calibration_calls = 0
 
@@ -152,6 +171,30 @@ class _ControllerStub:
             self.manager.sequence_state["status"] = "restoring_gripper_refresh"
             self.manager.streamCalibrationSequenceStateChanged.emit(
                 dict(self.manager.sequence_state)
+            )
+        return True, ""
+
+    def start_droplet_calibration_sequence(self):
+        self.start_droplet_calibration_sequence_calls += 1
+        if self.manager is not None:
+            self.manager.droplet_sequence_state["status"] = "pending_gripper_refresh"
+            self.manager.dropletCalibrationSequenceStateChanged.emit(
+                dict(self.manager.droplet_sequence_state)
+            )
+
+    def begin_droplet_calibration_sequence_gripper_preamble(self):
+        if self.manager is not None:
+            self.manager.droplet_sequence_state["status"] = "running"
+            self.manager.dropletCalibrationSequenceStateChanged.emit(
+                dict(self.manager.droplet_sequence_state)
+            )
+        return True, ""
+
+    def begin_droplet_calibration_sequence_gripper_restore(self):
+        if self.manager is not None:
+            self.manager.droplet_sequence_state["status"] = "restoring_gripper_refresh"
+            self.manager.dropletCalibrationSequenceStateChanged.emit(
+                dict(self.manager.droplet_sequence_state)
             )
         return True, ""
 
@@ -279,6 +322,31 @@ def test_stream_calibrate_all_toggle_starts_and_stops_via_controller(monkeypatch
     qapp.processEvents()
 
     assert dialog.calibrate_all_stream_button.text() == "Calibrate All"
+
+    dialog.deleteLater()
+
+
+def test_droplet_calibrate_all_toggle_starts_and_stops_via_controller(monkeypatch, qapp):
+    dialog, manager, controller = _build_dialog(monkeypatch, qapp)
+
+    dialog.calibrate_all_button.click()
+    qapp.processEvents()
+
+    assert controller.start_droplet_calibration_sequence_calls == 1
+    assert dialog.calibrate_all_button.text() == "Stop Calibration"
+
+    manager.droplet_sequence_state["status"] = "running"
+    dialog.calibrate_all_button.click()
+    qapp.processEvents()
+
+    assert controller.stop_calibration_calls == 1
+    assert dialog.calibrate_all_button.text() == "Stop Calibration"
+
+    manager.droplet_sequence_state["status"] = "idle"
+    dialog._refresh_manual_control_lock_state()
+    qapp.processEvents()
+
+    assert dialog.calibrate_all_button.text() == "Calibrate All"
 
     dialog.deleteLater()
 
@@ -515,6 +583,31 @@ def test_tabs_lock_during_stream_calibration_sequence_and_unlock_when_idle(monke
     dialog.deleteLater()
 
 
+def test_tabs_lock_during_droplet_calibration_sequence_and_unlock_when_idle(monkeypatch, qapp):
+    dialog, manager, _controller = _build_dialog(monkeypatch, qapp)
+
+    dialog.calibration_tabs.setCurrentIndex(0)
+    qapp.processEvents()
+
+    manager.droplet_sequence_state["status"] = "pending_gripper_restore"
+    dialog._refresh_manual_control_lock_state()
+    qapp.processEvents()
+
+    assert dialog.calibration_tabs.isTabEnabled(0) is True
+    assert dialog.calibration_tabs.isTabEnabled(1) is False
+    assert dialog.calibration_tabs.isTabEnabled(2) is False
+
+    manager.droplet_sequence_state["status"] = "idle"
+    dialog._refresh_manual_control_lock_state()
+    qapp.processEvents()
+
+    assert dialog.calibration_tabs.isTabEnabled(0) is True
+    assert dialog.calibration_tabs.isTabEnabled(1) is True
+    assert dialog.calibration_tabs.isTabEnabled(2) is True
+
+    dialog.deleteLater()
+
+
 def test_online_stream_running_process_keeps_stop_button_enabled_when_readiness_regresses(monkeypatch, qapp):
     dialog, manager, _controller = _build_dialog(monkeypatch, qapp)
     manager.activeCalibration = SimpleNamespace(phase_name="online_stream_calibration")
@@ -571,6 +664,54 @@ def test_stream_calibration_sequence_keeps_stop_button_enabled_through_restore(m
     qapp.processEvents()
 
     assert dialog.calibrate_all_stream_button.text() == "Calibrate All"
+
+    dialog.deleteLater()
+
+
+def test_droplet_calibration_sequence_keeps_stop_button_enabled_through_restore(monkeypatch, qapp):
+    dialog, manager, _controller = _build_dialog(monkeypatch, qapp)
+
+    manager.droplet_sequence_state["status"] = "running"
+    manager.dropletCalibrationSequenceStateChanged.emit(dict(manager.droplet_sequence_state))
+    qapp.processEvents()
+
+    assert dialog.calibrate_all_button.isEnabled() is True
+    assert dialog.calibrate_all_button.text() == "Stop Calibration"
+
+    manager.droplet_sequence_state["status"] = "pending_gripper_restore"
+    manager.dropletCalibrationSequenceStateChanged.emit(dict(manager.droplet_sequence_state))
+    qapp.processEvents()
+
+    assert dialog.calibrate_all_button.isEnabled() is True
+    assert dialog.calibrate_all_button.text() == "Stop Calibration"
+
+    manager.droplet_sequence_state["status"] = "idle"
+    manager.dropletCalibrationSequenceStateChanged.emit(dict(manager.droplet_sequence_state))
+    qapp.processEvents()
+
+    assert dialog.calibrate_all_button.text() == "Calibrate All"
+
+    dialog.deleteLater()
+
+
+def test_droplet_calibration_sequence_disables_manual_quick_controls(monkeypatch, qapp):
+    dialog, manager, _controller = _build_dialog(monkeypatch, qapp)
+
+    manager.droplet_sequence_state["status"] = "running"
+    dialog._refresh_manual_control_lock_state()
+    qapp.processEvents()
+
+    assert dialog.flash_delay_spinbox.isEnabled() is False
+    assert dialog.print_pulse_width_spinbox.isEnabled() is False
+    assert dialog.flash_button.isEnabled() is False
+
+    manager.droplet_sequence_state["status"] = "idle"
+    dialog._refresh_manual_control_lock_state()
+    qapp.processEvents()
+
+    assert dialog.flash_delay_spinbox.isEnabled() is True
+    assert dialog.print_pulse_width_spinbox.isEnabled() is True
+    assert dialog.flash_button.isEnabled() is True
 
     dialog.deleteLater()
 

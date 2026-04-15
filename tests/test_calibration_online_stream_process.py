@@ -649,6 +649,73 @@ def test_try_start_process_allows_stream_calibration_sequence_internal_queue_ste
     assert mgr.calibrationError.calls == []
 
 
+def test_try_start_process_blocks_when_droplet_calibration_sequence_is_open():
+    mgr = CalibrationManager.__new__(CalibrationManager)
+    mgr._stream_capture_state = {"status": "idle"}
+    mgr._stream_calibration_sequence_state = {"status": "idle"}
+    mgr._droplet_calibration_sequence_state = {"status": "running"}
+    mgr.calibrationStageChanged = SignalStub()
+    mgr.calibrationError = SignalStub()
+    mgr._prepare_calibration_memory_prior_application = lambda proc_cls, kwargs: dict(kwargs or {})
+    mgr._process_missing = lambda proc_cls, *args, **kwargs: []
+
+    started = CalibrationManager._try_start_process(mgr, OnlineStreamCalibrationProcess)
+
+    assert started is False
+    assert "droplet calibration sequence" in mgr.calibrationError.calls[-1][0][0].lower()
+
+
+def test_try_start_process_allows_droplet_calibration_sequence_internal_queue_step():
+    class _SequenceQueueProcess:
+        owns_calibration_memory_session = False
+
+        def __init__(self, manager, model, *args, **kwargs):
+            self.manager = manager
+            self.model = model
+            self.kwargs = dict(kwargs)
+            self.stageChanged = SignalStub()
+            self.calibrationCompleted = SignalStub()
+            self.calibrationError = SignalStub()
+            self.calibrationDataUpdated = SignalStub()
+            self.presentImageSignal = SignalStub()
+
+    mgr = CalibrationManager.__new__(CalibrationManager)
+    mgr._stream_capture_state = {"status": "idle"}
+    mgr._stream_calibration_sequence_state = {"status": "idle"}
+    mgr._droplet_calibration_sequence_state = {"status": "running"}
+    mgr._run_id = None
+    mgr._run_idx = None
+    mgr.model = SimpleNamespace()
+    mgr.calibrationStageChanged = SignalStub()
+    mgr.calibrationError = SignalStub()
+    mgr._prepare_calibration_memory_prior_application = lambda proc_cls, kwargs: dict(kwargs or {})
+    mgr._process_missing = lambda proc_cls, *args, **kwargs: []
+    started = []
+    mgr.start_active_calibration = lambda: started.append(mgr.activeCalibration)
+
+    started_ok = CalibrationManager._try_start_process(
+        mgr,
+        _SequenceQueueProcess,
+        _allow_droplet_calibration_sequence=True,
+        _droplet_calibration_sequence_phase="pressure_sweep_characterization",
+    )
+
+    assert started_ok is True
+    assert len(started) == 1
+    assert isinstance(mgr.activeCalibration, _SequenceQueueProcess)
+    assert mgr.activeCalibration.kwargs.get("parent") is mgr
+    assert mgr.calibrationError.calls == []
+
+
+def test_should_suppress_process_verdict_includes_droplet_calibration_sequence():
+    mgr = CalibrationManager.__new__(CalibrationManager)
+    mgr._stream_capture_state = {"status": "idle"}
+    mgr._stream_calibration_sequence_state = {"status": "idle"}
+    mgr._droplet_calibration_sequence_state = {"status": "running"}
+
+    assert CalibrationManager.should_suppress_process_verdict(mgr) is True
+
+
 def test_try_start_process_opens_session_before_online_stream_init(monkeypatch):
     mgr = CalibrationManager.__new__(CalibrationManager)
     mgr._stream_capture_state = {}
