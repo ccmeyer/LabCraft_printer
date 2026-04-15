@@ -6878,6 +6878,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._current_flow_capture_failure = None
         self._flow_fit_result = {}
         self._flow_fit_warnings = []
+        self._flow_num_droplets_armed = False
         self._tail_plan = {}
         self._tail_mode = "scout"
         self._tail_delay_sequence = []
@@ -8423,6 +8424,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._current_flow_capture_failure = None
         self._flow_fit_result = {}
         self._flow_fit_warnings = []
+        self._flow_num_droplets_armed = False
         self._tail_plan = {}
         self._tail_mode = "scout"
         self._tail_delay_sequence = []
@@ -8488,12 +8490,21 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             f"flow {flow_mode} delay={int(self._current_delay_us)} us, "
             f"rep {int(self._flow_replicate_index + 1)}/{int(self.flow_plan.get('replicates_per_delay') or 1)}"
         )
+        needs_num_droplets_arm = not bool(self._flow_num_droplets_armed)
+        settings = {
+            "flash_delay": int(self._current_delay_us),
+        }
+        if needs_num_droplets_arm:
+            settings["num_droplets"] = 1
+
+        def _on_flow_delay_settings_applied():
+            if needs_num_droplets_arm:
+                self._flow_num_droplets_armed = True
+            self.calibration_manager.emitSettingsChangeCompleted()
+
         self._request_guarded_settings_update(
-            {
-                "flash_delay": int(self._current_delay_us),
-                "num_droplets": 1,
-            },
-            self.calibration_manager.emitSettingsChangeCompleted,
+            settings,
+            _on_flow_delay_settings_applied,
             context=f"online_stream_apply_flow_{flow_mode}_{int(self._current_delay_us)}",
             timeout_message=(
                 f"Timed out waiting for online stream flow-delay settings @ {int(self._current_delay_us)} us."
