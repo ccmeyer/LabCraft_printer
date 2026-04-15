@@ -102,10 +102,12 @@ def _build_dialog_stub(runtime_model):
     dialog.main_window = SimpleNamespace(model=runtime_model)
     dialog.model = ExperimentModel(prof=CURRENT_PROFILE)
     dialog.choice_groups = set()
-    dialog.reagent_table = QTableWidget(0, 12)
+    dialog.reagent_table = QTableWidget(0, 13)
     dialog._auto_timer = SimpleNamespace(start=lambda: None)
     dialog.default_droplet_volume_nL = 10.0
     dialog.color_dict = {"dark_red": "#8a0303"}
+    dialog._test_sender = None
+    dialog.sender = lambda: dialog._test_sender
     for name in (
         "_bridge_get_runtime_model",
         "_list_known_reagent_identities",
@@ -113,6 +115,9 @@ def _build_dialog_stub(runtime_model):
         "_resolve_design_reagent_identity",
         "_find_row_for_widget",
         "_combo_current_payload",
+        "_current_printing_mode_from_combo",
+        "_build_printing_mode_selector",
+        "_configure_ejection_volume_spinbox",
         "_build_known_reagent_selector",
         "_build_head_type_selector",
         "_format_prior_availability",
@@ -120,6 +125,8 @@ def _build_dialog_stub(runtime_model):
         "_refresh_prior_availability_for_row",
         "_refresh_all_prior_availability",
         "_on_reagent_identity_changed",
+        "_on_reagent_printing_mode_changed",
+        "_on_fill_printing_mode_changed",
         "_make_group_combo",
         "_parse_targets",
         "_add_reagent_row",
@@ -157,7 +164,10 @@ def test_experiment_model_from_dict_keeps_legacy_rows_backward_compatible():
     model = ExperimentModel(prof=CURRENT_PROFILE)
     model.from_dict(
         {
-            "metadata": {"name": "legacy"},
+            "metadata": {
+                "name": "legacy",
+                "fill_droplet_volume_nL": 10.0,
+            },
             "factors": [
                 {
                     "name": "Water stock",
@@ -181,6 +191,39 @@ def test_experiment_model_from_dict_keeps_legacy_rows_backward_compatible():
     assert option.reagent_display_name is None
     assert option.intended_head_type_id is None
     assert option.intended_head_type_display_name is None
+    assert option.printing_mode == "droplet"
+    assert model.metadata["fill_printing_mode"] == "droplet"
+
+
+def test_experiment_model_from_dict_infers_stream_mode_from_legacy_volume():
+    model = ExperimentModel(prof=CURRENT_PROFILE)
+    model.from_dict(
+        {
+            "metadata": {
+                "name": "legacy-stream",
+                "fill_droplet_volume_nL": 40.0,
+            },
+            "factors": [
+                {
+                    "name": "Water stock",
+                    "kind": "additive",
+                    "options": [
+                        {
+                            "name": "Water stock",
+                            "targets": [0.0, 1.0],
+                            "units": "mM",
+                            "droplet_nL": 40.0,
+                            "starting_conc": 0.0,
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    option = model.factors[0].options[0]
+    assert option.printing_mode == "stream"
+    assert model.metadata["fill_printing_mode"] == "stream"
 
 
 def test_experiment_designer_rebuild_model_persists_reagent_and_head_type(qapp):
@@ -191,11 +234,12 @@ def test_experiment_designer_rebuild_model_persists_reagent_and_head_type(qapp):
         name="Water stock",
         targets="0, 1",
         units="mM",
-        droplet_nL=10.0,
+        droplet_nL=60.0,
         reagent_id="water",
         reagent_display_name="Water",
         intended_head_type_id="nozzle_100um",
         intended_head_type_display_name="100 um nozzle",
+        printing_mode="stream",
     )
 
     dialog._rebuild_model_from_table()
@@ -206,6 +250,55 @@ def test_experiment_designer_rebuild_model_persists_reagent_and_head_type(qapp):
     assert option.reagent_display_name == "Water"
     assert option.intended_head_type_id == "nozzle_100um"
     assert option.intended_head_type_display_name == "100 um nozzle"
+    assert option.printing_mode == "stream"
+
+
+def test_experiment_designer_stream_mode_snaps_invalid_volume_to_stream_default(qapp):
+    dialog = _build_dialog_stub(_RuntimeModelStub())
+
+    dialog._add_reagent_row(
+        name="Water stock",
+        targets="0, 1",
+        units="mM",
+        droplet_nL=10.0,
+        printing_mode="stream",
+    )
+
+    mode_combo: QComboBox = dialog._reagent_cell_widget(0, ExperimentDesignDialog.COL_MODE)
+    dv_spin: QDoubleSpinBox = dialog._reagent_cell_widget(0, ExperimentDesignDialog.COL_DROPLET)
+
+    assert mode_combo.currentData() == "stream"
+    assert dv_spin.minimum() == pytest.approx(40.0)
+    assert dv_spin.maximum() == pytest.approx(120.0)
+    assert dv_spin.value() == pytest.approx(60.0)
+
+
+def test_experiment_designer_mode_switch_updates_ejection_volume_range(qapp):
+    dialog = _build_dialog_stub(_RuntimeModelStub())
+    dialog._add_reagent_row(
+        name="Water stock",
+        targets="0, 1",
+        units="mM",
+        droplet_nL=20.0,
+        printing_mode="droplet",
+    )
+
+    mode_combo: QComboBox = dialog._reagent_cell_widget(0, ExperimentDesignDialog.COL_MODE)
+    dv_spin: QDoubleSpinBox = dialog._reagent_cell_widget(0, ExperimentDesignDialog.COL_DROPLET)
+
+    dialog._test_sender = mode_combo
+    mode_combo.setCurrentIndex(mode_combo.findData("stream"))
+    qapp.processEvents()
+    assert dv_spin.minimum() == pytest.approx(40.0)
+    assert dv_spin.maximum() == pytest.approx(120.0)
+    assert dv_spin.value() == pytest.approx(60.0)
+
+    dv_spin.setValue(80.0)
+    mode_combo.setCurrentIndex(mode_combo.findData("droplet"))
+    qapp.processEvents()
+    assert dv_spin.minimum() == pytest.approx(5.0)
+    assert dv_spin.maximum() == pytest.approx(25.0)
+    assert dv_spin.value() == pytest.approx(10.0)
 
 
 def test_experiment_designer_prior_indicator_uses_preview_status(qapp):
@@ -275,6 +368,11 @@ def test_load_reactions_from_model_applies_design_identity(experiment_model_fact
     model = experiment_model_factory()
     model.calibration_memory_store = CalibrationMemoryStore(model=model, root_dir=tmp_path / "CalibrationMemory")
     model.calibration_memory_store.ensure_initialized()
+    model.experiment_model.set_metadata(
+        fill_reagent_name="Water",
+        fill_droplet_volume_nL=60.0,
+        fill_printing_mode="stream",
+    )
     model.experiment_model.add_additive(
         name="Water stock",
         targets=[0.0, 1.0],
@@ -299,6 +397,34 @@ def test_load_reactions_from_model_applies_design_identity(experiment_model_fact
     assert water_stock.display_name == "Water"
     assert water_stock.intended_head_type_id == "nozzle_100um"
     assert water_stock.intended_head_type_display_name == "100 um nozzle"
+    assert water_stock.get_printing_mode() == "droplet"
+
+    fill_stock = next(
+        stock for stock in stock_solutions.get_all_stock_solutions()
+        if stock.get_reagent_name() == "Water"
+    )
+    assert fill_stock.get_printing_mode() == "stream"
+
+
+def test_experiment_designer_fill_mode_updates_volume_range_and_metadata(qapp):
+    dialog = _build_real_dialog()
+    dialog.show()
+    qapp.processEvents()
+
+    dialog.fill_mode_combo.setCurrentIndex(dialog.fill_mode_combo.findData("stream"))
+    qapp.processEvents()
+
+    assert dialog.fill_dv_spin.minimum() == pytest.approx(40.0)
+    assert dialog.fill_dv_spin.maximum() == pytest.approx(120.0)
+    assert dialog.fill_dv_spin.value() == pytest.approx(60.0)
+
+    dialog.fill_dv_spin.setValue(85.0)
+    dialog._update_metadata_from_controls()
+
+    assert dialog.model.metadata["fill_printing_mode"] == "stream"
+    assert dialog.model.metadata["fill_droplet_volume_nL"] == pytest.approx(85.0)
+
+    dialog.close()
 
 
 def test_experiment_designer_freezes_name_column_and_reorders_prior(qapp):

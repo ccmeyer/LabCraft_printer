@@ -1,7 +1,18 @@
 from __future__ import annotations
 
 # Import your model & dataclasses
-from Model import ( FactorSpec, OptionSpec, ExperimentModel, Well)
+from Model import (
+    FactorSpec,
+    OptionSpec,
+    ExperimentModel,
+    Well,
+    PRINTING_MODE_DROPLET,
+    PRINTING_MODE_STREAM,
+    normalize_printing_mode,
+    infer_printing_mode_from_volume,
+    printing_mode_default_ejection_volume_nl,
+    printing_mode_allowed_range_nl,
+)
 
 from PySide6 import QtCore, QtWidgets, QtGui, QtCharts
 from PySide6.QtWidgets import (
@@ -4634,14 +4645,15 @@ class ExperimentDesignDialog(QDialog):
     COL_REAGENT      = 1
     COL_GROUP        = 2
     COL_HEAD_TYPE    = 3
-    COL_STARTING     = 4
-    COL_TARGETS      = 5
-    COL_UNITS        = 6
-    COL_SET_STOCK    = 7
-    COL_MAX_STOCK    = 8
-    COL_DROPLET      = 9
-    COL_PRIOR        = 10
-    COL_DELETE       = 11
+    COL_MODE         = 4
+    COL_STARTING     = 5
+    COL_TARGETS      = 6
+    COL_UNITS        = 7
+    COL_SET_STOCK    = 8
+    COL_MAX_STOCK    = 9
+    COL_DROPLET      = 10
+    COL_PRIOR        = 11
+    COL_DELETE       = 12
 
     def __init__(self, model: ExperimentModel, main_window):
         super().__init__()
@@ -4654,10 +4666,7 @@ class ExperimentDesignDialog(QDialog):
         prof = getattr(self.main_window, "profile", None)
         self.legacy_mode = prof.name == "legacy" if prof else True
 
-        if self.legacy_mode:
-            self.default_droplet_volume_nL = 40.0
-        else:
-            self.default_droplet_volume_nL = 10.0
+        self.default_droplet_volume_nL = printing_mode_default_ejection_volume_nl(PRINTING_MODE_DROPLET)
 
         self.setWindowTitle("Experiment Design (v2)")
         self.setMinimumSize(1440, 820)
@@ -4710,24 +4719,25 @@ class ExperimentDesignDialog(QDialog):
         self.reagent_name_table.verticalHeader().setVisible(False)
         reagent_table_layout.addWidget(self.reagent_name_table, stretch=0)
 
-        self.reagent_table = QTableWidget(0, 11, self)
+        self.reagent_table = QTableWidget(0, 12, self)
         self.reagent_table.setHorizontalHeaderLabels([
-            "Reagent", "Group", "Head Type", "Starting", "Targets", "Units",
-            "Fixed Stock Conc", "Max Stock Conc", "Droplet Vol (nL)", "Prior", "Delete"
+            "Reagent", "Group", "Head Type", "Mode", "Starting", "Targets", "Units",
+            "Fixed Stock Conc", "Max Stock Conc", "Ejection Vol (nL)", "Prior", "Delete"
         ])
         self.reagent_table.setSelectionMode(QAbstractItemView.NoSelection)
         self.reagent_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.reagent_table.setColumnWidth(0, 170)   # Reagent
         self.reagent_table.setColumnWidth(1, 70)    # Group
         self.reagent_table.setColumnWidth(2, 75)    # Head type
-        self.reagent_table.setColumnWidth(3, 90)    # Starting
-        self.reagent_table.setColumnWidth(4, 220)   # Targets
-        self.reagent_table.setColumnWidth(5, 90)    # Units
-        self.reagent_table.setColumnWidth(6, 120)   # Fixed stock conc
-        self.reagent_table.setColumnWidth(7, 120)   # Max stock conc
-        self.reagent_table.setColumnWidth(8, 95)    # Droplet vol
-        self.reagent_table.setColumnWidth(9, 130)   # Prior
-        self.reagent_table.setColumnWidth(10, 90)   # Delete
+        self.reagent_table.setColumnWidth(3, 85)    # Mode
+        self.reagent_table.setColumnWidth(4, 90)    # Starting
+        self.reagent_table.setColumnWidth(5, 220)   # Targets
+        self.reagent_table.setColumnWidth(6, 90)    # Units
+        self.reagent_table.setColumnWidth(7, 120)   # Fixed stock conc
+        self.reagent_table.setColumnWidth(8, 120)   # Max stock conc
+        self.reagent_table.setColumnWidth(9, 105)   # Ejection vol
+        self.reagent_table.setColumnWidth(10, 130)  # Prior
+        self.reagent_table.setColumnWidth(11, 90)   # Delete
         reagent_table_layout.addWidget(self.reagent_table, stretch=1)
         right.addWidget(reagent_table_box)
         self.reagent_table.verticalScrollBar().valueChanged.connect(self._sync_frozen_reagent_scroll)
@@ -4747,7 +4757,7 @@ class ExperimentDesignDialog(QDialog):
         self.stock_table = QTableWidget(0, 9, self)
         self.stock_table.setHorizontalHeaderLabels([
             "Factor/Group", "Option", "Stock Conc", "Δ per drop",
-            "Units", "Drop Vol (nL)", "Max / Rxn (nL)", "Total Drops", "Total Vol (µL)"
+            "Units", "Ejection Vol (nL)", "Max / Rxn (nL)", "Total Drops", "Total Vol (µL)"
         ])
         self.stock_table.setSelectionMode(QAbstractItemView.NoSelection)
         self.stock_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
@@ -4801,14 +4811,25 @@ class ExperimentDesignDialog(QDialog):
         self.fill_name_edit = QLineEdit(self.model.metadata.get("fill_reagent_name", "Water"))
         form.addRow(QLabel("Fill Reagent Name"), self.fill_name_edit)
 
-        # Fill droplet volume
+        fill_dv_value = float(self.model.metadata.get("fill_droplet_volume_nL", self.default_droplet_volume_nL))
+        fill_mode_value = normalize_printing_mode(
+            self.model.metadata.get("fill_printing_mode"),
+            fallback=infer_printing_mode_from_volume(fill_dv_value, fallback=PRINTING_MODE_DROPLET),
+        )
+
+        self.fill_mode_combo = self._build_printing_mode_selector(fill_mode_value)
+        form.addRow(QLabel("Fill Mode"), self.fill_mode_combo)
+
+        # Fill ejection volume
         self.fill_dv_spin = QDoubleSpinBox()
         self.fill_dv_spin.setDecimals(1)
-        self.fill_dv_spin.setRange(0.1, 100_000.0)
         self.fill_dv_spin.setSingleStep(1.0)
-            
-        self.fill_dv_spin.setValue(float(self.model.metadata.get("fill_droplet_volume_nL", self.default_droplet_volume_nL)))
-        form.addRow(QLabel("Fill Droplet Vol (nL)"), self.fill_dv_spin)
+        self._configure_ejection_volume_spinbox(
+            self.fill_dv_spin,
+            fill_mode_value,
+            preferred_value=fill_dv_value,
+        )
+        form.addRow(QLabel("Fill Ejection Vol (nL)"), self.fill_dv_spin)
 
         # Randomize well assignments + seed
         self.randomize_chk = QCheckBox()
@@ -4934,6 +4955,7 @@ class ExperimentDesignDialog(QDialog):
         self.final_v_spin.valueChanged.connect(self._schedule_auto_update)
         self.fill_name_edit.textChanged.connect(self._schedule_auto_update)
         self.fill_dv_spin.valueChanged.connect(self._schedule_auto_update)
+        self.fill_mode_combo.currentIndexChanged.connect(self._on_fill_printing_mode_changed)
         self.plate_format_combo.currentIndexChanged.connect(self._schedule_auto_update)
 
         # ---- Model hooks & initial render ----
@@ -5136,6 +5158,43 @@ class ExperimentDesignDialog(QDialog):
                     return dict(data)
         return None
 
+    def _current_printing_mode_from_combo(self, combo: QComboBox | None, *, fallback=PRINTING_MODE_DROPLET) -> str:
+        if combo is None:
+            return normalize_printing_mode(fallback)
+        return normalize_printing_mode(combo.currentData(), fallback=fallback)
+
+    def _build_printing_mode_selector(self, printing_mode: str | None = None) -> QComboBox:
+        combo = QComboBox()
+        combo.addItem("Droplet", PRINTING_MODE_DROPLET)
+        combo.addItem("Stream", PRINTING_MODE_STREAM)
+        normalized = normalize_printing_mode(printing_mode, fallback=PRINTING_MODE_DROPLET)
+        for idx in range(combo.count()):
+            if combo.itemData(idx) == normalized:
+                combo.setCurrentIndex(idx)
+                break
+        return combo
+
+    def _configure_ejection_volume_spinbox(
+        self,
+        spinbox: QDoubleSpinBox | None,
+        printing_mode: str | None,
+        *,
+        preferred_value: float | None = None,
+    ) -> None:
+        if spinbox is None:
+            return
+
+        mode = normalize_printing_mode(printing_mode, fallback=PRINTING_MODE_DROPLET)
+        min_value, max_value = printing_mode_allowed_range_nl(mode)
+        candidate = float(spinbox.value()) if preferred_value is None else float(preferred_value)
+        if not (min_value <= candidate <= max_value):
+            candidate = printing_mode_default_ejection_volume_nl(mode)
+
+        blocker = QSignalBlocker(spinbox)
+        spinbox.setRange(min_value, max_value)
+        spinbox.setValue(candidate)
+        del blocker
+
     @staticmethod
     def _is_placeholder_stock_label(text: str) -> bool:
         lowered = (text or "").strip().lower()
@@ -5319,6 +5378,27 @@ class ExperimentDesignDialog(QDialog):
             self._refresh_prior_availability_for_row(row)
         self._schedule_auto_update()
 
+    def _on_reagent_printing_mode_changed(self, *_args):
+        row = self._find_row_for_widget(self.sender())
+        if row < 0:
+            self._schedule_auto_update()
+            return
+        mode_combo: QComboBox = self._reagent_cell_widget(row, self.COL_MODE)
+        dv_spin: QDoubleSpinBox = self._reagent_cell_widget(row, self.COL_DROPLET)
+        self._configure_ejection_volume_spinbox(
+            dv_spin,
+            self._current_printing_mode_from_combo(mode_combo),
+        )
+        self._refresh_prior_availability_for_row(row)
+        self._schedule_auto_update()
+
+    def _on_fill_printing_mode_changed(self, *_args):
+        self._configure_ejection_volume_spinbox(
+            self.fill_dv_spin,
+            self._current_printing_mode_from_combo(getattr(self, "fill_mode_combo", None)),
+        )
+        self._schedule_auto_update()
+
     def _make_group_combo(self) -> QComboBox:
         combo = QComboBox()
         combo.addItem(self.GROUP_ADDITIVE)
@@ -5392,7 +5472,8 @@ class ExperimentDesignDialog(QDialog):
                         reagent_id: str | None = None,
                         reagent_display_name: str | None = None,
                         intended_head_type_id: str | None = None,
-                        intended_head_type_display_name: str | None = None):
+                        intended_head_type_display_name: str | None = None,
+                        printing_mode: str | None = None):
         row = self._reagent_row_count()
         self._reagent_insert_row(row)
 
@@ -5424,7 +5505,16 @@ class ExperimentDesignDialog(QDialog):
             head_type_combo.setToolTip(str(intended_head_type_display_name))
         self._set_reagent_cell_widget(row, self.COL_HEAD_TYPE, head_type_combo)
 
-        # 4 Starting concentration
+        # 4 Printing mode
+        initial_mode = normalize_printing_mode(
+            printing_mode,
+            fallback=infer_printing_mode_from_volume(droplet_nL, fallback=PRINTING_MODE_DROPLET),
+        )
+        mode_combo = self._build_printing_mode_selector(initial_mode)
+        mode_combo.currentIndexChanged.connect(self._on_reagent_printing_mode_changed)
+        self._set_reagent_cell_widget(row, self.COL_MODE, mode_combo)
+
+        # 5 Starting concentration
         start_spin = QDoubleSpinBox()
         start_spin.setDecimals(4)
         start_spin.setRange(0.0, 1e12)
@@ -5433,46 +5523,49 @@ class ExperimentDesignDialog(QDialog):
         start_spin.valueChanged.connect(self._schedule_auto_update)
         self._set_reagent_cell_widget(row, self.COL_STARTING, start_spin)
 
-        # 5 Targets
+        # 6 Targets
         tgt_edit = QLineEdit(targets)
         tgt_edit.textEdited.connect(self._schedule_auto_update)
         self._set_reagent_cell_widget(row, self.COL_TARGETS, tgt_edit)
 
-        # 6 Units
+        # 7 Units
         units_edit = QLineEdit(units)
         units_edit.textEdited.connect(self._schedule_auto_update)
         self._set_reagent_cell_widget(row, self.COL_UNITS, units_edit)
 
-        # 7 Fixed Stock Conc (blank => optimize)
+        # 8 Fixed Stock Conc (blank => optimize)
         stock_edit = QLineEdit("" if forced_stock_conc in (None, 0.0) else str(forced_stock_conc))
         stock_edit.setPlaceholderText("auto")
         stock_edit.setToolTip(self._default_fixed_stock_tooltip())
         stock_edit.textEdited.connect(self._schedule_auto_update)
         self._set_reagent_cell_widget(row, self.COL_SET_STOCK, stock_edit)
 
-        # 8 Max Stock Conc (blank => unbounded)
+        # 9 Max Stock Conc (blank => unbounded)
         max_stock_edit = QLineEdit("" if max_stock_conc in (None, 0.0) else str(max_stock_conc))
         max_stock_edit.setPlaceholderText("unbounded")
         max_stock_edit.setToolTip(self._default_max_stock_tooltip())
         max_stock_edit.textEdited.connect(self._schedule_auto_update)
         self._set_reagent_cell_widget(row, self.COL_MAX_STOCK, max_stock_edit)
 
-        # 9 Droplet vol
+        # 10 Ejection volume
         dv_spin = QDoubleSpinBox()
         dv_spin.setDecimals(1)
-        dv_spin.setRange(0.1, 100_000.0)
         dv_spin.setSingleStep(1.0)
-        dv_spin.setValue(float(droplet_nL))
+        self._configure_ejection_volume_spinbox(
+            dv_spin,
+            initial_mode,
+            preferred_value=float(droplet_nL),
+        )
         dv_spin.valueChanged.connect(self._schedule_auto_update)
         self._set_reagent_cell_widget(row, self.COL_DROPLET, dv_spin)
 
-        # 10 Prior availability
+        # 11 Prior availability
         prior_label = QLabel("Head type not set")
         prior_label.setWordWrap(True)
         prior_label.setStyleSheet("color:#996515;")
         self._set_reagent_cell_widget(row, self.COL_PRIOR, prior_label)
 
-        # 11 Delete
+        # 12 Delete
         del_btn = QPushButton("Delete")
         del_btn.clicked.connect(lambda _, r=row: self._delete_row(r))
         self._set_reagent_cell_widget(row, self.COL_DELETE, del_btn)
@@ -5522,6 +5615,7 @@ class ExperimentDesignDialog(QDialog):
                     reagent_display_name=getattr(o, "reagent_display_name", None),
                     intended_head_type_id=getattr(o, "intended_head_type_id", None),
                     intended_head_type_display_name=getattr(o, "intended_head_type_display_name", None),
+                    printing_mode=getattr(o, "printing_mode", None),
                 )
         # Choice groups
         for f in getattr(self.model, "factors", []):
@@ -5541,6 +5635,7 @@ class ExperimentDesignDialog(QDialog):
                         reagent_display_name=getattr(o, "reagent_display_name", None),
                         intended_head_type_id=getattr(o, "intended_head_type_id", None),
                         intended_head_type_display_name=getattr(o, "intended_head_type_display_name", None),
+                        printing_mode=getattr(o, "printing_mode", None),
                     )
         self._sync_reagent_tables_geometry()
         self._refresh_all_prior_availability()
@@ -5791,6 +5886,7 @@ class ExperimentDesignDialog(QDialog):
             "v_spin",
             "final_v_spin",
             "fill_name_edit",
+            "fill_mode_combo",
             "fill_dv_spin",
             "allow_two_chk",
             "randomize_chk",
@@ -5838,6 +5934,7 @@ class ExperimentDesignDialog(QDialog):
             "v_spin",
             "final_v_spin",
             "fill_name_edit",
+            "fill_mode_combo",
             "fill_dv_spin",
             "allow_two_chk",
             "randomize_chk",
@@ -5922,6 +6019,7 @@ class ExperimentDesignDialog(QDialog):
             "v_spin",
             "final_v_spin",
             "fill_name_edit",
+            "fill_mode_combo",
             "fill_dv_spin",
             "allow_two_chk",
             "randomize_chk",
@@ -5965,6 +6063,7 @@ class ExperimentDesignDialog(QDialog):
             "v_spin",
             "final_v_spin",
             "fill_name_edit",
+            "fill_mode_combo",
             "fill_dv_spin",
             "allow_two_chk",
             "randomize_chk",
@@ -6184,6 +6283,7 @@ class ExperimentDesignDialog(QDialog):
             reagent_combo: QComboBox = self._reagent_cell_widget(row, self.COL_REAGENT)
             group_combo: QComboBox = self._reagent_cell_widget(row, self.COL_GROUP)
             head_type_combo: QComboBox = self._reagent_cell_widget(row, self.COL_HEAD_TYPE)
+            mode_combo: QComboBox = self._reagent_cell_widget(row, self.COL_MODE)
             start_spin: QDoubleSpinBox = self._reagent_cell_widget(row, self.COL_STARTING)
             tgt_edit: QLineEdit = self._reagent_cell_widget(row, self.COL_TARGETS)
             units_edit: QLineEdit = self._reagent_cell_widget(row, self.COL_UNITS)
@@ -6210,6 +6310,10 @@ class ExperimentDesignDialog(QDialog):
             r_reagent_display = resolved_reagent.get("display_name") or self._combo_current_text(reagent_combo) or r_name
             r_head_type_id = (head_type_payload or {}).get("head_type_id") if head_type_payload else None
             r_head_type_display = (head_type_payload or {}).get("display_name") if head_type_payload else None
+            r_printing_mode = self._current_printing_mode_from_combo(
+                mode_combo,
+                fallback=infer_printing_mode_from_volume(r_dv, fallback=PRINTING_MODE_DROPLET),
+            )
 
             if not r_name or not r_targets:
                 continue
@@ -6217,6 +6321,7 @@ class ExperimentDesignDialog(QDialog):
             if r_group == self.GROUP_ADDITIVE:
                 self.model.add_additive(name=r_name, targets=r_targets,
                                         units=r_units, droplet_nL=r_dv,
+                                        printing_mode=r_printing_mode,
                                         starting_conc=r_start,
                                         forced_stock_conc=r_forced,
                                         max_stock_conc=r_max_stock,
@@ -6230,6 +6335,7 @@ class ExperimentDesignDialog(QDialog):
                     created_choice_groups.add(r_group)
                 self.model.add_choice_option(group_name=r_group, option_name=r_name,
                                             targets=r_targets, units=r_units, droplet_nL=r_dv,
+                                            printing_mode=r_printing_mode,
                                             starting_conc=r_start,
                                             forced_stock_conc=r_forced,
                                             max_stock_conc=r_max_stock,
@@ -6263,6 +6369,10 @@ class ExperimentDesignDialog(QDialog):
             target_reaction_volume_nL=float(self.v_spin.value()),
             fill_reagent_name=self.fill_name_edit.text().strip() or "Water",
             fill_droplet_volume_nL=float(self.fill_dv_spin.value()),
+            fill_printing_mode=self._current_printing_mode_from_combo(
+                getattr(self, "fill_mode_combo", None),
+                fallback=infer_printing_mode_from_volume(self.fill_dv_spin.value(), fallback=PRINTING_MODE_DROPLET),
+            ),
             final_reaction_volume_nL=float(self.final_v_spin.value()),
             allow_two_stock_solutions=bool(self.allow_two_chk.isChecked()),
             randomize_assignments=randomize,
@@ -6432,7 +6542,11 @@ class ExperimentDesignDialog(QDialog):
 
     def _on_add_reagent(self):
         # Default to Additive (per your request)
-        self._add_reagent_row(group=self.GROUP_ADDITIVE, droplet_nL=self.default_droplet_volume_nL)
+        self._add_reagent_row(
+            group=self.GROUP_ADDITIVE,
+            droplet_nL=printing_mode_default_ejection_volume_nl(PRINTING_MODE_DROPLET),
+            printing_mode=PRINTING_MODE_DROPLET,
+        )
 
     def _on_optimize_and_generate(self, show_capacity_dialog: bool = False):
         ok, _res = self._run_design_optimization_flow(
@@ -6674,7 +6788,7 @@ class ExperimentDesignDialog(QDialog):
         # Block signals while restoring to avoid re-entrancy/races
         blk(self.exp_name_edit); blk(self.rep_spin); blk(self.v_spin)
         blk(self.final_v_spin)
-        blk(self.fill_name_edit); blk(self.fill_dv_spin)
+        blk(self.fill_name_edit); blk(getattr(self, "fill_mode_combo", None)); blk(self.fill_dv_spin)
         blk(self.allow_two_chk)
         blk(self.randomize_chk); blk(self.random_seed_spin)
         blk(self.subset_chk); blk(self.reduction_spin)
@@ -6685,7 +6799,21 @@ class ExperimentDesignDialog(QDialog):
         self.rep_spin.setValue(int(md.get("replicates", 1)))
         self.v_spin.setValue(float(md.get("target_reaction_volume_nL", 500.0)))
         self.fill_name_edit.setText(md.get("fill_reagent_name", "Water"))
-        self.fill_dv_spin.setValue(float(md.get("fill_droplet_volume_nL", 10.0)))
+        fill_dv_value = float(md.get("fill_droplet_volume_nL", 10.0))
+        fill_mode_value = normalize_printing_mode(
+            md.get("fill_printing_mode"),
+            fallback=infer_printing_mode_from_volume(fill_dv_value, fallback=PRINTING_MODE_DROPLET),
+        )
+        if hasattr(self, "fill_mode_combo") and self.fill_mode_combo is not None:
+            for idx in range(self.fill_mode_combo.count()):
+                if self.fill_mode_combo.itemData(idx) == fill_mode_value:
+                    self.fill_mode_combo.setCurrentIndex(idx)
+                    break
+        self._configure_ejection_volume_spinbox(
+            self.fill_dv_spin,
+            fill_mode_value,
+            preferred_value=fill_dv_value,
+        )
         self.final_v_spin.setValue(float(md.get(
             "final_reaction_volume_nL",
             md.get("target_reaction_volume_nL", 500.0)
@@ -6768,6 +6896,7 @@ class ExperimentDesignDialog(QDialog):
                     "target_reaction_volume_nL": 500.0,
                     "final_reaction_volume_nL": 500.0,
                     "fill_reagent_name": "Water",
+                    "fill_printing_mode": PRINTING_MODE_DROPLET,
                     "fill_droplet_volume_nL": 10.0,
                     "allow_two_stock_solutions": False,
                     "randomize_assignments": False,
@@ -6797,7 +6926,7 @@ class ExperimentDesignDialog(QDialog):
         blockers = [
             QSignalBlocker(self.exp_name_edit), QSignalBlocker(self.rep_spin),
             QSignalBlocker(self.v_spin), QSignalBlocker(self.fill_name_edit),
-            QSignalBlocker(self.fill_dv_spin), QSignalBlocker(self.allow_two_chk),
+            QSignalBlocker(getattr(self, "fill_mode_combo", None)), QSignalBlocker(self.fill_dv_spin), QSignalBlocker(self.allow_two_chk),
             QSignalBlocker(self.randomize_chk),
             QSignalBlocker(self.random_seed_spin), QSignalBlocker(self.subset_chk),
             QSignalBlocker(self.reduction_spin), QSignalBlocker(self.start_col_spin),

@@ -9,6 +9,7 @@ def test_reset_experiment_model_uses_current_profile_fill_default():
     em.reset_experiment_model()
 
     assert em.metadata["fill_droplet_volume_nL"] == 10.0
+    assert em.metadata["fill_printing_mode"] == "droplet"
 
 
 def test_reset_experiment_model_uses_legacy_profile_fill_default():
@@ -18,3 +19,4 @@ def test_reset_experiment_model_uses_legacy_profile_fill_default():
     em.reset_experiment_model()
 
     assert em.metadata["fill_droplet_volume_nL"] == 40.0
+    assert em.metadata["fill_printing_mode"] == "stream"

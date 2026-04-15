@@ -1647,6 +1647,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.set_imaging_droplets(self.droplet_camera_model.num_droplets)
         self.set_start_pressure(self.start_pressure_spin.value())
         self.set_num_pressure_tests(self.num_pressure_tests_spin.value())
+        self._apply_default_calibration_tab_from_printing_mode()
         self.populate_summary_table()
         self._refresh_manual_control_lock_state()
         self._apply_flash_safety_ui_state()
@@ -1857,6 +1858,46 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 missing,
                 tooltip_override=tooltip_override,
             )
+
+    @staticmethod
+    def _normalize_printing_mode(value, *, fallback: str = "droplet") -> str:
+        mode = str(value or "").strip().lower()
+        if mode in {"droplet", "stream"}:
+            return mode
+        return str(fallback or "droplet")
+
+    def _resolve_active_printer_head_printing_mode(self) -> str:
+        rack_model = getattr(getattr(self, "model", None), "rack_model", None)
+        if rack_model is None:
+            rack_model = getattr(getattr(self.main_window, "model", None), "rack_model", None)
+        if rack_model is None:
+            return "droplet"
+
+        getter = getattr(rack_model, "get_gripper_printer_head", None)
+        if not callable(getter):
+            return "droplet"
+
+        try:
+            printer_head = getter()
+        except Exception:
+            printer_head = None
+        if printer_head is None:
+            return "droplet"
+
+        mode_getter = getattr(printer_head, "get_printing_mode", None)
+        try:
+            if callable(mode_getter):
+                return self._normalize_printing_mode(mode_getter())
+        except Exception:
+            pass
+        return self._normalize_printing_mode(getattr(printer_head, "printing_mode", None))
+
+    def _apply_default_calibration_tab_from_printing_mode(self):
+        tabs = getattr(self, "calibration_tabs", None)
+        if tabs is None:
+            return
+        mode = self._resolve_active_printer_head_printing_mode()
+        tabs.setCurrentWidget(self.stream_tab if mode == "stream" else self.droplet_tab)
 
     def _refresh_calibration_tab_lock_state(self, *_args):
         tabs = getattr(self, "calibration_tabs", None)

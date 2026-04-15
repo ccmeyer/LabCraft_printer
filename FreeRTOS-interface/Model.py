@@ -60,6 +60,40 @@ def _format_stock_display_sig_figs(value, sig_figs: int = 3) -> str:
         text = text.rstrip("0").rstrip(".")
     return "0" if text in ("-0", "+0") else text
 
+
+PRINTING_MODE_DROPLET = "droplet"
+PRINTING_MODE_STREAM = "stream"
+PRINTING_MODE_CHOICES = (PRINTING_MODE_DROPLET, PRINTING_MODE_STREAM)
+
+
+def normalize_printing_mode(value, *, fallback=PRINTING_MODE_DROPLET) -> str:
+    mode = str(value or "").strip().lower()
+    if mode in PRINTING_MODE_CHOICES:
+        return mode
+    return str(fallback or PRINTING_MODE_DROPLET)
+
+
+def infer_printing_mode_from_volume(volume_nl, *, fallback=PRINTING_MODE_DROPLET) -> str:
+    try:
+        volume = float(volume_nl)
+    except Exception:
+        return normalize_printing_mode(fallback)
+    if volume >= 40.0:
+        return PRINTING_MODE_STREAM
+    return PRINTING_MODE_DROPLET
+
+
+def printing_mode_default_ejection_volume_nl(mode: str) -> float:
+    mode = normalize_printing_mode(mode)
+    return 60.0 if mode == PRINTING_MODE_STREAM else 10.0
+
+
+def printing_mode_allowed_range_nl(mode: str) -> tuple[float, float]:
+    mode = normalize_printing_mode(mode)
+    if mode == PRINTING_MODE_STREAM:
+        return (40.0, 120.0)
+    return (5.0, 25.0)
+
 def find_key_points(columns, line_values):
     """
     Identifies two low points and the high point between them in the data.
@@ -158,6 +192,7 @@ class OptionSpec:
     targets: List[float]           # desired final concentrations for this option
     units: str                     # e.g. 'mM'
     droplet_nL: float              # droplet volume for this reagent
+    printing_mode: str = PRINTING_MODE_DROPLET
     starting_conc: float = 0.0     # starting concentration for this reagent
     forced_stock_conc: float | None = None
     max_stock_conc: float | None = None
@@ -274,10 +309,8 @@ class ExperimentModel(QObject):
         # Format date-time for metadata
         temp_name = "Untitled-" + time.strftime("%Y%m%d_%H%M%S")
 
-        if self.legacy_mode:
-            fill_droplet_volume_nL = 40.0
-        else:
-            fill_droplet_volume_nL = 10.0
+        fill_printing_mode = self._default_fill_printing_mode()
+        fill_droplet_volume_nL = self._default_fill_droplet_volume_nl()
             
         self.metadata: Dict = {
             "name": temp_name,
@@ -288,6 +321,7 @@ class ExperimentModel(QObject):
             "target_reaction_volume_nL": 500.0, # PRINTED volume budget
             "final_reaction_volume_nL": 500.0, # includes non-printed (fill) volume
             "fill_reagent_name": "Water",
+            "fill_printing_mode": fill_printing_mode,
             "fill_droplet_volume_nL": fill_droplet_volume_nL,
             "randomize_assignments": False,
             "random_seed": None,
@@ -352,10 +386,12 @@ class ExperimentModel(QObject):
         reagent_display_name: str | None = None,
         intended_head_type_id: str | None = None,
         intended_head_type_display_name: str | None = None,
+        printing_mode: str | None = None,
     ):
         o = OptionSpec(name=f"{name}",
                     targets=list(targets), units=units,
                     droplet_nL=float(droplet_nL),
+                    printing_mode=self._resolve_option_printing_mode(printing_mode, droplet_nL),
                     starting_conc=float(starting_conc or 0.0),
                     forced_stock_conc=float(forced_stock_conc) if forced_stock_conc is not None else None,
                     max_stock_conc=float(max_stock_conc) if max_stock_conc is not None else None,
@@ -384,11 +420,14 @@ class ExperimentModel(QObject):
         reagent_display_name: str | None = None,
         intended_head_type_id: str | None = None,
         intended_head_type_display_name: str | None = None,
+        printing_mode: str | None = None,
     ):
         for f in self.factors:
             if f.name == group_name and f.kind == "choice":
                 o = OptionSpec(option_name, list(targets), units,
-                            float(droplet_nL), float(starting_conc or 0.0),
+                            float(droplet_nL),
+                            self._resolve_option_printing_mode(printing_mode, droplet_nL),
+                            float(starting_conc or 0.0),
                             float(forced_stock_conc) if forced_stock_conc is not None else None,
                             float(max_stock_conc) if max_stock_conc is not None else None,
                             reagent_id=reagent_id,
@@ -411,6 +450,7 @@ class ExperimentModel(QObject):
             reagent_display_name,
             intended_head_type_id,
             intended_head_type_display_name,
+            printing_mode,
         )
     def set_metadata(self, **kwargs):
         self.metadata.update(kwargs)
@@ -914,6 +954,11 @@ class ExperimentModel(QObject):
             "delta_per_drop": delta_per_drop,
             "units": units,
             "droplet_volume_nL": droplet_volume_nL,
+            "printing_mode": (
+                normalize_printing_mode(getattr(option, "printing_mode", None))
+                if option is not None
+                else infer_printing_mode_from_volume(droplet_volume_nL)
+            ),
             "reagent_id": getattr(option, "reagent_id", None) if option is not None else None,
             "reagent_display_name": getattr(option, "reagent_display_name", None) if option is not None else None,
             "intended_head_type_id": getattr(option, "intended_head_type_id", None) if option is not None else None,
@@ -2611,6 +2656,7 @@ class ExperimentModel(QObject):
                         targets=[],  # fill shortly
                         units=units or units_default or "arb",
                         droplet_nL=float(droplet_nL_default),
+                        printing_mode=PRINTING_MODE_DROPLET,
                         starting_conc=float(starting_conc_default),
                     )
                 ],
@@ -2828,6 +2874,7 @@ class ExperimentModel(QObject):
             "delta_per_drop": 0.0,
             "units": "--",
             "droplet_volume_nL": fill_dv,
+            "printing_mode": self._resolve_fill_printing_mode(self.metadata.get("fill_printing_mode"), fill_dv),
             "total_droplets": int(fill_total_drops),
             "total_volume_uL": round(fill_uL, 3),
             "max_per_rxn_nL": "",
@@ -3279,6 +3326,7 @@ class ExperimentModel(QObject):
                             "targets": list(o.targets),
                             "units": o.units,
                             "droplet_nL": float(o.droplet_nL),
+                            "printing_mode": normalize_printing_mode(getattr(o, "printing_mode", None)),
                             "starting_conc": float(getattr(o, "starting_conc", 0.0) or 0.0),
                             "reagent_id": getattr(o, "reagent_id", None),
                             "reagent_display_name": getattr(o, "reagent_display_name", None),
@@ -3351,16 +3399,26 @@ class ExperimentModel(QObject):
         # --- metadata + factors (existing behavior) ---
         self.metadata = d.get("metadata", self.metadata)
         self.stock_prep_state = self._normalize_stock_prep_state(d.get("stock_prep"))
+        fill_droplet_nl = float(self.metadata.get("fill_droplet_volume_nL", self._default_fill_droplet_volume_nl()))
+        self.metadata["fill_printing_mode"] = self._resolve_fill_printing_mode(
+            self.metadata.get("fill_printing_mode"),
+            fill_droplet_nl,
+        )
         self.factors = []
 
         for f in d.get("factors", []):
             fs = FactorSpec(name=f["name"], kind=f["kind"], options=[])
             for o in f.get("options", []):
+                option_droplet_nl = float(o.get("droplet_nL", 10.0))
                 opt = OptionSpec(
                     name=o["name"],
                     targets=list(o.get("targets", [])),
                     units=o.get("units", ""),
-                    droplet_nL=float(o.get("droplet_nL", 10.0)),
+                    droplet_nL=option_droplet_nl,
+                    printing_mode=self._resolve_option_printing_mode(
+                        o.get("printing_mode"),
+                        option_droplet_nl,
+                    ),
                     starting_conc=float(o.get("starting_conc", 0.0)),
                     forced_stock_conc=(
                         float(o["forced_stock_conc"])
@@ -3507,8 +3565,28 @@ class ExperimentModel(QObject):
             return obj.tolist()          # ndarray -> list
         raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
 
+    def _default_fill_printing_mode(self) -> str:
+        return PRINTING_MODE_STREAM if self.legacy_mode else PRINTING_MODE_DROPLET
+
     def _default_fill_droplet_volume_nl(self) -> float:
-        return 40.0 if self.legacy_mode else 10.0
+        if self._default_fill_printing_mode() == PRINTING_MODE_STREAM:
+            return 40.0
+        return 10.0
+
+    def _resolve_option_printing_mode(self, value, droplet_nL: float) -> str:
+        return normalize_printing_mode(
+            value,
+            fallback=infer_printing_mode_from_volume(droplet_nL, fallback=PRINTING_MODE_DROPLET),
+        )
+
+    def _resolve_fill_printing_mode(self, value, droplet_nL: float) -> str:
+        return normalize_printing_mode(
+            value,
+            fallback=infer_printing_mode_from_volume(
+                droplet_nL,
+                fallback=self._default_fill_printing_mode(),
+            ),
+        )
 
     def _atomic_json_dump(self, path: str, payload: Dict):
         import json
@@ -4347,6 +4425,7 @@ class ExperimentModel(QObject):
             "target_reaction_volume_nL": 500.0,
             "final_reaction_volume_nL": 500.0,
             "fill_reagent_name": "Water",
+            "fill_printing_mode": self._default_fill_printing_mode(),
             "fill_droplet_volume_nL": self._default_fill_droplet_volume_nl(),
             "randomize_assignments": False,
             "random_seed": None,
@@ -4402,6 +4481,7 @@ class StockSolution(QObject):
         self.intended_nominal_nozzle_diameter_um = None
         self.intended_head_type_tags = []
         self.intended_head_type_notes = ""
+        self.printing_mode = PRINTING_MODE_DROPLET
 
     def get_stock_id(self):
         return self.stock_id
@@ -4476,6 +4556,12 @@ class StockSolution(QObject):
             "tags": list(self.intended_head_type_tags or []),
             "notes": self.intended_head_type_notes,
         }
+
+    def set_printing_mode(self, printing_mode=None):
+        self.printing_mode = normalize_printing_mode(printing_mode)
+
+    def get_printing_mode(self):
+        return normalize_printing_mode(getattr(self, "printing_mode", None))
 
 
 class Reagent(QObject):
@@ -5437,6 +5523,17 @@ class PrinterHead(QObject):
         if self.stock_solution is None:
             return 'Calibration'
         return self.stock_solution.get_display_stock_name(new_line=new_line, sig_figs=sig_figs)
+
+    def get_printing_mode(self):
+        if self.stock_solution is None:
+            return PRINTING_MODE_DROPLET
+        getter = getattr(self.stock_solution, "get_printing_mode", None)
+        if callable(getter):
+            try:
+                return normalize_printing_mode(getter())
+            except Exception:
+                return PRINTING_MODE_DROPLET
+        return normalize_printing_mode(getattr(self.stock_solution, "printing_mode", None))
 
     def get_color(self):
         return self.color
@@ -7119,6 +7216,8 @@ class Model(QObject):
     def _apply_design_identity_to_stock_solution(self, stock_solution, stock_row):
         if stock_solution is None or not isinstance(stock_row, dict):
             return
+
+        stock_solution.set_printing_mode(stock_row.get("printing_mode"))
 
         registry = self._get_calibration_identity_registry()
         reagent_id = self._slugify_identity_token(stock_row.get("reagent_id"))

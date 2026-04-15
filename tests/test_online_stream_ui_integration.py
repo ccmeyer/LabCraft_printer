@@ -115,7 +115,7 @@ class _ControllerStub:
         self.stop_calibration_calls += 1
 
 
-def _build_dialog(monkeypatch, qapp):
+def _build_dialog(monkeypatch, qapp, *, printing_mode=None):
     monkeypatch.setattr(DropletImagingDialog, "_quick_controls_expanded_default", False, raising=False)
     for method_name in (
         "setup_shortcuts",
@@ -133,6 +133,11 @@ def _build_dialog(monkeypatch, qapp):
 
     manager = _CalibrationManagerStub()
     controller = _ControllerStub()
+    printer_head = (
+        SimpleNamespace(get_printing_mode=lambda mode=printing_mode: mode)
+        if printing_mode is not None
+        else None
+    )
     model = SimpleNamespace(
         droplet_camera_model=_DropletCameraModelStub(),
         calibration_manager=manager,
@@ -141,10 +146,27 @@ def _build_dialog(monkeypatch, qapp):
             get_print_pulse_width=lambda: 1400,
             get_current_print_pressure=lambda: 0.80,
         ),
+        rack_model=SimpleNamespace(get_gripper_printer_head=lambda: printer_head),
     )
-    dialog = DropletImagingDialog(SimpleNamespace(color_dict={}), model, controller)
+    dialog = DropletImagingDialog(SimpleNamespace(color_dict={}, model=model), model, controller)
     qapp.processEvents()
     return dialog, manager, controller
+
+
+def test_droplet_imaging_dialog_defaults_to_droplet_tab_without_stream_head(monkeypatch, qapp):
+    dialog, _manager, _controller = _build_dialog(monkeypatch, qapp)
+
+    assert dialog.calibration_tabs.currentWidget() is dialog.droplet_tab
+
+    dialog.deleteLater()
+
+
+def test_droplet_imaging_dialog_defaults_to_stream_tab_for_stream_head(monkeypatch, qapp):
+    dialog, _manager, _controller = _build_dialog(monkeypatch, qapp, printing_mode="stream")
+
+    assert dialog.calibration_tabs.currentWidget() is dialog.stream_tab
+
+    dialog.deleteLater()
 
 
 def test_online_stream_button_is_created_and_reset_label_is_stable(monkeypatch, qapp):
