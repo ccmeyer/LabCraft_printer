@@ -1739,6 +1739,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._online_stream_flow_chart_bundle = self._create_online_stream_chart_bundle(
             title="Visible Volume vs Time",
             y_title="Visible Volume (nL)",
+            use_scatter_data=True,
+            reference_color_key="blue",
+            reference_fallback="#2d7ff9",
         )
         self.online_stream_flow_chart_view = self._online_stream_flow_chart_bundle["view"]
         self.online_stream_flow_chart_view.setObjectName("online_stream_flow_chart_view")
@@ -2788,7 +2791,24 @@ class DropletImagingDialog(QtWidgets.QDialog):
         pen.setStyle(style)
         return pen
 
-    def _create_online_stream_chart_bundle(self, *, title: str, y_title: str):
+    @staticmethod
+    def _make_hollow_scatter_series(*, marker_size=9.0):
+        series = QtCharts.QScatterSeries()
+        series.setMarkerShape(QtCharts.QScatterSeries.MarkerShapeCircle)
+        series.setMarkerSize(marker_size)
+        series.setBorderColor(QColor("#ffffff"))
+        series.setColor(QColor(255, 255, 255, 0))
+        return series
+
+    def _create_online_stream_chart_bundle(
+        self,
+        *,
+        title: str,
+        y_title: str,
+        use_scatter_data: bool = False,
+        reference_color_key: str = "orange",
+        reference_fallback: str = "#f39c12",
+    ):
         chart = QtCharts.QChart()
         chart.setTheme(QtCharts.QChart.ChartThemeDark)
         chart.setTitle(title)
@@ -2804,16 +2824,20 @@ class DropletImagingDialog(QtWidgets.QDialog):
         chart.addAxis(axis_x, Qt.AlignBottom)
         chart.addAxis(axis_y, Qt.AlignLeft)
 
-        primary_series = QtCharts.QLineSeries()
-        primary_series.setPen(self._make_chart_pen("light_blue", "#6fb6ff", width=2))
-        secondary_series = QtCharts.QLineSeries()
-        secondary_series.setPen(self._make_chart_pen("teal", "#2aa198", width=2, style=Qt.DashLine))
+        if use_scatter_data:
+            primary_series = self._make_hollow_scatter_series()
+            secondary_series = self._make_hollow_scatter_series()
+        else:
+            primary_series = QtCharts.QLineSeries()
+            primary_series.setPen(self._make_chart_pen("light_blue", "#6fb6ff", width=2))
+            secondary_series = QtCharts.QLineSeries()
+            secondary_series.setPen(self._make_chart_pen("teal", "#2aa198", width=2, style=Qt.DashLine))
         current_series = QtCharts.QScatterSeries()
         current_series.setMarkerSize(11.0)
         current_series.setBorderColor(self._chart_color("light_gray", "#cfd8dc"))
         current_series.setColor(self._chart_color("green", "#2ecc71"))
         reference_series = QtCharts.QLineSeries()
-        reference_series.setPen(self._make_chart_pen("orange", "#f39c12", width=2))
+        reference_series.setPen(self._make_chart_pen(reference_color_key, reference_fallback, width=2))
         marker_series = QtCharts.QLineSeries()
         marker_series.setPen(self._make_chart_pen("yellow", "#f1c40f", width=2, style=Qt.DashLine))
 
