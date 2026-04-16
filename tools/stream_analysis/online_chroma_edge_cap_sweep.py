@@ -18,6 +18,9 @@ ANALYSIS_NAME = "online_chroma_edge_cap_sweep"
 CORRECTION_MODE = "chroma_edge_cap_sweep"
 STAGE_DIRNAME = "online_chroma_edge_cap_sweep"
 ROW_CONTINUITY_RADIUS = 2
+DEFAULT_DETACHED_INWARD_EDGE_GRAY_MARGIN_MAX = 18.0
+DEFAULT_DETACHED_INWARD_GRAY_DROP_MIN = 4.0
+DEFAULT_DETACHED_INWARD_DELTA_LAB_CHROMA_MAX = -1.0
 
 CAP_SUMMARY_COLUMNS = [
     "cap_px",
@@ -134,6 +137,24 @@ def _resolved_rule(
         "continuity_min_support": int(
             base_rule["continuity_min_support"] if continuity_min_support is None else continuity_min_support
         ),
+        "detached_inward_edge_gray_margin_max": float(
+            base_rule.get(
+                "detached_inward_edge_gray_margin_max",
+                DEFAULT_DETACHED_INWARD_EDGE_GRAY_MARGIN_MAX,
+            )
+        ),
+        "detached_inward_gray_drop_min": float(
+            base_rule.get(
+                "detached_inward_gray_drop_min",
+                DEFAULT_DETACHED_INWARD_GRAY_DROP_MIN,
+            )
+        ),
+        "detached_inward_delta_lab_chroma_max": float(
+            base_rule.get(
+                "detached_inward_delta_lab_chroma_max",
+                DEFAULT_DETACHED_INWARD_DELTA_LAB_CHROMA_MAX,
+            )
+        ),
     }
     rule["candidate_id"] = proto_mod._candidate_id(
         gray_headroom_px=int(rule["gray_headroom_px"]),
@@ -201,6 +222,7 @@ def _parse_frame_summary_row(run_id: str, row: dict) -> dict:
         "delay_from_emergence_us": _int_or_none(row.get("delay_from_emergence_us")),
         "threshold_value": _float_or_none(row.get("threshold_value")),
         "attached_edge_row_count": _int_or_none(row.get("attached_edge_row_count")) or 0,
+        "detached_component_count": _int_or_none(row.get("detached_component_count")) or 0,
         "feature_row_count": _int_or_none(row.get("feature_row_count")) or 0,
         "current_attached_volume_nl": float(_float_or_none(row.get("current_attached_volume_nl")) or 0.0),
         "current_total_visible_volume_nl": float(_float_or_none(row.get("current_total_visible_volume_nl")) or 0.0),
@@ -219,6 +241,8 @@ def _parse_frame_summary_row(run_id: str, row: dict) -> dict:
 
 def _parse_baseline_edge_row(row: dict) -> dict:
     return {
+        "component_kind": str(row.get("component_kind") or "attached"),
+        "component_id": str(row.get("component_id") or "attached_primary"),
         "y_px": int(_int_or_none(row.get("y_px")) or 0),
         "x_left_px": int(_int_or_none(row.get("x_left_px")) or 0),
         "x_right_px": int(_int_or_none(row.get("x_right_px")) or 0),
@@ -229,48 +253,96 @@ def _parse_baseline_edge_row(row: dict) -> dict:
 
 def _parse_offset_feature_row(row: dict) -> dict:
     return {
+        "component_kind": str(row.get("component_kind") or "attached"),
+        "component_id": str(row.get("component_id") or "attached_primary"),
+        "move_direction": str(row.get("move_direction") or "outward"),
         "y_px": int(_int_or_none(row.get("y_px")) or 0),
         "side": str(row.get("side") or ""),
         "current_x_px": int(_int_or_none(row.get("current_x_px")) or 0),
         "sample_offset_px": int(_int_or_none(row.get("sample_offset_px")) or 0),
         "sample_in_bounds": bool(_bool_or_none(row.get("sample_in_bounds"))),
+        "contiguous_to_component_mask": bool(
+            _bool_or_none(row.get("contiguous_to_component_mask"))
+            if row.get("contiguous_to_component_mask") is not None
+            else _bool_or_none(row.get("contiguous_to_attached_mask"))
+        ),
         "contiguous_to_attached_mask": bool(_bool_or_none(row.get("contiguous_to_attached_mask"))),
+        "sample_is_included": bool(_bool_or_none(row.get("sample_is_included"))),
         "sample_is_excluded": bool(_bool_or_none(row.get("sample_is_excluded"))),
+        "intermediate_pixels_all_included": bool(
+            _bool_or_none(row.get("intermediate_pixels_all_included"))
+        ),
         "intermediate_pixels_all_excluded": bool(_bool_or_none(row.get("intermediate_pixels_all_excluded"))),
+        "threshold_value": _float_or_none(row.get("threshold_value")),
+        "gray_edge": _float_or_none(row.get("gray_edge")),
+        "gray_sample": _float_or_none(row.get("gray_sample")),
         "gray_headroom": _float_or_none(row.get("gray_headroom")),
+        "edge_gray_margin": _float_or_none(row.get("edge_gray_margin")),
+        "sample_gray_drop": _float_or_none(row.get("sample_gray_drop")),
         "delta_lab_chroma": _float_or_none(row.get("delta_lab_chroma")),
         "edge_bg_gap": _float_or_none(row.get("edge_bg_gap")),
     }
 
 
 def _base_gate_pass(feature_row: dict, rule: dict) -> bool:
+    component_kind = str(feature_row.get("component_kind") or "attached").strip().lower()
+    move_direction = str(feature_row.get("move_direction") or "outward").strip().lower()
     if not bool(feature_row.get("sample_in_bounds")):
         return False
-    if not bool(feature_row.get("sample_is_excluded")):
-        return False
-    if not bool(feature_row.get("contiguous_to_attached_mask")):
-        return False
-    if not bool(feature_row.get("intermediate_pixels_all_excluded")):
-        return False
-    gray_headroom = feature_row.get("gray_headroom")
-    if gray_headroom is None:
-        return False
-    if not (0.0 < float(gray_headroom) <= float(rule["gray_headroom_px"])):
+    contiguous_to_component_mask = bool(
+        feature_row.get("contiguous_to_component_mask")
+        if feature_row.get("contiguous_to_component_mask") is not None
+        else feature_row.get("contiguous_to_attached_mask")
+    )
+    if not contiguous_to_component_mask:
         return False
     delta_lab_chroma = feature_row.get("delta_lab_chroma")
-    if delta_lab_chroma is None or float(delta_lab_chroma) > float(rule["delta_lab_chroma_max"]):
-        return False
     edge_bg_gap = feature_row.get("edge_bg_gap")
     if edge_bg_gap is None or float(edge_bg_gap) < float(rule["edge_bg_gap_min"]):
         return False
-    return True
+    if delta_lab_chroma is None:
+        return False
+    if move_direction == "outward":
+        if not bool(feature_row.get("sample_is_excluded")):
+            return False
+        if not bool(feature_row.get("intermediate_pixels_all_excluded")):
+            return False
+        gray_headroom = feature_row.get("gray_headroom")
+        if gray_headroom is None:
+            return False
+        if not (0.0 < float(gray_headroom) <= float(rule["gray_headroom_px"])):
+            return False
+        return bool(float(delta_lab_chroma) <= float(rule["delta_lab_chroma_max"]))
+    if component_kind != "detached" or move_direction != "inward":
+        return False
+    if not bool(feature_row.get("sample_is_included")):
+        return False
+    if not bool(feature_row.get("intermediate_pixels_all_included")):
+        return False
+    edge_gray_margin = feature_row.get("edge_gray_margin")
+    sample_gray_drop = feature_row.get("sample_gray_drop")
+    if edge_gray_margin is None or sample_gray_drop is None:
+        return False
+    if not (0.0 <= float(edge_gray_margin) <= float(rule["detached_inward_edge_gray_margin_max"])):
+        return False
+    if float(sample_gray_drop) < float(rule["detached_inward_gray_drop_min"]):
+        return False
+    return bool(
+        float(delta_lab_chroma) <= float(rule["detached_inward_delta_lab_chroma_max"])
+    )
 
 
 def _eligible_offsets_by_row_side(feature_rows: list[dict], rule: dict) -> dict[tuple[int, str, int], bool]:
     eligible = {}
     by_offset_side = defaultdict(list)
     for row in list(feature_rows or []):
-        key = (int(row["sample_offset_px"]), str(row["side"]))
+        key = (
+            str(row.get("component_kind") or "attached"),
+            str(row.get("component_id") or "attached_primary"),
+            str(row.get("move_direction") or "outward"),
+            int(row["sample_offset_px"]),
+            str(row["side"]),
+        )
         by_offset_side[key].append(
             {
                 **dict(row),
@@ -279,7 +351,7 @@ def _eligible_offsets_by_row_side(feature_rows: list[dict], rule: dict) -> dict[
         )
 
     continuity_min_support = int(rule.get("continuity_min_support", 0))
-    for (_offset_px, _side), rows in by_offset_side.items():
+    for (_component_kind, _component_id, _move_direction, _offset_px, _side), rows in by_offset_side.items():
         rows.sort(key=lambda item: int(item["y_px"]))
         y_values = [int(item["y_px"]) for item in rows]
         base_flags = [1 if bool(item.get("base_gate_pass")) else 0 for item in rows]
@@ -294,10 +366,33 @@ def _eligible_offsets_by_row_side(feature_rows: list[dict], rule: dict) -> dict[
             while right < len(rows) and int(y_values[right]) <= int(y_px + ROW_CONTINUITY_RADIUS):
                 support_count += int(base_flags[right])
                 right += 1
-            eligible[(int(row["y_px"]), str(row["side"]), int(row["sample_offset_px"]))] = bool(
+            eligible[
+                (
+                    str(row.get("component_kind") or "attached"),
+                    str(row.get("component_id") or "attached_primary"),
+                    str(row.get("move_direction") or "outward"),
+                    int(row["y_px"]),
+                    str(row["side"]),
+                    int(row["sample_offset_px"]),
+                )
+            ] = bool(
                 bool(row.get("base_gate_pass")) and int(support_count) >= int(continuity_min_support)
             )
     return eligible
+
+
+def _preferred_signed_move(*, component_kind: str, outward_max: int, inward_max: int) -> int:
+    outward_max = int(max(0, outward_max))
+    inward_max = int(max(0, inward_max))
+    if str(component_kind or "attached").strip().lower() != "detached":
+        return int(outward_max)
+    if inward_max > outward_max:
+        return int(-inward_max)
+    if outward_max > inward_max:
+        return int(outward_max)
+    if inward_max > 0:
+        return int(-inward_max)
+    return 0
 
 
 def _max_contiguous_move_map(
@@ -309,15 +404,64 @@ def _max_contiguous_move_map(
 ) -> dict[tuple[int, str], int]:
     eligible_offsets = _eligible_offsets_by_row_side(feature_rows, rule)
     move_map = {}
+    component_kind = next(
+        (
+            str(row.get("component_kind") or "attached")
+            for row in list(baseline_edge_rows or [])
+            if row is not None
+        ),
+        "attached",
+    )
+    component_id = next(
+        (
+            str(row.get("component_id") or "attached_primary")
+            for row in list(baseline_edge_rows or [])
+            if row is not None
+        ),
+        "attached_primary",
+    )
     for row in list(baseline_edge_rows or []):
         y_px = int(row["y_px"])
         for side in ("left", "right"):
-            max_contiguous = 0
+            outward_max = 0
+            inward_max = 0
             for offset_px in range(1, int(max_offset_px) + 1):
-                if not bool(eligible_offsets.get((y_px, side, int(offset_px)))):
+                outward_key = (
+                    str(component_kind),
+                    str(component_id),
+                    "outward",
+                    int(y_px),
+                    str(side),
+                    int(offset_px),
+                )
+                inward_key = (
+                    str(component_kind),
+                    str(component_id),
+                    "inward",
+                    int(y_px),
+                    str(side),
+                    int(offset_px),
+                )
+                if not bool(eligible_offsets.get(outward_key)):
                     break
-                max_contiguous = int(offset_px)
-            move_map[(y_px, side)] = int(max_contiguous)
+                outward_max = int(offset_px)
+            for offset_px in range(1, int(max_offset_px) + 1):
+                inward_key = (
+                    str(component_kind),
+                    str(component_id),
+                    "inward",
+                    int(y_px),
+                    str(side),
+                    int(offset_px),
+                )
+                if not bool(eligible_offsets.get(inward_key)):
+                    break
+                inward_max = int(offset_px)
+            move_map[(y_px, side)] = _preferred_signed_move(
+                component_kind=str(component_kind),
+                outward_max=int(outward_max),
+                inward_max=int(inward_max),
+            )
     return move_map
 
 
@@ -336,12 +480,20 @@ def _corrected_edge_rows_for_cap(
     x_max = int(roi["x1"]) - 1
     for row in list(baseline_edge_rows or []):
         y_px = int(row["y_px"])
-        left_move_px = min(int(cap_px), int(move_map.get((y_px, "left"), 0)))
-        right_move_px = min(int(cap_px), int(move_map.get((y_px, "right"), 0)))
-        moved_row_side_count += (1 if left_move_px > 0 else 0) + (1 if right_move_px > 0 else 0)
-        if left_move_px > 0 or right_move_px > 0:
+        left_move_px = int(move_map.get((y_px, "left"), 0))
+        right_move_px = int(move_map.get((y_px, "right"), 0))
+        if abs(int(left_move_px)) > int(cap_px):
+            left_move_px = int((1 if left_move_px > 0 else -1) * int(cap_px))
+        if abs(int(right_move_px)) > int(cap_px):
+            right_move_px = int((1 if right_move_px > 0 else -1) * int(cap_px))
+        moved_row_side_count += (1 if left_move_px != 0 else 0) + (1 if right_move_px != 0 else 0)
+        if left_move_px != 0 or right_move_px != 0:
             moved_row_count += 1
-        max_applied_move_px = max(max_applied_move_px, int(left_move_px), int(right_move_px))
+        max_applied_move_px = max(
+            max_applied_move_px,
+            abs(int(left_move_px)),
+            abs(int(right_move_px)),
+        )
         corrected_left = max(int(x_min), min(int(x_max), int(row["x_left_px"]) - int(left_move_px)))
         corrected_right = max(int(x_min), min(int(x_max), int(row["x_right_px"]) + int(right_move_px)))
         if corrected_right < corrected_left:
@@ -358,6 +510,96 @@ def _corrected_edge_rows_for_cap(
     return corrected_rows, int(moved_row_count), int(moved_row_side_count), int(max_applied_move_px)
 
 
+def _component_key(row: dict) -> tuple[str, str]:
+    return (
+        str(row.get("component_kind") or "attached"),
+        str(row.get("component_id") or "attached_primary"),
+    )
+
+
+def _frame_component_correction(
+    frame_summary: dict,
+    baseline_edge_rows: list[dict],
+    feature_rows: list[dict],
+    *,
+    max_offset_px: int,
+    rule: dict,
+    cap_px: int,
+) -> dict:
+    grouped_edge_rows = defaultdict(list)
+    grouped_feature_rows = defaultdict(list)
+    for row in list(baseline_edge_rows or []):
+        grouped_edge_rows[_component_key(row)].append(dict(row))
+    for row in list(feature_rows or []):
+        grouped_feature_rows[_component_key(row)].append(dict(row))
+
+    corrected_attached_edge_rows = []
+    attached_stats = {
+        "moved_row_count": 0,
+        "moved_row_side_count": 0,
+        "max_applied_move_px": 0,
+    }
+    detached_stats = {
+        "moved_row_count": 0,
+        "moved_row_side_count": 0,
+        "max_applied_move_px": 0,
+        "component_count": 0,
+    }
+    corrected_detached_volume_nl = float(frame_summary.get("detached_visible_volume_nl") or 0.0)
+    detached_component_keys = [
+        key for key in grouped_edge_rows.keys() if str(key[0]).strip().lower() == "detached"
+    ]
+    if detached_component_keys:
+        corrected_detached_volume_nl = 0.0
+
+    for component_key, component_edge_rows in grouped_edge_rows.items():
+        component_feature_rows = list(grouped_feature_rows.get(component_key) or [])
+        move_map = _max_contiguous_move_map(
+            component_edge_rows,
+            component_feature_rows,
+            max_offset_px=max_offset_px,
+            rule=rule,
+        )
+        corrected_rows, moved_row_count, moved_row_side_count, max_applied_move_px = _corrected_edge_rows_for_cap(
+            component_edge_rows,
+            move_map=move_map,
+            cap_px=cap_px,
+            roi=dict(frame_summary["roi"]),
+        )
+        component_kind = str(component_key[0]).strip().lower()
+        if component_kind == "detached":
+            corrected_detached_volume_nl += float(proto_mod._edge_rows_volume_nl(corrected_rows))
+            detached_stats["component_count"] += 1
+            detached_stats["moved_row_count"] += int(moved_row_count)
+            detached_stats["moved_row_side_count"] += int(moved_row_side_count)
+            detached_stats["max_applied_move_px"] = max(
+                int(detached_stats["max_applied_move_px"]),
+                int(max_applied_move_px),
+            )
+        else:
+            corrected_attached_edge_rows = list(corrected_rows)
+            attached_stats["moved_row_count"] += int(moved_row_count)
+            attached_stats["moved_row_side_count"] += int(moved_row_side_count)
+            attached_stats["max_applied_move_px"] = max(
+                int(attached_stats["max_applied_move_px"]),
+                int(max_applied_move_px),
+            )
+
+    if not corrected_attached_edge_rows:
+        corrected_attached_edge_rows = [
+            dict(row)
+            for row in list(baseline_edge_rows or [])
+            if str(row.get("component_kind") or "attached").strip().lower() != "detached"
+        ]
+
+    return {
+        "corrected_attached_edge_rows": corrected_attached_edge_rows,
+        "corrected_detached_volume_nl": float(corrected_detached_volume_nl),
+        "attached_stats": dict(attached_stats),
+        "detached_stats": dict(detached_stats),
+    }
+
+
 def _corrected_frame_row_from_cache(
     archived_row: dict,
     frame_summary: dict,
@@ -368,6 +610,8 @@ def _corrected_frame_row_from_cache(
     rule: dict,
     nozzle_center_px,
     analysis_config: dict | None = None,
+    detached_visible_volume_nl: float | None = None,
+    detached_stats: dict | None = None,
 ) -> dict:
     resolved_config = runtime_mod._resolved_analysis_config(analysis_config)
     roi = dict(frame_summary["roi"])
@@ -378,15 +622,30 @@ def _corrected_frame_row_from_cache(
         roi=roi,
     )
     corrected_attached_volume_nl = proto_mod._edge_rows_volume_nl(corrected_edge_rows)
-    detached_visible_volume_nl = float(frame_summary.get("detached_visible_volume_nl") or 0.0)
-    corrected_total_visible_volume_nl = float(corrected_attached_volume_nl + detached_visible_volume_nl)
+    current_detached_visible_volume_nl = float(frame_summary.get("detached_visible_volume_nl") or 0.0)
+    corrected_detached_visible_volume_nl = float(
+        current_detached_visible_volume_nl
+        if detached_visible_volume_nl is None
+        else detached_visible_volume_nl
+    )
+    corrected_total_visible_volume_nl = float(
+        corrected_attached_volume_nl + corrected_detached_visible_volume_nl
+    )
     current_attached_volume_nl = float(frame_summary.get("current_attached_volume_nl") or 0.0)
     current_total_visible_volume_nl = float(frame_summary.get("current_total_visible_volume_nl") or 0.0)
     attached_delta_nl = float(corrected_attached_volume_nl - current_attached_volume_nl)
+    detached_delta_nl = float(
+        corrected_detached_visible_volume_nl - current_detached_visible_volume_nl
+    )
     total_delta_nl = float(corrected_total_visible_volume_nl - current_total_visible_volume_nl)
     attached_delta_pct = None
     if current_attached_volume_nl != 0.0:
         attached_delta_pct = float((attached_delta_nl / current_attached_volume_nl) * 100.0)
+    detached_delta_pct = None
+    if current_detached_visible_volume_nl != 0.0:
+        detached_delta_pct = float(
+            (detached_delta_nl / current_detached_visible_volume_nl) * 100.0
+        )
     total_delta_pct = None
     if current_total_visible_volume_nl != 0.0:
         total_delta_pct = float((total_delta_nl / current_total_visible_volume_nl) * 100.0)
@@ -410,18 +669,41 @@ def _corrected_frame_row_from_cache(
     corrected_row["width_valid_row_count"] = width_metrics.get("width_valid_row_count")
     corrected_row["visible_volume_nl"] = float(corrected_total_visible_volume_nl)
     corrected_row["attached_visible_volume_nl"] = float(corrected_attached_volume_nl)
-    corrected_row["detached_visible_volume_nl"] = float(detached_visible_volume_nl)
+    corrected_row["detached_visible_volume_nl"] = float(corrected_detached_visible_volume_nl)
     corrected_row["total_visible_volume_nl"] = float(corrected_total_visible_volume_nl)
     corrected_row["correction_rule_candidate_id"] = str(rule["candidate_id"])
     corrected_row["correction_cap_px"] = int(cap_px)
     corrected_row["correction_mode"] = CORRECTION_MODE
     corrected_row["correction_attached_delta_nl"] = float(attached_delta_nl)
     corrected_row["correction_attached_delta_pct"] = attached_delta_pct
+    corrected_row["correction_detached_delta_nl"] = float(detached_delta_nl)
+    corrected_row["correction_detached_delta_pct"] = detached_delta_pct
     corrected_row["correction_total_delta_nl"] = float(total_delta_nl)
     corrected_row["correction_total_delta_pct"] = total_delta_pct
-    corrected_row["correction_moved_row_count"] = int(moved_row_count)
-    corrected_row["correction_moved_row_side_count"] = int(moved_row_side_count)
-    corrected_row["correction_max_row_side_move_px"] = int(max_applied_move_px)
+    detached_stats = dict(detached_stats or {})
+    corrected_row["correction_attached_moved_row_count"] = int(moved_row_count)
+    corrected_row["correction_attached_moved_row_side_count"] = int(moved_row_side_count)
+    corrected_row["correction_detached_moved_row_count"] = int(
+        detached_stats.get("moved_row_count") or 0
+    )
+    corrected_row["correction_detached_moved_row_side_count"] = int(
+        detached_stats.get("moved_row_side_count") or 0
+    )
+    corrected_row["correction_detached_component_count"] = int(
+        detached_stats.get("component_count") or 0
+    )
+    corrected_row["correction_moved_row_count"] = int(
+        int(moved_row_count) + int(detached_stats.get("moved_row_count") or 0)
+    )
+    corrected_row["correction_moved_row_side_count"] = int(
+        int(moved_row_side_count) + int(detached_stats.get("moved_row_side_count") or 0)
+    )
+    corrected_row["correction_max_row_side_move_px"] = int(
+        max(
+            int(max_applied_move_px),
+            int(detached_stats.get("max_applied_move_px") or 0),
+        )
+    )
     return corrected_row
 
 
@@ -484,16 +766,7 @@ def _run_context_for_cap(
     density_g_per_ml: float | int,
 ) -> dict:
     correction_context = dict(run_cache["run_manifest"].get("correction_context") or {})
-    move_map_by_frame = {}
     max_offset_px = int(run_cache["max_offset_px"])
-    for frame_key, feature_rows in run_cache["feature_rows_by_key"].items():
-        baseline_edge_rows = list(run_cache["edge_rows_by_key"].get(frame_key) or [])
-        move_map_by_frame[frame_key] = _max_contiguous_move_map(
-            baseline_edge_rows,
-            feature_rows,
-            max_offset_px=max_offset_px,
-            rule=rule,
-        )
 
     corrected_frame_rows = []
     for frame_key, archived_row in run_cache["archived_rows_in_order"]:
@@ -502,16 +775,42 @@ def _run_context_for_cap(
             corrected_frame_rows.append(dict(archived_row))
             continue
         baseline_edge_rows = list(run_cache["edge_rows_by_key"].get(frame_key) or [])
+        feature_rows = list(run_cache["feature_rows_by_key"].get(frame_key) or [])
+        component_correction = _frame_component_correction(
+            frame_summary,
+            baseline_edge_rows,
+            feature_rows,
+            max_offset_px=max_offset_px,
+            rule=rule,
+            cap_px=int(cap_px),
+        )
+        attached_baseline_edge_rows = [
+            dict(row)
+            for row in list(baseline_edge_rows or [])
+            if str(row.get("component_kind") or "attached").strip().lower() != "detached"
+        ]
+        attached_move_map = _max_contiguous_move_map(
+            attached_baseline_edge_rows,
+            [
+                dict(row)
+                for row in list(feature_rows or [])
+                if str(row.get("component_kind") or "attached").strip().lower() != "detached"
+            ],
+            max_offset_px=max_offset_px,
+            rule=rule,
+        )
         corrected_frame_rows.append(
             _corrected_frame_row_from_cache(
                 archived_row,
                 frame_summary,
-                baseline_edge_rows,
-                move_map=move_map_by_frame.get(frame_key, {}),
+                attached_baseline_edge_rows,
+                move_map=attached_move_map,
                 cap_px=cap_px,
                 rule=rule,
                 nozzle_center_px=list(correction_context.get("nozzle_center_px") or [0, 0]),
                 analysis_config=(run_cache["plan_snapshot"].get("analysis_config") or None),
+                detached_visible_volume_nl=component_correction["corrected_detached_volume_nl"],
+                detached_stats=component_correction["detached_stats"],
             )
         )
 

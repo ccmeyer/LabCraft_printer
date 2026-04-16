@@ -136,122 +136,213 @@ def _pixel_metrics_from_planes(planes: dict, *, y_px: int, x_px: int) -> dict:
     }
 
 
-def _extract_row_side_offset_features(frame_analysis: dict, *, max_offset_px: int) -> list[dict]:
+def _component_baseline_edge_rows(
+    frame_analysis: dict,
+    *,
+    component_kind: str,
+    component_id: str,
+    edge_rows: list[dict],
+) -> list[dict]:
+    rows = []
+    run_id = _clean_text((frame_analysis.get("run_dir") or Path("")).name)
+    for row in list(edge_rows or []):
+        rows.append(
+            {
+                "run_id": run_id,
+                "capture_id": _clean_text(frame_analysis.get("capture_id")),
+                "capture_index": frame_analysis.get("capture_index"),
+                "delay_us": int(frame_analysis["delay_us"]),
+                "delay_from_emergence_us": int(frame_analysis["delay_from_emergence_us"]),
+                "component_kind": str(component_kind),
+                "component_id": str(component_id),
+                "y_px": int(row["y_px"]),
+                "x_left_px": int(row["x_left_px"]),
+                "x_right_px": int(row["x_right_px"]),
+                "width_px": int(row["width_px"]),
+                "center_x_px": float(row["center_x_px"]),
+            }
+        )
+    return rows
+
+
+def _extract_component_row_side_offset_features(
+    frame_analysis: dict,
+    *,
+    component_kind: str,
+    component_id: str,
+    component_mask,
+    edge_rows: list[dict],
+    move_directions: tuple[str, ...],
+    max_offset_px: int,
+) -> list[dict]:
     roi = dict(frame_analysis["roi"])
-    attached_mask = proto_mod._ensure_mask(
-        frame_analysis["attached_mask"],
+    resolved_component_mask = proto_mod._ensure_mask(
+        component_mask,
         shape=(int(roi["height"]), int(roi["width"])),
     )
     threshold_value = frame_analysis.get("threshold_value")
     planes = _descriptor_planes(frame_analysis)
     features = []
-    for edge_row in list(frame_analysis.get("attached_edge_rows") or []):
+    for edge_row in list(edge_rows or []):
         y_px = int(edge_row["y_px"])
         local_y = int(y_px - int(roi["y0"]))
-        if local_y < 0 or local_y >= attached_mask.shape[0]:
+        if local_y < 0 or local_y >= resolved_component_mask.shape[0]:
             continue
         for side in ("left", "right"):
-            direction = -1 if side == "left" else 1
             current_x_px = int(edge_row["x_left_px"] if side == "left" else edge_row["x_right_px"])
             current_local_x = int(current_x_px - int(roi["x0"]))
             current_in_bounds = bool(
                 int(roi["x0"]) <= int(current_x_px) < int(roi["x1"])
-                and 0 <= int(current_local_x) < attached_mask.shape[1]
+                and 0 <= int(current_local_x) < resolved_component_mask.shape[1]
             )
             edge_metrics = (
                 _pixel_metrics_from_planes(planes, y_px=y_px, x_px=current_x_px)
                 if current_in_bounds
                 else None
             )
-            contiguous_to_attached_mask = bool(
-                current_in_bounds and attached_mask[local_y, current_local_x] > 0
+            contiguous_to_component_mask = bool(
+                current_in_bounds and resolved_component_mask[local_y, current_local_x] > 0
             )
-            for offset_px in range(1, int(max_offset_px) + 1):
-                sample_x_px = int(current_x_px + (direction * int(offset_px)))
-                sample_local_x = int(sample_x_px - int(roi["x0"]))
-                sample_in_bounds = bool(
-                    int(roi["x0"]) <= int(sample_x_px) < int(roi["x1"])
-                    and 0 <= int(sample_local_x) < attached_mask.shape[1]
-                )
-                sample_metrics = (
-                    _pixel_metrics_from_planes(planes, y_px=y_px, x_px=sample_x_px)
-                    if sample_in_bounds
-                    else None
-                )
-                sample_is_excluded = bool(
-                    sample_in_bounds and attached_mask[local_y, sample_local_x] == 0
-                )
-                intermediate_offsets = list(range(1, int(offset_px) + 1))
-                intermediate_positions = [int(current_x_px + (direction * value)) for value in intermediate_offsets]
-                intermediate_in_bounds = all(
-                    int(roi["x0"]) <= int(position) < int(roi["x1"])
-                    for position in intermediate_positions
-                )
-                intermediate_pixels_all_excluded = bool(intermediate_in_bounds)
-                intermediate_excluded_count = 0
-                for position in intermediate_positions:
-                    local_x = int(position - int(roi["x0"]))
-                    if not (0 <= local_x < attached_mask.shape[1]):
-                        intermediate_pixels_all_excluded = False
-                        continue
-                    excluded = bool(attached_mask[local_y, local_x] == 0)
-                    intermediate_excluded_count += 1 if excluded else 0
-                    intermediate_pixels_all_excluded = bool(intermediate_pixels_all_excluded and excluded)
+            for move_direction in move_directions:
+                if str(move_direction) not in {"outward", "inward"}:
+                    continue
+                direction = -1 if side == "left" else 1
+                if str(move_direction) == "inward":
+                    direction *= -1
+                for offset_px in range(1, int(max_offset_px) + 1):
+                    sample_x_px = int(current_x_px + (direction * int(offset_px)))
+                    sample_local_x = int(sample_x_px - int(roi["x0"]))
+                    sample_in_bounds = bool(
+                        int(roi["x0"]) <= int(sample_x_px) < int(roi["x1"])
+                        and 0 <= int(sample_local_x) < resolved_component_mask.shape[1]
+                    )
+                    sample_metrics = (
+                        _pixel_metrics_from_planes(planes, y_px=y_px, x_px=sample_x_px)
+                        if sample_in_bounds
+                        else None
+                    )
+                    sample_is_included = bool(
+                        sample_in_bounds and resolved_component_mask[local_y, sample_local_x] > 0
+                    )
+                    sample_is_excluded = bool(sample_in_bounds and not sample_is_included)
+                    intermediate_offsets = list(range(1, int(offset_px) + 1))
+                    intermediate_positions = [
+                        int(current_x_px + (direction * value))
+                        for value in intermediate_offsets
+                    ]
+                    intermediate_in_bounds = all(
+                        int(roi["x0"]) <= int(position) < int(roi["x1"])
+                        for position in intermediate_positions
+                    )
+                    intermediate_pixels_all_excluded = bool(intermediate_in_bounds)
+                    intermediate_pixels_all_included = bool(intermediate_in_bounds)
+                    intermediate_excluded_count = 0
+                    intermediate_included_count = 0
+                    for position in intermediate_positions:
+                        local_x = int(position - int(roi["x0"]))
+                        if not (0 <= local_x < resolved_component_mask.shape[1]):
+                            intermediate_pixels_all_excluded = False
+                            intermediate_pixels_all_included = False
+                            continue
+                        included = bool(resolved_component_mask[local_y, local_x] > 0)
+                        excluded = bool(not included)
+                        intermediate_excluded_count += 1 if excluded else 0
+                        intermediate_included_count += 1 if included else 0
+                        intermediate_pixels_all_excluded = bool(
+                            intermediate_pixels_all_excluded and excluded
+                        )
+                        intermediate_pixels_all_included = bool(
+                            intermediate_pixels_all_included and included
+                        )
 
-                gray_sample = None if sample_metrics is None else int(sample_metrics["gray"])
-                gray_headroom = None
-                if gray_sample is not None and threshold_value is not None:
-                    gray_headroom = float(gray_sample) - float(threshold_value)
-                delta_lab_chroma = None
-                if edge_metrics is not None and sample_metrics is not None:
-                    delta_lab_chroma = float(sample_metrics["lab_chroma"]) - float(edge_metrics["lab_chroma"])
-                features.append(
-                    {
-                        "run_id": _clean_text((frame_analysis.get("run_dir") or Path("")).name),
-                        "capture_id": _clean_text(frame_analysis.get("capture_id")),
-                        "capture_index": frame_analysis.get("capture_index"),
-                        "delay_us": int(frame_analysis["delay_us"]),
-                        "delay_from_emergence_us": int(frame_analysis["delay_from_emergence_us"]),
-                        "y_px": int(y_px),
-                        "side": str(side),
-                        "current_x_px": int(current_x_px),
-                        "sample_offset_px": int(offset_px),
-                        "sample_x_px": int(sample_x_px),
-                        "sample_in_bounds": bool(sample_in_bounds),
-                        "contiguous_to_attached_mask": bool(contiguous_to_attached_mask),
-                        "sample_is_excluded": bool(sample_is_excluded),
-                        "intermediate_pixels_all_excluded": bool(intermediate_pixels_all_excluded),
-                        "intermediate_excluded_count": int(intermediate_excluded_count),
-                        "threshold_value": threshold_value,
-                        "gray_edge": None if edge_metrics is None else int(edge_metrics["gray"]),
-                        "gray_sample": gray_sample,
-                        "gray_headroom": gray_headroom,
-                        "b_edge": None if edge_metrics is None else int(edge_metrics["b"]),
-                        "g_edge": None if edge_metrics is None else int(edge_metrics["g"]),
-                        "r_edge": None if edge_metrics is None else int(edge_metrics["r"]),
-                        "b_sample": None if sample_metrics is None else int(sample_metrics["b"]),
-                        "g_sample": None if sample_metrics is None else int(sample_metrics["g"]),
-                        "r_sample": None if sample_metrics is None else int(sample_metrics["r"]),
-                        "edge_bg_gap": None if edge_metrics is None else float(edge_metrics["bg_gap"]),
-                        "sample_bg_gap": None if sample_metrics is None else float(sample_metrics["bg_gap"]),
-                        "edge_gr_gap": None if edge_metrics is None else float(edge_metrics["gr_gap"]),
-                        "sample_gr_gap": None if sample_metrics is None else float(sample_metrics["gr_gap"]),
-                        "edge_br_gap": None if edge_metrics is None else float(edge_metrics["br_gap"]),
-                        "sample_br_gap": None if sample_metrics is None else float(sample_metrics["br_gap"]),
-                        "edge_rb_chroma": None if edge_metrics is None else float(edge_metrics["rb_chroma"]),
-                        "sample_rb_chroma": None if sample_metrics is None else float(sample_metrics["rb_chroma"]),
-                        "edge_blue_excess": None if edge_metrics is None else float(edge_metrics["blue_excess"]),
-                        "sample_blue_excess": None if sample_metrics is None else float(sample_metrics["blue_excess"]),
-                        "edge_lab_a": None if edge_metrics is None else float(edge_metrics["lab_a"]),
-                        "edge_lab_b": None if edge_metrics is None else float(edge_metrics["lab_b"]),
-                        "edge_lab_chroma": None if edge_metrics is None else float(edge_metrics["lab_chroma"]),
-                        "sample_lab_a": None if sample_metrics is None else float(sample_metrics["lab_a"]),
-                        "sample_lab_b": None if sample_metrics is None else float(sample_metrics["lab_b"]),
-                        "sample_lab_chroma": None if sample_metrics is None else float(sample_metrics["lab_chroma"]),
-                        "delta_lab_chroma": delta_lab_chroma,
-                    }
-                )
+                    gray_edge = None if edge_metrics is None else int(edge_metrics["gray"])
+                    gray_sample = None if sample_metrics is None else int(sample_metrics["gray"])
+                    gray_headroom = None
+                    edge_gray_margin = None
+                    sample_gray_drop = None
+                    if gray_sample is not None and threshold_value is not None:
+                        gray_headroom = float(gray_sample) - float(threshold_value)
+                    if gray_edge is not None and threshold_value is not None:
+                        edge_gray_margin = float(threshold_value) - float(gray_edge)
+                    if gray_edge is not None and gray_sample is not None:
+                        sample_gray_drop = float(gray_edge) - float(gray_sample)
+                    delta_lab_chroma = None
+                    if edge_metrics is not None and sample_metrics is not None:
+                        delta_lab_chroma = float(sample_metrics["lab_chroma"]) - float(
+                            edge_metrics["lab_chroma"]
+                        )
+                    features.append(
+                        {
+                            "run_id": _clean_text((frame_analysis.get("run_dir") or Path("")).name),
+                            "capture_id": _clean_text(frame_analysis.get("capture_id")),
+                            "capture_index": frame_analysis.get("capture_index"),
+                            "delay_us": int(frame_analysis["delay_us"]),
+                            "delay_from_emergence_us": int(frame_analysis["delay_from_emergence_us"]),
+                            "component_kind": str(component_kind),
+                            "component_id": str(component_id),
+                            "move_direction": str(move_direction),
+                            "y_px": int(y_px),
+                            "side": str(side),
+                            "current_x_px": int(current_x_px),
+                            "sample_offset_px": int(offset_px),
+                            "sample_x_px": int(sample_x_px),
+                            "sample_in_bounds": bool(sample_in_bounds),
+                            "contiguous_to_component_mask": bool(contiguous_to_component_mask),
+                            "contiguous_to_attached_mask": bool(contiguous_to_component_mask),
+                            "sample_is_included": bool(sample_is_included),
+                            "sample_is_excluded": bool(sample_is_excluded),
+                            "intermediate_pixels_all_included": bool(
+                                intermediate_pixels_all_included
+                            ),
+                            "intermediate_pixels_all_excluded": bool(
+                                intermediate_pixels_all_excluded
+                            ),
+                            "intermediate_included_count": int(intermediate_included_count),
+                            "intermediate_excluded_count": int(intermediate_excluded_count),
+                            "threshold_value": threshold_value,
+                            "gray_edge": gray_edge,
+                            "gray_sample": gray_sample,
+                            "gray_headroom": gray_headroom,
+                            "edge_gray_margin": edge_gray_margin,
+                            "sample_gray_drop": sample_gray_drop,
+                            "b_edge": None if edge_metrics is None else int(edge_metrics["b"]),
+                            "g_edge": None if edge_metrics is None else int(edge_metrics["g"]),
+                            "r_edge": None if edge_metrics is None else int(edge_metrics["r"]),
+                            "b_sample": None if sample_metrics is None else int(sample_metrics["b"]),
+                            "g_sample": None if sample_metrics is None else int(sample_metrics["g"]),
+                            "r_sample": None if sample_metrics is None else int(sample_metrics["r"]),
+                            "edge_bg_gap": None if edge_metrics is None else float(edge_metrics["bg_gap"]),
+                            "sample_bg_gap": None if sample_metrics is None else float(sample_metrics["bg_gap"]),
+                            "edge_gr_gap": None if edge_metrics is None else float(edge_metrics["gr_gap"]),
+                            "sample_gr_gap": None if sample_metrics is None else float(sample_metrics["gr_gap"]),
+                            "edge_br_gap": None if edge_metrics is None else float(edge_metrics["br_gap"]),
+                            "sample_br_gap": None if sample_metrics is None else float(sample_metrics["br_gap"]),
+                            "edge_rb_chroma": None if edge_metrics is None else float(edge_metrics["rb_chroma"]),
+                            "sample_rb_chroma": None if sample_metrics is None else float(sample_metrics["rb_chroma"]),
+                            "edge_blue_excess": None if edge_metrics is None else float(edge_metrics["blue_excess"]),
+                            "sample_blue_excess": None if sample_metrics is None else float(sample_metrics["blue_excess"]),
+                            "edge_lab_a": None if edge_metrics is None else float(edge_metrics["lab_a"]),
+                            "edge_lab_b": None if edge_metrics is None else float(edge_metrics["lab_b"]),
+                            "edge_lab_chroma": None if edge_metrics is None else float(edge_metrics["lab_chroma"]),
+                            "sample_lab_a": None if sample_metrics is None else float(sample_metrics["lab_a"]),
+                            "sample_lab_b": None if sample_metrics is None else float(sample_metrics["lab_b"]),
+                            "sample_lab_chroma": None if sample_metrics is None else float(sample_metrics["lab_chroma"]),
+                            "delta_lab_chroma": delta_lab_chroma,
+                        }
+                    )
     return features
+
+
+def _extract_row_side_offset_features(frame_analysis: dict, *, max_offset_px: int) -> list[dict]:
+    return _extract_component_row_side_offset_features(
+        frame_analysis,
+        component_kind="attached",
+        component_id="attached_primary",
+        component_mask=frame_analysis.get("attached_mask"),
+        edge_rows=list(frame_analysis.get("attached_edge_rows") or []),
+        move_directions=("outward",),
+        max_offset_px=int(max_offset_px),
+    )
 
 
 def _frame_summary_row(
@@ -273,6 +364,7 @@ def _frame_summary_row(
         "image_relpath": _clean_text(image_ref.get("image_relpath")) or str(frame_analysis["image_path"]),
         "threshold_value": frame_analysis.get("threshold_value"),
         "attached_edge_row_count": int(len(frame_analysis.get("attached_edge_rows") or [])),
+        "detached_component_count": int(len(frame_analysis.get("detached_components") or [])),
         "feature_row_count": int(feature_row_count),
         "current_attached_volume_nl": float(frame_analysis.get("current_attached_volume_nl") or 0.0),
         "current_total_visible_volume_nl": float(frame_analysis.get("current_total_visible_volume_nl") or 0.0),
@@ -286,21 +378,23 @@ def _frame_summary_row(
 
 def _baseline_edge_rows(frame_analysis: dict) -> list[dict]:
     rows = []
-    run_id = _clean_text((frame_analysis.get("run_dir") or Path("")).name)
-    for row in list(frame_analysis.get("attached_edge_rows") or []):
-        rows.append(
-            {
-                "run_id": run_id,
-                "capture_id": _clean_text(frame_analysis.get("capture_id")),
-                "capture_index": frame_analysis.get("capture_index"),
-                "delay_us": int(frame_analysis["delay_us"]),
-                "delay_from_emergence_us": int(frame_analysis["delay_from_emergence_us"]),
-                "y_px": int(row["y_px"]),
-                "x_left_px": int(row["x_left_px"]),
-                "x_right_px": int(row["x_right_px"]),
-                "width_px": int(row["width_px"]),
-                "center_x_px": float(row["center_x_px"]),
-            }
+    rows.extend(
+        _component_baseline_edge_rows(
+            frame_analysis,
+            component_kind="attached",
+            component_id="attached_primary",
+            edge_rows=list(frame_analysis.get("attached_edge_rows") or []),
+        )
+    )
+    for index, component in enumerate(list(frame_analysis.get("detached_components") or []), start=1):
+        component_id = _clean_text(dict(component).get("component_id")) or f"detached_{index:02d}"
+        rows.extend(
+            _component_baseline_edge_rows(
+                frame_analysis,
+                component_kind="detached",
+                component_id=str(component_id),
+                edge_rows=list(dict(component).get("edge_rows") or []),
+            )
         )
     return rows
 
@@ -351,10 +445,29 @@ def _run_cache_payload(
             run_label=str(metadata_row.get("Dataset name") or ""),
             run_dir=run_dir,
         )
-        offset_rows = _extract_row_side_offset_features(
+        offset_rows = _extract_component_row_side_offset_features(
             frame_analysis,
+            component_kind="attached",
+            component_id="attached_primary",
+            component_mask=frame_analysis.get("attached_mask"),
+            edge_rows=list(frame_analysis.get("attached_edge_rows") or []),
+            move_directions=("outward",),
             max_offset_px=int(max_offset_px),
         )
+        for index, component in enumerate(list(frame_analysis.get("detached_components") or []), start=1):
+            component_record = dict(component or {})
+            component_id = _clean_text(component_record.get("component_id")) or f"detached_{index:02d}"
+            offset_rows.extend(
+                _extract_component_row_side_offset_features(
+                    frame_analysis,
+                    component_kind="detached",
+                    component_id=str(component_id),
+                    component_mask=component_record.get("final_mask"),
+                    edge_rows=list(component_record.get("edge_rows") or []),
+                    move_directions=("outward", "inward"),
+                    max_offset_px=int(max_offset_px),
+                )
+            )
         frame_summaries.append(
             _frame_summary_row(
                 record,

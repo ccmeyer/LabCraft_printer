@@ -76,27 +76,55 @@ def _feature(
     side: str,
     offset_px: int,
     *,
+    component_kind: str = "attached",
+    component_id: str = "attached_primary",
+    move_direction: str = "outward",
     current_x_px: int | None = None,
     sample_in_bounds: bool = True,
+    sample_is_included: bool = False,
     sample_is_excluded: bool = True,
+    contiguous_to_component_mask: bool | None = None,
     contiguous_to_attached_mask: bool = True,
+    intermediate_pixels_all_included: bool = False,
     intermediate_pixels_all_excluded: bool = True,
+    threshold_value: float = 140.0,
+    gray_edge: float = 130.0,
+    gray_sample: float = 150.0,
     gray_headroom: float = 10.0,
+    edge_gray_margin: float | None = None,
+    sample_gray_drop: float | None = None,
     delta_lab_chroma: float = -8.0,
     edge_bg_gap: float = 60.0,
 ):
     if current_x_px is None:
         current_x_px = 120 if side == "left" else 150
+    if contiguous_to_component_mask is None:
+        contiguous_to_component_mask = contiguous_to_attached_mask
+    if edge_gray_margin is None:
+        edge_gray_margin = float(threshold_value) - float(gray_edge)
+    if sample_gray_drop is None:
+        sample_gray_drop = float(gray_edge) - float(gray_sample)
     return {
+        "component_kind": str(component_kind),
+        "component_id": str(component_id),
+        "move_direction": str(move_direction),
         "y_px": int(y_px),
         "side": str(side),
         "current_x_px": int(current_x_px),
         "sample_offset_px": int(offset_px),
         "sample_in_bounds": bool(sample_in_bounds),
+        "sample_is_included": bool(sample_is_included),
         "sample_is_excluded": bool(sample_is_excluded),
+        "contiguous_to_component_mask": bool(contiguous_to_component_mask),
         "contiguous_to_attached_mask": bool(contiguous_to_attached_mask),
+        "intermediate_pixels_all_included": bool(intermediate_pixels_all_included),
         "intermediate_pixels_all_excluded": bool(intermediate_pixels_all_excluded),
+        "threshold_value": float(threshold_value),
+        "gray_edge": float(gray_edge),
+        "gray_sample": float(gray_sample),
         "gray_headroom": float(gray_headroom),
+        "edge_gray_margin": float(edge_gray_margin),
+        "sample_gray_drop": float(sample_gray_drop),
         "delta_lab_chroma": float(delta_lab_chroma),
         "edge_bg_gap": float(edge_bg_gap),
     }
@@ -206,6 +234,73 @@ def test_continuity_is_evaluated_per_offset_not_borrowed_from_offset_one():
     assert move_map[(302, "right")] == 1
 
 
+def test_detached_move_map_can_choose_inward_when_detached_support_is_stronger():
+    edge_rows = [
+        {
+            **_edge_row(300),
+            "component_kind": "detached",
+            "component_id": "detached_01",
+        }
+    ]
+    features = [
+        _feature(
+            300,
+            "left",
+            1,
+            component_kind="detached",
+            component_id="detached_01",
+            move_direction="outward",
+        ),
+        _feature(
+            300,
+            "left",
+            1,
+            component_kind="detached",
+            component_id="detached_01",
+            move_direction="inward",
+            sample_is_included=True,
+            sample_is_excluded=False,
+            intermediate_pixels_all_included=True,
+            intermediate_pixels_all_excluded=False,
+            gray_sample=118.0,
+            gray_headroom=-22.0,
+            edge_gray_margin=10.0,
+            sample_gray_drop=12.0,
+            delta_lab_chroma=-4.0,
+        ),
+        _feature(
+            300,
+            "left",
+            2,
+            component_kind="detached",
+            component_id="detached_01",
+            move_direction="inward",
+            sample_is_included=True,
+            sample_is_excluded=False,
+            intermediate_pixels_all_included=True,
+            intermediate_pixels_all_excluded=False,
+            gray_sample=116.0,
+            gray_headroom=-24.0,
+            edge_gray_margin=10.0,
+            sample_gray_drop=14.0,
+            delta_lab_chroma=-5.0,
+        ),
+    ]
+    rule = {
+        "gray_headroom_px": 40,
+        "delta_lab_chroma_max": -4.0,
+        "edge_bg_gap_min": 45,
+        "continuity_min_support": 1,
+        "detached_inward_edge_gray_margin_max": 18.0,
+        "detached_inward_gray_drop_min": 4.0,
+        "detached_inward_delta_lab_chroma_max": -1.0,
+    }
+
+    move_map = mod._max_contiguous_move_map(edge_rows, features, max_offset_px=2, rule=rule)
+
+    assert move_map[(300, "left")] == -2
+
+
 def test_cap_one_matches_direct_single_offset_v2_correction():
     edge_rows = [_edge_row(300 + idx) for idx in range(5)]
     cache_features = []
@@ -236,6 +331,88 @@ def test_cap_one_matches_direct_single_offset_v2_correction():
     assert proto_mod._edge_rows_volume_nl(corrected_rows) == pytest.approx(
         proto_mod._edge_rows_volume_nl(direct_rows)
     )
+
+
+def test_frame_component_correction_recomputes_detached_volume_with_inward_moves():
+    attached_rows = [
+        {
+            **_edge_row(300 + idx, x_left=120, x_right=150),
+            "component_kind": "attached",
+            "component_id": "attached_primary",
+        }
+        for idx in range(5)
+    ]
+    detached_rows = [
+        {
+            **_edge_row(320 + idx, x_left=126, x_right=144),
+            "component_kind": "detached",
+            "component_id": "detached_01",
+        }
+        for idx in range(5)
+    ]
+    baseline_edge_rows = attached_rows + detached_rows
+    detached_current_volume_nl = proto_mod._edge_rows_volume_nl(detached_rows)
+    frame_summary = {
+        "delay_us": 4000,
+        "delay_from_emergence_us": 3000,
+        "current_attached_volume_nl": proto_mod._edge_rows_volume_nl(attached_rows),
+        "current_total_visible_volume_nl": proto_mod._edge_rows_volume_nl(attached_rows)
+        + detached_current_volume_nl,
+        "detached_visible_volume_nl": detached_current_volume_nl,
+        "roi": {"x0": 100, "y0": 250, "x1": 200, "y1": 360, "width": 100, "height": 110},
+    }
+    features = []
+    for edge in detached_rows:
+        for side in ("left", "right"):
+            features.extend(
+                [
+                    _feature(
+                        int(edge["y_px"]),
+                        side,
+                        1,
+                        component_kind="detached",
+                        component_id="detached_01",
+                        move_direction="inward",
+                        current_x_px=int(
+                            edge["x_left_px"] if side == "left" else edge["x_right_px"]
+                        ),
+                        sample_is_included=True,
+                        sample_is_excluded=False,
+                        contiguous_to_component_mask=True,
+                        intermediate_pixels_all_included=True,
+                        intermediate_pixels_all_excluded=False,
+                        gray_edge=132.0,
+                        gray_sample=118.0,
+                        gray_headroom=-22.0,
+                        edge_gray_margin=8.0,
+                        sample_gray_drop=14.0,
+                        delta_lab_chroma=-4.0,
+                    )
+                ]
+            )
+    rule = {
+        "candidate_id": "detached_inward_rule",
+        "gray_headroom_px": 40,
+        "delta_lab_chroma_max": -4.0,
+        "edge_bg_gap_min": 45,
+        "continuity_min_support": 1,
+        "detached_inward_edge_gray_margin_max": 18.0,
+        "detached_inward_gray_drop_min": 4.0,
+        "detached_inward_delta_lab_chroma_max": -1.0,
+    }
+
+    correction = mod._frame_component_correction(
+        frame_summary,
+        baseline_edge_rows,
+        features,
+        max_offset_px=1,
+        rule=rule,
+        cap_px=1,
+    )
+
+    assert correction["corrected_detached_volume_nl"] < detached_current_volume_nl
+    assert correction["detached_stats"]["moved_row_side_count"] > 0
+    assert correction["detached_stats"]["component_count"] == 1
 
 
 def test_corrected_frame_row_preserves_archived_fields_and_recomputes_metrics():
@@ -320,6 +497,49 @@ def test_cap_zero_returns_baseline_geometry_and_volumes():
     assert corrected_row["attached_visible_volume_nl"] == pytest.approx(attached_volume_nl)
     assert corrected_row["visible_volume_nl"] == pytest.approx(attached_volume_nl)
     assert corrected_row["correction_max_row_side_move_px"] == 0
+
+
+def test_corrected_frame_row_records_detached_correction_metrics():
+    edge_rows = [_edge_row(300 + idx) for idx in range(5)]
+    attached_volume_nl = proto_mod._edge_rows_volume_nl(edge_rows)
+    frame_summary = {
+        "delay_us": 4000,
+        "delay_from_emergence_us": 3000,
+        "current_attached_volume_nl": attached_volume_nl,
+        "current_total_visible_volume_nl": attached_volume_nl + 4.0,
+        "detached_visible_volume_nl": 4.0,
+        "roi": {"x0": 100, "y0": 250, "x1": 200, "y1": 360, "width": 100, "height": 110},
+    }
+    archived_row = _archived_frame_row(
+        phase="flow_rate",
+        delay_from_emergence_us=3000,
+        capture_index=1,
+        visible_volume_nl=10.0,
+        attached_width_px=60.0,
+    )
+    move_map = {(int(row["y_px"]), side): 0 for row in edge_rows for side in ("left", "right")}
+
+    corrected_row = mod._corrected_frame_row_from_cache(
+        archived_row,
+        frame_summary,
+        edge_rows,
+        move_map=move_map,
+        cap_px=0,
+        rule={"candidate_id": "rule"},
+        nozzle_center_px=[150, 250],
+        analysis_config={
+            "near_nozzle_band_top_px": 40,
+            "near_nozzle_band_height_px": 40,
+            "min_band_valid_rows": 1,
+        },
+        detached_visible_volume_nl=2.5,
+        detached_stats={"moved_row_count": 3, "moved_row_side_count": 6, "max_applied_move_px": 1, "component_count": 1},
+    )
+
+    assert corrected_row["detached_visible_volume_nl"] == pytest.approx(2.5)
+    assert corrected_row["correction_detached_delta_nl"] == pytest.approx(-1.5)
+    assert corrected_row["correction_detached_moved_row_count"] == 3
+    assert corrected_row["correction_detached_component_count"] == 1
 
 
 def test_corrected_attached_volume_is_monotonic_with_increasing_cap():

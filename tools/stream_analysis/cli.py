@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 
 from tools.stream_analysis import fit as fit_mod
+from tools.stream_analysis.online_halo_debug_frame import export_online_halo_debug_bundle
 from tools.stream_analysis.annotations import (
     diagnose_nozzle_candidates,
     evaluate_nozzle_annotations,
@@ -1446,6 +1447,31 @@ def build_parser():
         default=50,
         help="Maximum number of overlay frames to export per diagnostics category.",
     )
+
+    halo_debug = subparsers.add_parser(
+        "halo-debug-frame",
+        help="Build a single-frame halo debug bundle for an online stream capture.",
+    )
+    halo_debug.add_argument(
+        "--experiment-root",
+        required=True,
+        help="Experiment directory, stream_metadata.csv, calibration_recordings dir, process dir, or run dir.",
+    )
+    halo_debug.add_argument(
+        "--run-id",
+        required=True,
+        help="OnlineStreamCalibrationProcess run id containing the target frame.",
+    )
+    halo_debug.add_argument(
+        "--capture-id",
+        required=True,
+        help="Saved capture id to analyze, for example cap_000014.",
+    )
+    halo_debug.add_argument(
+        "--output-root",
+        default="",
+        help="Optional output directory. Defaults to the experiment-local halo debug directory.",
+    )
     return parser
 
 
@@ -1816,6 +1842,13 @@ def main(argv=None):
             limit_runs=(args.limit_runs or None),
             include_unmatched=bool(args.include_unmatched),
             limit_worst_frames=int(args.limit_worst_frames),
+        )
+    elif args.command == "halo-debug-frame":
+        payload = export_online_halo_debug_bundle(
+            args.experiment_root,
+            args.run_id,
+            args.capture_id,
+            output_root=args.output_root or None,
         )
     else:
         parser.error(f"Unsupported command: {args.command}")
