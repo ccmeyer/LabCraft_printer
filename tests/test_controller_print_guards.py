@@ -1,4 +1,3 @@
-import Controller as controller_module
 from types import SimpleNamespace
 from unittest.mock import Mock, call
 
@@ -13,81 +12,354 @@ class Emitter:
         self.calls.append(args)
 
 
-def _controller_for_print_guard(calibration_ok, gripper_info, regulation_on):
-    c = Controller.__new__(Controller)
-    c.error_occurred_signal = Emitter()
-    c.close_gripper = Mock()
-    c.move_to_location = Mock()
-    c.enable_print_profile = Mock()
-    c.print_droplets = Mock()
+class FakeWell:
+    def __init__(self, well_id, remaining, coords=None):
+        self.well_id = well_id
+        self.remaining = int(remaining)
+        self.coords = coords or {"X": 1, "Y": 2, "Z": 3}
+        self.record_calls = []
 
+    def get_remaining_droplets(self, _stock_id):
+        return self.remaining
+
+    def get_coordinates(self):
+        return dict(self.coords)
+
+    def record_stock_print(self, stock_id, droplets):
+        droplets = int(droplets)
+        self.record_calls.append((stock_id, droplets))
+        self.remaining = max(0, self.remaining - droplets)
+
+
+class FakeWellPlate:
+    def __init__(self, wells, calibration_ok=True):
+        self.wells = {well.well_id: well for well in wells}
+        self._calibration_ok = bool(calibration_ok)
+
+    def check_calibration_applied(self):
+        return self._calibration_ok
+
+    def get_all_wells_with_reactions(self, fill_by="rows"):
+        assert fill_by == "rows"
+        return list(self.wells.values())
+
+    def get_well(self, well_id):
+        return self.wells.get(well_id)
+
+
+def _make_printer_head(stock_id="stock-a", calibration_complete=False, current_volume=20.0, droplet_volume=1000.0):
+    return SimpleNamespace(
+        get_stock_id=lambda: stock_id,
+        check_calibration_complete=lambda: calibration_complete,
+        get_current_volume=lambda: current_volume,
+        get_target_droplet_volume=lambda: droplet_volume,
+        record_droplet_volume_lost=Mock(),
+    )
+
+
+def _make_controller(*, well_plate, printer_head, regulation_on=True, gripper_info=object(), queue_empty=True, initial_state="idle"):
+    c = Controller.__new__(Controller)
+    c.array_complete = Emitter()
+    c.array_state_changed = Emitter()
+    c.update_slots_signal = Emitter()
+    c.error_occurred_signal = Emitter()
+    c._array_state = initial_state
+    c._array_context = None
+    c.profile = SimpleNamespace(name="default")
+
+    c.close_gripper = Mock()
+    c.move_to_location = Mock(return_value=True)
+    c.enable_print_profile = Mock()
+    c.disable_print_profile = Mock()
+    c.set_absolute_coordinates = Mock(return_value=True)
+    c.print_droplets = Mock()
+    c.update_expected_with_current = Mock()
+
+    c.machine = SimpleNamespace(
+        check_if_all_completed=lambda: queue_empty,
+        clear_command_queue=Mock(),
+        pause_commands=Mock(),
+    )
     c.model = SimpleNamespace(
-        well_plate=SimpleNamespace(check_calibration_applied=lambda: calibration_ok),
-        rack_model=SimpleNamespace(get_gripper_info=lambda: gripper_info),
-        machine_model=SimpleNamespace(regulating_print_pressure=regulation_on),
+        well_plate=well_plate,
+        rack_model=SimpleNamespace(
+            get_gripper_info=lambda: gripper_info,
+            get_gripper_printer_head=Mock(return_value=printer_head),
+            gripper_printer_head=printer_head,
+        ),
+        machine_model=SimpleNamespace(
+            regulating_print_pressure=regulation_on,
+            clear_command_queue=Mock(),
+        ),
+        experiment_model=SimpleNamespace(create_progress_file=Mock()),
     )
     return c
 
 
+def _parking_move_side_effect(*args, on_complete=None, **kwargs):
+    if callable(on_complete):
+        on_complete()
+    return True
+
+
 def test_print_array_blocks_when_plate_not_calibrated():
-    c = _controller_for_print_guard(calibration_ok=False, gripper_info=object(), regulation_on=True)
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)], calibration_ok=False),
+        printer_head=_make_printer_head(),
+    )
     Controller.print_array(c)
     assert c.error_occurred_signal.calls[0][1] == "Calibration has not been applied to this plate"
     c.close_gripper.assert_not_called()
 
 
 def test_print_array_blocks_when_no_printer_head_loaded():
-    c = _controller_for_print_guard(calibration_ok=True, gripper_info=None, regulation_on=True)
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        gripper_info=None,
+    )
     Controller.print_array(c)
     assert c.error_occurred_signal.calls[0][1] == "No printer head is loaded"
     c.close_gripper.assert_not_called()
 
 
 def test_print_array_blocks_when_regulation_disabled():
-    c = _controller_for_print_guard(calibration_ok=True, gripper_info=object(), regulation_on=False)
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        regulation_on=False,
+    )
     Controller.print_array(c)
     assert c.error_occurred_signal.calls[0][1] == "Pressure regulation is not enabled"
     c.close_gripper.assert_not_called()
 
 
-def test_last_well_complete_handler_persists_progress_and_emits_completion(monkeypatch):
-    c = Controller.__new__(Controller)
-    c.disable_print_profile = Mock()
-    c.move_to_location = Mock()
-    c.array_complete = Emitter()
-    c.error_occurred_signal = Emitter()
-
-    printer_head = SimpleNamespace(record_droplet_volume_lost=Mock())
-    well = SimpleNamespace(record_stock_print=Mock())
-    c.model = SimpleNamespace(
-        rack_model=SimpleNamespace(get_gripper_printer_head=Mock(return_value=printer_head)),
-        well_plate=SimpleNamespace(get_well=Mock(return_value=well)),
-        experiment_model=SimpleNamespace(create_progress_file=Mock()),
+def test_print_array_queues_preamble_and_first_well_only():
+    first = FakeWell("A1", 5, {"X": 10, "Y": 20, "Z": 30})
+    second = FakeWell("A2", 7, {"X": 40, "Y": 50, "Z": 60})
+    c = _make_controller(
+        well_plate=FakeWellPlate([first, second]),
+        printer_head=_make_printer_head(),
     )
 
-    monkeypatch.setattr(
-        controller_module.QtCore.QTimer,
-        "singleShot",
-        staticmethod(lambda _ms, cb: cb()),
-        raising=False,
+    Controller.print_array(c)
+
+    c.close_gripper.assert_called_once_with()
+    assert c.move_to_location.call_args_list[:2] == [
+        call("pause", z_offset=-5000),
+        call("pause", ignore_safe_height=True),
+    ]
+    c.enable_print_profile.assert_called_once_with()
+    c.set_absolute_coordinates.assert_called_once_with(10, 20, 30, override=True)
+    assert c.print_droplets.call_count == 1
+    assert c.print_droplets.call_args.args[0] == 5
+    assert c.print_droplets.call_args.kwargs["handler"] == c._handle_array_well_complete
+    assert c._array_context["stock_id"] == "stock-a"
+    assert c.get_array_run_state() == "running"
+
+
+def test_print_array_resume_ready_starts_next_incomplete_well():
+    completed = FakeWell("A1", 0, {"X": 10, "Y": 20, "Z": 30})
+    remaining = FakeWell("A2", 7, {"X": 40, "Y": 50, "Z": 60})
+    c = _make_controller(
+        well_plate=FakeWellPlate([completed, remaining]),
+        printer_head=_make_printer_head(),
+        initial_state="resume_ready",
     )
 
-    Controller.last_well_complete_handler(
+    Controller.print_array(c)
+
+    c.set_absolute_coordinates.assert_called_once_with(40, 50, 60, override=True)
+    assert c.print_droplets.call_args.args[0] == 7
+    assert c.get_array_run_state() == "running"
+
+
+def test_request_array_soft_stop_changes_state_without_hard_pause():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        initial_state="running",
+    )
+
+    assert Controller.request_array_soft_stop(c) is True
+    assert c.get_array_run_state() == "stop_requested"
+    assert c.array_state_changed.calls == [("stop_requested",)]
+    c.machine.pause_commands.assert_not_called()
+
+
+def test_handle_array_well_complete_updates_progress_and_queues_next_well():
+    first = FakeWell("A1", 5)
+    second = FakeWell("A2", 3)
+    printer_head = _make_printer_head(calibration_complete=True, current_volume=20.0, droplet_volume=1000.0)
+    c = _make_controller(
+        well_plate=FakeWellPlate([first, second]),
+        printer_head=printer_head,
+        initial_state="running",
+    )
+    c._array_context = {
+        "stock_id": "stock-a",
+        "expected_volume": 20.0,
+        "update_volume": True,
+        "droplet_volume": 1000.0,
+        "finalize_reason": None,
+    }
+    c._queue_next_array_well = Mock()
+    c._enqueue_array_finalize = Mock()
+
+    Controller._handle_array_well_complete(
         c,
-        well_id="P1",
+        well_id="A1",
         stock_id="stock-a",
         target_droplets=5,
         update_volume=True,
     )
 
+    assert first.record_calls == [("stock-a", 5)]
     printer_head.record_droplet_volume_lost.assert_called_once_with(5)
-    c.disable_print_profile.assert_called_once_with()
-    assert c.move_to_location.call_args_list == [
-        call("pause"),
-        call("pause", z_offset=-5000),
-    ]
-    c.model.well_plate.get_well.assert_called_once_with("P1")
-    well.record_stock_print.assert_called_once_with("stock-a", 5)
     c.model.experiment_model.create_progress_file.assert_called_once_with()
+    assert c._array_context["expected_volume"] == 15.0
+    c._queue_next_array_well.assert_called_once_with()
+    c._enqueue_array_finalize.assert_not_called()
+
+
+def test_handle_array_well_complete_finalizes_completed_array():
+    last = FakeWell("A1", 5)
+    c = _make_controller(
+        well_plate=FakeWellPlate([last]),
+        printer_head=_make_printer_head(),
+        initial_state="running",
+    )
+    c._array_context = {
+        "stock_id": "stock-a",
+        "expected_volume": None,
+        "update_volume": False,
+        "droplet_volume": None,
+        "finalize_reason": None,
+    }
+    c.move_to_location = Mock(side_effect=_parking_move_side_effect)
+
+    Controller._handle_array_well_complete(
+        c,
+        well_id="A1",
+        stock_id="stock-a",
+        target_droplets=5,
+        update_volume=False,
+    )
+
+    c.disable_print_profile.assert_called_once_with()
+    assert c.move_to_location.call_args_list[0] == call("pause")
+    assert c.move_to_location.call_args_list[1].args == ("pause",)
+    assert c.move_to_location.call_args_list[1].kwargs["z_offset"] == -5000
+    assert callable(c.move_to_location.call_args_list[1].kwargs["on_complete"])
+    assert c.get_array_run_state() == "idle"
     assert c.array_complete.calls == [()]
-    assert c.error_occurred_signal.calls == []
+    assert c.update_slots_signal.calls == []
+
+
+def test_handle_array_well_complete_soft_stop_parks_and_becomes_resume_ready():
+    current = FakeWell("A1", 5)
+    later = FakeWell("A2", 2)
+    c = _make_controller(
+        well_plate=FakeWellPlate([current, later]),
+        printer_head=_make_printer_head(),
+        initial_state="stop_requested",
+    )
+    c._array_context = {
+        "stock_id": "stock-a",
+        "expected_volume": None,
+        "update_volume": False,
+        "droplet_volume": None,
+        "finalize_reason": None,
+    }
+    c.move_to_location = Mock(side_effect=_parking_move_side_effect)
+
+    Controller._handle_array_well_complete(
+        c,
+        well_id="A1",
+        stock_id="stock-a",
+        target_droplets=5,
+        update_volume=False,
+    )
+
+    assert c.get_array_run_state() == "resume_ready"
+    assert c.array_complete.calls == []
+    assert c.update_slots_signal.calls == [()]
+
+
+def test_handle_array_well_complete_refill_required_parks_and_becomes_resume_ready():
+    current = FakeWell("A1", 1)
+    later = FakeWell("A2", 2)
+    printer_head = _make_printer_head(calibration_complete=True, current_volume=9.0, droplet_volume=1000.0)
+    c = _make_controller(
+        well_plate=FakeWellPlate([current, later]),
+        printer_head=printer_head,
+        initial_state="running",
+    )
+    c._array_context = {
+        "stock_id": "stock-a",
+        "expected_volume": 9.0,
+        "update_volume": True,
+        "droplet_volume": 1000.0,
+        "finalize_reason": None,
+    }
+    c.move_to_location = Mock(side_effect=_parking_move_side_effect)
+
+    Controller._handle_array_well_complete(
+        c,
+        well_id="A1",
+        stock_id="stock-a",
+        target_droplets=1,
+        update_volume=True,
+    )
+
+    assert c.get_array_run_state() == "resume_ready"
+    assert c.update_slots_signal.calls == [()]
+    assert c.error_occurred_signal.calls[-1] == ("Error", "Printer head needs to be reloaded")
+
+
+def test_soft_stop_wins_over_refill_required():
+    current = FakeWell("A1", 1)
+    later = FakeWell("A2", 2)
+    printer_head = _make_printer_head(calibration_complete=True, current_volume=9.0, droplet_volume=1000.0)
+    c = _make_controller(
+        well_plate=FakeWellPlate([current, later]),
+        printer_head=printer_head,
+        initial_state="stop_requested",
+    )
+    c._array_context = {
+        "stock_id": "stock-a",
+        "expected_volume": 9.0,
+        "update_volume": True,
+        "droplet_volume": 1000.0,
+        "finalize_reason": None,
+    }
+    c._enqueue_array_finalize = Mock()
+    c._queue_next_array_well = Mock()
+
+    Controller._handle_array_well_complete(
+        c,
+        well_id="A1",
+        stock_id="stock-a",
+        target_droplets=1,
+        update_volume=True,
+    )
+
+    c._enqueue_array_finalize.assert_called_once_with("soft_stop")
+    c._queue_next_array_well.assert_not_called()
+
+
+def test_clear_command_queue_resets_array_runner_state():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        initial_state="resume_ready",
+    )
+    c._array_context = {"stock_id": "stock-a"}
+
+    Controller.clear_command_queue(c)
+
+    c.machine.clear_command_queue.assert_called_once_with()
+    c.model.machine_model.clear_command_queue.assert_called_once_with()
+    c.update_expected_with_current.assert_called_once_with()
+    assert c.get_array_run_state() == "idle"
+    assert c._array_context is None

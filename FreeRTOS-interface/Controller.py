@@ -20,6 +20,7 @@ from hardware.null_devices import NullCamera
 class Controller(QObject):
     """Controller class for the application."""
     array_complete = Signal()
+    array_state_changed = Signal(str)
     update_slots_signal = Signal()
     update_volumes_in_view_signal = Signal()
     error_occurred_signal = Signal(str,str)
@@ -79,6 +80,9 @@ class Controller(QObject):
 
         # This variable will temporarily hold the callback for the next capture.
         self.pending_capture_callback = None
+
+        self._array_state = "idle"
+        self._array_context = None
 
         # Connect the machine's signals to the controller's handlers
         self.machine.status_updated.connect(self.handle_status_update)
@@ -375,10 +379,40 @@ class Controller(QObject):
         """Clear the command queue."""
         self.machine.clear_command_queue()
         self.model.machine_model.clear_command_queue()
+        if self.get_array_run_state() != "idle":
+            self._complete_array_finalize("hard_abort")
         try:
             self.update_expected_with_current()
         except Exception:
             pass
+
+    def get_array_run_state(self):
+        """Return the current array runner state."""
+        return str(getattr(self, "_array_state", "idle") or "idle")
+
+    def _emit_optional(self, signal_name, *args):
+        signal = getattr(self, signal_name, None)
+        if signal is None:
+            return
+        try:
+            signal.emit(*args)
+        except Exception:
+            pass
+
+    def _set_array_run_state(self, state):
+        state = str(state or "idle")
+        if getattr(self, "_array_state", None) == state:
+            self._array_state = state
+            return
+        self._array_state = state
+        self._emit_optional("array_state_changed", state)
+
+    def request_array_soft_stop(self):
+        """Finish the active well, then park and leave the array resumable."""
+        if self.get_array_run_state() != "running":
+            return False
+        self._set_array_run_state("stop_requested")
+        return True
 
     def set_relative_X(self, x,manual=False,handler=None,override=False):
         """Set the relative X coordinate for the machine."""
@@ -1069,52 +1103,189 @@ class Controller(QObject):
         print('Starting mass stabilization timer...')
         QtCore.QTimer.singleShot(3000, self.model.calibration_model.check_for_final_mass)
 
+    def _record_array_progress(self, well_id=None, stock_id=None, target_droplets=None, update_volume=False):
+        target_droplets = int(target_droplets or 0)
+        well = self.model.well_plate.get_well(well_id)
+        if well is not None:
+            well.record_stock_print(stock_id, target_droplets)
+        if update_volume:
+            printer_head = self.model.rack_model.get_gripper_printer_head()
+            if printer_head is not None:
+                printer_head.record_droplet_volume_lost(target_droplets)
+        self.model.experiment_model.create_progress_file()
+
+    def _get_array_remaining_wells(self, stock_id):
+        if not stock_id:
+            return []
+        reaction_wells = self.model.well_plate.get_all_wells_with_reactions(fill_by='rows')
+        return [well for well in reaction_wells if well.get_remaining_droplets(stock_id) > 0]
+
+    def _start_array_run_context(self):
+        current_printer_head = self.model.rack_model.get_gripper_printer_head()
+        if current_printer_head is None:
+            return False
+
+        if current_printer_head.check_calibration_complete():
+            print('\nController: Using calibrations during array printing')
+            expected_volume = current_printer_head.get_current_volume()
+            droplet_volume = current_printer_head.get_target_droplet_volume()
+            update_volume = expected_volume is not None
+        else:
+            print('\nController: using default pulse width')
+            expected_volume = None
+            droplet_volume = None
+            update_volume = False
+
+        current_stock_id = current_printer_head.get_stock_id()
+        wells_with_droplets = self._get_array_remaining_wells(current_stock_id)
+        if not wells_with_droplets:
+            self._array_context = None
+            self._set_array_run_state("idle")
+            return False
+
+        self._array_context = {
+            "stock_id": current_stock_id,
+            "expected_volume": expected_volume,
+            "update_volume": update_volume,
+            "droplet_volume": droplet_volume,
+            "finalize_reason": None,
+        }
+        return True
+
+    def _queue_next_array_well(self):
+        context = getattr(self, "_array_context", None) or {}
+        stock_id = context.get("stock_id")
+        wells_with_droplets = self._get_array_remaining_wells(stock_id)
+        if not wells_with_droplets:
+            self._enqueue_array_finalize("completed")
+            return False
+
+        well = wells_with_droplets[0]
+        target_droplets = int(well.get_remaining_droplets(stock_id) or 0)
+        if target_droplets <= 0:
+            self._enqueue_array_finalize("completed")
+            return False
+
+        well_coords = well.get_coordinates()
+        if not isinstance(well_coords, dict):
+            self.error_occurred_signal.emit('Print Array Error', f'Well {well.well_id} has no coordinates')
+            self._complete_array_finalize("hard_abort")
+            return False
+
+        if self.set_absolute_coordinates(well_coords['X'], well_coords['Y'], well_coords['Z'], override=True) is False:
+            self.error_occurred_signal.emit('Print Array Error', f'Failed to move to well {well.well_id}')
+            self._complete_array_finalize("hard_abort")
+            return False
+
+        print(f'Printing {target_droplets} droplets to well {well.well_id}')
+        self.print_droplets(
+            target_droplets,
+            expected_volume=context.get("expected_volume"),
+            handler=self._handle_array_well_complete,
+            kwargs={
+                'well_id': well.well_id,
+                'stock_id': stock_id,
+                'target_droplets': target_droplets,
+                'update_volume': context.get("update_volume", False),
+            },
+        )
+        return True
+
+    def _handle_array_well_complete(self, well_id=None, stock_id=None, target_droplets=None, update_volume=False):
+        context = getattr(self, "_array_context", None) or {}
+        self._record_array_progress(
+            well_id=well_id,
+            stock_id=stock_id,
+            target_droplets=target_droplets,
+            update_volume=update_volume,
+        )
+
+        if context.get("update_volume") and context.get("expected_volume") is not None and context.get("droplet_volume") is not None:
+            context["expected_volume"] -= int(target_droplets or 0) * float(context["droplet_volume"]) / 1000.0
+
+        stock_id = context.get("stock_id", stock_id)
+        if not self._get_array_remaining_wells(stock_id):
+            self._enqueue_array_finalize("completed")
+        elif self.get_array_run_state() == "stop_requested":
+            self._enqueue_array_finalize("soft_stop")
+        elif context.get("update_volume") and context.get("expected_volume") is not None and context.get("expected_volume") < 10:
+            self._enqueue_array_finalize("refill_required")
+        else:
+            self._queue_next_array_well()
+
+    def _enqueue_array_finalize(self, reason):
+        reason = str(reason or "completed")
+        context = getattr(self, "_array_context", None)
+        if context is not None:
+            if context.get("finalize_reason") is not None:
+                return False
+            context["finalize_reason"] = reason
+
+        if reason == "hard_abort":
+            self._complete_array_finalize(reason)
+            return False
+
+        self.disable_print_profile()
+
+        def _finish_after_park():
+            self._complete_array_finalize(reason)
+
+        if self.move_to_location('pause') is False:
+            self._complete_array_finalize(reason)
+            return False
+        if self.move_to_location('pause', z_offset=-5000, on_complete=_finish_after_park) is False:
+            self._complete_array_finalize(reason)
+            return False
+        return True
+
+    def _complete_array_finalize(self, reason):
+        reason = str(reason or "completed")
+        self._array_context = None
+
+        if reason in {"soft_stop", "refill_required"}:
+            self._set_array_run_state("resume_ready")
+        else:
+            self._set_array_run_state("idle")
+
+        if reason == "completed":
+            print('---Printing complete---')
+            self._emit_optional("array_complete")
+        elif reason == "soft_stop":
+            print('---Array soft stop complete---')
+            self._emit_optional("update_slots_signal")
+        elif reason == "refill_required":
+            print('---Must reload printer head---')
+            self._emit_optional("update_slots_signal")
+            self.error_occurred_signal.emit('Error', 'Printer head needs to be reloaded')
+        elif reason == "hard_abort":
+            print('---Array run aborted---')
+
 
     def well_complete_handler(self,well_id=None,stock_id=None,target_droplets=None,update_volume=False):
-        self.model.well_plate.get_well(well_id).record_stock_print(stock_id,target_droplets)
-        if update_volume:
-            self.model.rack_model.get_gripper_printer_head().record_droplet_volume_lost(target_droplets)
-        self.model.experiment_model.create_progress_file()
-        #print(f'Printing complete for well {well_id}')
+        self._record_array_progress(
+            well_id=well_id,
+            stock_id=stock_id,
+            target_droplets=target_droplets,
+            update_volume=update_volume,
+        )
 
     def last_well_complete_handler(self,well_id=None,stock_id=None,target_droplets=None,update_volume=False):
-        # Reset acceleration and move to pause after the queue is processed
-        def finalize_printing():
-            try:
-                if update_volume:
-                    self.model.rack_model.get_gripper_printer_head().record_droplet_volume_lost(target_droplets)
-                # self.machine.reset_acceleration()
-                # self.exit_print_mode()
-                self.disable_print_profile()
-                self.move_to_location('pause')
-                self.move_to_location('pause',z_offset=-5000)
-                self.model.well_plate.get_well(well_id).record_stock_print(stock_id, target_droplets)
-                self.model.experiment_model.create_progress_file()
-                self.array_complete.emit()
-                print('---Printing complete---')
-            except Exception as exc:
-                msg = f'Failed to finalize array printing for well {well_id}: {exc}'
-                print(msg)
-                self.error_occurred_signal.emit('Print Array Error', msg)
-        
-        # Ensure that this is done after the command queue has been fully processed
-        QtCore.QTimer.singleShot(0, finalize_printing)
+        self._record_array_progress(
+            well_id=well_id,
+            stock_id=stock_id,
+            target_droplets=target_droplets,
+            update_volume=update_volume,
+        )
+        self._enqueue_array_finalize("completed")
 
     def refill_printer_head_handler(self,well_id=None,stock_id=None,target_droplets=None,update_volume=False):
-        # Reset acceleration and move to pause after the queue is processed
-        def refill_printer_head():
-            if update_volume:
-                self.model.rack_model.get_gripper_printer_head().record_droplet_volume_lost(target_droplets)
-            self.machine.reset_acceleration()
-            self.exit_print_mode()
-            self.move_to_location('pause')
-            self.model.well_plate.get_well(well_id).record_stock_print(stock_id, target_droplets)
-            self.model.experiment_model.create_progress_file()
-            print('---Must reload printer head---')
-            self.error_occurred_signal.emit('Error','Printer head needs to be reloaded')
-        
-        # Ensure that this is done after the command queue has been fully processed
-        QtCore.QTimer.singleShot(0, refill_printer_head)
+        self._record_array_progress(
+            well_id=well_id,
+            stock_id=stock_id,
+            target_droplets=target_droplets,
+            update_volume=update_volume,
+        )
+        self._enqueue_array_finalize("refill_required")
 
     def reset_single_array(self):
         """Resets the droplet count for all wells in the well plate for the currently loaded stock solution."""
@@ -1141,6 +1312,14 @@ class Controller(QObject):
         Iterates through all wells with an assigned reaction and prints the 
         required number of droplets for the currently loaded printer head.
         '''
+        if self.get_array_run_state() in {"running", "stop_requested"}:
+            print('Cannot print: Array runner is already active')
+            return
+
+        if not self.check_if_all_completed():
+            print('Cannot print: command queue is not empty')
+            return
+
         if not self.model.well_plate.check_calibration_applied():
             self.error_occurred_signal.emit('Error','Calibration has not been applied to this plate')
             print('Cannot print: Calibration has not been applied')
@@ -1155,6 +1334,10 @@ class Controller(QObject):
             self.error_occurred_signal.emit('Error','Pressure regulation is not enabled')
             print('Cannot print: Pressure regulation is not enabled')
             return
+
+        if not self._start_array_run_context():
+            print('Cannot print: No remaining droplets for the loaded stock')
+            return
         
         self.close_gripper()
         # self.wait_command()
@@ -1165,45 +1348,8 @@ class Controller(QObject):
         # self.enter_print_mode()
         self.enable_print_profile()
 
-        current_printer_head = self.model.rack_model.get_gripper_printer_head()
-        if current_printer_head is not None:
-            if current_printer_head.check_calibration_complete():
-                print('\nController: Using calibrations during array printing')
-                expected_volume = current_printer_head.get_current_volume()
-                droplet_volume = current_printer_head.get_target_droplet_volume()
-                if current_printer_head.get_current_volume() == None:
-                    update_volume = False
-                else:
-                    update_volume = True
-            else:
-                print('\nController: using default pulse width')
-                expected_volume = None
-                update_volume = False
-
-        current_stock_id = self.model.rack_model.gripper_printer_head.get_stock_id()
-        #print(f'Current stock:{current_stock_id}')
-        reaction_wells = self.model.well_plate.get_all_wells_with_reactions(fill_by='rows')
-        wells_with_droplets = [well for well in reaction_wells if well.get_remaining_droplets(current_stock_id) > 0]
-        for i,well in enumerate(wells_with_droplets):
-            target_droplets = well.get_remaining_droplets(current_stock_id)
-            if target_droplets == 0:
-                #print(f'No droplets required for well {well.well_id}')
-                continue
-            well_coords = well.get_coordinates()
-            self.set_absolute_coordinates(well_coords['X'],well_coords['Y'],well_coords['Z'],override=True)
-            print(f'Printing {target_droplets} droplets to well {well.well_id}')
-            is_last_iteration = i == len(wells_with_droplets) - 1
-            if update_volume:
-                if expected_volume < 10:
-                    self.print_droplets(target_droplets,expected_volume=expected_volume, handler=self.refill_printer_head_handler,kwargs={'well_id':well.well_id,'stock_id':current_stock_id,'target_droplets':target_droplets,'update_volume':update_volume})
-                    print('---Printer head needs to be reloaded---')
-                    return
-            if not is_last_iteration:
-                self.print_droplets(target_droplets,expected_volume=expected_volume, handler=self.well_complete_handler,kwargs={'well_id':well.well_id,'stock_id':current_stock_id,'target_droplets':target_droplets,'update_volume':update_volume})
-            else:
-                self.print_droplets(target_droplets,expected_volume=expected_volume, handler=self.last_well_complete_handler,kwargs={'well_id':well.well_id,'stock_id':current_stock_id,'target_droplets':target_droplets,'update_volume':update_volume})
-            if update_volume:
-                expected_volume -= target_droplets * droplet_volume / 1000  # convert to uL
+        self._set_array_run_state("running")
+        self._queue_next_array_well()
             
     def enable_print_profile(self):
         """Enable the print profile."""

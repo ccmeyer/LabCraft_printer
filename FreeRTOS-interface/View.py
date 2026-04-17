@@ -2024,6 +2024,7 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         self.model.well_plate.plate_format_changed_signal.connect(self.update_grid)
         self.model.well_plate.plate_summary_changed_signal.connect(self._update_plate_summary)
         self.model.rack_model.gripper_updated.connect(self.update_start_print_array_button)
+        self.controller.array_state_changed.connect(self.update_start_print_array_button)
         self.init_ui()
 
     def init_ui(self):
@@ -2063,6 +2064,12 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         self.start_print_array_button.clicked.connect(self.start_print_array)
         self.bottom_layout.addWidget(self.start_print_array_button)
 
+        self.soft_stop_print_array_button = QPushButton("Stop After Well")
+        self.soft_stop_print_array_button.setStyleSheet(f"background-color: {self.color_dict['darker_gray']}; color: white;")
+        self.soft_stop_print_array_button.setEnabled(False)
+        self.soft_stop_print_array_button.clicked.connect(self.request_array_soft_stop)
+        self.bottom_layout.addWidget(self.soft_stop_print_array_button)
+
         self.pause_machine_button = QPushButton("Pause")
         self.pause_machine_button.setStyleSheet(f"background-color: {self.color_dict['dark_red']}; color: white;")
         self.pause_machine_button.clicked.connect(self.main_window.pause_machine)
@@ -2079,23 +2086,57 @@ class WellPlateWidget(QtWidgets.QGroupBox):
 
         self.setLayout(self.layout)
         self.update_grid()
+        self.update_start_print_array_button()
 
-    def update_start_print_array_button(self):
-        if self.model.rack_model.gripper_printer_head is not None:
-            self.start_print_array_button.setEnabled(True)
-            self.start_print_array_button.setStyleSheet(f"background-color: {self.color_dict['dark_blue']}; color: white;")
-        else:
-            self.start_print_array_button.setEnabled(False)
-            self.start_print_array_button.setStyleSheet(f"background-color: {self.color_dict['darker_gray']}; color: white;")
+    def _set_array_button_state(self, button, enabled, active_color):
+        button.setEnabled(bool(enabled))
+        color = self.color_dict[active_color] if enabled else self.color_dict['darker_gray']
+        button.setStyleSheet(f"background-color: {color}; color: white;")
+
+    def update_start_print_array_button(self, *_args):
+        has_head = self.model.rack_model.gripper_printer_head is not None
+        state_getter = getattr(self.controller, "get_array_run_state", None)
+        array_state = state_getter() if callable(state_getter) else "idle"
+
+        start_label = "Resume Print" if array_state == "resume_ready" else "Start Print"
+        self.start_print_array_button.setText(start_label)
+        self.soft_stop_print_array_button.setText("Stop Pending" if array_state == "stop_requested" else "Stop After Well")
+
+        if array_state == "running":
+            self._set_array_button_state(self.start_print_array_button, False, 'dark_blue')
+            self._set_array_button_state(self.soft_stop_print_array_button, True, 'dark_red')
+            return
+
+        if array_state == "stop_requested":
+            self._set_array_button_state(self.start_print_array_button, False, 'dark_blue')
+            self._set_array_button_state(self.soft_stop_print_array_button, False, 'dark_red')
+            return
+
+        if array_state == "resume_ready":
+            self._set_array_button_state(self.start_print_array_button, has_head, 'dark_blue')
+            self._set_array_button_state(self.soft_stop_print_array_button, False, 'dark_red')
+            return
+
+        self._set_array_button_state(self.start_print_array_button, has_head, 'dark_blue')
+        self._set_array_button_state(self.soft_stop_print_array_button, False, 'dark_red')
 
     def start_print_array(self):
         if not self.controller.check_if_all_completed():
             return
-        response = self.main_window.popup_yes_no("Start Print Array","Are you sure you want to start the print array?")
+        state_getter = getattr(self.controller, "get_array_run_state", None)
+        is_resume = callable(state_getter) and state_getter() == "resume_ready"
+        title = "Resume Print Array" if is_resume else "Start Print Array"
+        message = "Are you sure you want to resume the print array?" if is_resume else "Are you sure you want to start the print array?"
+        response = self.main_window.popup_yes_no(title, message)
         if self.main_window._is_yes_response(response):
             self.controller.print_array()
         else:
             return
+
+    def request_array_soft_stop(self):
+        request_stop = getattr(self.controller, "request_array_soft_stop", None)
+        if callable(request_stop):
+            request_stop()
 
     def update_grid(self):
         """Update the grid layout to match the selected plate format."""
