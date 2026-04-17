@@ -2567,6 +2567,48 @@ def test_online_stream_debug_signal_emits_provisional_tail_width_points(tmp_path
     assert tail_plot["tail_start_x_us"] is None
 
 
+def test_online_stream_debug_signal_plots_unavailable_tail_widths_at_zero(tmp_path):
+    proc = _flow_proc(tmp_path)
+    proc._tail_plan = {
+        "steady_width_baseline_px": 74.0,
+        "scout_replicates": 1,
+        "backtrack_replicates": 1,
+    }
+    proc._tail_mode = "scout"
+    proc._tail_scout_delay_summaries = [
+        {
+            "delay_us": int(proc.emergence_time_us) + 1550,
+            "delay_from_emergence_us": 1550,
+            "median_width_px": None,
+        }
+    ]
+    proc._build_provisional_tail_delay_summary = lambda: {
+        "delay_us": int(proc.emergence_time_us) + 1750,
+        "delay_from_emergence_us": 1750,
+        "median_width_px": "width unavailable",
+    }
+    proc._tail_current_delay_us = int(proc.emergence_time_us) + 1750
+    proc._current_tail_analysis_summary = {
+        "attached_width_px": "width unavailable",
+        "tail_width_usable": False,
+    }
+
+    proc._emit_online_stream_debug_payload("tail_scout")
+
+    payload = proc.onlineStreamDebugUpdated.calls[-1][0][0]
+    tail_plot = payload["tail_plot"]
+    assert tail_plot["scout_points"] == [
+        {"x_us": 1550, "y_px": 0.0, "provisional": False},
+        {"x_us": 1750, "y_px": 0.0, "provisional": True},
+    ]
+    assert tail_plot["current_frame_point"] == {
+        "x_us": 1750,
+        "y_px": 0.0,
+        "accepted": False,
+        "mode": "scout",
+    }
+
+
 def test_online_stream_debug_signal_publishes_final_tail_start_after_resolution(tmp_path):
     proc = _flow_proc(tmp_path)
     proc._tail_mode = "backtrack"

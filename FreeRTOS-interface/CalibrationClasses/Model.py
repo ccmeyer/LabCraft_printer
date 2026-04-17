@@ -7777,6 +7777,12 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         except Exception:
             return None
 
+    def _debug_tail_width_plot_value(self, value) -> float:
+        width_px = self._debug_float(value)
+        if width_px is None:
+            return 0.0
+        return float(width_px)
+
     def _debug_summary_already_committed(self, summaries: list[dict], provisional_summary: dict | None) -> bool:
         if not provisional_summary:
             return False
@@ -7863,15 +7869,15 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         committed_rows = [dict(row or {}) for row in list(committed_summaries or [])]
         for row in committed_rows:
             x_us = self._debug_delay_us(row.get("delay_from_emergence_us"))
-            y_px = self._debug_float(row.get("median_width_px"))
-            if x_us is None or y_px is None:
+            if x_us is None:
                 continue
-            points.append({"x_us": int(x_us), "y_px": float(y_px), "provisional": False})
+            y_px = self._debug_tail_width_plot_value(row.get("median_width_px"))
+            points.append({"x_us": int(x_us), "y_px": y_px, "provisional": False})
         if provisional_summary and not self._debug_summary_already_committed(committed_rows, provisional_summary):
             x_us = self._debug_delay_us(provisional_summary.get("delay_from_emergence_us"))
-            y_px = self._debug_float(provisional_summary.get("median_width_px"))
-            if x_us is not None and y_px is not None:
-                points.append({"x_us": int(x_us), "y_px": float(y_px), "provisional": True})
+            if x_us is not None:
+                y_px = self._debug_tail_width_plot_value(provisional_summary.get("median_width_px"))
+                points.append({"x_us": int(x_us), "y_px": y_px, "provisional": True})
         points.sort(key=lambda row: int(row["x_us"]))
         return points
 
@@ -7893,12 +7899,12 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
     def _current_tail_frame_point_payload(self) -> dict | None:
         summary = dict(getattr(self, "_current_tail_analysis_summary", {}) or {})
         x_us = self._flow_delay_offset_from_emergence_us(getattr(self, "_tail_current_delay_us", None))
-        y_px = self._debug_float(summary.get("attached_width_px"))
-        if x_us is None or y_px is None:
+        if x_us is None or not summary:
             return None
+        y_px = self._debug_tail_width_plot_value(summary.get("attached_width_px"))
         return {
             "x_us": int(x_us),
-            "y_px": float(y_px),
+            "y_px": y_px,
             "accepted": bool(summary.get("tail_width_usable")),
             "mode": "backtrack" if str(getattr(self, "_tail_mode", "scout") or "scout") == "backtrack" else "scout",
         }
