@@ -3018,37 +3018,70 @@ class Machine(QObject):
             self._record_command_event(command, "requeued")
         self.pump_send_queue()
 
-    def request_pause_after_seq32(self, barrier_seq32, handler=None):
+    def _notify_pause_after_failure(self, on_failure, *, reason, barrier_seq32, ack_result=None, error=None):
+        payload = {
+            "reason": str(reason or "unknown"),
+            "barrier_seq32": int(barrier_seq32 or 0),
+            "ack_result": ack_result,
+            "error": error,
+        }
+        if callable(on_failure):
+            on_failure(payload)
+            return
+
+        detail = payload["reason"]
+        if ack_result:
+            detail = f"{detail}:{ack_result}"
+        if error:
+            detail = f"{detail}:{error}"
+        self.error_occurred.emit(
+            f"Pause-after watermark request failed for barrier {payload['barrier_seq32']}: {detail}"
+        )
+
+    def request_pause_after_seq32(self, barrier_seq32, on_success=None, on_failure=None):
         barrier_seq32 = int(barrier_seq32 or 0)
         if barrier_seq32 <= 0:
+            self._notify_pause_after_failure(
+                on_failure,
+                reason="invalid_barrier",
+                barrier_seq32=barrier_seq32,
+            )
             return False
         seq32 = self._alloc_ctl_seq32()
         frame = build_frame(PAUSE_AFTER_SEQ32, seq32, p1=barrier_seq32)
         try:
             self._write_frame(frame)
         except Exception as exc:
-            msg = f"Failed to send pause-after watermark: {exc}"
-            print(msg)
-            self.error_occurred.emit(msg)
+            self._notify_pause_after_failure(
+                on_failure,
+                reason="write_failed",
+                barrier_seq32=barrier_seq32,
+                error=str(exc),
+            )
             return False
 
         def _on_ok(ack):
             ack_result = str((ack or {}).get("ack_result") or "")
             if ack_result not in {"accepted", "watermark_set", "duplicate"}:
-                self._handle_transport_fault(
-                    f"MCU rejected pause-after watermark for barrier {barrier_seq32}: {ack_result or 'missing'}"
+                self._notify_pause_after_failure(
+                    on_failure,
+                    reason="ack_rejected",
+                    barrier_seq32=barrier_seq32,
+                    ack_result=ack_result or "missing",
                 )
                 return
-            if callable(handler):
-                handler()
+            if callable(on_success):
+                on_success(ack)
 
         self._start_ack_wait(
             CMD_QUEUE_ACK,
             seq32,
             self._queue_ack_timeout_ms,
             on_ok=_on_ok,
-            on_timeout=lambda _ack=None, barrier=barrier_seq32: self._handle_transport_fault(
-                f"Timed out waiting for pause-after watermark ACK for barrier {barrier}."
+            on_timeout=lambda _ack=None, barrier=barrier_seq32: self._notify_pause_after_failure(
+                on_failure,
+                reason="ack_timeout",
+                barrier_seq32=barrier,
             ),
         )
         return True

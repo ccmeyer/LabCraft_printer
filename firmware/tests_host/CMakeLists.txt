@@ -12,6 +12,7 @@ add_executable(fw_tests
     main.cpp
     tests/test_smoke.cpp
     tests/test_comm_codec.cpp
+    tests/test_orchestrator_completion_policy.cpp
     tests/test_orchestrator_decode.cpp
     tests/test_nvm_codec.cpp
     tests/test_pressure_regulator_math.cpp
@@ -28,6 +29,7 @@ add_executable(fw_tests
     # ../Src/protocol/ProtocolParser.cpp
     # ../Src/utils/RingBuffer.c
     ../Core/Src/CommCodec.cpp
+    ../Core/Src/OrchestratorCompletionPolicy.cpp
     ../Core/Src/OrchestratorDecode.cpp
     ../Core/Src/nvm_codec.c
     ../Core/Src/PressureRegulatorMath.cpp

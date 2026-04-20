@@ -1,4 +1,6 @@
 import time
+from unittest.mock import Mock
+
 from types import SimpleNamespace
 
 import Machine_FreeRTOS as mfr
@@ -211,3 +213,94 @@ def test_machine_snapshot_classifies_late_completion_after_timeout(qapp, test_pr
     assert snapshot["stall_hint"] == "late_completion_after_timeout"
     assert snapshot["commands"][-1]["completed_ms"] is not None
     assert any(event["event"] == "completed" for event in snapshot["recent_command_events"])
+
+
+def test_request_pause_after_seq32_write_failure_invokes_failure_callback(qapp, test_profile):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+    machine._write_frame = Mock(side_effect=IOError("port closed"))
+    failures = []
+    errors = []
+    machine.error_occurred.connect(errors.append)
+
+    ok = machine.request_pause_after_seq32(42, on_failure=failures.append)
+
+    assert ok is False
+    assert failures == [
+        {
+            "reason": "write_failed",
+            "barrier_seq32": 42,
+            "ack_result": None,
+            "error": "port closed",
+        }
+    ]
+    assert errors == []
+
+
+def test_request_pause_after_seq32_ack_rejection_invokes_failure_callback(qapp, test_profile):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+    machine._write_frame = Mock()
+    failures = []
+    errors = []
+    machine.error_occurred.connect(errors.append)
+
+    def _fake_start_ack_wait(_ack_code, _seq32, _timeout_ms, on_ok, on_timeout):
+        on_ok({"ack_result": "watermark_rejected"})
+
+    machine._start_ack_wait = _fake_start_ack_wait
+
+    ok = machine.request_pause_after_seq32(42, on_failure=failures.append)
+
+    assert ok is True
+    assert failures == [
+        {
+            "reason": "ack_rejected",
+            "barrier_seq32": 42,
+            "ack_result": "watermark_rejected",
+            "error": None,
+        }
+    ]
+    assert errors == []
+
+
+def test_request_pause_after_seq32_timeout_invokes_failure_callback(qapp, test_profile):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+    machine._write_frame = Mock()
+    failures = []
+    errors = []
+    machine.error_occurred.connect(errors.append)
+
+    def _fake_start_ack_wait(_ack_code, _seq32, _timeout_ms, on_ok, on_timeout):
+        on_timeout(None)
+
+    machine._start_ack_wait = _fake_start_ack_wait
+
+    ok = machine.request_pause_after_seq32(42, on_failure=failures.append)
+
+    assert ok is True
+    assert failures == [
+        {
+            "reason": "ack_timeout",
+            "barrier_seq32": 42,
+            "ack_result": None,
+            "error": None,
+        }
+    ]
+    assert errors == []
+
+
+def test_request_pause_after_seq32_success_still_invokes_success_callback(qapp, test_profile):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+    machine._write_frame = Mock()
+    successes = []
+    failures = []
+
+    def _fake_start_ack_wait(_ack_code, _seq32, _timeout_ms, on_ok, on_timeout):
+        on_ok({"ack_result": "watermark_set"})
+
+    machine._start_ack_wait = _fake_start_ack_wait
+
+    ok = machine.request_pause_after_seq32(42, on_success=successes.append, on_failure=failures.append)
+
+    assert ok is True
+    assert successes == [{"ack_result": "watermark_set"}]
+    assert failures == []

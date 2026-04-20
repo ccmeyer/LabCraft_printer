@@ -6,6 +6,7 @@
  */
 #include "BoardConfig.h"
 #include "Orchestrator.h"
+#include "OrchestratorCompletionPolicy.h"
 #include "OrchestratorDecode.h"
 #include "LEDController.h"    // your LED queue + done-event
 #include "Stepper.h"          // MX_STEPPERx_Move(), MX_STEPPERx_Stop(), MX_STEPPERx_IsBusy()
@@ -369,7 +370,7 @@ bool Orchestrator::waitForBits(EventBits_t bits)
   while (true) {
     Watchdog_CheckIn(CRASH_TASK_ORCH);
 		// If a PAUSE came in, stop waiting immediately.
-		if (_paused) {
+		if (_paused || _pauseRequested || _clearRequested || _shutdownRequested) {
 		  return false;
 	}
 	// Wait in small chunks
@@ -542,6 +543,7 @@ void Orchestrator::_run() {
 
 /// factor out all your “case CMD_MOVE_X / CMD_LED / etc” into this:
 void Orchestrator::executeCommand(const Command &cmd) {
+  bool commandCompleted = true;
 	if (cmd.hasSeq32) {
 		_currentCmdNum = cmd.seq32;
 		_lastSeq8      = cmd.seq8;   // optional: keep for legacy
@@ -571,33 +573,33 @@ void Orchestrator::executeCommand(const Command &cmd) {
           // p1=direction, p2=steps, p3=freqHz
           Stepper::stepperX()->move(cmd.p1, cmd.p2, cmd.p3,2000);
           // wait for stepper ISR to signal BIT_STEPPER_DONE
-      	  waitForBit(BIT_STEPPER1_DONE);
+      	  commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(waitForBit(BIT_STEPPER1_DONE));
           break;
         }
         case CMD_MOVE_Y: {
           // p1=direction, p2=steps, p3=freqHz
           Stepper::stepperY()->move(cmd.p1, cmd.p2, cmd.p3,2000);
-      	  waitForBit(BIT_STEPPER2_DONE);
+      	  commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(waitForBit(BIT_STEPPER2_DONE));
           break;
         }
         case CMD_MOVE_Z: {
           // p1=direction, p2=steps, p3=freqHz
           Stepper::stepperZ()->move(cmd.p1, cmd.p2, cmd.p3,2000);
-      	  waitForBit(BIT_STEPPER3_DONE);
+      	  commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(waitForBit(BIT_STEPPER3_DONE));
           break;
         }
         case CMD_ABS_X: {
           // p1=direction, p2=steps, p3=freqHz
           Stepper::stepperX()->moveTo(cmd.p1, cmd.p2, cmd.p3,2000);
           // wait for stepper ISR to signal BIT_STEPPER_DONE
-      	  waitForBit(BIT_STEPPER1_DONE);
+      	  commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(waitForBit(BIT_STEPPER1_DONE));
           break;
         }
         case CMD_ABS_Y: {
           // p1=direction, p2=steps, p3=freqHz
           Stepper::stepperY()->moveTo(cmd.p1, cmd.p2, cmd.p3,2000);
           // wait for stepper ISR to signal BIT_STEPPER_DONE
-      	  waitForBit(BIT_STEPPER2_DONE);
+      	  commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(waitForBit(BIT_STEPPER2_DONE));
           break;
         }
         case CMD_ABS_Z: {
@@ -605,7 +607,7 @@ void Orchestrator::executeCommand(const Command &cmd) {
           Logger::instance()->log("ABS-Z\r\n");
           Stepper::stepperZ()->moveTo(cmd.p1, cmd.p2, cmd.p3,2000);
           // wait for stepper ISR to signal BIT_STEPPER_DONE
-      	  waitForBit(BIT_STEPPER3_DONE);
+      	  commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(waitForBit(BIT_STEPPER3_DONE));
           break;
         }
 	        case CMD_SET_AXIS_MAXSPEED: {
@@ -633,19 +635,19 @@ void Orchestrator::executeCommand(const Command &cmd) {
         case CMD_HOME_X: {
           xEventGroupClearBits(_doneEvents, BIT_HOME_X_DONE);
           startHomeAsync(Stepper::stepperX(), cmd.p1, cmd.p2, cmd.p3, BIT_HOME_X_DONE);
-          waitForBit(BIT_HOME_X_DONE);
+          commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(waitForBit(BIT_HOME_X_DONE));
           break;
         }
         case CMD_HOME_Y: {
           xEventGroupClearBits(_doneEvents, BIT_HOME_Y_DONE);
           startHomeAsync(Stepper::stepperY(), cmd.p1, cmd.p2, cmd.p3, BIT_HOME_Y_DONE);
-          waitForBit(BIT_HOME_Y_DONE);
+          commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(waitForBit(BIT_HOME_Y_DONE));
           break;
         }
         case CMD_HOME_Z: {
           xEventGroupClearBits(_doneEvents, BIT_HOME_Z_DONE);
           startHomeAsync(Stepper::stepperZ(), cmd.p1, cmd.p2, cmd.p3, BIT_HOME_Z_DONE);
-          waitForBit(BIT_HOME_Z_DONE);
+          commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(waitForBit(BIT_HOME_Z_DONE));
           break;
         }
         case CMD_ENABLE_MOTORS: {
@@ -671,8 +673,9 @@ void Orchestrator::executeCommand(const Command &cmd) {
         case CMD_ABS_XY: {
           // p1=X, p2=Y, p3=freqHz
           Gantry::instance()->moveTo(cmd.p1,cmd.p2,cmd.p3);
-          waitForBit(BIT_STEPPER1_DONE);
-          waitForBit(BIT_STEPPER2_DONE);
+          commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(
+              waitForBit(BIT_STEPPER1_DONE) && waitForBit(BIT_STEPPER2_DONE)
+          );
           break;
         }
         case CMD_GRIPPER_OPEN: {
@@ -680,12 +683,12 @@ void Orchestrator::executeCommand(const Command &cmd) {
 //           runGripperOpenWatchdogCrashTest();
 // #endif
       	  MX_GRIPPER_Open();
-      	  waitForBit(BIT_GRIPPER_DONE);
+      	  commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(waitForBit(BIT_GRIPPER_DONE));
   		  break;
   		}
         case CMD_GRIPPER_CLOSE: {
       	  MX_GRIPPER_Close();
-      	  waitForBit(BIT_GRIPPER_DONE);
+      	  commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(waitForBit(BIT_GRIPPER_DONE));
   		  break;
   		}
         case CMD_GRIPPER_OFF: {
@@ -703,19 +706,19 @@ void Orchestrator::executeCommand(const Command &cmd) {
         case CMD_DISPENSE: {
           // param p1 = pulse width in microseconds, p2 = rate in Hz
 			Printer::instance()->enqueue(cmd.p1, cmd.p2,PulseMode::BOTH);
-			waitForBit(BIT_PRINTING_DONE);
+			commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(waitForBit(BIT_PRINTING_DONE));
           break;
         }
         case CMD_DISPENSE_PRINT: {
           // param p1 = pulse width in microseconds, p2 = rate in Hz
 			Printer::instance()->enqueue(cmd.p1, cmd.p2,PulseMode::PRINT_ONLY);
-			waitForBit(BIT_PRINTING_DONE);
+			commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(waitForBit(BIT_PRINTING_DONE));
           break;
         }
         case CMD_DISPENSE_REFUEL: {
           // param p1 = pulse width in microseconds, p2 = rate in Hz
 			Printer::instance()->enqueue(cmd.p1, cmd.p2,PulseMode::REFUEL_ONLY);
-			waitForBit(BIT_PRINTING_DONE);
+			commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(waitForBit(BIT_PRINTING_DONE));
           break;
         }
         case CMD_INIT_FLASH: {
@@ -795,7 +798,7 @@ void Orchestrator::executeCommand(const Command &cmd) {
             // ensure we re-wait even if already in band
             xEventGroupClearBits(_doneEvents, BIT_PRESSURE_P_READY);
             if (PressureTargetPolicy::shouldWaitForReadyAfterTargetChange(reg.isActive())) {
-              waitForBit(BIT_PRESSURE_P_READY);
+              commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(waitForBit(BIT_PRESSURE_P_READY));
             }
         	break;
         }
@@ -806,7 +809,7 @@ void Orchestrator::executeCommand(const Command &cmd) {
 			  reg.setTargetSafe(target);
 			  xEventGroupClearBits(_doneEvents, BIT_PRESSURE_R_READY);
 			  if (PressureTargetPolicy::shouldWaitForReadyAfterTargetChange(reg.isActive())) {
-			    waitForBit(BIT_PRESSURE_R_READY);
+			    commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(waitForBit(BIT_PRESSURE_R_READY));
 			  }
 			#else
 			  // Legacy: single channel → log message
@@ -823,7 +826,7 @@ void Orchestrator::executeCommand(const Command &cmd) {
             // ensure we re-wait even if already in band
             xEventGroupClearBits(_doneEvents, BIT_PRESSURE_P_READY);
             if (PressureTargetPolicy::shouldWaitForReadyAfterTargetChange(reg.isActive())) {
-              waitForBit(BIT_PRESSURE_P_READY);
+              commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(waitForBit(BIT_PRESSURE_P_READY));
             }
 			break;
 		}
@@ -836,7 +839,7 @@ void Orchestrator::executeCommand(const Command &cmd) {
 			reg.setRelativeTargetSafe(sign, delta);
 			xEventGroupClearBits(_doneEvents, BIT_PRESSURE_R_READY);
 			if (PressureTargetPolicy::shouldWaitForReadyAfterTargetChange(reg.isActive())) {
-			  waitForBit(BIT_PRESSURE_R_READY);
+			  commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(waitForBit(BIT_PRESSURE_R_READY));
 			}
 			#else
 			Logger::instance()->log("Legacy has no refuel channel");
@@ -854,14 +857,14 @@ void Orchestrator::executeCommand(const Command &cmd) {
         case CMD_HOME_PRINT: {
           xEventGroupClearBits(_doneEvents, BIT_HOME_P_DONE);
           startRegHomeAsync(&PressureRegulator::regP(), cmd.p1, cmd.p2, cmd.p3, BIT_HOME_P_DONE);
-          waitForBit(BIT_HOME_P_DONE);
+          commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(waitForBit(BIT_HOME_P_DONE));
           break;
         }
         case CMD_HOME_REFUEL: {
 		#if (LC_PRESSURE_PORTS > 1)
 		  xEventGroupClearBits(_doneEvents, BIT_HOME_R_DONE);
 		  startRegHomeAsync(&PressureRegulator::regR(), cmd.p1, cmd.p2, cmd.p3, BIT_HOME_R_DONE);
-		  waitForBit(BIT_HOME_R_DONE);
+		  commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(waitForBit(BIT_HOME_R_DONE));
 		#else
 		  Logger::instance()->log("Legacy has no refuel channel");
 		#endif
@@ -879,7 +882,9 @@ void Orchestrator::executeCommand(const Command &cmd) {
           startHomeAsync(Stepper::stepperY(), fastHz, slowHz, backoff, BIT_HOME_Y_DONE);
 
           // Wait for both to finish
-          waitForBits(BIT_HOME_X_DONE | BIT_HOME_Y_DONE);
+          commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(
+              waitForBits(BIT_HOME_X_DONE | BIT_HOME_Y_DONE)
+          );
           break;
         }
         case CMD_HOME_PR_BOTH: {
@@ -892,11 +897,13 @@ void Orchestrator::executeCommand(const Command &cmd) {
 		  xEventGroupClearBits(_doneEvents, BIT_HOME_P_DONE | BIT_HOME_R_DONE);
 		  startRegHomeAsync(&PressureRegulator::regP(), fastHz, slowHz, backoff, BIT_HOME_P_DONE);
 		  startRegHomeAsync(&PressureRegulator::regR(), fastHz, slowHz, backoff, BIT_HOME_R_DONE);
-		  waitForBits(BIT_HOME_P_DONE | BIT_HOME_R_DONE);
+		  commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(
+		      waitForBits(BIT_HOME_P_DONE | BIT_HOME_R_DONE)
+		  );
 		#else
 		  xEventGroupClearBits(_doneEvents, BIT_HOME_P_DONE);
 		  startRegHomeAsync(&PressureRegulator::regP(), fastHz, slowHz, backoff, BIT_HOME_P_DONE);
-		  waitForBit(BIT_HOME_P_DONE);
+		  commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(waitForBit(BIT_HOME_P_DONE));
 		#endif
           break;
         }
@@ -3165,32 +3172,30 @@ void Orchestrator::executeCommand(const Command &cmd) {
 					  const auto intent = OrchestratorDecode::decodeIntent(
 					      {static_cast<uint8_t>(cmd.cmd), cmd.p1u(), cmd.p2u(), cmd.p3u()});
 					  uint32_t ms = intent.waitMs;
-				  if (ms == 0) {
-				    break; // immediate completion
-				  }
+                            if (ms == 0) {
+                              break; // immediate completion
+                            }
 
-			  _waitRemainingTicks = msToAtLeast1Tick(ms);
+                    _waitRemainingTicks = msToAtLeast1Tick(ms);
 
-			  TickType_t rem = _waitRemainingTicks;
-			  bool completed = pauseAwareDelayTicks(rem);
-			  _waitRemainingTicks = rem;
-
-			  if (!completed && _waitRemainingTicks > 0) {
-			    // Interrupted by PAUSE/CLEAR/SHUTDOWN.
-			    // Do NOT advance _lastExecutedCmdNum yet — RESUME will finish it.
-			    return;
-			  }
-
-			  // Completed: fall through to end-of-command bookkeeping
-			  break;
-			}
+                    TickType_t rem = _waitRemainingTicks;
+                    bool completed = pauseAwareDelayTicks(rem);
+                    _waitRemainingTicks = rem;
+                    commandCompleted = OrchestratorCompletionPolicy::didPauseAwareDelayComplete(
+                        completed,
+                        static_cast<uint32_t>(_waitRemainingTicks)
+                    );
+                    break;
+                  }
         default:
           // unknown—ignore
       	HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
           break;
       }
-  _lastExecutedCmdNum = _currentCmdNum;
-  _lastRetiredCmdNum = _lastExecutedCmdNum;
+  if (!commandCompleted) {
+      return;
+  }
+  OrchestratorCompletionPolicy::retireCurrentCommand(_currentCmdNum, _lastExecutedCmdNum, _lastRetiredCmdNum);
   }
 
 void Orchestrator::performShutdown(uint8_t byeSeq8, uint32_t byeSeq32, bool have32)

@@ -200,7 +200,75 @@ def test_request_array_soft_stop_sends_pause_after_current_barrier():
     assert c.get_array_run_state() == "stop_requested"
     assert c.array_state_changed.calls == [("stop_requested",)]
     c.machine.pause_commands.assert_not_called()
-    c.machine.request_pause_after_seq32.assert_called_once_with(123)
+    args, kwargs = c.machine.request_pause_after_seq32.call_args
+    assert args == (123,)
+    assert callable(kwargs["on_failure"])
+
+
+def test_request_array_soft_stop_write_failure_aborts_to_idle():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        initial_state="running",
+    )
+
+    def _fail_pause_after(_barrier, on_success=None, on_failure=None):
+        assert on_success is None
+        on_failure({"reason": "write_failed", "barrier_seq32": 123})
+        return False
+
+    c.machine.request_pause_after_seq32 = Mock(side_effect=_fail_pause_after)
+    c._array_context = {"current_barrier_seq32": 123, "soft_stop_pending": False}
+
+    assert Controller.request_array_soft_stop(c) is False
+    c.machine.clear_command_queue.assert_called_once_with()
+    c.model.machine_model.clear_command_queue.assert_called_once_with()
+    assert c.get_array_run_state() == "idle"
+    assert c._array_context is None
+    assert c.error_occurred_signal.calls[-1][0] == "Soft Stop Failed"
+    assert "queued commands were cleared" in c.error_occurred_signal.calls[-1][1]
+
+
+def test_request_array_soft_stop_ack_rejection_aborts_to_idle():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        initial_state="running",
+    )
+
+    def _reject_pause_after(_barrier, on_success=None, on_failure=None):
+        on_failure({"reason": "ack_rejected", "barrier_seq32": 123})
+        return True
+
+    c.machine.request_pause_after_seq32 = Mock(side_effect=_reject_pause_after)
+    c._array_context = {"current_barrier_seq32": 123, "soft_stop_pending": False}
+
+    assert Controller.request_array_soft_stop(c) is True
+    c.machine.clear_command_queue.assert_called_once_with()
+    assert c.get_array_run_state() == "idle"
+    assert c._array_context is None
+    assert "MCU rejected" in c.error_occurred_signal.calls[-1][1]
+
+
+def test_request_array_soft_stop_ack_timeout_aborts_to_idle():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        initial_state="running",
+    )
+
+    def _timeout_pause_after(_barrier, on_success=None, on_failure=None):
+        on_failure({"reason": "ack_timeout", "barrier_seq32": 123})
+        return True
+
+    c.machine.request_pause_after_seq32 = Mock(side_effect=_timeout_pause_after)
+    c._array_context = {"current_barrier_seq32": 123, "soft_stop_pending": False}
+
+    assert Controller.request_array_soft_stop(c) is True
+    c.machine.clear_command_queue.assert_called_once_with()
+    assert c.get_array_run_state() == "idle"
+    assert c._array_context is None
+    assert "did not acknowledge" in c.error_occurred_signal.calls[-1][1]
 
 
 def test_handle_array_well_complete_updates_progress_and_queues_next_well():

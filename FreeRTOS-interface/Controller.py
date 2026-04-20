@@ -425,11 +425,39 @@ class Controller(QObject):
             return False
         self._set_array_run_state("stop_requested")
         context["soft_stop_pending"] = True
-        if not self.machine.request_pause_after_seq32(current_barrier):
-            context["soft_stop_pending"] = False
-            self._set_array_run_state("running")
+        if not self.machine.request_pause_after_seq32(
+            current_barrier,
+            on_failure=lambda payload, barrier=current_barrier: self._abort_array_after_soft_stop_failure(
+                payload.get("reason", "unknown"),
+                payload.get("barrier_seq32", barrier),
+            ),
+        ):
             return False
         return True
+
+    def _abort_array_after_soft_stop_failure(self, reason, barrier_seq32=None):
+        context = getattr(self, "_array_context", None)
+        if context is not None:
+            context["soft_stop_pending"] = False
+
+        detail_map = {
+            "write_failed": "the pause-after request could not be sent",
+            "ack_rejected": "the MCU rejected the pause-after request",
+            "ack_timeout": "the MCU did not acknowledge the pause-after request",
+            "invalid_barrier": "the pause-after request had an invalid barrier",
+        }
+        detail = detail_map.get(str(reason or "unknown"), f"the pause-after request failed ({reason})")
+        barrier_text = f" for command {int(barrier_seq32)}" if barrier_seq32 else ""
+
+        try:
+            self.clear_command_queue()
+        except Exception:
+            self._complete_array_finalize("hard_abort")
+
+        self.error_occurred_signal.emit(
+            "Soft Stop Failed",
+            f"Soft stop failed because {detail}{barrier_text}. The print array was aborted and the queued commands were cleared.",
+        )
 
     def set_relative_X(self, x,manual=False,handler=None,override=False):
         """Set the relative X coordinate for the machine."""
