@@ -4662,10 +4662,14 @@ class CommandQueueWidget(QGroupBox):
                 self.set_row_color(row_position, self.color_dict['darker_gray'])  # Dark grey
             elif command.status == "Sent":
                 self.set_row_color(row_position, self.color_dict['mid_gray'])  # Light grey
+            elif command.status == "Accepted":
+                self.set_row_color(row_position, self.color_dict['light_gray'])
             elif command.status == "Executing":
                 self.set_row_color(row_position, self.color_dict['dark_red'])  # Red
             elif command.status == "Completed":
                 self.set_row_color(row_position, self.color_dict['darker_gray'])  # Black
+            elif command.status == "Canceled":
+                self.set_row_color(row_position, self.color_dict['mid_red'])
 
     def set_row_color(self, row, color):
         """Set the background color for a row."""

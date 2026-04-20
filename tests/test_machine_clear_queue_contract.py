@@ -17,5 +17,12 @@ def test_clear_queue_timeout_keeps_tx_blocked_until_clear_status(qapp, test_prof
     machine.update_status({"cmd_depth": 1, "Current_command": 9, "Last_completed": 8})
     assert machine._tx_paused is True
 
-    machine.update_status({"cmd_depth": 0, "Current_command": 0, "Last_completed": 0})
+    machine.update_status(
+        {
+            "cmd_depth": 0,
+            "Current_command": 9,
+            "Last_completed": 8,
+            "Last_retired": 9,
+        }
+    )
     assert machine._tx_paused is False

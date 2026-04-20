@@ -6479,6 +6479,12 @@ class MachineModel(QObject):
         self.machine_free = True
         self.current_command_num = 0
         self.last_completed_command_num = 0
+        self.last_accepted_command_num = 0
+        self.last_retired_command_num = 0
+        self.command_depth = 0
+        self.pause_after_seq32 = 0
+        self.pause_watermark_reached = False
+        self.transport_paused = False
         self.current_micros = 0
 
         self.gripper_open = False
@@ -6549,6 +6555,12 @@ class MachineModel(QObject):
         self.machine_free = True
         self.current_command_num = 0
         self.last_completed_command_num = 0
+        self.last_accepted_command_num = 0
+        self.last_retired_command_num = 0
+        self.command_depth = 0
+        self.pause_after_seq32 = 0
+        self.pause_watermark_reached = False
+        self.transport_paused = False
         self.command_numbers_updated.emit()
         self.gripper_active = False
         self.reset_home_status()
@@ -6608,6 +6620,11 @@ class MachineModel(QObject):
     def clear_command_queue(self):
         self.paused = False
         self.machine_paused.emit()
+        self.machine_free = True
+        self.command_depth = 0
+        self.pause_after_seq32 = 0
+        self.pause_watermark_reached = False
+        self.transport_paused = False
 
     def open_gripper(self):
         self.gripper_open = True
@@ -6678,19 +6695,45 @@ class MachineModel(QObject):
         if changed:
             self.regulation_state_changed.emit(self.regulating_print_pressure)
 
-    def update_command_numbers(self, current_command_num, last_completed_command_num):
+    def update_command_numbers(
+        self,
+        current_command_num,
+        last_completed_command_num,
+        last_accepted_command_num=None,
+        last_retired_command_num=None,
+        command_depth=None,
+        pause_after_seq32=None,
+        pause_watermark_reached=None,
+        transport_paused=None,
+    ):
         self.current_command_num = current_command_num
         self.last_completed_command_num = last_completed_command_num
-        if self.last_completed_command_num != self.current_command_num:
+        if last_accepted_command_num is not None:
+            self.last_accepted_command_num = int(last_accepted_command_num)
+        if last_retired_command_num is not None:
+            self.last_retired_command_num = int(last_retired_command_num)
+        if command_depth is not None:
+            self.command_depth = int(command_depth)
+        if pause_after_seq32 is not None:
+            self.pause_after_seq32 = int(pause_after_seq32)
+        if pause_watermark_reached is not None:
+            self.pause_watermark_reached = bool(pause_watermark_reached)
+        if transport_paused is not None:
+            self.transport_paused = bool(transport_paused)
+
+        if self.command_depth > 0 or self.current_command_num != self.last_retired_command_num:
             self.machine_free = False
-            # #print(f"Machine busy. Current command: {self.current_command_num}, Last completed command: {self.last_completed_command_num}")
         else:
             self.machine_free = True
-            # #print(f"Machine free. Current command: {self.current_command_num}, Last completed command: {self.last_completed_command_num}")
         self.command_numbers_updated.emit()
 
     def get_command_numbers(self):
-        return self.current_command_num, self.last_completed_command_num
+        return (
+            self.current_command_num,
+            self.last_completed_command_num,
+            self.last_accepted_command_num,
+            self.last_retired_command_num,
+        )
     
     def update_target_position(self, x, y, z):
         self.target_x = int(x)
@@ -7447,8 +7490,19 @@ class Model(QObject):
         elif 'Grip_period' in status_keys:
             self.machine_model.update_gripper_refresh_period(status_dict['Grip_period'])
 
-        self.machine_model.update_command_numbers(status_dict.get('Current_command', self.machine_model.current_command_num),
-                                                    status_dict.get('Last_completed', self.machine_model.last_completed_command_num))
+        self.machine_model.update_command_numbers(
+            status_dict.get('Current_command', self.machine_model.current_command_num),
+            status_dict.get('Last_completed', self.machine_model.last_completed_command_num),
+            status_dict.get('Last_accepted', self.machine_model.last_accepted_command_num),
+            status_dict.get('Last_retired', self.machine_model.last_retired_command_num),
+            command_depth=status_dict.get('cmd_depth', self.machine_model.command_depth),
+            pause_after_seq32=status_dict.get('Pause_after_seq32', self.machine_model.pause_after_seq32),
+            pause_watermark_reached=status_dict.get(
+                'Pause_watermark_reached',
+                self.machine_model.pause_watermark_reached,
+            ),
+            transport_paused=status_dict.get('Transport_paused', self.machine_model.transport_paused),
+        )
         self.machine_state_updated.emit()
 
     def update_flash_session_state(self, flash_state: dict):

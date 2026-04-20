@@ -67,18 +67,25 @@ def _make_controller(*, well_plate, printer_head, regulation_on=True, gripper_in
     c._array_context = None
     c.profile = SimpleNamespace(name="default")
 
+    seq_counter = {"value": 100}
+
+    def _fake_print_droplets(*args, **kwargs):
+        seq_counter["value"] += 1
+        return SimpleNamespace(command_number=seq_counter["value"])
+
     c.close_gripper = Mock()
     c.move_to_location = Mock(return_value=True)
     c.enable_print_profile = Mock()
     c.disable_print_profile = Mock()
     c.set_absolute_coordinates = Mock(return_value=True)
-    c.print_droplets = Mock()
+    c.print_droplets = Mock(side_effect=_fake_print_droplets)
     c.update_expected_with_current = Mock()
 
     c.machine = SimpleNamespace(
         check_if_all_completed=lambda: queue_empty,
         clear_command_queue=Mock(),
         pause_commands=Mock(),
+        request_pause_after_seq32=Mock(return_value=True),
     )
     c.model = SimpleNamespace(
         well_plate=well_plate,
@@ -90,6 +97,8 @@ def _make_controller(*, well_plate, printer_head, regulation_on=True, gripper_in
         machine_model=SimpleNamespace(
             regulating_print_pressure=regulation_on,
             clear_command_queue=Mock(),
+            transport_paused=False,
+            pause_watermark_reached=False,
         ),
         experiment_model=SimpleNamespace(create_progress_file=Mock()),
     )
@@ -134,7 +143,7 @@ def test_print_array_blocks_when_regulation_disabled():
     c.close_gripper.assert_not_called()
 
 
-def test_print_array_queues_preamble_and_first_well_only():
+def test_print_array_prefetches_one_lookahead_well():
     first = FakeWell("A1", 5, {"X": 10, "Y": 20, "Z": 30})
     second = FakeWell("A2", 7, {"X": 40, "Y": 50, "Z": 60})
     c = _make_controller(
@@ -150,11 +159,16 @@ def test_print_array_queues_preamble_and_first_well_only():
         call("pause", ignore_safe_height=True),
     ]
     c.enable_print_profile.assert_called_once_with()
-    c.set_absolute_coordinates.assert_called_once_with(10, 20, 30, override=True)
-    assert c.print_droplets.call_count == 1
-    assert c.print_droplets.call_args.args[0] == 5
-    assert c.print_droplets.call_args.kwargs["handler"] == c._handle_array_well_complete
+    assert c.set_absolute_coordinates.call_args_list == [
+        call(10, 20, 30, override=True),
+        call(40, 50, 60, override=True),
+    ]
+    assert c.print_droplets.call_count == 2
+    assert c.print_droplets.call_args_list[0].args[0] == 5
+    assert c.print_droplets.call_args_list[1].args[0] == 7
+    assert c.print_droplets.call_args_list[0].kwargs["handler"] == c._handle_array_well_complete
     assert c._array_context["stock_id"] == "stock-a"
+    assert [item["well_id"] for item in c._array_context["queued_wells"]] == ["A1", "A2"]
     assert c.get_array_run_state() == "running"
 
 
@@ -174,17 +188,19 @@ def test_print_array_resume_ready_starts_next_incomplete_well():
     assert c.get_array_run_state() == "running"
 
 
-def test_request_array_soft_stop_changes_state_without_hard_pause():
+def test_request_array_soft_stop_sends_pause_after_current_barrier():
     c = _make_controller(
         well_plate=FakeWellPlate([FakeWell("A1", 5)]),
         printer_head=_make_printer_head(),
         initial_state="running",
     )
+    c._array_context = {"current_barrier_seq32": 123, "soft_stop_pending": False}
 
     assert Controller.request_array_soft_stop(c) is True
     assert c.get_array_run_state() == "stop_requested"
     assert c.array_state_changed.calls == [("stop_requested",)]
     c.machine.pause_commands.assert_not_called()
+    c.machine.request_pause_after_seq32.assert_called_once_with(123)
 
 
 def test_handle_array_well_complete_updates_progress_and_queues_next_well():
@@ -202,8 +218,10 @@ def test_handle_array_well_complete_updates_progress_and_queues_next_well():
         "update_volume": True,
         "droplet_volume": 1000.0,
         "finalize_reason": None,
+        "queued_wells": [{"well_id": "A1", "target_droplets": 5, "dispense_seq32": 101}],
+        "planned_well_ids": {"A1"},
     }
-    c._queue_next_array_well = Mock()
+    c._fill_array_lookahead = Mock()
     c._enqueue_array_finalize = Mock()
 
     Controller._handle_array_well_complete(
@@ -218,7 +236,7 @@ def test_handle_array_well_complete_updates_progress_and_queues_next_well():
     printer_head.record_droplet_volume_lost.assert_called_once_with(5)
     c.model.experiment_model.create_progress_file.assert_called_once_with()
     assert c._array_context["expected_volume"] == 15.0
-    c._queue_next_array_well.assert_called_once_with()
+    c._fill_array_lookahead.assert_called_once_with()
     c._enqueue_array_finalize.assert_not_called()
 
 
@@ -235,6 +253,8 @@ def test_handle_array_well_complete_finalizes_completed_array():
         "update_volume": False,
         "droplet_volume": None,
         "finalize_reason": None,
+        "queued_wells": [{"well_id": "A1", "target_droplets": 5, "dispense_seq32": 101}],
+        "planned_well_ids": {"A1"},
     }
     c.move_to_location = Mock(side_effect=_parking_move_side_effect)
 
@@ -256,7 +276,7 @@ def test_handle_array_well_complete_finalizes_completed_array():
     assert c.update_slots_signal.calls == []
 
 
-def test_handle_array_well_complete_soft_stop_parks_and_becomes_resume_ready():
+def test_handle_array_well_complete_soft_stop_waits_for_watermark():
     current = FakeWell("A1", 5)
     later = FakeWell("A2", 2)
     c = _make_controller(
@@ -270,8 +290,14 @@ def test_handle_array_well_complete_soft_stop_parks_and_becomes_resume_ready():
         "update_volume": False,
         "droplet_volume": None,
         "finalize_reason": None,
+        "queued_wells": [
+            {"well_id": "A1", "target_droplets": 5, "dispense_seq32": 101},
+            {"well_id": "A2", "target_droplets": 2, "dispense_seq32": 102},
+        ],
+        "planned_well_ids": {"A1", "A2"},
+        "soft_stop_pending": True,
     }
-    c.move_to_location = Mock(side_effect=_parking_move_side_effect)
+    c._enqueue_array_finalize = Mock()
 
     Controller._handle_array_well_complete(
         c,
@@ -281,9 +307,27 @@ def test_handle_array_well_complete_soft_stop_parks_and_becomes_resume_ready():
         update_volume=False,
     )
 
-    assert c.get_array_run_state() == "resume_ready"
-    assert c.array_complete.calls == []
-    assert c.update_slots_signal.calls == [()]
+    assert c.get_array_run_state() == "stop_requested"
+    assert c._array_context["soft_stop_pending"] is True
+    c._enqueue_array_finalize.assert_not_called()
+
+
+def test_handle_status_update_completes_soft_stop_when_watermark_reached():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        initial_state="stop_requested",
+    )
+    c._array_context = {"soft_stop_pending": True}
+    c.model.update_state = Mock(side_effect=lambda status: None)
+    c.model.machine_model.pause_watermark_reached = True
+    c.model.machine_model.transport_paused = True
+    c._complete_array_finalize = Mock()
+
+    Controller.handle_status_update(c, {"Pause_watermark_reached": 1, "Transport_paused": 1})
+
+    c.model.update_state.assert_called_once()
+    c._complete_array_finalize.assert_called_once_with("soft_stop")
 
 
 def test_handle_array_well_complete_refill_required_parks_and_becomes_resume_ready():
@@ -301,6 +345,8 @@ def test_handle_array_well_complete_refill_required_parks_and_becomes_resume_rea
         "update_volume": True,
         "droplet_volume": 1000.0,
         "finalize_reason": None,
+        "queued_wells": [{"well_id": "A1", "target_droplets": 1, "dispense_seq32": 101}],
+        "planned_well_ids": {"A1"},
     }
     c.move_to_location = Mock(side_effect=_parking_move_side_effect)
 
@@ -332,9 +378,12 @@ def test_soft_stop_wins_over_refill_required():
         "update_volume": True,
         "droplet_volume": 1000.0,
         "finalize_reason": None,
+        "queued_wells": [{"well_id": "A1", "target_droplets": 1, "dispense_seq32": 101}],
+        "planned_well_ids": {"A1"},
+        "soft_stop_pending": True,
     }
     c._enqueue_array_finalize = Mock()
-    c._queue_next_array_well = Mock()
+    c._fill_array_lookahead = Mock()
 
     Controller._handle_array_well_complete(
         c,
@@ -344,8 +393,9 @@ def test_soft_stop_wins_over_refill_required():
         update_volume=True,
     )
 
-    c._enqueue_array_finalize.assert_called_once_with("soft_stop")
-    c._queue_next_array_well.assert_not_called()
+    c._enqueue_array_finalize.assert_not_called()
+    c._fill_array_lookahead.assert_not_called()
+    assert c._array_context["soft_stop_pending"] is True
 
 
 def test_clear_command_queue_resets_array_runner_state():

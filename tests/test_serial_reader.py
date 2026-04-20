@@ -41,9 +41,38 @@ def test_serial_reader_emits_status_and_ack(qapp):
             0,
             0,
             0,
+            mfr.TAG_LAST_ACCEPTED_CMD,
+            4,
+            3,
+            0,
+            0,
+            0,
+            mfr.TAG_LAST_RETIRED_CMD,
+            4,
+            2,
+            0,
+            0,
+            0,
         ]
     )
-    ack_payload = bytes([mfr.HELLO_ACK, 0x01, mfr.Command.TAG_SEQ32, 4, 1, 0, 0, 0])
+    ack_payload = bytes(
+        [
+            mfr.HELLO_ACK,
+            0x01,
+            mfr.ACK_TLV_SEQ32,
+            4,
+            1,
+            0,
+            0,
+            0,
+            mfr.ACK_TLV_CAPABILITIES,
+            4,
+            mfr.REQUIRED_TRANSPORT_CAPS & 0xFF,
+            (mfr.REQUIRED_TRANSPORT_CAPS >> 8) & 0xFF,
+            (mfr.REQUIRED_TRANSPORT_CAPS >> 16) & 0xFF,
+            (mfr.REQUIRED_TRANSPORT_CAPS >> 24) & 0xFF,
+        ]
+    )
     serial_stream = _frame(status_payload) + _frame(ack_payload)
 
     fake_ser = FakeSerial(serial_stream)
@@ -58,14 +87,17 @@ def test_serial_reader_emits_status_and_ack(qapp):
     assert len(statuses) == 1
     assert statuses[0]["Current_command"] == 3
     assert statuses[0]["Last_completed"] == 2
+    assert statuses[0]["Last_accepted"] == 3
+    assert statuses[0]["Last_retired"] == 2
     assert isinstance(statuses[0]["__host_rx_monotonic_ns"], int)
     assert len(acks) == 1
     assert acks[0]["ack_cmd"] == mfr.HELLO_ACK
     assert acks[0]["seq32"] == 1
+    assert acks[0]["capabilities"] == mfr.REQUIRED_TRANSPORT_CAPS
 
 
 def test_serial_reader_rejects_bad_crc(qapp):
-    payload = bytes([mfr.HELLO_ACK, 0x01, mfr.Command.TAG_SEQ32, 4, 1, 0, 0, 0])
+    payload = bytes([mfr.HELLO_ACK, 0x01, mfr.ACK_TLV_SEQ32, 4, 1, 0, 0, 0])
     good = _frame(payload)
     bad = good[:-1] + bytes([good[-1] ^ 0xFF])
     fake_ser = FakeSerial(bad)
@@ -83,7 +115,7 @@ def test_serial_reader_rejects_bad_crc(qapp):
 
 
 def test_serial_reader_emits_reset_report_without_consuming_ack_path(qapp):
-    ack_payload = bytes([mfr.HELLO_ACK, 0x01, mfr.Command.TAG_SEQ32, 4, 1, 0, 0, 0])
+    ack_payload = bytes([mfr.HELLO_ACK, 0x01, mfr.ACK_TLV_SEQ32, 4, 1, 0, 0, 0])
     reset_payload = bytes(
         [
             mfr.RESET_REPORT,
@@ -151,6 +183,47 @@ def test_serial_reader_emits_reset_report_without_consuming_ack_path(qapp):
     assert reports[0]["recovery_boot"] is True
     assert "during open_gripper" in reports[0]["summary"]
     assert "first late task pressure" in reports[0]["summary"]
+
+
+def test_serial_reader_decodes_queue_ack_result_and_expected_seq32(qapp):
+    ack_payload = bytes(
+        [
+            mfr.CMD_QUEUE_ACK,
+            0x05,
+            mfr.ACK_TLV_SEQ32,
+            4,
+            9,
+            0,
+            0,
+            0,
+            mfr.ACK_TLV_RESULT,
+            1,
+            mfr.ACK_RESULT_GAP,
+            mfr.ACK_TLV_EXPECTED_SEQ32,
+            4,
+            7,
+            0,
+            0,
+            0,
+        ]
+    )
+    fake_ser = FakeSerial(_frame(ack_payload))
+    reader = mfr.SerialReader(fake_ser)
+    acks = []
+    reader.ackReceived.connect(acks.append)
+
+    reader.run()
+
+    assert acks == [
+        {
+            "ack_cmd": mfr.CMD_QUEUE_ACK,
+            "seq8": 0x05,
+            "seq32": 9,
+            "ack_result": "gap",
+            "expected_seq32": 7,
+            "capabilities": None,
+        }
+    ]
 
 
 def test_serial_reader_decodes_home_task_names_in_reset_reports(qapp):

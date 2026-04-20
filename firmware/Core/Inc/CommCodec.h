@@ -11,6 +11,9 @@ static constexpr uint8_t TAG_P1 = 0x01;
 static constexpr uint8_t TAG_P2 = 0x02;
 static constexpr uint8_t TAG_P3 = 0x03;
 static constexpr uint8_t TAG_SEQ32 = 0x10;
+static constexpr uint8_t TAG_ACK_RESULT = 0x11;
+static constexpr uint8_t TAG_EXPECTED_SEQ32 = 0x12;
+static constexpr uint8_t TAG_CAPABILITIES = 0x13;
 static constexpr size_t RX_BUF_SIZE = 64;
 
 struct DecodedCommand {
@@ -46,7 +49,20 @@ uint16_t crc16(const uint8_t* data, uint16_t len);
 
 size_t encodeFrame(const uint8_t* payload, uint8_t len, uint8_t* outFrame, size_t outCap);
 
-uint8_t buildAckPayload(uint8_t ackCmd, uint8_t seq8, uint32_t seq32, bool includeSeq32, uint8_t* outPayload, size_t outCap);
+uint8_t buildAckPayload(
+    uint8_t ackCmd,
+    uint8_t seq8,
+    uint32_t seq32,
+    bool includeSeq32,
+    uint8_t* outPayload,
+    size_t outCap,
+    bool includeAckResult = false,
+    uint8_t ackResult = 0,
+    bool includeExpectedSeq32 = false,
+    uint32_t expectedSeq32 = 0,
+    bool includeCapabilities = false,
+    uint32_t capabilities = 0
+);
 
 FeedResult feedRxByte(RxParser& parser, uint8_t b, uint8_t& outPayloadLen);
 

@@ -164,6 +164,14 @@ class Controller(QObject):
     def handle_status_update(self, status_dict):
         """Handle the status update and update the machine model."""
         self.model.update_state(status_dict)
+        context = getattr(self, "_array_context", None) or {}
+        if (
+            self.get_array_run_state() == "stop_requested"
+            and context.get("soft_stop_pending")
+            and self.model.machine_model.pause_watermark_reached
+            and self.model.machine_model.transport_paused
+        ):
+            self._complete_array_finalize("soft_stop")
 
     def handle_error(self, error_message):
         """Handle errors from the machine."""
@@ -411,7 +419,16 @@ class Controller(QObject):
         """Finish the active well, then park and leave the array resumable."""
         if self.get_array_run_state() != "running":
             return False
+        context = getattr(self, "_array_context", None) or {}
+        current_barrier = context.get("current_barrier_seq32")
+        if not current_barrier:
+            return False
         self._set_array_run_state("stop_requested")
+        context["soft_stop_pending"] = True
+        if not self.machine.request_pause_after_seq32(current_barrier):
+            context["soft_stop_pending"] = False
+            self._set_array_run_state("running")
+            return False
         return True
 
     def set_relative_X(self, x,manual=False,handler=None,override=False):
@@ -1083,7 +1100,7 @@ class Controller(QObject):
             else:
                 print('Controller: using default pulse width')
 
-        self.machine.print_droplets(droplets,handler=handler,kwargs=kwargs,manual=manual)
+        return self.machine.print_droplets(droplets,handler=handler,kwargs=kwargs,manual=manual)
 
     def print_only(self,droplets,manual=False):
         """Activate the print valve a specified number of times without refueling."""
@@ -1149,21 +1166,44 @@ class Controller(QObject):
             "update_volume": update_volume,
             "droplet_volume": droplet_volume,
             "finalize_reason": None,
+            "lookahead_wells": 2,
+            "queued_wells": [],
+            "planned_well_ids": set(),
+            "current_barrier_seq32": None,
+            "soft_stop_pending": False,
         }
         return True
+
+    def _array_post_well_expected_volume(self, target_droplets):
+        context = getattr(self, "_array_context", None) or {}
+        expected_volume = context.get("expected_volume")
+        droplet_volume = context.get("droplet_volume")
+        if expected_volume is None or droplet_volume is None:
+            return None
+        return float(expected_volume) - int(target_droplets or 0) * float(droplet_volume) / 1000.0
+
+    def _get_next_unplanned_array_well(self, context):
+        stock_id = context.get("stock_id")
+        planned = context.get("planned_well_ids", set())
+        for well in self._get_array_remaining_wells(stock_id):
+            if well.well_id not in planned:
+                return well
+        return None
+
+    def _update_current_array_barrier(self):
+        context = getattr(self, "_array_context", None) or {}
+        queued_wells = list(context.get("queued_wells") or [])
+        context["current_barrier_seq32"] = queued_wells[0]["dispense_seq32"] if queued_wells else None
 
     def _queue_next_array_well(self):
         context = getattr(self, "_array_context", None) or {}
         stock_id = context.get("stock_id")
-        wells_with_droplets = self._get_array_remaining_wells(stock_id)
-        if not wells_with_droplets:
-            self._enqueue_array_finalize("completed")
+        well = self._get_next_unplanned_array_well(context)
+        if well is None:
             return False
 
-        well = wells_with_droplets[0]
         target_droplets = int(well.get_remaining_droplets(stock_id) or 0)
         if target_droplets <= 0:
-            self._enqueue_array_finalize("completed")
             return False
 
         well_coords = well.get_coordinates()
@@ -1178,7 +1218,7 @@ class Controller(QObject):
             return False
 
         print(f'Printing {target_droplets} droplets to well {well.well_id}')
-        self.print_droplets(
+        dispense_command = self.print_droplets(
             target_droplets,
             expected_volume=context.get("expected_volume"),
             handler=self._handle_array_well_complete,
@@ -1189,10 +1229,66 @@ class Controller(QObject):
                 'update_volume': context.get("update_volume", False),
             },
         )
+        if dispense_command is None:
+            self.error_occurred_signal.emit('Print Array Error', f'Failed to queue dispense for well {well.well_id}')
+            self._complete_array_finalize("hard_abort")
+            return False
+
+        context.setdefault("planned_well_ids", set()).add(well.well_id)
+        context.setdefault("queued_wells", []).append(
+            {
+                "well_id": well.well_id,
+                "target_droplets": target_droplets,
+                "dispense_seq32": int(getattr(dispense_command, "command_number", 0) or 0),
+            }
+        )
+        self._update_current_array_barrier()
         return True
+
+    def _fill_array_lookahead(self):
+        context = getattr(self, "_array_context", None) or {}
+        if context.get("finalize_reason") is not None:
+            return False
+
+        queued_wells = context.setdefault("queued_wells", [])
+        lookahead_wells = int(context.get("lookahead_wells", 1) or 1)
+        added_any = False
+        while len(queued_wells) < lookahead_wells:
+            if self.get_array_run_state() == "stop_requested":
+                break
+
+            if queued_wells and context.get("update_volume"):
+                post_well_expected = self._array_post_well_expected_volume(queued_wells[-1]["target_droplets"])
+                if post_well_expected is not None and post_well_expected < 10:
+                    break
+
+            if not self._queue_next_array_well():
+                break
+            queued_wells = context.setdefault("queued_wells", [])
+            added_any = True
+
+        self._update_current_array_barrier()
+        return added_any
+
+    def _pop_completed_array_well(self, well_id):
+        context = getattr(self, "_array_context", None) or {}
+        queued_wells = list(context.get("queued_wells") or [])
+        removed = None
+        remaining = []
+        for info in queued_wells:
+            if removed is None and info.get("well_id") == well_id:
+                removed = info
+            else:
+                remaining.append(info)
+        context["queued_wells"] = remaining
+        if removed is not None:
+            context.setdefault("planned_well_ids", set()).discard(well_id)
+        self._update_current_array_barrier()
+        return removed
 
     def _handle_array_well_complete(self, well_id=None, stock_id=None, target_droplets=None, update_volume=False):
         context = getattr(self, "_array_context", None) or {}
+        self._pop_completed_array_well(well_id)
         self._record_array_progress(
             well_id=well_id,
             stock_id=stock_id,
@@ -1204,14 +1300,15 @@ class Controller(QObject):
             context["expected_volume"] -= int(target_droplets or 0) * float(context["droplet_volume"]) / 1000.0
 
         stock_id = context.get("stock_id", stock_id)
-        if not self._get_array_remaining_wells(stock_id):
+        remaining_wells = self._get_array_remaining_wells(stock_id)
+        if not remaining_wells and not context.get("queued_wells"):
             self._enqueue_array_finalize("completed")
         elif self.get_array_run_state() == "stop_requested":
-            self._enqueue_array_finalize("soft_stop")
+            context["soft_stop_pending"] = True
         elif context.get("update_volume") and context.get("expected_volume") is not None and context.get("expected_volume") < 10:
             self._enqueue_array_finalize("refill_required")
         else:
-            self._queue_next_array_well()
+            self._fill_array_lookahead()
 
     def _enqueue_array_finalize(self, reason):
         reason = str(reason or "completed")
@@ -1224,6 +1321,10 @@ class Controller(QObject):
         if reason == "hard_abort":
             self._complete_array_finalize(reason)
             return False
+
+        if reason == "soft_stop":
+            self._complete_array_finalize(reason)
+            return True
 
         self.disable_print_profile()
 
@@ -1335,6 +1436,9 @@ class Controller(QObject):
             print('Cannot print: Pressure regulation is not enabled')
             return
 
+        if self.get_array_run_state() == "resume_ready" and self.model.machine_model.transport_paused:
+            self.resume_commands()
+
         if not self._start_array_run_context():
             print('Cannot print: No remaining droplets for the loaded stock')
             return
@@ -1349,7 +1453,7 @@ class Controller(QObject):
         self.enable_print_profile()
 
         self._set_array_run_state("running")
-        self._queue_next_array_well()
+        self._fill_array_lookahead()
             
     def enable_print_profile(self):
         """Enable the print profile."""

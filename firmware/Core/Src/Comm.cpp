@@ -202,9 +202,33 @@ void Comm::sendCommandByte(uint8_t cmd, uint8_t seq) {
     xSemaphoreGive(_txMutex);
 }
 
-void Comm::sendAckWithSeq32(uint8_t ackCmd, uint8_t seq8, uint32_t seq32, bool includeSeq32) {
-  uint8_t payload[2 + 2 + 4] = {0}; // [ack, seq8] + [tag,len,val]
-  const uint8_t payloadLen = CommCodec::buildAckPayload(ackCmd, seq8, seq32, includeSeq32, payload, sizeof(payload));
+void Comm::sendAckWithSeq32(
+    uint8_t ackCmd,
+    uint8_t seq8,
+    uint32_t seq32,
+    bool includeSeq32,
+    bool includeAckResult,
+    uint8_t ackResult,
+    bool includeExpectedSeq32,
+    uint32_t expectedSeq32,
+    bool includeCapabilities,
+    uint32_t capabilities
+) {
+  uint8_t payload[24] = {0};
+  const uint8_t payloadLen = CommCodec::buildAckPayload(
+      ackCmd,
+      seq8,
+      seq32,
+      includeSeq32,
+      payload,
+      sizeof(payload),
+      includeAckResult,
+      ackResult,
+      includeExpectedSeq32,
+      expectedSeq32,
+      includeCapabilities,
+      capabilities
+  );
   if (payloadLen == 0) {
       return;
   }
@@ -398,7 +422,7 @@ void Comm::statusTask() {
         switch (chunk) {
         	case CHUNK_0: {
 				// LED, pressure, flash
-				uint8_t payload[1 + 18*(1+1+4)] = {};
+				uint8_t payload[160] = {};
 				size_t idx = 0;
 
 				uint16_t printP  = 0;
@@ -436,6 +460,11 @@ void Comm::statusTask() {
 				UBaseType_t depth = Orchestrator::getCommandDepth();
 				uint32_t currentCmd = Orchestrator::getCurrentCmdNum();
 				uint32_t lastCmd = Orchestrator::getLastCmdNum();
+				uint32_t lastAccepted = Orchestrator::getLastAcceptedCmdNum();
+				uint32_t lastRetired = Orchestrator::getLastRetiredCmdNum();
+				uint32_t pauseAfterSeq32 = Orchestrator::getPauseAfterSeq32();
+				uint32_t pauseWatermarkReached = Orchestrator::getPauseWatermarkReached() ? 1u : 0u;
+				uint32_t transportPaused = Orchestrator::isTransportPaused() ? 1u : 0u;
 
 				// Command byte first
 				payload[idx++] = CMD_STATUS;
@@ -463,7 +492,12 @@ void Comm::statusTask() {
 
 				APPEND_S32(payload, idx, TAG_CMD_DEPTH,   depth);
 				APPEND_S32(payload, idx, TAG_CURR_CMD,    currentCmd);
-					APPEND_S32(payload, idx, TAG_LAST_CMD,    lastCmd);
+				APPEND_S32(payload, idx, TAG_LAST_CMD,    lastCmd);
+				APPEND_S32(payload, idx, TAG_LAST_ACCEPTED, lastAccepted);
+				APPEND_S32(payload, idx, TAG_LAST_RETIRED, lastRetired);
+				APPEND_S32(payload, idx, TAG_PAUSE_AFTER_CMD, pauseAfterSeq32);
+				appendU8(payload, idx, TAG_PAUSE_WATERMARK_REACHED, static_cast<uint8_t>(pauseWatermarkReached));
+				appendU8(payload, idx, TAG_TRANSPORT_PAUSED, static_cast<uint8_t>(transportPaused));
 
 					sendFrame(_huart, payload, idx);
 					recordStatusSend(CHUNK_0);
@@ -472,7 +506,7 @@ void Comm::statusTask() {
 					break;
         	}
 			case CHUNK_1: {
-				uint8_t payload[1 + 19*(1+1+4)] = {};
+				uint8_t payload[176] = {};
 				size_t idx = 0;
 
 				auto pos = Gantry::instance()->getPosition();
@@ -518,6 +552,11 @@ void Comm::statusTask() {
 
 				uint32_t currentCmd = Orchestrator::getCurrentCmdNum();
 				uint32_t lastCmd = Orchestrator::getLastCmdNum();
+				uint32_t lastAccepted = Orchestrator::getLastAcceptedCmdNum();
+				uint32_t lastRetired = Orchestrator::getLastRetiredCmdNum();
+				uint32_t pauseAfterSeq32 = Orchestrator::getPauseAfterSeq32();
+				uint32_t pauseWatermarkReached = Orchestrator::getPauseWatermarkReached() ? 1u : 0u;
+				uint32_t transportPaused = Orchestrator::isTransportPaused() ? 1u : 0u;
 
 				// Command byte first
 				payload[idx++] = CMD_STATUS;
@@ -545,7 +584,12 @@ void Comm::statusTask() {
 				APPEND_S32(payload, idx, TAG_GRIP_REFRESH,   gripperRefreshPeriod);
 
 				APPEND_S32(payload, idx, TAG_CURR_CMD,    currentCmd);
-					APPEND_S32(payload, idx, TAG_LAST_CMD,    lastCmd);
+				APPEND_S32(payload, idx, TAG_LAST_CMD,    lastCmd);
+				APPEND_S32(payload, idx, TAG_LAST_ACCEPTED, lastAccepted);
+				APPEND_S32(payload, idx, TAG_LAST_RETIRED, lastRetired);
+				APPEND_S32(payload, idx, TAG_PAUSE_AFTER_CMD, pauseAfterSeq32);
+				appendU8(payload, idx, TAG_PAUSE_WATERMARK_REACHED, static_cast<uint8_t>(pauseWatermarkReached));
+				appendU8(payload, idx, TAG_TRANSPORT_PAUSED, static_cast<uint8_t>(transportPaused));
 
 			        sendFrame(_huart, payload, idx);
 			        recordStatusSend(CHUNK_1);

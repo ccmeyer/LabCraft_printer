@@ -258,6 +258,56 @@ TEST(CommCodec, ClearAckWithSeq32Roundtrips) {
     assertAckRoundtrip(0xF7, 0x10, 0x12345678u);
 }
 
+TEST(CommCodec, QueueAckWithResultExpectedAndCapabilitiesMatchesGoldenBytes) {
+    uint8_t payload[32] = {0};
+    const uint8_t payloadLen = CommCodec::buildAckPayload(
+        0xFE,
+        0x05,
+        0x00000009u,
+        true,
+        payload,
+        sizeof(payload),
+        true,
+        0x03,
+        true,
+        0x00000007u,
+        true,
+        0x0000000Fu
+    );
+    UNSIGNED_LONGS_EQUAL(23u, payloadLen);
+
+    static const uint8_t expected[] = {
+        0xFE, 0x05,
+        CommCodec::TAG_SEQ32, 0x04, 0x09, 0x00, 0x00, 0x00,
+        CommCodec::TAG_ACK_RESULT, 0x01, 0x03,
+        CommCodec::TAG_EXPECTED_SEQ32, 0x04, 0x07, 0x00, 0x00, 0x00,
+        CommCodec::TAG_CAPABILITIES, 0x04, 0x0F, 0x00, 0x00, 0x00
+    };
+    MEMCMP_EQUAL(expected, payload, sizeof(expected));
+}
+
+TEST(CommCodec, PauseAfterSeq32CommandParsesP1AndSeq32) {
+    static const uint8_t payload[] = {
+        0xFF, 0x55,
+        CommCodec::TAG_P1, 0x04, 0x2A, 0x00, 0x00, 0x00,
+        CommCodec::TAG_SEQ32, 0x04, 0x78, 0x56, 0x34, 0x12
+    };
+    uint8_t frame[32] = {0};
+    const size_t frameLen = CommCodec::encodeFrame(payload, sizeof(payload), frame, sizeof(frame));
+    CHECK_TRUE(frameLen > 0);
+
+    CommCodec::RxParser parser{};
+    uint8_t parsedLen = 0;
+    LONGS_EQUAL((int)CommCodec::FeedResult::FrameReady, (int)feedAll(parser, frame, frameLen, parsedLen));
+
+    const auto decoded = CommCodec::decodeCommand(parser.rxBuf, parsedLen);
+    UNSIGNED_LONGS_EQUAL(0xFFu, decoded.cmd);
+    UNSIGNED_LONGS_EQUAL(0x2Au, decoded.p1);
+    UNSIGNED_LONGS_EQUAL(4u, decoded.p1Len);
+    UNSIGNED_LONGS_EQUAL(0x12345678u, decoded.seq32);
+    CHECK_TRUE(decoded.hasSeq32);
+}
+
 TEST(CommCodec, SelftestResultCrashRecordMetricsFrameEncodesWithoutTruncation) {
     static const char name[] = "crash_record";
     static const char metrics[] = "pending=1;fault=hard;task=status;reset=iwdg;boot=42;fault_ct=3;wdg_ct=2;boot_stage=hello_ack";

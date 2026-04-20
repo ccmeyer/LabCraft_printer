@@ -31,8 +31,33 @@ size_t encodeFrame(const uint8_t* payload, uint8_t len, uint8_t* outFrame, size_
     return frameLen;
 }
 
-uint8_t buildAckPayload(uint8_t ackCmd, uint8_t seq8, uint32_t seq32, bool includeSeq32, uint8_t* outPayload, size_t outCap) {
-    const uint8_t needed = includeSeq32 ? 8u : 2u;
+uint8_t buildAckPayload(
+    uint8_t ackCmd,
+    uint8_t seq8,
+    uint32_t seq32,
+    bool includeSeq32,
+    uint8_t* outPayload,
+    size_t outCap,
+    bool includeAckResult,
+    uint8_t ackResult,
+    bool includeExpectedSeq32,
+    uint32_t expectedSeq32,
+    bool includeCapabilities,
+    uint32_t capabilities
+) {
+    uint8_t needed = 2u;
+    if (includeSeq32) {
+        needed = static_cast<uint8_t>(needed + 6u);
+    }
+    if (includeAckResult) {
+        needed = static_cast<uint8_t>(needed + 3u);
+    }
+    if (includeExpectedSeq32) {
+        needed = static_cast<uint8_t>(needed + 6u);
+    }
+    if (includeCapabilities) {
+        needed = static_cast<uint8_t>(needed + 6u);
+    }
     if (!outPayload || outCap < needed) {
         return 0;
     }
@@ -48,6 +73,30 @@ uint8_t buildAckPayload(uint8_t ackCmd, uint8_t seq8, uint32_t seq32, bool inclu
         outPayload[idx++] = static_cast<uint8_t>((seq32 >> 8) & 0xFFu);
         outPayload[idx++] = static_cast<uint8_t>((seq32 >> 16) & 0xFFu);
         outPayload[idx++] = static_cast<uint8_t>((seq32 >> 24) & 0xFFu);
+    }
+
+    if (includeAckResult) {
+        outPayload[idx++] = TAG_ACK_RESULT;
+        outPayload[idx++] = 1u;
+        outPayload[idx++] = ackResult;
+    }
+
+    if (includeExpectedSeq32) {
+        outPayload[idx++] = TAG_EXPECTED_SEQ32;
+        outPayload[idx++] = 4u;
+        outPayload[idx++] = static_cast<uint8_t>(expectedSeq32 & 0xFFu);
+        outPayload[idx++] = static_cast<uint8_t>((expectedSeq32 >> 8) & 0xFFu);
+        outPayload[idx++] = static_cast<uint8_t>((expectedSeq32 >> 16) & 0xFFu);
+        outPayload[idx++] = static_cast<uint8_t>((expectedSeq32 >> 24) & 0xFFu);
+    }
+
+    if (includeCapabilities) {
+        outPayload[idx++] = TAG_CAPABILITIES;
+        outPayload[idx++] = 4u;
+        outPayload[idx++] = static_cast<uint8_t>(capabilities & 0xFFu);
+        outPayload[idx++] = static_cast<uint8_t>((capabilities >> 8) & 0xFFu);
+        outPayload[idx++] = static_cast<uint8_t>((capabilities >> 16) & 0xFFu);
+        outPayload[idx++] = static_cast<uint8_t>((capabilities >> 24) & 0xFFu);
     }
 
     return idx;

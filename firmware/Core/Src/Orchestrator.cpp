@@ -84,10 +84,17 @@ void maybeSendResetReport(uint8_t seq8, uint32_t seq32) {
 
 Orchestrator::Orchestrator()
   : _cmdQueue(nullptr),
+    _ackQueue(nullptr),
     _taskHandle(nullptr),
     _doneEvents(nullptr)
 {
 	_instance = this;
+	_currentCmdNum = 0;
+	_lastExecutedCmdNum = 0;
+	_lastAcceptedCmdNum = 0;
+	_lastRetiredCmdNum = 0;
+	_nextExpectedCmdNum = 1;
+	_pauseAfterSeq32 = 0;
 	_trigPort = GPIOE;
 	_trigPin = GPIO_PIN_8;
 	_flashDelay = 1000;
@@ -102,6 +109,7 @@ Orchestrator* Orchestrator::instance() {
 void Orchestrator::begin() {
   // queue for up to 16 commands
   _cmdQueue    = xQueueCreate(16, sizeof(Command));
+  _ackQueue    = xQueueCreate(16, sizeof(AckMessage));
   // event bits to wait on finish
   _doneEvents  = xEventGroupCreate();
 
@@ -119,6 +127,40 @@ extern "C" void MX_ORCH_Init()
   orch.begin();
 }
 
+BaseType_t Orchestrator::enqueueAckFromISR(const AckMessage& ack, BaseType_t* pxHigherPriorityTaskWoken) {
+    if (_ackQueue == nullptr) {
+        return pdFALSE;
+    }
+    return xQueueSendFromISR(_ackQueue, &ack, pxHigherPriorityTaskWoken);
+}
+
+void Orchestrator::retireAcceptedPendingCommands() {
+    if (_lastAcceptedCmdNum > _lastRetiredCmdNum) {
+        _lastRetiredCmdNum = _lastAcceptedCmdNum;
+    }
+    _currentCmdNum = _lastRetiredCmdNum;
+}
+
+void Orchestrator::applyPauseAfterWatermark() {
+    if (_pauseAfterSeq32 == 0u) {
+        return;
+    }
+    if (_lastRetiredCmdNum < _pauseAfterSeq32) {
+        return;
+    }
+
+    cancelCurrent();
+    if (_cmdQueue) {
+        Command dump{};
+        while (xQueueReceive(_cmdQueue, &dump, 0) == pdTRUE) { /* discard queued future work */ }
+    }
+    retireAcceptedPendingCommands();
+    _paused = true;
+    _pauseRequested = false;
+    _pauseAfterSeq32 = 0u;
+    _pauseWatermarkReached = true;
+}
+
 BaseType_t Orchestrator::enqueueFromISR(const Command& cmd, BaseType_t* pxHigherPriorityTaskWoken) {
 	// special commands — handle immediately
 
@@ -129,45 +171,114 @@ BaseType_t Orchestrator::enqueueFromISR(const Command& cmd, BaseType_t* pxHigher
 			  _paused = false; _pauseRequested = false;
 		  _seqEpoch=0; _lastSeq8=0; _currentCmdNum=0; _lastExecutedCmdNum=0;
 		  _resumeRequested = false; _clearRequested = false;
-		  _inFlight = cmd;                 // capture seq/cmd for ACK
-		  _acknowledgeRequested = true;
-	      if (pxHigherPriorityTaskWoken) *pxHigherPriorityTaskWoken = pdTRUE; // wake task to send ACK
-
-		  return pdFALSE;
+		  _shutdownRequested = false;
+		  _pauseWatermarkReached = false;
+		  _pauseAfterSeq32 = 0u;
+		  _lastAcceptedCmdNum = 0u;
+		  _lastRetiredCmdNum = 0u;
+		  _nextExpectedCmdNum = 1u;
+		  _inFlight = cmd;
+		  AckMessage ack{};
+		  ack.ackCmd = CMD_HELLO_ACK;
+		  ack.seq8 = cmd.seq8;
+		  ack.seq32 = cmd.hasSeq32 ? cmd.seq32 : 0u;
+		  ack.includeSeq32 = cmd.hasSeq32;
+		  ack.includeCapabilities = true;
+		  ack.capabilities = TRANSPORT_CAPABILITIES;
+		  return enqueueAckFromISR(ack, pxHigherPriorityTaskWoken);
 		}
 		case CMD_GOODBYE: {
-		  _inFlight = cmd;                 // capture seq/cmd for ACK
+		  _inFlight = cmd;
 		  _paused = true;
 		  _pauseRequested = true;
 		  _shutdownRequested = true;
-//		  _clearRequested = true;
-		  _acknowledgeRequested = true;
-		  return pdFALSE;
+		  AckMessage ack{};
+		  ack.ackCmd = CMD_BYE_ACK;
+		  ack.seq8 = cmd.seq8;
+		  ack.seq32 = cmd.hasSeq32 ? cmd.seq32 : 0u;
+		  ack.includeSeq32 = cmd.hasSeq32;
+		  return enqueueAckFromISR(ack, pxHigherPriorityTaskWoken);
 		}
         case CMD_PAUSE:
-		  // request a pause
 		  _paused = true;
 		  _pauseRequested = true;
-		  return pdFALSE;           // don't put into the queue
+		  return pdFALSE;
 		case CMD_RESUME:
 		  _resumeRequested = true;
 		  return pdFALSE;
 	      case CMD_CLEAR: {
-//    	  xQueueReset(_cmdQueue);
-			  _inFlight = cmd;                 // capture seq/cmd for ACK
+			  _inFlight = cmd;
 	    	  _clearRequested = true;
-	    	  _acknowledgeRequested = true;
-	        // inject these at head so they fire immediately
-	        return pdFALSE;
+	    	  AckMessage ack{};
+	    	  ack.ackCmd = CMD_CLEAR_ACK;
+	    	  ack.seq8 = cmd.seq8;
+	    	  ack.seq32 = cmd.hasSeq32 ? cmd.seq32 : 0u;
+	    	  ack.includeSeq32 = cmd.hasSeq32;
+	          return enqueueAckFromISR(ack, pxHigherPriorityTaskWoken);
+	      }
+	      case CMD_PAUSE_AFTER_SEQ32: {
+	    	  AckMessage ack{};
+	    	  ack.ackCmd = CMD_QUEUE_ACK;
+	    	  ack.seq8 = cmd.seq8;
+	    	  ack.seq32 = cmd.hasSeq32 ? cmd.seq32 : 0u;
+	    	  ack.includeSeq32 = cmd.hasSeq32;
+	    	  ack.includeAckResult = true;
+	    	  if (cmd.hasSeq32 && cmd.p1u() >= _lastExecutedCmdNum) {
+	    	  	  _pauseAfterSeq32 = cmd.p1u();
+	    	  	  _pauseWatermarkReached = false;
+	    	  	  ack.ackResult = ACK_RESULT_WATERMARK_SET;
+	    	  } else {
+	    	  	  ack.ackResult = ACK_RESULT_WATERMARK_REJECTED;
+	    	  }
+	    	  return enqueueAckFromISR(ack, pxHigherPriorityTaskWoken);
 	      }
 	      case CMD_SELFTEST_ABORT: {
 	        _selfTestAbortRequested = true;
 	        return pdFALSE;
 	      }
 	      default: {
-	    	  return xQueueSendFromISR(_cmdQueue, &cmd, pxHigherPriorityTaskWoken);
+	    	  break;
 	      }
 	    }
+
+	if (!cmd.hasSeq32) {
+		return pdFALSE;
+	}
+
+	AckMessage ack{};
+	ack.ackCmd = CMD_QUEUE_ACK;
+	ack.seq8 = cmd.seq8;
+	ack.seq32 = cmd.seq32;
+	ack.includeSeq32 = true;
+	ack.includeAckResult = true;
+
+	if (cmd.seq32 < _nextExpectedCmdNum) {
+		ack.ackResult = ACK_RESULT_DUPLICATE;
+		return enqueueAckFromISR(ack, pxHigherPriorityTaskWoken);
+	}
+
+	if (cmd.seq32 > _nextExpectedCmdNum) {
+		ack.ackResult = ACK_RESULT_GAP;
+		ack.includeExpectedSeq32 = true;
+		ack.expectedSeq32 = _nextExpectedCmdNum;
+		return enqueueAckFromISR(ack, pxHigherPriorityTaskWoken);
+	}
+
+	if (_cmdQueue == nullptr || uxQueueSpacesAvailable(_cmdQueue) == 0u) {
+		ack.ackResult = ACK_RESULT_BUSY;
+		return enqueueAckFromISR(ack, pxHigherPriorityTaskWoken);
+	}
+
+	const BaseType_t queued = xQueueSendFromISR(_cmdQueue, &cmd, pxHigherPriorityTaskWoken);
+	if (queued == pdPASS) {
+		_lastAcceptedCmdNum = cmd.seq32;
+		_nextExpectedCmdNum = cmd.seq32 + 1u;
+		ack.ackResult = ACK_RESULT_ACCEPTED;
+	} else {
+		ack.ackResult = ACK_RESULT_BUSY;
+	}
+	(void)enqueueAckFromISR(ack, pxHigherPriorityTaskWoken);
+	return queued;
 }
 
 
@@ -285,50 +396,41 @@ void Orchestrator::_run() {
   maybeSendResetReport(0u, 0u);
   for (;;) {
 	  Watchdog_CheckIn(CRASH_TASK_ORCH);
-		  if (_acknowledgeRequested) {
-		  const uint8_t seq8  = _inFlight.seq8;
-		  const uint32_t seq32 = _inFlight.hasSeq32 ? _inFlight.seq32 : _currentCmdNum;
-		  const bool have32 = _inFlight.hasSeq32;
-//          // Reply with appropriate ACK using the same sequence number
-//          uint8_t seq = _inFlight.seq;
-	          switch (_inFlight.cmd) {
-	            case CMD_HELLO:{
-//            	Comm::instance()->sendCommandByte(CMD_HELLO_ACK, seq);
-	            	Comm::instance()->sendAckWithSeq32(CMD_HELLO_ACK, seq8, seq32, have32);
-	            	CrashLog_SetBootStage(CRASH_BOOT_STAGE_HELLO_ACK);
-	            	Watchdog_Arm();
-	            	CrashLog_LogBootSummary();
-	            	maybeSendResetReport(seq8, seq32);
-	                // Then resume status & cosmetic stuff
-	                Comm::instance()->setStatusPaused(false);
+	  if (_ackQueue != nullptr) {
+		  AckMessage ack{};
+		  while (xQueueReceive(_ackQueue, &ack, 0) == pdTRUE) {
+			  if (ack.ackCmd == CMD_HELLO_ACK) {
+				  CrashLog_SetBootStage(CRASH_BOOT_STAGE_HELLO_ACK);
+				  Watchdog_Arm();
+				  CrashLog_LogBootSummary();
+				  maybeSendResetReport(ack.seq8, ack.seq32);
+				  Comm::instance()->setStatusPaused(false);
 				#if LC_HAS_LED_STRIP == 1
 				  MX_LEDSTRIP_FadeTo(100,500);
 				#endif
-            	break;
-            }
-            case CMD_GOODBYE: {
-            	Comm::instance()->setStatusPaused(true);
-//            	Comm::instance()->sendCommandByte(CMD_BYE_ACK, seq);
-            	Comm::instance()->sendAckWithSeq32(CMD_BYE_ACK, seq8, seq32, have32);
-            	// Start next session clean
-            	Comm::instance()->resetReceiveState();
-//            	MX_LEDSTRIP_FadeTo(0,500);
-				#if LC_HAS_LED_STRIP == 1
-				  MX_LEDSTRIP_FadeTo(0,500);
-				#endif
-            	break;
-            }
-            case CMD_CLEAR:{
-            	Comm::instance()->setStatusPaused(true);
-//            	Comm::instance()->sendCommandByte(CMD_CLEAR_ACK, seq);
-            	Comm::instance()->sendAckWithSeq32(CMD_CLEAR_ACK, seq8, seq32, have32);
-            	break;
-            }
-            default: break;
-          }
+			  } else if (ack.ackCmd == CMD_BYE_ACK || ack.ackCmd == CMD_CLEAR_ACK) {
+				  Comm::instance()->setStatusPaused(true);
+				  if (ack.ackCmd == CMD_BYE_ACK) {
+					  Comm::instance()->resetReceiveState();
+					#if LC_HAS_LED_STRIP == 1
+					  MX_LEDSTRIP_FadeTo(0,500);
+					#endif
+				  }
+			  }
 
-		  _acknowledgeRequested = false;
-
+			  Comm::instance()->sendAckWithSeq32(
+				  ack.ackCmd,
+				  ack.seq8,
+				  ack.seq32,
+				  ack.includeSeq32,
+				  ack.includeAckResult,
+				  ack.ackResult,
+				  ack.includeExpectedSeq32,
+				  ack.expectedSeq32,
+				  ack.includeCapabilities,
+				  ack.capabilities
+			  );
+		  }
 	  }
 	  if (_pauseRequested) {
 		    Logger::instance()->log("Run\r\n");
@@ -339,6 +441,13 @@ void Orchestrator::_run() {
 	      }
 
 	  if (_resumeRequested) {
+		if (_pauseWatermarkReached) {
+			_pauseWatermarkReached = false;
+			_pauseAfterSeq32 = 0u;
+			_paused = false;
+			_resumeRequested = false;
+			continue;
+		}
 		resumeCurrent();
 		_paused = false;
 		_resumeRequested = false;
@@ -356,9 +465,11 @@ void Orchestrator::_run() {
 
 			    if (completed && _waitRemainingTicks == 0) {
 			      _lastExecutedCmdNum = _currentCmdNum;
+			      _lastRetiredCmdNum = _lastExecutedCmdNum;
 			    }
 			  } else {
 			    _lastExecutedCmdNum = _currentCmdNum;
+			    _lastRetiredCmdNum = _lastExecutedCmdNum;
 			  }
 			  break;
 			}
@@ -376,10 +487,11 @@ void Orchestrator::_run() {
         xQueueReset(_cmdQueue);
         Comm::instance()->resetReceiveState();
 
-        _currentCmdNum = 0;
-        _lastExecutedCmdNum = 0;
-        _seqEpoch = 0;
-        _lastSeq8 = 0;
+        retireAcceptedPendingCommands();
+        _pauseAfterSeq32 = 0u;
+        _pauseWatermarkReached = false;
+        _resumeRequested = false;
+        _pauseRequested = false;
 
         xEventGroupClearBits(_doneEvents,
             BIT_LED_DONE|BIT_STEPPER1_DONE|BIT_STEPPER2_DONE|BIT_STEPPER3_DONE|BIT_PRINTING_DONE|BIT_GRIPPER_DONE);
@@ -403,6 +515,8 @@ void Orchestrator::_run() {
 	  performShutdown(seq8, seq32, have32);
 	  _shutdownRequested = false;
 	}
+
+	applyPauseAfterWatermark();
 
 	if (_paused) {
 	  vTaskDelay(pdMS_TO_TICKS(50));
@@ -3076,6 +3190,7 @@ void Orchestrator::executeCommand(const Command &cmd) {
           break;
       }
   _lastExecutedCmdNum = _currentCmdNum;
+  _lastRetiredCmdNum = _lastExecutedCmdNum;
   }
 
 void Orchestrator::performShutdown(uint8_t byeSeq8, uint32_t byeSeq32, bool have32)
@@ -3122,8 +3237,9 @@ void Orchestrator::performShutdown(uint8_t byeSeq8, uint32_t byeSeq32, bool have
     while (xQueueReceive(_cmdQueue, &dump, 0) == pdTRUE) { /* discard */ }
   }
 
-  _currentCmdNum = 0;
-  _lastExecutedCmdNum = 0;
+  retireAcceptedPendingCommands();
+  _pauseAfterSeq32 = 0u;
+  _pauseWatermarkReached = false;
   xEventGroupClearBits(_doneEvents,
     BIT_LED_DONE|BIT_STEPPER1_DONE|BIT_STEPPER2_DONE|BIT_STEPPER3_DONE|BIT_PRINTING_DONE|BIT_FLASH_DONE);
 

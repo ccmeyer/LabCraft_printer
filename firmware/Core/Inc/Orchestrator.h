@@ -128,7 +128,9 @@ public:
 		CMD_SELFTEST_START  = 0xFA,
 		CMD_SELFTEST_RESULT = 0xFB,
 		CMD_SELFTEST_DONE   = 0xFC,
-		CMD_SELFTEST_ABORT  = 0xFD
+		CMD_SELFTEST_ABORT  = 0xFD,
+		CMD_QUEUE_ACK       = 0xFE,
+		CMD_PAUSE_AFTER_SEQ32 = 0xFF
 	  };
 
   // complete packet, decoded from Comm
@@ -175,6 +177,26 @@ public:
 	  return instance()->_lastExecutedCmdNum;
   }
 
+  static uint32_t getLastAcceptedCmdNum() {
+      return instance()->_lastAcceptedCmdNum;
+  }
+
+  static uint32_t getLastRetiredCmdNum() {
+      return instance()->_lastRetiredCmdNum;
+  }
+
+  static uint32_t getPauseAfterSeq32() {
+      return instance()->_pauseAfterSeq32;
+  }
+
+  static bool getPauseWatermarkReached() {
+      return instance()->_pauseWatermarkReached;
+  }
+
+  static bool isTransportPaused() {
+      return instance()->_paused;
+  }
+
   static uint32_t getCurrentCmdNum() {
 	  return instance()->_currentCmdNum;
   }
@@ -188,6 +210,11 @@ public:
   Command _lastPausedCmd;
   uint32_t _currentCmdNum;
   uint32_t _lastExecutedCmdNum;
+  uint32_t _lastAcceptedCmdNum;
+  uint32_t _lastRetiredCmdNum;
+  uint32_t _nextExpectedCmdNum;
+  uint32_t _pauseAfterSeq32;
+  volatile bool _pauseWatermarkReached = false;
 
   // epoch/seq tracking
   uint16_t  _seqEpoch             = 0;
@@ -204,6 +231,19 @@ public:
 
   volatile bool _paused = false;
   volatile bool _clearing = false;
+
+  struct AckMessage {
+      uint8_t ackCmd = 0;
+      uint8_t seq8 = 0;
+      uint32_t seq32 = 0;
+      bool includeSeq32 = false;
+      bool includeAckResult = false;
+      uint8_t ackResult = 0;
+      bool includeExpectedSeq32 = false;
+      uint32_t expectedSeq32 = 0;
+      bool includeCapabilities = false;
+      uint32_t capabilities = 0;
+  };
 
   void clearQueue();
   void pauseCurrent();
@@ -280,8 +320,12 @@ private:
 
   static void            _taskEntry(void* pv);
   void                   _run();
+  BaseType_t             enqueueAckFromISR(const AckMessage& ack, BaseType_t* pxHigherPriorityTaskWoken);
+  void                   retireAcceptedPendingCommands();
+  void                   applyPauseAfterWatermark();
 
   QueueHandle_t          _cmdQueue;
+  QueueHandle_t          _ackQueue;
   TaskHandle_t           _taskHandle;
   EventGroupHandle_t     _doneEvents;
 

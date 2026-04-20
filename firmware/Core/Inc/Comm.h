@@ -48,6 +48,11 @@ static constexpr uint8_t TAG_ACTIVE_R	   = 0x41;
 static constexpr uint8_t TAG_CMD_DEPTH     = 0x50;
 static constexpr uint8_t TAG_LAST_CMD      = 0x51;
 static constexpr uint8_t TAG_CURR_CMD      = 0x52;
+static constexpr uint8_t TAG_LAST_ACCEPTED = 0x53;
+static constexpr uint8_t TAG_LAST_RETIRED  = 0x54;
+static constexpr uint8_t TAG_PAUSE_AFTER_CMD = 0x55;
+static constexpr uint8_t TAG_PAUSE_WATERMARK_REACHED = 0x56;
+static constexpr uint8_t TAG_TRANSPORT_PAUSED = 0x57;
 
 static constexpr uint8_t TAG_FLASH_NUM	   = 0x60;
 static constexpr uint8_t TAG_FLASH_WIDTH   = 0x61;
@@ -83,6 +88,23 @@ static constexpr uint8_t TAG_RESET_FAULT_STAGE        = 0x1D;
 static constexpr uint8_t TAG_RESET_WATCHDOG_LATE_TASK = 0x1E;
 static constexpr uint8_t TAG_RESET_ACTIVE_COMMAND     = 0x1F;
 
+static constexpr uint8_t ACK_RESULT_ACCEPTED = 1;
+static constexpr uint8_t ACK_RESULT_DUPLICATE = 2;
+static constexpr uint8_t ACK_RESULT_GAP = 3;
+static constexpr uint8_t ACK_RESULT_BUSY = 4;
+static constexpr uint8_t ACK_RESULT_WATERMARK_SET = 5;
+static constexpr uint8_t ACK_RESULT_WATERMARK_REJECTED = 6;
+
+static constexpr uint32_t TRANSPORT_CAP_QUEUE_ACK = (1u << 0);
+static constexpr uint32_t TRANSPORT_CAP_STATUS_FRONTIERS = (1u << 1);
+static constexpr uint32_t TRANSPORT_CAP_PAUSE_AFTER_SEQ32 = (1u << 2);
+static constexpr uint32_t TRANSPORT_CAP_SESSION_SEQ_PERSIST = (1u << 3);
+static constexpr uint32_t TRANSPORT_CAPABILITIES =
+    TRANSPORT_CAP_QUEUE_ACK |
+    TRANSPORT_CAP_STATUS_FRONTIERS |
+    TRANSPORT_CAP_PAUSE_AFTER_SEQ32 |
+    TRANSPORT_CAP_SESSION_SEQ_PERSIST;
+
 
 
 class Comm {
@@ -103,7 +125,18 @@ public:
 
     // Send a 2‐byte payload: <cmd, seq>, wrapped in START/len/CRC
     void sendCommandByte(uint8_t cmd, uint8_t seq = 0);
-    void sendAckWithSeq32(uint8_t ackCmd, uint8_t seq8, uint32_t seq32, bool includeSeq32);
+    void sendAckWithSeq32(
+        uint8_t ackCmd,
+        uint8_t seq8,
+        uint32_t seq32,
+        bool includeSeq32,
+        bool includeAckResult = false,
+        uint8_t ackResult = 0,
+        bool includeExpectedSeq32 = false,
+        uint32_t expectedSeq32 = 0,
+        bool includeCapabilities = false,
+        uint32_t capabilities = 0
+    );
     void sendResetReport(uint8_t seq8, uint32_t seq32, const CrashLogSnapshot* snap, uint32_t recoveryBoot);
 
     void sendFrame(UART_HandleTypeDef* huart,

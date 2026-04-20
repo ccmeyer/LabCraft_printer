@@ -764,6 +764,8 @@ BYE_ACK     = 0xF6
 CLEAR_ACK   = 0xF7
 BYE_DONE    = 0xF8
 RESET_REPORT = 0xF9
+CMD_QUEUE_ACK = 0xFE
+PAUSE_AFTER_SEQ32 = 0xFF
 
 # TLV tag constants; must match firmware
 TAG_LED_TOTAL     = 0x10
@@ -792,6 +794,11 @@ TAG_ACTIVE_R      = 0x41
 TAG_CMD_DEPTH     = 0x50
 TAG_LAST_CMD      = 0x51
 TAG_CURR_CMD     = 0x52
+TAG_LAST_ACCEPTED_CMD = 0x53
+TAG_LAST_RETIRED_CMD = 0x54
+TAG_PAUSE_AFTER_CMD = 0x55
+TAG_PAUSE_WATERMARK_REACHED = 0x56
+TAG_TRANSPORT_PAUSED = 0x57
 TAG_FLASH_NUM	   = 0x60
 TAG_FLASH_WIDTH   = 0x61
 TAG_FLASH_DELAY   = 0x62
@@ -822,6 +829,38 @@ TAG_RESET_RECOVERY_BOOT     = 0x1C
 TAG_RESET_FAULT_STAGE       = 0x1D
 TAG_RESET_WATCHDOG_LATE_TASK = 0x1E
 TAG_RESET_ACTIVE_COMMAND    = 0x1F
+
+ACK_TLV_SEQ32 = 0x10
+ACK_TLV_RESULT = 0x11
+ACK_TLV_EXPECTED_SEQ32 = 0x12
+ACK_TLV_CAPABILITIES = 0x13
+
+ACK_RESULT_ACCEPTED = 1
+ACK_RESULT_DUPLICATE = 2
+ACK_RESULT_GAP = 3
+ACK_RESULT_BUSY = 4
+ACK_RESULT_WATERMARK_SET = 5
+ACK_RESULT_WATERMARK_REJECTED = 6
+
+ACK_RESULT_NAMES = {
+    ACK_RESULT_ACCEPTED: "accepted",
+    ACK_RESULT_DUPLICATE: "duplicate",
+    ACK_RESULT_GAP: "gap",
+    ACK_RESULT_BUSY: "busy",
+    ACK_RESULT_WATERMARK_SET: "watermark_set",
+    ACK_RESULT_WATERMARK_REJECTED: "watermark_rejected",
+}
+
+TRANSPORT_CAP_QUEUE_ACK = 1 << 0
+TRANSPORT_CAP_STATUS_FRONTIERS = 1 << 1
+TRANSPORT_CAP_PAUSE_AFTER_SEQ32 = 1 << 2
+TRANSPORT_CAP_SESSION_SEQ_PERSIST = 1 << 3
+REQUIRED_TRANSPORT_CAPS = (
+    TRANSPORT_CAP_QUEUE_ACK
+    | TRANSPORT_CAP_STATUS_FRONTIERS
+    | TRANSPORT_CAP_PAUSE_AFTER_SEQ32
+    | TRANSPORT_CAP_SESSION_SEQ_PERSIST
+)
 
 # Map tags → (field name, length_in_bytes, signed?)
 TAG_MAP = {
@@ -868,6 +907,11 @@ TAG_MAP = {
     TAG_CMD_DEPTH:    ("cmd_depth",  4, False),
     TAG_LAST_CMD:     ("Last_completed", 4, False),
     TAG_CURR_CMD:     ("Current_command", 4, False),
+    TAG_LAST_ACCEPTED_CMD: ("Last_accepted", 4, False),
+    TAG_LAST_RETIRED_CMD: ("Last_retired", 4, False),
+    TAG_PAUSE_AFTER_CMD: ("Pause_after_seq32", 4, False),
+    TAG_PAUSE_WATERMARK_REACHED: ("Pause_watermark_reached", 1, False),
+    TAG_TRANSPORT_PAUSED: ("Transport_paused", 1, False),
 }
 
 CMD_MAP = {
@@ -943,6 +987,8 @@ CMD_MAP = {
     'CLEAR_ACK'   : 0xF7,
     'BYE_DONE'    : 0xF8,
     'RESET_REPORT': 0xF9,
+    'QUEUE_ACK'   : 0xFE,
+    'PAUSE_AFTER_SEQ32': 0xFF,
 }
 
 CMD_NAME_BY_CODE = {value: key.lower() for key, value in CMD_MAP.items()}
@@ -1014,12 +1060,20 @@ def crc16_x25(data: bytes) -> int:
                 crc >>= 1
     return crc & 0xFFFF
 
-def build_frame(cmd, seq32):
-    TAG_SEQ32 = 0x10
+def build_frame(cmd, seq32, *, p1=None, p2=None, p3=None):
+    TAG_SEQ32 = ACK_TLV_SEQ32
     seq8 = seq32 & 0xFF
     payload = bytearray([cmd & 0xFF, seq8])
     # SEQ32 TLV
     payload += bytes([TAG_SEQ32, 4]) + struct.pack("<I", seq32 & 0xFFFFFFFF)
+    for tag, value in (
+        (Command.TAG_P1, p1),
+        (Command.TAG_P2, p2),
+        (Command.TAG_P3, p3),
+    ):
+        if value is None:
+            continue
+        payload += bytes([tag, 4]) + struct.pack("<I", int(value) & 0xFFFFFFFF)
     if len(payload) > 255:
         raise ValueError("Payload length exceeds 255 bytes")
     header  = bytes([START_BYTE, len(payload)])
@@ -1156,25 +1210,46 @@ class SerialReader(QThread):
     def _parse_ack(payload: bytes) -> dict:
         """
         payload layout: [ack_cmd, seq8, (TLVs...)]
-        We only care about TAG_SEQ32 (0x10, len=4, LE)
+        Parse common ACK metadata and any optional transport-control TLVs.
         """
-        TAG_SEQ32 = 0x10
-
         if not payload:
-            return {"ack_cmd": None, "seq8": None, "seq32": None}
+            return {
+                "ack_cmd": None,
+                "seq8": None,
+                "seq32": None,
+                "ack_result": None,
+                "expected_seq32": None,
+                "capabilities": None,
+            }
 
         ack_cmd = payload[0]
         seq8 = payload[1] if len(payload) >= 2 else 0
         seq32 = None
+        ack_result = None
+        expected_seq32 = None
+        capabilities = None
         i = 2
         while i + 1 < len(payload):
             tag = payload[i]; ln = payload[i+1]; i += 2
             if i + ln > len(payload):
                 break
-            if tag == TAG_SEQ32 and ln == 4:
+            if tag == ACK_TLV_SEQ32 and ln == 4:
                 seq32 = struct.unpack_from("<I", payload, i)[0]
+            elif tag == ACK_TLV_RESULT and ln == 1:
+                ack_result = ACK_RESULT_NAMES.get(payload[i], f"result_{payload[i]}")
+            elif tag == ACK_TLV_EXPECTED_SEQ32 and ln == 4:
+                expected_seq32 = struct.unpack_from("<I", payload, i)[0]
+            elif tag == ACK_TLV_CAPABILITIES and ln == 4:
+                capabilities = struct.unpack_from("<I", payload, i)[0]
             i += ln
-        return {"ack_cmd": ack_cmd, "seq8": seq8, "seq32": seq32}
+        return {
+            "ack_cmd": ack_cmd,
+            "seq8": seq8,
+            "seq32": seq32,
+            "ack_result": ack_result,
+            "expected_seq32": expected_seq32,
+            "capabilities": capabilities,
+        }
 
     @staticmethod
     def _parse_reset_report(payload: bytes) -> dict | None:
@@ -1601,18 +1676,17 @@ class Command:
         self.handler   = handler
         self.kwargs    = kwargs or {}
         self.trace_metadata = dict(trace_metadata or {})
+        self.send_attempts = 0
         self.lifecycle_ns = {
             "queued": int(time.monotonic_ns()),
             "sent": None,
+            "accepted": None,
             "executing": None,
             "completed": None,
+            "canceled": None,
         }
         self.signal = f'<{command_type} {self.command_number} {param1},{param2},{param3}>'
 
-
-    def mark_as_dispatched(self):
-        self.status = "Sent"
-        return True
 
     def mark_as_sent(self):
         self.status = "Sent"
@@ -1621,7 +1695,18 @@ class Command:
             return True
         return False
 
+    def mark_as_accepted(self):
+        if self.status in ("Completed", "Canceled"):
+            return False
+        self.status = "Accepted"
+        if self.lifecycle_ns["accepted"] is None:
+            self.lifecycle_ns["accepted"] = int(time.monotonic_ns())
+            return True
+        return False
+
     def mark_as_executing(self):
+        if self.status in ("Completed", "Canceled"):
+            return False
         self.status = "Executing"
         if self.lifecycle_ns["executing"] is None:
             self.lifecycle_ns["executing"] = int(time.monotonic_ns())
@@ -1635,6 +1720,22 @@ class Command:
             self.execute_handler()
             return True
         return False
+
+    def mark_as_canceled(self):
+        self.status = "Canceled"
+        if self.lifecycle_ns["canceled"] is None:
+            self.lifecycle_ns["canceled"] = int(time.monotonic_ns())
+            return True
+        return False
+
+    def reset_for_resend(self):
+        if self.status in ("Completed", "Canceled"):
+            return False
+        self.status = "Added"
+        self.lifecycle_ns["sent"] = None
+        self.lifecycle_ns["accepted"] = None
+        self.lifecycle_ns["executing"] = None
+        return True
 
     def get_number(self):
         return self.command_number
@@ -1664,7 +1765,7 @@ class CommandQueue(QObject):
         self.queue = deque()
         self.completed = deque()
         self.command_number = 0
-        self.max_sent_commands = 8  # Maximum number of commands that can be sent to the machine at once
+        self.max_inflight_commands = 4  # Sliding-window size for accepted or pending-ack commands
         self._event_callback = event_callback
 
     def _emit_command_event(self, command, event_name):
@@ -1695,62 +1796,105 @@ class CommandQueue(QObject):
         self._emit_command_event(command, "queued")
         return command
 
-    def get_number_of_sent_commands(self):
-        """Returns the number of commands that have been sent to the machine."""
-        return len([command for command in self.queue if command.status == "Sent"])
+    def get_inflight_command_count(self):
+        """Return the number of non-terminal commands currently occupying the transport window."""
+        active_statuses = {"Sent", "Accepted", "Executing"}
+        return len([command for command in self.queue if command.status in active_statuses])
 
     def get_next_command(self):
-        """Send the next command to the machine if the buffer allows."""
-        if self.queue and self.get_number_of_sent_commands() < self.max_sent_commands:
+        """Return the next locally queued command if the sliding window has capacity."""
+        if self.queue and self.get_inflight_command_count() < self.max_inflight_commands:
             for command in self.queue:
                 if command.status == "Added":
-                    command.mark_as_dispatched()
                     return command
         return None
-    
-    def update_command_status(self, current_executing_command, last_completed_command):
-        if current_executing_command is None and last_completed_command is None:
+
+    def _trim_terminal_commands(self):
+        while self.queue and self.queue[0].status in {"Completed", "Canceled"}:
+            completed_command = self.queue.popleft()
+            self.completed.append(completed_command)
+            if len(self.completed) > 100:
+                self.completed.popleft()
+
+    def mark_command_accepted(self, command_number):
+        target = int(command_number or 0)
+        for cmd in self.queue:
+            if cmd.command_number == target:
+                if cmd.mark_as_accepted():
+                    self._emit_command_event(cmd, "accepted")
+                break
+        self._trim_terminal_commands()
+        self.queue_updated.emit()
+
+    def mark_for_resend_from(self, command_number):
+        floor = int(command_number or 0)
+        for cmd in self.queue:
+            if cmd.command_number >= floor and cmd.status in {"Added", "Sent"}:
+                if cmd.reset_for_resend():
+                    self._emit_command_event(cmd, "requeued")
+        self.queue_updated.emit()
+
+    def update_command_status(
+        self,
+        current_executing_command,
+        last_completed_command,
+        last_accepted_command=None,
+        last_retired_command=None,
+    ):
+        if (
+            current_executing_command is None
+            and last_completed_command is None
+            and last_accepted_command is None
+            and last_retired_command is None
+        ):
             return
 
         curr = int(current_executing_command or -1)
         last = int(last_completed_command  or -1)
+        accepted = int(last_accepted_command if last_accepted_command is not None else last)
+        retired = int(last_retired_command if last_retired_command is not None else last)
 
-        # 1) Complete everything <= last (this is the main truth)
         for cmd in list(self.queue):
-            if cmd.status in ("Sent", "Executing") and cmd.command_number <= last:
+            if cmd.status in {"Added", "Sent"} and cmd.command_number <= accepted:
+                if cmd.mark_as_accepted():
+                    self._emit_command_event(cmd, "accepted")
+
+        # 1) Complete everything <= last.
+        for cmd in list(self.queue):
+            if cmd.status in {"Sent", "Accepted", "Executing"} and cmd.command_number <= last:
                 if cmd.mark_as_completed():
                     self._emit_command_event(cmd, "completed")
 
-        # 2) Optionally mark one command in (last, curr] as Executing
-        #    (if multiple were executed between status ticks, this might be empty)
+        # 2) Retire contiguous canceled commands after the completed frontier.
+        for cmd in list(self.queue):
+            if cmd.status in {"Sent", "Accepted", "Executing"} and last < cmd.command_number <= retired:
+                if cmd.mark_as_canceled():
+                    self._emit_command_event(cmd, "canceled")
+
+        # 3) Optionally mark one accepted command in (last, curr] as executing.
         if curr >= 0 and curr > last:
-            # pick the smallest Sent command > last
             cand = None
             for cmd in self.queue:
-                if cmd.status == "Sent" and last < cmd.command_number <= curr:
+                if cmd.status in {"Accepted", "Sent"} and last < cmd.command_number <= curr:
                     cand = cmd
                     break
             if cand:
                 if cand.mark_as_executing():
                     self._emit_command_event(cand, "executing")
 
-        # Trim completed
-        while self.queue and self.queue[0].status == "Completed":
-            completed_command = self.queue.popleft()
-            self.completed.append(completed_command)
-            if len(self.completed) > 100:
-                self.completed.popleft()
+        self._trim_terminal_commands()
 
         if not self.queue:
             self.commands_completed.emit()
 
         self.queue_updated.emit()
 
-    def clear_queue(self):
-        """Clear the command queue."""
+    def clear_queue(self, *, reset_counter=True):
+        """Clear queue state; keep the seq counter unless a whole transport session is being reset."""
         self.queue.clear()
         self.completed.clear()
-        self.command_number = 0
+        if reset_counter:
+            self.command_number = 0
         self.queue_updated.emit()
 
 class Machine(QObject):
@@ -1805,7 +1949,12 @@ class Machine(QObject):
 
         # ack_code -> {"timer": QTimer, "ok": callable, "to": callable}
         self._pending_acks = {}
-        self._next_ctl_seq32 = 1          # for out-of-band control frames (HELLO, CLEAR, etc.)
+        self._control_seq_base = 0x80000000
+        self._next_ctl_seq32 = self._control_seq_base
+        self._transport_capabilities = 0
+        self._transport_ready = False
+        self._queue_ack_timeout_ms = 200
+        self._queue_ack_max_retries = 3
 
         self._connection_attempts = 0
         self._tx_mutex = QMutex()
@@ -1813,7 +1962,7 @@ class Machine(QObject):
         self._sequence_pause = False  # blocks TX during UI countdowns
 
         self.execution_timer = QTimer(self)
-        self.execution_timer.timeout.connect(self.send_next_command)
+        self.execution_timer.timeout.connect(self.pump_send_queue)
         self._session_recovery_in_progress = False
         self._waiting_for_post_clear_status = False
 
@@ -1869,7 +2018,10 @@ class Machine(QObject):
 
     def _alloc_ctl_seq32(self) -> int:
         n = self._next_ctl_seq32
-        self._next_ctl_seq32 = (self._next_ctl_seq32 + 1) & 0xFFFFFFFF
+        if self._next_ctl_seq32 >= 0xFFFFFFFF:
+            self._next_ctl_seq32 = self._control_seq_base
+        else:
+            self._next_ctl_seq32 = (self._next_ctl_seq32 + 1) & 0xFFFFFFFF
         return n
     
     @staticmethod
@@ -1898,12 +2050,20 @@ class Machine(QObject):
         self._pending_acks[key] = {"timer": t, "ok": on_ok, "to": on_timeout}
         t.start(timeout_ms)
 
+    def _invoke_ack_callback(self, callback, ack=None):
+        if not callable(callback):
+            return
+        try:
+            callback(ack)
+        except TypeError:
+            callback()
+
     def _ack_timeout_by_key(self, key):
         entry = self._pending_acks.pop(key, None)
         if not entry:
             return
         try:
-            entry["to"]()
+            self._invoke_ack_callback(entry["to"])
         finally:
             entry["timer"].deleteLater()
 
@@ -1932,7 +2092,7 @@ class Machine(QObject):
         if entry:
             entry["timer"].stop()
             try:
-                entry["ok"]()
+                self._invoke_ack_callback(entry["ok"], ack)
             finally:
                 entry["timer"].deleteLater()
         else:
@@ -1956,6 +2116,8 @@ class Machine(QObject):
             self.machine_connected_signal.emit(False)
 
     def _send_hello(self):
+        self._transport_ready = False
+        self._transport_capabilities = 0
         hello_seq = self._alloc_ctl_seq32()
         self._write_frame(build_frame(HELLO, hello_seq))
         self._start_ack_wait(
@@ -1965,14 +2127,30 @@ class Machine(QObject):
         )
 
     @Slot()
-    def _on_hello_ack(self):
+    def _on_hello_ack(self, ack=None):
+        capabilities = int((ack or {}).get("capabilities") or 0)
+        missing_caps = REQUIRED_TRANSPORT_CAPS & ~capabilities
+        if missing_caps:
+            self._transport_capabilities = capabilities
+            self._transport_ready = False
+            msg = (
+                "Connected board does not advertise the required transport capabilities. "
+                f"missing=0x{missing_caps:08X} advertised=0x{capabilities:08X}"
+            )
+            print(msg)
+            self.error_occurred.emit(msg)
+            self.machine_connected_signal.emit(False)
+            return
         if self.profile.has_log_channel:
             self.begin_log_thread()
         self._session_recovery_in_progress = False
+        self._transport_capabilities = capabilities
+        self._transport_ready = True
         self._tx_paused = False
         self._sequence_pause = False
         self._waiting_for_post_clear_status = False
         self.begin_execution_timer()
+        self.pump_send_queue()
         self.machine_connected_signal.emit(True)
         print(f"Connected to {self.ser.name}")
         self._connection_attempts = 0  # reset attempts on success
@@ -2016,7 +2194,10 @@ class Machine(QObject):
 
     def reset_board(self):
         print('Resetting board')
-        self.command_queue.clear_queue()
+        self.command_queue.clear_queue(reset_counter=True)
+        self._transport_capabilities = 0
+        self._transport_ready = False
+        self._next_ctl_seq32 = self._control_seq_base
         # Stop TX timer
         if getattr(self, 'execution_timer', None):
             try:
@@ -2082,9 +2263,12 @@ class Machine(QObject):
         self._pending_acks.clear()
 
     def _reset_session_state_for_recovery(self):
-        self.command_queue.clear_queue()
+        self.command_queue.clear_queue(reset_counter=True)
         self.sent_command = None
         self._cancel_pending_acks()
+        self._transport_capabilities = 0
+        self._transport_ready = False
+        self._next_ctl_seq32 = self._control_seq_base
         self._tx_paused = True
         self._sequence_pause = False
         self._waiting_for_post_clear_status = False
@@ -2355,7 +2539,7 @@ class Machine(QObject):
         print('Starting execution timer')
         if self.execution_timer is None:
             self.execution_timer = QTimer(self)
-            self.execution_timer.timeout.connect(self.send_next_command)
+            self.execution_timer.timeout.connect(self.pump_send_queue)
         if not self.execution_timer.isActive():
             self.execution_timer.start(max(1, int(self.execution_interval_ms)))
 
@@ -2395,6 +2579,11 @@ class Machine(QObject):
             "monotonic_ns": now_ns,
             "Current_command": self._coerce_optional_int(data.get("Current_command")),
             "Last_completed": self._coerce_optional_int(data.get("Last_completed")),
+            "Last_accepted": self._coerce_optional_int(data.get("Last_accepted")),
+            "Last_retired": self._coerce_optional_int(data.get("Last_retired")),
+            "Pause_after_seq32": self._coerce_optional_int(data.get("Pause_after_seq32")),
+            "Pause_watermark_reached": bool(data.get("Pause_watermark_reached", False)),
+            "Transport_paused": bool(data.get("Transport_paused", False)),
             "cmd_depth": self._coerce_optional_int(data.get("cmd_depth")),
             "Flash_delay": self._coerce_optional_int(data.get("Flash_delay")),
             "Flash_droplets": self._coerce_optional_int(data.get("Flash_droplets")),
@@ -2406,6 +2595,11 @@ class Machine(QObject):
         out = {
             "Current_command": self._coerce_optional_int(sample.get("Current_command")),
             "Last_completed": self._coerce_optional_int(sample.get("Last_completed")),
+            "Last_accepted": self._coerce_optional_int(sample.get("Last_accepted")),
+            "Last_retired": self._coerce_optional_int(sample.get("Last_retired")),
+            "Pause_after_seq32": self._coerce_optional_int(sample.get("Pause_after_seq32")),
+            "Pause_watermark_reached": bool(sample.get("Pause_watermark_reached", False)),
+            "Transport_paused": bool(sample.get("Transport_paused", False)),
             "cmd_depth": self._coerce_optional_int(sample.get("cmd_depth")),
             "Flash_delay": self._coerce_optional_int(sample.get("Flash_delay")),
             "Flash_droplets": self._coerce_optional_int(sample.get("Flash_droplets")),
@@ -2502,8 +2696,10 @@ class Machine(QObject):
         lifecycle_ns = {
             "queued": None,
             "sent": None,
+            "accepted": None,
             "executing": None,
             "completed": None,
+            "canceled": None,
         }
         status = None
         for event in list(self.command_event_history):
@@ -2532,8 +2728,10 @@ class Machine(QObject):
             "status": status,
             "queued_ms": self._relative_ms(lifecycle_ns["queued"], request_created_monotonic_ns),
             "sent_ms": self._relative_ms(lifecycle_ns["sent"], request_created_monotonic_ns),
+            "accepted_ms": self._relative_ms(lifecycle_ns["accepted"], request_created_monotonic_ns),
             "executing_ms": self._relative_ms(lifecycle_ns["executing"], request_created_monotonic_ns),
             "completed_ms": self._relative_ms(lifecycle_ns["completed"], request_created_monotonic_ns),
+            "canceled_ms": self._relative_ms(lifecycle_ns["canceled"], request_created_monotonic_ns),
             "_lifecycle_ns": lifecycle_ns,
         }
 
@@ -2550,6 +2748,8 @@ class Machine(QObject):
                 "latest_status": {
                     "Current_command": None,
                     "Last_completed": None,
+                    "Last_accepted": None,
+                    "Last_retired": None,
                     "cmd_depth": None,
                     "Flash_delay": None,
                     "Flash_droplets": None,
@@ -2648,15 +2848,18 @@ class Machine(QObject):
                 depth = data.get("cmd_depth", 0)
                 curr  = data.get("Current_command", 0)
                 last  = data.get("Last_completed", 0)
-                if depth == 0 and curr == 0 and last == 0:
+                retired = data.get("Last_retired", last)
+                if depth == 0 and curr == retired:
                     self._waiting_for_post_clear_status = False
                     self._tx_paused = False
                     self.begin_execution_timer()
+                    self.pump_send_queue()
                 elif time.time() > getattr(self, "_wait_for_clear_status_deadline", 0):
                     # fallback: don’t block forever
                     self._waiting_for_post_clear_status = False
                     self._tx_paused = False
                     self.begin_execution_timer()
+                    self.pump_send_queue()
             self.status_updated.emit(data)
         else:
             print(f"Received non-dict status data: {data}")
@@ -2671,8 +2874,13 @@ class Machine(QObject):
             self.machine_connected_signal.emit(True)
         # print(f"Log line received: {line}")
 
-    def update_command_numbers(self,current_command,last_completed):
-        self.command_queue.update_command_status(current_command,last_completed)
+    def update_command_numbers(self,current_command,last_completed,last_accepted=None,last_retired=None):
+        self.command_queue.update_command_status(
+            current_command,
+            last_completed,
+            last_accepted_command=last_accepted,
+            last_retired_command=last_retired,
+        )
 
     def add_command_to_queue(self, command_type, param1, param2, param3, handler=None, kwargs=None, manual=False, trace_metadata=None):
         """Add a command to the queue."""
@@ -2684,7 +2892,7 @@ class Machine(QObject):
         #     if not completed:
         #         print('Cannot add manual command while commands are in queue')
         #         return False
-        return self.command_queue.add_command(
+        command = self.command_queue.add_command(
             command_type,
             param1,
             param2,
@@ -2693,6 +2901,9 @@ class Machine(QObject):
             kwargs,
             trace_metadata=trace_metadata,
         )
+        if self._transport_ready and not self._tx_paused and not self._sequence_pause:
+            self.pump_send_queue()
+        return command
     
     def check_if_all_completed(self):
         """Check if all commands have been completed."""
@@ -2723,49 +2934,157 @@ class Machine(QObject):
             self.error_occurred.emit(msg)
             return False
 
-    def send_next_command(self):
+    def _cancel_queue_ack_waits_from(self, command_number):
+        floor = int(command_number or 0)
+        for key in list(self._pending_acks.keys()):
+            ack_code, seq32, _seq8 = key
+            if ack_code != CMD_QUEUE_ACK:
+                continue
+            if seq32 >= floor:
+                self._cancel_ack_wait_by_key(key)
+
+    def _mark_command_sent(self, command):
+        command.send_attempts += 1
+        if command.mark_as_sent():
+            self._record_command_event(command, "sent")
+
+    def _handle_transport_fault(self, message):
+        self._tx_paused = True
+        try:
+            self.stop_execution_timer()
+        except Exception:
+            pass
+        print(message)
+        self.error_occurred.emit(message)
+
+    def _start_command_ack_wait(self, command):
+        seq32 = int(getattr(command, "command_number", 0) or 0)
+        self._start_ack_wait(
+            CMD_QUEUE_ACK,
+            seq32,
+            self._queue_ack_timeout_ms,
+            on_ok=lambda ack, seq=seq32: self._on_queue_ack(seq, ack),
+            on_timeout=lambda _ack=None, seq=seq32: self._on_queue_ack_timeout(seq),
+        )
+
+    def _on_queue_ack(self, seq32, ack):
+        command = self._find_command_by_number(seq32)
+        if command is None:
+            return
+
+        ack_result = str((ack or {}).get("ack_result") or "")
+        expected_seq32 = self._coerce_optional_int((ack or {}).get("expected_seq32"))
+
+        if ack_result in {"accepted", "duplicate"}:
+            self.command_queue.mark_command_accepted(seq32)
+            self.pump_send_queue()
+            return
+
+        if ack_result == "gap":
+            resend_from = expected_seq32 if expected_seq32 is not None else seq32
+            self._cancel_queue_ack_waits_from(resend_from)
+            self.command_queue.mark_for_resend_from(resend_from)
+            self.pump_send_queue()
+            return
+
+        if ack_result == "busy":
+            self.command_queue.mark_for_resend_from(seq32)
+            QtCore.QTimer.singleShot(20, self.pump_send_queue)
+            return
+
+        if ack_result == "watermark_set":
+            return
+
+        if ack_result == "watermark_rejected":
+            self._handle_transport_fault(
+                f"MCU rejected pause-after watermark for seq32={seq32}."
+            )
+            return
+
+        self._handle_transport_fault(
+            f"Unexpected queue ACK result for seq32={seq32}: {ack_result or 'missing'}"
+        )
+
+    def _on_queue_ack_timeout(self, seq32):
+        command = self._find_command_by_number(seq32)
+        if command is None or command.status in {"Completed", "Canceled", "Accepted", "Executing"}:
+            return
+        if int(getattr(command, "send_attempts", 0) or 0) >= int(self._queue_ack_max_retries):
+            self._handle_transport_fault(
+                f"Timed out waiting for queue ACK for command {seq32} after {command.send_attempts} attempts."
+            )
+            return
+        if command.reset_for_resend():
+            self._record_command_event(command, "requeued")
+        self.pump_send_queue()
+
+    def request_pause_after_seq32(self, barrier_seq32, handler=None):
+        barrier_seq32 = int(barrier_seq32 or 0)
+        if barrier_seq32 <= 0:
+            return False
+        seq32 = self._alloc_ctl_seq32()
+        frame = build_frame(PAUSE_AFTER_SEQ32, seq32, p1=barrier_seq32)
+        try:
+            self._write_frame(frame)
+        except Exception as exc:
+            msg = f"Failed to send pause-after watermark: {exc}"
+            print(msg)
+            self.error_occurred.emit(msg)
+            return False
+
+        def _on_ok(ack):
+            ack_result = str((ack or {}).get("ack_result") or "")
+            if ack_result not in {"accepted", "watermark_set", "duplicate"}:
+                self._handle_transport_fault(
+                    f"MCU rejected pause-after watermark for barrier {barrier_seq32}: {ack_result or 'missing'}"
+                )
+                return
+            if callable(handler):
+                handler()
+
+        self._start_ack_wait(
+            CMD_QUEUE_ACK,
+            seq32,
+            self._queue_ack_timeout_ms,
+            on_ok=_on_ok,
+            on_timeout=lambda _ack=None, barrier=barrier_seq32: self._handle_transport_fault(
+                f"Timed out waiting for pause-after watermark ACK for barrier {barrier}."
+            ),
+        )
+        return True
+
+    def pump_send_queue(self):
         """
-        Send the next command in the queue to the machine.
+        Fill the transport window with locally queued commands.
         """
+        if not self._transport_ready:
+            return
         if getattr(self, "_tx_paused", False) or getattr(self, "_sequence_pause", False):
             return
 
-        command = self.command_queue.get_next_command()
-        if not command:
-            return
+        while True:
+            command = self.command_queue.get_next_command()
+            if not command:
+                return
 
-        # --- Gripper gate (SEND FIRST, then pause & prompt) ---
-        if command.command_type in ('OPEN_GRIPPER', 'CLOSE_GRIPPER'):
-            if self._gripper_ack_required:
-                # 1) Send now so it actually executes and leaves the queue
-                try:
-                    self.send_command_to_board(command)
-                    if command.mark_as_sent():
-                        self._record_command_event(command, "sent")
-                    print(f"Sent command (pre-prompt): {command.command_type} {command.param1} {command.param2} {command.param3}")
-                except Exception as e:
-                    print(f"Failed to send command: {e}")
-                    self.error_occurred.emit(f"Failed to send command: {e}")
-                    return
+            if command.command_type in ('OPEN_GRIPPER', 'CLOSE_GRIPPER') and not self._gripper_ack_required:
+                self._reset_gripper_idle_timer()
 
-                # 2) Immediately pause TX and show the popup
+            if not self.send_command_to_board(command):
+                return
+
+            self._mark_command_sent(command)
+            self._start_command_ack_wait(command)
+            print(f"Sent command: {command.command_type} {command.param1} {command.param2} {command.param3}")
+
+            if command.command_type in ('OPEN_GRIPPER', 'CLOSE_GRIPPER') and self._gripper_ack_required:
                 self._tx_paused = True
                 action = 'OPEN' if command.command_type == 'OPEN_GRIPPER' else 'CLOSE'
                 self.require_gripper_confirmation.emit(action)
                 return
-            else:
-                # If we don't need a prompt, keep the idle timer fresh on gripper ops
-                self._reset_gripper_idle_timer()
 
-        # --- Normal path for everything else ---
-        try:
-            self.send_command_to_board(command)
-            if command.mark_as_sent():
-                self._record_command_event(command, "sent")
-            print(f"Sent command: {command.command_type} {command.param1} {command.param2} {command.param3}")
-        except Exception as e:
-            print(f"Failed to send command: {e}")
-            self.error_occurred.emit(f"Failed to send command: {e}")
+    def send_next_command(self):
+        self.pump_send_queue()
     
     def pause_commands(self):
         print('Pausing commands')
@@ -2817,7 +3136,7 @@ class Machine(QObject):
             print("CLEAR_ACK received, command queue cleared.")
 
         # Clear Python side queue & notify UI
-        self.command_queue.clear_queue()
+        self.command_queue.clear_queue(reset_counter=False)
 
         self._wait_for_clear_status_deadline = time.time() + 0.5  # 500 ms fallback
         self._waiting_for_post_clear_status = True
