@@ -92,6 +92,78 @@ def test_calc_emergence_area_prefers_attached_candidate_when_multiple_exist():
     assert int(center[1]) < 130
 
 
+def test_calc_emergence_area_uses_support_root_for_lateral_spread():
+    cam = _camera_stub()
+    bg = np.full((320, 640, 3), 220, dtype=np.uint8)
+    img = bg.copy()
+
+    cv2.rectangle(img, (300, 82), (336, 160), (20, 20, 20), -1)
+    cv2.rectangle(img, (336, 82), (530, 90), (20, 20, 20), -1)
+
+    area, center, _overlay, details = cam.calc_emergence_area(
+        bg,
+        img,
+        roi_x_center_px=318,
+        return_details=True,
+    )
+
+    assert details["status"] == "ok"
+    assert area == int(round(float(details["contour_area"])))
+    assert 3000 <= int(area) <= 8000
+    assert int(details["bbox_area"]) > int(area)
+    assert center is not None
+    assert details["ambiguous_lateral_spread"] is True
+    assert details["center_mode"] == "support_root_guardrailed"
+    assert details["root_center"] == [int(center[0]), int(center[1])]
+    assert int(center[0]) <= 322
+    assert int(center[0]) < int(details["bbox_center"][0]) - 25
+
+
+def test_calc_emergence_area_uses_support_root_for_clean_stream():
+    cam = _camera_stub()
+    bg = np.full((320, 320, 3), 220, dtype=np.uint8)
+    img = bg.copy()
+
+    cv2.rectangle(img, (145, 88), (175, 196), (20, 20, 20), -1)
+
+    area, center, _overlay, details = cam.calc_emergence_area(
+        bg,
+        img,
+        roi_x_center_px=160,
+        return_details=True,
+    )
+
+    assert details["status"] == "ok"
+    assert area == int(round(float(details["contour_area"])))
+    assert center is not None
+    assert details["ambiguous_lateral_spread"] is False
+    assert details["center_mode"] == "support_root"
+    assert abs(int(center[0]) - 160) <= 3
+    assert int(center[1]) == int(details["top_y"])
+
+
+def test_calc_emergence_area_falls_back_to_default_roi_when_x_prior_misses():
+    cam = _camera_stub()
+    bg = np.full((320, 320, 3), 220, dtype=np.uint8)
+    img = bg.copy()
+
+    cv2.rectangle(img, (145, 88), (175, 196), (20, 20, 20), -1)
+
+    area, center, _overlay, details = cam.calc_emergence_area(
+        bg,
+        img,
+        roi_x_center_px=60,
+        return_details=True,
+    )
+
+    assert details["status"] == "ok"
+    assert details["roi_search_mode"] == "fallback_default"
+    assert details["roi_search_fallback_used"] is True
+    assert area is not None and area > 0
+    assert center is not None
+    assert abs(int(center[0]) - 160) <= 3
+
+
 def test_emergence_finish_success_does_not_overwrite_nozzle_image_position():
     proc = DropletEmergenceCalibrationProcess.__new__(DropletEmergenceCalibrationProcess)
     proc.stageChanged = Recorder()
@@ -115,7 +187,11 @@ def test_emergence_finish_success_does_not_overwrite_nozzle_image_position():
     proc._finish_success(
         4100,
         {
-            "center": (159, 92),
+            "center": (190, 101),
+            "measured_center": (190, 101),
+            "resolved_center": (120, 80),
+            "center_source": "nozzle_position_preserved",
+            "center_update_allowed": False,
             "contour_class": "attached",
             "replicate_count": 3,
         },
@@ -124,9 +200,11 @@ def test_emergence_finish_success_does_not_overwrite_nozzle_image_position():
     assert len(calls["machine_center"]) == 1
     assert calls["machine_center"][0] == {"X": 10, "Y": 20, "Z": 30}
     assert calls["image_center"] == []
-    assert calls["emergence_center"] == [(159, 92)]
+    assert calls["emergence_center"] == [(120, 80)]
     assert proc.selected_area == 4100
-    assert proc.selected_center_px == (159, 92)
+    assert proc.selected_center_px == (120, 80)
+    assert proc.selected_quality["measured_center"] == (190, 101)
+    assert proc.selected_quality["resolved_center"] == (120, 80)
     assert proc.selected_quality["contour_class"] == "attached"
     assert proc.dropletDetected.calls
 
@@ -199,6 +277,7 @@ def test_on_analyze_accepts_target_area_even_when_classified_detached():
     assert proc.continueSearch.calls == []
     assert seen["kwargs"] is not None
     assert seen["kwargs"].get("nozzle_center", None) is None
+    assert seen["kwargs"].get("roi_x_center_px", None) == 12
 
 
 def test_set_next_delay_does_not_apply_extra_nudge():

@@ -11957,11 +11957,17 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
     def onAnalyze(self):
         self.stageChanged.emit("Analyzing droplet image (emergence)")
 
-        # Do not anchor emergence analysis to prior nozzle-position center.
-        # The emergence contour center itself is used to refine nozzle center for pressure-band.
+        roi_x_center_px = None
+        if self.nozzle_center_px is not None:
+            try:
+                roi_x_center_px = int(self.nozzle_center_px[0])
+            except Exception:
+                roi_x_center_px = None
+
         area, center, overlay, details = self.model.droplet_camera_model.calc_emergence_area(
             self.background_image,
             self.droplet_image,
+            roi_x_center_px=roi_x_center_px,
             return_details=True,
         )
         details = details or {}
@@ -12192,15 +12198,55 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
         cls = class_counts.most_common(1)[0][0] if class_counts else "none"
 
         centers = [r.get("center") for r in self._replicate_details if r.get("center") is not None]
-        center = None
+        measured_center = None
         if centers:
             xs = [int(c[0]) for c in centers]
             ys = [int(c[1]) for c in centers]
-            center = (int(median(xs)), int(median(ys)))
+            measured_center = (int(median(xs)), int(median(ys)))
+            center_x_span_px = int(max(xs) - min(xs))
+            center_y_span_px = int(max(ys) - min(ys))
+        else:
+            center_x_span_px = 0
+            center_y_span_px = 0
+
+        ambiguous_replicate_count = int(
+            sum(1 for r in self._replicate_details if bool((r.get("details") or {}).get("ambiguous_lateral_spread", False)))
+        )
+        center_measurement_count = int(len(centers))
+        center_update_allowed = bool(
+            measured_center is not None
+            and center_measurement_count >= 2
+            and center_x_span_px <= 24
+            and center_y_span_px <= 12
+        )
+        prior_center = None
+        if self.nozzle_center_px is not None:
+            try:
+                prior_center = (int(self.nozzle_center_px[0]), int(self.nozzle_center_px[1]))
+            except Exception:
+                prior_center = None
+        if center_update_allowed and measured_center is not None:
+            resolved_center = measured_center
+            center_source = "emergence_root"
+        else:
+            resolved_center = prior_center
+            center_source = "nozzle_position_preserved" if prior_center is not None else "none"
 
         contour_areas = [float((r.get("details") or {}).get("contour_area", 0.0)) for r in self._replicate_details]
         bbox_areas = [float((r.get("details") or {}).get("bbox_area", 0.0)) for r in self._replicate_details]
         p95s = [float((r.get("details") or {}).get("p95", 0.0)) for r in self._replicate_details]
+        metric_names = [str((r.get("details") or {}).get("area_metric", "contour_area")) for r in self._replicate_details]
+        metric_counts = Counter(metric_names)
+        area_metric = metric_counts.most_common(1)[0][0] if metric_counts else "contour_area"
+        center_modes = [str((r.get("details") or {}).get("center_mode", "none")) for r in self._replicate_details]
+        center_mode_counts = Counter(center_modes)
+        center_mode = center_mode_counts.most_common(1)[0][0] if center_mode_counts else "none"
+        roi_search_modes = [str((r.get("details") or {}).get("roi_search_mode", "fallback_default")) for r in self._replicate_details]
+        roi_mode_counts = Counter(roi_search_modes)
+        roi_search_mode = roi_mode_counts.most_common(1)[0][0] if roi_mode_counts else "fallback_default"
+        roi_search_fallback_used = any(
+            bool((r.get("details") or {}).get("roi_search_fallback_used", False)) for r in self._replicate_details
+        )
 
         arr = np.asarray(areas, dtype=float) if areas else np.asarray([0.0], dtype=float)
         m = float(arr.mean())
@@ -12210,10 +12256,24 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
 
         summary = {
             "contour_class": cls,
-            "center": center,
+            "center": resolved_center,
+            "measured_center": measured_center,
+            "resolved_center": resolved_center,
+            "center_source": str(center_source),
+            "center_mode": str(center_mode),
+            "center_measurement_count": int(center_measurement_count),
+            "center_x_span_px": int(center_x_span_px),
+            "center_y_span_px": int(center_y_span_px),
+            "center_update_allowed": bool(center_update_allowed),
+            "ambiguous_lateral_spread": bool(ambiguous_replicate_count > 0),
+            "ambiguous_replicate_count": int(ambiguous_replicate_count),
+            "area_metric": str(area_metric),
+            "metric_area": int(agg_area),
             "contour_area": float(median(contour_areas)) if contour_areas else 0.0,
             "bbox_area": float(median(bbox_areas)) if bbox_areas else 0.0,
             "p95": float(median(p95s)) if p95s else 0.0,
+            "roi_search_mode": str(roi_search_mode),
+            "roi_search_fallback_used": bool(roi_search_fallback_used),
             "replicate_count": int(len(areas)),
             "replicate_areas": areas,
             "replicate_cv": cv,
@@ -12229,7 +12289,13 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
         self.calibration_manager.set_nozzle_center(machine_pos)
 
         self.selected_area = int(agg_area)
-        self.selected_center_px = agg.get("center")
+        center = agg.get("resolved_center", agg.get("center"))
+        if center is not None:
+            try:
+                center = (int(center[0]), int(center[1]))
+            except Exception:
+                center = None
+        self.selected_center_px = center
         self.selected_quality = dict(agg or {})
         if self.selected_center_px is not None and hasattr(self.calibration_manager, "set_emergence_nozzle_center_image_position"):
             try:
@@ -25769,205 +25835,294 @@ class DropletCameraModel(QObject):
         """
         Emergence detector tuned for dark fluid against a background.
         - Uses dark-only diff (background - image).
-        - Uses a top ROI, anchored to calibrated nozzle center when available.
-        - Returns (bbox_area|None, center|None, overlay[, details]).
+        - Uses a top ROI with an optional X prior from nozzle-position calibration.
+        - Returns (contour_area|None, root_center|None, overlay[, details]).
         """
-        details = {
-            "status": "init",
-            "reason": "",
-            "roi": None,
-            "candidate_count": 0,
-            "chosen_bbox": None,
-            "contour_class": "none",
-            "bbox_area": 0,
-            "contour_area": 0.0,
-            "p95": 0.0,
-        }
-
-        if background is None or image is None:
-            details.update({"status": "none", "reason": "missing_image_or_background"})
-            if return_details:
-                return None, None, image, details
-            return None, None, image
-
-        img_gray, dark = self.calc_neg_diff_image(image, background)
-        if dark is None:
-            details.update({"status": "none", "reason": "dark_diff_failed"})
-            if return_details:
-                return None, None, image, details
-            return None, None, image
-
-        h, w = dark.shape[:2]
-
-        nzx = None
-        nzy = None
-        if nozzle_center is not None and isinstance(nozzle_center, (tuple, list)) and len(nozzle_center) >= 2:
-            try:
-                nzx = int(max(0, min(w - 1, int(nozzle_center[0]))))
-                nzy = int(max(0, min(h - 1, int(nozzle_center[1]))))
-            except Exception:
-                nzx = None
-                nzy = None
-
+        prior_anchor_x = None
         if roi_x_center_px is not None:
-            x_mid = int(max(0, min(w - 1, int(roi_x_center_px))))
-        elif nzx is not None:
-            x_mid = int(nzx)
-        else:
-            x_mid = int(round(roi_x_center_frac * w))
+            try:
+                prior_anchor_x = int(roi_x_center_px)
+            except Exception:
+                prior_anchor_x = None
 
-        x_half = int(round(roi_x_half_frac * w))
-        if x_half < 8:
-            x_half = 8
-        x0 = max(0, x_mid - x_half)
-        x1 = min(w, x_mid + x_half)
+        def _detect_once(active_roi_x_center_px, roi_search_mode):
+            details = {
+                "status": "init",
+                "reason": "",
+                "roi": None,
+                "roi_search_mode": str(roi_search_mode),
+                "roi_search_fallback_used": False,
+                "roi_search_prior_x_px": (None if prior_anchor_x is None else int(prior_anchor_x)),
+                "roi_anchor_px": None,
+                "candidate_count": 0,
+                "chosen_bbox": None,
+                "contour_class": "none",
+                "bbox_area": 0,
+                "contour_area": 0.0,
+                "area_metric": "contour_area",
+                "metric_area": 0,
+                "p95": 0.0,
+                "center": None,
+                "bbox_center": None,
+                "root_center": None,
+                "center_mode": "none",
+                "center_reason": "",
+                "ambiguous_lateral_spread": False,
+                "fill_ratio": 0.0,
+                "bbox_root_dx": None,
+                "prior_x_dx": None,
+                "support_threshold_px": 0,
+                "support_span_px": 0,
+                "support_peak_px": 0,
+                "top_y": None,
+            }
 
-        if nzy is not None:
-            up = int(max(8, round(0.08 * h)))
-            down = int(max(24, round(0.42 * h)))
-            y0 = max(0, nzy - up)
-            y1 = min(h, nzy + down)
-        else:
-            y0 = int(max(0, min(h - 1, round(roi_top_frac * h))))
-            y1 = int(max(0, min(h, round(roi_bottom_frac * h))))
-
-        if y1 <= y0 or x1 <= x0:
-            details.update({"status": "none", "reason": "invalid_roi", "roi": [int(x0), int(y0), int(x1), int(y1)]})
-            if return_details:
-                return None, None, image, details
-            return None, None, image
-
-        details["roi"] = [int(x0), int(y0), int(x1), int(y1)]
-
-        roi = dark[y0:y1, x0:x1].copy()
-        blur = cv2.GaussianBlur(roi, (5, 5), 0)
-
-        mu, sd = float(np.mean(blur)), float(np.std(blur))
-        t_hard = max(10, int(mu + 2.5 * sd))
-        _, th = cv2.threshold(blur, t_hard, 255, cv2.THRESH_BINARY)
-        if np.count_nonzero(th) < min_fg_pix:
-            _, th = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-        k = self._k3
-        th = cv2.morphologyEx(th, cv2.MORPH_OPEN, k, iterations=1)
-        th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, k, iterations=1)
-
-        overlay = image.copy() if image.ndim == 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        cv2.rectangle(overlay, (x0, y0), (x1, y1), (128, 128, 255), 1)
-        if nzx is not None and nzy is not None:
-            cv2.circle(overlay, (nzx, nzy), 4, (255, 0, 0), -1)
-
-        if np.count_nonzero(th) < min_fg_pix:
-            details.update({"status": "none", "reason": "insufficient_fg"})
-            cv2.putText(overlay, "No FG in ROI", (x0 + 5, y0 + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (128, 128, 255), 1)
-            if return_details:
+            overlay = image.copy() if isinstance(image, np.ndarray) and image.ndim == 3 else image
+            if background is None or image is None:
+                details.update({"status": "none", "reason": "missing_image_or_background"})
                 return None, None, overlay, details
-            return None, None, overlay
 
-        contours, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours:
-            details.update({"status": "none", "reason": "no_contours"})
-            if return_details:
+            img_gray, dark = self.calc_neg_diff_image(image, background)
+            if dark is None:
+                details.update({"status": "none", "reason": "dark_diff_failed"})
                 return None, None, overlay, details
-            return None, None, overlay
 
-        keep = []
-        for c in contours:
-            c_area = float(cv2.contourArea(c))
-            if c_area < float(min_contour_area):
-                continue
-            rx, ry, rw, rh = cv2.boundingRect(c)
-            fx, fy = int(rx + x0), int(ry + y0)
-            bottom = int(fy + rh)
-            cx = float(fx + rw / 2.0)
+            h, w = dark.shape[:2]
+            if overlay is None:
+                overlay = cv2.cvtColor(dark, cv2.COLOR_GRAY2BGR)
+            elif overlay.ndim != 3:
+                overlay = cv2.cvtColor(overlay, cv2.COLOR_GRAY2BGR)
 
-            cls = "unknown"
-            if nzy is not None:
-                if fy <= nzy <= (fy + rh + 2):
-                    cls = "attached"
-                elif fy > (nzy + 6):
-                    cls = "detached"
-                else:
-                    cls = "ambiguous"
+            nzx = None
+            nzy = None
+            if nozzle_center is not None and isinstance(nozzle_center, (tuple, list)) and len(nozzle_center) >= 2:
+                try:
+                    nzx = int(max(0, min(w - 1, int(nozzle_center[0]))))
+                    nzy = int(max(0, min(h - 1, int(nozzle_center[1]))))
+                except Exception:
+                    nzx = None
+                    nzy = None
 
-            if cls == "attached":
-                pri = 0
-            elif cls == "detached":
-                pri = 2
+            if active_roi_x_center_px is not None:
+                x_mid = int(max(0, min(w - 1, int(active_roi_x_center_px))))
+            elif nzx is not None:
+                x_mid = int(nzx)
             else:
-                pri = 1
+                x_mid = int(round(roi_x_center_frac * w))
+            details["roi_anchor_px"] = int(x_mid)
 
-            anchor_x = float(nzx if nzx is not None else x_mid)
-            x_pen = abs(cx - anchor_x)
-            keep.append({
-                "contour": c,
-                "contour_area": c_area,
-                "bbox": [fx, fy, int(rw), int(rh)],
-                "bottom": bottom,
-                "x_pen": float(x_pen),
-                "class": cls,
-                "pri": pri,
-            })
+            x_half = int(round(roi_x_half_frac * w))
+            if x_half < 8:
+                x_half = 8
+            x0 = max(0, x_mid - x_half)
+            x1 = min(w, x_mid + x_half)
 
-        details["candidate_count"] = int(len(keep))
-        if not keep:
-            details.update({"status": "none", "reason": "no_contours_after_filters"})
-            if return_details:
+            if nzy is not None:
+                up = int(max(8, round(0.08 * h)))
+                down = int(max(24, round(0.42 * h)))
+                y0 = max(0, nzy - up)
+                y1 = min(h, nzy + down)
+            else:
+                y0 = int(max(0, min(h - 1, round(roi_top_frac * h))))
+                y1 = int(max(0, min(h, round(roi_bottom_frac * h))))
+
+            cv2.rectangle(overlay, (x0, y0), (x1, y1), (128, 128, 255), 1)
+            if nzx is not None and nzy is not None:
+                cv2.circle(overlay, (nzx, nzy), 4, (255, 0, 0), -1)
+
+            if y1 <= y0 or x1 <= x0:
+                details.update({"status": "none", "reason": "invalid_roi", "roi": [int(x0), int(y0), int(x1), int(y1)]})
                 return None, None, overlay, details
-            return None, None, overlay
 
-        keep.sort(key=lambda d: (int(d["pri"]), float(d["x_pen"]), -float(d["contour_area"]), -int(d["bottom"])))
-        chosen = keep[0]
+            details["roi"] = [int(x0), int(y0), int(x1), int(y1)]
 
-        x, y, ww, hh = [int(v) for v in chosen["bbox"]]
-        patch = dark[y:y + hh, x:x + ww]
-        if patch.size == 0:
-            details.update({"status": "none", "reason": "empty_patch_after_bbox"})
-            if return_details:
+            roi = dark[y0:y1, x0:x1].copy()
+            blur = cv2.GaussianBlur(roi, (5, 5), 0)
+
+            mu, sd = float(np.mean(blur)), float(np.std(blur))
+            t_hard = max(10, int(mu + 2.5 * sd))
+            _, th = cv2.threshold(blur, t_hard, 255, cv2.THRESH_BINARY)
+            if np.count_nonzero(th) < min_fg_pix:
+                _, th = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+            k = self._k3
+            th = cv2.morphologyEx(th, cv2.MORPH_OPEN, k, iterations=1)
+            th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, k, iterations=1)
+
+            if np.count_nonzero(th) < min_fg_pix:
+                details.update({"status": "none", "reason": "insufficient_fg"})
+                cv2.putText(overlay, "No FG in ROI", (x0 + 5, y0 + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (128, 128, 255), 1)
                 return None, None, overlay, details
-            return None, None, overlay
 
-        p95 = float(np.percentile(patch, 95))
-        if p95 < float(min_peak_delta):
+            contours, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if not contours:
+                details.update({"status": "none", "reason": "no_contours"})
+                return None, None, overlay, details
+
+            keep = []
+            for c in contours:
+                c_area = float(cv2.contourArea(c))
+                if c_area < float(min_contour_area):
+                    continue
+                rx, ry, rw, rh = cv2.boundingRect(c)
+                fx, fy = int(rx + x0), int(ry + y0)
+                bottom = int(fy + rh)
+                cx = float(fx + rw / 2.0)
+
+                cls = "unknown"
+                if nzy is not None:
+                    if fy <= nzy <= (fy + rh + 2):
+                        cls = "attached"
+                    elif fy > (nzy + 6):
+                        cls = "detached"
+                    else:
+                        cls = "ambiguous"
+
+                if cls == "attached":
+                    pri = 0
+                elif cls == "detached":
+                    pri = 2
+                else:
+                    pri = 1
+
+                anchor_x = float(nzx if nzx is not None else x_mid)
+                x_pen = abs(cx - anchor_x)
+                keep.append({
+                    "contour": c,
+                    "contour_area": c_area,
+                    "bbox": [fx, fy, int(rw), int(rh)],
+                    "bottom": bottom,
+                    "x_pen": float(x_pen),
+                    "class": cls,
+                    "pri": pri,
+                })
+
+            details["candidate_count"] = int(len(keep))
+            if not keep:
+                details.update({"status": "none", "reason": "no_contours_after_filters"})
+                return None, None, overlay, details
+
+            keep.sort(key=lambda d: (int(d["pri"]), float(d["x_pen"]), -float(d["contour_area"]), -int(d["bottom"])))
+            chosen = keep[0]
+
+            x, y, ww, hh = [int(v) for v in chosen["bbox"]]
+            patch = dark[y:y + hh, x:x + ww]
+            if patch.size == 0:
+                details.update({"status": "none", "reason": "empty_patch_after_bbox"})
+                return None, None, overlay, details
+
+            bbox_area = int(ww * hh)
+            contour_area = float(chosen.get("contour_area", 0.0))
+            metric_area = int(round(contour_area))
+            bbox_center = (int(x + ww // 2), int(y + hh // 2))
+            fill_ratio = float(contour_area) / float(max(bbox_area, 1))
+
+            p95 = float(np.percentile(patch, 95))
+            if p95 < float(min_peak_delta):
+                details.update({
+                    "status": "none",
+                    "reason": "weak_signal",
+                    "p95": float(p95),
+                    "contour_class": str(chosen.get("class", "unknown")),
+                    "chosen_bbox": [int(x), int(y), int(ww), int(hh)],
+                    "bbox_area": int(bbox_area),
+                    "contour_area": float(contour_area),
+                    "metric_area": int(metric_area),
+                    "bbox_center": [int(bbox_center[0]), int(bbox_center[1])],
+                    "fill_ratio": float(fill_ratio),
+                })
+                cv2.putText(overlay, f"weak p95:{int(p95)}", (x0 + 5, y0 + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (80, 160, 255), 1)
+                return None, None, overlay, details
+
+            contour_full = chosen["contour"] + np.array([[[x0, y0]]], dtype=chosen["contour"].dtype)
+            color = (0, 255, 0) if str(chosen.get("class")) == "attached" else (0, 200, 255)
+            cv2.drawContours(overlay, [contour_full], -1, color, 2)
+            cv2.rectangle(overlay, (x, y), (x + ww, y + hh), (255, 0, 0), 2)
+
+            mask = np.zeros((hh, ww), dtype=np.uint8)
+            contour_local_to_bbox = contour_full - np.array([[[x, y]]], dtype=contour_full.dtype)
+            cv2.drawContours(mask, [contour_local_to_bbox], -1, 255, -1)
+            mask = self._fill_binary_holes(mask)
+
+            center = None
+            center_mode = "none"
+            center_reason = "no_vertical_support_band"
+            top_y = None
+            support_threshold_px = int(max(8, int(0.35 * float(hh))))
+            support_span_px = 0
+            support_peak_px = int(np.count_nonzero(mask > 0, axis=0).max()) if mask.size else 0
+            bbox_root_dx = None
+            prior_x_dx = None
+            ambiguous_lateral_spread = False
+
+            fg_rows = np.where(np.any(mask > 0, axis=1))[0]
+            if fg_rows.size > 0:
+                top_y = int(y + int(fg_rows[0]))
+                col_counts = np.count_nonzero(mask > 0, axis=0)
+                support_peak_px = int(col_counts.max()) if col_counts.size else 0
+                support_cols = np.where(col_counts >= int(support_threshold_px))[0]
+                if support_cols.size >= 4:
+                    support_first = int(support_cols[0])
+                    support_last = int(support_cols[-1])
+                    support_span_px = int(support_last - support_first + 1)
+                    support_mid_x = int(x + round((support_first + support_last) / 2.0))
+                    center = (int(support_mid_x), int(top_y))
+                    bbox_root_dx = int(abs(int(bbox_center[0]) - int(support_mid_x)))
+                    if prior_anchor_x is not None:
+                        prior_x_dx = int(abs(int(support_mid_x) - int(max(0, min(w - 1, int(prior_anchor_x))))))
+                    spread_triggers = [
+                        bool(fill_ratio < 0.45),
+                        bool(int(ww) > max(60, int(2.2 * float(hh)))),
+                        bool(int(bbox_root_dx) > max(35, int(0.18 * float(ww)))),
+                    ]
+                    if prior_x_dx is not None:
+                        spread_triggers.append(bool(int(prior_x_dx) > 70))
+                    ambiguous_lateral_spread = bool(sum(1 for flag in spread_triggers if flag) >= 2)
+                    center_mode = "support_root_guardrailed" if ambiguous_lateral_spread else "support_root"
+                    center_reason = "ok"
+
             details.update({
-                "status": "none",
-                "reason": "weak_signal",
-                "p95": float(p95),
+                "status": "ok",
+                "reason": "ok",
                 "contour_class": str(chosen.get("class", "unknown")),
                 "chosen_bbox": [int(x), int(y), int(ww), int(hh)],
-                "bbox_area": int(ww * hh),
-                "contour_area": float(chosen.get("contour_area", 0.0)),
+                "bbox_area": int(bbox_area),
+                "contour_area": float(contour_area),
+                "metric_area": int(metric_area),
+                "p95": float(p95),
+                "center": (None if center is None else [int(center[0]), int(center[1])]),
+                "bbox_center": [int(bbox_center[0]), int(bbox_center[1])],
+                "root_center": (None if center is None else [int(center[0]), int(center[1])]),
+                "center_mode": str(center_mode),
+                "center_reason": str(center_reason),
+                "ambiguous_lateral_spread": bool(ambiguous_lateral_spread),
+                "fill_ratio": float(fill_ratio),
+                "bbox_root_dx": (None if bbox_root_dx is None else int(bbox_root_dx)),
+                "prior_x_dx": (None if prior_x_dx is None else int(prior_x_dx)),
+                "support_threshold_px": int(support_threshold_px),
+                "support_span_px": int(support_span_px),
+                "support_peak_px": int(support_peak_px),
+                "top_y": (None if top_y is None else int(top_y)),
             })
-            cv2.putText(overlay, f"weak p95:{int(p95)}", (x0 + 5, y0 + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (80, 160, 255), 1)
-            if return_details:
-                return None, None, overlay, details
-            return None, None, overlay
 
-        contour_full = chosen["contour"] + np.array([[[x0, y0]]], dtype=chosen["contour"].dtype)
-        color = (0, 255, 0) if str(chosen.get("class")) == "attached" else (0, 200, 255)
-        cv2.drawContours(overlay, [contour_full], -1, color, 2)
-        cv2.rectangle(overlay, (x, y), (x + ww, y + hh), (255, 0, 0), 2)
+            cv2.putText(overlay, f"Area:{metric_area}", (x + ww + 6, y + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (50, 200, 50), 2)
+            cv2.putText(overlay, f"Center:{center_mode}", (x + ww + 6, y + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (50, 200, 50), 1)
+            cv2.putText(overlay, f"Class:{details['contour_class']}", (x + ww + 6, y + 46), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (50, 200, 50), 1)
 
-        metric_area = int(ww * hh)
-        center = (int(x + ww // 2), int(y + hh // 2))
+            return metric_area, center, overlay, details
 
-        details.update({
-            "status": "ok",
-            "reason": "ok",
-            "contour_class": str(chosen.get("class", "unknown")),
-            "chosen_bbox": [int(x), int(y), int(ww), int(hh)],
-            "bbox_area": int(metric_area),
-            "contour_area": float(chosen.get("contour_area", 0.0)),
-            "p95": float(p95),
-            "center": [int(center[0]), int(center[1])],
-        })
-
-        cv2.putText(overlay, f"Area:{metric_area}", (x + ww + 6, y + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (50, 200, 50), 2)
-        cv2.putText(overlay, f"Class:{details['contour_class']}", (x + ww + 6, y + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (50, 200, 50), 1)
+        area, center, overlay, details = _detect_once(prior_anchor_x, "prior_centered" if prior_anchor_x is not None else "fallback_default")
+        if prior_anchor_x is not None and details.get("status") != "ok":
+            initial_details = dict(details)
+            area, center, overlay, details = _detect_once(None, "fallback_default")
+            details["roi_search_fallback_used"] = True
+            details["roi_search_initial_status"] = str(initial_details.get("status", "none"))
+            details["roi_search_initial_reason"] = str(initial_details.get("reason", ""))
+            details["roi_search_initial_roi"] = list(initial_details.get("roi") or [])
 
         if return_details:
-            return metric_area, center, overlay, details
-        return metric_area, center, overlay
+            return area, center, overlay, details
+        return area, center, overlay
 
     def _fill_binary_holes(self, mask):
         work = np.uint8(mask > 0) * 255
