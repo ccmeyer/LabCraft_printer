@@ -484,6 +484,371 @@ def test_analyze_online_stream_frame_rejects_short_attached_stub_with_multiple_d
     assert "attached_width_unavailable" in summary["warnings"]
 
 
+def test_analyze_online_stream_frame_marks_single_detached_continuation_below_short_stub(monkeypatch):
+    attached_mask = np.zeros((220, 80), dtype=np.uint8)
+    attached_mask[12:91, 30:50] = 255
+    attached_component = _component_from_mask(
+        attached_mask,
+        component_id="attached_primary",
+        anchor_center_x_px=110.0,
+    )
+    attached_component["component_role"] = "attached_primary"
+    attached_component["component_rank"] = 0
+
+    detached_mask = np.zeros((220, 80), dtype=np.uint8)
+    detached_mask[126:210, 30:50] = 255
+    detached_component = _component_from_mask(
+        detached_mask,
+        component_id="detached_01",
+        anchor_center_x_px=110.0,
+    )
+    detached_component["component_role"] = "detached_accepted"
+    detached_component["component_rank"] = 1
+
+    stage3_frame = {
+        "metric_row": {
+            "silhouette_status": "ok",
+            "tracked_nozzle_x_px": 110.0,
+            "tracked_nozzle_y_px": 60.0,
+            "tracked_confidence": 1.0,
+            "raw_mode": "segment",
+            "final_mode": "segment",
+            "segment_id": 1,
+            "shift_event_before": False,
+            "cutoff_y_px": 62,
+            "selected_component_top_y_px": 62,
+            "selected_component_bottom_y_px": 140,
+            "roi_y0": 50,
+            "roi_y1": 320,
+            "roi_height": 270,
+            "accepted_component_count": 2,
+            "accepted_detached_component_count": 1,
+            "plausible_unaccepted_component_count": 0,
+        },
+        "component_rows": [
+            {
+                "component_id": "attached_primary",
+                "component_role": "attached_primary",
+                "component_rank": 0,
+                "top_y_px": 62,
+                "bottom_y_px": 140,
+                "last_valid_y_px": 140,
+            },
+            {
+                "component_id": "detached_01",
+                "component_role": "detached_accepted",
+                "component_rank": 1,
+                "top_y_px": 176,
+                "bottom_y_px": 259,
+                "last_valid_y_px": 259,
+            },
+        ],
+        "accepted_components": [attached_component, detached_component],
+        "roi": {"x0": 70, "y0": 50, "x1": 150, "y1": 320, "width": 80, "height": 270},
+    }
+    stage4_frame = {
+        "frame_metric_row": {
+            "total_visible_volume_nl": 18.0,
+            "detached_visible_volume_nl": 4.0,
+            "plausible_unaccepted_visible_volume_nl": 0.0,
+            "min_accepted_fluid_distance_from_bottom_px": 60,
+        },
+        "component_volume_rows": [],
+    }
+
+    monkeypatch.setattr(mod.silhouette_mod, "_analyze_stage3_gray", lambda *args, **kwargs: stage3_frame)
+    monkeypatch.setattr(mod.volume_mod, "_analyze_stage4_frame", lambda *args, **kwargs: stage4_frame)
+
+    result = mod.analyze_online_stream_frame(
+        frame_image=_blank_frame(),
+        background_image=_blank_frame(),
+        nozzle_center_px=NOZZLE_CENTER_PX,
+        delay_us=4250,
+        emergence_time_us=3200,
+        analysis_config=None,
+    )
+
+    summary = result["summary"]
+    assert summary["status"] == "rejected_width_qc"
+    assert summary["attached_width_px"] is None
+    assert summary["measurement_qc_pass"] is False
+    assert summary["tail_width_usable"] is False
+    assert summary["tail_landmark_usable"] is True
+    assert summary["attached_near_nozzle_breakup_detected"] is True
+    assert summary["residue_stub_with_detached_continuation"] is True
+    assert summary["separated_from_nozzle_landmark"] is True
+    assert summary["separation_mode"] == "detached_continuation_below_stub"
+    assert summary["effective_stream_owner"] == "detached_continuation"
+    assert summary["detached_continuation_component_id"] == "detached_01"
+    assert summary["detached_continuation_gap_px"] == 35
+    assert summary["detached_continuation_height_px"] == 84
+    assert summary["detached_continuation_row_count"] >= 40
+    assert "residue_stub_with_detached_continuation" in summary["warnings"]
+    assert "attached_width_unavailable" not in summary["warnings"]
+
+
+def test_analyze_online_stream_frame_preserves_attached_owner_when_stub_is_not_short(monkeypatch):
+    attached_mask = np.zeros((220, 80), dtype=np.uint8)
+    attached_mask[12:170, 30:50] = 255
+    attached_component = _component_from_mask(
+        attached_mask,
+        component_id="attached_primary",
+        anchor_center_x_px=110.0,
+    )
+    attached_component["component_role"] = "attached_primary"
+    attached_component["component_rank"] = 0
+
+    detached_mask = np.zeros((220, 80), dtype=np.uint8)
+    detached_mask[176:210, 30:50] = 255
+    detached_component = _component_from_mask(
+        detached_mask,
+        component_id="detached_01",
+        anchor_center_x_px=110.0,
+    )
+    detached_component["component_role"] = "detached_accepted"
+    detached_component["component_rank"] = 1
+
+    stage3_frame = {
+        "metric_row": {
+            "silhouette_status": "ok",
+            "tracked_nozzle_x_px": 110.0,
+            "tracked_nozzle_y_px": 60.0,
+            "tracked_confidence": 1.0,
+            "raw_mode": "segment",
+            "final_mode": "segment",
+            "segment_id": 1,
+            "shift_event_before": False,
+            "cutoff_y_px": 62,
+            "selected_component_top_y_px": 62,
+            "selected_component_bottom_y_px": 219,
+            "roi_y0": 50,
+            "roi_y1": 320,
+            "roi_height": 270,
+            "accepted_component_count": 2,
+            "accepted_detached_component_count": 1,
+            "plausible_unaccepted_component_count": 0,
+        },
+        "component_rows": [
+            {
+                "component_id": "attached_primary",
+                "component_role": "attached_primary",
+                "component_rank": 0,
+                "top_y_px": 62,
+                "bottom_y_px": 219,
+                "last_valid_y_px": 219,
+            },
+            {
+                "component_id": "detached_01",
+                "component_role": "detached_accepted",
+                "component_rank": 1,
+                "top_y_px": 226,
+                "bottom_y_px": 259,
+                "last_valid_y_px": 259,
+            },
+        ],
+        "accepted_components": [attached_component, detached_component],
+        "roi": {"x0": 70, "y0": 50, "x1": 150, "y1": 320, "width": 80, "height": 270},
+    }
+    stage4_frame = {
+        "frame_metric_row": {
+            "total_visible_volume_nl": 18.0,
+            "detached_visible_volume_nl": 1.2,
+            "plausible_unaccepted_visible_volume_nl": 0.0,
+            "min_accepted_fluid_distance_from_bottom_px": 60,
+        },
+        "component_volume_rows": [],
+    }
+
+    monkeypatch.setattr(mod.silhouette_mod, "_analyze_stage3_gray", lambda *args, **kwargs: stage3_frame)
+    monkeypatch.setattr(mod.volume_mod, "_analyze_stage4_frame", lambda *args, **kwargs: stage4_frame)
+
+    result = mod.analyze_online_stream_frame(
+        frame_image=_blank_frame(),
+        background_image=_blank_frame(),
+        nozzle_center_px=NOZZLE_CENTER_PX,
+        delay_us=4250,
+        emergence_time_us=3200,
+        analysis_config=None,
+    )
+
+    summary = result["summary"]
+    assert summary["status"] == "accepted"
+    assert summary["measurement_qc_pass"] is True
+    assert summary["attached_width_px"] is not None
+    assert summary["residue_stub_with_detached_continuation"] is False
+    assert summary["separated_from_nozzle_landmark"] is False
+    assert summary["effective_stream_owner"] == "attached_primary"
+
+
+def test_analyze_online_stream_frame_rejects_small_detached_body_as_continuation(monkeypatch):
+    attached_mask = np.zeros((220, 80), dtype=np.uint8)
+    attached_mask[12:91, 30:50] = 255
+    attached_component = _component_from_mask(
+        attached_mask,
+        component_id="attached_primary",
+        anchor_center_x_px=110.0,
+    )
+    attached_component["component_role"] = "attached_primary"
+    attached_component["component_rank"] = 0
+
+    detached_mask = np.zeros((220, 80), dtype=np.uint8)
+    detached_mask[126:145, 30:50] = 255
+    detached_component = _component_from_mask(
+        detached_mask,
+        component_id="detached_01",
+        anchor_center_x_px=110.0,
+    )
+    detached_component["component_role"] = "detached_accepted"
+    detached_component["component_rank"] = 1
+
+    stage3_frame = {
+        "metric_row": {
+            "silhouette_status": "ok",
+            "tracked_nozzle_x_px": 110.0,
+            "tracked_nozzle_y_px": 60.0,
+            "tracked_confidence": 1.0,
+            "raw_mode": "segment",
+            "final_mode": "segment",
+            "segment_id": 1,
+            "shift_event_before": False,
+            "cutoff_y_px": 62,
+            "selected_component_top_y_px": 62,
+            "selected_component_bottom_y_px": 140,
+            "roi_y0": 50,
+            "roi_y1": 320,
+            "roi_height": 270,
+            "accepted_component_count": 2,
+            "accepted_detached_component_count": 1,
+            "plausible_unaccepted_component_count": 0,
+        },
+        "component_rows": [
+            {
+                "component_id": "attached_primary",
+                "component_role": "attached_primary",
+                "component_rank": 0,
+                "top_y_px": 62,
+                "bottom_y_px": 140,
+                "last_valid_y_px": 140,
+            },
+            {
+                "component_id": "detached_01",
+                "component_role": "detached_accepted",
+                "component_rank": 1,
+                "top_y_px": 176,
+                "bottom_y_px": 194,
+                "last_valid_y_px": 194,
+            },
+        ],
+        "accepted_components": [attached_component, detached_component],
+        "roi": {"x0": 70, "y0": 50, "x1": 150, "y1": 320, "width": 80, "height": 270},
+    }
+    stage4_frame = {
+        "frame_metric_row": {
+            "total_visible_volume_nl": 18.0,
+            "detached_visible_volume_nl": 0.3,
+            "plausible_unaccepted_visible_volume_nl": 0.0,
+            "min_accepted_fluid_distance_from_bottom_px": 60,
+        },
+        "component_volume_rows": [],
+    }
+
+    monkeypatch.setattr(mod.silhouette_mod, "_analyze_stage3_gray", lambda *args, **kwargs: stage3_frame)
+    monkeypatch.setattr(mod.volume_mod, "_analyze_stage4_frame", lambda *args, **kwargs: stage4_frame)
+
+    result = mod.analyze_online_stream_frame(
+        frame_image=_blank_frame(),
+        background_image=_blank_frame(),
+        nozzle_center_px=NOZZLE_CENTER_PX,
+        delay_us=4250,
+        emergence_time_us=3200,
+        analysis_config=None,
+    )
+
+    summary = result["summary"]
+    assert summary["status"] == "accepted"
+    assert summary["measurement_qc_pass"] is True
+    assert summary["attached_width_px"] is not None
+    assert summary["residue_stub_with_detached_continuation"] is False
+    assert summary["detached_continuation_row_count"] < 40
+    assert summary["separated_from_nozzle_landmark"] is False
+
+
+def test_analyze_online_stream_frame_marks_direct_departure_as_separation(monkeypatch):
+    attached_mask = np.zeros((220, 80), dtype=np.uint8)
+    attached_mask[70:110, 30:50] = 255
+    attached_component = _component_from_mask(
+        attached_mask,
+        component_id="attached_primary",
+        anchor_center_x_px=110.0,
+    )
+    attached_component["component_role"] = "attached_primary"
+    attached_component["component_rank"] = 0
+
+    stage3_frame = {
+        "metric_row": {
+            "silhouette_status": "ok",
+            "tracked_nozzle_x_px": 110.0,
+            "tracked_nozzle_y_px": 60.0,
+            "tracked_confidence": 1.0,
+            "raw_mode": "segment",
+            "final_mode": "segment",
+            "segment_id": 1,
+            "shift_event_before": False,
+            "cutoff_y_px": 62,
+            "selected_component_top_y_px": 120,
+            "selected_component_bottom_y_px": 159,
+            "roi_y0": 50,
+            "roi_y1": 320,
+            "roi_height": 270,
+            "accepted_component_count": 1,
+            "accepted_detached_component_count": 0,
+            "plausible_unaccepted_component_count": 0,
+        },
+        "component_rows": [
+            {
+                "component_id": "attached_primary",
+                "component_role": "attached_primary",
+                "component_rank": 0,
+                "top_y_px": 120,
+                "bottom_y_px": 159,
+                "last_valid_y_px": 159,
+            },
+        ],
+        "accepted_components": [attached_component],
+        "roi": {"x0": 70, "y0": 50, "x1": 150, "y1": 320, "width": 80, "height": 270},
+    }
+    stage4_frame = {
+        "frame_metric_row": {
+            "total_visible_volume_nl": 6.0,
+            "detached_visible_volume_nl": 0.0,
+            "plausible_unaccepted_visible_volume_nl": 0.0,
+            "min_accepted_fluid_distance_from_bottom_px": 120,
+        },
+        "component_volume_rows": [],
+    }
+
+    monkeypatch.setattr(mod.silhouette_mod, "_analyze_stage3_gray", lambda *args, **kwargs: stage3_frame)
+    monkeypatch.setattr(mod.volume_mod, "_analyze_stage4_frame", lambda *args, **kwargs: stage4_frame)
+
+    result = mod.analyze_online_stream_frame(
+        frame_image=_blank_frame(),
+        background_image=_blank_frame(),
+        nozzle_center_px=NOZZLE_CENTER_PX,
+        delay_us=4250,
+        emergence_time_us=3200,
+        analysis_config=None,
+    )
+
+    summary = result["summary"]
+    assert summary["status"] == "rejected_nozzle_qc"
+    assert summary["measurement_qc_pass"] is False
+    assert summary["tail_landmark_usable"] is True
+    assert summary["separated_from_nozzle_landmark"] is True
+    assert summary["separation_mode"] == "selected_component_departed"
+    assert summary["effective_stream_owner"] == "attached_primary"
+    assert "attached_width_unavailable" not in summary["warnings"]
+
+
 def test_attached_geometry_summary_passes_straight_but_angled_stream():
     edge_rows = _edge_rows_from_centerline(
         y_start=60,

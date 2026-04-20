@@ -196,6 +196,35 @@ def test_summarize_online_stream_tail_delay_detects_separation_landmark():
     assert summary["landmark_reason"] == "separated_from_nozzle"
 
 
+def test_summarize_online_stream_tail_delay_treats_detached_continuation_handoff_as_separation():
+    summary = mod.summarize_online_stream_tail_delay(
+        [
+            _tail_frame_row(
+                delay_us=4750,
+                delay_from_emergence_us=1550,
+                status="rejected_width_qc",
+                width_px=None,
+                tail_width_usable=False,
+                separated_from_nozzle_landmark=True,
+                tail_landmark_usable=True,
+                warnings=["residue_stub_with_detached_continuation"],
+                separation_mode="detached_continuation_below_stub",
+                effective_stream_owner="detached_continuation",
+                residue_stub_with_detached_continuation=True,
+            )
+        ],
+        baseline_width_px=74.0,
+    )
+
+    assert summary["delay_accepted"] is True
+    assert summary["tail_width_usable"] is False
+    assert summary["tail_landmark_usable"] is True
+    assert summary["separated_from_nozzle_landmark"] is True
+    assert summary["attached_width_unavailable_landmark"] is False
+    assert summary["landmark_detected"] is True
+    assert summary["landmark_reason"] == "separated_from_nozzle"
+
+
 def test_summarize_online_stream_tail_delay_uses_width_collapse_backup_landmark():
     summary = mod.summarize_online_stream_tail_delay(
         [

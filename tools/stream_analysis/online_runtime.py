@@ -171,6 +171,85 @@ def _attached_near_nozzle_breakup(
     }
 
 
+def _residue_stub_with_detached_continuation(
+    attached_component_row: dict | None,
+    component_rows: list[dict],
+    accepted_components: list[dict],
+    breakup_metrics: dict,
+    *,
+    config: dict,
+):
+    default = {
+        "residue_stub_with_detached_continuation": False,
+        "detached_continuation_component_id": None,
+        "detached_continuation_gap_px": None,
+        "detached_continuation_height_px": None,
+        "detached_continuation_row_count": None,
+    }
+    if not attached_component_row:
+        return default
+
+    detached_rows = sorted(
+        (
+            dict(row)
+            for row in list(component_rows or [])
+            if str(row.get("component_role") or "") == "detached_accepted"
+        ),
+        key=lambda row: (
+            int(row.get("top_y_px") or 0),
+            int(row.get("last_valid_y_px") or 0),
+        ),
+    )
+    if not detached_rows:
+        return default
+
+    detached_row = detached_rows[0]
+    detached_component_id = str(detached_row.get("component_id") or "").strip() or None
+    component_by_id = {
+        str(component.get("component_id") or "").strip(): dict(component)
+        for component in list(accepted_components or [])
+        if str(component.get("component_id") or "").strip()
+    }
+    detached_component = None if detached_component_id is None else component_by_id.get(detached_component_id)
+    detached_row_count = len(list((detached_component or {}).get("edge_rows") or []))
+
+    attached_last_valid_y_px = attached_component_row.get("last_valid_y_px")
+    detached_top_y_px = detached_row.get("top_y_px")
+    detached_last_valid_y_px = detached_row.get("last_valid_y_px")
+    gap_px = None
+    if attached_last_valid_y_px not in (None, "") and detached_top_y_px not in (None, ""):
+        gap_px = int(int(detached_top_y_px) - int(attached_last_valid_y_px) - 1)
+    height_px = None
+    if detached_top_y_px not in (None, "") and detached_last_valid_y_px not in (None, ""):
+        height_px = int(int(detached_last_valid_y_px) - int(detached_top_y_px) + 1)
+
+    extension_px = breakup_metrics.get("attached_band_extension_px")
+    min_extension_px = breakup_metrics.get("attached_breakup_min_extension_px")
+    short_attached_stub = bool(
+        extension_px is not None
+        and min_extension_px is not None
+        and int(extension_px) < int(min_extension_px)
+    )
+    min_gap_px = max(8, int(config["near_nozzle_band_height_px"]) // 4)
+    min_detached_row_count = max(
+        int(config["min_band_valid_rows"]),
+        int(config["near_nozzle_band_height_px"]),
+    )
+    detected = bool(
+        short_attached_stub
+        and gap_px is not None
+        and int(gap_px) >= int(min_gap_px)
+        and int(detached_row_count) >= int(min_detached_row_count)
+    )
+    return {
+        "residue_stub_with_detached_continuation": bool(detected),
+        "detached_continuation_component_id": detached_component_id,
+        "detached_continuation_gap_px": gap_px,
+        "detached_continuation_height_px": height_px,
+        "detached_continuation_row_count": int(detached_row_count),
+    }
+
+
 def _visible_fluid_clearance_px(
     *,
     frame_metric_row: dict,
@@ -1066,8 +1145,19 @@ def analyze_online_stream_frame(
         width_metrics,
         config=config,
     )
+    continuation_metrics = _residue_stub_with_detached_continuation(
+        attached_component_row,
+        component_rows,
+        accepted_components,
+        breakup_metrics,
+        config=config,
+    )
+    residue_stub_with_detached_continuation = bool(
+        continuation_metrics.get("residue_stub_with_detached_continuation")
+    )
     attached_near_nozzle_breakup_detected = bool(
         breakup_metrics.get("attached_near_nozzle_breakup_detected")
+        or residue_stub_with_detached_continuation
     )
     attached_band_extension_px = breakup_metrics.get("attached_band_extension_px")
     attached_breakup_min_extension_px = breakup_metrics.get(
@@ -1088,16 +1178,30 @@ def analyze_online_stream_frame(
         near_nozzle_band_top_px=int(config["near_nozzle_band_top_px"]),
         near_nozzle_band_height_px=int(config["near_nozzle_band_height_px"]),
     )
-    tail_width_usable = bool(
-        silhouette_qc_pass
-        and nozzle_qc_pass
-        and attached_width_px is not None
-    )
-    separated_from_nozzle_landmark = bool(
+    direct_departure = bool(
         silhouette_qc_pass
         and cutoff_y_px is not None
         and selected_component_top_y_px is not None
         and int(selected_component_top_y_px) > int(cutoff_y_px) + int(config["near_nozzle_band_top_px"])
+    )
+    separated_from_nozzle_landmark = bool(
+        silhouette_qc_pass
+        and (direct_departure or residue_stub_with_detached_continuation)
+    )
+    separation_mode = "none"
+    if direct_departure:
+        separation_mode = "selected_component_departed"
+    elif residue_stub_with_detached_continuation:
+        separation_mode = "detached_continuation_below_stub"
+    effective_stream_owner = (
+        "detached_continuation"
+        if residue_stub_with_detached_continuation
+        else "attached_primary"
+    )
+    tail_width_usable = bool(
+        silhouette_qc_pass
+        and nozzle_qc_pass
+        and attached_width_px is not None
     )
     tail_landmark_usable = bool(
         silhouette_qc_pass and separated_from_nozzle_landmark
@@ -1209,7 +1313,9 @@ def analyze_online_stream_frame(
         warnings.append("nozzle_qc_failed")
     if attached_near_nozzle_breakup_detected:
         warnings.append("attached_near_nozzle_breakup")
-    if silhouette_qc_pass and attached_width_px is None:
+    if residue_stub_with_detached_continuation:
+        warnings.append("residue_stub_with_detached_continuation")
+    if silhouette_qc_pass and attached_width_px is None and not separated_from_nozzle_landmark:
         warnings.append("attached_width_unavailable")
     if silhouette_qc_pass and visible_volume_nl is None:
         warnings.append("visible_volume_unavailable")
@@ -1238,7 +1344,13 @@ def analyze_online_stream_frame(
             warnings.append("background_image_unavailable")
 
     failure_reason = stage3_metric_row.get("failure_reason")
-    if attached_near_nozzle_breakup_detected:
+    if residue_stub_with_detached_continuation:
+        failure_reason = (
+            "detached continuation separated from a short nozzle residue stub"
+        )
+    elif direct_departure:
+        failure_reason = "selected component separated from nozzle band"
+    elif attached_near_nozzle_breakup_detected:
         failure_reason = (
             "attached stream terminates too close to the nozzle while detached droplets are already present"
         )
@@ -1307,6 +1419,23 @@ def analyze_online_stream_frame(
         "separated_from_nozzle_landmark": bool(separated_from_nozzle_landmark),
         "tail_landmark_usable": bool(tail_landmark_usable),
         "landmark_reason": landmark_reason,
+        "effective_stream_owner": effective_stream_owner,
+        "separation_mode": separation_mode,
+        "residue_stub_with_detached_continuation": bool(
+            residue_stub_with_detached_continuation
+        ),
+        "detached_continuation_component_id": continuation_metrics.get(
+            "detached_continuation_component_id"
+        ),
+        "detached_continuation_gap_px": continuation_metrics.get(
+            "detached_continuation_gap_px"
+        ),
+        "detached_continuation_height_px": continuation_metrics.get(
+            "detached_continuation_height_px"
+        ),
+        "detached_continuation_row_count": continuation_metrics.get(
+            "detached_continuation_row_count"
+        ),
         "detached_near_bottom_warning": bool(detached_warning),
         "near_nozzle_detached_warning": bool(near_nozzle_detached_warning),
         "attached_near_nozzle_breakup_detected": bool(attached_near_nozzle_breakup_detected),

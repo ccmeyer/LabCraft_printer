@@ -8876,6 +8876,21 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 summary.get("flow_volume_completeness_reasons") or []
             ),
             flow_measurement_usable=bool(flow_measurement_usable),
+            effective_stream_owner=summary.get("effective_stream_owner"),
+            separation_mode=summary.get("separation_mode"),
+            residue_stub_with_detached_continuation=bool(
+                summary.get("residue_stub_with_detached_continuation")
+            ),
+            detached_continuation_component_id=summary.get(
+                "detached_continuation_component_id"
+            ),
+            detached_continuation_gap_px=summary.get("detached_continuation_gap_px"),
+            detached_continuation_height_px=summary.get(
+                "detached_continuation_height_px"
+            ),
+            detached_continuation_row_count=summary.get(
+                "detached_continuation_row_count"
+            ),
         )
         self._current_analysis_summary = dict(summary)
         self._current_delay_frame_rows.append(frame_row)
@@ -9540,6 +9555,21 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             near_nozzle_detached_warning=bool(summary.get("near_nozzle_detached_warning")),
             late_frame_warning=bool(summary.get("late_frame_warning")),
             attached_bottom_guard_hit=bool(summary.get("attached_bottom_guard_hit")),
+            effective_stream_owner=summary.get("effective_stream_owner"),
+            separation_mode=summary.get("separation_mode"),
+            residue_stub_with_detached_continuation=bool(
+                summary.get("residue_stub_with_detached_continuation")
+            ),
+            detached_continuation_component_id=summary.get(
+                "detached_continuation_component_id"
+            ),
+            detached_continuation_gap_px=summary.get("detached_continuation_gap_px"),
+            detached_continuation_height_px=summary.get(
+                "detached_continuation_height_px"
+            ),
+            detached_continuation_row_count=summary.get(
+                "detached_continuation_row_count"
+            ),
         )
         self._current_tail_analysis_summary = {
             **dict(summary),
