@@ -20,6 +20,38 @@ def _bg_head_out_of_view_image():
     return np.full((200, 200, 3), 240, dtype=np.uint8)
 
 
+def _build_process_for_detection():
+    proc = NozzlePositionCalibrationProcess.__new__(NozzlePositionCalibrationProcess)
+    proc.fixed_thresh_value = 30
+    proc.no_signal_min_fg_px = 120
+    proc.min_stream_bbox_h_px = 10
+    proc.search_top_band_frac = 0.60
+    proc._last_detection_details = {}
+    return proc
+
+
+def _make_smear_pair():
+    bg = np.zeros((320, 320, 3), dtype=np.uint8)
+    dr = bg.copy()
+    dr[20:240, 80:120, :] = 255
+    dr[40:52, 120:250, :] = 255
+    return bg, dr
+
+
+def _make_clean_stream_pair():
+    bg = np.zeros((320, 320, 3), dtype=np.uint8)
+    dr = bg.copy()
+    dr[20:240, 120:160, :] = 255
+    return bg, dr
+
+
+def _make_weak_vertical_support_pair():
+    bg = np.zeros((320, 320, 3), dtype=np.uint8)
+    dr = bg.copy()
+    dr[40:52, 20:280, :] = 255
+    return bg, dr
+
+
 def _build_process_for_analyze():
     proc = NozzlePositionCalibrationProcess.__new__(NozzlePositionCalibrationProcess)
     proc.stageChanged = Recorder()
@@ -104,6 +136,11 @@ def _build_process_for_analyze():
     proc.top_margin_frac = 0.12
     proc.center_tol_frac = 0.03
     proc.top_band_frac = 0.03
+    proc.fixed_thresh_value = 30
+    proc.no_signal_min_fg_px = 120
+    proc.min_stream_bbox_h_px = 10
+    proc.search_top_band_frac = 0.60
+    proc._last_detection_details = {}
     proc.measurements = []
 
     return proc, pos, settings_calls, move_calls, recenter_calls
@@ -119,6 +156,50 @@ def test_background_head_view_metrics_discriminates_in_view_vs_out_of_view():
     assert out_view["valid"] is True and out_view["head_in_view"] is False
     assert out_view["top_to_mid_ratio"] > in_view["top_to_mid_ratio"]
     assert out_view["top_mid_delta"] < in_view["top_mid_delta"]
+
+
+def test_detect_nozzle_uses_vertical_support_midpoint_for_connected_smear():
+    proc = _build_process_for_detection()
+    bg, dr = _make_smear_pair()
+
+    status, nozzle_px, n_contours, _ = proc._detect_nozzle_point(bg, dr)
+
+    assert status == "OK"
+    assert n_contours == 1
+    assert nozzle_px is not None
+    assert 95 <= nozzle_px[0] <= 105
+    assert nozzle_px[0] < 130
+    assert proc._last_detection_details["x_measurement_mode"] == "vertical_support_guardrailed"
+    assert proc._last_detection_details["ambiguous_lateral_spread"] is True
+    assert proc._last_detection_details["bbox_mid_x"] - proc._last_detection_details["support_mid_x"] >= 50
+
+
+def test_detect_nozzle_uses_vertical_support_for_clean_stream():
+    proc = _build_process_for_detection()
+    bg, dr = _make_clean_stream_pair()
+
+    status, nozzle_px, n_contours, _ = proc._detect_nozzle_point(bg, dr)
+
+    assert status == "OK"
+    assert n_contours == 1
+    assert nozzle_px is not None
+    assert 138 <= nozzle_px[0] <= 142
+    assert proc._last_detection_details["x_measurement_mode"] == "vertical_support"
+    assert proc._last_detection_details["ambiguous_lateral_spread"] is False
+    assert abs(proc._last_detection_details["bbox_mid_x"] - proc._last_detection_details["support_mid_x"]) <= 2
+
+
+def test_detect_nozzle_rejects_frames_without_vertical_support_band():
+    proc = _build_process_for_detection()
+    bg, dr = _make_weak_vertical_support_pair()
+
+    status, nozzle_px, n_contours, _ = proc._detect_nozzle_point(bg, dr)
+
+    assert status == "NONE"
+    assert nozzle_px is None
+    assert n_contours == 0
+    assert proc._last_detection_details["reason"] == "no_vertical_support_band"
+    assert proc._last_detection_details["support_column_count"] == 0
 
 
 def test_nozzle_missing_contour_scans_right_then_left_from_anchor_then_aborts():
@@ -281,3 +362,19 @@ def test_single_contour_still_uses_recenter_path():
     assert settings_calls == []
     assert move_calls == []
     assert proc.calibrationError.calls == []
+
+
+def test_on_analyze_routes_real_detector_result_to_recenter_once():
+    proc, _pos, settings_calls, move_calls, recenter_calls = _build_process_for_analyze()
+    bg, dr = _make_smear_pair()
+    proc.background_image = bg
+    proc.droplet_image = dr
+
+    proc.onAnalyze()
+
+    assert len(recenter_calls) == 1
+    assert 95 <= recenter_calls[0][0] <= 105
+    assert 18 <= recenter_calls[0][1] <= 21
+    assert settings_calls == []
+    assert move_calls == []
+    assert proc._last_detection_details["x_measurement_mode"] == "vertical_support_guardrailed"

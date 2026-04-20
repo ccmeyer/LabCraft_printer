@@ -10785,8 +10785,39 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         kept.sort(key=lambda t: (-bottom_y(t[0]), -t[1]))
         chosen, _, top_y, x, y, w, h = kept[0]
         n = len(kept)
-        mid_x = int(round(x + w / 2.0))
-        nozzle_xy = (mid_x, int(top_y))
+        bbox_mid_x = int(round(x + w / 2.0))
+
+        contour_mask = np.zeros((H, W), dtype=np.uint8)
+        cv2.drawContours(contour_mask, [chosen], -1, 255, -1)
+        contour_bbox_mask = contour_mask[y:y + h, x:x + w]
+        col_counts = np.count_nonzero(contour_bbox_mask, axis=0).astype(int)
+        support_threshold_px = int(max(30, int(0.35 * h)))
+        support_cols = np.flatnonzero(col_counts >= support_threshold_px)
+        support_peak_px = int(col_counts.max()) if col_counts.size else 0
+        support_col_count = int(support_cols.size)
+        support_span_px = int(support_cols[-1] - support_cols[0] + 1) if support_cols.size else 0
+        support_mid_x = None
+        bbox_support_dx = None
+        ambiguous_lateral_spread = False
+        x_measurement_mode = "insufficient_vertical_support"
+        support_left_x = None
+        support_right_x = None
+        nozzle_xy = None
+
+        if support_cols.size >= 5:
+            support_left_x = int(x + support_cols[0])
+            support_right_x = int(x + support_cols[-1])
+            support_mid_x = int(x + round((float(support_cols[0]) + float(support_cols[-1])) / 2.0))
+            bbox_support_dx = int(bbox_mid_x - support_mid_x)
+            ambiguous_lateral_spread = bool(
+                abs(bbox_support_dx) >= max(50, int(0.15 * w))
+                and w >= max(120, int(1.6 * support_span_px))
+            )
+            x_measurement_mode = (
+                "vertical_support_guardrailed" if ambiguous_lateral_spread else "vertical_support"
+            )
+            nozzle_xy = (int(support_mid_x), int(top_y))
+
         details["candidate_summaries"] = [
             {
                 "area": float(it[1]),
@@ -10796,19 +10827,45 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
             }
             for it in kept[:5]
         ]
+        details.update(
+            {
+                "bbox_mid_x": int(bbox_mid_x),
+                "support_mid_x": None if support_mid_x is None else int(support_mid_x),
+                "support_span_px": int(support_span_px),
+                "support_threshold_px": int(support_threshold_px),
+                "support_peak_px": int(support_peak_px),
+                "support_column_count": int(support_col_count),
+                "bbox_support_dx": None if bbox_support_dx is None else int(bbox_support_dx),
+                "x_measurement_mode": str(x_measurement_mode),
+                "ambiguous_lateral_spread": bool(ambiguous_lateral_spread),
+            }
+        )
         details["chosen"] = {
             "bbox": [int(x), int(y), int(w), int(h)],
             "top_y": int(top_y),
-            "nozzle_xy": [int(nozzle_xy[0]), int(nozzle_xy[1])],
+            "bbox_mid_x": int(bbox_mid_x),
+            "support_mid_x": None if support_mid_x is None else int(support_mid_x),
+            "support_span_px": int(support_span_px),
+            "nozzle_xy": None if nozzle_xy is None else [int(nozzle_xy[0]), int(nozzle_xy[1])],
+            "x_measurement_mode": str(x_measurement_mode),
+            "ambiguous_lateral_spread": bool(ambiguous_lateral_spread),
         }
-        details["status"] = "OK"
-        self._last_detection_details = details
 
         # Debug overlay
         dbg = a.copy() if (a.ndim == 3 and a.shape[2] == 3) else cv2.cvtColor(a, cv2.COLOR_GRAY2RGB)
         cv2.drawContours(dbg, [chosen], -1, (0, 255, 0), 2)
         cv2.rectangle(dbg, (x, y), (x + w, y + h), (255, 165, 0), 1)
         cv2.line(dbg, (x, int(top_y)), (x + w, int(top_y)), (0, 200, 255), 1)
+        if support_left_x is not None and support_right_x is not None:
+            cv2.line(dbg, (support_left_x, y), (support_left_x, y + h), (255, 0, 255), 1)
+            cv2.line(dbg, (support_right_x, y), (support_right_x, y + h), (255, 0, 255), 1)
+        if nozzle_xy is None:
+            details.update({"status": "NONE", "reason": "no_vertical_support_band"})
+            self._last_detection_details = details
+            return ("NONE", None, 0, dbg)
+
+        details["status"] = "OK"
+        self._last_detection_details = details
         cv2.circle(dbg, nozzle_xy, 4, (255, 0, 0), -1)
 
         return ("OK", nozzle_xy, n, dbg)
