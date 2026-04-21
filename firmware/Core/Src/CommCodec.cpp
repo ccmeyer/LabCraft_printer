@@ -182,6 +182,14 @@ DecodedCommand decodeCommand(const uint8_t* buf, uint8_t len) {
                 dc.seq32 = v;
                 dc.hasSeq32 = (l == 4);
                 break;
+            case TAG_RUN_ID:
+                dc.runId = v;
+                dc.hasRunId = (l == 4);
+                break;
+            case TAG_TIMEOUT_MS:
+                dc.timeoutMs = v;
+                dc.hasTimeoutMs = (l == 4);
+                break;
             default:
                 break;
         }

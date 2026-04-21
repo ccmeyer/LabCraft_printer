@@ -175,6 +175,10 @@ void Comm::handlePacket(const uint8_t* buf, uint8_t len) {
   oc.p3Len = decoded.p3Len;
   oc.seq32 = decoded.seq32;
   oc.hasSeq32 = decoded.hasSeq32;
+  oc.runId = decoded.runId;
+  oc.hasRunId = decoded.hasRunId;
+  oc.timeoutMs = decoded.timeoutMs;
+  oc.hasTimeoutMs = decoded.hasTimeoutMs;
 
   if (auto orch = Orchestrator::instance()) {
     BaseType_t woken = pdFALSE;
@@ -214,6 +218,9 @@ void Comm::sendAckWithSeq32(
     bool includeCapabilities,
     uint32_t capabilities
 ) {
+  if (xSemaphoreTake(_txMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+      return;
+  }
   uint8_t payload[24] = {0};
   const uint8_t payloadLen = CommCodec::buildAckPayload(
       ackCmd,
@@ -230,6 +237,7 @@ void Comm::sendAckWithSeq32(
       capabilities
   );
   if (payloadLen == 0) {
+      xSemaphoreGive(_txMutex);
       return;
   }
 
@@ -238,6 +246,7 @@ void Comm::sendAckWithSeq32(
   if (frameLen > 0) {
       (void)sendRawFrame(_huart, frame, frameLen, kCommTxTimeoutMs);
   }
+  xSemaphoreGive(_txMutex);
 }
 
 void Comm::sendResetReport(uint8_t seq8, uint32_t seq32, const CrashLogSnapshot* snap, uint32_t recoveryBoot) {

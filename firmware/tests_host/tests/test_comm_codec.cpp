@@ -355,9 +355,9 @@ TEST(CommCodec, SelftestStartWithFullProfileMirroredIntoP1ParsesProfileField) {
         0xFA, 0x10,
         CommCodec::TAG_SEQ32, 0x04, 0x78, 0x56, 0x34, 0x12,
         CommCodec::TAG_P1, 0x01, 0x01,       // mirrored FULL profile for firmware decode
-        0x20, 0x01, 0x01,                    // TAG_PROFILE
-        0x21, 0x04, 0x78, 0x56, 0x34, 0x12, // TAG_RUN_ID
-        0x22, 0x04, 0x30, 0x75, 0x00, 0x00  // TAG_TIMEOUT_MS = 30000
+        CommCodec::TAG_PROFILE, 0x01, 0x01,
+        CommCodec::TAG_RUN_ID, 0x04, 0x78, 0x56, 0x34, 0x12,
+        CommCodec::TAG_TIMEOUT_MS, 0x04, 0x30, 0x75, 0x00, 0x00
     };
     uint8_t frame[48] = {0};
     const size_t frameLen = CommCodec::encodeFrame(payload, sizeof(payload), frame, sizeof(frame));
@@ -374,6 +374,10 @@ TEST(CommCodec, SelftestStartWithFullProfileMirroredIntoP1ParsesProfileField) {
     UNSIGNED_LONGS_EQUAL(1u, decoded.p1Len);
     CHECK_TRUE(decoded.hasSeq32);
     UNSIGNED_LONGS_EQUAL(0x12345678u, decoded.seq32);
+    CHECK_TRUE(decoded.hasRunId);
+    UNSIGNED_LONGS_EQUAL(0x12345678u, decoded.runId);
+    CHECK_TRUE(decoded.hasTimeoutMs);
+    UNSIGNED_LONGS_EQUAL(30000u, decoded.timeoutMs);
 }
 
 TEST(CommCodec, SelftestDoneSummaryTlvsDoNotBreakDecoding) {

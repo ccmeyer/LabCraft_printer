@@ -8,6 +8,7 @@
 #include "Orchestrator.h"
 #include "OrchestratorCompletionPolicy.h"
 #include "OrchestratorDecode.h"
+#include "SelfTestCommandPolicy.h"
 #include "LEDController.h"    // your LED queue + done-event
 #include "Stepper.h"          // MX_STEPPERx_Move(), MX_STEPPERx_Stop(), MX_STEPPERx_IsBusy()
 #include "Gripper.h"
@@ -265,7 +266,7 @@ BaseType_t Orchestrator::enqueueFromISR(const Command& cmd, BaseType_t* pxHigher
 		return enqueueAckFromISR(ack, pxHigherPriorityTaskWoken);
 	}
 
-	if (_cmdQueue == nullptr || uxQueueSpacesAvailable(_cmdQueue) == 0u) {
+	if (_cmdQueue == nullptr) {
 		ack.ackResult = ACK_RESULT_BUSY;
 		return enqueueAckFromISR(ack, pxHigherPriorityTaskWoken);
 	}
@@ -395,44 +396,48 @@ bool Orchestrator::waitForBits(EventBits_t bits)
 void Orchestrator::_run() {
   Watchdog_EnableTask(CRASH_TASK_ORCH);
   maybeSendResetReport(0u, 0u);
+  auto drainAckQueue = [&]() {
+	  if (_ackQueue == nullptr) {
+		  return;
+	  }
+	  AckMessage ack{};
+	  while (xQueueReceive(_ackQueue, &ack, 0) == pdTRUE) {
+		  if (ack.ackCmd == CMD_HELLO_ACK) {
+			  CrashLog_SetBootStage(CRASH_BOOT_STAGE_HELLO_ACK);
+			  Watchdog_Arm();
+			  CrashLog_LogBootSummary();
+			  maybeSendResetReport(ack.seq8, ack.seq32);
+			  Comm::instance()->setStatusPaused(false);
+			#if LC_HAS_LED_STRIP == 1
+			  MX_LEDSTRIP_FadeTo(100,500);
+			#endif
+		  } else if (ack.ackCmd == CMD_BYE_ACK || ack.ackCmd == CMD_CLEAR_ACK) {
+			  Comm::instance()->setStatusPaused(true);
+			  if (ack.ackCmd == CMD_BYE_ACK) {
+				  Comm::instance()->resetReceiveState();
+				#if LC_HAS_LED_STRIP == 1
+				  MX_LEDSTRIP_FadeTo(0,500);
+				#endif
+			  }
+		  }
+
+		  Comm::instance()->sendAckWithSeq32(
+			  ack.ackCmd,
+			  ack.seq8,
+			  ack.seq32,
+			  ack.includeSeq32,
+			  ack.includeAckResult,
+			  ack.ackResult,
+			  ack.includeExpectedSeq32,
+			  ack.expectedSeq32,
+			  ack.includeCapabilities,
+			  ack.capabilities
+		  );
+	  }
+  };
   for (;;) {
 	  Watchdog_CheckIn(CRASH_TASK_ORCH);
-	  if (_ackQueue != nullptr) {
-		  AckMessage ack{};
-		  while (xQueueReceive(_ackQueue, &ack, 0) == pdTRUE) {
-			  if (ack.ackCmd == CMD_HELLO_ACK) {
-				  CrashLog_SetBootStage(CRASH_BOOT_STAGE_HELLO_ACK);
-				  Watchdog_Arm();
-				  CrashLog_LogBootSummary();
-				  maybeSendResetReport(ack.seq8, ack.seq32);
-				  Comm::instance()->setStatusPaused(false);
-				#if LC_HAS_LED_STRIP == 1
-				  MX_LEDSTRIP_FadeTo(100,500);
-				#endif
-			  } else if (ack.ackCmd == CMD_BYE_ACK || ack.ackCmd == CMD_CLEAR_ACK) {
-				  Comm::instance()->setStatusPaused(true);
-				  if (ack.ackCmd == CMD_BYE_ACK) {
-					  Comm::instance()->resetReceiveState();
-					#if LC_HAS_LED_STRIP == 1
-					  MX_LEDSTRIP_FadeTo(0,500);
-					#endif
-				  }
-			  }
-
-			  Comm::instance()->sendAckWithSeq32(
-				  ack.ackCmd,
-				  ack.seq8,
-				  ack.seq32,
-				  ack.includeSeq32,
-				  ack.includeAckResult,
-				  ack.ackResult,
-				  ack.includeExpectedSeq32,
-				  ack.expectedSeq32,
-				  ack.includeCapabilities,
-				  ack.capabilities
-			  );
-		  }
-	  }
+	  drainAckQueue();
 	  if (_pauseRequested) {
 		    Logger::instance()->log("Run\r\n");
 	        pauseCurrent();
@@ -532,6 +537,9 @@ void Orchestrator::_run() {
     Command cmd;
     // 1) always block here until there’s anything in the queue
     if (xQueueReceive(_cmdQueue, &cmd, pdMS_TO_TICKS(50)) == pdPASS){
+        // Flush any queue ACKs generated for this command before a long-running
+        // handler like CMD_SELFTEST_START enters its execution path.
+        drainAckQueue();
         // We got a real command—execute it
         _inFlight = cmd;
         CrashLog_SetActiveContext(CRASH_TASK_ORCH, static_cast<uint8_t>(cmd.cmd));
@@ -1008,12 +1016,34 @@ void Orchestrator::executeCommand(const Command &cmd) {
 				  if (!comm || !comm->handle()) {
 				    break;
 				  }
+				  const uint8_t outSeq8 = cmd.seq8;
+				  if (cmd.hasSeq32) {
+				      comm->sendAckWithSeq32(
+				          CMD_QUEUE_ACK,
+				          outSeq8,
+				          cmd.seq32,
+				          true,
+				          true,
+				          ACK_RESULT_ACCEPTED,
+				          false,
+				          0u,
+				          false,
+				          0u
+				      );
+				  }
 
                   comm->setStatusPaused(true);
 
 				  _selfTestAbortRequested = false;
-				  const uint32_t runId = cmd.hasSeq32 ? cmd.seq32 : _currentCmdNum;
-				  const uint8_t outSeq8 = cmd.seq8;
+				  const uint32_t runId = SelfTestCommandPolicy::resolveRunId(
+				      cmd.hasRunId,
+				      cmd.runId,
+				      cmd.hasSeq32,
+				      cmd.seq32,
+				      _currentCmdNum
+				  );
+				  const uint32_t requestedTimeoutMs = SelfTestCommandPolicy::resolveTimeoutMs(cmd.hasTimeoutMs, cmd.timeoutMs);
+				  (void)requestedTimeoutMs;
                   const uint32_t selftestStartMs = HAL_GetTick();
                   uint32_t lastProgressEmitMs = 0u;
 				  uint16_t total = 0;

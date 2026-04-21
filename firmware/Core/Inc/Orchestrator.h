@@ -139,6 +139,10 @@ public:
     uint8_t  seq8;
     uint32_t  seq32;     // full sequence
     bool      hasSeq32;  // parsed TLV present
+    uint32_t  runId = 0;
+    bool      hasRunId = false;
+    uint32_t  timeoutMs = 0;
+    bool      hasTimeoutMs = false;
 
     uint32_t p1 = 0, p2 = 0, p3 = 0;   // raw 32-bit storage
     uint8_t  p1Len = 0, p2Len = 0, p3Len = 0; // TLV value lengths (0,1,2,4)

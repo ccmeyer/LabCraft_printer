@@ -27,6 +27,7 @@ CMD_SELFTEST_START = 0xFA
 CMD_SELFTEST_RESULT = 0xFB
 CMD_SELFTEST_DONE = 0xFC
 CMD_SELFTEST_ABORT = 0xFD
+CMD_QUEUE_ACK = 0xFE
 
 TAG_PROFILE = 0x20
 TAG_RUN_ID = 0x21
@@ -48,6 +49,20 @@ TAG_TRACE_PAYLOAD = 0x3D
 TAG_SEQ32 = 0x10
 TAG_P2 = 0x02
 TAG_P3 = 0x03
+TAG_ACK_RESULT = 0x11
+TAG_EXPECTED_SEQ32 = 0x12
+TAG_CAPABILITIES = 0x13
+
+ACK_RESULT_ACCEPTED = 1
+ACK_RESULT_DUPLICATE = 2
+ACK_RESULT_GAP = 3
+ACK_RESULT_BUSY = 4
+ACK_RESULT_WATERMARK_SET = 5
+ACK_RESULT_WATERMARK_REJECTED = 6
+
+TRANSPORT_CAP_QUEUE_ACK = 1 << 0
+TRANSPORT_CAP_SESSION_SEQ_PERSIST = 1 << 3
+SELFTEST_TRANSPORT_CAPS = TRANSPORT_CAP_QUEUE_ACK | TRANSPORT_CAP_SESSION_SEQ_PERSIST
 
 TRACE_KIND_SAMPLES = 1
 TRACE_KIND_EVENTS = 2
@@ -87,6 +102,40 @@ def parse_tlvs(payload: bytes) -> dict[int, bytes]:
         out[tag] = payload[i : i + ln]
         i += ln
     return out
+
+
+def decode_ack_result(code: int | None) -> str | None:
+    if code is None:
+        return None
+    names = {
+        ACK_RESULT_ACCEPTED: "accepted",
+        ACK_RESULT_DUPLICATE: "duplicate",
+        ACK_RESULT_GAP: "gap",
+        ACK_RESULT_BUSY: "busy",
+        ACK_RESULT_WATERMARK_SET: "watermark_set",
+        ACK_RESULT_WATERMARK_REJECTED: "watermark_rejected",
+    }
+    return names.get(int(code), f"unknown_{int(code)}")
+
+
+def _tlv_u32(tlv: dict[int, bytes], tag: int) -> int | None:
+    raw = tlv.get(tag)
+    if raw is None or len(raw) != 4:
+        return None
+    return int.from_bytes(raw, "little")
+
+
+def _tlv_u8(tlv: dict[int, bytes], tag: int) -> int | None:
+    raw = tlv.get(tag)
+    if raw is None or len(raw) != 1:
+        return None
+    return raw[0]
+
+
+def supports_selftest_transport(capabilities: int | None) -> bool:
+    if capabilities is None:
+        return False
+    return (int(capabilities) & SELFTEST_TRANSPORT_CAPS) == SELFTEST_TRANSPORT_CAPS
 
 
 def parse_metrics(raw: str) -> dict:
@@ -555,6 +604,21 @@ def run(args: argparse.Namespace) -> int:
     with serial.Serial(args.port, args.baud, timeout=0.1) as ser:
         reader = FrameReader()
 
+        def write_report_and_return(rc: int) -> int:
+            report = {
+                "run_id": run_id,
+                "profile": profile,
+                "started_at": started_at,
+                "finished_at": now_iso(),
+                "aborted": aborted,
+                "summary": summary,
+                "results": results,
+                "host_checks": host_checks,
+            }
+            write_json_atomic(args.out, report)
+            print(f"Wrote self-test report: {args.out}")
+            return rc
+
         # HELLO handshake. Retry until the target is actually up so startup
         # latency after DFU does not cause us to lose both HELLO and START.
         hello_seq8 = 1
@@ -566,6 +630,7 @@ def run(args: argparse.Namespace) -> int:
         got_hello_ack = False
         hello_retries_sent = 0
         observed_uart_bytes = 0
+        hello_ack_capabilities = None
         while time.monotonic() < hello_deadline:
             now = time.monotonic()
             if now >= next_hello_send:
@@ -579,10 +644,13 @@ def run(args: argparse.Namespace) -> int:
                 if not frame or len(frame) < 2:
                     continue
                 if frame[0] == CMD_HELLO_ACK and frame[1] == hello_seq8:
+                    hello_tlv = parse_tlvs(frame[2:])
+                    hello_ack_capabilities = _tlv_u32(hello_tlv, TAG_CAPABILITIES)
                     got_hello_ack = True
                     break
             if got_hello_ack:
                 break
+        use_selftest_transport = supports_selftest_transport(hello_ack_capabilities)
         host_checks.append(
             {
                 "name": "hello_ack",
@@ -595,6 +663,8 @@ def run(args: argparse.Namespace) -> int:
                     "retries_sent": hello_retries_sent,
                     "observed_uart_bytes": observed_uart_bytes,
                     "fast_fail_on_missing_hello": bool(args.fast_fail_on_missing_hello),
+                    "capabilities": hello_ack_capabilities,
+                    "supports_selftest_transport": use_selftest_transport,
                 },
                 "timestamp": now_iso(),
             }
@@ -603,19 +673,7 @@ def run(args: argparse.Namespace) -> int:
             print("No HELLO_ACK before self-test start.")
             if args.fast_fail_on_missing_hello:
                 aborted = True
-                report = {
-                    "run_id": run_id,
-                    "profile": profile,
-                    "started_at": started_at,
-                    "finished_at": now_iso(),
-                    "aborted": aborted,
-                    "summary": summary,
-                    "results": results,
-                    "host_checks": host_checks,
-                }
-                write_json_atomic(args.out, report)
-                print(f"Wrote self-test report: {args.out}")
-                return 3
+                return write_report_and_return(3)
 
         bench_mode = str(getattr(args, "camera_benchmark_mode", "flash_only") or "flash_only").strip().lower()
         if bench_mode not in ("flash_only", "print_then_flash"):
@@ -648,7 +706,92 @@ def run(args: argparse.Namespace) -> int:
         tlvs += bytes([TAG_PROFILE, 1, profile_val])
         tlvs += bytes([TAG_RUN_ID, 4]) + run_id.to_bytes(4, "little")
         tlvs += bytes([TAG_TIMEOUT_MS, 4]) + effective_timeout_ms.to_bytes(4, "little")
-        ser.write(build_control(CMD_SELFTEST_START, 2, run_id, tlvs))
+        selftest_seq32 = 1 if use_selftest_transport else run_id
+        ser.write(build_control(CMD_SELFTEST_START, 2, selftest_seq32, tlvs))
+
+        if use_selftest_transport:
+            start_ack_timeout_ms = 2000
+            ack_deadline = time.monotonic() + (start_ack_timeout_ms / 1000.0)
+            start_ack_pass = False
+            start_ack_details = {
+                "transport_mode": "queue_ack",
+                "seq8": 2,
+                "seq32": selftest_seq32,
+                "run_id": run_id,
+                "timeout_ms": start_ack_timeout_ms,
+            }
+            while time.monotonic() < ack_deadline and not start_ack_pass:
+                chunk = ser.read(1)
+                if not chunk:
+                    continue
+                for v in chunk:
+                    frame = reader.feed(v)
+                    if not frame or len(frame) < 2:
+                        continue
+                    cmd = frame[0]
+                    seq8 = frame[1]
+                    tlv = parse_tlvs(frame[2:])
+                    if cmd != CMD_QUEUE_ACK or seq8 != 2:
+                        start_ack_details["observed_cmd"] = cmd
+                        start_ack_details["observed_seq8"] = seq8
+                        continue
+                    ack_seq32 = _tlv_u32(tlv, TAG_SEQ32)
+                    ack_result_code = _tlv_u8(tlv, TAG_ACK_RESULT)
+                    ack_result = decode_ack_result(ack_result_code)
+                    expected_seq32 = _tlv_u32(tlv, TAG_EXPECTED_SEQ32)
+                    start_ack_details["observed_cmd"] = cmd
+                    start_ack_details["observed_seq8"] = seq8
+                    start_ack_details["observed_seq32"] = ack_seq32
+                    start_ack_details["ack_result"] = ack_result
+                    start_ack_details["expected_seq32"] = expected_seq32
+                    if ack_seq32 != selftest_seq32:
+                        continue
+                    if ack_result_code is None:
+                        start_ack_details["reason"] = "malformed_ack"
+                        break
+                    if ack_result_code in (ACK_RESULT_ACCEPTED, ACK_RESULT_DUPLICATE):
+                        start_ack_pass = True
+                        start_ack_details["reason"] = "ok"
+                        break
+                    start_ack_details["reason"] = ack_result or "rejected"
+                    break
+                if start_ack_details.get("reason") in ("malformed_ack", "gap", "busy", "watermark_set", "watermark_rejected") or (
+                    start_ack_details.get("ack_result") not in (None, "accepted", "duplicate")
+                    and start_ack_details.get("observed_seq32") == selftest_seq32
+                ):
+                    break
+            if not start_ack_pass and "reason" not in start_ack_details:
+                start_ack_details["reason"] = "timeout"
+            host_checks.append(
+                {
+                    "name": "selftest_start_ack",
+                    "pass": start_ack_pass,
+                    "details": start_ack_details,
+                    "timestamp": now_iso(),
+                }
+            )
+            if not start_ack_pass:
+                aborted = True
+                print(
+                    "Failed to receive an accepting CMD_QUEUE_ACK for CMD_SELFTEST_START "
+                    f"({start_ack_details.get('reason')})."
+                )
+                return write_report_and_return(3)
+        else:
+            host_checks.append(
+                {
+                    "name": "selftest_start_ack",
+                    "pass": True,
+                    "details": {
+                        "transport_mode": "legacy",
+                        "seq8": 2,
+                        "seq32": selftest_seq32,
+                        "run_id": run_id,
+                        "skipped": "capabilities_missing",
+                    },
+                    "timestamp": now_iso(),
+                }
+            )
 
         hard_deadline = time.monotonic() + (effective_timeout_ms / 1000.0)
         progress_timeout_ms = max(1000, int(getattr(args, "progress_timeout_ms", 15000)))
@@ -707,6 +850,13 @@ def run(args: argparse.Namespace) -> int:
                         timeout_reason = "status_only_after_selftest"
                         done_seen = False
                         break
+
+                if cmd == CMD_QUEUE_ACK:
+                    frame_snapshot["ack_result"] = decode_ack_result(_tlv_u8(tlv, TAG_ACK_RESULT))
+                    frame_snapshot["ack_seq32"] = _tlv_u32(tlv, TAG_SEQ32)
+                    frame_snapshot["expected_seq32"] = _tlv_u32(tlv, TAG_EXPECTED_SEQ32)
+                    recent_frames.append(frame_snapshot)
+                    continue
 
                 if cmd == CMD_SELFTEST_RESULT:
                     selftest_frames_seen += 1

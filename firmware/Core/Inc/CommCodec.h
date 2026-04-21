@@ -14,6 +14,9 @@ static constexpr uint8_t TAG_SEQ32 = 0x10;
 static constexpr uint8_t TAG_ACK_RESULT = 0x11;
 static constexpr uint8_t TAG_EXPECTED_SEQ32 = 0x12;
 static constexpr uint8_t TAG_CAPABILITIES = 0x13;
+static constexpr uint8_t TAG_PROFILE = 0x20;
+static constexpr uint8_t TAG_RUN_ID = 0x21;
+static constexpr uint8_t TAG_TIMEOUT_MS = 0x22;
 static constexpr size_t RX_BUF_SIZE = 64;
 
 struct DecodedCommand {
@@ -23,10 +26,14 @@ struct DecodedCommand {
     uint32_t p2 = 0;
     uint32_t p3 = 0;
     uint32_t seq32 = 0;
+    uint32_t runId = 0;
+    uint32_t timeoutMs = 0;
     uint8_t p1Len = 0;
     uint8_t p2Len = 0;
     uint8_t p3Len = 0;
     bool hasSeq32 = false;
+    bool hasRunId = false;
+    bool hasTimeoutMs = false;
 };
 
 struct RxParser {

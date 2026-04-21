@@ -62,8 +62,21 @@ def _frame_payload(mod, payload: bytes) -> bytes:
     return mod.frame_payload(payload)
 
 
-def _hello_ack(mod) -> bytes:
-    return _frame_payload(mod, bytes([mod.CMD_HELLO_ACK, 1]))
+def _hello_ack(mod, capabilities: int | None = None) -> bytes:
+    payload = bytearray([mod.CMD_HELLO_ACK, 1])
+    if capabilities is not None:
+        payload += bytes([mod.TAG_CAPABILITIES, 4]) + int(capabilities).to_bytes(4, "little")
+    return _frame_payload(mod, bytes(payload))
+
+
+def _queue_ack(mod, seq8: int, seq32: int, ack_result: int | None, expected_seq32: int | None = None) -> bytes:
+    payload = bytearray([mod.CMD_QUEUE_ACK, seq8])
+    payload += bytes([mod.TAG_SEQ32, 4]) + seq32.to_bytes(4, "little")
+    if ack_result is not None:
+        payload += bytes([mod.TAG_ACK_RESULT, 1, ack_result])
+    if expected_seq32 is not None:
+        payload += bytes([mod.TAG_EXPECTED_SEQ32, 4]) + expected_seq32.to_bytes(4, "little")
+    return _frame_payload(mod, bytes(payload))
 
 
 def _selftest_done(mod, run_id: int, failed: int = 0, aborted: int = 0) -> bytes:
@@ -132,6 +145,8 @@ def test_goodbye_ack_and_done_success(monkeypatch, tmp_path):
     mod, rc, report, ser = _run_with_stream(monkeypatch, tmp_path, inbound)
     assert rc == 0
     checks = {c["name"]: c for c in report["host_checks"]}
+    assert checks["selftest_start_ack"]["pass"] is True
+    assert checks["selftest_start_ack"]["details"]["transport_mode"] == "legacy"
     assert checks["goodbye_ack"]["pass"] is True
     assert checks["goodbye_done"]["pass"] is True
     assert len(ser.writes) == 3
@@ -296,3 +311,98 @@ def test_selftest_pass_but_bad_bye_done_seq32_sets_rc3(monkeypatch, tmp_path):
     checks = {c["name"]: c for c in report["host_checks"]}
     assert checks["goodbye_ack"]["pass"] is True
     assert checks["goodbye_done"]["pass"] is False
+
+
+def test_transport_capabilities_use_seq32_one_and_queue_ack(monkeypatch, tmp_path):
+    run_mod = _load_run_selftest()
+    run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF
+    inbound = b"".join(
+        [
+            _hello_ack(run_mod, capabilities=run_mod.SELFTEST_TRANSPORT_CAPS),
+            _queue_ack(run_mod, 2, 1, run_mod.ACK_RESULT_ACCEPTED),
+            _selftest_done(run_mod, run_id),
+            _bye_ack(run_mod, 3),
+            _bye_done(run_mod, 3, seq32=run_id),
+        ]
+    )
+    mod, rc, report, ser = _run_with_stream(monkeypatch, tmp_path, inbound)
+    assert rc == 0
+    checks = {c["name"]: c for c in report["host_checks"]}
+    assert checks["hello_ack"]["details"]["supports_selftest_transport"] is True
+    assert checks["selftest_start_ack"]["pass"] is True
+    assert checks["selftest_start_ack"]["details"]["transport_mode"] == "queue_ack"
+    assert checks["selftest_start_ack"]["details"]["seq32"] == 1
+    reader = mod.FrameReader()
+    start_frame = None
+    for data in ser.writes:
+        for b in data:
+            frame = reader.feed(b)
+            if frame:
+                if frame[0] == mod.CMD_SELFTEST_START:
+                    start_frame = frame
+                break
+        if start_frame is not None:
+            break
+    assert start_frame is not None
+    tlv = mod.parse_tlvs(start_frame[2:])
+    assert int.from_bytes(tlv[mod.TAG_SEQ32], "little") == 1
+    assert int.from_bytes(tlv[mod.TAG_RUN_ID], "little") == run_id
+
+
+def test_selftest_start_queue_ack_gap_fails_fast(monkeypatch, tmp_path):
+    run_mod = _load_run_selftest()
+    inbound = b"".join(
+        [
+            _hello_ack(run_mod, capabilities=run_mod.SELFTEST_TRANSPORT_CAPS),
+            _queue_ack(run_mod, 2, 1, run_mod.ACK_RESULT_GAP, expected_seq32=1),
+        ]
+    )
+    _, rc, report, ser = _run_with_stream(monkeypatch, tmp_path, inbound)
+    assert rc == 3
+    assert report["aborted"] is True
+    checks = {c["name"]: c for c in report["host_checks"]}
+    assert checks["selftest_start_ack"]["pass"] is False
+    assert checks["selftest_start_ack"]["details"]["ack_result"] == "gap"
+    assert checks["selftest_start_ack"]["details"]["expected_seq32"] == 1
+    assert len(ser.writes) == 2
+
+
+def test_selftest_start_queue_ack_busy_fails_fast(monkeypatch, tmp_path):
+    run_mod = _load_run_selftest()
+    inbound = b"".join(
+        [
+            _hello_ack(run_mod, capabilities=run_mod.SELFTEST_TRANSPORT_CAPS),
+            _queue_ack(run_mod, 2, 1, run_mod.ACK_RESULT_BUSY),
+        ]
+    )
+    _, rc, report, _ = _run_with_stream(monkeypatch, tmp_path, inbound)
+    assert rc == 3
+    checks = {c["name"]: c for c in report["host_checks"]}
+    assert checks["selftest_start_ack"]["pass"] is False
+    assert checks["selftest_start_ack"]["details"]["ack_result"] == "busy"
+
+
+def test_selftest_start_queue_ack_malformed_fails_fast(monkeypatch, tmp_path):
+    run_mod = _load_run_selftest()
+    inbound = b"".join(
+        [
+            _hello_ack(run_mod, capabilities=run_mod.SELFTEST_TRANSPORT_CAPS),
+            _queue_ack(run_mod, 2, 1, None),
+        ]
+    )
+    _, rc, report, _ = _run_with_stream(monkeypatch, tmp_path, inbound)
+    assert rc == 3
+    checks = {c["name"]: c for c in report["host_checks"]}
+    assert checks["selftest_start_ack"]["pass"] is False
+    assert checks["selftest_start_ack"]["details"]["reason"] == "malformed_ack"
+
+
+def test_selftest_start_queue_ack_timeout_fails_fast(monkeypatch, tmp_path):
+    run_mod = _load_run_selftest()
+    inbound = _hello_ack(run_mod, capabilities=run_mod.SELFTEST_TRANSPORT_CAPS)
+    _, rc, report, ser = _run_with_stream(monkeypatch, tmp_path, inbound)
+    assert rc == 3
+    checks = {c["name"]: c for c in report["host_checks"]}
+    assert checks["selftest_start_ack"]["pass"] is False
+    assert checks["selftest_start_ack"]["details"]["reason"] == "timeout"
+    assert len(ser.writes) == 2
