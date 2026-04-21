@@ -6949,6 +6949,36 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             missing.append("Active printer head")
         return missing
 
+    def _get_target_print_pressure_snapshot(self):
+        machine_model = getattr(self.model, "machine_model", None)
+        getter = getattr(machine_model, "get_target_print_pressure", None)
+        if not callable(getter):
+            return None
+        try:
+            value = getter()
+        except Exception:
+            return None
+        if value in (None, ""):
+            return None
+        return value
+
+    def _snapshot_original_settings(self) -> dict:
+        try:
+            current_settings = dict(self.calibration_manager.get_current_settings() or {})
+        except Exception:
+            current_settings = {}
+
+        target_print_pressure = self._get_target_print_pressure_snapshot()
+        if target_print_pressure not in (None, ""):
+            current_settings["print_pressure"] = target_print_pressure
+
+        return {
+            "num_droplets": current_settings.get("num_droplets"),
+            "flash_delay": current_settings.get("flash_delay"),
+            "print_pressure": current_settings.get("print_pressure"),
+            "print_width": current_settings.get("print_width"),
+        }
+
     def __init__(self, calibration_manager, model, parent=None):
         super().__init__(calibration_manager, model, parent)
 
@@ -6961,17 +6991,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             )
 
         self.phase_name = "online_stream_calibration"
-
-        try:
-            self._orig_settings = dict(self.calibration_manager.get_current_settings() or {})
-        except Exception:
-            self._orig_settings = {}
-        self._orig_settings = {
-            "num_droplets": self._orig_settings.get("num_droplets"),
-            "flash_delay": self._orig_settings.get("flash_delay"),
-            "print_pressure": self._orig_settings.get("print_pressure"),
-            "print_width": self._orig_settings.get("print_width"),
-        }
+        self._orig_settings = self._snapshot_original_settings()
         self._restored_settings = False
         self._stop_requested = False
         self._stop_reason = None

@@ -3221,6 +3221,32 @@ def test_online_stream_on_restore_settings_maps_print_width_to_print_pulse_width
     assert captured["guard_timeout_ms"] == 10_000
 
 
+def test_online_stream_snapshot_original_settings_prefers_target_print_pressure():
+    proc = OnlineStreamCalibrationProcess.__new__(OnlineStreamCalibrationProcess)
+    proc.calibration_manager = SimpleNamespace(
+        get_current_settings=lambda: {
+            "num_droplets": 1,
+            "flash_delay": 4300,
+            "print_pressure": 0.79,
+            "print_width": 1350,
+        }
+    )
+    proc.model = SimpleNamespace(
+        machine_model=SimpleNamespace(
+            get_target_print_pressure=lambda: 0.80,
+        )
+    )
+
+    snapshot = proc._snapshot_original_settings()
+
+    assert snapshot == {
+        "num_droplets": 1,
+        "flash_delay": 4300,
+        "print_pressure": 0.80,
+        "print_width": 1350,
+    }
+
+
 def test_online_stream_restore_timeout_advances_final_without_clobbering_pending_stop():
     proc = OnlineStreamCalibrationProcess.__new__(OnlineStreamCalibrationProcess)
     proc._orig_settings = {
