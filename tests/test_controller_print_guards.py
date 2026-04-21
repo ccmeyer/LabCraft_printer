@@ -89,6 +89,7 @@ def _make_controller(*, well_plate, printer_head, regulation_on=True, gripper_in
     )
     c.model = SimpleNamespace(
         well_plate=well_plate,
+        update_state=Mock(side_effect=lambda status: None),
         rack_model=SimpleNamespace(
             get_gripper_info=lambda: gripper_info,
             get_gripper_printer_head=Mock(return_value=printer_head),
@@ -188,6 +189,23 @@ def test_print_array_resume_ready_starts_next_incomplete_well():
     assert c.get_array_run_state() == "running"
 
 
+def test_print_array_resume_ready_resumes_transport_before_queueing():
+    completed = FakeWell("A1", 0, {"X": 10, "Y": 20, "Z": 30})
+    remaining = FakeWell("A2", 7, {"X": 40, "Y": 50, "Z": 60})
+    c = _make_controller(
+        well_plate=FakeWellPlate([completed, remaining]),
+        printer_head=_make_printer_head(),
+        initial_state="resume_ready",
+    )
+    c.model.machine_model.transport_paused = True
+    c.resume_commands = Mock()
+
+    Controller.print_array(c)
+
+    c.resume_commands.assert_called_once_with()
+    c.set_absolute_coordinates.assert_called_once_with(40, 50, 60, override=True)
+
+
 def test_request_array_soft_stop_sends_pause_after_current_barrier():
     c = _make_controller(
         well_plate=FakeWellPlate([FakeWell("A1", 5)]),
@@ -203,6 +221,7 @@ def test_request_array_soft_stop_sends_pause_after_current_barrier():
     assert Controller.request_array_soft_stop(c) is True
     assert c.get_array_run_state() == "stop_requested"
     assert c.array_state_changed.calls == [("stop_requested",)]
+    assert c._array_context["soft_stop_phase"] == "waiting_watermark"
     c.machine.pause_commands.assert_not_called()
     args, kwargs = c.machine.request_pause_after_seq32.call_args
     assert args == (123,)
@@ -402,16 +421,104 @@ def test_handle_status_update_completes_soft_stop_when_watermark_reached():
         printer_head=_make_printer_head(),
         initial_state="stop_requested",
     )
-    c._array_context = {"soft_stop_pending": True}
-    c.model.update_state = Mock(side_effect=lambda status: None)
+    c._array_context = {"soft_stop_pending": True, "soft_stop_phase": "waiting_watermark"}
     c.model.machine_model.pause_watermark_reached = True
     c.model.machine_model.transport_paused = True
-    c._complete_array_finalize = Mock()
+    c._begin_soft_stop_clear_and_park = Mock()
 
     Controller.handle_status_update(c, {"Pause_watermark_reached": 1, "Transport_paused": 1})
 
     c.model.update_state.assert_called_once()
-    c._complete_array_finalize.assert_called_once_with("soft_stop")
+    c._begin_soft_stop_clear_and_park.assert_called_once_with()
+
+
+def test_handle_status_update_ignores_repeated_watermark_frames_after_clear_begins():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        initial_state="stop_requested",
+    )
+    c._array_context = {"soft_stop_pending": True, "soft_stop_phase": "waiting_watermark"}
+    c.model.machine_model.pause_watermark_reached = True
+    c.model.machine_model.transport_paused = True
+    c.machine.clear_command_queue.side_effect = lambda handler=None: None
+
+    Controller.handle_status_update(c, {"Pause_watermark_reached": 1, "Transport_paused": 1})
+    Controller.handle_status_update(c, {"Pause_watermark_reached": 1, "Transport_paused": 1})
+
+    c.machine.clear_command_queue.assert_called_once()
+    assert c._array_context["soft_stop_phase"] == "clearing"
+
+
+def test_handle_status_update_soft_stop_clear_and_park_completes_before_resume_ready():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        initial_state="stop_requested",
+    )
+    c._array_context = {"soft_stop_pending": True, "soft_stop_phase": "waiting_watermark"}
+    c.model.machine_model.pause_watermark_reached = True
+    c.model.machine_model.transport_paused = True
+    c.move_to_location = Mock(side_effect=_parking_move_side_effect)
+    c.machine.clear_command_queue.side_effect = lambda handler=None: handler({"timed_out": False})
+
+    Controller.handle_status_update(c, {"Pause_watermark_reached": 1, "Transport_paused": 1})
+
+    c.model.machine_model.clear_command_queue.assert_called_once_with()
+    c.update_expected_with_current.assert_called_once_with()
+    c.disable_print_profile.assert_called_once_with()
+    assert c.move_to_location.call_args_list[0] == call("pause")
+    assert c.move_to_location.call_args_list[1].args == ("pause",)
+    assert c.move_to_location.call_args_list[1].kwargs["z_offset"] == -5000
+    assert c.get_array_run_state() == "resume_ready"
+    assert c.update_slots_signal.calls == [()]
+
+
+def test_soft_stop_clear_timeout_warns_and_preserves_resume_ready():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        initial_state="stop_requested",
+    )
+    c._array_context = {"soft_stop_pending": True, "soft_stop_phase": "waiting_watermark"}
+    c.model.machine_model.pause_watermark_reached = True
+    c.model.machine_model.transport_paused = True
+    c.machine.clear_command_queue.side_effect = lambda handler=None: handler({"timed_out": True})
+
+    Controller.handle_status_update(c, {"Pause_watermark_reached": 1, "Transport_paused": 1})
+
+    c.model.machine_model.clear_command_queue.assert_called_once_with()
+    c.update_expected_with_current.assert_not_called()
+    c.move_to_location.assert_not_called()
+    assert c.get_array_run_state() == "resume_ready"
+    assert c.error_occurred_signal.calls[-1] == (
+        "Soft Stop Warning",
+        "Soft stop reached the watermark, but the queue clear was not confirmed. Preserving resume state without parking.",
+    )
+
+
+def test_soft_stop_park_failure_warns_and_preserves_resume_ready():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        initial_state="stop_requested",
+    )
+    c._array_context = {"soft_stop_pending": True, "soft_stop_phase": "waiting_watermark"}
+    c.model.machine_model.pause_watermark_reached = True
+    c.model.machine_model.transport_paused = True
+    c.machine.clear_command_queue.side_effect = lambda handler=None: handler({"timed_out": False})
+    c.move_to_location = Mock(return_value=False)
+
+    Controller.handle_status_update(c, {"Pause_watermark_reached": 1, "Transport_paused": 1})
+
+    c.disable_print_profile.assert_called_once_with()
+    c.update_expected_with_current.assert_called_once_with()
+    c.move_to_location.assert_called_once_with("pause")
+    assert c.get_array_run_state() == "resume_ready"
+    assert c.error_occurred_signal.calls[-1] == (
+        "Soft Stop Warning",
+        "Soft stop reached the watermark, but the machine could not be parked. Preserving resume state without parking.",
+    )
 
 
 def test_handle_array_well_complete_refill_required_parks_and_becomes_resume_ready():

@@ -26,3 +26,13 @@ def test_clear_queue_timeout_keeps_tx_blocked_until_clear_status(qapp, test_prof
         }
     )
     assert machine._tx_paused is False
+
+
+def test_clear_queue_handler_receives_timeout_payload(qapp, test_profile, fake_serial_main):
+    machine = Machine(SimpleNamespace(), profile=test_profile)
+    machine.ser = fake_serial_main
+    payloads = []
+
+    machine._on_clear_ack(handler=lambda payload: payloads.append(dict(payload or {})), timed_out=True)
+
+    assert payloads == [{"timed_out": True}]

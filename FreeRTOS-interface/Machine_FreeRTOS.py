@@ -3317,7 +3317,7 @@ class Machine(QObject):
         self._waiting_for_post_clear_status = True
 
         if handler:
-            handler()
+            self._invoke_ack_callback(handler, {"timed_out": bool(timed_out)})
 
         # self.begin_execution_timer()
 

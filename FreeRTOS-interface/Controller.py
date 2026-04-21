@@ -168,10 +168,11 @@ class Controller(QObject):
         if (
             self.get_array_run_state() == "stop_requested"
             and context.get("soft_stop_pending")
+            and context.get("soft_stop_phase", "waiting_watermark") == "waiting_watermark"
             and self.model.machine_model.pause_watermark_reached
             and self.model.machine_model.transport_paused
         ):
-            self._complete_array_finalize("soft_stop")
+            self._begin_soft_stop_clear_and_park()
 
     def handle_error(self, error_message):
         """Handle errors from the machine."""
@@ -429,6 +430,7 @@ class Controller(QObject):
             return False
         self._set_array_run_state("stop_requested")
         context["soft_stop_pending"] = True
+        context["soft_stop_phase"] = "waiting_watermark"
         if not self.machine.request_pause_after_seq32(
             current_barrier,
             on_failure=lambda payload, barrier=current_barrier: self._abort_array_after_soft_stop_failure(
@@ -443,6 +445,7 @@ class Controller(QObject):
         context = getattr(self, "_array_context", None)
         if context is not None:
             context["soft_stop_pending"] = False
+            context["soft_stop_phase"] = "done"
 
         detail_map = {
             "write_failed": "the pause-after request could not be sent",
@@ -463,6 +466,79 @@ class Controller(QObject):
             "Soft Stop Failed",
             f"Soft stop failed because {detail}{barrier_text}. The print array was aborted and the queued commands were cleared.",
         )
+
+    def _warn_soft_stop_post_watermark(self, message):
+        self.error_occurred_signal.emit("Soft Stop Warning", str(message or "Soft stop could not finish parking."))
+
+    def _clear_command_queue_for_soft_stop(self, on_cleared=None):
+        self.machine.clear_command_queue(handler=on_cleared)
+        self.model.machine_model.clear_command_queue()
+
+    def _begin_soft_stop_clear_and_park(self):
+        context = getattr(self, "_array_context", None)
+        if not isinstance(context, dict):
+            return False
+        if context.get("soft_stop_phase", "waiting_watermark") != "waiting_watermark":
+            return False
+
+        context["soft_stop_phase"] = "clearing"
+        context["finalize_reason"] = "soft_stop"
+
+        try:
+            self._clear_command_queue_for_soft_stop(self._on_soft_stop_queue_cleared)
+        except Exception:
+            context["soft_stop_phase"] = "done"
+            context["soft_stop_pending"] = False
+            self._warn_soft_stop_post_watermark(
+                "Soft stop reached the watermark, but the queued commands could not be cleared. Preserving resume state without parking."
+            )
+            self._complete_array_finalize("soft_stop")
+            return False
+        return True
+
+    def _on_soft_stop_queue_cleared(self, clear_result=None):
+        context = getattr(self, "_array_context", None)
+        if not isinstance(context, dict):
+            return
+
+        clear_result = dict(clear_result or {})
+        context["soft_stop_pending"] = False
+
+        if bool(clear_result.get("timed_out")):
+            context["soft_stop_phase"] = "done"
+            self._warn_soft_stop_post_watermark(
+                "Soft stop reached the watermark, but the queue clear was not confirmed. Preserving resume state without parking."
+            )
+            self._complete_array_finalize("soft_stop")
+            return
+
+        try:
+            self.update_expected_with_current()
+        except Exception:
+            pass
+
+        self.disable_print_profile()
+        context["soft_stop_phase"] = "parking"
+
+        def _finish_after_park():
+            active_context = getattr(self, "_array_context", None)
+            if isinstance(active_context, dict):
+                active_context["soft_stop_phase"] = "done"
+            self._complete_array_finalize("soft_stop")
+
+        if self._queue_pause_park_sequence(on_complete=_finish_after_park) is False:
+            context["soft_stop_phase"] = "done"
+            self._warn_soft_stop_post_watermark(
+                "Soft stop reached the watermark, but the machine could not be parked. Preserving resume state without parking."
+            )
+            self._complete_array_finalize("soft_stop")
+
+    def _queue_pause_park_sequence(self, on_complete=None):
+        if self.move_to_location('pause') is False:
+            return False
+        if self.move_to_location('pause', z_offset=-5000, on_complete=on_complete) is False:
+            return False
+        return True
 
     def set_relative_X(self, x,manual=False,handler=None,override=False):
         """Set the relative X coordinate for the machine."""
@@ -1204,6 +1280,7 @@ class Controller(QObject):
             "planned_well_ids": set(),
             "current_barrier_seq32": None,
             "soft_stop_pending": False,
+            "soft_stop_phase": None,
         }
         return True
 
@@ -1355,19 +1432,12 @@ class Controller(QObject):
             self._complete_array_finalize(reason)
             return False
 
-        if reason == "soft_stop":
-            self._complete_array_finalize(reason)
-            return True
-
         self.disable_print_profile()
 
         def _finish_after_park():
             self._complete_array_finalize(reason)
 
-        if self.move_to_location('pause') is False:
-            self._complete_array_finalize(reason)
-            return False
-        if self.move_to_location('pause', z_offset=-5000, on_complete=_finish_after_park) is False:
+        if self._queue_pause_park_sequence(on_complete=_finish_after_park) is False:
             self._complete_array_finalize(reason)
             return False
         return True
