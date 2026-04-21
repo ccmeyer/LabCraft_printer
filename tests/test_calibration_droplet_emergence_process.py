@@ -139,7 +139,9 @@ def test_calc_emergence_area_uses_support_root_for_clean_stream():
     assert details["ambiguous_lateral_spread"] is False
     assert details["center_mode"] == "support_root"
     assert abs(int(center[0]) - 160) <= 3
-    assert int(center[1]) == int(details["top_y"])
+    assert int(details["top_y"]) == 88
+    assert int(center[1]) == int(details["middle_y"])
+    assert int(center[1]) > int(details["top_y"]) + 20
 
 
 def test_calc_emergence_area_falls_back_to_default_roi_when_x_prior_misses():

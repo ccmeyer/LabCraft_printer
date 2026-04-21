@@ -25866,7 +25866,7 @@ class DropletCameraModel(QObject):
         Emergence detector tuned for dark fluid against a background.
         - Uses dark-only diff (background - image).
         - Uses a top ROI with an optional X prior from nozzle-position calibration.
-        - Returns (contour_area|None, root_center|None, overlay[, details]).
+        - Returns (contour_area|None, center|None, overlay[, details]).
         """
         prior_anchor_x = None
         if roi_x_center_px is not None:
@@ -25905,6 +25905,7 @@ class DropletCameraModel(QObject):
                 "support_span_px": 0,
                 "support_peak_px": 0,
                 "top_y": None,
+                "middle_y": None,
             }
 
             overlay = image.copy() if isinstance(image, np.ndarray) and image.ndim == 3 else image
@@ -26078,6 +26079,7 @@ class DropletCameraModel(QObject):
             center_mode = "none"
             center_reason = "no_vertical_support_band"
             top_y = None
+            middle_y = None
             support_threshold_px = int(max(8, int(0.35 * float(hh))))
             support_span_px = 0
             support_peak_px = int(np.count_nonzero(mask > 0, axis=0).max()) if mask.size else 0
@@ -26088,6 +26090,7 @@ class DropletCameraModel(QObject):
             fg_rows = np.where(np.any(mask > 0, axis=1))[0]
             if fg_rows.size > 0:
                 top_y = int(y + int(fg_rows[0]))
+                middle_y = int(y + round((int(fg_rows[0]) + int(fg_rows[-1])) / 2.0))
                 col_counts = np.count_nonzero(mask > 0, axis=0)
                 support_peak_px = int(col_counts.max()) if col_counts.size else 0
                 support_cols = np.where(col_counts >= int(support_threshold_px))[0]
@@ -26096,7 +26099,7 @@ class DropletCameraModel(QObject):
                     support_last = int(support_cols[-1])
                     support_span_px = int(support_last - support_first + 1)
                     support_mid_x = int(x + round((support_first + support_last) / 2.0))
-                    center = (int(support_mid_x), int(top_y))
+                    center = (int(support_mid_x), int(middle_y))
                     bbox_root_dx = int(abs(int(bbox_center[0]) - int(support_mid_x)))
                     if prior_anchor_x is not None:
                         prior_x_dx = int(abs(int(support_mid_x) - int(max(0, min(w - 1, int(prior_anchor_x))))))
@@ -26133,6 +26136,7 @@ class DropletCameraModel(QObject):
                 "support_span_px": int(support_span_px),
                 "support_peak_px": int(support_peak_px),
                 "top_y": (None if top_y is None else int(top_y)),
+                "middle_y": (None if middle_y is None else int(middle_y)),
             })
 
             cv2.putText(overlay, f"Area:{metric_area}", (x + ww + 6, y + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (50, 200, 50), 2)
