@@ -2064,12 +2064,6 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         self.start_print_array_button.clicked.connect(self.start_print_array)
         self.bottom_layout.addWidget(self.start_print_array_button)
 
-        self.soft_stop_print_array_button = QPushButton("Stop After Well")
-        self.soft_stop_print_array_button.setStyleSheet(f"background-color: {self.color_dict['darker_gray']}; color: white;")
-        self.soft_stop_print_array_button.setEnabled(False)
-        self.soft_stop_print_array_button.clicked.connect(self.request_array_soft_stop)
-        self.bottom_layout.addWidget(self.soft_stop_print_array_button)
-
         self.pause_machine_button = QPushButton("Pause")
         self.pause_machine_button.setStyleSheet(f"background-color: {self.color_dict['dark_red']}; color: white;")
         self.pause_machine_button.clicked.connect(self.main_window.pause_machine)
@@ -2098,33 +2092,38 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         state_getter = getattr(self.controller, "get_array_run_state", None)
         array_state = state_getter() if callable(state_getter) else "idle"
 
-        start_label = "Resume Print" if array_state == "resume_ready" else "Start Print"
-        self.start_print_array_button.setText(start_label)
-        self.soft_stop_print_array_button.setText("Stop Pending" if array_state == "stop_requested" else "Stop After Well")
-
         if array_state == "running":
-            self._set_array_button_state(self.start_print_array_button, False, 'dark_blue')
-            self._set_array_button_state(self.soft_stop_print_array_button, True, 'dark_red')
+            self.start_print_array_button.setText("Stop After Well")
+            self._set_array_button_state(self.start_print_array_button, True, 'dark_red')
             return
 
         if array_state == "stop_requested":
-            self._set_array_button_state(self.start_print_array_button, False, 'dark_blue')
-            self._set_array_button_state(self.soft_stop_print_array_button, False, 'dark_red')
+            self.start_print_array_button.setText("Stop Pending")
+            self._set_array_button_state(self.start_print_array_button, False, 'dark_red')
             return
 
         if array_state == "resume_ready":
+            self.start_print_array_button.setText("Resume Print")
             self._set_array_button_state(self.start_print_array_button, has_head, 'dark_blue')
-            self._set_array_button_state(self.soft_stop_print_array_button, False, 'dark_red')
             return
 
+        self.start_print_array_button.setText("Start Print")
         self._set_array_button_state(self.start_print_array_button, has_head, 'dark_blue')
-        self._set_array_button_state(self.soft_stop_print_array_button, False, 'dark_red')
 
     def start_print_array(self):
+        state_getter = getattr(self.controller, "get_array_run_state", None)
+        array_state = state_getter() if callable(state_getter) else "idle"
+
+        if array_state == "running":
+            self.request_array_soft_stop()
+            return
+
+        if array_state == "stop_requested":
+            return
+
         if not self.controller.check_if_all_completed():
             return
-        state_getter = getattr(self.controller, "get_array_run_state", None)
-        is_resume = callable(state_getter) and state_getter() == "resume_ready"
+        is_resume = array_state == "resume_ready"
         title = "Resume Print Array" if is_resume else "Start Print Array"
         message = "Are you sure you want to resume the print array?" if is_resume else "Are you sure you want to start the print array?"
         response = self.main_window.popup_yes_no(title, message)
@@ -4663,7 +4662,7 @@ class CommandQueueWidget(QGroupBox):
             elif command.status == "Sent":
                 self.set_row_color(row_position, self.color_dict['mid_gray'])  # Light grey
             elif command.status == "Accepted":
-                self.set_row_color(row_position, self.color_dict['light_gray'])
+                self.set_row_color(row_position, self.color_dict['dark_gray'])
             elif command.status == "Executing":
                 self.set_row_color(row_position, self.color_dict['dark_red'])  # Red
             elif command.status == "Completed":
