@@ -427,6 +427,71 @@ def test_characterization_summary_rows_include_latest_stream_result_once_and_fla
     assert manager.get_pressure_sweep_summary_rows() == rows
 
 
+def test_characterization_summary_rows_keep_multiple_terminal_stream_results_within_one_run(tmp_path):
+    runs = [
+        _make_run(
+            "run_stream_multi",
+            stream_entries=[
+                {
+                    "timestamp": "2026-03-18T10:00:00Z",
+                    "pw_us": 1800,
+                    "pressure_psi": 1.80,
+                    "predicted_volume_nl": None,
+                    "flow_fit_status": "ok",
+                    "tail_phase_status": "not_run",
+                },
+                {
+                    "timestamp": "2026-03-18T10:01:00Z",
+                    "pw_us": 1800,
+                    "pressure_psi": 1.80,
+                    "predicted_volume_nl": 72.6,
+                    "predicted_stream_duration_us": 3950,
+                    "flow_fit_status": "ok",
+                    "tail_phase_status": "captured",
+                },
+                {
+                    "timestamp": "2026-03-18T10:05:00Z",
+                    "pw_us": 1800,
+                    "pressure_psi": 1.80,
+                    "predicted_volume_nl": None,
+                    "flow_fit_status": "ok",
+                    "tail_phase_status": "not_run",
+                },
+                {
+                    "timestamp": "2026-03-18T10:06:00Z",
+                    "pw_us": 1800,
+                    "pressure_psi": 1.80,
+                    "predicted_volume_nl": 74.1,
+                    "predicted_stream_duration_us": 4010,
+                    "flow_fit_status": "ok",
+                    "tail_phase_status": "captured",
+                },
+            ],
+        ),
+    ]
+    _model, manager = _build_model_and_manager(
+        tmp_path,
+        runs,
+        current_mode="stream",
+        active_run_id="run_stream_multi",
+    )
+
+    rows = manager.get_characterization_summary_rows()
+    stream_rows = [row for row in rows if row["phase"] == "stream"]
+
+    assert len(stream_rows) == 2
+    assert [row["timestamp"] for row in stream_rows] == [
+        "2026-03-18T10:01:00Z",
+        "2026-03-18T10:06:00Z",
+    ]
+    assert [row["mean_nL"] for row in stream_rows] == [
+        pytest.approx(72.6),
+        pytest.approx(74.1),
+    ]
+    assert all(row["run_id"] == "run_stream_multi" for row in stream_rows)
+    assert all(row["tail_phase_status"] == "captured" for row in stream_rows)
+
+
 def test_pressure_sweep_focus_run_id_prefers_active_then_newest_matching_run(tmp_path):
     runs = [
         _make_run("run_old", sweep_entries=[{"timestamp": "2026-03-17T10:00:00Z", "pw_us": 1400, "pressure_psi": 1.0, "mean_nL": 8.0, "cv_pct": 5.0}]),

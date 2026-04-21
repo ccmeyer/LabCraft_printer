@@ -6096,12 +6096,21 @@ class CalibrationManager(QObject):
                 return str(candidate)
         return None
 
-    def _build_stream_summary_row(self, *, run: dict, run_id, run_no, focus_run_id):
-        steps = (run.get("steps") or {}).get("online_stream_calibration") or []
-        if not steps:
-            return None
+    @staticmethod
+    def _is_stream_summary_terminal_step(step: dict) -> bool:
+        result = dict((step or {}).get("result") or {})
+        tail_phase = dict(result.get("tail_phase") or {})
+        tail_status = str(tail_phase.get("status") or "").strip().lower()
+        if tail_status and tail_status != "not_run":
+            return True
+        if result.get("predicted_volume_nl") is not None:
+            return True
+        if result.get("predicted_stream_duration_us") is not None:
+            return True
+        return False
 
-        step = dict(steps[-1] or {})
+    def _build_stream_summary_row_from_step(self, *, step: dict, run_id, run_no, focus_run_id):
+        step = dict(step or {})
         result = dict(step.get("result") or {})
         settings = dict(step.get("settings") or {})
         condition = dict(result.get("condition") or {})
@@ -6153,6 +6162,31 @@ class CalibrationManager(QObject):
             "tail_phase_status": tail_phase.get("status"),
             "warnings": warnings,
         }
+
+    def _build_stream_summary_rows(self, *, run: dict, run_id, run_no, focus_run_id):
+        steps = list((run.get("steps") or {}).get("online_stream_calibration") or [])
+        if not steps:
+            return []
+
+        terminal_steps = [
+            dict(step or {})
+            for step in steps
+            if self._is_stream_summary_terminal_step(step)
+        ]
+        if not terminal_steps:
+            terminal_steps = [dict(steps[-1] or {})]
+
+        rows = []
+        for step in terminal_steps:
+            row = self._build_stream_summary_row_from_step(
+                step=step,
+                run_id=run_id,
+                run_no=run_no,
+                focus_run_id=focus_run_id,
+            )
+            if row is not None:
+                rows.append(row)
+        return rows
 
     def _get_pressure_sweep_summary_matching_runs(self):
         self.ensure_loaded()
@@ -6263,14 +6297,13 @@ class CalibrationManager(QObject):
                         "printing_mode": "droplet",
                     })
 
-            stream_row = self._build_stream_summary_row(
+            stream_rows = self._build_stream_summary_rows(
                 run=run,
                 run_id=rid,
                 run_no=run_no,
                 focus_run_id=focus_run_id,
             )
-            if stream_row is not None:
-                rows.append(stream_row)
+            rows.extend(stream_rows)
 
         # Sort: PW → Pressure → Run # → Timestamp
         def _last_if_none(val, fill):
