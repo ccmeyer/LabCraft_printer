@@ -325,6 +325,7 @@ bool Orchestrator::pauseAwareDelayTicks(TickType_t& remainingTicks)
 
   while (remainingTicks > 0) {
     Watchdog_CheckIn(CRASH_TASK_ORCH);
+    drainAckQueue();
     // Interrupt conditions (match your waitForBit() intent)
     if (_paused || _pauseRequested || _clearRequested || _shutdownRequested) {
       return false;
@@ -334,6 +335,7 @@ bool Orchestrator::pauseAwareDelayTicks(TickType_t& remainingTicks)
     if (step > quantum) step = quantum;
 
     vTaskDelay(step);
+    drainAckQueue();
 
     if (remainingTicks >= step) remainingTicks -= step;
     else remainingTicks = 0;
@@ -345,6 +347,7 @@ bool Orchestrator::waitForBit(EventBits_t bit) {
   const TickType_t ticks = pdMS_TO_TICKS(50);
   while (true) {
     Watchdog_CheckIn(CRASH_TASK_ORCH);
+    drainAckQueue();
     // If a PAUSE came in, stop waiting immediately.
 //    if (_paused) {
 //      return false;
@@ -358,6 +361,7 @@ bool Orchestrator::waitForBit(EventBits_t bit) {
       pdTRUE,  // wait for all bits (just one here)
       ticks
     );
+    drainAckQueue();
     if ( (result & bit) != 0 ) {
       return true;  // we got the signal, normal completion
     }
@@ -370,6 +374,7 @@ bool Orchestrator::waitForBits(EventBits_t bits)
   const TickType_t ticks = pdMS_TO_TICKS(50);
   while (true) {
     Watchdog_CheckIn(CRASH_TASK_ORCH);
+    drainAckQueue();
 		// If a PAUSE came in, stop waiting immediately.
 		if (_paused || _pauseRequested || _clearRequested || _shutdownRequested) {
 		  return false;
@@ -382,6 +387,7 @@ bool Orchestrator::waitForBits(EventBits_t bits)
 	  pdTRUE,  // wait for all bits (just one here)
 	  ticks
 	);
+    drainAckQueue();
 //	if ( (result & bits) != 0 ) {
 //	  return true;  // we got the signal, normal completion
 //	}
@@ -393,48 +399,49 @@ bool Orchestrator::waitForBits(EventBits_t bits)
   }
 }
 
+void Orchestrator::drainAckQueue() {
+  if (_ackQueue == nullptr) {
+    return;
+  }
+  AckMessage ack{};
+  while (xQueueReceive(_ackQueue, &ack, 0) == pdTRUE) {
+    if (ack.ackCmd == CMD_HELLO_ACK) {
+      CrashLog_SetBootStage(CRASH_BOOT_STAGE_HELLO_ACK);
+      Watchdog_Arm();
+      CrashLog_LogBootSummary();
+      maybeSendResetReport(ack.seq8, ack.seq32);
+      Comm::instance()->setStatusPaused(false);
+    #if LC_HAS_LED_STRIP == 1
+      MX_LEDSTRIP_FadeTo(100,500);
+    #endif
+    } else if (ack.ackCmd == CMD_BYE_ACK || ack.ackCmd == CMD_CLEAR_ACK) {
+      Comm::instance()->setStatusPaused(true);
+      if (ack.ackCmd == CMD_BYE_ACK) {
+        Comm::instance()->resetReceiveState();
+      #if LC_HAS_LED_STRIP == 1
+        MX_LEDSTRIP_FadeTo(0,500);
+      #endif
+      }
+    }
+
+    Comm::instance()->sendAckWithSeq32(
+      ack.ackCmd,
+      ack.seq8,
+      ack.seq32,
+      ack.includeSeq32,
+      ack.includeAckResult,
+      ack.ackResult,
+      ack.includeExpectedSeq32,
+      ack.expectedSeq32,
+      ack.includeCapabilities,
+      ack.capabilities
+    );
+  }
+}
+
 void Orchestrator::_run() {
   Watchdog_EnableTask(CRASH_TASK_ORCH);
   maybeSendResetReport(0u, 0u);
-  auto drainAckQueue = [&]() {
-	  if (_ackQueue == nullptr) {
-		  return;
-	  }
-	  AckMessage ack{};
-	  while (xQueueReceive(_ackQueue, &ack, 0) == pdTRUE) {
-		  if (ack.ackCmd == CMD_HELLO_ACK) {
-			  CrashLog_SetBootStage(CRASH_BOOT_STAGE_HELLO_ACK);
-			  Watchdog_Arm();
-			  CrashLog_LogBootSummary();
-			  maybeSendResetReport(ack.seq8, ack.seq32);
-			  Comm::instance()->setStatusPaused(false);
-			#if LC_HAS_LED_STRIP == 1
-			  MX_LEDSTRIP_FadeTo(100,500);
-			#endif
-		  } else if (ack.ackCmd == CMD_BYE_ACK || ack.ackCmd == CMD_CLEAR_ACK) {
-			  Comm::instance()->setStatusPaused(true);
-			  if (ack.ackCmd == CMD_BYE_ACK) {
-				  Comm::instance()->resetReceiveState();
-				#if LC_HAS_LED_STRIP == 1
-				  MX_LEDSTRIP_FadeTo(0,500);
-				#endif
-			  }
-		  }
-
-		  Comm::instance()->sendAckWithSeq32(
-			  ack.ackCmd,
-			  ack.seq8,
-			  ack.seq32,
-			  ack.includeSeq32,
-			  ack.includeAckResult,
-			  ack.ackResult,
-			  ack.includeExpectedSeq32,
-			  ack.expectedSeq32,
-			  ack.includeCapabilities,
-			  ack.capabilities
-		  );
-	  }
-  };
   for (;;) {
 	  Watchdog_CheckIn(CRASH_TASK_ORCH);
 	  drainAckQueue();

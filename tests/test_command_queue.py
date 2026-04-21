@@ -243,12 +243,9 @@ def test_request_pause_after_seq32_ack_rejection_invokes_failure_callback(qapp, 
     errors = []
     machine.error_occurred.connect(errors.append)
 
-    def _fake_start_ack_wait(_ack_code, _seq32, _timeout_ms, on_ok, on_timeout):
-        on_ok({"ack_result": "watermark_rejected"})
-
-    machine._start_ack_wait = _fake_start_ack_wait
-
     ok = machine.request_pause_after_seq32(42, on_failure=failures.append)
+    seq32 = next(iter(machine._pending_pause_after_requests))
+    machine._on_any_ack({"ack_cmd": mfr.CMD_QUEUE_ACK, "seq32": seq32, "seq8": 0, "ack_result": "watermark_rejected"})
 
     assert ok is True
     assert failures == [
@@ -262,30 +259,53 @@ def test_request_pause_after_seq32_ack_rejection_invokes_failure_callback(qapp, 
     assert errors == []
 
 
-def test_request_pause_after_seq32_timeout_invokes_failure_callback(qapp, test_profile):
+def test_request_pause_after_seq32_status_confirmation_survives_initial_ack_timeout(qapp, test_profile):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+    machine._write_frame = Mock()
+    successes = []
+    failures = []
+    ok = machine.request_pause_after_seq32(42, on_success=successes.append, on_failure=failures.append)
+    seq32 = next(iter(machine._pending_pause_after_requests))
+    request = machine._pending_pause_after_requests[seq32]
+
+    machine._on_pause_after_ack_timeout(seq32)
+    machine._update_pause_after_requests_from_status(
+        {
+            "monotonic_ns": int(request["created_monotonic_ns"]) + 1,
+            "Pause_after_seq32": 42,
+            "Pause_watermark_reached": False,
+            "Transport_paused": False,
+        }
+    )
+    machine._on_pause_after_confirm_timeout(seq32)
+
+    assert ok is True
+    assert failures == []
+    assert successes
+    assert successes[0]["ack_result"] == "status_confirmed"
+    assert seq32 not in machine._pending_pause_after_requests
+
+
+def test_request_pause_after_seq32_not_confirmed_within_grace_window_invokes_failure_callback(qapp, test_profile):
     machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
     machine._write_frame = Mock()
     failures = []
-    errors = []
-    machine.error_occurred.connect(errors.append)
-
-    def _fake_start_ack_wait(_ack_code, _seq32, _timeout_ms, on_ok, on_timeout):
-        on_timeout(None)
-
-    machine._start_ack_wait = _fake_start_ack_wait
 
     ok = machine.request_pause_after_seq32(42, on_failure=failures.append)
+    seq32 = next(iter(machine._pending_pause_after_requests))
+
+    machine._on_pause_after_ack_timeout(seq32)
+    machine._on_pause_after_confirm_timeout(seq32)
 
     assert ok is True
     assert failures == [
         {
-            "reason": "ack_timeout",
+            "reason": "not_confirmed",
             "barrier_seq32": 42,
             "ack_result": None,
             "error": None,
         }
     ]
-    assert errors == []
 
 
 def test_request_pause_after_seq32_success_still_invokes_success_callback(qapp, test_profile):
@@ -294,13 +314,11 @@ def test_request_pause_after_seq32_success_still_invokes_success_callback(qapp, 
     successes = []
     failures = []
 
-    def _fake_start_ack_wait(_ack_code, _seq32, _timeout_ms, on_ok, on_timeout):
-        on_ok({"ack_result": "watermark_set"})
-
-    machine._start_ack_wait = _fake_start_ack_wait
-
     ok = machine.request_pause_after_seq32(42, on_success=successes.append, on_failure=failures.append)
+    seq32 = next(iter(machine._pending_pause_after_requests))
+    machine._on_any_ack({"ack_cmd": mfr.CMD_QUEUE_ACK, "seq32": seq32, "seq8": 0, "ack_result": "watermark_set"})
 
     assert ok is True
-    assert successes == [{"ack_result": "watermark_set"}]
+    assert successes
+    assert successes[0]["ack_result"] == "watermark_set"
     assert failures == []

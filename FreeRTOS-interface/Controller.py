@@ -420,6 +420,10 @@ class Controller(QObject):
         if self.get_array_run_state() != "running":
             return False
         context = getattr(self, "_array_context", None) or {}
+        try:
+            self._update_current_array_barrier()
+        except Exception:
+            pass
         current_barrier = context.get("current_barrier_seq32")
         if not current_barrier:
             return False
@@ -444,6 +448,7 @@ class Controller(QObject):
             "write_failed": "the pause-after request could not be sent",
             "ack_rejected": "the MCU rejected the pause-after request",
             "ack_timeout": "the MCU did not acknowledge the pause-after request",
+            "not_confirmed": "the pause-after request was not confirmed within the grace window",
             "invalid_barrier": "the pause-after request had an invalid barrier",
         }
         detail = detail_map.get(str(reason or "unknown"), f"the pause-after request failed ({reason})")

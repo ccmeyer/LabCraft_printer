@@ -325,6 +325,7 @@ private:
   static void            _taskEntry(void* pv);
   void                   _run();
   BaseType_t             enqueueAckFromISR(const AckMessage& ack, BaseType_t* pxHigherPriorityTaskWoken);
+  void                   drainAckQueue();
   void                   retireAcceptedPendingCommands();
   void                   applyPauseAfterWatermark();
 

@@ -1955,6 +1955,9 @@ class Machine(QObject):
         self._transport_ready = False
         self._queue_ack_timeout_ms = 200
         self._queue_ack_max_retries = 3
+        self._pause_after_ack_timeout_ms = 1000
+        self._pause_after_confirm_timeout_ms = 2500
+        self._pending_pause_after_requests = {}
 
         self._connection_attempts = 0
         self._tx_mutex = QMutex()
@@ -2081,6 +2084,8 @@ class Machine(QObject):
         ack_code = ack.get("ack_cmd")
         seq32    = ack.get("seq32")
         seq8     = ack.get("seq8")
+        if ack_code == CMD_QUEUE_ACK and self._handle_pause_after_queue_ack(ack):
+            return
 
         # Try SEQ32 first, then fall back to seq8
         key = self._ack_key(ack_code, seq32, None)
@@ -2096,6 +2101,8 @@ class Machine(QObject):
             finally:
                 entry["timer"].deleteLater()
         else:
+            if ack_code == CMD_QUEUE_ACK and seq32 is not None and int(seq32) >= int(self._control_seq_base):
+                return
             # Optional: log stray ACKs
             print(f"Stray ACK: code=0x{ack_code:02X} seq32={seq32} seq8={seq8}")
             pass
@@ -2261,11 +2268,37 @@ class Machine(QObject):
             except Exception:
                 pass
         self._pending_acks.clear()
+        self._cancel_pending_pause_after_requests()
+
+    def _cleanup_timer(self, timer):
+        if timer is None:
+            return
+        try:
+            timer.stop()
+        except Exception:
+            pass
+        try:
+            timer.deleteLater()
+        except Exception:
+            pass
+
+    def _clear_pause_after_request(self, seq32):
+        request = self._pending_pause_after_requests.pop(int(seq32 or 0), None)
+        if request is None:
+            return None
+        self._cleanup_timer(request.get("ack_timer"))
+        self._cleanup_timer(request.get("confirm_timer"))
+        return request
+
+    def _cancel_pending_pause_after_requests(self):
+        for seq32 in list(self._pending_pause_after_requests.keys()):
+            self._clear_pause_after_request(seq32)
 
     def _reset_session_state_for_recovery(self):
         self.command_queue.clear_queue(reset_counter=True)
         self.sent_command = None
         self._cancel_pending_acks()
+        self._cancel_pending_pause_after_requests()
         self._transport_capabilities = 0
         self._transport_ready = False
         self._next_ctl_seq32 = self._control_seq_base
@@ -2844,6 +2877,7 @@ class Machine(QObject):
             sample = self._status_sample_from_dict(data, observed_monotonic_ns)
             self.status_history.append(sample)
             self._latest_status_sample = dict(sample)
+            self._update_pause_after_requests_from_status(sample)
             if getattr(self, "_waiting_for_post_clear_status", False):
                 depth = data.get("cmd_depth", 0)
                 curr  = data.get("Current_command", 0)
@@ -3038,6 +3072,114 @@ class Machine(QObject):
             f"Pause-after watermark request failed for barrier {payload['barrier_seq32']}: {detail}"
         )
 
+    def _emit_pause_after_success(self, request, payload):
+        if request is None or request.get("success_emitted"):
+            return
+        request["success_emitted"] = True
+        callback = request.get("on_success")
+        if callable(callback):
+            self._invoke_ack_callback(callback, payload)
+
+    def _fail_pause_after_request(self, seq32, *, reason, ack_result=None, error=None):
+        request = self._clear_pause_after_request(seq32)
+        if request is None:
+            return
+        self._notify_pause_after_failure(
+            request.get("on_failure"),
+            reason=reason,
+            barrier_seq32=request.get("barrier_seq32"),
+            ack_result=ack_result,
+            error=error,
+        )
+
+    def _handle_pause_after_queue_ack(self, ack):
+        seq32 = self._coerce_optional_int((ack or {}).get("seq32"))
+        if seq32 is None:
+            return False
+        request = self._pending_pause_after_requests.get(seq32)
+        if request is None:
+            return False
+
+        request["last_ack"] = dict(ack or {})
+        request["ack_received"] = True
+        ack_result = str((ack or {}).get("ack_result") or "")
+        if request.get("ack_timer") is not None:
+            self._cleanup_timer(request.get("ack_timer"))
+            request["ack_timer"] = None
+
+        if ack_result == "watermark_rejected":
+            self._fail_pause_after_request(
+                seq32,
+                reason="ack_rejected",
+                ack_result=ack_result,
+            )
+            return True
+
+        if ack_result in {"watermark_set", "accepted", "duplicate"}:
+            request["ack_result"] = ack_result
+            if ack_result == "watermark_set":
+                request["status_confirmed"] = True
+                self._emit_pause_after_success(request, ack)
+            return True
+
+        self._fail_pause_after_request(
+            seq32,
+            reason="ack_rejected",
+            ack_result=ack_result or "missing",
+        )
+        return True
+
+    def _status_confirms_pause_after_request(self, request, sample):
+        if request is None or not isinstance(sample, dict):
+            return False
+        sample_ns = self._coerce_optional_int(sample.get("monotonic_ns"))
+        created_ns = self._coerce_optional_int(request.get("created_monotonic_ns"))
+        if sample_ns is not None and created_ns is not None and sample_ns < created_ns:
+            return False
+        barrier_seq32 = int(request.get("barrier_seq32") or 0)
+        pause_after_seq32 = self._coerce_optional_int(sample.get("Pause_after_seq32"))
+        if pause_after_seq32 == barrier_seq32 and barrier_seq32 > 0:
+            return True
+        return bool(sample.get("Pause_watermark_reached")) and bool(sample.get("Transport_paused"))
+
+    def _update_pause_after_requests_from_status(self, sample):
+        if not self._pending_pause_after_requests:
+            return
+        status_payload = dict(sample or {})
+        for seq32, request in list(self._pending_pause_after_requests.items()):
+            if not self._status_confirms_pause_after_request(request, status_payload):
+                continue
+            request["status_confirmed"] = True
+            if request.get("ack_timer") is not None:
+                self._cleanup_timer(request.get("ack_timer"))
+                request["ack_timer"] = None
+            self._emit_pause_after_success(
+                request,
+                {
+                    "ack_result": "status_confirmed",
+                    "barrier_seq32": int(request.get("barrier_seq32") or 0),
+                    "status": dict(status_payload),
+                },
+            )
+
+    def _on_pause_after_ack_timeout(self, seq32):
+        request = self._pending_pause_after_requests.get(int(seq32 or 0))
+        if request is None:
+            return
+        request["ack_timed_out"] = True
+        if request.get("ack_timer") is not None:
+            self._cleanup_timer(request.get("ack_timer"))
+            request["ack_timer"] = None
+
+    def _on_pause_after_confirm_timeout(self, seq32):
+        request = self._pending_pause_after_requests.get(int(seq32 or 0))
+        if request is None:
+            return
+        if request.get("status_confirmed"):
+            self._clear_pause_after_request(seq32)
+            return
+        self._fail_pause_after_request(seq32, reason="not_confirmed")
+
     def request_pause_after_seq32(self, barrier_seq32, on_success=None, on_failure=None):
         barrier_seq32 = int(barrier_seq32 or 0)
         if barrier_seq32 <= 0:
@@ -3060,30 +3202,30 @@ class Machine(QObject):
             )
             return False
 
-        def _on_ok(ack):
-            ack_result = str((ack or {}).get("ack_result") or "")
-            if ack_result not in {"accepted", "watermark_set", "duplicate"}:
-                self._notify_pause_after_failure(
-                    on_failure,
-                    reason="ack_rejected",
-                    barrier_seq32=barrier_seq32,
-                    ack_result=ack_result or "missing",
-                )
-                return
-            if callable(on_success):
-                on_success(ack)
-
-        self._start_ack_wait(
-            CMD_QUEUE_ACK,
-            seq32,
-            self._queue_ack_timeout_ms,
-            on_ok=_on_ok,
-            on_timeout=lambda _ack=None, barrier=barrier_seq32: self._notify_pause_after_failure(
-                on_failure,
-                reason="ack_timeout",
-                barrier_seq32=barrier,
-            ),
-        )
+        self._clear_pause_after_request(seq32)
+        ack_timer = QTimer(self)
+        ack_timer.setSingleShot(True)
+        ack_timer.timeout.connect(lambda s=seq32: self._on_pause_after_ack_timeout(s))
+        confirm_timer = QTimer(self)
+        confirm_timer.setSingleShot(True)
+        confirm_timer.timeout.connect(lambda s=seq32: self._on_pause_after_confirm_timeout(s))
+        self._pending_pause_after_requests[seq32] = {
+            "seq32": seq32,
+            "barrier_seq32": barrier_seq32,
+            "on_success": on_success,
+            "on_failure": on_failure,
+            "ack_timer": ack_timer,
+            "confirm_timer": confirm_timer,
+            "created_monotonic_ns": int(time.monotonic_ns()),
+            "ack_received": False,
+            "ack_timed_out": False,
+            "ack_result": None,
+            "status_confirmed": False,
+            "success_emitted": False,
+            "last_ack": None,
+        }
+        ack_timer.start(self._pause_after_ack_timeout_ms)
+        confirm_timer.start(self._pause_after_confirm_timeout_ms)
         return True
 
     def pump_send_queue(self):

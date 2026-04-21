@@ -131,6 +131,8 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
   - `OrchestratorCompletionPolicy` centralizes the pure “did an interruptible command really finish?” bookkeeping used to decide when executed/retired frontiers may advance after pause-aware waits.
   - Flash session safety lives here: `CMD_INIT_FLASH` / `CMD_STOP_FLASH`, PE8 arm/disarm policy, PE9 output ownership, and fault latch logging (`FLASH_ARMED`, `FLASH_DISARMED`, `FLASH_FAULT`). Active imaging sessions now only hard-fault on `line_high_on_arm`; once armed, duplicate triggers while a flash is already pending are ignored and the task simply waits for PE8 to return low without latching on slow release.
 
+  - `Orchestrator::drainAckQueue()` now flushes deferred `CMD_QUEUE_ACK` traffic from both the main loop and interruptible wait loops so `CMD_PAUSE_AFTER_SEQ32` requests can be acknowledged promptly during long move/dispense commands.
+
 ### Logging/status/indicators
 
 - Logging:
