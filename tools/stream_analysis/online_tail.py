@@ -361,6 +361,31 @@ def _find_delay_summary(summaries: list[dict], delay_us: int | None) -> dict | N
     return None
 
 
+def _find_latest_accepted_flow_summary(
+    summaries: list[dict] | None,
+    *,
+    max_delay_us: int | None,
+) -> dict | None:
+    latest_summary = None
+    latest_delay_us = None
+    max_delay_value = _to_int(max_delay_us)
+    for row in list(summaries or []):
+        summary = dict(row or {})
+        delay_value = _to_int(summary.get("delay_us"))
+        if delay_value is None:
+            continue
+        if max_delay_value is not None and int(delay_value) > int(max_delay_value):
+            continue
+        if not bool(summary.get("delay_accepted")):
+            continue
+        if _to_float_or_none(summary.get("median_width_px")) is None:
+            continue
+        if latest_delay_us is None or int(delay_value) >= int(latest_delay_us):
+            latest_summary = summary
+            latest_delay_us = int(delay_value)
+    return None if latest_summary is None else dict(latest_summary)
+
+
 def _summary_delay_from_emergence(summary: dict | None, delay_us: int | None) -> int | None:
     if summary:
         return _to_int(summary.get("delay_from_emergence_us"))
@@ -1355,6 +1380,22 @@ def resolve_online_stream_tail_result(
             phase_label="flow_anchor",
         )
 
+    synthetic_left_bracket_candidate_delay_us = _to_int(plan.get("scout_anchor_delay_us"))
+    synthetic_left_bracket_summary = None
+    synthetic_left_bracket_row = None
+    synthetic_left_bracket_delay_from_emergence_us = None
+    synthetic_left_bracket_source = None
+    flow_anchor_summary = _find_latest_accepted_flow_summary(
+        list(flow_delay_summaries or []),
+        max_delay_us=synthetic_left_bracket_candidate_delay_us,
+    )
+    if flow_anchor_summary is not None:
+        synthetic_left_bracket_summary = _flow_anchor_summary(
+            flow_anchor_summary,
+            baseline_width_px,
+            phase_label="flow_anchor",
+        )
+
     local_trace_rows_by_delay = {}
     for row in list(backtrack_rows or []):
         summary = dict(row or {})
@@ -1370,8 +1411,25 @@ def resolve_online_stream_tail_result(
         if delay_value is None or int(delay_value) in local_trace_rows_by_delay:
             continue
         local_trace_rows_by_delay[int(delay_value)] = summary
+    if synthetic_left_bracket_summary:
+        summary = dict(synthetic_left_bracket_summary or {})
+        delay_value = _to_int(summary.get("delay_us"))
+        if delay_value is not None and int(delay_value) not in local_trace_rows_by_delay:
+            local_trace_rows_by_delay[int(delay_value)] = summary
     local_trace = list(local_trace_rows_by_delay.values())
     local_trace = _classify_trace_rows(local_trace, policy=resolved_policy)
+    if synthetic_left_bracket_summary:
+        synthetic_left_bracket_row = _find_delay_summary(
+            local_trace,
+            _to_int(synthetic_left_bracket_summary.get("delay_us")),
+        )
+        if not bool((synthetic_left_bracket_row or {}).get("resolver_plateau_candidate")):
+            synthetic_left_bracket_row = None
+        else:
+            synthetic_left_bracket_delay_from_emergence_us = _to_int(
+                synthetic_left_bracket_row.get("delay_from_emergence_us")
+            )
+            synthetic_left_bracket_source = "last_accepted_flow_anchor"
 
     landmark_delay_from_emergence_us = _summary_delay_from_emergence(landmark_summary, landmark_delay_us)
     onset_selection_trace = []
@@ -1438,6 +1496,8 @@ def resolve_online_stream_tail_result(
             and int(row_delay_from_emergence_us) >= int(effective_right_bracket_delay_from_emergence_us)
         ):
             break
+        if str(row.get("phase") or "") == "flow_anchor":
+            continue
         if bool(row.get("resolver_plateau_candidate")):
             last_plateau_row = dict(row)
 
@@ -1475,6 +1535,7 @@ def resolve_online_stream_tail_result(
     captured_candidate = None
     midpoint_candidate_delay_from_emergence_us = None
     tail_start_selection_method = None
+    synthetic_left_bracket_used = False
     if transition_rows and right_bracket_row is not None and last_plateau_row is not None:
         captured_candidate = dict(transition_rows[0])
         tail_start_selection_method = "earliest_transition_before_confirmed_collapse"
@@ -1486,6 +1547,21 @@ def resolve_online_stream_tail_result(
                 (int(left_delay_from_emergence_us) + int(right_delay_from_emergence_us)) / 2
             )
             tail_start_selection_method = "plateau_confirmed_collapse_midpoint"
+    elif right_bracket_row is not None and synthetic_left_bracket_row is not None:
+        right_delay_from_emergence_us = _to_int(right_bracket_row.get("delay_from_emergence_us"))
+        if (
+            synthetic_left_bracket_delay_from_emergence_us is not None
+            and right_delay_from_emergence_us is not None
+        ):
+            midpoint_candidate_delay_from_emergence_us = int(
+                (
+                    int(synthetic_left_bracket_delay_from_emergence_us)
+                    + int(right_delay_from_emergence_us)
+                )
+                / 2
+            )
+            tail_start_selection_method = "flow_anchor_confirmed_collapse_midpoint"
+            synthetic_left_bracket_used = True
 
     initial_confirmed_collapse_delay_from_emergence_us = _to_int(
         None if confirmed_collapse_row is None else confirmed_collapse_row.get("delay_from_emergence_us")
@@ -1544,9 +1620,17 @@ def resolve_online_stream_tail_result(
             tail_start_evidence = "backtrack_width_departure"
     elif midpoint_candidate_delay_from_emergence_us is not None:
         tail_phase_status = "captured"
-        termination_reason = termination_reason or "plateau_right_bracket_midpoint"
+        termination_reason = termination_reason or (
+            "flow_anchor_right_bracket_midpoint"
+            if bool(synthetic_left_bracket_used)
+            else "plateau_right_bracket_midpoint"
+        )
         tail_start_delay_from_emergence_us = int(midpoint_candidate_delay_from_emergence_us)
-        tail_start_evidence = "plateau_right_bracket_midpoint"
+        tail_start_evidence = (
+            "flow_anchor_right_bracket_midpoint"
+            if bool(synthetic_left_bracket_used)
+            else "plateau_right_bracket_midpoint"
+        )
     elif right_bracket_row is not None:
         tail_phase_status = "unresolved_missing_left_bracket"
         termination_reason = termination_reason or "missing_left_bracket"
@@ -1747,11 +1831,25 @@ def resolve_online_stream_tail_result(
         ),
         "trigger_delay_from_emergence_us": landmark_delay_from_emergence_us,
         "trigger_reason": landmark_reason or (None if landmark_summary is None else landmark_summary.get("landmark_reason")),
-        "last_nontrigger_delay_from_emergence_us": last_plateau_delay_from_emergence_us,
-        "synthetic_left_bracket_used": False,
+        "last_nontrigger_delay_from_emergence_us": (
+            synthetic_left_bracket_delay_from_emergence_us
+            if bool(synthetic_left_bracket_used)
+            else last_plateau_delay_from_emergence_us
+        ),
+        "synthetic_left_bracket_used": bool(synthetic_left_bracket_used),
+        "synthetic_left_bracket_delay_from_emergence_us": (
+            _to_int(synthetic_left_bracket_delay_from_emergence_us)
+            if bool(synthetic_left_bracket_used)
+            else None
+        ),
+        "synthetic_left_bracket_source": (
+            str(synthetic_left_bracket_source)
+            if bool(synthetic_left_bracket_used) and synthetic_left_bracket_source is not None
+            else None
+        ),
         "late_frame_warning": bool(late_frame_warning),
-        "tail_retarget_count": 0,
-        "retargeted_coarse_start_delay_us": None,
+        "tail_retarget_count": _to_int(plan.get("tail_retarget_count"), 0),
+        "retargeted_coarse_start_delay_us": _to_int(plan.get("retargeted_coarse_start_delay_us")),
         "tail_start_delay_from_emergence_us": (
             None if tail_start_delay_from_emergence_us is None else int(tail_start_delay_from_emergence_us)
         ),

@@ -9286,7 +9286,6 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         if bool(getattr(self, "_tail_left_bracket_extended", False)):
             return False
         scout_anchor_delay_us = self._tail_plan.get("scout_anchor_delay_us")
-        scout_step_us = int(self._tail_plan.get("scout_step_us") or 500)
         try:
             current_left_delay_us = int(
                 self._tail_backtrack_left_delay_us
@@ -9296,12 +9295,13 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             scout_anchor_delay_us = int(scout_anchor_delay_us)
         except Exception:
             return False
-        extended_left_delay_us = max(int(scout_anchor_delay_us), int(current_left_delay_us) - int(scout_step_us))
-        if int(extended_left_delay_us) >= int(current_left_delay_us):
+        if int(scout_anchor_delay_us) >= int(current_left_delay_us):
             return False
-        self._tail_backtrack_left_delay_us = int(extended_left_delay_us)
+        self._tail_backtrack_left_delay_us = int(scout_anchor_delay_us)
         self._tail_left_bracket_confirmed = False
         self._tail_left_bracket_extended = True
+        self._tail_plan["tail_retarget_count"] = int(self._tail_plan.get("tail_retarget_count") or 0) + 1
+        self._tail_plan["retargeted_coarse_start_delay_us"] = int(scout_anchor_delay_us)
         self._tail_delay_sequence = self._build_tail_backtrack_delay_sequence()
         if bool(self._tail_plan.get("tail_backtrack_budget_impossible")):
             self._tail_phase_status = "unresolved_budget_exhausted"
@@ -9324,6 +9324,9 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             self._tail_fit_warnings = list(tail_phase.get("warnings") or list(self._tail_fit_warnings))
             self._tail_left_bracket_confirmed = bool(tail_phase.get("left_bracket_confirmed"))
             self._tail_left_bracket_extended = bool(tail_phase.get("left_bracket_extended"))
+            self._tail_synthetic_left_bracket_used = bool(
+                tail_phase.get("synthetic_left_bracket_used")
+            )
         except Exception:
             pass
         self._write_tail_fit_artifact()

@@ -723,7 +723,7 @@ def test_resolve_online_stream_tail_result_uses_midpoint_without_prelandmark_dep
     assert resolved["tail_phase"]["tail_start_selection_method"] == "plateau_confirmed_collapse_midpoint"
 
 
-def test_resolve_online_stream_tail_result_returns_missing_left_bracket_without_plateau():
+def test_resolve_online_stream_tail_result_uses_flow_anchor_when_tail_plateau_is_missing():
     resolved = mod.resolve_online_stream_tail_result(
         flow_fit_result=_flow_fit_result(),
         tail_plan={
@@ -766,10 +766,70 @@ def test_resolve_online_stream_tail_result_returns_missing_left_bracket_without_
         },
     )
 
-    assert resolved["tail_phase"]["status"] == "unresolved_missing_left_bracket"
-    assert resolved["tail_phase"]["tail_start_delay_from_emergence_us"] is None
+    assert resolved["tail_phase"]["status"] == "captured"
+    assert resolved["tail_phase"]["synthetic_left_bracket_used"] is True
+    assert resolved["tail_phase"]["synthetic_left_bracket_delay_from_emergence_us"] == 1050
+    assert resolved["tail_phase"]["synthetic_left_bracket_source"] == "last_accepted_flow_anchor"
+    assert resolved["tail_phase"]["tail_start_delay_from_emergence_us"] == 1075
     assert resolved["tail_phase"]["confirmed_collapse_delay_from_emergence_us"] == 1100
     assert resolved["tail_phase"]["right_bracket_reason"] == "strong_tail_transition"
+    assert resolved["tail_phase"]["tail_start_evidence"] == "flow_anchor_right_bracket_midpoint"
+    assert (
+        resolved["tail_phase"]["tail_start_selection_method"]
+        == "flow_anchor_confirmed_collapse_midpoint"
+    )
+    assert resolved["predicted_volume_nl"] is not None
+    assert "unresolved_missing_left_bracket" not in resolved["tail_phase"]["warnings"]
+
+
+def test_resolve_online_stream_tail_result_keeps_missing_left_bracket_when_flow_anchor_is_not_plateau():
+    resolved = mod.resolve_online_stream_tail_result(
+        flow_fit_result=_flow_fit_result(),
+        tail_plan={
+            "steady_width_baseline_px": 74.0,
+            "scout_anchor_delay_us": 4250,
+            "backtrack_step_us": 50,
+        },
+        scout_summaries=[
+            mod.summarize_online_stream_tail_delay(
+                [
+                    _tail_frame_row(
+                        delay_us=4750,
+                        delay_from_emergence_us=1550,
+                        width_px=None,
+                        tail_width_usable=False,
+                        separated_from_nozzle_landmark=True,
+                        tail_landmark_usable=True,
+                    )
+                ],
+                baseline_width_px=74.0,
+            )
+        ],
+        backtrack_summaries=[
+            mod.summarize_online_stream_tail_delay(
+                [_tail_frame_row(delay_us=4300, delay_from_emergence_us=1100, phase="tail_backtrack", width_px=72.0)],
+                baseline_width_px=74.0,
+            ),
+            mod.summarize_online_stream_tail_delay(
+                [_tail_frame_row(delay_us=4350, delay_from_emergence_us=1150, phase="tail_backtrack", width_px=71.5)],
+                baseline_width_px=74.0,
+            ),
+        ],
+        flow_delay_summaries=[
+            _flow_delay_summary(delay_us=4250, delay_from_emergence_us=1050, width_px=73.0)
+        ],
+        trigger_bracket={
+            "tail_phase_status": "",
+            "termination_reason": "",
+            "landmark_delay_us": 4750,
+            "backtrack_left_delay_us": 4300,
+            "landmark_reason": "separated_from_nozzle",
+        },
+    )
+
+    assert resolved["tail_phase"]["status"] == "unresolved_missing_left_bracket"
+    assert resolved["tail_phase"]["tail_start_delay_from_emergence_us"] is None
+    assert resolved["tail_phase"]["synthetic_left_bracket_used"] is False
     assert "unresolved_missing_left_bracket" in resolved["tail_phase"]["warnings"]
 
 
