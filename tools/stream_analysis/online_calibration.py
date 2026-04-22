@@ -742,6 +742,17 @@ def summarize_online_stream_flow_delay(frame_rows: list[dict]) -> dict:
             else (True if accepted_replicates > 0 else None)
         ),
         "flow_volume_geometry_reasons": _unique_strings(geometry_reasons),
+        "geometry_boundary_scope": flow_geometry_boundary_scope(
+            {
+                "geometry_boundary_triggered": bool(geometry_boundary_triggered),
+                "flow_volume_geometry_ok": (
+                    False
+                    if geometry_boundary_triggered
+                    else (True if accepted_replicates > 0 else None)
+                ),
+                "flow_volume_geometry_reasons": _unique_strings(geometry_reasons),
+            }
+        ),
         "flow_volume_complete_ok": (
             False
             if volume_incomplete_rejected_replicates > 0
@@ -800,6 +811,47 @@ def is_online_stream_flow_geometry_boundary(delay_summary: dict | None) -> bool:
     if bool(summary.get("geometry_boundary_triggered")):
         return True
     return summary.get("flow_volume_geometry_ok") is False
+
+
+def flow_geometry_boundary_scope(delay_summary: dict | None) -> str:
+    summary = dict(delay_summary or {})
+    if not is_online_stream_flow_geometry_boundary(summary):
+        return "none"
+    reasons = _unique_strings(summary.get("flow_volume_geometry_reasons") or [])
+    if not reasons:
+        return "unknown"
+    attached_seen = False
+    detached_seen = False
+    unknown_seen = False
+    for reason in reasons:
+        label = str(reason or "").strip()
+        suffix = label.split(":", 1)[-1] if ":" in label else label
+        if str(suffix).startswith("attached_"):
+            attached_seen = True
+        elif str(suffix).startswith("detached_"):
+            detached_seen = True
+        else:
+            unknown_seen = True
+    if attached_seen and detached_seen and not unknown_seen:
+        return "mixed"
+    if attached_seen and not detached_seen and not unknown_seen:
+        return "attached"
+    if detached_seen and not attached_seen and not unknown_seen:
+        return "detached_only"
+    return "unknown"
+
+
+def is_online_stream_flow_search_boundary(
+    delay_summary: dict | None,
+    *,
+    late_coverage_reached: bool,
+) -> bool:
+    scope = flow_geometry_boundary_scope(delay_summary)
+    if scope == "none":
+        return False
+    if scope == "detached_only":
+        return bool(late_coverage_reached)
+    return True
 
 
 def decide_online_stream_flow_next_action(
@@ -916,6 +968,7 @@ def build_online_stream_flow_phase_payload(
     fit: dict | None = None,
     flow_mode: str | None = None,
     scout_boundary_reason: str | None = None,
+    search_boundary_deferred_reason: str | None = None,
     right_boundary_delay_from_emergence_us: int | None = None,
     captured_delay_offsets_from_emergence_us: list[int] | None = None,
     target_delay_offsets_from_emergence_us: list[int] | None = None,
@@ -937,6 +990,11 @@ def build_online_stream_flow_phase_payload(
         "warnings": _copy_warnings(warnings),
         "flow_mode": None if flow_mode in (None, "") else str(flow_mode),
         "scout_boundary_reason": None if scout_boundary_reason in (None, "") else str(scout_boundary_reason),
+        "search_boundary_deferred_reason": (
+            None
+            if search_boundary_deferred_reason in (None, "")
+            else str(search_boundary_deferred_reason)
+        ),
         "right_boundary_delay_from_emergence_us": _to_int(
             right_boundary_delay_from_emergence_us,
             None,

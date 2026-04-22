@@ -369,6 +369,7 @@ def test_build_online_stream_flow_phase_payload_appends_fit_fields():
             "flow_fit_dropped_outlier_delay_from_emergence_us": None,
             "warnings": ["flow_fit_min_points_only"],
         },
+        search_boundary_deferred_reason="detached_geometry_precoverage",
         confidence_boundary_delay_from_emergence_us=2150,
     )
 
@@ -378,6 +379,7 @@ def test_build_online_stream_flow_phase_payload_appends_fit_fields():
     assert payload["steady_width_baseline_px"] == 74.0
     assert payload["late_slope_stable"] is True
     assert payload["late_coverage_metric"] == "visible_fluid_bottom_clearance"
+    assert payload["search_boundary_deferred_reason"] == "detached_geometry_precoverage"
     assert payload["confidence_boundary_delay_from_emergence_us"] == 2150
     assert payload["flow_fit_point_count"] == 5
     assert payload["fit_warnings"] == ["flow_fit_min_points_only"]
@@ -595,6 +597,7 @@ def test_summarize_online_stream_flow_delay_excludes_geometry_rejected_rows_from
     assert summary["geometry_boundary_triggered"] is True
     assert summary["flow_volume_geometry_ok"] is False
     assert summary["flow_volume_geometry_reasons"] == ["attached_lower_centerline_span_high"]
+    assert summary["geometry_boundary_scope"] == "attached"
 
 
 def test_summarize_online_stream_flow_delay_excludes_volume_incomplete_rows_from_acceptance():
@@ -641,6 +644,76 @@ def test_online_stream_flow_geometry_boundary_helper_detects_geometry_failures()
     assert mod.is_online_stream_flow_geometry_boundary(
         {"flow_volume_geometry_ok": True}
     ) is False
+
+
+def test_flow_geometry_boundary_scope_classifies_attached_detached_mixed_and_unknown():
+    assert mod.flow_geometry_boundary_scope(
+        {
+            "flow_volume_geometry_ok": False,
+            "flow_volume_geometry_reasons": ["attached_lower_centerline_span_high"],
+        }
+    ) == "attached"
+    assert mod.flow_geometry_boundary_scope(
+        {
+            "flow_volume_geometry_ok": False,
+            "flow_volume_geometry_reasons": ["detached_01:detached_local_centerline_span_high"],
+        }
+    ) == "detached_only"
+    assert mod.flow_geometry_boundary_scope(
+        {
+            "flow_volume_geometry_ok": False,
+            "flow_volume_geometry_reasons": [
+                "attached_lower_centerline_span_high",
+                "detached_01:detached_local_centerline_span_high",
+            ],
+        }
+    ) == "mixed"
+    assert mod.flow_geometry_boundary_scope(
+        {
+            "flow_volume_geometry_ok": False,
+            "flow_volume_geometry_reasons": ["geometry_shape_unknown"],
+        }
+    ) == "unknown"
+    assert mod.flow_geometry_boundary_scope({"flow_volume_geometry_ok": True}) == "none"
+
+
+def test_online_stream_flow_search_boundary_defers_detached_only_failures_until_late_coverage():
+    detached_only = {
+        "flow_volume_geometry_ok": False,
+        "flow_volume_geometry_reasons": ["detached_01:detached_local_centerline_span_high"],
+    }
+    assert mod.is_online_stream_flow_search_boundary(
+        detached_only,
+        late_coverage_reached=False,
+    ) is False
+    assert mod.is_online_stream_flow_search_boundary(
+        detached_only,
+        late_coverage_reached=True,
+    ) is True
+    assert mod.is_online_stream_flow_search_boundary(
+        {
+            "flow_volume_geometry_ok": False,
+            "flow_volume_geometry_reasons": ["attached_lower_centerline_span_high"],
+        },
+        late_coverage_reached=False,
+    ) is True
+    assert mod.is_online_stream_flow_search_boundary(
+        {
+            "flow_volume_geometry_ok": False,
+            "flow_volume_geometry_reasons": [
+                "attached_lower_centerline_span_high",
+                "detached_01:detached_local_centerline_span_high",
+            ],
+        },
+        late_coverage_reached=False,
+    ) is True
+    assert mod.is_online_stream_flow_search_boundary(
+        {
+            "flow_volume_geometry_ok": False,
+            "flow_volume_geometry_reasons": ["geometry_shape_unknown"],
+        },
+        late_coverage_reached=False,
+    ) is True
 
 
 def test_decide_online_stream_flow_next_action_continue_case():

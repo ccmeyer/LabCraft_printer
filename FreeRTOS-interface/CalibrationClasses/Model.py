@@ -7089,6 +7089,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._flow_captured_delay_offsets_from_emergence_us = []
         self._flow_confidence_boundary_delay_from_emergence_us = None
         self._flow_scout_boundary_reason = None
+        self._flow_search_boundary_deferred_reason = None
         self._flow_right_boundary_delay_from_emergence_us = None
         self._flow_right_boundary_fixed = False
         self._flow_hard_boundary_delay_from_emergence_us = None
@@ -7732,6 +7733,25 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             and float(visible_fluid_clearance_px) <= float(late_clearance_px)
         )
 
+    def _flow_late_coverage_already_reached(
+        self,
+        *,
+        before_offset_us: int | None = None,
+    ) -> bool:
+        for summary in list(self._flow_delay_summaries or []):
+            row = dict(summary or {})
+            if not bool(row.get("delay_accepted")):
+                continue
+            try:
+                offset_us = int(row.get("delay_from_emergence_us"))
+            except Exception:
+                offset_us = None
+            if before_offset_us is not None and offset_us is not None and int(offset_us) >= int(before_offset_us):
+                continue
+            if bool(row.get("late_coverage_candidate")):
+                return True
+        return False
+
     def _flow_last_safe_late_confidence_offset_from_emergence_us(
         self,
         *,
@@ -8130,7 +8150,14 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         if current_offset_us is not None:
             self._merge_flow_target_offsets([int(current_offset_us)])
 
-        geometry_boundary = online_cal_mod.is_online_stream_flow_geometry_boundary(summary)
+        late_coverage_already_reached = self._flow_late_coverage_already_reached(
+            before_offset_us=current_offset_us
+        )
+        geometry_reject = online_cal_mod.is_online_stream_flow_geometry_boundary(summary)
+        geometry_search_boundary = online_cal_mod.is_online_stream_flow_search_boundary(
+            summary,
+            late_coverage_reached=late_coverage_already_reached,
+        )
         hard_boundary = online_cal_mod.is_online_stream_flow_hard_boundary(summary)
         soft_boundary = online_cal_mod.is_online_stream_flow_soft_boundary(
             summary,
@@ -8167,7 +8194,15 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             confidence_low_warning = False
         if confidence_low_warning:
             self._append_flow_warning("flow_low_confidence_warning")
-        if geometry_boundary and not bool(self._flow_right_boundary_fixed):
+        if (
+            geometry_reject
+            and not geometry_search_boundary
+            and not bool(self._flow_right_boundary_fixed)
+        ):
+            self._flow_search_boundary_deferred_reason = (
+                self._flow_search_boundary_deferred_reason or "detached_geometry_precoverage"
+            )
+        if geometry_search_boundary and not bool(self._flow_right_boundary_fixed):
             self._flow_right_boundary_fixed = True
             self._flow_scout_boundary_reason = self._flow_scout_boundary_reason or "geometry_not_axisymmetric"
             safe_offset_us = self._flow_last_accepted_offset_from_emergence_us(include_soft=True)
@@ -8229,6 +8264,10 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             and required_tail_capture_count > 0
             and remaining_hard_captures
             <= int(required_tail_capture_count + self._flow_tail_preserve_margin_captures())
+            and (
+                bool(preview_fit.get("late_coverage_reached"))
+                or bool(self._flow_right_boundary_fixed)
+            )
         ):
             self._append_flow_warning("tail_budget_preserved_early_finalize")
             self._flow_fit_stop_reason = "tail_budget_preserved"
@@ -8247,9 +8286,15 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         if str(self._flow_mode or "scout") == "scout":
             scout_limit = int(min(self._flow_target_delay_count(), self._flow_effective_capture_limit()))
             attempted_count = int(len(self._flow_delay_summaries))
-            if geometry_boundary or hard_boundary or soft_boundary or confidence_boundary or attempted_count >= scout_limit:
+            if (
+                geometry_search_boundary
+                or hard_boundary
+                or soft_boundary
+                or confidence_boundary
+                or attempted_count >= scout_limit
+            ):
                 if (
-                    not geometry_boundary
+                    not geometry_search_boundary
                     and not hard_boundary
                     and not soft_boundary
                     and not confidence_boundary
@@ -8643,6 +8688,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._flow_captured_delay_offsets_from_emergence_us = []
         self._flow_confidence_boundary_delay_from_emergence_us = None
         self._flow_scout_boundary_reason = None
+        self._flow_search_boundary_deferred_reason = None
         self._flow_right_boundary_delay_from_emergence_us = None
         self._flow_right_boundary_fixed = False
         self._flow_hard_boundary_delay_from_emergence_us = None
@@ -9135,6 +9181,11 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             fit=dict(self._flow_fit_result or {}),
             flow_mode=str(self._flow_mode or ""),
             scout_boundary_reason=self._flow_scout_boundary_reason,
+            search_boundary_deferred_reason=getattr(
+                self,
+                "_flow_search_boundary_deferred_reason",
+                None,
+            ),
             right_boundary_delay_from_emergence_us=self._flow_right_boundary_delay_from_emergence_us,
             captured_delay_offsets_from_emergence_us=list(
                 self._flow_captured_delay_offsets_from_emergence_us
