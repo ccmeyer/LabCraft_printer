@@ -11236,7 +11236,7 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
     MIN_VALID_FOCUS_EVALS = 4
     MAX_CONSEC_INVALID_MASK = 8
     RING_HALF_WIDTH = 5
-    MIN_BEST_RING_CV = 1.40
+    MIN_BEST_RING_CV = 1.34
     MIN_BEST_RING_MEAN_BG_RATIO = 20.0
 
     @staticmethod
@@ -11310,6 +11310,7 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
         self._last_contour_mask = None
         self._last_ring_mask = None
         self._last_bbox = None
+        self._tracked_pos = None
 
         self.focus_curve = []
 
@@ -11401,7 +11402,10 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
         self._draw_focus_overlay(overlay, overlay_mask, focus, snr_ratio=snr_ratio)
         self.presentImageSignal.emit(overlay)
 
-        pos = self.model.machine_model.get_current_position_dict()
+        reported_pos = self._machine_position_dict()
+        if self._start_pos is None:
+            self._tracked_pos = dict(reported_pos)
+        pos = self._tracked_position_dict(reported_pos)
         Y = pos["Y"]
         if self._start_pos is None:
             self._start_pos = dict(pos)
@@ -11420,6 +11424,12 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
                 "eval_count": int(self.eval_count),
                 "focus_metric": "ring_cv",
                 "position": {"X": int(pos["X"]), "Y": int(pos["Y"]), "Z": int(pos["Z"])},
+                "reported_position": {
+                    "X": int(reported_pos["X"]),
+                    "Y": int(reported_pos["Y"]),
+                    "Z": int(reported_pos["Z"]),
+                },
+                "position_source": "tracked",
                 "focus_value": float(focus),
                 "focus_stats": focus_stats_record,
                 "background_stats": dict(bg_stats or {}),
@@ -11575,10 +11585,13 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
     @Slot()
     def onCalibrationCompleted(self):
         if self.best_pos is None:
-            self.best_pos = self._start_pos or self.model.machine_model.get_current_position_dict()
+            self.best_pos = self._start_pos or self._tracked_position_dict(self._machine_position_dict())
 
-        final = dict(self.model.machine_model.get_current_position_dict())
+        reported_final = self._machine_position_dict()
+        final = self._tracked_position_dict(reported_final)
+        final["X"] = int(reported_final["X"])
         final["Y"] = self.best_pos["Y"]
+        final["Z"] = int(reported_final["Z"])
 
         self.calibration_manager.set_nozzle_center(final)
         self.calibrationDataUpdated.emit({
@@ -11597,6 +11610,69 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
 
     # ---------- helpers ----------
     def _abort_with_error(self, msg): self.stageChanged.emit(msg); self.calibrationError.emit(msg)
+
+    def _machine_position_dict(self):
+        tracked = getattr(self, "_tracked_pos", None) or {}
+        try:
+            pos = self.model.machine_model.get_current_position_dict() or {}
+        except Exception:
+            pos = {}
+        return {
+            "X": int(pos.get("X", tracked.get("X", 0))),
+            "Y": int(pos.get("Y", tracked.get("Y", 0))),
+            "Z": int(pos.get("Z", tracked.get("Z", 0))),
+        }
+
+    def _tracked_position_dict(self, reported_pos=None):
+        tracked = getattr(self, "_tracked_pos", None)
+        if not isinstance(tracked, dict):
+            tracked = dict(reported_pos or self._machine_position_dict())
+        tracked = {
+            "X": int(tracked.get("X", 0)),
+            "Y": int(tracked.get("Y", 0)),
+            "Z": int(tracked.get("Z", 0)),
+        }
+        if isinstance(reported_pos, dict):
+            # Firmware status alternates command counters and position. Y can lag the
+            # move-complete callback, so keep the search axis on tracked state but
+            # still refresh the non-focus axes from the latest reported position.
+            tracked["X"] = int(reported_pos.get("X", tracked["X"]))
+            tracked["Z"] = int(reported_pos.get("Z", tracked["Z"]))
+        self._tracked_pos = tracked
+        return dict(tracked)
+
+    def _apply_tracked_relative_move(self, move_vector):
+        dX, dY, dZ = (int(move_vector[0]), int(move_vector[1]), int(move_vector[2]))
+        tracked = self._tracked_position_dict()
+        tracked["X"] += dX
+        tracked["Y"] += dY
+        tracked["Z"] += dZ
+        self._tracked_pos = tracked
+        return dict(tracked)
+
+    def _request_tracked_move_relative_with_timeout(
+        self,
+        move_vector,
+        *,
+        on_done=None,
+        timeout_ms: int = 15_000,
+        err_msg: str | None = None,
+    ):
+        dX, dY, dZ = (int(move_vector[0]), int(move_vector[1]), int(move_vector[2]))
+
+        def _finish_tracked_move():
+            self._apply_tracked_relative_move((dX, dY, dZ))
+            if callable(on_done):
+                on_done()
+            else:
+                self.calibration_manager.emitMoveCompleted()
+
+        self._request_move_relative_with_timeout(
+            (dX, dY, dZ),
+            on_done=_finish_tracked_move,
+            timeout_ms=int(timeout_ms),
+            err_msg=err_msg,
+        )
 
     def _improve_eps(self, ref: float) -> float:
         return max(self.FOCUS_ABS_EPS, self.FOCUS_REL_EPS * max(abs(ref), 1.0))
@@ -11634,7 +11710,7 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
         self.refine_evals = 0
 
     def _run_up_next(self):
-        cur = self.model.machine_model.get_current_position_dict()
+        cur = self._tracked_position_dict(self._machine_position_dict())
         target = cur["Y"] + self.direction * self.step
         target = max(self._loY, min(self._hiY, target))
         if target == cur["Y"]:
@@ -11654,11 +11730,12 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
         self._move_to_Y_clamped(target)
 
     def _refine_next(self):
-        a = self._lo_br_y if self._lo_br_y is not None else self.model.machine_model.get_current_position_dict()["Y"]
-        b = self._hi_br_y if self._hi_br_y is not None else self.model.machine_model.get_current_position_dict()["Y"]
+        cur = self._tracked_position_dict(self._machine_position_dict())
+        a = self._lo_br_y if self._lo_br_y is not None else cur["Y"]
+        b = self._hi_br_y if self._hi_br_y is not None else cur["Y"]
         if a > b: a, b = b, a
         mid = int(round((a + b) / 2))
-        mid = self._avoid_revisit(mid, self.model.machine_model.get_current_position_dict()["Y"], a, b)
+        mid = self._avoid_revisit(mid, cur["Y"], a, b)
         self._move_to_Y_clamped(mid)
 
     def _move_to_best_then_finish(self):
@@ -11668,11 +11745,11 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
             return
         if self.best_pos is None:
             self.nozzleFocused.emit(); return
-        cur = self.model.machine_model.get_current_position_dict()
+        cur = self._tracked_position_dict(self._machine_position_dict())
         dY = self.best_pos["Y"] - cur["Y"]
         if dY == 0:
             self.nozzleFocused.emit(); return
-        self._request_move_relative_with_timeout(
+        self._request_tracked_move_relative_with_timeout(
             (0, dY, 0),
             on_done=self.nozzleFocused.emit,
             timeout_ms=15_000,
@@ -11680,7 +11757,7 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
         )
 
     def _move_to_Y_clamped(self, target_y: int):
-        cur = self.model.machine_model.get_current_position_dict()
+        cur = self._tracked_position_dict(self._machine_position_dict())
         tgt = int(max(self._loY, min(self._hiY, target_y)))
         dY = tgt - cur["Y"]
         # record proposed target for oscillation detection
@@ -11695,7 +11772,7 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
                 alt = int(max(self._loY, min(self._hiY, alt)))
                 if alt != cur["Y"] and (len(self._targets) < 2 or alt != self._targets[-2]):
                     self._targets.append(alt)
-                    self._request_move_relative_with_timeout(
+                    self._request_tracked_move_relative_with_timeout(
                         (0, alt - cur["Y"], 0),
                         timeout_ms=15_000,
                         err_msg="Nozzle focus nudge move timed out."
@@ -11708,7 +11785,7 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
             self.calibration_manager.captureImageRequested.emit(self.handleDropletCaptured)
             return
 
-        self._request_move_relative_with_timeout(
+        self._request_tracked_move_relative_with_timeout(
             (0, dY, 0),
             timeout_ms=15_000,
             err_msg="Nozzle focus step move timed out."

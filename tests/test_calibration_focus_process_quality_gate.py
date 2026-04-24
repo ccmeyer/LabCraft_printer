@@ -1,6 +1,7 @@
+from collections import deque
 from types import SimpleNamespace
 
-from tests.calibration_test_utils import Recorder, ensure_calibration_import_stubs
+from tests.calibration_test_utils import Recorder, SignalStub, ensure_calibration_import_stubs
 
 
 ensure_calibration_import_stubs()
@@ -72,7 +73,7 @@ def _build_quality_proc(*, ring_cv: float, ring_mean_bg_ratio: float, valid_eval
 
 def test_focus_quality_gate_blocks_low_ring_cv_move_to_best():
     proc = _build_quality_proc(
-        ring_cv=1.05,
+        ring_cv=1.33,
         ring_mean_bg_ratio=35.0,
         valid_evals=6,
         best_y=20,
@@ -92,7 +93,7 @@ def test_focus_quality_gate_blocks_low_ring_cv_move_to_best():
 
 def test_focus_quality_gate_blocks_low_visibility_move_to_best():
     proc = _build_quality_proc(
-        ring_cv=1.45,
+        ring_cv=1.35,
         ring_mean_bg_ratio=10.0,
         valid_evals=6,
         best_y=20,
@@ -112,7 +113,7 @@ def test_focus_quality_gate_blocks_low_visibility_move_to_best():
 
 def test_focus_quality_gate_allows_good_ring_cv_and_visibility_move_to_best():
     proc = _build_quality_proc(
-        ring_cv=1.45,
+        ring_cv=1.35,
         ring_mean_bg_ratio=35.0,
         valid_evals=6,
         best_y=20,
@@ -128,6 +129,55 @@ def test_focus_quality_gate_allows_good_ring_cv_and_visibility_move_to_best():
     proc._move_to_best_then_finish()
 
     assert captured["move"] == (0, 15, 0)
+    assert proc.calibrationError.calls == []
+
+
+def test_focus_process_uses_tracked_y_when_machine_feedback_lags():
+    move_completed = Recorder()
+    nozzle_focused = Recorder()
+    proc = NozzleFocusCalibrationProcess.__new__(NozzleFocusCalibrationProcess)
+    proc.stageChanged = Recorder()
+    proc.calibrationError = Recorder()
+    proc.nozzleFocused = nozzle_focused
+    proc.calibration_manager = SimpleNamespace(
+        emitMoveCompleted=move_completed.emit,
+        captureImageRequested=SignalStub(),
+    )
+    proc.model = SimpleNamespace(
+        machine_model=SimpleNamespace(get_current_position_dict=lambda: {"X": 10, "Y": 100, "Z": 20})
+    )
+    proc.best_pos = {"Y": 120}
+    proc.valid_focus_evals = 6
+    proc.best_focus_stats = {
+        "ring_cv": 1.35,
+        "ring_mean_bg_ratio": 35.0,
+    }
+    proc._tracked_pos = {"X": 10, "Y": 100, "Z": 20}
+    proc._loY = 0
+    proc._hiY = 500
+    proc.mode = "probe_dir"
+    proc._targets = deque(maxlen=proc._OSC_HISTORY)
+
+    requested_moves = []
+
+    def _stub_move(move_vector, *, on_done=None, **kwargs):
+        requested_moves.append(move_vector)
+        if callable(on_done):
+            on_done()
+
+    proc._request_move_relative_with_timeout = _stub_move
+
+    proc._move_to_Y_clamped(116)
+
+    assert requested_moves[0] == (0, 16, 0)
+    assert proc._tracked_pos["Y"] == 116
+    assert move_completed.calls
+
+    proc._move_to_best_then_finish()
+
+    assert requested_moves[1] == (0, 4, 0)
+    assert proc._tracked_pos["Y"] == 120
+    assert nozzle_focused.calls
     assert proc.calibrationError.calls == []
 
 
