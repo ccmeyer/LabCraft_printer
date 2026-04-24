@@ -15,88 +15,166 @@ from CalibrationClasses.Model import NozzleFocusCalibrationProcess
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXPERIMENT_ROOTS = {
-    "ribo": (
-        REPO_ROOT
-        / "FreeRTOS-interface"
-        / "Experiments"
-        / "Ribo_rep1-20260423_204338"
-    ),
-    "untitled": (
-        REPO_ROOT
-        / "FreeRTOS-interface"
-        / "Experiments"
-        / "Untitled-20260424_130613"
-    ),
+    "ribo": REPO_ROOT / "FreeRTOS-interface" / "Experiments" / "Ribo_rep1-20260423_204338",
+    "untitled_old": REPO_ROOT / "FreeRTOS-interface" / "Experiments" / "Untitled-20260424_130613",
+    "untitled_new": REPO_ROOT / "FreeRTOS-interface" / "Experiments" / "Untitled-20260424_141733",
 }
 
 RUN_SPECS = {
     "run_20260423_204534_8502f998": {
         "experiment_key": "ribo",
-        "background": (
-            EXPERIMENT_ROOTS["ribo"]
-            / "calibration_recordings"
-            / "NozzlePositionCalibrationProcess"
-            / "run_20260423_204532_57c91a44"
-            / "captures"
-            / "cap_000007_background.jpg"
-        ),
-        "sharp_eval": 5,
-        "soft_eval": 7,
-        "expected_peak_actual_y": {39166},
+        "background": EXPERIMENT_ROOTS["ribo"]
+        / "calibration_recordings"
+        / "NozzlePositionCalibrationProcess"
+        / "run_20260423_204532_57c91a44"
+        / "captures"
+        / "cap_000007_background.jpg",
+        "expected_peak_actual_y": {39161},
     },
     "run_20260423_204600_ffebacf9": {
         "experiment_key": "ribo",
-        "background": (
-            EXPERIMENT_ROOTS["ribo"]
-            / "calibration_recordings"
-            / "NozzlePositionCalibrationProcess"
-            / "run_20260423_204558_1b965cd9"
-            / "captures"
-            / "cap_000007_background.jpg"
-        ),
-        "sharp_eval": 5,
-        "soft_eval": 7,
-        "expected_peak_actual_y": {39166},
+        "background": EXPERIMENT_ROOTS["ribo"]
+        / "calibration_recordings"
+        / "NozzlePositionCalibrationProcess"
+        / "run_20260423_204558_1b965cd9"
+        / "captures"
+        / "cap_000007_background.jpg",
+        "expected_peak_actual_y": {39161},
     },
     "run_20260424_131431_32078ae9": {
-        "experiment_key": "untitled",
-        "background": (
-            EXPERIMENT_ROOTS["untitled"]
-            / "calibration_recordings"
-            / "NozzlePositionCalibrationProcess"
-            / "run_20260424_131427_b599a03f"
-            / "captures"
-            / "cap_000007_background.jpg"
-        ),
+        "experiment_key": "untitled_old",
+        "background": EXPERIMENT_ROOTS["untitled_old"]
+        / "calibration_recordings"
+        / "NozzlePositionCalibrationProcess"
+        / "run_20260424_131427_b599a03f"
+        / "captures"
+        / "cap_000007_background.jpg",
         "expected_peak_actual_y": {39145},
-        "consistent_actual_y": 39145,
         "mislabeled_eval": 3,
         "mislabeled_reported_y": 39145,
         "mislabeled_actual_y": 39161,
     },
     "run_20260424_131437_70432e5c": {
-        "experiment_key": "untitled",
-        "background": (
-            EXPERIMENT_ROOTS["untitled"]
-            / "calibration_recordings"
-            / "NozzlePositionCalibrationProcess"
-            / "run_20260424_131427_b599a03f"
-            / "captures"
-            / "cap_000007_background.jpg"
-        ),
-        "expected_peak_actual_y": {39144, 39145},
-        "consistent_actual_y": 39144,
+        "experiment_key": "untitled_old",
+        "background": EXPERIMENT_ROOTS["untitled_old"]
+        / "calibration_recordings"
+        / "NozzlePositionCalibrationProcess"
+        / "run_20260424_131427_b599a03f"
+        / "captures"
+        / "cap_000007_background.jpg",
+        "expected_peak_actual_y": {39144},
         "mislabeled_eval": 7,
         "mislabeled_reported_y": 39144,
         "mislabeled_actual_y": 39149,
     },
+    "run_20260424_142013_c47414a9": {
+        "experiment_key": "untitled_new",
+        "background": EXPERIMENT_ROOTS["untitled_new"]
+        / "calibration_recordings"
+        / "NozzlePositionCalibrationProcess"
+        / "run_20260424_142011_d7820c95"
+        / "captures"
+        / "cap_000007_background.jpg",
+        "expected_peak_actual_y": {39145},
+    },
+    "run_20260424_142026_f5e4944e": {
+        "experiment_key": "untitled_new",
+        "background": EXPERIMENT_ROOTS["untitled_new"]
+        / "calibration_recordings"
+        / "NozzlePositionCalibrationProcess"
+        / "run_20260424_142023_ee95a095"
+        / "captures"
+        / "cap_000007_background.jpg",
+        "expected_peak_actual_y": {39145},
+    },
+    "run_20260424_142038_70aca440": {
+        "experiment_key": "untitled_new",
+        "background": EXPERIMENT_ROOTS["untitled_new"]
+        / "calibration_recordings"
+        / "NozzlePositionCalibrationProcess"
+        / "run_20260424_142036_f43cd46b"
+        / "captures"
+        / "cap_000007_background.jpg",
+        "expected_peak_actual_y": {39145},
+    },
+    "run_20260424_142217_df027cda": {
+        "experiment_key": "untitled_new",
+        "background": EXPERIMENT_ROOTS["untitled_new"]
+        / "calibration_recordings"
+        / "NozzlePositionCalibrationProcess"
+        / "run_20260424_142036_f43cd46b"
+        / "captures"
+        / "cap_000007_background.jpg",
+        "strong_signal_eval": 1,
+        "weak_basin_min_y": 39216,
+    },
+    "run_20260424_142403_d34e6529": {
+        "experiment_key": "untitled_new",
+        "background": EXPERIMENT_ROOTS["untitled_new"]
+        / "calibration_recordings"
+        / "NozzlePositionCalibrationProcess"
+        / "run_20260424_142036_f43cd46b"
+        / "captures"
+        / "cap_000007_background.jpg",
+        "strong_signal_eval": 1,
+        "weak_basin_min_y": 39211,
+    },
+    "run_20260424_142454_e4946885": {
+        "experiment_key": "untitled_new",
+        "background": EXPERIMENT_ROOTS["untitled_new"]
+        / "calibration_recordings"
+        / "NozzlePositionCalibrationProcess"
+        / "run_20260424_142036_f43cd46b"
+        / "captures"
+        / "cap_000007_background.jpg",
+        "positive_eval": 2,
+        "negative_branch_eval": 4,
+    },
+    "run_20260424_142512_d2506065": {
+        "experiment_key": "untitled_new",
+        "background": EXPERIMENT_ROOTS["untitled_new"]
+        / "calibration_recordings"
+        / "NozzlePositionCalibrationProcess"
+        / "run_20260424_142036_f43cd46b"
+        / "captures"
+        / "cap_000007_background.jpg",
+        "positive_eval": 2,
+        "negative_branch_eval": 4,
+    },
+    "run_20260424_142520_8b4457f7": {
+        "experiment_key": "untitled_new",
+        "background": EXPERIMENT_ROOTS["untitled_new"]
+        / "calibration_recordings"
+        / "NozzlePositionCalibrationProcess"
+        / "run_20260424_142036_f43cd46b"
+        / "captures"
+        / "cap_000007_background.jpg",
+        "positive_eval": 2,
+        "negative_branch_eval": 4,
+    },
 }
 
-RIBO_RUN_IDS = [
-    run_id for run_id, spec in RUN_SPECS.items() if spec["experiment_key"] == "ribo"
+LEGACY_PEAK_RUN_IDS = [
+    "run_20260423_204534_8502f998",
+    "run_20260423_204600_ffebacf9",
+    "run_20260424_131431_32078ae9",
+    "run_20260424_131437_70432e5c",
+    "run_20260424_142013_c47414a9",
+    "run_20260424_142026_f5e4944e",
+    "run_20260424_142038_70aca440",
 ]
-UNTITLED_RUN_IDS = [
-    run_id for run_id, spec in RUN_SPECS.items() if spec["experiment_key"] == "untitled"
+TRACKED_Y_RUN_IDS = [
+    "run_20260424_131431_32078ae9",
+    "run_20260424_131437_70432e5c",
+]
+WRONG_DIRECTION_RUN_IDS = [
+    "run_20260424_142454_e4946885",
+    "run_20260424_142512_d2506065",
+    "run_20260424_142520_8b4457f7",
+]
+TINY_SIGNAL_RUN_IDS = [
+    "run_20260424_142217_df027cda",
+    "run_20260424_142403_d34e6529",
 ]
 
 
@@ -104,8 +182,6 @@ def _new_focus_proc():
     proc = NozzleFocusCalibrationProcess.__new__(NozzleFocusCalibrationProcess)
     proc._last_bbox = None
     proc._last_mask = None
-    proc._last_contour_mask = None
-    proc._last_ring_mask = None
     proc._tracked_pos = None
     return proc
 
@@ -121,27 +197,29 @@ def _load_analysis_rows(run_dir: Path) -> list[dict]:
             continue
         if row.get("process_name") != "NozzleFocusCalibrationProcess":
             continue
+        if "position" not in row:
+            continue
         rows.append(row)
     return rows
 
 
-def _load_move_requests(run_dir: Path) -> list[dict]:
-    requests = []
+def _load_move_completions(run_dir: Path) -> list[dict]:
+    moves = []
     for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
             continue
         event = json.loads(line)
-        if event.get("event_type") != "move_requested":
+        if event.get("event_type") != "move_completed":
             continue
         move = list((event.get("payload") or {}).get("move_vector") or [])
         if len(move) != 3:
             continue
-        requests.append({"ts_utc": str(event.get("ts_utc", "")), "dY": int(move[1])})
-    return requests
+        moves.append({"ts_utc": str(event.get("ts_utc", "")), "dY": int(move[1])})
+    return moves
 
 
-def _reconstruct_actual_y(analysis_rows: list[dict], move_requests: list[dict]) -> list[int]:
+def _reconstruct_actual_y(analysis_rows: list[dict], move_completions: list[dict]) -> list[int]:
     if not analysis_rows:
         return []
 
@@ -151,8 +229,8 @@ def _reconstruct_actual_y(analysis_rows: list[dict], move_requests: list[dict]) 
 
     for row in analysis_rows:
         row_ts = str(row.get("ts_utc", ""))
-        while move_idx < len(move_requests) and str(move_requests[move_idx]["ts_utc"]) <= row_ts:
-            current_y += int(move_requests[move_idx]["dY"])
+        while move_idx < len(move_completions) and str(move_completions[move_idx]["ts_utc"]) <= row_ts:
+            current_y += int(move_completions[move_idx]["dY"])
             move_idx += 1
         actual_y.append(current_y)
 
@@ -181,8 +259,8 @@ def _score_run(run_id: str) -> list[dict]:
     bg_g2 = _compute_bg_g2(bg)
 
     analysis_rows = _load_analysis_rows(run_dir)
-    move_requests = _load_move_requests(run_dir)
-    actual_y = _reconstruct_actual_y(analysis_rows, move_requests)
+    move_completions = _load_move_completions(run_dir)
+    actual_y = _reconstruct_actual_y(analysis_rows, move_completions)
     capture_paths = sorted((run_dir / "captures").glob("cap_*_droplet.jpg"))
     assert len(analysis_rows) == len(capture_paths) >= 2
     assert len(actual_y) == len(analysis_rows)
@@ -192,81 +270,56 @@ def _score_run(run_id: str) -> list[dict]:
         frame = cv2.imread(str(capture_path), cv2.IMREAD_COLOR)
         assert frame is not None
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        masks = proc._build_focus_masks(bg, frame)
-        focus_stats, bg_stats = proc._compute_focus_measurements(gray, masks, bg_g2=bg_g2)
-        reported_position = dict(analysis_row.get("reported_position") or analysis_row["position"])
+        mask = proc._build_focus_mask(bg, frame)
+        focus_stats = proc._compute_focus_stats(gray, mask)
+        bg_stats = proc._compute_focus_stats(None, mask, g2_precomputed=bg_g2)
+        p90_ratio = None
+        if focus_stats.get("valid", False) and bg_stats.get("valid", False):
+            p90_ratio = float((focus_stats["p90"] + 1.0) / (bg_stats["p90"] + 1.0))
         rescored.append(
             {
                 "eval_count": int(analysis_row["eval_count"]),
                 "mode": str(analysis_row["mode"]),
                 "reported_Y": int(analysis_row["position"]["Y"]),
                 "actual_Y": int(reconstructed_y),
-                "reported_position": {
-                    "X": int(reported_position["X"]),
-                    "Y": int(reported_position["Y"]),
-                    "Z": int(reported_position["Z"]),
-                },
+                "reported_position": dict(analysis_row.get("reported_position") or analysis_row["position"]),
                 "position_source": str(analysis_row.get("position_source") or "reported"),
                 "capture_path": capture_path,
-                "focus_stats": focus_stats,
+                "focus_stats": {
+                    "valid": bool(focus_stats.get("valid", False)),
+                    "mask_pixels": int(focus_stats.get("mask_pixels", 0)),
+                    "var": float(focus_stats.get("var", 0.0)) if focus_stats.get("valid", False) else 0.0,
+                    "mean": float(focus_stats.get("mean", 0.0)) if focus_stats.get("valid", False) else 0.0,
+                    "p90": float(focus_stats.get("p90", 0.0)) if focus_stats.get("valid", False) else 0.0,
+                    "p90_ratio_to_background": p90_ratio,
+                },
                 "background_stats": bg_stats,
             }
         )
     return rescored
 
 
-@pytest.mark.parametrize("run_id", RIBO_RUN_IDS)
-def test_replay_ring_metric_prefers_sharper_repeat_and_keeps_best_y(run_id: str):
+@pytest.mark.parametrize("run_id", LEGACY_PEAK_RUN_IDS)
+def test_replay_legacy_metric_keeps_best_actual_y_in_known_focus_basin(run_id: str):
     rescored = _score_run(run_id)
     spec = RUN_SPECS[run_id]
 
     for row in rescored:
-        focus_stats = row["focus_stats"]
-        assert focus_stats["valid"] is True
-        assert int(focus_stats["ring_pixels"]) > 0
-        assert int(focus_stats["contour_pixels"]) > 0
+        assert row["focus_stats"]["valid"] is True
+        assert int(row["focus_stats"]["mask_pixels"]) > 0
 
-    by_eval = {row["eval_count"]: row for row in rescored}
-    sharp_row = by_eval[spec["sharp_eval"]]
-    soft_row = by_eval[spec["soft_eval"]]
-
-    assert sharp_row["reported_Y"] == soft_row["reported_Y"] == 39187
-    assert sharp_row["focus_stats"]["ring_cv"] > soft_row["focus_stats"]["ring_cv"]
-    assert sharp_row["focus_stats"]["ring_cv"] >= NozzleFocusCalibrationProcess.MIN_BEST_RING_CV
-    assert soft_row["focus_stats"]["ring_cv"] < NozzleFocusCalibrationProcess.MIN_BEST_RING_CV
+    best_row = max(rescored, key=lambda row: float(row["focus_stats"]["var"] or 0.0))
+    assert best_row["actual_Y"] in set(spec["expected_peak_actual_y"])
     assert (
-        sharp_row["focus_stats"]["legacy_p90_ratio_to_background"]
-        < soft_row["focus_stats"]["legacy_p90_ratio_to_background"]
+        float(best_row["focus_stats"]["p90_ratio_to_background"] or 0.0)
+        > NozzleFocusCalibrationProcess.MIN_BEST_P90_BG_RATIO
     )
 
-    selector = _new_focus_proc()
-    selector.best_focus = None
-    selector.best_pos = None
-    selector.best_focus_stats = None
-    selector._best_focus_mode = None
-    for row in rescored:
-        selector.mode = row["mode"]
-        score = float(row["focus_stats"]["ring_cv"] or 0.0)
-        if selector._should_replace_best_focus(score):
-            selector.best_focus = score
-            selector.best_pos = {"Y": int(row["actual_Y"])}
-            selector.best_focus_stats = dict(row["focus_stats"])
-            selector._best_focus_mode = row["mode"]
 
-    assert selector.best_pos is not None
-    assert selector.best_pos["Y"] in set(spec["expected_peak_actual_y"])
-
-
-@pytest.mark.parametrize("run_id", UNTITLED_RUN_IDS)
-def test_replay_untitled_runs_require_corrected_y_labels_and_clear_new_threshold(run_id: str):
+@pytest.mark.parametrize("run_id", TRACKED_Y_RUN_IDS)
+def test_replay_tracked_y_fields_expose_machine_feedback_mislabels(run_id: str):
     rescored = _score_run(run_id)
     spec = RUN_SPECS[run_id]
-
-    for row in rescored:
-        focus_stats = row["focus_stats"]
-        assert focus_stats["valid"] is True
-        assert int(focus_stats["ring_pixels"]) > 0
-        assert int(focus_stats["contour_pixels"]) > 0
 
     assert any(row["actual_Y"] != row["reported_Y"] for row in rescored)
 
@@ -275,14 +328,46 @@ def test_replay_untitled_runs_require_corrected_y_labels_and_clear_new_threshold
     assert mislabeled["reported_Y"] == spec["mislabeled_reported_y"]
     assert mislabeled["actual_Y"] == spec["mislabeled_actual_y"]
 
-    consistent_scores = [
-        float(row["focus_stats"]["ring_cv"] or 0.0)
-        for row in rescored
-        if row["actual_Y"] == spec["consistent_actual_y"]
-    ]
-    assert len(consistent_scores) >= 2
-    assert max(consistent_scores) - min(consistent_scores) < 0.02
 
-    best_row = max(rescored, key=lambda row: float(row["focus_stats"]["ring_cv"] or 0.0))
-    assert best_row["actual_Y"] in set(spec["expected_peak_actual_y"])
-    assert float(best_row["focus_stats"]["ring_cv"] or 0.0) >= NozzleFocusCalibrationProcess.MIN_BEST_RING_CV
+@pytest.mark.parametrize("run_id", WRONG_DIRECTION_RUN_IDS)
+def test_replay_legacy_metric_prefers_initial_positive_probe_over_negative_branch(run_id: str):
+    rescored = _score_run(run_id)
+    spec = RUN_SPECS[run_id]
+    by_eval = {row["eval_count"]: row for row in rescored}
+
+    positive_row = by_eval[spec["positive_eval"]]
+    negative_row = by_eval[spec["negative_branch_eval"]]
+
+    assert positive_row["actual_Y"] > by_eval[1]["actual_Y"]
+    assert negative_row["actual_Y"] < by_eval[1]["actual_Y"]
+    assert positive_row["focus_stats"]["var"] > negative_row["focus_stats"]["var"]
+    assert (
+        positive_row["focus_stats"]["p90_ratio_to_background"]
+        > negative_row["focus_stats"]["p90_ratio_to_background"]
+    )
+    assert (
+        positive_row["focus_stats"]["p90_ratio_to_background"]
+        > NozzleFocusCalibrationProcess.MIN_BEST_P90_BG_RATIO
+    )
+
+
+@pytest.mark.parametrize("run_id", TINY_SIGNAL_RUN_IDS)
+def test_replay_legacy_metric_prefers_earlier_stronger_signal_over_tiny_signal_high_y_basin(run_id: str):
+    rescored = _score_run(run_id)
+    spec = RUN_SPECS[run_id]
+    by_eval = {row["eval_count"]: row for row in rescored}
+
+    strong_row = by_eval[spec["strong_signal_eval"]]
+    weak_basin_rows = [row for row in rescored if row["actual_Y"] >= int(spec["weak_basin_min_y"])]
+    assert weak_basin_rows
+
+    best_row = max(rescored, key=lambda row: float(row["focus_stats"]["var"] or 0.0))
+    assert best_row["eval_count"] == spec["strong_signal_eval"]
+    assert strong_row["focus_stats"]["var"] > max(row["focus_stats"]["var"] for row in weak_basin_rows)
+    assert (
+        strong_row["focus_stats"]["p90_ratio_to_background"]
+        > NozzleFocusCalibrationProcess.MIN_BEST_P90_BG_RATIO
+    )
+    assert strong_row["focus_stats"]["p90_ratio_to_background"] > max(
+        float(row["focus_stats"]["p90_ratio_to_background"] or 0.0) for row in weak_basin_rows
+    )

@@ -54,31 +54,22 @@ def test_start_nozzle_focus_uses_try_start_process():
     assert called["proc_cls"] is NozzleFocusCalibrationProcess
 
 
-def _build_quality_proc(*, ring_cv: float, ring_mean_bg_ratio: float, valid_evals: int, best_y: int, current_y: int):
+def _build_quality_proc(*, ratio: float, valid_evals: int, best_y: int, current_y: int):
     proc = NozzleFocusCalibrationProcess.__new__(NozzleFocusCalibrationProcess)
     proc.stageChanged = Recorder()
     proc.calibrationError = Recorder()
     proc.nozzleFocused = Recorder()
     proc.best_pos = {"Y": int(best_y)}
     proc.valid_focus_evals = int(valid_evals)
-    proc.best_focus_stats = {
-        "ring_cv": float(ring_cv),
-        "ring_mean_bg_ratio": float(ring_mean_bg_ratio),
-    }
+    proc.best_focus_stats = {"p90_ratio_to_background": float(ratio)}
     proc.model = SimpleNamespace(
         machine_model=SimpleNamespace(get_current_position_dict=lambda: {"Y": int(current_y)})
     )
     return proc
 
 
-def test_focus_quality_gate_blocks_low_ring_cv_move_to_best():
-    proc = _build_quality_proc(
-        ring_cv=1.33,
-        ring_mean_bg_ratio=35.0,
-        valid_evals=6,
-        best_y=20,
-        current_y=0,
-    )
+def test_focus_quality_gate_blocks_low_ratio_move_to_best():
+    proc = _build_quality_proc(ratio=1.05, valid_evals=6, best_y=20, current_y=0)
     moves = {"count": 0}
     proc._request_move_relative_with_timeout = (
         lambda *args, **kwargs: moves.__setitem__("count", moves["count"] + 1)
@@ -88,37 +79,11 @@ def test_focus_quality_gate_blocks_low_ring_cv_move_to_best():
 
     assert moves["count"] == 0
     assert proc.calibrationError.calls
-    assert "sharpness too low" in proc.calibrationError.calls[0][0][0].lower()
+    assert "focus quality too low" in proc.calibrationError.calls[0][0][0].lower()
 
 
-def test_focus_quality_gate_blocks_low_visibility_move_to_best():
-    proc = _build_quality_proc(
-        ring_cv=1.35,
-        ring_mean_bg_ratio=10.0,
-        valid_evals=6,
-        best_y=20,
-        current_y=5,
-    )
-    moves = {"count": 0}
-    proc._request_move_relative_with_timeout = (
-        lambda *args, **kwargs: moves.__setitem__("count", moves["count"] + 1)
-    )
-
-    proc._move_to_best_then_finish()
-
-    assert moves["count"] == 0
-    assert proc.calibrationError.calls
-    assert "visibility too low" in proc.calibrationError.calls[0][0][0].lower()
-
-
-def test_focus_quality_gate_allows_good_ring_cv_and_visibility_move_to_best():
-    proc = _build_quality_proc(
-        ring_cv=1.35,
-        ring_mean_bg_ratio=35.0,
-        valid_evals=6,
-        best_y=20,
-        current_y=5,
-    )
+def test_focus_quality_gate_allows_good_ratio_move_to_best():
+    proc = _build_quality_proc(ratio=1.45, valid_evals=6, best_y=20, current_y=5)
     captured = {"move": None}
 
     def _req(move, **kwargs):
@@ -148,10 +113,7 @@ def test_focus_process_uses_tracked_y_when_machine_feedback_lags():
     )
     proc.best_pos = {"Y": 120}
     proc.valid_focus_evals = 6
-    proc.best_focus_stats = {
-        "ring_cv": 1.35,
-        "ring_mean_bg_ratio": 35.0,
-    }
+    proc.best_focus_stats = {"p90_ratio_to_background": 1.45}
     proc._tracked_pos = {"X": 10, "Y": 100, "Z": 20}
     proc._loY = 0
     proc._hiY = 500
@@ -179,24 +141,6 @@ def test_focus_process_uses_tracked_y_when_machine_feedback_lags():
     assert proc._tracked_pos["Y"] == 120
     assert nozzle_focused.calls
     assert proc.calibrationError.calls == []
-
-
-def test_near_tie_refine_measurement_can_replace_run_up_best():
-    proc = NozzleFocusCalibrationProcess.__new__(NozzleFocusCalibrationProcess)
-    proc.best_focus = 1.4954
-    proc._best_focus_mode = "run_up"
-    proc.mode = "refine"
-
-    assert proc._should_replace_best_focus(1.4948) is True
-
-
-def test_clearly_worse_refine_measurement_does_not_replace_best():
-    proc = NozzleFocusCalibrationProcess.__new__(NozzleFocusCalibrationProcess)
-    proc.best_focus = 1.4900
-    proc._best_focus_mode = "refine"
-    proc.mode = "refine"
-
-    assert proc._should_replace_best_focus(1.4771) is False
 
 
 def test_initialize_focus_bounds_clamps_to_axis_limits():

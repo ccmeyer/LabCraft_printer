@@ -11219,10 +11219,8 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
     STEP_MIN = 4
     STEP_MAX = 128
 
-    FOCUS_ABS_EPS = 0.02
-    FOCUS_REL_EPS = 0.01
-    BEST_TIE_ABS_EPS = 0.005
-    BEST_TIE_REL_EPS = 0.002
+    TENENGRAD_ABS_EPS = 1e5
+    TENENGRAD_REL_EPS = 0.03
 
     MAX_EVALS = 60
     MIN_REFINE_EVALS = 3
@@ -11235,9 +11233,7 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
     MIN_MASK_PIXELS = 1200
     MIN_VALID_FOCUS_EVALS = 4
     MAX_CONSEC_INVALID_MASK = 8
-    RING_HALF_WIDTH = 5
-    MIN_BEST_RING_CV = 1.34
-    MIN_BEST_RING_MEAN_BG_RATIO = 20.0
+    MIN_BEST_P90_BG_RATIO = 1.18
 
     @staticmethod
     def missing_requirements(cm) -> list[str]:
@@ -11286,7 +11282,6 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
         self.best_focus = None
         self.best_pos = None
         self.best_focus_stats = None
-        self._best_focus_mode = None
         self.prev_focus = None
         self.valid_focus_evals = 0
         self.invalid_focus_evals = 0
@@ -11307,8 +11302,6 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
         self._hi_br_f = None
 
         self._last_mask = None
-        self._last_contour_mask = None
-        self._last_ring_mask = None
         self._last_bbox = None
         self._tracked_pos = None
 
@@ -11377,29 +11370,26 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
             self._abort_with_error("No image to analyze (capture failed).")
             return
 
-        focus_masks = (
-            self._build_focus_masks(self.background_image, img)
-            if self.background_image is not None else {}
-        )
+        mask = self._build_focus_mask(self.background_image, img) if self.background_image is not None else None
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        focus_stats, bg_stats = self._compute_focus_measurements(
-            gray,
-            focus_masks,
-            bg_g2=bg_g2,
-        )
-        focus = float(focus_stats.get("ring_cv") or 0.0)
-        snr_ratio = (
-            None if focus_stats.get("ring_mean_bg_ratio") is None
-            else float(focus_stats.get("ring_mean_bg_ratio"))
-        )
+        focus_stats = self._compute_focus_stats(gray, mask)
+        if focus_stats.get("valid", False):
+            focus = float(focus_stats.get("var", 0.0))
+        else:
+            focus = float(self.model.droplet_camera_model.compute_tenengrad_variance(gray, mask=mask))
+        bg_stats = None
+        p90_ratio = None
+        if bg_g2 is not None and focus_stats.get("valid", False):
+            try:
+                bg_stats = self._compute_focus_stats(None, mask, g2_precomputed=bg_g2)
+                if bg_stats.get("valid", False):
+                    p90_ratio = float((focus_stats["p90"] + 1.0) / (bg_stats["p90"] + 1.0))
+            except Exception:
+                bg_stats = None
+                p90_ratio = None
 
         overlay = img.copy()
-        overlay_mask = focus_masks.get("ring_mask")
-        if overlay_mask is None:
-            overlay_mask = focus_masks.get("contour_mask")
-        if overlay_mask is None:
-            overlay_mask = focus_masks.get("roi_mask")
-        self._draw_focus_overlay(overlay, overlay_mask, focus, snr_ratio=snr_ratio)
+        self._draw_focus_overlay(overlay, mask, focus, p90_ratio=p90_ratio)
         self.presentImageSignal.emit(overlay)
 
         reported_pos = self._machine_position_dict()
@@ -11415,14 +11405,22 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
 
         self.eval_count += 1
         self.focus_curve.append((focus, pos["X"], pos["Y"], pos["Z"], int(self.step), self.mode))
-        focus_stats_record = dict(focus_stats or {})
+        focus_stats_record = {
+            "valid": bool(focus_stats.get("valid", False)),
+            "reason": str(focus_stats.get("reason", "")),
+            "mask_pixels": int(focus_stats.get("mask_pixels", 0)),
+            "p90": float(focus_stats.get("p90", 0.0)) if focus_stats.get("valid", False) else 0.0,
+            "mean": float(focus_stats.get("mean", 0.0)) if focus_stats.get("valid", False) else 0.0,
+            "var": float(focus_stats.get("var", 0.0)) if focus_stats.get("valid", False) else 0.0,
+            "p90_ratio_to_background": (None if p90_ratio is None else float(p90_ratio)),
+        }
         self._record_analysis(
             {
                 "process_name": "NozzleFocusCalibrationProcess",
                 "phase_name": str(self.phase_name or ""),
                 "mode": str(self.mode),
                 "eval_count": int(self.eval_count),
-                "focus_metric": "ring_cv",
+                "focus_metric": "tenengrad_var",
                 "position": {"X": int(pos["X"]), "Y": int(pos["Y"]), "Z": int(pos["Z"])},
                 "reported_position": {
                     "X": int(reported_pos["X"]),
@@ -11440,11 +11438,16 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
         if focus_stats.get("valid", False):
             self.valid_focus_evals += 1
             self._consec_invalid_mask = 0
-            if self._should_replace_best_focus(focus):
+            if (self.best_focus is None) or (focus > self.best_focus):
                 self.best_focus = focus
                 self.best_pos = dict(pos)
-                self.best_focus_stats = dict(focus_stats_record)
-                self._best_focus_mode = str(self.mode)
+                self.best_focus_stats = {
+                    "mask_pixels": int(focus_stats.get("mask_pixels", 0)),
+                    "p90": float(focus_stats.get("p90", 0.0)),
+                    "mean": float(focus_stats.get("mean", 0.0)),
+                    "var": float(focus_stats.get("var", 0.0)),
+                    "p90_ratio_to_background": (None if p90_ratio is None else float(p90_ratio)),
+                }
         else:
             self.invalid_focus_evals += 1
             self._consec_invalid_mask += 1
@@ -11598,7 +11601,7 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
             "measurements": self.focus_curve,
             "result": {
                 "best_focus": self.best_focus,
-                "focus_metric": "ring_cv",
+                "focus_metric": "tenengrad_var",
                 "best_position": final,
                 "focus_axis": "Y",
                 "best_focus_stats": dict(self.best_focus_stats or {}),
@@ -11675,20 +11678,7 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
         )
 
     def _improve_eps(self, ref: float) -> float:
-        return max(self.FOCUS_ABS_EPS, self.FOCUS_REL_EPS * max(abs(ref), 1.0))
-
-    def _best_tie_eps(self, ref: float) -> float:
-        return max(self.BEST_TIE_ABS_EPS, self.BEST_TIE_REL_EPS * max(abs(ref), 1.0))
-
-    def _should_replace_best_focus(self, focus: float) -> bool:
-        if self.best_focus is None:
-            return True
-        if focus > self.best_focus:
-            return True
-        if abs(float(focus) - float(self.best_focus)) > self._best_tie_eps(max(self.best_focus, focus)):
-            return False
-        best_mode = getattr(self, "_best_focus_mode", None)
-        return str(self.mode) == "refine" and best_mode != "refine"
+        return max(self.TENENGRAD_ABS_EPS, self.TENENGRAD_REL_EPS * max(abs(ref), 1.0))
 
     def _recent_improvement_small(self) -> bool:
         if len(self.focus_curve) < 6: return False
@@ -11872,8 +11862,6 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
     def _clear_focus_masks(self):
         self._last_bbox = None
         self._last_mask = None
-        self._last_contour_mask = None
-        self._last_ring_mask = None
 
     def _compute_mask_stats(self, gray, mask, *, g2_precomputed=None):
         if mask is None:
@@ -11905,7 +11893,6 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
                 "reason": "ok",
                 "mask_pixels": int(mask_pixels),
                 "var": var,
-                "std": float(math.sqrt(max(var, 0.0))),
                 "mean": mean,
                 "p90": p90,
                 "p99": p99,
@@ -11916,84 +11903,6 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
     def _compute_focus_stats(self, gray, mask, *, g2_precomputed=None):
         return self._compute_mask_stats(gray, mask, g2_precomputed=g2_precomputed)
 
-    def _compute_focus_measurements(self, gray, focus_masks, *, bg_g2=None):
-        focus_masks = dict(focus_masks or {})
-        roi_mask = focus_masks.get("roi_mask")
-        contour_mask = focus_masks.get("contour_mask")
-        ring_mask = focus_masks.get("ring_mask")
-
-        legacy_stats = self._compute_mask_stats(gray, roi_mask)
-        ring_stats = self._compute_mask_stats(gray, ring_mask)
-        bg_roi_stats = self._compute_mask_stats(None, roi_mask, g2_precomputed=bg_g2) if bg_g2 is not None else None
-        bg_ring_stats = self._compute_mask_stats(None, ring_mask, g2_precomputed=bg_g2) if bg_g2 is not None else None
-
-        legacy_ratio = None
-        if legacy_stats.get("valid", False) and isinstance(bg_roi_stats, dict) and bg_roi_stats.get("valid", False):
-            legacy_ratio = float((legacy_stats["p90"] + 1.0) / (bg_roi_stats["p90"] + 1.0))
-
-        ring_cv = None
-        ring_mean_bg_ratio = None
-        if ring_stats.get("valid", False):
-            ring_cv = float(ring_stats["std"] / (ring_stats["mean"] + 1.0))
-            if isinstance(bg_ring_stats, dict) and bg_ring_stats.get("valid", False):
-                ring_mean_bg_ratio = float((ring_stats["mean"] + 1.0) / (bg_ring_stats["mean"] + 1.0))
-
-        focus_stats = {
-            "valid": bool(ring_stats.get("valid", False)),
-            "reason": str(ring_stats.get("reason", "missing_ring_mask")),
-            "mask_pixels": int(legacy_stats.get("mask_pixels", 0)),
-            "ring_pixels": int(ring_stats.get("mask_pixels", 0)),
-            "contour_pixels": int(np.count_nonzero(contour_mask > 0)) if contour_mask is not None else 0,
-            "var": float(legacy_stats.get("var", 0.0)) if legacy_stats.get("valid", False) else 0.0,
-            "mean": float(legacy_stats.get("mean", 0.0)) if legacy_stats.get("valid", False) else 0.0,
-            "p90": float(legacy_stats.get("p90", 0.0)) if legacy_stats.get("valid", False) else 0.0,
-            "p99": float(legacy_stats.get("p99", 0.0)) if legacy_stats.get("valid", False) else 0.0,
-            "legacy_tenengrad_var": float(legacy_stats.get("var", 0.0)) if legacy_stats.get("valid", False) else 0.0,
-            "legacy_mean": float(legacy_stats.get("mean", 0.0)) if legacy_stats.get("valid", False) else 0.0,
-            "legacy_p90": float(legacy_stats.get("p90", 0.0)) if legacy_stats.get("valid", False) else 0.0,
-            "legacy_p90_ratio_to_background": (None if legacy_ratio is None else float(legacy_ratio)),
-            "p90_ratio_to_background": (None if legacy_ratio is None else float(legacy_ratio)),
-            "ring_var": float(ring_stats.get("var", 0.0)) if ring_stats.get("valid", False) else 0.0,
-            "ring_mean": float(ring_stats.get("mean", 0.0)) if ring_stats.get("valid", False) else 0.0,
-            "ring_std": float(ring_stats.get("std", 0.0)) if ring_stats.get("valid", False) else 0.0,
-            "ring_p90": float(ring_stats.get("p90", 0.0)) if ring_stats.get("valid", False) else 0.0,
-            "ring_p99": float(ring_stats.get("p99", 0.0)) if ring_stats.get("valid", False) else 0.0,
-            "ring_cv": (None if ring_cv is None else float(ring_cv)),
-            "ring_mean_bg_ratio": (None if ring_mean_bg_ratio is None else float(ring_mean_bg_ratio)),
-        }
-        bg_stats = {
-            "valid": bool((bg_ring_stats or {}).get("valid", False) or (bg_roi_stats or {}).get("valid", False)),
-            "reason": str(
-                (bg_ring_stats or {}).get("reason")
-                or (bg_roi_stats or {}).get("reason")
-                or "missing_background_stats"
-            ),
-            "mask_pixels": int((bg_roi_stats or {}).get("mask_pixels", 0)),
-            "ring_pixels": int((bg_ring_stats or {}).get("mask_pixels", 0)),
-            "var": float((bg_roi_stats or {}).get("var", 0.0)) if (bg_roi_stats or {}).get("valid", False) else 0.0,
-            "mean": float((bg_roi_stats or {}).get("mean", 0.0)) if (bg_roi_stats or {}).get("valid", False) else 0.0,
-            "p90": float((bg_roi_stats or {}).get("p90", 0.0)) if (bg_roi_stats or {}).get("valid", False) else 0.0,
-            "p99": float((bg_roi_stats or {}).get("p99", 0.0)) if (bg_roi_stats or {}).get("valid", False) else 0.0,
-            "ring_var": float((bg_ring_stats or {}).get("var", 0.0)) if (bg_ring_stats or {}).get("valid", False) else 0.0,
-            "ring_mean": float((bg_ring_stats or {}).get("mean", 0.0)) if (bg_ring_stats or {}).get("valid", False) else 0.0,
-            "ring_p90": float((bg_ring_stats or {}).get("p90", 0.0)) if (bg_ring_stats or {}).get("valid", False) else 0.0,
-            "ring_p99": float((bg_ring_stats or {}).get("p99", 0.0)) if (bg_ring_stats or {}).get("valid", False) else 0.0,
-        }
-        return focus_stats, bg_stats
-
-    def _build_contour_ring_mask(self, contour_mask):
-        if contour_mask is None:
-            return None
-        try:
-            radius = int(max(1, getattr(self, "RING_HALF_WIDTH", 5)))
-            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius * 2 + 1, radius * 2 + 1))
-            dil = cv2.dilate(contour_mask, k, iterations=1)
-            ero = cv2.erode(contour_mask, k, iterations=1)
-            ring_mask = cv2.subtract(dil, ero)
-            return ring_mask
-        except Exception:
-            return None
-
     def _assess_best_focus_quality(self):
         if self.best_pos is None:
             return False, "No valid focus ROI observed; rerun nozzle position/focus calibration."
@@ -12002,28 +11911,19 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
                 False,
                 f"Insufficient valid focus samples ({self.valid_focus_evals}/{self.MIN_VALID_FOCUS_EVALS}); check stream visibility.",
             )
-        ring_cv = (self.best_focus_stats or {}).get("ring_cv")
-        if ring_cv is None:
-            return False, "Focus sharpness could not be computed; reacquire nozzle/background and retry."
-        ring_cv = float(ring_cv)
-        if ring_cv < float(self.MIN_BEST_RING_CV):
-            return (
-                False,
-                f"Focus sharpness too low (ringCV={ring_cv:.2f} < {self.MIN_BEST_RING_CV:.2f}).",
-            )
-        ratio = (self.best_focus_stats or {}).get("ring_mean_bg_ratio")
+        ratio = (self.best_focus_stats or {}).get("p90_ratio_to_background")
         if ratio is None:
-            return False, "Fluid visibility could not be normalized against background; reacquire nozzle/background and retry."
+            return False, "Focus quality could not be normalized against background; reacquire nozzle/background and retry."
         ratio = float(ratio)
-        if ratio < float(self.MIN_BEST_RING_MEAN_BG_RATIO):
+        if ratio < float(self.MIN_BEST_P90_BG_RATIO):
             return (
                 False,
-                f"Fluid visibility too low (ring mean/bg={ratio:.2f} < {self.MIN_BEST_RING_MEAN_BG_RATIO:.2f}).",
+                f"Best focus quality too low (p90/bg={ratio:.2f} < {self.MIN_BEST_P90_BG_RATIO:.2f}).",
             )
         return True, ""
 
     # ---- image/ROI helpers (unchanged from your working version) ----
-    def _build_focus_masks(self, bg, dr):
+    def _build_focus_mask(self, bg, dr):
         try:
             a = dr; b = bg
             if a.ndim == 3 and a.shape[2] == 3:
@@ -12043,12 +11943,12 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
             contours, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             if not contours:
                 self._clear_focus_masks()
-                return {}
+                return None
             areas = [cv2.contourArea(c) for c in contours]
             keep = [(c, a_) for (c, a_) in zip(contours, areas) if a_ >= 2000]
             if not keep:
                 self._clear_focus_masks()
-                return {}
+                return None
 
             def contour_bottom_y(contour):
                 ys = contour[:, :, 1].flatten()
@@ -12066,31 +11966,16 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
             x1 = min(dr.shape[1] - 1, x + w + pad_x)
             y1 = min(dr.shape[0] - 1, y + h + pad_y)
 
-            roi_mask = np.zeros((dr.shape[0], dr.shape[1]), np.uint8)
-            roi_mask[y0:y1+1, x0:x1+1] = 255
-
-            contour_mask = np.zeros((dr.shape[0], dr.shape[1]), np.uint8)
-            cv2.drawContours(contour_mask, [chosen], -1, 255, thickness=-1)
-            ring_mask = self._build_contour_ring_mask(contour_mask)
-
+            mask = np.zeros((dr.shape[0], dr.shape[1]), np.uint8)
+            mask[y0:y1+1, x0:x1+1] = 255
             self._last_bbox = (x0, y0, x1 - x0 + 1, y1 - y0 + 1)
-            self._last_mask = roi_mask
-            self._last_contour_mask = contour_mask
-            self._last_ring_mask = ring_mask
-            return {
-                "roi_mask": roi_mask,
-                "contour_mask": contour_mask,
-                "ring_mask": ring_mask,
-                "bbox": self._last_bbox,
-            }
+            self._last_mask = mask
+            return mask
         except Exception:
             self._clear_focus_masks()
-            return {}
+            return None
 
-    def _build_focus_mask(self, bg, dr):
-        return (self._build_focus_masks(bg, dr) or {}).get("roi_mask")
-
-    def _draw_focus_overlay(self, img_bgr, mask, focus_value: float, snr_ratio: float | None = None):
+    def _draw_focus_overlay(self, img_bgr, mask, focus_value: float, p90_ratio: float | None = None):
         # import cv2
         if self._last_bbox is not None:
             x, y, bw, bh = self._last_bbox
@@ -12100,10 +11985,10 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
             cv2.drawContours(img_bgr, contours, -1, (255, 0, 255), 1)
         pos = self.model.machine_model.get_current_position_dict()
         lines = [
-            f"Focus (ringCV): {focus_value:.2f}",
+            f"Focus (Tenengrad): {focus_value:.0f}",
             f"Y: {pos['Y']}  step:{self.step}  mode:{self.mode}",
-            (f"SNR(bg): {snr_ratio:.2f}" if snr_ratio is not None else "SNR(bg): -"),
-            f"Best: {self.best_focus:.2f}" if self.best_focus is not None else "Best: -",
+            (f"P90/bg: {p90_ratio:.2f}" if p90_ratio is not None else "P90/bg: -"),
+            f"Best: {self.best_focus:.0f}" if self.best_focus is not None else "Best: -",
         ]
         for i, line in enumerate(lines):
             cv2.putText(img_bgr, line, (8, 18 + i*18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (20, 220, 20), 1, cv2.LINE_AA)
