@@ -13,6 +13,7 @@ class _FakeMachineModel(QObject):
     machine_state_updated = Signal(bool)
     regulation_state_changed = Signal(bool)
     pressure_updated = Signal()
+    printing_parameters_updated = Signal()
 
     def __init__(
         self,
@@ -31,6 +32,7 @@ class _FakeMachineModel(QObject):
         self.current_location = current_location
         self.print_pulse_width = 3000
         self.refuel_pulse_width = 3000
+        self.dispense_frequency_hz = 10
 
     def is_connected(self):
         return True
@@ -49,6 +51,9 @@ class _FakeMachineModel(QObject):
 
     def get_target_refuel_pressure(self):
         return 1.0
+
+    def get_dispense_frequency_hz(self):
+        return self.dispense_frequency_hz
 
     def get_current_location(self):
         return self.current_location
@@ -83,6 +88,7 @@ def _make_controller(events, *, queue_clear=True):
         set_absolute_print_pressure=Mock(),
         set_absolute_refuel_pressure=Mock(),
         set_print_pulse_width=Mock(),
+        set_dispense_frequency_hz=Mock(),
         set_refuel_pulse_width=Mock(),
         check_if_all_completed=Mock(return_value=queue_clear),
         move_to_location=Mock(),
@@ -139,6 +145,7 @@ def test_current_profile_pressure_box_removes_extra_bottom_buttons(qapp):
 
     assert hasattr(box, "calibrate_pressure_button")
     assert hasattr(box, "refuel_camera_button")
+    assert hasattr(box, "print_frequency_spinbox")
     assert not hasattr(box, "droplet_imager_button")
     assert not hasattr(box, "nozzle_dataset_button")
 
@@ -153,7 +160,40 @@ def test_legacy_profile_pressure_box_hides_refuel_camera_button(qapp):
     )
 
     assert hasattr(box, "calibrate_pressure_button")
+    assert hasattr(box, "print_frequency_spinbox")
     assert not hasattr(box, "refuel_camera_button")
+
+
+def test_pressure_box_frequency_spinbox_calls_controller(qapp):
+    events = []
+    popups = []
+    controller = _make_controller(events)
+    box = PressurePlotBox(
+        _make_main_window(CURRENT_PROFILE, popups),
+        _make_model(_FakeMachineModel(), events),
+        controller,
+    )
+
+    box.print_frequency_spinbox.setValue(12)
+    box.handle_print_frequency_change()
+
+    controller.set_dispense_frequency_hz.assert_called_once_with(12, manual=True)
+
+
+def test_pressure_box_frequency_spinbox_tracks_machine_model_updates(qapp):
+    events = []
+    popups = []
+    machine_model = _FakeMachineModel()
+    box = PressurePlotBox(
+        _make_main_window(CURRENT_PROFILE, popups),
+        _make_model(machine_model, events),
+        _make_controller(events),
+    )
+
+    machine_model.dispense_frequency_hz = 18
+    machine_model.printing_parameters_updated.emit()
+
+    assert box.print_frequency_spinbox.value() == 18
 
 
 def test_current_profile_calibrate_pressure_rejects_when_queue_not_empty(monkeypatch, qapp):

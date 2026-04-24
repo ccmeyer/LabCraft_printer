@@ -1,7 +1,11 @@
 from types import SimpleNamespace
 from unittest.mock import Mock, call
 
-from Controller import Controller
+from Controller import (
+    ARRAY_PAUSE_DEPARTURE_ACCEL,
+    ARRAY_PAUSE_DEPARTURE_SETTLE_MS,
+    Controller,
+)
 
 
 class Emitter:
@@ -84,8 +88,11 @@ def _make_controller(*, well_plate, printer_head, regulation_on=True, gripper_in
     c.machine = SimpleNamespace(
         check_if_all_completed=lambda: queue_empty,
         clear_command_queue=Mock(),
+        change_acceleration=Mock(),
         pause_commands=Mock(),
         request_pause_after_seq32=Mock(return_value=True),
+        reset_acceleration=Mock(),
+        wait_ms=Mock(),
     )
     c.model = SimpleNamespace(
         well_plate=well_plate,
@@ -168,8 +175,12 @@ def test_print_array_prefetches_one_lookahead_well():
     assert c.print_droplets.call_args_list[0].args[0] == 5
     assert c.print_droplets.call_args_list[1].args[0] == 7
     assert c.print_droplets.call_args_list[0].kwargs["handler"] == c._handle_array_well_complete
+    c.machine.change_acceleration.assert_called_once_with(ARRAY_PAUSE_DEPARTURE_ACCEL)
+    c.machine.reset_acceleration.assert_called_once_with()
+    c.machine.wait_ms.assert_called_once_with(ARRAY_PAUSE_DEPARTURE_SETTLE_MS)
     assert c._array_context["stock_id"] == "stock-a"
     assert [item["well_id"] for item in c._array_context["queued_wells"]] == ["A1", "A2"]
+    assert c._array_context["pause_departure_pending"] is False
     assert c.get_array_run_state() == "running"
 
 
@@ -185,6 +196,9 @@ def test_print_array_resume_ready_starts_next_incomplete_well():
     Controller.print_array(c)
 
     c.set_absolute_coordinates.assert_called_once_with(40, 50, 60, override=True)
+    c.machine.change_acceleration.assert_called_once_with(ARRAY_PAUSE_DEPARTURE_ACCEL)
+    c.machine.reset_acceleration.assert_called_once_with()
+    c.machine.wait_ms.assert_called_once_with(ARRAY_PAUSE_DEPARTURE_SETTLE_MS)
     assert c.print_droplets.call_args.args[0] == 7
     assert c.get_array_run_state() == "running"
 

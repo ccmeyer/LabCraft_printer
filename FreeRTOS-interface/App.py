@@ -83,6 +83,20 @@ def main():
 
     # Initialize components
     model = Model(profile=profile)
+    dispenser_defaults = (
+        settings.get("DISPENSER_TYPES", {})
+        .get(settings.get("DEFAULT_DISPENSER", ""), {})
+    )
+    dispense_frequency_hz = (
+        dispenser_defaults.get("frequency")
+        if isinstance(dispenser_defaults, dict)
+        else None
+    )
+    if dispense_frequency_hz is not None:
+        try:
+            model.machine_model.update_dispense_frequency_hz(dispense_frequency_hz)
+        except (TypeError, ValueError):
+            pass
 
     machine = Machine(model,profile=profile)
     controller = Controller(machine, model, profile=profile)

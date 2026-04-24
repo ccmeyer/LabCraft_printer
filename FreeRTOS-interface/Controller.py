@@ -17,6 +17,9 @@ import json
 from hardware.profile import CURRENT_PROFILE, HardwareProfile
 from hardware.null_devices import NullCamera
 
+ARRAY_PAUSE_DEPARTURE_ACCEL = 16000
+ARRAY_PAUSE_DEPARTURE_SETTLE_MS = 200
+
 class Controller(QObject):
     """Controller class for the application."""
     array_complete = Signal()
@@ -816,6 +819,12 @@ class Controller(QObject):
             trace_metadata=trace_metadata,
         )
 
+    def set_dispense_frequency_hz(self, hz, manual=False):
+        """Set the print pacing used for future dispense commands."""
+        return self.model.set_dispense_frequency_hz(
+            hz,
+        )
+
     def reset_print_syringe(self):
         """Reset the print syringe."""
         self.machine.reset_print_syringe()
@@ -1281,6 +1290,13 @@ class Controller(QObject):
             "current_barrier_seq32": None,
             "soft_stop_pending": False,
             "soft_stop_phase": None,
+            "pause_departure_pending": True,
+            "pause_departure_accel": int(
+                getattr(self, "_array_pause_departure_accel", ARRAY_PAUSE_DEPARTURE_ACCEL)
+            ),
+            "pause_departure_settle_ms": int(
+                getattr(self, "_array_pause_departure_settle_ms", ARRAY_PAUSE_DEPARTURE_SETTLE_MS)
+            ),
         }
         return True
 
@@ -1322,10 +1338,39 @@ class Controller(QObject):
             self._complete_array_finalize("hard_abort")
             return False
 
+        apply_pause_departure_safeguards = bool(context.get("pause_departure_pending"))
+        pause_departure_accel = max(0, int(context.get("pause_departure_accel") or 0))
+        pause_departure_settle_ms = max(0, int(context.get("pause_departure_settle_ms") or 0))
+
+        if apply_pause_departure_safeguards and pause_departure_accel > 0:
+            if self.machine.change_acceleration(pause_departure_accel) is False:
+                self.error_occurred_signal.emit('Print Array Error', f'Failed to lower acceleration before moving to well {well.well_id}')
+                self._complete_array_finalize("hard_abort")
+                return False
+
         if self.set_absolute_coordinates(well_coords['X'], well_coords['Y'], well_coords['Z'], override=True) is False:
+            if apply_pause_departure_safeguards and pause_departure_accel > 0:
+                try:
+                    self.machine.reset_acceleration()
+                except Exception:
+                    pass
             self.error_occurred_signal.emit('Print Array Error', f'Failed to move to well {well.well_id}')
             self._complete_array_finalize("hard_abort")
             return False
+
+        if apply_pause_departure_safeguards and pause_departure_accel > 0:
+            if self.machine.reset_acceleration() is False:
+                self.error_occurred_signal.emit('Print Array Error', f'Failed to restore acceleration after moving to well {well.well_id}')
+                self._complete_array_finalize("hard_abort")
+                return False
+
+        if apply_pause_departure_safeguards and pause_departure_settle_ms > 0:
+            if self.machine.wait_ms(pause_departure_settle_ms) is False:
+                self.error_occurred_signal.emit('Print Array Error', f'Failed to queue settle delay before printing well {well.well_id}')
+                self._complete_array_finalize("hard_abort")
+                return False
+
+        context["pause_departure_pending"] = False
 
         print(f'Printing {target_droplets} droplets to well {well.well_id}')
         dispense_command = self.print_droplets(

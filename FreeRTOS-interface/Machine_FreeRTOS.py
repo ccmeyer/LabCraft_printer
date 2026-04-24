@@ -3387,7 +3387,7 @@ class Machine(QObject):
             return self.add_command_to_queue('CHANGE_ACCEL',acceleration,0,0,handler=handler,kwargs=kwargs,manual=manual)
 
     def reset_acceleration(self,handler=None,kwargs=None,manual=False):
-        self.add_command_to_queue('RESET_ACCEL',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        return self.add_command_to_queue('RESET_ACCEL',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
     
     def regulate_print_pressure(self,handler=None,kwargs=None,manual=False):
         return self.add_command_to_queue('REGULATE_PRESSURE_P',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
@@ -3622,10 +3622,23 @@ class Machine(QObject):
         if self.check_param_limits(ms, 1, 600000):  # 1 ms .. 10 min (adjust as you like)
             return self.add_command_to_queue('WAIT', ms, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
         return False
+
+    def _get_dispense_rate_hz(self):
+        machine_model = getattr(getattr(self, "model", None), "machine_model", None)
+        getter = getattr(machine_model, "get_dispense_frequency_hz", None)
+        try:
+            value = getter() if callable(getter) else getattr(machine_model, "dispense_frequency_hz", 0)
+        except Exception:
+            value = 0
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 0
     
     def print_droplets(self,droplet_count,handler=None,kwargs=None,manual=False):
         self.check_param_limits(droplet_count,1,1000)
-        return self.add_command_to_queue('DISPENSE',int(droplet_count),0,0,handler=handler,kwargs=kwargs,manual=manual)
+        rate_hz = self._get_dispense_rate_hz()
+        return self.add_command_to_queue('DISPENSE',int(droplet_count),rate_hz,0,handler=handler,kwargs=kwargs,manual=manual)
 
     def LED_on(self,handler=None,kwargs=None,manual=False):
         return self.add_command_to_queue('LED_ON',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
@@ -3733,11 +3746,13 @@ class Machine(QObject):
 
     def print_only(self,droplet_count,handler=None,kwargs=None,manual=False):
         self.check_param_limits(droplet_count,1,1000)
-        return self.add_command_to_queue('DISPENSE_PRINT',int(droplet_count),0,0,handler=handler,kwargs=kwargs,manual=manual)
+        rate_hz = self._get_dispense_rate_hz()
+        return self.add_command_to_queue('DISPENSE_PRINT',int(droplet_count),rate_hz,0,handler=handler,kwargs=kwargs,manual=manual)
 
     def refuel_only(self,droplet_count,handler=None,kwargs=None,manual=False):
         self.check_param_limits(droplet_count,1,1000)
-        return self.add_command_to_queue('DISPENSE_REFUEL',int(droplet_count),0,0,handler=handler,kwargs=kwargs,manual=manual)
+        rate_hz = self._get_dispense_rate_hz()
+        return self.add_command_to_queue('DISPENSE_REFUEL',int(droplet_count),rate_hz,0,handler=handler,kwargs=kwargs,manual=manual)
     
     def enable_print_profile(self, handler=None, kwargs=None, manual=False):
         return self.add_command_to_queue('ENABLE_PRINT_PROFILE', 0, 0, 0, handler=handler, kwargs=kwargs, manual=manual)

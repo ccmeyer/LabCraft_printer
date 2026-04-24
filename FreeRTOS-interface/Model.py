@@ -6503,6 +6503,7 @@ class MachineModel(QObject):
         self.target_refuel_pressure = 0
         self.print_pulse_width = 0
         self.refuel_pulse_width = 0
+        self.dispense_frequency_hz = 20
 
         self.gripper_refresh_period = 0
         self.gripper_pulse_duration = 0
@@ -6841,6 +6842,9 @@ class MachineModel(QObject):
 
     def get_refuel_pulse_width(self):
         return self.refuel_pulse_width
+
+    def get_dispense_frequency_hz(self):
+        return self.dispense_frequency_hz
     
     def get_current_p_motor(self):
         return self.current_p
@@ -6854,6 +6858,10 @@ class MachineModel(QObject):
     
     def update_refuel_pulse_width(self,pulse_width):
         self.refuel_pulse_width = int(pulse_width)
+        self.printing_parameters_updated.emit()
+
+    def update_dispense_frequency_hz(self, hz):
+        self.dispense_frequency_hz = max(0, int(hz))
         self.printing_parameters_updated.emit()
 
     def update_cycle_count(self,cycle_count):
@@ -7416,6 +7424,11 @@ class Model(QObject):
     def load_settings(self,file_path):
         with open(file_path, 'r') as file:
             return json.load(file)
+
+    def set_dispense_frequency_hz(self, hz):
+        hz = max(1, int(hz))
+        self.machine_model.update_dispense_frequency_hz(hz)
+        return True
         
     def get_default_machine_port(self):
         return self.settings['MACHINE_PORT']
@@ -7466,6 +7479,8 @@ class Model(QObject):
             self.machine_model.update_print_pulse_width(status_dict['Print_width'])
         if 'Refuel_width' in status_keys:
             self.machine_model.update_refuel_pulse_width(status_dict['Refuel_width'])
+        if 'Disp_freq' in status_keys:
+            self.machine_model.update_dispense_frequency_hz(status_dict['Disp_freq'])
         if 'Micros' in status_keys:
             self.machine_model.update_current_micros(status_dict['Micros'])
         if 'Flashes' in status_keys:

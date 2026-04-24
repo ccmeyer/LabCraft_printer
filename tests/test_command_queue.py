@@ -85,6 +85,25 @@ def test_command_queue_marks_canceled_commands_from_retired_frontier(qapp):
     assert [cmd.status for cmd in queue.completed] == ["Completed", "Canceled"]
 
 
+def test_machine_dispense_commands_use_configured_frequency(qapp, test_profile):
+    model = SimpleNamespace(
+        machine_model=SimpleNamespace(get_dispense_frequency_hz=lambda: 10)
+    )
+    machine = mfr.Machine(model, profile=test_profile)
+
+    dispense = machine.print_droplets(7)
+    print_only = machine.print_only(5)
+    refuel_only = machine.refuel_only(3)
+
+    assert dispense.command_type == "DISPENSE"
+    assert dispense.param1 == 7
+    assert dispense.param2 == 10
+    assert print_only.command_type == "DISPENSE_PRINT"
+    assert print_only.param2 == 10
+    assert refuel_only.command_type == "DISPENSE_REFUEL"
+    assert refuel_only.param2 == 10
+
+
 def _register_settings_trace(machine, *, request_id="req-1", settings=None):
     settings = dict(settings or {"flash_delay": 6000, "num_droplets": 1})
     created_ns = time.monotonic_ns()

@@ -1,5 +1,4 @@
 from types import SimpleNamespace
-
 from Model import Model, MachineModel
 
 
@@ -31,6 +30,7 @@ def test_model_update_state_maps_status_fields(qapp):
         "Pressure_R": model.machine_model.psi_offset + model.machine_model.fss,
         "Current_command": 9,
         "Last_completed": 8,
+        "Disp_freq": 12,
         "X_max_hz": 1000,
         "Y_max_hz": 1100,
         "Z_max_hz": 1200,
@@ -48,6 +48,7 @@ def test_model_update_state_maps_status_fields(qapp):
     assert (mm.target_p, mm.target_r) == (410, 510)
     assert mm.current_command_num == 9
     assert mm.last_completed_command_num == 8
+    assert mm.get_dispense_frequency_hz() == 12
     assert mm.x_max_hz == 1000 and mm.y_max_hz == 1100 and mm.z_max_hz == 1200
     assert mm.x_accel == 10 and mm.y_accel == 11 and mm.z_accel == 12
     assert len(emitted) == 1
@@ -117,3 +118,23 @@ def test_model_update_flash_session_state_updates_droplet_camera_and_emits(qapp)
         }
     ]
     assert emissions == [True]
+
+
+def test_model_set_dispense_frequency_hz_is_session_only(tmp_path):
+    model = Model.__new__(Model)
+    model.machine_model = MachineModel()
+    model.settings_path = str(tmp_path / "Settings.json")
+    model.settings = {
+        "DEFAULT_DISPENSER": "droplet",
+        "DISPENSER_TYPES": {
+            "droplet": {
+                "frequency": 10,
+            }
+        },
+    }
+
+    assert Model.set_dispense_frequency_hz(model, 14) is True
+
+    assert model.machine_model.get_dispense_frequency_hz() == 14
+    assert model.settings["DISPENSER_TYPES"]["droplet"]["frequency"] == 10
+    assert not (tmp_path / "Settings.json").exists()

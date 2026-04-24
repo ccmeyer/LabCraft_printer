@@ -92,3 +92,18 @@ def test_update_regulation_state_tracks_both_channels_and_emits_once(qapp):
 
     machine_model.update_regulation_state(True, False)
     assert emissions == [True]
+
+
+def test_dispense_frequency_defaults_and_updates(qapp):
+    machine_model = MachineModel()
+    emissions = []
+    machine_model.printing_parameters_updated.connect(
+        lambda: emissions.append(machine_model.get_dispense_frequency_hz())
+    )
+
+    assert machine_model.get_dispense_frequency_hz() == 20
+
+    machine_model.update_dispense_frequency_hz(10)
+
+    assert machine_model.get_dispense_frequency_hz() == 10
+    assert emissions == [10]
