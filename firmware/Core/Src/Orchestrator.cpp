@@ -3660,10 +3660,12 @@ void Orchestrator::scheduleFlashIn() {
 void Orchestrator::flashNotifyFromISR(uint16_t GPIO_Pin) {
 	if (_instance && GPIO_Pin == _instance->_trigPin && _instance->_flashTaskHandle) {
 		g_exti8_count++;
-	    const auto triggerAction = FlashSafety::onTrigger(_instance->_flashSafety);
+	    const bool lineHigh = _instance->_isFlashTriggerHigh();
+	    const auto triggerAction = FlashSafety::onTrigger(_instance->_flashSafety, lineHigh);
 	    if (triggerAction == FlashSafety::TriggerAction::IgnoredDisarmed ||
 	        triggerAction == FlashSafety::TriggerAction::IgnoredFaultLatched ||
-	        triggerAction == FlashSafety::TriggerAction::IgnoredBusy) {
+	        triggerAction == FlashSafety::TriggerAction::IgnoredBusy ||
+	        triggerAction == FlashSafety::TriggerAction::IgnoredLineLow) {
 	      return;
 	    }
 

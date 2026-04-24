@@ -37,7 +37,7 @@ TEST(FlashSafetyHelpers, FirstTriggerIsAcceptedWhileArmed)
     FlashSafety::State state{};
     FlashSafety::arm(state, false);
 
-    const auto action = FlashSafety::onTrigger(state);
+    const auto action = FlashSafety::onTrigger(state, true);
 
     LONGS_EQUAL(static_cast<long>(FlashSafety::TriggerAction::Accepted),
                 static_cast<long>(action));
@@ -46,13 +46,27 @@ TEST(FlashSafetyHelpers, FirstTriggerIsAcceptedWhileArmed)
     CHECK_FALSE(FlashSafety::isFaultLatched(state));
 }
 
+TEST(FlashSafetyHelpers, TriggerIsIgnoredWhenLineIsLowEvenIfSessionIsArmed)
+{
+    FlashSafety::State state{};
+    FlashSafety::arm(state, false);
+
+    const auto action = FlashSafety::onTrigger(state, false);
+
+    LONGS_EQUAL(static_cast<long>(FlashSafety::TriggerAction::IgnoredLineLow),
+                static_cast<long>(action));
+    CHECK_FALSE(state.awaitingRelease);
+    CHECK_TRUE(FlashSafety::isSessionArmed(state));
+    CHECK_FALSE(FlashSafety::isFaultLatched(state));
+}
+
 TEST(FlashSafetyHelpers, RetriggerWhileAwaitingReleaseIsIgnoredAndSessionStaysArmed)
 {
     FlashSafety::State state{};
     FlashSafety::arm(state, false);
-    FlashSafety::onTrigger(state);
+    FlashSafety::onTrigger(state, true);
 
-    const auto action = FlashSafety::onTrigger(state);
+    const auto action = FlashSafety::onTrigger(state, true);
 
     LONGS_EQUAL(static_cast<long>(FlashSafety::TriggerAction::IgnoredBusy),
                 static_cast<long>(action));
@@ -66,7 +80,7 @@ TEST(FlashSafetyHelpers, ReleasePollingKeepsWaitingIfLineStaysHigh)
 {
     FlashSafety::State state{};
     FlashSafety::arm(state, false);
-    FlashSafety::onTrigger(state);
+    FlashSafety::onTrigger(state, true);
 
     const auto action = FlashSafety::onReleasePoll(state, true);
 
@@ -82,7 +96,7 @@ TEST(FlashSafetyHelpers, ReleasePollingClearsBusyStateWhenLineReturnsLow)
 {
     FlashSafety::State state{};
     FlashSafety::arm(state, false);
-    FlashSafety::onTrigger(state);
+    FlashSafety::onTrigger(state, true);
 
     const auto action = FlashSafety::onReleasePoll(state, false);
 

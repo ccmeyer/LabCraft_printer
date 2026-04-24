@@ -21,6 +21,7 @@ enum class TriggerAction : uint8_t {
   IgnoredDisarmed = 0u,
   IgnoredFaultLatched,
   IgnoredBusy,
+  IgnoredLineLow,
   Accepted
 };
 
@@ -56,8 +57,11 @@ constexpr ArmAction arm(State& state, bool lineHigh)
   return ArmAction::Armed;
 }
 
-constexpr TriggerAction onTrigger(State& state)
+constexpr TriggerAction onTrigger(State& state, bool lineHigh)
 {
+  if (!lineHigh) {
+    return TriggerAction::IgnoredLineLow;
+  }
   if (state.faultLatched) {
     return TriggerAction::IgnoredFaultLatched;
   }
@@ -69,6 +73,11 @@ constexpr TriggerAction onTrigger(State& state)
   }
   state.awaitingRelease = true;
   return TriggerAction::Accepted;
+}
+
+constexpr TriggerAction onTrigger(State& state)
+{
+  return onTrigger(state, true);
 }
 
 constexpr ReleaseAction onReleasePoll(State& state, bool lineHigh)
