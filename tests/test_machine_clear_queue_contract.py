@@ -36,3 +36,16 @@ def test_clear_queue_handler_receives_timeout_payload(qapp, test_profile, fake_s
     machine._on_clear_ack(handler=lambda payload: payloads.append(dict(payload or {})), timed_out=True)
 
     assert payloads == [{"timed_out": True}]
+
+
+def test_global_accel_helpers_fail_fast_with_clear_error(qapp, test_profile, fake_serial_main):
+    machine = Machine(SimpleNamespace(), profile=test_profile)
+    machine.ser = fake_serial_main
+    errors = []
+    machine.error_occurred.connect(errors.append)
+
+    assert machine.change_acceleration(16000) is False
+    assert machine.reset_acceleration() is False
+
+    assert "CHANGE_ACCEL is not supported" in errors[0]
+    assert "RESET_ACCEL is not supported" in errors[1]

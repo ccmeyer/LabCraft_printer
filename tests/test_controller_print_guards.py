@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, call
 
 from Controller import (
+    ARRAY_AXIS_ACCEL_DEFAULT,
     ARRAY_PAUSE_DEPARTURE_ACCEL,
     ARRAY_PAUSE_DEPARTURE_SETTLE_MS,
     Controller,
@@ -88,10 +89,9 @@ def _make_controller(*, well_plate, printer_head, regulation_on=True, gripper_in
     c.machine = SimpleNamespace(
         check_if_all_completed=lambda: queue_empty,
         clear_command_queue=Mock(),
-        change_acceleration=Mock(),
         pause_commands=Mock(),
         request_pause_after_seq32=Mock(return_value=True),
-        reset_acceleration=Mock(),
+        set_axis_accel=Mock(),
         wait_ms=Mock(),
     )
     c.model = SimpleNamespace(
@@ -105,6 +105,7 @@ def _make_controller(*, well_plate, printer_head, regulation_on=True, gripper_in
         machine_model=SimpleNamespace(
             regulating_print_pressure=regulation_on,
             clear_command_queue=Mock(),
+            get_current_accelerations=lambda: (ARRAY_AXIS_ACCEL_DEFAULT, ARRAY_AXIS_ACCEL_DEFAULT, ARRAY_AXIS_ACCEL_DEFAULT),
             transport_paused=False,
             pause_watermark_reached=False,
         ),
@@ -175,8 +176,14 @@ def test_print_array_prefetches_one_lookahead_well():
     assert c.print_droplets.call_args_list[0].args[0] == 5
     assert c.print_droplets.call_args_list[1].args[0] == 7
     assert c.print_droplets.call_args_list[0].kwargs["handler"] == c._handle_array_well_complete
-    c.machine.change_acceleration.assert_called_once_with(ARRAY_PAUSE_DEPARTURE_ACCEL)
-    c.machine.reset_acceleration.assert_called_once_with()
+    assert c.machine.set_axis_accel.call_args_list == [
+        call(0, ARRAY_PAUSE_DEPARTURE_ACCEL),
+        call(1, ARRAY_PAUSE_DEPARTURE_ACCEL),
+        call(2, ARRAY_PAUSE_DEPARTURE_ACCEL),
+        call(0, ARRAY_AXIS_ACCEL_DEFAULT),
+        call(1, ARRAY_AXIS_ACCEL_DEFAULT),
+        call(2, ARRAY_AXIS_ACCEL_DEFAULT),
+    ]
     c.machine.wait_ms.assert_called_once_with(ARRAY_PAUSE_DEPARTURE_SETTLE_MS)
     assert c._array_context["stock_id"] == "stock-a"
     assert [item["well_id"] for item in c._array_context["queued_wells"]] == ["A1", "A2"]
@@ -196,8 +203,14 @@ def test_print_array_resume_ready_starts_next_incomplete_well():
     Controller.print_array(c)
 
     c.set_absolute_coordinates.assert_called_once_with(40, 50, 60, override=True)
-    c.machine.change_acceleration.assert_called_once_with(ARRAY_PAUSE_DEPARTURE_ACCEL)
-    c.machine.reset_acceleration.assert_called_once_with()
+    assert c.machine.set_axis_accel.call_args_list == [
+        call(0, ARRAY_PAUSE_DEPARTURE_ACCEL),
+        call(1, ARRAY_PAUSE_DEPARTURE_ACCEL),
+        call(2, ARRAY_PAUSE_DEPARTURE_ACCEL),
+        call(0, ARRAY_AXIS_ACCEL_DEFAULT),
+        call(1, ARRAY_AXIS_ACCEL_DEFAULT),
+        call(2, ARRAY_AXIS_ACCEL_DEFAULT),
+    ]
     c.machine.wait_ms.assert_called_once_with(ARRAY_PAUSE_DEPARTURE_SETTLE_MS)
     assert c.print_droplets.call_args.args[0] == 7
     assert c.get_array_run_state() == "running"

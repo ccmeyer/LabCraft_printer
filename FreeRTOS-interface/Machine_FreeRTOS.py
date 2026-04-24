@@ -3382,12 +3382,20 @@ class Machine(QObject):
     def set_axis_accel(self, axis_idx, accel):
         return self.add_command_to_queue('SET_AXIS_ACCEL', axis_idx, accel, 0)
 
+    def _unsupported_global_accel_command(self, command_name):
+        msg = (
+            f"{command_name} is not supported by the current firmware command set. "
+            "Use set_axis_accel per axis instead."
+        )
+        print(msg)
+        self.error_occurred.emit(msg)
+        return False
+
     def change_acceleration(self,acceleration,handler=None,kwargs=None,manual=False):
-        if self.check_param_limits(acceleration,1,50000):
-            return self.add_command_to_queue('CHANGE_ACCEL',acceleration,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        return self._unsupported_global_accel_command("CHANGE_ACCEL")
 
     def reset_acceleration(self,handler=None,kwargs=None,manual=False):
-        return self.add_command_to_queue('RESET_ACCEL',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        return self._unsupported_global_accel_command("RESET_ACCEL")
     
     def regulate_print_pressure(self,handler=None,kwargs=None,manual=False):
         return self.add_command_to_queue('REGULATE_PRESSURE_P',0,0,0,handler=handler,kwargs=kwargs,manual=manual)

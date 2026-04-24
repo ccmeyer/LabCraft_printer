@@ -19,6 +19,7 @@ from hardware.null_devices import NullCamera
 
 ARRAY_PAUSE_DEPARTURE_ACCEL = 16000
 ARRAY_PAUSE_DEPARTURE_SETTLE_MS = 200
+ARRAY_AXIS_ACCEL_DEFAULT = 140000
 
 class Controller(QObject):
     """Controller class for the application."""
@@ -1297,8 +1298,33 @@ class Controller(QObject):
             "pause_departure_settle_ms": int(
                 getattr(self, "_array_pause_departure_settle_ms", ARRAY_PAUSE_DEPARTURE_SETTLE_MS)
             ),
+            "pause_departure_restore_accels": self._get_array_pause_departure_restore_accels(),
         }
         return True
+
+    def _get_array_pause_departure_restore_accels(self):
+        defaults = (ARRAY_AXIS_ACCEL_DEFAULT,) * 3
+        machine_model = getattr(self.model, "machine_model", None)
+        getter = getattr(machine_model, "get_current_accelerations", None)
+        if not callable(getter):
+            return defaults
+
+        try:
+            values = getter()
+        except Exception:
+            return defaults
+
+        if not isinstance(values, (tuple, list)) or len(values) < 3:
+            return defaults
+
+        restore = []
+        for idx, default in enumerate(defaults):
+            try:
+                value = int(values[idx])
+            except Exception:
+                value = default
+            restore.append(value if value > 0 else default)
+        return tuple(restore)
 
     def _array_post_well_expected_volume(self, target_droplets):
         context = getattr(self, "_array_context", None) or {}
@@ -1341,28 +1367,29 @@ class Controller(QObject):
         apply_pause_departure_safeguards = bool(context.get("pause_departure_pending"))
         pause_departure_accel = max(0, int(context.get("pause_departure_accel") or 0))
         pause_departure_settle_ms = max(0, int(context.get("pause_departure_settle_ms") or 0))
+        pause_departure_restore_accels = tuple(
+            context.get("pause_departure_restore_accels")
+            or (ARRAY_AXIS_ACCEL_DEFAULT, ARRAY_AXIS_ACCEL_DEFAULT, ARRAY_AXIS_ACCEL_DEFAULT)
+        )
 
         if apply_pause_departure_safeguards and pause_departure_accel > 0:
-            if self.machine.change_acceleration(pause_departure_accel) is False:
-                self.error_occurred_signal.emit('Print Array Error', f'Failed to lower acceleration before moving to well {well.well_id}')
-                self._complete_array_finalize("hard_abort")
-                return False
+            for axis_idx in range(3):
+                if self.set_axis_accel(axis_idx, pause_departure_accel) is False:
+                    self.error_occurred_signal.emit('Print Array Error', f'Failed to lower acceleration before moving to well {well.well_id}')
+                    self._complete_array_finalize("hard_abort")
+                    return False
 
         if self.set_absolute_coordinates(well_coords['X'], well_coords['Y'], well_coords['Z'], override=True) is False:
-            if apply_pause_departure_safeguards and pause_departure_accel > 0:
-                try:
-                    self.machine.reset_acceleration()
-                except Exception:
-                    pass
             self.error_occurred_signal.emit('Print Array Error', f'Failed to move to well {well.well_id}')
             self._complete_array_finalize("hard_abort")
             return False
 
         if apply_pause_departure_safeguards and pause_departure_accel > 0:
-            if self.machine.reset_acceleration() is False:
-                self.error_occurred_signal.emit('Print Array Error', f'Failed to restore acceleration after moving to well {well.well_id}')
-                self._complete_array_finalize("hard_abort")
-                return False
+            for axis_idx, accel_value in enumerate(pause_departure_restore_accels[:3]):
+                if self.set_axis_accel(axis_idx, accel_value) is False:
+                    self.error_occurred_signal.emit('Print Array Error', f'Failed to restore acceleration after moving to well {well.well_id}')
+                    self._complete_array_finalize("hard_abort")
+                    return False
 
         if apply_pause_departure_safeguards and pause_departure_settle_ms > 0:
             if self.machine.wait_ms(pause_departure_settle_ms) is False:
