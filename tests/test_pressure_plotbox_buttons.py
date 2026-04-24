@@ -196,6 +196,51 @@ def test_pressure_box_frequency_spinbox_tracks_machine_model_updates(qapp):
     assert box.print_frequency_spinbox.value() == 18
 
 
+def test_pressure_refresh_does_not_overwrite_frequency_field(qapp):
+    events = []
+    popups = []
+    machine_model = _FakeMachineModel()
+    box = PressurePlotBox(
+        _make_main_window(CURRENT_PROFILE, popups),
+        _make_model(machine_model, events),
+        _make_controller(events),
+    )
+
+    box.print_frequency_spinbox.blockSignals(True)
+    box.print_frequency_spinbox.setValue(10)
+    box.print_frequency_spinbox.blockSignals(False)
+
+    box.update_pressure()
+
+    assert box.print_frequency_spinbox.value() == 10
+
+
+def test_current_profile_frequency_field_sits_below_pulse_width_fields(qapp):
+    events = []
+    popups = []
+    box = PressurePlotBox(
+        _make_main_window(CURRENT_PROFILE, popups),
+        _make_model(_FakeMachineModel(), events),
+        _make_controller(events),
+    )
+
+    assert box.layout.itemAtPosition(6, 2).widget() is box.print_frequency_label
+    assert box.layout.itemAtPosition(6, 3).widget() is box.print_frequency_spinbox
+
+
+def test_legacy_profile_frequency_field_sits_below_pulse_width_fields(qapp):
+    events = []
+    popups = []
+    box = PressurePlotBox(
+        _make_main_window(LEGACY_PROFILE, popups),
+        _make_model(_FakeMachineModel(), events),
+        _make_controller(events),
+    )
+
+    assert box.layout.itemAtPosition(5, 2).widget() is box.print_frequency_label
+    assert box.layout.itemAtPosition(5, 3).widget() is box.print_frequency_spinbox
+
+
 def test_current_profile_calibrate_pressure_rejects_when_queue_not_empty(monkeypatch, qapp):
     events = []
     popups = []

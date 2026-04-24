@@ -1247,8 +1247,6 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             self.print_frequency_spinbox,
             self.handle_print_frequency_change,
         )
-        self.layout.addWidget(self.print_frequency_label, 0, 4)
-        self.layout.addWidget(self.print_frequency_spinbox, 0, 5)
 
         if not self.legacy_mode:
             self.current_refuel_pressure_label = QtWidgets.QLabel("Refuel Pressure:")  # Create a new QLabel for the current pressure label
@@ -1273,7 +1271,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.pressure_regulation_button.setFocusPolicy(QtCore.Qt.NoFocus)
         # self.pressure_regulation_button.setCheckable(True)
         self.pressure_regulation_button.clicked.connect(self.request_toggle_regulation)
-        self.layout.addWidget(self.pressure_regulation_button, 2, 0, 1, 6)  # Add the button to the layout at position (2, 0) and make it span 2 columns
+        self.layout.addWidget(self.pressure_regulation_button, 2, 0, 1, 4)  # Add the button to the layout at position (2, 0) and make it span 2 columns
         self.update_regulation_button(self.model.machine_model.regulating_print_pressure)
 
         self.chart = QtCharts.QChart()
@@ -1325,7 +1323,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.chart.legend().hide()  # Hide the legend
         self.chart_view.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         self.chart_view.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.layout.addWidget(self.chart_view, 3, 0,1,6)
+        self.layout.addWidget(self.chart_view, 3, 0,1,4)
 
         self.calibrate_pressure_button = QtWidgets.QPushButton("Calibrate Printer head")
         self.calibrate_pressure_button.clicked.connect(self.calibrate_pressure)
@@ -1361,6 +1359,10 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             )
             self.layout.addWidget(self.refuel_pulse_width_label,5,2,1,1)
             self.layout.addWidget(self.refuel_pulse_width_spinbox,5,3,1,1)
+
+        frequency_row = 5 if self.legacy_mode else 6
+        self.layout.addWidget(self.print_frequency_label, frequency_row, 2, 1, 1)
+        self.layout.addWidget(self.print_frequency_spinbox, frequency_row, 3, 1, 1)
 
 
         self.model.machine_model.pressure_updated.connect(self.update_pressure)
@@ -1465,7 +1467,6 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.current_print_pressure_value.setText(f"{print_log[-1]:.3f}")
         if not self.legacy_mode:
             self.current_refuel_pressure_value.setText(f"{refuel_log[-1]:.3f}")
-        self.update_printing_controls()
 
     def request_toggle_regulation(self):
         """Emit a signal to request toggling the motors."""
