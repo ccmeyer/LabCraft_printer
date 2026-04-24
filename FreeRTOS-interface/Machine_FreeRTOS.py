@@ -1958,6 +1958,7 @@ class Machine(QObject):
         self._pause_after_ack_timeout_ms = 1000
         self._pause_after_confirm_timeout_ms = 2500
         self._pending_pause_after_requests = {}
+        self._pending_clear_request = None
 
         self._connection_attempts = 0
         self._tx_mutex = QMutex()
@@ -2269,6 +2270,7 @@ class Machine(QObject):
                 pass
         self._pending_acks.clear()
         self._cancel_pending_pause_after_requests()
+        self._pending_clear_request = None
 
     def _cleanup_timer(self, timer):
         if timer is None:
@@ -2294,6 +2296,23 @@ class Machine(QObject):
         for seq32 in list(self._pending_pause_after_requests.keys()):
             self._clear_pause_after_request(seq32)
 
+    def _complete_pending_clear_request(self, *, status_confirmed, status_timed_out):
+        request = self._pending_clear_request
+        self._pending_clear_request = None
+        if request is None:
+            return
+
+        payload = {
+            "ack_received": bool(request.get("ack_received", False)),
+            "ack_timed_out": bool(request.get("ack_timed_out", False)),
+            "status_confirmed": bool(status_confirmed),
+            "status_timed_out": bool(status_timed_out),
+        }
+
+        handler = request.get("handler")
+        if handler:
+            self._invoke_ack_callback(handler, payload)
+
     def _reset_session_state_for_recovery(self):
         self.command_queue.clear_queue(reset_counter=True)
         self.sent_command = None
@@ -2305,6 +2324,7 @@ class Machine(QObject):
         self._tx_paused = True
         self._sequence_pause = False
         self._waiting_for_post_clear_status = False
+        self._pending_clear_request = None
         self._goodbye_seq32 = None
         if getattr(self, 'execution_timer', None):
             try:
@@ -2888,12 +2908,20 @@ class Machine(QObject):
                     self._tx_paused = False
                     self.begin_execution_timer()
                     self.pump_send_queue()
+                    self._complete_pending_clear_request(
+                        status_confirmed=True,
+                        status_timed_out=False,
+                    )
                 elif time.time() > getattr(self, "_wait_for_clear_status_deadline", 0):
                     # fallback: don’t block forever
                     self._waiting_for_post_clear_status = False
                     self._tx_paused = False
                     self.begin_execution_timer()
                     self.pump_send_queue()
+                    self._complete_pending_clear_request(
+                        status_confirmed=False,
+                        status_timed_out=True,
+                    )
             self.status_updated.emit(data)
         else:
             print(f"Received non-dict status data: {data}")
@@ -3294,30 +3322,41 @@ class Machine(QObject):
         seq = self._alloc_ctl_seq32()
         frame = build_frame(CLEAR_QUEUE, seq)
         self._write_frame(frame)
+        self._pending_clear_request = {
+            "handler": handler,
+            "ack_received": False,
+            "ack_timed_out": False,
+        }
 
         self._start_ack_wait(
             CLEAR_ACK, seq, 2000,
-            on_ok=lambda: self._on_clear_ack(handler, timed_out=False),
-            on_timeout=lambda: self._on_clear_ack(handler, timed_out=True)
+            on_ok=lambda: self._on_clear_ack(timed_out=False),
+            on_timeout=lambda: self._on_clear_ack(timed_out=True)
         )        
 
     def set_sequence_pause(self, paused: bool):
         self._sequence_pause = bool(paused)
 
-    def _on_clear_ack(self, handler=None, timed_out=False):
+    def _on_clear_ack(self, timed_out=False):
+        if self._pending_clear_request is None:
+            self._pending_clear_request = {
+                "handler": None,
+                "ack_received": False,
+                "ack_timed_out": False,
+            }
+
         if timed_out:
             print("No CLEAR_ACK received, proceeding anyway.")
+            self._pending_clear_request["ack_timed_out"] = True
         else:
             print("CLEAR_ACK received, command queue cleared.")
+            self._pending_clear_request["ack_received"] = True
 
         # Clear Python side queue & notify UI
         self.command_queue.clear_queue(reset_counter=False)
 
         self._wait_for_clear_status_deadline = time.time() + 0.5  # 500 ms fallback
         self._waiting_for_post_clear_status = True
-
-        if handler:
-            self._invoke_ack_callback(handler, {"timed_out": bool(timed_out)})
 
         # self.begin_execution_timer()
 

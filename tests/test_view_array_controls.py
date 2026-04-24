@@ -131,3 +131,25 @@ def test_command_queue_widget_accepted_rows_use_darker_gray(qapp):
     widget = CommandQueueWidget(main_window, machine)
 
     assert widget.table.item(0, 0).background().color().name().lower() == "#444444"
+
+
+def test_command_queue_widget_canceled_rows_fall_back_to_dark_red_when_mid_red_missing(qapp):
+    command_queue = SimpleNamespace(
+        queue=[DummyCommand(13, "MOVE", "Canceled")],
+        completed=[],
+        queue_updated=DummySignal(),
+    )
+    machine = SimpleNamespace(command_queue=command_queue)
+    main_window = SimpleNamespace(
+        color_dict={
+            "darker_gray": "#111111",
+            "mid_gray": "#777777",
+            "dark_gray": "#444444",
+            "light_gray": "#dddddd",
+            "dark_red": "#880000",
+        }
+    )
+
+    widget = CommandQueueWidget(main_window, machine)
+
+    assert widget.table.item(0, 0).background().color().name().lower() == "#880000"

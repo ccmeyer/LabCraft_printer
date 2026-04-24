@@ -4687,17 +4687,24 @@ class CommandQueueWidget(QGroupBox):
 
             # Set the row color based on the command status
             if command.status == "Added":
-                self.set_row_color(row_position, self.color_dict['darker_gray'])  # Dark grey
+                self.set_row_color(row_position, self._queue_color("darker_gray", "dark_gray", default="#2c2c2c"))
             elif command.status == "Sent":
-                self.set_row_color(row_position, self.color_dict['mid_gray'])  # Light grey
+                self.set_row_color(row_position, self._queue_color("mid_gray", "light_gray", default="#6e6e6e"))
             elif command.status == "Accepted":
-                self.set_row_color(row_position, self.color_dict['dark_gray'])
+                self.set_row_color(row_position, self._queue_color("dark_gray", "mid_gray", default="#4d4d4d"))
             elif command.status == "Executing":
-                self.set_row_color(row_position, self.color_dict['dark_red'])  # Red
+                self.set_row_color(row_position, self._queue_color("dark_red", default="#8a0303"))
             elif command.status == "Completed":
-                self.set_row_color(row_position, self.color_dict['darker_gray'])  # Black
+                self.set_row_color(row_position, self._queue_color("darker_gray", "dark_gray", default="#2c2c2c"))
             elif command.status == "Canceled":
-                self.set_row_color(row_position, self.color_dict['mid_red'])
+                self.set_row_color(row_position, self._queue_color("mid_red", "dark_red", default="#8a0303"))
+
+    def _queue_color(self, *names, default):
+        for name in names:
+            color = self.color_dict.get(name)
+            if color:
+                return color
+        return default
 
     def set_row_color(self, row, color):
         """Set the background color for a row."""

@@ -506,12 +506,30 @@ class Controller(QObject):
             return
 
         clear_result = dict(clear_result or {})
+        print(f"Soft stop clear completion: {clear_result}")
         context["soft_stop_pending"] = False
 
-        if bool(clear_result.get("timed_out")):
+        if not bool(clear_result.get("status_confirmed")):
             context["soft_stop_phase"] = "done"
+            ack_received = bool(clear_result.get("ack_received"))
+            ack_timed_out = bool(clear_result.get("ack_timed_out"))
+            if ack_received:
+                warning = (
+                    "Soft stop reached the watermark and received CLEAR_ACK, but the queue clear was not confirmed within the grace window. "
+                    "Preserving resume state without parking."
+                )
+            elif ack_timed_out:
+                warning = (
+                    "Soft stop reached the watermark, but the queue clear was not confirmed within the grace window after CLEAR_ACK timed out. "
+                    "Preserving resume state without parking."
+                )
+            else:
+                warning = (
+                    "Soft stop reached the watermark, but the queue clear was not confirmed within the grace window. "
+                    "Preserving resume state without parking."
+                )
             self._warn_soft_stop_post_watermark(
-                "Soft stop reached the watermark, but the queue clear was not confirmed. Preserving resume state without parking."
+                warning
             )
             self._complete_array_finalize("soft_stop")
             return

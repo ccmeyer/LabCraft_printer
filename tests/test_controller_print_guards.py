@@ -487,7 +487,14 @@ def test_handle_status_update_soft_stop_clear_and_park_completes_before_resume_r
     c.model.machine_model.pause_watermark_reached = True
     c.model.machine_model.transport_paused = True
     c.move_to_location = Mock(side_effect=_parking_move_side_effect)
-    c.machine.clear_command_queue.side_effect = lambda handler=None: handler({"timed_out": False})
+    c.machine.clear_command_queue.side_effect = lambda handler=None: handler(
+        {
+            "ack_received": False,
+            "ack_timed_out": True,
+            "status_confirmed": True,
+            "status_timed_out": False,
+        }
+    )
 
     Controller.handle_status_update(c, {"Pause_watermark_reached": 1, "Transport_paused": 1})
 
@@ -499,9 +506,10 @@ def test_handle_status_update_soft_stop_clear_and_park_completes_before_resume_r
     assert c.move_to_location.call_args_list[1].kwargs["z_offset"] == -5000
     assert c.get_array_run_state() == "resume_ready"
     assert c.update_slots_signal.calls == [()]
+    assert c.error_occurred_signal.calls == []
 
 
-def test_soft_stop_clear_timeout_warns_and_preserves_resume_ready():
+def test_soft_stop_clear_unconfirmed_warns_and_preserves_resume_ready():
     c = _make_controller(
         well_plate=FakeWellPlate([FakeWell("A1", 5)]),
         printer_head=_make_printer_head(),
@@ -510,7 +518,14 @@ def test_soft_stop_clear_timeout_warns_and_preserves_resume_ready():
     c._array_context = {"soft_stop_pending": True, "soft_stop_phase": "waiting_watermark"}
     c.model.machine_model.pause_watermark_reached = True
     c.model.machine_model.transport_paused = True
-    c.machine.clear_command_queue.side_effect = lambda handler=None: handler({"timed_out": True})
+    c.machine.clear_command_queue.side_effect = lambda handler=None: handler(
+        {
+            "ack_received": False,
+            "ack_timed_out": True,
+            "status_confirmed": False,
+            "status_timed_out": True,
+        }
+    )
 
     Controller.handle_status_update(c, {"Pause_watermark_reached": 1, "Transport_paused": 1})
 
@@ -520,7 +535,7 @@ def test_soft_stop_clear_timeout_warns_and_preserves_resume_ready():
     assert c.get_array_run_state() == "resume_ready"
     assert c.error_occurred_signal.calls[-1] == (
         "Soft Stop Warning",
-        "Soft stop reached the watermark, but the queue clear was not confirmed. Preserving resume state without parking.",
+        "Soft stop reached the watermark, but the queue clear was not confirmed within the grace window after CLEAR_ACK timed out. Preserving resume state without parking.",
     )
 
 
@@ -533,7 +548,14 @@ def test_soft_stop_park_failure_warns_and_preserves_resume_ready():
     c._array_context = {"soft_stop_pending": True, "soft_stop_phase": "waiting_watermark"}
     c.model.machine_model.pause_watermark_reached = True
     c.model.machine_model.transport_paused = True
-    c.machine.clear_command_queue.side_effect = lambda handler=None: handler({"timed_out": False})
+    c.machine.clear_command_queue.side_effect = lambda handler=None: handler(
+        {
+            "ack_received": True,
+            "ack_timed_out": False,
+            "status_confirmed": True,
+            "status_timed_out": False,
+        }
+    )
     c.move_to_location = Mock(return_value=False)
 
     Controller.handle_status_update(c, {"Pause_watermark_reached": 1, "Transport_paused": 1})

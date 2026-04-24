@@ -1,6 +1,8 @@
+import time
 from types import SimpleNamespace
 
 from Machine_FreeRTOS import Machine
+
 
 def test_clear_queue_timeout_keeps_tx_blocked_until_clear_status(qapp, test_profile, fake_serial_main):
     machine = Machine(SimpleNamespace(), profile=test_profile)
@@ -28,14 +30,90 @@ def test_clear_queue_timeout_keeps_tx_blocked_until_clear_status(qapp, test_prof
     assert machine._tx_paused is False
 
 
-def test_clear_queue_handler_receives_timeout_payload(qapp, test_profile, fake_serial_main):
+def test_clear_queue_handler_fires_after_status_confirmation(qapp, test_profile, fake_serial_main):
     machine = Machine(SimpleNamespace(), profile=test_profile)
     machine.ser = fake_serial_main
     payloads = []
 
-    machine._on_clear_ack(handler=lambda payload: payloads.append(dict(payload or {})), timed_out=True)
+    machine.clear_command_queue(handler=lambda payload: payloads.append(dict(payload or {})))
+    machine._on_clear_ack(timed_out=False)
 
-    assert payloads == [{"timed_out": True}]
+    assert payloads == []
+
+    machine.update_status(
+        {
+            "cmd_depth": 0,
+            "Current_command": 9,
+            "Last_completed": 8,
+            "Last_retired": 9,
+        }
+    )
+
+    assert payloads == [
+        {
+            "ack_received": True,
+            "ack_timed_out": False,
+            "status_confirmed": True,
+            "status_timed_out": False,
+        }
+    ]
+
+
+def test_clear_queue_handler_reports_late_status_confirmation_after_ack_timeout(qapp, test_profile, fake_serial_main):
+    machine = Machine(SimpleNamespace(), profile=test_profile)
+    machine.ser = fake_serial_main
+    payloads = []
+
+    machine.clear_command_queue(handler=lambda payload: payloads.append(dict(payload or {})))
+    machine._on_clear_ack(timed_out=True)
+
+    assert payloads == []
+
+    machine.update_status(
+        {
+            "cmd_depth": 0,
+            "Current_command": 9,
+            "Last_completed": 8,
+            "Last_retired": 9,
+        }
+    )
+
+    assert payloads == [
+        {
+            "ack_received": False,
+            "ack_timed_out": True,
+            "status_confirmed": True,
+            "status_timed_out": False,
+        }
+    ]
+
+
+def test_clear_queue_handler_reports_unconfirmed_clear_after_status_timeout(qapp, test_profile, fake_serial_main):
+    machine = Machine(SimpleNamespace(), profile=test_profile)
+    machine.ser = fake_serial_main
+    payloads = []
+
+    machine.clear_command_queue(handler=lambda payload: payloads.append(dict(payload or {})))
+    machine._on_clear_ack(timed_out=True)
+    machine._wait_for_clear_status_deadline = time.time() - 1
+
+    machine.update_status(
+        {
+            "cmd_depth": 1,
+            "Current_command": 9,
+            "Last_completed": 8,
+            "Last_retired": 9,
+        }
+    )
+
+    assert payloads == [
+        {
+            "ack_received": False,
+            "ack_timed_out": True,
+            "status_confirmed": False,
+            "status_timed_out": True,
+        }
+    ]
 
 
 def test_global_accel_helpers_fail_fast_with_clear_error(qapp, test_profile, fake_serial_main):
