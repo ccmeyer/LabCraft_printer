@@ -1245,6 +1245,7 @@ def test_online_stream_analyze_flow_frame_appends_measurement_for_accepted_frame
                 "silhouette_status": "ok",
                 "failure_reason": None,
                 "attached_width_px": 91.5,
+                "attached_width_mode": "lower_consistent_window",
                 "visible_volume_nl": 12.3,
                 "attached_bottom_clearance_px": 150,
                 "min_accepted_fluid_distance_from_bottom_px": 150,
@@ -1350,6 +1351,7 @@ def test_online_stream_analyze_flow_frame_records_geometry_rejected_frame_withou
                 "silhouette_status": "ok",
                 "failure_reason": None,
                 "attached_width_px": 91.5,
+                "attached_width_mode": "lower_consistent_window",
                 "visible_volume_nl": 12.3,
                 "attached_bottom_clearance_px": 150,
                 "min_accepted_fluid_distance_from_bottom_px": 150,
@@ -1360,6 +1362,14 @@ def test_online_stream_analyze_flow_frame_records_geometry_rejected_frame_withou
                 "late_frame_warning": False,
                 "warnings": ["flow_volume_geometry_not_ok"],
                 "attached_bottom_guard_hit": False,
+                "root_band_width_px": 134.0,
+                "root_band_width_iqr_px": 28.0,
+                "root_band_half_delta_px": 24.0,
+                "selected_band_y0_px": 164,
+                "selected_band_y1_px": 204,
+                "selected_band_valid_row_count": 40,
+                "spread_fallback_triggered": True,
+                "candidate_window_count": 4,
             },
             "overlay": None,
         },
@@ -1375,6 +1385,11 @@ def test_online_stream_analyze_flow_frame_records_geometry_rejected_frame_withou
     assert payload["flow_volume_geometry_ok"] is False
     assert payload["flow_measurement_usable"] is False
     assert payload["attached_lower_centerline_span_px"] == 86.0
+    assert payload["attached_width_mode"] == "lower_consistent_window"
+    assert payload["root_band_width_px"] == 134.0
+    assert payload["selected_band_y0_px"] == 164
+    assert payload["selected_band_y1_px"] == 204
+    assert payload["spread_fallback_triggered"] is True
 
 
 def test_online_stream_debug_signal_emits_provisional_flow_point_and_fit(tmp_path):

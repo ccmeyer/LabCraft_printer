@@ -76,6 +76,23 @@ def _edge_rows_from_centerline(*, y_start: int, y_end: int, center_fn, half_widt
     return rows
 
 
+def _edge_rows_from_width_fn(*, y_start: int, y_end: int, width_fn, center_x_px: float = 110.0):
+    rows = []
+    for y_px in range(y_start, y_end):
+        width_px = float(width_fn(y_px))
+        half_width = float(width_px) / 2.0
+        rows.append(
+            {
+                "y_px": int(y_px),
+                "x_left_px": float(center_x_px - half_width),
+                "x_right_px": float(center_x_px + half_width),
+                "width_px": float(width_px),
+                "center_x_px": float(center_x_px),
+            }
+        )
+    return rows
+
+
 def _component_from_mask(mask: np.ndarray, *, component_id: str, anchor_center_x_px: float):
     edge_rows = []
     occupied_rows = np.flatnonzero(np.any(mask > 0, axis=1))
@@ -389,6 +406,110 @@ def test_attached_near_nozzle_breakup_detects_short_stub_only_when_continuity_is
     )
     assert preserved["attached_near_nozzle_breakup_detected"] is False
     assert preserved["attached_band_extension_px"] == 47
+
+
+def test_band_width_metrics_uses_lower_consistent_window_for_spread_heavy_root_band():
+    config = mod._resolved_analysis_config(None)
+    edge_rows = []
+    edge_rows.extend(_edge_rows_from_width_fn(y_start=84, y_end=104, width_fn=lambda y: 118.0))
+    edge_rows.extend(_edge_rows_from_width_fn(y_start=104, y_end=124, width_fn=lambda y: 78.0))
+    edge_rows.extend(_edge_rows_from_width_fn(y_start=124, y_end=164, width_fn=lambda y: 88.0))
+    edge_rows.extend(_edge_rows_from_width_fn(y_start=164, y_end=184, width_fn=lambda y: 42.0))
+    edge_rows.extend(_edge_rows_from_width_fn(y_start=184, y_end=224, width_fn=lambda y: 40.0))
+
+    metrics = mod._band_width_metrics(
+        {"tracked_nozzle_y_px": 60.0},
+        edge_rows,
+        near_nozzle_band_top_px=int(config["near_nozzle_band_top_px"]),
+        near_nozzle_band_height_px=int(config["near_nozzle_band_height_px"]),
+        min_band_valid_rows=int(config["min_band_valid_rows"]),
+    )
+
+    assert metrics["attached_width_mode"] == "lower_consistent_window"
+    assert metrics["spread_fallback_triggered"] is True
+    assert metrics["attached_width_px"] == pytest.approx(41.0)
+    assert metrics["root_band_width_px"] == pytest.approx(98.0)
+    assert metrics["root_band_width_iqr_px"] == pytest.approx(40.0)
+    assert metrics["root_band_half_delta_px"] == pytest.approx(40.0)
+    assert metrics["selected_band_y0_px"] == 164
+    assert metrics["selected_band_y1_px"] == 204
+    assert metrics["selected_band_valid_row_count"] == 40
+    assert metrics["candidate_window_count"] >= 4
+
+
+def test_band_width_metrics_keeps_root_band_for_normal_stream():
+    config = mod._resolved_analysis_config(None)
+    edge_rows = _edge_rows_from_width_fn(
+        y_start=84,
+        y_end=224,
+        width_fn=lambda y: 66.0,
+    )
+
+    metrics = mod._band_width_metrics(
+        {"tracked_nozzle_y_px": 60.0},
+        edge_rows,
+        near_nozzle_band_top_px=int(config["near_nozzle_band_top_px"]),
+        near_nozzle_band_height_px=int(config["near_nozzle_band_height_px"]),
+        min_band_valid_rows=int(config["min_band_valid_rows"]),
+    )
+
+    assert metrics["attached_width_mode"] == "root_band"
+    assert metrics["spread_fallback_triggered"] is False
+    assert metrics["attached_width_px"] == pytest.approx(66.0)
+    assert metrics["selected_band_y0_px"] == 84
+    assert metrics["selected_band_y1_px"] == 124
+    assert metrics["candidate_window_count"] == 0
+
+
+def test_band_width_metrics_keeps_root_band_for_normal_taper():
+    config = mod._resolved_analysis_config(None)
+    edge_rows = []
+    edge_rows.extend(_edge_rows_from_width_fn(y_start=84, y_end=104, width_fn=lambda y: 82.0))
+    edge_rows.extend(_edge_rows_from_width_fn(y_start=104, y_end=124, width_fn=lambda y: 72.0))
+    edge_rows.extend(_edge_rows_from_width_fn(y_start=124, y_end=224, width_fn=lambda y: 58.0))
+
+    metrics = mod._band_width_metrics(
+        {"tracked_nozzle_y_px": 60.0},
+        edge_rows,
+        near_nozzle_band_top_px=int(config["near_nozzle_band_top_px"]),
+        near_nozzle_band_height_px=int(config["near_nozzle_band_height_px"]),
+        min_band_valid_rows=int(config["min_band_valid_rows"]),
+    )
+
+    assert metrics["attached_width_mode"] == "root_band"
+    assert metrics["spread_fallback_triggered"] is False
+    assert metrics["attached_width_px"] == pytest.approx(77.0)
+    assert metrics["root_band_width_iqr_px"] == pytest.approx(10.0)
+    assert metrics["root_band_half_delta_px"] == pytest.approx(10.0)
+
+
+def test_band_width_metrics_keeps_root_band_when_no_trustworthy_lower_candidate_exists():
+    config = mod._resolved_analysis_config(None)
+    edge_rows = []
+    edge_rows.extend(_edge_rows_from_width_fn(y_start=84, y_end=104, width_fn=lambda y: 118.0))
+    edge_rows.extend(_edge_rows_from_width_fn(y_start=104, y_end=124, width_fn=lambda y: 78.0))
+    edge_rows.extend(_edge_rows_from_width_fn(y_start=124, y_end=164, width_fn=lambda y: 88.0))
+    edge_rows.extend(
+        _edge_rows_from_width_fn(
+            y_start=164,
+            y_end=204,
+            width_fn=lambda y: 10.0 if (int(y) % 2 == 0) else 70.0,
+        )
+    )
+    edge_rows.extend(_edge_rows_from_width_fn(y_start=204, y_end=244, width_fn=lambda y: 38.0))
+
+    metrics = mod._band_width_metrics(
+        {"tracked_nozzle_y_px": 60.0},
+        edge_rows,
+        near_nozzle_band_top_px=int(config["near_nozzle_band_top_px"]),
+        near_nozzle_band_height_px=int(config["near_nozzle_band_height_px"]),
+        min_band_valid_rows=int(config["min_band_valid_rows"]),
+    )
+
+    assert metrics["attached_width_mode"] == "root_band"
+    assert metrics["spread_fallback_triggered"] is False
+    assert metrics["attached_width_px"] == pytest.approx(98.0)
+    assert metrics["candidate_window_count"] >= 4
 
 
 def test_analyze_online_stream_frame_rejects_short_attached_stub_with_multiple_detached_components(monkeypatch):

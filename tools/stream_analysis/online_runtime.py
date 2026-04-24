@@ -12,6 +12,15 @@ _ROI_WIDTH_FRAC = 0.35
 _ROI_TOP_FRAC = 0.10
 _ROI_BOTTOM_FRAC = 1.0
 _CORRIDOR_WIDTH_FRAC = 0.70
+_WIDTH_ROOT_IQR_MIN_PX = 12.0
+_WIDTH_ROOT_IQR_FRAC = 0.10
+_WIDTH_ROOT_HALF_DELTA_MIN_PX = 16.0
+_WIDTH_ROOT_HALF_DELTA_FRAC = 0.12
+_WIDTH_CANDIDATE_IQR_MIN_PX = 8.0
+_WIDTH_CANDIDATE_IQR_FRAC = 0.08
+_WIDTH_CANDIDATE_NARROWER_MIN_PX = 18.0
+_WIDTH_CANDIDATE_NARROWER_FRAC = 0.15
+_WIDTH_MAX_CANDIDATE_START_DELTA_PX = 100
 
 
 def _resolved_analysis_config(config: dict | None = None) -> dict:
@@ -72,36 +81,169 @@ def _band_width_metrics(
     near_nozzle_band_height_px: int,
     min_band_valid_rows: int,
 ) -> dict:
-    tracked_nozzle_y_px = stage3_metric_row.get("tracked_nozzle_y_px")
-    if tracked_nozzle_y_px is None:
+    def _empty_metrics(*, tracked_nozzle_y_px=None):
+        root_band_y0_px = None
+        root_band_y1_px = None
+        if tracked_nozzle_y_px is not None:
+            root_band_y0_px = int(
+                np.floor(float(tracked_nozzle_y_px) + float(near_nozzle_band_top_px))
+            )
+            root_band_y1_px = int(root_band_y0_px + int(near_nozzle_band_height_px))
         return {
             "attached_width_px": None,
             "width_valid_row_count": 0,
-            "band_y0_px": None,
-            "band_y1_px": None,
+            "band_y0_px": root_band_y0_px,
+            "band_y1_px": root_band_y1_px,
+            "attached_width_mode": "root_band",
+            "spread_fallback_triggered": False,
+            "candidate_window_count": 0,
+            "root_band_width_px": None,
+            "root_band_width_iqr_px": None,
+            "root_band_half_delta_px": None,
+            "root_band_y0_px": root_band_y0_px,
+            "root_band_y1_px": root_band_y1_px,
+            "selected_band_y0_px": root_band_y0_px,
+            "selected_band_y1_px": root_band_y1_px,
+            "selected_band_valid_row_count": 0,
         }
 
-    band_y0_px = int(np.floor(float(tracked_nozzle_y_px) + float(near_nozzle_band_top_px)))
-    band_y1_px = int(band_y0_px + int(near_nozzle_band_height_px))
-    widths = [
-        int(row["width_px"])
-        for row in list(attached_edge_rows or [])
-        if band_y0_px <= int(row["y_px"]) < band_y1_px
-    ]
-    valid_row_count = int(len(widths))
-    if valid_row_count < int(min_band_valid_rows):
+    def _window_stats(width_rows: list[dict], *, y0_px: int, y1_px: int) -> dict:
+        rows = [
+            {"y_px": int(row["y_px"]), "width_px": float(row["width_px"])}
+            for row in list(width_rows or [])
+            if y0_px <= int(row["y_px"]) < y1_px
+        ]
+        rows.sort(key=lambda row: int(row["y_px"]))
+        valid_row_count = int(len(rows))
+        if valid_row_count <= 0:
+            return {
+                "y0_px": int(y0_px),
+                "y1_px": int(y1_px),
+                "valid_row_count": 0,
+                "median_width_px": None,
+                "iqr_px": None,
+                "min_width_px": None,
+                "max_width_px": None,
+                "top_half_median_width_px": None,
+                "bottom_half_median_width_px": None,
+                "half_delta_px": None,
+            }
+        widths = np.asarray([float(row["width_px"]) for row in rows], dtype=float)
+        split_count = int(max(1, valid_row_count // 2))
+        top_widths = widths[:split_count]
+        bottom_widths = widths[-split_count:]
         return {
-            "attached_width_px": None,
-            "width_valid_row_count": valid_row_count,
-            "band_y0_px": band_y0_px,
-            "band_y1_px": band_y1_px,
+            "y0_px": int(y0_px),
+            "y1_px": int(y1_px),
+            "valid_row_count": valid_row_count,
+            "median_width_px": float(np.median(widths)),
+            "iqr_px": float(np.percentile(widths, 75) - np.percentile(widths, 25)),
+            "min_width_px": float(np.min(widths)),
+            "max_width_px": float(np.max(widths)),
+            "top_half_median_width_px": float(np.median(top_widths)),
+            "bottom_half_median_width_px": float(np.median(bottom_widths)),
+            "half_delta_px": float(abs(np.median(top_widths) - np.median(bottom_widths))),
         }
+
+    tracked_nozzle_y_px = stage3_metric_row.get("tracked_nozzle_y_px")
+    if tracked_nozzle_y_px is None:
+        return _empty_metrics()
+
+    root_band_y0_px = int(
+        np.floor(float(tracked_nozzle_y_px) + float(near_nozzle_band_top_px))
+    )
+    root_band_y1_px = int(root_band_y0_px + int(near_nozzle_band_height_px))
+    width_rows = [
+        {"y_px": int(row["y_px"]), "width_px": float(row["width_px"])}
+        for row in list(attached_edge_rows or [])
+        if row.get("y_px") is not None and row.get("width_px") is not None
+    ]
+    root_stats = _window_stats(width_rows, y0_px=root_band_y0_px, y1_px=root_band_y1_px)
+    selected_stats = dict(root_stats)
+    attached_width_mode = "root_band"
+    spread_fallback_triggered = False
+    candidate_window_count = 0
+
+    if int(root_stats.get("valid_row_count") or 0) < int(min_band_valid_rows):
+        metrics = _empty_metrics(tracked_nozzle_y_px=tracked_nozzle_y_px)
+        metrics.update(
+            {
+                "width_valid_row_count": int(root_stats.get("valid_row_count") or 0),
+                "selected_band_valid_row_count": int(root_stats.get("valid_row_count") or 0),
+                "root_band_width_px": root_stats.get("median_width_px"),
+                "root_band_width_iqr_px": root_stats.get("iqr_px"),
+                "root_band_half_delta_px": root_stats.get("half_delta_px"),
+            }
+        )
+        return metrics
+
+    root_band_width_px = root_stats.get("median_width_px")
+    root_band_width_iqr_px = root_stats.get("iqr_px")
+    root_band_half_delta_px = root_stats.get("half_delta_px")
+    root_clearly_uneven = bool(
+        root_band_width_px is not None
+        and root_band_width_iqr_px is not None
+        and root_band_half_delta_px is not None
+        and float(root_band_width_iqr_px)
+        >= max(_WIDTH_ROOT_IQR_MIN_PX, _WIDTH_ROOT_IQR_FRAC * float(root_band_width_px))
+        and float(root_band_half_delta_px)
+        >= max(
+            _WIDTH_ROOT_HALF_DELTA_MIN_PX,
+            _WIDTH_ROOT_HALF_DELTA_FRAC * float(root_band_width_px),
+        )
+    )
+    if root_clearly_uneven:
+        candidate_step_px = int(max(1, int(near_nozzle_band_height_px) // 2))
+        max_candidate_start_px = int(root_band_y0_px + int(_WIDTH_MAX_CANDIDATE_START_DELTA_PX))
+        for candidate_y0_px in range(
+            int(root_band_y0_px) + int(candidate_step_px),
+            int(max_candidate_start_px) + 1,
+            int(candidate_step_px),
+        ):
+            candidate_y1_px = int(candidate_y0_px + int(near_nozzle_band_height_px))
+            candidate_stats = _window_stats(
+                width_rows,
+                y0_px=int(candidate_y0_px),
+                y1_px=int(candidate_y1_px),
+            )
+            if int(candidate_stats.get("valid_row_count") or 0) < int(min_band_valid_rows):
+                continue
+            candidate_window_count += 1
+            candidate_width_px = candidate_stats.get("median_width_px")
+            candidate_iqr_px = candidate_stats.get("iqr_px")
+            if candidate_width_px is None or candidate_iqr_px is None:
+                continue
+            if float(candidate_iqr_px) > max(
+                _WIDTH_CANDIDATE_IQR_MIN_PX,
+                _WIDTH_CANDIDATE_IQR_FRAC * float(candidate_width_px),
+            ):
+                continue
+            if float(candidate_width_px) > float(root_band_width_px) - max(
+                _WIDTH_CANDIDATE_NARROWER_MIN_PX,
+                _WIDTH_CANDIDATE_NARROWER_FRAC * float(root_band_width_px),
+            ):
+                continue
+            selected_stats = dict(candidate_stats)
+            attached_width_mode = "lower_consistent_window"
+            spread_fallback_triggered = True
+            break
 
     return {
-        "attached_width_px": float(np.median(np.asarray(widths, dtype=float))),
-        "width_valid_row_count": valid_row_count,
-        "band_y0_px": band_y0_px,
-        "band_y1_px": band_y1_px,
+        "attached_width_px": selected_stats.get("median_width_px"),
+        "width_valid_row_count": int(selected_stats.get("valid_row_count") or 0),
+        "band_y0_px": int(selected_stats.get("y0_px") or root_band_y0_px),
+        "band_y1_px": int(selected_stats.get("y1_px") or root_band_y1_px),
+        "attached_width_mode": attached_width_mode,
+        "spread_fallback_triggered": bool(spread_fallback_triggered),
+        "candidate_window_count": int(candidate_window_count),
+        "root_band_width_px": root_band_width_px,
+        "root_band_width_iqr_px": root_band_width_iqr_px,
+        "root_band_half_delta_px": root_band_half_delta_px,
+        "root_band_y0_px": int(root_band_y0_px),
+        "root_band_y1_px": int(root_band_y1_px),
+        "selected_band_y0_px": int(selected_stats.get("y0_px") or root_band_y0_px),
+        "selected_band_y1_px": int(selected_stats.get("y1_px") or root_band_y1_px),
+        "selected_band_valid_row_count": int(selected_stats.get("valid_row_count") or 0),
     }
 
 
@@ -156,7 +298,7 @@ def _attached_near_nozzle_breakup(
     )
     extension_px = _attached_component_extension_below_band(
         attached_component_row,
-        band_y1_px=width_metrics.get("band_y1_px"),
+        band_y1_px=width_metrics.get("root_band_y1_px", width_metrics.get("band_y1_px")),
     )
     detected = bool(
         extension_px is not None
@@ -1374,6 +1516,7 @@ def analyze_online_stream_frame(
         "silhouette_status": stage3_metric_row.get("silhouette_status"),
         "failure_reason": failure_reason,
         "attached_width_px": attached_width_px,
+        "attached_width_mode": width_metrics.get("attached_width_mode"),
         "visible_volume_nl": visible_volume_nl,
         "attached_bottom_clearance_px": attached_bottom_clearance_px,
         "min_accepted_fluid_distance_from_bottom_px": frame_metric_row.get(
@@ -1446,6 +1589,14 @@ def analyze_online_stream_frame(
         "selected_component_top_y_px": selected_component_top_y_px,
         "cutoff_y_px": cutoff_y_px,
         "width_valid_row_count": width_metrics.get("width_valid_row_count"),
+        "root_band_width_px": width_metrics.get("root_band_width_px"),
+        "root_band_width_iqr_px": width_metrics.get("root_band_width_iqr_px"),
+        "root_band_half_delta_px": width_metrics.get("root_band_half_delta_px"),
+        "selected_band_y0_px": width_metrics.get("selected_band_y0_px"),
+        "selected_band_y1_px": width_metrics.get("selected_band_y1_px"),
+        "selected_band_valid_row_count": width_metrics.get("selected_band_valid_row_count"),
+        "spread_fallback_triggered": bool(width_metrics.get("spread_fallback_triggered")),
+        "candidate_window_count": width_metrics.get("candidate_window_count"),
         "attached_bottom_guard_hit": bool(attached_bottom_guard_hit),
     }
     late_coverage_candidate, late_coverage_metric = online_cal_mod.is_online_stream_flow_late_coverage_candidate(
