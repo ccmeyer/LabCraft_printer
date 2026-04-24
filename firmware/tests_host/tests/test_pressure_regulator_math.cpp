@@ -115,6 +115,12 @@ TEST(PressureRegulatorMath, RecoveryBoostDecayIsLinearAndDeadlineSlipIsNonNegati
     UNSIGNED_LONGS_EQUAL(23u, PressureRegulatorMath::computeDeadlineSlipMs(100u, 123u));
 }
 
+TEST(PressureRegulatorMath, DefaultReadyToleranceIsChannelSpecific) {
+    UNSIGNED_LONGS_EQUAL(4u, PressureRegulatorMath::defaultReadyTolRaw(0u));
+    UNSIGNED_LONGS_EQUAL(8u, PressureRegulatorMath::defaultReadyTolRaw(1u));
+    UNSIGNED_LONGS_EQUAL(8u, PressureRegulatorMath::defaultReadyTolRaw(2u));
+}
+
 TEST(PressureRegulatorMath, RecoveryRequestedHzAppliesDirectionalBoostAndBounds) {
     PressureRegulatorMath::RecoveryState s{};
     s.baseRequestedHz = 1200;

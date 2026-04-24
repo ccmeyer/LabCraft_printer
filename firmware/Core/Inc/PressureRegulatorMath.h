@@ -102,6 +102,7 @@ uint32_t computeRecoveryRequestedHz(const RecoveryState& state);
 uint32_t applyAsymmetricSlew(uint32_t requestedHz,
                              uint32_t lastHz,
                              const SlewConfig& cfg);
+uint16_t defaultReadyTolRaw(uint8_t sensorPort);
 bool shouldExtendRecovery(int32_t errorRaw,
                           int32_t readyTolRaw,
                           uint16_t ticksExtended,

@@ -153,6 +153,10 @@ uint32_t applyAsymmetricSlew(uint32_t requestedHz,
   return requestedHz;
 }
 
+uint16_t defaultReadyTolRaw(uint8_t sensorPort) {
+  return (sensorPort == 0u) ? 4u : 8u;
+}
+
 bool shouldExtendRecovery(int32_t errorRaw,
                           int32_t readyTolRaw,
                           uint16_t ticksExtended,

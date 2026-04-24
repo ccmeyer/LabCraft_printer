@@ -87,6 +87,7 @@ void PressureRegulator::begin(
   _stepping  = false;
   _homing    = false;
   _resetting = false;
+  _readyCfg.readyTolRaw = PressureRegulatorMath::defaultReadyTolRaw(_sensorPort);
   _printTol = _readyCfg.readyTolRaw;
   _doneBit = doneBit;
 
