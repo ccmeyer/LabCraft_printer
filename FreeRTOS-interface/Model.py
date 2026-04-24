@@ -6504,6 +6504,7 @@ class MachineModel(QObject):
         self.print_pulse_width = 0
         self.refuel_pulse_width = 0
         self.dispense_frequency_hz = 20
+        self.reported_dispense_frequency_hz = 20
 
         self.gripper_refresh_period = 0
         self.gripper_pulse_duration = 0
@@ -6845,6 +6846,9 @@ class MachineModel(QObject):
 
     def get_dispense_frequency_hz(self):
         return self.dispense_frequency_hz
+
+    def get_reported_dispense_frequency_hz(self):
+        return self.reported_dispense_frequency_hz
     
     def get_current_p_motor(self):
         return self.current_p
@@ -6863,6 +6867,11 @@ class MachineModel(QObject):
     def update_dispense_frequency_hz(self, hz):
         self.dispense_frequency_hz = max(0, int(hz))
         self.printing_parameters_updated.emit()
+
+    def update_reported_dispense_frequency_hz(self, hz):
+        # Board-reported dispense rate can legitimately lag behind the host-side
+        # session preference until the next DISPENSE command is queued.
+        self.reported_dispense_frequency_hz = max(0, int(hz))
 
     def update_cycle_count(self,cycle_count):
         self.cycle_count = int(cycle_count)
@@ -7427,6 +7436,7 @@ class Model(QObject):
 
     def set_dispense_frequency_hz(self, hz):
         hz = max(1, int(hz))
+        print(f"Print frequency set to {hz} Hz for future dispense commands.")
         self.machine_model.update_dispense_frequency_hz(hz)
         return True
         
@@ -7480,7 +7490,7 @@ class Model(QObject):
         if 'Refuel_width' in status_keys:
             self.machine_model.update_refuel_pulse_width(status_dict['Refuel_width'])
         if 'Disp_freq' in status_keys:
-            self.machine_model.update_dispense_frequency_hz(status_dict['Disp_freq'])
+            self.machine_model.update_reported_dispense_frequency_hz(status_dict['Disp_freq'])
         if 'Micros' in status_keys:
             self.machine_model.update_current_micros(status_dict['Micros'])
         if 'Flashes' in status_keys:

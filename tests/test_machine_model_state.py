@@ -107,3 +107,13 @@ def test_dispense_frequency_defaults_and_updates(qapp):
 
     assert machine_model.get_dispense_frequency_hz() == 10
     assert emissions == [10]
+
+
+def test_reported_dispense_frequency_does_not_overwrite_session_value(qapp):
+    machine_model = MachineModel()
+    machine_model.update_dispense_frequency_hz(10)
+
+    machine_model.update_reported_dispense_frequency_hz(20)
+
+    assert machine_model.get_dispense_frequency_hz() == 10
+    assert machine_model.get_reported_dispense_frequency_hz() == 20

@@ -5,6 +5,7 @@ from Model import Model, MachineModel
 def test_model_update_state_maps_status_fields(qapp):
     model = Model.__new__(Model)
     model.machine_model = MachineModel()
+    model.machine_model.update_dispense_frequency_hz(10)
     model.droplet_camera_model = SimpleNamespace(
         update_num_flashes=lambda *_: None,
         update_flash_duration=lambda *_: None,
@@ -48,7 +49,8 @@ def test_model_update_state_maps_status_fields(qapp):
     assert (mm.target_p, mm.target_r) == (410, 510)
     assert mm.current_command_num == 9
     assert mm.last_completed_command_num == 8
-    assert mm.get_dispense_frequency_hz() == 12
+    assert mm.get_dispense_frequency_hz() == 10
+    assert mm.get_reported_dispense_frequency_hz() == 12
     assert mm.x_max_hz == 1000 and mm.y_max_hz == 1100 and mm.z_max_hz == 1200
     assert mm.x_accel == 10 and mm.y_accel == 11 and mm.z_accel == 12
     assert len(emitted) == 1
