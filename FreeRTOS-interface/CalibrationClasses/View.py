@@ -829,6 +829,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         "machine_position": False,
         "status": True,
     }
+    _STREAM_CAPTURE_READ_CAMERA_DISARM_STATUSES = {
+        "awaiting_mass",
+        "awaiting_mass_entry",
+        "pending_gripper_restore",
+        "restoring_gripper_refresh",
+    }
 
     def __init__(self, main_window, model, controller):
         super().__init__()
@@ -853,7 +859,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.saving_active = False
         self.analysis_active = False
         self.start_droplet_camera()
-        self.controller.start_read_camera()
+        self._read_camera_stream_armed = False
+        self._read_camera_stream_reconciled = False
 
         # Timer for periodic image capture
         self.camera_timer = QTimer(self)
@@ -3300,6 +3307,27 @@ class DropletImagingDialog(QtWidgets.QDialog):
         dialog.raise_()
         dialog.activateWindow()
 
+    def _set_stream_capture_read_camera_enabled(self, enabled: bool):
+        desired_enabled = bool(enabled)
+        if desired_enabled and getattr(self, "_stream_capture_dialog_closing", False):
+            return
+        if (
+            self._read_camera_stream_reconciled
+            and self._read_camera_stream_armed == desired_enabled
+        ):
+            return
+        if desired_enabled:
+            self.controller.start_read_camera()
+        else:
+            self.controller.stop_read_camera()
+        self._read_camera_stream_armed = desired_enabled
+        self._read_camera_stream_reconciled = True
+
+    def _sync_stream_capture_read_camera_state(self, status: str):
+        self._set_stream_capture_read_camera_enabled(
+            str(status or "idle") not in self._STREAM_CAPTURE_READ_CAMERA_DISARM_STATUSES
+        )
+
     def _begin_stream_capture_loading_move(self):
         result = self.controller.begin_stream_gravimetric_capture_loading_move()
         if isinstance(result, tuple) and result and (result[0] is False):
@@ -3320,6 +3348,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         result = self.controller.begin_stream_gravimetric_capture_camera_return()
         if isinstance(result, tuple) and result and (result[0] is False):
             return False
+        self._set_stream_capture_read_camera_enabled(True)
         move_ok = self.controller.move_to_location(
             "camera",
             on_complete=self.controller.on_stream_gravimetric_capture_camera_reached,
@@ -3350,6 +3379,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         state = self._get_stream_capture_state()
         status = str(state.get("status") or "idle")
+        self._sync_stream_capture_read_camera_state(status)
 
         if status == "pending_gripper_refresh":
             if not self._stream_capture_gripper_preamble_attempted:
@@ -5818,7 +5848,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         except Exception:
             pass
         self.stop_droplet_camera()
-        self.controller.stop_read_camera()
+        self._set_stream_capture_read_camera_enabled(False)
         self.controller.disable_print_profile()
         event.accept()
 

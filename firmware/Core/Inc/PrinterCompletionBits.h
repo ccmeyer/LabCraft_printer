@@ -1,0 +1,9 @@
+#ifndef INC_PRINTERCOMPLETIONBITS_H_
+#define INC_PRINTERCOMPLETIONBITS_H_
+
+#include <cstdint>
+
+static constexpr uint32_t PRINTER_COMPLETION_HOST_DONE_BIT = (1u << 6);
+static constexpr uint32_t PRINTER_COMPLETION_FLASH_DONE_BIT = (1u << 16);
+
+#endif // INC_PRINTERCOMPLETIONBITS_H_

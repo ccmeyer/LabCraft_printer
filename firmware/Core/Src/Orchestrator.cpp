@@ -292,7 +292,7 @@ void Orchestrator::pauseCurrent() {
 //  PressureRegulator::regR().pause();
   xEventGroupClearBits(_doneEvents,
       BIT_LED_DONE|BIT_STEPPER1_DONE|BIT_STEPPER2_DONE|
-      BIT_STEPPER3_DONE|BIT_PRINTING_DONE|BIT_GRIPPER_DONE);
+      BIT_STEPPER3_DONE|BIT_PRINTING_DONE|BIT_FLASH_PRINT_DONE|BIT_GRIPPER_DONE);
 }
 
 void Orchestrator::resumeCurrent() {
@@ -507,7 +507,7 @@ void Orchestrator::_run() {
         _pauseRequested = false;
 
         xEventGroupClearBits(_doneEvents,
-            BIT_LED_DONE|BIT_STEPPER1_DONE|BIT_STEPPER2_DONE|BIT_STEPPER3_DONE|BIT_PRINTING_DONE|BIT_GRIPPER_DONE);
+            BIT_LED_DONE|BIT_STEPPER1_DONE|BIT_STEPPER2_DONE|BIT_STEPPER3_DONE|BIT_PRINTING_DONE|BIT_FLASH_PRINT_DONE|BIT_GRIPPER_DONE);
 
         _paused = false;
         _clearRequested = false;
@@ -571,7 +571,7 @@ void Orchestrator::executeCommand(const Command &cmd) {
 
   // clear done‐bits
   xEventGroupClearBits(_doneEvents,
-      BIT_LED_DONE|BIT_STEPPER1_DONE|BIT_STEPPER2_DONE|BIT_STEPPER3_DONE|BIT_PRINTING_DONE|BIT_GRIPPER_DONE|
+      BIT_LED_DONE|BIT_STEPPER1_DONE|BIT_STEPPER2_DONE|BIT_STEPPER3_DONE|BIT_PRINTING_DONE|BIT_FLASH_PRINT_DONE|BIT_GRIPPER_DONE|
 	  BIT_PRESSURE_P_READY | BIT_PRESSURE_R_READY);
 
   switch(cmd.cmd) {
@@ -720,19 +720,19 @@ void Orchestrator::executeCommand(const Command &cmd) {
         }
         case CMD_DISPENSE: {
           // param p1 = pulse width in microseconds, p2 = rate in Hz
-			Printer::instance()->enqueue(cmd.p1, cmd.p2,PulseMode::BOTH);
+			Printer::instance()->enqueue(cmd.p1, cmd.p2, PulseMode::BOTH, BIT_PRINTING_DONE);
 			commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(waitForBit(BIT_PRINTING_DONE));
           break;
         }
         case CMD_DISPENSE_PRINT: {
           // param p1 = pulse width in microseconds, p2 = rate in Hz
-			Printer::instance()->enqueue(cmd.p1, cmd.p2,PulseMode::PRINT_ONLY);
+			Printer::instance()->enqueue(cmd.p1, cmd.p2, PulseMode::PRINT_ONLY, BIT_PRINTING_DONE);
 			commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(waitForBit(BIT_PRINTING_DONE));
           break;
         }
         case CMD_DISPENSE_REFUEL: {
           // param p1 = pulse width in microseconds, p2 = rate in Hz
-			Printer::instance()->enqueue(cmd.p1, cmd.p2,PulseMode::REFUEL_ONLY);
+			Printer::instance()->enqueue(cmd.p1, cmd.p2, PulseMode::REFUEL_ONLY, BIT_PRINTING_DONE);
 			commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(waitForBit(BIT_PRINTING_DONE));
           break;
         }
@@ -1763,7 +1763,7 @@ void Orchestrator::executeCommand(const Command &cmd) {
                             printer->setPrintPulse(secondaryPulseWidthUs);
                           }
                         }
-                        xEventGroupClearBits(_doneEvents, BIT_PRINTING_DONE | ((channel == 0u) ? BIT_PRESSURE_P_READY : BIT_PRESSURE_R_READY));
+                        xEventGroupClearBits(_doneEvents, BIT_PRINTING_DONE | BIT_FLASH_PRINT_DONE | ((channel == 0u) ? BIT_PRESSURE_P_READY : BIT_PRESSURE_R_READY));
                         reg.setTargetSafe(targetRaw);
                         sendProgressStage("trace_wait_ready");
                         const bool readyOk = waitBitsWithTimeout((channel == 0u) ? BIT_PRESSURE_P_READY : BIT_PRESSURE_R_READY, 5000u);
@@ -1782,7 +1782,12 @@ void Orchestrator::executeCommand(const Command &cmd) {
                               sendProgressStage("trace_abort_pre_enqueue");
                             } else {
                               sendProgressStage("trace_enqueue");
-                              queued = printer->enqueueWithTimeout(dropletCount, rateHz, mode, pdMS_TO_TICKS(250));
+                              queued = printer->enqueueWithTimeout(
+                                  dropletCount,
+                                  rateHz,
+                                  mode,
+                                  pdMS_TO_TICKS(250),
+                                  BIT_PRINTING_DONE);
                               if (queued) {
                                 sendProgressStage("trace_wait_done");
                                 printDone = waitBitsWithTimeout(BIT_PRINTING_DONE, 5000u);
@@ -3283,7 +3288,7 @@ void Orchestrator::performShutdown(uint8_t byeSeq8, uint32_t byeSeq32, bool have
   _pauseAfterSeq32 = 0u;
   _pauseWatermarkReached = false;
   xEventGroupClearBits(_doneEvents,
-    BIT_LED_DONE|BIT_STEPPER1_DONE|BIT_STEPPER2_DONE|BIT_STEPPER3_DONE|BIT_PRINTING_DONE|BIT_FLASH_DONE);
+    BIT_LED_DONE|BIT_STEPPER1_DONE|BIT_STEPPER2_DONE|BIT_STEPPER3_DONE|BIT_PRINTING_DONE|BIT_FLASH_PRINT_DONE|BIT_FLASH_DONE);
 
   // 7) UI off (asynchronous; don’t block)
 //  MX_LEDSTRIP_FadeTo(0, 500);
@@ -3704,12 +3709,18 @@ void Orchestrator::_flashTaskLoop() {
     _flashInProgress = true;
     xEventGroupClearBits(_doneEvents, BIT_FLASH_DONE);
 
-    if (_imagingDroplets == 0){
+    const bool waitForPrintCompletion = (_imagingDroplets != 0u);
+    if (!waitForPrintCompletion) {
     	Orchestrator::instance()->scheduleFlashIn();
     }
     else {
         Printer::instance()->setFlashOnLast(true);
-        Printer::instance()->enqueue(_imagingDroplets, _imagingFreq,PulseMode::BOTH);
+        xEventGroupClearBits(_doneEvents, BIT_FLASH_PRINT_DONE);
+        Printer::instance()->enqueue(
+            _imagingDroplets,
+            _imagingFreq,
+            PulseMode::BOTH,
+            BIT_FLASH_PRINT_DONE);
     }
 
 //    Logger::instance()->log("-FLASH COMP-\r\n");
@@ -3724,6 +3735,10 @@ void Orchestrator::_flashTaskLoop() {
     }
 
     _emitPendingFlashFaultLogs();
+
+    if (waitForPrintCompletion) {
+      (void)waitForBit(BIT_FLASH_PRINT_DONE);
+    }
 
     _clearFlashTaskNotifications();
 

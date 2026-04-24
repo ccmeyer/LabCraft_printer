@@ -15,6 +15,7 @@
 #include "FreeRTOS.h"
 #include "queue.h"
 #include "task.h"
+#include "PrinterCompletionBits.h"
 
 // in Printer.h, above class Printer:
 enum class PulseMode : uint8_t {
@@ -30,6 +31,7 @@ public:
     uint16_t count;
     uint16_t rateHz;
     PulseMode   mode;
+    uint32_t completionBit;
   };
 
   /// Get the singleton
@@ -57,10 +59,21 @@ public:
   );
 
   /// Enqueue a dispense operation (blocking until queued)
-  void enqueue(uint16_t count, uint16_t rateHz, PulseMode mode);
+  void enqueue(
+    uint16_t count,
+    uint16_t rateHz,
+    PulseMode mode,
+    uint32_t completionBit = PRINTER_COMPLETION_HOST_DONE_BIT
+  );
 
   /// Enqueue with explicit timeout (used by self-test to avoid deadlock).
-  bool enqueueWithTimeout(uint16_t count, uint16_t rateHz, PulseMode mode, TickType_t timeoutTicks);
+  bool enqueueWithTimeout(
+    uint16_t count,
+    uint16_t rateHz,
+    PulseMode mode,
+    TickType_t timeoutTicks,
+    uint32_t completionBit = PRINTER_COMPLETION_HOST_DONE_BIT
+  );
 
   /// Diagnostic-only guard to bound pressure-ready waits inside taskLoop().
   void setDiagnosticReadyTimeout(bool enabled, uint32_t timeoutMs);

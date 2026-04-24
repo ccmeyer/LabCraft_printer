@@ -106,15 +106,20 @@ void Printer::configureTimerRefuel() {
 #endif
 }
 
-void Printer::enqueue(uint16_t count, uint16_t rateHz, PulseMode mode) {
-  (void)enqueueWithTimeout(count, rateHz, mode, portMAX_DELAY);
+void Printer::enqueue(uint16_t count, uint16_t rateHz, PulseMode mode, uint32_t completionBit) {
+  (void)enqueueWithTimeout(count, rateHz, mode, portMAX_DELAY, completionBit);
 }
 
-bool Printer::enqueueWithTimeout(uint16_t count, uint16_t rateHz, PulseMode mode, TickType_t timeoutTicks) {
+bool Printer::enqueueWithTimeout(
+    uint16_t count,
+    uint16_t rateHz,
+    PulseMode mode,
+    TickType_t timeoutTicks,
+    uint32_t completionBit) {
   if (_queue == nullptr) {
     return false;
   }
-  DispenseCommand cmd{count, rateHz, mode};
+  DispenseCommand cmd{count, rateHz, mode, completionBit};
   if (xQueueSend(_queue, &cmd, 0) == pdTRUE) {
     return true;
   }
@@ -298,7 +303,9 @@ void Printer::taskLoop() {
       // --- always release the vacuum window at job end
       Gripper::instance().unlockVacuumGate();
 
-      xEventGroupSetBits(Orchestrator::getDoneEvents(), BIT_PRINTING_DONE);
+      if (cmd.completionBit != 0u) {
+        xEventGroupSetBits(Orchestrator::getDoneEvents(), cmd.completionBit);
+      }
     }
   }
 }

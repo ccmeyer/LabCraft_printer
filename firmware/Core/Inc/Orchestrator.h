@@ -11,6 +11,7 @@
 #include "PressureRegulator.h"
 #include "BoardConfig.h"
 #include "FlashSafety.h"
+#include "PrinterCompletionBits.h"
 
 #include <cstdint>
 #include <cstring>
@@ -22,9 +23,10 @@
 #define BIT_STEPPER3_DONE (1u << 3)
 #define BIT_STEPPER4_DONE (1u << 4)
 #define BIT_STEPPER5_DONE (1u << 5)
-#define BIT_PRINTING_DONE (1u << 6)
+#define BIT_PRINTING_DONE PRINTER_COMPLETION_HOST_DONE_BIT
 #define BIT_GRIPPER_DONE  (1u << 7)
 #define BIT_FLASH_DONE    (1u << 8)
+#define BIT_FLASH_PRINT_DONE PRINTER_COMPLETION_FLASH_DONE_BIT
 #define BIT_PRESSURE_P_READY    (1u << 9)   // Print regulator
 #define BIT_PRESSURE_R_READY    (1u << 10)  // Refuel regulator
 #define BIT_HOME_X_DONE   (1u << 11)

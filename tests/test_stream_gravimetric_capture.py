@@ -231,6 +231,7 @@ class _ViewControllerStub:
         self.manager = manager
         self.model = model
         self.moves = []
+        self.activity_log = []
         self.stream_capture_start_calls = []
         self.stream_calibration_sequence_start_calls = 0
         self.refuel_pressure_steps = []
@@ -240,9 +241,13 @@ class _ViewControllerStub:
         self.refuel_pulse_width_updates = []
         self.gripper_refresh_calls = []
         self.gripper_param_updates = []
+        self.start_read_camera_calls = 0
+        self.stop_read_camera_calls = 0
         self.auto_complete_moves = False
 
     def start_read_camera(self):
+        self.start_read_camera_calls += 1
+        self.activity_log.append("start_read_camera")
         return None
 
     def capture_droplet_image(self, throughput_mode=False):
@@ -258,6 +263,8 @@ class _ViewControllerStub:
         return None
 
     def stop_read_camera(self):
+        self.stop_read_camera_calls += 1
+        self.activity_log.append("stop_read_camera")
         return None
 
     def disable_print_profile(self):
@@ -425,6 +432,7 @@ class _ViewControllerStub:
 
     def move_to_location(self, name, **kwargs):
         self.moves.append(str(name))
+        self.activity_log.append(f"move:{name}")
         on_complete = kwargs.get("on_complete")
         if self.auto_complete_moves and callable(on_complete):
             on_complete()
@@ -1707,6 +1715,82 @@ def test_stream_capture_begin_uses_selected_capture_mode(
     assert manager.state["capture_process_name"] == expected_process
 
 
+def test_stream_capture_dialog_init_arms_read_camera_when_not_in_mass_entry(monkeypatch, qapp):
+    _dialog, _manager, controller = _build_view_dialog(monkeypatch, qapp)
+
+    assert controller.start_read_camera_calls == 1
+    assert controller.stop_read_camera_calls == 0
+    assert controller.activity_log[:1] == ["start_read_camera"]
+
+
+def test_stream_capture_mass_entry_disarms_read_camera_once(monkeypatch, qapp):
+    dialog, manager, controller = _build_view_dialog(monkeypatch, qapp)
+
+    manager.state.update(
+        {
+            "status": "awaiting_mass_entry",
+            "status_message": "Loading position reached. Enter ending mass and inspect the printer head.",
+            "session_id": "stream_capture_mass_entry",
+            "timecourse_run_id": "run_mass_entry_demo",
+            "starting_flash": 100,
+            "ending_flash": 111,
+            "raw_flash_delta": 11,
+            "background_capture_count": 1,
+            "printed_capture_count": 10,
+            "rep": 2,
+            "suggested_rep": 2,
+        }
+    )
+    manager.streamCaptureStateChanged.emit(dict(manager.state))
+    qapp.processEvents()
+
+    assert dialog._stream_capture_mass_dialog is not None
+    assert controller.start_read_camera_calls == 1
+    assert controller.stop_read_camera_calls == 1
+    assert controller.activity_log[:2] == ["start_read_camera", "stop_read_camera"]
+
+    manager.streamCaptureStateChanged.emit(dict(manager.state))
+    qapp.processEvents()
+
+    assert controller.stop_read_camera_calls == 1
+
+
+def test_stream_capture_popup_complete_rearms_read_camera_before_camera_move(monkeypatch, qapp):
+    dialog, manager, controller = _build_view_dialog(monkeypatch, qapp)
+
+    manager.state.update(
+        {
+            "status": "awaiting_mass_entry",
+            "status_message": "Loading position reached. Enter ending mass and inspect the printer head.",
+            "session_id": "stream_capture_complete_popup",
+            "timecourse_run_id": "run_complete_demo",
+            "starting_flash": 100,
+            "ending_flash": 111,
+            "raw_flash_delta": 11,
+            "background_capture_count": 1,
+            "printed_capture_count": 10,
+            "rep": 3,
+            "suggested_rep": 3,
+            "notes": "save me",
+            "gripper_refresh_period_snapshot_ms": 25000,
+            "gripper_pulse_duration_snapshot_ms": 1500,
+            "gripper_refresh_suspended": True,
+        }
+    )
+    manager.streamCaptureStateChanged.emit(dict(manager.state))
+    qapp.processEvents()
+
+    assert controller.stop_read_camera_calls == 1
+    dialog._stream_capture_mass_dialog.ending_mass_spin.setValue(5.5)
+    dialog._stream_capture_mass_dialog.complete_button.click()
+    qapp.processEvents()
+
+    assert controller.start_read_camera_calls == 2
+    assert controller.moves[-1] == "camera"
+    assert controller.activity_log[-2:] == ["start_read_camera", "move:camera"]
+    assert manager.state["status"] == "returning_to_camera"
+
+
 def test_stream_capture_popup_discard_returns_to_camera_without_saving(monkeypatch, qapp):
     dialog, manager, controller = _build_view_dialog(monkeypatch, qapp)
 
@@ -1736,7 +1820,10 @@ def test_stream_capture_popup_discard_returns_to_camera_without_saving(monkeypat
     dialog._stream_capture_mass_dialog.discard_button.click()
     qapp.processEvents()
 
+    assert controller.stop_read_camera_calls == 1
+    assert controller.start_read_camera_calls == 2
     assert controller.moves[-1] == "camera"
+    assert controller.activity_log[-2:] == ["start_read_camera", "move:camera"]
     assert manager.state["status"] == "returning_to_camera"
 
     controller.on_stream_gravimetric_capture_camera_reached()
@@ -2032,6 +2119,8 @@ def test_stream_capture_pending_mass_entry_restores_after_dialog_reopen(monkeypa
     qapp.processEvents()
 
     assert dialog._stream_capture_mass_dialog is not None
+    assert controller.start_read_camera_calls == 1
+    assert controller.stop_read_camera_calls == 1
     dialog.close()
     qapp.processEvents()
     assert manager.get_stream_gravimetric_capture_state()["status"] == "awaiting_mass_entry"
@@ -2047,3 +2136,4 @@ def test_stream_capture_pending_mass_entry_restores_after_dialog_reopen(monkeypa
 
     assert reopened._stream_capture_mass_dialog is not None
     assert reopened._stream_capture_mass_dialog.isVisible() is True
+    assert controller.start_read_camera_calls == 1
