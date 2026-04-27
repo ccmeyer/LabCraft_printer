@@ -159,6 +159,35 @@ If you pass `-Replay`, the script will try to run `tools/replay_calibration_run.
 
 Whole-experiment pulls also write `pull_state.json` into the destination experiment directory. If a large transfer is interrupted, rerun the same command and the script will compare the local contents against the remote manifest, skip completed copy units, and continue with the remaining files/directories.
 
+## Export Calibration Recording Summary CSV
+
+Use the read-only summary exporter to create one scan-friendly row per recorded calibration process run:
+
+```powershell
+py tools/export_calibration_recording_summary.py "FreeRTOS-interface\Experiments\EF-Ts_rep1-20260424_223016"
+```
+
+By default, the tool writes `calibration_recordings_summary.csv` into the experiment directory. The CSV includes the run ID, process name, recorder outcome, operator/system verdict, review status, review reasons, and extracted error or warning messages.
+
+Common examples:
+
+```powershell
+# Choose a custom output path
+py tools/export_calibration_recording_summary.py `
+  "FreeRTOS-interface\Experiments\EF-Ts_rep1-20260424_223016" `
+  --out "tmp\calibration_recordings_summary.csv"
+
+# Scan a standalone copied calibration_recordings directory
+py tools/export_calibration_recording_summary.py `
+  --recordings-root "tmp\pi_calibration\EF-Ts_rep1-20260424_223016\calibration_recordings"
+```
+
+Troubleshooting notes:
+
+- `review_status=needs_review` is expected for runs with `verdict=unknown`, explicit failed verdicts, event errors/warnings, analysis problems, missing files, or malformed JSON/JSONL.
+- `tool_error_count` means the exporter could not read one or more expected recorder files cleanly; check `error_messages` for the exact file and line when available.
+- The exporter does not replay image analysis or contact hardware. It only reads existing recorder files and writes a CSV.
+
 ## Getting Started - PlatformIO
 
 To get started with PlatformIO, follow these steps:
