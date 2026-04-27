@@ -69,6 +69,10 @@ DEFAULT_ONLINE_STREAM_ANALYSIS_CONFIG = {
     "optical_boundary_chroma_confidence_full": 12.0,
     "optical_boundary_chroma_confidence_zero": 32.0,
     "flow_volume_incomplete_material_volume_nl": 0.5,
+    "adaptive_roi_expansion_enabled": True,
+    "adaptive_roi_edge_margin_px": 8,
+    "adaptive_roi_expansion_step_px": 48,
+    "adaptive_roi_max_expansion_px": 160,
 }
 
 

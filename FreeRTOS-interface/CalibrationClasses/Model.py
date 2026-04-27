@@ -8999,6 +8999,22 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             selected_band_valid_row_count=summary.get("selected_band_valid_row_count"),
             spread_fallback_triggered=bool(summary.get("spread_fallback_triggered")),
             candidate_window_count=summary.get("candidate_window_count"),
+            adaptive_roi_expansion_triggered=bool(summary.get("adaptive_roi_expansion_triggered")),
+            adaptive_roi_expansion_sides=list(summary.get("adaptive_roi_expansion_sides") or []),
+            adaptive_roi_expansion_iterations=summary.get("adaptive_roi_expansion_iterations"),
+            adaptive_roi_left_expansion_px=summary.get("adaptive_roi_left_expansion_px"),
+            adaptive_roi_right_expansion_px=summary.get("adaptive_roi_right_expansion_px"),
+            adaptive_roi_stop_reason=summary.get("adaptive_roi_stop_reason"),
+            base_roi_x0=summary.get("base_roi_x0"),
+            base_roi_x1=summary.get("base_roi_x1"),
+            base_corridor_x0=summary.get("base_corridor_x0"),
+            base_corridor_x1=summary.get("base_corridor_x1"),
+            selected_component_corridor_left_clearance_px=summary.get(
+                "selected_component_corridor_left_clearance_px"
+            ),
+            selected_component_corridor_right_clearance_px=summary.get(
+                "selected_component_corridor_right_clearance_px"
+            ),
         )
         self._current_analysis_summary = dict(summary)
         self._current_delay_frame_rows.append(frame_row)
@@ -9695,6 +9711,22 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             selected_band_valid_row_count=summary.get("selected_band_valid_row_count"),
             spread_fallback_triggered=bool(summary.get("spread_fallback_triggered")),
             candidate_window_count=summary.get("candidate_window_count"),
+            adaptive_roi_expansion_triggered=bool(summary.get("adaptive_roi_expansion_triggered")),
+            adaptive_roi_expansion_sides=list(summary.get("adaptive_roi_expansion_sides") or []),
+            adaptive_roi_expansion_iterations=summary.get("adaptive_roi_expansion_iterations"),
+            adaptive_roi_left_expansion_px=summary.get("adaptive_roi_left_expansion_px"),
+            adaptive_roi_right_expansion_px=summary.get("adaptive_roi_right_expansion_px"),
+            adaptive_roi_stop_reason=summary.get("adaptive_roi_stop_reason"),
+            base_roi_x0=summary.get("base_roi_x0"),
+            base_roi_x1=summary.get("base_roi_x1"),
+            base_corridor_x0=summary.get("base_corridor_x0"),
+            base_corridor_x1=summary.get("base_corridor_x1"),
+            selected_component_corridor_left_clearance_px=summary.get(
+                "selected_component_corridor_left_clearance_px"
+            ),
+            selected_component_corridor_right_clearance_px=summary.get(
+                "selected_component_corridor_right_clearance_px"
+            ),
         )
         self._current_tail_analysis_summary = {
             **dict(summary),

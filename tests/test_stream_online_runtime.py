@@ -21,6 +21,12 @@ def _frame_with_attached_stream(*, bottom_y: int = 170):
     return frame
 
 
+def _frame_with_stream_bounds(x0: int, x1: int, *, bottom_y: int = 170):
+    frame = _blank_frame()
+    frame[62:bottom_y, int(x0) : int(x1)] = 20
+    return frame
+
+
 def _frame_with_detached_warning():
     frame = _frame_with_attached_stream(bottom_y=170)
     frame[250:280, 100:116] = 20
@@ -144,6 +150,102 @@ def test_analyze_online_stream_frame_returns_measurement_for_valid_attached_stre
     assert result["overlay"] is not None
     assert result["overlay"].shape == frame.shape + (3,)
     assert np.any(result["overlay"][80:170, 96:124] != np.stack([frame[80:170, 96:124]] * 3, axis=-1))
+
+
+def test_analyze_online_stream_frame_expands_left_when_contour_nears_corridor_edge():
+    frame = _frame_with_stream_bounds(50, 124, bottom_y=170)
+    disabled = mod.analyze_online_stream_frame(
+        frame_image=frame,
+        background_image=_blank_frame(),
+        nozzle_center_px=NOZZLE_CENTER_PX,
+        delay_us=4050,
+        emergence_time_us=3200,
+        analysis_config={"adaptive_roi_expansion_enabled": False},
+        _adaptive_retry=False,
+    )
+    expanded = mod.analyze_online_stream_frame(
+        frame_image=frame,
+        background_image=_blank_frame(),
+        nozzle_center_px=NOZZLE_CENTER_PX,
+        delay_us=4050,
+        emergence_time_us=3200,
+        analysis_config=None,
+        _adaptive_retry=False,
+    )
+
+    disabled_summary = disabled["summary"]
+    expanded_summary = expanded["summary"]
+    assert disabled_summary["adaptive_roi_expansion_triggered"] is False
+    assert expanded_summary["adaptive_roi_expansion_triggered"] is True
+    assert expanded_summary["adaptive_roi_expansion_sides"] == ["left"]
+    assert expanded_summary["adaptive_roi_left_expansion_px"] > 0
+    assert expanded_summary["adaptive_roi_right_expansion_px"] == 0
+    assert expanded_summary["visible_volume_nl"] > disabled_summary["visible_volume_nl"]
+    assert expanded_summary["selected_component_corridor_left_clearance_px"] > 8
+    assert expanded_summary["base_corridor_x0"] > expanded_summary["base_roi_x0"]
+
+
+def test_analyze_online_stream_frame_expands_right_when_contour_nears_corridor_edge():
+    frame = _frame_with_stream_bounds(96, 170, bottom_y=170)
+    result = mod.analyze_online_stream_frame(
+        frame_image=frame,
+        background_image=_blank_frame(),
+        nozzle_center_px=NOZZLE_CENTER_PX,
+        delay_us=4050,
+        emergence_time_us=3200,
+        analysis_config=None,
+        _adaptive_retry=False,
+    )
+
+    summary = result["summary"]
+    assert summary["adaptive_roi_expansion_triggered"] is True
+    assert summary["adaptive_roi_expansion_sides"] == ["right"]
+    assert summary["adaptive_roi_left_expansion_px"] == 0
+    assert summary["adaptive_roi_right_expansion_px"] > 0
+    assert summary["selected_component_corridor_right_clearance_px"] > 8
+
+
+def test_analyze_online_stream_frame_does_not_expand_centered_stream():
+    frame = _frame_with_attached_stream(bottom_y=170)
+    result = mod.analyze_online_stream_frame(
+        frame_image=frame,
+        background_image=_blank_frame(),
+        nozzle_center_px=NOZZLE_CENTER_PX,
+        delay_us=4050,
+        emergence_time_us=3200,
+        analysis_config=None,
+        _adaptive_retry=False,
+    )
+
+    summary = result["summary"]
+    assert summary["adaptive_roi_expansion_triggered"] is False
+    assert summary["adaptive_roi_expansion_sides"] == []
+    assert summary["adaptive_roi_left_expansion_px"] == 0
+    assert summary["adaptive_roi_right_expansion_px"] == 0
+    assert summary["adaptive_roi_stop_reason"] == "clearance_ok"
+    assert summary["base_roi_x0"] == 72
+    assert summary["base_roi_x1"] == 149
+    assert summary["base_corridor_x0"] == 83
+    assert summary["base_corridor_x1"] == 137
+
+
+def test_analyze_online_stream_frame_stops_expansion_at_image_edge():
+    frame = _frame_with_stream_bounds(0, 40, bottom_y=170)
+    result = mod.analyze_online_stream_frame(
+        frame_image=frame,
+        background_image=_blank_frame(),
+        nozzle_center_px=(30, 60),
+        delay_us=4050,
+        emergence_time_us=3200,
+        analysis_config=None,
+        _adaptive_retry=False,
+    )
+
+    summary = result["summary"]
+    assert summary["adaptive_roi_expansion_triggered"] is True
+    assert summary["adaptive_roi_expansion_sides"] == ["left"]
+    assert summary["adaptive_roi_stop_reason"] == "image_edge_reached"
+    assert summary["visible_volume_nl"] is not None
 
 
 def test_online_stream_overlay_preserves_full_frame_and_distinguishes_component_roles():

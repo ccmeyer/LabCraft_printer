@@ -1254,6 +1254,18 @@ def test_online_stream_analyze_flow_frame_appends_measurement_for_accepted_frame
                 "detached_near_bottom_warning": False,
                 "warnings": [],
                 "attached_bottom_guard_hit": False,
+                "adaptive_roi_expansion_triggered": True,
+                "adaptive_roi_expansion_sides": ["left"],
+                "adaptive_roi_expansion_iterations": 2,
+                "adaptive_roi_left_expansion_px": 96,
+                "adaptive_roi_right_expansion_px": 0,
+                "adaptive_roi_stop_reason": "clearance_ok",
+                "base_roi_x0": 440,
+                "base_roi_x1": 821,
+                "base_corridor_x0": 496,
+                "base_corridor_x1": 763,
+                "selected_component_corridor_left_clearance_px": 21,
+                "selected_component_corridor_right_clearance_px": 94,
             },
             "overlay": None,
         },
@@ -1270,6 +1282,11 @@ def test_online_stream_analyze_flow_frame_appends_measurement_for_accepted_frame
     payload = json.loads(lines[0])
     assert payload["status"] == "accepted"
     assert payload["visible_volume_nl"] == 12.3
+    assert payload["adaptive_roi_expansion_triggered"] is True
+    assert payload["adaptive_roi_expansion_sides"] == ["left"]
+    assert payload["adaptive_roi_left_expansion_px"] == 96
+    assert payload["base_corridor_x0"] == 496
+    assert payload["selected_component_corridor_left_clearance_px"] == 21
 
 
 def test_online_stream_analyze_flow_frame_records_rejected_frame_without_measurement(tmp_path, monkeypatch):
@@ -2748,6 +2765,18 @@ def test_online_stream_analyze_tail_frame_accepts_late_width_even_when_flow_qc_w
                 "tail_landmark_usable": False,
                 "separated_from_nozzle_landmark": False,
                 "landmark_reason": None,
+                "adaptive_roi_expansion_triggered": True,
+                "adaptive_roi_expansion_sides": ["right"],
+                "adaptive_roi_expansion_iterations": 1,
+                "adaptive_roi_left_expansion_px": 0,
+                "adaptive_roi_right_expansion_px": 48,
+                "adaptive_roi_stop_reason": "clearance_ok",
+                "base_roi_x0": 439,
+                "base_roi_x1": 820,
+                "base_corridor_x0": 495,
+                "base_corridor_x1": 762,
+                "selected_component_corridor_left_clearance_px": 73,
+                "selected_component_corridor_right_clearance_px": 18,
             },
             "overlay": None,
         },
@@ -2763,6 +2792,11 @@ def test_online_stream_analyze_tail_frame_accepts_late_width_even_when_flow_qc_w
     lines = Path(proc._frames_path).read_text(encoding="utf-8").strip().splitlines()
     payload = json.loads(lines[0])
     assert payload["status"] == "accepted"
+    assert payload["adaptive_roi_expansion_triggered"] is True
+    assert payload["adaptive_roi_expansion_sides"] == ["right"]
+    assert payload["adaptive_roi_right_expansion_px"] == 48
+    assert payload["base_roi_x1"] == 820
+    assert payload["selected_component_corridor_right_clearance_px"] == 18
 
 
 def test_online_stream_debug_signal_emits_provisional_tail_width_points(tmp_path):

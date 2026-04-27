@@ -59,6 +59,26 @@ def _tracked_row(nozzle_center_px) -> dict:
     }
 
 
+def _adaptive_roi_retry_needed(summary: dict, config: dict) -> bool:
+    if not bool(config.get("adaptive_roi_expansion_enabled")):
+        return False
+    if str(summary.get("silhouette_status") or "") != "ok":
+        return False
+    reasons = {str(item) for item in list(summary.get("flow_volume_geometry_reasons") or [])}
+    geometry_suspect = (
+        summary.get("flow_volume_geometry_ok") is False
+        or "attached_lower_centerline_span_high" in reasons
+    )
+    if not geometry_suspect:
+        return False
+    margin_px = int(config.get("adaptive_roi_edge_margin_px") or 0)
+    left_clearance = summary.get("selected_component_corridor_left_clearance_px")
+    right_clearance = summary.get("selected_component_corridor_right_clearance_px")
+    near_left = left_clearance is not None and int(left_clearance) <= margin_px
+    near_right = right_clearance is not None and int(right_clearance) <= margin_px
+    return bool(near_left or near_right)
+
+
 def _frame_row(*, delay_us: int, emergence_time_us: int, capture_ref: dict | None = None, capture_index: int | None = None):
     ref = dict(capture_ref or {})
     return {
@@ -1215,6 +1235,7 @@ def analyze_online_stream_frame(
     capture_index: int | None = None,
     frame_color_order: str = "bgr",
     background_color_order: str | None = None,
+    _adaptive_retry: bool = True,
 ) -> dict:
     config = _resolved_analysis_config(analysis_config)
     frame_color_order = _normalized_color_order(frame_color_order)
@@ -1238,6 +1259,11 @@ def analyze_online_stream_frame(
         corridor_width_frac=_CORRIDOR_WIDTH_FRAC,
         nozzle_guard_px=int(config["nozzle_guard_px"]),
         min_component_area_px=int(config["min_component_area_px"]),
+        adaptive_roi_expansion_enabled=bool(config["adaptive_roi_expansion_enabled"])
+        and not bool(_adaptive_retry),
+        adaptive_roi_edge_margin_px=int(config["adaptive_roi_edge_margin_px"]),
+        adaptive_roi_expansion_step_px=int(config["adaptive_roi_expansion_step_px"]),
+        adaptive_roi_max_expansion_px=int(config["adaptive_roi_max_expansion_px"]),
     )
     stage4_frame = volume_mod._analyze_stage4_frame(
         stage3_frame,
@@ -1588,6 +1614,32 @@ def analyze_online_stream_frame(
         "warnings": online_cal_mod._copy_warnings(warnings),
         "selected_component_top_y_px": selected_component_top_y_px,
         "cutoff_y_px": cutoff_y_px,
+        "adaptive_roi_expansion_triggered": bool(
+            stage3_metric_row.get("adaptive_roi_expansion_triggered")
+        ),
+        "adaptive_roi_expansion_sides": list(
+            stage3_metric_row.get("adaptive_roi_expansion_sides") or []
+        ),
+        "adaptive_roi_expansion_iterations": stage3_metric_row.get(
+            "adaptive_roi_expansion_iterations"
+        ),
+        "adaptive_roi_left_expansion_px": stage3_metric_row.get(
+            "adaptive_roi_left_expansion_px"
+        ),
+        "adaptive_roi_right_expansion_px": stage3_metric_row.get(
+            "adaptive_roi_right_expansion_px"
+        ),
+        "adaptive_roi_stop_reason": stage3_metric_row.get("adaptive_roi_stop_reason"),
+        "base_roi_x0": stage3_metric_row.get("base_roi_x0"),
+        "base_roi_x1": stage3_metric_row.get("base_roi_x1"),
+        "base_corridor_x0": stage3_metric_row.get("base_corridor_x0"),
+        "base_corridor_x1": stage3_metric_row.get("base_corridor_x1"),
+        "selected_component_corridor_left_clearance_px": stage3_metric_row.get(
+            "selected_component_corridor_left_clearance_px"
+        ),
+        "selected_component_corridor_right_clearance_px": stage3_metric_row.get(
+            "selected_component_corridor_right_clearance_px"
+        ),
         "width_valid_row_count": width_metrics.get("width_valid_row_count"),
         "root_band_width_px": width_metrics.get("root_band_width_px"),
         "root_band_width_iqr_px": width_metrics.get("root_band_width_iqr_px"),
@@ -1604,6 +1656,25 @@ def analyze_online_stream_frame(
     )
     summary["late_coverage_candidate"] = bool(late_coverage_candidate)
     summary["late_coverage_metric"] = late_coverage_metric
+
+    if bool(_adaptive_retry) and _adaptive_roi_retry_needed(summary, config):
+        retry_config = dict(config)
+        retry_config["adaptive_roi_expansion_enabled"] = True
+        return analyze_online_stream_frame(
+            frame_image=frame_image,
+            background_image=background_image,
+            nozzle_center_px=nozzle_center_px,
+            delay_us=int(delay_us),
+            emergence_time_us=int(emergence_time_us),
+            analysis_config=retry_config,
+            capture_ref=capture_ref,
+            capture_index=capture_index,
+            frame_color_order=frame_color_order,
+            background_color_order=background_color_order,
+            _adaptive_retry=False,
+        )
+    if bool(_adaptive_retry) and bool(config.get("adaptive_roi_expansion_enabled")):
+        summary["adaptive_roi_stop_reason"] = "retry_not_needed"
 
     overlay = None
     try:

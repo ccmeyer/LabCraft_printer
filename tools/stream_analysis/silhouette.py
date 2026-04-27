@@ -53,6 +53,18 @@ SILHOUETTE_METRIC_COLUMNS = [
     "corridor_x0",
     "corridor_x1",
     "corridor_width",
+    "adaptive_roi_expansion_triggered",
+    "adaptive_roi_expansion_sides",
+    "adaptive_roi_expansion_iterations",
+    "adaptive_roi_left_expansion_px",
+    "adaptive_roi_right_expansion_px",
+    "adaptive_roi_stop_reason",
+    "base_roi_x0",
+    "base_roi_x1",
+    "base_corridor_x0",
+    "base_corridor_x1",
+    "selected_component_corridor_left_clearance_px",
+    "selected_component_corridor_right_clearance_px",
     "nozzle_guard_px",
     "cutoff_y_px",
     "raw_dark_pixel_count",
@@ -215,6 +227,57 @@ def _corridor_bounds(
         "x1": int(x1),
         "width": int(x1 - x0),
     }
+
+
+def _stage3_bounds(
+    image_shape,
+    *,
+    tracked_x_px: float | None,
+    roi_width_frac: float,
+    roi_top_frac: float,
+    roi_bottom_frac: float,
+    corridor_width_frac: float,
+    left_expansion_px: int = 0,
+    right_expansion_px: int = 0,
+):
+    _height, width = image_shape[:2]
+    base_roi = _dynamic_roi_bounds(
+        image_shape,
+        tracked_x_px=tracked_x_px,
+        roi_width_frac=roi_width_frac,
+        roi_top_frac=roi_top_frac,
+        roi_bottom_frac=roi_bottom_frac,
+    )
+    base_corridor = _corridor_bounds(
+        base_roi,
+        tracked_x_px=tracked_x_px,
+        corridor_width_frac=corridor_width_frac,
+    )
+
+    left = max(0, int(left_expansion_px or 0))
+    right = max(0, int(right_expansion_px or 0))
+    roi_x0 = max(0, int(base_roi["x0"]) - left)
+    roi_x1 = min(int(width), int(base_roi["x1"]) + right)
+    corridor_x0 = max(roi_x0, int(base_corridor["x0"]) - left)
+    corridor_x1 = min(roi_x1, int(base_corridor["x1"]) + right)
+    corridor_x1 = max(corridor_x0 + 1, corridor_x1)
+    return (
+        {
+            "x0": int(roi_x0),
+            "y0": int(base_roi["y0"]),
+            "x1": int(roi_x1),
+            "y1": int(base_roi["y1"]),
+            "width": int(roi_x1 - roi_x0),
+            "height": int(base_roi["height"]),
+        },
+        {
+            "x0": int(corridor_x0),
+            "x1": int(corridor_x1),
+            "width": int(corridor_x1 - corridor_x0),
+        },
+        base_roi,
+        base_corridor,
+    )
 
 
 def _threshold_roi(roi_gray: np.ndarray):
@@ -1235,7 +1298,7 @@ def _analyze_accepted_component(
     return component_state
 
 
-def _analyze_stage3_gray(
+def _analyze_stage3_gray_single_pass(
     run_id: str,
     frame_row: dict,
     tracked_row: dict,
@@ -1247,21 +1310,21 @@ def _analyze_stage3_gray(
     corridor_width_frac: float,
     nozzle_guard_px: int,
     min_component_area_px: int,
+    roi_left_expansion_px: int = 0,
+    roi_right_expansion_px: int = 0,
 ):
     gray = _coerce_gray_image(gray)
     tracked_x_px = tracked_row.get("tracked_nozzle_x_px")
     tracked_y_px = tracked_row.get("tracked_nozzle_y_px")
-    roi = _dynamic_roi_bounds(
+    roi, corridor, _base_roi, _base_corridor = _stage3_bounds(
         gray.shape,
         tracked_x_px=tracked_x_px if tracked_x_px is not None else None,
         roi_width_frac=roi_width_frac,
         roi_top_frac=roi_top_frac,
         roi_bottom_frac=roi_bottom_frac,
-    )
-    corridor = _corridor_bounds(
-        roi,
-        tracked_x_px=tracked_x_px if tracked_x_px is not None else None,
         corridor_width_frac=corridor_width_frac,
+        left_expansion_px=roi_left_expansion_px,
+        right_expansion_px=roi_right_expansion_px,
     )
 
     threshold_value = None
@@ -1290,6 +1353,10 @@ def _analyze_stage3_gray(
     plausible_unaccepted_components = []
     component_rows = []
     edge_rows = []
+    corridor_exclusion = {
+        "left_dark_pixel_count": 0,
+        "right_dark_pixel_count": 0,
+    }
 
     if tracked_x_px is None or tracked_y_px is None:
         silhouette_status = "missing_nozzle_track"
@@ -1298,9 +1365,22 @@ def _analyze_stage3_gray(
     else:
         cutoff_y_px = int(np.floor(float(tracked_y_px) + float(nozzle_guard_px)))
         roi_gray = gray[roi["y0"] : roi["y1"], roi["x0"] : roi["x1"]]
-        threshold_value, raw_mask = _threshold_roi(roi_gray)
-        raw_mask = _apply_corridor_mask(raw_mask, roi, corridor)
-        raw_mask = _apply_nozzle_cutoff(raw_mask, roi, cutoff_y_px=cutoff_y_px)
+        threshold_value, threshold_mask = _threshold_roi(roi_gray)
+        cutoff_mask = _apply_nozzle_cutoff(threshold_mask, roi, cutoff_y_px=cutoff_y_px)
+        local_corridor_x0 = max(0, int(corridor["x0"]) - int(roi["x0"]))
+        local_corridor_x1 = max(
+            local_corridor_x0 + 1,
+            int(corridor["x1"]) - int(roi["x0"]),
+        )
+        corridor_exclusion = {
+            "left_dark_pixel_count": int(
+                np.count_nonzero(cutoff_mask[:, :local_corridor_x0])
+            ),
+            "right_dark_pixel_count": int(
+                np.count_nonzero(cutoff_mask[:, local_corridor_x1:])
+            ),
+        }
+        raw_mask = _apply_corridor_mask(cutoff_mask, roi, corridor)
         filled_mask = _clean_filled_mask(raw_mask)
 
         if not np.any(filled_mask > 0):
@@ -1417,7 +1497,199 @@ def _analyze_stage3_gray(
         "accepted_components": accepted_components,
         "plausible_unaccepted_components": plausible_unaccepted_components,
         "tracked_row": tracked_row,
+        "corridor_exclusion": corridor_exclusion,
     }
+
+
+def _component_corridor_clearance(metric_row: dict):
+    bbox_x = metric_row.get("selected_component_bbox_x_px")
+    bbox_w = metric_row.get("selected_component_bbox_w_px")
+    if bbox_x is None or bbox_w is None:
+        return None, None
+    left_edge = int(bbox_x)
+    right_edge = int(bbox_x) + int(bbox_w) - 1
+    left_clearance = int(left_edge - int(metric_row["corridor_x0"]))
+    right_clearance = int(int(metric_row["corridor_x1"]) - 1 - right_edge)
+    return left_clearance, right_clearance
+
+
+def _adaptive_roi_metadata(
+    *,
+    result: dict,
+    base_roi: dict,
+    base_corridor: dict,
+    left_expansion_px: int,
+    right_expansion_px: int,
+    iterations: int,
+    sides: list[str],
+    stop_reason: str,
+):
+    left_clearance, right_clearance = _component_corridor_clearance(
+        dict(result.get("metric_row") or {})
+    )
+    return {
+        "adaptive_roi_expansion_triggered": bool(iterations > 0),
+        "adaptive_roi_expansion_sides": list(dict.fromkeys(sides)),
+        "adaptive_roi_expansion_iterations": int(iterations),
+        "adaptive_roi_left_expansion_px": int(left_expansion_px),
+        "adaptive_roi_right_expansion_px": int(right_expansion_px),
+        "adaptive_roi_stop_reason": str(stop_reason),
+        "base_roi_x0": int(base_roi["x0"]),
+        "base_roi_x1": int(base_roi["x1"]),
+        "base_corridor_x0": int(base_corridor["x0"]),
+        "base_corridor_x1": int(base_corridor["x1"]),
+        "selected_component_corridor_left_clearance_px": left_clearance,
+        "selected_component_corridor_right_clearance_px": right_clearance,
+    }
+
+
+def _analyze_stage3_gray(
+    run_id: str,
+    frame_row: dict,
+    tracked_row: dict,
+    gray: np.ndarray,
+    *,
+    roi_width_frac: float,
+    roi_top_frac: float,
+    roi_bottom_frac: float,
+    corridor_width_frac: float,
+    nozzle_guard_px: int,
+    min_component_area_px: int,
+    adaptive_roi_expansion_enabled: bool = False,
+    adaptive_roi_edge_margin_px: int = 8,
+    adaptive_roi_expansion_step_px: int = 48,
+    adaptive_roi_max_expansion_px: int = 160,
+):
+    gray = _coerce_gray_image(gray)
+    tracked_x_px = tracked_row.get("tracked_nozzle_x_px")
+    base_roi = _dynamic_roi_bounds(
+        gray.shape,
+        tracked_x_px=tracked_x_px if tracked_x_px is not None else None,
+        roi_width_frac=roi_width_frac,
+        roi_top_frac=roi_top_frac,
+        roi_bottom_frac=roi_bottom_frac,
+    )
+    base_corridor = _corridor_bounds(
+        base_roi,
+        tracked_x_px=tracked_x_px if tracked_x_px is not None else None,
+        corridor_width_frac=corridor_width_frac,
+    )
+
+    left_expansion = 0
+    right_expansion = 0
+    iterations = 0
+    sides = []
+    stop_reason = "disabled"
+    max_expansion = max(0, int(adaptive_roi_max_expansion_px or 0))
+    step_px = max(1, int(adaptive_roi_expansion_step_px or 1))
+    edge_margin = max(0, int(adaptive_roi_edge_margin_px or 0))
+
+    result = _analyze_stage3_gray_single_pass(
+        run_id,
+        frame_row,
+        tracked_row,
+        gray,
+        roi_width_frac=roi_width_frac,
+        roi_top_frac=roi_top_frac,
+        roi_bottom_frac=roi_bottom_frac,
+        corridor_width_frac=corridor_width_frac,
+        nozzle_guard_px=nozzle_guard_px,
+        min_component_area_px=min_component_area_px,
+    )
+
+    if adaptive_roi_expansion_enabled and max_expansion > 0:
+        image_width = int(gray.shape[1])
+        stop_reason = "clearance_ok"
+        allowed_sides = None
+        while True:
+            metric_row = dict(result.get("metric_row") or {})
+            left_clearance, right_clearance = _component_corridor_clearance(metric_row)
+            if left_clearance is None or right_clearance is None:
+                stop_reason = "no_selected_component"
+                break
+
+            expand_left = int(left_clearance) <= edge_margin
+            expand_right = int(right_clearance) <= edge_margin
+            if not expand_left and not expand_right:
+                stop_reason = "clearance_ok"
+                break
+            if allowed_sides is None and expand_left and expand_right:
+                exclusion = dict(result.get("corridor_exclusion") or {})
+                left_excluded = int(exclusion.get("left_dark_pixel_count") or 0)
+                right_excluded = int(exclusion.get("right_dark_pixel_count") or 0)
+                if left_excluded >= max(200, right_excluded * 3):
+                    expand_right = False
+                elif right_excluded >= max(200, left_excluded * 3):
+                    expand_left = False
+                else:
+                    stop_reason = "ambiguous_corridor_edge_contact"
+                    break
+            if allowed_sides is None:
+                allowed_sides = {
+                    side
+                    for side, should_expand in (
+                        ("left", expand_left),
+                        ("right", expand_right),
+                    )
+                    if should_expand
+                }
+            else:
+                expand_left = bool(expand_left and "left" in allowed_sides)
+                expand_right = bool(expand_right and "right" in allowed_sides)
+                if not expand_left and not expand_right:
+                    stop_reason = "clearance_ok"
+                    break
+
+            corridor = result.get("corridor") or {}
+            left_at_image_edge = int(corridor.get("x0", 0) or 0) <= 0
+            right_at_image_edge = int(corridor.get("x1", image_width) or image_width) >= image_width
+            left_can_expand = expand_left and left_expansion < max_expansion and not left_at_image_edge
+            right_can_expand = expand_right and right_expansion < max_expansion and not right_at_image_edge
+            if not left_can_expand and not right_can_expand:
+                if (expand_left and left_at_image_edge) or (expand_right and right_at_image_edge):
+                    stop_reason = "image_edge_reached"
+                else:
+                    stop_reason = "max_expansion_reached"
+                break
+
+            if left_can_expand:
+                left_expansion = min(max_expansion, left_expansion + step_px)
+                sides.append("left")
+            if right_can_expand:
+                right_expansion = min(max_expansion, right_expansion + step_px)
+                sides.append("right")
+
+            result = _analyze_stage3_gray_single_pass(
+                run_id,
+                frame_row,
+                tracked_row,
+                gray,
+                roi_width_frac=roi_width_frac,
+                roi_top_frac=roi_top_frac,
+                roi_bottom_frac=roi_bottom_frac,
+                corridor_width_frac=corridor_width_frac,
+                nozzle_guard_px=nozzle_guard_px,
+                min_component_area_px=min_component_area_px,
+                roi_left_expansion_px=left_expansion,
+                roi_right_expansion_px=right_expansion,
+            )
+            iterations += 1
+    else:
+        stop_reason = "disabled"
+
+    result["metric_row"].update(
+        _adaptive_roi_metadata(
+            result=result,
+            base_roi=base_roi,
+            base_corridor=base_corridor,
+            left_expansion_px=left_expansion,
+            right_expansion_px=right_expansion,
+            iterations=iterations,
+            sides=sides,
+            stop_reason=stop_reason,
+        )
+    )
+    return result
 
 
 def _analyze_stage3_frame(
