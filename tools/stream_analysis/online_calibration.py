@@ -36,7 +36,7 @@ DEFAULT_ONLINE_STREAM_POLICY = {
 }
 
 DEFAULT_ONLINE_STREAM_ANALYSIS_CONFIG = {
-    "settling_aware_fit_enabled": True,
+    "settling_aware_fit_enabled": False,
     "tail_settling_rule_enabled": True,
     "nozzle_guard_px": 2,
     "min_component_area_px": 120,

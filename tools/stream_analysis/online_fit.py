@@ -19,7 +19,7 @@ DEFAULT_ONLINE_FLOW_FIT_POLICY = {
     "min_delays_for_outlier_prune": 4,
     "outlier_local_deviation_floor_nl": 0.75,
     "outlier_improvement_fraction_min": 0.20,
-    "settling_aware_fit_enabled": True,
+    "settling_aware_fit_enabled": False,
     "settling_aware_early_window_points": 6,
     "settling_aware_late_window_points": 12,
     "settling_aware_early_vs_late_pct_min": 2.0,
