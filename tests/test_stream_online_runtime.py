@@ -614,6 +614,134 @@ def test_band_width_metrics_keeps_root_band_when_no_trustworthy_lower_candidate_
     assert metrics["candidate_window_count"] >= 4
 
 
+def _sticky_band_kwargs(state, **overrides):
+    config = mod._resolved_analysis_config(None)
+    kwargs = {
+        "near_nozzle_band_top_px": int(config["near_nozzle_band_top_px"]),
+        "near_nozzle_band_height_px": int(config["near_nozzle_band_height_px"]),
+        "min_band_valid_rows": int(config["min_band_valid_rows"]),
+        "sticky_window_state": dict(state or {}),
+        "sticky_window_enabled": True,
+        "sticky_window_confirm_frames": 2,
+        "sticky_window_min_switch_drop_px": 12.0,
+        "sticky_window_min_switch_drop_frac": 0.12,
+        "sticky_window_max_step_multiplier": 1,
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+def _spread_edge_rows_for_sticky_windows():
+    edge_rows = []
+    edge_rows.extend(_edge_rows_from_width_fn(y_start=84, y_end=104, width_fn=lambda y: 150.0))
+    edge_rows.extend(_edge_rows_from_width_fn(y_start=104, y_end=124, width_fn=lambda y: 110.0))
+    edge_rows.extend(_edge_rows_from_width_fn(y_start=124, y_end=144, width_fn=lambda y: 97.0))
+    edge_rows.extend(_edge_rows_from_width_fn(y_start=144, y_end=164, width_fn=lambda y: 93.0))
+    edge_rows.extend(_edge_rows_from_width_fn(y_start=164, y_end=184, width_fn=lambda y: 85.0))
+    edge_rows.extend(_edge_rows_from_width_fn(y_start=184, y_end=224, width_fn=lambda y: 85.0))
+    return edge_rows
+
+
+def test_band_width_metrics_sticky_window_keeps_previous_for_small_candidate_change():
+    metrics = mod._band_width_metrics(
+        {"tracked_nozzle_y_px": 60.0},
+        _spread_edge_rows_for_sticky_windows(),
+        **_sticky_band_kwargs({"selected_band_y0_px": 144, "selected_band_y1_px": 184}),
+    )
+
+    assert metrics["attached_width_mode"] == "lower_consistent_window"
+    assert metrics["spread_fallback_triggered"] is True
+    assert metrics["sticky_window_active"] is True
+    assert metrics["sticky_window_instant_y0_px"] == 124
+    assert metrics["selected_band_y0_px"] == 144
+    assert metrics["attached_width_px"] == pytest.approx(89.0)
+    assert metrics["sticky_window_switch_blocked"] is True
+    assert metrics["sticky_window_candidate_streak"] == 1
+    assert metrics["next_sticky_window_state"]["pending_candidate_y0_px"] == 124
+
+
+def test_band_width_metrics_sticky_window_switches_after_confirmed_candidate():
+    metrics = mod._band_width_metrics(
+        {"tracked_nozzle_y_px": 60.0},
+        _spread_edge_rows_for_sticky_windows(),
+        **_sticky_band_kwargs(
+            {
+                "selected_band_y0_px": 144,
+                "selected_band_y1_px": 184,
+                "pending_candidate_y0_px": 124,
+                "pending_candidate_y1_px": 164,
+                "candidate_streak": 1,
+            }
+        ),
+    )
+
+    assert metrics["selected_band_y0_px"] == 124
+    assert metrics["attached_width_px"] == pytest.approx(95.0)
+    assert metrics["sticky_window_selected_reason"] == "sticky_confirmed_candidate"
+    assert metrics["sticky_window_switch_blocked"] is False
+    assert metrics["next_sticky_window_state"]["selected_band_y0_px"] == 124
+    assert metrics["next_sticky_window_state"]["candidate_streak"] == 0
+
+
+def test_band_width_metrics_sticky_window_switches_when_previous_invalid():
+    edge_rows = []
+    edge_rows.extend(_edge_rows_from_width_fn(y_start=84, y_end=104, width_fn=lambda y: 150.0))
+    edge_rows.extend(_edge_rows_from_width_fn(y_start=104, y_end=124, width_fn=lambda y: 110.0))
+    edge_rows.extend(_edge_rows_from_width_fn(y_start=124, y_end=164, width_fn=lambda y: 95.0))
+    edge_rows.extend(
+        _edge_rows_from_width_fn(
+            y_start=164,
+            y_end=184,
+            width_fn=lambda y: 20.0 if int(y) % 2 else 120.0,
+        )
+    )
+    edge_rows.extend(_edge_rows_from_width_fn(y_start=184, y_end=224, width_fn=lambda y: 88.0))
+
+    metrics = mod._band_width_metrics(
+        {"tracked_nozzle_y_px": 60.0},
+        edge_rows,
+        **_sticky_band_kwargs({"selected_band_y0_px": 164, "selected_band_y1_px": 204}),
+    )
+
+    assert metrics["selected_band_y0_px"] == 124
+    assert metrics["sticky_window_selected_reason"] == "sticky_previous_invalid"
+    assert metrics["sticky_window_switch_blocked"] is False
+    assert metrics["next_sticky_window_state"]["selected_band_y0_px"] == 124
+
+
+def test_band_width_metrics_sticky_window_allows_step_toward_material_drop():
+    metrics = mod._band_width_metrics(
+        {"tracked_nozzle_y_px": 60.0},
+        _spread_edge_rows_for_sticky_windows(),
+        **_sticky_band_kwargs(
+            {"selected_band_y0_px": 124, "selected_band_y1_px": 164},
+            sticky_window_min_switch_drop_px=4.0,
+            sticky_window_min_switch_drop_frac=0.0,
+        ),
+    )
+
+    assert metrics["selected_band_y0_px"] == 144
+    assert metrics["sticky_window_selected_reason"] == "sticky_material_candidate"
+    assert metrics["sticky_window_switch_blocked"] is False
+    assert metrics["next_sticky_window_state"]["selected_band_y0_px"] == 144
+
+
+def test_band_width_metrics_sticky_window_resets_when_root_band_recovers():
+    config = mod._resolved_analysis_config(None)
+    edge_rows = _edge_rows_from_width_fn(y_start=84, y_end=224, width_fn=lambda y: 66.0)
+
+    metrics = mod._band_width_metrics(
+        {"tracked_nozzle_y_px": 60.0},
+        edge_rows,
+        **_sticky_band_kwargs({"selected_band_y0_px": 144, "selected_band_y1_px": 184}),
+    )
+
+    assert metrics["attached_width_mode"] == "root_band"
+    assert metrics["spread_fallback_triggered"] is False
+    assert metrics["sticky_window_active"] is False
+    assert metrics["next_sticky_window_state"] == {}
+
+
 def test_analyze_online_stream_frame_rejects_short_attached_stub_with_multiple_detached_components(monkeypatch):
     attached_mask = np.zeros((220, 80), dtype=np.uint8)
     attached_mask[12:91, 30:50] = 255

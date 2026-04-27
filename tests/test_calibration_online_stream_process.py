@@ -200,6 +200,7 @@ def _flow_proc(tmp_path: Path):
     proc._tail_fit_warnings = []
     proc._tail_consecutive_failed_delays = 0
     proc._tail_attempted_capture_count = 0
+    proc._tail_width_window_state = {}
     proc._current_tail_analysis_summary = {}
     proc._current_tail_capture_ref = {}
     proc._current_tail_capture_failure = None
@@ -2895,6 +2896,170 @@ def test_online_stream_analyze_tail_frame_accepts_late_width_even_when_flow_qc_w
     assert payload["adaptive_roi_right_expansion_px"] == 48
     assert payload["base_roi_x1"] == 820
     assert payload["selected_component_corridor_right_clearance_px"] == 18
+
+
+def test_online_stream_analyze_tail_frame_reuses_and_records_sticky_window_state(tmp_path, monkeypatch):
+    proc = _flow_proc(tmp_path)
+    proc._frames_path = str(tmp_path / "frames.jsonl")
+    proc._tail_mode = "scout"
+    proc._tail_current_delay_us = 7150
+    proc._tail_replicate_index = 0
+    proc._tail_width_window_state = {
+        "selected_band_y0_px": 144,
+        "selected_band_y1_px": 184,
+    }
+    proc.flow_frame_image = np.full((320, 220), 230, dtype=np.uint8)
+    proc._current_tail_capture_ref = {
+        "capture_id": "cap_tail_sticky",
+        "image_relpath": "captures/tail_sticky.png",
+    }
+    captured_calls = []
+
+    def _fake_analyze(**kwargs):
+        captured_calls.append(dict(kwargs))
+        return {
+            "summary": {
+                "status": "accepted",
+                "measurement_qc_pass": True,
+                "nozzle_qc_pass": True,
+                "silhouette_qc_pass": True,
+                "silhouette_status": "ok",
+                "failure_reason": None,
+                "attached_width_px": 89.0,
+                "attached_width_mode": "lower_consistent_window",
+                "visible_volume_nl": 18.0,
+                "attached_bottom_clearance_px": 120,
+                "min_accepted_fluid_distance_from_bottom_px": 120,
+                "accepted_component_count": 1,
+                "accepted_detached_component_count": 0,
+                "detached_near_bottom_warning": False,
+                "near_nozzle_detached_warning": False,
+                "warnings": [],
+                "attached_bottom_guard_hit": False,
+                "late_frame_warning": False,
+                "tail_width_usable": True,
+                "tail_landmark_usable": False,
+                "separated_from_nozzle_landmark": False,
+                "landmark_reason": None,
+                "root_band_width_px": 130.0,
+                "root_band_width_iqr_px": 40.0,
+                "root_band_half_delta_px": 40.0,
+                "selected_band_y0_px": 144,
+                "selected_band_y1_px": 184,
+                "selected_band_valid_row_count": 40,
+                "spread_fallback_triggered": True,
+                "candidate_window_count": 5,
+                "sticky_window_active": True,
+                "sticky_window_previous_y0_px": 144,
+                "sticky_window_instant_y0_px": 124,
+                "sticky_window_selected_reason": "sticky_hold_previous",
+                "sticky_window_candidate_streak": 1,
+                "sticky_window_switch_blocked": True,
+                "next_sticky_window_state": {
+                    "selected_band_y0_px": 144,
+                    "selected_band_y1_px": 184,
+                    "pending_candidate_y0_px": 124,
+                    "pending_candidate_y1_px": 164,
+                    "candidate_streak": 1,
+                },
+            },
+            "overlay": None,
+        }
+
+    monkeypatch.setattr(
+        calibration_model.online_runtime_mod,
+        "analyze_online_stream_frame",
+        _fake_analyze,
+    )
+
+    proc.onAnalyzeTailFrame()
+
+    assert captured_calls[0]["sticky_window_state"] == {
+        "selected_band_y0_px": 144,
+        "selected_band_y1_px": 184,
+    }
+    assert proc._tail_width_window_state == {
+        "selected_band_y0_px": 144,
+        "selected_band_y1_px": 184,
+        "pending_candidate_y0_px": 124,
+        "pending_candidate_y1_px": 164,
+        "candidate_streak": 1,
+    }
+    payload = json.loads(Path(proc._frames_path).read_text(encoding="utf-8").strip())
+    assert payload["sticky_window_active"] is True
+    assert payload["sticky_window_previous_y0_px"] == 144
+    assert payload["sticky_window_instant_y0_px"] == 124
+    assert payload["sticky_window_selected_reason"] == "sticky_hold_previous"
+    assert payload["sticky_window_candidate_streak"] == 1
+    assert payload["sticky_window_switch_blocked"] is True
+
+
+def test_online_stream_analyze_tail_frame_resets_sticky_window_state_on_root_band(tmp_path, monkeypatch):
+    proc = _flow_proc(tmp_path)
+    proc._frames_path = str(tmp_path / "frames.jsonl")
+    proc._tail_mode = "scout"
+    proc._tail_current_delay_us = 7150
+    proc._tail_replicate_index = 0
+    proc._tail_width_window_state = {
+        "selected_band_y0_px": 144,
+        "selected_band_y1_px": 184,
+    }
+    proc.flow_frame_image = np.full((320, 220), 230, dtype=np.uint8)
+    proc._current_tail_capture_ref = {
+        "capture_id": "cap_tail_root",
+        "image_relpath": "captures/tail_root.png",
+    }
+
+    monkeypatch.setattr(
+        calibration_model.online_runtime_mod,
+        "analyze_online_stream_frame",
+        lambda **kwargs: {
+            "summary": {
+                "status": "accepted",
+                "measurement_qc_pass": True,
+                "nozzle_qc_pass": True,
+                "silhouette_qc_pass": True,
+                "silhouette_status": "ok",
+                "failure_reason": None,
+                "attached_width_px": 70.0,
+                "attached_width_mode": "root_band",
+                "visible_volume_nl": 18.0,
+                "attached_bottom_clearance_px": 120,
+                "min_accepted_fluid_distance_from_bottom_px": 120,
+                "accepted_component_count": 1,
+                "accepted_detached_component_count": 0,
+                "detached_near_bottom_warning": False,
+                "near_nozzle_detached_warning": False,
+                "warnings": [],
+                "attached_bottom_guard_hit": False,
+                "late_frame_warning": False,
+                "tail_width_usable": True,
+                "tail_landmark_usable": False,
+                "separated_from_nozzle_landmark": False,
+                "landmark_reason": None,
+                "selected_band_y0_px": 84,
+                "selected_band_y1_px": 124,
+                "selected_band_valid_row_count": 40,
+                "spread_fallback_triggered": False,
+                "candidate_window_count": 0,
+                "sticky_window_active": False,
+                "sticky_window_previous_y0_px": 144,
+                "sticky_window_instant_y0_px": None,
+                "sticky_window_selected_reason": "reset_root_band",
+                "sticky_window_candidate_streak": 0,
+                "sticky_window_switch_blocked": False,
+                "next_sticky_window_state": {},
+            },
+            "overlay": None,
+        },
+    )
+
+    proc.onAnalyzeTailFrame()
+
+    assert proc._tail_width_window_state == {}
+    payload = json.loads(Path(proc._frames_path).read_text(encoding="utf-8").strip())
+    assert payload["sticky_window_active"] is False
+    assert payload["sticky_window_selected_reason"] == "reset_root_band"
 
 
 def test_online_stream_debug_signal_emits_provisional_tail_width_points(tmp_path):

@@ -7139,6 +7139,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._tail_fit_warnings = []
         self._tail_consecutive_failed_delays = 0
         self._tail_attempted_capture_count = 0
+        self._tail_width_window_state = {}
         self._current_tail_analysis_summary = {}
         self._current_tail_capture_ref = {}
         self._current_tail_capture_failure = None
@@ -8368,6 +8369,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
     def _reset_tail_delay_cursor(self, *, reset_index: bool = False):
         if bool(reset_index):
             self._tail_delay_index = 0
+            self._tail_width_window_state = {}
         self._tail_replicate_index = 0
         self._tail_current_delay_us = None
         self._tail_current_delay_frame_rows = []
@@ -8744,6 +8746,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._tail_fit_warnings = []
         self._tail_consecutive_failed_delays = 0
         self._tail_attempted_capture_count = 0
+        self._tail_width_window_state = {}
         self._current_tail_analysis_summary = {}
         self._current_tail_capture_ref = {}
         self._current_tail_capture_failure = None
@@ -9461,6 +9464,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._tail_fit_warnings = []
         self._tail_consecutive_failed_delays = 0
         self._tail_attempted_capture_count = 0
+        self._tail_width_window_state = {}
         self._current_tail_analysis_summary = {}
         self._current_tail_capture_ref = {}
         self._current_tail_capture_failure = None
@@ -9639,6 +9643,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 "tail_landmark_usable": False,
                 "warnings": list(frame_row.get("warnings") or []),
             }
+            self._tail_width_window_state = {}
             self._tail_current_delay_frame_rows.append(frame_row)
             self._append_flow_jsonl(self._frames_path, frame_row)
             self._emit_online_stream_debug_payload(self._tail_phase_label())
@@ -9656,9 +9661,19 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             capture_index=self._attempted_capture_count + self._tail_attempted_capture_count,
             frame_color_order="rgb",
             background_color_order="rgb",
+            sticky_window_state=dict(getattr(self, "_tail_width_window_state", {}) or {}),
         )
         summary = dict(analysis.get("summary") or {})
         overlay = analysis.get("overlay")
+        next_sticky_window_state = summary.get("next_sticky_window_state")
+        if isinstance(next_sticky_window_state, dict):
+            self._tail_width_window_state = dict(next_sticky_window_state)
+        elif (
+            not bool(summary.get("sticky_window_active"))
+            or not bool(summary.get("spread_fallback_triggered"))
+            or summary.get("attached_width_px") is None
+        ):
+            self._tail_width_window_state = {}
         tail_qc_pass = bool(summary.get("tail_width_usable"))
         status = "accepted" if tail_qc_pass else str(summary.get("status") or "rejected_tail_qc")
         frame_row = online_cal_mod.build_online_stream_frame_row(
@@ -9719,6 +9734,12 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             selected_band_valid_row_count=summary.get("selected_band_valid_row_count"),
             spread_fallback_triggered=bool(summary.get("spread_fallback_triggered")),
             candidate_window_count=summary.get("candidate_window_count"),
+            sticky_window_active=bool(summary.get("sticky_window_active")),
+            sticky_window_previous_y0_px=summary.get("sticky_window_previous_y0_px"),
+            sticky_window_instant_y0_px=summary.get("sticky_window_instant_y0_px"),
+            sticky_window_selected_reason=summary.get("sticky_window_selected_reason"),
+            sticky_window_candidate_streak=summary.get("sticky_window_candidate_streak"),
+            sticky_window_switch_blocked=bool(summary.get("sticky_window_switch_blocked")),
             adaptive_roi_expansion_triggered=bool(summary.get("adaptive_roi_expansion_triggered")),
             adaptive_roi_expansion_sides=list(summary.get("adaptive_roi_expansion_sides") or []),
             adaptive_roi_expansion_iterations=summary.get("adaptive_roi_expansion_iterations"),

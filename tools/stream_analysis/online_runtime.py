@@ -100,7 +100,114 @@ def _band_width_metrics(
     near_nozzle_band_top_px: int,
     near_nozzle_band_height_px: int,
     min_band_valid_rows: int,
+    sticky_window_state: dict | None = None,
+    sticky_window_enabled: bool = False,
+    sticky_window_confirm_frames: int = 2,
+    sticky_window_min_switch_drop_px: float = 12.0,
+    sticky_window_min_switch_drop_frac: float = 0.12,
+    sticky_window_max_step_multiplier: int = 1,
 ) -> dict:
+    sticky_active = bool(sticky_window_enabled and sticky_window_state is not None)
+    sticky_state = dict(sticky_window_state or {}) if sticky_active else {}
+
+    def _to_int_or_none(value):
+        try:
+            if value in (None, ""):
+                return None
+            return int(value)
+        except Exception:
+            return None
+
+    def _to_float_or_none(value):
+        try:
+            if value in (None, ""):
+                return None
+            return float(value)
+        except Exception:
+            return None
+
+    previous_y0_px = _to_int_or_none(sticky_state.get("selected_band_y0_px"))
+    previous_y1_px = _to_int_or_none(sticky_state.get("selected_band_y1_px"))
+
+    def _sticky_fields(
+        *,
+        selected_reason: str,
+        instant_stats: dict | None = None,
+        next_state: dict | None = None,
+        candidate_streak: int | None = None,
+        switch_blocked: bool = False,
+    ) -> dict:
+        return {
+            "sticky_window_active": bool(sticky_active and next_state),
+            "sticky_window_previous_y0_px": previous_y0_px,
+            "sticky_window_previous_y1_px": previous_y1_px,
+            "sticky_window_instant_y0_px": (
+                None if instant_stats is None else _to_int_or_none(instant_stats.get("y0_px"))
+            ),
+            "sticky_window_instant_y1_px": (
+                None if instant_stats is None else _to_int_or_none(instant_stats.get("y1_px"))
+            ),
+            "sticky_window_selected_reason": str(selected_reason),
+            "sticky_window_candidate_streak": int(candidate_streak or 0),
+            "sticky_window_switch_blocked": bool(switch_blocked),
+            "next_sticky_window_state": (
+                dict(next_state or {}) if sticky_active else None
+            ),
+        }
+
+    def _state_for_selected(
+        stats: dict,
+        *,
+        pending_stats: dict | None = None,
+        candidate_streak: int = 0,
+    ) -> dict:
+        state = {
+            "selected_band_y0_px": int(stats["y0_px"]),
+            "selected_band_y1_px": int(stats["y1_px"]),
+        }
+        if pending_stats is not None:
+            pending_y0_px = _to_int_or_none(pending_stats.get("y0_px"))
+            if pending_y0_px is not None and int(pending_y0_px) != int(stats["y0_px"]):
+                state["pending_candidate_y0_px"] = int(pending_y0_px)
+                state["pending_candidate_y1_px"] = int(pending_stats["y1_px"])
+                state["candidate_streak"] = int(candidate_streak)
+                return state
+        state["candidate_streak"] = 0
+        return state
+
+    def _metrics_payload(
+        *,
+        selected_stats: dict,
+        attached_width_mode: str,
+        spread_fallback_triggered: bool,
+        candidate_window_count: int,
+        root_band_width_px,
+        root_band_width_iqr_px,
+        root_band_half_delta_px,
+        root_band_y0_px: int,
+        root_band_y1_px: int,
+        sticky_payload: dict,
+    ) -> dict:
+        payload = {
+            "attached_width_px": selected_stats.get("median_width_px"),
+            "width_valid_row_count": int(selected_stats.get("valid_row_count") or 0),
+            "band_y0_px": int(selected_stats.get("y0_px") or root_band_y0_px),
+            "band_y1_px": int(selected_stats.get("y1_px") or root_band_y1_px),
+            "attached_width_mode": attached_width_mode,
+            "spread_fallback_triggered": bool(spread_fallback_triggered),
+            "candidate_window_count": int(candidate_window_count),
+            "root_band_width_px": root_band_width_px,
+            "root_band_width_iqr_px": root_band_width_iqr_px,
+            "root_band_half_delta_px": root_band_half_delta_px,
+            "root_band_y0_px": int(root_band_y0_px),
+            "root_band_y1_px": int(root_band_y1_px),
+            "selected_band_y0_px": int(selected_stats.get("y0_px") or root_band_y0_px),
+            "selected_band_y1_px": int(selected_stats.get("y1_px") or root_band_y1_px),
+            "selected_band_valid_row_count": int(selected_stats.get("valid_row_count") or 0),
+        }
+        payload.update(sticky_payload)
+        return payload
+
     def _empty_metrics(*, tracked_nozzle_y_px=None):
         root_band_y0_px = None
         root_band_y1_px = None
@@ -125,6 +232,10 @@ def _band_width_metrics(
             "selected_band_y0_px": root_band_y0_px,
             "selected_band_y1_px": root_band_y1_px,
             "selected_band_valid_row_count": 0,
+            **_sticky_fields(
+                selected_reason="reset_no_width",
+                next_state={},
+            ),
         }
 
     def _window_stats(width_rows: list[dict], *, y0_px: int, y1_px: int) -> dict:
@@ -193,6 +304,10 @@ def _band_width_metrics(
                 "root_band_width_px": root_stats.get("median_width_px"),
                 "root_band_width_iqr_px": root_stats.get("iqr_px"),
                 "root_band_half_delta_px": root_stats.get("half_delta_px"),
+                **_sticky_fields(
+                    selected_reason="reset_insufficient_root_rows",
+                    next_state={},
+                ),
             }
         )
         return metrics
@@ -212,8 +327,45 @@ def _band_width_metrics(
             _WIDTH_ROOT_HALF_DELTA_FRAC * float(root_band_width_px),
         )
     )
+    if not root_clearly_uneven:
+        return _metrics_payload(
+            selected_stats=selected_stats,
+            attached_width_mode=attached_width_mode,
+            spread_fallback_triggered=False,
+            candidate_window_count=0,
+            root_band_width_px=root_band_width_px,
+            root_band_width_iqr_px=root_band_width_iqr_px,
+            root_band_half_delta_px=root_band_half_delta_px,
+            root_band_y0_px=root_band_y0_px,
+            root_band_y1_px=root_band_y1_px,
+            sticky_payload=_sticky_fields(
+                selected_reason="reset_root_band",
+                next_state={},
+            ),
+        )
+
+    def _candidate_is_eligible(candidate_stats: dict) -> bool:
+        candidate_width_px = candidate_stats.get("median_width_px")
+        candidate_iqr_px = candidate_stats.get("iqr_px")
+        if candidate_width_px is None or candidate_iqr_px is None:
+            return False
+        if float(candidate_iqr_px) > max(
+            _WIDTH_CANDIDATE_IQR_MIN_PX,
+            _WIDTH_CANDIDATE_IQR_FRAC * float(candidate_width_px),
+        ):
+            return False
+        if float(candidate_width_px) > float(root_band_width_px) - max(
+            _WIDTH_CANDIDATE_NARROWER_MIN_PX,
+            _WIDTH_CANDIDATE_NARROWER_FRAC * float(root_band_width_px),
+        ):
+            return False
+        return True
+
+    candidate_step_px = int(max(1, int(near_nozzle_band_height_px) // 2))
+    candidate_stats_by_y0 = {}
+    eligible_by_y0 = {}
+    eligible_candidates = []
     if root_clearly_uneven:
-        candidate_step_px = int(max(1, int(near_nozzle_band_height_px) // 2))
         max_candidate_start_px = int(root_band_y0_px + int(_WIDTH_MAX_CANDIDATE_START_DELTA_PX))
         for candidate_y0_px in range(
             int(root_band_y0_px) + int(candidate_step_px),
@@ -229,42 +381,151 @@ def _band_width_metrics(
             if int(candidate_stats.get("valid_row_count") or 0) < int(min_band_valid_rows):
                 continue
             candidate_window_count += 1
-            candidate_width_px = candidate_stats.get("median_width_px")
-            candidate_iqr_px = candidate_stats.get("iqr_px")
-            if candidate_width_px is None or candidate_iqr_px is None:
-                continue
-            if float(candidate_iqr_px) > max(
-                _WIDTH_CANDIDATE_IQR_MIN_PX,
-                _WIDTH_CANDIDATE_IQR_FRAC * float(candidate_width_px),
-            ):
-                continue
-            if float(candidate_width_px) > float(root_band_width_px) - max(
-                _WIDTH_CANDIDATE_NARROWER_MIN_PX,
-                _WIDTH_CANDIDATE_NARROWER_FRAC * float(root_band_width_px),
-            ):
-                continue
-            selected_stats = dict(candidate_stats)
-            attached_width_mode = "lower_consistent_window"
-            spread_fallback_triggered = True
-            break
+            candidate_stats_by_y0[int(candidate_stats["y0_px"])] = dict(candidate_stats)
+            if _candidate_is_eligible(candidate_stats):
+                eligible = dict(candidate_stats)
+                eligible_by_y0[int(eligible["y0_px"])] = eligible
+                eligible_candidates.append(eligible)
 
-    return {
-        "attached_width_px": selected_stats.get("median_width_px"),
-        "width_valid_row_count": int(selected_stats.get("valid_row_count") or 0),
-        "band_y0_px": int(selected_stats.get("y0_px") or root_band_y0_px),
-        "band_y1_px": int(selected_stats.get("y1_px") or root_band_y1_px),
-        "attached_width_mode": attached_width_mode,
-        "spread_fallback_triggered": bool(spread_fallback_triggered),
-        "candidate_window_count": int(candidate_window_count),
-        "root_band_width_px": root_band_width_px,
-        "root_band_width_iqr_px": root_band_width_iqr_px,
-        "root_band_half_delta_px": root_band_half_delta_px,
-        "root_band_y0_px": int(root_band_y0_px),
-        "root_band_y1_px": int(root_band_y1_px),
-        "selected_band_y0_px": int(selected_stats.get("y0_px") or root_band_y0_px),
-        "selected_band_y1_px": int(selected_stats.get("y1_px") or root_band_y1_px),
-        "selected_band_valid_row_count": int(selected_stats.get("valid_row_count") or 0),
-    }
+    instant_stats = dict(eligible_candidates[0]) if eligible_candidates else None
+    if instant_stats is None:
+        return _metrics_payload(
+            selected_stats=selected_stats,
+            attached_width_mode="root_band",
+            spread_fallback_triggered=False,
+            candidate_window_count=candidate_window_count,
+            root_band_width_px=root_band_width_px,
+            root_band_width_iqr_px=root_band_width_iqr_px,
+            root_band_half_delta_px=root_band_half_delta_px,
+            root_band_y0_px=root_band_y0_px,
+            root_band_y1_px=root_band_y1_px,
+            sticky_payload=_sticky_fields(
+                selected_reason="reset_no_lower_candidate",
+                next_state={},
+            ),
+        )
+
+    selected_stats = dict(instant_stats)
+    attached_width_mode = "lower_consistent_window"
+    spread_fallback_triggered = True
+    sticky_reason = "instant_candidate"
+    sticky_blocked = False
+    sticky_streak = 0
+    next_state = _state_for_selected(selected_stats)
+
+    if sticky_active:
+        previous_stats = None
+        if previous_y0_px is not None:
+            maybe_previous_stats = candidate_stats_by_y0.get(int(previous_y0_px))
+            if maybe_previous_stats is not None and _candidate_is_eligible(maybe_previous_stats):
+                previous_stats = dict(maybe_previous_stats)
+
+        if previous_stats is None:
+            sticky_reason = "sticky_initial_candidate" if previous_y0_px is None else "sticky_previous_invalid"
+            next_state = _state_for_selected(selected_stats)
+        else:
+            previous_width_px = _to_float_or_none(previous_stats.get("median_width_px"))
+            switch_drop_px = max(
+                float(sticky_window_min_switch_drop_px),
+                float(sticky_window_min_switch_drop_frac) * float(previous_width_px or 0.0),
+            )
+            material_stats = None
+            if previous_width_px is not None:
+                for candidate in eligible_candidates:
+                    candidate_y0_px = int(candidate["y0_px"])
+                    if candidate_y0_px <= int(previous_y0_px):
+                        continue
+                    candidate_width_px = _to_float_or_none(candidate.get("median_width_px"))
+                    if candidate_width_px is None:
+                        continue
+                    if float(candidate_width_px) <= float(previous_width_px) - float(switch_drop_px):
+                        material_stats = dict(candidate)
+                        break
+
+            preferred_stats = dict(material_stats or instant_stats)
+            preferred_y0_px = int(preferred_stats["y0_px"])
+            previous_selected_y0_px = int(previous_stats["y0_px"])
+            if preferred_y0_px == previous_selected_y0_px:
+                selected_stats = dict(previous_stats)
+                sticky_reason = "sticky_same_window"
+                next_state = _state_for_selected(selected_stats)
+            else:
+                pending_y0_px = _to_int_or_none(sticky_state.get("pending_candidate_y0_px"))
+                if pending_y0_px == preferred_y0_px:
+                    sticky_streak = int(sticky_state.get("candidate_streak") or 0) + 1
+                else:
+                    sticky_streak = 1
+
+                confirmed = bool(
+                    int(max(1, sticky_window_confirm_frames)) <= 1
+                    or int(sticky_streak) >= int(max(1, sticky_window_confirm_frames))
+                )
+                material_switch = material_stats is not None
+                if material_switch or confirmed:
+                    max_step_px = int(max(1, sticky_window_max_step_multiplier)) * int(candidate_step_px)
+                    target_stats = dict(preferred_stats)
+                    target_y0_px = int(target_stats["y0_px"])
+                    if abs(int(target_y0_px) - int(previous_selected_y0_px)) > int(max_step_px):
+                        direction = 1 if int(target_y0_px) > int(previous_selected_y0_px) else -1
+                        step_y0_px = int(previous_selected_y0_px) + int(direction * max_step_px)
+                        step_stats = eligible_by_y0.get(int(step_y0_px))
+                        if step_stats is None:
+                            selected_stats = dict(previous_stats)
+                            sticky_reason = "sticky_hold_step_candidate_unavailable"
+                            sticky_blocked = True
+                            next_state = _state_for_selected(
+                                selected_stats,
+                                pending_stats=preferred_stats,
+                                candidate_streak=sticky_streak,
+                            )
+                        else:
+                            selected_stats = dict(step_stats)
+                            sticky_reason = (
+                                "sticky_step_toward_material_candidate"
+                                if material_switch
+                                else "sticky_step_toward_confirmed_candidate"
+                            )
+                            next_state = _state_for_selected(
+                                selected_stats,
+                                pending_stats=preferred_stats,
+                                candidate_streak=sticky_streak,
+                            )
+                    else:
+                        selected_stats = dict(target_stats)
+                        sticky_reason = (
+                            "sticky_material_candidate"
+                            if material_switch
+                            else "sticky_confirmed_candidate"
+                        )
+                        next_state = _state_for_selected(selected_stats)
+                else:
+                    selected_stats = dict(previous_stats)
+                    sticky_reason = "sticky_hold_previous"
+                    sticky_blocked = True
+                    next_state = _state_for_selected(
+                        selected_stats,
+                        pending_stats=preferred_stats,
+                        candidate_streak=sticky_streak,
+                    )
+
+    return _metrics_payload(
+        selected_stats=selected_stats,
+        attached_width_mode=attached_width_mode,
+        spread_fallback_triggered=spread_fallback_triggered,
+        candidate_window_count=candidate_window_count,
+        root_band_width_px=root_band_width_px,
+        root_band_width_iqr_px=root_band_width_iqr_px,
+        root_band_half_delta_px=root_band_half_delta_px,
+        root_band_y0_px=root_band_y0_px,
+        root_band_y1_px=root_band_y1_px,
+        sticky_payload=_sticky_fields(
+            selected_reason=sticky_reason,
+            instant_stats=instant_stats,
+            next_state=next_state,
+            candidate_streak=sticky_streak,
+            switch_blocked=sticky_blocked,
+        ),
+    )
 
 
 def _attached_component_clearance(stage3_metric_row: dict, attached_component_row: dict | None):
@@ -1243,6 +1504,7 @@ def analyze_online_stream_frame(
     capture_index: int | None = None,
     frame_color_order: str = "bgr",
     background_color_order: str | None = None,
+    sticky_window_state: dict | None = None,
     _adaptive_retry: bool = True,
 ) -> dict:
     config = _resolved_analysis_config(analysis_config)
@@ -1303,6 +1565,12 @@ def analyze_online_stream_frame(
         near_nozzle_band_top_px=int(config["near_nozzle_band_top_px"]),
         near_nozzle_band_height_px=int(config["near_nozzle_band_height_px"]),
         min_band_valid_rows=int(config["min_band_valid_rows"]),
+        sticky_window_state=sticky_window_state,
+        sticky_window_enabled=bool(config["tail_width_sticky_window_enabled"]),
+        sticky_window_confirm_frames=int(config["tail_width_sticky_window_confirm_frames"]),
+        sticky_window_min_switch_drop_px=float(config["tail_width_sticky_window_min_switch_drop_px"]),
+        sticky_window_min_switch_drop_frac=float(config["tail_width_sticky_window_min_switch_drop_frac"]),
+        sticky_window_max_step_multiplier=int(config["tail_width_sticky_window_max_step_multiplier"]),
     )
 
     silhouette_qc_pass = str(stage3_metric_row.get("silhouette_status") or "") == "ok"
@@ -1665,6 +1933,15 @@ def analyze_online_stream_frame(
         "selected_band_valid_row_count": width_metrics.get("selected_band_valid_row_count"),
         "spread_fallback_triggered": bool(width_metrics.get("spread_fallback_triggered")),
         "candidate_window_count": width_metrics.get("candidate_window_count"),
+        "sticky_window_active": bool(width_metrics.get("sticky_window_active")),
+        "sticky_window_previous_y0_px": width_metrics.get("sticky_window_previous_y0_px"),
+        "sticky_window_previous_y1_px": width_metrics.get("sticky_window_previous_y1_px"),
+        "sticky_window_instant_y0_px": width_metrics.get("sticky_window_instant_y0_px"),
+        "sticky_window_instant_y1_px": width_metrics.get("sticky_window_instant_y1_px"),
+        "sticky_window_selected_reason": width_metrics.get("sticky_window_selected_reason"),
+        "sticky_window_candidate_streak": width_metrics.get("sticky_window_candidate_streak"),
+        "sticky_window_switch_blocked": bool(width_metrics.get("sticky_window_switch_blocked")),
+        "next_sticky_window_state": width_metrics.get("next_sticky_window_state"),
         "attached_bottom_guard_hit": bool(attached_bottom_guard_hit),
     }
     late_coverage_candidate, late_coverage_metric = online_cal_mod.is_online_stream_flow_late_coverage_candidate(
@@ -1687,6 +1964,7 @@ def analyze_online_stream_frame(
             capture_index=capture_index,
             frame_color_order=frame_color_order,
             background_color_order=background_color_order,
+            sticky_window_state=sticky_window_state,
             _adaptive_retry=False,
         )
     if bool(_adaptive_retry) and bool(config.get("adaptive_roi_expansion_enabled")):

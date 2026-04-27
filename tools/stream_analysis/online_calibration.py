@@ -75,6 +75,11 @@ DEFAULT_ONLINE_STREAM_ANALYSIS_CONFIG = {
     "adaptive_roi_edge_margin_px": 8,
     "adaptive_roi_expansion_step_px": 48,
     "adaptive_roi_max_expansion_px": 160,
+    "tail_width_sticky_window_enabled": True,
+    "tail_width_sticky_window_confirm_frames": 2,
+    "tail_width_sticky_window_min_switch_drop_px": 12.0,
+    "tail_width_sticky_window_min_switch_drop_frac": 0.12,
+    "tail_width_sticky_window_max_step_multiplier": 1,
 }
 
 
