@@ -32,6 +32,28 @@ def _camera_stub():
     return cam
 
 
+def _emergence_proc_with_replicates(nozzle_center_px, centers, areas=None, detail_updates=None):
+    proc = DropletEmergenceCalibrationProcess.__new__(DropletEmergenceCalibrationProcess)
+    proc.nozzle_center_px = nozzle_center_px
+    proc._rep_areas = list(areas if areas is not None else [4000 for _ in centers])
+    detail_updates = list(detail_updates or [{} for _ in centers])
+    proc._replicate_details = []
+    for area, center, update in zip(proc._rep_areas, centers, detail_updates):
+        details = {
+            "contour_class": "unknown",
+            "contour_area": float(area),
+            "bbox_area": float(area),
+            "p95": 80.0,
+            "area_metric": "contour_area",
+            "center_mode": "support_root",
+            "ambiguous_lateral_spread": False,
+            "roi_search_mode": "prior_centered",
+        }
+        details.update(update)
+        proc._replicate_details.append({"area": int(area), "center": center, "details": details})
+    return proc
+
+
 def test_droplet_emergence_missing_requirements_reports_dependencies():
     cm = _ready_cm()
     cm.get_nozzle_center = lambda: None
@@ -164,6 +186,88 @@ def test_calc_emergence_area_falls_back_to_default_roi_when_x_prior_misses():
     assert area is not None and area > 0
     assert center is not None
     assert abs(int(center[0]) - 160) <= 3
+
+
+def test_aggregate_replicates_uses_nozzle_x_and_emergence_y_for_lateral_spread():
+    proc = _emergence_proc_with_replicates(
+        (536, 183),
+        [(629, 314), (636, 314)],
+        areas=[4240, 4664],
+        detail_updates=[
+            {"ambiguous_lateral_spread": True, "center_mode": "support_root_guardrailed"},
+            {"ambiguous_lateral_spread": True, "center_mode": "support_root_guardrailed"},
+        ],
+    )
+
+    area, summary = proc._aggregate_replicates()
+
+    assert area == 4452
+    assert summary["measured_center"] == (632, 314)
+    assert summary["resolved_center"] == (536, 314)
+    assert summary["center"] == (536, 314)
+    assert summary["center_source"] == "nozzle_x_emergence_y"
+    assert summary["center_x_source"] == "nozzle_position"
+    assert summary["center_y_source"] == "emergence_root"
+    assert summary["center_full_update_allowed"] is True
+    assert summary["center_y_update_allowed"] is True
+    assert summary["center_update_allowed"] is True
+    assert summary["ambiguous_lateral_spread"] is True
+
+
+def test_aggregate_replicates_uses_prior_x_for_clean_stable_center():
+    proc = _emergence_proc_with_replicates(
+        (536, 183),
+        [(544, 315), (546, 315)],
+        areas=[3500, 3600],
+    )
+
+    _area, summary = proc._aggregate_replicates()
+
+    assert summary["measured_center"] == (545, 315)
+    assert summary["resolved_center"] == (536, 315)
+    assert summary["center_source"] == "nozzle_x_emergence_y"
+    assert summary["center_x_source"] == "nozzle_position"
+    assert summary["center_y_source"] == "emergence_root"
+    assert summary["center_y_update_allowed"] is True
+    assert summary["ambiguous_lateral_spread"] is False
+
+
+def test_aggregate_replicates_preserves_prior_when_emergence_y_is_unstable():
+    proc = _emergence_proc_with_replicates(
+        (536, 183),
+        [(632, 310), (633, 330)],
+        areas=[4200, 4300],
+    )
+
+    _area, summary = proc._aggregate_replicates()
+
+    assert summary["measured_center"] == (632, 320)
+    assert summary["resolved_center"] == (536, 183)
+    assert summary["center_source"] == "nozzle_position_preserved"
+    assert summary["center_x_source"] == "nozzle_position"
+    assert summary["center_y_source"] == "nozzle_position"
+    assert summary["center_full_update_allowed"] is False
+    assert summary["center_y_update_allowed"] is False
+    assert summary["center_update_allowed"] is False
+
+
+def test_aggregate_replicates_without_prior_uses_full_stable_emergence_center():
+    proc = _emergence_proc_with_replicates(
+        None,
+        [(632, 314), (636, 314)],
+        areas=[4200, 4300],
+    )
+
+    _area, summary = proc._aggregate_replicates()
+
+    assert summary["measured_center"] == (634, 314)
+    assert summary["resolved_center"] == (634, 314)
+    assert summary["center_source"] == "emergence_root"
+    assert summary["center_x_source"] == "emergence_root"
+    assert summary["center_y_source"] == "emergence_root"
+    assert summary["center_full_update_allowed"] is True
+    assert summary["center_y_update_allowed"] is True
+    assert summary["center_update_allowed"] is True
 
 
 def test_emergence_finish_success_does_not_overwrite_nozzle_image_position():

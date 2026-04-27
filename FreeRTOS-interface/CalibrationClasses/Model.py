@@ -12465,10 +12465,15 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
             sum(1 for r in self._replicate_details if bool((r.get("details") or {}).get("ambiguous_lateral_spread", False)))
         )
         center_measurement_count = int(len(centers))
-        center_update_allowed = bool(
+        center_full_update_allowed = bool(
             measured_center is not None
             and center_measurement_count >= 2
             and center_x_span_px <= 24
+            and center_y_span_px <= 12
+        )
+        center_y_update_allowed = bool(
+            measured_center is not None
+            and center_measurement_count >= 2
             and center_y_span_px <= 12
         )
         prior_center = None
@@ -12477,12 +12482,33 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
                 prior_center = (int(self.nozzle_center_px[0]), int(self.nozzle_center_px[1]))
             except Exception:
                 prior_center = None
-        if center_update_allowed and measured_center is not None:
+
+        center_x_source = "none"
+        center_y_source = "none"
+        if prior_center is not None:
+            if center_y_update_allowed and measured_center is not None:
+                resolved_center = (int(prior_center[0]), int(measured_center[1]))
+                center_source = "nozzle_x_emergence_y"
+                center_x_source = "nozzle_position"
+                center_y_source = "emergence_root"
+            else:
+                resolved_center = prior_center
+                center_source = "nozzle_position_preserved"
+                center_x_source = "nozzle_position"
+                center_y_source = "nozzle_position"
+        elif center_full_update_allowed and measured_center is not None:
             resolved_center = measured_center
             center_source = "emergence_root"
+            center_x_source = "emergence_root"
+            center_y_source = "emergence_root"
         else:
-            resolved_center = prior_center
-            center_source = "nozzle_position_preserved" if prior_center is not None else "none"
+            resolved_center = None
+            center_source = "none"
+
+        center_update_allowed = bool(
+            (center_y_update_allowed if prior_center is not None else center_full_update_allowed)
+            and measured_center is not None
+        )
 
         contour_areas = [float((r.get("details") or {}).get("contour_area", 0.0)) for r in self._replicate_details]
         bbox_areas = [float((r.get("details") or {}).get("bbox_area", 0.0)) for r in self._replicate_details]
@@ -12512,11 +12538,15 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
             "measured_center": measured_center,
             "resolved_center": resolved_center,
             "center_source": str(center_source),
+            "center_x_source": str(center_x_source),
+            "center_y_source": str(center_y_source),
             "center_mode": str(center_mode),
             "center_measurement_count": int(center_measurement_count),
             "center_x_span_px": int(center_x_span_px),
             "center_y_span_px": int(center_y_span_px),
             "center_update_allowed": bool(center_update_allowed),
+            "center_full_update_allowed": bool(center_full_update_allowed),
+            "center_y_update_allowed": bool(center_y_update_allowed),
             "ambiguous_lateral_spread": bool(ambiguous_replicate_count > 0),
             "ambiguous_replicate_count": int(ambiguous_replicate_count),
             "area_metric": str(area_metric),
