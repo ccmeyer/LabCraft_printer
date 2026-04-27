@@ -10204,7 +10204,17 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         self.min_flash_delay_us = 2000
         self.max_flash_delay_us = 12000
         self.multi_contour_delay_step_us = 200
+        self.max_multi_contour_probe_steps = 3
+        self.multi_contour_match_max_center_px = 120.0
+        self.multi_contour_match_min_iou = 0.10
+        self.multi_contour_responsive_area_drop_frac = 0.15
+        self.multi_contour_responsive_height_drop_frac = 0.15
+        self.multi_contour_responsive_bottom_up_px = 25
+        self.multi_contour_static_area_change_frac = 0.08
+        self.multi_contour_static_height_change_frac = 0.10
+        self.multi_contour_static_center_shift_px = 25.0
         self._current_flash_delay_us = int(self.initial_flash_delay_us)
+        self._reset_multi_contour_tracking()
 
         # pressure search (psi)
         self.max_pressure_levels = 3          # total pressure levels: base + two bumps
@@ -10392,6 +10402,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
     @Slot()
     def onPrepareDroplet(self):
         self.stageChanged.emit("Nozzle Pos - Preparing droplet capture")
+        self._reset_multi_contour_tracking()
         self._current_flash_delay_us = int(
             self._clamp_delay(getattr(self, "_current_flash_delay_us", self.initial_flash_delay_us))
         )
@@ -10493,6 +10504,9 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
             if n_contours > 1:
                 self._handle_multiple_contours(int(n_contours), nozzle_px)
                 return
+            if self._multi_contour_has_probe_history():
+                self._handle_single_contour_after_multi_probe(nozzle_px)
+                return
             decision = self._recenter_or_finish(nozzle_px)
             if decision:
                 self._record_decision(
@@ -10501,8 +10515,15 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
                 )
             return
 
-        if status == "NO_SIGNAL":
-            self._handle_missing_nozzle(status)
+        if self._multi_contour_has_probe_history():
+            self._abort_multi_contour_ambiguous(
+                f"probe_result_{str(status).lower()}",
+                {
+                    "status": str(status),
+                    "flash_delay_us": int(self._current_flash_delay_us),
+                    "history": self._multi_contour_history_payload(),
+                },
+            )
             return
 
         # status == "NONE" → keep your existing delay-scan plan, then (smaller) pressure bump
@@ -10766,10 +10787,62 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
     def _handle_multiple_contours(self, n_contours: int, nozzle_px):
         self._x_scan_active = False
         cur_delay = int(self._clamp_delay(getattr(self, "_current_flash_delay_us", self.initial_flash_delay_us)))
+
+        candidates = self._current_nozzle_candidates()
+        selection = self._select_delay_responsive_candidate(candidates)
+        if selection is not None:
+            self._append_multi_contour_snapshot(cur_delay, candidates, str("OK"), int(n_contours))
+            self._select_responsive_multi_contour_candidate(selection, int(n_contours))
+            return
+
+        response_summary = self._multi_contour_response_summary(candidates)
+        self._append_multi_contour_snapshot(cur_delay, candidates, str("OK"), int(n_contours))
+        self._probe_multi_contour_delay(
+            int(n_contours),
+            nozzle_px,
+            reason="needs_delay_response_probe",
+            candidates=candidates,
+            response_summary=response_summary,
+        )
+
+    def _handle_single_contour_after_multi_probe(self, nozzle_px):
+        cur_delay = int(self._clamp_delay(getattr(self, "_current_flash_delay_us", self.initial_flash_delay_us)))
+        candidates = self._current_nozzle_candidates()
+        selection = self._select_delay_responsive_candidate(candidates)
+        if selection is not None:
+            self._append_multi_contour_snapshot(cur_delay, candidates, str("OK"), 1)
+            self._select_responsive_multi_contour_candidate(selection, 1)
+            return
+
+        response_summary = self._multi_contour_response_summary(candidates)
+        self._append_multi_contour_snapshot(cur_delay, candidates, str("OK"), 1)
+        self._abort_multi_contour_ambiguous(
+            "single_contour_after_probe_not_delay_responsive",
+            {
+                "status": "OK",
+                "n_contours": 1,
+                "nozzle_px": nozzle_px,
+                "flash_delay_us": int(cur_delay),
+                "candidates": candidates,
+                "response_summary": response_summary,
+                "history": self._multi_contour_history_payload(),
+            },
+        )
+
+    def _probe_multi_contour_delay(
+        self,
+        n_contours: int,
+        nozzle_px,
+        *,
+        reason: str,
+        candidates: list | None = None,
+        response_summary: list | None = None,
+    ):
+        cur_delay = int(self._clamp_delay(getattr(self, "_current_flash_delay_us", self.initial_flash_delay_us)))
         if cur_delay <= int(self.min_flash_delay_us):
             msg = (
                 f"Nozzle Pos - Multiple contours persist at minimum flash delay "
-                f"({int(self.min_flash_delay_us)} us); unable to isolate attached droplet."
+                f"({int(self.min_flash_delay_us)} us); unable to isolate delay-responsive nozzle fluid."
             )
             self._record_decision(
                 "multi_contour_min_delay_abort",
@@ -10777,14 +10850,35 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
                     "n_contours": int(n_contours),
                     "flash_delay_us": int(cur_delay),
                     "nozzle_px": nozzle_px,
+                    "reason": str(reason),
+                    "candidates": candidates or [],
+                    "response_summary": response_summary or [],
+                    "history": self._multi_contour_history_payload(),
                 },
             )
             self.calibrationError.emit(msg)
             return
 
+        probe_steps = int(getattr(self, "_multi_contour_probe_steps", 0))
+        max_steps = int(getattr(self, "max_multi_contour_probe_steps", 3))
+        if probe_steps >= max_steps:
+            self._abort_multi_contour_ambiguous(
+                "probe_limit_reached",
+                {
+                    "n_contours": int(n_contours),
+                    "flash_delay_us": int(cur_delay),
+                    "nozzle_px": nozzle_px,
+                    "max_probe_steps": int(max_steps),
+                    "candidates": candidates or [],
+                    "response_summary": response_summary or [],
+                    "history": self._multi_contour_history_payload(),
+                },
+            )
+            return
+
         new_delay = int(self._clamp_delay(cur_delay - int(self.multi_contour_delay_step_us)))
         if new_delay >= cur_delay:
-            msg = "Nozzle Pos - Unable to reduce flash delay for multi-contour recovery."
+            msg = "Nozzle Pos - Unable to reduce flash delay for multi-contour diagnostic probe."
             self._record_decision(
                 "multi_contour_min_delay_abort",
                 {
@@ -10792,38 +10886,321 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
                     "flash_delay_us": int(cur_delay),
                     "requested_new_delay_us": int(new_delay),
                     "nozzle_px": nozzle_px,
+                    "reason": str(reason),
                 },
             )
             self.calibrationError.emit(msg)
             return
 
         self._current_flash_delay_us = int(new_delay)
+        self._multi_contour_probe_steps = probe_steps + 1
         settings = {
             "num_droplets": 1,
             "flash_delay": int(self._current_flash_delay_us),
         }
         self.stageChanged.emit(
-            f"Nozzle Pos - Multiple contours ({int(n_contours)}); decreasing flash delay to "
-            f"{int(self._current_flash_delay_us)} us and reassessing."
+            f"Nozzle Pos - Multiple contours ({int(n_contours)}); probing flash delay at "
+            f"{int(self._current_flash_delay_us)} us to identify ejecting fluid."
         )
         self._record_decision(
-            "multi_contour_delay_backoff",
+            "multi_contour_delay_probe",
             {
                 "n_contours": int(n_contours),
                 "previous_flash_delay_us": int(cur_delay),
                 "flash_delay_us": int(self._current_flash_delay_us),
                 "step_us": int(self.multi_contour_delay_step_us),
+                "probe_step": int(self._multi_contour_probe_steps),
+                "max_probe_steps": int(max_steps),
                 "nozzle_px": nozzle_px,
+                "reason": str(reason),
+                "candidates": candidates or [],
+                "response_summary": response_summary or [],
                 "settings": settings,
             },
         )
         self._request_settings_with_recording(
             settings,
             self.calibration_manager.emitSettingsChangeCompleted,
-            context="nozzle_multi_contour_delay_backoff",
+            context="nozzle_multi_contour_delay_probe",
         )
 
     # ----------------- Helpers: detection & movement -----------------
+
+    def _reset_multi_contour_tracking(self):
+        self._multi_contour_probe_steps = 0
+        self._multi_contour_probe_history = []
+
+    def _multi_contour_has_probe_history(self):
+        return bool(getattr(self, "_multi_contour_probe_history", []))
+
+    def _multi_contour_history_payload(self):
+        payload = []
+        for snap in list(getattr(self, "_multi_contour_probe_history", []) or []):
+            payload.append(
+                {
+                    "flash_delay_us": int(snap.get("flash_delay_us", 0)),
+                    "status": str(snap.get("status", "")),
+                    "n_contours": int(snap.get("n_contours", 0)),
+                    "candidates": list(snap.get("candidates") or []),
+                }
+            )
+        return payload[-4:]
+
+    def _append_multi_contour_snapshot(self, delay_us, candidates, status, n_contours):
+        if not hasattr(self, "_multi_contour_probe_history"):
+            self._reset_multi_contour_tracking()
+        snap = {
+            "flash_delay_us": int(delay_us),
+            "status": str(status),
+            "n_contours": int(n_contours),
+            "candidates": [dict(c) for c in list(candidates or [])],
+        }
+        self._multi_contour_probe_history.append(snap)
+        self._multi_contour_probe_history = self._multi_contour_probe_history[-4:]
+
+    def _normalize_nozzle_candidate(self, cand):
+        cand = dict(cand or {})
+        bbox = cand.get("bbox") or [0, 0, 0, 0]
+        try:
+            x, y, w, h = [int(v) for v in bbox[:4]]
+        except Exception:
+            x, y, w, h = 0, 0, 0, 0
+        w = max(0, int(w))
+        h = max(0, int(h))
+        top_y = int(cand.get("top_y", y))
+        bottom_y = int(cand.get("bottom_y", y + max(0, h - 1)))
+        bbox_mid_x = int(cand.get("bbox_mid_x", int(round(x + w / 2.0))))
+        bbox_mid_y = int(cand.get("bbox_mid_y", int(round(y + h / 2.0))))
+        support_mid_x = cand.get("support_mid_x")
+        if support_mid_x is not None:
+            support_mid_x = int(support_mid_x)
+        nozzle_xy = cand.get("nozzle_xy")
+        if nozzle_xy is not None:
+            try:
+                nozzle_xy = [int(nozzle_xy[0]), int(nozzle_xy[1])]
+            except Exception:
+                nozzle_xy = None
+        if nozzle_xy is None and support_mid_x is not None:
+            nozzle_xy = [int(support_mid_x), int(top_y)]
+        return {
+            "index": int(cand.get("index", 0)),
+            "area": float(cand.get("area", 0.0)),
+            "bbox": [int(x), int(y), int(w), int(h)],
+            "top_y": int(top_y),
+            "bottom_y": int(bottom_y),
+            "width": int(cand.get("width", w)),
+            "height": int(cand.get("height", h)),
+            "bbox_mid_x": int(bbox_mid_x),
+            "bbox_mid_y": int(bbox_mid_y),
+            "support_mid_x": support_mid_x,
+            "support_span_px": int(cand.get("support_span_px", 0)),
+            "support_threshold_px": int(cand.get("support_threshold_px", 0)),
+            "support_peak_px": int(cand.get("support_peak_px", 0)),
+            "support_column_count": int(cand.get("support_column_count", 0)),
+            "bbox_support_dx": None if cand.get("bbox_support_dx") is None else int(cand.get("bbox_support_dx")),
+            "x_measurement_mode": str(cand.get("x_measurement_mode", "")),
+            "ambiguous_lateral_spread": bool(cand.get("ambiguous_lateral_spread", False)),
+            "nozzle_xy": nozzle_xy,
+        }
+
+    def _current_nozzle_candidates(self):
+        details = dict(getattr(self, "_last_detection_details", {}) or {})
+        raw = details.get("candidates")
+        if raw is None:
+            raw = details.get("candidate_summaries") or []
+        return [self._normalize_nozzle_candidate(c) for c in list(raw or [])]
+
+    @staticmethod
+    def _bbox_iou(a, b):
+        try:
+            ax, ay, aw, ah = [float(v) for v in a[:4]]
+            bx, by, bw, bh = [float(v) for v in b[:4]]
+        except Exception:
+            return 0.0
+        ax2, ay2 = ax + max(0.0, aw), ay + max(0.0, ah)
+        bx2, by2 = bx + max(0.0, bw), by + max(0.0, bh)
+        ix1, iy1 = max(ax, bx), max(ay, by)
+        ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+        iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+        inter = iw * ih
+        area_a = max(0.0, aw) * max(0.0, ah)
+        area_b = max(0.0, bw) * max(0.0, bh)
+        denom = area_a + area_b - inter
+        return float(inter / denom) if denom > 0 else 0.0
+
+    @staticmethod
+    def _candidate_center_distance(a, b):
+        ax = float(a.get("bbox_mid_x", 0.0))
+        ay = float(a.get("bbox_mid_y", 0.0))
+        bx = float(b.get("bbox_mid_x", 0.0))
+        by = float(b.get("bbox_mid_y", 0.0))
+        return float(math.hypot(ax - bx, ay - by))
+
+    def _match_previous_multi_contour_candidate(self, cand):
+        max_center = float(getattr(self, "multi_contour_match_max_center_px", 120.0))
+        min_iou = float(getattr(self, "multi_contour_match_min_iou", 0.10))
+        for snap in reversed(list(getattr(self, "_multi_contour_probe_history", []) or [])):
+            prev_candidates = list(snap.get("candidates") or [])
+            if not prev_candidates:
+                continue
+            best = None
+            best_key = None
+            for prev in prev_candidates:
+                prev = self._normalize_nozzle_candidate(prev)
+                dist = self._candidate_center_distance(cand, prev)
+                iou = self._bbox_iou(cand.get("bbox", []), prev.get("bbox", []))
+                if dist > max_center and iou < min_iou:
+                    continue
+                key = (float(iou), -float(dist), float(prev.get("area", 0.0)))
+                if best is None or key > best_key:
+                    best = prev
+                    best_key = key
+            if best is not None:
+                return best
+        return None
+
+    def _candidate_delay_response_metrics(self, cand):
+        prev = self._match_previous_multi_contour_candidate(cand)
+        if prev is None:
+            return {
+                "classification": "unknown",
+                "matched": False,
+            }
+        prev_area = float(max(prev.get("area", 0.0), 1e-9))
+        cur_area = float(max(cand.get("area", 0.0), 0.0))
+        prev_h = float(max(prev.get("height", 0), 1))
+        cur_h = float(max(cand.get("height", 0), 0))
+        area_drop = float((prev_area - cur_area) / prev_area)
+        height_drop = float((prev_h - cur_h) / prev_h)
+        area_change_abs = abs(float(cur_area - prev_area)) / prev_area
+        height_change_abs = abs(float(cur_h - prev_h)) / prev_h
+        bottom_up = int(prev.get("bottom_y", 0)) - int(cand.get("bottom_y", 0))
+        center_shift = self._candidate_center_distance(cand, prev)
+        responsive = bool(
+            area_drop >= float(getattr(self, "multi_contour_responsive_area_drop_frac", 0.15))
+            and (
+                height_drop >= float(getattr(self, "multi_contour_responsive_height_drop_frac", 0.15))
+                or bottom_up >= int(getattr(self, "multi_contour_responsive_bottom_up_px", 25))
+            )
+            and cand.get("nozzle_xy") is not None
+        )
+        static = bool(
+            area_change_abs <= float(getattr(self, "multi_contour_static_area_change_frac", 0.08))
+            and height_change_abs <= float(getattr(self, "multi_contour_static_height_change_frac", 0.10))
+            and center_shift <= float(getattr(self, "multi_contour_static_center_shift_px", 25.0))
+        )
+        classification = "responsive_fluid" if responsive else ("static_artifact" if static else "unknown")
+        score = float(max(0.0, area_drop) + max(0.0, height_drop) + max(0.0, bottom_up) / 100.0)
+        return {
+            "classification": classification,
+            "matched": True,
+            "matched_previous": prev,
+            "area_drop_frac": float(area_drop),
+            "height_drop_frac": float(height_drop),
+            "area_change_abs_frac": float(area_change_abs),
+            "height_change_abs_frac": float(height_change_abs),
+            "bottom_up_px": int(bottom_up),
+            "center_shift_px": float(center_shift),
+            "score": float(score),
+        }
+
+    def _multi_contour_response_summary(self, candidates):
+        out = []
+        for cand in list(candidates or []):
+            metrics = self._candidate_delay_response_metrics(cand)
+            item = {
+                "candidate": cand,
+                "classification": str(metrics.get("classification", "unknown")),
+                "matched": bool(metrics.get("matched", False)),
+            }
+            for key in (
+                "area_drop_frac",
+                "height_drop_frac",
+                "area_change_abs_frac",
+                "height_change_abs_frac",
+                "bottom_up_px",
+                "center_shift_px",
+                "score",
+            ):
+                if key in metrics:
+                    item[key] = metrics[key]
+            out.append(item)
+        return out
+
+    def _select_delay_responsive_candidate(self, candidates):
+        selected = None
+        selected_metrics = None
+        for cand in list(candidates or []):
+            metrics = self._candidate_delay_response_metrics(cand)
+            if str(metrics.get("classification", "")) != "responsive_fluid":
+                continue
+            key = (
+                float(metrics.get("score", 0.0)),
+                float(cand.get("area", 0.0)),
+                int(cand.get("height", 0)),
+            )
+            if selected is None or key > selected[0]:
+                selected = (key, cand)
+                selected_metrics = metrics
+        if selected is None:
+            return None
+        return {
+            "candidate": selected[1],
+            "metrics": selected_metrics or {},
+            "response_summary": self._multi_contour_response_summary(candidates),
+        }
+
+    def _select_responsive_multi_contour_candidate(self, selection, n_contours: int):
+        candidate = dict((selection or {}).get("candidate") or {})
+        nozzle_xy = candidate.get("nozzle_xy")
+        if nozzle_xy is None:
+            self._abort_multi_contour_ambiguous(
+                "responsive_candidate_missing_nozzle_xy",
+                {
+                    "n_contours": int(n_contours),
+                    "selection": selection or {},
+                    "history": self._multi_contour_history_payload(),
+                },
+            )
+            return
+        nozzle_px = (int(nozzle_xy[0]), int(nozzle_xy[1]))
+        self.stageChanged.emit(
+            "Nozzle Pos - Selected delay-responsive nozzle fluid candidate; preserving flash delay."
+        )
+        self._record_decision(
+            "multi_contour_selected_responsive_candidate",
+            {
+                "n_contours": int(n_contours),
+                "flash_delay_us": int(getattr(self, "_current_flash_delay_us", self.initial_flash_delay_us)),
+                "nozzle_px": [int(nozzle_px[0]), int(nozzle_px[1])],
+                "candidate": candidate,
+                "metrics": dict((selection or {}).get("metrics") or {}),
+                "response_summary": list((selection or {}).get("response_summary") or []),
+                "history": self._multi_contour_history_payload(),
+            },
+        )
+        decision = self._recenter_or_finish(nozzle_px)
+        if decision:
+            self._record_decision(
+                decision,
+                {
+                    "status": "OK",
+                    "nozzle_px": [int(nozzle_px[0]), int(nozzle_px[1])],
+                    "n_contours": int(n_contours),
+                    "source": "delay_responsive_multi_contour",
+                },
+            )
+
+    def _abort_multi_contour_ambiguous(self, reason: str, payload: dict | None = None):
+        out = dict(payload or {})
+        out["reason"] = str(reason)
+        self.stageChanged.emit(
+            "Nozzle Pos - Ambiguous contours; no delay-responsive nozzle fluid could be isolated."
+        )
+        self._record_decision("multi_contour_ambiguous_abort", out)
+        self.calibrationError.emit(
+            "Nozzle Pos - Ambiguous contours; unable to identify delay-responsive nozzle fluid."
+        )
 
     def _escalate_pressure_on_no_signal(self):
         """
@@ -10938,54 +11315,54 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
             return int(ys.max())
 
         kept.sort(key=lambda t: (-bottom_y(t[0]), -t[1]))
-        chosen, _, top_y, x, y, w, h = kept[0]
         n = len(kept)
-        bbox_mid_x = int(round(x + w / 2.0))
 
-        contour_mask = np.zeros((H, W), dtype=np.uint8)
-        cv2.drawContours(contour_mask, [chosen], -1, 255, -1)
-        contour_bbox_mask = contour_mask[y:y + h, x:x + w]
-        col_counts = np.count_nonzero(contour_bbox_mask, axis=0).astype(int)
-        support_threshold_px = int(max(30, int(0.35 * h)))
-        support_cols = np.flatnonzero(col_counts >= support_threshold_px)
-        support_peak_px = int(col_counts.max()) if col_counts.size else 0
-        support_col_count = int(support_cols.size)
-        support_span_px = int(support_cols[-1] - support_cols[0] + 1) if support_cols.size else 0
-        support_mid_x = None
-        bbox_support_dx = None
-        ambiguous_lateral_spread = False
-        x_measurement_mode = "insufficient_vertical_support"
-        support_left_x = None
-        support_right_x = None
-        nozzle_xy = None
-
-        if support_cols.size >= 5:
-            support_left_x = int(x + support_cols[0])
-            support_right_x = int(x + support_cols[-1])
-            support_mid_x = int(x + round((float(support_cols[0]) + float(support_cols[-1])) / 2.0))
-            bbox_support_dx = int(bbox_mid_x - support_mid_x)
-            ambiguous_lateral_spread = bool(
-                abs(bbox_support_dx) >= max(50, int(0.15 * w))
-                and w >= max(120, int(1.6 * support_span_px))
-            )
-            x_measurement_mode = (
-                "vertical_support_guardrailed" if ambiguous_lateral_spread else "vertical_support"
-            )
-            nozzle_xy = (int(support_mid_x), int(top_y))
-
-        details["candidate_summaries"] = [
-            {
-                "area": float(it[1]),
-                "top_y": int(it[2]),
-                "bbox": [int(it[3]), int(it[4]), int(it[5]), int(it[6])],
-                "bottom_y": int(bottom_y(it[0])),
-            }
-            for it in kept[:5]
-        ]
-        details.update(
-            {
+        def _candidate_record(item, index):
+            contour, area, top_y, x, y, w, h = item
+            bbox_mid_x = int(round(x + w / 2.0))
+            bbox_mid_y = int(round(y + h / 2.0))
+            contour_local = contour - np.array([[[x, y]]], dtype=contour.dtype)
+            contour_bbox_mask = np.zeros((max(1, h), max(1, w)), dtype=np.uint8)
+            cv2.drawContours(contour_bbox_mask, [contour_local], -1, 255, -1)
+            col_counts = np.count_nonzero(contour_bbox_mask, axis=0).astype(int)
+            support_threshold_px = int(max(30, int(0.35 * h)))
+            support_cols = np.flatnonzero(col_counts >= support_threshold_px)
+            support_peak_px = int(col_counts.max()) if col_counts.size else 0
+            support_col_count = int(support_cols.size)
+            support_span_px = int(support_cols[-1] - support_cols[0] + 1) if support_cols.size else 0
+            support_mid_x = None
+            bbox_support_dx = None
+            ambiguous_lateral_spread = False
+            x_measurement_mode = "insufficient_vertical_support"
+            support_left_x = None
+            support_right_x = None
+            nozzle_xy = None
+            if support_cols.size >= 5:
+                support_left_x = int(x + support_cols[0])
+                support_right_x = int(x + support_cols[-1])
+                support_mid_x = int(x + round((float(support_cols[0]) + float(support_cols[-1])) / 2.0))
+                bbox_support_dx = int(bbox_mid_x - support_mid_x)
+                ambiguous_lateral_spread = bool(
+                    abs(bbox_support_dx) >= max(50, int(0.15 * w))
+                    and w >= max(120, int(1.6 * support_span_px))
+                )
+                x_measurement_mode = (
+                    "vertical_support_guardrailed" if ambiguous_lateral_spread else "vertical_support"
+                )
+                nozzle_xy = [int(support_mid_x), int(top_y)]
+            return {
+                "index": int(index),
+                "area": float(area),
+                "top_y": int(top_y),
+                "bottom_y": int(bottom_y(contour)),
+                "bbox": [int(x), int(y), int(w), int(h)],
+                "width": int(w),
+                "height": int(h),
                 "bbox_mid_x": int(bbox_mid_x),
+                "bbox_mid_y": int(bbox_mid_y),
                 "support_mid_x": None if support_mid_x is None else int(support_mid_x),
+                "support_left_x": None if support_left_x is None else int(support_left_x),
+                "support_right_x": None if support_right_x is None else int(support_right_x),
                 "support_span_px": int(support_span_px),
                 "support_threshold_px": int(support_threshold_px),
                 "support_peak_px": int(support_peak_px),
@@ -10993,6 +11370,39 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
                 "bbox_support_dx": None if bbox_support_dx is None else int(bbox_support_dx),
                 "x_measurement_mode": str(x_measurement_mode),
                 "ambiguous_lateral_spread": bool(ambiguous_lateral_spread),
+                "nozzle_xy": nozzle_xy,
+            }
+
+        candidates = [_candidate_record(item, idx) for idx, item in enumerate(kept)]
+        chosen_candidate = next((c for c in candidates if c.get("nozzle_xy") is not None), candidates[0])
+        chosen, _, top_y, x, y, w, h = kept[int(chosen_candidate["index"])]
+        bbox_mid_x = int(chosen_candidate["bbox_mid_x"])
+        support_mid_x = chosen_candidate.get("support_mid_x")
+        support_left_x = chosen_candidate.get("support_left_x")
+        support_right_x = chosen_candidate.get("support_right_x")
+        nozzle_xy = chosen_candidate.get("nozzle_xy")
+
+        details["candidates"] = candidates
+        details["candidate_summaries"] = [
+            {
+                "area": float(it["area"]),
+                "top_y": int(it["top_y"]),
+                "bbox": list(it["bbox"]),
+                "bottom_y": int(it["bottom_y"]),
+            }
+            for it in candidates[:5]
+        ]
+        details.update(
+            {
+                "bbox_mid_x": int(bbox_mid_x),
+                "support_mid_x": None if support_mid_x is None else int(support_mid_x),
+                "support_span_px": int(chosen_candidate["support_span_px"]),
+                "support_threshold_px": int(chosen_candidate["support_threshold_px"]),
+                "support_peak_px": int(chosen_candidate["support_peak_px"]),
+                "support_column_count": int(chosen_candidate["support_column_count"]),
+                "bbox_support_dx": chosen_candidate.get("bbox_support_dx"),
+                "x_measurement_mode": str(chosen_candidate["x_measurement_mode"]),
+                "ambiguous_lateral_spread": bool(chosen_candidate["ambiguous_lateral_spread"]),
             }
         )
         details["chosen"] = {
@@ -11000,10 +11410,10 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
             "top_y": int(top_y),
             "bbox_mid_x": int(bbox_mid_x),
             "support_mid_x": None if support_mid_x is None else int(support_mid_x),
-            "support_span_px": int(support_span_px),
+            "support_span_px": int(chosen_candidate["support_span_px"]),
             "nozzle_xy": None if nozzle_xy is None else [int(nozzle_xy[0]), int(nozzle_xy[1])],
-            "x_measurement_mode": str(x_measurement_mode),
-            "ambiguous_lateral_spread": bool(ambiguous_lateral_spread),
+            "x_measurement_mode": str(chosen_candidate["x_measurement_mode"]),
+            "ambiguous_lateral_spread": bool(chosen_candidate["ambiguous_lateral_spread"]),
         }
 
         # Debug overlay
@@ -11012,8 +11422,8 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         cv2.rectangle(dbg, (x, y), (x + w, y + h), (255, 165, 0), 1)
         cv2.line(dbg, (x, int(top_y)), (x + w, int(top_y)), (0, 200, 255), 1)
         if support_left_x is not None and support_right_x is not None:
-            cv2.line(dbg, (support_left_x, y), (support_left_x, y + h), (255, 0, 255), 1)
-            cv2.line(dbg, (support_right_x, y), (support_right_x, y + h), (255, 0, 255), 1)
+            cv2.line(dbg, (int(support_left_x), y), (int(support_left_x), y + h), (255, 0, 255), 1)
+            cv2.line(dbg, (int(support_right_x), y), (int(support_right_x), y + h), (255, 0, 255), 1)
         if nozzle_xy is None:
             details.update({"status": "NONE", "reason": "no_vertical_support_band"})
             self._last_detection_details = details
@@ -11021,6 +11431,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
 
         details["status"] = "OK"
         self._last_detection_details = details
+        nozzle_xy = (int(nozzle_xy[0]), int(nozzle_xy[1]))
         cv2.circle(dbg, nozzle_xy, 4, (255, 0, 0), -1)
 
         return ("OK", nozzle_xy, n, dbg)
