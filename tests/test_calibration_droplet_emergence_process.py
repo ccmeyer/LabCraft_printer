@@ -166,6 +166,79 @@ def test_calc_emergence_area_uses_support_root_for_clean_stream():
     assert int(center[1]) > int(details["top_y"]) + 20
 
 
+def test_calc_emergence_area_prefers_lower_viable_stacked_contour():
+    cam = _camera_stub()
+    bg = np.full((320, 320, 3), 220, dtype=np.uint8)
+    img = bg.copy()
+
+    # Upper reflection is closest to the X prior; lower fluid is vertically stacked.
+    cv2.rectangle(img, (145, 90), (175, 112), (20, 20, 20), -1)
+    cv2.rectangle(img, (154, 124), (186, 148), (20, 20, 20), -1)
+
+    area, center, _overlay, details = cam.calc_emergence_area(
+        bg,
+        img,
+        roi_x_center_px=160,
+        return_details=True,
+    )
+
+    assert details["status"] == "ok"
+    assert area is not None and area > 0
+    assert center is not None
+    assert details["stacked_lower_preferred"] is True
+    assert details["stacked_candidate_count"] == 1
+    assert details["stacked_selection_reason"] == "lower_viable_stacked_candidate"
+    assert details["stacked_original_bbox"][1] < details["stacked_selected_bbox"][1]
+    assert details["chosen_bbox"] == details["stacked_selected_bbox"]
+    assert int(details["chosen_bbox"][1]) >= 120
+
+
+def test_calc_emergence_area_ignores_tiny_lower_stacked_artifact():
+    cam = _camera_stub()
+    bg = np.full((320, 320, 3), 220, dtype=np.uint8)
+    img = bg.copy()
+
+    cv2.rectangle(img, (145, 90), (175, 112), (20, 20, 20), -1)
+    cv2.rectangle(img, (155, 124), (166, 134), (20, 20, 20), -1)
+
+    area, center, _overlay, details = cam.calc_emergence_area(
+        bg,
+        img,
+        roi_x_center_px=160,
+        return_details=True,
+    )
+
+    assert details["status"] == "ok"
+    assert area is not None and area > 0
+    assert center is not None
+    assert details["stacked_lower_preferred"] is False
+    assert details["stacked_candidate_count"] == 0
+    assert details["chosen_bbox"][1] < 120
+
+
+def test_calc_emergence_area_ignores_far_lower_blob():
+    cam = _camera_stub()
+    bg = np.full((320, 320, 3), 220, dtype=np.uint8)
+    img = bg.copy()
+
+    cv2.rectangle(img, (145, 90), (175, 112), (20, 20, 20), -1)
+    cv2.rectangle(img, (174, 190), (224, 230), (20, 20, 20), -1)
+
+    area, center, _overlay, details = cam.calc_emergence_area(
+        bg,
+        img,
+        roi_x_center_px=160,
+        return_details=True,
+    )
+
+    assert details["status"] == "ok"
+    assert area is not None and area > 0
+    assert center is not None
+    assert details["stacked_lower_preferred"] is False
+    assert details["stacked_candidate_count"] == 0
+    assert details["chosen_bbox"][1] < 120
+
+
 def test_calc_emergence_area_falls_back_to_default_roi_when_x_prior_misses():
     cam = _camera_stub()
     bg = np.full((320, 320, 3), 220, dtype=np.uint8)

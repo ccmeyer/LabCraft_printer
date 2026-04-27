@@ -26158,6 +26158,11 @@ class DropletCameraModel(QObject):
                 "support_peak_px": 0,
                 "top_y": None,
                 "middle_y": None,
+                "stacked_candidate_count": 0,
+                "stacked_lower_preferred": False,
+                "stacked_original_bbox": None,
+                "stacked_selected_bbox": None,
+                "stacked_selection_reason": "",
             }
 
             overlay = image.copy() if isinstance(image, np.ndarray) and image.ndim == 3 else image
@@ -26286,7 +26291,70 @@ class DropletCameraModel(QObject):
                 return None, None, overlay, details
 
             keep.sort(key=lambda d: (int(d["pri"]), float(d["x_pen"]), -float(d["contour_area"]), -int(d["bottom"])))
-            chosen = keep[0]
+            base_chosen = keep[0]
+            chosen = base_chosen
+
+            def _candidate_patch_p95(candidate):
+                bx, by, bw, bh = [int(v) for v in candidate.get("bbox", [0, 0, 0, 0])]
+                patch_roi = dark[by:by + bh, bx:bx + bw]
+                if patch_roi.size == 0:
+                    return 0.0
+                return float(np.percentile(patch_roi, 95))
+
+            def _horizontal_overlap_px(a, b):
+                ax, _ay, aw, _ah = [int(v) for v in a.get("bbox", [0, 0, 0, 0])]
+                bx, _by, bw, _bh = [int(v) for v in b.get("bbox", [0, 0, 0, 0])]
+                return int(max(0, min(ax + aw, bx + bw) - max(ax, bx)))
+
+            stacked_challengers = []
+            bx, by, bw, bh = [int(v) for v in base_chosen.get("bbox", [0, 0, 0, 0])]
+            base_bottom = int(base_chosen.get("bottom", by + bh))
+            base_area = float(base_chosen.get("contour_area", 0.0))
+            base_x_pen = float(base_chosen.get("x_pen", 0.0))
+            for candidate in keep[1:]:
+                if int(candidate.get("pri", 99)) > int(base_chosen.get("pri", 99)):
+                    continue
+                cx0, cy0, cw, ch = [int(v) for v in candidate.get("bbox", [0, 0, 0, 0])]
+                candidate_bottom = int(candidate.get("bottom", cy0 + ch))
+                candidate_area = float(candidate.get("contour_area", 0.0))
+                if cy0 <= by or candidate_bottom <= base_bottom:
+                    continue
+                vertical_gap = int(cy0 - base_bottom)
+                max_vertical_gap = int(max(24, round(0.75 * float(max(ch, bh, 1)))))
+                if vertical_gap > max_vertical_gap:
+                    continue
+
+                overlap_px = _horizontal_overlap_px(base_chosen, candidate)
+                min_width = int(max(1, min(cw, bw)))
+                center_dx = abs(float(cx0 + cw / 2.0) - float(bx + bw / 2.0))
+                if overlap_px < int(round(0.25 * float(min_width))) and center_dx > max(24.0, 0.35 * float(min_width)):
+                    continue
+
+                candidate_x_pen = float(candidate.get("x_pen", 0.0))
+                if candidate_x_pen > max(base_x_pen + 80.0, 120.0):
+                    continue
+                if candidate_area < max(float(min_contour_area) * 8.0, 0.15 * max(base_area, 1.0)):
+                    continue
+                candidate_p95 = _candidate_patch_p95(candidate)
+                if candidate_p95 < float(min_peak_delta):
+                    continue
+                candidate["stacked_p95"] = float(candidate_p95)
+                stacked_challengers.append(candidate)
+
+            details["stacked_candidate_count"] = int(len(stacked_challengers))
+            if stacked_challengers:
+                stacked_challengers.sort(
+                    key=lambda d: (
+                        -int(d.get("bottom", 0)),
+                        float(d.get("x_pen", 0.0)),
+                        -float(d.get("contour_area", 0.0)),
+                    )
+                )
+                chosen = stacked_challengers[0]
+                details["stacked_lower_preferred"] = True
+                details["stacked_original_bbox"] = [int(v) for v in base_chosen.get("bbox", [])]
+                details["stacked_selected_bbox"] = [int(v) for v in chosen.get("bbox", [])]
+                details["stacked_selection_reason"] = "lower_viable_stacked_candidate"
 
             x, y, ww, hh = [int(v) for v in chosen["bbox"]]
             patch = dark[y:y + hh, x:x + ww]
