@@ -8,12 +8,33 @@ def test_machine_model_busy_free_from_command_numbers(qapp):
     emissions = []
     machine_model.command_numbers_updated.connect(lambda: emissions.append(1))
 
-    machine_model.update_command_numbers(5, 3)
+    machine_model.update_command_numbers(
+        5,
+        3,
+        last_accepted_command_num=5,
+        last_retired_command_num=3,
+        command_depth=2,
+    )
     assert machine_model.machine_free is False
 
-    machine_model.update_command_numbers(5, 5)
+    machine_model.update_command_numbers(
+        5,
+        5,
+        last_accepted_command_num=5,
+        last_retired_command_num=5,
+        command_depth=1,
+    )
+    assert machine_model.machine_free is False
+
+    machine_model.update_command_numbers(
+        5,
+        5,
+        last_accepted_command_num=5,
+        last_retired_command_num=5,
+        command_depth=0,
+    )
     assert machine_model.machine_free is True
-    assert len(emissions) == 2
+    assert len(emissions) == 3
 
 
 def test_disconnect_machine_resets_safety_state(qapp):

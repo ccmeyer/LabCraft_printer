@@ -379,9 +379,6 @@ def test_refuel_camera_model_record_mode_creates_run_and_analysis_files(tmp_path
     analysis_lines = (run_dirs[0] / "analysis.jsonl").read_text(encoding="utf-8").splitlines()
     assert any(json.loads(line)["kind"] == "refuel_level_sample" for line in analysis_lines)
 
-    capture_files = list((run_dirs[0] / "captures").iterdir())
-    assert capture_files
-
     model.sample_trace = [
         {"elapsed_s": 0.0, "monotonic_s": 1.0, "level_px": 88.0, "phase": "live"},
         {"elapsed_s": 0.5, "monotonic_s": 1.5, "level_px": 88.0, "phase": "live"},
@@ -396,8 +393,15 @@ def test_refuel_camera_model_record_mode_creates_run_and_analysis_files(tmp_path
         image = np.zeros((12, 12, 3), dtype=np.uint8)
         model.update_ui_with_analysis(image, image.copy(), level, 20)
 
+    assert model.get_last_burst_result() is not None
+    analysis_lines = (run_dirs[0] / "analysis.jsonl").read_text(encoding="utf-8").splitlines()
+    assert any(json.loads(line)["kind"] == "refuel_burst_result" for line in analysis_lines)
+
+    model.close_session()
     capture_files = list((run_dirs[0] / "captures").iterdir())
-    assert len(capture_files) >= 2
+    capture_names = {path.name for path in capture_files}
+    assert any(name.endswith("_target_lock.jpg") for name in capture_names)
+    assert any(name.endswith("_burst_completion.jpg") for name in capture_names)
 
 
 def test_refuel_camera_model_record_mode_off_does_not_create_run(tmp_path):
