@@ -1115,7 +1115,38 @@ def test_attached_geometry_summary_fails_connected_curl():
     )
 
     assert geometry["attached_volume_geometry_ok"] is False
-    assert geometry["attached_lower_centerline_span_px"] > 50.0
+    assert geometry["attached_geometry_reasons"] == ["attached_lower_centerline_span_high"]
+    assert geometry["attached_geometry_warnings"] == []
+    assert geometry["attached_lower_centerline_span_px"] > 70.0
+
+
+def test_attached_geometry_summary_warns_moderate_connected_curl():
+    edge_rows = _edge_rows_from_centerline(
+        y_start=60,
+        y_end=180,
+        center_fn=lambda y_px: (
+            100.0
+            + (0.15 * float(y_px - 60))
+            + (
+                0.0
+                if y_px < 125
+                else (30.0 if y_px < 150 else -30.0)
+            )
+        ),
+    )
+
+    geometry = mod._attached_geometry_summary(
+        edge_rows,
+        lower_row_fraction=0.35,
+        min_rows=12,
+        span_max_px=50,
+        geometry_assessable=True,
+    )
+
+    assert geometry["attached_volume_geometry_ok"] is True
+    assert geometry["attached_geometry_reasons"] == []
+    assert geometry["attached_geometry_warnings"] == ["attached_lower_centerline_span_high"]
+    assert 50.0 < geometry["attached_lower_centerline_span_px"] < 70.0
 
 
 def test_detached_geometry_passes_compact_symmetric_body_with_moderate_axis_offset():

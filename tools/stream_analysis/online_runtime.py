@@ -662,6 +662,8 @@ def _attached_geometry_summary(
     geometry_assessable: bool,
 ) -> dict:
     config = _resolved_analysis_config(config)
+    warn_span_px = float(config.get("attached_lower_centerline_span_warn_px", span_max_px))
+    reject_span_px = float(config.get("attached_lower_centerline_span_reject_px", span_max_px))
     metrics = _centerline_residual_metrics(
         attached_edge_rows,
         lower_fraction=float(lower_row_fraction),
@@ -670,18 +672,23 @@ def _attached_geometry_summary(
     span_px = metrics.get("span_px")
     rms_px = metrics.get("rms_px")
     reasons = []
+    warnings = []
     geometry_ok = None
     if geometry_assessable:
         if row_count >= int(min_rows) and span_px is not None:
-            geometry_ok = bool(float(span_px) <= float(span_max_px))
-            if not geometry_ok:
+            if float(span_px) > float(reject_span_px):
+                geometry_ok = False
                 reasons.append("attached_lower_centerline_span_high")
+            else:
+                geometry_ok = True
+                if float(span_px) > float(warn_span_px):
+                    warnings.append("attached_lower_centerline_span_high")
     geometry_confidence = None
     if geometry_assessable:
         geometry_confidence = _confidence_smaller_better(
             span_px,
             full_at=float(config.get("attached_geometry_confidence_full_span_px", 25)),
-            zero_at=float(config.get("attached_geometry_confidence_zero_span_px", span_max_px)),
+            zero_at=float(config.get("attached_geometry_confidence_zero_span_px", reject_span_px)),
         )
     return {
         "attached_lower_centerline_span_px": span_px,
@@ -689,6 +696,7 @@ def _attached_geometry_summary(
         "attached_volume_geometry_ok": geometry_ok,
         "attached_geometry_confidence": geometry_confidence,
         "attached_geometry_reasons": reasons,
+        "attached_geometry_warnings": warnings,
         "attached_lower_centerline_row_count": row_count,
     }
 
@@ -1441,7 +1449,11 @@ def analyze_online_stream_frame(
         flow_point_confidence = 1.0
     flow_volume_geometry_ok = None
     flow_volume_geometry_reasons = []
+    flow_volume_geometry_warnings = []
     if geometry_assessable:
+        flow_volume_geometry_warnings = online_cal_mod._unique_strings(
+            list(attached_geometry.get("attached_geometry_warnings") or [])
+        )
         flow_volume_geometry_reasons = online_cal_mod._unique_strings(
             list(attached_geometry.get("attached_geometry_reasons") or [])
             + list(detached_geometry.get("detached_geometry_reasons") or [])
@@ -1497,6 +1509,9 @@ def analyze_online_stream_frame(
         warnings.append("near_nozzle_detached_warning")
     if measurement_qc_pass and flow_volume_geometry_ok is False:
         warnings.append("flow_volume_geometry_not_ok")
+    for geometry_warning in list(flow_volume_geometry_warnings or []):
+        if measurement_qc_pass:
+            warnings.append(str(geometry_warning))
     if measurement_qc_pass and flow_volume_complete_ok is False:
         warnings.append("flow_volume_incomplete")
 
@@ -1581,6 +1596,7 @@ def analyze_online_stream_frame(
         ),
         "flow_volume_geometry_ok": flow_volume_geometry_ok,
         "flow_volume_geometry_reasons": flow_volume_geometry_reasons,
+        "flow_volume_geometry_warnings": flow_volume_geometry_warnings,
         "flow_volume_complete_ok": flow_volume_complete_ok,
         "flow_volume_completeness_reasons": flow_volume_completeness_reasons,
         "flow_measurement_usable": bool(flow_measurement_usable),

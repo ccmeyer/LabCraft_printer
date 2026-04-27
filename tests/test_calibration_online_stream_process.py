@@ -1514,7 +1514,53 @@ def test_online_stream_advance_flow_phase_uses_bottom_guard_as_right_boundary_si
     assert proc._flow_delay_sequence == [3850]
 
 
-def test_online_stream_advance_flow_phase_uses_geometry_failure_as_right_boundary_signal(tmp_path):
+def test_online_stream_advance_flow_phase_ignores_attached_geometry_warning_for_boundary(tmp_path):
+    proc = _flow_proc(tmp_path)
+    proc._current_delay_frame_rows = [
+        calibration_model.online_cal_mod.build_online_stream_frame_row(
+            phase="flow_rate",
+            status="accepted",
+            delay_us=4050,
+            delay_from_emergence_us=850,
+            replicate_index=1,
+            qc={"measurement_qc_pass": True},
+            image_ref={"capture_id": "cap_flow_geom_warn"},
+            warnings=["attached_lower_centerline_span_high"],
+            attached_width_px=89.0,
+            visible_volume_nl=12.0,
+            attached_bottom_clearance_px=420,
+            min_accepted_fluid_distance_from_bottom_px=420,
+            accepted_component_count=1,
+            accepted_detached_component_count=0,
+            detached_near_bottom_warning=False,
+            attached_bottom_guard_hit=False,
+            attached_lower_centerline_span_px=50.1,
+            flow_volume_geometry_ok=True,
+            flow_volume_geometry_warnings=["attached_lower_centerline_span_high"],
+            flow_measurement_usable=True,
+        )
+    ]
+    proc._current_analysis_summary = {
+        "status": "accepted",
+        "measurement_qc_pass": True,
+        "flow_volume_geometry_ok": True,
+        "flow_measurement_usable": True,
+    }
+
+    proc.onAdvanceFlowPhase()
+
+    assert proc.flowAcquisitionFinished.calls == []
+    assert proc.nextDelay.calls
+    assert proc._flow_termination_reason is None
+    assert proc._flow_right_boundary_fixed is False
+    assert proc._flow_scout_boundary_reason is None
+    assert proc._flow_delay_sequence == [4150]
+    assert proc._flow_delay_summaries[-1]["flow_volume_geometry_warnings"] == [
+        "attached_lower_centerline_span_high"
+    ]
+
+
+def test_online_stream_advance_flow_phase_defers_attached_geometry_boundary_before_late_coverage(tmp_path):
     proc = _flow_proc(tmp_path)
     proc._current_delay_frame_rows = [
         calibration_model.online_cal_mod.build_online_stream_frame_row(
@@ -1528,8 +1574,8 @@ def test_online_stream_advance_flow_phase_uses_geometry_failure_as_right_boundar
             warnings=["flow_volume_geometry_not_ok"],
             attached_width_px=89.0,
             visible_volume_nl=12.0,
-            attached_bottom_clearance_px=140,
-            min_accepted_fluid_distance_from_bottom_px=140,
+            attached_bottom_clearance_px=420,
+            min_accepted_fluid_distance_from_bottom_px=420,
             accepted_component_count=1,
             accepted_detached_component_count=0,
             detached_near_bottom_warning=False,
@@ -1551,10 +1597,10 @@ def test_online_stream_advance_flow_phase_uses_geometry_failure_as_right_boundar
     assert proc.flowAcquisitionFinished.calls == []
     assert proc.nextDelay.calls
     assert proc._flow_termination_reason is None
-    assert proc._flow_right_boundary_fixed is True
-    assert proc._flow_scout_boundary_reason == "geometry_not_axisymmetric"
-    assert proc._flow_right_boundary_delay_from_emergence_us == 650
-    assert proc._flow_delay_sequence == [3850]
+    assert proc._flow_right_boundary_fixed is False
+    assert proc._flow_scout_boundary_reason is None
+    assert proc._flow_search_boundary_deferred_reason == "attached_geometry_precoverage"
+    assert proc._flow_delay_sequence == [4150]
     assert "flow_geometry_boundary_triggered" in proc._flow_warnings
     assert "flow_volume_geometry_not_ok" in proc._flow_warnings
 
@@ -1573,8 +1619,8 @@ def test_online_stream_advance_flow_phase_defers_detached_only_geometry_boundary
             warnings=["flow_volume_geometry_not_ok"],
             attached_width_px=89.0,
             visible_volume_nl=12.0,
-            attached_bottom_clearance_px=140,
-            min_accepted_fluid_distance_from_bottom_px=140,
+            attached_bottom_clearance_px=420,
+            min_accepted_fluid_distance_from_bottom_px=420,
             accepted_component_count=2,
             accepted_detached_component_count=1,
             detached_near_bottom_warning=False,
@@ -1641,6 +1687,58 @@ def test_online_stream_advance_flow_phase_uses_detached_only_geometry_as_search_
             attached_bottom_guard_hit=False,
             flow_volume_geometry_ok=False,
             flow_volume_geometry_reasons=["detached_01:detached_local_centerline_span_high"],
+            flow_measurement_usable=False,
+        )
+    ]
+    proc._current_analysis_summary = {
+        "status": "accepted",
+        "measurement_qc_pass": True,
+        "flow_volume_geometry_ok": False,
+        "flow_measurement_usable": False,
+    }
+
+    proc.onAdvanceFlowPhase()
+
+    assert proc._flow_right_boundary_fixed is True
+    assert proc._flow_scout_boundary_reason == "geometry_not_axisymmetric"
+    assert proc._flow_right_boundary_delay_from_emergence_us == 2350
+
+
+def test_online_stream_advance_flow_phase_uses_attached_geometry_as_search_boundary_after_late_coverage(tmp_path):
+    proc = _flow_proc(tmp_path)
+    proc._flow_delay_summaries = [
+        {
+            "delay_us": 5550,
+            "delay_from_emergence_us": 2350,
+            "delay_accepted": True,
+            "late_coverage_candidate": True,
+            "flow_point_confidence": 0.92,
+            "flow_optical_confidence_active": True,
+            "min_attached_bottom_clearance_px": 260,
+            "min_accepted_fluid_distance_from_bottom_px": 260,
+            "warnings": [],
+        }
+    ]
+    proc._current_delay_frame_rows = [
+        calibration_model.online_cal_mod.build_online_stream_frame_row(
+            phase="flow_rate",
+            status="accepted",
+            delay_us=5650,
+            delay_from_emergence_us=2450,
+            replicate_index=1,
+            qc={"measurement_qc_pass": True},
+            image_ref={"capture_id": "cap_flow_geom_attached_late"},
+            warnings=["flow_volume_geometry_not_ok"],
+            attached_width_px=89.0,
+            visible_volume_nl=22.0,
+            attached_bottom_clearance_px=240,
+            min_accepted_fluid_distance_from_bottom_px=240,
+            accepted_component_count=1,
+            accepted_detached_component_count=0,
+            detached_near_bottom_warning=False,
+            attached_bottom_guard_hit=False,
+            flow_volume_geometry_ok=False,
+            flow_volume_geometry_reasons=["attached_lower_centerline_span_high"],
             flow_measurement_usable=False,
         )
     ]

@@ -600,6 +600,38 @@ def test_summarize_online_stream_flow_delay_excludes_geometry_rejected_rows_from
     assert summary["geometry_boundary_scope"] == "attached"
 
 
+def test_summarize_online_stream_flow_delay_accepts_geometry_warning_rows():
+    summary = mod.summarize_online_stream_flow_delay(
+        [
+            mod.build_online_stream_frame_row(
+                phase="flow_rate",
+                status="accepted",
+                delay_us=4250,
+                delay_from_emergence_us=1050,
+                replicate_index=1,
+                qc={"measurement_qc_pass": True},
+                image_ref={"capture_id": "cap_geom_warn"},
+                warnings=[],
+                attached_width_px=88.0,
+                visible_volume_nl=13.5,
+                attached_bottom_clearance_px=420,
+                detached_near_bottom_warning=False,
+                flow_volume_geometry_ok=True,
+                flow_volume_geometry_warnings=["attached_lower_centerline_span_high"],
+                flow_measurement_usable=True,
+            )
+        ]
+    )
+
+    assert summary["accepted_replicates"] == 1
+    assert summary["geometry_rejected_replicates"] == 0
+    assert summary["geometry_boundary_triggered"] is False
+    assert summary["flow_volume_geometry_ok"] is True
+    assert summary["flow_volume_geometry_reasons"] == []
+    assert summary["flow_volume_geometry_warnings"] == ["attached_lower_centerline_span_high"]
+    assert "attached_lower_centerline_span_high" in summary["warnings"]
+
+
 def test_summarize_online_stream_flow_delay_excludes_volume_incomplete_rows_from_acceptance():
     summary = mod.summarize_online_stream_flow_delay(
         [
@@ -677,10 +709,14 @@ def test_flow_geometry_boundary_scope_classifies_attached_detached_mixed_and_unk
     assert mod.flow_geometry_boundary_scope({"flow_volume_geometry_ok": True}) == "none"
 
 
-def test_online_stream_flow_search_boundary_defers_detached_only_failures_until_late_coverage():
+def test_online_stream_flow_search_boundary_defers_attached_and_detached_only_failures_until_late_coverage():
     detached_only = {
         "flow_volume_geometry_ok": False,
         "flow_volume_geometry_reasons": ["detached_01:detached_local_centerline_span_high"],
+    }
+    attached_only = {
+        "flow_volume_geometry_ok": False,
+        "flow_volume_geometry_reasons": ["attached_lower_centerline_span_high"],
     }
     assert mod.is_online_stream_flow_search_boundary(
         detached_only,
@@ -691,11 +727,12 @@ def test_online_stream_flow_search_boundary_defers_detached_only_failures_until_
         late_coverage_reached=True,
     ) is True
     assert mod.is_online_stream_flow_search_boundary(
-        {
-            "flow_volume_geometry_ok": False,
-            "flow_volume_geometry_reasons": ["attached_lower_centerline_span_high"],
-        },
+        attached_only,
         late_coverage_reached=False,
+    ) is False
+    assert mod.is_online_stream_flow_search_boundary(
+        attached_only,
+        late_coverage_reached=True,
     ) is True
     assert mod.is_online_stream_flow_search_boundary(
         {

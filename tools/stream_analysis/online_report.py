@@ -390,6 +390,7 @@ def _flow_frame_row_from_runtime_summary(
         detached_volume_geometry_ok=summary.get("detached_volume_geometry_ok"),
         flow_volume_geometry_ok=flow_volume_geometry_ok,
         flow_volume_geometry_reasons=list(summary.get("flow_volume_geometry_reasons") or []),
+        flow_volume_geometry_warnings=list(summary.get("flow_volume_geometry_warnings") or []),
         detached_geometry_details=list(summary.get("detached_geometry_details") or []),
         min_detached_axis_symmetry_score=summary.get("min_detached_axis_symmetry_score"),
         max_detached_local_centerline_span_px=summary.get("max_detached_local_centerline_span_px"),

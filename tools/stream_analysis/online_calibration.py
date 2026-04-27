@@ -50,8 +50,10 @@ DEFAULT_ONLINE_STREAM_ANALYSIS_CONFIG = {
     "attached_lower_centerline_row_fraction": 0.35,
     "attached_lower_centerline_min_rows": 12,
     "attached_lower_centerline_span_max_px": 50,
+    "attached_lower_centerline_span_warn_px": 50,
+    "attached_lower_centerline_span_reject_px": 70,
     "attached_geometry_confidence_full_span_px": 25,
-    "attached_geometry_confidence_zero_span_px": 50,
+    "attached_geometry_confidence_zero_span_px": 70,
     "detached_material_volume_min_nl": 0.5,
     "detached_material_volume_fraction_min": 0.25,
     "detached_axis_symmetry_min": 0.80,
@@ -609,12 +611,14 @@ def summarize_online_stream_flow_delay(frame_rows: list[dict]) -> dict:
     geometry_rejected_replicates = 0
     geometry_boundary_triggered = False
     geometry_reasons = []
+    geometry_warnings = []
     volume_incomplete_rejected_replicates = 0
     flow_volume_completeness_reasons = []
     for row in rows:
         status = str(row.get("status") or "")
         if status != "accepted":
             continue
+        geometry_warnings.extend(list(row.get("flow_volume_geometry_warnings") or []))
         flow_measurement_usable = row.get("flow_measurement_usable")
         if flow_measurement_usable is None:
             flow_measurement_usable = (
@@ -697,9 +701,12 @@ def summarize_online_stream_flow_delay(frame_rows: list[dict]) -> dict:
         min_accepted_fluid_distance_from_bottom_px = float(min(accepted_fluid_clearances))
 
     warnings = _unique_strings(
-        warning
-        for row in rows
-        for warning in list(row.get("warnings") or [])
+        list(geometry_warnings)
+        + [
+            warning
+            for row in rows
+            for warning in list(row.get("warnings") or [])
+        ]
     )
     attached_bottom_guard_hit = any(
         str(row.get("status") or "") == "rejected_bottom_guard"
@@ -746,6 +753,7 @@ def summarize_online_stream_flow_delay(frame_rows: list[dict]) -> dict:
             else (True if accepted_replicates > 0 else None)
         ),
         "flow_volume_geometry_reasons": _unique_strings(geometry_reasons),
+        "flow_volume_geometry_warnings": _unique_strings(geometry_warnings),
         "geometry_boundary_scope": flow_geometry_boundary_scope(
             {
                 "geometry_boundary_triggered": bool(geometry_boundary_triggered),
@@ -853,7 +861,7 @@ def is_online_stream_flow_search_boundary(
     scope = flow_geometry_boundary_scope(delay_summary)
     if scope == "none":
         return False
-    if scope == "detached_only":
+    if scope in {"attached", "detached_only"}:
         return bool(late_coverage_reached)
     return True
 

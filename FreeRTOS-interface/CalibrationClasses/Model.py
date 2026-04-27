@@ -8153,10 +8153,11 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         late_coverage_already_reached = self._flow_late_coverage_already_reached(
             before_offset_us=current_offset_us
         )
+        current_summary_in_late_window = self._flow_summary_in_late_window(summary)
         geometry_reject = online_cal_mod.is_online_stream_flow_geometry_boundary(summary)
         geometry_search_boundary = online_cal_mod.is_online_stream_flow_search_boundary(
             summary,
-            late_coverage_reached=late_coverage_already_reached,
+            late_coverage_reached=bool(late_coverage_already_reached or current_summary_in_late_window),
         )
         hard_boundary = online_cal_mod.is_online_stream_flow_hard_boundary(summary)
         soft_boundary = online_cal_mod.is_online_stream_flow_soft_boundary(
@@ -8199,8 +8200,14 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             and not geometry_search_boundary
             and not bool(self._flow_right_boundary_fixed)
         ):
+            geometry_scope = online_cal_mod.flow_geometry_boundary_scope(summary)
+            deferred_reason = (
+                "attached_geometry_precoverage"
+                if str(geometry_scope) == "attached"
+                else "detached_geometry_precoverage"
+            )
             self._flow_search_boundary_deferred_reason = (
-                self._flow_search_boundary_deferred_reason or "detached_geometry_precoverage"
+                self._flow_search_boundary_deferred_reason or deferred_reason
             )
         if geometry_search_boundary and not bool(self._flow_right_boundary_fixed):
             self._flow_right_boundary_fixed = True
@@ -8956,6 +8963,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             detached_volume_geometry_ok=summary.get("detached_volume_geometry_ok"),
             flow_volume_geometry_ok=flow_volume_geometry_ok,
             flow_volume_geometry_reasons=list(summary.get("flow_volume_geometry_reasons") or []),
+            flow_volume_geometry_warnings=list(summary.get("flow_volume_geometry_warnings") or []),
             detached_geometry_details=list(summary.get("detached_geometry_details") or []),
             min_detached_axis_symmetry_score=summary.get("min_detached_axis_symmetry_score"),
             max_detached_local_centerline_span_px=summary.get("max_detached_local_centerline_span_px"),
