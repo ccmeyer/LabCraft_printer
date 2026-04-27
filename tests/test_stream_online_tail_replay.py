@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import sys
 from pathlib import Path
 
@@ -22,11 +23,85 @@ EXPERIMENT_ROOT = (
     / "Stream_characterization-20260327_225650"
 )
 SUMMARY_CSV = EXPERIMENT_ROOT / "analysis" / "stream_characterization" / "experiment_summary.csv"
+HTPS_ONLINE_STREAM_ROOT = (
+    REPO_ROOT
+    / "FreeRTOS-interface"
+    / "Experiments"
+    / "HTPS_rep1-20260423_200444"
+    / "calibration_recordings"
+    / "OnlineStreamCalibrationProcess"
+)
 
 
 def _read_csv_rows(path: Path) -> list[dict]:
     with path.open("r", encoding="utf-8", newline="") as handle:
         return list(csv.DictReader(handle))
+
+
+def _read_json(path: Path) -> dict:
+    with path.open("r", encoding="utf-8") as handle:
+        return dict(json.load(handle) or {})
+
+
+def _delay_us_for_offset(rows: list[dict], delay_from_emergence_us: int | None) -> int | None:
+    offset = _to_int(delay_from_emergence_us)
+    if offset is None:
+        return None
+    for row in list(rows or []):
+        if _to_int(dict(row or {}).get("delay_from_emergence_us")) == int(offset):
+            return _to_int(dict(row or {}).get("delay_us"))
+    return None
+
+
+def _first_int(*values):
+    for value in values:
+        parsed = _to_int(value)
+        if parsed is not None:
+            return int(parsed)
+    return None
+
+
+def _resolve_htps_tail_artifact(run_id: str) -> dict:
+    run_dir = HTPS_ONLINE_STREAM_ROOT / run_id
+    if not (run_dir / "tail_fit.json").exists():
+        pytest.skip(f"missing HTPS tail artifact: {run_id}")
+    tail_artifact = _read_json(run_dir / "tail_fit.json")
+    flow_artifact = _read_json(run_dir / "flow_fit.json")
+    tail_phase = dict((dict(tail_artifact.get("result") or {}).get("tail_phase") or {}))
+    scout_summaries = [dict(row or {}) for row in list(tail_artifact.get("scout_delay_summaries") or [])]
+    backtrack_summaries = [dict(row or {}) for row in list(tail_artifact.get("backtrack_delay_summaries") or [])]
+    flow_delay_summaries = [dict(row or {}) for row in list(flow_artifact.get("delay_summaries") or [])]
+    all_rows = list(scout_summaries) + list(backtrack_summaries) + list(flow_delay_summaries)
+    landmark_delay_us = _delay_us_for_offset(
+        all_rows,
+        _first_int(
+            tail_phase.get("landmark_delay_from_emergence_us"),
+            tail_phase.get("trigger_delay_from_emergence_us"),
+        ),
+    )
+    backtrack_left_delay_us = _delay_us_for_offset(
+        all_rows,
+        _first_int(
+            tail_phase.get("last_nontrigger_delay_from_emergence_us"),
+            tail_phase.get("last_plateau_delay_from_emergence_us"),
+        ),
+    )
+    return online_tail_mod.resolve_online_stream_tail_result(
+        flow_fit_result=dict(flow_artifact.get("fit") or flow_artifact.get("result") or {}),
+        tail_plan=dict(tail_artifact.get("tail_plan") or {}),
+        scout_summaries=scout_summaries,
+        backtrack_summaries=backtrack_summaries,
+        trigger_bracket={
+            "tail_phase_status": "",
+            "termination_reason": "",
+            "landmark_delay_us": landmark_delay_us,
+            "backtrack_left_delay_us": backtrack_left_delay_us,
+            "landmark_reason": str(tail_phase.get("landmark_reason") or tail_phase.get("trigger_reason") or ""),
+            "warnings": list(tail_phase.get("warnings") or []),
+        },
+        flow_delay_summaries=flow_delay_summaries,
+        analysis_config=dict((tail_phase.get("analysis_config") or {})),
+    )
 
 def _feature_row_is_tail_width_usable(row: dict) -> bool:
     return bool(
@@ -519,7 +594,7 @@ def test_sparse_online_tail_replay_applies_settling_rule_to_long_separated_shoul
         1050: {
             "flash_delay_us": 1050,
             "silhouette_status": "ok",
-            "attached_near_nozzle_width_median_px": 73.0,
+            "attached_near_nozzle_width_median_px": 71.5,
             "total_visible_volume_nl": 20.1,
             "min_accepted_fluid_distance_from_bottom_px": 164.0,
         },
@@ -533,28 +608,28 @@ def test_sparse_online_tail_replay_applies_settling_rule_to_long_separated_shoul
         1150: {
             "flash_delay_us": 1150,
             "silhouette_status": "ok",
-            "attached_near_nozzle_width_median_px": 72.0,
+            "attached_near_nozzle_width_median_px": 70.0,
             "total_visible_volume_nl": 22.3,
             "min_accepted_fluid_distance_from_bottom_px": 160.0,
         },
         1200: {
             "flash_delay_us": 1200,
             "silhouette_status": "ok",
-            "attached_near_nozzle_width_median_px": 71.8,
+            "attached_near_nozzle_width_median_px": 69.5,
             "total_visible_volume_nl": 23.3,
             "min_accepted_fluid_distance_from_bottom_px": 158.0,
         },
         1250: {
             "flash_delay_us": 1250,
             "silhouette_status": "ok",
-            "attached_near_nozzle_width_median_px": 71.7,
+            "attached_near_nozzle_width_median_px": 69.0,
             "total_visible_volume_nl": 24.2,
             "min_accepted_fluid_distance_from_bottom_px": 156.0,
         },
         1300: {
             "flash_delay_us": 1300,
             "silhouette_status": "ok",
-            "attached_near_nozzle_width_median_px": 71.0,
+            "attached_near_nozzle_width_median_px": 68.5,
             "total_visible_volume_nl": 25.0,
             "min_accepted_fluid_distance_from_bottom_px": 154.0,
         },
@@ -577,6 +652,48 @@ def test_sparse_online_tail_replay_applies_settling_rule_to_long_separated_shoul
     assert result["tail_phase"]["initial_confirmed_collapse_delay_from_emergence_us"] == 1150
     assert result["tail_phase"]["tail_start_delay_from_emergence_us"] == 1150
     assert result["tail_phase"]["confirmed_collapse_delay_from_emergence_us"] == 1150
+
+
+@pytest.mark.parametrize(
+    ("run_id", "prior_tail_start_us"),
+    [
+        ("run_20260423_200714_f6304546", 3900),
+        ("run_20260423_200738_6aa1a40c", 3900),
+        ("run_20260423_201547_0ba2972f", 3950),
+    ],
+)
+def test_htps_tail_replay_keeps_normal_runs_near_prior_behavior(run_id, prior_tail_start_us):
+    result = _resolve_htps_tail_artifact(run_id)
+    tail_phase = result["tail_phase"]
+
+    assert tail_phase["status"] == "captured"
+    assert abs(int(tail_phase["tail_start_delay_from_emergence_us"]) - int(prior_tail_start_us)) <= 100
+
+
+@pytest.mark.parametrize(
+    ("run_id", "minimum_tail_start_us"),
+    [
+        ("run_20260423_203233_f91d1fd4", 3900),
+        ("run_20260423_202911_963b0643", 3900),
+        ("run_20260423_200802_1b56cac7", 3950),
+        ("run_20260423_201613_152ceb5c", 3900),
+    ],
+)
+def test_htps_tail_replay_moves_early_selection_runs_later(run_id, minimum_tail_start_us):
+    result = _resolve_htps_tail_artifact(run_id)
+    tail_phase = result["tail_phase"]
+
+    assert tail_phase["status"] == "captured"
+    assert int(tail_phase["tail_start_delay_from_emergence_us"]) >= int(minimum_tail_start_us)
+
+
+def test_htps_tail_replay_flags_right_extension_for_incomplete_window_run():
+    result = _resolve_htps_tail_artifact("run_20260423_203233_f91d1fd4")
+    tail_phase = result["tail_phase"]
+
+    assert tail_phase["tail_right_extension_needed"] is True
+    assert tail_phase["tail_min_width_at_right_edge"] is True
+    assert tail_phase["tail_width_still_falling_at_right_edge"] is True
 
 
 def test_sparse_online_tail_replay_matches_dense_offline_tail_start_with_scout_backtrack():

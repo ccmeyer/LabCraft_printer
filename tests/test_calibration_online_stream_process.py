@@ -185,6 +185,10 @@ def _flow_proc(tmp_path: Path):
     proc._tail_landmark_delay_us = None
     proc._tail_landmark_reason = None
     proc._tail_backtrack_left_delay_us = None
+    proc._tail_left_bracket_confirmed = False
+    proc._tail_left_bracket_extended = False
+    proc._tail_backup_landmark_confirmed = False
+    proc._tail_backup_landmark_confirmation_reason = None
     proc._tail_coarse_delay_summaries = []
     proc._tail_refine_delay_summaries = []
     proc._tail_last_nontrigger_delay_us = None
@@ -3240,6 +3244,76 @@ def test_online_stream_advance_tail_phase_keeps_scout_running_on_single_pixel_ta
     assert len(proc._tail_scout_delay_summaries) == 1
 
 
+def test_online_stream_advance_tail_phase_keeps_first_mild_backup_collapse_scouting(tmp_path):
+    proc = _flow_proc(tmp_path)
+    _seed_tail_flow_context(proc)
+    proc._tail_plan = {
+        "steady_width_baseline_px": 74.0,
+        "scout_anchor_delay_us": 4250,
+        "backtrack_step_us": 50,
+        "scout_replicates": 1,
+        "backtrack_replicates": 1,
+        "fine_prepad_us": 100,
+        "fine_postpad_us": 100,
+        "planned_scout_delay_count": 3,
+    }
+    proc._tail_mode = "scout"
+    proc._tail_delay_sequence = [4750, 5250, 5750]
+    proc._tail_delay_index = 0
+    proc._tail_replicate_index = 0
+    proc._tail_current_delay_us = 4750
+    proc._tail_current_delay_frame_rows = [
+        _accepted_tail_frame_row(proc, 1550, phase="tail_scout", width_px=69.0)
+    ]
+
+    proc.onAdvanceTailPhase()
+
+    assert proc.nextTailDelay.calls
+    assert proc._tail_mode == "scout"
+    assert proc._tail_delay_index == 1
+    assert proc._tail_landmark_delay_us is None
+    assert "tail_backup_landmark_unconfirmed" in proc._tail_fit_warnings
+
+
+def test_online_stream_advance_tail_phase_switches_on_confirmed_backup_collapse(tmp_path):
+    proc = _flow_proc(tmp_path)
+    _seed_tail_flow_context(proc)
+    proc._tail_plan = {
+        "steady_width_baseline_px": 74.0,
+        "scout_anchor_delay_us": 4250,
+        "backtrack_step_us": 50,
+        "scout_replicates": 1,
+        "backtrack_replicates": 1,
+        "fine_prepad_us": 100,
+        "fine_postpad_us": 100,
+        "planned_scout_delay_count": 3,
+    }
+    proc._tail_mode = "scout"
+    proc._tail_delay_sequence = [4750, 5250, 5750]
+    proc._tail_delay_index = 1
+    proc._tail_replicate_index = 0
+    proc._tail_scout_delay_summaries = [
+        calibration_model.online_tail_mod.summarize_online_stream_tail_delay(
+            [_accepted_tail_frame_row(proc, 1550, phase="tail_scout", width_px=69.0)],
+            74.0,
+        )
+    ]
+    proc._tail_current_delay_us = 5250
+    proc._tail_current_delay_frame_rows = [
+        _accepted_tail_frame_row(proc, 2050, phase="tail_scout", width_px=68.5)
+    ]
+
+    proc.onAdvanceTailPhase()
+
+    assert proc.nextTailDelay.calls
+    assert proc._tail_mode == "backtrack"
+    assert proc._tail_landmark_delay_us == 5250
+    assert proc._tail_landmark_reason == "strong_width_collapse_backup"
+    assert proc._tail_backup_landmark_confirmed is True
+    assert proc._tail_backup_landmark_confirmation_reason == "confirmed_backup_width_collapse"
+    assert proc._tail_backtrack_left_delay_us == 4750
+
+
 def test_online_stream_advance_tail_phase_switches_to_backtrack_on_separation_landmark(tmp_path):
     proc = _flow_proc(tmp_path)
     _seed_tail_flow_context(proc)
@@ -3590,6 +3664,149 @@ def test_online_stream_successful_backtrack_writes_tail_fit_artifact(tmp_path):
     assert artifact["result"]["tail_phase"]["tail_start_evidence"] == "plateau_right_bracket_midpoint"
     assert artifact["result"]["tail_phase"]["tail_start_selection_method"] == "plateau_confirmed_collapse_midpoint"
     assert artifact["result"]["predicted_stream_duration_us"] == 1350
+
+
+def test_online_stream_backtrack_extends_right_edge_when_width_is_still_falling(tmp_path):
+    proc = _flow_proc(tmp_path)
+    _seed_tail_flow_context(proc)
+    proc._tail_plan = {
+        "steady_width_baseline_px": 74.0,
+        "scout_anchor_delay_us": 4250,
+        "backtrack_step_us": 50,
+        "scout_replicates": 1,
+        "backtrack_replicates": 1,
+        "tail_right_extension_count": 0,
+    }
+    proc._tail_mode = "backtrack"
+    proc._tail_delay_sequence = [4300, 4350, 4400]
+    proc._tail_delay_index = 2
+    proc._tail_replicate_index = 0
+    proc._tail_current_delay_us = 4400
+    proc._tail_landmark_delay_us = 4750
+    proc._tail_landmark_reason = "separated_from_nozzle"
+    proc._tail_backtrack_left_delay_us = 4300
+    proc._tail_scout_delay_summaries = [
+        calibration_model.online_tail_mod.summarize_online_stream_tail_delay(
+            [_accepted_tail_frame_row(proc, 1550, phase="tail_scout", width_px=70.0, landmark=True)],
+            74.0,
+        )
+    ]
+    proc._tail_backtrack_delay_summaries = [
+        calibration_model.online_tail_mod.summarize_online_stream_tail_delay(
+            [_accepted_tail_frame_row(proc, 1100, phase="tail_backtrack", width_px=74.0)],
+            74.0,
+        ),
+        calibration_model.online_tail_mod.summarize_online_stream_tail_delay(
+            [_accepted_tail_frame_row(proc, 1150, phase="tail_backtrack", width_px=70.0)],
+            74.0,
+        ),
+    ]
+    proc._tail_current_delay_frame_rows = [
+        _accepted_tail_frame_row(proc, 1200, phase="tail_backtrack", width_px=66.0)
+    ]
+
+    proc.onAdvanceTailPhase()
+
+    assert proc.nextTailDelay.calls
+    assert not proc.tailPhaseFinished.calls
+    assert proc._tail_delay_sequence[-1] == 4450
+    assert proc._tail_delay_index == proc._tail_delay_sequence.index(4450)
+    assert proc._tail_plan["tail_right_extension_count"] == 1
+    assert proc._tail_plan["tail_right_extension_reason"] == "right_edge_width_still_falling"
+
+
+def test_online_stream_backtrack_extension_max_reached_finalizes_with_warning(tmp_path):
+    proc = _flow_proc(tmp_path)
+    _seed_tail_flow_context(proc)
+    proc._tail_plan = {
+        "steady_width_baseline_px": 74.0,
+        "scout_anchor_delay_us": 4250,
+        "backtrack_step_us": 50,
+        "scout_replicates": 1,
+        "backtrack_replicates": 1,
+        "tail_right_extension_count": 6,
+    }
+    proc._tail_mode = "backtrack"
+    proc._tail_delay_sequence = [4300, 4350, 4400]
+    proc._tail_delay_index = 2
+    proc._tail_replicate_index = 0
+    proc._tail_current_delay_us = 4400
+    proc._tail_landmark_delay_us = 4750
+    proc._tail_landmark_reason = "separated_from_nozzle"
+    proc._tail_backtrack_left_delay_us = 4300
+    proc._tail_scout_delay_summaries = [
+        calibration_model.online_tail_mod.summarize_online_stream_tail_delay(
+            [_accepted_tail_frame_row(proc, 1550, phase="tail_scout", width_px=70.0, landmark=True)],
+            74.0,
+        )
+    ]
+    proc._tail_backtrack_delay_summaries = [
+        calibration_model.online_tail_mod.summarize_online_stream_tail_delay(
+            [_accepted_tail_frame_row(proc, 1100, phase="tail_backtrack", width_px=74.0)],
+            74.0,
+        ),
+        calibration_model.online_tail_mod.summarize_online_stream_tail_delay(
+            [_accepted_tail_frame_row(proc, 1150, phase="tail_backtrack", width_px=70.0)],
+            74.0,
+        ),
+    ]
+    proc._tail_current_delay_frame_rows = [
+        _accepted_tail_frame_row(proc, 1200, phase="tail_backtrack", width_px=66.0)
+    ]
+
+    proc.onAdvanceTailPhase()
+
+    assert proc.tailPhaseFinished.calls
+    assert "tail_right_extension_max_reached" in proc._tail_fit_warnings
+    assert proc._tail_delay_sequence == [4300, 4350, 4400]
+
+
+def test_online_stream_backtrack_extension_budget_exhausted_finalizes_with_warning(tmp_path):
+    proc = _flow_proc(tmp_path)
+    _seed_tail_flow_context(proc)
+    proc.capture_budget["captures_remaining_hard"] = 0
+    proc.capture_budget["exhausted"] = False
+    proc._tail_plan = {
+        "steady_width_baseline_px": 74.0,
+        "scout_anchor_delay_us": 4250,
+        "backtrack_step_us": 50,
+        "scout_replicates": 1,
+        "backtrack_replicates": 1,
+        "tail_right_extension_count": 0,
+    }
+    proc._tail_mode = "backtrack"
+    proc._tail_delay_sequence = [4300, 4350, 4400]
+    proc._tail_delay_index = 2
+    proc._tail_replicate_index = 0
+    proc._tail_current_delay_us = 4400
+    proc._tail_landmark_delay_us = 4750
+    proc._tail_landmark_reason = "separated_from_nozzle"
+    proc._tail_backtrack_left_delay_us = 4300
+    proc._tail_scout_delay_summaries = [
+        calibration_model.online_tail_mod.summarize_online_stream_tail_delay(
+            [_accepted_tail_frame_row(proc, 1550, phase="tail_scout", width_px=70.0, landmark=True)],
+            74.0,
+        )
+    ]
+    proc._tail_backtrack_delay_summaries = [
+        calibration_model.online_tail_mod.summarize_online_stream_tail_delay(
+            [_accepted_tail_frame_row(proc, 1100, phase="tail_backtrack", width_px=74.0)],
+            74.0,
+        ),
+        calibration_model.online_tail_mod.summarize_online_stream_tail_delay(
+            [_accepted_tail_frame_row(proc, 1150, phase="tail_backtrack", width_px=70.0)],
+            74.0,
+        ),
+    ]
+    proc._tail_current_delay_frame_rows = [
+        _accepted_tail_frame_row(proc, 1200, phase="tail_backtrack", width_px=66.0)
+    ]
+
+    proc.onAdvanceTailPhase()
+
+    assert proc.tailPhaseFinished.calls
+    assert "tail_right_extension_budget_exhausted" in proc._tail_fit_warnings
+    assert proc._tail_delay_sequence == [4300, 4350, 4400]
 
 
 def test_online_stream_backtrack_separation_without_early_departure_resolves_midpoint_tail(tmp_path):

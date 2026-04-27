@@ -7124,6 +7124,8 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._tail_backtrack_left_delay_us = None
         self._tail_left_bracket_confirmed = False
         self._tail_left_bracket_extended = False
+        self._tail_backup_landmark_confirmed = False
+        self._tail_backup_landmark_confirmation_reason = None
         self._tail_coarse_delay_summaries = []
         self._tail_refine_delay_summaries = []
         self._tail_last_nontrigger_delay_us = None
@@ -8732,6 +8734,8 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._tail_backtrack_left_delay_us = None
         self._tail_left_bracket_confirmed = False
         self._tail_left_bracket_extended = False
+        self._tail_backup_landmark_confirmed = False
+        self._tail_backup_landmark_confirmation_reason = None
         self._tail_coarse_delay_summaries = []
         self._tail_refine_delay_summaries = []
         self._tail_last_nontrigger_delay_us = None
@@ -9355,6 +9359,14 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             "landmark_reason": self._tail_landmark_reason,
             "left_bracket_confirmed": bool(getattr(self, "_tail_left_bracket_confirmed", False)),
             "left_bracket_extended": bool(getattr(self, "_tail_left_bracket_extended", False)),
+            "tail_backup_landmark_confirmed": bool(
+                getattr(self, "_tail_backup_landmark_confirmed", False)
+            ),
+            "tail_backup_landmark_confirmation_reason": getattr(
+                self,
+                "_tail_backup_landmark_confirmation_reason",
+                None,
+            ),
             "warnings": list(self._tail_fit_warnings),
         }
 
@@ -9397,6 +9409,40 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             return False
         self._reset_tail_delay_cursor(reset_index=True)
         return bool(list(self._tail_delay_sequence or []))
+
+    def _maybe_extend_tail_right_edge(self, preview_result: dict | None = None) -> bool:
+        decision = online_tail_mod.decide_online_stream_tail_right_extension(
+            resolve_result=dict(preview_result or {}),
+            tail_plan=dict(self._tail_plan or {}),
+            backtrack_summaries=list(self._tail_backtrack_delay_summaries or []),
+            capture_budget=dict(self.capture_budget or {}),
+            replicates_per_delay=int(self._current_tail_replicates()),
+        )
+        warning = str(decision.get("warning") or "")
+        if warning:
+            self._append_tail_warning(warning)
+            self._tail_plan["tail_right_extension_blocked_reason"] = warning
+        if not bool(decision.get("extend")):
+            return False
+        try:
+            next_delay_us = int(decision.get("next_delay_us"))
+        except Exception:
+            return False
+        delay_sequence = list(self._tail_delay_sequence or [])
+        if next_delay_us not in delay_sequence:
+            delay_sequence.append(int(next_delay_us))
+            delay_sequence.sort()
+        self._tail_delay_sequence = delay_sequence
+        self._tail_delay_index = int(delay_sequence.index(int(next_delay_us)))
+        self._tail_plan["tail_right_extension_count"] = int(
+            self._tail_plan.get("tail_right_extension_count") or 0
+        ) + 1
+        self._tail_plan["tail_right_extension_reason"] = str(
+            decision.get("reason") or "right_edge_width_still_falling"
+        )
+        self._tail_plan["tail_right_extension_last_delay_us"] = int(next_delay_us)
+        self._reset_tail_delay_cursor(reset_index=False)
+        return True
 
     def _resolve_tail_phase(self, resolve_result=None):
         if resolve_result is None:
@@ -9449,6 +9495,8 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._tail_backtrack_left_delay_us = None
         self._tail_left_bracket_confirmed = False
         self._tail_left_bracket_extended = False
+        self._tail_backup_landmark_confirmed = False
+        self._tail_backup_landmark_confirmation_reason = None
         self._tail_coarse_delay_summaries = []
         self._tail_refine_delay_summaries = []
         self._tail_last_nontrigger_delay_us = None
@@ -9834,7 +9882,10 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 consecutive_failed_delays=int(self._tail_consecutive_failed_delays),
                 attempted_delay_count=int(len(self._tail_scout_delay_summaries)),
                 planned_delay_count=int(self._planned_tail_delay_count()),
+                scout_summaries=list(self._tail_scout_delay_summaries or []),
             )
+            for warning in list(decision.get("warnings") or []):
+                self._append_tail_warning(str(warning))
             action = str(decision.get("action") or "")
             if action == "continue":
                 self._tail_delay_index += 1
@@ -9852,6 +9903,12 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                     or delay_summary.get("landmark_reason")
                     or ""
                 ) or None
+                self._tail_backup_landmark_confirmed = bool(
+                    decision.get("tail_backup_landmark_confirmed")
+                )
+                self._tail_backup_landmark_confirmation_reason = (
+                    str(decision.get("tail_backup_landmark_confirmation_reason") or "") or None
+                )
                 left_anchor = online_tail_mod.select_online_stream_tail_left_anchor(
                     scout_summaries=list(self._tail_scout_delay_summaries or []),
                     scout_anchor_delay_us=self._tail_plan.get("scout_anchor_delay_us"),
@@ -9919,6 +9976,11 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 self._emit_online_stream_debug_payload(self._tail_phase_label())
                 self.nextTailDelay.emit()
                 return
+            if self._maybe_extend_tail_right_edge(preview_result):
+                self._emit_online_stream_debug_payload(self._tail_phase_label())
+                self.nextTailDelay.emit()
+                return
+            preview_result = self._preview_tail_resolve_result()
             if bool(self._tail_plan.get("tail_backtrack_budget_impossible")):
                 self._tail_phase_status = "unresolved_budget_exhausted"
                 self._tail_termination_reason = "capture_budget_exhausted"

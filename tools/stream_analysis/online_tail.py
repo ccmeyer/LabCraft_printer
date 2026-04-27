@@ -20,10 +20,14 @@ DEFAULT_ONLINE_TAIL_POLICY = {
     "scout_landmark_width_frac": 0.95,
     "plateau_width_frac": 0.995,
     "departure_width_frac": 0.99,
+    "backup_landmark_confirm_count": 2,
+    "backup_landmark_immediate_width_frac": 0.85,
     "resolver_plateau_width_drop_px": 1.0,
-    "resolver_transition_width_drop_px": 1.0,
-    "resolver_collapse_width_drop_px": 2.0,
-    "resolver_collapse_width_frac": 0.975,
+    "resolver_transition_width_drop_px": 2.0,
+    "resolver_transition_width_drop_frac": 0.03,
+    "resolver_collapse_width_drop_px": 4.0,
+    "resolver_collapse_width_frac": 0.95,
+    "resolver_collapse_width_drop_frac": 0.05,
     "resolver_confirmation_window_us": 100,
     "consecutive_failed_tail_delays_stop": 2,
     "scout_step_us": 500,
@@ -34,6 +38,9 @@ DEFAULT_ONLINE_TAIL_POLICY = {
     "fine_prepad_us": 100,
     "fine_postpad_us": 100,
     "reserved_backtrack_capture_count": 15,
+    "tail_right_extension_enabled": True,
+    "tail_right_extension_max_us": 300,
+    "tail_right_extension_min_falling_drop_px": 2.0,
 }
 
 
@@ -119,7 +126,9 @@ def _resolved_policy(policy: dict | None = None) -> dict:
     for key, default_value in DEFAULT_ONLINE_TAIL_POLICY.items():
         if key not in provided:
             continue
-        if isinstance(default_value, int):
+        if isinstance(default_value, bool):
+            merged[key] = bool(provided.get(key))
+        elif isinstance(default_value, int):
             merged[key] = max(0, _to_int(provided.get(key), default_value))
         else:
             merged[key] = float(provided.get(key))
@@ -164,6 +173,94 @@ def _sorted_unique_delays(values) -> list[int]:
         delays.append(int(parsed))
     delays.sort()
     return delays
+
+
+def _baseline_width_px_for_summary(summary: dict, median_width_px=None) -> float | None:
+    if median_width_px is None:
+        median_width_px = _to_float_or_none(summary.get("median_width_px"))
+    width_ratio_to_baseline = _to_float_or_none(summary.get("width_ratio_to_baseline"))
+    if (
+        median_width_px is not None
+        and width_ratio_to_baseline is not None
+        and float(width_ratio_to_baseline) > 0.0
+    ):
+        return float(float(median_width_px) / float(width_ratio_to_baseline))
+    width_drop_from_baseline_px = _to_float_or_none(summary.get("width_drop_from_baseline_px"))
+    if median_width_px is not None and width_drop_from_baseline_px is not None:
+        return float(float(median_width_px) + float(width_drop_from_baseline_px))
+    return None
+
+
+def _material_width_drop_threshold_px(
+    summary: dict,
+    resolved_policy: dict,
+    *,
+    px_key: str,
+    frac_key: str | None = None,
+) -> float:
+    threshold_px = float(resolved_policy.get(px_key, 0.0) or 0.0)
+    if frac_key is not None:
+        baseline_width_px = _baseline_width_px_for_summary(summary)
+        frac = _to_float_or_none(resolved_policy.get(frac_key))
+        if baseline_width_px is not None and frac is not None:
+            threshold_px = max(float(threshold_px), float(baseline_width_px) * float(frac))
+    return float(threshold_px)
+
+
+def _is_backup_width_collapse_landmark(summary: dict | None) -> bool:
+    row = dict(summary or {})
+    return bool(row.get("backup_width_collapse_landmark")) or str(
+        row.get("landmark_reason") or ""
+    ) == "strong_width_collapse_backup"
+
+
+def _backup_landmark_confirmation(
+    *,
+    delay_summary: dict,
+    scout_summaries: list[dict] | None,
+    attempted_delay_count: int,
+    planned_delay_count: int,
+    resolved_policy: dict,
+) -> dict:
+    width_ratio = _to_float_or_none(delay_summary.get("width_ratio_to_baseline"))
+    immediate_width_frac = float(resolved_policy["backup_landmark_immediate_width_frac"])
+    if width_ratio is not None and float(width_ratio) <= immediate_width_frac:
+        return {
+            "confirmed": True,
+            "reason": "severe_backup_width_collapse",
+            "warnings": [],
+        }
+
+    history = [dict(row or {}) for row in list(scout_summaries or [])]
+    current_delay_us = _to_int(delay_summary.get("delay_us"))
+    if not history or _to_int(history[-1].get("delay_us")) != current_delay_us:
+        history.append(dict(delay_summary))
+    consecutive = 0
+    for row in reversed(history):
+        if _is_backup_width_collapse_landmark(row):
+            consecutive += 1
+        else:
+            break
+    confirm_count = max(1, _to_int(resolved_policy.get("backup_landmark_confirm_count"), 2))
+    if consecutive >= int(confirm_count):
+        return {
+            "confirmed": True,
+            "reason": "confirmed_backup_width_collapse",
+            "warnings": [],
+        }
+
+    if int(attempted_delay_count) >= int(max(0, planned_delay_count)):
+        return {
+            "confirmed": True,
+            "reason": "final_scout_backup_width_collapse",
+            "warnings": ["tail_backup_landmark_final_scout"],
+        }
+
+    return {
+        "confirmed": False,
+        "reason": "unconfirmed_backup_width_collapse",
+        "warnings": ["tail_backup_landmark_unconfirmed"],
+    }
 
 
 def compress_online_stream_tail_backtrack_plan(
@@ -827,6 +924,24 @@ def _classify_trace_rows(rows: list[dict], *, policy: dict | None = None) -> lis
         ):
             inferred_baseline_px = float(float(median_width_px) / float(width_ratio_to_baseline))
             width_drop_from_baseline_px = float(inferred_baseline_px - float(median_width_px))
+        summary_for_thresholds = {
+            **summary,
+            "median_width_px": median_width_px,
+            "width_ratio_to_baseline": width_ratio_to_baseline,
+            "width_drop_from_baseline_px": width_drop_from_baseline_px,
+        }
+        transition_width_drop_threshold_px = _material_width_drop_threshold_px(
+            summary_for_thresholds,
+            resolved_policy,
+            px_key="resolver_transition_width_drop_px",
+            frac_key="resolver_transition_width_drop_frac",
+        )
+        collapse_width_drop_threshold_px = _material_width_drop_threshold_px(
+            summary_for_thresholds,
+            resolved_policy,
+            px_key="resolver_collapse_width_drop_px",
+            frac_key="resolver_collapse_width_drop_frac",
+        )
         tail_width_usable = bool(summary.get("tail_width_usable"))
         separated_from_nozzle_landmark = bool(summary.get("separated_from_nozzle_landmark"))
         attached_width_unavailable_landmark = bool(summary.get("attached_width_unavailable_landmark"))
@@ -861,8 +976,8 @@ def _classify_trace_rows(rows: list[dict], *, policy: dict | None = None) -> lis
         resolver_transition_candidate = bool(
             tail_width_usable
             and width_drop_from_baseline_px is not None
-            and float(width_drop_from_baseline_px) >= float(resolved_policy["resolver_transition_width_drop_px"])
-            and float(width_drop_from_baseline_px) < float(resolved_policy["resolver_collapse_width_drop_px"])
+            and float(width_drop_from_baseline_px) >= float(transition_width_drop_threshold_px)
+            and float(width_drop_from_baseline_px) < float(collapse_width_drop_threshold_px)
             and not separated_from_nozzle_landmark
             and not attached_width_unavailable_landmark
         )
@@ -872,7 +987,7 @@ def _classify_trace_rows(rows: list[dict], *, policy: dict | None = None) -> lis
                 and (
                     (
                         width_drop_from_baseline_px is not None
-                        and float(width_drop_from_baseline_px) >= float(resolved_policy["resolver_collapse_width_drop_px"])
+                        and float(width_drop_from_baseline_px) >= float(collapse_width_drop_threshold_px)
                     )
                     or (
                         width_ratio_to_baseline is not None
@@ -885,6 +1000,8 @@ def _classify_trace_rows(rows: list[dict], *, policy: dict | None = None) -> lis
             or backup_width_collapse_landmark
         )
         summary["width_drop_from_baseline_px"] = width_drop_from_baseline_px
+        summary["resolver_transition_width_drop_threshold_px"] = float(transition_width_drop_threshold_px)
+        summary["resolver_collapse_width_drop_threshold_px"] = float(collapse_width_drop_threshold_px)
         summary["plateau_candidate"] = bool(plateau_candidate)
         summary["early_departure_candidate"] = bool(early_departure_candidate)
         summary["strong_tail_candidate"] = bool(strong_tail_candidate)
@@ -1113,12 +1230,14 @@ def summarize_online_stream_tail_delay(
         bool(row.get("separated_from_nozzle_landmark"))
         for row in rows
     )
+    phase_label = str((rows[0] if rows else {}).get("phase") or "")
     backup_width_collapse_landmark = bool(
         width_usable_replicates > 0
         and width_ratio_to_baseline is not None
         and float(width_ratio_to_baseline) <= float(resolved_policy["scout_landmark_width_frac"])
         and not separated_from_nozzle_landmark
         and not attached_width_unavailable_landmark
+        and phase_label not in {"tail_backtrack", "tail_refine", "refine"}
     )
     landmark_detected = bool(
         separated_from_nozzle_landmark
@@ -1139,7 +1258,7 @@ def summarize_online_stream_tail_delay(
     if rows:
         delay_us = _to_int(rows[0].get("delay_us"))
         delay_from_emergence_us = _to_int(rows[0].get("delay_from_emergence_us"))
-        phase = str(rows[0].get("phase") or "")
+        phase = phase_label
 
     summary = {
         "phase": phase,
@@ -1236,6 +1355,7 @@ def decide_online_stream_tail_next_action(
     consecutive_failed_delays: int = 0,
     attempted_delay_count: int = 0,
     planned_delay_count: int = 0,
+    scout_summaries: list[dict] | None = None,
     policy: dict | None = None,
     **unused,
 ) -> dict:
@@ -1251,11 +1371,44 @@ def decide_online_stream_tail_next_action(
 
     if mode_label == "scout":
         if bool(summary.get("landmark_detected")):
+            if _is_backup_width_collapse_landmark(summary):
+                confirmation = _backup_landmark_confirmation(
+                    delay_summary=summary,
+                    scout_summaries=scout_summaries,
+                    attempted_delay_count=int(attempted_delay_count),
+                    planned_delay_count=int(planned_delay_count),
+                    resolved_policy=resolved_policy,
+                )
+                if not bool(confirmation.get("confirmed")):
+                    return {
+                        "action": "continue",
+                        "tail_phase_status": None,
+                        "termination_reason": None,
+                        "warnings": _copy_warnings(confirmation.get("warnings")),
+                        "tail_backup_landmark_confirmed": False,
+                        "tail_backup_landmark_confirmation_reason": str(
+                            confirmation.get("reason") or ""
+                        ),
+                    }
+                return {
+                    "action": "switch_to_backtrack",
+                    "tail_phase_status": None,
+                    "termination_reason": None,
+                    "landmark_reason": str(summary.get("landmark_reason") or ""),
+                    "warnings": _copy_warnings(confirmation.get("warnings")),
+                    "tail_backup_landmark_confirmed": True,
+                    "tail_backup_landmark_confirmation_reason": str(
+                        confirmation.get("reason") or ""
+                    ),
+                }
             return {
                 "action": "switch_to_backtrack",
                 "tail_phase_status": None,
                 "termination_reason": None,
                 "landmark_reason": str(summary.get("landmark_reason") or ""),
+                "warnings": [],
+                "tail_backup_landmark_confirmed": False,
+                "tail_backup_landmark_confirmation_reason": None,
             }
         if int(consecutive_failed_delays) >= int(resolved_policy["consecutive_failed_tail_delays_stop"]):
             return {
@@ -1303,6 +1456,149 @@ def decide_online_stream_tail_next_action(
         "action": "continue",
         "tail_phase_status": None,
         "termination_reason": None,
+    }
+
+
+def _tail_right_edge_coverage_summary(
+    backtrack_rows: list[dict] | None,
+    *,
+    policy: dict | None = None,
+) -> dict:
+    resolved_policy = _resolved_policy(policy)
+    classified_rows = _classify_trace_rows(list(backtrack_rows or []), policy=resolved_policy)
+    width_rows = [
+        dict(row or {})
+        for row in classified_rows
+        if bool(row.get("tail_width_usable"))
+        and _to_float_or_none(row.get("median_width_px")) is not None
+        and _to_int(row.get("delay_us")) is not None
+    ]
+    width_rows.sort(key=lambda item: int(_to_int(item.get("delay_us"), 0)))
+    selection_noise_floor_px = None
+    if width_rows:
+        selection_noise_floor_px = _material_width_drop_threshold_px(
+            width_rows[0],
+            resolved_policy,
+            px_key="resolver_transition_width_drop_px",
+            frac_key="resolver_transition_width_drop_frac",
+        )
+
+    diagnostics = {
+        "tail_collapse_coverage_ok": True,
+        "tail_right_extension_needed": False,
+        "tail_right_extension_reason": None,
+        "tail_min_width_delay_from_emergence_us": None,
+        "tail_min_width_at_right_edge": False,
+        "tail_width_still_falling_at_right_edge": False,
+        "tail_selection_noise_floor_px": (
+            None if selection_noise_floor_px is None else float(selection_noise_floor_px)
+        ),
+    }
+    if len(width_rows) < 2:
+        return diagnostics
+
+    min_index = min(
+        range(len(width_rows)),
+        key=lambda index: float(_to_float_or_none(width_rows[index].get("median_width_px"))),
+    )
+    min_row = dict(width_rows[min_index])
+    min_width_px = _to_float_or_none(min_row.get("median_width_px"))
+    diagnostics["tail_min_width_delay_from_emergence_us"] = _to_int(
+        min_row.get("delay_from_emergence_us")
+    )
+    min_delay_us = _to_int(min_row.get("delay_us"))
+    min_at_right_edge = bool(min_index >= len(width_rows) - 2)
+    diagnostics["tail_min_width_at_right_edge"] = bool(min_at_right_edge)
+
+    still_falling = False
+    if min_index > 0 and min_width_px is not None:
+        previous_width_px = _to_float_or_none(width_rows[min_index - 1].get("median_width_px"))
+        if previous_width_px is not None:
+            still_falling = bool(
+                float(previous_width_px) - float(min_width_px)
+                >= float(resolved_policy["tail_right_extension_min_falling_drop_px"])
+            )
+    diagnostics["tail_width_still_falling_at_right_edge"] = bool(still_falling)
+
+    terminal_after_min = False
+    recovered_after_min = False
+    if min_delay_us is not None:
+        for row in classified_rows:
+            row_delay_us = _to_int(row.get("delay_us"))
+            if row_delay_us is None or int(row_delay_us) <= int(min_delay_us):
+                continue
+            if (
+                bool(row.get("separated_from_nozzle_landmark"))
+                or bool(row.get("attached_width_unavailable_landmark"))
+                or not bool(row.get("tail_width_usable"))
+            ):
+                terminal_after_min = True
+                break
+            later_width_px = _to_float_or_none(row.get("median_width_px"))
+            if min_width_px is not None and later_width_px is not None and float(later_width_px) >= float(min_width_px):
+                recovered_after_min = True
+
+    raw_extension_needed = bool(
+        min_at_right_edge and still_falling and not terminal_after_min and not recovered_after_min
+    )
+    diagnostics["tail_collapse_coverage_ok"] = not bool(raw_extension_needed)
+    diagnostics["tail_right_extension_needed"] = bool(
+        raw_extension_needed and bool(resolved_policy["tail_right_extension_enabled"])
+    )
+    if raw_extension_needed:
+        diagnostics["tail_right_extension_reason"] = "right_edge_width_still_falling"
+    return diagnostics
+
+
+def decide_online_stream_tail_right_extension(
+    *,
+    resolve_result: dict | None,
+    tail_plan: dict | None,
+    backtrack_summaries: list[dict] | None,
+    capture_budget: dict | None,
+    replicates_per_delay: int = 1,
+    policy: dict | None = None,
+) -> dict:
+    plan = dict(tail_plan or {})
+    plan_policy = plan.get("policy") if isinstance(plan.get("policy"), dict) else None
+    resolved_policy = _resolved_policy(policy or plan_policy)
+    tail_phase = dict((dict(resolve_result or {}).get("tail_phase") or {}))
+    if not bool(resolved_policy["tail_right_extension_enabled"]):
+        return {"extend": False, "reason": "disabled", "warning": None, "next_delay_us": None}
+    if not bool(tail_phase.get("tail_right_extension_needed")):
+        return {"extend": False, "reason": "not_needed", "warning": None, "next_delay_us": None}
+
+    step_us = max(1, _to_int(plan.get("backtrack_step_us"), resolved_policy["backtrack_step_us"]))
+    max_extension_us = max(0, _to_int(resolved_policy.get("tail_right_extension_max_us"), 0))
+    max_extension_count = int(max_extension_us // int(step_us)) if step_us > 0 else 0
+    extension_count = max(0, _to_int(plan.get("tail_right_extension_count"), 0))
+    if extension_count >= max_extension_count:
+        return {
+            "extend": False,
+            "reason": "max_reached",
+            "warning": "tail_right_extension_max_reached",
+            "next_delay_us": None,
+        }
+
+    required_captures = max(1, _to_int(replicates_per_delay, 1))
+    if _remaining_hard_budget(capture_budget) < int(required_captures):
+        return {
+            "extend": False,
+            "reason": "budget_exhausted",
+            "warning": "tail_right_extension_budget_exhausted",
+            "next_delay_us": None,
+        }
+
+    sampled_delays = _sorted_unique_delays(
+        row.get("delay_us") for row in list(backtrack_summaries or [])
+    )
+    if not sampled_delays:
+        return {"extend": False, "reason": "missing_backtrack_delays", "warning": None, "next_delay_us": None}
+    return {
+        "extend": True,
+        "reason": str(tail_phase.get("tail_right_extension_reason") or "right_edge_width_still_falling"),
+        "warning": None,
+        "next_delay_us": int(max(sampled_delays) + int(step_us)),
     }
 
 
@@ -1537,8 +1833,8 @@ def resolve_online_stream_tail_result(
     tail_start_selection_method = None
     synthetic_left_bracket_used = False
     if transition_rows and right_bracket_row is not None and last_plateau_row is not None:
-        captured_candidate = dict(transition_rows[0])
-        tail_start_selection_method = "earliest_transition_before_confirmed_collapse"
+        captured_candidate = dict(transition_rows[-1])
+        tail_start_selection_method = "latest_transition_before_confirmed_collapse"
     elif right_bracket_row is not None and last_plateau_row is not None:
         left_delay_from_emergence_us = _to_int(last_plateau_row.get("delay_from_emergence_us"))
         right_delay_from_emergence_us = _to_int(right_bracket_row.get("delay_from_emergence_us"))
@@ -1654,7 +1950,10 @@ def resolve_online_stream_tail_result(
         if (
             tail_phase_status == "captured"
             and tail_start_delay_from_emergence_us is not None
-            and tail_start_selection_method == "earliest_transition_before_confirmed_collapse"
+            and tail_start_selection_method in {
+                "earliest_transition_before_confirmed_collapse",
+                "latest_transition_before_confirmed_collapse",
+            }
             and str(landmark_reason or "") == "separated_from_nozzle"
         ):
             if initial_collapse_window_us is None:
@@ -1763,6 +2062,10 @@ def resolve_online_stream_tail_result(
     last_plateau_delay_from_emergence_us = _to_int(
         None if last_plateau_row is None else last_plateau_row.get("delay_from_emergence_us")
     )
+    right_edge_coverage = _tail_right_edge_coverage_summary(
+        backtrack_rows,
+        policy=resolved_policy,
+    )
     tail_phase = {
         "status": str(tail_phase_status or "unresolved_no_landmark"),
         "plan": _copy_jsonish(plan),
@@ -1828,6 +2131,24 @@ def resolve_online_stream_tail_result(
         ),
         "tail_settling_progress_threshold": _to_float_or_none(
             tail_settling_diagnostics.get("tail_settling_progress_threshold")
+        ),
+        "tail_backup_landmark_confirmed": bool(bracket.get("tail_backup_landmark_confirmed")),
+        "tail_backup_landmark_confirmation_reason": (
+            str(bracket.get("tail_backup_landmark_confirmation_reason") or "") or None
+        ),
+        "tail_collapse_coverage_ok": bool(right_edge_coverage.get("tail_collapse_coverage_ok")),
+        "tail_right_extension_needed": bool(right_edge_coverage.get("tail_right_extension_needed")),
+        "tail_right_extension_reason": right_edge_coverage.get("tail_right_extension_reason"),
+        "tail_right_extension_count": _to_int(plan.get("tail_right_extension_count"), 0),
+        "tail_min_width_delay_from_emergence_us": _to_int(
+            right_edge_coverage.get("tail_min_width_delay_from_emergence_us")
+        ),
+        "tail_min_width_at_right_edge": bool(right_edge_coverage.get("tail_min_width_at_right_edge")),
+        "tail_width_still_falling_at_right_edge": bool(
+            right_edge_coverage.get("tail_width_still_falling_at_right_edge")
+        ),
+        "tail_selection_noise_floor_px": _to_float_or_none(
+            right_edge_coverage.get("tail_selection_noise_floor_px")
         ),
         "trigger_delay_from_emergence_us": landmark_delay_from_emergence_us,
         "trigger_reason": landmark_reason or (None if landmark_summary is None else landmark_summary.get("landmark_reason")),
