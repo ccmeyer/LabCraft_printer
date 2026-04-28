@@ -7,7 +7,7 @@ from tests.calibration_test_utils import Recorder, ensure_calibration_import_stu
 
 ensure_calibration_import_stubs()
 
-from CalibrationClasses.Model import NozzlePositionCalibrationProcess
+from CalibrationClasses.Model import NozzlePositionCalibrationProcess, _detect_nozzle_point_from_diff
 
 
 def _bg_head_in_view_image():
@@ -247,6 +247,19 @@ def test_detect_nozzle_uses_vertical_support_for_clean_stream():
     assert proc._last_detection_details["x_measurement_mode"] == "vertical_support"
     assert proc._last_detection_details["ambiguous_lateral_spread"] is False
     assert abs(proc._last_detection_details["bbox_mid_x"] - proc._last_detection_details["support_mid_x"]) <= 2
+
+
+def test_shared_nozzle_detector_matches_nozzle_position_detector():
+    proc = _build_process_for_detection()
+    bg, dr = _make_clean_stream_pair()
+
+    direct = proc._detect_nozzle_point(bg, dr)[:3]
+    proc._last_detection_details = {}
+    shared = _detect_nozzle_point_from_diff(proc, bg, dr)[:3]
+
+    assert shared == direct
+    assert proc._last_detection_details["status"] == "OK"
+    assert proc._last_detection_details["x_measurement_mode"] == "vertical_support"
 
 
 def test_detect_nozzle_rejects_frames_without_vertical_support_band():

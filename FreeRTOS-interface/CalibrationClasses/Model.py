@@ -1425,6 +1425,7 @@ class CalibrationManager(QObject):
         self.background_image = None
         self.nozzle_center = None
         self.nozzle_center_image_position = None
+        self.nozzle_center_image_position_source = None
         self.emergence_nozzle_center_image_position = None
         self.real_nozzle_center_image_position = None
         self.droplet_trajectory_vector = None
@@ -5348,8 +5349,9 @@ class CalibrationManager(QObject):
     def set_nozzle_center(self, center): 
         self.nozzle_center = center
         self._emit_readiness()
-    def set_nozzle_center_image_position(self, center): 
+    def set_nozzle_center_image_position(self, center, source="nozzle_position"): 
         self.nozzle_center_image_position = center
+        self.nozzle_center_image_position_source = str(source or "unknown") if center is not None else None
         self._emit_readiness()
     def set_real_nozzle_center_image_position(self, center):
         self.real_nozzle_center_image_position = center
@@ -5407,6 +5409,10 @@ class CalibrationManager(QObject):
     def get_background_image(self): return self.background_image
     def get_nozzle_center(self): return self.nozzle_center
     def get_nozzle_center_image_position(self): return self.nozzle_center_image_position
+    def get_nozzle_center_image_position_source(self):
+        return getattr(self, "nozzle_center_image_position_source", None) or (
+            "nozzle_position" if self.nozzle_center_image_position is not None else "none"
+        )
     def get_real_nozzle_center_image_position(self):
         real_center = getattr(self, "real_nozzle_center_image_position", None)
         if real_center is not None:
@@ -11569,7 +11575,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
             machine_pos = self.model.machine_model.get_current_position_dict()
             self.measurements.append((machine_pos, nozzle_px))
             self.calibration_manager.set_background_image(self.background_image)
-            self.calibration_manager.set_nozzle_center_image_position(nozzle_px)
+            self.calibration_manager.set_nozzle_center_image_position(nozzle_px, "nozzle_position")
             self.calibration_manager.set_nozzle_center(machine_pos)
             self.nozzleCentered.emit()
             return "finish"
@@ -11740,8 +11746,13 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         self._cap_timeout = None
         self.calibration_manager.emitCaptureCompleted()
 
+def _detect_nozzle_point_from_diff(detector, bg, dr):
+    """Run the canonical nozzle-position image detector on any calibration process."""
+    return NozzlePositionCalibrationProcess._detect_nozzle_point(detector, bg, dr)
+
 class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
     nozzleFocused = Signal()
+    postFocusNozzleRefreshFinished = Signal()
 
     # --------- Tuning / Safety ---------
     FOCUS_AXIS = "Y"
@@ -11806,6 +11817,31 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
         self._bg_g2_cache = None
         self._bg_cache_sig = None
 
+        self.post_focus_nozzle_refresh_enabled = True
+        self.min_flash_delay_us = 2000
+        self.max_flash_delay_us = 12000
+        try:
+            pulse_width_us = int(self.model.machine_model.get_print_pulse_width())
+        except Exception:
+            pulse_width_us = 0
+        self.post_focus_nozzle_refresh_flash_delay_us = self._clamp_post_focus_refresh_delay(
+            max(pulse_width_us + 2600, 0)
+        )
+        self.fixed_thresh_value = 30
+        self.no_signal_min_fg_px = 120
+        self.min_stream_bbox_h_px = 10
+        self.search_top_band_frac = 0.60
+        self._last_detection_details = {}
+        self._pre_focus_nozzle_center_px = None
+        self._post_focus_nozzle_refresh_result = {
+            "status": "pending",
+            "pre_focus_nozzle_center_px": None,
+            "post_focus_nozzle_center_px": None,
+            "post_focus_nozzle_delta_px": None,
+            "post_focus_nozzle_center_source": "none",
+        }
+        self._post_focus_nozzle_refresh_done = False
+
         self.mode = "probe_dir"
         self.direction = +1
         self.step = self.STEP_INIT
@@ -11847,10 +11883,22 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
         # --- state machine wiring (unchanged) ---
         self.state_capture = QState()
         self.state_analyze = QState()
+        self.state_refresh_prepare_background = QState()
+        self.state_refresh_capture_background = QState()
+        self.state_refresh_prepare_warmup = QState()
+        self.state_refresh_capture_warmup = QState()
+        self.state_refresh_capture_droplet = QState()
+        self.state_refresh_analyze_nozzle = QState()
         self.state_final   = QFinalState()
 
         self.state_capture.entered.connect(self.onCaptureDroplet)
         self.state_analyze.entered.connect(self.onAnalyze)
+        self.state_refresh_prepare_background.entered.connect(self.onPostFocusPrepareBackground)
+        self.state_refresh_capture_background.entered.connect(self.onPostFocusCaptureBackground)
+        self.state_refresh_prepare_warmup.entered.connect(self.onPostFocusPrepareWarmup)
+        self.state_refresh_capture_warmup.entered.connect(self.onPostFocusCaptureWarmup)
+        self.state_refresh_capture_droplet.entered.connect(self.onPostFocusCaptureDroplet)
+        self.state_refresh_analyze_nozzle.entered.connect(self.onPostFocusAnalyzeNozzle)
         self.state_final.entered.connect(self.onCalibrationCompleted)
 
         t_cap_done = QSignalTransition()
@@ -11868,11 +11916,61 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
         t_focused = QSignalTransition()
         t_focused.setSenderObject(self)
         t_focused.setSignal(b"2nozzleFocused()")
-        t_focused.setTargetState(self.state_final)
+        t_focused.setTargetState(self.state_refresh_prepare_background)
         self.state_analyze.addTransition(t_focused)
+
+        t_refresh_bg_ready = QSignalTransition()
+        t_refresh_bg_ready.setSenderObject(self.calibration_manager)
+        t_refresh_bg_ready.setSignal(b"2settingsChangeCompleted()")
+        t_refresh_bg_ready.setTargetState(self.state_refresh_capture_background)
+        self.state_refresh_prepare_background.addTransition(t_refresh_bg_ready)
+
+        t_refresh_bg_captured = QSignalTransition()
+        t_refresh_bg_captured.setSenderObject(self.calibration_manager)
+        t_refresh_bg_captured.setSignal(b"2captureCompleted()")
+        t_refresh_bg_captured.setTargetState(self.state_refresh_prepare_warmup)
+        self.state_refresh_capture_background.addTransition(t_refresh_bg_captured)
+
+        t_refresh_warmup_ready = QSignalTransition()
+        t_refresh_warmup_ready.setSenderObject(self.calibration_manager)
+        t_refresh_warmup_ready.setSignal(b"2settingsChangeCompleted()")
+        t_refresh_warmup_ready.setTargetState(self.state_refresh_capture_warmup)
+        self.state_refresh_prepare_warmup.addTransition(t_refresh_warmup_ready)
+
+        t_refresh_warmup_captured = QSignalTransition()
+        t_refresh_warmup_captured.setSenderObject(self.calibration_manager)
+        t_refresh_warmup_captured.setSignal(b"2captureCompleted()")
+        t_refresh_warmup_captured.setTargetState(self.state_refresh_capture_droplet)
+        self.state_refresh_capture_warmup.addTransition(t_refresh_warmup_captured)
+
+        t_refresh_droplet_captured = QSignalTransition()
+        t_refresh_droplet_captured.setSenderObject(self.calibration_manager)
+        t_refresh_droplet_captured.setSignal(b"2captureCompleted()")
+        t_refresh_droplet_captured.setTargetState(self.state_refresh_analyze_nozzle)
+        self.state_refresh_capture_droplet.addTransition(t_refresh_droplet_captured)
+
+        for refresh_state in (
+            self.state_refresh_prepare_background,
+            self.state_refresh_capture_background,
+            self.state_refresh_prepare_warmup,
+            self.state_refresh_capture_warmup,
+            self.state_refresh_capture_droplet,
+            self.state_refresh_analyze_nozzle,
+        ):
+            t_refresh_done = QSignalTransition()
+            t_refresh_done.setSenderObject(self)
+            t_refresh_done.setSignal(b"2postFocusNozzleRefreshFinished()")
+            t_refresh_done.setTargetState(self.state_final)
+            refresh_state.addTransition(t_refresh_done)
 
         self.state_machine.addState(self.state_capture)
         self.state_machine.addState(self.state_analyze)
+        self.state_machine.addState(self.state_refresh_prepare_background)
+        self.state_machine.addState(self.state_refresh_capture_background)
+        self.state_machine.addState(self.state_refresh_prepare_warmup)
+        self.state_machine.addState(self.state_refresh_capture_warmup)
+        self.state_machine.addState(self.state_refresh_capture_droplet)
+        self.state_machine.addState(self.state_refresh_analyze_nozzle)
         self.state_machine.addState(self.state_final)
         self.state_machine.setInitialState(self.state_capture)
 
@@ -12120,6 +12218,143 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
 
     # ---------- finish ----------
     @Slot()
+    def onPostFocusPrepareBackground(self):
+        self.stageChanged.emit("Nozzle Focus - Preparing post-focus nozzle refresh background")
+        if not bool(getattr(self, "post_focus_nozzle_refresh_enabled", True)):
+            self._finish_post_focus_nozzle_refresh("skipped", reason="disabled")
+            return
+        try:
+            prior = self.calibration_manager.get_nozzle_center_image_position()
+        except Exception:
+            prior = None
+        self._pre_focus_nozzle_center_px = self._coerce_center_px(prior)
+        self._post_focus_nozzle_refresh_done = False
+        self._post_focus_nozzle_refresh_result = {
+            "status": "pending",
+            "pre_focus_nozzle_center_px": self._pre_focus_nozzle_center_px,
+            "post_focus_nozzle_center_px": None,
+            "post_focus_nozzle_delta_px": None,
+            "post_focus_nozzle_center_source": "none",
+        }
+        settings = {
+            "num_droplets": 0,
+            "flash_delay": int(self._post_focus_refresh_delay_us()),
+        }
+        self._request_settings_with_recording(
+            settings,
+            self.calibration_manager.emitSettingsChangeCompleted,
+            context="focus_post_refresh_prepare_background",
+        )
+
+    @Slot()
+    def onPostFocusCaptureBackground(self):
+        self._capture_with_policy(
+            set_attr="background_image",
+            stage_text="Capturing post-focus nozzle refresh background",
+            attempts_total=3,
+            retry_delay_ms=100,
+            guard_timeout_ms=10_000,
+            final_error_msg="Post-focus nozzle refresh background capture failed.",
+            on_final_failure=lambda: self._finish_post_focus_nozzle_refresh(
+                "failed",
+                reason="background_capture_failed",
+            ),
+        )
+
+    @Slot()
+    def onPostFocusPrepareWarmup(self):
+        self.stageChanged.emit("Nozzle Focus - Preparing post-focus nozzle refresh droplet")
+        settings = {
+            "num_droplets": 1,
+            "flash_delay": int(self._post_focus_refresh_delay_us()),
+        }
+        self._request_settings_with_recording(
+            settings,
+            self.calibration_manager.emitSettingsChangeCompleted,
+            context="focus_post_refresh_prepare_droplet",
+        )
+
+    @Slot()
+    def onPostFocusCaptureWarmup(self):
+        self._capture_with_policy(
+            set_attr="droplet_image",
+            stage_text="Capturing post-focus nozzle refresh warm-up droplet",
+            attempts_total=5,
+            retry_delay_ms=75,
+            guard_timeout_ms=10_000,
+            final_error_msg="Post-focus nozzle refresh warm-up capture failed.",
+            on_final_failure=lambda: self._finish_post_focus_nozzle_refresh(
+                "failed",
+                reason="warmup_capture_failed",
+            ),
+        )
+
+    @Slot()
+    def onPostFocusCaptureDroplet(self):
+        self._capture_with_policy(
+            set_attr="droplet_image",
+            stage_text="Capturing post-focus nozzle refresh droplet",
+            attempts_total=5,
+            retry_delay_ms=75,
+            guard_timeout_ms=10_000,
+            final_error_msg="Post-focus nozzle refresh droplet capture failed.",
+            on_final_failure=lambda: self._finish_post_focus_nozzle_refresh(
+                "failed",
+                reason="droplet_capture_failed",
+            ),
+        )
+
+    @Slot()
+    def onPostFocusAnalyzeNozzle(self):
+        self.stageChanged.emit("Nozzle Focus - Refreshing nozzle image position")
+        bg = self.background_image
+        dr = self.droplet_image
+        try:
+            status, nozzle_px, n_contours, debug_img = _detect_nozzle_point_from_diff(self, bg, dr)
+        except Exception as exc:
+            self._finish_post_focus_nozzle_refresh("failed", reason=f"detection_exception:{exc}")
+            return
+
+        nozzle_px = self._coerce_center_px(nozzle_px)
+        details = dict(getattr(self, "_last_detection_details", {}) or {})
+        pair_ctx = self._post_focus_refresh_pair_context()
+        self._record_analysis(
+            {
+                "kind": "post_focus_nozzle_detection",
+                "process_name": "NozzleFocusCalibrationProcess",
+                "phase_name": str(self.phase_name or ""),
+                "status": str(status),
+                "nozzle_px": nozzle_px,
+                "n_contours": int(n_contours),
+                "flash_delay_us": int(self._post_focus_refresh_delay_us()),
+                "detection": details,
+                "pair": pair_ctx,
+            }
+        )
+        if debug_img is not None:
+            self.presentImageSignal.emit(debug_img)
+
+        if str(status) == "OK" and nozzle_px is not None:
+            refresh_status = "ok" if int(n_contours) <= 1 else "ok_multi_contour"
+            self._finish_post_focus_nozzle_refresh(
+                refresh_status,
+                nozzle_px=nozzle_px,
+                n_contours=int(n_contours),
+                detection=details,
+                pair=pair_ctx,
+            )
+            return
+
+        reason = str(details.get("reason") or status or "unknown")
+        self._finish_post_focus_nozzle_refresh(
+            "failed",
+            reason=reason,
+            n_contours=int(n_contours),
+            detection=details,
+            pair=pair_ctx,
+        )
+
+    @Slot()
     def onCalibrationCompleted(self):
         if self.best_pos is None:
             self.best_pos = self._start_pos or self._tracked_position_dict(self._machine_position_dict())
@@ -12131,6 +12366,7 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
         final["Z"] = int(reported_final["Z"])
 
         self.calibration_manager.set_nozzle_center(final)
+        refresh_result = dict(getattr(self, "_post_focus_nozzle_refresh_result", {}) or {})
         self.calibrationDataUpdated.emit({
             "measurements": self.focus_curve,
             "result": {
@@ -12141,12 +12377,102 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
                 "best_focus_stats": dict(self.best_focus_stats or {}),
                 "valid_focus_evals": int(self.valid_focus_evals),
                 "invalid_focus_evals": int(self.invalid_focus_evals),
+                "post_focus_nozzle_refresh": refresh_result,
+                "post_focus_nozzle_refresh_status": str(refresh_result.get("status", "unknown")),
+                "pre_focus_nozzle_center_px": refresh_result.get("pre_focus_nozzle_center_px"),
+                "post_focus_nozzle_center_px": refresh_result.get("post_focus_nozzle_center_px"),
+                "post_focus_nozzle_delta_px": refresh_result.get("post_focus_nozzle_delta_px"),
+                "post_focus_nozzle_center_source": refresh_result.get("post_focus_nozzle_center_source"),
             }
         })
         self.calibrationCompleted.emit()
 
     # ---------- helpers ----------
     def _abort_with_error(self, msg): self.stageChanged.emit(msg); self.calibrationError.emit(msg)
+
+    def _clamp_post_focus_refresh_delay(self, delay_us):
+        try:
+            delay_us = int(delay_us)
+        except Exception:
+            delay_us = 2600
+        return int(max(int(self.min_flash_delay_us), min(int(self.max_flash_delay_us), delay_us)))
+
+    def _post_focus_refresh_delay_us(self):
+        return self._clamp_post_focus_refresh_delay(
+            getattr(self, "post_focus_nozzle_refresh_flash_delay_us", 2600)
+        )
+
+    def _coerce_center_px(self, center):
+        if center is None:
+            return None
+        try:
+            return (int(center[0]), int(center[1]))
+        except Exception:
+            return None
+
+    def _post_focus_refresh_pair_context(self):
+        refs = getattr(self, "_last_capture_refs", {}) or {}
+        bg_ref = refs.get("background_image") or {}
+        dr_ref = refs.get("droplet_image") or {}
+        return {
+            "background_capture_id": bg_ref.get("capture_id", ""),
+            "background_image_relpath": bg_ref.get("image_relpath", ""),
+            "droplet_capture_id": dr_ref.get("capture_id", ""),
+            "droplet_image_relpath": dr_ref.get("image_relpath", ""),
+        }
+
+    def _finish_post_focus_nozzle_refresh(
+        self,
+        status,
+        *,
+        reason=None,
+        nozzle_px=None,
+        n_contours=None,
+        detection=None,
+        pair=None,
+    ):
+        if bool(getattr(self, "_post_focus_nozzle_refresh_done", False)):
+            return
+        self._post_focus_nozzle_refresh_done = True
+        pre_center = self._coerce_center_px(getattr(self, "_pre_focus_nozzle_center_px", None))
+        nozzle_px = self._coerce_center_px(nozzle_px)
+        delta = None
+        if pre_center is not None and nozzle_px is not None:
+            delta = (int(nozzle_px[0] - pre_center[0]), int(nozzle_px[1] - pre_center[1]))
+
+        success = str(status).startswith("ok") and nozzle_px is not None
+        source = "nozzle_focus_refresh" if success else "none"
+        if success:
+            try:
+                self.calibration_manager.set_background_image(self.background_image)
+            except Exception:
+                pass
+            try:
+                self.calibration_manager.set_nozzle_center_image_position(nozzle_px, "nozzle_focus_refresh")
+            except TypeError:
+                self.calibration_manager.set_nozzle_center_image_position(nozzle_px)
+            self.stageChanged.emit(f"Nozzle Focus - Refreshed nozzle image position: {nozzle_px}")
+        else:
+            self.stageChanged.emit("Nozzle Focus - Post-focus nozzle image refresh unavailable; preserving prior center")
+
+        result = {
+            "status": str(status),
+            "reason": None if reason is None else str(reason),
+            "pre_focus_nozzle_center_px": pre_center,
+            "post_focus_nozzle_center_px": nozzle_px,
+            "post_focus_nozzle_delta_px": delta,
+            "post_focus_nozzle_center_source": source,
+            "n_contours": None if n_contours is None else int(n_contours),
+            "flash_delay_us": int(self._post_focus_refresh_delay_us()),
+            "detection": dict(detection or {}),
+            "pair": dict(pair or self._post_focus_refresh_pair_context()),
+        }
+        self._post_focus_nozzle_refresh_result = result
+        self._record_decision(
+            "post_focus_nozzle_refresh_success" if success else "post_focus_nozzle_refresh_preserved_prior",
+            result,
+        )
+        self.postFocusNozzleRefreshFinished.emit()
 
     def _machine_position_dict(self):
         tracked = getattr(self, "_tracked_pos", None) or {}
@@ -12680,6 +13006,10 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
         self._best_candidate = None
         self._recent_delay_history = []
         self.nozzle_center_px = self.calibration_manager.get_nozzle_center_image_position()
+        try:
+            self.nozzle_center_px_source = self.calibration_manager.get_nozzle_center_image_position_source()
+        except Exception:
+            self.nozzle_center_px_source = "nozzle_position" if self.nozzle_center_px is not None else "none"
         self.selected_area = None
         self.selected_center_px = None
         self.selected_quality = {}
@@ -13016,6 +13346,7 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
                 prior_center = (int(self.nozzle_center_px[0]), int(self.nozzle_center_px[1]))
             except Exception:
                 prior_center = None
+        prior_center_source = str(getattr(self, "nozzle_center_px_source", None) or "nozzle_position")
 
         center_x_source = "none"
         center_y_source = "none"
@@ -13023,13 +13354,13 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
             if center_y_update_allowed and measured_center is not None:
                 resolved_center = (int(prior_center[0]), int(measured_center[1]))
                 center_source = "nozzle_x_emergence_y"
-                center_x_source = "nozzle_position"
+                center_x_source = prior_center_source
                 center_y_source = "emergence_root"
             else:
                 resolved_center = prior_center
                 center_source = "nozzle_position_preserved"
-                center_x_source = "nozzle_position"
-                center_y_source = "nozzle_position"
+                center_x_source = prior_center_source
+                center_y_source = prior_center_source
         elif center_full_update_allowed and measured_center is not None:
             resolved_center = measured_center
             center_source = "emergence_root"

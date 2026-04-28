@@ -305,6 +305,23 @@ def test_aggregate_replicates_uses_prior_x_for_clean_stable_center():
     assert summary["ambiguous_lateral_spread"] is False
 
 
+def test_aggregate_replicates_reports_focus_refreshed_x_source():
+    proc = _emergence_proc_with_replicates(
+        (666, 273),
+        [(700, 315), (702, 315)],
+        areas=[3500, 3600],
+    )
+    proc.nozzle_center_px_source = "nozzle_focus_refresh"
+
+    _area, summary = proc._aggregate_replicates()
+
+    assert summary["measured_center"] == (701, 315)
+    assert summary["resolved_center"] == (666, 315)
+    assert summary["center_source"] == "nozzle_x_emergence_y"
+    assert summary["center_x_source"] == "nozzle_focus_refresh"
+    assert summary["center_y_source"] == "emergence_root"
+
+
 def test_aggregate_replicates_preserves_prior_when_emergence_y_is_unstable():
     proc = _emergence_proc_with_replicates(
         (536, 183),

@@ -1,6 +1,8 @@
 from collections import deque
 from types import SimpleNamespace
 
+import numpy as np
+
 from tests.calibration_test_utils import Recorder, SignalStub, ensure_calibration_import_stubs
 
 
@@ -154,3 +156,122 @@ def test_initialize_focus_bounds_clamps_to_axis_limits():
 
     assert proc._loY == 100
     assert proc._hiY == 200
+
+
+def _build_post_focus_refresh_proc(prior_center=(546, 196)):
+    proc = NozzleFocusCalibrationProcess.__new__(NozzleFocusCalibrationProcess)
+    proc.stageChanged = Recorder()
+    proc.presentImageSignal = Recorder()
+    proc.postFocusNozzleRefreshFinished = Recorder()
+    proc.min_flash_delay_us = 2000
+    proc.max_flash_delay_us = 12_000
+    proc.post_focus_nozzle_refresh_flash_delay_us = 2600
+    proc.fixed_thresh_value = 30
+    proc.no_signal_min_fg_px = 120
+    proc.min_stream_bbox_h_px = 10
+    proc.search_top_band_frac = 0.60
+    proc._last_detection_details = {}
+    proc._pre_focus_nozzle_center_px = tuple(prior_center)
+    proc._post_focus_nozzle_refresh_done = False
+    proc._last_capture_refs = {
+        "background_image": {"capture_id": "bg-1", "image_relpath": "bg.png"},
+        "droplet_image": {"capture_id": "dr-1", "image_relpath": "dr.png"},
+    }
+    proc.phase_name = "nozzle_focus"
+
+    calls = {"background": [], "image_center": [], "decisions": [], "analysis": []}
+    proc._record_decision = lambda name, payload=None: calls["decisions"].append((name, dict(payload or {})))
+    proc._record_analysis = lambda payload: calls["analysis"].append(dict(payload or {}))
+    proc.calibration_manager = SimpleNamespace(
+        set_background_image=lambda image: calls["background"].append(image),
+        set_nozzle_center_image_position=lambda center, source="": calls["image_center"].append(
+            (tuple(center), source)
+        ),
+    )
+    return proc, calls
+
+
+def test_focus_post_refresh_success_updates_image_center_and_diagnostics():
+    proc, calls = _build_post_focus_refresh_proc(prior_center=(546, 196))
+    proc.background_image = np.zeros((320, 800, 3), dtype=np.uint8)
+    proc.droplet_image = proc.background_image.copy()
+    proc.droplet_image[20:240, 646:686, :] = 255
+
+    proc.onPostFocusAnalyzeNozzle()
+
+    assert len(calls["image_center"]) == 1
+    refreshed_center, refreshed_source = calls["image_center"][0]
+    assert refreshed_source == "nozzle_focus_refresh"
+    assert abs(refreshed_center[0] - 666) <= 2
+    assert abs(refreshed_center[1] - 20) <= 2
+    assert len(calls["background"]) == 1
+    assert calls["background"][0] is proc.background_image
+    result = proc._post_focus_nozzle_refresh_result
+    assert result["status"] == "ok"
+    assert result["pre_focus_nozzle_center_px"] == (546, 196)
+    assert result["post_focus_nozzle_center_px"] == refreshed_center
+    assert result["post_focus_nozzle_delta_px"] == (
+        refreshed_center[0] - 546,
+        refreshed_center[1] - 196,
+    )
+    assert result["post_focus_nozzle_center_source"] == "nozzle_focus_refresh"
+    assert calls["analysis"][-1]["kind"] == "post_focus_nozzle_detection"
+    assert proc.postFocusNozzleRefreshFinished.calls
+
+
+def test_focus_post_refresh_failure_preserves_prior_center():
+    proc, calls = _build_post_focus_refresh_proc(prior_center=(546, 196))
+
+    proc._finish_post_focus_nozzle_refresh(
+        "failed",
+        reason="foreground_below_min",
+        detection={"status": "NO_SIGNAL"},
+    )
+
+    assert calls["image_center"] == []
+    assert calls["background"] == []
+    result = proc._post_focus_nozzle_refresh_result
+    assert result["status"] == "failed"
+    assert result["reason"] == "foreground_below_min"
+    assert result["pre_focus_nozzle_center_px"] == (546, 196)
+    assert result["post_focus_nozzle_center_px"] is None
+    assert result["post_focus_nozzle_center_source"] == "none"
+    assert calls["decisions"][0][0] == "post_focus_nozzle_refresh_preserved_prior"
+    assert proc.postFocusNozzleRefreshFinished.calls
+
+
+def test_focus_completion_includes_post_refresh_diagnostics():
+    proc = NozzleFocusCalibrationProcess.__new__(NozzleFocusCalibrationProcess)
+    proc.best_pos = {"Y": 273}
+    proc._start_pos = {"X": 10, "Y": 200, "Z": 30}
+    proc._tracked_pos = {"X": 10, "Y": 273, "Z": 30}
+    proc.focus_curve = []
+    proc.best_focus = 123.0
+    proc.best_focus_stats = {"p90_ratio_to_background": 1.4}
+    proc.valid_focus_evals = 5
+    proc.invalid_focus_evals = 1
+    proc._post_focus_nozzle_refresh_result = {
+        "status": "ok",
+        "pre_focus_nozzle_center_px": (546, 196),
+        "post_focus_nozzle_center_px": (666, 273),
+        "post_focus_nozzle_delta_px": (120, 77),
+        "post_focus_nozzle_center_source": "nozzle_focus_refresh",
+    }
+    proc.model = SimpleNamespace(
+        machine_model=SimpleNamespace(get_current_position_dict=lambda: {"X": 10, "Y": 273, "Z": 30})
+    )
+    calls = {"machine": []}
+    proc.calibration_manager = SimpleNamespace(
+        set_nozzle_center=lambda center: calls["machine"].append(dict(center))
+    )
+    proc.calibrationDataUpdated = Recorder()
+    proc.calibrationCompleted = Recorder()
+
+    proc.onCalibrationCompleted()
+
+    result = proc.calibrationDataUpdated.calls[0][0][0]["result"]
+    assert calls["machine"] == [{"X": 10, "Y": 273, "Z": 30}]
+    assert result["post_focus_nozzle_refresh_status"] == "ok"
+    assert result["post_focus_nozzle_center_px"] == (666, 273)
+    assert result["post_focus_nozzle_delta_px"] == (120, 77)
+    assert proc.calibrationCompleted.calls
