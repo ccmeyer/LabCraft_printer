@@ -46,6 +46,8 @@ DEFAULT_ONLINE_TAIL_POLICY = {
     "tail_right_extension_enabled": True,
     "tail_right_extension_max_us": 300,
     "tail_right_extension_min_falling_drop_px": 2.0,
+    "tail_width_scout_requires_geometry_landmark": True,
+    "tail_width_min_window_baseline_points": 2,
 }
 
 
@@ -210,6 +212,69 @@ def _material_width_drop_threshold_px(
         if baseline_width_px is not None and frac is not None:
             threshold_px = max(float(threshold_px), float(baseline_width_px) * float(frac))
     return float(threshold_px)
+
+
+def _window_step_index_for_summary(summary: dict | None) -> int | None:
+    row = dict(summary or {})
+    parsed = _to_int(row.get("selected_band_step_index"))
+    if parsed is not None:
+        return int(parsed)
+    mode = str(row.get("attached_width_mode") or "").strip()
+    if mode == "root_band":
+        return 0
+    return None
+
+
+def _most_common_string(values) -> str | None:
+    counts = {}
+    first_index = {}
+    for index, value in enumerate(list(values or [])):
+        label = str(value or "").strip()
+        if not label:
+            continue
+        counts[label] = int(counts.get(label, 0)) + 1
+        first_index.setdefault(label, int(index))
+    if not counts:
+        return None
+    return sorted(counts, key=lambda item: (-int(counts[item]), int(first_index[item])))[0]
+
+
+def _window_baseline_by_step(
+    rows: list[dict],
+    *,
+    min_points: int,
+) -> dict[int, dict]:
+    baselines = {}
+    grouped: dict[int, list[dict]] = {}
+    for row in list(rows or []):
+        summary = dict(row or {})
+        if not bool(summary.get("tail_width_usable")):
+            continue
+        step_index = _window_step_index_for_summary(summary)
+        if step_index is None or int(step_index) <= 0:
+            continue
+        width_px = _to_float_or_none(summary.get("median_width_px"))
+        if width_px is None:
+            continue
+        grouped.setdefault(int(step_index), []).append(summary)
+
+    required = max(1, int(min_points))
+    for step_index, items in grouped.items():
+        ordered = sorted(
+            list(items or []),
+            key=lambda item: (
+                _to_int(item.get("delay_from_emergence_us"), 10**9),
+                _to_int(item.get("delay_us"), 10**9),
+            ),
+        )
+        baseline_rows = list(ordered[:required])
+        baseline_width = _median_or_none(row.get("median_width_px") for row in baseline_rows)
+        baselines[int(step_index)] = {
+            "baseline_width_px": baseline_width if len(baseline_rows) >= required else None,
+            "sample_count": int(len(baseline_rows)),
+            "total_usable_count": int(len(ordered)),
+        }
+    return baselines
 
 
 def _is_backup_width_collapse_landmark(summary: dict | None) -> bool:
@@ -915,6 +980,17 @@ def _flow_anchor_summary(flow_summary: dict | None, baseline_width_px: float | i
 
 def _classify_trace_rows(rows: list[dict], *, policy: dict | None = None) -> list[dict]:
     resolved_policy = _resolved_policy(policy)
+    min_window_baseline_points = max(
+        1,
+        _to_int(
+            resolved_policy.get("tail_width_min_window_baseline_points"),
+            DEFAULT_ONLINE_TAIL_POLICY["tail_width_min_window_baseline_points"],
+        ),
+    )
+    window_baselines = _window_baseline_by_step(
+        [dict(row or {}) for row in list(rows or [])],
+        min_points=int(min_window_baseline_points),
+    )
     classified = []
     for row in list(rows or []):
         summary = dict(row or {})
@@ -929,11 +1005,41 @@ def _classify_trace_rows(rows: list[dict], *, policy: dict | None = None) -> lis
         ):
             inferred_baseline_px = float(float(median_width_px) / float(width_ratio_to_baseline))
             width_drop_from_baseline_px = float(inferred_baseline_px - float(median_width_px))
+        selected_band_step_index = _window_step_index_for_summary(summary)
+        attached_width_mode = str(summary.get("attached_width_mode") or "").strip() or None
+        window_baseline_width_px = None
+        window_baseline_sample_count = 0
+        window_baseline_status = "missing_window_identity"
+        window_width_ratio_to_baseline = None
+        window_width_drop_from_baseline_px = None
+        classification_width_ratio_to_baseline = width_ratio_to_baseline
+        classification_width_drop_from_baseline_px = width_drop_from_baseline_px
+        if selected_band_step_index is not None and int(selected_band_step_index) <= 0:
+            window_baseline_status = "root_flow_baseline"
+        elif selected_band_step_index is not None and int(selected_band_step_index) > 0:
+            baseline_info = dict(window_baselines.get(int(selected_band_step_index)) or {})
+            window_baseline_sample_count = int(baseline_info.get("sample_count") or 0)
+            window_baseline_width_px = _to_float_or_none(baseline_info.get("baseline_width_px"))
+            if (
+                window_baseline_width_px is not None
+                and median_width_px is not None
+                and float(window_baseline_width_px) > 0.0
+                and int(window_baseline_sample_count) >= int(min_window_baseline_points)
+            ):
+                window_width_ratio_to_baseline = float(float(median_width_px) / float(window_baseline_width_px))
+                window_width_drop_from_baseline_px = float(float(window_baseline_width_px) - float(median_width_px))
+                classification_width_ratio_to_baseline = window_width_ratio_to_baseline
+                classification_width_drop_from_baseline_px = window_width_drop_from_baseline_px
+                window_baseline_status = "ok"
+            else:
+                classification_width_ratio_to_baseline = None
+                classification_width_drop_from_baseline_px = None
+                window_baseline_status = "insufficient_window_baseline"
         summary_for_thresholds = {
             **summary,
             "median_width_px": median_width_px,
-            "width_ratio_to_baseline": width_ratio_to_baseline,
-            "width_drop_from_baseline_px": width_drop_from_baseline_px,
+            "width_ratio_to_baseline": classification_width_ratio_to_baseline,
+            "width_drop_from_baseline_px": classification_width_drop_from_baseline_px,
         }
         transition_width_drop_threshold_px = _material_width_drop_threshold_px(
             summary_for_thresholds,
@@ -953,36 +1059,36 @@ def _classify_trace_rows(rows: list[dict], *, policy: dict | None = None) -> lis
         backup_width_collapse_landmark = bool(summary.get("backup_width_collapse_landmark"))
         plateau_candidate = bool(
             tail_width_usable
-            and width_ratio_to_baseline is not None
-            and float(width_ratio_to_baseline) >= float(resolved_policy["plateau_width_frac"])
+            and classification_width_ratio_to_baseline is not None
+            and float(classification_width_ratio_to_baseline) >= float(resolved_policy["plateau_width_frac"])
             and not separated_from_nozzle_landmark
             and not attached_width_unavailable_landmark
         )
         early_departure_candidate = bool(
             tail_width_usable
-            and width_ratio_to_baseline is not None
-            and float(resolved_policy["departure_width_frac"]) <= float(width_ratio_to_baseline) < float(resolved_policy["plateau_width_frac"])
+            and classification_width_ratio_to_baseline is not None
+            and float(resolved_policy["departure_width_frac"]) <= float(classification_width_ratio_to_baseline) < float(resolved_policy["plateau_width_frac"])
             and not separated_from_nozzle_landmark
             and not attached_width_unavailable_landmark
         )
         strong_tail_candidate = bool(
-            (tail_width_usable and width_ratio_to_baseline is not None and float(width_ratio_to_baseline) < float(resolved_policy["departure_width_frac"]))
+            (tail_width_usable and classification_width_ratio_to_baseline is not None and float(classification_width_ratio_to_baseline) < float(resolved_policy["departure_width_frac"]))
             or separated_from_nozzle_landmark
             or attached_width_unavailable_landmark
             or backup_width_collapse_landmark
         )
         resolver_plateau_candidate = bool(
             tail_width_usable
-            and width_drop_from_baseline_px is not None
-            and float(width_drop_from_baseline_px) < float(resolved_policy["resolver_plateau_width_drop_px"])
+            and classification_width_drop_from_baseline_px is not None
+            and float(classification_width_drop_from_baseline_px) < float(resolved_policy["resolver_plateau_width_drop_px"])
             and not separated_from_nozzle_landmark
             and not attached_width_unavailable_landmark
         )
         resolver_transition_candidate = bool(
             tail_width_usable
-            and width_drop_from_baseline_px is not None
-            and float(width_drop_from_baseline_px) >= float(transition_width_drop_threshold_px)
-            and float(width_drop_from_baseline_px) < float(collapse_width_drop_threshold_px)
+            and classification_width_drop_from_baseline_px is not None
+            and float(classification_width_drop_from_baseline_px) >= float(transition_width_drop_threshold_px)
+            and float(classification_width_drop_from_baseline_px) < float(collapse_width_drop_threshold_px)
             and not separated_from_nozzle_landmark
             and not attached_width_unavailable_landmark
         )
@@ -991,12 +1097,12 @@ def _classify_trace_rows(rows: list[dict], *, policy: dict | None = None) -> lis
                 tail_width_usable
                 and (
                     (
-                        width_drop_from_baseline_px is not None
-                        and float(width_drop_from_baseline_px) >= float(collapse_width_drop_threshold_px)
+                        classification_width_drop_from_baseline_px is not None
+                        and float(classification_width_drop_from_baseline_px) >= float(collapse_width_drop_threshold_px)
                     )
                     or (
-                        width_ratio_to_baseline is not None
-                        and float(width_ratio_to_baseline) <= float(resolved_policy["resolver_collapse_width_frac"])
+                        classification_width_ratio_to_baseline is not None
+                        and float(classification_width_ratio_to_baseline) <= float(resolved_policy["resolver_collapse_width_frac"])
                     )
                 )
             )
@@ -1005,6 +1111,15 @@ def _classify_trace_rows(rows: list[dict], *, policy: dict | None = None) -> lis
             or backup_width_collapse_landmark
         )
         summary["width_drop_from_baseline_px"] = width_drop_from_baseline_px
+        summary["selected_band_step_index"] = selected_band_step_index
+        summary["attached_width_mode"] = attached_width_mode
+        summary["window_baseline_width_px"] = window_baseline_width_px
+        summary["window_baseline_sample_count"] = int(window_baseline_sample_count)
+        summary["window_baseline_status"] = str(window_baseline_status)
+        summary["window_width_ratio_to_baseline"] = window_width_ratio_to_baseline
+        summary["window_width_drop_from_baseline_px"] = window_width_drop_from_baseline_px
+        summary["classification_width_ratio_to_baseline"] = classification_width_ratio_to_baseline
+        summary["classification_width_drop_from_baseline_px"] = classification_width_drop_from_baseline_px
         summary["resolver_transition_width_drop_threshold_px"] = float(transition_width_drop_threshold_px)
         summary["resolver_collapse_width_drop_threshold_px"] = float(collapse_width_drop_threshold_px)
         summary["plateau_candidate"] = bool(plateau_candidate)
@@ -1200,6 +1315,26 @@ def summarize_online_stream_tail_delay(
     rejected_replicates = int(max(0, attempted_replicates - accepted_replicates))
     median_width_px = _median_or_none(row.get("attached_width_px") for row in width_usable_rows)
     width_ratio_to_baseline = _width_ratio_to_baseline(median_width_px, baseline_width_px)
+    window_step_values = [
+        _window_step_index_for_summary(row)
+        for row in width_usable_rows
+        if _window_step_index_for_summary(row) is not None
+    ]
+    selected_band_step_index = None
+    window_identity_consistent = bool(width_usable_rows)
+    if window_step_values:
+        first_step = int(window_step_values[0])
+        window_identity_consistent = bool(
+            len(window_step_values) == len(width_usable_rows)
+            and all(int(step) == int(first_step) for step in window_step_values)
+        )
+        if window_identity_consistent:
+            selected_band_step_index = int(first_step)
+    elif width_usable_rows:
+        window_identity_consistent = False
+    attached_width_mode = _most_common_string(row.get("attached_width_mode") for row in width_usable_rows)
+    selected_band_y0_px = _median_or_none(row.get("selected_band_y0_px") for row in width_usable_rows)
+    selected_band_y1_px = _median_or_none(row.get("selected_band_y1_px") for row in width_usable_rows)
     resolved_policy = _resolved_policy(policy)
     warnings = _unique_strings(
         warning
@@ -1236,13 +1371,22 @@ def summarize_online_stream_tail_delay(
         for row in rows
     )
     phase_label = str((rows[0] if rows else {}).get("phase") or "")
-    backup_width_collapse_landmark = bool(
+    width_only_collapse_candidate = bool(
         width_usable_replicates > 0
         and width_ratio_to_baseline is not None
         and float(width_ratio_to_baseline) <= float(resolved_policy["scout_landmark_width_frac"])
         and not separated_from_nozzle_landmark
         and not attached_width_unavailable_landmark
         and phase_label not in {"tail_backtrack", "tail_refine", "refine"}
+    )
+    scout_requires_geometry_landmark = bool(
+        resolved_policy.get("tail_width_scout_requires_geometry_landmark", True)
+    )
+    backup_width_collapse_landmark = bool(
+        width_only_collapse_candidate and not scout_requires_geometry_landmark
+    )
+    width_only_collapse_suppressed = bool(
+        width_only_collapse_candidate and scout_requires_geometry_landmark
     )
     landmark_detected = bool(
         separated_from_nozzle_landmark
@@ -1281,10 +1425,23 @@ def summarize_online_stream_tail_delay(
             if median_width_px is None or baseline_width_px is None
             else float(float(baseline_width_px) - float(median_width_px))
         ),
+        "attached_width_mode": attached_width_mode,
+        "selected_band_step_index": selected_band_step_index,
+        "selected_band_y0_px": selected_band_y0_px,
+        "selected_band_y1_px": selected_band_y1_px,
+        "window_identity_consistent": bool(window_identity_consistent),
+        "window_delay_lock_active": any(bool(row.get("window_delay_lock_active")) for row in rows),
+        "window_locked_reused": any(bool(row.get("window_locked_reused")) for row in rows),
+        "window_locked_invalid": any(bool(row.get("window_locked_invalid")) for row in rows),
+        "window_monotonic_upward_move_blocked": any(
+            bool(row.get("window_monotonic_upward_move_blocked")) for row in rows
+        ),
         "tail_width_usable": bool(width_usable_replicates > 0),
         "tail_landmark_usable": bool(landmark_usable_replicates > 0),
         "separated_from_nozzle_landmark": bool(separated_from_nozzle_landmark),
         "attached_width_unavailable_landmark": bool(attached_width_unavailable_landmark),
+        "width_only_collapse_candidate": bool(width_only_collapse_candidate),
+        "width_only_collapse_suppressed_as_scout_landmark": bool(width_only_collapse_suppressed),
         "backup_width_collapse_landmark": bool(backup_width_collapse_landmark),
         "landmark_detected": bool(landmark_detected),
         "landmark_reason": landmark_reason,
@@ -1626,6 +1783,13 @@ def _segmented_tail_source_rows(
                 "delay_from_emergence_us": int(delay_from_emergence_us),
                 "attached_width_px": None if width_px is None else float(width_px),
                 "tail_width_usable": bool(summary.get("tail_width_usable")) and width_px is not None,
+                "attached_width_mode": summary.get("attached_width_mode"),
+                "selected_band_step_index": _window_step_index_for_summary(summary),
+                "selected_band_y0_px": summary.get("selected_band_y0_px"),
+                "selected_band_y1_px": summary.get("selected_band_y1_px"),
+                "window_baseline_status": summary.get("window_baseline_status"),
+                "window_baseline_width_px": summary.get("window_baseline_width_px"),
+                "window_width_drop_from_baseline_px": summary.get("window_width_drop_from_baseline_px"),
             }
         )
     return rows
@@ -1741,6 +1905,7 @@ def evaluate_online_stream_segmented_tail_shadow(
                 runtime_tail_start_delay_from_emergence_us
             ),
             "confidence": "unavailable",
+            "window_trace": _copy_jsonish(source_rows),
         }
     result = segmented_tail_mod.evaluate_segmented_tail_trace(
         source_rows,
@@ -1751,6 +1916,7 @@ def evaluate_online_stream_segmented_tail_shadow(
         runtime_tail_start_delay_from_emergence_us=runtime_tail_start_delay_from_emergence_us,
     )
     payload["min_usable_points"] = int(min_usable_points)
+    payload["window_trace"] = _copy_jsonish(source_rows)
     return payload
 
 

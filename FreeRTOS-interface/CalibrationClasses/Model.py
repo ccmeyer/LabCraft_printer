@@ -8505,7 +8505,6 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
     def _reset_tail_delay_cursor(self, *, reset_index: bool = False):
         if bool(reset_index):
             self._tail_delay_index = 0
-            self._tail_width_window_state = {}
         self._tail_replicate_index = 0
         self._tail_current_delay_us = None
         self._tail_current_delay_frame_rows = []
@@ -9835,7 +9834,6 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 "tail_landmark_usable": False,
                 "warnings": list(frame_row.get("warnings") or []),
             }
-            self._tail_width_window_state = {}
             self._tail_current_delay_frame_rows.append(frame_row)
             self._append_flow_jsonl(self._frames_path, frame_row)
             self._emit_online_stream_debug_payload(self._tail_phase_label())
@@ -9923,15 +9921,31 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             root_band_half_delta_px=summary.get("root_band_half_delta_px"),
             selected_band_y0_px=summary.get("selected_band_y0_px"),
             selected_band_y1_px=summary.get("selected_band_y1_px"),
+            selected_band_step_index=summary.get("selected_band_step_index"),
+            root_band_step_index=summary.get("root_band_step_index"),
             selected_band_valid_row_count=summary.get("selected_band_valid_row_count"),
             spread_fallback_triggered=bool(summary.get("spread_fallback_triggered")),
             candidate_window_count=summary.get("candidate_window_count"),
             sticky_window_active=bool(summary.get("sticky_window_active")),
             sticky_window_previous_y0_px=summary.get("sticky_window_previous_y0_px"),
+            sticky_window_previous_y1_px=summary.get("sticky_window_previous_y1_px"),
             sticky_window_instant_y0_px=summary.get("sticky_window_instant_y0_px"),
+            sticky_window_instant_y1_px=summary.get("sticky_window_instant_y1_px"),
             sticky_window_selected_reason=summary.get("sticky_window_selected_reason"),
             sticky_window_candidate_streak=summary.get("sticky_window_candidate_streak"),
             sticky_window_switch_blocked=bool(summary.get("sticky_window_switch_blocked")),
+            window_delay_lock_active=bool(summary.get("window_delay_lock_active")),
+            window_locked_reused=bool(summary.get("window_locked_reused")),
+            window_locked_invalid=bool(summary.get("window_locked_invalid")),
+            window_monotonic_lower_bound_step_index=summary.get(
+                "window_monotonic_lower_bound_step_index"
+            ),
+            window_monotonic_upper_bound_step_index=summary.get(
+                "window_monotonic_upper_bound_step_index"
+            ),
+            window_monotonic_upward_move_blocked=bool(
+                summary.get("window_monotonic_upward_move_blocked")
+            ),
             adaptive_roi_expansion_triggered=bool(summary.get("adaptive_roi_expansion_triggered")),
             adaptive_roi_expansion_sides=list(summary.get("adaptive_roi_expansion_sides") or []),
             adaptive_roi_expansion_iterations=summary.get("adaptive_roi_expansion_iterations"),

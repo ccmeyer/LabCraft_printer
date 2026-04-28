@@ -593,7 +593,7 @@ def test_summarize_online_stream_tail_delay_treats_detached_continuation_handoff
     assert summary["landmark_reason"] == "separated_from_nozzle"
 
 
-def test_summarize_online_stream_tail_delay_uses_width_collapse_backup_landmark():
+def test_summarize_online_stream_tail_delay_suppresses_width_only_scout_landmark_by_default():
     summary = mod.summarize_online_stream_tail_delay(
         [
             _tail_frame_row(
@@ -608,9 +608,11 @@ def test_summarize_online_stream_tail_delay_uses_width_collapse_backup_landmark(
     assert summary["tail_width_usable"] is True
     assert summary["width_ratio_to_baseline"] <= 0.95
     assert summary["separated_from_nozzle_landmark"] is False
-    assert summary["backup_width_collapse_landmark"] is True
-    assert summary["landmark_detected"] is True
-    assert summary["landmark_reason"] == "strong_width_collapse_backup"
+    assert summary["width_only_collapse_candidate"] is True
+    assert summary["width_only_collapse_suppressed_as_scout_landmark"] is True
+    assert summary["backup_width_collapse_landmark"] is False
+    assert summary["landmark_detected"] is False
+    assert summary["landmark_reason"] is None
 
 
 def test_summarize_online_stream_tail_delay_uses_attached_width_unavailable_as_landmark():
@@ -706,6 +708,67 @@ def test_summarize_online_stream_tail_delay_adds_resolver_width_drop_metrics():
     assert collapse["resolver_collapse_candidate"] is True
 
 
+def test_lower_window_width_drop_is_not_classified_from_root_flow_baseline_without_window_baseline():
+    rows = mod._classify_trace_rows(
+        [
+            {
+                "phase": "tail_backtrack",
+                "delay_us": 4750,
+                "delay_from_emergence_us": 1550,
+                "median_width_px": 52.0,
+                "width_ratio_to_baseline": 52.0 / 74.0,
+                "width_drop_from_baseline_px": 22.0,
+                "tail_width_usable": True,
+                "attached_width_mode": "lower_consistent_window",
+                "selected_band_step_index": 3,
+            }
+        ]
+    )
+
+    assert rows[0]["window_baseline_status"] == "insufficient_window_baseline"
+    assert rows[0]["classification_width_drop_from_baseline_px"] is None
+    assert rows[0]["resolver_collapse_candidate"] is False
+    assert rows[0]["strong_tail_candidate"] is False
+
+
+def test_same_window_lower_band_collapse_is_classified_after_local_baseline():
+    rows = mod._classify_trace_rows(
+        [
+            {
+                "phase": "tail_backtrack",
+                "delay_us": 4700,
+                "delay_from_emergence_us": 1500,
+                "median_width_px": 52.0,
+                "tail_width_usable": True,
+                "attached_width_mode": "lower_consistent_window",
+                "selected_band_step_index": 3,
+            },
+            {
+                "phase": "tail_backtrack",
+                "delay_us": 4750,
+                "delay_from_emergence_us": 1550,
+                "median_width_px": 52.2,
+                "tail_width_usable": True,
+                "attached_width_mode": "lower_consistent_window",
+                "selected_band_step_index": 3,
+            },
+            {
+                "phase": "tail_backtrack",
+                "delay_us": 4800,
+                "delay_from_emergence_us": 1600,
+                "median_width_px": 47.0,
+                "tail_width_usable": True,
+                "attached_width_mode": "lower_consistent_window",
+                "selected_band_step_index": 3,
+            },
+        ]
+    )
+
+    assert rows[0]["window_baseline_status"] == "ok"
+    assert rows[2]["window_width_drop_from_baseline_px"] == pytest.approx(5.1)
+    assert rows[2]["resolver_collapse_candidate"] is True
+
+
 def test_build_online_stream_tail_backtrack_plan_includes_dense_window_around_later_landmark():
     plan = mod.build_online_stream_tail_backtrack_plan(
         scout_anchor_delay_us=4250,
@@ -774,7 +837,7 @@ def test_decide_online_stream_tail_next_action_switches_to_backtrack_on_landmark
     assert decision["landmark_reason"] == "separated_from_nozzle"
 
 
-def test_decide_online_stream_tail_next_action_keeps_first_mild_backup_landmark_scouting():
+def test_decide_online_stream_tail_next_action_keeps_width_only_scout_drop_scouting():
     summary = mod.summarize_online_stream_tail_delay(
         [_tail_frame_row(delay_us=4750, delay_from_emergence_us=1550, width_px=69.0)],
         baseline_width_px=74.0,
@@ -790,13 +853,14 @@ def test_decide_online_stream_tail_next_action_keeps_first_mild_backup_landmark_
         scout_summaries=[summary],
     )
 
-    assert summary["landmark_reason"] == "strong_width_collapse_backup"
+    assert summary["width_only_collapse_candidate"] is True
+    assert summary["landmark_reason"] is None
     assert decision["action"] == "continue"
-    assert decision["tail_backup_landmark_confirmed"] is False
-    assert "tail_backup_landmark_unconfirmed" in decision["warnings"]
+    assert decision.get("tail_backup_landmark_confirmed", False) is False
+    assert "tail_backup_landmark_unconfirmed" not in decision.get("warnings", [])
 
 
-def test_decide_online_stream_tail_next_action_switches_on_severe_backup_landmark():
+def test_decide_online_stream_tail_next_action_does_not_switch_on_severe_width_only_drop():
     summary = mod.summarize_online_stream_tail_delay(
         [_tail_frame_row(delay_us=4750, delay_from_emergence_us=1550, width_px=62.0)],
         baseline_width_px=74.0,
@@ -812,12 +876,13 @@ def test_decide_online_stream_tail_next_action_switches_on_severe_backup_landmar
         scout_summaries=[summary],
     )
 
-    assert decision["action"] == "switch_to_backtrack"
-    assert decision["tail_backup_landmark_confirmed"] is True
-    assert decision["tail_backup_landmark_confirmation_reason"] == "severe_backup_width_collapse"
+    assert summary["width_only_collapse_candidate"] is True
+    assert summary["landmark_detected"] is False
+    assert decision["action"] == "continue"
+    assert decision.get("tail_backup_landmark_confirmed", False) is False
 
 
-def test_decide_online_stream_tail_next_action_switches_on_confirmed_backup_landmark():
+def test_decide_online_stream_tail_next_action_does_not_switch_on_repeated_width_only_drop():
     first_summary = mod.summarize_online_stream_tail_delay(
         [_tail_frame_row(delay_us=4750, delay_from_emergence_us=1550, width_px=69.0)],
         baseline_width_px=74.0,
@@ -837,9 +902,10 @@ def test_decide_online_stream_tail_next_action_switches_on_confirmed_backup_land
         scout_summaries=[first_summary, second_summary],
     )
 
-    assert decision["action"] == "switch_to_backtrack"
-    assert decision["tail_backup_landmark_confirmed"] is True
-    assert decision["tail_backup_landmark_confirmation_reason"] == "confirmed_backup_width_collapse"
+    assert first_summary["width_only_collapse_candidate"] is True
+    assert second_summary["width_only_collapse_candidate"] is True
+    assert decision["action"] == "continue"
+    assert decision.get("tail_backup_landmark_confirmed", False) is False
 
 
 def test_decide_online_stream_tail_next_action_stops_when_scout_budget_ends_without_landmark():

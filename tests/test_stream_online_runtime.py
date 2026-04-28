@@ -742,6 +742,106 @@ def test_band_width_metrics_sticky_window_resets_when_root_band_recovers():
     assert metrics["next_sticky_window_state"] == {}
 
 
+def test_band_width_metrics_delay_lock_reuses_same_delay_window_when_root_recovers():
+    first = mod._band_width_metrics(
+        {"tracked_nozzle_y_px": 60.0},
+        _spread_edge_rows_for_sticky_windows(),
+        **_sticky_band_kwargs({}, delay_from_emergence_us=1500),
+    )
+
+    metrics = mod._band_width_metrics(
+        {"tracked_nozzle_y_px": 60.0},
+        _edge_rows_from_width_fn(y_start=84, y_end=224, width_fn=lambda y: 66.0),
+        **_sticky_band_kwargs(
+            first["next_sticky_window_state"],
+            delay_from_emergence_us=1500,
+        ),
+    )
+
+    assert first["selected_band_step_index"] > 0
+    assert metrics["window_locked_reused"] is True
+    assert metrics["window_locked_invalid"] is False
+    assert metrics["sticky_window_selected_reason"] == "delay_locked_window_reused"
+    assert metrics["selected_band_step_index"] == first["selected_band_step_index"]
+    assert metrics["attached_width_mode"] == "lower_consistent_window"
+
+
+def test_band_width_metrics_delay_lock_invalid_returns_unusable_width():
+    state = {
+        "delay_window_map": {
+            "1500": {
+                "delay_from_emergence_us": 1500,
+                "selected_band_step_index": 4,
+                "selected_band_y0_px": 164,
+                "selected_band_y1_px": 204,
+                "attached_width_mode": "lower_consistent_window",
+            }
+        }
+    }
+
+    metrics = mod._band_width_metrics(
+        {"tracked_nozzle_y_px": 60.0},
+        _edge_rows_from_width_fn(y_start=84, y_end=124, width_fn=lambda y: 66.0),
+        **_sticky_band_kwargs(state, delay_from_emergence_us=1500),
+    )
+
+    assert metrics["attached_width_px"] is None
+    assert metrics["window_locked_reused"] is True
+    assert metrics["window_locked_invalid"] is True
+    assert metrics["sticky_window_selected_reason"] == "delay_locked_window_invalid"
+
+
+def test_band_width_metrics_later_delay_cannot_move_up_after_lower_window():
+    state = {
+        "delay_window_map": {
+            "1500": {
+                "delay_from_emergence_us": 1500,
+                "selected_band_step_index": 4,
+                "selected_band_y0_px": 164,
+                "selected_band_y1_px": 204,
+                "attached_width_mode": "lower_consistent_window",
+            }
+        }
+    }
+
+    metrics = mod._band_width_metrics(
+        {"tracked_nozzle_y_px": 60.0},
+        _edge_rows_from_width_fn(y_start=84, y_end=224, width_fn=lambda y: 66.0),
+        **_sticky_band_kwargs(state, delay_from_emergence_us=2000),
+    )
+
+    assert metrics["selected_band_step_index"] == 4
+    assert metrics["attached_width_mode"] == "lower_consistent_window"
+    assert metrics["window_monotonic_lower_bound_step_index"] == 4
+    assert metrics["window_monotonic_upward_move_blocked"] is True
+    assert metrics["sticky_window_selected_reason"] == "monotonic_hold_lower_window"
+
+
+def test_band_width_metrics_backtrack_earlier_delay_can_stay_above_future_lower_window():
+    state = {
+        "delay_window_map": {
+            "2000": {
+                "delay_from_emergence_us": 2000,
+                "selected_band_step_index": 4,
+                "selected_band_y0_px": 164,
+                "selected_band_y1_px": 204,
+                "attached_width_mode": "lower_consistent_window",
+            }
+        }
+    }
+
+    metrics = mod._band_width_metrics(
+        {"tracked_nozzle_y_px": 60.0},
+        _edge_rows_from_width_fn(y_start=84, y_end=224, width_fn=lambda y: 66.0),
+        **_sticky_band_kwargs(state, delay_from_emergence_us=1500),
+    )
+
+    assert metrics["selected_band_step_index"] == 0
+    assert metrics["attached_width_mode"] == "root_band"
+    assert metrics["window_monotonic_upper_bound_step_index"] == 4
+    assert metrics["window_monotonic_upward_move_blocked"] is False
+
+
 def test_analyze_online_stream_frame_rejects_short_attached_stub_with_multiple_detached_components(monkeypatch):
     attached_mask = np.zeros((220, 80), dtype=np.uint8)
     attached_mask[12:91, 30:50] = 255

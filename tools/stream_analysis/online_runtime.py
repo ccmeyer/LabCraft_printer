@@ -40,6 +40,15 @@ def _resolved_analysis_config(config: dict | None = None) -> dict:
                     merged[key] = int(config.get(key))
                 except Exception:
                     merged[key] = int(default_value)
+    extra_defaults = {
+        "tail_width_window_delay_lock_enabled": True,
+        "tail_width_window_monotonic_by_delay_enabled": True,
+    }
+    for key, default_value in extra_defaults.items():
+        if isinstance(config, dict) and key in config:
+            merged[key] = bool(config.get(key))
+        else:
+            merged[key] = bool(default_value)
     return merged
 
 
@@ -100,8 +109,11 @@ def _band_width_metrics(
     near_nozzle_band_top_px: int,
     near_nozzle_band_height_px: int,
     min_band_valid_rows: int,
+    delay_from_emergence_us: int | None = None,
     sticky_window_state: dict | None = None,
     sticky_window_enabled: bool = False,
+    window_delay_lock_enabled: bool = True,
+    window_monotonic_by_delay_enabled: bool = True,
     sticky_window_confirm_frames: int = 2,
     sticky_window_min_switch_drop_px: float = 12.0,
     sticky_window_min_switch_drop_frac: float = 0.12,
@@ -128,6 +140,78 @@ def _band_width_metrics(
 
     previous_y0_px = _to_int_or_none(sticky_state.get("selected_band_y0_px"))
     previous_y1_px = _to_int_or_none(sticky_state.get("selected_band_y1_px"))
+    current_delay_from_emergence_us = _to_int_or_none(delay_from_emergence_us)
+    raw_delay_window_map = sticky_state.get("delay_window_map") if sticky_active else None
+    delay_window_map = dict(raw_delay_window_map or {}) if isinstance(raw_delay_window_map, dict) else {}
+    locked_window = None
+    if bool(window_delay_lock_enabled) and current_delay_from_emergence_us is not None:
+        maybe_locked = delay_window_map.get(str(int(current_delay_from_emergence_us)))
+        if isinstance(maybe_locked, dict):
+            locked_window = dict(maybe_locked)
+    locked_step_index = _to_int_or_none(
+        None if locked_window is None else locked_window.get("selected_band_step_index")
+    )
+
+    def _step_index_for_y0(y0_px, *, root_band_y0_px: int, candidate_step_px: int) -> int | None:
+        parsed_y0 = _to_int_or_none(y0_px)
+        if parsed_y0 is None:
+            return None
+        try:
+            return int(round((int(parsed_y0) - int(root_band_y0_px)) / float(candidate_step_px)))
+        except Exception:
+            return None
+
+    def _mode_for_step(step_index: int | None) -> str:
+        return "root_band" if int(step_index or 0) <= 0 else "lower_consistent_window"
+
+    def _delay_map_entry(
+        *,
+        delay_value_us: int | None,
+        stats: dict,
+        step_index: int,
+        attached_width_mode: str,
+    ) -> dict | None:
+        if delay_value_us is None:
+            return None
+        return {
+            "delay_from_emergence_us": int(delay_value_us),
+            "selected_band_step_index": int(step_index),
+            "selected_band_y0_px": int(stats["y0_px"]),
+            "selected_band_y1_px": int(stats["y1_px"]),
+            "attached_width_mode": str(attached_width_mode),
+        }
+
+    def _monotonic_bounds(*, delay_value_us: int | None) -> tuple[int | None, int | None]:
+        if (
+            not bool(window_monotonic_by_delay_enabled)
+            or delay_value_us is None
+            or not isinstance(delay_window_map, dict)
+        ):
+            return None, None
+        lower_bound = None
+        upper_bound = None
+        for delay_key, entry in delay_window_map.items():
+            if not isinstance(entry, dict):
+                continue
+            mapped_delay = _to_int_or_none(entry.get("delay_from_emergence_us"))
+            if mapped_delay is None:
+                mapped_delay = _to_int_or_none(delay_key)
+            mapped_step = _to_int_or_none(entry.get("selected_band_step_index"))
+            if mapped_delay is None or mapped_step is None:
+                continue
+            if int(mapped_delay) < int(delay_value_us):
+                lower_bound = (
+                    int(mapped_step)
+                    if lower_bound is None
+                    else max(int(lower_bound), int(mapped_step))
+                )
+            elif int(mapped_delay) > int(delay_value_us):
+                upper_bound = (
+                    int(mapped_step)
+                    if upper_bound is None
+                    else min(int(upper_bound), int(mapped_step))
+                )
+        return lower_bound, upper_bound
 
     def _sticky_fields(
         *,
@@ -136,6 +220,11 @@ def _band_width_metrics(
         next_state: dict | None = None,
         candidate_streak: int | None = None,
         switch_blocked: bool = False,
+        locked_reused: bool = False,
+        locked_invalid: bool = False,
+        monotonic_lower_bound_step_index: int | None = None,
+        monotonic_upper_bound_step_index: int | None = None,
+        monotonic_upward_move_blocked: bool = False,
     ) -> dict:
         return {
             "sticky_window_active": bool(sticky_active and next_state),
@@ -150,6 +239,12 @@ def _band_width_metrics(
             "sticky_window_selected_reason": str(selected_reason),
             "sticky_window_candidate_streak": int(candidate_streak or 0),
             "sticky_window_switch_blocked": bool(switch_blocked),
+            "window_delay_lock_active": bool(window_delay_lock_enabled and locked_window is not None),
+            "window_locked_reused": bool(locked_reused),
+            "window_locked_invalid": bool(locked_invalid),
+            "window_monotonic_lower_bound_step_index": monotonic_lower_bound_step_index,
+            "window_monotonic_upper_bound_step_index": monotonic_upper_bound_step_index,
+            "window_monotonic_upward_move_blocked": bool(monotonic_upward_move_blocked),
             "next_sticky_window_state": (
                 dict(next_state or {}) if sticky_active else None
             ),
@@ -158,13 +253,29 @@ def _band_width_metrics(
     def _state_for_selected(
         stats: dict,
         *,
+        step_index: int | None = None,
+        attached_width_mode: str | None = None,
         pending_stats: dict | None = None,
         candidate_streak: int = 0,
     ) -> dict:
+        selected_step_index = 0 if step_index is None else int(step_index)
         state = {
             "selected_band_y0_px": int(stats["y0_px"]),
             "selected_band_y1_px": int(stats["y1_px"]),
+            "selected_band_step_index": int(selected_step_index),
+            "attached_width_mode": str(attached_width_mode or _mode_for_step(selected_step_index)),
         }
+        next_delay_window_map = dict(delay_window_map)
+        entry = _delay_map_entry(
+            delay_value_us=current_delay_from_emergence_us,
+            stats=stats,
+            step_index=int(selected_step_index),
+            attached_width_mode=str(attached_width_mode or _mode_for_step(selected_step_index)),
+        )
+        if entry is not None and bool(window_delay_lock_enabled):
+            next_delay_window_map[str(int(current_delay_from_emergence_us))] = entry
+        if next_delay_window_map:
+            state["delay_window_map"] = next_delay_window_map
         if pending_stats is not None:
             pending_y0_px = _to_int_or_none(pending_stats.get("y0_px"))
             if pending_y0_px is not None and int(pending_y0_px) != int(stats["y0_px"]):
@@ -205,6 +316,13 @@ def _band_width_metrics(
             "selected_band_y1_px": int(selected_stats.get("y1_px") or root_band_y1_px),
             "selected_band_valid_row_count": int(selected_stats.get("valid_row_count") or 0),
         }
+        selected_step_index = _step_index_for_y0(
+            payload["selected_band_y0_px"],
+            root_band_y0_px=int(root_band_y0_px),
+            candidate_step_px=max(1, int(near_nozzle_band_height_px) // 2),
+        )
+        payload["selected_band_step_index"] = 0 if selected_step_index is None else int(selected_step_index)
+        payload["root_band_step_index"] = 0
         payload.update(sticky_payload)
         return payload
 
@@ -231,6 +349,8 @@ def _band_width_metrics(
             "root_band_y1_px": root_band_y1_px,
             "selected_band_y0_px": root_band_y0_px,
             "selected_band_y1_px": root_band_y1_px,
+            "selected_band_step_index": 0,
+            "root_band_step_index": 0,
             "selected_band_valid_row_count": 0,
             **_sticky_fields(
                 selected_reason="reset_no_width",
@@ -290,64 +410,15 @@ def _band_width_metrics(
         if row.get("y_px") is not None and row.get("width_px") is not None
     ]
     root_stats = _window_stats(width_rows, y0_px=root_band_y0_px, y1_px=root_band_y1_px)
-    selected_stats = dict(root_stats)
-    attached_width_mode = "root_band"
-    spread_fallback_triggered = False
-    candidate_window_count = 0
-
-    if int(root_stats.get("valid_row_count") or 0) < int(min_band_valid_rows):
-        metrics = _empty_metrics(tracked_nozzle_y_px=tracked_nozzle_y_px)
-        metrics.update(
-            {
-                "width_valid_row_count": int(root_stats.get("valid_row_count") or 0),
-                "selected_band_valid_row_count": int(root_stats.get("valid_row_count") or 0),
-                "root_band_width_px": root_stats.get("median_width_px"),
-                "root_band_width_iqr_px": root_stats.get("iqr_px"),
-                "root_band_half_delta_px": root_stats.get("half_delta_px"),
-                **_sticky_fields(
-                    selected_reason="reset_insufficient_root_rows",
-                    next_state={},
-                ),
-            }
-        )
-        return metrics
-
     root_band_width_px = root_stats.get("median_width_px")
     root_band_width_iqr_px = root_stats.get("iqr_px")
     root_band_half_delta_px = root_stats.get("half_delta_px")
-    root_clearly_uneven = bool(
-        root_band_width_px is not None
-        and root_band_width_iqr_px is not None
-        and root_band_half_delta_px is not None
-        and float(root_band_width_iqr_px)
-        >= max(_WIDTH_ROOT_IQR_MIN_PX, _WIDTH_ROOT_IQR_FRAC * float(root_band_width_px))
-        and float(root_band_half_delta_px)
-        >= max(
-            _WIDTH_ROOT_HALF_DELTA_MIN_PX,
-            _WIDTH_ROOT_HALF_DELTA_FRAC * float(root_band_width_px),
-        )
-    )
-    if not root_clearly_uneven:
-        return _metrics_payload(
-            selected_stats=selected_stats,
-            attached_width_mode=attached_width_mode,
-            spread_fallback_triggered=False,
-            candidate_window_count=0,
-            root_band_width_px=root_band_width_px,
-            root_band_width_iqr_px=root_band_width_iqr_px,
-            root_band_half_delta_px=root_band_half_delta_px,
-            root_band_y0_px=root_band_y0_px,
-            root_band_y1_px=root_band_y1_px,
-            sticky_payload=_sticky_fields(
-                selected_reason="reset_root_band",
-                next_state={},
-            ),
-        )
+    candidate_step_px = int(max(1, int(near_nozzle_band_height_px) // 2))
 
     def _candidate_is_eligible(candidate_stats: dict) -> bool:
         candidate_width_px = candidate_stats.get("median_width_px")
         candidate_iqr_px = candidate_stats.get("iqr_px")
-        if candidate_width_px is None or candidate_iqr_px is None:
+        if candidate_width_px is None or candidate_iqr_px is None or root_band_width_px is None:
             return False
         if float(candidate_iqr_px) > max(
             _WIDTH_CANDIDATE_IQR_MIN_PX,
@@ -361,36 +432,234 @@ def _band_width_metrics(
             return False
         return True
 
-    candidate_step_px = int(max(1, int(near_nozzle_band_height_px) // 2))
-    candidate_stats_by_y0 = {}
+    candidate_window_count = 0
+    candidate_stats_by_step = {
+        0: dict(root_stats),
+    }
+    candidate_stats_by_y0 = {
+        int(root_band_y0_px): dict(root_stats),
+    }
     eligible_by_y0 = {}
     eligible_candidates = []
-    if root_clearly_uneven:
-        max_candidate_start_px = int(root_band_y0_px + int(_WIDTH_MAX_CANDIDATE_START_DELTA_PX))
-        for candidate_y0_px in range(
-            int(root_band_y0_px) + int(candidate_step_px),
-            int(max_candidate_start_px) + 1,
-            int(candidate_step_px),
-        ):
-            candidate_y1_px = int(candidate_y0_px + int(near_nozzle_band_height_px))
-            candidate_stats = _window_stats(
-                width_rows,
-                y0_px=int(candidate_y0_px),
-                y1_px=int(candidate_y1_px),
-            )
-            if int(candidate_stats.get("valid_row_count") or 0) < int(min_band_valid_rows):
-                continue
-            candidate_window_count += 1
-            candidate_stats_by_y0[int(candidate_stats["y0_px"])] = dict(candidate_stats)
-            if _candidate_is_eligible(candidate_stats):
-                eligible = dict(candidate_stats)
-                eligible_by_y0[int(eligible["y0_px"])] = eligible
-                eligible_candidates.append(eligible)
+    max_candidate_start_px = int(root_band_y0_px + int(_WIDTH_MAX_CANDIDATE_START_DELTA_PX))
+    for candidate_y0_px in range(
+        int(root_band_y0_px) + int(candidate_step_px),
+        int(max_candidate_start_px) + 1,
+        int(candidate_step_px),
+    ):
+        candidate_y1_px = int(candidate_y0_px + int(near_nozzle_band_height_px))
+        candidate_stats = _window_stats(
+            width_rows,
+            y0_px=int(candidate_y0_px),
+            y1_px=int(candidate_y1_px),
+        )
+        if int(candidate_stats.get("valid_row_count") or 0) < int(min_band_valid_rows):
+            continue
+        candidate_window_count += 1
+        candidate_step_index = _step_index_for_y0(
+            candidate_stats.get("y0_px"),
+            root_band_y0_px=int(root_band_y0_px),
+            candidate_step_px=int(candidate_step_px),
+        )
+        if candidate_step_index is not None:
+            candidate_stats_by_step[int(candidate_step_index)] = dict(candidate_stats)
+        candidate_stats_by_y0[int(candidate_stats["y0_px"])] = dict(candidate_stats)
+        if _candidate_is_eligible(candidate_stats):
+            eligible = dict(candidate_stats)
+            eligible_by_y0[int(eligible["y0_px"])] = eligible
+            eligible_candidates.append(eligible)
 
-    instant_stats = dict(eligible_candidates[0]) if eligible_candidates else None
-    if instant_stats is None:
+    def _stats_for_step(step_index: int | None) -> dict | None:
+        if step_index is None:
+            return None
+        stats = candidate_stats_by_step.get(int(step_index))
+        if stats is None:
+            return None
+        if int(stats.get("valid_row_count") or 0) < int(min_band_valid_rows):
+            return None
+        return dict(stats)
+
+    def _unavailable_metrics(
+        *,
+        selected_reason: str,
+        locked_reused: bool = False,
+        locked_invalid: bool = False,
+        monotonic_lower_bound_step_index: int | None = None,
+        monotonic_upper_bound_step_index: int | None = None,
+        monotonic_upward_move_blocked: bool = False,
+    ) -> dict:
+        metrics = _empty_metrics(tracked_nozzle_y_px=tracked_nozzle_y_px)
+        metrics.update(
+            {
+                "width_valid_row_count": 0,
+                "selected_band_valid_row_count": 0,
+                "candidate_window_count": int(candidate_window_count),
+                "root_band_width_px": root_band_width_px,
+                "root_band_width_iqr_px": root_band_width_iqr_px,
+                "root_band_half_delta_px": root_band_half_delta_px,
+                **_sticky_fields(
+                    selected_reason=selected_reason,
+                    next_state=dict(sticky_state),
+                    locked_reused=locked_reused,
+                    locked_invalid=locked_invalid,
+                    monotonic_lower_bound_step_index=monotonic_lower_bound_step_index,
+                    monotonic_upper_bound_step_index=monotonic_upper_bound_step_index,
+                    monotonic_upward_move_blocked=monotonic_upward_move_blocked,
+                ),
+            }
+        )
+        return metrics
+
+    def _payload_for_step(
+        *,
+        stats: dict,
+        step_index: int,
+        selected_reason: str,
+        spread_fallback_triggered: bool,
+        instant_stats: dict | None = None,
+        locked_reused: bool = False,
+        locked_invalid: bool = False,
+        monotonic_lower_bound_step_index: int | None = None,
+        monotonic_upper_bound_step_index: int | None = None,
+        monotonic_upward_move_blocked: bool = False,
+    ) -> dict:
+        mode = _mode_for_step(step_index)
+        next_state = _state_for_selected(
+            stats,
+            step_index=int(step_index),
+            attached_width_mode=mode,
+        )
         return _metrics_payload(
-            selected_stats=selected_stats,
+            selected_stats=stats,
+            attached_width_mode=mode,
+            spread_fallback_triggered=bool(spread_fallback_triggered),
+            candidate_window_count=candidate_window_count,
+            root_band_width_px=root_band_width_px,
+            root_band_width_iqr_px=root_band_width_iqr_px,
+            root_band_half_delta_px=root_band_half_delta_px,
+            root_band_y0_px=root_band_y0_px,
+            root_band_y1_px=root_band_y1_px,
+            sticky_payload=_sticky_fields(
+                selected_reason=selected_reason,
+                instant_stats=instant_stats,
+                next_state=next_state,
+                locked_reused=locked_reused,
+                locked_invalid=locked_invalid,
+                monotonic_lower_bound_step_index=monotonic_lower_bound_step_index,
+                monotonic_upper_bound_step_index=monotonic_upper_bound_step_index,
+                monotonic_upward_move_blocked=monotonic_upward_move_blocked,
+            ),
+        )
+
+    lower_bound_step, upper_bound_step = _monotonic_bounds(
+        delay_value_us=current_delay_from_emergence_us
+    )
+
+    if locked_step_index is not None:
+        locked_stats = _stats_for_step(locked_step_index)
+        if locked_stats is None:
+            return _unavailable_metrics(
+                selected_reason="delay_locked_window_invalid",
+                locked_reused=True,
+                locked_invalid=True,
+                monotonic_lower_bound_step_index=lower_bound_step,
+                monotonic_upper_bound_step_index=upper_bound_step,
+            )
+        return _payload_for_step(
+            stats=locked_stats,
+            step_index=int(locked_step_index),
+            selected_reason="delay_locked_window_reused",
+            spread_fallback_triggered=int(locked_step_index) > 0,
+            locked_reused=True,
+            monotonic_lower_bound_step_index=lower_bound_step,
+            monotonic_upper_bound_step_index=upper_bound_step,
+        )
+
+    if int(root_stats.get("valid_row_count") or 0) < int(min_band_valid_rows):
+        return _unavailable_metrics(
+            selected_reason="reset_insufficient_root_rows",
+            monotonic_lower_bound_step_index=lower_bound_step,
+            monotonic_upper_bound_step_index=upper_bound_step,
+        )
+
+    root_clearly_uneven = bool(
+        root_band_width_px is not None
+        and root_band_width_iqr_px is not None
+        and root_band_half_delta_px is not None
+        and float(root_band_width_iqr_px)
+        >= max(_WIDTH_ROOT_IQR_MIN_PX, _WIDTH_ROOT_IQR_FRAC * float(root_band_width_px))
+        and float(root_band_half_delta_px)
+        >= max(
+            _WIDTH_ROOT_HALF_DELTA_MIN_PX,
+            _WIDTH_ROOT_HALF_DELTA_FRAC * float(root_band_width_px),
+        )
+    )
+    instant_stats = dict(eligible_candidates[0]) if (root_clearly_uneven and eligible_candidates) else None
+    if not root_clearly_uneven:
+        if lower_bound_step is not None and int(lower_bound_step) > 0:
+            bound_stats = _stats_for_step(lower_bound_step)
+            if bound_stats is None:
+                return _unavailable_metrics(
+                    selected_reason="monotonic_lower_window_invalid",
+                    monotonic_lower_bound_step_index=lower_bound_step,
+                    monotonic_upper_bound_step_index=upper_bound_step,
+                    monotonic_upward_move_blocked=True,
+                )
+            return _payload_for_step(
+                stats=bound_stats,
+                step_index=int(lower_bound_step),
+                selected_reason="monotonic_hold_lower_window",
+                spread_fallback_triggered=True,
+                monotonic_lower_bound_step_index=lower_bound_step,
+                monotonic_upper_bound_step_index=upper_bound_step,
+                monotonic_upward_move_blocked=True,
+            )
+        return _metrics_payload(
+            selected_stats=dict(root_stats),
+            attached_width_mode="root_band",
+            spread_fallback_triggered=False,
+            candidate_window_count=0,
+            root_band_width_px=root_band_width_px,
+            root_band_width_iqr_px=root_band_width_iqr_px,
+            root_band_half_delta_px=root_band_half_delta_px,
+            root_band_y0_px=root_band_y0_px,
+            root_band_y1_px=root_band_y1_px,
+            sticky_payload=_sticky_fields(
+                selected_reason="reset_root_band",
+                next_state=(
+                    _state_for_selected(
+                        dict(root_stats),
+                        step_index=0,
+                        attached_width_mode="root_band",
+                    )
+                    if current_delay_from_emergence_us is not None
+                    else {}
+                ),
+                monotonic_lower_bound_step_index=lower_bound_step,
+                monotonic_upper_bound_step_index=upper_bound_step,
+            ),
+        )
+    if instant_stats is None:
+        if lower_bound_step is not None and int(lower_bound_step) > 0:
+            bound_stats = _stats_for_step(lower_bound_step)
+            if bound_stats is None:
+                return _unavailable_metrics(
+                    selected_reason="monotonic_lower_window_invalid",
+                    monotonic_lower_bound_step_index=lower_bound_step,
+                    monotonic_upper_bound_step_index=upper_bound_step,
+                    monotonic_upward_move_blocked=True,
+                )
+            return _payload_for_step(
+                stats=bound_stats,
+                step_index=int(lower_bound_step),
+                selected_reason="monotonic_hold_lower_window",
+                spread_fallback_triggered=True,
+                monotonic_lower_bound_step_index=lower_bound_step,
+                monotonic_upper_bound_step_index=upper_bound_step,
+                monotonic_upward_move_blocked=True,
+            )
+        return _metrics_payload(
+            selected_stats=dict(root_stats),
             attached_width_mode="root_band",
             spread_fallback_triggered=False,
             candidate_window_count=candidate_window_count,
@@ -401,7 +670,17 @@ def _band_width_metrics(
             root_band_y1_px=root_band_y1_px,
             sticky_payload=_sticky_fields(
                 selected_reason="reset_no_lower_candidate",
-                next_state={},
+                next_state=(
+                    _state_for_selected(
+                        dict(root_stats),
+                        step_index=0,
+                        attached_width_mode="root_band",
+                    )
+                    if current_delay_from_emergence_us is not None
+                    else {}
+                ),
+                monotonic_lower_bound_step_index=lower_bound_step,
+                monotonic_upper_bound_step_index=upper_bound_step,
             ),
         )
 
@@ -411,7 +690,15 @@ def _band_width_metrics(
     sticky_reason = "instant_candidate"
     sticky_blocked = False
     sticky_streak = 0
-    next_state = _state_for_selected(selected_stats)
+    next_state = _state_for_selected(
+        selected_stats,
+        step_index=_step_index_for_y0(
+            selected_stats.get("y0_px"),
+            root_band_y0_px=root_band_y0_px,
+            candidate_step_px=candidate_step_px,
+        ),
+        attached_width_mode=attached_width_mode,
+    )
 
     if sticky_active:
         previous_stats = None
@@ -448,7 +735,15 @@ def _band_width_metrics(
             if preferred_y0_px == previous_selected_y0_px:
                 selected_stats = dict(previous_stats)
                 sticky_reason = "sticky_same_window"
-                next_state = _state_for_selected(selected_stats)
+                next_state = _state_for_selected(
+                    selected_stats,
+                    step_index=_step_index_for_y0(
+                        selected_stats.get("y0_px"),
+                        root_band_y0_px=root_band_y0_px,
+                        candidate_step_px=candidate_step_px,
+                    ),
+                    attached_width_mode=attached_width_mode,
+                )
             else:
                 pending_y0_px = _to_int_or_none(sticky_state.get("pending_candidate_y0_px"))
                 if pending_y0_px == preferred_y0_px:
@@ -475,6 +770,12 @@ def _band_width_metrics(
                             sticky_blocked = True
                             next_state = _state_for_selected(
                                 selected_stats,
+                                step_index=_step_index_for_y0(
+                                    selected_stats.get("y0_px"),
+                                    root_band_y0_px=root_band_y0_px,
+                                    candidate_step_px=candidate_step_px,
+                                ),
+                                attached_width_mode=attached_width_mode,
                                 pending_stats=preferred_stats,
                                 candidate_streak=sticky_streak,
                             )
@@ -487,6 +788,12 @@ def _band_width_metrics(
                             )
                             next_state = _state_for_selected(
                                 selected_stats,
+                                step_index=_step_index_for_y0(
+                                    selected_stats.get("y0_px"),
+                                    root_band_y0_px=root_band_y0_px,
+                                    candidate_step_px=candidate_step_px,
+                                ),
+                                attached_width_mode=attached_width_mode,
                                 pending_stats=preferred_stats,
                                 candidate_streak=sticky_streak,
                             )
@@ -497,16 +804,85 @@ def _band_width_metrics(
                             if material_switch
                             else "sticky_confirmed_candidate"
                         )
-                        next_state = _state_for_selected(selected_stats)
+                        next_state = _state_for_selected(
+                            selected_stats,
+                            step_index=_step_index_for_y0(
+                                selected_stats.get("y0_px"),
+                                root_band_y0_px=root_band_y0_px,
+                                candidate_step_px=candidate_step_px,
+                            ),
+                            attached_width_mode=attached_width_mode,
+                        )
                 else:
                     selected_stats = dict(previous_stats)
                     sticky_reason = "sticky_hold_previous"
                     sticky_blocked = True
                     next_state = _state_for_selected(
                         selected_stats,
+                        step_index=_step_index_for_y0(
+                            selected_stats.get("y0_px"),
+                            root_band_y0_px=root_band_y0_px,
+                            candidate_step_px=candidate_step_px,
+                        ),
+                        attached_width_mode=attached_width_mode,
                         pending_stats=preferred_stats,
                         candidate_streak=sticky_streak,
                     )
+
+    selected_step_index = _step_index_for_y0(
+        selected_stats.get("y0_px"),
+        root_band_y0_px=root_band_y0_px,
+        candidate_step_px=candidate_step_px,
+    )
+    if selected_step_index is None:
+        selected_step_index = 0
+    monotonic_upward_move_blocked = False
+    if lower_bound_step is not None and int(selected_step_index) < int(lower_bound_step):
+        bound_stats = _stats_for_step(lower_bound_step)
+        if bound_stats is None:
+            return _unavailable_metrics(
+                selected_reason="monotonic_lower_window_invalid",
+                monotonic_lower_bound_step_index=lower_bound_step,
+                monotonic_upper_bound_step_index=upper_bound_step,
+                monotonic_upward_move_blocked=True,
+            )
+        selected_stats = dict(bound_stats)
+        selected_step_index = int(lower_bound_step)
+        attached_width_mode = _mode_for_step(selected_step_index)
+        spread_fallback_triggered = selected_step_index > 0
+        sticky_reason = "monotonic_hold_lower_window"
+        sticky_blocked = True
+        monotonic_upward_move_blocked = True
+    if upper_bound_step is not None and int(selected_step_index) > int(upper_bound_step):
+        bound_stats = _stats_for_step(upper_bound_step)
+        if bound_stats is None:
+            return _unavailable_metrics(
+                selected_reason="monotonic_upper_window_invalid",
+                monotonic_lower_bound_step_index=lower_bound_step,
+                monotonic_upper_bound_step_index=upper_bound_step,
+            )
+        selected_stats = dict(bound_stats)
+        selected_step_index = int(upper_bound_step)
+        attached_width_mode = _mode_for_step(selected_step_index)
+        spread_fallback_triggered = selected_step_index > 0
+        sticky_reason = "monotonic_cap_to_future_window"
+        sticky_blocked = True
+    if not (
+        sticky_blocked
+        and sticky_reason
+        in {
+            "sticky_hold_previous",
+            "sticky_candidate_pending",
+            "sticky_confirm_wait",
+        }
+        and isinstance(next_state, dict)
+        and "pending_candidate_y0_px" in next_state
+    ):
+        next_state = _state_for_selected(
+            selected_stats,
+            step_index=int(selected_step_index),
+            attached_width_mode=attached_width_mode,
+        )
 
     return _metrics_payload(
         selected_stats=selected_stats,
@@ -524,6 +900,9 @@ def _band_width_metrics(
             next_state=next_state,
             candidate_streak=sticky_streak,
             switch_blocked=sticky_blocked,
+            monotonic_lower_bound_step_index=lower_bound_step,
+            monotonic_upper_bound_step_index=upper_bound_step,
+            monotonic_upward_move_blocked=monotonic_upward_move_blocked,
         ),
     )
 
@@ -1565,8 +1944,13 @@ def analyze_online_stream_frame(
         near_nozzle_band_top_px=int(config["near_nozzle_band_top_px"]),
         near_nozzle_band_height_px=int(config["near_nozzle_band_height_px"]),
         min_band_valid_rows=int(config["min_band_valid_rows"]),
+        delay_from_emergence_us=int(delay_us) - int(emergence_time_us),
         sticky_window_state=sticky_window_state,
         sticky_window_enabled=bool(config["tail_width_sticky_window_enabled"]),
+        window_delay_lock_enabled=bool(config["tail_width_window_delay_lock_enabled"]),
+        window_monotonic_by_delay_enabled=bool(
+            config["tail_width_window_monotonic_by_delay_enabled"]
+        ),
         sticky_window_confirm_frames=int(config["tail_width_sticky_window_confirm_frames"]),
         sticky_window_min_switch_drop_px=float(config["tail_width_sticky_window_min_switch_drop_px"]),
         sticky_window_min_switch_drop_frac=float(config["tail_width_sticky_window_min_switch_drop_frac"]),
@@ -1930,6 +2314,8 @@ def analyze_online_stream_frame(
         "root_band_half_delta_px": width_metrics.get("root_band_half_delta_px"),
         "selected_band_y0_px": width_metrics.get("selected_band_y0_px"),
         "selected_band_y1_px": width_metrics.get("selected_band_y1_px"),
+        "selected_band_step_index": width_metrics.get("selected_band_step_index"),
+        "root_band_step_index": width_metrics.get("root_band_step_index"),
         "selected_band_valid_row_count": width_metrics.get("selected_band_valid_row_count"),
         "spread_fallback_triggered": bool(width_metrics.get("spread_fallback_triggered")),
         "candidate_window_count": width_metrics.get("candidate_window_count"),
@@ -1941,6 +2327,18 @@ def analyze_online_stream_frame(
         "sticky_window_selected_reason": width_metrics.get("sticky_window_selected_reason"),
         "sticky_window_candidate_streak": width_metrics.get("sticky_window_candidate_streak"),
         "sticky_window_switch_blocked": bool(width_metrics.get("sticky_window_switch_blocked")),
+        "window_delay_lock_active": bool(width_metrics.get("window_delay_lock_active")),
+        "window_locked_reused": bool(width_metrics.get("window_locked_reused")),
+        "window_locked_invalid": bool(width_metrics.get("window_locked_invalid")),
+        "window_monotonic_lower_bound_step_index": width_metrics.get(
+            "window_monotonic_lower_bound_step_index"
+        ),
+        "window_monotonic_upper_bound_step_index": width_metrics.get(
+            "window_monotonic_upper_bound_step_index"
+        ),
+        "window_monotonic_upward_move_blocked": bool(
+            width_metrics.get("window_monotonic_upward_move_blocked")
+        ),
         "next_sticky_window_state": width_metrics.get("next_sticky_window_state"),
         "attached_bottom_guard_hit": bool(attached_bottom_guard_hit),
     }

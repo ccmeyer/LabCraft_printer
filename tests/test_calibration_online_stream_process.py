@@ -354,6 +354,7 @@ def _accepted_tail_frame_row(
     width_px: float,
     visible_volume_nl: float = 14.0,
     landmark: bool = False,
+    **extra,
 ):
     delay_us = int(proc.emergence_time_us) + int(offset_us)
     return calibration_model.online_cal_mod.build_online_stream_frame_row(
@@ -387,6 +388,7 @@ def _accepted_tail_frame_row(
         near_nozzle_detached_warning=False,
         late_frame_warning=False,
         attached_bottom_guard_hit=False,
+        **dict(extra or {}),
     )
 
 
@@ -2953,6 +2955,8 @@ def test_online_stream_analyze_tail_frame_reuses_and_records_sticky_window_state
                 "root_band_half_delta_px": 40.0,
                 "selected_band_y0_px": 144,
                 "selected_band_y1_px": 184,
+                "selected_band_step_index": 3,
+                "root_band_step_index": 0,
                 "selected_band_valid_row_count": 40,
                 "spread_fallback_triggered": True,
                 "candidate_window_count": 5,
@@ -2962,9 +2966,14 @@ def test_online_stream_analyze_tail_frame_reuses_and_records_sticky_window_state
                 "sticky_window_selected_reason": "sticky_hold_previous",
                 "sticky_window_candidate_streak": 1,
                 "sticky_window_switch_blocked": True,
+                "window_delay_lock_active": False,
+                "window_locked_reused": False,
+                "window_locked_invalid": False,
+                "window_monotonic_upward_move_blocked": False,
                 "next_sticky_window_state": {
                     "selected_band_y0_px": 144,
                     "selected_band_y1_px": 184,
+                    "selected_band_step_index": 3,
                     "pending_candidate_y0_px": 124,
                     "pending_candidate_y1_px": 164,
                     "candidate_streak": 1,
@@ -2988,6 +2997,7 @@ def test_online_stream_analyze_tail_frame_reuses_and_records_sticky_window_state
     assert proc._tail_width_window_state == {
         "selected_band_y0_px": 144,
         "selected_band_y1_px": 184,
+        "selected_band_step_index": 3,
         "pending_candidate_y0_px": 124,
         "pending_candidate_y1_px": 164,
         "candidate_streak": 1,
@@ -2999,6 +3009,8 @@ def test_online_stream_analyze_tail_frame_reuses_and_records_sticky_window_state
     assert payload["sticky_window_selected_reason"] == "sticky_hold_previous"
     assert payload["sticky_window_candidate_streak"] == 1
     assert payload["sticky_window_switch_blocked"] is True
+    assert payload["selected_band_step_index"] == 3
+    assert payload["window_locked_reused"] is False
 
 
 def test_online_stream_analyze_tail_frame_resets_sticky_window_state_on_root_band(tmp_path, monkeypatch):
@@ -3382,10 +3394,10 @@ def test_online_stream_advance_tail_phase_keeps_first_mild_backup_collapse_scout
     assert proc._tail_mode == "scout"
     assert proc._tail_delay_index == 1
     assert proc._tail_landmark_delay_us is None
-    assert "tail_backup_landmark_unconfirmed" in proc._tail_fit_warnings
+    assert "tail_backup_landmark_unconfirmed" not in proc._tail_fit_warnings
 
 
-def test_online_stream_advance_tail_phase_switches_on_confirmed_backup_collapse(tmp_path):
+def test_online_stream_advance_tail_phase_does_not_end_scout_on_repeated_width_only_drop(tmp_path):
     proc = _flow_proc(tmp_path)
     _seed_tail_flow_context(proc)
     proc._tail_plan = {
@@ -3416,12 +3428,74 @@ def test_online_stream_advance_tail_phase_switches_on_confirmed_backup_collapse(
     proc.onAdvanceTailPhase()
 
     assert proc.nextTailDelay.calls
-    assert proc._tail_mode == "backtrack"
-    assert proc._tail_landmark_delay_us == 5250
-    assert proc._tail_landmark_reason == "strong_width_collapse_backup"
-    assert proc._tail_backup_landmark_confirmed is True
-    assert proc._tail_backup_landmark_confirmation_reason == "confirmed_backup_width_collapse"
-    assert proc._tail_backtrack_left_delay_us == 4750
+    assert proc._tail_mode == "scout"
+    assert proc._tail_delay_index == 2
+    assert proc._tail_landmark_delay_us is None
+    assert proc._tail_landmark_reason is None
+    assert proc._tail_backup_landmark_confirmed is False
+    assert proc._tail_backup_landmark_confirmation_reason is None
+    assert proc._tail_backtrack_left_delay_us is None
+
+
+def test_online_stream_advance_tail_phase_continues_after_root_to_lower_window_drop(tmp_path):
+    proc = _flow_proc(tmp_path)
+    _seed_tail_flow_context(proc)
+    proc._tail_plan = {
+        "steady_width_baseline_px": 74.0,
+        "scout_anchor_delay_us": 4250,
+        "backtrack_step_us": 50,
+        "scout_replicates": 1,
+        "backtrack_replicates": 1,
+        "fine_prepad_us": 100,
+        "fine_postpad_us": 100,
+        "planned_scout_delay_count": 3,
+    }
+    proc._tail_mode = "scout"
+    proc._tail_delay_sequence = [4750, 5250, 5750]
+    proc._tail_delay_index = 1
+    proc._tail_replicate_index = 0
+    proc._tail_scout_delay_summaries = [
+        calibration_model.online_tail_mod.summarize_online_stream_tail_delay(
+            [
+                _accepted_tail_frame_row(
+                    proc,
+                    1550,
+                    phase="tail_scout",
+                    width_px=74.0,
+                    attached_width_mode="root_band",
+                    selected_band_step_index=0,
+                )
+            ],
+            74.0,
+        )
+    ]
+    proc._tail_current_delay_us = 5250
+    proc._tail_current_delay_frame_rows = [
+        _accepted_tail_frame_row(
+            proc,
+            2050,
+            phase="tail_scout",
+            width_px=58.0,
+            attached_width_mode="lower_consistent_window",
+            selected_band_step_index=3,
+            selected_band_y0_px=144,
+            selected_band_y1_px=184,
+            spread_fallback_triggered=True,
+        )
+    ]
+
+    proc.onAdvanceTailPhase()
+
+    assert proc.nextTailDelay.calls
+    assert proc._tail_mode == "scout"
+    assert proc._tail_delay_index == 2
+    assert proc._tail_landmark_delay_us is None
+    assert proc._tail_scout_delay_summaries[-1]["width_only_collapse_candidate"] is True
+    assert (
+        proc._tail_scout_delay_summaries[-1]["width_only_collapse_suppressed_as_scout_landmark"]
+        is True
+    )
+    assert proc._tail_scout_delay_summaries[-1]["resolver_collapse_candidate"] is False
 
 
 def test_online_stream_advance_tail_phase_switches_to_backtrack_on_separation_landmark(tmp_path):
@@ -3442,6 +3516,17 @@ def test_online_stream_advance_tail_phase_switches_to_backtrack_on_separation_la
     proc._tail_delay_index = 0
     proc._tail_replicate_index = 0
     proc._tail_current_delay_us = 4750
+    proc._tail_width_window_state = {
+        "delay_window_map": {
+            "1550": {
+                "delay_from_emergence_us": 1550,
+                "selected_band_step_index": 2,
+                "selected_band_y0_px": 124,
+                "selected_band_y1_px": 164,
+                "attached_width_mode": "lower_consistent_window",
+            }
+        }
+    }
     proc._tail_current_delay_frame_rows = [
         calibration_model.online_cal_mod.build_online_stream_frame_row(
             phase="tail_scout",
@@ -3469,6 +3554,7 @@ def test_online_stream_advance_tail_phase_switches_to_backtrack_on_separation_la
     assert proc._tail_landmark_reason == "separated_from_nozzle"
     assert proc._tail_backtrack_left_delay_us == 4250
     assert proc._tail_delay_sequence == [4250, 4300, 4350, 4400, 4450, 4500, 4550, 4600, 4650, 4700, 4750, 4800, 4850]
+    assert "1550" in proc._tail_width_window_state["delay_window_map"]
 
 
 def test_online_stream_advance_tail_phase_switches_to_dense_full_window_after_later_scout_landmark(tmp_path):
