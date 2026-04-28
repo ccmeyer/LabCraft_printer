@@ -66,6 +66,11 @@ def main(argv: list[str] | None = None) -> int:
             "Defaults to the runtime/replay default."
         ),
     )
+    parser.add_argument(
+        "--segmented-tail-review",
+        action="store_true",
+        help="Write an offline segmented-regression tail-start review alongside the report.",
+    )
     args = parser.parse_args(argv)
 
     payload = online_report_mod.export_online_stream_experiment_report(
@@ -76,6 +81,7 @@ def main(argv: list[str] | None = None) -> int:
         correction_mode=(None if args.correction_mode == "none" else args.correction_mode),
         settling_aware_fit_enabled=args.settling_aware_fit,
         tail_settling_rule_enabled=args.tail_settling_rule,
+        segmented_tail_review=bool(args.segmented_tail_review),
     )
     dataset_mod._print_json(payload)
     return 0

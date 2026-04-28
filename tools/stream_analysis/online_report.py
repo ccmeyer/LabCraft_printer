@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import statistics
 from collections import defaultdict
 from pathlib import Path
@@ -15,6 +16,7 @@ from tools.stream_analysis import online_fit as online_fit_mod
 from tools.stream_analysis import online_replay as online_replay_mod
 from tools.stream_analysis import online_runtime as runtime_mod
 from tools.stream_analysis import online_tail as online_tail_mod
+from tools.stream_analysis import segmented_tail as segmented_tail_mod
 
 
 PROCESS_NAME = dataset_mod.ONLINE_STREAM_PROCESS_NAME
@@ -87,6 +89,47 @@ CONDITION_SUMMARY_COLUMNS = [
     "gravimetric_after_detachment_count",
     "gravimetric_after_last_observed_tail_count",
     "condition_overlay_png",
+]
+
+SEGMENTED_TAIL_REVIEW_COLUMNS = [
+    "run_id",
+    "condition_key",
+    "print_pressure",
+    "print_pw_us",
+    "replicate_index",
+    "current_tail_start_delay_from_emergence_us",
+    "segmented_tail_start_delay_from_emergence_us",
+    "segmented_knee_delay_from_emergence_us",
+    "segmented_second_knee_delay_from_emergence_us",
+    "segmented_breakpoint_delays_from_emergence_us",
+    "segmented_breakpoint_refinement_step_us",
+    "segmented_tail_start_observed_delay",
+    "segmented_breakpoint_observed_delays",
+    "segmented_tail_start_source",
+    "segmented_three_break_tail_start_delay_from_emergence_us",
+    "segmented_two_break_tail_start_delay_from_emergence_us",
+    "segmented_midpoint_tail_start_delay_from_emergence_us",
+    "segmented_model_name",
+    "segmented_fit_status",
+    "segmented_usable_point_count",
+    "segmented_noise_estimate_px",
+    "segmented_bic_plateau",
+    "segmented_bic_plateau_decline",
+    "segmented_bic_plateau_shoulder_collapse",
+    "segmented_bic_plateau_gradual_shoulder_steep_shoulder_collapse",
+    "segmented_three_break_gate_passed",
+    "segmented_three_break_gate_reason",
+    "segmented_three_break_tail_start_advance_us",
+    "segmented_three_break_early_shoulder_slope_px_per_ms",
+    "segmented_local_confirmation_passed",
+    "segmented_local_confirmation_reason",
+    "segmented_local_confirmation_baseline_width_px",
+    "segmented_local_confirmation_final_drop_px",
+    "segmented_local_confirmation_rebound_px",
+    "segmented_minus_current_tail_start_us",
+    "gravimetric_equality_delay_us",
+    "gravimetric_minus_segmented_tail_start_us",
+    "run_report_png",
 ]
 
 
@@ -1065,6 +1108,83 @@ def _run_context(
     )
 
 
+def _metadata_row_from_online_run_dir(run_dir: Path, tail_artifact: dict) -> dict:
+    run_id = run_dir.name
+    run_meta = _load_json(run_dir / "run_meta.json")
+    if _clean_text(run_meta.get("run_id")):
+        run_id = str(run_meta.get("run_id"))
+    condition = dict(tail_artifact.get("condition") or {})
+    tail_result = dict(tail_artifact.get("result") or {})
+    warnings = list(tail_result.get("warnings") or tail_artifact.get("warnings") or [])
+    return {
+        "Dataset name": run_id,
+        "Print PW": condition.get("print_pulse_width_us"),
+        "Print Pressure": condition.get("print_pressure_psi"),
+        "Rep": "",
+        "Mass/print": "",
+        "Num printed": "",
+        "Capture Process": PROCESS_NAME,
+        "Predicted Volume (nL)": tail_result.get("predicted_volume_nl"),
+        "Analysis Warnings": "; ".join(str(item) for item in warnings if str(item or "").strip()),
+    }
+
+
+def _context_from_online_run_dir(
+    experiment_root: Path,
+    run_dir: Path,
+    *,
+    density_g_per_ml: float | int,
+) -> dict:
+    flow_artifact = _load_json(run_dir / "flow_fit.json")
+    tail_artifact = _load_json(run_dir / "tail_fit.json")
+    frame_rows = _iter_jsonl(run_dir / "frames.jsonl")
+    return _context_from_replay(
+        metadata_row=_metadata_row_from_online_run_dir(run_dir, tail_artifact),
+        run_dir=run_dir,
+        frame_rows=frame_rows,
+        fit=dict(flow_artifact.get("fit") or {}),
+        tail_result=dict(tail_artifact.get("result") or {}),
+        density_g_per_ml=density_g_per_ml,
+        correction_mode=None,
+        correction_context=None,
+        flow_artifact=flow_artifact,
+        tail_artifact=tail_artifact,
+    )
+
+
+def _segmented_tail_contexts_with_unlisted_runs(
+    experiment_root: Path,
+    contexts: list[dict],
+    *,
+    density_g_per_ml: float | int,
+) -> list[dict]:
+    combined = list(contexts or [])
+    seen_run_ids = {
+        str(dict(context.get("summary_row") or {}).get("run_id") or "")
+        for context in combined
+    }
+    process_root = Path(experiment_root) / "calibration_recordings" / PROCESS_NAME
+    if not process_root.is_dir():
+        return combined
+    for run_dir in sorted(path for path in process_root.iterdir() if path.is_dir()):
+        run_id = run_dir.name
+        if run_id in seen_run_ids:
+            continue
+        if not (run_dir / "frames.jsonl").exists() or not (run_dir / "tail_fit.json").exists():
+            continue
+        context = _context_from_online_run_dir(
+            Path(experiment_root),
+            run_dir,
+            density_g_per_ml=density_g_per_ml,
+        )
+        resolved_run_id = str(dict(context.get("summary_row") or {}).get("run_id") or run_id)
+        if resolved_run_id in seen_run_ids:
+            continue
+        combined.append(context)
+        seen_run_ids.add(resolved_run_id)
+    return combined
+
+
 def _cv(values: list[float]) -> float | None:
     numeric = [float(value) for value in list(values or []) if _float_or_none(value) is not None]
     if not numeric:
@@ -1173,6 +1293,145 @@ def _summaries_from_contexts(contexts: list[dict]) -> tuple[list[dict], list[dic
     return summary_rows, condition_summary_rows, grouped_contexts
 
 
+def _delta_or_none(left, right):
+    left_value = _float_or_none(left)
+    right_value = _float_or_none(right)
+    if left_value is None or right_value is None:
+        return None
+    return float(left_value - right_value)
+
+
+def _bic_score(result: dict, model_name: str):
+    scores = dict(result.get("bic_scores") or {})
+    return _float_or_none(scores.get(model_name))
+
+
+def _segmented_tail_review_row(context: dict, result: dict, *, plot_path: Path) -> dict:
+    summary = dict(context.get("summary_row") or {})
+    segmented_tail_start = _int_or_none(result.get("tail_start_delay_from_emergence_us"))
+    current_tail_start = _int_or_none(summary.get("tail_start_delay_from_emergence_us"))
+    grav_delay = _float_or_none(summary.get("gravimetric_equality_delay_us"))
+    three_break_gate = dict(result.get("three_break_selection_gate") or {})
+    local_confirmation = dict(result.get("local_confirmation") or {})
+    return {
+        "run_id": summary.get("run_id"),
+        "condition_key": summary.get("condition_key"),
+        "print_pressure": _float_or_none(summary.get("print_pressure")),
+        "print_pw_us": _int_or_none(summary.get("print_pw_us")),
+        "replicate_index": _int_or_none(summary.get("replicate_index")),
+        "current_tail_start_delay_from_emergence_us": current_tail_start,
+        "segmented_tail_start_delay_from_emergence_us": segmented_tail_start,
+        "segmented_knee_delay_from_emergence_us": _int_or_none(result.get("knee_delay_from_emergence_us")),
+        "segmented_second_knee_delay_from_emergence_us": _int_or_none(
+            result.get("second_knee_delay_from_emergence_us")
+        ),
+        "segmented_breakpoint_delays_from_emergence_us": [
+            int(value)
+            for value in list(result.get("breakpoint_delays_from_emergence_us") or [])
+            if _int_or_none(value) is not None
+        ],
+        "segmented_breakpoint_refinement_step_us": _int_or_none(
+            result.get("breakpoint_refinement_step_us")
+        ),
+        "segmented_tail_start_observed_delay": result.get("tail_start_observed_delay"),
+        "segmented_breakpoint_observed_delays": [
+            bool(value)
+            for value in list(result.get("breakpoint_observed_delays") or [])
+        ],
+        "segmented_tail_start_source": _clean_text(result.get("tail_start_source")),
+        "segmented_three_break_tail_start_delay_from_emergence_us": _int_or_none(
+            result.get("three_break_tail_start_delay_from_emergence_us")
+        ),
+        "segmented_two_break_tail_start_delay_from_emergence_us": _int_or_none(
+            result.get("two_break_tail_start_delay_from_emergence_us")
+        ),
+        "segmented_midpoint_tail_start_delay_from_emergence_us": _int_or_none(
+            result.get("midpoint_tail_start_delay_from_emergence_us")
+        ),
+        "segmented_model_name": _clean_text(result.get("model_name")),
+        "segmented_fit_status": _clean_text(result.get("fit_status")),
+        "segmented_usable_point_count": _int_or_none(result.get("usable_point_count")),
+        "segmented_noise_estimate_px": _float_or_none(result.get("noise_estimate_px")),
+        "segmented_bic_plateau": _bic_score(result, segmented_tail_mod.MODEL_PLATEAU),
+        "segmented_bic_plateau_decline": _bic_score(result, segmented_tail_mod.MODEL_PLATEAU_DECLINE),
+        "segmented_bic_plateau_shoulder_collapse": _bic_score(
+            result,
+            segmented_tail_mod.MODEL_PLATEAU_SHOULDER_COLLAPSE,
+        ),
+        "segmented_bic_plateau_gradual_shoulder_steep_shoulder_collapse": _bic_score(
+            result,
+            segmented_tail_mod.MODEL_PLATEAU_GRADUAL_SHOULDER_STEEP_SHOULDER_COLLAPSE,
+        ),
+        "segmented_three_break_gate_passed": bool(three_break_gate.get("passed")),
+        "segmented_three_break_gate_reason": _clean_text(three_break_gate.get("reason")),
+        "segmented_three_break_tail_start_advance_us": _float_or_none(
+            three_break_gate.get("tail_start_advance_us")
+        ),
+        "segmented_three_break_early_shoulder_slope_px_per_ms": _float_or_none(
+            three_break_gate.get("early_shoulder_slope_px_per_ms")
+        ),
+        "segmented_local_confirmation_passed": bool(local_confirmation.get("passed")),
+        "segmented_local_confirmation_reason": _clean_text(local_confirmation.get("reason")),
+        "segmented_local_confirmation_baseline_width_px": _float_or_none(
+            local_confirmation.get("baseline_width_px")
+        ),
+        "segmented_local_confirmation_final_drop_px": _float_or_none(
+            local_confirmation.get("final_drop_px")
+        ),
+        "segmented_local_confirmation_rebound_px": _float_or_none(
+            local_confirmation.get("rebound_px")
+        ),
+        "segmented_minus_current_tail_start_us": _delta_or_none(segmented_tail_start, current_tail_start),
+        "gravimetric_equality_delay_us": grav_delay,
+        "gravimetric_minus_segmented_tail_start_us": _delta_or_none(grav_delay, segmented_tail_start),
+        "run_report_png": str(plot_path),
+    }
+
+
+def _segmented_tail_baseline_width(context: dict):
+    fit = dict(context.get("fit") or {})
+    baseline = _float_or_none(fit.get("steady_width_baseline_px"))
+    if baseline is not None:
+        return baseline
+    flow_artifact_fit = dict(dict(context.get("flow_artifact") or {}).get("fit") or {})
+    return _float_or_none(flow_artifact_fit.get("steady_width_baseline_px"))
+
+
+def _write_segmented_tail_review(contexts: list[dict], *, stage_dir: Path) -> dict:
+    review_dir = Path(stage_dir) / "segmented_tail_review"
+    runs_dir = review_dir / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+
+    review_items = []
+    review_rows = []
+    for context in list(contexts or []):
+        summary = dict(context.get("summary_row") or {})
+        run_id = str(summary.get("run_id") or "run")
+        result = segmented_tail_mod.evaluate_segmented_tail_trace(
+            list(context.get("tail_rows") or []),
+            baseline_width_px=_segmented_tail_baseline_width(context),
+        )
+        plot_path = runs_dir / f"{_safe_slug(run_id)}.png"
+        row = _segmented_tail_review_row(context, result, plot_path=plot_path)
+        _plot_segmented_tail_run(context, result, row, plot_path)
+        context["segmented_tail_review"] = result
+        review_rows.append(row)
+        review_items.append({"context": context, "result": result, "row": row})
+
+    run_summary_csv = review_dir / "run_summary.csv"
+    run_summary_json = review_dir / "run_summary.json"
+    contact_sheet_png = review_dir / "contact_sheet.png"
+    dataset_mod._write_csv(run_summary_csv, SEGMENTED_TAIL_REVIEW_COLUMNS, review_rows)
+    dataset_mod._write_json(run_summary_json, review_rows)
+    _plot_segmented_tail_contact_sheet(review_items, contact_sheet_png)
+    return {
+        "segmented_tail_review_dir": str(review_dir),
+        "segmented_tail_review_run_summary_csv": str(run_summary_csv),
+        "segmented_tail_review_run_summary_json": str(run_summary_json),
+        "segmented_tail_review_contact_sheet_png": str(contact_sheet_png),
+    }
+
+
 def _export_report_from_contexts(
     contexts: list[dict],
     *,
@@ -1183,6 +1442,8 @@ def _export_report_from_contexts(
     correction_mode: str | None = None,
     correction_rule: dict | None = None,
     flow_fit_policy_override: dict | None = None,
+    segmented_tail_review: bool = False,
+    segmented_tail_contexts: list[dict] | None = None,
 ) -> dict:
     stage_dir = Path(stage_dir).expanduser().resolve()
     stage_dir.mkdir(parents=True, exist_ok=True)
@@ -1226,6 +1487,14 @@ def _export_report_from_contexts(
     delay_gap_path = experiment_dir / "delay_gap_by_condition.png"
     _plot_predicted_vs_gravimetric(contexts, predicted_vs_gravimetric_path)
     _plot_delay_gap_by_condition(contexts, delay_gap_path)
+    segmented_tail_paths = (
+        _write_segmented_tail_review(
+            segmented_tail_contexts if segmented_tail_contexts is not None else contexts,
+            stage_dir=stage_dir,
+        )
+        if bool(segmented_tail_review)
+        else {}
+    )
 
     run_summary_csv = stage_dir / "run_summary.csv"
     run_summary_json = stage_dir / "run_summary.json"
@@ -1251,6 +1520,12 @@ def _export_report_from_contexts(
         ),
         "run_count": len(rendered_summary_rows),
         "condition_count": len(rendered_condition_rows),
+        "segmented_tail_review": bool(segmented_tail_review),
+        "segmented_tail_review_run_count": (
+            len(segmented_tail_contexts if segmented_tail_contexts is not None else contexts)
+            if bool(segmented_tail_review)
+            else 0
+        ),
         "paths": {
             "run_summary_csv": str(run_summary_csv),
             "run_summary_json": str(run_summary_json),
@@ -1260,6 +1535,7 @@ def _export_report_from_contexts(
             "delay_gap_by_condition_png": str(delay_gap_path),
             "runs_dir": str(runs_dir),
             "conditions_dir": str(conditions_dir),
+            **segmented_tail_paths,
         },
     }
     dataset_mod._write_json(manifest_json, manifest)
@@ -1299,6 +1575,271 @@ def _add_vertical_guides(ax, guides: list[tuple[float | None, str, str, str, flo
             alpha=0.95,
             label=label_arg,
         )
+
+
+def _segmented_tail_common_guides(summary_row: dict, review_row: dict):
+    guides = [
+        (
+            review_row.get("segmented_tail_start_delay_from_emergence_us"),
+            "segmented tail start",
+            "#059669",
+            "--",
+            1.8,
+        ),
+        (
+            review_row.get("segmented_knee_delay_from_emergence_us"),
+            "segmented knee",
+            "#0891b2",
+            "-.",
+            1.4,
+        ),
+        (
+            review_row.get("segmented_second_knee_delay_from_emergence_us"),
+            "segmented second knee",
+            "#be123c",
+            "-.",
+            1.2,
+        ),
+        (
+            summary_row.get("tail_start_delay_from_emergence_us"),
+            "current tail start",
+            "#7c3aed",
+            "--",
+            1.5,
+        ),
+        (
+            summary_row.get("last_plateau_delay_from_emergence_us"),
+            "current last plateau",
+            "#0f766e",
+            ":",
+            1.1,
+        ),
+        (
+            summary_row.get("confirmed_collapse_delay_from_emergence_us"),
+            "current confirmed collapse",
+            "#dc2626",
+            "-.",
+            1.2,
+        ),
+        (
+            summary_row.get("gravimetric_equality_delay_us"),
+            "grav eq timing",
+            "#111827",
+            ":",
+            1.4,
+        ),
+    ]
+    if (
+        _clean_text(review_row.get("segmented_tail_start_source"))
+        == segmented_tail_mod.TAIL_START_SOURCE_THREE_TWO_MIDPOINT
+    ):
+        guides.extend(
+            [
+                (
+                    review_row.get("segmented_three_break_tail_start_delay_from_emergence_us"),
+                    "three-break tau1",
+                    "#86efac",
+                    ":",
+                    1.0,
+                ),
+                (
+                    review_row.get("segmented_two_break_tail_start_delay_from_emergence_us"),
+                    "two-break tau1",
+                    "#94a3b8",
+                    ":",
+                    1.0,
+                ),
+            ]
+        )
+    return guides
+
+
+def _raw_tail_width_points(tail_rows: list[dict]) -> list[tuple[float, float]]:
+    points = []
+    for row in list(tail_rows or []):
+        delay = _float_or_none(dict(row or {}).get("delay_from_emergence_us"))
+        width = _float_or_none(dict(row or {}).get("attached_width_px"))
+        if delay is None or width is None:
+            continue
+        points.append((float(delay), float(width)))
+    return sorted(points)
+
+
+def _plot_segmented_tail_run(context: dict, result: dict, review_row: dict, output_path: Path):
+    plt = _import_pyplot()
+
+    summary_row = dict(context.get("summary_row") or {})
+    tail_rows = list(context.get("tail_rows") or [])
+    raw_points = _raw_tail_width_points(tail_rows)
+    median_trace = list(result.get("trace") or [])
+    fit_points = list(result.get("fit_points") or [])
+    guides = _segmented_tail_common_guides(summary_row, review_row)
+
+    fig, ax = plt.subplots(1, 1, figsize=(11, 6))
+    if raw_points:
+        ax.scatter(
+            [x for x, _y in raw_points],
+            [y for _x, y in raw_points],
+            color="#d1d5db",
+            edgecolors="#6b7280",
+            s=26,
+            linewidths=0.5,
+            label="recorded width frames",
+            zorder=2,
+        )
+    if median_trace:
+        ax.plot(
+            [float(row["delay_from_emergence_us"]) for row in median_trace],
+            [float(row["median_width_px"]) for row in median_trace],
+            color="#d97706",
+            marker="o",
+            markersize=4,
+            linewidth=1.5,
+            label="median fit trace",
+            zorder=4,
+        )
+    if fit_points:
+        ax.plot(
+            [float(row["delay_from_emergence_us"]) for row in fit_points],
+            [float(row["fitted_width_px"]) for row in fit_points],
+            color="#059669",
+            linewidth=2.2,
+            label="segmented regression",
+            zorder=5,
+        )
+
+    bottom_guard_points = [
+        (
+            _float_or_none(row.get("delay_from_emergence_us")),
+            _float_or_none(row.get("attached_width_px")),
+        )
+        for row in tail_rows
+        if bool(row.get("attached_bottom_guard_hit"))
+    ]
+    bottom_guard_points = [
+        (float(x), float(y)) for x, y in bottom_guard_points if x is not None and y is not None
+    ]
+    if bottom_guard_points:
+        ax.scatter(
+            [x for x, _y in bottom_guard_points],
+            [y for _x, y in bottom_guard_points],
+            facecolors="none",
+            edgecolors="#dc2626",
+            s=54,
+            linewidths=1.0,
+            label="bottom-guard hit",
+            zorder=6,
+        )
+
+    detachment_points = [
+        (
+            _float_or_none(row.get("delay_from_emergence_us")),
+            _float_or_none(row.get("attached_width_px")),
+        )
+        for row in tail_rows
+        if _tail_detachment_predicate(row)
+    ]
+    detachment_points = [
+        (float(x), float(y)) for x, y in detachment_points if x is not None and y is not None
+    ]
+    if detachment_points:
+        ax.scatter(
+            [x for x, _y in detachment_points],
+            [y for _x, y in detachment_points],
+            color="#111827",
+            marker="x",
+            s=48,
+            label="detachment-like frame",
+            zorder=7,
+        )
+
+    grav_low = _float_or_none(summary_row.get("gravimetric_equality_delay_low_us"))
+    grav_high = _float_or_none(summary_row.get("gravimetric_equality_delay_high_us"))
+    if grav_low is not None and grav_high is not None and grav_high > grav_low:
+        ax.axvspan(float(grav_low), float(grav_high), color="#111827", alpha=0.09, label="grav eq 95% band")
+    _add_vertical_guides(ax, guides)
+
+    fit_status = review_row.get("segmented_fit_status") or "n/a"
+    model_name = review_row.get("segmented_model_name") or "n/a"
+    segmented_tail = review_row.get("segmented_tail_start_delay_from_emergence_us")
+    current_tail = review_row.get("current_tail_start_delay_from_emergence_us")
+    ax.set_title(
+        f"{summary_row.get('run_id')} | {summary_row.get('condition_key')} | "
+        f"{model_name} ({fit_status}) | segmented {segmented_tail} us vs current {current_tail} us",
+        fontsize=11,
+    )
+    ax.set_xlabel("Delay from emergence (us)")
+    ax.set_ylabel("Attached width (px)")
+    ax.grid(alpha=0.22)
+    handles, labels = ax.get_legend_handles_labels()
+    if handles:
+        ax.legend(handles, labels, fontsize=8, loc="best")
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+
+
+def _plot_segmented_tail_contact_sheet(review_items: list[dict], output_path: Path):
+    plt = _import_pyplot()
+
+    items = list(review_items or [])
+    if not items:
+        fig, ax = plt.subplots(1, 1, figsize=(8, 3))
+        ax.text(0.5, 0.5, "No segmented tail review rows", ha="center", va="center")
+        ax.axis("off")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=160)
+        plt.close(fig)
+        return
+
+    column_count = min(3, max(1, len(items)))
+    row_count = int(math.ceil(len(items) / float(column_count)))
+    fig, axes = plt.subplots(row_count, column_count, figsize=(5.2 * column_count, 3.4 * row_count), squeeze=False)
+    for ax in axes.flatten():
+        ax.axis("off")
+
+    for index, item in enumerate(items):
+        ax = axes[index // column_count][index % column_count]
+        ax.axis("on")
+        context = dict(item.get("context") or {})
+        result = dict(item.get("result") or {})
+        row = dict(item.get("row") or {})
+        summary = dict(context.get("summary_row") or {})
+        trace = list(result.get("trace") or [])
+        fit_points = list(result.get("fit_points") or [])
+        if trace:
+            ax.plot(
+                [float(point["delay_from_emergence_us"]) for point in trace],
+                [float(point["median_width_px"]) for point in trace],
+                color="#d97706",
+                marker="o",
+                markersize=2.8,
+                linewidth=1.1,
+            )
+        if fit_points:
+            ax.plot(
+                [float(point["delay_from_emergence_us"]) for point in fit_points],
+                [float(point["fitted_width_px"]) for point in fit_points],
+                color="#059669",
+                linewidth=1.6,
+            )
+        for x_value, _label, color, linestyle, linewidth in _segmented_tail_common_guides(summary, row):
+            if _float_or_none(x_value) is not None:
+                ax.axvline(float(x_value), color=color, linestyle=linestyle, linewidth=linewidth, alpha=0.85)
+        ax.set_title(
+            f"{summary.get('run_id')}\n{row.get('segmented_model_name') or 'n/a'} | "
+            f"seg {row.get('segmented_tail_start_delay_from_emergence_us')}",
+            fontsize=8,
+        )
+        ax.grid(alpha=0.18)
+        ax.tick_params(labelsize=7)
+
+    fig.suptitle("Segmented Tail Start Review", fontsize=13)
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.97))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=160)
+    plt.close(fig)
 
 
 def _plot_run_report(context: dict, output_path: Path):
@@ -1832,6 +2373,7 @@ def export_online_stream_experiment_report(
     correction_mode: str | None = None,
     settling_aware_fit_enabled: bool | None = None,
     tail_settling_rule_enabled: bool | None = None,
+    segmented_tail_review: bool = False,
 ):
     experiment_root = dataset_mod.resolve_experiment_root(experiment_root)
     density_g_per_ml = _validate_density_g_per_ml(density_g_per_ml)
@@ -1877,6 +2419,15 @@ def export_online_stream_experiment_report(
         )
         for row in metadata_rows
     ]
+    segmented_tail_contexts = (
+        _segmented_tail_contexts_with_unlisted_runs(
+            experiment_root,
+            contexts,
+            density_g_per_ml=density_g_per_ml,
+        )
+        if bool(segmented_tail_review)
+        else None
+    )
     return _export_report_from_contexts(
         contexts,
         stage_dir=stage_dir,
@@ -1885,6 +2436,8 @@ def export_online_stream_experiment_report(
         density_g_per_ml=density_g_per_ml,
         correction_mode=correction_mode,
         flow_fit_policy_override=flow_fit_policy_override,
+        segmented_tail_review=segmented_tail_review,
+        segmented_tail_contexts=segmented_tail_contexts,
         correction_rule=(
             dict(chroma_proto_mod.SELECTED_V2_RULE)
             if correction_mode == CORRECTION_MODE_CHROMA_EDGE_V2

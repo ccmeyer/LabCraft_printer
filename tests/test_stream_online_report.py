@@ -7,6 +7,7 @@ import pytest
 import tools.report_online_stream_experiment as report_cli_mod
 from tools.stream_analysis import dataset as dataset_mod
 from tools.stream_analysis import online_report as mod
+from tools.stream_analysis import segmented_tail as segmented_tail_mod
 
 
 def _write_json(path: Path, payload):
@@ -80,6 +81,7 @@ def _make_online_run(
             "visible_volume_nl": 80.0,
             "attached_bottom_clearance_px": 120.0,
             "attached_bottom_guard_hit": True,
+            "tail_width_usable": True,
             "warnings": ["attached_bottom_guard_hit"],
         },
         {
@@ -90,6 +92,7 @@ def _make_online_run(
             "visible_volume_nl": 84.0,
             "attached_bottom_clearance_px": 108.0,
             "attached_bottom_guard_hit": True,
+            "tail_width_usable": True,
             "warnings": ["attached_bottom_guard_hit"],
             "tail_start_candidate": True,
         },
@@ -101,6 +104,7 @@ def _make_online_run(
             "visible_volume_nl": 88.0,
             "attached_bottom_clearance_px": 96.0,
             "attached_bottom_guard_hit": True,
+            "tail_width_usable": True,
             "warnings": ["attached_bottom_guard_hit"],
             "separated_from_nozzle_landmark": True,
             "landmark_reason": "separated_from_nozzle",
@@ -113,6 +117,7 @@ def _make_online_run(
             "visible_volume_nl": 92.0,
             "attached_bottom_clearance_px": 85.0,
             "attached_bottom_guard_hit": True,
+            "tail_width_usable": True,
             "warnings": ["attached_bottom_guard_hit"],
         },
     ]
@@ -284,6 +289,86 @@ def test_export_online_stream_report_writes_artifacts_and_expected_timing(tmp_pa
     assert Path(condition_row["condition_overlay_png"]).exists()
 
 
+def test_export_online_stream_report_writes_segmented_tail_review(tmp_path):
+    pytest.importorskip("matplotlib")
+    pytest.importorskip("scipy")
+
+    exp_dir = tmp_path / "Stream_report_segmented-20260414_120000"
+    process_root = exp_dir / "calibration_recordings" / dataset_mod.ONLINE_STREAM_PROCESS_NAME
+    run = _make_online_run(
+        process_root,
+        run_id="run_001",
+        replicate_index=1,
+        gravimetric_nl=90.0,
+        predicted_volume_nl=84.0,
+        tail_start_delay_us=4200,
+        first_detachment_delay_us=4400,
+    )
+    orphan_run = _make_online_run(
+        process_root,
+        run_id="run_002",
+        replicate_index=2,
+        gravimetric_nl=88.0,
+        predicted_volume_nl=83.0,
+        tail_start_delay_us=4250,
+        first_detachment_delay_us=4520,
+    )
+    _write_metadata_csv(exp_dir, [run["metadata_row"]])
+
+    payload = mod.export_online_stream_experiment_report(exp_dir, segmented_tail_review=True)
+
+    paths = payload["paths"]
+    assert payload["segmented_tail_review"] is True
+    assert payload["run_count"] == 1
+    assert payload["segmented_tail_review_run_count"] == 2
+    assert Path(paths["segmented_tail_review_run_summary_csv"]).exists()
+    assert Path(paths["segmented_tail_review_run_summary_json"]).exists()
+    assert Path(paths["segmented_tail_review_contact_sheet_png"]).exists()
+
+    with Path(paths["segmented_tail_review_run_summary_csv"]).open("r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+
+    assert len(rows) == 2
+    by_run = {row["run_id"]: row for row in rows}
+    assert set(by_run) == {"run_001", "run_002"}
+    row = by_run["run_001"]
+    assert row["run_id"] == "run_001"
+    assert row["segmented_fit_status"] == "ok"
+    assert row["segmented_usable_point_count"] == "4"
+    assert "segmented_second_knee_delay_from_emergence_us" in row
+    assert "segmented_breakpoint_delays_from_emergence_us" in row
+    assert "segmented_breakpoint_refinement_step_us" in row
+    assert "segmented_tail_start_observed_delay" in row
+    assert "segmented_breakpoint_observed_delays" in row
+    assert "segmented_tail_start_source" in row
+    assert "segmented_three_break_tail_start_delay_from_emergence_us" in row
+    assert "segmented_two_break_tail_start_delay_from_emergence_us" in row
+    assert "segmented_midpoint_tail_start_delay_from_emergence_us" in row
+    assert "segmented_bic_plateau_gradual_shoulder_steep_shoulder_collapse" in row
+    assert "segmented_three_break_gate_passed" in row
+    assert "segmented_three_break_gate_reason" in row
+    assert "segmented_three_break_tail_start_advance_us" in row
+    assert "segmented_three_break_early_shoulder_slope_px_per_ms" in row
+    assert "segmented_local_confirmation_passed" in row
+    assert "segmented_local_confirmation_reason" in row
+    assert "segmented_local_confirmation_baseline_width_px" in row
+    assert "segmented_local_confirmation_final_drop_px" in row
+    assert "segmented_local_confirmation_rebound_px" in row
+    assert row["segmented_model_name"] in {
+        segmented_tail_mod.MODEL_PLATEAU_DECLINE,
+        segmented_tail_mod.MODEL_PLATEAU_SHOULDER_COLLAPSE,
+    }
+    assert Path(row["run_report_png"]).exists()
+    assert by_run["run_002"]["gravimetric_equality_delay_us"] == ""
+    assert Path(by_run["run_002"]["run_report_png"]).exists()
+
+    review_json = json.loads(Path(paths["segmented_tail_review_run_summary_json"]).read_text(encoding="utf-8"))
+    json_row = {item["run_id"]: item for item in review_json}["run_001"]
+    assert "segmented_breakpoint_delays_from_emergence_us" in json_row
+    assert "segmented_breakpoint_observed_delays" in json_row
+    assert "segmented_tail_start_source" in json_row
+
+
 def test_export_online_stream_report_default_path_does_not_use_chroma_correction(tmp_path, monkeypatch):
     pytest.importorskip("matplotlib")
 
@@ -310,6 +395,9 @@ def test_export_online_stream_report_default_path_does_not_use_chroma_correction
     assert payload["correction_mode"] is None
     assert payload["correction_rule"] is None
     assert Path(payload["output_root"]).name == mod.STAGE_DIRNAME
+    assert payload["segmented_tail_review"] is False
+    assert "segmented_tail_review_run_summary_csv" not in payload["paths"]
+    assert not (Path(payload["output_root"]) / "segmented_tail_review").exists()
 
 
 def test_export_online_stream_report_runtime_rgb_fix_passes_settling_override(tmp_path, monkeypatch):
@@ -443,6 +531,7 @@ def test_report_online_stream_experiment_cli_passes_tail_settling_toggle(monkeyp
             "runtime_rgb_fix",
             "--no-settling-aware-fit",
             "--no-tail-settling-rule",
+            "--segmented-tail-review",
         ]
     )
 
@@ -450,3 +539,4 @@ def test_report_online_stream_experiment_cli_passes_tail_settling_toggle(monkeyp
     assert captured["kwargs"]["correction_mode"] == "runtime_rgb_fix"
     assert captured["kwargs"]["settling_aware_fit_enabled"] is False
     assert captured["kwargs"]["tail_settling_rule_enabled"] is False
+    assert captured["kwargs"]["segmented_tail_review"] is True

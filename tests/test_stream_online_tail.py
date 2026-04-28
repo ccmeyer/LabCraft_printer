@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from tools.stream_analysis import online_tail as mod
+from tools.stream_analysis import segmented_tail as segmented_tail_mod
 
 
 def _flow_fit_result(**overrides):
@@ -74,6 +75,371 @@ def _tail_frame_row(
     }
     row.update(dict(extra or {}))
     return row
+
+
+def _segmented_tail_rows(widths, *, start_delay_us=0, step_us=100):
+    return [
+        {
+            "phase": "tail_backtrack",
+            "status": "accepted",
+            "delay_from_emergence_us": int(start_delay_us + index * step_us),
+            "attached_width_px": float(width),
+            "tail_width_usable": True,
+        }
+        for index, width in enumerate(widths)
+    ]
+
+
+def _segmented_tail_pairs(pairs):
+    return [
+        {
+            "phase": "tail_backtrack",
+            "status": "accepted",
+            "delay_from_emergence_us": int(delay_us),
+            "attached_width_px": float(width),
+            "tail_width_usable": True,
+        }
+        for delay_us, width in pairs
+    ]
+
+
+def test_segmented_tail_plateau_only_returns_no_tail_start():
+    result = segmented_tail_mod.evaluate_segmented_tail_trace(
+        _segmented_tail_rows([70.0, 70.1, 69.9, 70.0, 70.1, 69.95]),
+        baseline_width_px=70.0,
+    )
+
+    assert result["fit_status"] == "ok"
+    assert result["model_name"] == segmented_tail_mod.MODEL_PLATEAU
+    assert result["tail_start_delay_from_emergence_us"] is None
+
+
+def test_segmented_tail_one_breakpoint_collapse_selects_breakpoint():
+    result = segmented_tail_mod.evaluate_segmented_tail_trace(
+        _segmented_tail_rows([70, 70, 70, 66, 62, 58, 54]),
+        baseline_width_px=70.0,
+    )
+
+    assert result["fit_status"] == "ok"
+    assert result["model_name"] == segmented_tail_mod.MODEL_PLATEAU_DECLINE
+    assert result["tail_start_delay_from_emergence_us"] == 200
+    assert result["knee_delay_from_emergence_us"] is None
+
+
+def test_segmented_tail_one_breakpoint_uses_25us_refined_breakpoint():
+    result = segmented_tail_mod.evaluate_segmented_tail_trace(
+        _segmented_tail_rows([70, 70, 70, 67, 63, 59, 55]),
+        baseline_width_px=70.0,
+    )
+
+    assert result["model_name"] == segmented_tail_mod.MODEL_PLATEAU_DECLINE
+    assert result["tail_start_delay_from_emergence_us"] == 225
+    assert result["tail_start_observed_delay"] is False
+    assert result["breakpoint_observed_delays"] == [False]
+    assert result["breakpoint_refinement_step_us"] == 25
+
+
+def test_segmented_tail_shoulder_collapse_selects_earlier_shoulder_start():
+    result = segmented_tail_mod.evaluate_segmented_tail_trace(
+        _segmented_tail_rows([70, 70, 70, 69, 68, 63, 58]),
+        baseline_width_px=70.0,
+    )
+
+    assert result["fit_status"] == "ok"
+    assert result["model_name"] == segmented_tail_mod.MODEL_PLATEAU_SHOULDER_COLLAPSE
+    assert result["tail_start_delay_from_emergence_us"] == 200
+    assert result["knee_delay_from_emergence_us"] == 400
+    assert result["second_knee_delay_from_emergence_us"] is None
+
+
+def test_segmented_tail_two_break_model_uses_25us_refined_knee():
+    result = segmented_tail_mod.evaluate_segmented_tail_trace(
+        _segmented_tail_rows([70, 70, 70, 70, 69, 67, 63, 59, 55]),
+        baseline_width_px=70.0,
+    )
+    two_break = result["models"][segmented_tail_mod.MODEL_PLATEAU_SHOULDER_COLLAPSE]
+
+    assert two_break["tail_start_delay_from_emergence_us"] == 300
+    assert two_break["knee_delay_from_emergence_us"] == 475
+    assert two_break["breakpoint_observed_delays"] == [True, False]
+
+
+def test_segmented_tail_multi_stage_shoulder_selects_three_break_model():
+    result = segmented_tail_mod.evaluate_segmented_tail_trace(
+        _segmented_tail_rows([70, 70, 70, 70, 69.8, 69.4, 69.0, 68.6, 66, 62, 58, 54]),
+        baseline_width_px=70.0,
+    )
+
+    assert result["fit_status"] == "ok"
+    assert (
+        result["model_name"]
+        == segmented_tail_mod.MODEL_PLATEAU_GRADUAL_SHOULDER_STEEP_SHOULDER_COLLAPSE
+    )
+    assert result["tail_start_delay_from_emergence_us"] == 325
+    assert result["knee_delay_from_emergence_us"] == 700
+    assert result["second_knee_delay_from_emergence_us"] == 800
+    assert result["breakpoint_delays_from_emergence_us"] == [325, 700, 800]
+    assert result["breakpoint_observed_delays"] == [False, True, True]
+
+
+def test_segmented_tail_three_break_uses_25us_refined_breakpoints_and_local_confirmation():
+    pairs = []
+    for delay_us in range(0, 1000, 100):
+        width = 70.0
+        if delay_us > 275:
+            width += -15.0 * float(delay_us - 275) / 1000.0
+        if delay_us > 475:
+            width += -45.0 * float(delay_us - 475) / 1000.0
+        if delay_us > 675:
+            width += -100.0 * float(delay_us - 675) / 1000.0
+        pairs.append((delay_us, width))
+
+    result = segmented_tail_mod.evaluate_segmented_tail_trace(
+        _segmented_tail_pairs(pairs),
+        baseline_width_px=70.0,
+    )
+
+    assert (
+        result["model_name"]
+        == segmented_tail_mod.MODEL_PLATEAU_GRADUAL_SHOULDER_STEEP_SHOULDER_COLLAPSE
+    )
+    assert result["tail_start_source"] == segmented_tail_mod.TAIL_START_SOURCE_THREE_BREAK_TAU1
+    assert result["breakpoint_delays_from_emergence_us"] == [275, 475, 675]
+    assert result["breakpoint_observed_delays"] == [False, False, False]
+    assert result["tail_start_observed_delay"] is False
+    assert result["local_confirmation"]["passed"] is True
+
+
+def test_segmented_tail_highlighted_184202_shape_moves_start_earlier():
+    result = segmented_tail_mod.evaluate_segmented_tail_trace(
+        _segmented_tail_pairs(
+            [
+                (1950, 66.0),
+                (2450, 66.0),
+                (2850, 66.0),
+                (2900, 66.0),
+                (2950, 66.0),
+                (3000, 65.0),
+                (3050, 64.5),
+                (3100, 64.0),
+                (3150, 63.0),
+                (3200, 61.5),
+                (3250, 58.0),
+                (3300, 51.5),
+                (3350, 39.0),
+                (3400, 25.0),
+            ]
+        ),
+        baseline_width_px=66.0,
+    )
+
+    assert (
+        result["model_name"]
+        == segmented_tail_mod.MODEL_PLATEAU_GRADUAL_SHOULDER_STEEP_SHOULDER_COLLAPSE
+    )
+    assert result["tail_start_delay_from_emergence_us"] == 2950
+    assert result["knee_delay_from_emergence_us"] == 3225
+    assert result["second_knee_delay_from_emergence_us"] == 3325
+
+
+def test_segmented_tail_highlighted_184023_shape_moves_start_earlier():
+    result = segmented_tail_mod.evaluate_segmented_tail_trace(
+        _segmented_tail_pairs(
+            [
+                (1950, 67.0),
+                (2350, 67.0),
+                (2400, 67.0),
+                (2450, 67.0),
+                (2500, 67.0),
+                (2550, 67.0),
+                (2600, 67.0),
+                (2650, 67.0),
+                (2700, 66.0),
+                (2750, 66.0),
+                (2800, 66.0),
+                (2850, 66.0),
+                (2900, 66.0),
+                (2950, 66.0),
+                (3000, 66.0),
+                (3050, 66.0),
+                (3100, 64.0),
+                (3150, 64.0),
+                (3200, 62.0),
+                (3250, 58.0),
+                (3300, 52.0),
+                (3350, 39.0),
+                (3400, 25.0),
+            ]
+        ),
+        baseline_width_px=67.0,
+    )
+
+    assert (
+        result["model_name"]
+        == segmented_tail_mod.MODEL_PLATEAU_GRADUAL_SHOULDER_STEEP_SHOULDER_COLLAPSE
+    )
+    assert result["tail_start_delay_from_emergence_us"] == 3025
+    assert result["knee_delay_from_emergence_us"] == 3200
+    assert result["second_knee_delay_from_emergence_us"] == 3300
+
+
+def test_segmented_tail_three_break_gate_blocks_early_weak_shoulder_overfit():
+    result = segmented_tail_mod.evaluate_segmented_tail_trace(
+        _segmented_tail_pairs(
+            [
+                (1950, 67.0),
+                (2050, 67.0),
+                (2150, 67.0),
+                (2250, 66.0),
+                (2350, 66.5),
+                (2450, 66.25),
+                (2550, 66.5),
+                (2650, 67.0),
+                (2750, 66.5),
+                (2850, 65.5),
+                (2950, 65.5),
+                (3050, 65.0),
+                (3100, 65.0),
+                (3150, 63.5),
+                (3200, 62.5),
+                (3250, 59.0),
+                (3300, 53.0),
+                (3350, 41.0),
+                (3400, 27.0),
+            ]
+        ),
+        baseline_width_px=66.5,
+    )
+
+    three_break = result["models"][
+        segmented_tail_mod.MODEL_PLATEAU_GRADUAL_SHOULDER_STEEP_SHOULDER_COLLAPSE
+    ]
+    assert three_break["tail_start_delay_from_emergence_us"] == 2775
+    assert result["model_name"] == segmented_tail_mod.MODEL_PLATEAU_SHOULDER_COLLAPSE
+    assert result["tail_start_delay_from_emergence_us"] == 3075
+    assert result["three_break_selection_gate"]["passed"] is False
+    assert result["three_break_selection_gate"]["reason"] == "tail_start_advance_too_large"
+
+
+def test_segmented_tail_local_rebound_uses_midpoint_between_three_and_two_breaks():
+    result = segmented_tail_mod.evaluate_segmented_tail_trace(
+        _segmented_tail_pairs(
+            [
+                (2050, 66.0),
+                (2550, 66.0),
+                (2950, 65.5),
+                (3000, 65.0),
+                (3050, 65.5),
+                (3100, 64.0),
+                (3150, 63.5),
+                (3200, 62.5),
+                (3250, 59.0),
+                (3300, 53.0),
+                (3350, 41.0),
+                (3400, 26.0),
+            ]
+        ),
+        baseline_width_px=66.0,
+    )
+
+    assert result["model_name"] == segmented_tail_mod.MODEL_THREE_BREAK_TWO_BREAK_MIDPOINT
+    assert result["tail_start_source"] == segmented_tail_mod.TAIL_START_SOURCE_THREE_TWO_MIDPOINT
+    assert result["three_break_tail_start_delay_from_emergence_us"] == 2975
+    assert result["two_break_tail_start_delay_from_emergence_us"] == 3125
+    assert result["midpoint_tail_start_delay_from_emergence_us"] == 3050
+    assert result["tail_start_delay_from_emergence_us"] == 3050
+    assert result["knee_delay_from_emergence_us"] == 3225
+    assert result["second_knee_delay_from_emergence_us"] == 3325
+    assert result["local_confirmation"]["passed"] is False
+    assert result["local_confirmation"]["reason"] == "final_drop_too_small"
+
+
+def test_segmented_tail_weak_local_drop_uses_midpoint_between_three_and_two_breaks():
+    result = segmented_tail_mod.evaluate_segmented_tail_trace(
+        _segmented_tail_pairs(
+            [
+                (1950, 67.0),
+                (2350, 67.0),
+                (2400, 67.0),
+                (2450, 67.0),
+                (2500, 67.0),
+                (2550, 67.0),
+                (2600, 67.0),
+                (2650, 66.0),
+                (2700, 66.0),
+                (2750, 66.0),
+                (2800, 66.0),
+                (2850, 66.0),
+                (2900, 66.0),
+                (2950, 66.0),
+                (3000, 66.0),
+                (3050, 65.0),
+                (3100, 64.5),
+                (3150, 64.0),
+                (3200, 62.0),
+                (3250, 58.0),
+                (3300, 52.0),
+                (3350, 40.5),
+                (3400, 26.0),
+            ]
+        ),
+        baseline_width_px=67.0,
+    )
+
+    assert result["model_name"] == segmented_tail_mod.MODEL_THREE_BREAK_TWO_BREAK_MIDPOINT
+    assert result["tail_start_source"] == segmented_tail_mod.TAIL_START_SOURCE_THREE_TWO_MIDPOINT
+    assert result["three_break_tail_start_delay_from_emergence_us"] == 2975
+    assert result["two_break_tail_start_delay_from_emergence_us"] == 3125
+    assert result["midpoint_tail_start_delay_from_emergence_us"] == 3050
+    assert result["tail_start_delay_from_emergence_us"] == 3050
+    assert result["local_confirmation"]["passed"] is False
+    assert result["local_confirmation"]["reason"] == "final_drop_too_small"
+
+
+def test_segmented_tail_robust_to_plateau_outlier():
+    result = segmented_tail_mod.evaluate_segmented_tail_trace(
+        _segmented_tail_rows([70.0, 70.1, 75.0, 70.0, 69.8, 67.0, 64.0, 61.0, 58.0]),
+        baseline_width_px=70.0,
+    )
+
+    assert result["fit_status"] == "ok"
+    assert result["tail_start_delay_from_emergence_us"] == 325
+
+
+def test_segmented_tail_insufficient_points_returns_status():
+    result = segmented_tail_mod.evaluate_segmented_tail_trace(
+        _segmented_tail_rows([70.0, 69.5, 69.0]),
+        baseline_width_px=70.0,
+    )
+
+    assert result["fit_status"] == "insufficient_usable_points"
+    assert result["tail_start_delay_from_emergence_us"] is None
+
+
+def test_segmented_tail_median_aggregates_duplicate_delays():
+    rows = [
+        {
+            "phase": "tail_backtrack",
+            "delay_from_emergence_us": 1000,
+            "attached_width_px": width,
+            "tail_width_usable": True,
+        }
+        for width in [70.0, 68.0, 69.0]
+    ]
+    rows.append(
+        {
+            "phase": "tail_backtrack",
+            "delay_from_emergence_us": 1100,
+            "attached_width_px": 67.0,
+            "tail_width_usable": True,
+        }
+    )
+
+    trace = segmented_tail_mod.build_tail_width_trace(rows)
+
+    assert trace[0]["delay_from_emergence_us"] == 1000
+    assert trace[0]["median_width_px"] == 69.0
+    assert trace[0]["sample_count"] == 3
 
 
 def test_plan_online_stream_tail_phase_anchors_on_last_accepted_flow_delay():
