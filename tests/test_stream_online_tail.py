@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from tools.stream_analysis import online_tail as mod
 from tools.stream_analysis import segmented_tail as segmented_tail_mod
 
@@ -1017,12 +1019,31 @@ def test_resolve_online_stream_tail_result_adds_segmented_shadow_without_control
     assert segmented["tail_start_delay_from_emergence_us"] is not None
     assert segmented["fit_points"]
     assert resolved["predicted_stream_duration_us"] == runtime_tail_start
+    expected_segmented_volume = -1.2 + (
+        0.0187 * float(segmented["tail_start_delay_from_emergence_us"])
+    )
+    assert segmented["predicted_stream_duration_us"] == segmented["tail_start_delay_from_emergence_us"]
+    assert segmented["predicted_volume_nl"] == pytest.approx(expected_segmented_volume)
+    assert segmented["runtime_predicted_volume_nl"] == pytest.approx(resolved["predicted_volume_nl"])
+    assert segmented["predicted_volume_delta_from_runtime_nl"] == pytest.approx(
+        expected_segmented_volume - resolved["predicted_volume_nl"]
+    )
     assert (
         resolved["tail_phase"]["segmented_tail_start_delay_from_emergence_us"]
         == segmented["tail_start_delay_from_emergence_us"]
     )
     assert resolved["tail_phase"]["segmented_tail_start_delta_from_runtime_us"] == (
         segmented["tail_start_delay_from_emergence_us"] - runtime_tail_start
+    )
+    assert (
+        resolved["tail_phase"]["segmented_predicted_stream_duration_us"]
+        == segmented["predicted_stream_duration_us"]
+    )
+    assert resolved["tail_phase"]["segmented_predicted_volume_nl"] == pytest.approx(
+        segmented["predicted_volume_nl"]
+    )
+    assert resolved["tail_phase"]["segmented_predicted_volume_delta_from_runtime_nl"] == pytest.approx(
+        segmented["predicted_volume_delta_from_runtime_nl"]
     )
 
 

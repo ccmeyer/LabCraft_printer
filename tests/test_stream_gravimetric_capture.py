@@ -601,6 +601,10 @@ def _online_stream_result_payload():
             "tail_phase": {
                 "status": "resolved",
                 "tail_start_delay_from_emergence_us": 5200,
+                "segmented_tail_start_delay_from_emergence_us": 5100,
+                "segmented_predicted_stream_duration_us": 5100,
+                "segmented_predicted_volume_nl": 0.7740,
+                "segmented_predicted_volume_delta_from_runtime_nl": -0.0161,
             },
             "predicted_stream_duration_us": 6400,
             "predicted_volume_nl": 0.7901,
@@ -1524,6 +1528,10 @@ def test_stream_capture_finalize_online_mode_appends_metadata_and_sidecar(tmp_pa
     assert rows[0]["Tail Start From Emergence (us)"] == "5200"
     assert rows[0]["Predicted Stream Duration (us)"] == "6400"
     assert rows[0]["Predicted Volume (nL)"] == "0.7901"
+    assert rows[0]["Segmented Tail Start From Emergence (us)"] == "5100"
+    assert rows[0]["Segmented Predicted Stream Duration (us)"] == "5100"
+    assert rows[0]["Segmented Predicted Volume (nL)"] == "0.774"
+    assert rows[0]["Segmented Volume Delta From Runtime (nL)"] == "-0.0161"
     assert rows[0]["Analysis Warnings"] == "tail advisory; budget low"
 
     sidecar_path = Path(model.experiment_model.experiment_dir_path) / "stream_capture_log.jsonl"
@@ -1543,6 +1551,12 @@ def test_stream_capture_finalize_online_mode_appends_metadata_and_sidecar(tmp_pa
     assert sidecar_rows[0]["tail_start_delay_from_emergence_us"] == 5200
     assert sidecar_rows[0]["predicted_stream_duration_us"] == 6400
     assert sidecar_rows[0]["predicted_volume_nl"] == pytest.approx(0.7901)
+    assert sidecar_rows[0]["segmented_tail_start_delay_from_emergence_us"] == 5100
+    assert sidecar_rows[0]["segmented_predicted_stream_duration_us"] == 5100
+    assert sidecar_rows[0]["segmented_predicted_volume_nl"] == pytest.approx(0.7740)
+    assert sidecar_rows[0]["segmented_predicted_volume_delta_from_runtime_nl"] == pytest.approx(
+        -0.0161
+    )
     assert sidecar_rows[0]["analysis_warnings"] == ["tail advisory", "budget low"]
     assert [child["run_id"] for child in sidecar_rows[0]["child_processes"]] == [
         "run_nozzle",
@@ -1902,6 +1916,10 @@ def test_stream_capture_online_summary_uses_generic_dataset_labels(monkeypatch, 
             "tail_start_delay_from_emergence_us": 5200,
             "predicted_stream_duration_us": 6400,
             "predicted_volume_nl": 0.7901,
+            "segmented_tail_start_delay_from_emergence_us": 5100,
+            "segmented_predicted_stream_duration_us": 5100,
+            "segmented_predicted_volume_nl": 0.7740,
+            "segmented_predicted_volume_delta_from_runtime_nl": -0.0161,
             "analysis_warnings": ["tail advisory"],
         }
     )
@@ -1912,6 +1930,8 @@ def test_stream_capture_online_summary_uses_generic_dataset_labels(monkeypatch, 
     assert "Capture Run: run_online_demo | Mode: online_stream | Process: OnlineStreamCalibrationProcess" in panel_text
     assert "Timecourse:" not in panel_text
     assert "Flow fit: warning | Tail: resolved" in panel_text
+    assert "Segmented tail: 5100 us" in panel_text
+    assert "Segmented volume: 0.774 nL" in panel_text
     assert "Warnings: tail advisory" in panel_text
 
     popup = dialog._stream_capture_mass_dialog
@@ -1923,6 +1943,10 @@ def test_stream_capture_online_summary_uses_generic_dataset_labels(monkeypatch, 
     assert "Tail start: 5200 us" in popup_text
     assert "Duration: 6400 us" in popup_text
     assert "Volume: 0.7901 nL" in popup_text
+    assert "Segmented tail: 5100 us" in popup_text
+    assert "Segmented duration: 5100 us" in popup_text
+    assert "Segmented volume: 0.774 nL" in popup_text
+    assert "Delta: -0.0161 nL" in popup_text
     assert "Timecourse:" not in popup_text
 
 

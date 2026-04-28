@@ -265,6 +265,10 @@ class StreamCaptureMassEntryDialog(QtWidgets.QDialog):
         tail_start = state.get("tail_start_delay_from_emergence_us")
         predicted_duration = state.get("predicted_stream_duration_us")
         predicted_volume = state.get("predicted_volume_nl")
+        segmented_tail_start = state.get("segmented_tail_start_delay_from_emergence_us")
+        segmented_predicted_duration = state.get("segmented_predicted_stream_duration_us")
+        segmented_predicted_volume = state.get("segmented_predicted_volume_nl")
+        segmented_volume_delta = state.get("segmented_predicted_volume_delta_from_runtime_nl")
         self.status_label.setText(status_message or "Enter ending mass and inspect the printer head.")
         summary_text = (
             f"Session: {state.get('session_id') or '-'}\n"
@@ -282,6 +286,22 @@ class StreamCaptureMassEntryDialog(QtWidgets.QDialog):
                 f"Duration: {predicted_duration if predicted_duration is not None else '-'} us | "
                 f"Volume: {predicted_volume if predicted_volume is not None else '-'} nL"
             )
+            if any(
+                value is not None
+                for value in (
+                    segmented_tail_start,
+                    segmented_predicted_duration,
+                    segmented_predicted_volume,
+                )
+            ):
+                summary_text += (
+                    "\n"
+                    f"Segmented tail: {segmented_tail_start if segmented_tail_start is not None else '-'} us | "
+                    f"Segmented duration: {segmented_predicted_duration if segmented_predicted_duration is not None else '-'} us | "
+                    f"Segmented volume: {segmented_predicted_volume if segmented_predicted_volume is not None else '-'} nL"
+                )
+                if segmented_volume_delta is not None:
+                    summary_text += f" | Delta: {segmented_volume_delta} nL"
         self.summary_label.setText(summary_text)
         ending_mass = state.get("ending_mass_mg")
         if ending_mass is not None and not self._mass_editor_has_focus():
@@ -3038,6 +3058,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         baseline_width_px = plot.get("baseline_width_px")
         tail_start_x_us = plot.get("tail_start_x_us")
         segmented_tail = dict(plot.get("segmented_tail") or {})
+        segmented_status = str(segmented_tail.get("status") or "")
         segmented_fit_points = [
             (float(row["delay_from_emergence_us"]), float(row["fitted_width_px"]))
             for row in list(segmented_tail.get("fit_points") or [])
@@ -3100,10 +3121,21 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._replace_xy_series(bundle["segmented_bracket_right_series"], _vertical_guide(segmented_bracket_right_x_us))
 
         title = "Attached Width vs Time"
-        if segmented_start_x_us is not None:
+        if segmented_status == "running":
+            title = f"{title} | segmented fit running..."
+        elif segmented_start_x_us is not None:
             runtime_label = "-" if tail_start_x_us is None else f"{float(tail_start_x_us):.0f}"
             segmented_label = f"{float(segmented_start_x_us):.0f}"
             title = f"{title} | runtime {runtime_label} us | segmented {segmented_label} us"
+            runtime_volume = segmented_tail.get("runtime_predicted_volume_nl")
+            segmented_volume = segmented_tail.get("predicted_volume_nl")
+            volume_parts = []
+            if runtime_volume is not None:
+                volume_parts.append(f"runtime vol {float(runtime_volume):.4g} nL")
+            if segmented_volume is not None:
+                volume_parts.append(f"segmented vol {float(segmented_volume):.4g} nL")
+            if volume_parts:
+                title = f"{title} | " + " | ".join(volume_parts)
         bundle["chart"].setTitle(title)
 
     def on_online_stream_debug_updated(self, payload):
@@ -3321,6 +3353,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "tail_start_delay_from_emergence_us": None,
             "predicted_stream_duration_us": None,
             "predicted_volume_nl": None,
+            "segmented_tail_start_delay_from_emergence_us": None,
+            "segmented_predicted_stream_duration_us": None,
+            "segmented_predicted_volume_nl": None,
+            "segmented_predicted_volume_delta_from_runtime_nl": None,
             "analysis_warnings": [],
             "rep": int(self.stream_capture_rep_spin.value()) if hasattr(self, "stream_capture_rep_spin") else 1,
             "suggested_rep": int(self.stream_capture_rep_spin.value()) if hasattr(self, "stream_capture_rep_spin") else 1,
@@ -3601,6 +3637,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         tail_start = state.get("tail_start_delay_from_emergence_us")
         predicted_duration = state.get("predicted_stream_duration_us")
         predicted_volume = state.get("predicted_volume_nl")
+        segmented_tail_start = state.get("segmented_tail_start_delay_from_emergence_us")
+        segmented_predicted_duration = state.get("segmented_predicted_stream_duration_us")
+        segmented_predicted_volume = state.get("segmented_predicted_volume_nl")
+        segmented_volume_delta = state.get("segmented_predicted_volume_delta_from_runtime_nl")
         analysis_warnings = state.get("analysis_warnings") or []
         if isinstance(analysis_warnings, (list, tuple)):
             warning_text = "; ".join(str(item) for item in analysis_warnings if str(item).strip())
@@ -3643,6 +3683,22 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 f"Duration: {predicted_duration if predicted_duration is not None else '-'} us | "
                 f"Volume: {predicted_volume if predicted_volume is not None else '-'} nL"
             )
+            if any(
+                value is not None
+                for value in (
+                    segmented_tail_start,
+                    segmented_predicted_duration,
+                    segmented_predicted_volume,
+                )
+            ):
+                summary_text += (
+                    "\n"
+                    f"Segmented tail: {segmented_tail_start if segmented_tail_start is not None else '-'} us | "
+                    f"Segmented duration: {segmented_predicted_duration if segmented_predicted_duration is not None else '-'} us | "
+                    f"Segmented volume: {segmented_predicted_volume if segmented_predicted_volume is not None else '-'} nL"
+                )
+                if segmented_volume_delta is not None:
+                    summary_text += f" | Delta: {segmented_volume_delta} nL"
             if warning_text:
                 summary_text += f"\nWarnings: {warning_text}"
         self.stream_capture_summary_label.setText(summary_text)

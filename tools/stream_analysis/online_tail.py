@@ -2232,6 +2232,46 @@ def resolve_online_stream_tail_result(
             runtime_tail_start_delay_from_emergence_us=tail_start_delay_from_emergence_us,
             analysis_config=resolved_analysis_config,
         )
+    segmented_predicted_stream_duration_us = None
+    segmented_predicted_volume_nl = None
+    segmented_predicted_volume_delta_from_runtime_nl = None
+    if isinstance(segmented_tail_shadow, dict):
+        segmented_tail_shadow = dict(segmented_tail_shadow)
+        segmented_tail_start_delay_from_emergence_us = _to_int(
+            segmented_tail_shadow.get("tail_start_delay_from_emergence_us")
+        )
+        if (
+            segmented_tail_start_delay_from_emergence_us is not None
+            and flow_rate is not None
+            and flow_intercept is not None
+        ):
+            segmented_predicted_stream_duration_us = int(
+                segmented_tail_start_delay_from_emergence_us
+            )
+            segmented_predicted_volume_nl = float(
+                float(flow_intercept)
+                + (float(flow_rate) * float(segmented_predicted_stream_duration_us))
+            )
+        if segmented_predicted_volume_nl is not None and predicted_volume_nl is not None:
+            segmented_predicted_volume_delta_from_runtime_nl = float(
+                float(segmented_predicted_volume_nl) - float(predicted_volume_nl)
+            )
+        segmented_tail_shadow["predicted_stream_duration_us"] = (
+            None
+            if segmented_predicted_stream_duration_us is None
+            else int(segmented_predicted_stream_duration_us)
+        )
+        segmented_tail_shadow["predicted_volume_nl"] = (
+            None if segmented_predicted_volume_nl is None else float(segmented_predicted_volume_nl)
+        )
+        segmented_tail_shadow["runtime_predicted_volume_nl"] = (
+            None if predicted_volume_nl is None else float(predicted_volume_nl)
+        )
+        segmented_tail_shadow["predicted_volume_delta_from_runtime_nl"] = (
+            None
+            if segmented_predicted_volume_delta_from_runtime_nl is None
+            else float(segmented_predicted_volume_delta_from_runtime_nl)
+        )
     tail_phase = {
         "status": str(tail_phase_status or "unresolved_no_landmark"),
         "plan": _copy_jsonish(plan),
@@ -2349,6 +2389,19 @@ def resolve_online_stream_tail_result(
         )
         tail_phase["segmented_tail_start_delta_from_runtime_us"] = _to_int(
             segmented_tail_shadow.get("tail_start_delta_from_runtime_us")
+        )
+        tail_phase["segmented_predicted_stream_duration_us"] = (
+            None
+            if segmented_predicted_stream_duration_us is None
+            else int(segmented_predicted_stream_duration_us)
+        )
+        tail_phase["segmented_predicted_volume_nl"] = (
+            None if segmented_predicted_volume_nl is None else float(segmented_predicted_volume_nl)
+        )
+        tail_phase["segmented_predicted_volume_delta_from_runtime_nl"] = (
+            None
+            if segmented_predicted_volume_delta_from_runtime_nl is None
+            else float(segmented_predicted_volume_delta_from_runtime_nl)
         )
     return {
         "phase": str(phase),

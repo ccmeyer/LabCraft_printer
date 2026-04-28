@@ -202,6 +202,7 @@ def _flow_proc(tmp_path: Path):
     proc._predicted_volume_nl = None
     proc._tail_fit_result = {}
     proc._tail_fit_warnings = []
+    proc._tail_segmented_analysis_running = False
     proc._tail_consecutive_failed_delays = 0
     proc._tail_attempted_capture_count = 0
     proc._tail_width_window_state = {}
@@ -3158,6 +3159,48 @@ def test_online_stream_debug_signal_does_not_run_segmented_tail_preview(tmp_path
     assert calls["count"] == 0
 
 
+def test_online_stream_tail_final_resolution_emits_segmented_busy_signal(tmp_path, monkeypatch):
+    proc = _flow_proc(tmp_path)
+    proc._tail_plan = {"steady_width_baseline_px": 74.0}
+    proc.analysis_config = {"segmented_tail_online_shadow_enabled": True}
+    captured = {}
+
+    def _fake_tail_resolve_result(*, run_segmented_tail_shadow):
+        captured["run_segmented_tail_shadow"] = bool(run_segmented_tail_shadow)
+        captured["running_during_resolve"] = bool(proc._tail_segmented_analysis_running)
+        busy_payload = proc.onlineStreamDebugUpdated.calls[-1][0][0]
+        captured["busy_segmented_tail"] = dict(busy_payload["tail_plot"]["segmented_tail"])
+        return {
+            "tail_phase": {
+                "status": "captured",
+                "tail_start_delay_from_emergence_us": 1200,
+                "segmented_tail": {
+                    "status": "ok",
+                    "tail_start_delay_from_emergence_us": 1175,
+                    "predicted_volume_nl": 20.7725,
+                    "runtime_predicted_volume_nl": 21.24,
+                },
+                "segmented_tail_start_delay_from_emergence_us": 1175,
+                "segmented_predicted_stream_duration_us": 1175,
+                "segmented_predicted_volume_nl": 20.7725,
+            },
+            "predicted_stream_duration_us": 1200,
+            "predicted_volume_nl": 21.24,
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(proc, "_tail_resolve_result", _fake_tail_resolve_result)
+
+    proc._resolve_tail_phase()
+
+    assert captured["run_segmented_tail_shadow"] is True
+    assert captured["running_during_resolve"] is True
+    assert captured["busy_segmented_tail"]["status"] == "running"
+    assert "fitting segmented tail model" in proc.stageChanged.calls[-1][0][0]
+    assert proc._tail_segmented_analysis_running is False
+    assert proc._tail_fit_result["tail_phase"]["segmented_predicted_volume_nl"] == 20.7725
+
+
 def test_online_stream_debug_signal_plots_unavailable_tail_widths_at_zero(tmp_path):
     proc = _flow_proc(tmp_path)
     proc._tail_plan = {
@@ -3209,6 +3252,8 @@ def test_online_stream_debug_signal_publishes_final_tail_start_after_resolution(
             "segmented_tail": {
                 "status": "ok",
                 "tail_start_delay_from_emergence_us": 3900,
+                "predicted_volume_nl": 71.73,
+                "runtime_predicted_volume_nl": 72.665,
                 "fit_points": [
                     {"delay_from_emergence_us": 3850, "fitted_width_px": 74.0},
                     {"delay_from_emergence_us": 3900, "fitted_width_px": 70.0},
@@ -3229,6 +3274,7 @@ def test_online_stream_debug_signal_publishes_final_tail_start_after_resolution(
     assert payload["subphase"] == "completed"
     assert payload["tail_plot"]["tail_start_x_us"] == 3950
     assert payload["tail_plot"]["segmented_tail"]["tail_start_delay_from_emergence_us"] == 3900
+    assert payload["tail_plot"]["segmented_tail"]["predicted_volume_nl"] == 71.73
 
 
 def test_online_stream_advance_tail_phase_continues_scout_without_landmark(tmp_path):

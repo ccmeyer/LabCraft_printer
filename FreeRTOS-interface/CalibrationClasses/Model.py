@@ -1386,6 +1386,10 @@ class CalibrationManager(QObject):
         "Tail Start From Emergence (us)",
         "Predicted Stream Duration (us)",
         "Predicted Volume (nL)",
+        "Segmented Tail Start From Emergence (us)",
+        "Segmented Predicted Stream Duration (us)",
+        "Segmented Predicted Volume (nL)",
+        "Segmented Volume Delta From Runtime (nL)",
         "Analysis Warnings",
     ]
 
@@ -3797,6 +3801,10 @@ class CalibrationManager(QObject):
             "tail_start_delay_from_emergence_us": None,
             "predicted_stream_duration_us": None,
             "predicted_volume_nl": None,
+            "segmented_tail_start_delay_from_emergence_us": None,
+            "segmented_predicted_stream_duration_us": None,
+            "segmented_predicted_volume_nl": None,
+            "segmented_predicted_volume_delta_from_runtime_nl": None,
             "analysis_warnings": [],
             "metadata_csv_path": self._resolve_stream_capture_metadata_csv_path(),
             "stream_capture_log_path": self._resolve_stream_capture_log_path(),
@@ -4168,6 +4176,38 @@ class CalibrationManager(QObject):
         predicted_volume = self._stream_capture_float_or_none(result.get("predicted_volume_nl"))
         if predicted_volume is not None:
             self._stream_capture_state["predicted_volume_nl"] = float(predicted_volume)
+
+        segmented_tail_start = self._stream_capture_int_or_none(
+            tail_phase.get("segmented_tail_start_delay_from_emergence_us")
+        )
+        if segmented_tail_start is not None:
+            self._stream_capture_state["segmented_tail_start_delay_from_emergence_us"] = int(
+                segmented_tail_start
+            )
+
+        segmented_predicted_duration = self._stream_capture_int_or_none(
+            tail_phase.get("segmented_predicted_stream_duration_us")
+        )
+        if segmented_predicted_duration is not None:
+            self._stream_capture_state["segmented_predicted_stream_duration_us"] = int(
+                segmented_predicted_duration
+            )
+
+        segmented_predicted_volume = self._stream_capture_float_or_none(
+            tail_phase.get("segmented_predicted_volume_nl")
+        )
+        if segmented_predicted_volume is not None:
+            self._stream_capture_state["segmented_predicted_volume_nl"] = float(
+                segmented_predicted_volume
+            )
+
+        segmented_volume_delta = self._stream_capture_float_or_none(
+            tail_phase.get("segmented_predicted_volume_delta_from_runtime_nl")
+        )
+        if segmented_volume_delta is not None:
+            self._stream_capture_state["segmented_predicted_volume_delta_from_runtime_nl"] = float(
+                segmented_volume_delta
+            )
 
         self._stream_capture_state["analysis_warnings"] = self._stream_capture_warning_list(
             result.get("warnings")
@@ -5028,6 +5068,54 @@ class CalibrationManager(QObject):
                 if is_online_capture
                 else ""
             ),
+            "Segmented Tail Start From Emergence (us)": (
+                (
+                    str(segmented_tail_start_value)
+                    if (
+                        segmented_tail_start_value := self._stream_capture_int_or_none(
+                            (self._stream_capture_state or {}).get(
+                                "segmented_tail_start_delay_from_emergence_us"
+                            )
+                        )
+                    ) is not None
+                    else ""
+                )
+                if is_online_capture
+                else ""
+            ),
+            "Segmented Predicted Stream Duration (us)": (
+                (
+                    str(segmented_predicted_duration_value)
+                    if (
+                        segmented_predicted_duration_value := self._stream_capture_int_or_none(
+                            (self._stream_capture_state or {}).get(
+                                "segmented_predicted_stream_duration_us"
+                            )
+                        )
+                    ) is not None
+                    else ""
+                )
+                if is_online_capture
+                else ""
+            ),
+            "Segmented Predicted Volume (nL)": (
+                self._format_stream_capture_decimal(
+                    (self._stream_capture_state or {}).get("segmented_predicted_volume_nl"),
+                    4,
+                )
+                if is_online_capture
+                else ""
+            ),
+            "Segmented Volume Delta From Runtime (nL)": (
+                self._format_stream_capture_decimal(
+                    (self._stream_capture_state or {}).get(
+                        "segmented_predicted_volume_delta_from_runtime_nl"
+                    ),
+                    4,
+                )
+                if is_online_capture
+                else ""
+            ),
             "Analysis Warnings": (
                 self._format_stream_capture_warning_text(
                     (self._stream_capture_state or {}).get("analysis_warnings")
@@ -5150,6 +5238,10 @@ class CalibrationManager(QObject):
             "tail_start_delay_from_emergence_us": None,
             "predicted_stream_duration_us": None,
             "predicted_volume_nl": None,
+            "segmented_tail_start_delay_from_emergence_us": None,
+            "segmented_predicted_stream_duration_us": None,
+            "segmented_predicted_volume_nl": None,
+            "segmented_predicted_volume_delta_from_runtime_nl": None,
             "analysis_warnings": [],
             "metadata_csv_path": self._resolve_stream_capture_metadata_csv_path(),
             "stream_capture_log_path": self._resolve_stream_capture_log_path(),
@@ -7145,6 +7237,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._predicted_volume_nl = None
         self._tail_fit_result = {}
         self._tail_fit_warnings = []
+        self._tail_segmented_analysis_running = False
         self._tail_consecutive_failed_delays = 0
         self._tail_attempted_capture_count = 0
         self._tail_width_window_state = {}
@@ -8025,12 +8118,38 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         return self._debug_float(baseline)
 
     def _stored_segmented_tail_debug_payload(self) -> dict | None:
+        if bool(getattr(self, "_tail_segmented_analysis_running", False)):
+            return {
+                "status": "running",
+                "fit_status": "running",
+                "reason": "final_segmented_tail_fit_in_progress",
+            }
         tail_fit_result = dict(getattr(self, "_tail_fit_result", {}) or {})
         tail_phase = dict(tail_fit_result.get("tail_phase") or {})
         segmented_tail = tail_phase.get("segmented_tail")
         if not isinstance(segmented_tail, dict):
             return None
         return dict(segmented_tail)
+
+    def _segmented_tail_shadow_enabled(self) -> bool:
+        config = dict(getattr(self, "analysis_config", {}) or {})
+        return bool(config.get("segmented_tail_online_shadow_enabled", True))
+
+    def _begin_tail_segmented_analysis_busy_signal(self):
+        if not self._segmented_tail_shadow_enabled():
+            return
+        self._tail_segmented_analysis_running = True
+        try:
+            self.stageChanged.emit("Online stream calibration: fitting segmented tail model")
+        except Exception:
+            pass
+        self._emit_online_stream_debug_payload("tail_segmented_fit")
+        try:
+            app = QtWidgets.QApplication.instance()
+            if app is not None:
+                app.processEvents()
+        except Exception:
+            pass
 
     def _emit_online_stream_debug_payload(self, subphase: str):
         flow_provisional_summary = self._build_provisional_flow_delay_summary()
@@ -8763,6 +8882,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._predicted_volume_nl = None
         self._tail_fit_result = {}
         self._tail_fit_warnings = []
+        self._tail_segmented_analysis_running = False
         self._tail_consecutive_failed_delays = 0
         self._tail_attempted_capture_count = 0
         self._tail_width_window_state = {}
@@ -9465,7 +9585,11 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
 
     def _resolve_tail_phase(self, resolve_result=None):
         if resolve_result is None:
-            resolve_result = self._tail_resolve_result(run_segmented_tail_shadow=True)
+            self._begin_tail_segmented_analysis_busy_signal()
+            try:
+                resolve_result = self._tail_resolve_result(run_segmented_tail_shadow=True)
+            finally:
+                self._tail_segmented_analysis_running = False
         self._tail_fit_result = dict(resolve_result or {})
         self._predicted_stream_duration_us = resolve_result.get("predicted_stream_duration_us")
         self._predicted_volume_nl = resolve_result.get("predicted_volume_nl")
@@ -9529,6 +9653,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._predicted_volume_nl = None
         self._tail_fit_result = {}
         self._tail_fit_warnings = []
+        self._tail_segmented_analysis_running = False
         self._tail_consecutive_failed_delays = 0
         self._tail_attempted_capture_count = 0
         self._tail_width_window_state = {}

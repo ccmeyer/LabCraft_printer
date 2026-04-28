@@ -787,6 +787,8 @@ def test_online_stream_debug_payload_draws_segmented_tail_overlay(monkeypatch, q
                     "model_name": "three_break_two_break_midpoint",
                     "tail_start_source": "three_two_midpoint",
                     "tail_start_delay_from_emergence_us": 1625,
+                    "predicted_volume_nl": 29.1875,
+                    "runtime_predicted_volume_nl": 30.125,
                     "knee_delay_from_emergence_us": 1700,
                     "second_knee_delay_from_emergence_us": 1750,
                     "three_break_tail_start_delay_from_emergence_us": 1600,
@@ -811,6 +813,40 @@ def test_online_stream_debug_payload_draws_segmented_tail_overlay(monkeypatch, q
     assert bundle["segmented_bracket_left_series"].count() == 2
     assert bundle["segmented_bracket_right_series"].count() == 2
     assert "segmented 1625 us" in bundle["chart"].title()
+    assert "runtime vol 30.12 nL" in bundle["chart"].title()
+    assert "segmented vol 29.19 nL" in bundle["chart"].title()
+
+    dialog.deleteLater()
+
+
+def test_online_stream_debug_payload_shows_segmented_tail_busy_title(monkeypatch, qapp):
+    dialog, manager, _controller = _build_dialog(monkeypatch, qapp)
+    manager.activeCalibration = SimpleNamespace(phase_name="online_stream_calibration")
+
+    manager.onlineStreamDebugUpdated.emit(
+        {
+            "phase_name": "online_stream_calibration",
+            "subphase": "tail_segmented_fit",
+            "flow_plot": {"points": [], "current_frame_point": None, "fit": None},
+            "tail_plot": {
+                "baseline_width_px": 74.0,
+                "scout_points": [{"x_us": 1550, "y_px": 73.0, "provisional": False}],
+                "backtrack_points": [],
+                "current_frame_point": None,
+                "tail_start_x_us": None,
+                "segmented_tail": {
+                    "status": "running",
+                    "fit_status": "running",
+                },
+            },
+        }
+    )
+    qapp.processEvents()
+
+    bundle = dialog._online_stream_tail_chart_bundle
+    assert "segmented fit running" in bundle["chart"].title()
+    assert bundle["segmented_fit_series"].count() == 0
+    assert bundle["segmented_marker_series"].count() == 0
 
     dialog.deleteLater()
 
