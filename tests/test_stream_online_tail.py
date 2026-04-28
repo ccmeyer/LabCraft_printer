@@ -1026,6 +1026,49 @@ def test_resolve_online_stream_tail_result_adds_segmented_shadow_without_control
     )
 
 
+def test_resolve_online_stream_tail_result_can_skip_segmented_shadow_for_previews():
+    resolved = mod.resolve_online_stream_tail_result(
+        flow_fit_result=_flow_fit_result(),
+        tail_plan={
+            "steady_width_baseline_px": 74.0,
+            "scout_anchor_delay_us": 4250,
+            "backtrack_step_us": 50,
+        },
+        scout_summaries=[
+            mod.summarize_online_stream_tail_delay(
+                [_tail_frame_row(delay_us=4750, delay_from_emergence_us=1550, width_px=60.0)],
+                baseline_width_px=74.0,
+            )
+        ],
+        backtrack_summaries=[
+            mod.summarize_online_stream_tail_delay(
+                [
+                    _tail_frame_row(
+                        delay_us=4300 + 50 * index,
+                        delay_from_emergence_us=1100 + 50 * index,
+                        phase="tail_backtrack",
+                        width_px=width_px,
+                    )
+                ],
+                baseline_width_px=74.0,
+            )
+            for index, width_px in enumerate([74, 73, 72, 70, 66, 61])
+        ],
+        flow_delay_summaries=[_flow_delay_summary(delay_us=4250, delay_from_emergence_us=1050)],
+        trigger_bracket={
+            "tail_phase_status": "",
+            "termination_reason": "",
+            "landmark_delay_us": 4750,
+            "backtrack_left_delay_us": 4250,
+            "landmark_reason": "separated_from_nozzle",
+        },
+        run_segmented_tail_shadow=False,
+    )
+
+    assert "segmented_tail" not in resolved["tail_phase"]
+    assert "segmented_tail_start_delay_from_emergence_us" not in resolved["tail_phase"]
+
+
 def test_resolve_online_stream_tail_result_omits_segmented_shadow_when_disabled():
     resolved = mod.resolve_online_stream_tail_result(
         flow_fit_result=_flow_fit_result(),

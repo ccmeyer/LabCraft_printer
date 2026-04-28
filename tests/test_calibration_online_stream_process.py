@@ -205,8 +205,6 @@ def _flow_proc(tmp_path: Path):
     proc._tail_consecutive_failed_delays = 0
     proc._tail_attempted_capture_count = 0
     proc._tail_width_window_state = {}
-    proc._tail_segmented_debug_cache_key = None
-    proc._tail_segmented_debug_cache_payload = None
     proc._current_tail_analysis_summary = {}
     proc._current_tail_capture_ref = {}
     proc._current_tail_capture_failure = None
@@ -2746,19 +2744,6 @@ def test_online_stream_plan_tail_phase_runs_for_warning_quality_flow_fit(tmp_pat
     assert snapshot["tail_plan"] == proc._tail_plan
 
 
-def test_online_stream_plan_tail_phase_resets_segmented_debug_cache(tmp_path):
-    proc = _flow_proc(tmp_path)
-    proc.onPlanFlowPhase()
-    _seed_tail_flow_context(proc)
-    proc._tail_segmented_debug_cache_key = "old"
-    proc._tail_segmented_debug_cache_payload = {"status": "ok"}
-
-    proc.onPlanTailPhase()
-
-    assert proc._tail_segmented_debug_cache_key is None
-    assert proc._tail_segmented_debug_cache_payload is None
-
-
 def test_online_stream_plan_tail_phase_passes_tail_settling_toggle(tmp_path, monkeypatch):
     proc = _flow_proc(tmp_path)
     proc.onPlanFlowPhase()
@@ -2789,6 +2774,7 @@ def test_online_stream_preview_tail_resolve_result_passes_tail_settling_toggle(t
 
     def _fake_resolve(**kwargs):
         captured["analysis_config"] = dict(kwargs.get("analysis_config") or {})
+        captured["run_segmented_tail_shadow"] = kwargs.get("run_segmented_tail_shadow")
         return {
             "phase": "online_stream_calibration",
             "tail_phase": {"status": "captured", "warnings": []},
@@ -2802,6 +2788,7 @@ def test_online_stream_preview_tail_resolve_result_passes_tail_settling_toggle(t
     proc._preview_tail_resolve_result()
 
     assert captured["analysis_config"]["tail_settling_rule_enabled"] is False
+    assert captured["run_segmented_tail_shadow"] is False
 
 
 def test_online_stream_plan_tail_phase_reserves_backtrack_budget_for_tail_search(tmp_path):
@@ -3122,7 +3109,7 @@ def test_online_stream_debug_signal_emits_provisional_tail_width_points(tmp_path
     assert tail_plot["tail_start_x_us"] is None
 
 
-def test_online_stream_debug_signal_includes_segmented_tail_preview_from_provisional_point(tmp_path):
+def test_online_stream_debug_signal_does_not_run_segmented_tail_preview(tmp_path, monkeypatch):
     proc = _flow_proc(tmp_path)
     proc._tail_plan = {
         "steady_width_baseline_px": 74.0,
@@ -3152,18 +3139,23 @@ def test_online_stream_debug_signal_includes_segmented_tail_preview_from_provisi
         "attached_width_px": 61.0,
         "tail_width_usable": True,
     }
+    calls = {"count": 0}
+
+    def _fail_if_called(**kwargs):
+        calls["count"] += 1
+        raise AssertionError("segmented tail should not run during debug emission")
+
+    monkeypatch.setattr(
+        calibration_model.online_tail_mod,
+        "evaluate_online_stream_segmented_tail_shadow",
+        _fail_if_called,
+    )
 
     proc._emit_online_stream_debug_payload("tail_scout")
 
     payload = proc.onlineStreamDebugUpdated.calls[-1][0][0]
-    segmented = payload["tail_plot"]["segmented_tail"]
-    assert segmented["status"] == "ok"
-    assert segmented["usable_point_count"] == 6
-    assert len(segmented["fit_points"]) == 6
-    assert segmented["tail_start_delay_from_emergence_us"] is not None
-    assert segmented["tail_start_delta_from_runtime_us"] == (
-        segmented["tail_start_delay_from_emergence_us"] - 1700
-    )
+    assert payload["tail_plot"]["segmented_tail"] is None
+    assert calls["count"] == 0
 
 
 def test_online_stream_debug_signal_plots_unavailable_tail_widths_at_zero(tmp_path):
@@ -3212,6 +3204,18 @@ def test_online_stream_debug_signal_publishes_final_tail_start_after_resolution(
     proc = _flow_proc(tmp_path)
     proc._tail_mode = "backtrack"
     proc._tail_start_delay_from_emergence_us = 3950
+    proc._tail_fit_result = {
+        "tail_phase": {
+            "segmented_tail": {
+                "status": "ok",
+                "tail_start_delay_from_emergence_us": 3900,
+                "fit_points": [
+                    {"delay_from_emergence_us": 3850, "fitted_width_px": 74.0},
+                    {"delay_from_emergence_us": 3900, "fitted_width_px": 70.0},
+                ],
+            }
+        }
+    }
     proc._tail_backtrack_delay_summaries = [
         calibration_model.online_tail_mod.summarize_online_stream_tail_delay(
             [_accepted_tail_frame_row(proc, 3550, phase="tail_backtrack", width_px=58.0)],
@@ -3224,6 +3228,7 @@ def test_online_stream_debug_signal_publishes_final_tail_start_after_resolution(
     payload = proc.onlineStreamDebugUpdated.calls[-1][0][0]
     assert payload["subphase"] == "completed"
     assert payload["tail_plot"]["tail_start_x_us"] == 3950
+    assert payload["tail_plot"]["segmented_tail"]["tail_start_delay_from_emergence_us"] == 3900
 
 
 def test_online_stream_advance_tail_phase_continues_scout_without_landmark(tmp_path):
@@ -3618,7 +3623,7 @@ def test_online_stream_capture_tail_frame_stops_on_budget_exhaustion(tmp_path):
     assert proc._tail_phase_status == "unresolved_budget_exhausted"
 
 
-def test_online_stream_successful_backtrack_writes_tail_fit_artifact(tmp_path):
+def test_online_stream_successful_backtrack_writes_tail_fit_artifact(tmp_path, monkeypatch):
     proc = _flow_proc(tmp_path)
     proc._tail_fit_path = str(tmp_path / "tail_fit.json")
     _seed_tail_flow_context(proc)
@@ -3714,10 +3719,23 @@ def test_online_stream_successful_backtrack_writes_tail_fit_artifact(tmp_path):
             separated_from_nozzle_landmark=False,
         )
     ]
+    calls = {"count": 0}
+    original_segmented = calibration_model.online_tail_mod.evaluate_online_stream_segmented_tail_shadow
+
+    def _count_segmented(**kwargs):
+        calls["count"] += 1
+        return original_segmented(**kwargs)
+
+    monkeypatch.setattr(
+        calibration_model.online_tail_mod,
+        "evaluate_online_stream_segmented_tail_shadow",
+        _count_segmented,
+    )
 
     proc.onAdvanceTailPhase()
 
     assert proc.tailPhaseFinished.calls
+    assert calls["count"] == 1
     artifact = json.loads(Path(proc._tail_fit_path).read_text(encoding="utf-8"))
     assert artifact["result"]["tail_phase"]["status"] == "captured"
     assert artifact["result"]["tail_phase"]["tail_start_evidence"] == "plateau_right_bracket_midpoint"
@@ -3726,7 +3744,7 @@ def test_online_stream_successful_backtrack_writes_tail_fit_artifact(tmp_path):
     assert artifact["result"]["predicted_stream_duration_us"] == 1350
 
 
-def test_online_stream_backtrack_extends_right_edge_when_width_is_still_falling(tmp_path):
+def test_online_stream_backtrack_extends_right_edge_without_segmented_preview(tmp_path, monkeypatch):
     proc = _flow_proc(tmp_path)
     _seed_tail_flow_context(proc)
     proc._tail_plan = {
@@ -3764,6 +3782,17 @@ def test_online_stream_backtrack_extends_right_edge_when_width_is_still_falling(
     proc._tail_current_delay_frame_rows = [
         _accepted_tail_frame_row(proc, 1200, phase="tail_backtrack", width_px=66.0)
     ]
+    calls = {"count": 0}
+
+    def _fail_if_called(**kwargs):
+        calls["count"] += 1
+        raise AssertionError("segmented tail should not run for right-edge preview")
+
+    monkeypatch.setattr(
+        calibration_model.online_tail_mod,
+        "evaluate_online_stream_segmented_tail_shadow",
+        _fail_if_called,
+    )
 
     proc.onAdvanceTailPhase()
 
@@ -3773,6 +3802,7 @@ def test_online_stream_backtrack_extends_right_edge_when_width_is_still_falling(
     assert proc._tail_delay_index == proc._tail_delay_sequence.index(4450)
     assert proc._tail_plan["tail_right_extension_count"] == 1
     assert proc._tail_plan["tail_right_extension_reason"] == "right_edge_width_still_falling"
+    assert calls["count"] == 0
 
 
 def test_online_stream_backtrack_extension_max_reached_finalizes_with_warning(tmp_path):

@@ -1766,6 +1766,7 @@ def resolve_online_stream_tail_result(
     flow_delay_summaries: list[dict] | None = None,
     analysis_config: dict | None = None,
     phase: str = "online_stream_calibration",
+    run_segmented_tail_shadow: bool = True,
 ) -> dict:
     fit = dict(flow_fit_result or {})
     plan = dict(tail_plan or {})
@@ -2218,17 +2219,19 @@ def resolve_online_stream_tail_result(
         backtrack_rows,
         policy=resolved_policy,
     )
-    segmented_tail_shadow = evaluate_online_stream_segmented_tail_shadow(
-        scout_summaries=scout_rows,
-        backtrack_summaries=backtrack_rows,
-        baseline_width_px=(
-            baseline_width_px
-            if baseline_width_px is not None
-            else _to_float_or_none(plan.get("steady_width_baseline_px"))
-        ),
-        runtime_tail_start_delay_from_emergence_us=tail_start_delay_from_emergence_us,
-        analysis_config=resolved_analysis_config,
-    )
+    segmented_tail_shadow = None
+    if bool(run_segmented_tail_shadow):
+        segmented_tail_shadow = evaluate_online_stream_segmented_tail_shadow(
+            scout_summaries=scout_rows,
+            backtrack_summaries=backtrack_rows,
+            baseline_width_px=(
+                baseline_width_px
+                if baseline_width_px is not None
+                else _to_float_or_none(plan.get("steady_width_baseline_px"))
+            ),
+            runtime_tail_start_delay_from_emergence_us=tail_start_delay_from_emergence_us,
+            analysis_config=resolved_analysis_config,
+        )
     tail_phase = {
         "status": str(tail_phase_status or "unresolved_no_landmark"),
         "plan": _copy_jsonish(plan),

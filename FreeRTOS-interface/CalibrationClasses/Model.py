@@ -7148,8 +7148,6 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._tail_consecutive_failed_delays = 0
         self._tail_attempted_capture_count = 0
         self._tail_width_window_state = {}
-        self._tail_segmented_debug_cache_key = None
-        self._tail_segmented_debug_cache_payload = None
         self._current_tail_analysis_summary = {}
         self._current_tail_capture_ref = {}
         self._current_tail_capture_failure = None
@@ -8026,75 +8024,13 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             baseline = (dict(getattr(self, "_flow_preview_fit_result", {}) or {})).get("steady_width_baseline_px")
         return self._debug_float(baseline)
 
-    def _tail_segmented_debug_cache_fingerprint(
-        self,
-        scout_summaries: list[dict],
-        backtrack_summaries: list[dict],
-        runtime_tail_start_x_us,
-    ) -> str:
-        def _summary_fingerprint(row):
-            summary = dict(row or {})
-            return {
-                "phase": str(summary.get("phase") or ""),
-                "delay_from_emergence_us": self._debug_delay_us(summary.get("delay_from_emergence_us")),
-                "median_width_px": self._debug_float(summary.get("median_width_px")),
-                "tail_width_usable": bool(summary.get("tail_width_usable")),
-            }
-
-        analysis_config = dict(getattr(self, "analysis_config", {}) or {})
-        relevant_config = {
-            "segmented_tail_online_shadow_enabled": bool(
-                analysis_config.get("segmented_tail_online_shadow_enabled", True)
-            ),
-            "segmented_tail_online_min_usable_points": self._debug_delay_us(
-                analysis_config.get("segmented_tail_online_min_usable_points", 6)
-            ),
-        }
-        return json.dumps(
-            {
-                "scout": [_summary_fingerprint(row) for row in list(scout_summaries or [])],
-                "backtrack": [_summary_fingerprint(row) for row in list(backtrack_summaries or [])],
-                "runtime_tail_start_x_us": self._debug_delay_us(runtime_tail_start_x_us),
-                "baseline_width_px": self._tail_debug_baseline_width_px(),
-                "analysis_config": relevant_config,
-            },
-            sort_keys=True,
-        )
-
-    def _build_segmented_tail_debug_payload(self, tail_provisional_summary: dict | None = None) -> dict | None:
-        tail_mode = "backtrack" if str(getattr(self, "_tail_mode", "scout") or "scout") == "backtrack" else "scout"
-        scout_summaries = self._merged_tail_debug_delay_summaries(
-            getattr(self, "_tail_scout_delay_summaries", []) or [],
-            tail_provisional_summary if tail_mode == "scout" else None,
-        )
-        backtrack_summaries = self._merged_tail_debug_delay_summaries(
-            getattr(self, "_tail_backtrack_delay_summaries", []) or [],
-            tail_provisional_summary if tail_mode == "backtrack" else None,
-        )
-        runtime_tail_start_x_us = self._debug_delay_us(
-            getattr(self, "_tail_start_delay_from_emergence_us", None)
-        )
-        cache_key = self._tail_segmented_debug_cache_fingerprint(
-            scout_summaries,
-            backtrack_summaries,
-            runtime_tail_start_x_us,
-        )
-        if cache_key == getattr(self, "_tail_segmented_debug_cache_key", None):
-            cached = getattr(self, "_tail_segmented_debug_cache_payload", None)
-            return None if cached is None else dict(cached)
-        try:
-            payload = online_tail_mod.evaluate_online_stream_segmented_tail_shadow(
-                scout_summaries=scout_summaries,
-                backtrack_summaries=backtrack_summaries,
-                baseline_width_px=self._tail_debug_baseline_width_px(),
-                runtime_tail_start_delay_from_emergence_us=runtime_tail_start_x_us,
-                analysis_config=dict(getattr(self, "analysis_config", {}) or {}),
-            )
-        except Exception:
-            payload = None
-        self._tail_segmented_debug_cache_key = cache_key
-        self._tail_segmented_debug_cache_payload = None if payload is None else dict(payload)
-        return payload
+    def _stored_segmented_tail_debug_payload(self) -> dict | None:
+        tail_fit_result = dict(getattr(self, "_tail_fit_result", {}) or {})
+        tail_phase = dict(tail_fit_result.get("tail_phase") or {})
+        segmented_tail = tail_phase.get("segmented_tail")
+        if not isinstance(segmented_tail, dict):
+            return None
+        return dict(segmented_tail)
 
     def _emit_online_stream_debug_payload(self, subphase: str):
         flow_provisional_summary = self._build_provisional_flow_delay_summary()
@@ -8124,7 +8060,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 ),
                 "current_frame_point": self._current_tail_frame_point_payload(),
                 "tail_start_x_us": tail_start_x_us,
-                "segmented_tail": self._build_segmented_tail_debug_payload(tail_provisional_summary),
+                "segmented_tail": self._stored_segmented_tail_debug_payload(),
             },
         }
         try:
@@ -8830,8 +8766,6 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._tail_consecutive_failed_delays = 0
         self._tail_attempted_capture_count = 0
         self._tail_width_window_state = {}
-        self._tail_segmented_debug_cache_key = None
-        self._tail_segmented_debug_cache_payload = None
         self._current_tail_analysis_summary = {}
         self._current_tail_capture_ref = {}
         self._current_tail_capture_failure = None
@@ -9451,7 +9385,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             "warnings": list(self._tail_fit_warnings),
         }
 
-    def _preview_tail_resolve_result(self) -> dict:
+    def _tail_resolve_result(self, *, run_segmented_tail_shadow: bool) -> dict:
         return online_tail_mod.resolve_online_stream_tail_result(
             flow_fit_result=dict(self._flow_fit_result or {}),
             tail_plan=dict(self._tail_plan or {}),
@@ -9460,7 +9394,11 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             flow_delay_summaries=list(self._flow_delay_summaries),
             trigger_bracket=self._build_tail_trigger_bracket(),
             analysis_config=dict(self.analysis_config or {}),
+            run_segmented_tail_shadow=bool(run_segmented_tail_shadow),
         )
+
+    def _preview_tail_resolve_result(self) -> dict:
+        return self._tail_resolve_result(run_segmented_tail_shadow=False)
 
     def _maybe_extend_tail_left_bracket(self) -> bool:
         if bool(getattr(self, "_tail_left_bracket_extended", False)):
@@ -9527,7 +9465,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
 
     def _resolve_tail_phase(self, resolve_result=None):
         if resolve_result is None:
-            resolve_result = self._preview_tail_resolve_result()
+            resolve_result = self._tail_resolve_result(run_segmented_tail_shadow=True)
         self._tail_fit_result = dict(resolve_result or {})
         self._predicted_stream_duration_us = resolve_result.get("predicted_stream_duration_us")
         self._predicted_volume_nl = resolve_result.get("predicted_volume_nl")
@@ -9594,8 +9532,6 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._tail_consecutive_failed_delays = 0
         self._tail_attempted_capture_count = 0
         self._tail_width_window_state = {}
-        self._tail_segmented_debug_cache_key = None
-        self._tail_segmented_debug_cache_payload = None
         self._current_tail_analysis_summary = {}
         self._current_tail_capture_ref = {}
         self._current_tail_capture_failure = None
@@ -10063,7 +9999,6 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 self._emit_online_stream_debug_payload(self._tail_phase_label())
                 self.nextTailDelay.emit()
                 return
-            preview_result = self._preview_tail_resolve_result()
             if bool(self._tail_plan.get("tail_backtrack_budget_impossible")):
                 self._tail_phase_status = "unresolved_budget_exhausted"
                 self._tail_termination_reason = "capture_budget_exhausted"
@@ -10072,7 +10007,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 self._emit_online_stream_debug_payload(self._tail_phase_label())
                 self.tailPhaseFinished.emit()
                 return
-            self._resolve_tail_phase(resolve_result=preview_result)
+            self._resolve_tail_phase()
         else:
             self._resolve_tail_phase()
         self._emit_online_stream_debug_payload(self._tail_phase_label())
