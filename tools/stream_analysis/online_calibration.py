@@ -80,6 +80,8 @@ DEFAULT_ONLINE_STREAM_ANALYSIS_CONFIG = {
     "tail_width_sticky_window_min_switch_drop_px": 12.0,
     "tail_width_sticky_window_min_switch_drop_frac": 0.12,
     "tail_width_sticky_window_max_step_multiplier": 1,
+    "segmented_tail_online_shadow_enabled": True,
+    "segmented_tail_online_min_usable_points": 6,
 }
 
 

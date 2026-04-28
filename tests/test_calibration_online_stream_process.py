@@ -205,6 +205,8 @@ def _flow_proc(tmp_path: Path):
     proc._tail_consecutive_failed_delays = 0
     proc._tail_attempted_capture_count = 0
     proc._tail_width_window_state = {}
+    proc._tail_segmented_debug_cache_key = None
+    proc._tail_segmented_debug_cache_payload = None
     proc._current_tail_analysis_summary = {}
     proc._current_tail_capture_ref = {}
     proc._current_tail_capture_failure = None
@@ -2744,6 +2746,19 @@ def test_online_stream_plan_tail_phase_runs_for_warning_quality_flow_fit(tmp_pat
     assert snapshot["tail_plan"] == proc._tail_plan
 
 
+def test_online_stream_plan_tail_phase_resets_segmented_debug_cache(tmp_path):
+    proc = _flow_proc(tmp_path)
+    proc.onPlanFlowPhase()
+    _seed_tail_flow_context(proc)
+    proc._tail_segmented_debug_cache_key = "old"
+    proc._tail_segmented_debug_cache_payload = {"status": "ok"}
+
+    proc.onPlanTailPhase()
+
+    assert proc._tail_segmented_debug_cache_key is None
+    assert proc._tail_segmented_debug_cache_payload is None
+
+
 def test_online_stream_plan_tail_phase_passes_tail_settling_toggle(tmp_path, monkeypatch):
     proc = _flow_proc(tmp_path)
     proc.onPlanFlowPhase()
@@ -3105,6 +3120,50 @@ def test_online_stream_debug_signal_emits_provisional_tail_width_points(tmp_path
         "mode": "scout",
     }
     assert tail_plot["tail_start_x_us"] is None
+
+
+def test_online_stream_debug_signal_includes_segmented_tail_preview_from_provisional_point(tmp_path):
+    proc = _flow_proc(tmp_path)
+    proc._tail_plan = {
+        "steady_width_baseline_px": 74.0,
+        "scout_replicates": 1,
+        "backtrack_replicates": 1,
+    }
+    proc._tail_mode = "scout"
+    proc._tail_start_delay_from_emergence_us = 1700
+    proc._tail_scout_delay_summaries = [
+        calibration_model.online_tail_mod.summarize_online_stream_tail_delay(
+            [_accepted_tail_frame_row(proc, offset_us, phase="tail_scout", width_px=width_px)],
+            74.0,
+        )
+        for offset_us, width_px in [
+            (1500, 74.0),
+            (1550, 73.8),
+            (1600, 72.0),
+            (1650, 70.0),
+            (1700, 66.0),
+        ]
+    ]
+    proc._tail_current_delay_us = int(proc.emergence_time_us) + 1750
+    proc._tail_current_delay_frame_rows = [
+        _accepted_tail_frame_row(proc, 1750, phase="tail_scout", width_px=61.0)
+    ]
+    proc._current_tail_analysis_summary = {
+        "attached_width_px": 61.0,
+        "tail_width_usable": True,
+    }
+
+    proc._emit_online_stream_debug_payload("tail_scout")
+
+    payload = proc.onlineStreamDebugUpdated.calls[-1][0][0]
+    segmented = payload["tail_plot"]["segmented_tail"]
+    assert segmented["status"] == "ok"
+    assert segmented["usable_point_count"] == 6
+    assert len(segmented["fit_points"]) == 6
+    assert segmented["tail_start_delay_from_emergence_us"] is not None
+    assert segmented["tail_start_delta_from_runtime_us"] == (
+        segmented["tail_start_delay_from_emergence_us"] - 1700
+    )
 
 
 def test_online_stream_debug_signal_plots_unavailable_tail_widths_at_zero(tmp_path):
@@ -3663,6 +3722,7 @@ def test_online_stream_successful_backtrack_writes_tail_fit_artifact(tmp_path):
     assert artifact["result"]["tail_phase"]["status"] == "captured"
     assert artifact["result"]["tail_phase"]["tail_start_evidence"] == "plateau_right_bracket_midpoint"
     assert artifact["result"]["tail_phase"]["tail_start_selection_method"] == "plateau_confirmed_collapse_midpoint"
+    assert artifact["result"]["tail_phase"]["segmented_tail"]["status"] == "insufficient_usable_points"
     assert artifact["result"]["predicted_stream_duration_us"] == 1350
 
 

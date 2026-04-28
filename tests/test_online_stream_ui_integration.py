@@ -767,6 +767,54 @@ def test_online_stream_debug_payload_shows_plots_and_updates_chart_series(monkey
     dialog.deleteLater()
 
 
+def test_online_stream_debug_payload_draws_segmented_tail_overlay(monkeypatch, qapp):
+    dialog, manager, _controller = _build_dialog(monkeypatch, qapp)
+    manager.activeCalibration = SimpleNamespace(phase_name="online_stream_calibration")
+
+    manager.onlineStreamDebugUpdated.emit(
+        {
+            "phase_name": "online_stream_calibration",
+            "subphase": "tail_backtrack",
+            "flow_plot": {"points": [], "current_frame_point": None, "fit": None},
+            "tail_plot": {
+                "baseline_width_px": 74.0,
+                "scout_points": [{"x_us": 1550, "y_px": 73.0, "provisional": False}],
+                "backtrack_points": [{"x_us": 1600, "y_px": 70.0, "provisional": False}],
+                "current_frame_point": None,
+                "tail_start_x_us": 1650,
+                "segmented_tail": {
+                    "status": "ok",
+                    "model_name": "three_break_two_break_midpoint",
+                    "tail_start_source": "three_two_midpoint",
+                    "tail_start_delay_from_emergence_us": 1625,
+                    "knee_delay_from_emergence_us": 1700,
+                    "second_knee_delay_from_emergence_us": 1750,
+                    "three_break_tail_start_delay_from_emergence_us": 1600,
+                    "two_break_tail_start_delay_from_emergence_us": 1650,
+                    "fit_points": [
+                        {"delay_from_emergence_us": 1550, "fitted_width_px": 73.5},
+                        {"delay_from_emergence_us": 1600, "fitted_width_px": 70.0},
+                        {"delay_from_emergence_us": 1650, "fitted_width_px": 66.0},
+                    ],
+                },
+            },
+        }
+    )
+    qapp.processEvents()
+
+    bundle = dialog._online_stream_tail_chart_bundle
+    assert bundle["marker_series"].count() == 2
+    assert bundle["segmented_fit_series"].count() == 3
+    assert bundle["segmented_marker_series"].count() == 2
+    assert bundle["segmented_knee_series"].count() == 2
+    assert bundle["segmented_second_knee_series"].count() == 2
+    assert bundle["segmented_bracket_left_series"].count() == 2
+    assert bundle["segmented_bracket_right_series"].count() == 2
+    assert "segmented 1625 us" in bundle["chart"].title()
+
+    dialog.deleteLater()
+
+
 def test_online_stream_debug_plots_reset_when_nonstream_preview_replaces_center_image(monkeypatch, qapp):
     dialog, manager, _controller = _build_dialog(monkeypatch, qapp)
     manager.activeCalibration = SimpleNamespace(phase_name="online_stream_calibration")

@@ -2847,8 +2847,32 @@ class DropletImagingDialog(QtWidgets.QDialog):
         reference_series.setPen(self._make_chart_pen(reference_color_key, reference_fallback, width=2))
         marker_series = QtCharts.QLineSeries()
         marker_series.setPen(self._make_chart_pen("yellow", "#f1c40f", width=2, style=Qt.DashLine))
+        segmented_fit_series = QtCharts.QLineSeries()
+        segmented_fit_series.setPen(self._make_chart_pen("purple", "#d946ef", width=2))
+        segmented_marker_series = QtCharts.QLineSeries()
+        segmented_marker_series.setPen(self._make_chart_pen("green", "#2ecc71", width=2, style=Qt.DashLine))
+        segmented_knee_series = QtCharts.QLineSeries()
+        segmented_knee_series.setPen(self._make_chart_pen("gray", "#9ca3af", width=1, style=Qt.DotLine))
+        segmented_second_knee_series = QtCharts.QLineSeries()
+        segmented_second_knee_series.setPen(self._make_chart_pen("gray", "#9ca3af", width=1, style=Qt.DotLine))
+        segmented_bracket_left_series = QtCharts.QLineSeries()
+        segmented_bracket_left_series.setPen(self._make_chart_pen("gray", "#9ca3af", width=1, style=Qt.DashDotLine))
+        segmented_bracket_right_series = QtCharts.QLineSeries()
+        segmented_bracket_right_series.setPen(self._make_chart_pen("gray", "#9ca3af", width=1, style=Qt.DashDotLine))
 
-        for series in (primary_series, secondary_series, current_series, reference_series, marker_series):
+        for series in (
+            primary_series,
+            secondary_series,
+            current_series,
+            reference_series,
+            marker_series,
+            segmented_fit_series,
+            segmented_marker_series,
+            segmented_knee_series,
+            segmented_second_knee_series,
+            segmented_bracket_left_series,
+            segmented_bracket_right_series,
+        ):
             chart.addSeries(series)
             series.attachAxis(axis_x)
             series.attachAxis(axis_y)
@@ -2868,6 +2892,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "current_series": current_series,
             "reference_series": reference_series,
             "marker_series": marker_series,
+            "segmented_fit_series": segmented_fit_series,
+            "segmented_marker_series": segmented_marker_series,
+            "segmented_knee_series": segmented_knee_series,
+            "segmented_second_knee_series": segmented_second_knee_series,
+            "segmented_bracket_left_series": segmented_bracket_left_series,
+            "segmented_bracket_right_series": segmented_bracket_right_series,
         }
 
     @staticmethod
@@ -2903,7 +2933,19 @@ class DropletImagingDialog(QtWidgets.QDialog):
             axis_y.setRange(0.0, 1.0)
 
     def _clear_online_stream_chart_bundle(self, bundle):
-        for key in ("primary_series", "secondary_series", "current_series", "reference_series", "marker_series"):
+        for key in (
+            "primary_series",
+            "secondary_series",
+            "current_series",
+            "reference_series",
+            "marker_series",
+            "segmented_fit_series",
+            "segmented_marker_series",
+            "segmented_knee_series",
+            "segmented_second_knee_series",
+            "segmented_bracket_left_series",
+            "segmented_bracket_right_series",
+        ):
             bundle[key].clear()
         bundle["axis_x"].setRange(0.0, 1.0)
         bundle["axis_y"].setRange(0.0, 1.0)
@@ -2995,10 +3037,35 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         baseline_width_px = plot.get("baseline_width_px")
         tail_start_x_us = plot.get("tail_start_x_us")
-        all_xs = [x for x, _ in scout_points + backtrack_points + current_points]
+        segmented_tail = dict(plot.get("segmented_tail") or {})
+        segmented_fit_points = [
+            (float(row["delay_from_emergence_us"]), float(row["fitted_width_px"]))
+            for row in list(segmented_tail.get("fit_points") or [])
+            if dict(row or {}).get("delay_from_emergence_us") is not None
+            and dict(row or {}).get("fitted_width_px") is not None
+        ]
+        segmented_start_x_us = segmented_tail.get("tail_start_delay_from_emergence_us")
+        segmented_knee_x_us = segmented_tail.get("knee_delay_from_emergence_us")
+        segmented_second_knee_x_us = segmented_tail.get("second_knee_delay_from_emergence_us")
+        segmented_bracket_left_x_us = None
+        segmented_bracket_right_x_us = None
+        if str(segmented_tail.get("tail_start_source") or "") == "three_two_midpoint":
+            segmented_bracket_left_x_us = segmented_tail.get("three_break_tail_start_delay_from_emergence_us")
+            segmented_bracket_right_x_us = segmented_tail.get("two_break_tail_start_delay_from_emergence_us")
+
+        all_xs = [x for x, _ in scout_points + backtrack_points + current_points + segmented_fit_points]
         if tail_start_x_us is not None:
             all_xs.append(float(tail_start_x_us))
-        all_ys = [y for _, y in scout_points + backtrack_points + current_points]
+        for guide_x in (
+            segmented_start_x_us,
+            segmented_knee_x_us,
+            segmented_second_knee_x_us,
+            segmented_bracket_left_x_us,
+            segmented_bracket_right_x_us,
+        ):
+            if guide_x is not None:
+                all_xs.append(float(guide_x))
+        all_ys = [y for _, y in scout_points + backtrack_points + current_points + segmented_fit_points]
         if baseline_width_px is not None:
             all_ys.append(float(baseline_width_px))
 
@@ -3015,12 +3082,29 @@ class DropletImagingDialog(QtWidgets.QDialog):
         tail_start_points = []
         if tail_start_x_us is not None:
             tail_start_points = [(float(tail_start_x_us), y_min), (float(tail_start_x_us), y_max)]
+        def _vertical_guide(x_value):
+            if x_value is None:
+                return []
+            return [(float(x_value), y_min), (float(x_value), y_max)]
 
         self._replace_xy_series(bundle["primary_series"], scout_points)
         self._replace_xy_series(bundle["secondary_series"], backtrack_points)
         self._replace_xy_series(bundle["current_series"], current_points)
         self._replace_xy_series(bundle["reference_series"], baseline_points)
         self._replace_xy_series(bundle["marker_series"], tail_start_points)
+        self._replace_xy_series(bundle["segmented_fit_series"], segmented_fit_points)
+        self._replace_xy_series(bundle["segmented_marker_series"], _vertical_guide(segmented_start_x_us))
+        self._replace_xy_series(bundle["segmented_knee_series"], _vertical_guide(segmented_knee_x_us))
+        self._replace_xy_series(bundle["segmented_second_knee_series"], _vertical_guide(segmented_second_knee_x_us))
+        self._replace_xy_series(bundle["segmented_bracket_left_series"], _vertical_guide(segmented_bracket_left_x_us))
+        self._replace_xy_series(bundle["segmented_bracket_right_series"], _vertical_guide(segmented_bracket_right_x_us))
+
+        title = "Attached Width vs Time"
+        if segmented_start_x_us is not None:
+            runtime_label = "-" if tail_start_x_us is None else f"{float(tail_start_x_us):.0f}"
+            segmented_label = f"{float(segmented_start_x_us):.0f}"
+            title = f"{title} | runtime {runtime_label} us | segmented {segmented_label} us"
+        bundle["chart"].setTitle(title)
 
     def on_online_stream_debug_updated(self, payload):
         data = dict(payload or {})

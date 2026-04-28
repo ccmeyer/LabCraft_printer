@@ -6,6 +6,11 @@ import numpy as np
 
 from tools.stream_analysis import online_calibration as online_cal_mod
 
+try:
+    from tools.stream_analysis import segmented_tail as segmented_tail_mod
+except Exception:  # pragma: no cover - diagnostic path degrades safely.
+    segmented_tail_mod = None
+
 
 SEARCH_METHOD = "separation_landmark_backtrack_v1"
 TAIL_SETTLING_SELECTION_METHOD = "settling_progress90_after_long_shoulder"
@@ -1602,6 +1607,153 @@ def decide_online_stream_tail_right_extension(
     }
 
 
+def _segmented_tail_source_rows(
+    scout_summaries: list[dict] | None,
+    backtrack_summaries: list[dict] | None,
+) -> list[dict]:
+    rows = []
+    for row in list(scout_summaries or []) + list(backtrack_summaries or []):
+        summary = dict(row or {})
+        delay_from_emergence_us = _to_int(summary.get("delay_from_emergence_us"))
+        if delay_from_emergence_us is None:
+            continue
+        width_px = _to_float_or_none(summary.get("median_width_px"))
+        rows.append(
+            {
+                "phase": str(summary.get("phase") or ""),
+                "status": "accepted" if bool(summary.get("tail_width_usable")) else "rejected",
+                "delay_us": _to_int(summary.get("delay_us")),
+                "delay_from_emergence_us": int(delay_from_emergence_us),
+                "attached_width_px": None if width_px is None else float(width_px),
+                "tail_width_usable": bool(summary.get("tail_width_usable")) and width_px is not None,
+            }
+        )
+    return rows
+
+
+def _segmented_tail_confidence(result: dict) -> str:
+    if segmented_tail_mod is None:
+        return "unavailable"
+    tail_start = _to_int(result.get("tail_start_delay_from_emergence_us"))
+    if str(result.get("fit_status") or "") != "ok" or tail_start is None:
+        return "unavailable"
+    source = str(result.get("tail_start_source") or "")
+    model_name = str(result.get("model_name") or "")
+    if source == segmented_tail_mod.TAIL_START_SOURCE_THREE_BREAK_TAU1:
+        local_confirmation = dict(result.get("local_confirmation") or {})
+        return "high" if bool(local_confirmation.get("passed", True)) else "medium"
+    if source == segmented_tail_mod.TAIL_START_SOURCE_THREE_TWO_MIDPOINT:
+        return "medium"
+    if model_name in {
+        segmented_tail_mod.MODEL_PLATEAU_DECLINE,
+        segmented_tail_mod.MODEL_PLATEAU_SHOULDER_COLLAPSE,
+    }:
+        return "low"
+    return "unavailable"
+
+
+def _compact_segmented_tail_shadow_payload(
+    result: dict,
+    *,
+    runtime_tail_start_delay_from_emergence_us: int | None,
+) -> dict:
+    tail_start = _to_int(result.get("tail_start_delay_from_emergence_us"))
+    runtime_tail_start = _to_int(runtime_tail_start_delay_from_emergence_us)
+    delta_from_runtime = None
+    if tail_start is not None and runtime_tail_start is not None:
+        delta_from_runtime = int(tail_start) - int(runtime_tail_start)
+    fit_status = str(result.get("fit_status") or "unknown")
+    status = fit_status
+    if fit_status == "ok" and tail_start is None:
+        status = "no_tail_start"
+    return {
+        "status": status,
+        "fit_status": fit_status,
+        "model_name": result.get("model_name"),
+        "tail_start_source": result.get("tail_start_source"),
+        "confidence": _segmented_tail_confidence(result),
+        "tail_start_delay_from_emergence_us": tail_start,
+        "tail_start_delta_from_runtime_us": delta_from_runtime,
+        "runtime_tail_start_delay_from_emergence_us": runtime_tail_start,
+        "knee_delay_from_emergence_us": _to_int(result.get("knee_delay_from_emergence_us")),
+        "second_knee_delay_from_emergence_us": _to_int(result.get("second_knee_delay_from_emergence_us")),
+        "breakpoint_delays_from_emergence_us": _copy_jsonish(
+            result.get("breakpoint_delays_from_emergence_us") or []
+        ),
+        "breakpoint_observed_delays": _copy_jsonish(result.get("breakpoint_observed_delays") or []),
+        "three_break_tail_start_delay_from_emergence_us": _to_int(
+            result.get("three_break_tail_start_delay_from_emergence_us")
+        ),
+        "two_break_tail_start_delay_from_emergence_us": _to_int(
+            result.get("two_break_tail_start_delay_from_emergence_us")
+        ),
+        "midpoint_tail_start_delay_from_emergence_us": _to_int(
+            result.get("midpoint_tail_start_delay_from_emergence_us")
+        ),
+        "tail_start_observed_delay": result.get("tail_start_observed_delay"),
+        "breakpoint_refinement_step_us": _to_int(result.get("breakpoint_refinement_step_us")),
+        "usable_point_count": _to_int(result.get("usable_point_count"), 0),
+        "noise_estimate_px": _to_float_or_none(result.get("noise_estimate_px")),
+        "bic_scores": _copy_jsonish(result.get("bic_scores") or {}),
+        "local_confirmation": _copy_jsonish(result.get("local_confirmation") or {}),
+        "three_break_selection_gate": _copy_jsonish(result.get("three_break_selection_gate") or {}),
+        "trace": _copy_jsonish(result.get("trace") or []),
+        "fit_points": _copy_jsonish(result.get("fit_points") or []),
+    }
+
+
+def evaluate_online_stream_segmented_tail_shadow(
+    *,
+    scout_summaries: list[dict] | None,
+    backtrack_summaries: list[dict] | None,
+    baseline_width_px: float | int | None,
+    runtime_tail_start_delay_from_emergence_us: int | None = None,
+    analysis_config: dict | None = None,
+) -> dict | None:
+    resolved_analysis_config = _resolved_analysis_config(analysis_config)
+    if not bool(resolved_analysis_config.get("segmented_tail_online_shadow_enabled")):
+        return None
+    min_usable_points = max(
+        1,
+        _to_int(resolved_analysis_config.get("segmented_tail_online_min_usable_points"), 6),
+    )
+    if segmented_tail_mod is None:
+        return {
+            "status": "unavailable",
+            "fit_status": "unavailable",
+            "reason": "segmented_tail_module_unavailable",
+            "usable_point_count": 0,
+            "min_usable_points": int(min_usable_points),
+        }
+    source_rows = _segmented_tail_source_rows(scout_summaries, backtrack_summaries)
+    trace = segmented_tail_mod.build_tail_width_trace(source_rows)
+    if len(trace) < int(min_usable_points):
+        return {
+            "status": "insufficient_usable_points",
+            "fit_status": "insufficient_points",
+            "usable_point_count": int(len(trace)),
+            "min_usable_points": int(min_usable_points),
+            "trace": _copy_jsonish(trace),
+            "fit_points": [],
+            "tail_start_delay_from_emergence_us": None,
+            "tail_start_delta_from_runtime_us": None,
+            "runtime_tail_start_delay_from_emergence_us": _to_int(
+                runtime_tail_start_delay_from_emergence_us
+            ),
+            "confidence": "unavailable",
+        }
+    result = segmented_tail_mod.evaluate_segmented_tail_trace(
+        source_rows,
+        baseline_width_px=_to_float_or_none(baseline_width_px),
+    )
+    payload = _compact_segmented_tail_shadow_payload(
+        dict(result or {}),
+        runtime_tail_start_delay_from_emergence_us=runtime_tail_start_delay_from_emergence_us,
+    )
+    payload["min_usable_points"] = int(min_usable_points)
+    return payload
+
+
 def resolve_online_stream_tail_result(
     *,
     flow_fit_result: dict | None,
@@ -2066,6 +2218,17 @@ def resolve_online_stream_tail_result(
         backtrack_rows,
         policy=resolved_policy,
     )
+    segmented_tail_shadow = evaluate_online_stream_segmented_tail_shadow(
+        scout_summaries=scout_rows,
+        backtrack_summaries=backtrack_rows,
+        baseline_width_px=(
+            baseline_width_px
+            if baseline_width_px is not None
+            else _to_float_or_none(plan.get("steady_width_baseline_px"))
+        ),
+        runtime_tail_start_delay_from_emergence_us=tail_start_delay_from_emergence_us,
+        analysis_config=resolved_analysis_config,
+    )
     tail_phase = {
         "status": str(tail_phase_status or "unresolved_no_landmark"),
         "plan": _copy_jsonish(plan),
@@ -2176,6 +2339,14 @@ def resolve_online_stream_tail_result(
         ),
         "warnings": _copy_warnings(warnings),
     }
+    if segmented_tail_shadow is not None:
+        tail_phase["segmented_tail"] = _copy_jsonish(segmented_tail_shadow)
+        tail_phase["segmented_tail_start_delay_from_emergence_us"] = _to_int(
+            segmented_tail_shadow.get("tail_start_delay_from_emergence_us")
+        )
+        tail_phase["segmented_tail_start_delta_from_runtime_us"] = _to_int(
+            segmented_tail_shadow.get("tail_start_delta_from_runtime_us")
+        )
     return {
         "phase": str(phase),
         "tail_phase": tail_phase,
