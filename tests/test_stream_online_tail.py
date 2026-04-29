@@ -79,6 +79,58 @@ def _tail_frame_row(
     return row
 
 
+def _window_candidate(step_index, width_px, *, y0_px=None, usable=True):
+    y0 = 100 + int(step_index) * 20 if y0_px is None else int(y0_px)
+    return {
+        "step_index": int(step_index),
+        "mode": "root_band" if int(step_index) == 0 else "lower_consistent_window",
+        "y0_px": int(y0),
+        "y1_px": int(y0 + 40),
+        "median_width_px": None if width_px is None else float(width_px),
+        "iqr_px": 0.5 if width_px is not None else None,
+        "half_delta_px": 0.5 if width_px is not None else None,
+        "valid_row_count": 40 if usable else 8,
+        "width_usable": bool(usable and width_px is not None),
+        "eligible_as_selected_window": bool(usable and width_px is not None),
+    }
+
+
+def _tail_summary_with_window_bank(
+    *,
+    delay_from_emergence_us,
+    selected_width_px,
+    selected_step_index,
+    lower_step3_width_px,
+    lower_step4_width_px=None,
+    phase="tail_backtrack",
+):
+    delay_us = 3200 + int(delay_from_emergence_us)
+    candidates = [
+        _window_candidate(0, selected_width_px if int(selected_step_index) == 0 else selected_width_px + 20.0),
+        _window_candidate(3, lower_step3_width_px),
+    ]
+    if lower_step4_width_px is not None:
+        candidates.append(_window_candidate(4, lower_step4_width_px))
+    return mod.summarize_online_stream_tail_delay(
+        [
+            _tail_frame_row(
+                delay_us=delay_us,
+                delay_from_emergence_us=int(delay_from_emergence_us),
+                phase=phase,
+                width_px=float(selected_width_px),
+                attached_width_mode=(
+                    "root_band" if int(selected_step_index) == 0 else "lower_consistent_window"
+                ),
+                selected_band_step_index=int(selected_step_index),
+                selected_band_y0_px=100 + int(selected_step_index) * 20,
+                selected_band_y1_px=140 + int(selected_step_index) * 20,
+                tail_width_window_candidates=candidates,
+            )
+        ],
+        baseline_width_px=95.0,
+    )
+
+
 def _segmented_tail_rows(widths, *, start_delay_us=0, step_us=100):
     return [
         {
@@ -1111,6 +1163,268 @@ def test_resolve_online_stream_tail_result_adds_segmented_shadow_without_control
     assert resolved["tail_phase"]["segmented_predicted_volume_delta_from_runtime_nl"] == pytest.approx(
         segmented["predicted_volume_delta_from_runtime_nl"]
     )
+
+
+def test_summarize_online_stream_tail_delay_median_aggregates_window_candidates():
+    summary = mod.summarize_online_stream_tail_delay(
+        [
+            _tail_frame_row(
+                delay_us=6100,
+                delay_from_emergence_us=2900,
+                width_px=95.0,
+                tail_width_window_candidates=[
+                    _window_candidate(0, 95.0),
+                    _window_candidate(3, 78.0),
+                ],
+            ),
+            _tail_frame_row(
+                delay_us=6100,
+                delay_from_emergence_us=2900,
+                width_px=94.0,
+                tail_width_window_candidates=[
+                    _window_candidate(0, 94.0),
+                    _window_candidate(3, 76.0),
+                ],
+            ),
+        ],
+        baseline_width_px=95.0,
+    )
+
+    by_step = {
+        int(candidate["step_index"]): candidate
+        for candidate in summary["tail_width_window_candidates"]
+    }
+    assert by_step[0]["median_width_px"] == pytest.approx(94.5)
+    assert by_step[3]["median_width_px"] == pytest.approx(77.0)
+    assert by_step[3]["sample_count"] == 2
+    assert by_step[3]["usable_sample_count"] == 2
+
+
+def test_segmented_shadow_uses_uniform_lower_window_trace_for_mixed_selected_windows():
+    delays = list(range(2800, 3600, 50))
+    lower_widths = [
+        77.0,
+        77.0,
+        77.0,
+        77.0,
+        76.5,
+        77.0,
+        76.0,
+        76.0,
+        75.0,
+        73.5,
+        72.0,
+        69.0,
+        65.0,
+        57.0,
+        43.5,
+        26.0,
+    ]
+    selected_steps = [0] * 6 + [3] * 10
+    selected_widths = [95.0] * 6 + lower_widths[6:]
+    backtrack_summaries = [
+        _tail_summary_with_window_bank(
+            delay_from_emergence_us=delay,
+            selected_width_px=selected_width,
+            selected_step_index=selected_step,
+            lower_step3_width_px=lower_width,
+        )
+        for delay, selected_width, selected_step, lower_width in zip(
+            delays,
+            selected_widths,
+            selected_steps,
+            lower_widths,
+        )
+    ]
+
+    segmented = mod.evaluate_online_stream_segmented_tail_shadow(
+        scout_summaries=[],
+        backtrack_summaries=backtrack_summaries,
+        baseline_width_px=95.0,
+        runtime_tail_start_delay_from_emergence_us=3250,
+        analysis_config={},
+    )
+
+    assert segmented["status"] == "ok"
+    assert segmented["segmented_tail_source_trace_kind"] == "uniform_window"
+    assert segmented["segmented_tail_source_window_step_index"] == 3
+    assert segmented["segmented_tail_source_baseline_width_px"] == pytest.approx(77.0)
+    assert segmented["segmented_tail_window_selection_reason"] == "selected_uniform_window"
+    assert segmented["tail_start_delay_from_emergence_us"] >= 3150
+    first_trace_widths = [
+        point["median_width_px"]
+        for point in segmented["trace"][:6]
+    ]
+    assert min(first_trace_widths) >= 76.5
+    assert max(first_trace_widths) <= 77.0
+    assert segmented["window_trace"][0]["selected_band_step_index"] == 3
+    assert segmented["segmented_tail_candidate_window_traces"][0]["qualified"] is True
+
+
+def test_segmented_shadow_prefers_shallowest_qualifying_lower_window():
+    delays = list(range(2800, 3600, 50))
+    lower_step3_widths = [
+        77.0,
+        77.0,
+        77.0,
+        77.0,
+        76.5,
+        77.0,
+        76.0,
+        76.0,
+        75.0,
+        73.5,
+        72.0,
+        69.0,
+        65.0,
+        57.0,
+        43.5,
+        26.0,
+    ]
+    lower_step4_widths = [
+        70.0,
+        70.0,
+        70.0,
+        70.0,
+        70.0,
+        70.0,
+        69.0,
+        69.0,
+        68.0,
+        67.0,
+        65.0,
+        62.0,
+        58.0,
+        50.0,
+        35.0,
+        20.0,
+    ]
+    backtrack_summaries = [
+        _tail_summary_with_window_bank(
+            delay_from_emergence_us=delay,
+            selected_width_px=width,
+            selected_step_index=3,
+            lower_step3_width_px=width,
+            lower_step4_width_px=step4_width,
+        )
+        for delay, width, step4_width in zip(delays, lower_step3_widths, lower_step4_widths)
+    ]
+
+    segmented = mod.evaluate_online_stream_segmented_tail_shadow(
+        scout_summaries=[],
+        backtrack_summaries=backtrack_summaries,
+        baseline_width_px=95.0,
+        runtime_tail_start_delay_from_emergence_us=3250,
+        analysis_config={},
+    )
+
+    assert segmented["segmented_tail_source_trace_kind"] == "uniform_window"
+    assert segmented["segmented_tail_source_window_step_index"] == 3
+    assert [
+        trace["step_index"]
+        for trace in segmented["segmented_tail_candidate_window_traces"]
+    ] == [3, 4]
+
+
+def test_segmented_shadow_rejects_unstable_lower_window_baseline():
+    delays = list(range(2800, 3600, 50))
+    unstable_step3_widths = [
+        77.0,
+        80.0,
+        77.0,
+        79.0,
+        78.0,
+        77.0,
+        76.0,
+        76.0,
+        75.0,
+        73.5,
+        72.0,
+        69.0,
+        65.0,
+        57.0,
+        43.5,
+        26.0,
+    ]
+    stable_step4_widths = [
+        70.0,
+        70.0,
+        70.0,
+        70.0,
+        70.0,
+        70.0,
+        69.0,
+        69.0,
+        68.0,
+        67.0,
+        65.0,
+        62.0,
+        58.0,
+        50.0,
+        35.0,
+        20.0,
+    ]
+    backtrack_summaries = [
+        _tail_summary_with_window_bank(
+            delay_from_emergence_us=delay,
+            selected_width_px=width,
+            selected_step_index=3,
+            lower_step3_width_px=width,
+            lower_step4_width_px=step4_width,
+        )
+        for delay, width, step4_width in zip(delays, unstable_step3_widths, stable_step4_widths)
+    ]
+
+    segmented = mod.evaluate_online_stream_segmented_tail_shadow(
+        scout_summaries=[],
+        backtrack_summaries=backtrack_summaries,
+        baseline_width_px=95.0,
+        runtime_tail_start_delay_from_emergence_us=3250,
+        analysis_config={},
+    )
+
+    assert segmented["segmented_tail_source_trace_kind"] == "uniform_window"
+    assert segmented["segmented_tail_source_window_step_index"] == 4
+    diagnostics = {
+        int(trace["step_index"]): trace
+        for trace in segmented["segmented_tail_candidate_window_traces"]
+    }
+    assert diagnostics[3]["qualified"] is False
+    assert diagnostics[3]["selection_reason"] == "unstable_window_baseline"
+    assert diagnostics[4]["qualified"] is True
+
+
+def test_segmented_shadow_falls_back_to_selected_trace_without_candidate_bank():
+    backtrack_summaries = [
+        mod.summarize_online_stream_tail_delay(
+            [
+                _tail_frame_row(
+                    delay_us=6000 + 50 * index,
+                    delay_from_emergence_us=2800 + 50 * index,
+                    phase="tail_backtrack",
+                    width_px=width_px,
+                    attached_width_mode="lower_consistent_window" if index >= 6 else "root_band",
+                    selected_band_step_index=3 if index >= 6 else 0,
+                    selected_band_y0_px=160 if index >= 6 else 100,
+                    selected_band_y1_px=200 if index >= 6 else 140,
+                )
+            ],
+            baseline_width_px=95.0,
+        )
+        for index, width_px in enumerate([95, 95, 95, 95, 95, 95, 76, 75, 72, 68])
+    ]
+
+    segmented = mod.evaluate_online_stream_segmented_tail_shadow(
+        scout_summaries=[],
+        backtrack_summaries=backtrack_summaries,
+        baseline_width_px=95.0,
+        runtime_tail_start_delay_from_emergence_us=3250,
+        analysis_config={},
+    )
+
+    assert segmented["segmented_tail_source_trace_kind"] == "selected_window_fallback"
+    assert segmented["segmented_tail_window_selection_reason"] == "missing_window_candidate_bank"
+    assert segmented["segmented_tail_source_window_step_index"] is None
 
 
 def test_resolve_online_stream_tail_result_can_skip_segmented_shadow_for_previews():

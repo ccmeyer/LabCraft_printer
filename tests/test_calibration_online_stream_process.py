@@ -2960,6 +2960,32 @@ def test_online_stream_analyze_tail_frame_reuses_and_records_sticky_window_state
                 "selected_band_valid_row_count": 40,
                 "spread_fallback_triggered": True,
                 "candidate_window_count": 5,
+                "tail_width_window_candidates": [
+                    {
+                        "step_index": 0,
+                        "mode": "root_band",
+                        "y0_px": 84,
+                        "y1_px": 124,
+                        "median_width_px": 130.0,
+                        "iqr_px": 40.0,
+                        "half_delta_px": 40.0,
+                        "valid_row_count": 40,
+                        "width_usable": True,
+                        "eligible_as_selected_window": False,
+                    },
+                    {
+                        "step_index": 3,
+                        "mode": "lower_consistent_window",
+                        "y0_px": 144,
+                        "y1_px": 184,
+                        "median_width_px": 89.0,
+                        "iqr_px": 1.0,
+                        "half_delta_px": 1.0,
+                        "valid_row_count": 40,
+                        "width_usable": True,
+                        "eligible_as_selected_window": True,
+                    },
+                ],
                 "sticky_window_active": True,
                 "sticky_window_previous_y0_px": 144,
                 "sticky_window_instant_y0_px": 124,
@@ -3011,6 +3037,8 @@ def test_online_stream_analyze_tail_frame_reuses_and_records_sticky_window_state
     assert payload["sticky_window_switch_blocked"] is True
     assert payload["selected_band_step_index"] == 3
     assert payload["window_locked_reused"] is False
+    assert payload["tail_width_window_candidates"][1]["step_index"] == 3
+    assert payload["tail_width_window_candidates"][1]["median_width_px"] == 89.0
 
 
 def test_online_stream_analyze_tail_frame_resets_sticky_window_state_on_root_band(tmp_path, monkeypatch):
@@ -3287,6 +3315,117 @@ def test_online_stream_debug_signal_publishes_final_tail_start_after_resolution(
     assert payload["tail_plot"]["tail_start_x_us"] == 3950
     assert payload["tail_plot"]["segmented_tail"]["tail_start_delay_from_emergence_us"] == 3900
     assert payload["tail_plot"]["segmented_tail"]["predicted_volume_nl"] == 71.73
+
+
+def test_online_stream_final_tail_fit_contains_uniform_window_segmented_diagnostics(tmp_path):
+    proc = _flow_proc(tmp_path)
+    _seed_tail_flow_context(proc, steady_width_baseline_px=95.0)
+    proc._tail_fit_path = str(tmp_path / "tail_fit.json")
+    proc._tail_plan = {
+        "steady_width_baseline_px": 95.0,
+        "scout_anchor_delay_us": int(proc.emergence_time_us) + 2800,
+        "backtrack_step_us": 50,
+        "scout_replicates": 1,
+        "backtrack_replicates": 1,
+    }
+    proc._tail_landmark_delay_us = int(proc.emergence_time_us) + 3600
+    proc._tail_landmark_reason = "separated_from_nozzle"
+    proc._tail_backtrack_left_delay_us = int(proc.emergence_time_us) + 2800
+    proc._tail_scout_delay_summaries = [
+        calibration_model.online_tail_mod.summarize_online_stream_tail_delay(
+            [
+                _accepted_tail_frame_row(
+                    proc,
+                    3600,
+                    phase="tail_scout",
+                    width_px=20.0,
+                    landmark=True,
+                )
+            ],
+            95.0,
+        )
+    ]
+
+    def _candidate(step_index, width_px):
+        y0_px = 100 + int(step_index) * 20
+        return {
+            "step_index": int(step_index),
+            "mode": "root_band" if int(step_index) == 0 else "lower_consistent_window",
+            "y0_px": int(y0_px),
+            "y1_px": int(y0_px + 40),
+            "median_width_px": float(width_px),
+            "iqr_px": 0.5,
+            "half_delta_px": 0.5,
+            "valid_row_count": 40,
+            "width_usable": True,
+            "eligible_as_selected_window": True,
+        }
+
+    delays = list(range(2800, 3600, 50))
+    lower_widths = [
+        77.0,
+        77.0,
+        77.0,
+        77.0,
+        76.5,
+        77.0,
+        76.0,
+        76.0,
+        75.0,
+        73.5,
+        72.0,
+        69.0,
+        65.0,
+        57.0,
+        43.5,
+        26.0,
+    ]
+    selected_steps = [0] * 6 + [3] * 10
+    selected_widths = [95.0] * 6 + lower_widths[6:]
+    proc._tail_backtrack_delay_summaries = [
+        calibration_model.online_tail_mod.summarize_online_stream_tail_delay(
+            [
+                _accepted_tail_frame_row(
+                    proc,
+                    delay,
+                    phase="tail_backtrack",
+                    width_px=selected_width,
+                    attached_width_mode=(
+                        "root_band" if int(selected_step) == 0 else "lower_consistent_window"
+                    ),
+                    selected_band_step_index=int(selected_step),
+                    selected_band_y0_px=100 + int(selected_step) * 20,
+                    selected_band_y1_px=140 + int(selected_step) * 20,
+                    tail_width_window_candidates=[
+                        _candidate(
+                            0,
+                            selected_width
+                            if int(selected_step) == 0
+                            else selected_width + 20.0,
+                        ),
+                        _candidate(3, lower_width),
+                    ],
+                )
+            ],
+            95.0,
+        )
+        for delay, selected_width, selected_step, lower_width in zip(
+            delays,
+            selected_widths,
+            selected_steps,
+            lower_widths,
+        )
+    ]
+
+    proc._resolve_tail_phase()
+
+    artifact = json.loads(Path(proc._tail_fit_path).read_text(encoding="utf-8"))
+    segmented = artifact["result"]["tail_phase"]["segmented_tail"]
+    assert segmented["status"] == "ok"
+    assert segmented["segmented_tail_source_trace_kind"] == "uniform_window"
+    assert segmented["segmented_tail_source_window_step_index"] == 3
+    assert abs(float(segmented["segmented_tail_source_baseline_width_px"]) - 77.0) < 1e-6
+    assert abs(float(segmented["trace"][0]["median_width_px"]) - 77.0) < 1e-6
 
 
 def test_online_stream_advance_tail_phase_continues_scout_without_landmark(tmp_path):

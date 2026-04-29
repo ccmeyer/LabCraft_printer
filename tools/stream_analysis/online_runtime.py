@@ -112,6 +112,7 @@ def _band_width_metrics(
     delay_from_emergence_us: int | None = None,
     sticky_window_state: dict | None = None,
     sticky_window_enabled: bool = False,
+    window_bank_enabled: bool = True,
     window_delay_lock_enabled: bool = True,
     window_monotonic_by_delay_enabled: bool = True,
     sticky_window_confirm_frames: int = 2,
@@ -315,6 +316,7 @@ def _band_width_metrics(
             "selected_band_y0_px": int(selected_stats.get("y0_px") or root_band_y0_px),
             "selected_band_y1_px": int(selected_stats.get("y1_px") or root_band_y1_px),
             "selected_band_valid_row_count": int(selected_stats.get("valid_row_count") or 0),
+            "tail_width_window_candidates": _candidate_bank_records(),
         }
         selected_step_index = _step_index_for_y0(
             payload["selected_band_y0_px"],
@@ -351,6 +353,7 @@ def _band_width_metrics(
             "selected_band_y1_px": root_band_y1_px,
             "selected_band_step_index": 0,
             "root_band_step_index": 0,
+            "tail_width_window_candidates": [],
             "selected_band_valid_row_count": 0,
             **_sticky_fields(
                 selected_reason="reset_no_width",
@@ -439,6 +442,7 @@ def _band_width_metrics(
     candidate_stats_by_y0 = {
         int(root_band_y0_px): dict(root_stats),
     }
+    candidate_eligible_by_step = {}
     eligible_by_y0 = {}
     eligible_candidates = []
     max_candidate_start_px = int(root_band_y0_px + int(_WIDTH_MAX_CANDIDATE_START_DELTA_PX))
@@ -453,8 +457,6 @@ def _band_width_metrics(
             y0_px=int(candidate_y0_px),
             y1_px=int(candidate_y1_px),
         )
-        if int(candidate_stats.get("valid_row_count") or 0) < int(min_band_valid_rows):
-            continue
         candidate_window_count += 1
         candidate_step_index = _step_index_for_y0(
             candidate_stats.get("y0_px"),
@@ -464,10 +466,44 @@ def _band_width_metrics(
         if candidate_step_index is not None:
             candidate_stats_by_step[int(candidate_step_index)] = dict(candidate_stats)
         candidate_stats_by_y0[int(candidate_stats["y0_px"])] = dict(candidate_stats)
-        if _candidate_is_eligible(candidate_stats):
+        candidate_eligible = bool(
+            int(candidate_stats.get("valid_row_count") or 0) >= int(min_band_valid_rows)
+            and _candidate_is_eligible(candidate_stats)
+        )
+        if candidate_step_index is not None:
+            candidate_eligible_by_step[int(candidate_step_index)] = bool(candidate_eligible)
+        if candidate_eligible:
             eligible = dict(candidate_stats)
             eligible_by_y0[int(eligible["y0_px"])] = eligible
             eligible_candidates.append(eligible)
+
+    def _candidate_bank_records() -> list[dict]:
+        if not bool(window_bank_enabled):
+            return []
+        records = []
+        for step_index in sorted(candidate_stats_by_step):
+            stats = dict(candidate_stats_by_step.get(int(step_index)) or {})
+            width_px = _to_float_or_none(stats.get("median_width_px"))
+            valid_rows = int(stats.get("valid_row_count") or 0)
+            width_usable = bool(width_px is not None and valid_rows >= int(min_band_valid_rows))
+            eligible_as_selected = bool(width_usable) if int(step_index) == 0 else bool(
+                candidate_eligible_by_step.get(int(step_index), False)
+            )
+            records.append(
+                {
+                    "step_index": int(step_index),
+                    "mode": _mode_for_step(int(step_index)),
+                    "y0_px": _to_int_or_none(stats.get("y0_px")),
+                    "y1_px": _to_int_or_none(stats.get("y1_px")),
+                    "median_width_px": width_px,
+                    "iqr_px": _to_float_or_none(stats.get("iqr_px")),
+                    "half_delta_px": _to_float_or_none(stats.get("half_delta_px")),
+                    "valid_row_count": int(valid_rows),
+                    "width_usable": bool(width_usable),
+                    "eligible_as_selected_window": bool(eligible_as_selected),
+                }
+            )
+        return records
 
     def _stats_for_step(step_index: int | None) -> dict | None:
         if step_index is None:
@@ -494,6 +530,7 @@ def _band_width_metrics(
                 "width_valid_row_count": 0,
                 "selected_band_valid_row_count": 0,
                 "candidate_window_count": int(candidate_window_count),
+                "tail_width_window_candidates": _candidate_bank_records(),
                 "root_band_width_px": root_band_width_px,
                 "root_band_width_iqr_px": root_band_width_iqr_px,
                 "root_band_half_delta_px": root_band_half_delta_px,
@@ -1947,6 +1984,7 @@ def analyze_online_stream_frame(
         delay_from_emergence_us=int(delay_us) - int(emergence_time_us),
         sticky_window_state=sticky_window_state,
         sticky_window_enabled=bool(config["tail_width_sticky_window_enabled"]),
+        window_bank_enabled=bool(config["tail_width_window_bank_enabled"]),
         window_delay_lock_enabled=bool(config["tail_width_window_delay_lock_enabled"]),
         window_monotonic_by_delay_enabled=bool(
             config["tail_width_window_monotonic_by_delay_enabled"]
@@ -2319,6 +2357,7 @@ def analyze_online_stream_frame(
         "selected_band_valid_row_count": width_metrics.get("selected_band_valid_row_count"),
         "spread_fallback_triggered": bool(width_metrics.get("spread_fallback_triggered")),
         "candidate_window_count": width_metrics.get("candidate_window_count"),
+        "tail_width_window_candidates": width_metrics.get("tail_width_window_candidates") or [],
         "sticky_window_active": bool(width_metrics.get("sticky_window_active")),
         "sticky_window_previous_y0_px": width_metrics.get("sticky_window_previous_y0_px"),
         "sticky_window_previous_y1_px": width_metrics.get("sticky_window_previous_y1_px"),

@@ -9926,6 +9926,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             selected_band_valid_row_count=summary.get("selected_band_valid_row_count"),
             spread_fallback_triggered=bool(summary.get("spread_fallback_triggered")),
             candidate_window_count=summary.get("candidate_window_count"),
+            tail_width_window_candidates=list(summary.get("tail_width_window_candidates") or []),
             sticky_window_active=bool(summary.get("sticky_window_active")),
             sticky_window_previous_y0_px=summary.get("sticky_window_previous_y0_px"),
             sticky_window_previous_y1_px=summary.get("sticky_window_previous_y1_px"),

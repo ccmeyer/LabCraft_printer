@@ -277,6 +277,61 @@ def _window_baseline_by_step(
     return baselines
 
 
+def _candidate_step_index(candidate: dict | None) -> int | None:
+    item = dict(candidate or {})
+    parsed = _to_int(item.get("step_index"))
+    if parsed is not None:
+        return int(parsed)
+    return _to_int(item.get("selected_band_step_index"))
+
+
+def _aggregate_tail_width_window_candidates(rows: list[dict]) -> list[dict]:
+    grouped: dict[int, list[dict]] = {}
+    for row in list(rows or []):
+        for candidate in list(dict(row or {}).get("tail_width_window_candidates") or []):
+            item = dict(candidate or {})
+            step_index = _candidate_step_index(item)
+            if step_index is None:
+                continue
+            grouped.setdefault(int(step_index), []).append(item)
+
+    records = []
+    for step_index in sorted(grouped):
+        items = list(grouped.get(step_index) or [])
+        usable_items = [
+            item
+            for item in items
+            if bool(item.get("width_usable"))
+            and _to_float_or_none(item.get("median_width_px")) is not None
+        ]
+        records.append(
+            {
+                "step_index": int(step_index),
+                "mode": _most_common_string(item.get("mode") for item in items)
+                or ("root_band" if int(step_index) == 0 else "lower_consistent_window"),
+                "y0_px": _median_or_none(item.get("y0_px") for item in items),
+                "y1_px": _median_or_none(item.get("y1_px") for item in items),
+                "median_width_px": _median_or_none(
+                    item.get("median_width_px") for item in usable_items
+                ),
+                "iqr_px": _median_or_none(item.get("iqr_px") for item in usable_items),
+                "half_delta_px": _median_or_none(
+                    item.get("half_delta_px") for item in usable_items
+                ),
+                "valid_row_count": _median_or_none(
+                    item.get("valid_row_count") for item in items
+                ),
+                "sample_count": int(len(items)),
+                "usable_sample_count": int(len(usable_items)),
+                "width_usable": bool(usable_items),
+                "eligible_as_selected_window": any(
+                    bool(item.get("eligible_as_selected_window")) for item in items
+                ),
+            }
+        )
+    return records
+
+
 def _is_backup_width_collapse_landmark(summary: dict | None) -> bool:
     row = dict(summary or {})
     return bool(row.get("backup_width_collapse_landmark")) or str(
@@ -1335,6 +1390,7 @@ def summarize_online_stream_tail_delay(
     attached_width_mode = _most_common_string(row.get("attached_width_mode") for row in width_usable_rows)
     selected_band_y0_px = _median_or_none(row.get("selected_band_y0_px") for row in width_usable_rows)
     selected_band_y1_px = _median_or_none(row.get("selected_band_y1_px") for row in width_usable_rows)
+    tail_width_window_candidates = _aggregate_tail_width_window_candidates(rows)
     resolved_policy = _resolved_policy(policy)
     warnings = _unique_strings(
         warning
@@ -1429,6 +1485,7 @@ def summarize_online_stream_tail_delay(
         "selected_band_step_index": selected_band_step_index,
         "selected_band_y0_px": selected_band_y0_px,
         "selected_band_y1_px": selected_band_y1_px,
+        "tail_width_window_candidates": tail_width_window_candidates,
         "window_identity_consistent": bool(window_identity_consistent),
         "window_delay_lock_active": any(bool(row.get("window_delay_lock_active")) for row in rows),
         "window_locked_reused": any(bool(row.get("window_locked_reused")) for row in rows),
@@ -1795,6 +1852,210 @@ def _segmented_tail_source_rows(
     return rows
 
 
+def _segmented_tail_window_candidate_rows(
+    scout_summaries: list[dict] | None,
+    backtrack_summaries: list[dict] | None,
+) -> list[dict]:
+    rows = []
+    for row in list(scout_summaries or []) + list(backtrack_summaries or []):
+        summary = dict(row or {})
+        delay_from_emergence_us = _to_int(summary.get("delay_from_emergence_us"))
+        if delay_from_emergence_us is None:
+            continue
+        for candidate in list(summary.get("tail_width_window_candidates") or []):
+            item = dict(candidate or {})
+            step_index = _candidate_step_index(item)
+            if step_index is None:
+                continue
+            width_px = _to_float_or_none(item.get("median_width_px"))
+            rows.append(
+                {
+                    "phase": str(summary.get("phase") or ""),
+                    "status": "accepted" if bool(item.get("width_usable")) else "rejected",
+                    "delay_us": _to_int(summary.get("delay_us")),
+                    "delay_from_emergence_us": int(delay_from_emergence_us),
+                    "attached_width_px": None if width_px is None else float(width_px),
+                    "tail_width_usable": bool(item.get("width_usable")) and width_px is not None,
+                    "attached_width_mode": item.get("mode"),
+                    "selected_band_step_index": int(step_index),
+                    "selected_band_y0_px": item.get("y0_px"),
+                    "selected_band_y1_px": item.get("y1_px"),
+                    "window_candidate_eligible_as_selected": bool(
+                        item.get("eligible_as_selected_window")
+                    ),
+                }
+            )
+    return rows
+
+
+def _window_trace_diagnostics(
+    rows: list[dict],
+    *,
+    step_index: int,
+    mode: str,
+    min_baseline_points: int,
+    max_early_range_px: float,
+    min_collapse_drop_px: float,
+) -> dict:
+    trace = (
+        segmented_tail_mod.build_tail_width_trace(rows)
+        if segmented_tail_mod is not None
+        else []
+    )
+    widths = [
+        _to_float_or_none(row.get("median_width_px"))
+        for row in trace
+        if _to_float_or_none(row.get("median_width_px")) is not None
+    ]
+    required_baseline_points = max(1, int(min_baseline_points))
+    baseline_values = list(widths[:required_baseline_points])
+    baseline_width_px = _median_or_none(baseline_values)
+    early_range_px = None
+    if baseline_values:
+        early_range_px = float(max(baseline_values) - min(baseline_values))
+    later_widths = list(widths[required_baseline_points:])
+    collapse_drop_px = None
+    if baseline_width_px is not None and later_widths:
+        collapse_drop_px = float(float(baseline_width_px) - float(min(later_widths)))
+    qualified = True
+    reason = "selected_uniform_window"
+    if len(trace) <= 0:
+        qualified = False
+        reason = "missing_window_trace"
+    elif len(trace) < required_baseline_points:
+        qualified = False
+        reason = "insufficient_window_baseline_points"
+    elif early_range_px is None or float(early_range_px) > float(max_early_range_px):
+        qualified = False
+        reason = "unstable_window_baseline"
+    elif collapse_drop_px is None or float(collapse_drop_px) < float(min_collapse_drop_px):
+        qualified = False
+        reason = "insufficient_window_collapse_drop"
+    return {
+        "step_index": int(step_index),
+        "mode": str(mode or ("root_band" if int(step_index) == 0 else "lower_consistent_window")),
+        "usable_point_count": int(len(trace)),
+        "baseline_width_px": baseline_width_px,
+        "baseline_point_count": int(min(len(trace), required_baseline_points)),
+        "early_range_px": early_range_px,
+        "collapse_drop_px": collapse_drop_px,
+        "qualified": bool(qualified),
+        "selection_reason": str(reason),
+        "trace": _copy_jsonish(trace),
+    }
+
+
+def _select_segmented_tail_source_rows(
+    *,
+    scout_summaries: list[dict] | None,
+    backtrack_summaries: list[dict] | None,
+    selected_source_rows: list[dict],
+    analysis_config: dict,
+) -> dict:
+    selected_trace = (
+        segmented_tail_mod.build_tail_width_trace(selected_source_rows)
+        if segmented_tail_mod is not None
+        else []
+    )
+    fallback = {
+        "source_rows": list(selected_source_rows or []),
+        "trace": _copy_jsonish(selected_trace),
+        "baseline_width_px": None,
+        "source_trace_kind": "selected_window_fallback",
+        "source_window_step_index": None,
+        "source_window_mode": None,
+        "window_selection_reason": "uniform_window_disabled_or_unavailable",
+        "candidate_window_traces": [],
+    }
+    if not bool(analysis_config.get("segmented_tail_uniform_window_enabled", True)):
+        fallback["window_selection_reason"] = "uniform_window_disabled"
+        return fallback
+
+    all_summaries = list(scout_summaries or []) + list(backtrack_summaries or [])
+    selected_lower_steps = sorted(
+        {
+            int(step)
+            for step in (
+                _window_step_index_for_summary(summary)
+                for summary in all_summaries
+            )
+            if step is not None and int(step) > 0
+        }
+    )
+    if not selected_lower_steps:
+        fallback["window_selection_reason"] = "no_selected_lower_window"
+        return fallback
+
+    candidate_rows = _segmented_tail_window_candidate_rows(scout_summaries, backtrack_summaries)
+    if not candidate_rows:
+        fallback["window_selection_reason"] = "missing_window_candidate_bank"
+        return fallback
+
+    min_points = max(1, _to_int(analysis_config.get("segmented_tail_uniform_window_min_points"), 6))
+    min_baseline_points = max(
+        1,
+        _to_int(analysis_config.get("segmented_tail_uniform_window_min_baseline_points"), 2),
+    )
+    max_early_range_px = max(
+        0.0,
+        _to_float_or_none(analysis_config.get("segmented_tail_uniform_window_max_early_range_px"))
+        or 2.0,
+    )
+    min_collapse_drop_px = max(
+        0.0,
+        _to_float_or_none(analysis_config.get("segmented_tail_uniform_window_min_collapse_drop_px"))
+        or 4.0,
+    )
+
+    rows_by_step: dict[int, list[dict]] = {}
+    modes_by_step: dict[int, list[str]] = {}
+    for row in candidate_rows:
+        step = _to_int(row.get("selected_band_step_index"))
+        if step is None or int(step) <= 0:
+            continue
+        rows_by_step.setdefault(int(step), []).append(dict(row))
+        mode = str(row.get("attached_width_mode") or "").strip()
+        if mode:
+            modes_by_step.setdefault(int(step), []).append(mode)
+
+    diagnostics = []
+    for step in sorted(rows_by_step):
+        mode = _most_common_string(modes_by_step.get(int(step)) or []) or "lower_consistent_window"
+        diag = _window_trace_diagnostics(
+            rows_by_step[int(step)],
+            step_index=int(step),
+            mode=mode,
+            min_baseline_points=int(min_baseline_points),
+            max_early_range_px=float(max_early_range_px),
+            min_collapse_drop_px=float(min_collapse_drop_px),
+        )
+        if int(diag["usable_point_count"]) < int(min_points):
+            diag["qualified"] = False
+            diag["selection_reason"] = "insufficient_window_points"
+        diagnostics.append(diag)
+
+    for diag in diagnostics:
+        if not bool(diag.get("qualified")):
+            continue
+        step = _to_int(diag.get("step_index"))
+        if step is None or int(step) <= 0:
+            continue
+        return {
+            "source_rows": rows_by_step[int(step)],
+            "trace": _copy_jsonish(diag.get("trace") or []),
+            "baseline_width_px": _to_float_or_none(diag.get("baseline_width_px")),
+            "source_trace_kind": "uniform_window",
+            "source_window_step_index": int(step),
+            "source_window_mode": diag.get("mode"),
+            "window_selection_reason": diag.get("selection_reason"),
+            "candidate_window_traces": _copy_jsonish(diagnostics),
+        }
+
+    fallback["window_selection_reason"] = "no_qualifying_uniform_window"
+    fallback["candidate_window_traces"] = _copy_jsonish(diagnostics)
+    return fallback
+
+
 def _segmented_tail_confidence(result: dict) -> str:
     if segmented_tail_mod is None:
         return "unavailable"
@@ -1889,8 +2150,21 @@ def evaluate_online_stream_segmented_tail_shadow(
             "usable_point_count": 0,
             "min_usable_points": int(min_usable_points),
         }
-    source_rows = _segmented_tail_source_rows(scout_summaries, backtrack_summaries)
+    selected_source_rows = _segmented_tail_source_rows(scout_summaries, backtrack_summaries)
+    source_selection = _select_segmented_tail_source_rows(
+        scout_summaries=scout_summaries,
+        backtrack_summaries=backtrack_summaries,
+        selected_source_rows=selected_source_rows,
+        analysis_config=resolved_analysis_config,
+    )
+    source_rows = list(source_selection.get("source_rows") or selected_source_rows)
     trace = segmented_tail_mod.build_tail_width_trace(source_rows)
+    source_baseline_width_px = _to_float_or_none(source_selection.get("baseline_width_px"))
+    fit_baseline_width_px = (
+        source_baseline_width_px
+        if source_baseline_width_px is not None
+        else _to_float_or_none(baseline_width_px)
+    )
     if len(trace) < int(min_usable_points):
         return {
             "status": "insufficient_usable_points",
@@ -1906,10 +2180,22 @@ def evaluate_online_stream_segmented_tail_shadow(
             ),
             "confidence": "unavailable",
             "window_trace": _copy_jsonish(source_rows),
+            "segmented_tail_source_trace_kind": source_selection.get("source_trace_kind"),
+            "segmented_tail_source_window_step_index": _to_int(
+                source_selection.get("source_window_step_index")
+            ),
+            "segmented_tail_source_window_mode": source_selection.get("source_window_mode"),
+            "segmented_tail_source_baseline_width_px": fit_baseline_width_px,
+            "segmented_tail_window_selection_reason": source_selection.get(
+                "window_selection_reason"
+            ),
+            "segmented_tail_candidate_window_traces": _copy_jsonish(
+                source_selection.get("candidate_window_traces") or []
+            ),
         }
     result = segmented_tail_mod.evaluate_segmented_tail_trace(
         source_rows,
-        baseline_width_px=_to_float_or_none(baseline_width_px),
+        baseline_width_px=fit_baseline_width_px,
     )
     payload = _compact_segmented_tail_shadow_payload(
         dict(result or {}),
@@ -1917,6 +2203,18 @@ def evaluate_online_stream_segmented_tail_shadow(
     )
     payload["min_usable_points"] = int(min_usable_points)
     payload["window_trace"] = _copy_jsonish(source_rows)
+    payload["segmented_tail_source_trace_kind"] = source_selection.get("source_trace_kind")
+    payload["segmented_tail_source_window_step_index"] = _to_int(
+        source_selection.get("source_window_step_index")
+    )
+    payload["segmented_tail_source_window_mode"] = source_selection.get("source_window_mode")
+    payload["segmented_tail_source_baseline_width_px"] = fit_baseline_width_px
+    payload["segmented_tail_window_selection_reason"] = source_selection.get(
+        "window_selection_reason"
+    )
+    payload["segmented_tail_candidate_window_traces"] = _copy_jsonish(
+        source_selection.get("candidate_window_traces") or []
+    )
     return payload
 
 

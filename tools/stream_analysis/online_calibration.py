@@ -80,8 +80,14 @@ DEFAULT_ONLINE_STREAM_ANALYSIS_CONFIG = {
     "tail_width_sticky_window_min_switch_drop_px": 12.0,
     "tail_width_sticky_window_min_switch_drop_frac": 0.12,
     "tail_width_sticky_window_max_step_multiplier": 1,
+    "tail_width_window_bank_enabled": True,
     "segmented_tail_online_shadow_enabled": True,
     "segmented_tail_online_min_usable_points": 6,
+    "segmented_tail_uniform_window_enabled": True,
+    "segmented_tail_uniform_window_min_points": 6,
+    "segmented_tail_uniform_window_min_baseline_points": 2,
+    "segmented_tail_uniform_window_max_early_range_px": 2.0,
+    "segmented_tail_uniform_window_min_collapse_drop_px": 4.0,
 }
 
 

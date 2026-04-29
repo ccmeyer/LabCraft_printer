@@ -787,6 +787,7 @@ def test_online_stream_debug_payload_draws_segmented_tail_overlay(monkeypatch, q
                     "model_name": "three_break_two_break_midpoint",
                     "tail_start_source": "three_two_midpoint",
                     "tail_start_delay_from_emergence_us": 1625,
+                    "segmented_tail_source_window_step_index": 3,
                     "predicted_volume_nl": 29.1875,
                     "runtime_predicted_volume_nl": 30.125,
                     "knee_delay_from_emergence_us": 1700,
@@ -813,6 +814,7 @@ def test_online_stream_debug_payload_draws_segmented_tail_overlay(monkeypatch, q
     assert bundle["segmented_bracket_left_series"].count() == 2
     assert bundle["segmented_bracket_right_series"].count() == 2
     assert "segmented 1625 us" in bundle["chart"].title()
+    assert "segmented window step=3" in bundle["chart"].title()
     assert "runtime vol 30.12 nL" in bundle["chart"].title()
     assert "segmented vol 29.19 nL" in bundle["chart"].title()
 

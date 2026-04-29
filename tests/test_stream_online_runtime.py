@@ -563,6 +563,58 @@ def test_band_width_metrics_keeps_root_band_for_normal_stream():
     assert metrics["candidate_window_count"] == 0
 
 
+def test_band_width_metrics_emits_candidate_window_bank_when_root_selected():
+    config = mod._resolved_analysis_config(None)
+    edge_rows = _edge_rows_from_width_fn(
+        y_start=84,
+        y_end=224,
+        width_fn=lambda y: 77.0 if int(y) >= 144 else 95.0,
+    )
+
+    metrics = mod._band_width_metrics(
+        {"tracked_nozzle_y_px": 60.0},
+        edge_rows,
+        near_nozzle_band_top_px=int(config["near_nozzle_band_top_px"]),
+        near_nozzle_band_height_px=int(config["near_nozzle_band_height_px"]),
+        min_band_valid_rows=int(config["min_band_valid_rows"]),
+    )
+
+    candidates = metrics["tail_width_window_candidates"]
+    by_step = {int(row["step_index"]): row for row in candidates}
+    assert metrics["attached_width_mode"] == "root_band"
+    assert 0 in by_step
+    assert 3 in by_step
+    assert by_step[0]["mode"] == "root_band"
+    assert by_step[0]["width_usable"] is True
+    assert by_step[3]["mode"] == "lower_consistent_window"
+    assert by_step[3]["width_usable"] is True
+    assert by_step[3]["median_width_px"] == pytest.approx(77.0)
+
+
+def test_band_width_metrics_candidate_window_bank_marks_invalid_lower_windows():
+    config = mod._resolved_analysis_config(None)
+    edge_rows = _edge_rows_from_width_fn(
+        y_start=84,
+        y_end=134,
+        width_fn=lambda y: 80.0,
+    )
+
+    metrics = mod._band_width_metrics(
+        {"tracked_nozzle_y_px": 60.0},
+        edge_rows,
+        near_nozzle_band_top_px=int(config["near_nozzle_band_top_px"]),
+        near_nozzle_band_height_px=int(config["near_nozzle_band_height_px"]),
+        min_band_valid_rows=int(config["min_band_valid_rows"]),
+    )
+
+    by_step = {int(row["step_index"]): row for row in metrics["tail_width_window_candidates"]}
+    assert metrics["attached_width_mode"] == "root_band"
+    assert by_step[0]["width_usable"] is True
+    assert by_step[2]["width_usable"] is False
+    assert by_step[2]["eligible_as_selected_window"] is False
+    assert by_step[2]["valid_row_count"] < int(config["min_band_valid_rows"])
+
+
 def test_band_width_metrics_keeps_root_band_for_normal_taper():
     config = mod._resolved_analysis_config(None)
     edge_rows = []

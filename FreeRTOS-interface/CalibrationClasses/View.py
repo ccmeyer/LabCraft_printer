@@ -3127,6 +3127,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
             runtime_label = "-" if tail_start_x_us is None else f"{float(tail_start_x_us):.0f}"
             segmented_label = f"{float(segmented_start_x_us):.0f}"
             title = f"{title} | runtime {runtime_label} us | segmented {segmented_label} us"
+            segmented_window_step = segmented_tail.get("segmented_tail_source_window_step_index")
+            if segmented_window_step is not None:
+                title = f"{title} | segmented window step={int(segmented_window_step)}"
             runtime_volume = segmented_tail.get("runtime_predicted_volume_nl")
             segmented_volume = segmented_tail.get("predicted_volume_nl")
             volume_parts = []
