@@ -82,6 +82,8 @@ DEFAULT_ONLINE_STREAM_ANALYSIS_CONFIG = {
     "tail_width_sticky_window_max_step_multiplier": 1,
     "tail_width_window_bank_enabled": True,
     "segmented_tail_online_shadow_enabled": True,
+    "segmented_tail_online_controlling_enabled": True,
+    "segmented_tail_online_legacy_fallback_enabled": True,
     "segmented_tail_online_min_usable_points": 6,
     "segmented_tail_uniform_window_enabled": True,
     "segmented_tail_uniform_window_min_points": 6,

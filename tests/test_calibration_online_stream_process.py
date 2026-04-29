@@ -3641,6 +3641,16 @@ def test_online_stream_final_tail_fit_contains_uniform_window_segmented_diagnost
     assert segmented["segmented_tail_source_window_step_index"] == 3
     assert abs(float(segmented["segmented_tail_source_baseline_width_px"]) - 77.0) < 1e-6
     assert abs(float(segmented["trace"][0]["median_width_px"]) - 77.0) < 1e-6
+    assert artifact["result"]["tail_phase"]["segmented_tail_controlling"] is True
+    assert artifact["result"]["tail_phase"]["tail_start_selection_method"] == "segmented_regression"
+    assert artifact["result"]["tail_phase"]["tail_start_delay_from_emergence_us"] == segmented[
+        "tail_start_delay_from_emergence_us"
+    ]
+    assert artifact["result"]["predicted_stream_duration_us"] == segmented[
+        "tail_start_delay_from_emergence_us"
+    ]
+    assert proc._tail_start_delay_from_emergence_us == segmented["tail_start_delay_from_emergence_us"]
+    assert proc._predicted_stream_duration_us == segmented["tail_start_delay_from_emergence_us"]
 
 
 def test_online_stream_advance_tail_phase_continues_scout_without_landmark(tmp_path):

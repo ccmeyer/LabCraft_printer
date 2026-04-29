@@ -2088,6 +2088,19 @@ def _segmented_tail_confidence(result: dict) -> str:
     return "unavailable"
 
 
+def _segmented_tail_control_evidence(segmented_tail: dict | None) -> str:
+    if segmented_tail_mod is None:
+        return "segmented_reference_model"
+    source = str((segmented_tail or {}).get("tail_start_source") or "")
+    if source == segmented_tail_mod.TAIL_START_SOURCE_THREE_BREAK_TAU1:
+        return "segmented_three_break_tau1"
+    if source == segmented_tail_mod.TAIL_START_SOURCE_THREE_TWO_MIDPOINT:
+        return "segmented_midpoint"
+    if source:
+        return f"segmented_{source}"
+    return "segmented_reference_model"
+
+
 def _compact_segmented_tail_shadow_payload(
     result: dict,
     *,
@@ -2642,6 +2655,13 @@ def resolve_online_stream_tail_result(
             float(flow_intercept) + (float(flow_rate) * float(predicted_stream_duration_us))
         )
 
+    legacy_tail_phase_status = tail_phase_status
+    legacy_tail_start_delay_from_emergence_us = tail_start_delay_from_emergence_us
+    legacy_tail_start_selection_method = tail_start_selection_method
+    legacy_tail_start_evidence = tail_start_evidence
+    legacy_predicted_stream_duration_us = predicted_stream_duration_us
+    legacy_predicted_volume_nl = predicted_volume_nl
+
     landmark_delay_from_emergence_us = _summary_delay_from_emergence(landmark_summary, landmark_delay_us)
     fine_window_delays_us = build_online_stream_tail_backtrack_plan(
         scout_anchor_delay_us=_to_int(plan.get("scout_anchor_delay_us")),
@@ -2701,6 +2721,7 @@ def resolve_online_stream_tail_result(
         policy=resolved_policy,
     )
     segmented_tail_shadow = None
+    segmented_tail_start_delay_from_emergence_us = None
     if bool(run_segmented_tail_shadow):
         segmented_tail_shadow = evaluate_online_stream_segmented_tail_shadow(
             scout_summaries=scout_rows,
@@ -2753,6 +2774,64 @@ def resolve_online_stream_tail_result(
             if segmented_predicted_volume_delta_from_runtime_nl is None
             else float(segmented_predicted_volume_delta_from_runtime_nl)
         )
+
+    segmented_tail_controlling = False
+    segmented_tail_legacy_fallback_used = False
+    segmented_tail_control_reason = "segmented_tail_not_run"
+    segmented_control_enabled = bool(
+        resolved_analysis_config.get("segmented_tail_online_controlling_enabled", True)
+    )
+    segmented_legacy_fallback_enabled = bool(
+        resolved_analysis_config.get("segmented_tail_online_legacy_fallback_enabled", True)
+    )
+    segmented_shadow_enabled = bool(
+        resolved_analysis_config.get("segmented_tail_online_shadow_enabled", True)
+    )
+    segmented_can_control = (
+        segmented_tail_start_delay_from_emergence_us is not None
+        and segmented_predicted_stream_duration_us is not None
+        and segmented_predicted_volume_nl is not None
+    )
+    if not bool(run_segmented_tail_shadow):
+        segmented_tail_control_reason = "segmented_tail_not_run"
+    elif not segmented_shadow_enabled:
+        segmented_tail_control_reason = "segmented_tail_disabled"
+    elif not segmented_control_enabled:
+        segmented_tail_control_reason = "segmented_tail_control_disabled"
+    elif segmented_can_control:
+        segmented_tail_controlling = True
+        segmented_tail_control_reason = "segmented_tail_promoted"
+        tail_phase_status = "captured"
+        tail_start_delay_from_emergence_us = int(segmented_tail_start_delay_from_emergence_us)
+        tail_start_selection_method = "segmented_regression"
+        tail_start_evidence = _segmented_tail_control_evidence(segmented_tail_shadow)
+        predicted_stream_duration_us = int(segmented_predicted_stream_duration_us)
+        predicted_volume_nl = float(segmented_predicted_volume_nl)
+        termination_reason = termination_reason or "segmented_regression"
+    else:
+        status = ""
+        if isinstance(segmented_tail_shadow, dict):
+            status = str(segmented_tail_shadow.get("status") or "")
+        if segmented_tail_shadow is None:
+            segmented_tail_control_reason = "segmented_tail_unavailable"
+        elif segmented_tail_start_delay_from_emergence_us is None:
+            segmented_tail_control_reason = (
+                f"segmented_tail_{status}" if status else "segmented_tail_no_tail_start"
+            )
+        else:
+            segmented_tail_control_reason = "segmented_tail_missing_flow_fit"
+        if bool(segmented_legacy_fallback_enabled):
+            segmented_tail_legacy_fallback_used = True
+        else:
+            tail_phase_status = "unresolved_segmented_tail_unavailable"
+            termination_reason = segmented_tail_control_reason
+            tail_start_delay_from_emergence_us = None
+            tail_start_selection_method = None
+            tail_start_evidence = None
+            predicted_stream_duration_us = None
+            predicted_volume_nl = None
+            if "unresolved_segmented_tail_unavailable" not in warnings:
+                warnings.append("unresolved_segmented_tail_unavailable")
     tail_phase = {
         "status": str(tail_phase_status or "unresolved_no_landmark"),
         "plan": _copy_jsonish(plan),
@@ -2808,6 +2887,25 @@ def resolve_online_stream_tail_result(
         "fine_window_end_delay_from_emergence_us": backtrack_window_end_delay_from_emergence_us,
         "tail_start_evidence": tail_start_evidence,
         "tail_start_selection_method": tail_start_selection_method,
+        "legacy_tail_phase_status": str(legacy_tail_phase_status or "unresolved_no_landmark"),
+        "legacy_tail_start_delay_from_emergence_us": (
+            None
+            if legacy_tail_start_delay_from_emergence_us is None
+            else int(legacy_tail_start_delay_from_emergence_us)
+        ),
+        "legacy_tail_start_selection_method": legacy_tail_start_selection_method,
+        "legacy_tail_start_evidence": legacy_tail_start_evidence,
+        "legacy_predicted_stream_duration_us": (
+            None
+            if legacy_predicted_stream_duration_us is None
+            else int(legacy_predicted_stream_duration_us)
+        ),
+        "legacy_predicted_volume_nl": (
+            None if legacy_predicted_volume_nl is None else float(legacy_predicted_volume_nl)
+        ),
+        "segmented_tail_controlling": bool(segmented_tail_controlling),
+        "segmented_tail_control_reason": str(segmented_tail_control_reason),
+        "segmented_tail_legacy_fallback_used": bool(segmented_tail_legacy_fallback_used),
         "tail_settling_rule_applied": bool(tail_settling_rule_applied),
         "tail_settling_rule_reason": str(tail_settling_rule_reason),
         "tail_settling_candidate_delay_from_emergence_us": _to_int(
