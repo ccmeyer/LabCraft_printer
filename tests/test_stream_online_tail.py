@@ -1248,8 +1248,9 @@ def test_segmented_shadow_uses_uniform_lower_window_trace_for_mixed_selected_win
     assert segmented["status"] == "ok"
     assert segmented["segmented_tail_source_trace_kind"] == "uniform_window"
     assert segmented["segmented_tail_source_window_step_index"] == 3
+    assert segmented["segmented_tail_target_selected_window_step_index"] == 3
     assert segmented["segmented_tail_source_baseline_width_px"] == pytest.approx(77.0)
-    assert segmented["segmented_tail_window_selection_reason"] == "selected_uniform_window"
+    assert segmented["segmented_tail_window_selection_reason"] == "selected_lowest_uniform_window"
     assert segmented["tail_start_delay_from_emergence_us"] >= 3150
     first_trace_widths = [
         point["median_width_px"]
@@ -1261,7 +1262,7 @@ def test_segmented_shadow_uses_uniform_lower_window_trace_for_mixed_selected_win
     assert segmented["segmented_tail_candidate_window_traces"][0]["qualified"] is True
 
 
-def test_segmented_shadow_prefers_shallowest_qualifying_lower_window():
+def test_segmented_shadow_uses_lowest_selected_lower_window_over_deeper_candidates():
     delays = list(range(2800, 3600, 50))
     lower_step3_widths = [
         77.0,
@@ -1320,13 +1321,74 @@ def test_segmented_shadow_prefers_shallowest_qualifying_lower_window():
 
     assert segmented["segmented_tail_source_trace_kind"] == "uniform_window"
     assert segmented["segmented_tail_source_window_step_index"] == 3
+    assert segmented["segmented_tail_target_selected_window_step_index"] == 3
     assert [
         trace["step_index"]
         for trace in segmented["segmented_tail_candidate_window_traces"]
     ] == [3, 4]
 
 
-def test_segmented_shadow_rejects_unstable_lower_window_baseline():
+def test_segmented_shadow_uses_lowest_selected_window_after_brief_shallower_selection():
+    delays = list(range(2800, 3600, 50))
+    step3_widths = [
+        77.0,
+        77.0,
+        77.0,
+        77.0,
+        76.5,
+        77.0,
+        76.0,
+        76.0,
+        75.0,
+        73.5,
+        72.0,
+        69.0,
+        65.0,
+        57.0,
+        43.5,
+        26.0,
+    ]
+    selected_steps = [0] * 5 + [2] * 3 + [3] * 8
+    selected_widths = [
+        95.0,
+        95.0,
+        95.0,
+        95.0,
+        95.0,
+        80.0,
+        79.5,
+        79.0,
+    ] + step3_widths[8:]
+    backtrack_summaries = [
+        _tail_summary_with_window_bank(
+            delay_from_emergence_us=delay,
+            selected_width_px=selected_width,
+            selected_step_index=selected_step,
+            lower_step3_width_px=step3_width,
+        )
+        for delay, selected_width, selected_step, step3_width in zip(
+            delays,
+            selected_widths,
+            selected_steps,
+            step3_widths,
+        )
+    ]
+
+    segmented = mod.evaluate_online_stream_segmented_tail_shadow(
+        scout_summaries=[],
+        backtrack_summaries=backtrack_summaries,
+        baseline_width_px=95.0,
+        runtime_tail_start_delay_from_emergence_us=3250,
+        analysis_config={},
+    )
+
+    assert segmented["segmented_tail_source_trace_kind"] == "uniform_window"
+    assert segmented["segmented_tail_source_window_step_index"] == 3
+    assert segmented["segmented_tail_target_selected_window_step_index"] == 3
+    assert segmented["segmented_tail_window_selection_reason"] == "selected_lowest_uniform_window"
+
+
+def test_segmented_shadow_falls_back_when_lowest_selected_window_is_unqualified():
     delays = list(range(2800, 3600, 50))
     unstable_step3_widths = [
         77.0,
@@ -1383,8 +1445,10 @@ def test_segmented_shadow_rejects_unstable_lower_window_baseline():
         analysis_config={},
     )
 
-    assert segmented["segmented_tail_source_trace_kind"] == "uniform_window"
-    assert segmented["segmented_tail_source_window_step_index"] == 4
+    assert segmented["segmented_tail_source_trace_kind"] == "selected_window_fallback"
+    assert segmented["segmented_tail_source_window_step_index"] is None
+    assert segmented["segmented_tail_target_selected_window_step_index"] == 3
+    assert segmented["segmented_tail_window_selection_reason"] == "selected_lowest_window_unqualified"
     diagnostics = {
         int(trace["step_index"]): trace
         for trace in segmented["segmented_tail_candidate_window_traces"]
@@ -1425,6 +1489,7 @@ def test_segmented_shadow_falls_back_to_selected_trace_without_candidate_bank():
     assert segmented["segmented_tail_source_trace_kind"] == "selected_window_fallback"
     assert segmented["segmented_tail_window_selection_reason"] == "missing_window_candidate_bank"
     assert segmented["segmented_tail_source_window_step_index"] is None
+    assert segmented["segmented_tail_target_selected_window_step_index"] == 3
 
 
 def test_resolve_online_stream_tail_result_can_skip_segmented_shadow_for_previews():

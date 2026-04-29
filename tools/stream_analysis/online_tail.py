@@ -1965,6 +1965,7 @@ def _select_segmented_tail_source_rows(
         "source_window_step_index": None,
         "source_window_mode": None,
         "window_selection_reason": "uniform_window_disabled_or_unavailable",
+        "target_selected_window_step_index": None,
         "candidate_window_traces": [],
     }
     if not bool(analysis_config.get("segmented_tail_uniform_window_enabled", True)):
@@ -1972,19 +1973,20 @@ def _select_segmented_tail_source_rows(
         return fallback
 
     all_summaries = list(scout_summaries or []) + list(backtrack_summaries or [])
-    selected_lower_steps = sorted(
-        {
-            int(step)
-            for step in (
-                _window_step_index_for_summary(summary)
-                for summary in all_summaries
-            )
-            if step is not None and int(step) > 0
-        }
-    )
+    selected_lower_steps = []
+    for summary in all_summaries:
+        item = dict(summary or {})
+        if not bool(item.get("tail_width_usable")):
+            continue
+        step = _window_step_index_for_summary(item)
+        if step is not None and int(step) > 0:
+            selected_lower_steps.append(int(step))
+    selected_lower_steps = sorted(set(selected_lower_steps))
     if not selected_lower_steps:
         fallback["window_selection_reason"] = "no_selected_lower_window"
         return fallback
+    target_step = int(max(selected_lower_steps))
+    fallback["target_selected_window_step_index"] = int(target_step)
 
     candidate_rows = _segmented_tail_window_candidate_rows(scout_summaries, backtrack_summaries)
     if not candidate_rows:
@@ -2034,24 +2036,33 @@ def _select_segmented_tail_source_rows(
             diag["selection_reason"] = "insufficient_window_points"
         diagnostics.append(diag)
 
+    target_diag = None
     for diag in diagnostics:
-        if not bool(diag.get("qualified")):
-            continue
         step = _to_int(diag.get("step_index"))
-        if step is None or int(step) <= 0:
-            continue
+        if step is not None and int(step) == int(target_step):
+            target_diag = diag
+            break
+
+    if target_diag is None:
+        fallback["window_selection_reason"] = "selected_lowest_window_unavailable"
+        fallback["candidate_window_traces"] = _copy_jsonish(diagnostics)
+        return fallback
+
+    if bool(target_diag.get("qualified")):
+        step = int(target_step)
         return {
             "source_rows": rows_by_step[int(step)],
-            "trace": _copy_jsonish(diag.get("trace") or []),
-            "baseline_width_px": _to_float_or_none(diag.get("baseline_width_px")),
+            "trace": _copy_jsonish(target_diag.get("trace") or []),
+            "baseline_width_px": _to_float_or_none(target_diag.get("baseline_width_px")),
             "source_trace_kind": "uniform_window",
             "source_window_step_index": int(step),
-            "source_window_mode": diag.get("mode"),
-            "window_selection_reason": diag.get("selection_reason"),
+            "source_window_mode": target_diag.get("mode"),
+            "window_selection_reason": "selected_lowest_uniform_window",
+            "target_selected_window_step_index": int(target_step),
             "candidate_window_traces": _copy_jsonish(diagnostics),
         }
 
-    fallback["window_selection_reason"] = "no_qualifying_uniform_window"
+    fallback["window_selection_reason"] = "selected_lowest_window_unqualified"
     fallback["candidate_window_traces"] = _copy_jsonish(diagnostics)
     return fallback
 
@@ -2189,6 +2200,9 @@ def evaluate_online_stream_segmented_tail_shadow(
             "segmented_tail_window_selection_reason": source_selection.get(
                 "window_selection_reason"
             ),
+            "segmented_tail_target_selected_window_step_index": _to_int(
+                source_selection.get("target_selected_window_step_index")
+            ),
             "segmented_tail_candidate_window_traces": _copy_jsonish(
                 source_selection.get("candidate_window_traces") or []
             ),
@@ -2211,6 +2225,9 @@ def evaluate_online_stream_segmented_tail_shadow(
     payload["segmented_tail_source_baseline_width_px"] = fit_baseline_width_px
     payload["segmented_tail_window_selection_reason"] = source_selection.get(
         "window_selection_reason"
+    )
+    payload["segmented_tail_target_selected_window_step_index"] = _to_int(
+        source_selection.get("target_selected_window_step_index")
     )
     payload["segmented_tail_candidate_window_traces"] = _copy_jsonish(
         source_selection.get("candidate_window_traces") or []
