@@ -9627,7 +9627,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         )
         os.makedirs(os.path.dirname(self._tail_fit_path), exist_ok=True)
         with open(self._tail_fit_path, "w", encoding="utf-8") as handle:
-            json.dump(artifact, handle, indent=2, default=numpy_encoder)
+            json.dump(artifact, handle, separators=(",", ":"), default=numpy_encoder)
 
     def _build_tail_trigger_bracket(self) -> dict:
         return {

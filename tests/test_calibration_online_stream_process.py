@@ -4232,7 +4232,14 @@ def test_online_stream_successful_backtrack_writes_tail_fit_artifact(tmp_path, m
 
     assert proc.tailPhaseFinished.calls
     assert calls["count"] == 1
-    artifact = json.loads(Path(proc._tail_fit_path).read_text(encoding="utf-8"))
+    raw_artifact = Path(proc._tail_fit_path).read_text(encoding="utf-8")
+    artifact = json.loads(raw_artifact)
+    assert "\n" not in raw_artifact
+    assert artifact["schema_version"] == 2
+    assert "coarse_delay_summaries" not in artifact
+    assert "refine_delay_summaries" not in artifact
+    assert "scout_delay_summaries" not in artifact["result"]["tail_phase"]
+    assert "backtrack_delay_summaries" not in artifact["result"]["tail_phase"]
     assert artifact["result"]["tail_phase"]["status"] == "captured"
     assert artifact["result"]["tail_phase"]["tail_start_evidence"] == "plateau_right_bracket_midpoint"
     assert artifact["result"]["tail_phase"]["tail_start_selection_method"] == "plateau_confirmed_collapse_midpoint"

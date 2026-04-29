@@ -2593,18 +2593,129 @@ def test_resolve_online_stream_tail_result_does_not_extend_after_plateau_or_unav
 
 
 def test_build_online_stream_tail_fit_artifact_and_outputs_are_json_serializable():
+    candidate = {
+        "step_index": 3,
+        "mode": "lower_consistent_window",
+        "y0_px": 160,
+        "y1_px": 200,
+        "median_width_px": 72.5,
+        "iqr_px": 3.25,
+        "half_delta_px": 2.5,
+        "valid_row_count": 39,
+        "width_usable": True,
+        "eligible_as_selected_window": True,
+    }
     artifact = mod.build_online_stream_tail_fit_artifact(
         condition={"print_pressure_psi": 0.42},
         tail_plan={"scout_first_delay_us": 4750, "steady_width_baseline_px": 74.0},
         steady_width_baseline_px=74.0,
-        scout_delay_summaries=[{"delay_us": 4750}],
-        backtrack_delay_summaries=[{"delay_us": 4300}],
-        result={"tail_phase": {"status": "captured"}, "warnings": ["tail_ok"]},
+        scout_delay_summaries=[{"delay_us": 4750, "coarse_only_debug": "drop"}],
+        backtrack_delay_summaries=[
+            {
+                "phase": "tail_backtrack",
+                "delay_us": 4300,
+                "delay_from_emergence_us": 1100,
+                "attempted_replicates": 1,
+                "accepted_replicates": 1,
+                "median_width_px": 72.5,
+                "tail_width_usable": True,
+                "selected_band_step_index": 3,
+                "tail_width_window_candidates": [candidate],
+                "debug_blob": {"large": "drop"},
+            }
+        ],
+        result={
+            "tail_phase": {
+                "status": "captured",
+                "scout_delay_summaries": [{"delay_us": 4750, "debug_blob": "drop"}],
+                "backtrack_delay_summaries": [{"delay_us": 4300, "debug_blob": "drop"}],
+                "coarse_delay_summaries": [{"delay_us": 4750}],
+                "refine_delay_summaries": [{"delay_us": 4300}],
+                "segmented_tail": {
+                    "status": "ok",
+                    "tail_start_delay_from_emergence_us": 1125,
+                    "tail_start_source": "three_two_midpoint",
+                    "trace": [
+                        {
+                            "delay_from_emergence_us": 1100,
+                            "median_width_px": 72.5,
+                            "sample_count": 1,
+                            "debug_blob": "drop",
+                        }
+                    ],
+                    "fit_points": [
+                        {
+                            "delay_from_emergence_us": 1100,
+                            "fitted_width_px": 72.4,
+                            "debug_blob": "drop",
+                        }
+                    ],
+                    "window_trace": [
+                        {
+                            "delay_us": 4300,
+                            "delay_from_emergence_us": 1100,
+                            "median_width_px": 72.5,
+                            "tail_width_window_candidates": [candidate],
+                            "debug_blob": "drop",
+                        }
+                    ],
+                },
+            },
+            "warnings": ["tail_ok"],
+        },
         warnings=["tail_ok"],
     )
 
     encoded = json.dumps({"artifact": artifact})
 
     assert isinstance(encoded, str)
+    assert artifact["schema_version"] == 2
     assert artifact["search_method"] == "separation_landmark_backtrack_v1"
     assert artifact["result"]["tail_phase"]["status"] == "captured"
+    assert "coarse_delay_summaries" not in artifact
+    assert "refine_delay_summaries" not in artifact
+    assert "scout_delay_summaries" not in artifact["result"]["tail_phase"]
+    assert "backtrack_delay_summaries" not in artifact["result"]["tail_phase"]
+    assert "coarse_delay_summaries" not in artifact["result"]["tail_phase"]
+    assert "refine_delay_summaries" not in artifact["result"]["tail_phase"]
+    compact_backtrack = artifact["backtrack_delay_summaries"][0]
+    assert compact_backtrack["delay_us"] == 4300
+    assert compact_backtrack["selected_band_step_index"] == 3
+    assert "debug_blob" not in compact_backtrack
+    compact_candidate = compact_backtrack["tail_width_window_candidates"][0]
+    assert compact_candidate == {
+        "step_index": 3,
+        "mode": "lower_consistent_window",
+        "y0_px": 160,
+        "y1_px": 200,
+        "median_width_px": 72.5,
+        "width_usable": True,
+        "eligible_as_selected_window": True,
+        "valid_row_count": 39,
+    }
+    segmented = artifact["result"]["tail_phase"]["segmented_tail"]
+    assert segmented["trace"][0]["sample_count"] == 1
+    assert segmented["fit_points"][0]["fitted_width_px"] == 72.4
+    assert "debug_blob" not in segmented["window_trace"][0]
+    assert "iqr_px" not in segmented["window_trace"][0]["tail_width_window_candidates"][0]
+
+
+def test_build_online_stream_tail_fit_artifact_accepts_legacy_summary_alias_inputs():
+    artifact = mod.build_online_stream_tail_fit_artifact(
+        tail_plan={"steady_width_baseline_px": 74.0},
+        steady_width_baseline_px=74.0,
+        coarse_delay_summaries=[{"delay_us": 4750, "delay_from_emergence_us": 1550}],
+        refine_delay_summaries=[{"delay_us": 4300, "delay_from_emergence_us": 1100}],
+        result={"tail_phase": {"status": "captured"}, "warnings": []},
+        warnings=[],
+    )
+
+    assert artifact["schema_version"] == 2
+    assert artifact["scout_delay_summaries"] == [
+        {"delay_us": 4750, "delay_from_emergence_us": 1550}
+    ]
+    assert artifact["backtrack_delay_summaries"] == [
+        {"delay_us": 4300, "delay_from_emergence_us": 1100}
+    ]
+    assert "coarse_delay_summaries" not in artifact
+    assert "refine_delay_summaries" not in artifact

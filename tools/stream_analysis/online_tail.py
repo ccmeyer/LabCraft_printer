@@ -13,6 +13,7 @@ except Exception:  # pragma: no cover - diagnostic path degrades safely.
 
 
 SEARCH_METHOD = "separation_landmark_backtrack_v1"
+TAIL_FIT_ARTIFACT_SCHEMA_VERSION = 2
 TAIL_SETTLING_SELECTION_METHOD = "settling_progress90_after_long_shoulder"
 TAIL_SETTLING_PROGRESS_THRESHOLD = 0.90
 TAIL_SETTLING_INTERP_STEP_US = 25
@@ -2993,6 +2994,182 @@ def resolve_online_stream_tail_result(
     }
 
 
+_TAIL_SUMMARY_ARTIFACT_KEYS = (
+    "phase",
+    "delay_us",
+    "delay_from_emergence_us",
+    "attempted_replicates",
+    "accepted_replicates",
+    "tail_width_usable_replicates",
+    "tail_landmark_usable_replicates",
+    "rejected_replicates",
+    "median_width_px",
+    "width_ratio_to_baseline",
+    "width_drop_from_baseline_px",
+    "attached_width_mode",
+    "selected_band_step_index",
+    "selected_band_y0_px",
+    "selected_band_y1_px",
+    "tail_width_window_candidates",
+    "window_identity_consistent",
+    "window_delay_lock_active",
+    "window_locked_reused",
+    "window_locked_invalid",
+    "window_monotonic_upward_move_blocked",
+    "tail_width_usable",
+    "tail_landmark_usable",
+    "separated_from_nozzle_landmark",
+    "attached_width_unavailable_landmark",
+    "width_only_collapse_candidate",
+    "width_only_collapse_suppressed_as_scout_landmark",
+    "backup_width_collapse_landmark",
+    "landmark_detected",
+    "landmark_reason",
+    "attached_bottom_guard_hit",
+    "detached_near_bottom_warning",
+    "near_nozzle_detached_warning",
+    "late_frame_warning",
+    "warnings",
+    "delay_accepted",
+    "triggered_scout",
+    "strong_tail_candidate",
+    "resolver_plateau_candidate",
+    "resolver_transition_candidate",
+    "resolver_collapse_candidate",
+    "width_only_collapse_baseline_qualified",
+    "window_local_baseline_width_px",
+    "window_local_baseline_sample_count",
+)
+
+_WINDOW_CANDIDATE_ARTIFACT_KEYS = (
+    "step_index",
+    "mode",
+    "y0_px",
+    "y1_px",
+    "median_width_px",
+    "width_usable",
+    "eligible_as_selected_window",
+    "valid_row_count",
+)
+
+
+def _compact_window_candidate_for_artifact(candidate: dict | None) -> dict:
+    item = dict(candidate or {})
+    compact = {}
+    for key in _WINDOW_CANDIDATE_ARTIFACT_KEYS:
+        if key in item:
+            compact[key] = _copy_jsonish(item.get(key))
+    return compact
+
+
+def _compact_tail_summary_for_artifact(summary: dict | None) -> dict:
+    row = dict(summary or {})
+    compact = {}
+    for key in _TAIL_SUMMARY_ARTIFACT_KEYS:
+        if key not in row:
+            continue
+        if key == "tail_width_window_candidates":
+            compact[key] = [
+                _compact_window_candidate_for_artifact(candidate)
+                for candidate in list(row.get(key) or [])
+            ]
+        elif key == "warnings":
+            compact[key] = _copy_warnings(row.get(key))
+        else:
+            compact[key] = _copy_jsonish(row.get(key))
+    return compact
+
+
+def _compact_tail_summaries_for_artifact(rows: list[dict] | None) -> list[dict]:
+    return [
+        _compact_tail_summary_for_artifact(row)
+        for row in list(rows or [])
+    ]
+
+
+def _compact_segmented_trace_point_for_artifact(point: dict | None) -> dict:
+    row = dict(point or {})
+    keep_keys = (
+        "delay_from_emergence_us",
+        "delay_us",
+        "median_width_px",
+        "sample_count",
+        "phases",
+        "width_px",
+        "fit_width_px",
+        "fitted_width_px",
+        "tail_width_usable",
+        "selected_band_step_index",
+        "attached_width_mode",
+        "phase",
+        "source",
+        "observed",
+    )
+    return {
+        key: _copy_jsonish(row.get(key))
+        for key in keep_keys
+        if key in row
+    }
+
+
+def _compact_segmented_candidate_trace_for_artifact(trace: dict | None) -> dict:
+    row = dict(trace or {})
+    compact = {}
+    for key, value in row.items():
+        if key == "trace" and isinstance(value, list):
+            compact[key] = [
+                _compact_segmented_trace_point_for_artifact(point)
+                for point in list(value or [])
+            ]
+        else:
+            compact[key] = _copy_jsonish(value)
+    return compact
+
+
+def _compact_segmented_tail_for_artifact(segmented_tail: dict | None) -> dict:
+    row = dict(segmented_tail or {})
+    compact = {}
+    for key, value in row.items():
+        if key == "window_trace" and isinstance(value, list):
+            compact[key] = _compact_tail_summaries_for_artifact(value)
+        elif key == "segmented_tail_candidate_window_traces" and isinstance(value, list):
+            compact[key] = [
+                _compact_segmented_candidate_trace_for_artifact(item)
+                for item in list(value or [])
+            ]
+        elif key in {"trace", "fit_points"} and isinstance(value, list):
+            compact[key] = [
+                _compact_segmented_trace_point_for_artifact(point)
+                for point in list(value or [])
+            ]
+        else:
+            compact[key] = _copy_jsonish(value)
+    return compact
+
+
+def _compact_tail_phase_result_for_artifact(tail_phase: dict | None) -> dict:
+    compact = dict(_copy_jsonish(tail_phase or {}))
+    for key in (
+        "scout_delay_summaries",
+        "backtrack_delay_summaries",
+        "coarse_delay_summaries",
+        "refine_delay_summaries",
+    ):
+        compact.pop(key, None)
+    if isinstance(compact.get("segmented_tail"), dict):
+        compact["segmented_tail"] = _compact_segmented_tail_for_artifact(
+            compact.get("segmented_tail")
+        )
+    return compact
+
+
+def _compact_tail_result_for_artifact(result: dict | None) -> dict:
+    compact = dict(_copy_jsonish(result or {}))
+    if isinstance(compact.get("tail_phase"), dict):
+        compact["tail_phase"] = _compact_tail_phase_result_for_artifact(compact.get("tail_phase"))
+    return compact
+
+
 def build_online_stream_tail_fit_artifact(
     *,
     condition: dict | None = None,
@@ -3004,14 +3181,16 @@ def build_online_stream_tail_fit_artifact(
     refine_delay_summaries: list[dict] | None = None,
     result: dict | None = None,
     warnings: list[str] | None = None,
-    schema_version: int = 1,
+    schema_version: int = TAIL_FIT_ARTIFACT_SCHEMA_VERSION,
     phase: str = "online_stream_calibration",
 ) -> dict:
-    result_obj = dict(result or {})
+    result_obj = _compact_tail_result_for_artifact(result or {})
     resolved_scout_rows = scout_delay_summaries if scout_delay_summaries is not None else coarse_delay_summaries or []
     resolved_backtrack_rows = (
         backtrack_delay_summaries if backtrack_delay_summaries is not None else refine_delay_summaries or []
     )
+    compact_scout_rows = _compact_tail_summaries_for_artifact(resolved_scout_rows)
+    compact_backtrack_rows = _compact_tail_summaries_for_artifact(resolved_backtrack_rows)
     return {
         "schema_version": int(schema_version),
         "phase": str(phase),
@@ -3023,11 +3202,9 @@ def build_online_stream_tail_fit_artifact(
             else (tail_plan or {}).get("steady_width_baseline_px")
         ),
         "search_method": SEARCH_METHOD,
-        "scout_delay_summaries": _copy_jsonish(resolved_scout_rows),
-        "backtrack_delay_summaries": _copy_jsonish(resolved_backtrack_rows),
-        "coarse_delay_summaries": _copy_jsonish(resolved_scout_rows),
-        "refine_delay_summaries": _copy_jsonish(resolved_backtrack_rows),
-        "result": _copy_jsonish(result_obj),
+        "scout_delay_summaries": compact_scout_rows,
+        "backtrack_delay_summaries": compact_backtrack_rows,
+        "result": result_obj,
         "warnings": _copy_warnings(
             warnings if warnings is not None else result_obj.get("warnings")
         ),
