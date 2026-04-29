@@ -8035,26 +8035,133 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         points.sort(key=lambda row: int(row["x_us"]))
         return points
 
+    def _tail_debug_candidate_width_for_step(self, summary, step_index):
+        if step_index is None:
+            return None, False
+        try:
+            target_step = int(step_index)
+        except Exception:
+            return None, False
+        for candidate in list(dict(summary or {}).get("tail_width_window_candidates") or []):
+            item = dict(candidate or {})
+            try:
+                candidate_step = int(item.get("step_index"))
+            except Exception:
+                continue
+            if candidate_step != target_step:
+                continue
+            width_px = self._debug_float(item.get("median_width_px"))
+            if width_px is None or not bool(item.get("width_usable")):
+                return None, False
+            return float(width_px), True
+        return None, False
+
+    def _tail_debug_selected_step_from_summary(self, summary):
+        row = dict(summary or {})
+        if not bool(row.get("tail_width_usable")):
+            return None
+        try:
+            step_index = int(row.get("selected_band_step_index"))
+        except Exception:
+            return None
+        if step_index <= 0:
+            return None
+        return int(step_index)
+
+    def _tail_debug_trace_source(
+        self,
+        *,
+        tail_provisional_summary,
+        tail_mode: str,
+        segmented_tail,
+    ) -> dict:
+        segmented = dict(segmented_tail or {})
+        try:
+            final_step = int(segmented.get("segmented_tail_source_window_step_index"))
+        except Exception:
+            final_step = None
+        if final_step is not None and int(final_step) > 0:
+            return {
+                "kind": "uniform_window_candidate",
+                "step_index": int(final_step),
+                "reason": "final_segmented_window",
+            }
+
+        summaries = []
+        scout_provisional = tail_provisional_summary if str(tail_mode) == "scout" else None
+        backtrack_provisional = tail_provisional_summary if str(tail_mode) == "backtrack" else None
+        summaries.extend(
+            self._merged_tail_debug_delay_summaries(
+                getattr(self, "_tail_scout_delay_summaries", []) or [],
+                scout_provisional,
+            )
+        )
+        summaries.extend(
+            self._merged_tail_debug_delay_summaries(
+                getattr(self, "_tail_backtrack_delay_summaries", []) or [],
+                backtrack_provisional,
+            )
+        )
+        selected_steps = []
+        for summary in summaries:
+            step = self._tail_debug_selected_step_from_summary(summary)
+            if step is not None and int(step) > 0:
+                selected_steps.append(int(step))
+        if selected_steps:
+            return {
+                "kind": "uniform_window_candidate",
+                "step_index": int(max(selected_steps)),
+                "reason": "live_lowest_selected_window",
+            }
+        return {
+            "kind": "selected_window",
+            "step_index": None,
+            "reason": "no_lower_window",
+        }
+
     def _build_tail_debug_points(
         self,
-        committed_summaries: list[dict] | None,
-        provisional_summary: dict | None = None,
-    ) -> list[dict]:
+        committed_summaries,
+        provisional_summary=None,
+        trace_step_index=None,
+    ):
         points = []
+        target_unavailable = False
         committed_rows = [dict(row or {}) for row in list(committed_summaries or [])]
         for row in committed_rows:
             x_us = self._debug_delay_us(row.get("delay_from_emergence_us"))
             if x_us is None:
                 continue
-            y_px = self._debug_tail_width_plot_value(row.get("median_width_px"))
-            points.append({"x_us": int(x_us), "y_px": y_px, "provisional": False})
+            point = {"x_us": int(x_us), "provisional": False}
+            if trace_step_index is None:
+                point["y_px"] = self._debug_tail_width_plot_value(row.get("median_width_px"))
+            else:
+                width_px, usable = self._tail_debug_candidate_width_for_step(row, trace_step_index)
+                point["y_px"] = self._debug_tail_width_plot_value(width_px)
+                point["accepted"] = bool(usable)
+                if not usable:
+                    target_unavailable = True
+            points.append(point)
         if provisional_summary and not self._debug_summary_already_committed(committed_rows, provisional_summary):
             x_us = self._debug_delay_us(provisional_summary.get("delay_from_emergence_us"))
             if x_us is not None:
-                y_px = self._debug_tail_width_plot_value(provisional_summary.get("median_width_px"))
-                points.append({"x_us": int(x_us), "y_px": y_px, "provisional": True})
+                point = {"x_us": int(x_us), "provisional": True}
+                if trace_step_index is None:
+                    point["y_px"] = self._debug_tail_width_plot_value(
+                        provisional_summary.get("median_width_px")
+                    )
+                else:
+                    width_px, usable = self._tail_debug_candidate_width_for_step(
+                        provisional_summary,
+                        trace_step_index,
+                    )
+                    point["y_px"] = self._debug_tail_width_plot_value(width_px)
+                    point["accepted"] = bool(usable)
+                    if not usable:
+                        target_unavailable = True
+                points.append(point)
         points.sort(key=lambda row: int(row["x_us"]))
-        return points
+        return points, bool(target_unavailable)
 
     def _current_flow_frame_point_payload(self) -> dict | None:
         summary = dict(getattr(self, "_current_analysis_summary", {}) or {})
@@ -8071,18 +8178,32 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             "accepted": bool(accepted),
         }
 
-    def _current_tail_frame_point_payload(self) -> dict | None:
+    def _current_tail_frame_point_payload(
+        self,
+        trace_step_index=None,
+    ):
         summary = dict(getattr(self, "_current_tail_analysis_summary", {}) or {})
         x_us = self._flow_delay_offset_from_emergence_us(getattr(self, "_tail_current_delay_us", None))
         if x_us is None or not summary:
-            return None
-        y_px = self._debug_tail_width_plot_value(summary.get("attached_width_px"))
+            return None, False
+        target_unavailable = False
+        accepted = bool(summary.get("tail_width_usable"))
+        if trace_step_index is None:
+            y_px = self._debug_tail_width_plot_value(summary.get("attached_width_px"))
+        else:
+            width_px, candidate_usable = self._tail_debug_candidate_width_for_step(
+                summary,
+                trace_step_index,
+            )
+            y_px = self._debug_tail_width_plot_value(width_px)
+            accepted = bool(candidate_usable)
+            target_unavailable = not bool(candidate_usable)
         return {
             "x_us": int(x_us),
             "y_px": y_px,
-            "accepted": bool(summary.get("tail_width_usable")),
+            "accepted": bool(accepted),
             "mode": "backtrack" if str(getattr(self, "_tail_mode", "scout") or "scout") == "backtrack" else "scout",
-        }
+        }, bool(target_unavailable)
 
     def _build_flow_debug_fit_payload(self, provisional_summary: dict | None = None) -> dict | None:
         fit_result = dict(getattr(self, "_flow_fit_result", {}) or {})
@@ -8155,6 +8276,33 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         flow_provisional_summary = self._build_provisional_flow_delay_summary()
         tail_provisional_summary = self._build_provisional_tail_delay_summary()
         tail_mode = "backtrack" if str(getattr(self, "_tail_mode", "scout") or "scout") == "backtrack" else "scout"
+        segmented_tail_payload = self._stored_segmented_tail_debug_payload()
+        trace_source = self._tail_debug_trace_source(
+            tail_provisional_summary=tail_provisional_summary,
+            tail_mode=tail_mode,
+            segmented_tail=segmented_tail_payload,
+        )
+        trace_step_index = trace_source.get("step_index")
+        scout_points, scout_target_unavailable = self._build_tail_debug_points(
+            getattr(self, "_tail_scout_delay_summaries", []) or [],
+            tail_provisional_summary if tail_mode == "scout" else None,
+            trace_step_index=trace_step_index,
+        )
+        backtrack_points, backtrack_target_unavailable = self._build_tail_debug_points(
+            getattr(self, "_tail_backtrack_delay_summaries", []) or [],
+            tail_provisional_summary if tail_mode == "backtrack" else None,
+            trace_step_index=trace_step_index,
+        )
+        current_frame_point, current_target_unavailable = self._current_tail_frame_point_payload(
+            trace_step_index=trace_step_index,
+        )
+        trace_source_reason = str(trace_source.get("reason") or "")
+        if trace_step_index is not None and (
+            bool(scout_target_unavailable)
+            or bool(backtrack_target_unavailable)
+            or bool(current_target_unavailable)
+        ):
+            trace_source_reason = "target_window_unavailable"
         tail_start_x_us = None
         if getattr(self, "_tail_start_delay_from_emergence_us", None) is not None:
             tail_start_x_us = self._debug_delay_us(getattr(self, "_tail_start_delay_from_emergence_us", None))
@@ -8169,17 +8317,14 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             },
             "tail_plot": {
                 "baseline_width_px": self._tail_debug_baseline_width_px(),
-                "scout_points": self._build_tail_debug_points(
-                    getattr(self, "_tail_scout_delay_summaries", []) or [],
-                    tail_provisional_summary if tail_mode == "scout" else None,
-                ),
-                "backtrack_points": self._build_tail_debug_points(
-                    getattr(self, "_tail_backtrack_delay_summaries", []) or [],
-                    tail_provisional_summary if tail_mode == "backtrack" else None,
-                ),
-                "current_frame_point": self._current_tail_frame_point_payload(),
+                "scout_points": scout_points,
+                "backtrack_points": backtrack_points,
+                "current_frame_point": current_frame_point,
                 "tail_start_x_us": tail_start_x_us,
-                "segmented_tail": self._stored_segmented_tail_debug_payload(),
+                "segmented_tail": segmented_tail_payload,
+                "width_trace_source_kind": str(trace_source.get("kind") or "selected_window"),
+                "width_trace_source_window_step_index": trace_step_index,
+                "width_trace_source_reason": trace_source_reason,
             },
         }
         try:

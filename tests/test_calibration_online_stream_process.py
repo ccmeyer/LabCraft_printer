@@ -3148,6 +3148,221 @@ def test_online_stream_debug_signal_emits_provisional_tail_width_points(tmp_path
         "mode": "scout",
     }
     assert tail_plot["tail_start_x_us"] is None
+    assert tail_plot["width_trace_source_kind"] == "selected_window"
+    assert tail_plot["width_trace_source_window_step_index"] is None
+    assert tail_plot["width_trace_source_reason"] == "no_lower_window"
+
+
+def test_online_stream_debug_signal_replots_tail_points_with_lowest_selected_window(tmp_path):
+    proc = _flow_proc(tmp_path)
+    proc._tail_plan = {
+        "steady_width_baseline_px": 95.0,
+        "scout_replicates": 1,
+        "backtrack_replicates": 1,
+    }
+    proc._tail_mode = "scout"
+
+    def _candidate(step_index, width_px, *, usable=True):
+        y0_px = 100 + int(step_index) * 20
+        return {
+            "step_index": int(step_index),
+            "mode": "root_band" if int(step_index) == 0 else "lower_consistent_window",
+            "y0_px": int(y0_px),
+            "y1_px": int(y0_px + 40),
+            "median_width_px": None if width_px is None else float(width_px),
+            "iqr_px": 0.5 if width_px is not None else None,
+            "half_delta_px": 0.5 if width_px is not None else None,
+            "valid_row_count": 40 if usable else 4,
+            "width_usable": bool(usable and width_px is not None),
+            "eligible_as_selected_window": bool(usable and width_px is not None),
+        }
+
+    proc._tail_scout_delay_summaries = [
+        calibration_model.online_tail_mod.summarize_online_stream_tail_delay(
+            [
+                _accepted_tail_frame_row(
+                    proc,
+                    1550,
+                    phase="tail_scout",
+                    width_px=95.0,
+                    attached_width_mode="root_band",
+                    selected_band_step_index=0,
+                    tail_width_window_candidates=[
+                        _candidate(0, 95.0),
+                        _candidate(3, 77.0),
+                    ],
+                )
+            ],
+            95.0,
+        ),
+        calibration_model.online_tail_mod.summarize_online_stream_tail_delay(
+            [
+                _accepted_tail_frame_row(
+                    proc,
+                    1600,
+                    phase="tail_scout",
+                    width_px=76.0,
+                    attached_width_mode="lower_consistent_window",
+                    selected_band_step_index=3,
+                    tail_width_window_candidates=[
+                        _candidate(0, 98.0),
+                        _candidate(3, 76.0),
+                    ],
+                )
+            ],
+            95.0,
+        ),
+    ]
+
+    proc._emit_online_stream_debug_payload("tail_scout")
+
+    tail_plot = proc.onlineStreamDebugUpdated.calls[-1][0][0]["tail_plot"]
+    assert tail_plot["width_trace_source_kind"] == "uniform_window_candidate"
+    assert tail_plot["width_trace_source_window_step_index"] == 3
+    assert tail_plot["width_trace_source_reason"] == "live_lowest_selected_window"
+    assert tail_plot["scout_points"] == [
+        {"x_us": 1550, "provisional": False, "y_px": 77.0, "accepted": True},
+        {"x_us": 1600, "provisional": False, "y_px": 76.0, "accepted": True},
+    ]
+
+
+def test_online_stream_debug_signal_uses_deepest_live_selected_window(tmp_path):
+    proc = _flow_proc(tmp_path)
+    proc._tail_plan = {"steady_width_baseline_px": 95.0}
+    proc._tail_mode = "backtrack"
+
+    def _candidate(step_index, width_px):
+        y0_px = 100 + int(step_index) * 20
+        return {
+            "step_index": int(step_index),
+            "mode": "lower_consistent_window" if int(step_index) else "root_band",
+            "y0_px": int(y0_px),
+            "y1_px": int(y0_px + 40),
+            "median_width_px": float(width_px),
+            "iqr_px": 0.5,
+            "half_delta_px": 0.5,
+            "valid_row_count": 40,
+            "width_usable": True,
+            "eligible_as_selected_window": True,
+        }
+
+    proc._tail_backtrack_delay_summaries = [
+        calibration_model.online_tail_mod.summarize_online_stream_tail_delay(
+            [
+                _accepted_tail_frame_row(
+                    proc,
+                    3200,
+                    phase="tail_backtrack",
+                    width_px=80.0,
+                    attached_width_mode="lower_consistent_window",
+                    selected_band_step_index=2,
+                    tail_width_window_candidates=[
+                        _candidate(2, 80.0),
+                        _candidate(3, 76.5),
+                    ],
+                )
+            ],
+            95.0,
+        ),
+        calibration_model.online_tail_mod.summarize_online_stream_tail_delay(
+            [
+                _accepted_tail_frame_row(
+                    proc,
+                    3250,
+                    phase="tail_backtrack",
+                    width_px=75.0,
+                    attached_width_mode="lower_consistent_window",
+                    selected_band_step_index=3,
+                    tail_width_window_candidates=[
+                        _candidate(2, 79.0),
+                        _candidate(3, 75.0),
+                    ],
+                )
+            ],
+            95.0,
+        ),
+    ]
+
+    proc._emit_online_stream_debug_payload("tail_backtrack")
+
+    tail_plot = proc.onlineStreamDebugUpdated.calls[-1][0][0]["tail_plot"]
+    assert tail_plot["width_trace_source_window_step_index"] == 3
+    assert [point["y_px"] for point in tail_plot["backtrack_points"]] == [76.5, 75.0]
+
+
+def test_online_stream_debug_signal_uses_final_segmented_window_for_trace(tmp_path):
+    proc = _flow_proc(tmp_path)
+    proc._tail_plan = {"steady_width_baseline_px": 95.0}
+    proc._tail_mode = "backtrack"
+    proc._tail_fit_result = {
+        "tail_phase": {
+            "segmented_tail": {
+                "status": "ok",
+                "segmented_tail_source_window_step_index": 3,
+                "tail_start_delay_from_emergence_us": 3300,
+            }
+        }
+    }
+    proc._tail_backtrack_delay_summaries = [
+        {
+            "delay_us": int(proc.emergence_time_us) + 3200,
+            "delay_from_emergence_us": 3200,
+            "median_width_px": 80.0,
+            "tail_width_usable": True,
+            "selected_band_step_index": 2,
+            "tail_width_window_candidates": [
+                {"step_index": 2, "median_width_px": 80.0, "width_usable": True},
+                {"step_index": 3, "median_width_px": 76.0, "width_usable": True},
+            ],
+        }
+    ]
+
+    proc._emit_online_stream_debug_payload("completed")
+
+    tail_plot = proc.onlineStreamDebugUpdated.calls[-1][0][0]["tail_plot"]
+    assert tail_plot["width_trace_source_window_step_index"] == 3
+    assert tail_plot["width_trace_source_reason"] == "final_segmented_window"
+    assert tail_plot["backtrack_points"][0]["y_px"] == 76.0
+
+
+def test_online_stream_debug_signal_marks_missing_uniform_window_trace_point(tmp_path):
+    proc = _flow_proc(tmp_path)
+    proc._tail_plan = {"steady_width_baseline_px": 95.0}
+    proc._tail_mode = "scout"
+    proc._tail_scout_delay_summaries = [
+        {
+            "delay_us": int(proc.emergence_time_us) + 1550,
+            "delay_from_emergence_us": 1550,
+            "median_width_px": 95.0,
+            "tail_width_usable": True,
+            "selected_band_step_index": 0,
+            "tail_width_window_candidates": [
+                {"step_index": 0, "median_width_px": 95.0, "width_usable": True},
+            ],
+        },
+        {
+            "delay_us": int(proc.emergence_time_us) + 1600,
+            "delay_from_emergence_us": 1600,
+            "median_width_px": 75.0,
+            "tail_width_usable": True,
+            "selected_band_step_index": 3,
+            "tail_width_window_candidates": [
+                {"step_index": 3, "median_width_px": 75.0, "width_usable": True},
+            ],
+        },
+    ]
+
+    proc._emit_online_stream_debug_payload("tail_scout")
+
+    tail_plot = proc.onlineStreamDebugUpdated.calls[-1][0][0]["tail_plot"]
+    assert tail_plot["width_trace_source_window_step_index"] == 3
+    assert tail_plot["width_trace_source_reason"] == "target_window_unavailable"
+    assert tail_plot["scout_points"][0] == {
+        "x_us": 1550,
+        "provisional": False,
+        "y_px": 0.0,
+        "accepted": False,
+    }
 
 
 def test_online_stream_debug_signal_does_not_run_segmented_tail_preview(tmp_path, monkeypatch):

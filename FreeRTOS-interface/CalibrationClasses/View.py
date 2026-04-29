@@ -3139,6 +3139,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 volume_parts.append(f"segmented vol {float(segmented_volume):.4g} nL")
             if volume_parts:
                 title = f"{title} | " + " | ".join(volume_parts)
+        trace_window_step = plot.get("width_trace_source_window_step_index")
+        if trace_window_step is not None:
+            title = f"{title} | trace window step={int(trace_window_step)}"
         bundle["chart"].setTitle(title)
 
     def on_online_stream_debug_updated(self, payload):
