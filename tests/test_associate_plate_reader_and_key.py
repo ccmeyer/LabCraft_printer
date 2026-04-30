@@ -46,8 +46,13 @@ def _write_key(path: Path) -> None:
     )
 
 
-def _make_experiment(tmp_path: Path, *, incomplete_final: bool = True) -> tuple[Path, Path, Path]:
-    exp_dir = tmp_path / "ExperimentA-20260429_180300"
+def _make_experiment(
+    tmp_path: Path,
+    *,
+    name: str = "ExperimentA-20260429_180300",
+    incomplete_final: bool = True,
+) -> tuple[Path, Path, Path]:
+    exp_dir = tmp_path / name
     plate = exp_dir / "ExperimentA_data.xls"
     key = exp_dir / "concentration_key.csv"
     _write_plate_export(plate, incomplete_final=incomplete_final)
@@ -77,6 +82,44 @@ def test_experiment_directory_discovers_inputs_and_writes_tidy_output(tmp_path, 
     captured = capsys.readouterr()
     assert "Dropped incomplete timepoints" in captured.out
     assert "00:02:00" in captured.out
+
+
+def test_bare_experiment_name_resolves_under_default_experiments_dir(tmp_path, monkeypatch):
+    experiments_root = tmp_path / "Experiments"
+    exp_dir, _plate, _key = _make_experiment(experiments_root, name="Mg_DNA_screen-20260429_180300")
+    monkeypatch.setattr(mod, "DEFAULT_EXPERIMENTS_DIR", experiments_root)
+
+    assert mod.main(["Mg_DNA_screen-20260429_180300"]) == 0
+
+    out = exp_dir / "ExperimentA_data_merged_tidy.csv"
+    df = _read_output(out)
+    assert len(df) == 12
+
+
+def test_wildcard_experiment_name_resolves_single_match(tmp_path, monkeypatch):
+    experiments_root = tmp_path / "Experiments"
+    exp_dir, _plate, _key = _make_experiment(experiments_root, name="Mg_DNA_screen-20260429_180300")
+    monkeypatch.setattr(mod, "DEFAULT_EXPERIMENTS_DIR", experiments_root)
+
+    assert mod.main(["Mg_DNA_screen*"]) == 0
+
+    out = exp_dir / "ExperimentA_data_merged_tidy.csv"
+    assert out.exists()
+
+
+def test_wildcard_experiment_name_lists_multiple_matches_and_exits(tmp_path, monkeypatch, capsys):
+    experiments_root = tmp_path / "Experiments"
+    _make_experiment(experiments_root, name="Mg_DNA_screen-20260429_180300")
+    _make_experiment(experiments_root, name="Mg_DNA_screen-20260430_120000")
+    monkeypatch.setattr(mod, "DEFAULT_EXPERIMENTS_DIR", experiments_root)
+
+    assert mod.main(["Mg_DNA_screen*"]) == 1
+
+    captured = capsys.readouterr()
+    assert "Multiple experiment directories matched" in captured.err
+    assert "Mg_DNA_screen-20260429_180300" in captured.err
+    assert "Mg_DNA_screen-20260430_120000" in captured.err
+    assert "complete experiment directory name" in captured.err
 
 
 def test_explicit_plate_key_and_output_options_work(tmp_path):

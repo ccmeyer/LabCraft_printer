@@ -1608,10 +1608,15 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "Target", "Achievable", "Error (%)", "Drops", "Δ/drop", "Printed nL (new)", "Δ printed nL"
         ])
         self.bridge_table.horizontalHeader().setStretchLastSection(True)
-        self.bridge_table.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.AdjustToContents)
-        self.bridge_table.setMinimumHeight(220)
-        self.bridge_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.bridge_table.verticalHeader().setVisible(False)
+        self.bridge_table.setWordWrap(False)
+        self.bridge_table.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        self.bridge_table.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.AdjustIgnored)
+        self.bridge_table.setFixedHeight(280)
+        self.bridge_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self.bridge_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.bridge_table.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
+        self.bridge_table.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
 
         self.bridge_apply_btn = QtWidgets.QPushButton("Apply new ejection volume to design")
         self.bridge_apply_btn.setMinimumHeight(32)

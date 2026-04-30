@@ -600,6 +600,66 @@ def test_results_table_sorts_numeric_columns_and_selection_payload_survives_prox
     dialog.deleteLater()
 
 
+def test_bridge_table_uses_stable_geometry_for_many_design_targets(monkeypatch, qapp, tmp_path):
+    runs = [
+        _make_run(
+            "run_mg",
+            sweep_entries=[
+                {
+                    "timestamp": "2026-04-29T18:03:00Z",
+                    "pw_us": 1400,
+                    "pressure_psi": 1.20,
+                    "mean_nL": 9.5,
+                    "cv_pct": 3.0,
+                    "valid": True,
+                }
+            ],
+        )
+    ]
+    dialog, _manager = _build_dialog(monkeypatch, qapp, tmp_path, runs, active_run_id="run_mg")
+
+    def _preview_eight_targets(_key, new_droplet_nL, *, quantum=0.1):
+        new_droplet_nL = float(new_droplet_nL)
+        rows = []
+        for idx, target in enumerate((5.0, 7.0, 9.0, 11.0, 13.0, 15.0, 17.0, 19.0), start=1):
+            rows.append(
+                {
+                    "target_final": target,
+                    "achieved_final": target,
+                    "error": 0.0,
+                    "drops": idx,
+                    "delta_per_drop": quantum,
+                    "printed_nL_new": idx * new_droplet_nL,
+                    "printed_nL_shift": 0.0,
+                    "units": "mM",
+                }
+            )
+        return {
+            "ok": True,
+            "n_stocks": 1,
+            "new_droplet_nL": new_droplet_nL,
+            "rows": rows,
+        }
+
+    monkeypatch.setattr(
+        dialog.model.experiment_model,
+        "preview_requantized_for_option",
+        _preview_eight_targets,
+    )
+
+    _select_visible_row(dialog, 0)
+    qapp.processEvents()
+
+    assert dialog.bridge_table.rowCount() == 8
+    assert dialog.bridge_table.sizeAdjustPolicy() == calibration_view.QtWidgets.QAbstractScrollArea.AdjustIgnored
+    assert dialog.bridge_table.verticalScrollBarPolicy() == Qt.ScrollBarAlwaysOn
+    assert dialog.bridge_table.sizePolicy().verticalPolicy() == calibration_view.QtWidgets.QSizePolicy.Fixed
+    assert dialog.bridge_table.minimumHeight() == 280
+    assert dialog.bridge_table.maximumHeight() == 280
+
+    dialog.deleteLater()
+
+
 def test_stream_results_filter_and_detail_strip_show_stream_metadata(monkeypatch, qapp, tmp_path):
     runs = [
         _make_run(
