@@ -1946,6 +1946,330 @@ def _window_trace_diagnostics(
     }
 
 
+_ROOT_WINDOW_OVERRIDE_EVIDENCE_WARNINGS = {
+    "attached_near_nozzle_breakup",
+    "residue_stub_with_detached_continuation",
+}
+
+
+def _summary_has_root_window_override_evidence(summary: dict | None) -> bool:
+    item = dict(summary or {})
+    warnings = {str(warning) for warning in list(item.get("warnings") or [])}
+    if any(warning in warnings for warning in _ROOT_WINDOW_OVERRIDE_EVIDENCE_WARNINGS):
+        return True
+    return bool(
+        item.get("attached_near_nozzle_breakup")
+        or item.get("residue_stub_with_detached_continuation")
+    )
+
+
+def _trace_delay_width_pairs(trace: list[dict] | None) -> list[tuple[int, float]]:
+    pairs: list[tuple[int, float]] = []
+    for row in list(trace or []):
+        delay = _to_int(dict(row or {}).get("delay_from_emergence_us"))
+        width = _to_float_or_none(dict(row or {}).get("median_width_px"))
+        if delay is None or width is None:
+            continue
+        pairs.append((int(delay), float(width)))
+    pairs.sort(key=lambda item: item[0])
+    return pairs
+
+
+def _root_override_first_collapse_event(
+    trace: list[dict] | None,
+    *,
+    collapse_drop_px: float,
+    min_baseline_drop_px: float,
+    max_collapse_span_us: int,
+) -> dict | None:
+    pairs = _trace_delay_width_pairs(trace)
+    if len(pairs) < 4:
+        return None
+    baseline_width_px = _median_or_none(width for _, width in pairs[:3])
+    if baseline_width_px is None:
+        return None
+    for start_index, (start_delay, start_width) in enumerate(pairs[:-1]):
+        best_end = None
+        for end_index in range(start_index + 1, len(pairs)):
+            end_delay, end_width = pairs[end_index]
+            span_us = int(end_delay) - int(start_delay)
+            if span_us <= 0:
+                continue
+            if span_us > int(max_collapse_span_us):
+                break
+            local_drop_px = float(start_width) - float(end_width)
+            baseline_drop_px = float(baseline_width_px) - float(end_width)
+            if (
+                local_drop_px >= float(collapse_drop_px)
+                and baseline_drop_px >= float(min_baseline_drop_px)
+            ):
+                best_end = (end_index, end_delay, end_width, span_us, local_drop_px, baseline_drop_px)
+        if best_end is None:
+            continue
+        end_index, end_delay, end_width, span_us, local_drop_px, baseline_drop_px = best_end
+        future_widths = [width for _, width in pairs[end_index:min(len(pairs), end_index + 4)]]
+        if not future_widths:
+            continue
+        future_min_width = min(future_widths)
+        future_final_width = future_widths[-1]
+        remains_low = bool(
+            float(future_final_width)
+            <= float(baseline_width_px) - float(min_baseline_drop_px)
+            or float(future_min_width)
+            <= float(baseline_width_px) - float(min_baseline_drop_px) - 2.0
+        )
+        if not remains_low:
+            continue
+        return {
+            "delay_from_emergence_us": int(start_delay),
+            "end_delay_from_emergence_us": int(end_delay),
+            "span_us": int(span_us),
+            "start_width_px": float(start_width),
+            "end_width_px": float(end_width),
+            "local_drop_px": float(local_drop_px),
+            "baseline_width_px": float(baseline_width_px),
+            "baseline_drop_px": float(baseline_drop_px),
+            "future_min_width_px": float(future_min_width),
+            "future_final_width_px": float(future_final_width),
+        }
+    return None
+
+
+def _root_override_early_range_px(trace: list[dict] | None) -> float | None:
+    pairs = _trace_delay_width_pairs(trace)
+    if len(pairs) < 3:
+        return None
+    widths = [width for _, width in pairs[:3]]
+    return float(max(widths) - min(widths))
+
+
+def _root_override_separation_growth(
+    *,
+    root_trace: list[dict] | None,
+    candidate_trace: list[dict] | None,
+) -> dict:
+    root_by_delay = {
+        int(delay): float(width)
+        for delay, width in _trace_delay_width_pairs(root_trace)
+    }
+    common: list[tuple[int, float]] = []
+    for delay, width in _trace_delay_width_pairs(candidate_trace):
+        root_width = root_by_delay.get(int(delay))
+        if root_width is None:
+            continue
+        common.append((int(delay), float(root_width) - float(width)))
+    if len(common) < 5:
+        return {
+            "common_point_count": int(len(common)),
+            "baseline_separation_px": None,
+            "probe_max_separation_px": None,
+            "separation_growth_px": None,
+        }
+    baseline_separation_px = _median_or_none(separation for _, separation in common[:2])
+    probe_values = [separation for _, separation in common[2:5]]
+    probe_max_separation_px = max(probe_values) if probe_values else None
+    growth = None
+    if baseline_separation_px is not None and probe_max_separation_px is not None:
+        growth = float(probe_max_separation_px) - float(baseline_separation_px)
+    return {
+        "common_point_count": int(len(common)),
+        "baseline_separation_px": baseline_separation_px,
+        "probe_max_separation_px": probe_max_separation_px,
+        "separation_growth_px": growth,
+    }
+
+
+def _select_root_window_override_source(
+    *,
+    all_summaries: list[dict],
+    rows_by_step: dict[int, list[dict]],
+    modes_by_step: dict[int, list[str]],
+    analysis_config: dict,
+    min_points: int,
+) -> dict:
+    result = {
+        "applied": False,
+        "reason": "root_window_override_not_evaluated",
+        "source_rows": None,
+        "source_trace": [],
+        "baseline_width_px": None,
+        "source_window_step_index": None,
+        "source_window_mode": None,
+        "candidate_diagnostics": [],
+    }
+    if not bool(analysis_config.get("segmented_tail_root_window_override_enabled", True)):
+        result["reason"] = "root_window_override_disabled"
+        return result
+
+    contamination_count = sum(
+        1 for summary in list(all_summaries or [])
+        if _summary_has_root_window_override_evidence(summary)
+    )
+    min_contamination_frames = max(
+        0,
+        _to_int(analysis_config.get("segmented_tail_root_override_min_contamination_frames"), 4),
+    )
+    if int(contamination_count) < int(min_contamination_frames):
+        result["reason"] = "insufficient_root_window_override_evidence"
+        result["contamination_frame_count"] = int(contamination_count)
+        result["min_contamination_frame_count"] = int(min_contamination_frames)
+        return result
+
+    root_rows = list(rows_by_step.get(0) or [])
+    if not root_rows:
+        result["reason"] = "missing_root_window_trace"
+        result["contamination_frame_count"] = int(contamination_count)
+        result["min_contamination_frame_count"] = int(min_contamination_frames)
+        return result
+
+    collapse_drop_px = max(
+        0.0,
+        _to_float_or_none(analysis_config.get("segmented_tail_root_override_collapse_drop_px"))
+        or 8.0,
+    )
+    min_baseline_drop_px = max(
+        0.0,
+        _to_float_or_none(analysis_config.get("segmented_tail_root_override_min_baseline_drop_px"))
+        or 6.0,
+    )
+    max_collapse_span_us = max(
+        1,
+        _to_int(analysis_config.get("segmented_tail_root_override_max_collapse_span_us"), 125),
+    )
+    min_separation_growth_px = max(
+        0.0,
+        _to_float_or_none(
+            analysis_config.get("segmented_tail_root_override_min_root_separation_growth_px")
+        )
+        or 1.0,
+    )
+    max_early_range_px = max(
+        0.0,
+        _to_float_or_none(analysis_config.get("segmented_tail_root_override_max_early_range_px"))
+        or 2.0,
+    )
+    max_candidate_step = max(
+        1,
+        _to_int(analysis_config.get("segmented_tail_root_override_max_candidate_step_index"), 4),
+    )
+
+    root_trace = (
+        segmented_tail_mod.build_tail_width_trace(root_rows)
+        if segmented_tail_mod is not None
+        else []
+    )
+    root_event = _root_override_first_collapse_event(
+        root_trace,
+        collapse_drop_px=float(collapse_drop_px),
+        min_baseline_drop_px=float(min_baseline_drop_px),
+        max_collapse_span_us=int(max_collapse_span_us),
+    )
+    qualified = []
+    diagnostics = []
+    for step in sorted(step for step in rows_by_step if 0 < int(step) <= int(max_candidate_step)):
+        rows = list(rows_by_step.get(int(step)) or [])
+        mode = _most_common_string(modes_by_step.get(int(step)) or []) or "lower_consistent_window"
+        trace = (
+            segmented_tail_mod.build_tail_width_trace(rows)
+            if segmented_tail_mod is not None
+            else []
+        )
+        widths = [
+            width for _, width in _trace_delay_width_pairs(trace)
+        ]
+        baseline_width_px = _median_or_none(widths[:2])
+        early_range_px = _root_override_early_range_px(trace)
+        collapse_event = _root_override_first_collapse_event(
+            trace,
+            collapse_drop_px=float(collapse_drop_px),
+            min_baseline_drop_px=float(min_baseline_drop_px),
+            max_collapse_span_us=int(max_collapse_span_us),
+        )
+        separation = _root_override_separation_growth(
+            root_trace=root_trace,
+            candidate_trace=trace,
+        )
+        reason = "qualified"
+        is_qualified = True
+        if len(trace) < int(min_points):
+            reason = "insufficient_window_points"
+            is_qualified = False
+        elif early_range_px is None or float(early_range_px) > float(max_early_range_px):
+            reason = "unstable_window_baseline"
+            is_qualified = False
+        elif collapse_event is None:
+            reason = "missing_steep_irreversible_collapse"
+            is_qualified = False
+        elif (
+            root_event is not None
+            and int(collapse_event["delay_from_emergence_us"])
+            > int(root_event["delay_from_emergence_us"])
+        ):
+            reason = "lower_collapse_after_root"
+            is_qualified = False
+        elif (
+            _to_float_or_none(separation.get("separation_growth_px")) is None
+            or float(separation.get("separation_growth_px"))
+            <= float(min_separation_growth_px)
+        ):
+            reason = "insufficient_root_separation_growth"
+            is_qualified = False
+
+        diag = {
+            "step_index": int(step),
+            "mode": mode,
+            "qualified": bool(is_qualified),
+            "selection_reason": reason,
+            "usable_point_count": int(len(trace)),
+            "baseline_width_px": baseline_width_px,
+            "early_range_px": early_range_px,
+            "collapse_event": _copy_jsonish(collapse_event or {}),
+            "root_collapse_event": _copy_jsonish(root_event or {}),
+            "root_separation": _copy_jsonish(separation),
+        }
+        diagnostics.append(diag)
+        if is_qualified and collapse_event is not None:
+            qualified.append(
+                {
+                    "step_index": int(step),
+                    "rows": rows,
+                    "trace": trace,
+                    "baseline_width_px": baseline_width_px,
+                    "mode": mode,
+                    "collapse_delay": int(collapse_event["delay_from_emergence_us"]),
+                }
+            )
+
+    result["candidate_diagnostics"] = _copy_jsonish(diagnostics)
+    result["contamination_frame_count"] = int(contamination_count)
+    result["min_contamination_frame_count"] = int(min_contamination_frames)
+    result["root_collapse_event"] = _copy_jsonish(root_event or {})
+    if not qualified:
+        result["reason"] = "root_window_override_no_qualified_lower_collapse"
+        return result
+
+    earliest_delay = min(int(item["collapse_delay"]) for item in qualified)
+    near_earliest = [
+        item
+        for item in qualified
+        if int(item["collapse_delay"]) <= int(earliest_delay) + 50
+    ]
+    selected = max(near_earliest, key=lambda item: int(item["step_index"]))
+    result.update(
+        {
+            "applied": True,
+            "reason": "root_window_override_steep_collapse",
+            "source_rows": list(selected["rows"]),
+            "source_trace": _copy_jsonish(selected["trace"]),
+            "baseline_width_px": _to_float_or_none(selected.get("baseline_width_px")),
+            "source_window_step_index": int(selected["step_index"]),
+            "source_window_mode": selected.get("mode"),
+            "earliest_lower_collapse_delay_from_emergence_us": int(earliest_delay),
+        }
+    )
+    return result
+
+
 def _select_segmented_tail_source_rows(
     *,
     scout_summaries: list[dict] | None,
@@ -1968,9 +2292,13 @@ def _select_segmented_tail_source_rows(
         "window_selection_reason": "uniform_window_disabled_or_unavailable",
         "target_selected_window_step_index": None,
         "candidate_window_traces": [],
+        "root_window_override_applied": False,
+        "root_window_override_reason": "root_window_override_not_evaluated",
+        "root_window_override_candidate_diagnostics": [],
     }
     if not bool(analysis_config.get("segmented_tail_uniform_window_enabled", True)):
         fallback["window_selection_reason"] = "uniform_window_disabled"
+        fallback["root_window_override_reason"] = "uniform_window_disabled"
         return fallback
 
     all_summaries = list(scout_summaries or []) + list(backtrack_summaries or [])
@@ -1983,15 +2311,17 @@ def _select_segmented_tail_source_rows(
         if step is not None and int(step) > 0:
             selected_lower_steps.append(int(step))
     selected_lower_steps = sorted(set(selected_lower_steps))
-    if not selected_lower_steps:
-        fallback["window_selection_reason"] = "no_selected_lower_window"
-        return fallback
-    target_step = int(max(selected_lower_steps))
-    fallback["target_selected_window_step_index"] = int(target_step)
+    target_step = int(max(selected_lower_steps)) if selected_lower_steps else None
+    if target_step is not None:
+        fallback["target_selected_window_step_index"] = int(target_step)
 
     candidate_rows = _segmented_tail_window_candidate_rows(scout_summaries, backtrack_summaries)
     if not candidate_rows:
-        fallback["window_selection_reason"] = "missing_window_candidate_bank"
+        fallback["window_selection_reason"] = (
+            "missing_window_candidate_bank" if selected_lower_steps else "no_selected_lower_window"
+        )
+        if not selected_lower_steps:
+            fallback["root_window_override_reason"] = "missing_window_candidate_bank"
         return fallback
 
     min_points = max(1, _to_int(analysis_config.get("segmented_tail_uniform_window_min_points"), 6))
@@ -2014,7 +2344,7 @@ def _select_segmented_tail_source_rows(
     modes_by_step: dict[int, list[str]] = {}
     for row in candidate_rows:
         step = _to_int(row.get("selected_band_step_index"))
-        if step is None or int(step) <= 0:
+        if step is None:
             continue
         rows_by_step.setdefault(int(step), []).append(dict(row))
         mode = str(row.get("attached_width_mode") or "").strip()
@@ -2022,7 +2352,7 @@ def _select_segmented_tail_source_rows(
             modes_by_step.setdefault(int(step), []).append(mode)
 
     diagnostics = []
-    for step in sorted(rows_by_step):
+    for step in sorted(step for step in rows_by_step if int(step) > 0):
         mode = _most_common_string(modes_by_step.get(int(step)) or []) or "lower_consistent_window"
         diag = _window_trace_diagnostics(
             rows_by_step[int(step)],
@@ -2036,6 +2366,41 @@ def _select_segmented_tail_source_rows(
             diag["qualified"] = False
             diag["selection_reason"] = "insufficient_window_points"
         diagnostics.append(diag)
+
+    if not selected_lower_steps:
+        override = _select_root_window_override_source(
+            all_summaries=all_summaries,
+            rows_by_step=rows_by_step,
+            modes_by_step=modes_by_step,
+            analysis_config=analysis_config,
+            min_points=int(min_points),
+        )
+        fallback["candidate_window_traces"] = _copy_jsonish(diagnostics)
+        fallback["root_window_override_applied"] = bool(override.get("applied"))
+        fallback["root_window_override_reason"] = override.get("reason")
+        fallback["root_window_override_candidate_diagnostics"] = _copy_jsonish(
+            override.get("candidate_diagnostics") or []
+        )
+        if bool(override.get("applied")):
+            step = _to_int(override.get("source_window_step_index"))
+            return {
+                "source_rows": list(override.get("source_rows") or []),
+                "trace": _copy_jsonish(override.get("source_trace") or []),
+                "baseline_width_px": _to_float_or_none(override.get("baseline_width_px")),
+                "source_trace_kind": "uniform_window",
+                "source_window_step_index": step,
+                "source_window_mode": override.get("source_window_mode"),
+                "window_selection_reason": "root_window_override_steep_collapse",
+                "target_selected_window_step_index": None,
+                "candidate_window_traces": _copy_jsonish(diagnostics),
+                "root_window_override_applied": True,
+                "root_window_override_reason": override.get("reason"),
+                "root_window_override_candidate_diagnostics": _copy_jsonish(
+                    override.get("candidate_diagnostics") or []
+                ),
+            }
+        fallback["window_selection_reason"] = override.get("reason") or "no_selected_lower_window"
+        return fallback
 
     target_diag = None
     for diag in diagnostics:
@@ -2061,6 +2426,9 @@ def _select_segmented_tail_source_rows(
             "window_selection_reason": "selected_lowest_uniform_window",
             "target_selected_window_step_index": int(target_step),
             "candidate_window_traces": _copy_jsonish(diagnostics),
+            "root_window_override_applied": False,
+            "root_window_override_reason": "runtime_selected_lower_window",
+            "root_window_override_candidate_diagnostics": [],
         }
 
     fallback["window_selection_reason"] = "selected_lowest_window_unqualified"
@@ -2220,6 +2588,15 @@ def evaluate_online_stream_segmented_tail_shadow(
             "segmented_tail_candidate_window_traces": _copy_jsonish(
                 source_selection.get("candidate_window_traces") or []
             ),
+            "segmented_tail_root_window_override_applied": bool(
+                source_selection.get("root_window_override_applied")
+            ),
+            "segmented_tail_root_window_override_reason": source_selection.get(
+                "root_window_override_reason"
+            ),
+            "segmented_tail_root_window_override_candidate_diagnostics": _copy_jsonish(
+                source_selection.get("root_window_override_candidate_diagnostics") or []
+            ),
         }
     result = segmented_tail_mod.evaluate_segmented_tail_trace(
         source_rows,
@@ -2245,6 +2622,15 @@ def evaluate_online_stream_segmented_tail_shadow(
     )
     payload["segmented_tail_candidate_window_traces"] = _copy_jsonish(
         source_selection.get("candidate_window_traces") or []
+    )
+    payload["segmented_tail_root_window_override_applied"] = bool(
+        source_selection.get("root_window_override_applied")
+    )
+    payload["segmented_tail_root_window_override_reason"] = source_selection.get(
+        "root_window_override_reason"
+    )
+    payload["segmented_tail_root_window_override_candidate_diagnostics"] = _copy_jsonish(
+        source_selection.get("root_window_override_candidate_diagnostics") or []
     )
     return payload
 

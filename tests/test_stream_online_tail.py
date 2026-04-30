@@ -131,6 +131,38 @@ def _tail_summary_with_window_bank(
     )
 
 
+def _root_selected_tail_summary_with_window_bank(
+    *,
+    delay_from_emergence_us,
+    root_width_px,
+    candidate_widths_by_step,
+    warnings=None,
+):
+    delay_us = 3200 + int(delay_from_emergence_us)
+    candidates = [
+        _window_candidate(0, root_width_px),
+    ]
+    for step_index, width_px in sorted(dict(candidate_widths_by_step).items()):
+        candidates.append(_window_candidate(int(step_index), width_px))
+    return mod.summarize_online_stream_tail_delay(
+        [
+            _tail_frame_row(
+                delay_us=delay_us,
+                delay_from_emergence_us=int(delay_from_emergence_us),
+                phase="tail_backtrack",
+                width_px=float(root_width_px),
+                attached_width_mode="root_band",
+                selected_band_step_index=0,
+                selected_band_y0_px=100,
+                selected_band_y1_px=140,
+                warnings=list(warnings or []),
+                tail_width_window_candidates=candidates,
+            )
+        ],
+        baseline_width_px=95.0,
+    )
+
+
 def _segmented_tail_rows(widths, *, start_delay_us=0, step_us=100):
     return [
         {
@@ -1406,6 +1438,8 @@ def test_segmented_shadow_uses_lowest_selected_lower_window_over_deeper_candidat
     assert segmented["segmented_tail_source_trace_kind"] == "uniform_window"
     assert segmented["segmented_tail_source_window_step_index"] == 3
     assert segmented["segmented_tail_target_selected_window_step_index"] == 3
+    assert segmented["segmented_tail_root_window_override_applied"] is False
+    assert segmented["segmented_tail_root_window_override_reason"] == "runtime_selected_lower_window"
     assert [
         trace["step_index"]
         for trace in segmented["segmented_tail_candidate_window_traces"]
@@ -1470,6 +1504,216 @@ def test_segmented_shadow_uses_lowest_selected_window_after_brief_shallower_sele
     assert segmented["segmented_tail_source_window_step_index"] == 3
     assert segmented["segmented_tail_target_selected_window_step_index"] == 3
     assert segmented["segmented_tail_window_selection_reason"] == "selected_lowest_uniform_window"
+
+
+def test_segmented_shadow_root_override_selects_deep_steep_collapse_window():
+    delays = list(range(3000, 3650, 50))
+    root_widths = [95, 95, 96, 97, 97, 96, 95, 94, 92, 88, 76, 58, 35]
+    step3_widths = [79, 79, 79, 78, 77, 76, 75, 72, 66, 55, 38, 25, 20]
+    step4_widths = [77, 77, 77, 76, 75, 74, 73, 70, 64, 52, 35, 22, 18]
+    backtrack_summaries = [
+        _root_selected_tail_summary_with_window_bank(
+            delay_from_emergence_us=delay,
+            root_width_px=root_width,
+            candidate_widths_by_step={
+                3: step3_width,
+                4: step4_width,
+            },
+            warnings=["attached_near_nozzle_breakup"],
+        )
+        for delay, root_width, step3_width, step4_width in zip(
+            delays,
+            root_widths,
+            step3_widths,
+            step4_widths,
+        )
+    ]
+
+    segmented = mod.evaluate_online_stream_segmented_tail_shadow(
+        scout_summaries=[],
+        backtrack_summaries=backtrack_summaries,
+        baseline_width_px=95.0,
+        runtime_tail_start_delay_from_emergence_us=3450,
+        analysis_config={},
+    )
+
+    assert segmented["status"] == "ok"
+    assert segmented["segmented_tail_source_trace_kind"] == "uniform_window"
+    assert segmented["segmented_tail_source_window_step_index"] == 4
+    assert segmented["segmented_tail_window_selection_reason"] == "root_window_override_steep_collapse"
+    assert segmented["segmented_tail_root_window_override_applied"] is True
+    assert segmented["segmented_tail_root_window_override_reason"] == "root_window_override_steep_collapse"
+    diagnostics = {
+        int(row["step_index"]): row
+        for row in segmented["segmented_tail_root_window_override_candidate_diagnostics"]
+    }
+    assert diagnostics[4]["qualified"] is True
+    assert diagnostics[4]["root_separation"]["separation_growth_px"] > 1.0
+    assert segmented["window_trace"][0]["selected_band_step_index"] == 4
+
+
+def test_segmented_shadow_root_override_rejects_early_lower_drift_without_growth():
+    delays = [
+        1550,
+        2050,
+        2550,
+        2950,
+        3000,
+        3050,
+        3100,
+        3150,
+        3200,
+        3250,
+        3300,
+        3350,
+        3400,
+        3450,
+        3500,
+        3550,
+        3600,
+        3650,
+        3700,
+        3750,
+    ]
+    root_widths = [
+        70,
+        70,
+        70,
+        69.5,
+        70,
+        70.25,
+        70,
+        70.5,
+        71,
+        71,
+        70,
+        70.5,
+        69.5,
+        68.5,
+        65,
+        59.25,
+        48,
+        28.5,
+        21,
+        None,
+    ]
+    step4_widths = [
+        66,
+        66,
+        66,
+        65,
+        65,
+        65,
+        65,
+        65,
+        64,
+        63,
+        62,
+        61,
+        60,
+        58,
+        54,
+        49,
+        43,
+        37,
+        32,
+        43.5,
+    ]
+    backtrack_summaries = [
+        _root_selected_tail_summary_with_window_bank(
+            delay_from_emergence_us=delay,
+            root_width_px=root_width,
+            candidate_widths_by_step={4: step4_width},
+            warnings=["residue_stub_with_detached_continuation"],
+        )
+        for delay, root_width, step4_width in zip(delays, root_widths, step4_widths)
+        if root_width is not None
+    ]
+
+    segmented = mod.evaluate_online_stream_segmented_tail_shadow(
+        scout_summaries=[],
+        backtrack_summaries=backtrack_summaries,
+        baseline_width_px=70.0,
+        runtime_tail_start_delay_from_emergence_us=3375,
+        analysis_config={},
+    )
+
+    assert segmented["status"] == "ok"
+    assert segmented["segmented_tail_source_trace_kind"] == "selected_window_fallback"
+    assert segmented["segmented_tail_source_window_step_index"] is None
+    assert segmented["segmented_tail_root_window_override_applied"] is False
+    assert (
+        segmented["segmented_tail_root_window_override_reason"]
+        == "root_window_override_no_qualified_lower_collapse"
+    )
+    diagnostics = {
+        int(row["step_index"]): row
+        for row in segmented["segmented_tail_root_window_override_candidate_diagnostics"]
+    }
+    assert diagnostics[4]["qualified"] is False
+
+
+def test_segmented_shadow_root_override_requires_contamination_evidence():
+    delays = list(range(3000, 3650, 50))
+    root_widths = [95, 95, 96, 97, 97, 96, 95, 94, 92, 88, 76, 58, 35]
+    step4_widths = [77, 77, 77, 76, 75, 74, 73, 70, 64, 52, 35, 22, 18]
+    backtrack_summaries = [
+        _root_selected_tail_summary_with_window_bank(
+            delay_from_emergence_us=delay,
+            root_width_px=root_width,
+            candidate_widths_by_step={4: step4_width},
+            warnings=[],
+        )
+        for delay, root_width, step4_width in zip(delays, root_widths, step4_widths)
+    ]
+
+    segmented = mod.evaluate_online_stream_segmented_tail_shadow(
+        scout_summaries=[],
+        backtrack_summaries=backtrack_summaries,
+        baseline_width_px=95.0,
+        runtime_tail_start_delay_from_emergence_us=3450,
+        analysis_config={},
+    )
+
+    assert segmented["segmented_tail_source_trace_kind"] == "selected_window_fallback"
+    assert segmented["segmented_tail_source_window_step_index"] is None
+    assert segmented["segmented_tail_root_window_override_applied"] is False
+    assert (
+        segmented["segmented_tail_root_window_override_reason"]
+        == "insufficient_root_window_override_evidence"
+    )
+
+
+def test_segmented_shadow_root_override_requires_repeated_contamination_evidence():
+    delays = list(range(3000, 3650, 50))
+    root_widths = [95, 95, 96, 97, 97, 96, 95, 94, 92, 88, 76, 58, 35]
+    step4_widths = [77, 77, 77, 76, 75, 74, 73, 70, 64, 52, 35, 22, 18]
+    backtrack_summaries = [
+        _root_selected_tail_summary_with_window_bank(
+            delay_from_emergence_us=delay,
+            root_width_px=root_width,
+            candidate_widths_by_step={4: step4_width},
+            warnings=["attached_near_nozzle_breakup"] if index < 2 else [],
+        )
+        for index, (delay, root_width, step4_width) in enumerate(
+            zip(delays, root_widths, step4_widths)
+        )
+    ]
+
+    segmented = mod.evaluate_online_stream_segmented_tail_shadow(
+        scout_summaries=[],
+        backtrack_summaries=backtrack_summaries,
+        baseline_width_px=95.0,
+        runtime_tail_start_delay_from_emergence_us=3450,
+        analysis_config={},
+    )
+
+    assert segmented["segmented_tail_source_trace_kind"] == "selected_window_fallback"
+    assert segmented["segmented_tail_root_window_override_applied"] is False
+    assert (
+        segmented["segmented_tail_root_window_override_reason"]
+        == "insufficient_root_window_override_evidence"
+    )
 
 
 def test_segmented_shadow_falls_back_when_lowest_selected_window_is_unqualified():

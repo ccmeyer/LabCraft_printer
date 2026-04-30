@@ -86,6 +86,8 @@ def _resolve_htps_tail_artifact(run_id: str) -> dict:
             tail_phase.get("last_plateau_delay_from_emergence_us"),
         ),
     )
+    analysis_config = dict((tail_phase.get("analysis_config") or {}))
+    analysis_config["segmented_tail_online_controlling_enabled"] = False
     return online_tail_mod.resolve_online_stream_tail_result(
         flow_fit_result=dict(flow_artifact.get("fit") or flow_artifact.get("result") or {}),
         tail_plan=dict(tail_artifact.get("tail_plan") or {}),
@@ -100,7 +102,7 @@ def _resolve_htps_tail_artifact(run_id: str) -> dict:
             "warnings": list(tail_phase.get("warnings") or []),
         },
         flow_delay_summaries=flow_delay_summaries,
-        analysis_config=dict((tail_phase.get("analysis_config") or {})),
+        analysis_config=analysis_config,
     )
 
 def _feature_row_is_tail_width_usable(row: dict) -> bool:
@@ -274,6 +276,7 @@ def _replay_tail_result(rows_by_delay: dict[int, dict]):
                 "warnings": ["unresolved_missing_flow_baseline"],
             },
             flow_delay_summaries=flow_delay_summaries,
+            analysis_config={"segmented_tail_online_controlling_enabled": False},
         )
 
     baseline_width_px = float(tail_plan["steady_width_baseline_px"])
@@ -315,6 +318,7 @@ def _replay_tail_result(rows_by_delay: dict[int, dict]):
                 "warnings": ["unresolved_no_landmark"],
             },
             flow_delay_summaries=flow_delay_summaries,
+            analysis_config={"segmented_tail_online_controlling_enabled": False},
         )
 
     backtrack_summaries = []
@@ -348,6 +352,7 @@ def _replay_tail_result(rows_by_delay: dict[int, dict]):
             "landmark_reason": landmark_reason,
         },
         flow_delay_summaries=flow_delay_summaries,
+        analysis_config={"segmented_tail_online_controlling_enabled": False},
     )
 
 

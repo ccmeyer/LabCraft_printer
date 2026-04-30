@@ -3653,6 +3653,95 @@ def test_online_stream_final_tail_fit_contains_uniform_window_segmented_diagnost
     assert proc._predicted_stream_duration_us == segmented["tail_start_delay_from_emergence_us"]
 
 
+def test_online_stream_final_tail_fit_records_root_window_override_diagnostics(tmp_path):
+    proc = _flow_proc(tmp_path)
+    _seed_tail_flow_context(proc, steady_width_baseline_px=95.0)
+    proc._tail_fit_path = str(tmp_path / "tail_fit.json")
+    proc._tail_plan = {
+        "steady_width_baseline_px": 95.0,
+        "scout_anchor_delay_us": int(proc.emergence_time_us) + 3000,
+        "backtrack_step_us": 50,
+        "scout_replicates": 1,
+        "backtrack_replicates": 1,
+    }
+    proc._tail_landmark_delay_us = int(proc.emergence_time_us) + 3650
+    proc._tail_landmark_reason = "separated_from_nozzle"
+    proc._tail_backtrack_left_delay_us = int(proc.emergence_time_us) + 3000
+    proc._tail_scout_delay_summaries = [
+        calibration_model.online_tail_mod.summarize_online_stream_tail_delay(
+            [
+                _accepted_tail_frame_row(
+                    proc,
+                    3650,
+                    phase="tail_scout",
+                    width_px=20.0,
+                    landmark=True,
+                )
+            ],
+            95.0,
+        )
+    ]
+
+    def _candidate(step_index, width_px):
+        y0_px = 100 + int(step_index) * 20
+        return {
+            "step_index": int(step_index),
+            "mode": "root_band" if int(step_index) == 0 else "lower_consistent_window",
+            "y0_px": int(y0_px),
+            "y1_px": int(y0_px + 40),
+            "median_width_px": float(width_px),
+            "iqr_px": 0.5,
+            "half_delta_px": 0.5,
+            "valid_row_count": 40,
+            "width_usable": True,
+            "eligible_as_selected_window": True,
+        }
+
+    delays = list(range(3000, 3650, 50))
+    root_widths = [95, 95, 96, 97, 97, 96, 95, 94, 92, 88, 76, 58, 35]
+    step4_widths = [77, 77, 77, 76, 75, 74, 73, 70, 64, 52, 35, 22, 18]
+    summaries = []
+    for delay, root_width, step4_width in zip(delays, root_widths, step4_widths):
+        row = _accepted_tail_frame_row(
+            proc,
+            delay,
+            phase="tail_backtrack",
+            width_px=root_width,
+            attached_width_mode="root_band",
+            selected_band_step_index=0,
+            selected_band_y0_px=100,
+            selected_band_y1_px=140,
+            tail_width_window_candidates=[
+                _candidate(0, root_width),
+                _candidate(4, step4_width),
+            ],
+        )
+        row["warnings"] = ["attached_near_nozzle_breakup"]
+        summaries.append(
+            calibration_model.online_tail_mod.summarize_online_stream_tail_delay(
+                [row],
+                95.0,
+            )
+        )
+    proc._tail_backtrack_delay_summaries = summaries
+
+    proc._resolve_tail_phase()
+
+    artifact = json.loads(Path(proc._tail_fit_path).read_text(encoding="utf-8"))
+    result = artifact["result"]
+    segmented = result["tail_phase"]["segmented_tail"]
+    assert segmented["status"] == "ok"
+    assert segmented["segmented_tail_source_trace_kind"] == "uniform_window"
+    assert segmented["segmented_tail_source_window_step_index"] == 4
+    assert segmented["segmented_tail_window_selection_reason"] == "root_window_override_steep_collapse"
+    assert segmented["segmented_tail_root_window_override_applied"] is True
+    assert segmented["segmented_tail_root_window_override_reason"] == "root_window_override_steep_collapse"
+    assert result["tail_phase"]["segmented_tail_controlling"] is True
+    assert result["predicted_stream_duration_us"] == segmented["tail_start_delay_from_emergence_us"]
+    assert result["predicted_volume_nl"] == segmented["predicted_volume_nl"]
+    assert result["tail_phase"]["legacy_predicted_volume_nl"] != result["predicted_volume_nl"]
+
+
 def test_online_stream_advance_tail_phase_continues_scout_without_landmark(tmp_path):
     proc = _flow_proc(tmp_path)
     proc._tail_plan = {
