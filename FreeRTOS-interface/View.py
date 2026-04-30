@@ -1133,6 +1133,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
     # update_target_pressure_input = QtCore.Signal(float)
     # update_pulse_width_input = QtCore.Signal(int)
     popup_message_signal = QtCore.Signal(str,str)
+    PRINT_PROFILE_PRESSURE_TOLERANCE = 0.005
 
     def __init__(self, main_window, model,controller):
         super().__init__('PRESSURE')
@@ -1143,6 +1144,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self._pressure_spinbox_focus_targets = {}
         self._pressure_spinboxes = []
         self._active_spinbox_highlight = None
+        self._print_profile_apply_pending = False
 
         prof = getattr(self.main_window, "profile", None)
         self.legacy_mode = prof.name == "legacy" if prof else True
@@ -1208,6 +1210,181 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             QTimer.singleShot(0, self._refresh_spinbox_edit_highlight)
         return super().eventFilter(watched, event)
 
+    @staticmethod
+    def _format_print_profile_tooltip(profile):
+        try:
+            print_pressure = float(profile["print_pressure"])
+            refuel_pressure = float(profile["refuel_pressure"])
+            print_pw = int(profile["print_pulse_width"])
+            refuel_pw = int(profile["refuel_pulse_width"])
+        except (KeyError, TypeError, ValueError):
+            return "Invalid print profile"
+        return (
+            f"Print pressure: {print_pressure:.2f} psi\n"
+            f"Refuel pressure: {refuel_pressure:.2f} psi\n"
+            f"Print PW: {print_pw} us\n"
+            f"Refuel PW: {refuel_pw} us"
+        )
+
+    def _init_print_profile_row(self, row):
+        self.print_profile_label = QtWidgets.QLabel("Print Profile")
+        self.print_profile_combo = QtWidgets.QComboBox()
+        self.print_profile_combo.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.print_profile_apply_button = QtWidgets.QPushButton("Loaded")
+        self.print_profile_apply_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.print_profile_apply_button.clicked.connect(self.handle_print_profile_apply)
+
+        profiles = list(getattr(self.model, "print_profiles", []) or [])
+        for profile in profiles:
+            profile_data = dict(profile)
+            self.print_profile_combo.addItem(str(profile_data.get("name", profile_data.get("id", "Profile"))), profile_data)
+            index = self.print_profile_combo.count() - 1
+            self.print_profile_combo.setItemData(
+                index,
+                self._format_print_profile_tooltip(profile_data),
+                QtCore.Qt.ToolTipRole,
+            )
+        try:
+            self.print_profile_combo.view().setMouseTracking(True)
+        except Exception:
+            pass
+        self.print_profile_combo.currentIndexChanged.connect(self.handle_print_profile_selection_change)
+
+        self.layout.addWidget(self.print_profile_label, row, 0)
+        self.layout.addWidget(self.print_profile_combo, row, 1, 1, 2)
+        self.layout.addWidget(self.print_profile_apply_button, row, 3)
+
+        if not profiles:
+            self.print_profile_combo.setEnabled(False)
+            self._set_print_profile_button("No Profiles", enabled=False, color="#777777")
+        else:
+            self._refresh_print_profile_combo_tooltip()
+            self.update_print_profile_button_state()
+
+    def _get_selected_print_profile(self):
+        combo = getattr(self, "print_profile_combo", None)
+        if combo is None or combo.count() == 0:
+            return None
+        profile = combo.currentData()
+        return dict(profile) if isinstance(profile, dict) else None
+
+    def _refresh_print_profile_combo_tooltip(self):
+        combo = getattr(self, "print_profile_combo", None)
+        if combo is None:
+            return
+        tooltip = combo.itemData(combo.currentIndex(), QtCore.Qt.ToolTipRole)
+        combo.setToolTip(str(tooltip or ""))
+
+    def _current_print_profile_values(self):
+        machine_model = self.model.machine_model
+        print_pressure = (
+            self.target_print_pressure_spinbox.value()
+            if hasattr(self, "target_print_pressure_spinbox")
+            else machine_model.get_target_print_pressure()
+        )
+        refuel_pressure = (
+            self.target_refuel_pressure_spinbox.value()
+            if hasattr(self, "target_refuel_pressure_spinbox")
+            else machine_model.get_target_refuel_pressure()
+        )
+        print_pulse_width = (
+            self.print_pulse_width_spinbox.value()
+            if hasattr(self, "print_pulse_width_spinbox")
+            else getattr(
+                machine_model,
+                "get_print_pulse_width",
+                lambda: getattr(machine_model, "print_pulse_width", 0),
+            )()
+        )
+        refuel_pulse_width = (
+            self.refuel_pulse_width_spinbox.value()
+            if hasattr(self, "refuel_pulse_width_spinbox")
+            else getattr(
+                machine_model,
+                "get_refuel_pulse_width",
+                lambda: getattr(machine_model, "refuel_pulse_width", 0),
+            )()
+        )
+        return {
+            "print_pressure": float(print_pressure),
+            "refuel_pressure": float(refuel_pressure),
+            "print_pulse_width": int(print_pulse_width),
+            "refuel_pulse_width": int(refuel_pulse_width),
+        }
+
+    def _selected_print_profile_is_loaded(self, profile):
+        if profile is None:
+            return False
+        try:
+            current = self._current_print_profile_values()
+            return (
+                abs(current["print_pressure"] - float(profile["print_pressure"]))
+                <= self.PRINT_PROFILE_PRESSURE_TOLERANCE
+                and abs(current["refuel_pressure"] - float(profile["refuel_pressure"]))
+                <= self.PRINT_PROFILE_PRESSURE_TOLERANCE
+                and current["print_pulse_width"] == int(profile["print_pulse_width"])
+                and current["refuel_pulse_width"] == int(profile["refuel_pulse_width"])
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    def _set_print_profile_button(self, text, *, enabled, color):
+        button = getattr(self, "print_profile_apply_button", None)
+        if button is None:
+            return
+        button.setText(text)
+        button.setEnabled(enabled)
+        button.setProperty("profile_state", text.lower())
+        button.setStyleSheet(f"background-color: {color}; color: white;")
+
+    def update_print_profile_button_state(self):
+        if self.legacy_mode or not hasattr(self, "print_profile_apply_button"):
+            return
+        profile = self._get_selected_print_profile()
+        if profile is None:
+            self._set_print_profile_button("No Profiles", enabled=False, color="#777777")
+            return
+
+        if self._selected_print_profile_is_loaded(profile):
+            self._print_profile_apply_pending = False
+            self._set_print_profile_button("Loaded", enabled=False, color="#777777")
+        elif self._print_profile_apply_pending:
+            self._set_print_profile_button("Applying...", enabled=False, color=self.color_dict["light_blue"])
+        else:
+            self._set_print_profile_button("Apply", enabled=True, color=self.color_dict["light_blue"])
+
+    def handle_print_profile_selection_change(self, _index=None):
+        self._print_profile_apply_pending = False
+        self._refresh_print_profile_combo_tooltip()
+        self.update_print_profile_button_state()
+
+    def handle_print_profile_apply(self):
+        profile = self._get_selected_print_profile()
+        if profile is None:
+            return
+        self._print_profile_apply_pending = True
+        self.update_print_profile_button_state()
+        result = self.controller.apply_print_profile(
+            profile,
+            callback=self._handle_print_profile_apply_complete,
+        )
+        if result is False:
+            self._print_profile_apply_pending = False
+            self.update_print_profile_button_state()
+
+    def _handle_print_profile_apply_complete(self, *args, **kwargs):
+        QTimer.singleShot(0, self._finish_print_profile_apply)
+
+    def _finish_print_profile_apply(self):
+        self._print_profile_apply_pending = False
+        self.update_print_profile_button_state()
+
+    def _mark_print_profile_settings_changed(self):
+        if self.legacy_mode or not hasattr(self, "print_profile_apply_button"):
+            return
+        self._print_profile_apply_pending = False
+        self.update_print_profile_button_state()
+
     def init_ui(self):
         self.setFocusPolicy(QtCore.Qt.NoFocus)
         self.layout = QtWidgets.QGridLayout(self)
@@ -1223,6 +1400,11 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         )
         self.edit_focus_frame.hide()
 
+        row_offset = 0
+        if not self.legacy_mode:
+            self._init_print_profile_row(0)
+            row_offset = 1
+
         self.current_print_pressure_label = QtWidgets.QLabel("Print Pressure:")  # Create a new QLabel for the current pressure label
         self.current_print_pressure_value = QtWidgets.QLabel()  # Create a new QLabel for the current pressure value
         self.target_print_pressure_label = QtWidgets.QLabel("Target Print:")  # Create a new QLabel for the target pressure label
@@ -1235,10 +1417,10 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             self.handle_target_print_pressure_change,
         )
 
-        self.layout.addWidget(self.current_print_pressure_label, 0, 0)  # Add the QLabel to the layout at position (0, 0)
-        self.layout.addWidget(self.current_print_pressure_value, 0, 1)  # Add the QLabel to the layout at position (0, 1)
-        self.layout.addWidget(self.target_print_pressure_label, 0, 2)  # Add the QLabel to the layout at position (1, 0)
-        self.layout.addWidget(self.target_print_pressure_spinbox, 0, 3)  # Add the QDoubleSpinBox to the layout at position (1, 1)
+        self.layout.addWidget(self.current_print_pressure_label, row_offset + 0, 0)  # Add the QLabel to the layout at position (0, 0)
+        self.layout.addWidget(self.current_print_pressure_value, row_offset + 0, 1)  # Add the QLabel to the layout at position (0, 1)
+        self.layout.addWidget(self.target_print_pressure_label, row_offset + 0, 2)  # Add the QLabel to the layout at position (1, 0)
+        self.layout.addWidget(self.target_print_pressure_spinbox, row_offset + 0, 3)  # Add the QDoubleSpinBox to the layout at position (1, 1)
         self.print_frequency_label = QtWidgets.QLabel("Print Frequency (Hz):")
         self.print_frequency_spinbox = QtWidgets.QSpinBox()
         self.print_frequency_spinbox.setRange(1, 100)
@@ -1261,17 +1443,17 @@ class PressurePlotBox(QtWidgets.QGroupBox):
                 self.handle_target_refuel_pressure_change,
             )
 
-            self.layout.addWidget(self.current_refuel_pressure_label, 1, 0)  # Add the QLabel to the layout at position (0, 0)
-            self.layout.addWidget(self.current_refuel_pressure_value, 1, 1)  # Add the QLabel to the layout at position (0, 1)
-            self.layout.addWidget(self.target_refuel_pressure_label, 1, 2)  # Add the QLabel to the layout at position (1, 0)
-            self.layout.addWidget(self.target_refuel_pressure_spinbox, 1, 3)  # Add the QDoubleSpinBox to the layout at position (1, 1)
+            self.layout.addWidget(self.current_refuel_pressure_label, row_offset + 1, 0)  # Add the QLabel to the layout at position (0, 0)
+            self.layout.addWidget(self.current_refuel_pressure_value, row_offset + 1, 1)  # Add the QLabel to the layout at position (0, 1)
+            self.layout.addWidget(self.target_refuel_pressure_label, row_offset + 1, 2)  # Add the QLabel to the layout at position (1, 0)
+            self.layout.addWidget(self.target_refuel_pressure_spinbox, row_offset + 1, 3)  # Add the QDoubleSpinBox to the layout at position (1, 1)
 
 
         self.pressure_regulation_button = QtWidgets.QPushButton("Regulate Pressure")
         self.pressure_regulation_button.setFocusPolicy(QtCore.Qt.NoFocus)
         # self.pressure_regulation_button.setCheckable(True)
         self.pressure_regulation_button.clicked.connect(self.request_toggle_regulation)
-        self.layout.addWidget(self.pressure_regulation_button, 2, 0, 1, 4)  # Add the button to the layout at position (2, 0) and make it span 2 columns
+        self.layout.addWidget(self.pressure_regulation_button, row_offset + 2, 0, 1, 4)  # Add the button to the layout at position (2, 0) and make it span 2 columns
         self.update_regulation_button(self.model.machine_model.regulating_print_pressure)
 
         self.chart = QtCharts.QChart()
@@ -1323,16 +1505,16 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.chart.legend().hide()  # Hide the legend
         self.chart_view.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         self.chart_view.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.layout.addWidget(self.chart_view, 3, 0,1,4)
+        self.layout.addWidget(self.chart_view, row_offset + 3, 0,1,4)
 
         self.calibrate_pressure_button = QtWidgets.QPushButton("Calibrate Printer head")
         self.calibrate_pressure_button.clicked.connect(self.calibrate_pressure)
-        self.layout.addWidget(self.calibrate_pressure_button, 4, 0, 1, 2)
+        self.layout.addWidget(self.calibrate_pressure_button, row_offset + 4, 0, 1, 2)
 
         if not self.legacy_mode:
             self.refuel_camera_button = QtWidgets.QPushButton("Refuel Camera")
             self.refuel_camera_button.clicked.connect(self.refuel_camera)
-            self.layout.addWidget(self.refuel_camera_button, 5, 0, 1, 2)
+            self.layout.addWidget(self.refuel_camera_button, row_offset + 5, 0, 1, 2)
 
         self.print_pulse_width_label = QtWidgets.QLabel("Print Pulse Width:")
         self.print_pulse_width_spinbox = QtWidgets.QSpinBox()
@@ -1343,8 +1525,8 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             self.print_pulse_width_spinbox,
             self.handle_print_pulse_width_change,
         )
-        self.layout.addWidget(self.print_pulse_width_label,4,2,1,1)
-        self.layout.addWidget(self.print_pulse_width_spinbox,4,3,1,1)
+        self.layout.addWidget(self.print_pulse_width_label,row_offset + 4,2,1,1)
+        self.layout.addWidget(self.print_pulse_width_spinbox,row_offset + 4,3,1,1)
 
 
         if not self.legacy_mode:
@@ -1357,10 +1539,10 @@ class PressurePlotBox(QtWidgets.QGroupBox):
                 self.refuel_pulse_width_spinbox,
                 self.handle_refuel_pulse_width_change,
             )
-            self.layout.addWidget(self.refuel_pulse_width_label,5,2,1,1)
-            self.layout.addWidget(self.refuel_pulse_width_spinbox,5,3,1,1)
+            self.layout.addWidget(self.refuel_pulse_width_label,row_offset + 5,2,1,1)
+            self.layout.addWidget(self.refuel_pulse_width_spinbox,row_offset + 5,3,1,1)
 
-        frequency_row = 5 if self.legacy_mode else 6
+        frequency_row = row_offset + (5 if self.legacy_mode else 6)
         self.layout.addWidget(self.print_frequency_label, frequency_row, 2, 1, 1)
         self.layout.addWidget(self.print_frequency_spinbox, frequency_row, 3, 1, 1)
 
@@ -1372,18 +1554,21 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         value = self.target_print_pressure_spinbox.value()
         self.controller.set_absolute_print_pressure(value,manual=True)
         self._finish_spinbox_edit(self.target_print_pressure_spinbox)
+        self._mark_print_profile_settings_changed()
 
     def handle_target_refuel_pressure_change(self):
         """Handle changes to the target pressure value."""
         value = self.target_refuel_pressure_spinbox.value()
         self.controller.set_absolute_refuel_pressure(value,manual=True)
         self._finish_spinbox_edit(self.target_refuel_pressure_spinbox)
+        self._mark_print_profile_settings_changed()
 
     def handle_print_pulse_width_change(self):
         """Handle changes to the pulse width value."""
         value = self.print_pulse_width_spinbox.value()
         self.controller.set_print_pulse_width(value,manual=True)
         self._finish_spinbox_edit(self.print_pulse_width_spinbox)
+        self._mark_print_profile_settings_changed()
 
     def handle_print_frequency_change(self):
         """Handle changes to the print pacing value."""
@@ -1396,6 +1581,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         value = self.refuel_pulse_width_spinbox.value()
         self.controller.set_refuel_pulse_width(value,manual=True)
         self._finish_spinbox_edit(self.refuel_pulse_width_spinbox)
+        self._mark_print_profile_settings_changed()
 
     def update_printing_controls(self):
         """Refresh editable print settings from the machine model."""
@@ -1426,6 +1612,8 @@ class PressurePlotBox(QtWidgets.QGroupBox):
                 self.refuel_pulse_width_spinbox.blockSignals(True)
                 self.refuel_pulse_width_spinbox.setValue(machine_model.refuel_pulse_width)
                 self.refuel_pulse_width_spinbox.blockSignals(False)
+
+        self.update_print_profile_button_state()
 
     def update_pressure(self):
         """Update the current pressure label and plot with the new pressure values."""

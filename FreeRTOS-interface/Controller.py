@@ -838,6 +838,28 @@ class Controller(QObject):
             trace_metadata=trace_metadata,
         )
 
+    def apply_print_profile(self, profile, callback=None):
+        """Apply a print profile through the existing print/refuel setting commands."""
+        profile = dict(profile or {})
+        required = (
+            "print_pressure",
+            "refuel_pressure",
+            "print_pulse_width",
+            "refuel_pulse_width",
+        )
+        missing = [key for key in required if key not in profile]
+        if missing:
+            raise ValueError(f"Print profile missing required settings: {missing}")
+
+        settings = {
+            "print_pressure": float(profile["print_pressure"]),
+            "refuel_pressure": float(profile["refuel_pressure"]),
+            "print_pulse_width": int(profile["print_pulse_width"]),
+            "refuel_pulse_width": int(profile["refuel_pulse_width"]),
+        }
+        self.handle_settings_change_request(settings, callback or self.intermediate_callback)
+        return True
+
     def set_dispense_frequency_hz(self, hz, manual=False):
         """Set the print pacing used for future dispense commands."""
         return self.model.set_dispense_frequency_hz(

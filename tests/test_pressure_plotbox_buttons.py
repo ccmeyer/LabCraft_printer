@@ -1,12 +1,36 @@
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import ANY, Mock
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import QMessageBox
 
 import View
 from View import PressurePlotBox
 from hardware.profile import CURRENT_PROFILE, LEGACY_PROFILE
+
+
+_PRINT_PROFILES = [
+    {
+        "id": "water_droplet",
+        "name": "Water - droplet",
+        "mode": "droplet",
+        "material": "water",
+        "print_pressure": 0.6,
+        "refuel_pressure": 0.3,
+        "print_pulse_width": 1300,
+        "refuel_pulse_width": 3000,
+    },
+    {
+        "id": "water_stream",
+        "name": "Water - stream",
+        "mode": "stream",
+        "material": "water",
+        "print_pressure": 0.8,
+        "refuel_pressure": 0.8,
+        "print_pulse_width": 2500,
+        "refuel_pulse_width": 6000,
+    },
+]
 
 
 class _FakeMachineModel(QObject):
@@ -21,6 +45,10 @@ class _FakeMachineModel(QObject):
         regulating_print_pressure=False,
         regulating_refuel_pressure=None,
         current_location="camera",
+        target_print_pressure=1.0,
+        target_refuel_pressure=1.0,
+        print_pulse_width=3000,
+        refuel_pulse_width=3000,
     ):
         super().__init__()
         self.regulating_print_pressure = regulating_print_pressure
@@ -30,8 +58,10 @@ class _FakeMachineModel(QObject):
             else regulating_refuel_pressure
         )
         self.current_location = current_location
-        self.print_pulse_width = 3000
-        self.refuel_pulse_width = 3000
+        self.target_print_pressure = target_print_pressure
+        self.target_refuel_pressure = target_refuel_pressure
+        self.print_pulse_width = print_pulse_width
+        self.refuel_pulse_width = refuel_pulse_width
         self.dispense_frequency_hz = 10
 
     def is_connected(self):
@@ -47,10 +77,16 @@ class _FakeMachineModel(QObject):
         return [0.9, 1.0]
 
     def get_target_print_pressure(self):
-        return 1.0
+        return self.target_print_pressure
 
     def get_target_refuel_pressure(self):
-        return 1.0
+        return self.target_refuel_pressure
+
+    def get_print_pulse_width(self):
+        return self.print_pulse_width
+
+    def get_refuel_pulse_width(self):
+        return self.refuel_pulse_width
 
     def get_dispense_frequency_hz(self):
         return self.dispense_frequency_hz
@@ -77,6 +113,7 @@ def _make_model(machine_model, events, *, printer_head=None):
     return SimpleNamespace(
         machine_model=machine_model,
         rack_model=SimpleNamespace(get_gripper_printer_head=Mock(return_value=printer_head)),
+        print_profiles=[dict(profile) for profile in _PRINT_PROFILES],
         reload_droplet_model=Mock(side_effect=lambda: events.append("reload_droplet_model")),
         reload_refuel_model=Mock(side_effect=lambda: events.append("reload_refuel_model")),
     )
@@ -90,6 +127,7 @@ def _make_controller(events, *, queue_clear=True):
         set_print_pulse_width=Mock(),
         set_dispense_frequency_hz=Mock(),
         set_refuel_pulse_width=Mock(),
+        apply_print_profile=Mock(side_effect=lambda profile, callback=None: True),
         check_if_all_completed=Mock(return_value=queue_clear),
         move_to_location=Mock(),
         disconnect_droplet_camera_signals=Mock(
@@ -224,8 +262,8 @@ def test_current_profile_frequency_field_sits_below_pulse_width_fields(qapp):
         _make_controller(events),
     )
 
-    assert box.layout.itemAtPosition(6, 2).widget() is box.print_frequency_label
-    assert box.layout.itemAtPosition(6, 3).widget() is box.print_frequency_spinbox
+    assert box.layout.itemAtPosition(7, 2).widget() is box.print_frequency_label
+    assert box.layout.itemAtPosition(7, 3).widget() is box.print_frequency_spinbox
 
 
 def test_legacy_profile_frequency_field_sits_below_pulse_width_fields(qapp):
@@ -239,6 +277,140 @@ def test_legacy_profile_frequency_field_sits_below_pulse_width_fields(qapp):
 
     assert box.layout.itemAtPosition(5, 2).widget() is box.print_frequency_label
     assert box.layout.itemAtPosition(5, 3).widget() is box.print_frequency_spinbox
+
+
+def test_current_profile_print_profile_row_sits_above_pressure_controls(qapp):
+    events = []
+    popups = []
+    box = PressurePlotBox(
+        _make_main_window(CURRENT_PROFILE, popups),
+        _make_model(_FakeMachineModel(), events),
+        _make_controller(events),
+    )
+
+    assert box.layout.itemAtPosition(0, 0).widget() is box.print_profile_label
+    assert box.layout.itemAtPosition(0, 1).widget() is box.print_profile_combo
+    assert box.layout.itemAtPosition(0, 3).widget() is box.print_profile_apply_button
+    assert box.layout.itemAtPosition(1, 0).widget() is box.current_print_pressure_label
+
+
+def test_legacy_profile_hides_print_profile_row(qapp):
+    events = []
+    popups = []
+    box = PressurePlotBox(
+        _make_main_window(LEGACY_PROFILE, popups),
+        _make_model(_FakeMachineModel(), events),
+        _make_controller(events),
+    )
+
+    assert not hasattr(box, "print_profile_combo")
+    assert box.layout.itemAtPosition(0, 0).widget() is box.current_print_pressure_label
+
+
+def test_print_profile_tooltips_show_profile_parameters(qapp):
+    events = []
+    popups = []
+    box = PressurePlotBox(
+        _make_main_window(CURRENT_PROFILE, popups),
+        _make_model(_FakeMachineModel(), events),
+        _make_controller(events),
+    )
+
+    tooltip = box.print_profile_combo.itemData(0, Qt.ToolTipRole)
+
+    assert "Print pressure: 0.60 psi" in tooltip
+    assert "Refuel pressure: 0.30 psi" in tooltip
+    assert "Print PW: 1300 us" in tooltip
+    assert "Refuel PW: 3000 us" in tooltip
+
+
+def test_matching_print_profile_shows_loaded_button(qapp):
+    events = []
+    popups = []
+    box = PressurePlotBox(
+        _make_main_window(CURRENT_PROFILE, popups),
+        _make_model(
+            _FakeMachineModel(
+                target_print_pressure=0.6,
+                target_refuel_pressure=0.3,
+                print_pulse_width=1300,
+                refuel_pulse_width=3000,
+            ),
+            events,
+        ),
+        _make_controller(events),
+    )
+
+    assert box.print_profile_apply_button.text() == "Loaded"
+    assert not box.print_profile_apply_button.isEnabled()
+    assert "#777777" in box.print_profile_apply_button.styleSheet()
+
+
+def test_selecting_different_print_profile_enables_apply(qapp):
+    events = []
+    popups = []
+    box = PressurePlotBox(
+        _make_main_window(CURRENT_PROFILE, popups),
+        _make_model(
+            _FakeMachineModel(
+                target_print_pressure=0.6,
+                target_refuel_pressure=0.3,
+                print_pulse_width=1300,
+                refuel_pulse_width=3000,
+            ),
+            events,
+        ),
+        _make_controller(events),
+    )
+
+    box.print_profile_combo.setCurrentIndex(1)
+
+    assert box.print_profile_apply_button.text() == "Apply"
+    assert box.print_profile_apply_button.isEnabled()
+    assert "#60a5fa" in box.print_profile_apply_button.styleSheet()
+
+
+def test_manual_print_profile_setting_change_returns_button_to_apply(qapp):
+    events = []
+    popups = []
+    controller = _make_controller(events)
+    box = PressurePlotBox(
+        _make_main_window(CURRENT_PROFILE, popups),
+        _make_model(
+            _FakeMachineModel(
+                target_print_pressure=0.6,
+                target_refuel_pressure=0.3,
+                print_pulse_width=1300,
+                refuel_pulse_width=3000,
+            ),
+            events,
+        ),
+        controller,
+    )
+
+    box.target_print_pressure_spinbox.setValue(0.7)
+    box.handle_target_print_pressure_change()
+
+    controller.set_absolute_print_pressure.assert_called_with(0.7, manual=True)
+    assert box.print_profile_apply_button.text() == "Apply"
+    assert box.print_profile_apply_button.isEnabled()
+
+
+def test_apply_print_profile_calls_controller_and_enters_applying_state(qapp):
+    events = []
+    popups = []
+    controller = _make_controller(events)
+    box = PressurePlotBox(
+        _make_main_window(CURRENT_PROFILE, popups),
+        _make_model(_FakeMachineModel(), events),
+        controller,
+    )
+
+    box.handle_print_profile_apply()
+
+    controller.apply_print_profile.assert_called_once_with(_PRINT_PROFILES[0], callback=ANY)
+    assert box.print_profile_apply_button.text() == "Applying..."
+    assert not box.print_profile_apply_button.isEnabled()
 
 
 def test_current_profile_calibrate_pressure_rejects_when_queue_not_empty(monkeypatch, qapp):

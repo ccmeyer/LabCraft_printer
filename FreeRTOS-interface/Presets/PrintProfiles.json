@@ -1,0 +1,25 @@
+{
+    "version": 1,
+    "profiles": [
+        {
+            "id": "water_droplet",
+            "name": "Water - droplet",
+            "mode": "droplet",
+            "material": "water",
+            "print_pressure": 0.6,
+            "refuel_pressure": 0.3,
+            "print_pulse_width": 1300,
+            "refuel_pulse_width": 3000
+        },
+        {
+            "id": "water_stream",
+            "name": "Water - stream",
+            "mode": "stream",
+            "material": "water",
+            "print_pressure": 0.8,
+            "refuel_pressure": 0.8,
+            "print_pulse_width": 2500,
+            "refuel_pulse_width": 6000
+        }
+    ]
+}

@@ -6924,6 +6924,7 @@ class Model(QObject):
         self.plates_path = os.path.join(self.script_dir, 'Presets','Plates.json')
         self.colors_path = os.path.join(self.script_dir, 'Presets','Printer_head_colors.json')
         self.settings_path = os.path.join(self.script_dir, 'Presets','Settings.json')
+        self.print_profiles_path = os.path.join(self.script_dir, 'Presets','PrintProfiles.json')
         self.obstacles_path = os.path.join(self.script_dir, 'Presets','Obstacles.json')
         self.predictive_model_dir = os.path.join(self.script_dir, 'Presets','Predictive_models')
         self.pixel_step_conv_path = os.path.join(self.script_dir, 'Presets','step_conv_250813.json')
@@ -6932,6 +6933,7 @@ class Model(QObject):
     
         self.printer_head_colors = self.load_colors(self.colors_path)
         self.settings = self.load_settings(self.settings_path)
+        self.print_profiles = self.load_print_profiles(self.print_profiles_path)
         self.machine_model = MachineModel()
         self.num_slots = 5
         self.location_data = self.load_all_location_data(self.locations_path)
@@ -7433,6 +7435,81 @@ class Model(QObject):
     def load_settings(self,file_path):
         with open(file_path, 'r') as file:
             return json.load(file)
+
+    def load_print_profiles(self,file_path):
+        with open(file_path, 'r', encoding='utf-8') as file:
+            data = json.load(file)
+
+        profiles = data.get("profiles") if isinstance(data, dict) else data
+        if not isinstance(profiles, list):
+            raise ValueError("PrintProfiles.json must contain a profiles list.")
+
+        required = {
+            "id",
+            "name",
+            "mode",
+            "material",
+            "print_pressure",
+            "refuel_pressure",
+            "print_pulse_width",
+            "refuel_pulse_width",
+        }
+        validated = []
+        seen_ids = set()
+        for i, profile in enumerate(profiles):
+            if not isinstance(profile, dict):
+                raise ValueError(f"Print profile at index {i} must be an object.")
+            missing = required - set(profile.keys())
+            if missing:
+                raise ValueError(f"Print profile at index {i} missing required keys: {sorted(missing)}")
+
+            profile_id = str(profile["id"]).strip()
+            name = str(profile["name"]).strip()
+            mode = str(profile["mode"]).strip().lower()
+            material = str(profile["material"]).strip()
+            if not profile_id:
+                raise ValueError(f"Print profile at index {i} must have a non-empty id.")
+            if profile_id in seen_ids:
+                raise ValueError(f"Duplicate print profile id '{profile_id}' in PrintProfiles.json.")
+            if not name:
+                raise ValueError(f"Print profile '{profile_id}' must have a non-empty name.")
+            if mode not in PRINTING_MODE_CHOICES:
+                raise ValueError(f"Print profile '{profile_id}' has invalid mode '{profile['mode']}'.")
+            if not material:
+                raise ValueError(f"Print profile '{profile_id}' must have a non-empty material.")
+
+            print_pressure = float(profile["print_pressure"])
+            refuel_pressure = float(profile["refuel_pressure"])
+            print_pulse_width = int(profile["print_pulse_width"])
+            refuel_pulse_width = int(profile["refuel_pulse_width"])
+
+            for key, value in (
+                ("print_pressure", print_pressure),
+                ("refuel_pressure", refuel_pressure),
+            ):
+                if value < 0 or value > 5:
+                    raise ValueError(f"Print profile '{profile_id}' {key} must be between 0 and 5 psi.")
+            for key, value in (
+                ("print_pulse_width", print_pulse_width),
+                ("refuel_pulse_width", refuel_pulse_width),
+            ):
+                if value < 100 or value > 10000:
+                    raise ValueError(f"Print profile '{profile_id}' {key} must be between 100 and 10000 us.")
+
+            seen_ids.add(profile_id)
+            validated.append(
+                {
+                    "id": profile_id,
+                    "name": name,
+                    "mode": mode,
+                    "material": material,
+                    "print_pressure": print_pressure,
+                    "refuel_pressure": refuel_pressure,
+                    "print_pulse_width": print_pulse_width,
+                    "refuel_pulse_width": refuel_pulse_width,
+                }
+            )
+        return validated
 
     def set_dispense_frequency_hz(self, hz):
         hz = max(1, int(hz))
