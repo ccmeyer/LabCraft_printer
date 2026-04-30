@@ -20,6 +20,16 @@
             "refuel_pressure": 0.8,
             "print_pulse_width": 2500,
             "refuel_pulse_width": 6000
+        },
+        {
+            "id": "protein_stream",
+            "name": "Protein - stream",
+            "mode": "stream",
+            "material": "protein",
+            "print_pressure": 1.2,
+            "refuel_pressure": 1.4,
+            "print_pulse_width": 2500,
+            "refuel_pulse_width": 8000
         }
     ]
 }
