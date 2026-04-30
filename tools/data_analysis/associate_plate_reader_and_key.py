@@ -31,6 +31,8 @@ EX_EM_RE = re.compile(r"^(\d+)\s+(\d+)$")
 TIME_RE = re.compile(r"^\d{2}:\d{2}:\d{2}$")
 DEFAULT_KEY_FILENAME = "concentration_key.csv"
 DEFAULT_PLATE_PATTERN = "*_data.xls"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_EXPERIMENTS_DIR = REPO_ROOT / "FreeRTOS-interface" / "Experiments"
 
 
 @dataclass(frozen=True)
@@ -304,6 +306,63 @@ def discover_plate_file(experiment_dir: Path) -> Path:
     return candidates[0]
 
 
+def has_wildcard(path_text: str | Path) -> bool:
+    return any(char in str(path_text) for char in "*?[")
+
+
+def _unique_sorted_dirs(paths: Iterable[Path]) -> list[Path]:
+    unique: dict[str, Path] = {}
+    for path in paths:
+        if path.is_dir():
+            unique[str(path.resolve()).lower()] = path
+    return sorted(unique.values(), key=lambda p: str(p).lower())
+
+
+def _format_experiment_matches(matches: Iterable[Path]) -> str:
+    return "\n".join(f"  {path.name}" for path in matches)
+
+
+def resolve_experiment_dir(experiment_arg: str | Path) -> Path:
+    raw_text = str(experiment_arg)
+    candidate = Path(raw_text)
+
+    if has_wildcard(raw_text):
+        if candidate.is_absolute() or candidate.parent != Path("."):
+            parent = candidate.parent
+            matches = parent.glob(candidate.name) if parent.exists() else []
+        else:
+            matches = DEFAULT_EXPERIMENTS_DIR.glob(raw_text) if DEFAULT_EXPERIMENTS_DIR.exists() else []
+
+        matched_dirs = _unique_sorted_dirs(matches)
+        if len(matched_dirs) == 1:
+            return matched_dirs[0]
+        if not matched_dirs:
+            raise ValueError(
+                f"No experiment directories matched {raw_text!r}. "
+                f"Checked {DEFAULT_EXPERIMENTS_DIR} for bare names."
+            )
+        raise ValueError(
+            "Multiple experiment directories matched. Rerun with one complete experiment directory name:\n"
+            f"{_format_experiment_matches(matched_dirs)}"
+        )
+
+    if candidate.exists():
+        if not candidate.is_dir():
+            raise ValueError(f"Experiment path is not a directory: {candidate}")
+        return candidate
+
+    experiment_name_candidate = DEFAULT_EXPERIMENTS_DIR / candidate
+    if experiment_name_candidate.exists():
+        if not experiment_name_candidate.is_dir():
+            raise ValueError(f"Experiment path is not a directory: {experiment_name_candidate}")
+        return experiment_name_candidate
+
+    raise ValueError(
+        f"Experiment directory does not exist: {candidate}. "
+        f"For bare names, also checked {DEFAULT_EXPERIMENTS_DIR}."
+    )
+
+
 def resolve_optional_path(path: str | Path | None, experiment_dir: Path | None = None) -> Path | None:
     if path is None:
         return None
@@ -329,7 +388,7 @@ def resolve_inputs(args: argparse.Namespace) -> ResolvedInputs:
         key_file = legacy_key_file
         experiment_dir = plate_file.resolve().parent
     else:
-        experiment_dir = first_positional
+        experiment_dir = resolve_experiment_dir(first_positional) if first_positional is not None else None
         plate_file = resolve_optional_path(args.plate_file, experiment_dir)
         key_file = resolve_optional_path(args.key_file, experiment_dir)
 
@@ -337,9 +396,6 @@ def resolve_inputs(args: argparse.Namespace) -> ResolvedInputs:
             if plate_file is None or key_file is None:
                 raise ValueError("Provide an experiment directory, or both --plate-file and --key-file.")
             experiment_dir = plate_file.resolve().parent
-        else:
-            if not experiment_dir.exists() or not experiment_dir.is_dir():
-                raise ValueError(f"Experiment directory does not exist or is not a directory: {experiment_dir}")
 
         if key_file is None:
             key_file = experiment_dir / DEFAULT_KEY_FILENAME
@@ -385,7 +441,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         nargs="?",
         help=(
             "Experiment directory. Legacy mode also accepts plate_file here when a second "
-            "positional key_file is supplied."
+            "positional key_file is supplied. Bare names and wildcards are resolved under "
+            "FreeRTOS-interface/Experiments."
         ),
     )
     parser.add_argument(
