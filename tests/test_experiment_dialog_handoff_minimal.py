@@ -14,4 +14,4 @@ def test_complete_experiment_design_calls_model_load_from_model():
 
     MainWindow.complete_experiment_design(main_window)
 
-    load_mock.assert_called_once_with(plate_name="96well-8x12")
+    load_mock.assert_called_once_with(plate_name="96well-8x12", load_progress=True)

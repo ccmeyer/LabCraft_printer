@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -85,10 +87,12 @@ def test_apply_droplet_volume_for_option_refreshes_runtime_after_apply():
 
     assert refresh_calls == [{"write_keys_if_assigned": False}]
     assert option.droplet_nL == 12.0
+    assert option.intended_droplet_nL == 10.0
     assert stock["droplet_volume_nL"] == 12.0
     assert stock_row["droplet_volume_nL"] == 12.0
     assert em.unsaved_changes is True
     assert result["stock_row_updated"] is True
+    assert result["saved_experiment"] is False
 
 
 def test_apply_fill_droplet_volume_refreshes_runtime_after_apply():
@@ -114,9 +118,11 @@ def test_apply_fill_droplet_volume_refreshes_runtime_after_apply():
 
     assert generate_calls == [True]
     assert refresh_calls == [{"write_keys_if_assigned": True}]
+    assert em.metadata["intended_fill_droplet_volume_nL"] == 10.0
     assert em.unsaved_changes is True
     assert result["new_fill_nL"] == 12.0
     assert result["total_drops_new"] == 42
+    assert result["saved_experiment"] is False
 
 
 def test_apply_droplet_volume_for_option_rejects_volume_outside_printing_mode_range():
@@ -177,3 +183,99 @@ def test_apply_fill_droplet_volume_rejects_volume_outside_fill_printing_mode_ran
 
     with pytest.raises(ValueError, match="outside the allowed range for stream mode"):
         em.apply_fill_droplet_volume(10.0, write_keys_if_assigned=True)
+
+
+def _configure_calibrated_volume_design(em):
+    em.factors = []
+    em.add_additive(
+        "glycerol",
+        [0.9],
+        "mM",
+        10.0,
+        forced_stock_conc=10.0,
+        printing_mode="droplet",
+    )
+    em.set_metadata(
+        randomize_assignments=False,
+        start_row=0,
+        start_col=0,
+        replicates=1,
+        target_reaction_volume_nL=500.0,
+        final_reaction_volume_nL=500.0,
+        fill_reagent_name="Water",
+        fill_droplet_volume_nL=10.0,
+    )
+    assert em.optimize_stock_solutions()["best"]
+    em.generate_experiment()
+    em.save_experiment()
+
+
+def _first_option_payload(payload, factor_name):
+    for factor in payload["factors"]:
+        if factor["name"] == factor_name:
+            return factor["options"][0]
+    raise AssertionError(f"Factor {factor_name!r} not found")
+
+
+def _first_saved_target(em, factor_name):
+    stock = em.plans_per_option[(factor_name, None)]["stocks"][0]
+    return next(iter(stock["droplets_per_target"].values()))
+
+
+def test_apply_droplet_volume_for_option_persists_effective_and_intended_volume(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_calibrated_volume_design(em)
+
+    result = em.apply_droplet_volume_for_option(
+        "glycerol",
+        None,
+        15.0,
+        write_keys_if_assigned=False,
+    )
+
+    payload = json.loads(Path(em.experiment_file_path).read_text(encoding="utf-8"))
+    option = _first_option_payload(payload, "glycerol")
+    assert option["droplet_nL"] == 15.0
+    assert option["intended_droplet_nL"] == 10.0
+    assert result["saved_experiment"] is True
+    assert em.unsaved_changes is False
+
+
+def test_apply_fill_droplet_volume_persists_effective_and_intended_volume(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_calibrated_volume_design(em)
+
+    result = em.apply_fill_droplet_volume(12.0, write_keys_if_assigned=False)
+
+    payload = json.loads(Path(em.experiment_file_path).read_text(encoding="utf-8"))
+    assert payload["metadata"]["fill_droplet_volume_nL"] == 12.0
+    assert payload["metadata"]["intended_fill_droplet_volume_nL"] == 10.0
+    assert result["saved_experiment"] is True
+    assert em.unsaved_changes is False
+
+
+def test_reloading_after_calibrated_volume_apply_uses_saved_effective_counts(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_calibrated_volume_design(em)
+    original_target = _first_saved_target(em, "glycerol")
+
+    em.apply_droplet_volume_for_option("glycerol", None, 15.0, write_keys_if_assigned=False)
+    calibrated_target = _first_saved_target(em, "glycerol")
+    assert calibrated_target != original_target
+
+    reloaded_model = experiment_model_factory()
+    reloaded = reloaded_model.experiment_model
+    reloaded.load_experiment(em.experiment_file_path, em.experiment_dir_path)
+
+    assert reloaded.factors[0].options[0].droplet_nL == 15.0
+    assert reloaded.factors[0].options[0].intended_droplet_nL == 10.0
+    assert _first_saved_target(reloaded, "glycerol") == calibrated_target

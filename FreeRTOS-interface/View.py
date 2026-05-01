@@ -594,7 +594,7 @@ class MainWindow(QMainWindow):
         """Handle completion of experiment design."""
         print("[MainWindow] Experiment design completed.")
         plate_name = self.model.experiment_model.metadata.get("plate_name")
-        self.model.load_experiment_from_model(plate_name=plate_name)
+        self.model.load_experiment_from_model(plate_name=plate_name, load_progress=True)
     
     def closeEvent(self, event):
         """Handle the window close event."""

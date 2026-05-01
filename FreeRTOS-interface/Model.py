@@ -216,6 +216,7 @@ class OptionSpec:
     reagent_display_name: str | None = None
     intended_head_type_id: str | None = None
     intended_head_type_display_name: str | None = None
+    intended_droplet_nL: float | None = None
 
 
 @dataclass
@@ -369,6 +370,7 @@ class ExperimentModel(QObject):
         self.concentration_key_file_path: Optional[str] = None
         self.calibration_file_path: Optional[str] = None
         self.progress_data: Dict[str, Dict] = {}
+        self._last_progress_load_warnings: list[dict[str, object]] = []
         self.unsaved_changes: bool = False
 
         # optional dependency (if you have one); safe to ignore if None
@@ -3218,6 +3220,13 @@ class ExperimentModel(QObject):
         # keep quantum small so future near-match logic is permissive but irrelevant (we use exact t_add keys)
         st["quantum"] = 1e-6
 
+        current_design_dv = float(getattr(opt_obj, "droplet_nL", new_dv))
+        if (
+            getattr(opt_obj, "intended_droplet_nL", None) is None
+            and abs(current_design_dv - new_dv) > 1e-9
+        ):
+            opt_obj.intended_droplet_nL = current_design_dv
+
         # Update the persistent design object so saves/loads reflect the new dv
         opt_obj.droplet_nL = new_dv
 
@@ -3241,6 +3250,10 @@ class ExperimentModel(QObject):
 
         # mark unsaved since design object changed
         self.unsaved_changes = True
+        saved_experiment = False
+        if getattr(self, "experiment_file_path", None):
+            self.save_experiment()
+            saved_experiment = True
 
         return {
             "factor": factor_name,
@@ -3252,6 +3265,7 @@ class ExperimentModel(QObject):
             "example_map": dict(list(dp.items())[: min(5, len(dp))]),
             "stock_row_updated": bool(updated_row),
             "worst_nonfill_after_nL": float(self._last_worst_nonfill_volume_nL or 0.0),
+            "saved_experiment": saved_experiment,
         }
 
 
@@ -3356,6 +3370,11 @@ class ExperimentModel(QObject):
                             "reagent_display_name": getattr(o, "reagent_display_name", None),
                             "intended_head_type_id": getattr(o, "intended_head_type_id", None),
                             "intended_head_type_display_name": getattr(o, "intended_head_type_display_name", None),
+                            **(
+                                {"intended_droplet_nL": float(o.intended_droplet_nL)}
+                                if getattr(o, "intended_droplet_nL", None) is not None
+                                else {}
+                            ),
                             "forced_stock_conc": (
                                 float(o.forced_stock_conc)
                                 if o.forced_stock_conc is not None
@@ -3458,6 +3477,11 @@ class ExperimentModel(QObject):
                     reagent_display_name=o.get("reagent_display_name"),
                     intended_head_type_id=o.get("intended_head_type_id"),
                     intended_head_type_display_name=o.get("intended_head_type_display_name"),
+                    intended_droplet_nL=(
+                        float(o["intended_droplet_nL"])
+                        if o.get("intended_droplet_nL") is not None
+                        else None
+                    ),
                 )
                 fs.options.append(opt)
             self.factors.append(fs)
@@ -4302,18 +4326,28 @@ class ExperimentModel(QObject):
         # Preview before we apply, so we can report useful deltas after recompute
         prev = self.preview_fill_requantized(new_fill_droplet_nL)
         # Apply
+        if (
+            "intended_fill_droplet_volume_nL" not in self.metadata
+            and abs(old - new_fill_droplet_nL) > 1e-9
+        ):
+            self.metadata["intended_fill_droplet_volume_nL"] = old
         self.metadata["fill_droplet_volume_nL"] = new_fill_droplet_nL
         self.generate_experiment()
 
         self._refresh_runtime_after_plan_change(write_keys_if_assigned=write_keys_if_assigned)
 
         self.unsaved_changes = True
+        saved_experiment = False
+        if getattr(self, "experiment_file_path", None):
+            self.save_experiment()
+            saved_experiment = True
         return {
             "old_fill_nL": old,
             "new_fill_nL": new_fill_droplet_nL,
             "total_drops_old": prev.get("total_drops_old"),
             "total_drops_new": prev.get("total_drops_new"),
             "total_drops_delta": prev.get("total_drops_delta"),
+            "saved_experiment": saved_experiment,
         }
 
 
@@ -4351,6 +4385,7 @@ class ExperimentModel(QObject):
         """Apply progress.json into live ReactionComposition objects (requires runtime context)."""
         if self._runtime_well_plate is None:
             return
+        self._last_progress_load_warnings = []
         # Plate compatibility check (for new structured progress payloads)
         try:
             with open(self.progress_file_path, "r") as f:
@@ -4377,6 +4412,9 @@ class ExperimentModel(QObject):
             self.create_progress_file()
             return
 
+        self.progress_data = data
+        target_mismatches: list[dict[str, object]] = []
+
         # Apply to each well's reaction
         for well_id, entry in data.items():
             well = self._runtime_well_plate.get_well(well_id)
@@ -4390,11 +4428,36 @@ class ExperimentModel(QObject):
                     reagent = rxn.get_reagent_by_id(stock_id)
                 except KeyError:
                     continue
-                reagent.added_droplets = rd.get("added_droplets", 0)
+                saved_target = int(rd.get("target_droplets", reagent.get_target_droplets()))
+                runtime_target = int(reagent.get_target_droplets())
+                if saved_target != runtime_target:
+                    target_mismatches.append(
+                        {
+                            "well_id": well_id,
+                            "reaction_id": rxn.unique_id,
+                            "stock_id": stock_id,
+                            "saved_target_droplets": saved_target,
+                            "runtime_target_droplets": runtime_target,
+                        }
+                    )
+                reagent.target_droplets = saved_target
+                reagent.added_droplets = int(rd.get("added_droplets", 0))
                 reagent.completed = reagent.is_complete()
             if entry.get("completed"):
                 # notify listeners if you want (well emits on record)
                 pass
+        self._last_progress_load_warnings = target_mismatches
+        if target_mismatches:
+            preview = ", ".join(
+                f"{w['well_id']}:{w['stock_id']} saved={w['saved_target_droplets']} runtime={w['runtime_target_droplets']}"
+                for w in target_mismatches[:5]
+            )
+            suffix = "" if len(target_mismatches) <= 5 else f", ... +{len(target_mismatches) - 5} more"
+            print(
+                "[ExperimentModel] WARNING: progress.json target droplets differed from "
+                f"regenerated targets for {len(target_mismatches)} reagent entries; "
+                f"using saved progress targets ({preview}{suffix})."
+            )
 
     # -----------------------------
     # Rename / duplicate
@@ -4479,8 +4542,11 @@ class ExperimentModel(QObject):
         self.experiment_file_path = None
         self.progress_file_path = None
         self.progress_data = {}
+        self._last_progress_load_warnings = []
         self.calibration_file_path = None
         self.key_file_path = None
+        self._runtime_well_plate = None
+        self._runtime_reaction_collection = None
 
         # clear any uploaded/manual reaction list state
         self._uploaded_reactions = None
@@ -4615,13 +4681,13 @@ class Reagent(QObject):
         return self.target_droplets
     
     def get_remaining_droplets(self):
-        return self.target_droplets - self.added_droplets
+        return max(0, self.target_droplets - self.added_droplets)
     
     def add_droplets(self, droplets):
         self.added_droplets += droplets
 
     def is_complete(self):
-        if self.added_droplets == self.target_droplets:
+        if self.added_droplets >= self.target_droplets:
             self.completed = True
             return True
         else:
