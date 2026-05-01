@@ -115,6 +115,9 @@ def _make_controller(
             handler(**(kwargs or {}))
         return SimpleNamespace(command_number=seq_counter["value"])
 
+    def _fake_resume_commands():
+        command_events.append(("resume_commands",))
+
     def _fake_move_to_location(*args, **kwargs):
         command_events.append(("move_to_location", args, kwargs))
         return True
@@ -135,6 +138,7 @@ def _make_controller(
         check_if_all_completed=lambda: queue_empty,
         clear_command_queue=Mock(),
         pause_commands=Mock(),
+        resume_commands=Mock(side_effect=_fake_resume_commands),
         request_pause_after_seq32=Mock(return_value=True),
         set_axis_accel=Mock(side_effect=_fake_set_axis_accel),
         wait_ms=Mock(),
@@ -153,6 +157,7 @@ def _make_controller(
             get_current_accelerations=lambda: current_accels,
             transport_paused=False,
             pause_watermark_reached=False,
+            resume_commands=Mock(),
         ),
         experiment_model=SimpleNamespace(create_progress_file=Mock()),
     )
@@ -706,6 +711,41 @@ def test_handle_status_update_soft_stop_clear_and_park_completes_before_resume_r
     assert c.get_array_run_state() == "resume_ready"
     assert c.update_slots_signal.calls == [()]
     assert c.error_occurred_signal.calls == []
+
+
+def test_soft_stop_resumes_paused_transport_after_clear_before_parking():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        initial_state="stop_requested",
+    )
+    c._array_context = _with_lowered_array_accels({"soft_stop_pending": True, "soft_stop_phase": "waiting_watermark"})
+    c.model.machine_model.pause_watermark_reached = True
+    c.model.machine_model.transport_paused = True
+
+    def _parking_move(*args, on_complete=None, **kwargs):
+        c.command_events.append(("move_to_location", args, kwargs))
+        if callable(on_complete):
+            on_complete()
+        return True
+
+    c.move_to_location = Mock(side_effect=_parking_move)
+    c.machine.clear_command_queue.side_effect = lambda handler=None: handler(
+        {
+            "ack_received": True,
+            "ack_timed_out": False,
+            "status_confirmed": True,
+            "status_timed_out": False,
+        }
+    )
+
+    Controller.handle_status_update(c, {"Pause_watermark_reached": 1, "Transport_paused": 1})
+
+    event_names = [event[0] for event in c.command_events]
+    assert event_names[:3] == ["resume_commands", "move_to_location", "move_to_location"]
+    c.machine.resume_commands.assert_called_once_with()
+    c.model.machine_model.resume_commands.assert_called_once_with()
+    assert c.get_array_run_state() == "resume_ready"
 
 
 def test_soft_stop_clear_unconfirmed_warns_and_preserves_resume_ready():

@@ -492,6 +492,9 @@ class Controller(QObject):
 
         context["soft_stop_phase"] = "clearing"
         context["finalize_reason"] = "soft_stop"
+        context["soft_stop_transport_was_paused"] = bool(
+            getattr(self.model.machine_model, "transport_paused", False)
+        )
 
         try:
             self._clear_command_queue_for_soft_stop(self._on_soft_stop_queue_cleared)
@@ -543,6 +546,17 @@ class Controller(QObject):
             self.update_expected_with_current()
         except Exception:
             pass
+
+        if context.get("soft_stop_transport_was_paused"):
+            try:
+                self.resume_commands()
+            except Exception:
+                context["soft_stop_phase"] = "done"
+                self._warn_soft_stop_post_watermark(
+                    "Soft stop reached the watermark and cleared the queue, but transport could not be resumed for parking. Preserving resume state without parking."
+                )
+                self._complete_array_finalize("soft_stop")
+                return
 
         self.disable_print_profile()
         context["soft_stop_phase"] = "parking"
