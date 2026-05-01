@@ -495,6 +495,7 @@ class Controller(QObject):
         context["soft_stop_transport_was_paused"] = bool(
             getattr(self.model.machine_model, "transport_paused", False)
         )
+        self._soft_stop_clear_uncertain = False
 
         try:
             self._clear_command_queue_for_soft_stop(self._on_soft_stop_queue_cleared)
@@ -518,6 +519,7 @@ class Controller(QObject):
         context["soft_stop_pending"] = False
 
         if not bool(clear_result.get("status_confirmed")):
+            self._soft_stop_clear_uncertain = True
             context["soft_stop_phase"] = "done"
             ack_received = bool(clear_result.get("ack_received"))
             ack_timed_out = bool(clear_result.get("ack_timed_out"))
@@ -547,6 +549,7 @@ class Controller(QObject):
         except Exception:
             pass
 
+        self._soft_stop_clear_uncertain = False
         if context.get("soft_stop_transport_was_paused"):
             try:
                 self.resume_commands()
@@ -1169,12 +1172,42 @@ class Controller(QObject):
         """Handle the pick up signal from the rack."""
         self.model.rack_model.transfer_to_gripper(slot)
 
+    def _prepare_manual_head_transfer(self):
+        array_state = self.get_array_run_state()
+        if array_state in {"running", "stop_requested"}:
+            self.error_occurred_signal.emit(
+                'Head Transfer Blocked',
+                'Cannot load or unload a printer head while the print array is still stopping.',
+            )
+            return False
+
+        if getattr(self, "_soft_stop_clear_uncertain", False):
+            self.error_occurred_signal.emit(
+                'Head Transfer Blocked',
+                'The last soft stop did not confirm that the firmware queue was cleared. Clear the queue or reconnect before loading another printer head.',
+            )
+            return False
+
+        if self.machine.check_if_all_completed() == False:
+            print('Cannot transfer printer head: Commands are still running')
+            return False
+
+        machine_model = getattr(self.model, "machine_model", None)
+        if bool(getattr(machine_model, "transport_paused", False)) or bool(getattr(machine_model, "paused", False)):
+            try:
+                self.resume_commands()
+            except Exception:
+                self.error_occurred_signal.emit(
+                    'Head Transfer Blocked',
+                    'Cannot resume machine transport before loading or unloading a printer head.',
+                )
+                return False
+        return True
+
     def pick_up_printer_head(self,slot,manual=False):
         """Pick up a printer head from the rack."""
         if manual == True:
-            status = self.machine.check_if_all_completed()
-            if status == False:
-                print('Cannot pick up: Commands are still running')
+            if not self._prepare_manual_head_transfer():
                 return
         # is_valid, error_msg = self.model.rack_model.verify_transfer_to_gripper(slot)
         is_valid, error_msg = self.model.rack_model.verify_transfer_to_gripper(slot, use_expected=True)
@@ -1204,9 +1237,7 @@ class Controller(QObject):
     def drop_off_printer_head(self,slot,manual=False):
         """Drop off a printer head to the rack."""
         if manual == True:
-            status = self.machine.check_if_all_completed()
-            if status == False:
-                print('Cannot drop off: Commands are still running')
+            if not self._prepare_manual_head_transfer():
                 return
         is_valid, error_msg = self.model.rack_model.verify_transfer_from_gripper(slot, use_expected=True)
         if is_valid:

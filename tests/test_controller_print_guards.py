@@ -811,6 +811,72 @@ def test_soft_stop_park_failure_warns_and_preserves_resume_ready():
     )
 
 
+def _make_pickup_ready_controller(*, initial_state="resume_ready", transport_paused=False):
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        initial_state=initial_state,
+    )
+    c.model.machine_model.transport_paused = bool(transport_paused)
+    c.model.rack_model = SimpleNamespace(
+        verify_transfer_to_gripper=Mock(return_value=(True, "")),
+        plan_transfer_to_gripper=Mock(return_value=(True, "")),
+        get_slot_coordinates=Mock(return_value={"X": 10, "Y": 20, "Z": 30}),
+        transfer_to_gripper=Mock(),
+    )
+    c.machine.open_gripper = Mock(return_value=True)
+
+    def _close_gripper(handler=None):
+        if callable(handler):
+            handler()
+        return True
+
+    c.machine.close_gripper = Mock(side_effect=_close_gripper)
+    c.close_gripper = lambda handler=None: c.machine.close_gripper(handler=handler)
+    c.move_to_location = Mock(return_value=True)
+    return c
+
+
+def test_manual_head_pickup_resumes_paused_transport_before_queueing_rack_moves():
+    c = _make_pickup_ready_controller(transport_paused=True)
+
+    Controller.pick_up_printer_head(c, 0, manual=True)
+
+    assert c.command_events[0] == ("resume_commands",)
+    c.machine.resume_commands.assert_called_once_with()
+    c.model.machine_model.resume_commands.assert_called_once_with()
+    c.machine.open_gripper.assert_called_once_with(handler=None)
+    assert c.move_to_location.call_count == 3
+    c.model.rack_model.transfer_to_gripper.assert_called_once_with(0)
+
+
+def test_manual_head_pickup_blocks_while_soft_stop_is_still_finishing():
+    c = _make_pickup_ready_controller(initial_state="stop_requested")
+
+    Controller.pick_up_printer_head(c, 0, manual=True)
+
+    c.machine.open_gripper.assert_not_called()
+    c.move_to_location.assert_not_called()
+    assert c.error_occurred_signal.calls[-1] == (
+        "Head Transfer Blocked",
+        "Cannot load or unload a printer head while the print array is still stopping.",
+    )
+
+
+def test_manual_head_pickup_blocks_after_unconfirmed_soft_stop_clear():
+    c = _make_pickup_ready_controller()
+    c._soft_stop_clear_uncertain = True
+
+    Controller.pick_up_printer_head(c, 0, manual=True)
+
+    c.machine.open_gripper.assert_not_called()
+    c.move_to_location.assert_not_called()
+    assert c.error_occurred_signal.calls[-1] == (
+        "Head Transfer Blocked",
+        "The last soft stop did not confirm that the firmware queue was cleared. Clear the queue or reconnect before loading another printer head.",
+    )
+
+
 def test_handle_array_well_complete_refill_required_parks_and_becomes_resume_ready():
     current = FakeWell("A1", 1)
     later = FakeWell("A2", 2)
