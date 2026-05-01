@@ -17,7 +17,7 @@ import json
 from hardware.profile import CURRENT_PROFILE, HardwareProfile
 from hardware.null_devices import NullCamera
 
-ARRAY_PAUSE_DEPARTURE_ACCEL = 16000
+ARRAY_PAUSE_DEPARTURE_ACCEL = 32000
 ARRAY_PAUSE_DEPARTURE_SETTLE_MS = 200
 ARRAY_AXIS_ACCEL_DEFAULT = 140000
 ARRAY_ROW_START_OVERSHOOT_STEPS = 200
@@ -1824,13 +1824,13 @@ class Controller(QObject):
             return
         
         self.close_gripper()
-        if not self._apply_array_run_acceleration():
-            self._complete_array_finalize("hard_abort")
-            return
         # self.wait_command()
 
         self.move_to_location('pause',z_offset=-5000)
         self.move_to_location('pause', ignore_safe_height=True)
+        if not self._apply_array_run_acceleration():
+            self._complete_array_finalize("hard_abort")
+            return
         # self.machine.change_acceleration(16000)
         # self.enter_print_mode()
         self.enable_print_profile()

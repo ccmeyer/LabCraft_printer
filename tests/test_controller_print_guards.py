@@ -102,22 +102,29 @@ def _make_controller(
     c.profile = SimpleNamespace(name="default")
 
     seq_counter = {"value": 100}
+    command_events = []
 
     def _fake_print_droplets(*args, **kwargs):
         seq_counter["value"] += 1
         return SimpleNamespace(command_number=seq_counter["value"])
 
     def _fake_set_axis_accel(_axis_idx, _accel, handler=None, kwargs=None, manual=False):
+        command_events.append(("set_axis_accel", _axis_idx, _accel))
         seq_counter["value"] += 1
         if callable(handler):
             handler(**(kwargs or {}))
         return SimpleNamespace(command_number=seq_counter["value"])
 
+    def _fake_move_to_location(*args, **kwargs):
+        command_events.append(("move_to_location", args, kwargs))
+        return True
+
     if current_accels is None:
         current_accels = (ARRAY_AXIS_ACCEL_DEFAULT, ARRAY_AXIS_ACCEL_DEFAULT, ARRAY_AXIS_ACCEL_DEFAULT)
 
+    c.command_events = command_events
     c.close_gripper = Mock()
-    c.move_to_location = Mock(return_value=True)
+    c.move_to_location = Mock(side_effect=_fake_move_to_location)
     c.enable_print_profile = Mock()
     c.disable_print_profile = Mock()
     c.set_absolute_coordinates = Mock(return_value=True)
@@ -229,6 +236,13 @@ def test_print_array_prefetches_one_lookahead_well():
         call("pause", ignore_safe_height=True),
     ]
     c.enable_print_profile.assert_called_once_with()
+    assert c.command_events[:5] == [
+        ("move_to_location", ("pause",), {"z_offset": -5000}),
+        ("move_to_location", ("pause",), {"ignore_safe_height": True}),
+        ("set_axis_accel", 0, ARRAY_PAUSE_DEPARTURE_ACCEL),
+        ("set_axis_accel", 1, ARRAY_PAUSE_DEPARTURE_ACCEL),
+        ("set_axis_accel", 2, ARRAY_PAUSE_DEPARTURE_ACCEL),
+    ]
     assert c.set_absolute_coordinates.call_args_list == [
         call(10, 20, 30, override=True),
         call(40, 50, 60, override=True),
