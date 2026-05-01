@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import Mock, call
+from unittest.mock import ANY, Mock, call
 
 from Controller import (
     ARRAY_AXIS_ACCEL_DEFAULT,
@@ -62,7 +62,16 @@ def _make_printer_head(stock_id="stock-a", calibration_complete=False, current_v
     )
 
 
-def _make_controller(*, well_plate, printer_head, regulation_on=True, gripper_info=object(), queue_empty=True, initial_state="idle"):
+def _make_controller(
+    *,
+    well_plate,
+    printer_head,
+    regulation_on=True,
+    gripper_info=object(),
+    queue_empty=True,
+    initial_state="idle",
+    current_accels=None,
+):
     c = Controller.__new__(Controller)
     c.array_complete = Emitter()
     c.array_state_changed = Emitter()
@@ -78,6 +87,15 @@ def _make_controller(*, well_plate, printer_head, regulation_on=True, gripper_in
         seq_counter["value"] += 1
         return SimpleNamespace(command_number=seq_counter["value"])
 
+    def _fake_set_axis_accel(_axis_idx, _accel, handler=None, kwargs=None, manual=False):
+        seq_counter["value"] += 1
+        if callable(handler):
+            handler(**(kwargs or {}))
+        return SimpleNamespace(command_number=seq_counter["value"])
+
+    if current_accels is None:
+        current_accels = (ARRAY_AXIS_ACCEL_DEFAULT, ARRAY_AXIS_ACCEL_DEFAULT, ARRAY_AXIS_ACCEL_DEFAULT)
+
     c.close_gripper = Mock()
     c.move_to_location = Mock(return_value=True)
     c.enable_print_profile = Mock()
@@ -91,7 +109,7 @@ def _make_controller(*, well_plate, printer_head, regulation_on=True, gripper_in
         clear_command_queue=Mock(),
         pause_commands=Mock(),
         request_pause_after_seq32=Mock(return_value=True),
-        set_axis_accel=Mock(),
+        set_axis_accel=Mock(side_effect=_fake_set_axis_accel),
         wait_ms=Mock(),
     )
     c.model = SimpleNamespace(
@@ -105,7 +123,7 @@ def _make_controller(*, well_plate, printer_head, regulation_on=True, gripper_in
         machine_model=SimpleNamespace(
             regulating_print_pressure=regulation_on,
             clear_command_queue=Mock(),
-            get_current_accelerations=lambda: (ARRAY_AXIS_ACCEL_DEFAULT, ARRAY_AXIS_ACCEL_DEFAULT, ARRAY_AXIS_ACCEL_DEFAULT),
+            get_current_accelerations=lambda: current_accels,
             transport_paused=False,
             pause_watermark_reached=False,
         ),
@@ -118,6 +136,29 @@ def _parking_move_side_effect(*args, on_complete=None, **kwargs):
     if callable(on_complete):
         on_complete()
     return True
+
+
+def _with_lowered_array_accels(context, restore_accels=None):
+    if restore_accels is None:
+        restore_accels = (ARRAY_AXIS_ACCEL_DEFAULT, ARRAY_AXIS_ACCEL_DEFAULT, ARRAY_AXIS_ACCEL_DEFAULT)
+    context.update(
+        {
+            "pause_departure_restore_accels": restore_accels,
+            "array_accels_lowered": True,
+            "array_accels_restored": False,
+        }
+    )
+    return context
+
+
+def _restore_calls(restore_accels=None):
+    if restore_accels is None:
+        restore_accels = (ARRAY_AXIS_ACCEL_DEFAULT, ARRAY_AXIS_ACCEL_DEFAULT, ARRAY_AXIS_ACCEL_DEFAULT)
+    return [
+        call(0, restore_accels[0]),
+        call(1, restore_accels[1]),
+        call(2, restore_accels[2], handler=ANY),
+    ]
 
 
 def test_print_array_blocks_when_plate_not_calibrated():
@@ -180,9 +221,6 @@ def test_print_array_prefetches_one_lookahead_well():
         call(0, ARRAY_PAUSE_DEPARTURE_ACCEL),
         call(1, ARRAY_PAUSE_DEPARTURE_ACCEL),
         call(2, ARRAY_PAUSE_DEPARTURE_ACCEL),
-        call(0, ARRAY_AXIS_ACCEL_DEFAULT),
-        call(1, ARRAY_AXIS_ACCEL_DEFAULT),
-        call(2, ARRAY_AXIS_ACCEL_DEFAULT),
     ]
     c.machine.wait_ms.assert_called_once_with(ARRAY_PAUSE_DEPARTURE_SETTLE_MS)
     assert c._array_context["stock_id"] == "stock-a"
@@ -207,13 +245,67 @@ def test_print_array_resume_ready_starts_next_incomplete_well():
         call(0, ARRAY_PAUSE_DEPARTURE_ACCEL),
         call(1, ARRAY_PAUSE_DEPARTURE_ACCEL),
         call(2, ARRAY_PAUSE_DEPARTURE_ACCEL),
-        call(0, ARRAY_AXIS_ACCEL_DEFAULT),
-        call(1, ARRAY_AXIS_ACCEL_DEFAULT),
-        call(2, ARRAY_AXIS_ACCEL_DEFAULT),
     ]
     c.machine.wait_ms.assert_called_once_with(ARRAY_PAUSE_DEPARTURE_SETTLE_MS)
     assert c.print_droplets.call_args.args[0] == 7
     assert c.get_array_run_state() == "running"
+
+
+def test_print_array_restores_captured_custom_accels_on_completion():
+    custom_accels = (50000, 60000, 70000)
+    last = FakeWell("A1", 5, {"X": 10, "Y": 20, "Z": 30})
+    c = _make_controller(
+        well_plate=FakeWellPlate([last]),
+        printer_head=_make_printer_head(),
+        current_accels=custom_accels,
+    )
+    c.move_to_location = Mock(side_effect=_parking_move_side_effect)
+
+    Controller.print_array(c)
+    Controller._handle_array_well_complete(
+        c,
+        well_id="A1",
+        stock_id="stock-a",
+        target_droplets=5,
+        update_volume=False,
+    )
+
+    assert c.machine.set_axis_accel.call_args_list == [
+        call(0, ARRAY_PAUSE_DEPARTURE_ACCEL),
+        call(1, ARRAY_PAUSE_DEPARTURE_ACCEL),
+        call(2, ARRAY_PAUSE_DEPARTURE_ACCEL),
+        *_restore_calls(custom_accels),
+    ]
+    assert c.get_array_run_state() == "idle"
+    assert c.array_complete.calls == [()]
+
+
+def test_print_array_resume_ready_reapplies_and_restores_array_accels():
+    completed = FakeWell("A1", 0, {"X": 10, "Y": 20, "Z": 30})
+    remaining = FakeWell("A2", 7, {"X": 40, "Y": 50, "Z": 60})
+    c = _make_controller(
+        well_plate=FakeWellPlate([completed, remaining]),
+        printer_head=_make_printer_head(),
+        initial_state="resume_ready",
+    )
+    c.move_to_location = Mock(side_effect=_parking_move_side_effect)
+
+    Controller.print_array(c)
+    Controller._handle_array_well_complete(
+        c,
+        well_id="A2",
+        stock_id="stock-a",
+        target_droplets=7,
+        update_volume=False,
+    )
+
+    assert c.machine.set_axis_accel.call_args_list == [
+        call(0, ARRAY_PAUSE_DEPARTURE_ACCEL),
+        call(1, ARRAY_PAUSE_DEPARTURE_ACCEL),
+        call(2, ARRAY_PAUSE_DEPARTURE_ACCEL),
+        *_restore_calls(),
+    ]
+    assert c.get_array_run_state() == "idle"
 
 
 def test_print_array_resume_ready_resumes_transport_before_queueing():
@@ -268,15 +360,18 @@ def test_request_array_soft_stop_write_failure_aborts_to_idle():
         return False
 
     c.machine.request_pause_after_seq32 = Mock(side_effect=_fail_pause_after)
-    c._array_context = {
-        "queued_wells": [{"well_id": "A1", "target_droplets": 5, "dispense_seq32": 123}],
-        "current_barrier_seq32": 123,
-        "soft_stop_pending": False,
-    }
+    c._array_context = _with_lowered_array_accels(
+        {
+            "queued_wells": [{"well_id": "A1", "target_droplets": 5, "dispense_seq32": 123}],
+            "current_barrier_seq32": 123,
+            "soft_stop_pending": False,
+        }
+    )
 
     assert Controller.request_array_soft_stop(c) is False
     c.machine.clear_command_queue.assert_called_once_with()
     c.model.machine_model.clear_command_queue.assert_called_once_with()
+    assert c.machine.set_axis_accel.call_args_list == _restore_calls()
     assert c.get_array_run_state() == "idle"
     assert c._array_context is None
     assert c.error_occurred_signal.calls[-1][0] == "Soft Stop Failed"
@@ -377,15 +472,17 @@ def test_handle_array_well_complete_finalizes_completed_array():
         printer_head=_make_printer_head(),
         initial_state="running",
     )
-    c._array_context = {
-        "stock_id": "stock-a",
-        "expected_volume": None,
-        "update_volume": False,
-        "droplet_volume": None,
-        "finalize_reason": None,
-        "queued_wells": [{"well_id": "A1", "target_droplets": 5, "dispense_seq32": 101}],
-        "planned_well_ids": {"A1"},
-    }
+    c._array_context = _with_lowered_array_accels(
+        {
+            "stock_id": "stock-a",
+            "expected_volume": None,
+            "update_volume": False,
+            "droplet_volume": None,
+            "finalize_reason": None,
+            "queued_wells": [{"well_id": "A1", "target_droplets": 5, "dispense_seq32": 101}],
+            "planned_well_ids": {"A1"},
+        }
+    )
     c.move_to_location = Mock(side_effect=_parking_move_side_effect)
 
     Controller._handle_array_well_complete(
@@ -401,6 +498,7 @@ def test_handle_array_well_complete_finalizes_completed_array():
     assert c.move_to_location.call_args_list[1].args == ("pause",)
     assert c.move_to_location.call_args_list[1].kwargs["z_offset"] == -5000
     assert callable(c.move_to_location.call_args_list[1].kwargs["on_complete"])
+    assert c.machine.set_axis_accel.call_args_list == _restore_calls()
     assert c.get_array_run_state() == "idle"
     assert c.array_complete.calls == [()]
     assert c.update_slots_signal.calls == []
@@ -448,7 +546,7 @@ def test_handle_status_update_completes_soft_stop_when_watermark_reached():
         printer_head=_make_printer_head(),
         initial_state="stop_requested",
     )
-    c._array_context = {"soft_stop_pending": True, "soft_stop_phase": "waiting_watermark"}
+    c._array_context = _with_lowered_array_accels({"soft_stop_pending": True, "soft_stop_phase": "waiting_watermark"})
     c.model.machine_model.pause_watermark_reached = True
     c.model.machine_model.transport_paused = True
     c._begin_soft_stop_clear_and_park = Mock()
@@ -465,7 +563,7 @@ def test_handle_status_update_ignores_repeated_watermark_frames_after_clear_begi
         printer_head=_make_printer_head(),
         initial_state="stop_requested",
     )
-    c._array_context = {"soft_stop_pending": True, "soft_stop_phase": "waiting_watermark"}
+    c._array_context = _with_lowered_array_accels({"soft_stop_pending": True, "soft_stop_phase": "waiting_watermark"})
     c.model.machine_model.pause_watermark_reached = True
     c.model.machine_model.transport_paused = True
     c.machine.clear_command_queue.side_effect = lambda handler=None: None
@@ -483,7 +581,7 @@ def test_handle_status_update_soft_stop_clear_and_park_completes_before_resume_r
         printer_head=_make_printer_head(),
         initial_state="stop_requested",
     )
-    c._array_context = {"soft_stop_pending": True, "soft_stop_phase": "waiting_watermark"}
+    c._array_context = _with_lowered_array_accels({"soft_stop_pending": True, "soft_stop_phase": "waiting_watermark"})
     c.model.machine_model.pause_watermark_reached = True
     c.model.machine_model.transport_paused = True
     c.move_to_location = Mock(side_effect=_parking_move_side_effect)
@@ -504,6 +602,7 @@ def test_handle_status_update_soft_stop_clear_and_park_completes_before_resume_r
     assert c.move_to_location.call_args_list[0] == call("pause")
     assert c.move_to_location.call_args_list[1].args == ("pause",)
     assert c.move_to_location.call_args_list[1].kwargs["z_offset"] == -5000
+    assert c.machine.set_axis_accel.call_args_list == _restore_calls()
     assert c.get_array_run_state() == "resume_ready"
     assert c.update_slots_signal.calls == [()]
     assert c.error_occurred_signal.calls == []
@@ -515,7 +614,7 @@ def test_soft_stop_clear_unconfirmed_warns_and_preserves_resume_ready():
         printer_head=_make_printer_head(),
         initial_state="stop_requested",
     )
-    c._array_context = {"soft_stop_pending": True, "soft_stop_phase": "waiting_watermark"}
+    c._array_context = _with_lowered_array_accels({"soft_stop_pending": True, "soft_stop_phase": "waiting_watermark"})
     c.model.machine_model.pause_watermark_reached = True
     c.model.machine_model.transport_paused = True
     c.machine.clear_command_queue.side_effect = lambda handler=None: handler(
@@ -532,6 +631,7 @@ def test_soft_stop_clear_unconfirmed_warns_and_preserves_resume_ready():
     c.model.machine_model.clear_command_queue.assert_called_once_with()
     c.update_expected_with_current.assert_not_called()
     c.move_to_location.assert_not_called()
+    assert c.machine.set_axis_accel.call_args_list == _restore_calls()
     assert c.get_array_run_state() == "resume_ready"
     assert c.error_occurred_signal.calls[-1] == (
         "Soft Stop Warning",
@@ -545,7 +645,7 @@ def test_soft_stop_park_failure_warns_and_preserves_resume_ready():
         printer_head=_make_printer_head(),
         initial_state="stop_requested",
     )
-    c._array_context = {"soft_stop_pending": True, "soft_stop_phase": "waiting_watermark"}
+    c._array_context = _with_lowered_array_accels({"soft_stop_pending": True, "soft_stop_phase": "waiting_watermark"})
     c.model.machine_model.pause_watermark_reached = True
     c.model.machine_model.transport_paused = True
     c.machine.clear_command_queue.side_effect = lambda handler=None: handler(
@@ -563,6 +663,7 @@ def test_soft_stop_park_failure_warns_and_preserves_resume_ready():
     c.disable_print_profile.assert_called_once_with()
     c.update_expected_with_current.assert_called_once_with()
     c.move_to_location.assert_called_once_with("pause")
+    assert c.machine.set_axis_accel.call_args_list == _restore_calls()
     assert c.get_array_run_state() == "resume_ready"
     assert c.error_occurred_signal.calls[-1] == (
         "Soft Stop Warning",
@@ -579,15 +680,17 @@ def test_handle_array_well_complete_refill_required_parks_and_becomes_resume_rea
         printer_head=printer_head,
         initial_state="running",
     )
-    c._array_context = {
-        "stock_id": "stock-a",
-        "expected_volume": 9.0,
-        "update_volume": True,
-        "droplet_volume": 1000.0,
-        "finalize_reason": None,
-        "queued_wells": [{"well_id": "A1", "target_droplets": 1, "dispense_seq32": 101}],
-        "planned_well_ids": {"A1"},
-    }
+    c._array_context = _with_lowered_array_accels(
+        {
+            "stock_id": "stock-a",
+            "expected_volume": 9.0,
+            "update_volume": True,
+            "droplet_volume": 1000.0,
+            "finalize_reason": None,
+            "queued_wells": [{"well_id": "A1", "target_droplets": 1, "dispense_seq32": 101}],
+            "planned_well_ids": {"A1"},
+        }
+    )
     c.move_to_location = Mock(side_effect=_parking_move_side_effect)
 
     Controller._handle_array_well_complete(
@@ -599,6 +702,7 @@ def test_handle_array_well_complete_refill_required_parks_and_becomes_resume_rea
     )
 
     assert c.get_array_run_state() == "resume_ready"
+    assert c.machine.set_axis_accel.call_args_list == _restore_calls()
     assert c.update_slots_signal.calls == [()]
     assert c.error_occurred_signal.calls[-1] == ("Error", "Printer head needs to be reloaded")
 
@@ -644,12 +748,13 @@ def test_clear_command_queue_resets_array_runner_state():
         printer_head=_make_printer_head(),
         initial_state="resume_ready",
     )
-    c._array_context = {"stock_id": "stock-a"}
+    c._array_context = _with_lowered_array_accels({"stock_id": "stock-a"})
 
     Controller.clear_command_queue(c)
 
     c.machine.clear_command_queue.assert_called_once_with()
     c.model.machine_model.clear_command_queue.assert_called_once_with()
+    assert c.machine.set_axis_accel.call_args_list == _restore_calls()
     c.update_expected_with_current.assert_called_once_with()
     assert c.get_array_run_state() == "idle"
     assert c._array_context is None

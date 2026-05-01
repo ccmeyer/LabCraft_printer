@@ -3418,8 +3418,8 @@ class Machine(QObject):
     def set_axis_maxspeed(self, axis_idx, max_speed):
         return self.add_command_to_queue('SET_AXIS_MAXSPEED', axis_idx, max_speed, 0)
 
-    def set_axis_accel(self, axis_idx, accel):
-        return self.add_command_to_queue('SET_AXIS_ACCEL', axis_idx, accel, 0)
+    def set_axis_accel(self, axis_idx, accel, handler=None, kwargs=None, manual=False):
+        return self.add_command_to_queue('SET_AXIS_ACCEL', axis_idx, accel, 0, handler=handler, kwargs=kwargs, manual=manual)
 
     def _unsupported_global_accel_command(self, command_name):
         msg = (

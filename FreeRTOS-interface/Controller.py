@@ -195,9 +195,13 @@ class Controller(QObject):
         """Set the maximum speed for a specific axis."""
         self.machine.set_axis_maxspeed(axis_idx, max_speed)
 
-    def set_axis_accel(self, axis_idx, accel):
+    def set_axis_accel(self, axis_idx, accel, handler=None, kwargs=None, manual=False):
         """Set the acceleration for a specific axis."""
-        self.machine.set_axis_accel(axis_idx, accel)
+        if handler is None and kwargs is None and manual is False:
+            return self.machine.set_axis_accel(axis_idx, accel)
+        if kwargs is None and manual is False:
+            return self.machine.set_axis_accel(axis_idx, accel, handler=handler)
+        return self.machine.set_axis_accel(axis_idx, accel, handler=handler, kwargs=kwargs, manual=manual)
 
     def reset_board(self):
         """Reset the machine board."""
@@ -1339,6 +1343,8 @@ class Controller(QObject):
                 getattr(self, "_array_pause_departure_settle_ms", ARRAY_PAUSE_DEPARTURE_SETTLE_MS)
             ),
             "pause_departure_restore_accels": self._get_array_pause_departure_restore_accels(),
+            "array_accels_lowered": False,
+            "array_accels_restored": False,
         }
         return True
 
@@ -1365,6 +1371,68 @@ class Controller(QObject):
                 value = default
             restore.append(value if value > 0 else default)
         return tuple(restore)
+
+    def _apply_array_run_acceleration(self):
+        context = getattr(self, "_array_context", None)
+        if not isinstance(context, dict):
+            return False
+        if context.get("array_accels_lowered"):
+            return True
+
+        accel = max(0, int(context.get("pause_departure_accel") or 0))
+        if accel <= 0:
+            context["array_accels_lowered"] = True
+            context["array_accels_restored"] = True
+            return True
+
+        queued_any = False
+        for axis_idx in range(3):
+            if self.set_axis_accel(axis_idx, accel) is False:
+                if queued_any:
+                    context["array_accels_lowered"] = True
+                    self._restore_array_run_acceleration()
+                self.error_occurred_signal.emit(
+                    'Print Array Error',
+                    'Failed to lower acceleration before starting the print array',
+                )
+                return False
+            queued_any = True
+
+        context["array_accels_lowered"] = True
+        context["array_accels_restored"] = False
+        return True
+
+    def _restore_array_run_acceleration(self, on_restored=None):
+        context = getattr(self, "_array_context", None)
+        if not isinstance(context, dict):
+            if callable(on_restored):
+                on_restored()
+            return True
+
+        if not context.get("array_accels_lowered") or context.get("array_accels_restored"):
+            if callable(on_restored):
+                on_restored()
+            return True
+
+        restore_accels = tuple(
+            context.get("pause_departure_restore_accels")
+            or (ARRAY_AXIS_ACCEL_DEFAULT, ARRAY_AXIS_ACCEL_DEFAULT, ARRAY_AXIS_ACCEL_DEFAULT)
+        )
+        if len(restore_accels) < 3:
+            restore_accels = (ARRAY_AXIS_ACCEL_DEFAULT, ARRAY_AXIS_ACCEL_DEFAULT, ARRAY_AXIS_ACCEL_DEFAULT)
+
+        context["array_accels_restored"] = True
+        for axis_idx, accel_value in enumerate(restore_accels[:3]):
+            handler = on_restored if axis_idx == 2 else None
+            if self.set_axis_accel(axis_idx, int(accel_value), handler=handler) is False:
+                self.error_occurred_signal.emit(
+                    'Print Array Warning',
+                    'Failed to restore acceleration after the print array; check the Speed Profiles tab before the next run.',
+                )
+                if callable(on_restored):
+                    on_restored()
+                return False
+        return True
 
     def _array_post_well_expected_volume(self, target_droplets):
         context = getattr(self, "_array_context", None) or {}
@@ -1405,31 +1473,12 @@ class Controller(QObject):
             return False
 
         apply_pause_departure_safeguards = bool(context.get("pause_departure_pending"))
-        pause_departure_accel = max(0, int(context.get("pause_departure_accel") or 0))
         pause_departure_settle_ms = max(0, int(context.get("pause_departure_settle_ms") or 0))
-        pause_departure_restore_accels = tuple(
-            context.get("pause_departure_restore_accels")
-            or (ARRAY_AXIS_ACCEL_DEFAULT, ARRAY_AXIS_ACCEL_DEFAULT, ARRAY_AXIS_ACCEL_DEFAULT)
-        )
-
-        if apply_pause_departure_safeguards and pause_departure_accel > 0:
-            for axis_idx in range(3):
-                if self.set_axis_accel(axis_idx, pause_departure_accel) is False:
-                    self.error_occurred_signal.emit('Print Array Error', f'Failed to lower acceleration before moving to well {well.well_id}')
-                    self._complete_array_finalize("hard_abort")
-                    return False
 
         if self.set_absolute_coordinates(well_coords['X'], well_coords['Y'], well_coords['Z'], override=True) is False:
             self.error_occurred_signal.emit('Print Array Error', f'Failed to move to well {well.well_id}')
             self._complete_array_finalize("hard_abort")
             return False
-
-        if apply_pause_departure_safeguards and pause_departure_accel > 0:
-            for axis_idx, accel_value in enumerate(pause_departure_restore_accels[:3]):
-                if self.set_axis_accel(axis_idx, accel_value) is False:
-                    self.error_occurred_signal.emit('Print Array Error', f'Failed to restore acceleration after moving to well {well.well_id}')
-                    self._complete_array_finalize("hard_abort")
-                    return False
 
         if apply_pause_departure_safeguards and pause_departure_settle_ms > 0:
             if self.machine.wait_ms(pause_departure_settle_ms) is False:
@@ -1556,6 +1605,19 @@ class Controller(QObject):
 
     def _complete_array_finalize(self, reason):
         reason = str(reason or "completed")
+        context = getattr(self, "_array_context", None)
+        if isinstance(context, dict) and context.get("array_finalize_after_accel_restore"):
+            return
+        if isinstance(context, dict):
+            context["array_finalize_after_accel_restore"] = reason
+
+        def _finish_finalize():
+            self._finish_array_finalize(reason)
+
+        self._restore_array_run_acceleration(on_restored=_finish_finalize)
+
+    def _finish_array_finalize(self, reason):
+        reason = str(reason or "completed")
         self._array_context = None
 
         if reason in {"soft_stop", "refill_required"}:
@@ -1659,6 +1721,9 @@ class Controller(QObject):
             return
         
         self.close_gripper()
+        if not self._apply_array_run_acceleration():
+            self._complete_array_finalize("hard_abort")
+            return
         # self.wait_command()
 
         self.move_to_location('pause',z_offset=-5000)
