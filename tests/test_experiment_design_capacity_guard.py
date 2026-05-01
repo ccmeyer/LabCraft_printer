@@ -1,8 +1,10 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pandas as pd
 from PySide6.QtWidgets import QLabel, QMessageBox, QSpinBox
 
+import View
 from View import ExperimentDesignDialog
 
 
@@ -100,3 +102,49 @@ def test_summary_shows_plain_required_when_within_capacity(qapp):
     assert "Total reactions = 3" in text
     assert "Available wells = 4" in text
     assert "color:#8a0303" not in text
+
+
+def test_upload_design_warns_immediately_for_invalid_selected_plate(monkeypatch, qapp, experiment_model_factory):
+    runtime_model = experiment_model_factory()
+    dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    dialog.model = SimpleNamespace(
+        extract_uploaded_design_well_ids_from_dataframe=(
+            runtime_model.experiment_model.extract_uploaded_design_well_ids_from_dataframe
+        ),
+        set_uploaded_design_from_dataframe=Mock(),
+        factors=[],
+    )
+    dialog.main_window = SimpleNamespace(model=runtime_model)
+    dialog.status_lbl = QLabel("")
+    dialog.summary_lbl = QLabel("")
+    dialog._set_status = ExperimentDesignDialog._set_status.__get__(dialog, ExperimentDesignDialog)
+    dialog._load_factors_into_table = Mock()
+    dialog._update_metadata_from_controls = Mock()
+    dialog._run_design_optimization_flow = Mock()
+    dialog._uploaded_design_active = False
+    dialog._uploaded_design_path = None
+    dialog.choice_groups = set()
+    dialog.plate_format_combo = SimpleNamespace(currentText=lambda: "96well-8x12")
+
+    warn = Mock()
+    monkeypatch.setattr(QMessageBox, "warning", warn)
+    monkeypatch.setattr(
+        View.QFileDialog,
+        "getOpenFileName",
+        lambda *args, **kwargs: ("bad_layout.csv", "CSV files (*.csv)"),
+    )
+    monkeypatch.setattr(
+        View.pd,
+        "read_csv",
+        lambda _path: pd.DataFrame({"Well ID": ["G16"], "NaCl (mM)": [1.0]}),
+    )
+
+    ExperimentDesignDialog._on_upload_design(dialog)
+
+    warn.assert_called_once()
+    dialog.model.set_uploaded_design_from_dataframe.assert_not_called()
+    dialog._load_factors_into_table.assert_not_called()
+    dialog._run_design_optimization_flow.assert_not_called()
+    assert dialog._uploaded_design_active is False
+    assert "G16" in dialog.status_lbl.text()
+    assert "96well-8x12" in dialog.status_lbl.text()

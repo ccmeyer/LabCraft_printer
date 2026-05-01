@@ -2560,6 +2560,33 @@ class ExperimentModel(QObject):
     def has_uploaded_design(self) -> bool:
         return self._uploaded_reactions is not None
 
+    @staticmethod
+    def find_uploaded_design_well_column(df: "pd.DataFrame") -> Optional[str]:
+        for col in getattr(df, "columns", []):
+            name = str(col).strip().lower()
+            if name in ("well", "well id", "well_id", "wellid", "well position", "well_position"):
+                return col
+        return None
+
+    @classmethod
+    def extract_uploaded_design_well_ids_from_dataframe(
+        cls,
+        df: "pd.DataFrame",
+    ) -> Optional[list[Optional[str]]]:
+        well_col = cls.find_uploaded_design_well_column(df)
+        if well_col is None:
+            return None
+
+        uploaded_well_ids: list[Optional[str]] = []
+        for v in df[well_col].tolist():
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                uploaded_well_ids.append(None)
+            else:
+                s = str(v).strip()
+                uploaded_well_ids.append(s if s else None)
+
+        return uploaded_well_ids if any(w for w in uploaded_well_ids) else None
+
     def clear_uploaded_design(self):
         """Reset back to normal (factor-defined) design."""
         self._uploaded_reactions = None
@@ -2608,30 +2635,11 @@ class ExperimentModel(QObject):
         df_in = df.copy()
 
         # -------- 0) Optional well-assignment column --------
-        well_col = None
-        for col in df_in.columns:
-            name = str(col).strip().lower()
-            if name in ("well", "well id", "well_id", "wellid", "well position", "well_position"):
-                well_col = col
-                break
-
-        uploaded_well_ids: list[Optional[str]] | None = None
+        well_col = self.find_uploaded_design_well_column(df_in)
+        uploaded_well_ids = self.extract_uploaded_design_well_ids_from_dataframe(df_in)
         if well_col is not None:
-            wells_raw = df_in[well_col].tolist()
-            uploaded_well_ids = []
-            for v in wells_raw:
-                if v is None or (isinstance(v, float) and pd.isna(v)):
-                    uploaded_well_ids.append(None)
-                else:
-                    s = str(v).strip()
-                    uploaded_well_ids.append(s if s else None)
-
             # Drop the well column from the design matrix before parsing reagents
             df_in = df_in.drop(columns=[well_col])
-
-            # If all entries are None/blank, treat as "no explicit assignments"
-            if not any(w for w in uploaded_well_ids):
-                uploaded_well_ids = None
 
         # Store (or clear) well assignments for this uploaded design
         self._uploaded_well_ids = uploaded_well_ids
@@ -5069,6 +5077,103 @@ class WellPlate(QObject):
         self.excluded_wells = normalized
         return normalized
 
+    @staticmethod
+    def _format_well_id_examples(values, max_items: int = 5) -> str:
+        examples = []
+        for value in list(values)[:max_items]:
+            text = str(value).strip()
+            examples.append(text if text else "<blank>")
+        if len(values) > max_items:
+            examples.append("...")
+        return ", ".join(examples)
+
+    def _normalize_excluded_wells_for_plate(self, rows: int, cols: int, excluded_wells=None) -> set[str]:
+        normalized = set()
+        for item in set(self.excluded_wells if excluded_wells is None else excluded_wells):
+            raw = item.well_id if isinstance(item, Well) else item
+            try:
+                wid = self._normalize_well_id(raw)
+                row_label, col_1 = Well.parse_well_id(wid)
+                row_idx = Well.row_label_to_index(row_label)
+                col_idx = int(col_1) - 1
+            except ValueError:
+                continue
+            if 0 <= row_idx < int(rows) and 0 <= col_idx < int(cols):
+                normalized.add(wid)
+        return normalized
+
+    def validate_explicit_well_ids(
+        self,
+        well_ids,
+        *,
+        plate_name: Optional[str] = None,
+        excluded_wells=None,
+    ) -> list[str]:
+        plate_data = self.get_plate_data_by_name(plate_name) if plate_name else self.current_plate_data
+        target_name = str(plate_data["name"])
+        rows = int(plate_data["rows"])
+        cols = int(plate_data["columns"])
+        normalized_excluded = self._normalize_excluded_wells_for_plate(
+            rows,
+            cols,
+            excluded_wells=excluded_wells,
+        )
+
+        malformed: list[str] = []
+        out_of_bounds: list[str] = []
+        excluded: list[str] = []
+        duplicates: list[str] = []
+        normalized_ids: list[str] = []
+        seen: set[str] = set()
+
+        for well_id in list(well_ids or []):
+            raw = "" if well_id is None else str(well_id).strip()
+            if not raw:
+                malformed.append("<blank>")
+                continue
+            try:
+                wid = self._normalize_well_id(raw)
+                row_label, col_1 = Well.parse_well_id(wid)
+                row_idx = Well.row_label_to_index(row_label)
+                col_idx = int(col_1) - 1
+            except ValueError:
+                malformed.append(raw)
+                continue
+
+            if row_idx >= rows or col_idx >= cols:
+                out_of_bounds.append(wid)
+                continue
+            if wid in normalized_excluded:
+                excluded.append(wid)
+                continue
+            if wid in seen:
+                duplicates.append(wid)
+                continue
+
+            seen.add(wid)
+            normalized_ids.append(wid)
+
+        issues = []
+        if malformed:
+            issues.append(f"Invalid well IDs: {self._format_well_id_examples(malformed)}.")
+        if out_of_bounds:
+            issues.append(
+                f"Out of bounds for plate '{target_name}' ({rows}x{cols}): "
+                f"{self._format_well_id_examples(out_of_bounds)}."
+            )
+        if excluded:
+            issues.append(f"Excluded wells: {self._format_well_id_examples(excluded)}.")
+        if duplicates:
+            issues.append(f"Duplicate wells: {self._format_well_id_examples(duplicates)}.")
+
+        if issues:
+            raise ValueError(
+                f"Explicit well assignments are invalid for plate '{target_name}' ({rows}x{cols}). "
+                + " ".join(issues)
+            )
+
+        return normalized_ids
+
     def validate_start_position(self, start_row=0, start_col=0):
         if int(start_row) < 0 or int(start_row) >= self.rows:
             raise ValueError(
@@ -5465,10 +5570,10 @@ class WellPlate(QObject):
                 f"number of well IDs ({len(well_ids)})."
             )
 
+        normalized_well_ids = self.validate_explicit_well_ids(well_ids)
         reaction_assignment = {}
 
-        for reaction, well_id in zip(reactions, well_ids):
-            wid = str(well_id).strip().upper()
+        for reaction, wid in zip(reactions, normalized_well_ids):
             well = self.wells.get(wid)
 
             if well is None:
@@ -7858,7 +7963,29 @@ class Model(QObject):
             print("No reactions in the experiment model.")
             return
 
+        stock_solutions, reaction_collection = self.load_reactions_from_model()
+        if stock_solutions is None or reaction_collection is None:
+            print("No stock solutions or reactions found in the experiment model.")
+            return
+
+        all_reactions = reaction_collection.get_all_reactions()
+        manual_well_ids = self._get_manual_well_assignments()
+        using_manual_assignments = manual_well_ids is not None
+        target_plate_name = plate_name or self.well_plate.get_current_plate_name()
         preserved_exclusions = set(getattr(self.well_plate, "excluded_wells", set()))
+
+        if using_manual_assignments:
+            if len(manual_well_ids) != len(all_reactions):
+                raise ValueError(
+                    f"Manual well assignments ({len(manual_well_ids)}) "
+                    f"must match the number of reactions ({len(all_reactions)})."
+                )
+            manual_well_ids = self.well_plate.validate_explicit_well_ids(
+                manual_well_ids,
+                plate_name=target_plate_name,
+                excluded_wells=preserved_exclusions,
+            )
+
         self.clear_experiment()
         self.well_plate.excluded_wells = preserved_exclusions
         if plate_name is not None:
@@ -7866,12 +7993,6 @@ class Model(QObject):
             self.experiment_model.metadata["plate_name"] = self.well_plate.get_current_plate_name()
             self.experiment_model.metadata["plate_rows"] = self.well_plate.get_num_rows()
             self.experiment_model.metadata["plate_columns"] = self.well_plate.get_num_cols()
-
-        stock_solutions, reaction_collection = self.load_reactions_from_model()
-        if stock_solutions is None or reaction_collection is None:
-            print("No stock solutions or reactions found in the experiment model.")
-            self.clear_experiment()
-            return
 
         self.stock_solutions = stock_solutions
         self.reaction_collection = reaction_collection
@@ -7881,19 +8002,8 @@ class Model(QObject):
 
         # Randomization (handled earlier via seed in ExperimentModel->load_reactions_from_model)
         all_reactions = self.reaction_collection.get_all_reactions()
-        
-        # ---- 1) Check for manual well assignments ----
-        manual_well_ids = self._get_manual_well_assignments()
-        using_manual_assignments = manual_well_ids is not None
 
         if using_manual_assignments:
-            # Enforce 1:1 mapping between reactions and wells
-            if len(manual_well_ids) != len(all_reactions):
-                raise ValueError(
-                    f"Manual well assignments ({len(manual_well_ids)}) "
-                    f"must match the number of reactions ({len(all_reactions)})."
-                )
-
             # When manual well assignments are used, treat "replicates" as 0
             # so the runtime / metadata clearly reflect that layout is explicit.
             try:

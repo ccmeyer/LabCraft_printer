@@ -34,7 +34,7 @@ def _build_proc(*, manual_start=False, contour_fn=None, characterize_fn=None):
     proc.droplet_image = np.zeros((120, 160, 3), dtype=np.uint8)
     proc.num_images = 3
     proc.image_counter = 0
-    proc.circularity_threshold = 0.95
+    proc.circularity_threshold = 0.90
     proc.droplet_positions = []
     proc.droplet_focus = []
     proc.circularity_values = []
@@ -229,6 +229,88 @@ def _build_proc(*, manual_start=False, contour_fn=None, characterize_fn=None):
     }
 
 
+def _configure_camera_centered_safe_span(proc, ctx, camera_xyz):
+    camera_xyz = {axis: int(camera_xyz[axis]) for axis in ("X", "Y", "Z")}
+    ctx["live_position"].update(dict(camera_xyz))
+    proc.nozzle_center_machine = None
+    proc.model.location_model = SimpleNamespace(
+        get_location_dict=lambda name: dict(camera_xyz) if name == "camera" else None
+    )
+    proc._safe_span_origin_xyz = None
+    proc._safe_span_origin_source = None
+    proc.x_lo, proc.x_hi = proc._get_axis_bounds_safe("X", 20_000)
+    proc.y_lo, proc.y_hi = proc._get_axis_bounds_safe("Y", 10_000)
+    proc.z_lo, proc.z_hi = proc._get_axis_bounds_safe("Z", 20_000)
+    anchor = (camera_xyz["X"], camera_xyz["Y"], camera_xyz["Z"])
+    proc._motion_anchor_xyz = anchor
+    proc._last_safe_xyz = anchor
+    proc._last_observed_live_xyz = anchor
+
+
+def test_droplet_search_safe_bounds_prefer_machine_bounds_when_available():
+    proc, _ctx = _build_proc(manual_start=True)
+    machine_model = proc.model.machine_model
+    proc.model.machine_model = SimpleNamespace(
+        get_axis_bounds=lambda axis: {
+            "X": (10, 20),
+            "Y": (30, 40),
+            "Z": (50, 60),
+        }[axis],
+        get_current_position_dict=machine_model.get_current_position_dict,
+        get_current_print_pressure=machine_model.get_current_print_pressure,
+        get_print_pulse_width=machine_model.get_print_pulse_width,
+    )
+    proc.model.location_model = SimpleNamespace(
+        get_location_dict=lambda _name: {"X": 9000, "Y": 10000, "Z": 11000}
+    )
+
+    assert proc._get_axis_bounds_safe("X", 20_000) == (10, 20)
+    assert proc._get_axis_bounds_safe("Y", 10_000) == (30, 40)
+    assert proc._get_axis_bounds_safe("Z", 20_000) == (50, 60)
+
+
+def test_droplet_search_safe_bounds_prefer_camera_location_before_live_or_nozzle_center():
+    proc, ctx = _build_proc(manual_start=True)
+    ctx["live_position"].update({"X": 15000, "Y": 25000, "Z": 35000})
+    proc.nozzle_center_machine = {"X": 101, "Y": 202, "Z": 303}
+    proc.model.location_model = SimpleNamespace(
+        get_location_dict=lambda name: {"X": 11040, "Y": 39636, "Z": 98052} if name == "camera" else None
+    )
+
+    assert proc._get_axis_bounds_safe("X", 20_000) == (-8960, 31040)
+    assert proc._get_axis_bounds_safe("Y", 10_000) == (29636, 49636)
+    assert proc._get_axis_bounds_safe("Z", 20_000) == (78052, 118052)
+
+
+def test_droplet_search_safe_bounds_fall_back_to_live_position_when_camera_missing():
+    proc, ctx = _build_proc(manual_start=True)
+    ctx["live_position"].update({"X": 5100, "Y": 6100, "Z": 7100})
+    proc.nozzle_center_machine = None
+    proc.model.location_model = SimpleNamespace(get_location_dict=lambda _name: None)
+
+    assert proc._get_axis_bounds_safe("X", 20_000) == (-14900, 25100)
+    assert proc._get_axis_bounds_safe("Y", 10_000) == (-3900, 16100)
+    assert proc._get_axis_bounds_safe("Z", 20_000) == (-12900, 27100)
+
+
+def test_droplet_search_safe_bounds_zero_fallback_emits_diagnostic():
+    proc, _ctx = _build_proc(manual_start=True)
+    proc.nozzle_center_machine = None
+    proc.model = SimpleNamespace(
+        machine_model=SimpleNamespace(
+            get_current_print_pressure=lambda: 1.61,
+            get_print_pulse_width=lambda: 1500,
+        ),
+        droplet_camera_model=proc.model.droplet_camera_model,
+        location_model=SimpleNamespace(get_location_dict=lambda _name: None),
+    )
+
+    assert proc._get_axis_bounds_safe("Z", 20_000) == (-20_000, 20_000)
+    assert any(
+        "origin-centered safety span" in text for text in _recorder_texts(proc.stageChanged)
+    )
+
+
 def test_droplet_search_manual_mode_keeps_fixed_delay():
     proc, _ctx = _build_proc(manual_start=True)
     proc.current_delay_us = None
@@ -378,6 +460,54 @@ def test_droplet_search_characterization_recenters_before_focus_work():
     assert proc.initiateCharacterizationAnalysis.calls == []
 
 
+def test_droplet_search_manual_focus_move_uses_camera_centered_safe_span_without_nozzle_center():
+    def characterize_fn(image, _bg):
+        return {
+            "center": (80, 60),
+            "focus": 100_000.0,
+            "circularity": 0.95,
+            "circularity_ellipse": 0.95,
+            "volume": 10.0,
+        }, image.copy()
+
+    proc, ctx = _build_proc(manual_start=True, characterize_fn=characterize_fn)
+    _configure_camera_centered_safe_span(
+        proc,
+        ctx,
+        {"X": 11040, "Y": 39636, "Z": 98052},
+    )
+
+    proc.onCharacterization()
+
+    assert ctx["move_targets"] == [(11040, 39638, 98052)]
+    assert proc._last_safe_xyz == (11040, 39638, 98052)
+    assert all(target[1] > 39000 for target in ctx["move_targets"])
+
+
+def test_droplet_search_center_first_recenter_uses_camera_centered_safe_span_without_nozzle_center():
+    def characterize_fn(image, _bg):
+        return {
+            "center": (10, 10),
+            "focus": 900_000.0,
+            "circularity": 0.96,
+            "circularity_ellipse": 0.96,
+            "volume": 9.8,
+        }, image.copy()
+
+    proc, ctx = _build_proc(manual_start=True, characterize_fn=characterize_fn)
+    _configure_camera_centered_safe_span(
+        proc,
+        ctx,
+        {"X": 11040, "Y": 39636, "Z": 98052},
+    )
+
+    proc.onCharacterization()
+
+    assert ctx["move_targets"] == [(11089, 39636, 98087)]
+    assert proc._char_need_capture is True
+    assert all(target[2] > 97000 for target in ctx["move_targets"])
+
+
 def test_droplet_search_characterization_preserves_specific_failure_reason_at_attempt_limit():
     def characterize_fn(image, _bg, return_details=False):
         details = {"reason": "no_large_contours", "bbox": None, "contour_area": 0.0}
@@ -430,6 +560,47 @@ def test_droplet_search_invalid_characterization_payload_includes_reason_and_dia
     assert payload["focus_moves_done"] == 5
     assert payload["focus_dir_switches"] == 2
     assert payload["best_focus_y_offset_steps"] == 14
+
+
+def test_droplet_search_analysis_accepts_point92_circularity():
+    proc, _ctx = _build_proc(manual_start=True)
+    proc.droplet_positions = [(80, 60), (81, 60), (79, 61)]
+    proc.droplet_volumes = [10.1, 10.2, 10.3]
+    proc.circularity_values = [0.92, 0.93, 0.94]
+    proc.droplet_focus = [800_000.0, 820_000.0, 810_000.0]
+    proc.image_counter = 3
+
+    proc.onAnalyzeCharacterization()
+
+    payload = proc.calibrationDataUpdated.calls[0][0][0]["result"]
+    assert payload["valid"] is True
+    assert payload["invalid_reason"] is None
+    assert payload["accepted_replicates"] == 3
+    assert payload["captured_replicates"] == 3
+
+
+def test_droplet_search_analysis_rejects_below_point90_circularity():
+    proc, _ctx = _build_proc(manual_start=True)
+    proc.droplet_positions = [(80, 60), (81, 60), (79, 61)]
+    proc.droplet_volumes = [10.1, 10.2, 10.3]
+    proc.circularity_values = [0.89, 0.88, 0.87]
+    proc.droplet_focus = [800_000.0, 820_000.0, 810_000.0]
+    proc.image_counter = 3
+
+    proc.onAnalyzeCharacterization()
+
+    payload = proc.calibrationDataUpdated.calls[0][0][0]["result"]
+    assert payload["valid"] is False
+    assert payload["invalid_reason"] == "no_good_replicates"
+    assert payload["accepted_replicates"] == 0
+    assert payload["captured_replicates"] == 3
+
+
+def test_droplet_search_count_good_replicates_includes_point90_boundary():
+    proc, _ctx = _build_proc(manual_start=True)
+    proc.circularity_values = [0.90, 0.899, 0.91]
+
+    assert proc._count_good_replicates() == 2
 
 
 def test_droplet_search_manual_move_guard_clamps_target_inside_anchor_envelope():

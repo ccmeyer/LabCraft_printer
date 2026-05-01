@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QSpinBox,
     QTableWidget,
@@ -150,6 +151,32 @@ def test_experiment_designer_finish_stops_when_capacity_check_fails():
     dialog.accept.assert_not_called()
     dialog._ensure_experiment_dir.assert_not_called()
     assert dialog._apply_requested is False
+
+
+def test_experiment_designer_finish_surfaces_apply_errors_and_stays_open(monkeypatch, qapp):
+    dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    dialog._editing_locked_by_gripper = False
+    dialog._apply_requested = False
+    dialog._on_optimize_and_generate = Mock(return_value=True)
+    dialog._ensure_experiment_dir = Mock()
+    dialog.status_lbl = QLabel("")
+    dialog._set_status = ExperimentDesignDialog._set_status.__get__(dialog, ExperimentDesignDialog)
+    dialog.accept = Mock()
+    warn = Mock()
+    monkeypatch.setattr(QMessageBox, "warning", warn)
+
+    complete_mock = Mock(side_effect=ValueError("Explicit well assignments are invalid for plate '96well-8x12' (8x12). Out of bounds for plate '96well-8x12' (8x12): G16."))
+    save_mock = Mock()
+    dialog.main_window = SimpleNamespace(complete_experiment_design=complete_mock)
+    dialog.model = SimpleNamespace(save_experiment=save_mock)
+
+    ExperimentDesignDialog._on_finish(dialog)
+
+    warn.assert_called_once()
+    dialog.accept.assert_not_called()
+    assert dialog._apply_requested is False
+    assert "G16" in dialog.status_lbl.text()
+    assert "96well-8x12" in dialog.status_lbl.text()
 
 
 def test_experiment_designer_locks_edit_actions_when_gripper_loaded(qapp):

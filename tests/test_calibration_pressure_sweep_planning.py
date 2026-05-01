@@ -214,6 +214,25 @@ def _build_pressure_sweep_init_model():
     )
 
 
+def test_pressure_sweep_safe_bounds_prefer_camera_location_before_nozzle_center():
+    proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
+    proc.nozzle_center_machine = {"X": 100, "Y": 200, "Z": 300}
+    proc.stageChanged = Recorder()
+    proc._record_event = lambda *args, **kwargs: None
+    proc.model = SimpleNamespace(
+        location_model=SimpleNamespace(
+            get_location_dict=lambda name: {"X": 5000, "Y": 6000, "Z": 7000} if name == "camera" else None
+        ),
+        machine_model=SimpleNamespace(
+            get_current_position_dict=lambda: {"X": 9000, "Y": 10000, "Z": 11000}
+        ),
+    )
+
+    assert proc._get_axis_bounds_safe("X", 20_000) == (-15_000, 25_000)
+    assert proc._get_axis_bounds_safe("Y", 10_000) == (-4_000, 16_000)
+    assert proc._get_axis_bounds_safe("Z", 20_000) == (-13_000, 27_000)
+
+
 def test_manager_trajectory_helpers_prefer_explicit_fields():
     mgr = CalibrationManager.__new__(CalibrationManager)
     mgr._pressure_traj_result = {
@@ -335,6 +354,48 @@ def test_pressure_sweep_analyze_batch_marks_valid_with_20_good():
     assert proc.samples
     assert proc.samples[-1]["valid"] is True
     assert proc.samples[-1]["accepted_replicates"] == 20
+    assert emitted
+    assert proc.nextPressure.calls
+
+
+def test_pressure_sweep_analyze_batch_final_phase_accepts_point92_circularity():
+    proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
+    proc.num_images = 20
+    proc.circularity_threshold = 0.95
+    proc.char_delay_retarget_cap = 2
+    proc._morphology_retarget_count = 2
+    proc.droplet_volumes = [1.0 + (i * 0.01) for i in range(20)]
+    proc.circularity_values = [0.92] * 20
+    proc.droplet_positions = [(120, 230)] * 20
+    proc.cur_pressure = 1.20
+    proc.current_delay_us = 9500
+    proc.multiple_droplet_hits = 0
+    proc._y_focus_offset_steps = 0
+    proc.samples = []
+    proc.stageChanged = Recorder()
+    proc.presentImageSignal = Recorder()
+    proc.model = SimpleNamespace(
+        machine_model=SimpleNamespace(get_current_position_dict=lambda: {"X": 1, "Y": 2, "Z": 3}),
+        droplet_camera_model=SimpleNamespace(
+            convert_pixel_position_to_motor_steps=lambda _center, pos: dict(pos)
+        ),
+    )
+    proc._annotate_char_summary_image = lambda *_args, **_kwargs: np.zeros((32, 32, 3), dtype=np.uint8)
+    emitted = []
+    proc._emit_incremental_pressure_step = lambda rec: emitted.append(dict(rec))
+    proc._record_analysis = lambda *_args, **_kwargs: None
+    proc._record_decision = lambda *_args, **_kwargs: None
+    proc.i = 0
+    proc._reset_char_buffers = lambda: None
+    proc.nextPressure = Recorder()
+
+    proc.onAnalyzeBatch()
+
+    assert proc.samples
+    assert proc.samples[-1]["valid"] is True
+    assert proc.samples[-1]["accepted_replicates"] == 20
+    assert proc.samples[-1]["circularity_threshold_active"] == 0.90
+    assert proc.samples[-1]["circularity_threshold_final_phase_active"] is True
     assert emitted
     assert proc.nextPressure.calls
 
@@ -1294,6 +1355,35 @@ def test_pressure_sweep_second_morphology_retarget_uses_second_step():
     assert moves[-1] == (9500, 1200, 2200)
 
 
+def test_pressure_sweep_pre_final_phase_keeps_strict_roundness_gate():
+    proc, _state, moves = _build_pressure_sweep_focus_proc(
+        [6_000_000],
+        roundness_values=[0.92],
+    )
+    proc.current_delay_us = 7500
+    proc.target_delay_us = 7500
+    proc._morphology_retarget_count = 1
+    proc._morphology_retarget_history_us = [7500]
+    proc._morphology_window_evaluable_count = 2
+    proc._morphology_window_nonround_hits = 2
+    proc._morphology_nonround_hits_total = 2
+    proc._target_xyz_for_delay = lambda delay_us, include_offsets=True: (int(delay_us), 1200, 2200)
+
+    handled = proc._maybe_retarget_for_morphology(
+        (200, 200),
+        0.92,
+        focus_val=6_000_000.0,
+        stream_like=False,
+    )
+
+    assert handled is True
+    assert proc._morphology_retarget_count == 2
+    assert proc._morphology_retarget_history_us == [7500, 9500]
+    assert proc.target_delay_us == 9500
+    assert proc._forced_delay_us == 9500
+    assert moves[-1] == (9500, 1200, 2200)
+
+
 def test_pressure_sweep_morphology_delay_over_limit_invalidates_pressure():
     proc, _state, moves = _build_pressure_sweep_focus_proc(
         [6_000_000],
@@ -1349,6 +1439,49 @@ def test_pressure_sweep_morphology_retarget_exhausted_invalidates_pressure():
     assert invalidated
     assert invalidated[-1][0] == "morphology_retarget_exhausted"
     assert moves == []
+
+
+def test_pressure_sweep_final_phase_accepts_point92_roundness():
+    proc, _state, moves = _build_pressure_sweep_focus_proc(
+        [6_000_000],
+        roundness_values=[0.92],
+    )
+    proc.current_delay_us = 9500
+    proc.target_delay_us = 9500
+    proc._morphology_retarget_count = 2
+    proc._morphology_retarget_history_us = [7500, 9500]
+    proc._morphology_nonround_hits_total = 2
+
+    proc.onCharacterizeLoop()
+
+    assert proc.image_counter == 1
+    assert proc.circularity_values == [0.92]
+    assert proc.droplet_volumes == [1.0]
+    assert proc._morphology_window_evaluable_count == 1
+    assert proc._morphology_window_nonround_hits == 0
+    assert proc._char_stream_hits == 0
+    assert proc.continueCap.calls
+    assert not moves
+
+
+def test_pressure_sweep_final_phase_still_rejects_stream_like_frames():
+    proc, _state, _moves = _build_pressure_sweep_focus_proc(
+        [6_000_000],
+        roundness_values=[0.55],
+    )
+    proc.current_delay_us = 9500
+    proc.target_delay_us = 9500
+    proc._morphology_retarget_count = 2
+    proc._morphology_retarget_history_us = [7500, 9500]
+    proc._morphology_nonround_hits_total = 2
+
+    proc.onCharacterizeLoop()
+
+    assert proc.image_counter == 0
+    assert proc.circularity_values == []
+    assert proc._char_stream_hits == 1
+    assert proc._char_invalid_hits == 1
+    assert proc.continueCap.calls
 
 
 def test_pressure_sweep_morphology_evidence_ignores_none_and_multiple_frames():
