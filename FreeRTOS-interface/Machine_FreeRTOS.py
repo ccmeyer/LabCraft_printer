@@ -2675,6 +2675,23 @@ class Machine(QObject):
                 return command
         return None
 
+    def _lowest_queued_command_number(self):
+        numbers = [
+            self._coerce_optional_int(getattr(command, "command_number", None))
+            for command in list(getattr(self.command_queue, "queue", []))
+            if getattr(command, "status", None) not in {"Completed", "Canceled"}
+        ]
+        numbers = [number for number in numbers if number is not None]
+        return min(numbers) if numbers else None
+
+    def _align_command_counter_after_clear(self, last_retired_command):
+        last_retired = self._coerce_optional_int(last_retired_command)
+        if last_retired is None:
+            return
+        if len(getattr(self.command_queue, "queue", [])) != 0:
+            return
+        self.command_queue.command_number = max(0, int(last_retired))
+
     def _record_command_event(self, command, event_name):
         metadata = dict(getattr(command, "trace_metadata", {}) or {})
         request_id = metadata.get("request_id")
@@ -2905,6 +2922,7 @@ class Machine(QObject):
                 retired = data.get("Last_retired", last)
                 if depth == 0 and curr == retired:
                     self._waiting_for_post_clear_status = False
+                    self._align_command_counter_after_clear(retired)
                     self._tx_paused = False
                     self.begin_execution_timer()
                     self.pump_send_queue()
@@ -3044,12 +3062,28 @@ class Machine(QObject):
 
         if ack_result == "gap":
             resend_from = expected_seq32 if expected_seq32 is not None else seq32
+            lowest_queued = self._lowest_queued_command_number()
+            if lowest_queued is not None and int(resend_from) < int(lowest_queued):
+                self._handle_transport_fault(
+                    f"MCU requested resend from command {resend_from}, but earliest local queued command is {lowest_queued}. Clear the queue or reconnect before continuing."
+                )
+                return
+            if int(getattr(command, "send_attempts", 0) or 0) >= int(self._queue_ack_max_retries):
+                self._handle_transport_fault(
+                    f"Timed out recovering queue gap for command {seq32} after {command.send_attempts} attempts."
+                )
+                return
             self._cancel_queue_ack_waits_from(resend_from)
             self.command_queue.mark_for_resend_from(resend_from)
             self.pump_send_queue()
             return
 
         if ack_result == "busy":
+            if int(getattr(command, "send_attempts", 0) or 0) >= int(self._queue_ack_max_retries):
+                self._handle_transport_fault(
+                    f"MCU remained busy for command {seq32} after {command.send_attempts} attempts."
+                )
+                return
             self.command_queue.mark_for_resend_from(seq32)
             QtCore.QTimer.singleShot(20, self.pump_send_queue)
             return

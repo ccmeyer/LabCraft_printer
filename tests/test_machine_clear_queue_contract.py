@@ -59,6 +59,30 @@ def test_clear_queue_handler_fires_after_status_confirmation(qapp, test_profile,
     ]
 
 
+def test_clear_queue_confirmation_realigns_host_command_counter(qapp, test_profile, fake_serial_main):
+    machine = Machine(SimpleNamespace(), profile=test_profile)
+    machine.ser = fake_serial_main
+    for idx in range(12):
+        machine.command_queue.add_command("WAIT", idx + 1, 0, 0)
+
+    machine.clear_command_queue()
+    machine._on_clear_ack(timed_out=False)
+    assert machine.command_queue.command_number == 12
+
+    machine.update_status(
+        {
+            "cmd_depth": 0,
+            "Current_command": 7,
+            "Last_completed": 6,
+            "Last_retired": 7,
+        }
+    )
+
+    assert machine.command_queue.command_number == 7
+    next_command = machine.wait_ms(10)
+    assert next_command.command_number == 8
+
+
 def test_clear_queue_handler_reports_late_status_confirmation_after_ack_timeout(qapp, test_profile, fake_serial_main):
     machine = Machine(SimpleNamespace(), profile=test_profile)
     machine.ser = fake_serial_main

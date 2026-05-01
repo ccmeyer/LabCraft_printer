@@ -520,6 +520,7 @@ class Controller(QObject):
 
         if not bool(clear_result.get("status_confirmed")):
             self._soft_stop_clear_uncertain = True
+            context["skip_array_accel_restore"] = True
             context["soft_stop_phase"] = "done"
             ack_received = bool(clear_result.get("ack_received"))
             ack_timed_out = bool(clear_result.get("ack_timed_out"))
@@ -1755,6 +1756,9 @@ class Controller(QObject):
         reason = str(reason or "completed")
         context = getattr(self, "_array_context", None)
         if isinstance(context, dict) and context.get("array_finalize_after_accel_restore"):
+            return
+        if isinstance(context, dict) and context.get("skip_array_accel_restore"):
+            self._finish_array_finalize(reason)
             return
         if isinstance(context, dict):
             context["array_finalize_after_accel_restore"] = reason

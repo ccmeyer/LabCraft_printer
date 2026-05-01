@@ -341,3 +341,44 @@ def test_request_pause_after_seq32_success_still_invokes_success_callback(qapp, 
     assert successes
     assert successes[0]["ack_result"] == "watermark_set"
     assert failures == []
+
+
+def test_queue_gap_below_local_queue_faults_instead_of_resending(qapp, test_profile):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+    errors = []
+    machine.error_occurred.connect(errors.append)
+    machine._transport_ready = True
+    machine._write_frame = Mock()
+    machine.command_queue.command_number = 9
+    command = machine.wait_ms(10)
+    sent_before_gap = machine._write_frame.call_count
+    command.send_attempts = 1
+    command.mark_as_sent()
+
+    machine._on_queue_ack(
+        command.command_number,
+        {
+            "ack_result": "gap",
+            "expected_seq32": 5,
+        },
+    )
+
+    assert machine._tx_paused is True
+    assert errors
+    assert "earliest local queued command is 10" in errors[-1]
+    assert machine._write_frame.call_count == sent_before_gap
+
+
+def test_queue_busy_resends_are_bounded(qapp, test_profile):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+    errors = []
+    machine.error_occurred.connect(errors.append)
+    command = machine.wait_ms(10)
+    command.send_attempts = machine._queue_ack_max_retries
+    command.mark_as_sent()
+
+    machine._on_queue_ack(command.command_number, {"ack_result": "busy"})
+
+    assert machine._tx_paused is True
+    assert errors
+    assert "remained busy" in errors[-1]

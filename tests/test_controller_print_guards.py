@@ -771,7 +771,7 @@ def test_soft_stop_clear_unconfirmed_warns_and_preserves_resume_ready():
     c.model.machine_model.clear_command_queue.assert_called_once_with()
     c.update_expected_with_current.assert_not_called()
     c.move_to_location.assert_not_called()
-    assert c.machine.set_axis_accel.call_args_list == _restore_calls()
+    c.machine.set_axis_accel.assert_not_called()
     assert c.get_array_run_state() == "resume_ready"
     assert c.error_occurred_signal.calls[-1] == (
         "Soft Stop Warning",
