@@ -371,6 +371,7 @@ class ExperimentModel(QObject):
         self.calibration_file_path: Optional[str] = None
         self.progress_data: Dict[str, Dict] = {}
         self._last_progress_load_warnings: list[dict[str, object]] = []
+        self._last_progress_stock_override_warnings: list[dict[str, object]] = []
         self.unsaved_changes: bool = False
 
         # optional dependency (if you have one); safe to ignore if None
@@ -3237,6 +3238,7 @@ class ExperimentModel(QObject):
 
         # Update the persistent design object so saves/loads reflect the new dv
         opt_obj.droplet_nL = new_dv
+        opt_obj.forced_stock_conc = c_stock
 
         # Update the cached stock rows so UI tables reflect new dv
         updated_row = None
@@ -4389,6 +4391,202 @@ class ExperimentModel(QObject):
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return {}
 
+    @staticmethod
+    def _parse_progress_stock_id(stock_id: str):
+        try:
+            reagent_name, concentration, units = str(stock_id).rsplit("_", 2)
+            if not reagent_name:
+                return None
+            return reagent_name, float(concentration), units
+        except (TypeError, ValueError):
+            return None
+
+    def _iter_progress_option_specs(self):
+        for factor in self.factors:
+            if factor.kind == "additive":
+                if not factor.options:
+                    continue
+                option = factor.options[0]
+                names = [factor.name]
+                if option.name not in names:
+                    names.append(option.name)
+                yield (factor.name, None), option, names
+            else:
+                for option in factor.options:
+                    yield (factor.name, option.name), option, [option.name]
+
+    def _reoptimize_after_progress_stock_overrides(self) -> bool:
+        res = self.optimize_stock_solutions(
+            quantum=0.1,
+            max_refine=60,
+            two_max_refine=40,
+            allow_two=self._allow_two_from_metadata(),
+        )
+        if not res.get("best"):
+            return False
+        self.generate_experiment()
+        return True
+
+    def _apply_progress_stock_concentration_overrides_for_resume(self) -> dict:
+        """
+        Preserve stock IDs from progress.json before runtime reactions are rebuilt.
+        This keeps an in-progress run from silently changing reagent-1_4.08_mM into
+        a freshly optimized reagent-1_4.15_mM on reload.
+        """
+        self._last_progress_stock_override_warnings = []
+        data = self.return_progress_data()
+        if not data:
+            return {"applied": False, "applied_overrides": [], "warnings": []}
+
+        fill_name = str(self.metadata.get("fill_reagent_name", "Water"))
+        saved_concentrations: dict[tuple[str, str], set[float]] = {}
+        warnings: list[dict[str, object]] = []
+
+        for well_id, entry in data.items():
+            for stock_id in (entry.get("reagents") or {}).keys():
+                parsed = self._parse_progress_stock_id(stock_id)
+                if parsed is None:
+                    warnings.append(
+                        {
+                            "code": "progress_stock_id_unparseable",
+                            "well_id": well_id,
+                            "stock_id": stock_id,
+                        }
+                    )
+                    continue
+                reagent_name, concentration, units = parsed
+                if reagent_name == fill_name and units == "--":
+                    continue
+                saved_concentrations.setdefault((reagent_name, units), set()).add(float(concentration))
+
+        old_forced: dict[tuple[str, str | None], float | None] = {}
+        applied: list[dict[str, object]] = []
+
+        for key, option, progress_names in self._iter_progress_option_specs():
+            concentrations: set[float] = set()
+            for name in progress_names:
+                concentrations.update(saved_concentrations.get((name, option.units), set()))
+            if not concentrations:
+                continue
+            if len(concentrations) != 1:
+                warnings.append(
+                    {
+                        "code": "progress_stock_concentration_ambiguous",
+                        "factor": key[0],
+                        "option": key[1],
+                        "units": option.units,
+                        "concentrations": sorted(concentrations),
+                    }
+                )
+                continue
+
+            plan = self.plans_per_option.get(key)
+            if plan is not None and int(plan.get("n_stocks", 1)) != 1:
+                warnings.append(
+                    {
+                        "code": "progress_stock_override_two_stock_unsupported",
+                        "factor": key[0],
+                        "option": key[1],
+                        "units": option.units,
+                        "concentrations": sorted(concentrations),
+                    }
+                )
+                continue
+
+            saved_conc = float(next(iter(concentrations)))
+            current_forced = getattr(option, "forced_stock_conc", None)
+            try:
+                already_forced = current_forced is not None and abs(float(current_forced) - saved_conc) <= 1e-9
+            except (TypeError, ValueError):
+                already_forced = False
+            if already_forced:
+                continue
+
+            old_forced[key] = current_forced
+            option.forced_stock_conc = saved_conc
+            applied.append(
+                {
+                    "factor": key[0],
+                    "option": key[1],
+                    "stock_concentration": saved_conc,
+                    "units": option.units,
+                }
+            )
+
+        if not applied:
+            self._last_progress_stock_override_warnings = warnings
+            return {"applied": False, "applied_overrides": [], "warnings": warnings}
+
+        if not self._reoptimize_after_progress_stock_overrides():
+            for key, previous in old_forced.items():
+                option = self._get_option_for_key(key)
+                if option is not None:
+                    option.forced_stock_conc = previous
+            self._reoptimize_after_progress_stock_overrides()
+            warnings.append(
+                {
+                    "code": "progress_stock_override_optimization_failed",
+                    "applied_overrides": applied,
+                }
+            )
+            self._last_progress_stock_override_warnings = warnings
+            return {"applied": False, "applied_overrides": [], "warnings": warnings}
+
+        self.unsaved_changes = True
+        saved_experiment = False
+        if getattr(self, "experiment_file_path", None):
+            self.save_experiment()
+            saved_experiment = True
+        self._last_progress_stock_override_warnings = warnings
+        return {
+            "applied": True,
+            "applied_overrides": applied,
+            "warnings": warnings,
+            "saved_experiment": saved_experiment,
+        }
+
+    def _find_progress_reagent_by_identity(self, rxn, progress_stock_id: str):
+        parsed = self._parse_progress_stock_id(progress_stock_id)
+        if parsed is None:
+            return None, None, {
+                "code": "progress_stock_id_unparseable",
+                "stock_id": progress_stock_id,
+            }
+
+        reagent_name, _concentration, units = parsed
+        candidates = []
+        for runtime_stock_id, reagent in rxn.get_all_reagents().items():
+            runtime_parsed = self._parse_progress_stock_id(runtime_stock_id)
+            if runtime_parsed is None:
+                continue
+            runtime_name, _runtime_conc, runtime_units = runtime_parsed
+            if runtime_name == reagent_name and runtime_units == units:
+                candidates.append((runtime_stock_id, reagent))
+
+        if len(candidates) == 1:
+            runtime_stock_id, reagent = candidates[0]
+            return runtime_stock_id, reagent, {
+                "code": "progress_stock_id_mapped",
+                "stock_id": progress_stock_id,
+                "runtime_stock_id": runtime_stock_id,
+                "reagent_name": reagent_name,
+                "units": units,
+            }
+        if len(candidates) > 1:
+            return None, None, {
+                "code": "progress_stock_id_ambiguous",
+                "stock_id": progress_stock_id,
+                "reagent_name": reagent_name,
+                "units": units,
+                "runtime_stock_ids": [sid for sid, _reagent in candidates],
+            }
+        return None, None, {
+            "code": "progress_stock_id_unmatched",
+            "stock_id": progress_stock_id,
+            "reagent_name": reagent_name,
+            "units": units,
+        }
+
     def load_progress(self):
         """Apply progress.json into live ReactionComposition objects (requires runtime context)."""
         if self._runtime_well_plate is None:
@@ -4421,7 +4619,7 @@ class ExperimentModel(QObject):
             return
 
         self.progress_data = data
-        target_mismatches: list[dict[str, object]] = []
+        progress_warnings: list[dict[str, object]] = []
 
         # Apply to each well's reaction
         for well_id, entry in data.items():
@@ -4432,18 +4630,30 @@ class ExperimentModel(QObject):
             if rxn is None or rxn.unique_id != entry.get("reaction_id"):
                 continue
             for stock_id, rd in entry.get("reagents", {}).items():
+                runtime_stock_id = stock_id
                 try:
                     reagent = rxn.get_reagent_by_id(stock_id)
                 except KeyError:
-                    continue
-                saved_target = int(rd.get("target_droplets", reagent.get_target_droplets()))
-                runtime_target = int(reagent.get_target_droplets())
-                if saved_target != runtime_target:
-                    target_mismatches.append(
+                    runtime_stock_id, reagent, stock_warning = self._find_progress_reagent_by_identity(rxn, stock_id)
+                    stock_warning.update(
                         {
                             "well_id": well_id,
                             "reaction_id": rxn.unique_id,
+                        }
+                    )
+                    progress_warnings.append(stock_warning)
+                    if reagent is None:
+                        continue
+                saved_target = int(rd.get("target_droplets", reagent.get_target_droplets()))
+                runtime_target = int(reagent.get_target_droplets())
+                if saved_target != runtime_target:
+                    progress_warnings.append(
+                        {
+                            "code": "progress_target_mismatch",
+                            "well_id": well_id,
+                            "reaction_id": rxn.unique_id,
                             "stock_id": stock_id,
+                            "runtime_stock_id": runtime_stock_id,
                             "saved_target_droplets": saved_target,
                             "runtime_target_droplets": runtime_target,
                         }
@@ -4454,17 +4664,24 @@ class ExperimentModel(QObject):
             if entry.get("completed"):
                 # notify listeners if you want (well emits on record)
                 pass
-        self._last_progress_load_warnings = target_mismatches
-        if target_mismatches:
-            preview = ", ".join(
-                f"{w['well_id']}:{w['stock_id']} saved={w['saved_target_droplets']} runtime={w['runtime_target_droplets']}"
-                for w in target_mismatches[:5]
-            )
-            suffix = "" if len(target_mismatches) <= 5 else f", ... +{len(target_mismatches) - 5} more"
+        self._last_progress_load_warnings = progress_warnings
+        if progress_warnings:
+            def _preview(w):
+                code = w.get("code")
+                if code == "progress_target_mismatch":
+                    return (
+                        f"{w['well_id']}:{w['stock_id']} "
+                        f"saved={w['saved_target_droplets']} runtime={w['runtime_target_droplets']}"
+                    )
+                if code == "progress_stock_id_mapped":
+                    return f"{w['well_id']}:{w['stock_id']}->{w['runtime_stock_id']}"
+                return f"{w.get('well_id', '?')}:{w.get('stock_id', '?')} {code}"
+
+            preview = ", ".join(_preview(w) for w in progress_warnings[:5])
+            suffix = "" if len(progress_warnings) <= 5 else f", ... +{len(progress_warnings) - 5} more"
             print(
-                "[ExperimentModel] WARNING: progress.json target droplets differed from "
-                f"regenerated targets for {len(target_mismatches)} reagent entries; "
-                f"using saved progress targets ({preview}{suffix})."
+                "[ExperimentModel] WARNING: progress.json required resume reconciliation "
+                f"for {len(progress_warnings)} reagent entries ({preview}{suffix})."
             )
 
     # -----------------------------
@@ -4551,6 +4768,7 @@ class ExperimentModel(QObject):
         self.progress_file_path = None
         self.progress_data = {}
         self._last_progress_load_warnings = []
+        self._last_progress_stock_override_warnings = []
         self.calibration_file_path = None
         self.key_file_path = None
         self._runtime_well_plate = None
@@ -7962,6 +8180,19 @@ class Model(QObject):
         if self.experiment_model.get_number_of_reactions() == 0:
             print("No reactions in the experiment model.")
             return
+
+        if load_progress:
+            override_result = self.experiment_model._apply_progress_stock_concentration_overrides_for_resume()
+            if override_result.get("applied"):
+                print(
+                    "Applied progress stock concentration overrides before loading runtime reactions: "
+                    f"{override_result.get('applied_overrides')}"
+                )
+            if override_result.get("warnings"):
+                print(
+                    "Progress stock concentration override warnings: "
+                    f"{override_result.get('warnings')}"
+                )
 
         stock_solutions, reaction_collection = self.load_reactions_from_model()
         if stock_solutions is None or reaction_collection is None:

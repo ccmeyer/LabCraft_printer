@@ -88,6 +88,7 @@ def test_apply_droplet_volume_for_option_refreshes_runtime_after_apply():
     assert refresh_calls == [{"write_keys_if_assigned": False}]
     assert option.droplet_nL == 12.0
     assert option.intended_droplet_nL == 10.0
+    assert option.forced_stock_conc == 10.0
     assert stock["droplet_volume_nL"] == 12.0
     assert stock_row["droplet_volume_nL"] == 12.0
     assert em.unsaved_changes is True
@@ -240,6 +241,7 @@ def test_apply_droplet_volume_for_option_persists_effective_and_intended_volume(
     option = _first_option_payload(payload, "glycerol")
     assert option["droplet_nL"] == 15.0
     assert option["intended_droplet_nL"] == 10.0
+    assert option["forced_stock_conc"] == result["stock_concentration"]
     assert result["saved_experiment"] is True
     assert em.unsaved_changes is False
 
@@ -267,10 +269,13 @@ def test_reloading_after_calibrated_volume_apply_uses_saved_effective_counts(
     em = model.experiment_model
     _configure_calibrated_volume_design(em)
     original_target = _first_saved_target(em, "glycerol")
+    original_stock_concentration = em.plans_per_option[("glycerol", None)]["stocks"][0]["stock_concentration"]
 
     em.apply_droplet_volume_for_option("glycerol", None, 15.0, write_keys_if_assigned=False)
     calibrated_target = _first_saved_target(em, "glycerol")
+    calibrated_stock_concentration = em.plans_per_option[("glycerol", None)]["stocks"][0]["stock_concentration"]
     assert calibrated_target != original_target
+    assert calibrated_stock_concentration == original_stock_concentration
 
     reloaded_model = experiment_model_factory()
     reloaded = reloaded_model.experiment_model
@@ -278,4 +283,5 @@ def test_reloading_after_calibrated_volume_apply_uses_saved_effective_counts(
 
     assert reloaded.factors[0].options[0].droplet_nL == 15.0
     assert reloaded.factors[0].options[0].intended_droplet_nL == 10.0
+    assert reloaded.factors[0].options[0].forced_stock_conc == calibrated_stock_concentration
     assert _first_saved_target(reloaded, "glycerol") == calibrated_target

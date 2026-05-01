@@ -1,7 +1,8 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
-from Model import Model, Reagent, StockSolution
+from Model import Model, ReactionComposition, Reagent, StockSolution
 
 
 def _configure_design(em):
@@ -46,6 +47,18 @@ def _first_assigned_reagent_with_target(well_plate, minimum_target=1):
     raise AssertionError("No assigned reaction reagent with target droplets")
 
 
+def _first_assigned_reagent_named(well_plate, reagent_name, minimum_target=1):
+    for well in well_plate.get_all_wells():
+        rxn = well.get_assigned_reaction()
+        if rxn is None:
+            continue
+        for sid, reagent in rxn.get_all_reagents().items():
+            parsed_name = sid.rsplit("_", 2)[0]
+            if parsed_name == reagent_name and reagent.get_target_droplets() >= minimum_target:
+                return well, sid, reagent
+    raise AssertionError(f"No assigned {reagent_name} reagent with target droplets")
+
+
 def _prepare_saved_experiment(model):
     em = model.experiment_model
     _configure_design(em)
@@ -54,6 +67,39 @@ def _prepare_saved_experiment(model):
     em.save_experiment()
     Model.load_experiment_from_model(model, load_progress=False)
     return em
+
+
+def _configure_stock_identity_design(em):
+    em.factors = []
+    em.add_additive("reagent_1", [0.0, 1.0], "mM", 9.1)
+    em.set_metadata(
+        randomize_assignments=False,
+        start_row=0,
+        start_col=0,
+        replicates=1,
+        target_reaction_volume_nL=2000.0,
+        final_reaction_volume_nL=2000.0,
+        fill_reagent_name="Water",
+        fill_printing_mode="stream",
+        fill_droplet_volume_nL=60.0,
+    )
+
+
+def _replace_progress_stock_id(payload, reagent_name, units, replacement_stock_id):
+    replaced = False
+    for well_id, entry in payload.items():
+        if well_id == "__plate__":
+            continue
+        reagents = entry.get("reagents", {})
+        for stock_id in list(reagents.keys()):
+            try:
+                parsed_name, _concentration, parsed_units = stock_id.rsplit("_", 2)
+            except ValueError:
+                continue
+            if parsed_name == reagent_name and parsed_units == units:
+                reagents[replacement_stock_id] = reagents.pop(stock_id)
+                replaced = True
+    assert replaced
 
 
 def test_update_well_plate_reassigns_without_wiping_exclusions(experiment_model_factory):
@@ -186,6 +232,122 @@ def test_load_progress_restores_saved_targets_when_regenerated_target_differs(
         and warning["saved_target_droplets"] == saved_target
         and warning["runtime_target_droplets"] == regenerated_target
         for warning in reloaded_em._last_progress_load_warnings
+    )
+
+
+def test_load_progress_infers_saved_stock_concentration_before_runtime_build(
+    experiment_model_factory,
+):
+    source_model = experiment_model_factory()
+    source_em = source_model.experiment_model
+    _configure_stock_identity_design(source_em)
+    assert source_em.optimize_stock_solutions()["best"]
+    source_em.generate_experiment()
+    source_em.save_experiment()
+    Model.load_experiment_from_model(source_model, load_progress=False)
+
+    well, original_sid, original_reagent = _first_assigned_reagent_named(
+        source_model.well_plate,
+        "reagent_1",
+    )
+    saved_sid = "reagent_1_4.08_mM"
+    assert original_sid != saved_sid
+
+    progress_path = Path(source_em.progress_file_path)
+    payload = json.loads(progress_path.read_text(encoding="utf-8"))
+    _replace_progress_stock_id(payload, "reagent_1", "mM", saved_sid)
+    saved_target = original_reagent.get_target_droplets() + 1
+    payload[well.well_id]["reagents"][saved_sid]["target_droplets"] = saved_target
+    payload[well.well_id]["reagents"][saved_sid]["added_droplets"] = saved_target
+    progress_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    reloaded_model = experiment_model_factory()
+    reloaded_em = reloaded_model.experiment_model
+    reloaded_em.load_experiment(source_em.experiment_file_path, source_em.experiment_dir_path)
+    assert reloaded_em.factors[0].options[0].forced_stock_conc is None
+
+    Model.load_experiment_from_model(reloaded_model, load_progress=True)
+
+    reloaded_well = reloaded_model.well_plate.get_well(well.well_id)
+    runtime_reagent = reloaded_well.get_assigned_reaction().get_reagent_by_id(saved_sid)
+    assert runtime_reagent.get_target_droplets() == saved_target
+    assert runtime_reagent.added_droplets == saved_target
+    assert reloaded_em.factors[0].options[0].forced_stock_conc == 4.08
+
+    design_payload = json.loads(Path(reloaded_em.experiment_file_path).read_text(encoding="utf-8"))
+    reagent_option = next(
+        factor["options"][0]
+        for factor in design_payload["factors"]
+        if factor["name"] == "reagent_1"
+    )
+    assert reagent_option["forced_stock_conc"] == 4.08
+
+
+def test_load_progress_maps_changed_stock_id_by_unique_reagent_identity(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = _prepare_saved_experiment(model)
+
+    well, sid, reagent = _first_assigned_reagent_with_target(model.well_plate)
+    reagent_name, concentration, units = sid.rsplit("_", 2)
+    saved_sid = f"{reagent_name}_{float(concentration) + 1.0:.2f}_{units}"
+    progress_path = Path(em.progress_file_path)
+    payload = json.loads(progress_path.read_text(encoding="utf-8"))
+    payload[well.well_id]["reagents"][saved_sid] = payload[well.well_id]["reagents"].pop(sid)
+    payload[well.well_id]["reagents"][saved_sid]["added_droplets"] = 1
+    progress_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    em.load_progress()
+
+    runtime_reagent = well.get_assigned_reaction().get_reagent_by_id(sid)
+    assert runtime_reagent.added_droplets == 1
+    assert any(
+        warning["code"] == "progress_stock_id_mapped"
+        and warning["stock_id"] == saved_sid
+        and warning["runtime_stock_id"] == sid
+        for warning in em._last_progress_load_warnings
+    )
+
+
+def test_load_progress_ambiguous_stock_id_fallback_does_not_apply(tmp_path, experiment_model_factory):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    stock_a = StockSolution("Mix_1.00_mM", "Mix", 1.0, "mM")
+    stock_b = StockSolution("Mix_2.00_mM", "Mix", 2.0, "mM")
+    rxn = ReactionComposition("R1")
+    rxn.add_reagent(stock_a, 5)
+    rxn.add_reagent(stock_b, 6)
+    well = SimpleNamespace(get_assigned_reaction=lambda: rxn)
+    em._runtime_well_plate = SimpleNamespace(get_well=lambda well_id: well if well_id == "A1" else None)
+    em.progress_file_path = str(tmp_path / "progress.json")
+    Path(em.progress_file_path).write_text(
+        json.dumps(
+            {
+                "A1": {
+                    "reaction_id": "R1",
+                    "reagents": {
+                        "Mix_1.50_mM": {
+                            "target_droplets": 9,
+                            "added_droplets": 9,
+                        }
+                    },
+                    "completed": False,
+                }
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    em.load_progress()
+
+    assert rxn.get_reagent_by_id("Mix_1.00_mM").added_droplets == 0
+    assert rxn.get_reagent_by_id("Mix_2.00_mM").added_droplets == 0
+    assert any(
+        warning["code"] == "progress_stock_id_ambiguous"
+        and warning["stock_id"] == "Mix_1.50_mM"
+        for warning in em._last_progress_load_warnings
     )
 
 
