@@ -5323,6 +5323,27 @@ class WellPlate(QObject):
 
         return wells
 
+    def linear_order(self, wells, fill_by="columns"):
+        """
+        Return wells ordered without zigzag alternation.
+
+        Args:
+            wells (list of Well): The list of wells to be ordered.
+            fill_by (str): Whether to fill wells by "rows" or "columns".
+
+        Returns:
+            list of Well: The list of wells ordered linearly.
+        """
+        def row_to_num(row):
+            return Well.row_label_to_index(row)
+
+        if fill_by == "rows":
+            wells.sort(key=lambda w: (row_to_num(w.row), w.col))
+        else:
+            wells.sort(key=lambda w: (w.col, row_to_num(w.row)))
+
+        return wells
+
     def get_available_wells(self, fill_by="columns",start_row=0,start_col=0):
         """
         Get a list of available wells, sorted by rows or columns in a zigzag pattern.
@@ -5447,19 +5468,22 @@ class WellPlate(QObject):
 
         return reaction_assignment
     
-    def get_all_wells_with_reactions(self, fill_by="columns"):
+    def get_all_wells_with_reactions(self, fill_by="columns", serpentine=True):
         """
-        Get all wells that have been assigned a reaction, sorted in a zigzag pattern.
+        Get all wells that have been assigned a reaction.
 
         Args:
             fill_by (str): Whether to fill wells by "rows" or "columns".
+            serpentine (bool): Whether to use the existing zigzag pattern.
 
         Returns:
             list of Well: Sorted list of wells with assigned reactions.
         """
         wells_with_reactions = [well for well in self.wells.values() if well.assigned_reaction is not None]
 
-        return self.zigzag_order(wells_with_reactions, fill_by=fill_by)
+        if serpentine:
+            return self.zigzag_order(wells_with_reactions, fill_by=fill_by)
+        return self.linear_order(wells_with_reactions, fill_by=fill_by)
     
     def well_state_changed(self, well_id):
         """Handle changes in the state of a well."""

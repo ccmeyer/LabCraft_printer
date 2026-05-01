@@ -5,6 +5,7 @@ from Controller import (
     ARRAY_AXIS_ACCEL_DEFAULT,
     ARRAY_PAUSE_DEPARTURE_ACCEL,
     ARRAY_PAUSE_DEPARTURE_SETTLE_MS,
+    ARRAY_ROW_START_OVERSHOOT_STEPS,
     Controller,
 )
 
@@ -20,6 +21,14 @@ class Emitter:
 class FakeWell:
     def __init__(self, well_id, remaining, coords=None):
         self.well_id = well_id
+        row = ''.join(ch for ch in self.well_id if ch.isalpha()).upper()
+        col = ''.join(ch for ch in self.well_id if ch.isdigit())
+        self.row = row
+        self.col = int(col)
+        row_num = 0
+        for ch in row:
+            row_num = row_num * 26 + (ord(ch) - ord('A') + 1)
+        self.row_num = row_num - 1
         self.remaining = int(remaining)
         self.coords = coords or {"X": 1, "Y": 2, "Z": 3}
         self.record_calls = []
@@ -28,7 +37,9 @@ class FakeWell:
         return self.remaining
 
     def get_coordinates(self):
-        return dict(self.coords)
+        if isinstance(self.coords, dict):
+            return dict(self.coords)
+        return self.coords
 
     def record_stock_print(self, stock_id, droplets):
         droplets = int(droplets)
@@ -44,9 +55,18 @@ class FakeWellPlate:
     def check_calibration_applied(self):
         return self._calibration_ok
 
-    def get_all_wells_with_reactions(self, fill_by="rows"):
+    def get_all_wells_with_reactions(self, fill_by="rows", serpentine=True):
         assert fill_by == "rows"
-        return list(self.wells.values())
+        wells = list(self.wells.values())
+        if serpentine:
+            return sorted(
+                wells,
+                key=lambda well: (
+                    well.row_num,
+                    well.col if well.row_num % 2 == 0 else -well.col,
+                ),
+            )
+        return sorted(wells, key=lambda well: (well.row_num, well.col))
 
     def get_well(self, well_id):
         return self.wells.get(well_id)
@@ -227,6 +247,72 @@ def test_print_array_prefetches_one_lookahead_well():
     assert [item["well_id"] for item in c._array_context["queued_wells"]] == ["A1", "A2"]
     assert c._array_context["pause_departure_pending"] is False
     assert c.get_array_run_state() == "running"
+
+
+def test_print_array_uses_row_major_order_not_serpentine():
+    a1 = FakeWell("A1", 1, {"X": 10, "Y": 0, "Z": 30})
+    a2 = FakeWell("A2", 1, {"X": 20, "Y": 0, "Z": 30})
+    b1 = FakeWell("B1", 1, {"X": 10, "Y": 10, "Z": 30})
+    b2 = FakeWell("B2", 1, {"X": 20, "Y": 10, "Z": 30})
+    c = _make_controller(
+        well_plate=FakeWellPlate([a1, a2, b2, b1]),
+        printer_head=_make_printer_head(),
+    )
+    c._array_row_start_overshoot_steps = 0
+
+    Controller.print_array(c)
+    Controller._handle_array_well_complete(c, well_id="A1", stock_id="stock-a", target_droplets=1)
+    Controller._handle_array_well_complete(c, well_id="A2", stock_id="stock-a", target_droplets=1)
+
+    assert c.set_absolute_coordinates.call_args_list == [
+        call(10, 0, 30, override=True),
+        call(20, 0, 30, override=True),
+        call(10, 10, 30, override=True),
+        call(20, 10, 30, override=True),
+    ]
+    assert [call.kwargs["kwargs"]["well_id"] for call in c.print_droplets.call_args_list] == [
+        "A1",
+        "A2",
+        "B1",
+        "B2",
+    ]
+
+
+def test_print_array_overshoots_first_well_of_next_row():
+    a2 = FakeWell("A2", 1, {"X": 20, "Y": 0, "Z": 30})
+    b1 = FakeWell("B1", 1, {"X": 0, "Y": 10, "Z": 40})
+    b2 = FakeWell("B2", 0, {"X": 10, "Y": 10, "Z": 40})
+    c = _make_controller(
+        well_plate=FakeWellPlate([a2, b1, b2]),
+        printer_head=_make_printer_head(),
+    )
+
+    Controller.print_array(c)
+
+    assert c.set_absolute_coordinates.call_args_list == [
+        call(20, 0, 30, override=True),
+        call(-ARRAY_ROW_START_OVERSHOOT_STEPS, 10, 40, override=True),
+        call(0, 10, 40, override=True),
+    ]
+    assert [call.kwargs["kwargs"]["well_id"] for call in c.print_droplets.call_args_list] == ["A2", "B1"]
+
+
+def test_print_array_skips_row_overshoot_when_neighbor_coordinates_are_invalid():
+    a2 = FakeWell("A2", 1, {"X": 20, "Y": 0, "Z": 30})
+    b1 = FakeWell("B1", 1, {"X": 0, "Y": 10, "Z": 40})
+    b2 = FakeWell("B2", 0, "bad-coordinates")
+    c = _make_controller(
+        well_plate=FakeWellPlate([a2, b1, b2]),
+        printer_head=_make_printer_head(),
+    )
+
+    Controller.print_array(c)
+
+    assert c.set_absolute_coordinates.call_args_list == [
+        call(20, 0, 30, override=True),
+        call(0, 10, 40, override=True),
+    ]
+    assert [call.kwargs["kwargs"]["well_id"] for call in c.print_droplets.call_args_list] == ["A2", "B1"]
 
 
 def test_print_array_resume_ready_starts_next_incomplete_well():

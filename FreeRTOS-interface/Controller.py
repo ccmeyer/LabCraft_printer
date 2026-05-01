@@ -20,6 +20,7 @@ from hardware.null_devices import NullCamera
 ARRAY_PAUSE_DEPARTURE_ACCEL = 16000
 ARRAY_PAUSE_DEPARTURE_SETTLE_MS = 200
 ARRAY_AXIS_ACCEL_DEFAULT = 140000
+ARRAY_ROW_START_OVERSHOOT_STEPS = 200
 
 class Controller(QObject):
     """Controller class for the application."""
@@ -1297,7 +1298,7 @@ class Controller(QObject):
     def _get_array_remaining_wells(self, stock_id):
         if not stock_id:
             return []
-        reaction_wells = self.model.well_plate.get_all_wells_with_reactions(fill_by='rows')
+        reaction_wells = self.model.well_plate.get_all_wells_with_reactions(fill_by='rows', serpentine=False)
         return [well for well in reaction_wells if well.get_remaining_droplets(stock_id) > 0]
 
     def _start_array_run_context(self):
@@ -1345,6 +1346,11 @@ class Controller(QObject):
             "pause_departure_restore_accels": self._get_array_pause_departure_restore_accels(),
             "array_accels_lowered": False,
             "array_accels_restored": False,
+            "row_start_overshoot_steps": int(
+                getattr(self, "_array_row_start_overshoot_steps", ARRAY_ROW_START_OVERSHOOT_STEPS)
+            ),
+            "last_planned_row_num": None,
+            "last_planned_col": None,
         }
         return True
 
@@ -1450,6 +1456,95 @@ class Controller(QObject):
                 return well
         return None
 
+    def _get_array_well_row_col(self, well):
+        try:
+            return int(well.row_num), int(well.col)
+        except Exception:
+            return None, None
+
+    def _get_well_xy_direction(self, target_coords, neighbor_coords, *, invert=False):
+        try:
+            target_x = float(target_coords['X'])
+            target_y = float(target_coords['Y'])
+            neighbor_x = float(neighbor_coords['X'])
+            neighbor_y = float(neighbor_coords['Y'])
+        except Exception:
+            return None
+
+        dx = neighbor_x - target_x
+        dy = neighbor_y - target_y
+        if invert:
+            dx = -dx
+            dy = -dy
+
+        length = math.hypot(dx, dy)
+        if length <= 0:
+            return None
+        return dx / length, dy / length
+
+    def _get_array_row_start_overshoot_coords(self, context, well, target_coords):
+        try:
+            overshoot_steps = int(context.get("row_start_overshoot_steps") or 0)
+        except Exception:
+            overshoot_steps = 0
+        if overshoot_steps <= 0:
+            return None
+
+        row_num, col = self._get_array_well_row_col(well)
+        last_row_num = context.get("last_planned_row_num")
+        if row_num is None or col is None or last_row_num is None:
+            return None
+        try:
+            if row_num <= int(last_row_num):
+                return None
+        except Exception:
+            return None
+
+        row_label = getattr(well, "row", None)
+        if not row_label:
+            return None
+
+        well_plate = getattr(self.model, "well_plate", None)
+        get_well = getattr(well_plate, "get_well", None)
+        if not callable(get_well):
+            return None
+
+        direction = None
+        right_neighbor = get_well(f"{row_label}{col + 1}")
+        if right_neighbor is not None:
+            right_coords = right_neighbor.get_coordinates()
+            if isinstance(right_coords, dict):
+                direction = self._get_well_xy_direction(target_coords, right_coords)
+
+        if direction is None and col > 1:
+            left_neighbor = get_well(f"{row_label}{col - 1}")
+            if left_neighbor is not None:
+                left_coords = left_neighbor.get_coordinates()
+                if isinstance(left_coords, dict):
+                    direction = self._get_well_xy_direction(target_coords, left_coords, invert=True)
+
+        if direction is None:
+            return None
+
+        unit_x, unit_y = direction
+        try:
+            target_x = float(target_coords['X'])
+            target_y = float(target_coords['Y'])
+            target_z = target_coords['Z']
+        except Exception:
+            return None
+
+        return {
+            'X': int(round(target_x - unit_x * overshoot_steps, 0)),
+            'Y': int(round(target_y - unit_y * overshoot_steps, 0)),
+            'Z': target_z,
+        }
+
+    def _record_last_planned_array_well(self, context, well):
+        row_num, col = self._get_array_well_row_col(well)
+        context["last_planned_row_num"] = row_num
+        context["last_planned_col"] = col
+
     def _update_current_array_barrier(self):
         context = getattr(self, "_array_context", None) or {}
         queued_wells = list(context.get("queued_wells") or [])
@@ -1474,6 +1569,13 @@ class Controller(QObject):
 
         apply_pause_departure_safeguards = bool(context.get("pause_departure_pending"))
         pause_departure_settle_ms = max(0, int(context.get("pause_departure_settle_ms") or 0))
+
+        overshoot_coords = self._get_array_row_start_overshoot_coords(context, well, well_coords)
+        if overshoot_coords is not None:
+            if self.set_absolute_coordinates(overshoot_coords['X'], overshoot_coords['Y'], overshoot_coords['Z'], override=True) is False:
+                self.error_occurred_signal.emit('Print Array Error', f'Failed to queue row-entry approach for well {well.well_id}')
+                self._complete_array_finalize("hard_abort")
+                return False
 
         if self.set_absolute_coordinates(well_coords['X'], well_coords['Y'], well_coords['Z'], override=True) is False:
             self.error_occurred_signal.emit('Print Array Error', f'Failed to move to well {well.well_id}')
@@ -1513,6 +1615,7 @@ class Controller(QObject):
                 "dispense_seq32": int(getattr(dispense_command, "command_number", 0) or 0),
             }
         )
+        self._record_last_planned_array_well(context, well)
         self._update_current_array_barrier()
         return True
 
