@@ -4391,6 +4391,96 @@ class ExperimentModel(QObject):
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return {}
 
+    def get_progress_status(self, progress_file_path: Optional[str] = None) -> dict:
+        """
+        Summarize whether progress.json contains real printed progress.
+
+        A generated progress file with zero added droplets is bookkeeping only:
+        it should not freeze design editing or force resume stock overrides.
+        """
+        import json
+        import os
+
+        path = progress_file_path or self.progress_file_path
+        status = {
+            "path": path,
+            "exists": False,
+            "readable": False,
+            "has_printed_progress": False,
+            "total_added_droplets": 0,
+            "wells_with_progress": 0,
+            "well_count": 0,
+            "reagent_entry_count": 0,
+            "error": None,
+        }
+        if not path:
+            return status
+        if not os.path.exists(path):
+            return status
+
+        status["exists"] = True
+        try:
+            with open(path, "r") as f:
+                payload = json.load(f)
+        except (json.JSONDecodeError, OSError) as exc:
+            status["error"] = str(exc)
+            return status
+
+        if not isinstance(payload, dict):
+            status["error"] = "progress.json does not contain an object"
+            return status
+
+        status["readable"] = True
+        total_added = 0
+        wells_with_progress = 0
+        well_count = 0
+        reagent_entry_count = 0
+
+        for well_id, entry in payload.items():
+            if well_id == "__plate__" or not isinstance(entry, dict):
+                continue
+            well_count += 1
+            well_added = 0
+            reagents = entry.get("reagents") or {}
+            if not isinstance(reagents, dict):
+                continue
+            for rd in reagents.values():
+                if not isinstance(rd, dict):
+                    continue
+                reagent_entry_count += 1
+                try:
+                    added = int(rd.get("added_droplets", 0) or 0)
+                except (TypeError, ValueError):
+                    added = 0
+                if added > 0:
+                    total_added += added
+                    well_added += added
+            if well_added > 0:
+                wells_with_progress += 1
+
+        status["total_added_droplets"] = total_added
+        status["wells_with_progress"] = wells_with_progress
+        status["well_count"] = well_count
+        status["reagent_entry_count"] = reagent_entry_count
+        status["has_printed_progress"] = total_added > 0
+        return status
+
+    def clear_progress_for_design_edit(self, progress_file_path: Optional[str] = None) -> dict:
+        """
+        Explicitly discard run progress so the design can be edited safely.
+
+        The next fresh load/apply path will regenerate progress.json from the
+        current runtime assignments.
+        """
+        path = progress_file_path or self.progress_file_path
+        before = self.get_progress_status(path)
+        if path:
+            self._atomic_json_dump(path, {})
+        self.progress_data = {}
+        self._last_progress_load_warnings = []
+        self._last_progress_stock_override_warnings = []
+        return before
+
     @staticmethod
     def _parse_progress_stock_id(stock_id: str):
         try:

@@ -85,6 +85,31 @@ def _configure_stock_identity_design(em):
     )
 
 
+def _configure_forced_stock_identity_design(em, forced_stock_conc):
+    em.factors = []
+    em.add_additive(
+        "reagent_1",
+        [0.0, 1.0],
+        "mM",
+        9.1,
+        forced_stock_conc=forced_stock_conc,
+    )
+    em.set_metadata(
+        randomize_assignments=False,
+        start_row=0,
+        start_col=0,
+        replicates=1,
+        target_reaction_volume_nL=2000.0,
+        final_reaction_volume_nL=2000.0,
+        fill_reagent_name="Water",
+        fill_printing_mode="stream",
+        fill_droplet_volume_nL=60.0,
+    )
+    assert em.optimize_stock_solutions()["best"]
+    em.generate_experiment()
+    em.save_experiment()
+
+
 def _replace_progress_stock_id(payload, reagent_name, units, replacement_stock_id):
     replaced = False
     for well_id, entry in payload.items():
@@ -142,6 +167,48 @@ def test_load_progress_applies_added_droplets(experiment_model_factory):
     em.load_progress()
     runtime_reagent = well.get_assigned_reaction().get_reagent_by_id(sid)
     assert runtime_reagent.added_droplets == 1
+
+
+def test_progress_status_treats_zero_added_file_as_unstarted(experiment_model_factory):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_design(em)
+    assert em.optimize_stock_solutions()["best"]
+    em.generate_experiment()
+    Model.load_experiment_from_model(model, load_progress=False)
+
+    status = em.get_progress_status()
+
+    assert status["exists"] is True
+    assert status["readable"] is True
+    assert status["has_printed_progress"] is False
+    assert status["total_added_droplets"] == 0
+
+
+def test_progress_status_detects_added_droplets_and_clear_resets_file(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_design(em)
+    assert em.optimize_stock_solutions()["best"]
+    em.generate_experiment()
+    Model.load_experiment_from_model(model, load_progress=False)
+
+    well, sid, _reagent = _first_assigned_reagent_with_target(model.well_plate)
+    progress_path = Path(em.progress_file_path)
+    payload = json.loads(progress_path.read_text(encoding="utf-8"))
+    payload[well.well_id]["reagents"][sid]["added_droplets"] = 2
+    progress_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    status = em.get_progress_status()
+    before_clear = em.clear_progress_for_design_edit()
+
+    assert status["has_printed_progress"] is True
+    assert status["total_added_droplets"] == 2
+    assert before_clear["has_printed_progress"] is True
+    assert json.loads(progress_path.read_text(encoding="utf-8")) == {}
+    assert em.progress_data == {}
 
 
 def test_load_progress_skips_unknown_reagent_ids_gracefully(experiment_model_factory):
@@ -372,6 +439,38 @@ def test_explicit_fresh_load_overwrites_saved_progress(experiment_model_factory)
 
     disk_payload = json.loads(progress_path.read_text(encoding="utf-8"))
     assert disk_payload[well.well_id]["reagents"][sid]["added_droplets"] == 0
+
+
+def test_fresh_finish_after_unstarted_progress_keeps_edited_fixed_stock(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_forced_stock_identity_design(em, 4.08)
+    Model.load_experiment_from_model(model, load_progress=False)
+    assert em.get_progress_status()["has_printed_progress"] is False
+
+    _configure_forced_stock_identity_design(em, 5.0)
+    Model.load_experiment_from_model(model, load_progress=False)
+
+    assert em.factors[0].options[0].forced_stock_conc == 5.0
+    design_payload = json.loads(Path(em.experiment_file_path).read_text(encoding="utf-8"))
+    reagent_option = next(
+        factor["options"][0]
+        for factor in design_payload["factors"]
+        if factor["name"] == "reagent_1"
+    )
+    assert reagent_option["forced_stock_conc"] == 5.0
+
+    progress_payload = json.loads(Path(em.progress_file_path).read_text(encoding="utf-8"))
+    progress_stock_ids = {
+        stock_id
+        for well_id, entry in progress_payload.items()
+        if well_id != "__plate__"
+        for stock_id in entry.get("reagents", {})
+    }
+    assert "reagent_1_5.00_mM" in progress_stock_ids
+    assert "reagent_1_4.08_mM" not in progress_stock_ids
 
 
 def test_reagent_over_target_is_complete_and_has_no_remaining_droplets():

@@ -126,7 +126,7 @@ def test_experiment_designer_finish_calls_apply_once():
 
     ExperimentDesignDialog._on_finish(dialog)
 
-    complete_mock.assert_called_once_with()
+    complete_mock.assert_called_once_with(load_progress=False)
     save_mock.assert_called_once_with()
     assert dialog._apply_requested is True
 

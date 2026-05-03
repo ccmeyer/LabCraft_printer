@@ -590,11 +590,11 @@ class MainWindow(QMainWindow):
     def disconnect_successful(self):
         self.disconnected = True
 
-    def complete_experiment_design(self):
+    def complete_experiment_design(self, *, load_progress: bool = False):
         """Handle completion of experiment design."""
         print("[MainWindow] Experiment design completed.")
         plate_name = self.model.experiment_model.metadata.get("plate_name")
-        self.model.load_experiment_from_model(plate_name=plate_name, load_progress=True)
+        self.model.load_experiment_from_model(plate_name=plate_name, load_progress=load_progress)
     
     def closeEvent(self, event):
         """Handle the window close event."""
@@ -2541,6 +2541,9 @@ class WellPlateWidget(QtWidgets.QGroupBox):
     def open_experiment_designer(self):
         # dialog = ExperimentDesignDialog(self.main_window, self.model)
         dialog = ExperimentDesignDialog(self.model.experiment_model,self.main_window)
+        if hasattr(dialog, "prepare_progress_policy_for_current_design"):
+            if not dialog.prepare_progress_policy_for_current_design():
+                return
         if dialog.exec():
             print("Experiment file generated and loaded.")
 
@@ -4923,6 +4926,10 @@ class ExperimentDesignDialog(QDialog):
     COL_PRIOR        = 11
     COL_DELETE       = 12
 
+    PROGRESS_POLICY_RESUME = "resume"
+    PROGRESS_POLICY_RESET = "reset"
+    PROGRESS_POLICY_CANCEL = "cancel"
+
     def __init__(self, model: ExperimentModel, main_window):
         super().__init__()
         self.main_window = main_window
@@ -4950,6 +4957,10 @@ class ExperimentDesignDialog(QDialog):
         self._uploaded_design_path: str | None = getattr(self.model, "_uploaded_design_source", None)
         self._apply_requested: bool = False
         self._editing_locked_by_gripper: bool = False
+        self._progress_protected: bool = False
+        self._preserve_progress_on_finish: bool = False
+        self._progress_reset_confirmed: bool = False
+        self._progress_lock_status_message: str = ""
         self._gripper_lock_connection = None
 
 
@@ -6270,6 +6281,7 @@ class ExperimentDesignDialog(QDialog):
         self._apply_default_edit_state()
         self._apply_uploaded_design_mode_to_ui(active=self._uploaded_design_active)
         self._apply_manual_assignment_lock_state()
+        self._apply_progress_edit_lock_state()
         self._apply_gripper_edit_lock_state()
 
     def _apply_uploaded_design_mode_to_ui(self, active: bool):
@@ -6390,6 +6402,120 @@ class ExperimentDesignDialog(QDialog):
                     w.setReadOnly(False)
                 else:
                     w.setEnabled(True)
+
+    def _progress_status_message(self, status: Mapping[str, Any]) -> str:
+        wells = int(status.get("wells_with_progress", 0) or 0)
+        droplets = int(status.get("total_added_droplets", 0) or 0)
+        return (
+            "This experiment has saved print progress "
+            f"({droplets} droplet(s) recorded across {wells} well(s)). "
+            "The design is view-only unless progress is deleted."
+        )
+
+    def _set_progress_protection(self, protected: bool, status: Mapping[str, Any] | None = None):
+        self._progress_protected = bool(protected)
+        self._preserve_progress_on_finish = bool(protected)
+        self._progress_lock_status_message = (
+            self._progress_status_message(status or {})
+            if protected
+            else ""
+        )
+
+    def _prompt_progress_policy(self, status: Mapping[str, Any], *, title: str) -> str:
+        message = self._progress_status_message(status)
+        msg = QMessageBox(self)
+        msg.setWindowTitle(title)
+        msg.setIcon(QMessageBox.Warning)
+        msg.setText(message)
+        msg.setInformativeText(
+            "Keep Progress / Resume will preserve the saved run state and keep the design read-only. "
+            "Delete Progress and Edit will discard saved progress so the design can be changed."
+        )
+        keep_btn = msg.addButton("Keep Progress / Resume", QMessageBox.AcceptRole)
+        reset_btn = msg.addButton("Delete Progress and Edit", QMessageBox.DestructiveRole)
+        cancel_btn = msg.addButton(QMessageBox.Cancel)
+        msg.setDefaultButton(keep_btn)
+        msg.exec()
+
+        clicked = msg.clickedButton()
+        if clicked is reset_btn:
+            return self.PROGRESS_POLICY_RESET
+        if clicked is cancel_btn:
+            return self.PROGRESS_POLICY_CANCEL
+        return self.PROGRESS_POLICY_RESUME
+
+    def prepare_progress_policy_for_current_design(self) -> bool:
+        get_status = getattr(self.model, "get_progress_status", None)
+        status = get_status() if callable(get_status) else {}
+        if not status.get("has_printed_progress"):
+            self._set_progress_protection(False)
+            self._progress_reset_confirmed = False
+            self._refresh_all_lock_states()
+            return True
+
+        policy = self._prompt_progress_policy(
+            status,
+            title="Experiment progress exists",
+        )
+        if policy == self.PROGRESS_POLICY_CANCEL:
+            return False
+        if policy == self.PROGRESS_POLICY_RESET:
+            clearer = getattr(self.model, "clear_progress_for_design_edit", None)
+            if callable(clearer):
+                clearer()
+            self._progress_reset_confirmed = True
+            self._set_progress_protection(False)
+            self._set_status("Saved progress deleted. The design can be edited.")
+        else:
+            self._progress_reset_confirmed = False
+            self._set_progress_protection(True, status)
+            self._set_status(self._progress_lock_status_message)
+        self._refresh_all_lock_states()
+        return True
+
+    def _apply_progress_edit_lock_state(self):
+        if not getattr(self, "_progress_protected", False):
+            if hasattr(self, "status_lbl") and self.status_lbl is not None:
+                if self.status_lbl.text() == getattr(self, "_progress_lock_status_message", ""):
+                    self._set_status("")
+            return
+
+        mutating_controls = [
+            "add_reagent_btn",
+            "upload_design_btn",
+            "reset_upload_btn",
+            "run_btn",
+            "save_btn",
+            "rep_spin",
+            "v_spin",
+            "final_v_spin",
+            "fill_name_edit",
+            "fill_mode_combo",
+            "fill_dv_spin",
+            "allow_two_chk",
+            "randomize_chk",
+            "random_seed_spin",
+            "subset_chk",
+            "reduction_spin",
+            "start_col_spin",
+            "start_row_spin",
+            "plate_format_combo",
+        ]
+        for attr_name in mutating_controls:
+            widget = getattr(self, attr_name, None)
+            if widget is not None:
+                widget.setEnabled(False)
+
+        if hasattr(self, "reagent_table") and self.reagent_table is not None:
+            for _row, _col, w in self._iter_reagent_widgets():
+                if isinstance(w, QLineEdit):
+                    w.setReadOnly(True)
+                else:
+                    w.setEnabled(False)
+
+        message = getattr(self, "_progress_lock_status_message", "")
+        if message:
+            self._set_status(message)
 
     # -----------------------------
     # Model rebuild & metadata
@@ -7223,6 +7349,9 @@ class ExperimentDesignDialog(QDialog):
                 self._set_status(f"New experiment failed (fallback): {e}")
                 return
 
+        self._progress_reset_confirmed = False
+        self._set_progress_protection(False)
+
         # Repaint UI from the fresh model (avoid auto-update churn while setting)
         blockers = [
             QSignalBlocker(self.exp_name_edit), QSignalBlocker(self.rep_spin),
@@ -7283,8 +7412,34 @@ class ExperimentDesignDialog(QDialog):
             self._set_status(f"No 'experiment_design.json' found in: {exp_dir}")
             return
 
+        progress_path = os.path.join(exp_dir, "progress.json")
+        progress_status = {}
+        get_status = getattr(self.model, "get_progress_status", None)
+        if callable(get_status):
+            progress_status = get_status(progress_file_path=progress_path)
+
+        progress_policy = None
+        if progress_status.get("has_printed_progress"):
+            progress_policy = self._prompt_progress_policy(
+                progress_status,
+                title="Loaded experiment has saved progress",
+            )
+            if progress_policy == self.PROGRESS_POLICY_CANCEL:
+                self._set_status("Load canceled; current design was left unchanged.")
+                return
+            if progress_policy == self.PROGRESS_POLICY_RESET:
+                clearer = getattr(self.model, "clear_progress_for_design_edit", None)
+                if callable(clearer):
+                    clearer(progress_file_path=progress_path)
+
         # Load into the model (recomputes optimization + grid)
         self.model.load_experiment(path, exp_dir)
+        if progress_policy == self.PROGRESS_POLICY_RESUME:
+            self._progress_reset_confirmed = False
+            self._set_progress_protection(True, progress_status)
+        else:
+            self._progress_reset_confirmed = progress_policy == self.PROGRESS_POLICY_RESET
+            self._set_progress_protection(False)
 
         # After loading, refresh uploaded-design UI state
         self._uploaded_design_active = self.model.has_uploaded_design()
@@ -7300,8 +7455,14 @@ class ExperimentDesignDialog(QDialog):
         self._refresh_stock_table()
         self._update_summary_labels()
         self._refresh_all_prior_availability()
+        self._refresh_all_lock_states()
 
-        self._set_status(f"Design loaded from: {exp_dir}")
+        if progress_policy == self.PROGRESS_POLICY_RESUME:
+            self._set_status(self._progress_lock_status_message)
+        elif progress_policy == self.PROGRESS_POLICY_RESET:
+            self._set_status(f"Design loaded from: {exp_dir}. Saved progress deleted; edits are enabled.")
+        else:
+            self._set_status(f"Design loaded from: {exp_dir}")
 
     def _on_finish(self):
         """
@@ -7311,6 +7472,16 @@ class ExperimentDesignDialog(QDialog):
         if self._editing_locked_by_gripper:
             self._set_status("Design is view-only while a printer head is loaded in the gripper.")
             return
+
+        if (
+            not getattr(self, "_progress_protected", False)
+            and not getattr(self, "_progress_reset_confirmed", False)
+        ):
+            get_status = getattr(self.model, "get_progress_status", None)
+            status = get_status() if callable(get_status) else {}
+            if status.get("has_printed_progress"):
+                if not self.prepare_progress_policy_for_current_design():
+                    return
 
         # Reuse the same logic as Optimize & Generate
         if not self._on_optimize_and_generate(show_capacity_dialog=True):
@@ -7326,7 +7497,9 @@ class ExperimentDesignDialog(QDialog):
         # Propagate the experiment to the main window
         try:
             if self.main_window is not None and hasattr(self.main_window, "complete_experiment_design"):
-                self.main_window.complete_experiment_design()
+                self.main_window.complete_experiment_design(
+                    load_progress=getattr(self, "_preserve_progress_on_finish", False)
+                )
                 self._apply_requested = True
         except Exception as e:
             message = str(e) or "Unknown error applying the experiment design."
