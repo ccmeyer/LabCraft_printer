@@ -28,6 +28,7 @@ import pandas as pd
 
 WELL_RE = re.compile(r"^[A-P](?:[1-9]|1[0-9]|2[0-4])$")
 EX_EM_RE = re.compile(r"^(\d+)\s+(\d+)$")
+WAVELENGTH_RE = re.compile(r"^\d{3}(?:\.0)?$")
 TIME_RE = re.compile(r"^\d{2}:\d{2}:\d{2}$")
 DEFAULT_KEY_FILENAME = "concentration_key.csv"
 DEFAULT_PLATE_PATTERN = "*_data.xls"
@@ -57,7 +58,47 @@ class MergeSummary:
     missing_key_wells: list[str]
 
 
-def extract_channel_labels(metadata_row: list[str]) -> list[str]:
+def _parse_wavelength_cell(raw: object) -> int | None:
+    text = str(raw).strip()
+    if not WAVELENGTH_RE.match(text):
+        return None
+    return int(float(text))
+
+
+def infer_single_channel_label(metadata_row: list[str]) -> str | None:
+    """
+    Infer an Ex/Em label from LabCraft single-channel metadata.
+
+    Multi-channel exports store labels as combined cells such as "502 540".
+    Single-channel exports can instead split the same information across
+    fixed metadata fields; in observed exports, emission is at index 16 and
+    excitation is at index 20.
+    """
+    emission_nm = _parse_wavelength_cell(metadata_row[16]) if len(metadata_row) > 16 else None
+    excitation_nm = _parse_wavelength_cell(metadata_row[20]) if len(metadata_row) > 20 else None
+    if excitation_nm is not None and emission_nm is not None and excitation_nm != emission_nm:
+        return f"{excitation_nm}_{emission_nm}"
+
+    wavelength_candidates: list[int] = []
+    seen: set[int] = set()
+    for raw in metadata_row:
+        wavelength = _parse_wavelength_cell(raw)
+        if wavelength is None or wavelength in {96, 384, 1536}:
+            continue
+        if not 400 <= wavelength <= 800:
+            continue
+        if wavelength not in seen:
+            seen.add(wavelength)
+            wavelength_candidates.append(wavelength)
+
+    if len(wavelength_candidates) == 2:
+        excitation_nm, emission_nm = sorted(wavelength_candidates)
+        return f"{excitation_nm}_{emission_nm}"
+
+    return None
+
+
+def extract_channel_labels(metadata_row: list[str], *, expected_count: int | None = None) -> list[str]:
     """Extract unique Ex/Em labels from the metadata row and format as 502_540."""
     labels: list[str] = []
     seen: set[str] = set()
@@ -71,6 +112,14 @@ def extract_channel_labels(metadata_row: list[str]) -> list[str]:
         if label not in seen:
             seen.add(label)
             labels.append(label)
+
+    if not labels:
+        inferred_label = infer_single_channel_label(metadata_row)
+        if inferred_label is not None:
+            labels.append(inferred_label)
+
+    if not labels and expected_count == 1:
+        labels.append("channel_1")
 
     if not labels:
         raise ValueError("Could not find any excitation/emission labels in the metadata row.")
@@ -134,7 +183,6 @@ def parse_plate_reader(path: str | Path) -> pd.DataFrame:
 
     metadata_row = rows[1]
     header_row = rows[2]
-    channel_labels = extract_channel_labels(metadata_row)
 
     if len(header_row) < 3 or str(header_row[0]).strip() != "Time":
         raise ValueError("Unexpected plate-reader header row; expected 'Time' in the first column.")
@@ -148,6 +196,7 @@ def parse_plate_reader(path: str | Path) -> pd.DataFrame:
     well_column_indices = [column_indices_by_name[well] for well in well_columns]
 
     blocks = split_into_blocks(rows[3:])
+    channel_labels = extract_channel_labels(metadata_row, expected_count=len(blocks))
     if len(blocks) != len(channel_labels):
         raise ValueError(
             f"Found {len(blocks)} data blocks but {len(channel_labels)} channel labels. "
