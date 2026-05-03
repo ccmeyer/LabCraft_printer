@@ -37,6 +37,8 @@ public:
   void stopPump();
   /// Stop pump refresh
   void stopRefresh();
+  /// Force gripper hardware to a safe idle state
+  void forceOff();
 
   // ---- Runtime setters/getters (ticks) ----
   void      setRefreshPeriodTicks(TickType_t ticks);
@@ -84,6 +86,7 @@ private:
   // ---- synchronization state ----
   static SemaphoreHandle_t _vacuumGate;  // binary semaphore shared with Printer
   TaskHandle_t   _refreshTask = nullptr; // worker that performs refresh pulses
+  volatile bool  _refreshEnabled = false; // true while background refresh may pulse
   volatile bool  _isRefreshing = false;  // true while a refresh/open/close pulse is active
   bool           _gateHeld     = false;  // true if THIS gripper instance took the gate
 };
@@ -98,6 +101,7 @@ void MX_GRIPPER_Open(void);
 void MX_GRIPPER_Close(void);
 void MX_GRIPPER_StopPump(void);
 void MX_GRIPPER_StopRefresh(void);
+void MX_GRIPPER_ForceOff(void);
 
 void     MX_GRIPPER_SetRefreshPeriodMs(uint32_t ms);
 void     MX_GRIPPER_SetPulseDurationMs(uint32_t ms);

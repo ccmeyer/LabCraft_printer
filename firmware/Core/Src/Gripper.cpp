@@ -32,7 +32,8 @@ Gripper::Gripper()
     _valvePort(nullptr), _valvePin(0),
     _refreshTimer(nullptr), _pumpOffTimer(nullptr),
     _refreshPeriod(0), _pulseDuration(0), _callerTask(nullptr),
-    _refreshTask(nullptr), _isRefreshing(false), _gateHeld(false)
+    _refreshTask(nullptr), _refreshEnabled(false), _isRefreshing(false),
+    _gateHeld(false)
 {}
 
 void Gripper::begin(GPIO_TypeDef* pumpPort, uint16_t pumpPin,
@@ -45,6 +46,7 @@ void Gripper::begin(GPIO_TypeDef* pumpPort, uint16_t pumpPin,
   _refreshPeriod  = refreshPeriodTicks;
   _pulseDuration  = pulseDurationTicks;
   _busy = false;
+  _refreshEnabled = false;
 
   // --- GPIO setup ---
   __HAL_RCC_GPIOD_CLK_ENABLE();
@@ -118,6 +120,7 @@ void Gripper::open() {
   }
   _gateHeld = true;
   _isRefreshing = true;
+  _refreshEnabled = true;
 
   EXTI8_SoftwareTrigger();
   // start refreshing from now on
@@ -145,6 +148,7 @@ void Gripper::close() {
   }
   _gateHeld = true;
   _isRefreshing = true;
+  _refreshEnabled = true;
 
   // start refreshing from now on
   if (_refreshTimer) {
@@ -165,10 +169,36 @@ void Gripper::stopPump() {
 }
 
 void Gripper::stopRefresh() {
+  _refreshEnabled = false;
   if (_refreshTimer) {
     xTimerStop(_refreshTimer, 0);
   }
   HAL_GPIO_WritePin(_pumpPort, _pumpPin, GPIO_PIN_RESET);
+}
+
+void Gripper::forceOff() {
+  _refreshEnabled = false;
+  if (_refreshTimer) {
+    xTimerStop(_refreshTimer, 0);
+  }
+  if (_pumpOffTimer) {
+    xTimerStop(_pumpOffTimer, 0);
+  }
+  if (_pumpPort != nullptr) {
+    HAL_GPIO_WritePin(_pumpPort, _pumpPin, GPIO_PIN_RESET);
+  }
+  if (_valvePort != nullptr) {
+    HAL_GPIO_WritePin(_valvePort, _valvePin, GPIO_PIN_RESET);
+  }
+
+  _isRefreshing = false;
+  _busy = false;
+  if (_gateHeld && _vacuumGate) {
+    _gateHeld = false;
+    xSemaphoreGive(_vacuumGate);
+  } else {
+    _gateHeld = false;
+  }
 }
 
 // ==== runtime setters/getters ====
@@ -222,7 +252,7 @@ uint32_t Gripper::getPulseDurationMs() const {
 // do NOT pulse in the timer callback; just notify the worker task
 void Gripper::refreshTimerCallback(TimerHandle_t xTimer) {
   Gripper* self = static_cast<Gripper*>(pvTimerGetTimerID(xTimer));
-  if (self && self->_refreshTask) {
+  if (self && self->_refreshTask && self->_refreshEnabled) {
     // coalesces if multiple periods elapse
     xTaskNotifyGive(self->_refreshTask);
   }
@@ -236,13 +266,17 @@ void Gripper::refreshTaskEntry(void* pv) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
     // if already in a refresh pulse (open/close/previous refresh), skip
-    if (self->_isRefreshing) {
+    if (!self->_refreshEnabled || self->_isRefreshing) {
       continue;
     }
 
     // Take the vacuum window; will block if a print job is active
     if (!self->lockVacuumGate(portMAX_DELAY)) {
       continue; // unexpected, but safe to skip
+    }
+    if (!self->_refreshEnabled) {
+      self->unlockVacuumGate();
+      continue;
     }
     self->_gateHeld     = true;
     self->_isRefreshing = true;
@@ -296,6 +330,7 @@ void MX_GRIPPER_Open(void)  { Gripper::instance().open(); }
 void MX_GRIPPER_Close(void) { Gripper::instance().close(); }
 void MX_GRIPPER_StopRefresh(void) { Gripper::instance().stopRefresh(); }
 void MX_GRIPPER_StopPump(void)    { Gripper::instance().stopPump(); }
+void MX_GRIPPER_ForceOff(void)    { Gripper::instance().forceOff(); }
 
 // New: Orchestrator-facing setters/getters (ms)
 void     MX_GRIPPER_SetRefreshPeriodMs(uint32_t ms) { Gripper::instance().setRefreshPeriodMs(ms); }

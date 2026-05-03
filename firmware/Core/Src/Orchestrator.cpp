@@ -707,7 +707,7 @@ void Orchestrator::executeCommand(const Command &cmd) {
   		  break;
   		}
         case CMD_GRIPPER_OFF: {
-      	  MX_GRIPPER_StopRefresh();
+      	  MX_GRIPPER_ForceOff();
   		  break;
   		}
         case CMD_PRINT: {
@@ -3268,7 +3268,7 @@ void Orchestrator::performShutdown(uint8_t byeSeq8, uint32_t byeSeq32, bool have
 #endif
 
   // 4) Gripper off
-  MX_GRIPPER_StopRefresh();
+  MX_GRIPPER_ForceOff();
 //
 //  // 5) Disable motors
   Stepper::stepperX()->disableMotor();
