@@ -30,6 +30,57 @@ def _write_plate_export(path: Path, *, incomplete_final: bool = True) -> None:
         writer.writerows(rows)
 
 
+def _write_single_channel_plate_export(path: Path) -> None:
+    rows = [
+        ["##BLOCKS= 1"],
+        [
+            "Plate:",
+            "Plate1",
+            "1.3",
+            "TimeFormat",
+            "Kinetic",
+            "Fluorescence",
+            "FALSE",
+            "Raw",
+            "FALSE",
+            "3",
+            "600",
+            "60",
+            "",
+            "",
+            "",
+            "1",
+            "510 ",
+            "1",
+            "5",
+            "384",
+            "485 ",
+            "Manual",
+            "",
+            "",
+            "",
+            "10",
+            "High",
+            "",
+            "",
+            "1",
+            "16",
+            "485 ",
+            "",
+            "",
+        ],
+        ["Time", "Temperature(C)", "A1", "A2", "A3"],
+        ["00:00:00", "37", "10", "20", ""],
+        ["00:01:00", "37", "11", "21", ""],
+        [],
+        ["~End"],
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-16", newline="") as handle:
+        writer = csv.writer(handle, delimiter="\t")
+        writer.writerows(rows)
+
+
 def _write_key(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -142,6 +193,25 @@ def test_diluent_columns_are_dropped_and_concentration_columns_are_preserved(tmp
     assert "Mg_mM" in merged.columns
     assert "Water_--" not in merged.columns
     assert "Diluent_--" not in merged.columns
+
+
+def test_single_channel_export_with_split_ex_em_metadata_is_parsed(tmp_path):
+    exp_dir = tmp_path / "SingleChannel-20260501_195912"
+    plate = exp_dir / "SingleChannel_data.xls"
+    key = exp_dir / "concentration_key.csv"
+    _write_single_channel_plate_export(plate)
+    _write_key(key)
+
+    merged, filter_result, summary = mod.build_merged_tidy_data(plate, key)
+
+    assert len(merged) == 4
+    assert filter_result.dropped_timepoints == []
+    assert set(merged["fluorophore"]) == {"485_510"}
+    assert set(merged["excitation_nm"]) == {485}
+    assert set(merged["emission_nm"]) == {510}
+    assert merged.groupby("fluorophore")["time"].nunique().to_dict() == {"485_510": 2}
+    assert summary.keyed_wells == ["A1", "A2"]
+    assert summary.missing_key_wells == ["A4"]
 
 
 def test_keyed_and_unkeyed_wells_are_retained_with_is_keyed(tmp_path):
