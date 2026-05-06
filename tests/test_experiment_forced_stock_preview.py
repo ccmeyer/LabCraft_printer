@@ -571,6 +571,93 @@ def test_uploaded_design_with_allow_two_skips_two_stock_search_when_single_stock
     assert result["two_stock_search_limited_keys"] == []
 
 
+def test_uploaded_design_reports_max_stock_volume_budget_contributors():
+    em = _make_model(target_volume_nl=700.0, final_volume_nl=1000.0)
+    df = pd.DataFrame(
+        {
+            "well_id": ["A1"],
+            "Reagent A mM": [4.0],
+            "Reagent B mM": [4.0],
+        }
+    )
+    em.set_uploaded_design_from_dataframe(
+        df,
+        units_default="",
+        droplet_nL_default=10.0,
+        starting_conc_default=0.0,
+    )
+    for factor in em.factors:
+        factor.options[0].max_stock_conc = 10.0
+
+    result = em.optimize_stock_solutions(quantum=0.1, max_refine=20, two_max_refine=20, allow_two=False)
+
+    assert not result.get("best")
+    issue = result["issues_by_key"][("__uploaded_design__", None)][0]
+    assert issue["code"] == "max_stock_volume_budget_exceeded"
+    assert issue["field"] == "volume_budget"
+    assert issue["row_label"] == "well A1"
+    assert issue["required_volume_nL"] == pytest.approx(800.0)
+    assert issue["allowed_volume_nL"] == pytest.approx(700.0)
+    assert [row["label"] for row in issue["contributors"]] == ["Reagent A", "Reagent B"]
+    assert "Largest contributors at max stock" in issue["message"]
+
+
+def test_uploaded_design_volume_budget_uses_actual_rows_not_independent_factor_maxima():
+    em = _make_model(target_volume_nl=600.0, final_volume_nl=1000.0)
+    df = pd.DataFrame(
+        {
+            "well_id": ["A1", "A2"],
+            "Reagent A mM": [5.0, 0.0],
+            "Reagent B mM": [0.0, 5.0],
+        }
+    )
+    em.set_uploaded_design_from_dataframe(
+        df,
+        units_default="",
+        droplet_nL_default=10.0,
+        starting_conc_default=0.0,
+    )
+    for factor in em.factors:
+        factor.options[0].max_stock_conc = 10.0
+
+    result = em.optimize_stock_solutions(quantum=0.1, max_refine=60, two_max_refine=40, allow_two=False)
+
+    assert result["best"]
+    assert result["worst_nonfill_nL"] <= 600.0
+    assert result["issues_by_key"] == {}
+
+
+def test_uploaded_design_selected_plan_volume_budget_issue_reports_row_context():
+    em = _make_model(target_volume_nl=550.0, final_volume_nl=1000.0)
+    df = pd.DataFrame(
+        {
+            "well_id": ["B3"],
+            "Reagent A mM": [5.0],
+            "Reagent B mM": [5.0],
+        }
+    )
+    em.set_uploaded_design_from_dataframe(
+        df,
+        units_default="",
+        droplet_nL_default=10.0,
+        starting_conc_default=0.0,
+    )
+    for factor in em.factors:
+        factor.options[0].forced_stock_conc = 10.0
+        factor.options[0].max_stock_conc = 20.0
+
+    result = em.optimize_stock_solutions(quantum=0.1, max_refine=20, two_max_refine=20, allow_two=False)
+
+    assert not result.get("best")
+    issue = result["issues_by_key"][("__uploaded_design__", None)][0]
+    assert issue["code"] == "selected_plan_volume_budget_exceeded"
+    assert issue["field"] == "volume_budget"
+    assert issue["row_label"] == "well B3"
+    assert issue["required_volume_nL"] == pytest.approx(1000.0)
+    assert issue["allowed_volume_nL"] == pytest.approx(550.0)
+    assert "Selected stock plan exceeds" in issue["message"]
+
+
 def test_two_stock_enumeration_honors_pair_cap(monkeypatch):
     em = _make_model(target_volume_nl=500.0, final_volume_nl=500.0)
     monkeypatch.setattr(

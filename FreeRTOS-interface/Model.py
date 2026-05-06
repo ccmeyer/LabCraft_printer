@@ -880,6 +880,114 @@ class ExperimentModel(QObject):
                     return option
         return None
 
+    @staticmethod
+    def _design_key_label(key: Tuple[str, Optional[str]]) -> str:
+        factor_name, option_name = key
+        return factor_name if option_name in (None, "") else f"{factor_name}/{option_name}"
+
+    def _uploaded_reaction_label(self, index: int) -> str:
+        well_ids = getattr(self, "_uploaded_well_ids", None) or []
+        if 0 <= int(index) < len(well_ids):
+            well_id = well_ids[int(index)]
+            if well_id not in (None, ""):
+                return f"well {well_id}"
+        return f"row {int(index) + 1}"
+
+    @staticmethod
+    def _format_volume_contributors(contributors: List[Dict[str, Any]], *, limit: int = 4) -> str:
+        parts = []
+        for row in list(contributors or [])[:limit]:
+            label = str(row.get("label") or row.get("factor") or "reagent")
+            try:
+                volume = float(row.get("volume_nL", 0.0) or 0.0)
+            except Exception:
+                volume = 0.0
+            parts.append(f"{label} {volume:.6g} nL")
+        if not parts:
+            return "none"
+        remaining = len(contributors or []) - len(parts)
+        if remaining > 0:
+            parts.append(f"+{remaining} more")
+        return ", ".join(parts)
+
+    def _uploaded_max_stock_volume_diagnostic(
+        self,
+        *,
+        printed_volume_nL: float,
+        final_volume_nL: float,
+    ) -> Optional[Dict[str, Any]]:
+        reactions = getattr(self, "_uploaded_reactions", None)
+        if not reactions:
+            return None
+
+        worst: Optional[Dict[str, Any]] = None
+        for index, rxn in enumerate(reactions):
+            total = 0.0
+            contributors: List[Dict[str, Any]] = []
+            unconstrained: List[str] = []
+
+            for key, target in (rxn or {}).items():
+                opt = self._get_option_for_key(key)
+                if opt is None:
+                    continue
+                starting = float(getattr(opt, "starting_conc", 0.0) or 0.0)
+                target_adjusted = max(0.0, float(target) - starting)
+                if target_adjusted <= 1e-12:
+                    continue
+
+                max_stock = getattr(opt, "max_stock_conc", None)
+                if max_stock is None or float(max_stock) <= 0.0:
+                    unconstrained.append(self._design_key_label(key))
+                    continue
+
+                volume_nL = (target_adjusted / float(max_stock)) * float(final_volume_nL)
+                total += volume_nL
+                contributors.append({
+                    "key": key,
+                    "label": self._design_key_label(key),
+                    "target": float(target),
+                    "target_adjusted": float(target_adjusted),
+                    "max_stock_conc": float(max_stock),
+                    "volume_nL": float(volume_nL),
+                    "units": getattr(opt, "units", ""),
+                })
+
+            contributors.sort(key=lambda row: float(row.get("volume_nL", 0.0)), reverse=True)
+            if worst is None or total > float(worst.get("required_volume_nL", 0.0)):
+                worst = {
+                    "row_index": int(index),
+                    "row_label": self._uploaded_reaction_label(index),
+                    "required_volume_nL": float(total),
+                    "contributors": contributors,
+                    "unconstrained_reagents": unconstrained,
+                }
+
+        if worst is None or float(worst["required_volume_nL"]) <= float(printed_volume_nL) + 1e-6:
+            return None
+
+        contributor_text = self._format_volume_contributors(worst["contributors"])
+        message = (
+            f"Uploaded design cannot fit within the printed-volume budget: {worst['row_label']} "
+            f"needs at least {float(worst['required_volume_nL']):.6g} nL even using max stock "
+            f"concentrations, but only {float(printed_volume_nL):.6g} nL can be printed. "
+            f"Largest contributors at max stock: {contributor_text}. Increase the printed volume, "
+            "lower the final reaction volume, raise max stock concentrations for the contributors, "
+            "or lower those targets."
+        )
+        return {
+            "field": "volume_budget",
+            "severity": "error",
+            "code": "max_stock_volume_budget_exceeded",
+            "message": message,
+            "row_index": worst["row_index"],
+            "row_label": worst["row_label"],
+            "required_volume_nL": float(worst["required_volume_nL"]),
+            "allowed_volume_nL": float(printed_volume_nL),
+            "final_volume_nL": float(final_volume_nL),
+            "contributors": [dict(row) for row in worst["contributors"]],
+            "unconstrained_reagents": list(worst["unconstrained_reagents"]),
+        }
+
     def _refresh_plan_preview_maps(self):
         self._target_preview_map = {}
         self._unreachable_preview_map = {}
@@ -1270,6 +1378,29 @@ class ExperimentModel(QObject):
                 "two_stock_search_limited_keys": list(two_stock_search_limited_keys),
             }
 
+        def _add_design_issue(issue: Dict[str, Any]) -> Dict[str, Any]:
+            issue_copy = dict(issue)
+            field = str(issue_copy.pop("field"))
+            severity = str(issue_copy.pop("severity"))
+            code = str(issue_copy.pop("code"))
+            message = str(issue_copy.pop("message"))
+            return _add_issue(
+                ("__uploaded_design__", None),
+                field=field,
+                severity=severity,
+                code=code,
+                message=message,
+                **issue_copy,
+            )
+
+        max_stock_volume_issue = self._uploaded_max_stock_volume_diagnostic(
+            printed_volume_nL=V_print,
+            final_volume_nL=V_final,
+        )
+        if max_stock_volume_issue is not None:
+            issue = _add_design_issue(max_stock_volume_issue)
+            return _failure(str(issue["message"]))
+
         def _no_feasible_reason(label: str, opt, *, search_limited: bool = False) -> str:
             bound = _bound_text(opt)
             if not allow_two:
@@ -1633,7 +1764,148 @@ class ExperimentModel(QObject):
                         sum_conc += p1.stock_concentration
             return tot_stocks, sum_conc
 
+        def _selected_plan_for_key(key: Tuple[str, Optional[str]]):
+            factor_name, option_name = key
+            if option_name in (None, ""):
+                for name, singles, twos in additives:
+                    if name != factor_name:
+                        continue
+                    if add_two_idx[name] is not None:
+                        resolved_twos = twos if twos is not None else _ensure_additive_twos(name)
+                        return resolved_twos[add_two_idx[name]]
+                    return singles[add_idx[name]]
+                return None
+
+            bucket = choice_groups.get(factor_name, [])
+            for oname, singles, twos in bucket:
+                if oname != option_name:
+                    continue
+                if ch_two_idx[(factor_name, oname)] is not None:
+                    resolved_twos = twos if twos is not None else _ensure_choice_twos(factor_name, oname)
+                    return resolved_twos[ch_two_idx[(factor_name, oname)]]
+                return singles[ch_idx[(factor_name, oname)]]
+            return None
+
+        def _drops_from_mapping(mapping: Dict[float, Any], target_adjusted: float, quantum_hint: float = 1e-6):
+            if not mapping:
+                return 0, None
+            t_norm = self._normalize_target_key(float(target_adjusted))
+            if t_norm in mapping:
+                return mapping[t_norm], t_norm
+            if float(target_adjusted) in mapping:
+                return mapping[float(target_adjusted)], float(target_adjusted)
+            nearest_key = min(mapping.keys(), key=lambda item: abs(float(item) - float(target_adjusted)))
+            tolerance = max(float(quantum_hint) * 0.5 + 1e-12, 1e-6)
+            if abs(float(nearest_key) - float(target_adjusted)) <= tolerance:
+                return mapping[nearest_key], nearest_key
+            return 0, nearest_key
+
+        def _selected_plan_volume_for_target(key: Tuple[str, Optional[str]], target: float) -> Tuple[float, Dict[str, Any]]:
+            plan = _selected_plan_for_key(key)
+            opt = self._get_option_for_key(key)
+            if plan is None or opt is None:
+                return 0.0, {}
+
+            starting = float(getattr(opt, "starting_conc", 0.0) or 0.0)
+            target_adjusted = max(0.0, float(target) - starting)
+            label = self._design_key_label(key)
+
+            if isinstance(plan, SingleStockPlan):
+                drops, matched_key = _drops_from_mapping(
+                    plan.droplets_per_target,
+                    target_adjusted,
+                    quantum_hint=float(plan.lookup_quantum or 1e-6),
+                )
+                volume_nL = int(drops) * float(plan.droplet_nL)
+                return volume_nL, {
+                    "key": key,
+                    "label": label,
+                    "target": float(target),
+                    "target_adjusted": float(target_adjusted),
+                    "matched_target": float(matched_key) if matched_key is not None else None,
+                    "droplets": int(drops),
+                    "stock_concentration": float(plan.stock_concentration),
+                    "volume_nL": float(volume_nL),
+                    "units": plan.units,
+                }
+
+            if isinstance(plan, TwoStockPlan):
+                drops_pair, matched_key = _drops_from_mapping(
+                    plan.droplets_per_target,
+                    target_adjusted,
+                    quantum_hint=1e-6,
+                )
+                k1, k2 = (int(drops_pair[0]), int(drops_pair[1])) if drops_pair else (0, 0)
+                volume_nL = (k1 + k2) * float(plan.droplet_nL)
+                return volume_nL, {
+                    "key": key,
+                    "label": label,
+                    "target": float(target),
+                    "target_adjusted": float(target_adjusted),
+                    "matched_target": float(matched_key) if matched_key is not None else None,
+                    "droplets": (int(k1), int(k2)),
+                    "stock_concentration": tuple(float(v) for v in plan.stock_concs),
+                    "volume_nL": float(volume_nL),
+                    "units": plan.units,
+                }
+
+            return 0.0, {}
+
+        def _uploaded_selected_volume_details() -> Optional[Dict[str, Any]]:
+            reactions = getattr(self, "_uploaded_reactions", None)
+            if not reactions:
+                return None
+
+            worst: Optional[Dict[str, Any]] = None
+            for index, rxn in enumerate(reactions):
+                total = 0.0
+                contributors: List[Dict[str, Any]] = []
+                for key, target in (rxn or {}).items():
+                    volume_nL, contributor = _selected_plan_volume_for_target(key, float(target))
+                    total += float(volume_nL)
+                    if contributor:
+                        contributors.append(contributor)
+
+                contributors.sort(key=lambda row: float(row.get("volume_nL", 0.0)), reverse=True)
+                if worst is None or total > float(worst.get("required_volume_nL", 0.0)):
+                    worst = {
+                        "row_index": int(index),
+                        "row_label": self._uploaded_reaction_label(index),
+                        "required_volume_nL": float(total),
+                        "contributors": contributors,
+                    }
+            return worst
+
+        def _record_uploaded_selected_volume_budget_issue(code: str) -> Optional[Dict[str, Any]]:
+            details = _uploaded_selected_volume_details()
+            if not details or float(details.get("required_volume_nL", 0.0)) <= V_print + 1e-6:
+                return None
+            contributor_text = self._format_volume_contributors(details.get("contributors", []))
+            message = (
+                f"Selected stock plan exceeds the printed-volume budget for the uploaded design: "
+                f"{details['row_label']} needs {float(details['required_volume_nL']):.6g} nL, "
+                f"but only {float(V_print):.6g} nL can be printed. Largest contributors: "
+                f"{contributor_text}. Increase the printed volume, raise stock concentrations for the "
+                "contributors, enable two-stock mode when available, or lower those targets."
+            )
+            return _add_issue(
+                ("__uploaded_design__", None),
+                field="volume_budget",
+                severity="error",
+                code=code,
+                message=message,
+                row_index=int(details["row_index"]),
+                row_label=details["row_label"],
+                required_volume_nL=float(details["required_volume_nL"]),
+                allowed_volume_nL=float(V_print),
+                contributors=[dict(row) for row in details.get("contributors", [])],
+            )
+
         def worst_case_nonfill_volume() -> float:
+            uploaded_details = _uploaded_selected_volume_details()
+            if uploaded_details is not None:
+                return float(uploaded_details.get("required_volume_nL", 0.0))
+
             total = 0.0
             for name, singles, twos in additives:
                 if add_two_idx[name] is not None:
@@ -1936,6 +2208,9 @@ class ExperimentModel(QObject):
                 if best_switch is None and tie_switch is not None:
                     best_switch = tie_switch
                 if best_switch is None:
+                    aggregate_issue = _record_uploaded_selected_volume_budget_issue(
+                        "selected_plan_volume_budget_exceeded"
+                    )
                     for name, singles, twos in additives:
                         if add_two_idx[name] is not None:
                             continue
@@ -1965,6 +2240,8 @@ class ExperimentModel(QObject):
                     reason = "Volume budget too tight even after two-stock exploration."
                     if two_stock_search_limited_keys:
                         reason = "Volume budget too tight even after bounded two-stock exploration."
+                    if aggregate_issue is not None:
+                        reason = str(aggregate_issue.get("message") or reason)
                     return _failure(reason)
 
                 if best_switch[0] == "add":
@@ -2133,6 +2410,9 @@ class ExperimentModel(QObject):
 
         final_worst = worst_case_nonfill_volume()
         if final_worst > V_print + 1e-6:
+            aggregate_issue = _record_uploaded_selected_volume_budget_issue(
+                "selected_plan_volume_budget_exceeded"
+            )
             for name, singles, twos in additives:
                 if add_two_idx[name] is not None:
                     continue
@@ -2163,8 +2443,13 @@ class ExperimentModel(QObject):
                 reason = "Volume budget too tight even with the available stock solutions."
                 if two_stock_search_limited_keys:
                     reason = "Volume budget too tight even with the bounded two-stock search."
+                if aggregate_issue is not None:
+                    reason = str(aggregate_issue.get("message") or reason)
                 return _failure(reason)
-            return _failure("No feasible single-stock plan fits within the printed-volume budget. Enable two-stock mode or increase the target reaction volume.")
+            reason = "No feasible single-stock plan fits within the printed-volume budget. Enable two-stock mode or increase the target reaction volume."
+            if aggregate_issue is not None:
+                reason = str(aggregate_issue.get("message") or reason)
+            return _failure(reason)
 
         # Materialize plans
         self.plans_per_option.clear()

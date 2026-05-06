@@ -6947,7 +6947,7 @@ class ExperimentDesignDialog(QDialog):
                 QMessageBox.warning(
                     self,
                     failure_title,
-                    f"{failure_prefix}{res.get('reason', 'Unknown error')}",
+                    f"{failure_prefix}{summary or res.get('reason', 'Unknown error')}",
                 )
             return False, res
 

@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
 )
 
+import View
 from View import ExperimentDesignDialog
 
 
@@ -116,6 +117,47 @@ def test_negative_fixed_stock_is_treated_as_invalid_input(qapp):
     assert fixed_edit.styleSheet() == "border:1px solid #8a0303;"
     assert "must be greater than zero" in fixed_edit.toolTip()
     assert result["issues_by_key"][("AddA", None)][0]["code"] == "nonpositive_value"
+
+
+def test_failure_dialog_shows_detailed_issue_summary(qapp, monkeypatch):
+    dialog, _fixed_edit, _max_edit = _build_dialog(
+        responses=[
+            {
+                "best": None,
+                "reason": "Generic optimizer failure",
+                "issues_by_key": {
+                    ("__uploaded_design__", None): [
+                        {
+                            "field": "volume_budget",
+                            "severity": "error",
+                            "code": "max_stock_volume_budget_exceeded",
+                            "message": "Uploaded row A1 needs 1600 nL; top contributor is Reagent A.",
+                        }
+                    ]
+                },
+                "two_stock_search_limited_keys": [],
+            }
+        ]
+    )
+    captured = {}
+
+    def capture_warning(_parent, title, text):
+        captured["title"] = title
+        captured["text"] = text
+
+    monkeypatch.setattr(View.QMessageBox, "warning", capture_warning)
+
+    ok, _result = ExperimentDesignDialog._run_design_optimization_flow(
+        dialog,
+        show_failure_dialog=True,
+        failure_prefix="Could not optimize:\n",
+    )
+
+    assert ok is False
+    assert captured["title"] == "Optimization failed"
+    assert captured["text"].startswith("Could not optimize:\n")
+    assert "Uploaded row A1 needs 1600 nL" in captured["text"]
+    assert "Generic optimizer failure" not in captured["text"]
 
 
 def test_invalid_max_stock_keeps_table_stale_until_fixed(qapp):
