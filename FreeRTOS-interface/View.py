@@ -4903,6 +4903,496 @@ class CommandQueueWidget(QGroupBox):
             self.table.item(row, column).setBackground(QtGui.QColor(color))
         
 
+class _NoElideTableItemDelegate(QtWidgets.QStyledItemDelegate):
+    """Render table cells without replacing visible text with ellipses."""
+
+    def initStyleOption(self, option, index):
+        super().initStyleOption(option, index)
+        option.textElideMode = Qt.TextElideMode.ElideNone
+
+
+class ExperimentImportWizard(QDialog):
+    """Preflight uploaded reaction designs before applying them to the editor."""
+
+    COMPOSITION_FIRST_REAGENT_COL = 3
+    COMPOSITION_TRAILING_COLS = 3
+    COMPOSITION_REAGENT_COL_WIDTH = 118
+    COMPOSITION_HEADER_HEIGHT = 58
+    COMPOSITION_ROW_HEIGHT = 46
+
+    STOCK_COL_REAGENT = 0
+    STOCK_COL_UNITS = 1
+    STOCK_COL_MAX = 2
+    STOCK_COL_IDEAL = 3
+    STOCK_COL_DELTA = 4
+    STOCK_COL_MIN = 5
+    STOCK_COL_MAX_TARGET = 6
+    STOCK_COL_SPAN = 7
+    STOCK_COL_SMALLEST = 8
+    STOCK_COL_WORST_VOL = 9
+    STOCK_COL_STEP = 10
+    STOCK_COL_STATUS = 11
+
+    def __init__(
+        self,
+        model: ExperimentModel,
+        parent=None,
+        *,
+        printed_volume_nL: float = 500.0,
+        final_volume_nL: float = 500.0,
+        allow_two: bool = False,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Import Experiment Design")
+        self.setMinimumSize(1280, 760)
+
+        self.model = model
+        self.design_df: pd.DataFrame | None = None
+        self.max_stock_df: pd.DataFrame | None = None
+        self.design_path: str | None = None
+        self.max_stock_path: str | None = None
+        self.report: Dict[str, Any] | None = None
+        self._manual_max_stock_by_reagent: Dict[str, float] = {}
+        self._populating_tables = False
+
+        root = QHBoxLayout(self)
+        left = QVBoxLayout()
+        right = QVBoxLayout()
+        root.addLayout(left, stretch=1)
+        root.addLayout(right, stretch=3)
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        self.design_path_lbl = QLabel("No design CSV loaded")
+        self.design_path_lbl.setWordWrap(True)
+        self.max_stock_path_lbl = QLabel("No max stock CSV loaded")
+        self.max_stock_path_lbl.setWordWrap(True)
+
+        self.load_design_btn = QPushButton("Upload Target Concentrations CSV...")
+        self.load_design_btn.clicked.connect(self._on_load_design_clicked)
+        left.addWidget(self.load_design_btn)
+        left.addWidget(self.design_path_lbl)
+
+        self.load_stock_btn = QPushButton("Upload Max Stock Concentrations CSV...")
+        self.load_stock_btn.clicked.connect(self._on_load_max_stock_clicked)
+        left.addWidget(self.load_stock_btn)
+        left.addWidget(self.max_stock_path_lbl)
+
+        self.printed_volume_spin = QDoubleSpinBox()
+        self.printed_volume_spin.setDecimals(1)
+        self.printed_volume_spin.setRange(1.0, 1_000_000.0)
+        self.printed_volume_spin.setSingleStep(50.0)
+        self.printed_volume_spin.setValue(float(printed_volume_nL))
+        self.printed_volume_spin.editingFinished.connect(self._recompute_report)
+        form.addRow(QLabel("Printed Volume (nL)"), self.printed_volume_spin)
+
+        self.final_volume_spin = QDoubleSpinBox()
+        self.final_volume_spin.setDecimals(1)
+        self.final_volume_spin.setRange(1.0, 1_000_000.0)
+        self.final_volume_spin.setSingleStep(50.0)
+        self.final_volume_spin.setValue(float(final_volume_nL))
+        self.final_volume_spin.editingFinished.connect(self._recompute_report)
+        form.addRow(QLabel("Final Reaction Volume (nL)"), self.final_volume_spin)
+
+        self.allow_two_chk = QCheckBox()
+        self.allow_two_chk.setChecked(bool(allow_two))
+        self.allow_two_chk.stateChanged.connect(self._recompute_report)
+        form.addRow(QLabel("Allow Two Stock Solutions"), self.allow_two_chk)
+
+        left.addLayout(form)
+
+        self.status_lbl = QLabel("")
+        self.status_lbl.setWordWrap(True)
+        self.status_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.status_lbl.setStyleSheet("color:#666; font-style: italic;")
+        left.addWidget(self.status_lbl)
+        left.addStretch(1)
+
+        buttons = QHBoxLayout()
+        self.apply_btn = QPushButton("Apply to Experiment Editor")
+        self.apply_btn.clicked.connect(self._on_apply_clicked)
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self.reject)
+        buttons.addWidget(self.cancel_btn)
+        buttons.addWidget(self.apply_btn)
+        left.addLayout(buttons)
+
+        right.addWidget(QLabel("Unique Compositions"))
+        self.composition_table = QTableWidget(0, 0, self)
+        self.composition_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.composition_table.setWordWrap(True)
+        self.composition_table.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self.composition_table.setItemDelegate(_NoElideTableItemDelegate(self.composition_table))
+        self.composition_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.composition_table.horizontalHeader().setDefaultAlignment(
+            Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.composition_table.horizontalHeader().setFixedHeight(self.COMPOSITION_HEADER_HEIGHT)
+        self.composition_table.verticalHeader().setDefaultSectionSize(self.COMPOSITION_ROW_HEIGHT)
+        right.addWidget(self.composition_table, stretch=3)
+
+        right.addWidget(QLabel("Stock Concentration Constraints"))
+        self.stock_table = QTableWidget(0, 12, self)
+        self.stock_table.setHorizontalHeaderLabels([
+            "Reagent", "Units", "Max Stock", "Ideal Stock", "Delta/drop",
+            "Target Min", "Target Max", "Span", "Smallest Nonzero",
+            "Worst Vol @ Max", "Smallest Step", "Status / Recommendation"
+        ])
+        self.stock_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.stock_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.stock_table.cellChanged.connect(self._on_stock_cell_changed)
+        right.addWidget(self.stock_table, stretch=2)
+
+        self._recompute_report()
+
+    @staticmethod
+    def _fmt_value(value, digits: int = 4) -> str:
+        if value is None:
+            return ""
+        try:
+            number = float(value)
+        except Exception:
+            return str(value)
+        if not math.isfinite(number):
+            return ""
+        if abs(number - round(number)) < 1e-9:
+            return str(int(round(number)))
+        return f"{number:.{digits}f}".rstrip("0").rstrip(".")
+
+    @staticmethod
+    def _fmt_whole_nl(value) -> str:
+        if value is None:
+            return ""
+        try:
+            number = float(value)
+        except Exception:
+            return str(value)
+        if not math.isfinite(number):
+            return ""
+        return f"{number:.0f}"
+
+    @staticmethod
+    def _wrap_header_label(value, max_line_chars: int = 14) -> str:
+        text = str(value or "").strip()
+        if len(text) <= max_line_chars:
+            return text
+
+        prefix = ""
+        suffix = ""
+        inner = text
+        if inner.startswith("[") and inner.endswith("]") and len(inner) > 2:
+            prefix = "["
+            suffix = "]"
+            inner = inner[1:-1].strip()
+
+        normalized = inner.replace("_", " ").replace("-", " ").replace("/", " / ")
+        words = [word for word in normalized.split() if word]
+        if not words:
+            words = [inner]
+
+        lines = []
+        current = ""
+        for word in words:
+            candidate = f"{current} {word}" if current else word
+            if len(candidate) <= max_line_chars or not current:
+                current = candidate
+            else:
+                lines.append(current)
+                current = word
+        if current:
+            lines.append(current)
+
+        split_lines = []
+        for line in lines:
+            if len(line) <= max_line_chars:
+                split_lines.append(line)
+            else:
+                split_lines.extend(
+                    line[idx:idx + max_line_chars]
+                    for idx in range(0, len(line), max_line_chars)
+                )
+
+        if prefix and split_lines:
+            split_lines[0] = f"{prefix}{split_lines[0]}"
+            split_lines[-1] = f"{split_lines[-1]}{suffix}"
+        return "\n".join(split_lines)
+
+    @staticmethod
+    def _short_path(path: str | None) -> str:
+        if not path:
+            return ""
+        return os.path.basename(str(path)) or str(path)
+
+    def load_design_dataframe(self, df: "pd.DataFrame", *, source_path: str | None = None):
+        self.design_df = df.copy()
+        self.design_path = source_path
+        self.design_path_lbl.setText(self._short_path(source_path) if source_path else "Design CSV loaded")
+        self._manual_max_stock_by_reagent.clear()
+        self._recompute_report()
+
+    def load_max_stock_dataframe(self, df: "pd.DataFrame", *, source_path: str | None = None):
+        self.max_stock_df = df.copy()
+        self.max_stock_path = source_path
+        self.max_stock_path_lbl.setText(self._short_path(source_path) if source_path else "Max stock CSV loaded")
+        self._recompute_report()
+
+    def _on_load_design_clicked(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select reaction design CSV",
+            "",
+            "CSV files (*.csv);;All files (*)"
+        )
+        if not path:
+            return
+        try:
+            df = pd.read_csv(path)
+        except Exception as e:
+            QMessageBox.critical(self, "Error loading CSV", f"Could not read file:\n{e}")
+            return
+        if df.empty:
+            QMessageBox.warning(self, "Empty file", "The selected CSV has no data.")
+            return
+        self.load_design_dataframe(df, source_path=path)
+
+    def _on_load_max_stock_clicked(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select max stock concentrations CSV",
+            "",
+            "CSV files (*.csv);;All files (*)"
+        )
+        if not path:
+            return
+        try:
+            df = pd.read_csv(path)
+        except Exception as e:
+            QMessageBox.critical(self, "Error loading CSV", f"Could not read file:\n{e}")
+            return
+        if df.empty:
+            QMessageBox.warning(self, "Empty file", "The selected CSV has no data.")
+            return
+        self.load_max_stock_dataframe(df, source_path=path)
+
+    def _recompute_report(self):
+        if self.design_df is None:
+            self.report = None
+            self._populate_composition_table(None)
+            self._populate_stock_table(None)
+            self.status_lbl.setText("Upload a target concentrations CSV to begin.")
+            self.apply_btn.setEnabled(False)
+            return
+
+        self.report = self.model.build_import_feasibility_report(
+            self.design_df,
+            max_stock_df=self.max_stock_df,
+            max_stock_map=self._manual_max_stock_by_reagent,
+            units_default="",
+            droplet_nL_default=10.0,
+            starting_conc_default=0.0,
+            printed_volume_nL=float(self.printed_volume_spin.value()),
+            final_volume_nL=float(self.final_volume_spin.value()),
+            allow_two=bool(self.allow_two_chk.isChecked()),
+        )
+        self._populate_composition_table(self.report)
+        self._populate_stock_table(self.report)
+        self._update_status()
+
+        has_errors = any(issue.get("severity") == "error" for issue in self.report.get("issues", []))
+        self.apply_btn.setEnabled(not has_errors)
+
+    def _status_brush(self, status: str) -> QtGui.QBrush | None:
+        status = str(status or "")
+        if status in {"Volume impossible", "Invalid value", "Stock plan impossible"}:
+            return QtGui.QBrush(QtGui.QColor("#8b1e1e"))
+        if status in {"Missing max stock", "Unit mismatch", "Resolution warning"}:
+            return QtGui.QBrush(QtGui.QColor("#7a5a00"))
+        return None
+
+    def _set_row_status_background(self, table: QTableWidget, row: int, status: str):
+        brush = self._status_brush(status)
+        if brush is None:
+            return
+        foreground = QtGui.QBrush(QtGui.QColor("#ffffff"))
+        for col in range(table.columnCount()):
+            item = table.item(row, col)
+            if item is not None:
+                item.setBackground(brush)
+                item.setForeground(foreground)
+
+    def _populate_composition_table(self, report: Dict[str, Any] | None):
+        self._populating_tables = True
+        try:
+            self.composition_table.clear()
+            if not report:
+                self.composition_table.setRowCount(0)
+                self.composition_table.setColumnCount(0)
+                return
+
+            specs = report.get("reagent_specs", [])
+            headers = ["Composition", "Wells", "Count"]
+            headers.extend(self._wrap_header_label(spec.get("name", "")) for spec in specs)
+            headers.extend(["Total @ Max (nL)", "Remaining (nL)", "Status"])
+
+            rows = report.get("composition_rows", [])
+            self.composition_table.setColumnCount(len(headers))
+            self.composition_table.setHorizontalHeaderLabels(headers)
+            self.composition_table.setRowCount(len(rows))
+
+            for row_idx, row in enumerate(rows):
+                values = [
+                    row.get("label", ""),
+                    ", ".join(row.get("wells", [])[:8]) + ("..." if len(row.get("wells", [])) > 8 else ""),
+                    str(row.get("count", "")),
+                ]
+                for spec in specs:
+                    name = spec.get("name")
+                    target = row.get("targets", {}).get(name)
+                    volume = row.get("reagent_volumes_nL", {}).get(name)
+                    text = self._fmt_value(target)
+                    if volume is None and target not in (None, 0, 0.0):
+                        text = f"{text}\nmissing"
+                    elif volume is not None:
+                        text = f"{text}\n{self._fmt_value(volume)} nL"
+                    values.append(text)
+                values.extend([
+                    self._fmt_whole_nl(row.get("total_required_volume_nL")),
+                    self._fmt_whole_nl(row.get("remaining_printed_volume_nL")),
+                    row.get("status", ""),
+                ])
+
+                for col_idx, value in enumerate(values):
+                    item = QTableWidgetItem(str(value))
+                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                    self.composition_table.setItem(row_idx, col_idx, item)
+                self._set_row_status_background(self.composition_table, row_idx, row.get("status", ""))
+
+            self._apply_composition_table_layout(len(specs))
+        finally:
+            self._populating_tables = False
+
+    def _apply_composition_table_layout(self, reagent_count: int):
+        self.composition_table.resizeColumnsToContents()
+        header = self.composition_table.horizontalHeader()
+        header.setFixedHeight(self.COMPOSITION_HEADER_HEIGHT)
+
+        first_reagent = self.COMPOSITION_FIRST_REAGENT_COL
+        last_reagent = first_reagent + int(reagent_count)
+        for col in range(first_reagent, last_reagent):
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
+            self.composition_table.setColumnWidth(col, self.COMPOSITION_REAGENT_COL_WIDTH)
+
+        trailing = [
+            (0, 110),
+            (1, 130),
+            (2, 58),
+            (last_reagent, 112),
+            (last_reagent + 1, 112),
+            (last_reagent + 2, 140),
+        ]
+        for col, width in trailing:
+            if col < self.composition_table.columnCount():
+                header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
+                self.composition_table.setColumnWidth(col, max(width, self.composition_table.columnWidth(col)))
+
+        for row in range(self.composition_table.rowCount()):
+            self.composition_table.setRowHeight(row, self.COMPOSITION_ROW_HEIGHT)
+
+    def _populate_stock_table(self, report: Dict[str, Any] | None):
+        self._populating_tables = True
+        try:
+            rows = list((report or {}).get("stock_rows", []))
+            self.stock_table.setRowCount(len(rows))
+            for row_idx, row in enumerate(rows):
+                values = [
+                    row.get("reagent", ""),
+                    row.get("units", ""),
+                    self._fmt_value(row.get("max_stock_conc")),
+                    self._fmt_value(row.get("ideal_stock_conc")),
+                    self._fmt_value(row.get("delta_per_drop")),
+                    self._fmt_value(row.get("target_min")),
+                    self._fmt_value(row.get("target_max")),
+                    self._fmt_value(row.get("target_span")),
+                    self._fmt_value(row.get("smallest_nonzero_target")),
+                    self._fmt_value(row.get("worst_max_stock_volume_nL")),
+                    self._fmt_value(row.get("smallest_useful_target_step")),
+                    f"{row.get('status', '')}: {row.get('recommendation', '')}",
+                ]
+                for col_idx, value in enumerate(values):
+                    item = QTableWidgetItem(str(value))
+                    if col_idx == self.STOCK_COL_MAX:
+                        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
+                        item.setData(Qt.ItemDataRole.UserRole, row.get("reagent", ""))
+                    else:
+                        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                    self.stock_table.setItem(row_idx, col_idx, item)
+                self._set_row_status_background(self.stock_table, row_idx, row.get("status", ""))
+            self.stock_table.resizeColumnsToContents()
+        finally:
+            self._populating_tables = False
+
+    def _on_stock_cell_changed(self, row: int, col: int):
+        if self._populating_tables or col != self.STOCK_COL_MAX:
+            return
+        item = self.stock_table.item(row, col)
+        if item is None:
+            return
+        reagent = item.data(Qt.ItemDataRole.UserRole)
+        if not reagent and self.stock_table.item(row, self.STOCK_COL_REAGENT) is not None:
+            reagent = self.stock_table.item(row, self.STOCK_COL_REAGENT).text()
+        if not reagent:
+            return
+        text = (item.text() or "").strip()
+        if not text:
+            self._manual_max_stock_by_reagent.pop(str(reagent), None)
+            self._recompute_report()
+            return
+        try:
+            value = float(text)
+        except Exception:
+            return
+        if value > 0 and math.isfinite(value):
+            self._manual_max_stock_by_reagent[str(reagent)] = value
+            self._recompute_report()
+
+    def _update_status(self):
+        report = self.report or {}
+        rows = report.get("composition_rows", [])
+        stock_rows = report.get("stock_rows", [])
+        status_counts = report.get("status_counts", {})
+        parts = [
+            f"{len(rows)} unique composition(s)",
+            f"{len(stock_rows)} reagent(s)",
+        ]
+        if status_counts:
+            parts.append(", ".join(f"{key}: {value}" for key, value in status_counts.items()))
+        if report.get("unmatched_stock_rows"):
+            parts.append(f"{len(report['unmatched_stock_rows'])} unmatched stock row(s)")
+        issues = report.get("issues", [])
+        if issues:
+            parts.append(str(issues[0].get("message", "")))
+        self.status_lbl.setText(". ".join(part for part in parts if part))
+
+    def _on_apply_clicked(self):
+        if self.design_df is None:
+            return
+        self._recompute_report()
+        if self.apply_btn.isEnabled():
+            self.accept()
+
+    def get_apply_payload(self) -> Dict[str, Any]:
+        report = self.report or {}
+        return {
+            "design_df": self.design_df.copy() if self.design_df is not None else None,
+            "source_path": self.design_path,
+            "max_stock_by_reagent": dict(report.get("max_stock_by_reagent", {})),
+            "printed_volume_nL": float(self.printed_volume_spin.value()),
+            "final_volume_nL": float(self.final_volume_spin.value()),
+            "allow_two": bool(self.allow_two_chk.isChecked()),
+        }
+
+
 class ExperimentDesignDialog(QDialog):
     """
     UI for composing reagents (additives and choice groups), optimizing stock solutions,
@@ -6000,27 +6490,35 @@ class ExperimentDesignDialog(QDialog):
         
 
     def _on_upload_design(self):
-        """
-        Let user pick a CSV containing explicit reactions.
-        Each column is a reagent final concentration; each row is a reaction.
-        """
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select reaction design CSV",
-            "",
-            "CSV files (*.csv);;All files (*)"
+        """Launch a feasibility wizard for explicit reaction designs."""
+        printed_volume = (
+            float(self.v_spin.value())
+            if hasattr(self, "v_spin") and self.v_spin is not None
+            else float(getattr(self.model, "metadata", {}).get("target_reaction_volume_nL", 500.0))
         )
-        if not path:
+        final_volume = (
+            float(self.final_v_spin.value())
+            if hasattr(self, "final_v_spin") and self.final_v_spin is not None
+            else float(getattr(self.model, "metadata", {}).get("final_reaction_volume_nL", printed_volume))
+        )
+        allow_two = (
+            bool(self.allow_two_chk.isChecked())
+            if hasattr(self, "allow_two_chk") and self.allow_two_chk is not None
+            else bool(getattr(self.model, "metadata", {}).get("allow_two_stock_solutions", False))
+        )
+        wizard = ExperimentImportWizard(
+            self.model,
+            self,
+            printed_volume_nL=printed_volume,
+            final_volume_nL=final_volume,
+            allow_two=allow_two,
+        )
+        if wizard.exec() != QDialog.Accepted:
             return
 
-        try:
-            df = pd.read_csv(path)
-        except Exception as e:
-            QMessageBox.critical(self, "Error loading CSV", f"Could not read file:\n{e}")
-            return
-
-        if df.empty:
-            QMessageBox.warning(self, "Empty file", "The selected CSV has no data.")
+        payload = wizard.get_apply_payload()
+        df = payload.get("design_df")
+        if df is None or df.empty:
             return
 
         # Push into the model – this will rebuild factors and uploaded reactions.
@@ -6028,17 +6526,36 @@ class ExperimentDesignDialog(QDialog):
         if not self._validate_uploaded_design_well_assignments(df):
             return
 
+        with QSignalBlocker(self.v_spin), QSignalBlocker(self.final_v_spin), QSignalBlocker(self.allow_two_chk):
+            self.v_spin.setValue(float(payload.get("printed_volume_nL", self.v_spin.value())))
+            self.final_v_spin.setValue(float(payload.get("final_volume_nL", self.final_v_spin.value())))
+            self.allow_two_chk.setChecked(bool(payload.get("allow_two", self.allow_two_chk.isChecked())))
+
+        self.model.set_metadata(
+            target_reaction_volume_nL=float(self.v_spin.value()),
+            final_reaction_volume_nL=float(self.final_v_spin.value()),
+            allow_two_stock_solutions=bool(self.allow_two_chk.isChecked()),
+        )
+
         self.model.set_uploaded_design_from_dataframe(
             df,
             units_default="",                    # user units come from header; blank defaults to "arb"
             droplet_nL_default=10.0,
             starting_conc_default=0.0,
-            source_path=path,
+            source_path=payload.get("source_path"),
         )
+
+        max_stock_by_reagent = dict(payload.get("max_stock_by_reagent") or {})
+        for factor in getattr(self.model, "factors", []) or []:
+            if not getattr(factor, "options", None):
+                continue
+            value = max_stock_by_reagent.get(getattr(factor, "name", ""))
+            if value is not None:
+                factor.options[0].max_stock_conc = float(value)
 
         # Update local flags
         self._uploaded_design_active = True
-        self._uploaded_design_path = path
+        self._uploaded_design_path = payload.get("source_path")
 
         # Rebuild UI from the model's new factors
         self.choice_groups = set(

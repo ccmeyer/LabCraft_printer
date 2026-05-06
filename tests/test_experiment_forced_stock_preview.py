@@ -263,7 +263,7 @@ def test_auto_paths_keep_optimizer_behavior_and_two_stock_enumeration():
     )
 
 
-def test_max_stock_bound_filters_single_stock_candidates():
+def test_max_stock_bound_adds_physical_edge_single_stock_candidates():
     em = _make_model(target_volume_nl=500.0, final_volume_nl=500.0)
     candidates = em._enumerate_single_stock_candidates(
         [0.1, 0.2],
@@ -273,7 +273,24 @@ def test_max_stock_bound_filters_single_stock_candidates():
         max_refine=10,
         max_stock_conc=0.4,
     )
-    assert candidates == []
+    assert candidates
+    assert all(candidate.stock_concentration <= 0.4 + 1e-12 for candidate in candidates)
+
+
+def test_max_stock_edge_candidate_handles_polyp_refine_cutoff():
+    em = _make_model(target_volume_nl=6700.0, final_volume_nl=10000.0)
+    candidates = em._enumerate_single_stock_candidates(
+        [30.31, 59.6],
+        10.0,
+        "mM",
+        final_volume_nL=10000.0,
+        max_refine=60,
+        max_stock_conc=500.0,
+    )
+
+    assert candidates
+    assert all(candidate.stock_concentration <= 500.0 + 1e-12 for candidate in candidates)
+    assert any(candidate.stock_concentration == pytest.approx(496.885245902, rel=1e-9) for candidate in candidates)
 
 
 def test_bounded_auto_stock_prefers_lowest_error_candidate_under_selected_volume_limit():
@@ -493,7 +510,7 @@ def test_max_stock_issue_payload_reports_no_single_plan():
 
     assert not result.get("best")
     issues = result["issues_by_key"][("AddA", None)]
-    assert any(issue["field"] == "max_stock" and issue["code"] == "max_stock_no_single_plan" for issue in issues)
+    assert any(issue["field"] == "max_stock" and issue["code"] == "single_stock_volume_budget_exceeded" for issue in issues)
 
 
 def test_fixed_stock_issue_payload_reports_unreachable_targets():
@@ -656,6 +673,154 @@ def test_uploaded_design_selected_plan_volume_budget_issue_reports_row_context()
     assert issue["required_volume_nL"] == pytest.approx(1000.0)
     assert issue["allowed_volume_nL"] == pytest.approx(550.0)
     assert "Selected stock plan exceeds" in issue["message"]
+
+
+def test_import_feasibility_report_flags_missing_max_stock():
+    em = _make_model(target_volume_nl=500.0, final_volume_nl=1000.0)
+    df = pd.DataFrame({"well_id": ["A1"], "Reagent A mM": [1.0], "Reagent B mM": [2.0]})
+    max_df = pd.DataFrame({"reagent": ["Reagent A"], "stock_conc": [10.0], "units": ["mM"]})
+
+    report = em.build_import_feasibility_report(
+        df,
+        max_stock_df=max_df,
+        printed_volume_nL=500.0,
+        final_volume_nL=1000.0,
+    )
+
+    assert any(issue["code"] == "missing_max_stock" and issue["reagent"] == "Reagent B" for issue in report["issues"])
+    assert report["stock_rows"][1]["status"] == "Missing max stock"
+    assert report["composition_rows"][0]["status"] == "Missing max stock"
+
+
+def test_bnext_large_design_polyp_500_mm_is_single_stock_feasible():
+    design = pd.read_csv("FreeRTOS-interface/Experiments/bnext_large_design/samples_titration_labcraft.csv")
+    stocks = pd.read_csv("FreeRTOS-interface/Experiments/bnext_large_design/stock_solutions.csv")
+
+    em = ExperimentModel(prof=CURRENT_PROFILE)
+    report = em.build_import_feasibility_report(
+        design,
+        max_stock_df=stocks,
+        printed_volume_nL=6700.0,
+        final_volume_nL=10000.0,
+        allow_two=False,
+    )
+
+    assert not any(issue.get("severity") == "error" for issue in report["issues"])
+
+    em.set_metadata(
+        target_reaction_volume_nL=6700.0,
+        final_reaction_volume_nL=10000.0,
+        allow_two_stock_solutions=False,
+    )
+    em.set_uploaded_design_from_dataframe(
+        design,
+        units_default="",
+        droplet_nL_default=10.0,
+        starting_conc_default=0.0,
+        source_path="samples_titration_labcraft.csv",
+    )
+    max_stock_by_reagent = report["max_stock_by_reagent"]
+    for factor in em.factors:
+        if factor.options and factor.name in max_stock_by_reagent:
+            factor.options[0].max_stock_conc = max_stock_by_reagent[factor.name]
+
+    result = em.optimize_stock_solutions(quantum=0.1, max_refine=60, two_max_refine=40, allow_two=False)
+
+    assert result.get("best")
+    poly_rows = [
+        row
+        for row in em.get_stock_table_rows(include_fill=False)
+        if row.get("factor_name") == "[PolyP]"
+    ]
+    assert poly_rows
+    assert poly_rows[0]["stock_concentration"] <= 500.0 + 1e-12
+
+
+def test_import_feasibility_report_surfaces_draft_optimizer_errors(monkeypatch):
+    def fail_optimizer(self, *args, **kwargs):
+        return {
+            "best": None,
+            "reason": "No feasible single-stock plan for additive 'Reagent A'.",
+            "issues_by_key": {
+                ("Reagent A", None): [
+                    {
+                        "field": "max_stock",
+                        "severity": "error",
+                        "code": "max_stock_no_single_plan",
+                        "message": "Max stock 10 mM cannot support a single-stock plan for additive 'Reagent A'.",
+                        "max_stock_conc": 10.0,
+                    }
+                ]
+            },
+        }
+
+    monkeypatch.setattr(ExperimentModel, "optimize_stock_solutions", fail_optimizer)
+    em = _make_model(target_volume_nl=500.0, final_volume_nl=1000.0)
+    df = pd.DataFrame({"well_id": ["A1"], "Reagent A mM": [1.0]})
+    max_df = pd.DataFrame({"reagent": ["Reagent A"], "stock_conc": [10.0], "units": ["mM"]})
+
+    report = em.build_import_feasibility_report(
+        df,
+        max_stock_df=max_df,
+        printed_volume_nL=500.0,
+        final_volume_nL=1000.0,
+    )
+
+    assert report["ok"] is False
+    assert any(
+        issue["code"] == "max_stock_no_single_plan" and issue["reagent"] == "Reagent A"
+        for issue in report["issues"]
+    )
+    assert report["stock_rows"][0]["status"] == "Stock plan impossible"
+    assert "single-stock plan" in report["stock_rows"][0]["recommendation"]
+
+
+def test_import_feasibility_report_flags_unit_mismatch():
+    em = _make_model(target_volume_nl=500.0, final_volume_nl=1000.0)
+    df = pd.DataFrame({"well_id": ["A1"], "Reagent A mM": [1.0]})
+    max_df = pd.DataFrame({"reagent": ["Reagent A"], "stock_conc": [10.0], "units": ["uM"]})
+
+    report = em.build_import_feasibility_report(
+        df,
+        max_stock_df=max_df,
+        printed_volume_nL=500.0,
+        final_volume_nL=1000.0,
+    )
+
+    assert any(issue["code"] == "unit_mismatch" for issue in report["issues"])
+    assert report["stock_rows"][0]["status"] == "Unit mismatch"
+    assert report["composition_rows"][0]["status"] == "Unit mismatch"
+
+
+def test_import_feasibility_report_collapses_duplicate_compositions():
+    em = _make_model(target_volume_nl=500.0, final_volume_nl=1000.0)
+    df = pd.DataFrame(
+        {
+            "well_id": ["A1", "A2", "B1"],
+            "Reagent A mM": [1.0, 1.0, 2.0],
+            "Reagent B mM": [2.0, 2.0, 3.0],
+        }
+    )
+    max_df = pd.DataFrame(
+        {
+            "reagent": ["Reagent A", "Reagent B"],
+            "stock_conc": [10.0, 10.0],
+            "units": ["mM", "mM"],
+        }
+    )
+
+    report = em.build_import_feasibility_report(
+        df,
+        max_stock_df=max_df,
+        printed_volume_nL=500.0,
+        final_volume_nL=1000.0,
+    )
+
+    assert len(report["composition_rows"]) == 2
+    first = report["composition_rows"][0]
+    assert first["count"] == 2
+    assert first["wells"] == ["A1", "A2"]
+    assert first["total_required_volume_nL"] == pytest.approx(300.0)
 
 
 def test_two_stock_enumeration_honors_pair_cap(monkeypatch):

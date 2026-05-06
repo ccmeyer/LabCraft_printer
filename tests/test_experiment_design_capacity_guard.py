@@ -128,16 +128,25 @@ def test_upload_design_warns_immediately_for_invalid_selected_plate(monkeypatch,
 
     warn = Mock()
     monkeypatch.setattr(QMessageBox, "warning", warn)
-    monkeypatch.setattr(
-        View.QFileDialog,
-        "getOpenFileName",
-        lambda *args, **kwargs: ("bad_layout.csv", "CSV files (*.csv)"),
-    )
-    monkeypatch.setattr(
-        View.pd,
-        "read_csv",
-        lambda _path: pd.DataFrame({"Well ID": ["G16"], "NaCl (mM)": [1.0]}),
-    )
+
+    class _FakeWizard:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            return View.QDialog.Accepted
+
+        def get_apply_payload(self):
+            return {
+                "design_df": pd.DataFrame({"Well ID": ["G16"], "NaCl (mM)": [1.0]}),
+                "source_path": "bad_layout.csv",
+                "max_stock_by_reagent": {},
+                "printed_volume_nL": 500.0,
+                "final_volume_nL": 500.0,
+                "allow_two": False,
+            }
+
+    monkeypatch.setattr(View, "ExperimentImportWizard", _FakeWizard)
 
     ExperimentDesignDialog._on_upload_design(dialog)
 

@@ -1119,7 +1119,21 @@ class ExperimentModel(QObject):
     ) -> List[SingleStockPlan]:
         xs = sorted({self._normalize_target_key(max(0.0, float(t))) for t in targets})
         cands: List[SingleStockPlan] = []
-        for delta in self._candidate_single_stock_deltas(xs, max_refine=max_refine, min_delta=min_delta):
+        candidate_deltas = set(
+            self._candidate_single_stock_deltas(xs, max_refine=max_refine, min_delta=min_delta)
+        )
+        if max_stock_conc is not None and final_volume_nL > 0 and droplet_nL > 0:
+            max_delta = (float(max_stock_conc) * float(droplet_nL)) / float(final_volume_nL)
+            if max_delta >= min_delta and math.isfinite(max_delta):
+                candidate_deltas.add(self._normalize_target_key(max_delta))
+                for target in (t for t in xs if t > 1e-12):
+                    drops_at_max = max(1, int(math.ceil(float(target) / max_delta)))
+                    for drops in (drops_at_max, drops_at_max + 1):
+                        delta = float(target) / float(drops)
+                        if delta >= min_delta and delta <= max_delta + 1e-12:
+                            candidate_deltas.add(self._normalize_target_key(delta))
+
+        for delta in sorted(candidate_deltas):
             stock_c = (float(delta) * final_volume_nL) / droplet_nL
             if max_stock_conc is not None and stock_c > (float(max_stock_conc) + 1e-12):
                 continue
@@ -2872,6 +2886,529 @@ class ExperimentModel(QObject):
                 uploaded_well_ids.append(s if s else None)
 
         return uploaded_well_ids if any(w for w in uploaded_well_ids) else None
+
+    @staticmethod
+    def _normalize_import_token(value) -> str:
+        text = re.sub(r"\([^)]*\)", "", str(value or "")).strip().lower()
+        text = text.replace("[", " ").replace("]", " ")
+        return re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+
+    @classmethod
+    def _import_alias_tokens(cls, value) -> Set[str]:
+        token = cls._normalize_import_token(value)
+        aliases = {
+            "amino_acids": {"aas", "amino_acid_mix", "amino_acids"},
+            "amino_acid_mix": {"aas", "amino_acids", "amino_acid_mix"},
+            "aas": {"aas", "amino_acids", "amino_acid_mix"},
+            "polyp": {"polyp", "polyphosphate"},
+            "polyphosphate": {"polyp", "polyphosphate"},
+            "trna": {"trna", "t_rna"},
+            "rnas_inh": {"rnas_inh", "rnase_inhib", "rnase_inhibitor"},
+            "rnase_inhib": {"rnas_inh", "rnase_inhib", "rnase_inhibitor"},
+        }
+        result = {token}
+        result.update(aliases.get(token, set()))
+        return {x for x in result if x}
+
+    @staticmethod
+    def _normalize_import_units(value) -> str:
+        text = str(value or "").strip().lower()
+        text = text.replace("µ", "u").replace("μ", "u")
+        text = re.sub(r"\s+", "", text)
+        return text
+
+    @staticmethod
+    def _parse_import_header(raw_header, units_default: str = "") -> Tuple[str, str]:
+        raw = str(raw_header).strip()
+        units = units_default
+        name = raw
+
+        m = re.match(r"^(.*)\((.+)\)\s*$", raw)
+        if m:
+            name = m.group(1).strip()
+            units = m.group(2).strip()
+        else:
+            parts = raw.split()
+            if len(parts) > 1:
+                name = " ".join(parts[:-1]).strip()
+                units = parts[-1].strip()
+
+        return (name or raw, units or units_default or "arb")
+
+    def _parse_import_design_dataframe(
+        self,
+        df: "pd.DataFrame",
+        *,
+        units_default: str = "",
+        droplet_nL_default: float = 10.0,
+        starting_conc_default: float = 0.0,
+    ) -> Dict[str, Any]:
+        df_in = df.copy()
+        well_col = self.find_uploaded_design_well_column(df_in)
+        well_ids = self.extract_uploaded_design_well_ids_from_dataframe(df_in)
+        if well_col is not None:
+            df_in = df_in.drop(columns=[well_col])
+
+        def _row_label(row_index: int) -> str:
+            if well_ids and 0 <= row_index < len(well_ids) and well_ids[row_index]:
+                return f"well {well_ids[row_index]}"
+            return f"row {row_index + 1}"
+
+        reagent_specs: List[Dict[str, Any]] = []
+        values_by_name: Dict[str, List[float]] = {}
+        issues: List[Dict[str, Any]] = []
+
+        for col in df_in.columns:
+            reagent_name, units = self._parse_import_header(col, units_default=units_default)
+            vals: List[float] = []
+            for row_index, value in enumerate(df_in[col].tolist()):
+                if value is None or (isinstance(value, float) and pd.isna(value)):
+                    vals.append(0.0)
+                    continue
+                try:
+                    numeric = float(value)
+                    if not math.isfinite(numeric):
+                        raise ValueError("not finite")
+                    vals.append(numeric)
+                except Exception:
+                    vals.append(0.0)
+                    issues.append({
+                        "field": "target",
+                        "severity": "error",
+                        "code": "invalid_target_value",
+                        "message": (
+                            f"Invalid target value for {reagent_name} in "
+                            f"{_row_label(row_index)}; treating it as 0."
+                        ),
+                        "row_index": int(row_index),
+                        "row_label": _row_label(row_index),
+                        "reagent": reagent_name,
+                        "raw_value": value,
+                    })
+
+            values_by_name[reagent_name] = vals
+            targets = sorted(set(float(v) for v in vals))
+            reagent_specs.append({
+                "column": col,
+                "name": reagent_name,
+                "units": units,
+                "targets": targets,
+                "droplet_nL": float(droplet_nL_default),
+                "starting_conc": float(starting_conc_default),
+                "tokens": sorted(self._import_alias_tokens(reagent_name)),
+            })
+
+        reactions: List[Dict[Tuple[str, Optional[str]], float]] = []
+        n_rows = len(df_in.index)
+        for row_index in range(n_rows):
+            rxn: Dict[Tuple[str, Optional[str]], float] = {}
+            for spec in reagent_specs:
+                vals = values_by_name.get(spec["name"], [])
+                rxn[(spec["name"], None)] = float(vals[row_index]) if row_index < len(vals) else 0.0
+            reactions.append(rxn)
+
+        return {
+            "reagent_specs": reagent_specs,
+            "reactions": reactions,
+            "well_ids": well_ids,
+            "issues": issues,
+            "row_count": n_rows,
+        }
+
+    def _parse_import_max_stock_dataframe(
+        self,
+        max_stock_df: Optional["pd.DataFrame"],
+    ) -> Dict[str, Any]:
+        if max_stock_df is None or getattr(max_stock_df, "empty", True):
+            return {"stocks": [], "issues": []}
+
+        columns = {str(col).strip().lower(): col for col in max_stock_df.columns}
+        reagent_col = None
+        for candidate in ("reagent", "name", "stock", "stock_name", "stock label", "stock_label"):
+            if candidate in columns:
+                reagent_col = columns[candidate]
+                break
+
+        conc_col = None
+        for candidate in ("stock_conc", "max_stock_conc", "max stock conc", "stock concentration", "stock_concentration"):
+            if candidate in columns:
+                conc_col = columns[candidate]
+                break
+
+        units_col = None
+        for candidate in ("units", "unit"):
+            if candidate in columns:
+                units_col = columns[candidate]
+                break
+
+        issues: List[Dict[str, Any]] = []
+        if reagent_col is None or conc_col is None:
+            issues.append({
+                "field": "max_stock_csv",
+                "severity": "error",
+                "code": "missing_required_columns",
+                "message": "Max stock CSV must include reagent and stock_conc columns.",
+            })
+            return {"stocks": [], "issues": issues}
+
+        rows: List[Dict[str, Any]] = []
+        for row_index, row in max_stock_df.iterrows():
+            name = str(row.get(reagent_col, "") or "").strip()
+            if not name:
+                continue
+            raw_conc = row.get(conc_col)
+            try:
+                stock_conc = float(raw_conc)
+                if not math.isfinite(stock_conc) or stock_conc <= 0:
+                    raise ValueError("nonpositive")
+            except Exception:
+                issues.append({
+                    "field": "max_stock",
+                    "severity": "warning",
+                    "code": "invalid_max_stock",
+                    "message": f"Max stock for {name} is not a positive number.",
+                    "row_index": int(row_index),
+                    "reagent": name,
+                    "raw_value": raw_conc,
+                })
+                continue
+
+            units = str(row.get(units_col, "") or "").strip() if units_col is not None else ""
+            rows.append({
+                "name": name,
+                "stock_conc": stock_conc,
+                "units": units,
+                "tokens": sorted(self._import_alias_tokens(name)),
+            })
+
+        return {"stocks": rows, "issues": issues}
+
+    def build_import_feasibility_report(
+        self,
+        df: "pd.DataFrame",
+        *,
+        max_stock_df: Optional["pd.DataFrame"] = None,
+        max_stock_map: Dict[str, float] | None = None,
+        units_default: str = "",
+        droplet_nL_default: float = 10.0,
+        starting_conc_default: float = 0.0,
+        printed_volume_nL: float | None = None,
+        final_volume_nL: float | None = None,
+        allow_two: bool = False,
+    ) -> Dict[str, Any]:
+        printed_volume = float(
+            printed_volume_nL
+            if printed_volume_nL is not None
+            else self.metadata.get("target_reaction_volume_nL", 500.0)
+        )
+        final_volume = float(
+            final_volume_nL
+            if final_volume_nL is not None
+            else self.metadata.get("final_reaction_volume_nL", printed_volume)
+        )
+        if printed_volume > final_volume:
+            printed_volume = final_volume
+
+        parsed = self._parse_import_design_dataframe(
+            df,
+            units_default=units_default,
+            droplet_nL_default=droplet_nL_default,
+            starting_conc_default=starting_conc_default,
+        )
+        max_stock_payload = self._parse_import_max_stock_dataframe(max_stock_df)
+        max_stock_map = dict(max_stock_map or {})
+
+        stock_candidates = list(max_stock_payload.get("stocks", []))
+        issues: List[Dict[str, Any]] = list(parsed.get("issues", [])) + list(max_stock_payload.get("issues", []))
+        unmatched_stock_rows = []
+        matched_stock_names: Set[str] = set()
+
+        def _manual_stock_for_spec(spec: Dict[str, Any]):
+            for candidate_key, value in max_stock_map.items():
+                if candidate_key == spec["name"] or self._normalize_import_token(candidate_key) in set(spec["tokens"]):
+                    try:
+                        stock_conc = float(value)
+                    except Exception:
+                        continue
+                    if stock_conc > 0 and math.isfinite(stock_conc):
+                        return {"name": candidate_key, "stock_conc": stock_conc, "units": spec["units"], "tokens": sorted(self._import_alias_tokens(candidate_key))}
+            return None
+
+        def _stock_for_spec(spec: Dict[str, Any]):
+            manual = _manual_stock_for_spec(spec)
+            if manual is not None:
+                return manual
+            tokens = set(spec["tokens"])
+            for stock in stock_candidates:
+                if tokens.intersection(set(stock.get("tokens", []))):
+                    matched_stock_names.add(stock["name"])
+                    return stock
+            return None
+
+        spec_by_key = {(spec["name"], None): spec for spec in parsed["reagent_specs"]}
+        stocks_by_reagent: Dict[str, Dict[str, Any] | None] = {}
+        for spec in parsed["reagent_specs"]:
+            stock = _stock_for_spec(spec)
+            stocks_by_reagent[spec["name"]] = stock
+            if stock is None:
+                issues.append({
+                    "field": "max_stock",
+                    "severity": "warning",
+                    "code": "missing_max_stock",
+                    "message": f"No max stock concentration was supplied for {spec['name']}.",
+                    "reagent": spec["name"],
+                })
+            else:
+                design_units = self._normalize_import_units(spec.get("units"))
+                stock_units = self._normalize_import_units(stock.get("units"))
+                if stock_units and design_units and stock_units != design_units:
+                    issues.append({
+                        "field": "units",
+                        "severity": "warning",
+                        "code": "unit_mismatch",
+                        "message": (
+                            f"Unit mismatch for {spec['name']}: design uses {spec['units']}, "
+                            f"max stock CSV uses {stock.get('units')}."
+                        ),
+                        "reagent": spec["name"],
+                        "design_units": spec["units"],
+                        "stock_units": stock.get("units"),
+                    })
+
+        for stock in stock_candidates:
+            if stock["name"] not in matched_stock_names and not any(
+                self._normalize_import_token(stock["name"]) == self._normalize_import_token(k)
+                for k in max_stock_map.keys()
+            ):
+                unmatched_stock_rows.append(stock)
+
+        composition_lookup: Dict[Tuple[float, ...], Dict[str, Any]] = {}
+        reagent_specs = list(parsed["reagent_specs"])
+        well_ids = parsed.get("well_ids") or []
+        for row_index, rxn in enumerate(parsed["reactions"]):
+            signature = tuple(
+                float(f"{float(rxn.get((spec['name'], None), 0.0)):.12g}")
+                for spec in reagent_specs
+            )
+            row = composition_lookup.get(signature)
+            if row is None:
+                row = {
+                    "label": f"Composition {len(composition_lookup) + 1}",
+                    "row_indices": [],
+                    "wells": [],
+                    "count": 0,
+                    "targets": {},
+                    "reagent_volumes_nL": {},
+                    "total_required_volume_nL": 0.0,
+                    "remaining_printed_volume_nL": 0.0,
+                    "status": "OK",
+                    "issue_codes": [],
+                }
+                composition_lookup[signature] = row
+            row["row_indices"].append(int(row_index))
+            if row_index < len(well_ids) and well_ids[row_index]:
+                row["wells"].append(well_ids[row_index])
+            row["count"] += 1
+
+        for signature, row in composition_lookup.items():
+            total = 0.0
+            missing = False
+            unit_mismatch = False
+            for idx, spec in enumerate(reagent_specs):
+                target = float(signature[idx])
+                stock = stocks_by_reagent.get(spec["name"])
+                row["targets"][spec["name"]] = target
+                if stock is None:
+                    row["reagent_volumes_nL"][spec["name"]] = None
+                    if abs(target) > 1e-12:
+                        missing = True
+                    continue
+                if (
+                    self._normalize_import_units(stock.get("units"))
+                    and self._normalize_import_units(spec.get("units"))
+                    and self._normalize_import_units(stock.get("units")) != self._normalize_import_units(spec.get("units"))
+                ):
+                    unit_mismatch = True
+                starting = float(spec.get("starting_conc", 0.0) or 0.0)
+                target_adjusted = max(0.0, target - starting)
+                volume = (target_adjusted / float(stock["stock_conc"])) * final_volume if stock["stock_conc"] > 0 else 0.0
+                row["reagent_volumes_nL"][spec["name"]] = float(volume)
+                total += float(volume)
+            row["total_required_volume_nL"] = float(total)
+            row["remaining_printed_volume_nL"] = float(printed_volume - total)
+            if any(issue.get("code") == "invalid_target_value" for issue in parsed.get("issues", [])):
+                row["status"] = "Invalid value"
+                row["issue_codes"].append("invalid_target_value")
+            elif missing:
+                row["status"] = "Missing max stock"
+                row["issue_codes"].append("missing_max_stock")
+            elif unit_mismatch:
+                row["status"] = "Unit mismatch"
+                row["issue_codes"].append("unit_mismatch")
+            elif total > printed_volume + 1e-6:
+                row["status"] = "Volume impossible"
+                row["issue_codes"].append("max_stock_volume_budget_exceeded")
+
+        draft_stock_rows_by_name: Dict[str, Dict[str, Any]] = {}
+        draft_optimizer_issues_by_reagent: Dict[str, List[Dict[str, Any]]] = {}
+
+        def _record_draft_optimizer_issue(key, issue: Dict[str, Any]):
+            issue_copy = dict(issue or {})
+            issue_copy.setdefault("field", "stock_plan")
+            issue_copy.setdefault("severity", "error")
+            issue_copy.setdefault("code", "draft_optimizer_failed")
+            issue_copy.setdefault("message", "Draft stock optimization failed.")
+
+            reagent_name = None
+            if isinstance(key, tuple) and key:
+                factor_name = str(key[0])
+                option_name = key[1] if len(key) > 1 else None
+                if factor_name != "__uploaded_design__":
+                    reagent_name = self._design_key_label((factor_name, option_name))
+                    issue_copy.setdefault("reagent", reagent_name)
+                    issue_copy.setdefault("factor", factor_name)
+                    if option_name not in (None, ""):
+                        issue_copy.setdefault("option", option_name)
+
+            issues.append(issue_copy)
+            if reagent_name:
+                draft_optimizer_issues_by_reagent.setdefault(reagent_name, []).append(issue_copy)
+
+        try:
+            draft = ExperimentModel(prof=CURRENT_PROFILE)
+            draft.set_metadata(
+                target_reaction_volume_nL=printed_volume,
+                final_reaction_volume_nL=final_volume,
+                allow_two_stock_solutions=bool(allow_two),
+            )
+            draft.set_uploaded_design_from_dataframe(
+                df,
+                units_default=units_default,
+                droplet_nL_default=droplet_nL_default,
+                starting_conc_default=starting_conc_default,
+            )
+            for factor in draft.factors:
+                stock = stocks_by_reagent.get(factor.name)
+                if stock is not None and factor.options:
+                    factor.options[0].max_stock_conc = float(stock["stock_conc"])
+            res = draft.optimize_stock_solutions(
+                quantum=0.1,
+                max_refine=60,
+                two_max_refine=40,
+                allow_two=bool(allow_two),
+            )
+            if res.get("best"):
+                for row in draft.get_stock_table_rows(include_fill=False):
+                    draft_stock_rows_by_name.setdefault(str(row.get("factor_name")), dict(row))
+            else:
+                issues_by_key = res.get("issues_by_key") or {}
+                if issues_by_key:
+                    for key, issue_list in issues_by_key.items():
+                        for issue in issue_list:
+                            _record_draft_optimizer_issue(key, issue)
+                elif res.get("reason"):
+                    issues.append({
+                        "field": "stock_plan",
+                        "severity": "error",
+                        "code": "draft_optimizer_failed",
+                        "message": str(res.get("reason")),
+                    })
+        except Exception:
+            draft_stock_rows_by_name = {}
+
+        stock_rows: List[Dict[str, Any]] = []
+        for spec in reagent_specs:
+            targets = sorted(set(float(t) for t in spec.get("targets", [])))
+            positives = [t for t in targets if t > 1e-12]
+            diffs = [
+                abs(float(b) - float(a))
+                for a, b in zip(targets, targets[1:])
+                if abs(float(b) - float(a)) > 1e-12
+            ]
+            stock = stocks_by_reagent.get(spec["name"])
+            max_stock = float(stock["stock_conc"]) if stock is not None else None
+            ideal_row = draft_stock_rows_by_name.get(spec["name"], {})
+            ideal_stock = ideal_row.get("stock_concentration")
+            if ideal_stock is None and max_stock is not None:
+                ideal_stock = max_stock
+            delta_per_drop = None
+            if ideal_stock is not None:
+                try:
+                    delta_per_drop = float(ideal_stock) * float(spec["droplet_nL"]) / final_volume
+                except Exception:
+                    delta_per_drop = None
+            worst_volume = None
+            if max_stock is not None and positives:
+                worst_volume = (max(positives) / max_stock) * final_volume
+
+            smallest_step = min(diffs) if diffs else None
+            status = "OK"
+            recommendation = "Feasible under current bounds."
+            if stock is None:
+                status = "Missing max stock"
+                recommendation = "Upload or enter a max stock concentration."
+            elif any(
+                issue.get("code") == "unit_mismatch" and issue.get("reagent") == spec["name"]
+                for issue in issues
+            ):
+                status = "Unit mismatch"
+                recommendation = "Confirm units or convert the design/stock concentration."
+            elif worst_volume is not None and worst_volume > printed_volume + 1e-6:
+                status = "Volume impossible"
+                recommendation = "Increase printed volume, lower final volume, raise max stock, or reduce the target."
+            elif any(
+                issue.get("severity") == "error"
+                for issue in draft_optimizer_issues_by_reagent.get(spec["name"], [])
+            ):
+                optimizer_issue = next(
+                    issue
+                    for issue in draft_optimizer_issues_by_reagent.get(spec["name"], [])
+                    if issue.get("severity") == "error"
+                )
+                status = "Stock plan impossible"
+                recommendation = (
+                    f"{optimizer_issue.get('message', 'Draft stock optimization failed.')} "
+                    "Try a higher max stock, allow two-stock mode, lower targets, or adjust reaction volumes."
+                )
+            elif delta_per_drop is not None and smallest_step is not None and smallest_step < (0.5 * delta_per_drop):
+                status = "Resolution warning"
+                recommendation = "Use a lower stock concentration or accept rounding error."
+
+            stock_rows.append({
+                "reagent": spec["name"],
+                "units": spec["units"],
+                "max_stock_conc": max_stock,
+                "matched_stock_name": stock.get("name") if stock is not None else None,
+                "matched_stock_units": stock.get("units") if stock is not None else None,
+                "ideal_stock_conc": ideal_stock,
+                "delta_per_drop": delta_per_drop,
+                "target_min": min(targets) if targets else 0.0,
+                "target_max": max(targets) if targets else 0.0,
+                "target_span": (max(targets) - min(targets)) if targets else 0.0,
+                "smallest_nonzero_target": min(positives) if positives else None,
+                "worst_max_stock_volume_nL": worst_volume,
+                "smallest_useful_target_step": smallest_step,
+                "status": status,
+                "recommendation": recommendation,
+            })
+
+        return {
+            "ok": not any(issue.get("severity") == "error" for issue in issues),
+            "printed_volume_nL": printed_volume,
+            "final_volume_nL": final_volume,
+            "reagent_specs": reagent_specs,
+            "composition_rows": list(composition_lookup.values()),
+            "stock_rows": stock_rows,
+            "issues": issues,
+            "missing_stock_rows": [row for row in stock_rows if row["status"] == "Missing max stock"],
+            "unmatched_stock_rows": unmatched_stock_rows,
+            "status_counts": dict(pd.Series([row["status"] for row in composition_lookup.values()]).value_counts()) if composition_lookup else {},
+            "max_stock_by_reagent": {
+                row["reagent"]: row["max_stock_conc"]
+                for row in stock_rows
+                if row.get("max_stock_conc") is not None
+            },
+        }
 
     def clear_uploaded_design(self):
         """Reset back to normal (factor-defined) design."""

@@ -1,13 +1,18 @@
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDoubleSpinBox,
     QLabel,
     QLineEdit,
     QTableWidget,
     QTableWidgetItem,
 )
 
+import pandas as pd
 import View
+from Model import CURRENT_PROFILE, ExperimentModel
 from View import ExperimentDesignDialog
 
 
@@ -158,6 +163,316 @@ def test_failure_dialog_shows_detailed_issue_summary(qapp, monkeypatch):
     assert captured["text"].startswith("Could not optimize:\n")
     assert "Uploaded row A1 needs 1600 nL" in captured["text"]
     assert "Generic optimizer failure" not in captured["text"]
+
+
+def test_import_wizard_loads_design_and_stock_tables(qapp):
+    model = ExperimentModel(prof=CURRENT_PROFILE)
+    wizard = View.ExperimentImportWizard(
+        model,
+        printed_volume_nL=500.0,
+        final_volume_nL=1000.0,
+        allow_two=False,
+    )
+    design_df = pd.DataFrame(
+        {
+            "well_id": ["A1", "A2"],
+            "Reagent A mM": [1.0, 1.0],
+            "Reagent B mM": [2.0, 2.0],
+        }
+    )
+    stock_df = pd.DataFrame(
+        {
+            "reagent": ["Reagent A", "Reagent B"],
+            "stock_conc": [10.0, 20.0],
+            "units": ["mM", "mM"],
+        }
+    )
+
+    wizard.load_design_dataframe(design_df, source_path="design.csv")
+    wizard.load_max_stock_dataframe(stock_df, source_path="stocks.csv")
+
+    assert wizard.composition_table.rowCount() == 1
+    assert wizard.stock_table.rowCount() == 2
+    assert wizard.report["composition_rows"][0]["count"] == 2
+    assert wizard.report["composition_rows"][0]["total_required_volume_nL"] == 200.0
+    assert wizard.apply_btn.isEnabled()
+
+
+def test_import_wizard_volume_edits_recompute_feasibility(qapp):
+    model = ExperimentModel(prof=CURRENT_PROFILE)
+    wizard = View.ExperimentImportWizard(
+        model,
+        printed_volume_nL=500.0,
+        final_volume_nL=1000.0,
+        allow_two=False,
+    )
+    wizard.load_design_dataframe(
+        pd.DataFrame({"well_id": ["A1"], "Reagent A mM": [4.0]}),
+        source_path="design.csv",
+    )
+    wizard.load_max_stock_dataframe(
+        pd.DataFrame({"reagent": ["Reagent A"], "stock_conc": [10.0], "units": ["mM"]}),
+        source_path="stocks.csv",
+    )
+
+    assert wizard.report["composition_rows"][0]["status"] == "OK"
+
+    wizard.printed_volume_spin.setValue(300.0)
+
+    assert wizard.report["composition_rows"][0]["status"] == "OK"
+
+    wizard.printed_volume_spin.editingFinished.emit()
+
+    assert wizard.report["composition_rows"][0]["status"] == "Volume impossible"
+    assert "Volume impossible" in wizard.status_lbl.text()
+
+
+def test_import_wizard_status_colors_distinguish_warnings_from_errors(qapp):
+    warning_wizard = View.ExperimentImportWizard(
+        ExperimentModel(prof=CURRENT_PROFILE),
+        printed_volume_nL=500.0,
+        final_volume_nL=1000.0,
+        allow_two=False,
+    )
+    warning_wizard.load_design_dataframe(
+        pd.DataFrame({"well_id": ["A1"], "Reagent A mM": [1.0]}),
+        source_path="design.csv",
+    )
+
+    warning_item = warning_wizard.composition_table.item(0, 0)
+    assert warning_item.background().color().name() == "#7a5a00"
+    assert warning_item.foreground().color().name() == "#ffffff"
+
+    error_wizard = View.ExperimentImportWizard(
+        ExperimentModel(prof=CURRENT_PROFILE),
+        printed_volume_nL=500.0,
+        final_volume_nL=1000.0,
+        allow_two=False,
+    )
+    error_wizard.load_design_dataframe(
+        pd.DataFrame({"well_id": ["A1"], "Reagent A mM": [10.0]}),
+        source_path="design.csv",
+    )
+    error_wizard.load_max_stock_dataframe(
+        pd.DataFrame({"reagent": ["Reagent A"], "stock_conc": [1.0], "units": ["mM"]}),
+        source_path="stocks.csv",
+    )
+
+    error_item = error_wizard.composition_table.item(0, 0)
+    assert error_wizard.report["composition_rows"][0]["status"] == "Volume impossible"
+    assert error_item.background().color().name() == "#8b1e1e"
+    assert error_item.foreground().color().name() == "#ffffff"
+    assert warning_wizard.apply_btn.isEnabled()
+
+
+def test_import_wizard_stock_plan_errors_are_red_and_disable_apply(qapp):
+    class _ReportModel:
+        def build_import_feasibility_report(self, *_args, **_kwargs):
+            return {
+                "ok": False,
+                "printed_volume_nL": 500.0,
+                "final_volume_nL": 1000.0,
+                "reagent_specs": [{"name": "Reagent A", "units": "mM"}],
+                "composition_rows": [
+                    {
+                        "label": "Composition 1",
+                        "wells": ["A1"],
+                        "count": 1,
+                        "targets": {"Reagent A": 1.0},
+                        "reagent_volumes_nL": {"Reagent A": 100.0},
+                        "total_required_volume_nL": 100.0,
+                        "remaining_printed_volume_nL": 400.0,
+                        "status": "OK",
+                    }
+                ],
+                "stock_rows": [
+                    {
+                        "reagent": "Reagent A",
+                        "units": "mM",
+                        "max_stock_conc": 10.0,
+                        "ideal_stock_conc": None,
+                        "delta_per_drop": None,
+                        "target_min": 1.0,
+                        "target_max": 1.0,
+                        "target_span": 0.0,
+                        "smallest_nonzero_target": 1.0,
+                        "worst_max_stock_volume_nL": 100.0,
+                        "smallest_useful_target_step": None,
+                        "status": "Stock plan impossible",
+                        "recommendation": "Max stock cannot support a single-stock plan.",
+                    }
+                ],
+                "issues": [
+                    {
+                        "field": "max_stock",
+                        "severity": "error",
+                        "code": "max_stock_no_single_plan",
+                        "message": "Max stock cannot support a single-stock plan.",
+                        "reagent": "Reagent A",
+                    }
+                ],
+                "missing_stock_rows": [],
+                "unmatched_stock_rows": [],
+                "status_counts": {"OK": 1},
+                "max_stock_by_reagent": {"Reagent A": 10.0},
+            }
+
+    wizard = View.ExperimentImportWizard(
+        _ReportModel(),
+        printed_volume_nL=500.0,
+        final_volume_nL=1000.0,
+        allow_two=False,
+    )
+    wizard.load_design_dataframe(pd.DataFrame({"well_id": ["A1"], "Reagent A mM": [1.0]}))
+
+    stock_item = wizard.stock_table.item(0, 0)
+    assert stock_item.background().color().name() == "#8b1e1e"
+    assert stock_item.foreground().color().name() == "#ffffff"
+    assert not wizard.apply_btn.isEnabled()
+
+
+def test_import_wizard_composition_table_layout_and_formatting(qapp):
+    model = ExperimentModel(prof=CURRENT_PROFILE)
+    wizard = View.ExperimentImportWizard(
+        model,
+        printed_volume_nL=10000.0,
+        final_volume_nL=10000.0,
+        allow_two=False,
+    )
+    wizard.load_design_dataframe(
+        pd.DataFrame(
+            {
+                "well_id": ["A1"],
+                "Very Long Reagent Name mM": [44.1],
+                "Another Long Reagent mM": [3.55],
+            }
+        ),
+        source_path="design.csv",
+    )
+    wizard.load_max_stock_dataframe(
+        pd.DataFrame(
+            {
+                "reagent": ["Very Long Reagent Name", "Another Long Reagent"],
+                "stock_conc": [200.0, 100.0],
+                "units": ["mM", "mM"],
+            }
+        ),
+        source_path="stocks.csv",
+    )
+
+    assert wizard.composition_table.textElideMode() == Qt.TextElideMode.ElideNone
+    assert wizard.composition_table.columnWidth(3) == wizard.composition_table.columnWidth(4)
+    assert "\n" in wizard.composition_table.horizontalHeaderItem(3).text()
+    assert "..." not in wizard.composition_table.item(0, 3).text()
+    assert wizard.composition_table.item(0, 5).text() == "2560"
+    assert wizard.composition_table.item(0, 6).text() == "7440"
+
+
+def test_upload_design_wizard_apply_mutates_model_once(qapp, monkeypatch):
+    design_df = pd.DataFrame({"well_id": ["A1"], "Reagent A mM": [1.0]})
+    constructed = {}
+
+    class _FakeWizard:
+        def __init__(self, *args, **kwargs):
+            constructed["args"] = args
+            constructed["kwargs"] = kwargs
+
+        def exec(self):
+            return QDialog.Accepted
+
+        def get_apply_payload(self):
+            return {
+                "design_df": design_df,
+                "source_path": "design.csv",
+                "max_stock_by_reagent": {"Reagent A": 10.0},
+                "printed_volume_nL": 750.0,
+                "final_volume_nL": 1000.0,
+                "allow_two": True,
+            }
+
+    class _ModelStub:
+        def __init__(self):
+            self.metadata = {}
+            self.factors = []
+            self.upload_calls = 0
+            self.metadata_calls = []
+
+        def set_metadata(self, **kwargs):
+            self.metadata.update(kwargs)
+            self.metadata_calls.append(kwargs)
+
+        def set_uploaded_design_from_dataframe(self, df, **kwargs):
+            self.upload_calls += 1
+            self.uploaded_df = df.copy()
+            self.upload_kwargs = kwargs
+            option = type("Option", (), {"max_stock_conc": None})()
+            self.factors = [type("Factor", (), {"name": "Reagent A", "kind": "additive", "options": [option]})()]
+
+        def extract_uploaded_design_well_ids_from_dataframe(self, _df):
+            return None
+
+    dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    dialog.model = _ModelStub()
+    dialog.choice_groups = set()
+    dialog._uploaded_design_active = False
+    dialog._uploaded_design_path = None
+    dialog.v_spin = QDoubleSpinBox()
+    dialog.v_spin.setRange(1.0, 1_000_000.0)
+    dialog.v_spin.setValue(500.0)
+    dialog.final_v_spin = QDoubleSpinBox()
+    dialog.final_v_spin.setRange(1.0, 1_000_000.0)
+    dialog.final_v_spin.setValue(500.0)
+    dialog.allow_two_chk = QCheckBox()
+    dialog._validate_uploaded_design_well_assignments = lambda _df: True
+    dialog._load_factors_into_table = lambda: None
+    dialog._update_metadata_from_controls = lambda: None
+    run_calls = []
+    dialog._run_design_optimization_flow = lambda **kwargs: run_calls.append(kwargs)
+
+    monkeypatch.setattr(View, "ExperimentImportWizard", _FakeWizard)
+
+    ExperimentDesignDialog._on_upload_design(dialog)
+
+    assert constructed["kwargs"]["printed_volume_nL"] == 500.0
+    assert dialog.model.upload_calls == 1
+    assert dialog.model.upload_kwargs["source_path"] == "design.csv"
+    assert dialog.model.factors[0].options[0].max_stock_conc == 10.0
+    assert dialog.model.metadata["target_reaction_volume_nL"] == 750.0
+    assert dialog.model.metadata["final_reaction_volume_nL"] == 1000.0
+    assert dialog.model.metadata["allow_two_stock_solutions"] is True
+    assert len(run_calls) == 1
+
+
+def test_upload_design_wizard_cancel_leaves_model_unchanged(qapp, monkeypatch):
+    class _FakeWizard:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            return QDialog.Rejected
+
+    class _ModelStub:
+        def __init__(self):
+            self.upload_calls = 0
+
+        def set_uploaded_design_from_dataframe(self, *_args, **_kwargs):
+            self.upload_calls += 1
+
+    dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    dialog.model = _ModelStub()
+    dialog.v_spin = QDoubleSpinBox()
+    dialog.v_spin.setRange(1.0, 1_000_000.0)
+    dialog.v_spin.setValue(500.0)
+    dialog.final_v_spin = QDoubleSpinBox()
+    dialog.final_v_spin.setRange(1.0, 1_000_000.0)
+    dialog.final_v_spin.setValue(500.0)
+    dialog.allow_two_chk = QCheckBox()
+
+    monkeypatch.setattr(View, "ExperimentImportWizard", _FakeWizard)
+
+    ExperimentDesignDialog._on_upload_design(dialog)
+
+    assert dialog.model.upload_calls == 0
 
 
 def test_invalid_max_stock_keeps_table_stale_until_fixed(qapp):
