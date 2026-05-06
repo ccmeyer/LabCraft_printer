@@ -692,6 +692,40 @@ def test_import_feasibility_report_flags_missing_max_stock():
     assert report["composition_rows"][0]["status"] == "Missing max stock"
 
 
+def test_import_max_stock_parser_accepts_labcraft_reagents_csv():
+    em = _make_model(target_volume_nl=6700.0, final_volume_nl=10000.0)
+    max_df = pd.read_csv("FreeRTOS-interface/Experiments/bnext_large_design/reagents.csv")
+
+    payload = em._parse_import_max_stock_dataframe(max_df)
+
+    assert not any(issue.get("reagent") == "water" for issue in payload["issues"])
+    stocks_by_name = {row["name"]: row for row in payload["stocks"]}
+    assert stocks_by_name["polyp"]["stock_conc"] == pytest.approx(500.0)
+    assert stocks_by_name["trna"]["units"] == "ug/ul"
+    assert "amino_acids" in stocks_by_name["aas"]["tokens"]
+    assert "polyphosphate" in stocks_by_name["polyp"]["tokens"]
+
+
+def test_import_feasibility_report_accepts_labcraft_reagents_csv_for_bnext_design():
+    design = pd.read_csv("FreeRTOS-interface/Experiments/bnext_large_design/samples_titration_labcraft.csv")
+    max_df = pd.read_csv("FreeRTOS-interface/Experiments/bnext_large_design/reagents.csv")
+    em = _make_model(target_volume_nl=6700.0, final_volume_nl=10000.0)
+
+    report = em.build_import_feasibility_report(
+        design,
+        max_stock_df=max_df,
+        printed_volume_nL=6700.0,
+        final_volume_nL=10000.0,
+        allow_two=False,
+    )
+
+    assert not any(issue.get("code") == "missing_max_stock" for issue in report["issues"])
+    assert not any(issue.get("severity") == "error" for issue in report["issues"])
+    assert not any(issue.get("reagent") == "water" for issue in report["issues"])
+    assert report["max_stock_by_reagent"]["[PolyP]"] == pytest.approx(500.0)
+    assert report["max_stock_by_reagent"]["[Amino Acids]"] == pytest.approx(6.0)
+
+
 def test_bnext_large_design_polyp_500_mm_is_single_stock_feasible():
     design = pd.read_csv("FreeRTOS-interface/Experiments/bnext_large_design/samples_titration_labcraft.csv")
     stocks = pd.read_csv("FreeRTOS-interface/Experiments/bnext_large_design/stock_solutions.csv")

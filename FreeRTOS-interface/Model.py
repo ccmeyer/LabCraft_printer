@@ -3022,15 +3022,36 @@ class ExperimentModel(QObject):
         if max_stock_df is None or getattr(max_stock_df, "empty", True):
             return {"stocks": [], "issues": []}
 
-        columns = {str(col).strip().lower(): col for col in max_stock_df.columns}
+        def _column_key(value) -> str:
+            return re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+
+        def _is_blank(value) -> bool:
+            if value is None:
+                return True
+            try:
+                if pd.isna(value):
+                    return True
+            except Exception:
+                pass
+            return str(value).strip() == ""
+
+        columns = {_column_key(col): col for col in max_stock_df.columns}
         reagent_col = None
-        for candidate in ("reagent", "name", "stock", "stock_name", "stock label", "stock_label"):
+        for candidate in ("reagent", "reagent_name", "name", "stock", "stock_name", "stock_label"):
             if candidate in columns:
                 reagent_col = columns[candidate]
                 break
 
         conc_col = None
-        for candidate in ("stock_conc", "max_stock_conc", "max stock conc", "stock concentration", "stock_concentration"):
+        for candidate in (
+            "stock_conc",
+            "max_stock_conc",
+            "max_conc",
+            "stock_concentration",
+            "max_stock_concentration",
+            "concentration",
+            "conc",
+        ):
             if candidate in columns:
                 conc_col = columns[candidate]
                 break
@@ -3040,6 +3061,7 @@ class ExperimentModel(QObject):
             if candidate in columns:
                 units_col = columns[candidate]
                 break
+        description_col = columns.get("description")
 
         issues: List[Dict[str, Any]] = []
         if reagent_col is None or conc_col is None:
@@ -3053,10 +3075,15 @@ class ExperimentModel(QObject):
 
         rows: List[Dict[str, Any]] = []
         for row_index, row in max_stock_df.iterrows():
-            name = str(row.get(reagent_col, "") or "").strip()
+            raw_name = row.get(reagent_col, "")
+            if _is_blank(raw_name):
+                continue
+            name = str(raw_name).strip()
             if not name:
                 continue
             raw_conc = row.get(conc_col)
+            if _is_blank(raw_conc):
+                continue
             try:
                 stock_conc = float(raw_conc)
                 if not math.isfinite(stock_conc) or stock_conc <= 0:
@@ -3074,11 +3101,20 @@ class ExperimentModel(QObject):
                 continue
 
             units = str(row.get(units_col, "") or "").strip() if units_col is not None else ""
+            description = (
+                str(row.get(description_col, "") or "").strip()
+                if description_col is not None and not _is_blank(row.get(description_col, ""))
+                else ""
+            )
+            tokens = set(self._import_alias_tokens(name))
+            if description:
+                tokens.update(self._import_alias_tokens(description))
             rows.append({
                 "name": name,
                 "stock_conc": stock_conc,
                 "units": units,
-                "tokens": sorted(self._import_alias_tokens(name)),
+                "description": description,
+                "tokens": sorted(tokens),
             })
 
         return {"stocks": rows, "issues": issues}
