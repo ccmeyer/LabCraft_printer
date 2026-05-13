@@ -5,9 +5,10 @@ from Controller import (
     ARRAY_AXIS_ACCEL_DEFAULT,
     ARRAY_PAUSE_DEPARTURE_ACCEL,
     ARRAY_PAUSE_DEPARTURE_SETTLE_MS,
-    ARRAY_ROW_START_OVERSHOOT_STEPS,
     Controller,
 )
+
+ROW_START_OVERSHOOT_FOR_TEST = 200
 
 
 class Emitter:
@@ -176,6 +177,7 @@ def _with_lowered_array_accels(context, restore_accels=None):
     context.update(
         {
             "pause_departure_restore_accels": restore_accels,
+            "gentle_accel_enabled": True,
             "array_accels_lowered": True,
             "array_accels_restored": False,
         }
@@ -241,12 +243,9 @@ def test_print_array_prefetches_one_lookahead_well():
         call("pause", ignore_safe_height=True),
     ]
     c.enable_print_profile.assert_called_once_with()
-    assert c.command_events[:5] == [
+    assert c.command_events == [
         ("move_to_location", ("pause",), {"z_offset": -5000}),
         ("move_to_location", ("pause",), {"ignore_safe_height": True}),
-        ("set_axis_accel", 0, ARRAY_PAUSE_DEPARTURE_ACCEL),
-        ("set_axis_accel", 1, ARRAY_PAUSE_DEPARTURE_ACCEL),
-        ("set_axis_accel", 2, ARRAY_PAUSE_DEPARTURE_ACCEL),
     ]
     assert c.set_absolute_coordinates.call_args_list == [
         call(10, 20, 30, override=True),
@@ -256,11 +255,7 @@ def test_print_array_prefetches_one_lookahead_well():
     assert c.print_droplets.call_args_list[0].args[0] == 5
     assert c.print_droplets.call_args_list[1].args[0] == 7
     assert c.print_droplets.call_args_list[0].kwargs["handler"] == c._handle_array_well_complete
-    assert c.machine.set_axis_accel.call_args_list == [
-        call(0, ARRAY_PAUSE_DEPARTURE_ACCEL),
-        call(1, ARRAY_PAUSE_DEPARTURE_ACCEL),
-        call(2, ARRAY_PAUSE_DEPARTURE_ACCEL),
-    ]
+    c.machine.set_axis_accel.assert_not_called()
     c.machine.wait_ms.assert_called_once_with(ARRAY_PAUSE_DEPARTURE_SETTLE_MS)
     assert c._array_context["stock_id"] == "stock-a"
     assert [item["well_id"] for item in c._array_context["queued_wells"]] == ["A1", "A2"]
@@ -268,7 +263,7 @@ def test_print_array_prefetches_one_lookahead_well():
     assert c.get_array_run_state() == "running"
 
 
-def test_print_array_uses_row_major_order_not_serpentine():
+def test_print_array_uses_serpentine_order_by_default():
     a1 = FakeWell("A1", 1, {"X": 10, "Y": 0, "Z": 30})
     a2 = FakeWell("A2", 1, {"X": 20, "Y": 0, "Z": 30})
     b1 = FakeWell("B1", 1, {"X": 10, "Y": 10, "Z": 30})
@@ -277,6 +272,36 @@ def test_print_array_uses_row_major_order_not_serpentine():
         well_plate=FakeWellPlate([a1, a2, b2, b1]),
         printer_head=_make_printer_head(),
     )
+    c._array_row_start_overshoot_steps = 0
+
+    Controller.print_array(c)
+    Controller._handle_array_well_complete(c, well_id="A1", stock_id="stock-a", target_droplets=1)
+    Controller._handle_array_well_complete(c, well_id="A2", stock_id="stock-a", target_droplets=1)
+
+    assert c.set_absolute_coordinates.call_args_list == [
+        call(10, 0, 30, override=True),
+        call(20, 0, 30, override=True),
+        call(20, 10, 30, override=True),
+        call(10, 10, 30, override=True),
+    ]
+    assert [call.kwargs["kwargs"]["well_id"] for call in c.print_droplets.call_args_list] == [
+        "A1",
+        "A2",
+        "B2",
+        "B1",
+    ]
+
+
+def test_print_array_can_use_row_major_order_when_serpentine_disabled():
+    a1 = FakeWell("A1", 1, {"X": 10, "Y": 0, "Z": 30})
+    a2 = FakeWell("A2", 1, {"X": 20, "Y": 0, "Z": 30})
+    b1 = FakeWell("B1", 1, {"X": 10, "Y": 10, "Z": 30})
+    b2 = FakeWell("B2", 1, {"X": 20, "Y": 10, "Z": 30})
+    c = _make_controller(
+        well_plate=FakeWellPlate([a1, a2, b2, b1]),
+        printer_head=_make_printer_head(),
+    )
+    c._array_print_serpentine = False
     c._array_row_start_overshoot_steps = 0
 
     Controller.print_array(c)
@@ -297,7 +322,7 @@ def test_print_array_uses_row_major_order_not_serpentine():
     ]
 
 
-def test_print_array_overshoots_first_well_of_next_row():
+def test_print_array_overshoots_first_well_of_next_row_when_enabled():
     a2 = FakeWell("A2", 1, {"X": 20, "Y": 0, "Z": 30})
     b1 = FakeWell("B1", 1, {"X": 0, "Y": 10, "Z": 40})
     b2 = FakeWell("B2", 0, {"X": 10, "Y": 10, "Z": 40})
@@ -305,12 +330,14 @@ def test_print_array_overshoots_first_well_of_next_row():
         well_plate=FakeWellPlate([a2, b1, b2]),
         printer_head=_make_printer_head(),
     )
+    c._array_print_serpentine = False
+    c._array_row_start_overshoot_steps = ROW_START_OVERSHOOT_FOR_TEST
 
     Controller.print_array(c)
 
     assert c.set_absolute_coordinates.call_args_list == [
         call(20, 0, 30, override=True),
-        call(-ARRAY_ROW_START_OVERSHOOT_STEPS, 10, 40, override=True),
+        call(-ROW_START_OVERSHOOT_FOR_TEST, 10, 40, override=True),
         call(0, 10, 40, override=True),
     ]
     assert [call.kwargs["kwargs"]["well_id"] for call in c.print_droplets.call_args_list] == ["A2", "B1"]
@@ -324,6 +351,8 @@ def test_print_array_skips_row_overshoot_when_neighbor_coordinates_are_invalid()
         well_plate=FakeWellPlate([a2, b1, b2]),
         printer_head=_make_printer_head(),
     )
+    c._array_print_serpentine = False
+    c._array_row_start_overshoot_steps = ROW_START_OVERSHOOT_FOR_TEST
 
     Controller.print_array(c)
 
@@ -346,17 +375,35 @@ def test_print_array_resume_ready_starts_next_incomplete_well():
     Controller.print_array(c)
 
     c.set_absolute_coordinates.assert_called_once_with(40, 50, 60, override=True)
-    assert c.machine.set_axis_accel.call_args_list == [
-        call(0, ARRAY_PAUSE_DEPARTURE_ACCEL),
-        call(1, ARRAY_PAUSE_DEPARTURE_ACCEL),
-        call(2, ARRAY_PAUSE_DEPARTURE_ACCEL),
-    ]
+    c.machine.set_axis_accel.assert_not_called()
     c.machine.wait_ms.assert_called_once_with(ARRAY_PAUSE_DEPARTURE_SETTLE_MS)
     assert c.print_droplets.call_args.args[0] == 7
     assert c.get_array_run_state() == "running"
 
 
-def test_print_array_restores_captured_custom_accels_on_completion():
+def test_print_array_does_not_change_accels_by_default_on_completion():
+    last = FakeWell("A1", 5, {"X": 10, "Y": 20, "Z": 30})
+    c = _make_controller(
+        well_plate=FakeWellPlate([last]),
+        printer_head=_make_printer_head(),
+    )
+    c.move_to_location = Mock(side_effect=_parking_move_side_effect)
+
+    Controller.print_array(c)
+    Controller._handle_array_well_complete(
+        c,
+        well_id="A1",
+        stock_id="stock-a",
+        target_droplets=5,
+        update_volume=False,
+    )
+
+    c.machine.set_axis_accel.assert_not_called()
+    assert c.get_array_run_state() == "idle"
+    assert c.array_complete.calls == [()]
+
+
+def test_print_array_restores_captured_custom_accels_on_completion_when_gentle_accel_enabled():
     custom_accels = (50000, 60000, 70000)
     last = FakeWell("A1", 5, {"X": 10, "Y": 20, "Z": 30})
     c = _make_controller(
@@ -364,6 +411,7 @@ def test_print_array_restores_captured_custom_accels_on_completion():
         printer_head=_make_printer_head(),
         current_accels=custom_accels,
     )
+    c._array_gentle_accel_enabled = True
     c.move_to_location = Mock(side_effect=_parking_move_side_effect)
 
     Controller.print_array(c)
@@ -393,6 +441,7 @@ def test_print_array_resume_ready_reapplies_and_restores_array_accels():
         printer_head=_make_printer_head(),
         initial_state="resume_ready",
     )
+    c._array_gentle_accel_enabled = True
     c.move_to_location = Mock(side_effect=_parking_move_side_effect)
 
     Controller.print_array(c)

@@ -20,7 +20,9 @@ from hardware.null_devices import NullCamera
 ARRAY_PAUSE_DEPARTURE_ACCEL = 32000
 ARRAY_PAUSE_DEPARTURE_SETTLE_MS = 200
 ARRAY_AXIS_ACCEL_DEFAULT = 140000
-ARRAY_ROW_START_OVERSHOOT_STEPS = 200
+ARRAY_PRINT_SERPENTINE = True
+ARRAY_GENTLE_ACCEL_ENABLED = False
+ARRAY_ROW_START_OVERSHOOT_STEPS = 0
 
 class Controller(QObject):
     """Controller class for the application."""
@@ -1344,7 +1346,8 @@ class Controller(QObject):
     def _get_array_remaining_wells(self, stock_id):
         if not stock_id:
             return []
-        reaction_wells = self.model.well_plate.get_all_wells_with_reactions(fill_by='rows', serpentine=False)
+        serpentine = bool(getattr(self, "_array_print_serpentine", ARRAY_PRINT_SERPENTINE))
+        reaction_wells = self.model.well_plate.get_all_wells_with_reactions(fill_by='rows', serpentine=serpentine)
         return [well for well in reaction_wells if well.get_remaining_droplets(stock_id) > 0]
 
     def _start_array_run_context(self):
@@ -1390,6 +1393,9 @@ class Controller(QObject):
                 getattr(self, "_array_pause_departure_settle_ms", ARRAY_PAUSE_DEPARTURE_SETTLE_MS)
             ),
             "pause_departure_restore_accels": self._get_array_pause_departure_restore_accels(),
+            "gentle_accel_enabled": bool(
+                getattr(self, "_array_gentle_accel_enabled", ARRAY_GENTLE_ACCEL_ENABLED)
+            ),
             "array_accels_lowered": False,
             "array_accels_restored": False,
             "row_start_overshoot_steps": int(
@@ -1429,6 +1435,11 @@ class Controller(QObject):
         if not isinstance(context, dict):
             return False
         if context.get("array_accels_lowered"):
+            return True
+
+        if not context.get("gentle_accel_enabled", ARRAY_GENTLE_ACCEL_ENABLED):
+            context["array_accels_lowered"] = False
+            context["array_accels_restored"] = True
             return True
 
         accel = max(0, int(context.get("pause_departure_accel") or 0))
