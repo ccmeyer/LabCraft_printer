@@ -5018,16 +5018,18 @@ class ExperimentImportWizard(QDialog):
 
     STOCK_COL_REAGENT = 0
     STOCK_COL_UNITS = 1
-    STOCK_COL_MAX = 2
-    STOCK_COL_IDEAL = 3
-    STOCK_COL_DELTA = 4
-    STOCK_COL_MIN = 5
-    STOCK_COL_MAX_TARGET = 6
-    STOCK_COL_SPAN = 7
-    STOCK_COL_SMALLEST = 8
-    STOCK_COL_WORST_VOL = 9
-    STOCK_COL_STEP = 10
-    STOCK_COL_STATUS = 11
+    STOCK_COL_MODE = 2
+    STOCK_COL_DROPLET = 3
+    STOCK_COL_MAX = 4
+    STOCK_COL_IDEAL = 5
+    STOCK_COL_DELTA = 6
+    STOCK_COL_MIN = 7
+    STOCK_COL_MAX_TARGET = 8
+    STOCK_COL_SPAN = 9
+    STOCK_COL_SMALLEST = 10
+    STOCK_COL_WORST_VOL = 11
+    STOCK_COL_STEP = 12
+    STOCK_COL_STATUS = 13
 
     def __init__(
         self,
@@ -5153,11 +5155,12 @@ class ExperimentImportWizard(QDialog):
         right.addWidget(self.composition_table, stretch=3)
 
         right.addWidget(QLabel("Stock Concentration Constraints"))
-        self.stock_table = QTableWidget(0, 12, self)
+        self.stock_table = QTableWidget(0, 14, self)
         self.stock_table.setHorizontalHeaderLabels([
-            "Reagent", "Units", "Max Stock", "Ideal Stock", "Delta/drop",
-            "Target Min", "Target Max", "Span", "Smallest Nonzero",
-            "Worst Vol @ Max", "Smallest Step", "Status / Recommendation"
+            "Reagent", "Units", "Print Mode", "Ejection Vol (nL)",
+            "Max Stock", "Ideal Stock", "Delta/drop", "Target Min",
+            "Target Max", "Span", "Smallest Nonzero", "Worst Vol @ Max",
+            "Smallest Step", "Status / Recommendation"
         ])
         self.stock_table.setSelectionMode(QAbstractItemView.NoSelection)
         self.stock_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
@@ -5195,6 +5198,11 @@ class ExperimentImportWizard(QDialog):
         if not math.isfinite(number):
             return ""
         return f"{number:.0f}"
+
+    @staticmethod
+    def _fmt_printing_mode(value) -> str:
+        mode = normalize_printing_mode(value, fallback=PRINTING_MODE_DROPLET)
+        return "Stream" if mode == PRINTING_MODE_STREAM else "Droplet"
 
     @staticmethod
     def _wrap_header_label(value, max_line_chars: int = 14) -> str:
@@ -5414,7 +5422,7 @@ class ExperimentImportWizard(QDialog):
         status = str(status or "")
         if status in {"Volume impossible", "Invalid value", "Stock plan impossible"}:
             return QtGui.QBrush(QtGui.QColor("#8b1e1e"))
-        if status in {"Missing max stock", "Unit mismatch", "Resolution warning", "Near budget"}:
+        if status in {"Missing max stock", "Unit mismatch", "Resolution warning", "Near budget", "Invalid print mode"}:
             return QtGui.QBrush(QtGui.QColor("#7a5a00"))
         return None
 
@@ -5516,6 +5524,8 @@ class ExperimentImportWizard(QDialog):
                 values = [
                     row.get("reagent", ""),
                     row.get("units", ""),
+                    self._fmt_printing_mode(row.get("printing_mode")),
+                    self._fmt_value(row.get("droplet_nL")),
                     self._fmt_value(row.get("max_stock_conc")),
                     self._fmt_value(row.get("ideal_stock_conc")),
                     self._fmt_value(row.get("delta_per_drop")),
@@ -5598,6 +5608,7 @@ class ExperimentImportWizard(QDialog):
             "design_df": self.design_df.copy() if self.design_df is not None else None,
             "source_path": self.design_path,
             "max_stock_by_reagent": dict(report.get("max_stock_by_reagent", {})),
+            "stock_settings_by_reagent": dict(report.get("stock_settings_by_reagent", {})),
             "printed_volume_nL": float(self.printed_volume_spin.value()),
             "printed_volume_tolerance_nL": float(self.printed_volume_tolerance_spin.value()),
             "final_volume_nL": float(self.final_volume_spin.value()),
@@ -6928,12 +6939,29 @@ class ExperimentDesignDialog(QDialog):
         )
 
         max_stock_by_reagent = dict(payload.get("max_stock_by_reagent") or {})
+        stock_settings_by_reagent = dict(payload.get("stock_settings_by_reagent") or {})
         for factor in getattr(self.model, "factors", []) or []:
             if not getattr(factor, "options", None):
                 continue
-            value = max_stock_by_reagent.get(getattr(factor, "name", ""))
+            factor_name = getattr(factor, "name", "")
+            option = factor.options[0]
+            settings = stock_settings_by_reagent.get(factor_name) or {}
+            value = settings.get("max_stock_conc", max_stock_by_reagent.get(factor_name))
             if value is not None:
-                factor.options[0].max_stock_conc = float(value)
+                option.max_stock_conc = float(value)
+            if settings:
+                mode = normalize_printing_mode(
+                    settings.get("printing_mode"),
+                    fallback=getattr(option, "printing_mode", PRINTING_MODE_DROPLET),
+                )
+                option.printing_mode = mode
+                try:
+                    droplet_nL = float(settings.get("droplet_nL"))
+                except Exception:
+                    droplet_nL = printing_mode_default_ejection_volume_nl(mode)
+                if not math.isfinite(droplet_nL) or droplet_nL <= 0:
+                    droplet_nL = printing_mode_default_ejection_volume_nl(mode)
+                option.droplet_nL = float(droplet_nL)
 
         # Update local flags
         self._uploaded_design_active = True

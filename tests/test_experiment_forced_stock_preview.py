@@ -892,6 +892,74 @@ def test_import_max_stock_parser_accepts_labcraft_reagents_csv():
     assert "polyphosphate" in stocks_by_name["polyp"]["tokens"]
 
 
+def test_import_max_stock_parser_reads_print_modes_from_reagents_csv():
+    em = _make_model(target_volume_nl=5827.0, final_volume_nl=10000.0)
+    max_df = pd.read_csv("FreeRTOS-interface/Experiments/bnext_260513_rep2/reagents.csv")
+
+    payload = em._parse_import_max_stock_dataframe(max_df)
+
+    stocks_by_name = {row["name"]: row for row in payload["stocks"]}
+    assert stocks_by_name["polyp"]["printing_mode"] == "stream"
+    assert stocks_by_name["polyp"]["droplet_nL"] == pytest.approx(60.0)
+    assert stocks_by_name["hepes"]["printing_mode"] == "droplet"
+    assert stocks_by_name["hepes"]["droplet_nL"] == pytest.approx(10.0)
+    assert stocks_by_name["tcep"]["printing_mode"] == "droplet"
+
+
+def test_import_max_stock_parser_warns_for_invalid_print_mode():
+    em = _make_model(target_volume_nl=500.0, final_volume_nl=1000.0)
+    max_df = pd.DataFrame(
+        {
+            "reagent": ["Reagent A", "Reagent B"],
+            "stock_conc": [10.0, 20.0],
+            "units": ["mM", "mM"],
+            "print_mode": ["BadMode", ""],
+        }
+    )
+
+    payload = em._parse_import_max_stock_dataframe(max_df)
+
+    stocks_by_name = {row["name"]: row for row in payload["stocks"]}
+    assert stocks_by_name["Reagent A"]["printing_mode"] == "droplet"
+    assert stocks_by_name["Reagent A"]["droplet_nL"] == pytest.approx(10.0)
+    assert stocks_by_name["Reagent B"]["printing_mode"] == "droplet"
+    assert any(
+        issue["code"] == "invalid_print_mode" and issue["reagent"] == "Reagent A"
+        for issue in payload["issues"]
+    )
+
+
+def test_import_feasibility_report_uses_imported_stream_mode_and_canonical_matching():
+    em = _make_model(target_volume_nl=6700.0, final_volume_nl=10000.0)
+    design = pd.DataFrame({"well_id": ["A1"], "[PolyP] mM": [30.0]})
+    max_df = pd.DataFrame(
+        {
+            "reagent": ["polyp"],
+            "reagent_canonical_name": ["PolyP"],
+            "stock_conc": [500.0],
+            "units": ["mM"],
+            "print_mode": ["Stream"],
+        }
+    )
+
+    report = em.build_import_feasibility_report(
+        design,
+        max_stock_df=max_df,
+        printed_volume_nL=6700.0,
+        final_volume_nL=10000.0,
+        allow_two=False,
+    )
+
+    row = report["stock_rows"][0]
+    assert report["max_stock_by_reagent"]["[PolyP]"] == pytest.approx(500.0)
+    assert row["matched_stock_name"] == "polyp"
+    assert row["printing_mode"] == "stream"
+    assert row["droplet_nL"] == pytest.approx(60.0)
+    assert row["delta_per_drop"] == pytest.approx(row["ideal_stock_conc"] * 60.0 / 10000.0)
+    assert report["stock_settings_by_reagent"]["[PolyP]"]["printing_mode"] == "stream"
+    assert report["stock_settings_by_reagent"]["[PolyP]"]["droplet_nL"] == pytest.approx(60.0)
+
+
 def test_bnext_260513_tolerance_does_not_increase_selected_plan_volume():
     design = pd.read_csv("FreeRTOS-interface/Experiments/bnext_260513/samples_titration_labcraft.csv")
     max_df = pd.read_csv("FreeRTOS-interface/Experiments/bnext_260513/reagents.csv")

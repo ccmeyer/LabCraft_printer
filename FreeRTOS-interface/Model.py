@@ -3242,6 +3242,16 @@ class ExperimentModel(QObject):
                 units_col = columns[candidate]
                 break
         description_col = columns.get("description")
+        canonical_col = None
+        for candidate in ("reagent_canonical_name", "canonical_name", "canonical_reagent", "display_name"):
+            if candidate in columns:
+                canonical_col = columns[candidate]
+                break
+        print_mode_col = None
+        for candidate in ("print_mode", "printing_mode", "mode"):
+            if candidate in columns:
+                print_mode_col = columns[candidate]
+                break
 
         issues: List[Dict[str, Any]] = []
         if reagent_col is None or conc_col is None:
@@ -3286,14 +3296,47 @@ class ExperimentModel(QObject):
                 if description_col is not None and not _is_blank(row.get(description_col, ""))
                 else ""
             )
+            canonical_name = (
+                str(row.get(canonical_col, "") or "").strip()
+                if canonical_col is not None and not _is_blank(row.get(canonical_col, ""))
+                else ""
+            )
+            raw_print_mode = row.get(print_mode_col, "") if print_mode_col is not None else ""
+            if _is_blank(raw_print_mode):
+                printing_mode = PRINTING_MODE_DROPLET
+            else:
+                raw_mode_text = str(raw_print_mode).strip()
+                normalized_mode = raw_mode_text.lower()
+                if normalized_mode in PRINTING_MODE_CHOICES:
+                    printing_mode = normalized_mode
+                else:
+                    printing_mode = PRINTING_MODE_DROPLET
+                    issues.append({
+                        "field": "print_mode",
+                        "severity": "warning",
+                        "code": "invalid_print_mode",
+                        "message": (
+                            f"Print mode for {name} must be Droplet or Stream; "
+                            "using Droplet."
+                        ),
+                        "row_index": int(row_index),
+                        "reagent": name,
+                        "raw_value": raw_print_mode,
+                    })
+            droplet_nL = printing_mode_default_ejection_volume_nl(printing_mode)
             tokens = set(self._import_alias_tokens(name))
             if description:
                 tokens.update(self._import_alias_tokens(description))
+            if canonical_name:
+                tokens.update(self._import_alias_tokens(canonical_name))
             rows.append({
                 "name": name,
                 "stock_conc": stock_conc,
                 "units": units,
                 "description": description,
+                "canonical_name": canonical_name,
+                "printing_mode": printing_mode,
+                "droplet_nL": float(droplet_nL),
                 "tokens": sorted(tokens),
             })
 
@@ -3351,7 +3394,28 @@ class ExperimentModel(QObject):
         unmatched_stock_rows = []
         matched_stock_names: Set[str] = set()
 
-        def _manual_stock_for_spec(spec: Dict[str, Any]):
+        def _stock_with_mode_defaults(stock: Dict[str, Any]) -> Dict[str, Any]:
+            stock_copy = dict(stock)
+            mode = normalize_printing_mode(stock_copy.get("printing_mode"), fallback=PRINTING_MODE_DROPLET)
+            stock_copy["printing_mode"] = mode
+            try:
+                droplet_nL = float(stock_copy.get("droplet_nL"))
+            except Exception:
+                droplet_nL = printing_mode_default_ejection_volume_nl(mode)
+            if not math.isfinite(droplet_nL) or droplet_nL <= 0:
+                droplet_nL = printing_mode_default_ejection_volume_nl(mode)
+            stock_copy["droplet_nL"] = float(droplet_nL)
+            return stock_copy
+
+        def _csv_stock_for_spec(spec: Dict[str, Any]):
+            tokens = set(spec["tokens"])
+            for stock in stock_candidates:
+                if tokens.intersection(set(stock.get("tokens", []))):
+                    matched_stock_names.add(stock["name"])
+                    return _stock_with_mode_defaults(stock)
+            return None
+
+        def _manual_stock_for_spec(spec: Dict[str, Any], base_stock: Dict[str, Any] | None = None):
             for candidate_key, value in max_stock_map.items():
                 if candidate_key == spec["name"] or self._normalize_import_token(candidate_key) in set(spec["tokens"]):
                     try:
@@ -3359,25 +3423,39 @@ class ExperimentModel(QObject):
                     except Exception:
                         continue
                     if stock_conc > 0 and math.isfinite(stock_conc):
-                        return {"name": candidate_key, "stock_conc": stock_conc, "units": spec["units"], "tokens": sorted(self._import_alias_tokens(candidate_key))}
+                        stock = _stock_with_mode_defaults(base_stock or {
+                            "printing_mode": PRINTING_MODE_DROPLET,
+                            "droplet_nL": printing_mode_default_ejection_volume_nl(PRINTING_MODE_DROPLET),
+                        })
+                        tokens = set(stock.get("tokens", []))
+                        tokens.update(self._import_alias_tokens(candidate_key))
+                        stock.update({
+                            "name": stock.get("name") or candidate_key,
+                            "stock_conc": stock_conc,
+                            "units": stock.get("units") or spec["units"],
+                            "tokens": sorted(tokens),
+                            "manual_override": True,
+                        })
+                        return stock
             return None
 
         def _stock_for_spec(spec: Dict[str, Any]):
-            manual = _manual_stock_for_spec(spec)
+            csv_stock = _csv_stock_for_spec(spec)
+            manual = _manual_stock_for_spec(spec, csv_stock)
             if manual is not None:
                 return manual
-            tokens = set(spec["tokens"])
-            for stock in stock_candidates:
-                if tokens.intersection(set(stock.get("tokens", []))):
-                    matched_stock_names.add(stock["name"])
-                    return stock
-            return None
+            return csv_stock
 
         spec_by_key = {(spec["name"], None): spec for spec in parsed["reagent_specs"]}
         stocks_by_reagent: Dict[str, Dict[str, Any] | None] = {}
         for spec in parsed["reagent_specs"]:
             stock = _stock_for_spec(spec)
             stocks_by_reagent[spec["name"]] = stock
+            if stock is not None:
+                spec["printing_mode"] = stock.get("printing_mode", PRINTING_MODE_DROPLET)
+                spec["droplet_nL"] = float(stock.get("droplet_nL", spec.get("droplet_nL", droplet_nL_default)))
+            else:
+                spec.setdefault("printing_mode", PRINTING_MODE_DROPLET)
             if stock is None:
                 issues.append({
                     "field": "max_stock",
@@ -3526,7 +3604,18 @@ class ExperimentModel(QObject):
             for factor in draft.factors:
                 stock = stocks_by_reagent.get(factor.name)
                 if stock is not None and factor.options:
-                    factor.options[0].max_stock_conc = float(stock["stock_conc"])
+                    opt = factor.options[0]
+                    opt.max_stock_conc = float(stock["stock_conc"])
+                    opt.printing_mode = normalize_printing_mode(
+                        stock.get("printing_mode"),
+                        fallback=PRINTING_MODE_DROPLET,
+                    )
+                    opt.droplet_nL = float(
+                        stock.get(
+                            "droplet_nL",
+                            printing_mode_default_ejection_volume_nl(opt.printing_mode),
+                        )
+                    )
             res = draft.optimize_stock_solutions(
                 quantum=0.1,
                 max_refine=60,
@@ -3598,6 +3687,16 @@ class ExperimentModel(QObject):
             ]
             stock = stocks_by_reagent.get(spec["name"])
             max_stock = float(stock["stock_conc"]) if stock is not None else None
+            printing_mode = (
+                normalize_printing_mode(stock.get("printing_mode"), fallback=PRINTING_MODE_DROPLET)
+                if stock is not None
+                else normalize_printing_mode(spec.get("printing_mode"), fallback=PRINTING_MODE_DROPLET)
+            )
+            droplet_nL = (
+                float(stock.get("droplet_nL"))
+                if stock is not None and stock.get("droplet_nL") is not None
+                else float(spec.get("droplet_nL", droplet_nL_default))
+            )
             ideal_row = draft_stock_rows_by_name.get(spec["name"], {})
             ideal_stock = ideal_row.get("stock_concentration")
             if ideal_stock is None and max_stock is not None:
@@ -3605,7 +3704,7 @@ class ExperimentModel(QObject):
             delta_per_drop = None
             if ideal_stock is not None:
                 try:
-                    delta_per_drop = float(ideal_stock) * float(spec["droplet_nL"]) / final_volume
+                    delta_per_drop = float(ideal_stock) * float(droplet_nL) / final_volume
                 except Exception:
                     delta_per_drop = None
             worst_volume = None
@@ -3613,6 +3712,9 @@ class ExperimentModel(QObject):
                 worst_volume = (max(positives) / max_stock) * final_volume
 
             smallest_step = min(diffs) if diffs else None
+            stock_issue_names = {spec["name"]}
+            if stock is not None and stock.get("name"):
+                stock_issue_names.add(str(stock.get("name")))
             status = "OK"
             recommendation = "Feasible under current bounds."
             if stock is None:
@@ -3644,6 +3746,12 @@ class ExperimentModel(QObject):
                     f"{optimizer_issue.get('message', 'Draft stock optimization failed.')} "
                     "Try a higher max stock, allow two-stock mode, lower targets, or adjust reaction volumes."
                 )
+            elif any(
+                issue.get("code") == "invalid_print_mode" and str(issue.get("reagent")) in stock_issue_names
+                for issue in issues
+            ):
+                status = "Invalid print mode"
+                recommendation = "Using Droplet mode; change the print_mode value to Droplet or Stream."
             elif delta_per_drop is not None and smallest_step is not None and smallest_step < (0.5 * delta_per_drop):
                 status = "Resolution warning"
                 recommendation = "Use a lower stock concentration or accept rounding error."
@@ -3654,6 +3762,8 @@ class ExperimentModel(QObject):
                 "max_stock_conc": max_stock,
                 "matched_stock_name": stock.get("name") if stock is not None else None,
                 "matched_stock_units": stock.get("units") if stock is not None else None,
+                "printing_mode": printing_mode,
+                "droplet_nL": float(droplet_nL),
                 "ideal_stock_conc": ideal_stock,
                 "delta_per_drop": delta_per_drop,
                 "target_min": min(targets) if targets else 0.0,
@@ -3681,6 +3791,18 @@ class ExperimentModel(QObject):
             "status_counts": dict(pd.Series([row["status"] for row in composition_lookup.values()]).value_counts()) if composition_lookup else {},
             "max_stock_by_reagent": {
                 row["reagent"]: row["max_stock_conc"]
+                for row in stock_rows
+                if row.get("max_stock_conc") is not None
+            },
+            "stock_settings_by_reagent": {
+                row["reagent"]: {
+                    "max_stock_conc": row.get("max_stock_conc"),
+                    "units": row.get("units"),
+                    "matched_stock_name": row.get("matched_stock_name"),
+                    "matched_stock_units": row.get("matched_stock_units"),
+                    "printing_mode": row.get("printing_mode"),
+                    "droplet_nL": row.get("droplet_nL"),
+                }
                 for row in stock_rows
                 if row.get("max_stock_conc") is not None
             },
