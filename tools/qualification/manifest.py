@@ -18,6 +18,8 @@ class QualificationManifest:
     profile: str
     expected_test_ids: tuple[int, ...]
     fixtures: tuple[dict[str, Any], ...]
+    enforce_expected_test_ids: bool
+    analysis_rules: dict[str, Any]
     raw: dict[str, Any]
 
     def to_report_dict(self) -> dict[str, Any]:
@@ -28,6 +30,8 @@ class QualificationManifest:
             "profile": self.profile,
             "expected_test_ids": list(self.expected_test_ids),
             "fixtures": [dict(item) for item in self.fixtures],
+            "enforce_expected_test_ids": bool(self.enforce_expected_test_ids),
+            "analysis_rules": dict(self.analysis_rules),
         }
 
 
@@ -67,6 +71,37 @@ def _parse_expected_test_ids(payload: dict[str, Any]) -> tuple[int, ...]:
     return tuple(parsed)
 
 
+def _parse_analysis_rules(payload: dict[str, Any]) -> dict[str, Any]:
+    rules = payload.get("analysis_rules", {})
+    if not isinstance(rules, dict):
+        raise ManifestError("Manifest 'analysis_rules' must be an object when present.")
+
+    parsed: dict[str, Any] = {}
+    for key, value in rules.items():
+        try:
+            test_id = int(key)
+        except Exception as exc:
+            raise ManifestError("Manifest analysis rule keys must be test IDs.") from exc
+        if test_id <= 0:
+            raise ManifestError("Manifest analysis rule keys must be positive test IDs.")
+        if not isinstance(value, dict):
+            raise ManifestError("Manifest analysis rule entries must be objects.")
+        metrics = value.get("metrics", {})
+        if metrics is not None and not isinstance(metrics, dict):
+            raise ManifestError("Manifest analysis rule 'metrics' must be an object when present.")
+        if isinstance(metrics, dict):
+            for metric_name, metric_rule in metrics.items():
+                if not isinstance(metric_name, str) or not metric_name:
+                    raise ManifestError("Manifest metric rule names must be non-empty strings.")
+                if not isinstance(metric_rule, dict):
+                    raise ManifestError("Manifest metric rule entries must be objects.")
+                maturity = str(metric_rule.get("maturity", "informational")).lower()
+                if maturity not in {"informational", "candidate", "acceptance"}:
+                    raise ManifestError("Manifest metric rule maturity must be informational, candidate, or acceptance.")
+        parsed[str(test_id)] = dict(value)
+    return parsed
+
+
 def parse_manifest(payload: dict[str, Any]) -> QualificationManifest:
     if not isinstance(payload, dict):
         raise ManifestError("Manifest JSON must be an object.")
@@ -85,6 +120,10 @@ def parse_manifest(payload: dict[str, Any]) -> QualificationManifest:
         if not isinstance(item, dict):
             raise ManifestError("Manifest fixture entries must be objects.")
 
+    enforce_expected = payload.get("enforce_expected_test_ids", False)
+    if not isinstance(enforce_expected, bool):
+        raise ManifestError("Manifest 'enforce_expected_test_ids' must be a boolean when present.")
+
     return QualificationManifest(
         schema_version=schema_version,
         manifest_id=manifest_id,
@@ -92,6 +131,8 @@ def parse_manifest(payload: dict[str, Any]) -> QualificationManifest:
         profile=profile,
         expected_test_ids=_parse_expected_test_ids(payload),
         fixtures=tuple(dict(item) for item in fixtures),
+        enforce_expected_test_ids=enforce_expected,
+        analysis_rules=_parse_analysis_rules(payload),
         raw=dict(payload),
     )
 

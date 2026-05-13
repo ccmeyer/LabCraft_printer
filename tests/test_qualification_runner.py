@@ -18,6 +18,24 @@ def _raw_selftest():
     }
 
 
+def _manifest_path(tmp_path):
+    path = tmp_path / "unit_manifest.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "qualification_manifest_v0",
+                "manifest_id": "unit_manifest",
+                "name": "Unit Manifest",
+                "profile": "FULL",
+                "expected_test_ids": [1001],
+                "analysis_rules": {"1001": {"category": "protocol", "failure_domain": "infrastructure"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
 def test_run_qualification_wraps_fake_selftest_invoker(tmp_path):
     invocations = []
 
@@ -27,7 +45,7 @@ def test_run_qualification_wraps_fake_selftest_invoker(tmp_path):
         return 0
 
     result = run_qualification(
-        manifest_ref="factory_acceptance_v0",
+        manifest_ref=_manifest_path(tmp_path),
         port="COM9",
         baud=57600,
         machine_id="LC-0001",
@@ -55,7 +73,7 @@ def test_run_qualification_wraps_fake_selftest_invoker(tmp_path):
 
 def test_run_qualification_writes_failure_report_when_raw_missing(tmp_path):
     result = run_qualification(
-        manifest_ref="factory_acceptance_v0",
+        manifest_ref=_manifest_path(tmp_path),
         machine_id="LC-0001",
         identity_path=tmp_path / "local" / "machine_identity.json",
         output_root=tmp_path / "qualification",
@@ -77,7 +95,7 @@ def test_qualification_cli_accepts_fake_invoker(tmp_path, capsys):
     rc = cli.main(
         [
             "--manifest",
-            "factory_acceptance_v0",
+            str(_manifest_path(tmp_path)),
             "--machine-id",
             "LC-0001",
             "--identity-path",
@@ -93,6 +111,57 @@ def test_qualification_cli_accepts_fake_invoker(tmp_path, capsys):
     captured = capsys.readouterr()
     assert rc == 0
     assert "Wrote qualification report" in captured.out
+
+
+def test_qualification_can_convert_existing_raw_report_without_invoker(tmp_path):
+    raw_path = tmp_path / "existing_raw.json"
+    raw_path.write_text(json.dumps(_raw_selftest()), encoding="utf-8")
+    called = False
+
+    def fake_invoker(_invocation):
+        nonlocal called
+        called = True
+        return 99
+
+    result = run_qualification(
+        manifest_ref=_manifest_path(tmp_path),
+        machine_id="LC-0001",
+        identity_path=tmp_path / "local" / "machine_identity.json",
+        output_root=tmp_path / "qualification",
+        raw_report_path=raw_path,
+        invoker=fake_invoker,
+    )
+
+    assert result.returncode == 0
+    assert called is False
+    assert result.raw_selftest_path.read_text(encoding="utf-8") == raw_path.read_text(encoding="utf-8")
+    assert result.report["schema_version"] == "qualification_report_v1"
+
+
+def test_qualification_cli_raw_report_skips_invoker(tmp_path):
+    raw_path = tmp_path / "existing_raw.json"
+    raw_path.write_text(json.dumps(_raw_selftest()), encoding="utf-8")
+
+    def fake_invoker(_invocation):
+        raise AssertionError("raw report conversion should not invoke hardware self-test")
+
+    rc = cli.main(
+        [
+            "--manifest",
+            str(_manifest_path(tmp_path)),
+            "--machine-id",
+            "LC-0001",
+            "--identity-path",
+            str(tmp_path / "local" / "machine_identity.json"),
+            "--output-root",
+            str(tmp_path / "qualification"),
+            "--raw-report",
+            str(raw_path),
+        ],
+        invoker=fake_invoker,
+    )
+
+    assert rc == 0
 
 
 def test_gitignore_excludes_local_identity():

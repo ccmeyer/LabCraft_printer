@@ -103,11 +103,34 @@ def run_qualification(
     output_root: str | Path = Path("hil_reports") / "qualification",
     timeout_ms: int | None = None,
     run_selftest_path: str | Path | None = None,
+    raw_report_path: str | Path | None = None,
     invoker: SelfTestInvoker = default_selftest_invoker,
 ) -> QualificationRunResult:
     manifest = load_manifest(manifest_ref)
     identity = load_or_create_identity(identity_path, machine_id=machine_id)
     artifacts = create_run_artifacts(identity["machine_id"], output_root=output_root)
+
+    if raw_report_path is not None:
+        source_path = Path(raw_report_path)
+        raw_selftest = json.loads(source_path.read_text(encoding="utf-8"))
+        report = write_qualification_artifacts(
+            raw_selftest,
+            manifest,
+            identity,
+            artifacts,
+            raw_source_path=source_path,
+            selftest_returncode=0,
+        )
+        qualification_returncode = 0 if report.get("overall_status") == "pass" else 3
+        return QualificationRunResult(
+            returncode=qualification_returncode,
+            run_dir=artifacts.run_dir,
+            raw_selftest_path=artifacts.raw_selftest_path,
+            report_path=artifacts.report_path,
+            summary_csv_path=artifacts.summary_csv_path,
+            report=report,
+        )
+
     command = _build_selftest_command(
         run_selftest_path=run_selftest_path,
         port=port,

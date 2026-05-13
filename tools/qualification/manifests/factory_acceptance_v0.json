@@ -46,5 +46,93 @@
       "operator_note": "Confirm valve/pulse diagnostics are safe for the current fixture before FULL runs."
     }
   ],
-  "threshold_policy": "raw_selftest_only"
+  "enforce_expected_test_ids": true,
+  "threshold_policy": "candidate_analysis_v1",
+  "analysis_rules": {
+    "1001": {"category": "protocol", "failure_domain": "infrastructure"},
+    "1002": {"category": "protocol", "failure_domain": "infrastructure"},
+    "1003": {"category": "status", "failure_domain": "infrastructure"},
+    "1004": {"category": "status", "failure_domain": "infrastructure"},
+    "1005": {"category": "flash", "failure_domain": "infrastructure"},
+    "1006": {"category": "build", "failure_domain": "infrastructure"},
+    "1007": {"category": "flash", "failure_domain": "infrastructure"},
+    "1010": {"category": "session", "failure_domain": "infrastructure"},
+    "1011": {"category": "session", "failure_domain": "infrastructure"},
+    "1012": {"category": "session", "failure_domain": "infrastructure"},
+    "1013": {"category": "session", "failure_domain": "infrastructure"},
+    "1020": {"category": "status", "failure_domain": "infrastructure"},
+    "1021": {
+      "category": "status",
+      "failure_domain": "infrastructure",
+      "metrics": {
+        "period_ms_avg": {"maturity": "candidate", "min": 20, "max": 200},
+        "period_ms_max_jitter": {"maturity": "candidate", "max": 100}
+      }
+    },
+    "1030": {"category": "protocol", "failure_domain": "infrastructure"},
+    "1040": {
+      "category": "memory",
+      "failure_domain": "infrastructure",
+      "metrics": {
+        "heap_min": {"maturity": "candidate", "min": 1024},
+        "stk_min": {"maturity": "candidate", "min": 32}
+      }
+    },
+    "1041": {"category": "crash", "failure_domain": "infrastructure"},
+    "1042": {"category": "watchdog", "failure_domain": "infrastructure"},
+    "2001": {
+      "category": "motion",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "home_time_ms": {"maturity": "candidate", "max": 5000},
+        "home_success_axes": {"maturity": "candidate", "min": 4},
+        "limit_hits": {"maturity": "candidate", "min": 1}
+      }
+    },
+    "2002": {
+      "category": "motion",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "final_error_steps": {"maturity": "candidate", "max": 10},
+        "bound_violation": {"maturity": "candidate", "equals": 0}
+      }
+    },
+    "2003": {
+      "category": "pressure",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "settle_time_ms": {"maturity": "candidate", "max": 5000},
+        "overshoot": {"maturity": "candidate", "max": 250},
+        "steady_state_error": {"maturity": "candidate", "max": 100}
+      }
+    },
+    "2004": {
+      "category": "valve",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "valve_open_count": {"maturity": "candidate", "min": 2},
+        "valve_close_count": {"maturity": "candidate", "min": 2},
+        "sequence_order_ok": {"maturity": "candidate", "equals": 1}
+      }
+    },
+    "2005": {
+      "category": "pulse",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "pulse_count": {"maturity": "candidate", "min": 2},
+        "pulse_width_min_ns": {"maturity": "candidate", "min": 100000},
+        "pulse_width_max_ns": {"maturity": "candidate", "max": 5000000}
+      }
+    },
+    "2006": {
+      "category": "safety",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "abort_latency_ms": {"maturity": "candidate", "max": 2000},
+        "motors_disabled": {"maturity": "candidate", "equals": 1},
+        "regulators_stopped": {"maturity": "candidate", "equals": 1},
+        "valves_safe_state": {"maturity": "candidate", "equals": 1}
+      }
+    }
+  }
 }

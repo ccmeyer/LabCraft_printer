@@ -20,6 +20,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-root", default=str(Path("hil_reports") / "qualification"))
     parser.add_argument("--timeout-ms", type=int, default=None)
     parser.add_argument("--run-selftest-path", default=None)
+    parser.add_argument(
+        "--raw-report",
+        default=None,
+        help="Normalize an existing raw self-test JSON report instead of launching hardware self-test.",
+    )
     return parser
 
 
@@ -34,6 +39,7 @@ def main(argv: Sequence[str] | None = None, *, invoker: SelfTestInvoker | None =
         output_root=args.output_root,
         timeout_ms=args.timeout_ms,
         run_selftest_path=args.run_selftest_path,
+        raw_report_path=args.raw_report,
         invoker=invoker if invoker is not None else default_selftest_invoker,
     )
     print(f"Wrote qualification report: {result.report_path}")

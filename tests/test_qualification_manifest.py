@@ -13,6 +13,8 @@ def test_load_builtin_factory_acceptance_manifest():
     assert 1001 in manifest.expected_test_ids
     assert 2006 in manifest.expected_test_ids
     assert manifest.fixtures
+    assert manifest.enforce_expected_test_ids is True
+    assert manifest.analysis_rules["2003"]["category"] == "pressure"
     assert manifest.to_report_dict()["schema_version"] == "qualification_manifest_v0"
 
 
@@ -58,5 +60,25 @@ def test_manifest_rejects_invalid_profile():
                 "name": "Bad",
                 "profile": "HARDWARE",
                 "expected_test_ids": [1001],
+            }
+        )
+
+
+def test_manifest_rejects_invalid_analysis_rule_maturity():
+    with pytest.raises(ManifestError, match="maturity"):
+        parse_manifest(
+            {
+                "schema_version": "qualification_manifest_v0",
+                "manifest_id": "bad",
+                "name": "Bad",
+                "profile": "FULL",
+                "expected_test_ids": [1001],
+                "analysis_rules": {
+                    "1001": {
+                        "metrics": {
+                            "crc": {"maturity": "strict"},
+                        }
+                    }
+                },
             }
         )
