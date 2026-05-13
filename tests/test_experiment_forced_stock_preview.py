@@ -4,10 +4,11 @@ import pytest
 from Model import CURRENT_PROFILE, ExperimentModel, SingleStockPlan, TwoStockPlan
 
 
-def _make_model(*, target_volume_nl=5000.0, final_volume_nl=5000.0):
+def _make_model(*, target_volume_nl=5000.0, final_volume_nl=5000.0, printed_volume_tolerance_nl=0.0):
     em = ExperimentModel(prof=CURRENT_PROFILE)
     em.set_metadata(
         target_reaction_volume_nL=float(target_volume_nl),
+        printed_volume_tolerance_nL=float(printed_volume_tolerance_nl),
         final_reaction_volume_nL=float(final_volume_nl),
     )
     return em
@@ -675,6 +676,134 @@ def test_uploaded_design_selected_plan_volume_budget_issue_reports_row_context()
     assert "Selected stock plan exceeds" in issue["message"]
 
 
+def test_printed_volume_tolerance_does_not_relax_stock_choice():
+    em = _make_model(
+        target_volume_nl=500.0,
+        final_volume_nl=1000.0,
+        printed_volume_tolerance_nl=10.0,
+    )
+    df = pd.DataFrame({"well_id": ["A1"], "Reagent A mM": [5.0]})
+    em.set_uploaded_design_from_dataframe(
+        df,
+        units_default="",
+        droplet_nL_default=10.0,
+        starting_conc_default=0.0,
+    )
+    em.factors[0].options[0].max_stock_conc = 10.0
+
+    result = em.optimize_stock_solutions(quantum=0.1, max_refine=60, two_max_refine=40, allow_two=False)
+
+    assert result.get("best")
+    assert result["worst_nonfill_nL"] == pytest.approx(500.0)
+    assert result["issues_by_key"] == {}
+    stock_rows = em.get_stock_table_rows(include_fill=False)
+    assert stock_rows[0]["stock_concentration"] == pytest.approx(10.0)
+
+
+def test_uploaded_design_selected_plan_overage_within_tolerance_warns():
+    em = _make_model(
+        target_volume_nl=950.0,
+        final_volume_nl=1000.0,
+        printed_volume_tolerance_nl=50.0,
+    )
+    df = pd.DataFrame(
+        {
+            "well_id": ["B3"],
+            "Reagent A mM": [5.0],
+            "Reagent B mM": [5.0],
+        }
+    )
+    em.set_uploaded_design_from_dataframe(
+        df,
+        units_default="",
+        droplet_nL_default=10.0,
+        starting_conc_default=0.0,
+    )
+    for factor in em.factors:
+        factor.options[0].forced_stock_conc = 10.0
+        factor.options[0].max_stock_conc = 20.0
+
+    result = em.optimize_stock_solutions(quantum=0.1, max_refine=20, two_max_refine=20, allow_two=False)
+
+    assert result.get("best")
+    assert result["worst_nonfill_nL"] == pytest.approx(1000.0)
+    issues = result["issues_by_key"][("__uploaded_design__", None)]
+    issue = next(row for row in issues if row["code"] == "selected_plan_volume_budget_within_tolerance")
+    assert issue["severity"] == "warning"
+    assert issue["row_label"] == "well B3"
+    assert issue["required_volume_nL"] == pytest.approx(1000.0)
+    assert issue["allowed_volume_nL"] == pytest.approx(950.0)
+    assert issue["effective_allowed_volume_nL"] == pytest.approx(1000.0)
+    assert issue["printed_volume_tolerance_nL"] == pytest.approx(50.0)
+    assert issue["overage_nL"] == pytest.approx(50.0)
+
+
+def test_uploaded_design_selected_plan_overage_without_tolerance_fails():
+    em = _make_model(
+        target_volume_nl=950.0,
+        final_volume_nl=1000.0,
+        printed_volume_tolerance_nl=0.0,
+    )
+    df = pd.DataFrame(
+        {
+            "well_id": ["B3"],
+            "Reagent A mM": [5.0],
+            "Reagent B mM": [5.0],
+        }
+    )
+    em.set_uploaded_design_from_dataframe(
+        df,
+        units_default="",
+        droplet_nL_default=10.0,
+        starting_conc_default=0.0,
+    )
+    for factor in em.factors:
+        factor.options[0].forced_stock_conc = 10.0
+        factor.options[0].max_stock_conc = 20.0
+
+    result = em.optimize_stock_solutions(quantum=0.1, max_refine=20, two_max_refine=20, allow_two=False)
+
+    assert not result.get("best")
+    issue = result["issues_by_key"][("__uploaded_design__", None)][0]
+    assert issue["code"] == "selected_plan_volume_budget_exceeded"
+    assert issue["required_volume_nL"] == pytest.approx(1000.0)
+    assert issue["effective_allowed_volume_nL"] == pytest.approx(950.0)
+
+
+def test_uploaded_design_printed_volume_tolerance_is_capped_by_final_volume():
+    em = _make_model(
+        target_volume_nl=990.0,
+        final_volume_nl=1000.0,
+        printed_volume_tolerance_nl=50.0,
+    )
+    df = pd.DataFrame(
+        {
+            "well_id": ["B3"],
+            "Reagent A mM": [5.0],
+            "Reagent B mM": [5.1],
+        }
+    )
+    em.set_uploaded_design_from_dataframe(
+        df,
+        units_default="",
+        droplet_nL_default=10.0,
+        starting_conc_default=0.0,
+    )
+    for factor in em.factors:
+        factor.options[0].forced_stock_conc = 10.0
+        factor.options[0].max_stock_conc = 20.0
+
+    result = em.optimize_stock_solutions(quantum=0.1, max_refine=20, two_max_refine=20, allow_two=False)
+
+    assert not result.get("best")
+    assert result["effective_printed_volume_limit_nL"] == pytest.approx(1000.0)
+    issue = result["issues_by_key"][("__uploaded_design__", None)][0]
+    assert issue["code"] == "selected_plan_volume_budget_exceeded"
+    assert issue["required_volume_nL"] == pytest.approx(1010.0)
+    assert issue["allowed_volume_nL"] == pytest.approx(990.0)
+    assert issue["effective_allowed_volume_nL"] == pytest.approx(1000.0)
+
+
 def test_import_feasibility_report_flags_missing_max_stock():
     em = _make_model(target_volume_nl=500.0, final_volume_nl=1000.0)
     df = pd.DataFrame({"well_id": ["A1"], "Reagent A mM": [1.0], "Reagent B mM": [2.0]})
@@ -692,6 +821,60 @@ def test_import_feasibility_report_flags_missing_max_stock():
     assert report["composition_rows"][0]["status"] == "Missing max stock"
 
 
+def test_import_feasibility_report_marks_selected_overage_as_near_budget():
+    em = _make_model(target_volume_nl=950.0, final_volume_nl=1000.0)
+    df = pd.DataFrame({"well_id": ["B3"], "Reagent A mM": [5.0], "Reagent B mM": [5.0]})
+    max_df = pd.DataFrame(
+        {
+            "reagent": ["Reagent A", "Reagent B"],
+            "stock_conc": [10.0, 10.0],
+            "units": ["mM", "mM"],
+        }
+    )
+
+    report = em.build_import_feasibility_report(
+        df,
+        max_stock_df=max_df,
+        printed_volume_nL=950.0,
+        printed_volume_tolerance_nL=50.0,
+        final_volume_nL=1000.0,
+    )
+
+    assert report["ok"] is True
+    assert report["effective_printed_volume_limit_nL"] == pytest.approx(1000.0)
+    row = report["composition_rows"][0]
+    assert row["status"] == "Near budget"
+    assert row["selected_plan_required_volume_nL"] == pytest.approx(1000.0)
+    assert row["selected_plan_overage_nL"] == pytest.approx(50.0)
+    assert row["selected_plan_contributors"]
+    assert any(issue["code"] == "selected_plan_volume_budget_within_tolerance" for issue in report["issues"])
+
+
+def test_import_feasibility_report_blocks_volume_overage_beyond_tolerance():
+    em = _make_model(target_volume_nl=949.0, final_volume_nl=1000.0)
+    df = pd.DataFrame({"well_id": ["B3"], "Reagent A mM": [5.0], "Reagent B mM": [5.0]})
+    max_df = pd.DataFrame(
+        {
+            "reagent": ["Reagent A", "Reagent B"],
+            "stock_conc": [10.0, 10.0],
+            "units": ["mM", "mM"],
+        }
+    )
+
+    report = em.build_import_feasibility_report(
+        df,
+        max_stock_df=max_df,
+        printed_volume_nL=949.0,
+        printed_volume_tolerance_nL=50.0,
+        final_volume_nL=1000.0,
+    )
+
+    assert report["ok"] is False
+    assert report["effective_printed_volume_limit_nL"] == pytest.approx(999.0)
+    assert report["composition_rows"][0]["status"] == "Volume impossible"
+    assert any(issue["severity"] == "error" for issue in report["issues"])
+
+
 def test_import_max_stock_parser_accepts_labcraft_reagents_csv():
     em = _make_model(target_volume_nl=6700.0, final_volume_nl=10000.0)
     max_df = pd.read_csv("FreeRTOS-interface/Experiments/bnext_large_design/reagents.csv")
@@ -704,6 +887,44 @@ def test_import_max_stock_parser_accepts_labcraft_reagents_csv():
     assert stocks_by_name["trna"]["units"] == "ug/ul"
     assert "amino_acids" in stocks_by_name["aas"]["tokens"]
     assert "polyphosphate" in stocks_by_name["polyp"]["tokens"]
+
+
+def test_bnext_260513_tolerance_does_not_increase_selected_plan_volume():
+    design = pd.read_csv("FreeRTOS-interface/Experiments/bnext_260513/samples_titration_labcraft.csv")
+    max_df = pd.read_csv("FreeRTOS-interface/Experiments/bnext_260513/reagents.csv")
+
+    def report_for(tolerance_nl: float) -> dict:
+        em = _make_model(target_volume_nl=5827.0, final_volume_nl=10000.0)
+        return em.build_import_feasibility_report(
+            design,
+            max_stock_df=max_df,
+            printed_volume_nL=5827.0,
+            printed_volume_tolerance_nL=float(tolerance_nl),
+            final_volume_nL=10000.0,
+            allow_two=False,
+        )
+
+    report_50 = report_for(50.0)
+    report_100 = report_for(100.0)
+    issue_50 = next(
+        issue
+        for issue in report_50["issues"]
+        if issue.get("code") == "selected_plan_volume_budget_within_tolerance"
+    )
+    issue_100 = next(
+        issue
+        for issue in report_100["issues"]
+        if issue.get("code") == "selected_plan_volume_budget_within_tolerance"
+    )
+
+    assert issue_50["row_label"] == "well I17"
+    assert issue_100["row_label"] == "well I17"
+    assert issue_50["required_volume_nL"] == pytest.approx(5830.0)
+    assert issue_100["required_volume_nL"] == pytest.approx(issue_50["required_volume_nL"])
+    assert not any(issue.get("row_label") == "well H4" for issue in report_100["issues"])
+    h4_rows = [row for row in report_100["composition_rows"] if "H4" in row.get("wells", [])]
+    assert len(h4_rows) == 1
+    assert h4_rows[0]["status"] == "OK"
 
 
 def test_import_feasibility_report_accepts_labcraft_reagents_csv_for_bnext_design():

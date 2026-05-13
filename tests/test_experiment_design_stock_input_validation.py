@@ -202,7 +202,7 @@ def test_import_wizard_volume_edits_recompute_feasibility(qapp):
     model = ExperimentModel(prof=CURRENT_PROFILE)
     wizard = View.ExperimentImportWizard(
         model,
-        printed_volume_nL=500.0,
+        printed_volume_nL=600.0,
         final_volume_nL=1000.0,
         allow_two=False,
     )
@@ -225,6 +225,47 @@ def test_import_wizard_volume_edits_recompute_feasibility(qapp):
 
     assert wizard.report["composition_rows"][0]["status"] == "Volume impossible"
     assert "Volume impossible" in wizard.status_lbl.text()
+
+
+def test_import_wizard_passes_printed_volume_tolerance_to_report(qapp):
+    class _CaptureModel:
+        def __init__(self):
+            self.calls = []
+
+        def build_import_feasibility_report(self, *_args, **kwargs):
+            self.calls.append(kwargs)
+            return {
+                "ok": True,
+                "printed_volume_nL": kwargs.get("printed_volume_nL"),
+                "printed_volume_tolerance_nL": kwargs.get("printed_volume_tolerance_nL"),
+                "final_volume_nL": kwargs.get("final_volume_nL"),
+                "reagent_specs": [],
+                "composition_rows": [],
+                "stock_rows": [],
+                "issues": [],
+                "missing_stock_rows": [],
+                "unmatched_stock_rows": [],
+                "status_counts": {},
+                "max_stock_by_reagent": {},
+            }
+
+    model = _CaptureModel()
+    wizard = View.ExperimentImportWizard(
+        model,
+        printed_volume_nL=500.0,
+        printed_volume_tolerance_nL=25.0,
+        final_volume_nL=1000.0,
+        allow_two=False,
+    )
+    wizard.load_design_dataframe(pd.DataFrame({"well_id": ["A1"], "Reagent A mM": [1.0]}))
+
+    assert model.calls[-1]["printed_volume_tolerance_nL"] == 25.0
+
+    wizard.printed_volume_tolerance_spin.setValue(40.0)
+    assert model.calls[-1]["printed_volume_tolerance_nL"] == 25.0
+
+    wizard.printed_volume_tolerance_spin.editingFinished.emit()
+    assert model.calls[-1]["printed_volume_tolerance_nL"] == 40.0
 
 
 def test_import_wizard_status_colors_distinguish_warnings_from_errors(qapp):
@@ -263,6 +304,34 @@ def test_import_wizard_status_colors_distinguish_warnings_from_errors(qapp):
     assert error_item.background().color().name() == "#8b1e1e"
     assert error_item.foreground().color().name() == "#ffffff"
     assert warning_wizard.apply_btn.isEnabled()
+
+    near_budget_wizard = View.ExperimentImportWizard(
+        ExperimentModel(prof=CURRENT_PROFILE),
+        printed_volume_nL=950.0,
+        printed_volume_tolerance_nL=50.0,
+        final_volume_nL=1000.0,
+        allow_two=False,
+    )
+    near_budget_wizard.load_design_dataframe(
+        pd.DataFrame({"well_id": ["B3"], "Reagent A mM": [5.0], "Reagent B mM": [5.0]}),
+        source_path="design.csv",
+    )
+    near_budget_wizard.load_max_stock_dataframe(
+        pd.DataFrame(
+            {
+                "reagent": ["Reagent A", "Reagent B"],
+                "stock_conc": [10.0, 10.0],
+                "units": ["mM", "mM"],
+            }
+        ),
+        source_path="stocks.csv",
+    )
+
+    near_item = near_budget_wizard.composition_table.item(0, 0)
+    assert near_budget_wizard.report["composition_rows"][0]["status"] == "Near budget"
+    assert near_item.background().color().name() == "#7a5a00"
+    assert near_item.foreground().color().name() == "#ffffff"
+    assert near_budget_wizard.apply_btn.isEnabled()
 
 
 def test_import_wizard_stock_plan_errors_are_red_and_disable_apply(qapp):
@@ -386,6 +455,7 @@ def test_upload_design_wizard_apply_mutates_model_once(qapp, monkeypatch):
                 "source_path": "design.csv",
                 "max_stock_by_reagent": {"Reagent A": 10.0},
                 "printed_volume_nL": 750.0,
+                "printed_volume_tolerance_nL": 35.0,
                 "final_volume_nL": 1000.0,
                 "allow_two": True,
             }
@@ -422,6 +492,9 @@ def test_upload_design_wizard_apply_mutates_model_once(qapp, monkeypatch):
     dialog.final_v_spin = QDoubleSpinBox()
     dialog.final_v_spin.setRange(1.0, 1_000_000.0)
     dialog.final_v_spin.setValue(500.0)
+    dialog.volume_tolerance_spin = QDoubleSpinBox()
+    dialog.volume_tolerance_spin.setRange(0.0, 1_000_000.0)
+    dialog.volume_tolerance_spin.setValue(25.0)
     dialog.allow_two_chk = QCheckBox()
     dialog._validate_uploaded_design_well_assignments = lambda _df: True
     dialog._load_factors_into_table = lambda: None
@@ -434,10 +507,12 @@ def test_upload_design_wizard_apply_mutates_model_once(qapp, monkeypatch):
     ExperimentDesignDialog._on_upload_design(dialog)
 
     assert constructed["kwargs"]["printed_volume_nL"] == 500.0
+    assert constructed["kwargs"]["printed_volume_tolerance_nL"] == 25.0
     assert dialog.model.upload_calls == 1
     assert dialog.model.upload_kwargs["source_path"] == "design.csv"
     assert dialog.model.factors[0].options[0].max_stock_conc == 10.0
     assert dialog.model.metadata["target_reaction_volume_nL"] == 750.0
+    assert dialog.model.metadata["printed_volume_tolerance_nL"] == 35.0
     assert dialog.model.metadata["final_reaction_volume_nL"] == 1000.0
     assert dialog.model.metadata["allow_two_stock_solutions"] is True
     assert len(run_calls) == 1

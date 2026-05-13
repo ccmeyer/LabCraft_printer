@@ -336,6 +336,7 @@ class ExperimentModel(QObject):
             "allow_two_stock_solutions": False,
             "reduction_factor": 1,  # reserved; current generate is full factorial
             "target_reaction_volume_nL": 500.0, # PRINTED volume budget
+            "printed_volume_tolerance_nL": 50.0,
             "final_reaction_volume_nL": 500.0, # includes non-printed (fill) volume
             "fill_reagent_name": "Water",
             "fill_printing_mode": fill_printing_mode,
@@ -1323,14 +1324,22 @@ class ExperimentModel(QObject):
             # clamp negatives if user set starting > some target
             return sorted(set(max(0.0, float(t) - s) for t in opt.targets))
         
-        # V_print = how much volume we are allowed to PRINT (old meaning of target)
+        # V_print = nominal printed volume. Tolerance is an acceptance band only;
+        # it does not silently change the requested reaction volume metadata.
         V_print = float(self.metadata.get("target_reaction_volume_nL", 500.0))
         # V_final = the actual final well volume after prefill + printing
         V_final = float(self.metadata.get("final_reaction_volume_nL", V_print))
+        try:
+            V_tolerance = float(self.metadata.get("printed_volume_tolerance_nL", 50.0))
+        except Exception:
+            V_tolerance = 0.0
+        if not math.isfinite(V_tolerance) or V_tolerance < 0.0:
+            V_tolerance = 0.0
 
         # Safety: never allow printed budget to exceed final volume (quiet clamp)
         if V_print > V_final:
             V_print = V_final
+        V_accept = min(float(V_final), float(V_print) + float(V_tolerance))
 
         # Build candidate lists + handle forced stocks
         self._unreachable_preview_map = {}
@@ -1388,6 +1397,9 @@ class ExperimentModel(QObject):
             return {
                 "best": None,
                 "reason": reason,
+                "printed_volume_nL": float(V_print),
+                "printed_volume_tolerance_nL": float(V_tolerance),
+                "effective_printed_volume_limit_nL": float(V_accept),
                 "issues_by_key": _copy_issues(),
                 "two_stock_search_limited_keys": list(two_stock_search_limited_keys),
             }
@@ -1408,10 +1420,20 @@ class ExperimentModel(QObject):
             )
 
         max_stock_volume_issue = self._uploaded_max_stock_volume_diagnostic(
-            printed_volume_nL=V_print,
+            printed_volume_nL=V_accept,
             final_volume_nL=V_final,
         )
         if max_stock_volume_issue is not None:
+            required = float(max_stock_volume_issue.get("required_volume_nL", 0.0))
+            max_stock_volume_issue["allowed_volume_nL"] = float(V_print)
+            max_stock_volume_issue["effective_allowed_volume_nL"] = float(V_accept)
+            max_stock_volume_issue["printed_volume_tolerance_nL"] = float(V_tolerance)
+            max_stock_volume_issue["overage_nL"] = max(0.0, required - float(V_print))
+            max_stock_volume_issue["message"] = (
+                f"{max_stock_volume_issue.get('message', '')} Nominal printed volume is "
+                f"{float(V_print):.6g} nL with {float(V_tolerance):.6g} nL tolerance "
+                f"(effective limit {float(V_accept):.6g} nL)."
+            ).strip()
             issue = _add_design_issue(max_stock_volume_issue)
             return _failure(str(issue["message"]))
 
@@ -1702,7 +1724,8 @@ class ExperimentModel(QObject):
             label = key[0] if key[1] in (None, "") else f"{key[0]}/{key[1]}"
             message = (
                 f"{label} requires up to {float(required_volume_nL):.6g} nL per reaction, "
-                f"but the printed-volume budget is {float(V_print):.6g} nL."
+                f"but the printed-volume budget is {float(V_print):.6g} nL "
+                f"(tolerance {float(V_tolerance):.6g} nL; effective limit {float(V_accept):.6g} nL)."
             )
             _add_issue(
                 key,
@@ -1712,6 +1735,9 @@ class ExperimentModel(QObject):
                 message=message,
                 required_volume_nL=float(required_volume_nL),
                 allowed_volume_nL=float(V_print),
+                effective_allowed_volume_nL=float(V_accept),
+                printed_volume_tolerance_nL=float(V_tolerance),
+                overage_nL=max(0.0, float(required_volume_nL) - float(V_print)),
                 units=units,
                 fixed_stock_conc=(
                     float(getattr(opt, "forced_stock_conc"))
@@ -1890,28 +1916,51 @@ class ExperimentModel(QObject):
                     }
             return worst
 
-        def _record_uploaded_selected_volume_budget_issue(code: str) -> Optional[Dict[str, Any]]:
+        def _record_uploaded_selected_volume_budget_issue(
+            code: str,
+            *,
+            severity: str = "error",
+        ) -> Optional[Dict[str, Any]]:
             details = _uploaded_selected_volume_details()
-            if not details or float(details.get("required_volume_nL", 0.0)) <= V_print + 1e-6:
+            if not details:
+                return None
+            required = float(details.get("required_volume_nL", 0.0))
+            if severity == "warning":
+                if required <= V_print + 1e-6 or required > V_accept + 1e-6:
+                    return None
+            elif required <= V_accept + 1e-6:
                 return None
             contributor_text = self._format_volume_contributors(details.get("contributors", []))
-            message = (
-                f"Selected stock plan exceeds the printed-volume budget for the uploaded design: "
-                f"{details['row_label']} needs {float(details['required_volume_nL']):.6g} nL, "
-                f"but only {float(V_print):.6g} nL can be printed. Largest contributors: "
-                f"{contributor_text}. Increase the printed volume, raise stock concentrations for the "
-                "contributors, enable two-stock mode when available, or lower those targets."
-            )
+            overage = max(0.0, required - float(V_print))
+            if severity == "warning":
+                message = (
+                    f"Selected stock plan is within the printed-volume tolerance for the uploaded design: "
+                    f"{details['row_label']} needs {required:.6g} nL, which is {overage:.6g} nL "
+                    f"over the nominal {float(V_print):.6g} nL printed volume and within the "
+                    f"{float(V_tolerance):.6g} nL tolerance. Largest contributors: {contributor_text}."
+                )
+            else:
+                message = (
+                    f"Selected stock plan exceeds the printed-volume budget for the uploaded design: "
+                    f"{details['row_label']} needs {required:.6g} nL, but the nominal budget is "
+                    f"{float(V_print):.6g} nL with {float(V_tolerance):.6g} nL tolerance "
+                    f"(effective limit {float(V_accept):.6g} nL). Largest contributors: "
+                    f"{contributor_text}. Increase the printed volume, raise stock concentrations for the "
+                    "contributors, enable two-stock mode when available, or lower those targets."
+                )
             return _add_issue(
                 ("__uploaded_design__", None),
                 field="volume_budget",
-                severity="error",
+                severity=severity,
                 code=code,
                 message=message,
                 row_index=int(details["row_index"]),
                 row_label=details["row_label"],
-                required_volume_nL=float(details["required_volume_nL"]),
+                required_volume_nL=required,
                 allowed_volume_nL=float(V_print),
+                effective_allowed_volume_nL=float(V_accept),
+                printed_volume_tolerance_nL=float(V_tolerance),
+                overage_nL=overage,
                 contributors=[dict(row) for row in details.get("contributors", [])],
             )
 
@@ -2222,6 +2271,8 @@ class ExperimentModel(QObject):
                 if best_switch is None and tie_switch is not None:
                     best_switch = tie_switch
                 if best_switch is None:
+                    if worst_case_nonfill_volume() <= V_accept + 1e-6:
+                        break
                     aggregate_issue = _record_uploaded_selected_volume_budget_issue(
                         "selected_plan_volume_budget_exceeded"
                     )
@@ -2230,7 +2281,7 @@ class ExperimentModel(QObject):
                             continue
                         opt = additive_option_map[name]
                         selected = singles[add_idx[name]]
-                        if selected.max_volume_nL > V_print + 1e-6:
+                        if selected.max_volume_nL > V_accept + 1e-6:
                             code = (
                                 "fixed_volume_budget_exceeded"
                                 if getattr(opt, "forced_stock_conc", None) not in (None, 0.0)
@@ -2244,7 +2295,7 @@ class ExperimentModel(QObject):
                                 continue
                             opt = choice_option_map[key]
                             selected = singles[ch_idx[key]]
-                            if selected.max_volume_nL > V_print + 1e-6:
+                            if selected.max_volume_nL > V_accept + 1e-6:
                                 code = (
                                     "fixed_volume_budget_exceeded"
                                     if getattr(opt, "forced_stock_conc", None) not in (None, 0.0)
@@ -2423,7 +2474,7 @@ class ExperimentModel(QObject):
                     ch_idx[key] = _refine_single_selection(opt, singles, ch_idx[key])
 
         final_worst = worst_case_nonfill_volume()
-        if final_worst > V_print + 1e-6:
+        if final_worst > V_accept + 1e-6:
             aggregate_issue = _record_uploaded_selected_volume_budget_issue(
                 "selected_plan_volume_budget_exceeded"
             )
@@ -2432,7 +2483,7 @@ class ExperimentModel(QObject):
                     continue
                 opt = additive_option_map[name]
                 selected = singles[add_idx[name]]
-                if selected.max_volume_nL > V_print + 1e-6:
+                if selected.max_volume_nL > V_accept + 1e-6:
                     code = (
                         "fixed_volume_budget_exceeded"
                         if getattr(opt, "forced_stock_conc", None) not in (None, 0.0)
@@ -2446,7 +2497,7 @@ class ExperimentModel(QObject):
                         continue
                     opt = choice_option_map[key]
                     selected = singles[ch_idx[key]]
-                    if selected.max_volume_nL > V_print + 1e-6:
+                    if selected.max_volume_nL > V_accept + 1e-6:
                         code = (
                             "fixed_volume_budget_exceeded"
                             if getattr(opt, "forced_stock_conc", None) not in (None, 0.0)
@@ -2607,6 +2658,10 @@ class ExperimentModel(QObject):
         self._fill_row_cache = None
         self._refresh_plan_preview_maps()
         self._last_worst_nonfill_volume_nL = worst_case_nonfill_volume()
+        _record_uploaded_selected_volume_budget_issue(
+            "selected_plan_volume_budget_within_tolerance",
+            severity="warning",
+        )
 
         for key in two_stock_search_limited_keys:
             opt = self._get_option_for_key(key)
@@ -2660,6 +2715,9 @@ class ExperimentModel(QObject):
             "stocks": selection_counts()[0],
             "sum_conc": selection_counts()[1],
             "worst_nonfill_nL": self._last_worst_nonfill_volume_nL,
+            "printed_volume_nL": float(V_print),
+            "printed_volume_tolerance_nL": float(V_tolerance),
+            "effective_printed_volume_limit_nL": float(V_accept),
             "two_stock_keys": list(two_stock_keys),
             "two_stock_search_limited_keys": list(two_stock_search_limited_keys),
             "issues_by_key": _copy_issues(),
@@ -3129,6 +3187,7 @@ class ExperimentModel(QObject):
         droplet_nL_default: float = 10.0,
         starting_conc_default: float = 0.0,
         printed_volume_nL: float | None = None,
+        printed_volume_tolerance_nL: float | None = None,
         final_volume_nL: float | None = None,
         allow_two: bool = False,
     ) -> Dict[str, Any]:
@@ -3144,6 +3203,17 @@ class ExperimentModel(QObject):
         )
         if printed_volume > final_volume:
             printed_volume = final_volume
+        try:
+            printed_volume_tolerance = float(
+                printed_volume_tolerance_nL
+                if printed_volume_tolerance_nL is not None
+                else self.metadata.get("printed_volume_tolerance_nL", 50.0)
+            )
+        except Exception:
+            printed_volume_tolerance = 0.0
+        if not math.isfinite(printed_volume_tolerance) or printed_volume_tolerance < 0.0:
+            printed_volume_tolerance = 0.0
+        effective_printed_volume = min(final_volume, printed_volume + printed_volume_tolerance)
 
         parsed = self._parse_import_design_dataframe(
             df,
@@ -3237,6 +3307,9 @@ class ExperimentModel(QObject):
                     "reagent_volumes_nL": {},
                     "total_required_volume_nL": 0.0,
                     "remaining_printed_volume_nL": 0.0,
+                    "overage_nL": 0.0,
+                    "printed_volume_tolerance_nL": float(printed_volume_tolerance),
+                    "effective_allowed_volume_nL": float(effective_printed_volume),
                     "status": "OK",
                     "issue_codes": [],
                 }
@@ -3272,6 +3345,7 @@ class ExperimentModel(QObject):
                 total += float(volume)
             row["total_required_volume_nL"] = float(total)
             row["remaining_printed_volume_nL"] = float(printed_volume - total)
+            row["overage_nL"] = max(0.0, float(total) - float(printed_volume))
             if any(issue.get("code") == "invalid_target_value" for issue in parsed.get("issues", [])):
                 row["status"] = "Invalid value"
                 row["issue_codes"].append("invalid_target_value")
@@ -3281,9 +3355,12 @@ class ExperimentModel(QObject):
             elif unit_mismatch:
                 row["status"] = "Unit mismatch"
                 row["issue_codes"].append("unit_mismatch")
-            elif total > printed_volume + 1e-6:
+            elif total > effective_printed_volume + 1e-6:
                 row["status"] = "Volume impossible"
                 row["issue_codes"].append("max_stock_volume_budget_exceeded")
+            elif total > printed_volume + 1e-6:
+                row["status"] = "Near budget"
+                row["issue_codes"].append("max_stock_volume_budget_within_tolerance")
 
         draft_stock_rows_by_name: Dict[str, Dict[str, Any]] = {}
         draft_optimizer_issues_by_reagent: Dict[str, List[Dict[str, Any]]] = {}
@@ -3314,6 +3391,7 @@ class ExperimentModel(QObject):
             draft = ExperimentModel(prof=CURRENT_PROFILE)
             draft.set_metadata(
                 target_reaction_volume_nL=printed_volume,
+                printed_volume_tolerance_nL=printed_volume_tolerance,
                 final_reaction_volume_nL=final_volume,
                 allow_two_stock_solutions=bool(allow_two),
             )
@@ -3333,16 +3411,16 @@ class ExperimentModel(QObject):
                 two_max_refine=40,
                 allow_two=bool(allow_two),
             )
+            issues_by_key = res.get("issues_by_key") or {}
+            if issues_by_key:
+                for key, issue_list in issues_by_key.items():
+                    for issue in issue_list:
+                        _record_draft_optimizer_issue(key, issue)
             if res.get("best"):
                 for row in draft.get_stock_table_rows(include_fill=False):
                     draft_stock_rows_by_name.setdefault(str(row.get("factor_name")), dict(row))
             else:
-                issues_by_key = res.get("issues_by_key") or {}
-                if issues_by_key:
-                    for key, issue_list in issues_by_key.items():
-                        for issue in issue_list:
-                            _record_draft_optimizer_issue(key, issue)
-                elif res.get("reason"):
+                if not issues_by_key and res.get("reason"):
                     issues.append({
                         "field": "stock_plan",
                         "severity": "error",
@@ -3351,6 +3429,41 @@ class ExperimentModel(QObject):
                     })
         except Exception:
             draft_stock_rows_by_name = {}
+
+        for issue in issues:
+            if issue.get("field") != "volume_budget":
+                continue
+            code = str(issue.get("code") or "")
+            row_index = issue.get("row_index")
+            if row_index is None:
+                continue
+            for row in composition_lookup.values():
+                if int(row_index) not in set(int(idx) for idx in row.get("row_indices", [])):
+                    continue
+                if "selected_plan_required_volume_nL" not in row and issue.get("required_volume_nL") is not None:
+                    row["selected_plan_required_volume_nL"] = float(issue.get("required_volume_nL"))
+                    row["selected_plan_contributors"] = [
+                        dict(contributor)
+                        for contributor in issue.get("contributors", [])
+                    ]
+                if issue.get("overage_nL") is not None:
+                    row["selected_plan_overage_nL"] = float(issue.get("overage_nL"))
+                if issue.get("effective_allowed_volume_nL") is not None:
+                    row["effective_allowed_volume_nL"] = float(issue.get("effective_allowed_volume_nL"))
+                if issue.get("printed_volume_tolerance_nL") is not None:
+                    row["printed_volume_tolerance_nL"] = float(issue.get("printed_volume_tolerance_nL"))
+                if code == "selected_plan_volume_budget_within_tolerance":
+                    if row.get("status") == "OK":
+                        row["status"] = "Near budget"
+                    if code not in row["issue_codes"]:
+                        row["issue_codes"].append(code)
+                elif issue.get("severity") == "error" and code in {
+                    "selected_plan_volume_budget_exceeded",
+                    "max_stock_volume_budget_exceeded",
+                }:
+                    row["status"] = "Volume impossible"
+                    if code not in row["issue_codes"]:
+                        row["issue_codes"].append(code)
 
         stock_rows: List[Dict[str, Any]] = []
         for spec in reagent_specs:
@@ -3389,9 +3502,12 @@ class ExperimentModel(QObject):
             ):
                 status = "Unit mismatch"
                 recommendation = "Confirm units or convert the design/stock concentration."
-            elif worst_volume is not None and worst_volume > printed_volume + 1e-6:
+            elif worst_volume is not None and worst_volume > effective_printed_volume + 1e-6:
                 status = "Volume impossible"
                 recommendation = "Increase printed volume, lower final volume, raise max stock, or reduce the target."
+            elif worst_volume is not None and worst_volume > printed_volume + 1e-6:
+                status = "Near budget"
+                recommendation = "Within the printed-volume tolerance; review actual selected volumes before applying."
             elif any(
                 issue.get("severity") == "error"
                 for issue in draft_optimizer_issues_by_reagent.get(spec["name"], [])
@@ -3431,6 +3547,8 @@ class ExperimentModel(QObject):
         return {
             "ok": not any(issue.get("severity") == "error" for issue in issues),
             "printed_volume_nL": printed_volume,
+            "printed_volume_tolerance_nL": printed_volume_tolerance,
+            "effective_printed_volume_limit_nL": effective_printed_volume,
             "final_volume_nL": final_volume,
             "reagent_specs": reagent_specs,
             "composition_rows": list(composition_lookup.values()),
@@ -5693,6 +5811,7 @@ class ExperimentModel(QObject):
             "allow_two_stock_solutions": False,
             "reduction_factor": 1,
             "target_reaction_volume_nL": 500.0,
+            "printed_volume_tolerance_nL": 50.0,
             "final_reaction_volume_nL": 500.0,
             "fill_reagent_name": "Water",
             "fill_printing_mode": self._default_fill_printing_mode(),

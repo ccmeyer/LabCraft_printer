@@ -4939,6 +4939,7 @@ class ExperimentImportWizard(QDialog):
         parent=None,
         *,
         printed_volume_nL: float = 500.0,
+        printed_volume_tolerance_nL: float = 50.0,
         final_volume_nL: float = 500.0,
         allow_two: bool = False,
     ):
@@ -4994,6 +4995,14 @@ class ExperimentImportWizard(QDialog):
         self.final_volume_spin.setValue(float(final_volume_nL))
         self.final_volume_spin.editingFinished.connect(self._recompute_report)
         form.addRow(QLabel("Final Reaction Volume (nL)"), self.final_volume_spin)
+
+        self.printed_volume_tolerance_spin = QDoubleSpinBox()
+        self.printed_volume_tolerance_spin.setDecimals(1)
+        self.printed_volume_tolerance_spin.setRange(0.0, 1_000_000.0)
+        self.printed_volume_tolerance_spin.setSingleStep(10.0)
+        self.printed_volume_tolerance_spin.setValue(max(0.0, float(printed_volume_tolerance_nL)))
+        self.printed_volume_tolerance_spin.editingFinished.connect(self._recompute_report)
+        form.addRow(QLabel("Printed Volume Tolerance (nL)"), self.printed_volume_tolerance_spin)
 
         self.allow_two_chk = QCheckBox()
         self.allow_two_chk.setChecked(bool(allow_two))
@@ -5192,6 +5201,7 @@ class ExperimentImportWizard(QDialog):
             droplet_nL_default=10.0,
             starting_conc_default=0.0,
             printed_volume_nL=float(self.printed_volume_spin.value()),
+            printed_volume_tolerance_nL=float(self.printed_volume_tolerance_spin.value()),
             final_volume_nL=float(self.final_volume_spin.value()),
             allow_two=bool(self.allow_two_chk.isChecked()),
         )
@@ -5206,7 +5216,7 @@ class ExperimentImportWizard(QDialog):
         status = str(status or "")
         if status in {"Volume impossible", "Invalid value", "Stock plan impossible"}:
             return QtGui.QBrush(QtGui.QColor("#8b1e1e"))
-        if status in {"Missing max stock", "Unit mismatch", "Resolution warning"}:
+        if status in {"Missing max stock", "Unit mismatch", "Resolution warning", "Near budget"}:
             return QtGui.QBrush(QtGui.QColor("#7a5a00"))
         return None
 
@@ -5388,6 +5398,7 @@ class ExperimentImportWizard(QDialog):
             "source_path": self.design_path,
             "max_stock_by_reagent": dict(report.get("max_stock_by_reagent", {})),
             "printed_volume_nL": float(self.printed_volume_spin.value()),
+            "printed_volume_tolerance_nL": float(self.printed_volume_tolerance_spin.value()),
             "final_volume_nL": float(self.final_volume_spin.value()),
             "allow_two": bool(self.allow_two_chk.isChecked()),
         }
@@ -5571,6 +5582,13 @@ class ExperimentDesignDialog(QDialog):
         self.final_v_spin.setSingleStep(50.0)
         form.addRow(QLabel("Final Reaction Volume (nL)"), self.final_v_spin)
 
+        self.volume_tolerance_spin = QDoubleSpinBox()
+        self.volume_tolerance_spin.setDecimals(1)
+        self.volume_tolerance_spin.setRange(0.0, 1_000_000.0)
+        self.volume_tolerance_spin.setSingleStep(10.0)
+        self.volume_tolerance_spin.setValue(float(self.model.metadata.get("printed_volume_tolerance_nL", 50.0)))
+        form.addRow(QLabel("Printed Volume Tolerance (nL)"), self.volume_tolerance_spin)
+
         self.allow_two_chk = QCheckBox()
         self.allow_two_chk.setChecked(bool(self.model.metadata.get("allow_two_stock_solutions", False)))
         self.allow_two_chk.setToolTip("Enable two-stock fallback when a single stock cannot satisfy the targets under the current bounds.")
@@ -5722,6 +5740,7 @@ class ExperimentDesignDialog(QDialog):
         self.rep_spin.valueChanged.connect(self._schedule_auto_update)
         self.v_spin.valueChanged.connect(self._schedule_auto_update)
         self.final_v_spin.valueChanged.connect(self._schedule_auto_update)
+        self.volume_tolerance_spin.valueChanged.connect(self._schedule_auto_update)
         self.fill_name_edit.textChanged.connect(self._schedule_auto_update)
         self.fill_dv_spin.valueChanged.connect(self._schedule_auto_update)
         self.fill_mode_combo.currentIndexChanged.connect(self._on_fill_printing_mode_changed)
@@ -6501,6 +6520,11 @@ class ExperimentDesignDialog(QDialog):
             if hasattr(self, "final_v_spin") and self.final_v_spin is not None
             else float(getattr(self.model, "metadata", {}).get("final_reaction_volume_nL", printed_volume))
         )
+        printed_volume_tolerance = (
+            float(self.volume_tolerance_spin.value())
+            if hasattr(self, "volume_tolerance_spin") and self.volume_tolerance_spin is not None
+            else float(getattr(self.model, "metadata", {}).get("printed_volume_tolerance_nL", 50.0))
+        )
         allow_two = (
             bool(self.allow_two_chk.isChecked())
             if hasattr(self, "allow_two_chk") and self.allow_two_chk is not None
@@ -6510,6 +6534,7 @@ class ExperimentDesignDialog(QDialog):
             self.model,
             self,
             printed_volume_nL=printed_volume,
+            printed_volume_tolerance_nL=printed_volume_tolerance,
             final_volume_nL=final_volume,
             allow_two=allow_two,
         )
@@ -6526,13 +6551,22 @@ class ExperimentDesignDialog(QDialog):
         if not self._validate_uploaded_design_well_assignments(df):
             return
 
-        with QSignalBlocker(self.v_spin), QSignalBlocker(self.final_v_spin), QSignalBlocker(self.allow_two_chk):
+        with (
+            QSignalBlocker(self.v_spin),
+            QSignalBlocker(self.final_v_spin),
+            QSignalBlocker(self.volume_tolerance_spin),
+            QSignalBlocker(self.allow_two_chk),
+        ):
             self.v_spin.setValue(float(payload.get("printed_volume_nL", self.v_spin.value())))
             self.final_v_spin.setValue(float(payload.get("final_volume_nL", self.final_v_spin.value())))
+            self.volume_tolerance_spin.setValue(float(
+                payload.get("printed_volume_tolerance_nL", self.volume_tolerance_spin.value())
+            ))
             self.allow_two_chk.setChecked(bool(payload.get("allow_two", self.allow_two_chk.isChecked())))
 
         self.model.set_metadata(
             target_reaction_volume_nL=float(self.v_spin.value()),
+            printed_volume_tolerance_nL=float(self.volume_tolerance_spin.value()),
             final_reaction_volume_nL=float(self.final_v_spin.value()),
             allow_two_stock_solutions=bool(self.allow_two_chk.isChecked()),
         )
@@ -6714,6 +6748,7 @@ class ExperimentDesignDialog(QDialog):
             "rep_spin",
             "v_spin",
             "final_v_spin",
+            "volume_tolerance_spin",
             "fill_name_edit",
             "fill_mode_combo",
             "fill_dv_spin",
@@ -6762,6 +6797,7 @@ class ExperimentDesignDialog(QDialog):
             "rep_spin",
             "v_spin",
             "final_v_spin",
+            "volume_tolerance_spin",
             "fill_name_edit",
             "fill_mode_combo",
             "fill_dv_spin",
@@ -6848,6 +6884,7 @@ class ExperimentDesignDialog(QDialog):
             "rep_spin",
             "v_spin",
             "final_v_spin",
+            "volume_tolerance_spin",
             "fill_name_edit",
             "fill_mode_combo",
             "fill_dv_spin",
@@ -6892,6 +6929,7 @@ class ExperimentDesignDialog(QDialog):
             "rep_spin",
             "v_spin",
             "final_v_spin",
+            "volume_tolerance_spin",
             "fill_name_edit",
             "fill_mode_combo",
             "fill_dv_spin",
@@ -7006,6 +7044,7 @@ class ExperimentDesignDialog(QDialog):
             "rep_spin",
             "v_spin",
             "final_v_spin",
+            "volume_tolerance_spin",
             "fill_name_edit",
             "fill_mode_combo",
             "fill_dv_spin",
@@ -7295,6 +7334,11 @@ class ExperimentDesignDialog(QDialog):
         selected_plate_name = self.plate_format_combo.currentText().strip() or None
         plate_rows = None
         plate_columns = None
+        printed_volume_tolerance = (
+            float(self.volume_tolerance_spin.value())
+            if hasattr(self, "volume_tolerance_spin") and self.volume_tolerance_spin is not None
+            else float(getattr(self.model, "metadata", {}).get("printed_volume_tolerance_nL", 50.0))
+        )
 
         # Keep plate metadata coherent at save-time, before finish handoff mutates runtime state.
         try:
@@ -7311,6 +7355,7 @@ class ExperimentDesignDialog(QDialog):
             name=self.exp_name_edit.text().strip() or "Untitled",
             replicates=int(self.rep_spin.value()),
             target_reaction_volume_nL=float(self.v_spin.value()),
+            printed_volume_tolerance_nL=printed_volume_tolerance,
             fill_reagent_name=self.fill_name_edit.text().strip() or "Water",
             fill_droplet_volume_nL=float(self.fill_dv_spin.value()),
             fill_printing_mode=self._current_printing_mode_from_combo(
@@ -7732,6 +7777,7 @@ class ExperimentDesignDialog(QDialog):
         # Block signals while restoring to avoid re-entrancy/races
         blk(self.exp_name_edit); blk(self.rep_spin); blk(self.v_spin)
         blk(self.final_v_spin)
+        blk(self.volume_tolerance_spin)
         blk(self.fill_name_edit); blk(getattr(self, "fill_mode_combo", None)); blk(self.fill_dv_spin)
         blk(self.allow_two_chk)
         blk(self.randomize_chk); blk(self.random_seed_spin)
@@ -7762,6 +7808,7 @@ class ExperimentDesignDialog(QDialog):
             "final_reaction_volume_nL",
             md.get("target_reaction_volume_nL", 500.0)
         )))
+        self.volume_tolerance_spin.setValue(float(md.get("printed_volume_tolerance_nL", 50.0)))
         self.allow_two_chk.setChecked(bool(md.get("allow_two_stock_solutions", False)))
 
         if hasattr(self, "randomize_chk"):
@@ -7838,6 +7885,7 @@ class ExperimentDesignDialog(QDialog):
                     "name": temp_name,
                     "replicates": 1,
                     "target_reaction_volume_nL": 500.0,
+                    "printed_volume_tolerance_nL": 50.0,
                     "final_reaction_volume_nL": 500.0,
                     "fill_reagent_name": "Water",
                     "fill_printing_mode": PRINTING_MODE_DROPLET,
@@ -7872,7 +7920,7 @@ class ExperimentDesignDialog(QDialog):
         # Repaint UI from the fresh model (avoid auto-update churn while setting)
         blockers = [
             QSignalBlocker(self.exp_name_edit), QSignalBlocker(self.rep_spin),
-            QSignalBlocker(self.v_spin), QSignalBlocker(self.fill_name_edit),
+            QSignalBlocker(self.v_spin), QSignalBlocker(self.volume_tolerance_spin), QSignalBlocker(self.fill_name_edit),
             QSignalBlocker(getattr(self, "fill_mode_combo", None)), QSignalBlocker(self.fill_dv_spin), QSignalBlocker(self.allow_two_chk),
             QSignalBlocker(self.randomize_chk),
             QSignalBlocker(self.random_seed_spin), QSignalBlocker(self.subset_chk),
