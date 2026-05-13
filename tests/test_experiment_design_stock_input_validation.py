@@ -83,13 +83,17 @@ class _FakeTimer:
 
 def _build_dialog(*, fixed_text="", max_text="", responses=None, stock_rows=None):
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
-    dialog.color_dict = {"dark_red": "#8a0303"}
+    dialog.color_dict = {"dark_red": "#8a0303", "dark_blue": "#1b3a57"}
     dialog.model = _OptimizeModelStub(responses or [], stock_rows=stock_rows)
     dialog.status_lbl = QLabel("")
     dialog.stock_table_status_lbl = QLabel("")
     dialog.stock_table = QTableWidget(0, 9)
     dialog.summary_lbl = QLabel("")
     dialog.allow_two_chk = QCheckBox()
+    dialog.auto_update_chk = QCheckBox()
+    dialog.auto_update_chk.setChecked(True)
+    dialog.run_btn = QPushButton("Optimize and Generate")
+    dialog._run_btn_default_stylesheet = dialog.run_btn.styleSheet()
     dialog.reagent_table = QTableWidget(1, 12)
 
     name_edit = QLineEdit("AddA")
@@ -255,6 +259,73 @@ def test_experiment_design_busy_state_restores_after_optimizer_exception(qapp):
         )
     )
     assert dialog.status_lbl.text() == "Optimization failed."
+
+
+def test_auto_update_on_preserves_debounced_schedule(qapp):
+    dialog, _fixed_edit, _max_edit = _build_dialog()
+    dialog._design_optimization_dirty = False
+    dialog.auto_update_chk.setChecked(True)
+
+    ExperimentDesignDialog._schedule_auto_update(dialog)
+
+    assert dialog._design_optimization_dirty is True
+    assert dialog._auto_timer.starts == 1
+    assert dialog.run_btn.styleSheet() == ""
+
+
+def test_auto_update_off_marks_dirty_without_starting_timer(qapp):
+    dialog, _fixed_edit, _max_edit = _build_dialog()
+    dialog._design_optimization_dirty = False
+    dialog.auto_update_chk.setChecked(False)
+
+    ExperimentDesignDialog._schedule_auto_update(dialog)
+
+    assert dialog._design_optimization_dirty is True
+    assert dialog._auto_timer.starts == 0
+    assert "background-color: #1b3a57" in dialog.run_btn.styleSheet()
+    assert "color: white" in dialog.run_btn.styleSheet()
+    assert "Press Optimize and Generate" in dialog.status_lbl.text()
+
+
+def test_auto_update_toggle_back_on_schedules_dirty_design(qapp):
+    dialog, _fixed_edit, _max_edit = _build_dialog()
+    dialog._design_optimization_dirty = True
+    dialog.auto_update_chk.setChecked(False)
+    ExperimentDesignDialog._update_run_button_dirty_state(dialog)
+
+    dialog.auto_update_chk.setChecked(True)
+    ExperimentDesignDialog._on_auto_update_toggled(dialog, True)
+
+    assert dialog._auto_timer.starts == 1
+    assert dialog.run_btn.styleSheet() == ""
+
+
+def test_successful_manual_optimization_restores_run_button_style(qapp):
+    dialog, _fixed_edit, _max_edit = _build_dialog(
+        responses=[{"best": True, "issues_by_key": {}, "two_stock_search_limited_keys": []}]
+    )
+    dialog.auto_update_chk.setChecked(False)
+    ExperimentDesignDialog._schedule_auto_update(dialog)
+    assert "background-color: #1b3a57" in dialog.run_btn.styleSheet()
+
+    ok, _result = ExperimentDesignDialog._run_design_optimization_flow(dialog, show_failure_dialog=False)
+
+    assert ok is True
+    assert dialog._design_optimization_dirty is False
+    assert dialog.run_btn.styleSheet() == ""
+
+
+def test_failed_manual_optimization_keeps_run_button_dirty(qapp):
+    dialog, _fixed_edit, _max_edit = _build_dialog(
+        responses=[{"best": None, "reason": "no plan", "issues_by_key": {}, "two_stock_search_limited_keys": []}]
+    )
+    dialog.auto_update_chk.setChecked(False)
+
+    ok, _result = ExperimentDesignDialog._run_design_optimization_flow(dialog, show_failure_dialog=False)
+
+    assert ok is False
+    assert dialog._design_optimization_dirty is True
+    assert "background-color: #1b3a57" in dialog.run_btn.styleSheet()
 
 
 def test_failure_dialog_shows_detailed_issue_summary(qapp, monkeypatch):

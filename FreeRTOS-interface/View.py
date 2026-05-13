@@ -5383,7 +5383,7 @@ class ExperimentImportWizard(QDialog):
 
         with _BusyUiContext(
             self,
-            "Calculating feasibility... this may take a moment.",
+            "Calculating feasibility... this may take a moment on Raspberry Pi.",
             widgets=self._busy_widgets(),
             status_setter=self.status_lbl.setText,
             failure_message="Feasibility calculation failed.",
@@ -5886,8 +5886,17 @@ class ExperimentDesignDialog(QDialog):
         self.reset_upload_btn.clicked.connect(self._on_reset_uploaded_design)
         controls_col.addWidget(self.reset_upload_btn)
 
+        self.auto_update_chk = QCheckBox("Auto update design")
+        self.auto_update_chk.setChecked(True)
+        self.auto_update_chk.setToolTip(
+            "When enabled, design edits automatically re-optimize after a short delay. "
+            "Turn this off to make several edits before pressing Optimize and Generate."
+        )
+        self.auto_update_chk.toggled.connect(self._on_auto_update_toggled)
+        controls_col.addWidget(self.auto_update_chk)
+
         self.run_btn = new_btn = QPushButton("Optimize and Generate")
-        # self.run_btn.setStyleSheet("background-color: #b33; color: white;")
+        self._run_btn_default_stylesheet = self.run_btn.styleSheet()
         self.run_btn.clicked.connect(self._on_optimize_and_generate)
         controls_col.addWidget(self.run_btn)
 
@@ -6575,8 +6584,47 @@ class ExperimentDesignDialog(QDialog):
         self._refresh_all_prior_availability()
         self._schedule_auto_update()
 
+    def _auto_update_enabled(self) -> bool:
+        chk = getattr(self, "auto_update_chk", None)
+        if chk is None:
+            return True
+        try:
+            return bool(chk.isChecked())
+        except Exception:
+            return True
+
+    def _run_button_dirty_stylesheet(self) -> str:
+        color = str(self.color_dict.get("dark_blue") or "#1b3a57")
+        return f"background-color: {color}; color: white;"
+
+    def _update_run_button_dirty_state(self):
+        run_btn = getattr(self, "run_btn", None)
+        if run_btn is None:
+            return
+        dirty = bool(getattr(self, "_design_optimization_dirty", True))
+        if dirty and not self._auto_update_enabled():
+            run_btn.setStyleSheet(self._run_button_dirty_stylesheet())
+        else:
+            run_btn.setStyleSheet(getattr(self, "_run_btn_default_stylesheet", ""))
+
+    def _on_auto_update_toggled(self, checked: bool):
+        timer = getattr(self, "_auto_timer", None)
+        if not checked:
+            if timer is not None:
+                timer.stop()
+            if getattr(self, "_design_optimization_dirty", False):
+                self._set_status("Design edits pending. Press Optimize and Generate to update.")
+            self._update_run_button_dirty_state()
+            return
+
+        self._update_run_button_dirty_state()
+        if getattr(self, "_design_optimization_dirty", False):
+            if timer is not None:
+                timer.start()
+
     def _mark_design_optimization_dirty(self):
         self._design_optimization_dirty = True
+        self._update_run_button_dirty_state()
 
     def _mark_design_optimization_clean(self, result: dict | None = None):
         self._design_optimization_dirty = False
@@ -6584,6 +6632,7 @@ class ExperimentDesignDialog(QDialog):
         timer = getattr(self, "_auto_timer", None)
         if timer is not None:
             timer.stop()
+        self._update_run_button_dirty_state()
 
     def _has_current_generated_design(self) -> bool:
         plans = getattr(self.model, "plans_per_option", None)
@@ -6626,6 +6675,15 @@ class ExperimentDesignDialog(QDialog):
         ):
             return
 
+        if not self._auto_update_enabled():
+            timer = getattr(self, "_auto_timer", None)
+            if timer is not None:
+                timer.stop()
+            if getattr(self, "_design_optimization_dirty", False):
+                self._set_status("Design edits pending. Press Optimize and Generate to update.")
+            self._update_run_button_dirty_state()
+            return
+
         # Debounce rapid edits
         timer = getattr(self, "_auto_timer", None)
         if timer is not None:
@@ -6640,7 +6698,7 @@ class ExperimentDesignDialog(QDialog):
         self._run_design_optimization_flow(
             show_failure_dialog=False,
             show_capacity_dialog=False,
-            busy_message="Updating experiment design... this may take a moment.",
+            busy_message="Updating experiment design... this may take a moment on Raspberry Pi.",
         )
 
     def _load_factors_into_table(self):
@@ -6701,6 +6759,7 @@ class ExperimentDesignDialog(QDialog):
             getattr(self, "upload_design_btn", None),
             getattr(self, "reset_upload_btn", None),
             getattr(self, "add_reagent_btn", None),
+            getattr(self, "auto_update_chk", None),
             getattr(self, "new_btn", None),
             getattr(self, "load_btn", None),
         ]
@@ -6882,7 +6941,7 @@ class ExperimentDesignDialog(QDialog):
             failure_prefix="Could not find feasible stock solutions for the uploaded design:\n",
             show_capacity_dialog=False,
             refresh_lock_states=True,
-            busy_message="Applying uploaded design and optimizing stock solutions... this may take a moment.",
+            busy_message="Applying uploaded design and optimizing stock solutions... this may take a moment on Raspberry Pi.",
         )
 
     def _validate_uploaded_design_well_assignments(self, df) -> bool:
@@ -7765,7 +7824,7 @@ class ExperimentDesignDialog(QDialog):
 
         with _BusyUiContext(
             self,
-            busy_message or "Optimizing stock solutions and generating experiment... this may take a moment.",
+            busy_message or "Optimizing stock solutions and generating experiment... this may take a moment on Raspberry Pi.",
             widgets=self._design_busy_widgets(),
             status_setter=self._set_status,
             failure_message="Optimization failed.",
@@ -7837,7 +7896,7 @@ class ExperimentDesignDialog(QDialog):
             show_failure_dialog=True,
             failure_title="Optimization failed",
             show_capacity_dialog=show_capacity_dialog,
-            busy_message=busy_message or "Optimizing stock solutions and generating experiment... this may take a moment.",
+            busy_message=busy_message or "Optimizing stock solutions and generating experiment... this may take a moment on Raspberry Pi.",
         )
         return ok
 
@@ -8242,7 +8301,7 @@ class ExperimentDesignDialog(QDialog):
             show_failure_dialog=True,
             failure_title="Optimization failed",
             show_capacity_dialog=False,
-            busy_message="Optimizing before saving design... this may take a moment.",
+            busy_message="Optimizing before saving design... this may take a moment on Raspberry Pi.",
         )
         if not ok:
             return
@@ -8358,7 +8417,7 @@ class ExperimentDesignDialog(QDialog):
             # Reuse the same logic as Optimize & Generate
             if not self._on_optimize_and_generate(
                 show_capacity_dialog=True,
-                busy_message="Optimizing stock solutions and generating experiment... this may take a moment.",
+                busy_message="Optimizing stock solutions and generating experiment... this may take a moment on Raspberry Pi.",
             ):
                 return
 
