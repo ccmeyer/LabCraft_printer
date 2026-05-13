@@ -206,6 +206,11 @@ def test_failure_dialog_shows_detailed_issue_summary(qapp, monkeypatch):
     assert "Generic optimizer failure" not in captured["text"]
 
 
+def _calculate_import_wizard(wizard):
+    assert wizard.calculate_btn.isEnabled()
+    wizard.calculate_btn.click()
+
+
 def test_import_wizard_loads_design_and_stock_tables(qapp):
     model = ExperimentModel(prof=CURRENT_PROFILE)
     wizard = View.ExperimentImportWizard(
@@ -232,14 +237,27 @@ def test_import_wizard_loads_design_and_stock_tables(qapp):
     wizard.load_design_dataframe(design_df, source_path="design.csv")
     wizard.load_max_stock_dataframe(stock_df, source_path="stocks.csv")
 
+    assert wizard.design_path_lbl.text() == "design.csv"
+    assert wizard.max_stock_path_lbl.text() == "stocks.csv"
+    assert wizard.report is None
+    assert wizard.composition_table.rowCount() == 0
+    assert wizard.stock_table.rowCount() == 0
+    assert not wizard.apply_btn.isEnabled()
+    assert wizard._report_dirty is True
+    assert "background-color" in wizard.calculate_btn.styleSheet()
+
+    _calculate_import_wizard(wizard)
+
     assert wizard.composition_table.rowCount() == 1
     assert wizard.stock_table.rowCount() == 2
     assert wizard.report["composition_rows"][0]["count"] == 2
     assert wizard.report["composition_rows"][0]["total_required_volume_nL"] == 200.0
     assert wizard.apply_btn.isEnabled()
+    assert wizard._report_dirty is False
+    assert wizard.calculate_btn.styleSheet() == wizard.cancel_btn.styleSheet()
 
 
-def test_import_wizard_volume_edits_recompute_feasibility(qapp):
+def test_import_wizard_volume_edits_mark_report_stale_until_calculated(qapp):
     model = ExperimentModel(prof=CURRENT_PROFILE)
     wizard = View.ExperimentImportWizard(
         model,
@@ -255,6 +273,7 @@ def test_import_wizard_volume_edits_recompute_feasibility(qapp):
         pd.DataFrame({"reagent": ["Reagent A"], "stock_conc": [10.0], "units": ["mM"]}),
         source_path="stocks.csv",
     )
+    _calculate_import_wizard(wizard)
 
     assert wizard.report["composition_rows"][0]["status"] == "OK"
 
@@ -263,6 +282,13 @@ def test_import_wizard_volume_edits_recompute_feasibility(qapp):
     assert wizard.report["composition_rows"][0]["status"] == "OK"
 
     wizard.printed_volume_spin.editingFinished.emit()
+
+    assert wizard.report["composition_rows"][0]["status"] == "OK"
+    assert "stale" in wizard.status_lbl.text()
+    assert not wizard.apply_btn.isEnabled()
+    assert "background-color" in wizard.calculate_btn.styleSheet()
+
+    _calculate_import_wizard(wizard)
 
     assert wizard.report["composition_rows"][0]["status"] == "Volume impossible"
     assert "Volume impossible" in wizard.status_lbl.text()
@@ -300,13 +326,167 @@ def test_import_wizard_passes_printed_volume_tolerance_to_report(qapp):
     )
     wizard.load_design_dataframe(pd.DataFrame({"well_id": ["A1"], "Reagent A mM": [1.0]}))
 
+    assert model.calls == []
+
+    _calculate_import_wizard(wizard)
     assert model.calls[-1]["printed_volume_tolerance_nL"] == 25.0
 
     wizard.printed_volume_tolerance_spin.setValue(40.0)
     assert model.calls[-1]["printed_volume_tolerance_nL"] == 25.0
 
     wizard.printed_volume_tolerance_spin.editingFinished.emit()
+    assert model.calls[-1]["printed_volume_tolerance_nL"] == 25.0
+    assert not wizard.apply_btn.isEnabled()
+
+    _calculate_import_wizard(wizard)
     assert model.calls[-1]["printed_volume_tolerance_nL"] == 40.0
+
+
+def test_import_wizard_calculate_button_state_tracks_dirty_edits(qapp):
+    wizard = View.ExperimentImportWizard(
+        ExperimentModel(prof=CURRENT_PROFILE),
+        printed_volume_nL=500.0,
+        final_volume_nL=1000.0,
+        allow_two=False,
+    )
+
+    assert not wizard.calculate_btn.isEnabled()
+    assert wizard.calculate_btn.styleSheet() == wizard.cancel_btn.styleSheet()
+    assert not wizard.apply_btn.isEnabled()
+
+    wizard.load_design_dataframe(
+        pd.DataFrame({"well_id": ["A1"], "Reagent A mM": [1.0]}),
+        source_path="design.csv",
+    )
+
+    assert wizard.calculate_btn.isEnabled()
+    assert "#1b3a57" in wizard.calculate_btn.styleSheet()
+    assert "color: white" in wizard.calculate_btn.styleSheet()
+    assert not wizard.apply_btn.isEnabled()
+
+    _calculate_import_wizard(wizard)
+
+    assert wizard.calculate_btn.isEnabled()
+    assert wizard.calculate_btn.styleSheet() == wizard.cancel_btn.styleSheet()
+    assert wizard.apply_btn.isEnabled()
+
+    wizard.allow_two_chk.setChecked(True)
+
+    assert wizard._report_dirty is True
+    assert "#1b3a57" in wizard.calculate_btn.styleSheet()
+    assert not wizard.apply_btn.isEnabled()
+
+
+def test_import_wizard_apply_does_not_recalculate_dirty_report(qapp):
+    class _CaptureModel:
+        def __init__(self):
+            self.calls = []
+
+        def build_import_feasibility_report(self, *_args, **kwargs):
+            self.calls.append(kwargs)
+            return {
+                "ok": True,
+                "printed_volume_nL": kwargs.get("printed_volume_nL"),
+                "final_volume_nL": kwargs.get("final_volume_nL"),
+                "reagent_specs": [],
+                "composition_rows": [],
+                "stock_rows": [],
+                "issues": [],
+                "missing_stock_rows": [],
+                "unmatched_stock_rows": [],
+                "status_counts": {},
+                "max_stock_by_reagent": {},
+            }
+
+    model = _CaptureModel()
+    wizard = View.ExperimentImportWizard(
+        model,
+        printed_volume_nL=500.0,
+        final_volume_nL=1000.0,
+        allow_two=False,
+    )
+    accepted = {"value": False}
+    wizard.accept = lambda: accepted.__setitem__("value", True)
+    wizard.load_design_dataframe(pd.DataFrame({"well_id": ["A1"], "Reagent A mM": [1.0]}))
+
+    _calculate_import_wizard(wizard)
+    assert len(model.calls) == 1
+
+    wizard.printed_volume_spin.setValue(450.0)
+    wizard.printed_volume_spin.editingFinished.emit()
+    wizard._on_apply_clicked()
+
+    assert len(model.calls) == 1
+    assert accepted["value"] is False
+    assert "Calculate feasibility before applying" in wizard.status_lbl.text()
+
+    _calculate_import_wizard(wizard)
+    wizard._on_apply_clicked()
+
+    assert len(model.calls) == 2
+    assert accepted["value"] is True
+
+
+def test_import_wizard_stock_table_edit_marks_dirty_without_recompute(qapp):
+    class _CaptureModel:
+        def __init__(self):
+            self.calls = []
+
+        def build_import_feasibility_report(self, *_args, **kwargs):
+            self.calls.append(kwargs)
+            max_stock_map = dict(kwargs.get("max_stock_map") or {})
+            return {
+                "ok": True,
+                "printed_volume_nL": kwargs.get("printed_volume_nL"),
+                "final_volume_nL": kwargs.get("final_volume_nL"),
+                "reagent_specs": [{"name": "Reagent A", "units": "mM"}],
+                "composition_rows": [],
+                "stock_rows": [
+                    {
+                        "reagent": "Reagent A",
+                        "units": "mM",
+                        "max_stock_conc": max_stock_map.get("Reagent A", 10.0),
+                        "ideal_stock_conc": 10.0,
+                        "delta_per_drop": 0.1,
+                        "target_min": 1.0,
+                        "target_max": 1.0,
+                        "target_span": 0.0,
+                        "smallest_nonzero_target": 1.0,
+                        "worst_max_stock_volume_nL": 100.0,
+                        "smallest_useful_target_step": 1.0,
+                        "status": "OK",
+                        "recommendation": "",
+                    }
+                ],
+                "issues": [],
+                "missing_stock_rows": [],
+                "unmatched_stock_rows": [],
+                "status_counts": {"OK": 1},
+                "max_stock_by_reagent": {"Reagent A": max_stock_map.get("Reagent A", 10.0)},
+            }
+
+    model = _CaptureModel()
+    wizard = View.ExperimentImportWizard(
+        model,
+        printed_volume_nL=500.0,
+        final_volume_nL=1000.0,
+        allow_two=False,
+    )
+    wizard.load_design_dataframe(pd.DataFrame({"well_id": ["A1"], "Reagent A mM": [1.0]}))
+    _calculate_import_wizard(wizard)
+    assert len(model.calls) == 1
+
+    wizard.stock_table.item(0, wizard.STOCK_COL_MAX).setText("20")
+
+    assert len(model.calls) == 1
+    assert wizard._manual_max_stock_by_reagent["Reagent A"] == 20.0
+    assert wizard._report_dirty is True
+    assert not wizard.apply_btn.isEnabled()
+
+    _calculate_import_wizard(wizard)
+
+    assert len(model.calls) == 2
+    assert model.calls[-1]["max_stock_map"] == {"Reagent A": 20.0}
 
 
 def test_import_wizard_status_colors_distinguish_warnings_from_errors(qapp):
@@ -320,6 +500,7 @@ def test_import_wizard_status_colors_distinguish_warnings_from_errors(qapp):
         pd.DataFrame({"well_id": ["A1"], "Reagent A mM": [1.0]}),
         source_path="design.csv",
     )
+    _calculate_import_wizard(warning_wizard)
 
     warning_item = warning_wizard.composition_table.item(0, 0)
     assert warning_item.background().color().name() == "#7a5a00"
@@ -339,6 +520,7 @@ def test_import_wizard_status_colors_distinguish_warnings_from_errors(qapp):
         pd.DataFrame({"reagent": ["Reagent A"], "stock_conc": [1.0], "units": ["mM"]}),
         source_path="stocks.csv",
     )
+    _calculate_import_wizard(error_wizard)
 
     error_item = error_wizard.composition_table.item(0, 0)
     assert error_wizard.report["composition_rows"][0]["status"] == "Volume impossible"
@@ -367,6 +549,7 @@ def test_import_wizard_status_colors_distinguish_warnings_from_errors(qapp):
         ),
         source_path="stocks.csv",
     )
+    _calculate_import_wizard(near_budget_wizard)
 
     near_item = near_budget_wizard.composition_table.item(0, 0)
     assert near_budget_wizard.report["composition_rows"][0]["status"] == "Near budget"
@@ -434,6 +617,7 @@ def test_import_wizard_stock_plan_errors_are_red_and_disable_apply(qapp):
         allow_two=False,
     )
     wizard.load_design_dataframe(pd.DataFrame({"well_id": ["A1"], "Reagent A mM": [1.0]}))
+    _calculate_import_wizard(wizard)
 
     stock_item = wizard.stock_table.item(0, 0)
     assert stock_item.background().color().name() == "#8b1e1e"
@@ -469,6 +653,7 @@ def test_import_wizard_composition_table_layout_and_formatting(qapp):
         ),
         source_path="stocks.csv",
     )
+    _calculate_import_wizard(wizard)
 
     assert wizard.composition_table.textElideMode() == Qt.TextElideMode.ElideNone
     assert wizard.composition_table.columnWidth(3) == wizard.composition_table.columnWidth(4)

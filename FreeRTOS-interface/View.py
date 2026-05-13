@@ -4955,6 +4955,9 @@ class ExperimentImportWizard(QDialog):
         self.report: Dict[str, Any] | None = None
         self._manual_max_stock_by_reagent: Dict[str, float] = {}
         self._populating_tables = False
+        self._report_dirty = False
+        self._has_calculated_report = False
+        self._pending_change_message = ""
 
         root = QHBoxLayout(self)
         left = QVBoxLayout()
@@ -4985,7 +4988,9 @@ class ExperimentImportWizard(QDialog):
         self.printed_volume_spin.setRange(1.0, 1_000_000.0)
         self.printed_volume_spin.setSingleStep(50.0)
         self.printed_volume_spin.setValue(float(printed_volume_nL))
-        self.printed_volume_spin.editingFinished.connect(self._recompute_report)
+        self.printed_volume_spin.editingFinished.connect(
+            lambda: self._mark_report_dirty("Printed volume changed.")
+        )
         form.addRow(QLabel("Printed Volume (nL)"), self.printed_volume_spin)
 
         self.final_volume_spin = QDoubleSpinBox()
@@ -4993,7 +4998,9 @@ class ExperimentImportWizard(QDialog):
         self.final_volume_spin.setRange(1.0, 1_000_000.0)
         self.final_volume_spin.setSingleStep(50.0)
         self.final_volume_spin.setValue(float(final_volume_nL))
-        self.final_volume_spin.editingFinished.connect(self._recompute_report)
+        self.final_volume_spin.editingFinished.connect(
+            lambda: self._mark_report_dirty("Final reaction volume changed.")
+        )
         form.addRow(QLabel("Final Reaction Volume (nL)"), self.final_volume_spin)
 
         self.printed_volume_tolerance_spin = QDoubleSpinBox()
@@ -5001,12 +5008,16 @@ class ExperimentImportWizard(QDialog):
         self.printed_volume_tolerance_spin.setRange(0.0, 1_000_000.0)
         self.printed_volume_tolerance_spin.setSingleStep(10.0)
         self.printed_volume_tolerance_spin.setValue(max(0.0, float(printed_volume_tolerance_nL)))
-        self.printed_volume_tolerance_spin.editingFinished.connect(self._recompute_report)
+        self.printed_volume_tolerance_spin.editingFinished.connect(
+            lambda: self._mark_report_dirty("Printed volume tolerance changed.")
+        )
         form.addRow(QLabel("Printed Volume Tolerance (nL)"), self.printed_volume_tolerance_spin)
 
         self.allow_two_chk = QCheckBox()
         self.allow_two_chk.setChecked(bool(allow_two))
-        self.allow_two_chk.stateChanged.connect(self._recompute_report)
+        self.allow_two_chk.stateChanged.connect(
+            lambda _state: self._mark_report_dirty("Two-stock setting changed.")
+        )
         form.addRow(QLabel("Allow Two Stock Solutions"), self.allow_two_chk)
 
         left.addLayout(form)
@@ -5017,6 +5028,10 @@ class ExperimentImportWizard(QDialog):
         self.status_lbl.setStyleSheet("color:#666; font-style: italic;")
         left.addWidget(self.status_lbl)
         left.addStretch(1)
+
+        self.calculate_btn = QPushButton("Calculate Feasibility")
+        self.calculate_btn.clicked.connect(self._recompute_report)
+        left.addWidget(self.calculate_btn)
 
         buttons = QHBoxLayout()
         self.apply_btn = QPushButton("Apply to Experiment Editor")
@@ -5053,7 +5068,11 @@ class ExperimentImportWizard(QDialog):
         self.stock_table.cellChanged.connect(self._on_stock_cell_changed)
         right.addWidget(self.stock_table, stretch=2)
 
-        self._recompute_report()
+        self._populate_composition_table(None)
+        self._populate_stock_table(None)
+        self.status_lbl.setText("Upload a target concentrations CSV to begin.")
+        self._update_calculate_button_state()
+        self._update_apply_enabled()
 
     @staticmethod
     def _fmt_value(value, digits: int = 4) -> str:
@@ -5133,18 +5152,78 @@ class ExperimentImportWizard(QDialog):
             return ""
         return os.path.basename(str(path)) or str(path)
 
+    def _dirty_calculate_stylesheet(self) -> str:
+        color = "#1b3a57"
+        parent = self.parent()
+        parent_colors = getattr(parent, "color_dict", {}) if parent is not None else {}
+        if isinstance(parent_colors, Mapping):
+            color = str(parent_colors.get("dark_blue") or color)
+        return f"background-color: {color}; color: white;"
+
+    def _report_has_errors(self) -> bool:
+        return any(
+            issue.get("severity") == "error"
+            for issue in (self.report or {}).get("issues", [])
+        )
+
+    def _update_calculate_button_state(self):
+        has_design = self.design_df is not None
+        self.calculate_btn.setEnabled(has_design)
+        if has_design and self._report_dirty:
+            self.calculate_btn.setStyleSheet(self._dirty_calculate_stylesheet())
+        else:
+            self.calculate_btn.setStyleSheet("")
+
+    def _update_apply_enabled(self):
+        self.apply_btn.setEnabled(
+            self.design_df is not None
+            and self.report is not None
+            and not self._report_dirty
+            and not self._report_has_errors()
+        )
+
+    def _mark_report_dirty(self, reason: str = "Inputs changed."):
+        if self.design_df is None:
+            self._report_dirty = False
+            self._pending_change_message = ""
+            self.status_lbl.setText("Upload a target concentrations CSV to begin.")
+            self._update_calculate_button_state()
+            self._update_apply_enabled()
+            return
+
+        self._report_dirty = True
+        self._pending_change_message = str(reason or "Inputs changed.")
+        if self._has_calculated_report and self.report is not None:
+            self.status_lbl.setText(
+                f"Results are stale: {self._pending_change_message} "
+                "Press Calculate Feasibility to update."
+            )
+        else:
+            self.status_lbl.setText(
+                f"{self._pending_change_message} Press Calculate Feasibility to analyze."
+            )
+        self._update_calculate_button_state()
+        self._update_apply_enabled()
+
+    def _mark_report_clean(self):
+        self._report_dirty = False
+        self._has_calculated_report = True
+        self._pending_change_message = ""
+        self._update_calculate_button_state()
+        self._update_apply_enabled()
+
     def load_design_dataframe(self, df: "pd.DataFrame", *, source_path: str | None = None):
         self.design_df = df.copy()
         self.design_path = source_path
         self.design_path_lbl.setText(self._short_path(source_path) if source_path else "Design CSV loaded")
         self._manual_max_stock_by_reagent.clear()
-        self._recompute_report()
+        self._mark_report_dirty("Target concentrations CSV loaded.")
 
     def load_max_stock_dataframe(self, df: "pd.DataFrame", *, source_path: str | None = None):
         self.max_stock_df = df.copy()
         self.max_stock_path = source_path
         self.max_stock_path_lbl.setText(self._short_path(source_path) if source_path else "Max stock CSV loaded")
-        self._recompute_report()
+        self._mark_report_dirty("Max stock concentrations CSV loaded.")
 
     def _on_load_design_clicked(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -5190,7 +5269,10 @@ class ExperimentImportWizard(QDialog):
             self._populate_composition_table(None)
             self._populate_stock_table(None)
             self.status_lbl.setText("Upload a target concentrations CSV to begin.")
-            self.apply_btn.setEnabled(False)
+            self._report_dirty = False
+            self._has_calculated_report = False
+            self._update_calculate_button_state()
+            self._update_apply_enabled()
             return
 
         self.report = self.model.build_import_feasibility_report(
@@ -5208,9 +5290,7 @@ class ExperimentImportWizard(QDialog):
         self._populate_composition_table(self.report)
         self._populate_stock_table(self.report)
         self._update_status()
-
-        has_errors = any(issue.get("severity") == "error" for issue in self.report.get("issues", []))
-        self.apply_btn.setEnabled(not has_errors)
+        self._mark_report_clean()
 
     def _status_brush(self, status: str) -> QtGui.QBrush | None:
         status = str(status or "")
@@ -5356,15 +5436,16 @@ class ExperimentImportWizard(QDialog):
         text = (item.text() or "").strip()
         if not text:
             self._manual_max_stock_by_reagent.pop(str(reagent), None)
-            self._recompute_report()
+            self._mark_report_dirty("Max stock override cleared.")
             return
         try:
             value = float(text)
         except Exception:
+            self._mark_report_dirty("Max stock override changed.")
             return
         if value > 0 and math.isfinite(value):
             self._manual_max_stock_by_reagent[str(reagent)] = value
-            self._recompute_report()
+            self._mark_report_dirty("Max stock override changed.")
 
     def _update_status(self):
         report = self.report or {}
@@ -5387,7 +5468,9 @@ class ExperimentImportWizard(QDialog):
     def _on_apply_clicked(self):
         if self.design_df is None:
             return
-        self._recompute_report()
+        if self._report_dirty or self.report is None:
+            self._mark_report_dirty("Calculate feasibility before applying.")
+            return
         if self.apply_btn.isEnabled():
             self.accept()
 
