@@ -6,11 +6,13 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QLabel,
     QLineEdit,
+    QPushButton,
     QTableWidget,
     QTableWidgetItem,
 )
 
 import pandas as pd
+import pytest
 import View
 from Model import CURRENT_PROFILE, ExperimentModel
 from View import ExperimentDesignDialog
@@ -163,6 +165,96 @@ def test_successful_optimization_marks_design_clean(qapp):
     assert dialog._design_optimization_dirty is False
     assert dialog._last_optimization_result is result
     assert dialog._auto_timer.stops == 1
+
+
+def _install_design_busy_buttons(dialog):
+    for name in (
+        "run_btn",
+        "finish_btn",
+        "save_btn",
+        "upload_design_btn",
+        "reset_upload_btn",
+        "add_reagent_btn",
+        "new_btn",
+        "load_btn",
+    ):
+        setattr(dialog, name, QPushButton(name))
+
+
+def test_experiment_design_optimization_busy_state_disables_controls(qapp):
+    dialog, _fixed_edit, _max_edit = _build_dialog(
+        responses=[{"best": True, "issues_by_key": {}, "two_stock_search_limited_keys": []}]
+    )
+    _install_design_busy_buttons(dialog)
+    observed = {}
+    original_optimize = dialog.model.optimize_stock_solutions
+
+    def capture_busy_state(**kwargs):
+        observed["buttons_enabled"] = {
+            name: getattr(dialog, name).isEnabled()
+            for name in (
+                "run_btn",
+                "finish_btn",
+                "save_btn",
+                "upload_design_btn",
+                "reset_upload_btn",
+                "add_reagent_btn",
+            )
+        }
+        observed["status"] = dialog.status_lbl.text()
+        return original_optimize(**kwargs)
+
+    dialog.model.optimize_stock_solutions = capture_busy_state
+
+    ok, _result = ExperimentDesignDialog._run_design_optimization_flow(
+        dialog,
+        show_failure_dialog=False,
+        busy_message="Optimizing test design...",
+    )
+
+    assert ok is True
+    assert observed["buttons_enabled"] == {
+        "run_btn": False,
+        "finish_btn": False,
+        "save_btn": False,
+        "upload_design_btn": False,
+        "reset_upload_btn": False,
+        "add_reagent_btn": False,
+    }
+    assert observed["status"] == "Optimizing test design..."
+    assert all(getattr(dialog, name).isEnabled() for name in observed["buttons_enabled"])
+
+
+def test_experiment_design_busy_state_restores_after_optimizer_exception(qapp):
+    dialog, _fixed_edit, _max_edit = _build_dialog(
+        responses=[{"best": True, "issues_by_key": {}, "two_stock_search_limited_keys": []}]
+    )
+    _install_design_busy_buttons(dialog)
+
+    def fail_optimize(**_kwargs):
+        raise RuntimeError("optimizer boom")
+
+    dialog.model.optimize_stock_solutions = fail_optimize
+
+    with pytest.raises(RuntimeError, match="optimizer boom"):
+        ExperimentDesignDialog._run_design_optimization_flow(
+            dialog,
+            show_failure_dialog=False,
+            busy_message="Optimizing test design...",
+        )
+
+    assert all(
+        getattr(dialog, name).isEnabled()
+        for name in (
+            "run_btn",
+            "finish_btn",
+            "save_btn",
+            "upload_design_btn",
+            "reset_upload_btn",
+            "add_reagent_btn",
+        )
+    )
+    assert dialog.status_lbl.text() == "Optimization failed."
 
 
 def test_failure_dialog_shows_detailed_issue_summary(qapp, monkeypatch):
@@ -487,6 +579,84 @@ def test_import_wizard_stock_table_edit_marks_dirty_without_recompute(qapp):
 
     assert len(model.calls) == 2
     assert model.calls[-1]["max_stock_map"] == {"Reagent A": 20.0}
+
+
+def test_import_wizard_calculation_busy_state_disables_controls(qapp):
+    observed = {}
+
+    class _BusyModel:
+        def build_import_feasibility_report(self, *_args, **_kwargs):
+            observed["load_design_enabled"] = wizard.load_design_btn.isEnabled()
+            observed["load_stock_enabled"] = wizard.load_stock_btn.isEnabled()
+            observed["calculate_enabled"] = wizard.calculate_btn.isEnabled()
+            observed["apply_enabled"] = wizard.apply_btn.isEnabled()
+            observed["cancel_enabled"] = wizard.cancel_btn.isEnabled()
+            observed["status"] = wizard.status_lbl.text()
+            return {
+                "ok": True,
+                "printed_volume_nL": 500.0,
+                "final_volume_nL": 1000.0,
+                "reagent_specs": [],
+                "composition_rows": [],
+                "stock_rows": [],
+                "issues": [],
+                "missing_stock_rows": [],
+                "unmatched_stock_rows": [],
+                "status_counts": {},
+                "max_stock_by_reagent": {},
+            }
+
+    wizard = View.ExperimentImportWizard(
+        _BusyModel(),
+        printed_volume_nL=500.0,
+        final_volume_nL=1000.0,
+        allow_two=False,
+    )
+    wizard.load_design_dataframe(pd.DataFrame({"well_id": ["A1"], "Reagent A mM": [1.0]}))
+    wizard.load_max_stock_dataframe(
+        pd.DataFrame({"reagent": ["Reagent A"], "stock_conc": [10.0], "units": ["mM"]})
+    )
+
+    _calculate_import_wizard(wizard)
+
+    assert observed == {
+        "load_design_enabled": False,
+        "load_stock_enabled": False,
+        "calculate_enabled": False,
+        "apply_enabled": False,
+        "cancel_enabled": False,
+        "status": "Calculating feasibility... this may take a moment on Raspberry Pi.",
+    }
+    assert wizard.load_design_btn.isEnabled()
+    assert wizard.load_stock_btn.isEnabled()
+    assert wizard.calculate_btn.isEnabled()
+    assert wizard.cancel_btn.isEnabled()
+    assert wizard.apply_btn.isEnabled()
+
+
+def test_import_wizard_busy_state_restores_after_report_exception(qapp):
+    class _FailingModel:
+        def build_import_feasibility_report(self, *_args, **_kwargs):
+            raise RuntimeError("boom")
+
+    wizard = View.ExperimentImportWizard(
+        _FailingModel(),
+        printed_volume_nL=500.0,
+        final_volume_nL=1000.0,
+        allow_two=False,
+    )
+    wizard.load_design_dataframe(pd.DataFrame({"well_id": ["A1"], "Reagent A mM": [1.0]}))
+
+    with pytest.raises(RuntimeError, match="boom"):
+        wizard._recompute_report()
+
+    assert wizard.load_design_btn.isEnabled()
+    assert wizard.load_stock_btn.isEnabled()
+    assert wizard.calculate_btn.isEnabled()
+    assert wizard.cancel_btn.isEnabled()
+    assert not wizard.apply_btn.isEnabled()
+    assert wizard._report_dirty is True
+    assert wizard.status_lbl.text() == "Feasibility calculation failed."
 
 
 def test_import_wizard_status_colors_distinguish_warnings_from_errors(qapp):

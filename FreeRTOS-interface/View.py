@@ -4911,6 +4911,97 @@ class _NoElideTableItemDelegate(QtWidgets.QStyledItemDelegate):
         option.textElideMode = Qt.TextElideMode.ElideNone
 
 
+class _BusyUiContext:
+    """Show an indeterminate busy dialog while synchronous UI work runs."""
+
+    def __init__(
+        self,
+        parent,
+        message: str,
+        *,
+        widgets: Sequence[Any] | None = None,
+        status_setter=None,
+        failure_message: str | None = None,
+    ):
+        self.parent = parent
+        self.message = str(message or "Working...")
+        self.widgets = [widget for widget in (widgets or []) if widget is not None]
+        self.status_setter = status_setter
+        self.failure_message = failure_message
+        self._enabled_states: list[tuple[Any, bool]] = []
+        self._dialog = None
+
+    def __enter__(self):
+        for widget in self.widgets:
+            try:
+                self._enabled_states.append((widget, bool(widget.isEnabled())))
+                widget.setEnabled(False)
+            except Exception:
+                pass
+
+        if callable(self.status_setter):
+            self.status_setter(self.message)
+
+        app = QApplication.instance()
+        if app is not None:
+            try:
+                QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            except Exception:
+                pass
+
+        try:
+            self._dialog = QtWidgets.QProgressDialog(self.message, "", 0, 0, self.parent)
+            self._dialog.setWindowTitle("Please wait")
+            self._dialog.setCancelButton(None)
+            self._dialog.setWindowModality(Qt.WindowModality.WindowModal)
+            self._dialog.setMinimumDuration(0)
+            self._dialog.setAutoClose(False)
+            self._dialog.setAutoReset(False)
+            self._dialog.setRange(0, 0)
+            self._dialog.show()
+        except Exception:
+            self._dialog = None
+
+        if app is not None:
+            try:
+                app.processEvents()
+            except Exception:
+                pass
+        return self
+
+    def __exit__(self, exc_type, _exc, _tb):
+        if self._dialog is not None:
+            try:
+                self._dialog.close()
+                self._dialog.deleteLater()
+            except Exception:
+                pass
+            self._dialog = None
+
+        try:
+            QApplication.restoreOverrideCursor()
+        except Exception:
+            pass
+
+        for widget, enabled in self._enabled_states:
+            try:
+                widget.setEnabled(enabled)
+            except Exception:
+                pass
+        self._enabled_states.clear()
+
+        if exc_type is not None and callable(self.status_setter) and self.failure_message:
+            self.status_setter(self.failure_message)
+
+        app = QApplication.instance()
+        if app is not None:
+            try:
+                app.processEvents()
+            except Exception:
+                pass
+        return False
+
+
 class ExperimentImportWizard(QDialog):
     """Preflight uploaded reaction designs before applying them to the editor."""
 
@@ -5212,6 +5303,21 @@ class ExperimentImportWizard(QDialog):
         self._update_calculate_button_state()
         self._update_apply_enabled()
 
+    def _busy_widgets(self) -> list[Any]:
+        return [
+            self.load_design_btn,
+            self.load_stock_btn,
+            self.printed_volume_spin,
+            self.final_volume_spin,
+            self.printed_volume_tolerance_spin,
+            self.allow_two_chk,
+            self.calculate_btn,
+            self.apply_btn,
+            self.cancel_btn,
+            self.composition_table,
+            self.stock_table,
+        ]
+
     def load_design_dataframe(self, df: "pd.DataFrame", *, source_path: str | None = None):
         self.design_df = df.copy()
         self.design_path = source_path
@@ -5275,20 +5381,27 @@ class ExperimentImportWizard(QDialog):
             self._update_apply_enabled()
             return
 
-        self.report = self.model.build_import_feasibility_report(
-            self.design_df,
-            max_stock_df=self.max_stock_df,
-            max_stock_map=self._manual_max_stock_by_reagent,
-            units_default="",
-            droplet_nL_default=10.0,
-            starting_conc_default=0.0,
-            printed_volume_nL=float(self.printed_volume_spin.value()),
-            printed_volume_tolerance_nL=float(self.printed_volume_tolerance_spin.value()),
-            final_volume_nL=float(self.final_volume_spin.value()),
-            allow_two=bool(self.allow_two_chk.isChecked()),
-        )
-        self._populate_composition_table(self.report)
-        self._populate_stock_table(self.report)
+        with _BusyUiContext(
+            self,
+            "Calculating feasibility... this may take a moment.",
+            widgets=self._busy_widgets(),
+            status_setter=self.status_lbl.setText,
+            failure_message="Feasibility calculation failed.",
+        ):
+            self.report = self.model.build_import_feasibility_report(
+                self.design_df,
+                max_stock_df=self.max_stock_df,
+                max_stock_map=self._manual_max_stock_by_reagent,
+                units_default="",
+                droplet_nL_default=10.0,
+                starting_conc_default=0.0,
+                printed_volume_nL=float(self.printed_volume_spin.value()),
+                printed_volume_tolerance_nL=float(self.printed_volume_tolerance_spin.value()),
+                final_volume_nL=float(self.final_volume_spin.value()),
+                allow_two=bool(self.allow_two_chk.isChecked()),
+            )
+            self._populate_composition_table(self.report)
+            self._populate_stock_table(self.report)
         self._update_status()
         self._mark_report_clean()
 
@@ -6524,7 +6637,11 @@ class ExperimentDesignDialog(QDialog):
             and self._can_reuse_current_generated_design()
         ):
             return
-        self._run_design_optimization_flow(show_failure_dialog=False, show_capacity_dialog=False)
+        self._run_design_optimization_flow(
+            show_failure_dialog=False,
+            show_capacity_dialog=False,
+            busy_message="Updating experiment design... this may take a moment.",
+        )
 
     def _load_factors_into_table(self):
         """Populate the reagent table from the model's current factors (if any)."""
@@ -6575,6 +6692,18 @@ class ExperimentDesignDialog(QDialog):
             self._refresh_all_prior_availability()
         finally:
             self._auto_update_suspended = previous_suspended
+
+    def _design_busy_widgets(self) -> list[Any]:
+        return [
+            getattr(self, "run_btn", None),
+            getattr(self, "finish_btn", None),
+            getattr(self, "save_btn", None),
+            getattr(self, "upload_design_btn", None),
+            getattr(self, "reset_upload_btn", None),
+            getattr(self, "add_reagent_btn", None),
+            getattr(self, "new_btn", None),
+            getattr(self, "load_btn", None),
+        ]
     # -----------------------------
     # Uploaded design mode toggling
     # -----------------------------
@@ -6753,6 +6882,7 @@ class ExperimentDesignDialog(QDialog):
             failure_prefix="Could not find feasible stock solutions for the uploaded design:\n",
             show_capacity_dialog=False,
             refresh_lock_states=True,
+            busy_message="Applying uploaded design and optimizing stock solutions... this may take a moment.",
         )
 
     def _validate_uploaded_design_well_assignments(self, df) -> bool:
@@ -7608,6 +7738,7 @@ class ExperimentDesignDialog(QDialog):
         failure_prefix: str = "",
         show_capacity_dialog: bool = False,
         refresh_lock_states: bool = False,
+        busy_message: str | None = None,
     ) -> tuple[bool, dict | None]:
         self._rebuild_model_from_table()
         self._refresh_all_prior_availability()
@@ -7632,12 +7763,21 @@ class ExperimentDesignDialog(QDialog):
                 "issues_by_key": raw_issues,
             }
 
-        res = self.model.optimize_stock_solutions(
-            quantum=0.1,
-            max_refine=60,
-            two_max_refine=40,
-            allow_two=self._allow_two_setting(),
-        )
+        with _BusyUiContext(
+            self,
+            busy_message or "Optimizing stock solutions and generating experiment... this may take a moment.",
+            widgets=self._design_busy_widgets(),
+            status_setter=self._set_status,
+            failure_message="Optimization failed.",
+        ):
+            res = self.model.optimize_stock_solutions(
+                quantum=0.1,
+                max_refine=60,
+                two_max_refine=40,
+                allow_two=self._allow_two_setting(),
+            )
+            if res.get("best"):
+                self.model.generate_experiment()
         merged_issues = self._merge_issue_maps(res.get("issues_by_key") or {})
         self._apply_stock_input_issue_state(merged_issues)
 
@@ -7663,7 +7803,6 @@ class ExperimentDesignDialog(QDialog):
                 )
             return False, res
 
-        self.model.generate_experiment()
         capacity_ok = self._validate_plate_capacity(show_dialog=show_capacity_dialog)
         self._refresh_stock_table()
         self._update_summary_labels()
@@ -7688,11 +7827,17 @@ class ExperimentDesignDialog(QDialog):
             printing_mode=PRINTING_MODE_DROPLET,
         )
 
-    def _on_optimize_and_generate(self, show_capacity_dialog: bool = False):
+    def _on_optimize_and_generate(
+        self,
+        show_capacity_dialog: bool = False,
+        *,
+        busy_message: str | None = None,
+    ):
         ok, _res = self._run_design_optimization_flow(
             show_failure_dialog=True,
             failure_title="Optimization failed",
             show_capacity_dialog=show_capacity_dialog,
+            busy_message=busy_message or "Optimizing stock solutions and generating experiment... this may take a moment.",
         )
         return ok
 
@@ -8097,6 +8242,7 @@ class ExperimentDesignDialog(QDialog):
             show_failure_dialog=True,
             failure_title="Optimization failed",
             show_capacity_dialog=False,
+            busy_message="Optimizing before saving design... this may take a moment.",
         )
         if not ok:
             return
@@ -8210,7 +8356,10 @@ class ExperimentDesignDialog(QDialog):
             self._apply_target_color_state()
         else:
             # Reuse the same logic as Optimize & Generate
-            if not self._on_optimize_and_generate(show_capacity_dialog=True):
+            if not self._on_optimize_and_generate(
+                show_capacity_dialog=True,
+                busy_message="Optimizing stock solutions and generating experiment... this may take a moment.",
+            ):
                 return
 
         # Ensure the folder exists and save the design itself
