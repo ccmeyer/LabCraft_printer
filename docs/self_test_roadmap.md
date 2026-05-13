@@ -12,6 +12,16 @@ The core design is a hybrid:
 
 The intent is to increase quantitative coverage without turning the firmware, Python runner, or GUI into a large monolith with many failure points.
 
+## Progress
+
+| Milestone | State | Current artifact |
+| --- | --- | --- |
+| Milestone 0: Baseline Inventory and Acceptance Definitions | Complete | `docs/self_test_milestone0_baseline.md` |
+| Milestone 1: Python Qualification Skeleton, No Firmware Behavior Change | Complete | `tools/qualification/`, `tools/run_qualification.py`, `tools/qualification/manifests/factory_acceptance_v0.json` |
+| Milestone 2: Firmware Diagnostics Extraction, Behavior Preserved | Not started | Planned |
+| Milestone 3: Stable Report Schema and Analyzer Gate | Not started | Planned |
+| Later fixture-dependent diagnostics | Not started | Planned |
+
 ## Current Call Path
 
 Existing HIL self-test flow:
@@ -299,6 +309,10 @@ Expected outputs:
 - Initial qualification suite outline.
 - Initial fixture list.
 - A small table of proposed acceptance metrics for motion, pressure, valves, and gripper tests.
+
+Milestone 0 artifact:
+
+- `docs/self_test_milestone0_baseline.md` records the current baseline inventory and latest-known-good report reference.
 
 Validation:
 
@@ -897,8 +911,8 @@ Rollback:
 
 ## Suggested First Implementation Sequence
 
-1. Complete Milestone 0 with the current latest-known-good report and fixture assumptions.
-2. Implement Milestone 1 so qualification reports and manifests exist before new firmware diagnostics.
+1. Milestone 0 is complete with the current latest-known-good report and fixture assumptions.
+2. Milestone 1 is complete with qualification reports, manifests, and local machine identity support.
 3. Implement Milestone 2 to make firmware diagnostics extensible without behavior changes.
 4. Add one hardware slice at a time: motion, pressure, valves, gripper.
 5. Add the app window only after CLI/report behavior is proven.

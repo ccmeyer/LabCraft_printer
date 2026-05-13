@@ -1,0 +1,50 @@
+{
+  "schema_version": "qualification_manifest_v0",
+  "manifest_id": "factory_acceptance_v0",
+  "name": "Factory Acceptance v0",
+  "profile": "FULL",
+  "description": "Milestone 1 wrapper manifest for the existing SAFE and FULL self-test inventory. Fixture declarations are informational only.",
+  "expected_test_ids": [
+    1001,
+    1002,
+    1010,
+    1011,
+    1012,
+    1003,
+    1013,
+    1020,
+    1021,
+    1004,
+    1005,
+    1007,
+    1006,
+    1030,
+    1040,
+    1041,
+    1042,
+    2001,
+    2002,
+    2003,
+    2004,
+    2005,
+    2006
+  ],
+  "fixtures": [
+    {
+      "fixture_id": "motion_clear_envelope",
+      "required_for": [2001, 2002, 2006],
+      "operator_note": "Confirm the gantry envelope is clear before FULL motion and abort diagnostics."
+    },
+    {
+      "fixture_id": "pressure_hold_closed_loop",
+      "required_for": [2003],
+      "operator_note": "Confirm the pressure system is prepared for the existing FULL pressure response diagnostic."
+    },
+    {
+      "fixture_id": "print_valve_pneumatic_drop",
+      "required_for": [2004, 2005],
+      "operator_note": "Confirm valve/pulse diagnostics are safe for the current fixture before FULL runs."
+    }
+  ],
+  "threshold_policy": "raw_selftest_only"
+}

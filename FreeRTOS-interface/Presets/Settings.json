@@ -1,6 +1,6 @@
 {
     "BASE_PATH":"./",
-    "HARDWARE_PROFILE":"legacy",
+    "HARDWARE_PROFILE":"current",
     "MACHINE_PORT":"/dev/ttyAMA0",
     "BALANCE_PORT":"",
     "DEFAULT_PLATE": "shallow-384_well_plate",
