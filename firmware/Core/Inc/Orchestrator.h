@@ -16,6 +16,8 @@
 #include <cstdint>
 #include <cstring>
 
+class DiagnosticsRunner;
+
 // bit-flags for waiting on completion
 #define BIT_LED_DONE      (1u << 0)
 #define BIT_STEPPER1_DONE (1u << 1)
@@ -38,6 +40,8 @@
 
 
 class Orchestrator {
+  friend class DiagnosticsRunner;
+
 public:
   // the two command types we currently support
   enum CmdType : uint8_t {

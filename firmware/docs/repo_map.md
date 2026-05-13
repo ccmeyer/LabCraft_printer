@@ -124,9 +124,12 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
   - HAL hooks in same file: `HAL_UART_RxCpltCallback`, `HAL_UART_ErrorCallback`
 - High-level command execution/state machine:
   - `firmware/Core/Inc/Orchestrator.h`, `firmware/Core/Src/Orchestrator.cpp`
+  - `firmware/Core/Inc/Diagnostics.h`, `firmware/Core/Src/Diagnostics.cpp`
+  - `firmware/Core/Inc/DiagnosticResultEmitter.h`, `firmware/Core/Src/DiagnosticResultEmitter.cpp`
   - `firmware/Core/Inc/OrchestratorCompletionPolicy.h`, `firmware/Core/Src/OrchestratorCompletionPolicy.cpp`
   - `firmware/Core/Inc/SelfTestCommandPolicy.h`
   - Functions: `Orchestrator::begin`, `Orchestrator::_run`, `Orchestrator::executeCommand`, `enqueueFromISR`, `startHomeAsync`, `startRegHomeAsync`, `_flashTaskLoop`
+  - Self-test entrypoint: `CMD_SELFTEST_START` remains dispatched from `Orchestrator::executeCommand`, but the SAFE/FULL diagnostic sequence now lives in `DiagnosticsRunner::runSelfTest`. `DiagnosticResultEmitter` owns the byte layout for `CMD_SELFTEST_RESULT` and `CMD_SELFTEST_DONE` payloads.
   - `SelfTestCommandPolicy` resolves the logical self-test `run_id` and optional timeout TLVs independently from transport `seq32`, keeping HIL self-test compatible with the sliding-window queue-ACK transport.
   - `OrchestratorCompletionPolicy` centralizes the pure “did an interruptible command really finish?” bookkeeping used to decide when executed/retired frontiers may advance after pause-aware waits.
   - Flash session safety lives here: `CMD_INIT_FLASH` / `CMD_STOP_FLASH`, PE8 arm/disarm policy, PE9 output ownership, and fault latch logging (`FLASH_ARMED`, `FLASH_DISARMED`, `FLASH_FAULT`). Active imaging sessions now only hard-fault on `line_high_on_arm`; once armed, duplicate triggers while a flash is already pending are ignored and the task simply waits for PE8 to return low without latching on slow release.

@@ -18,7 +18,7 @@ The intent is to increase quantitative coverage without turning the firmware, Py
 | --- | --- | --- |
 | Milestone 0: Baseline Inventory and Acceptance Definitions | Complete | `docs/self_test_milestone0_baseline.md` |
 | Milestone 1: Python Qualification Skeleton, No Firmware Behavior Change | Complete | `tools/qualification/`, `tools/run_qualification.py`, `tools/qualification/manifests/factory_acceptance_v0.json` |
-| Milestone 2: Firmware Diagnostics Extraction, Behavior Preserved | Not started | Planned |
+| Milestone 2: Firmware Diagnostics Extraction, Behavior Preserved | Complete | `firmware/Core/Src/Diagnostics.cpp`, `firmware/Core/Src/DiagnosticResultEmitter.cpp`; FULL HIL `hil_reports/selftest_20260513_163220.json` |
 | Milestone 3: Stable Report Schema and Analyzer Gate | Not started | Planned |
 | Later fixture-dependent diagnostics | Not started | Planned |
 

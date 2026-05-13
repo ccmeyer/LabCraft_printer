@@ -26,11 +26,13 @@ add_executable(fw_tests
     tests/test_flash_safety.cpp
     tests/test_flash_output_state.cpp
     tests/test_printer_completion_bits.cpp
+    tests/test_diagnostic_result_emitter.cpp
 
     # Add *selected* firmware sources here (NOT the whole firmware):
     # ../Src/protocol/ProtocolParser.cpp
     # ../Src/utils/RingBuffer.c
     ../Core/Src/CommCodec.cpp
+    ../Core/Src/DiagnosticResultEmitter.cpp
     ../Core/Src/OrchestratorCompletionPolicy.cpp
     ../Core/Src/OrchestratorDecode.cpp
     ../Core/Src/nvm_codec.c
