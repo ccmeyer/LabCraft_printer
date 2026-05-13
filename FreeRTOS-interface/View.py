@@ -4959,12 +4959,17 @@ class _BusyUiContext:
             self._dialog.setAutoReset(False)
             self._dialog.setRange(0, 0)
             self._dialog.show()
+            self._dialog.raise_()
+            self._dialog.activateWindow()
+            self._dialog.repaint()
         except Exception:
             self._dialog = None
 
         if app is not None:
             try:
-                app.processEvents()
+                QApplication.sendPostedEvents(None, QtCore.QEvent.Type.Paint)
+                app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 50)
+                app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 50)
             except Exception:
                 pass
         return self
@@ -6885,6 +6890,13 @@ class ExperimentDesignDialog(QDialog):
         # Push into the model – this will rebuild factors and uploaded reactions.
         # We default to same droplet volume and units assumptions used elsewhere.
         if not self._validate_uploaded_design_well_assignments(df):
+            return
+
+        QTimer.singleShot(0, lambda payload=payload: self._apply_uploaded_design_payload(payload))
+
+    def _apply_uploaded_design_payload(self, payload: Mapping[str, Any]):
+        df = payload.get("design_df")
+        if df is None or df.empty:
             return
 
         with (

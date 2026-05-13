@@ -374,6 +374,62 @@ def _calculate_import_wizard(wizard):
     wizard.calculate_btn.click()
 
 
+def test_busy_context_forces_dialog_body_paint(monkeypatch, qapp):
+    calls = []
+
+    class _FakeProgressDialog:
+        def __init__(self, *_args, **_kwargs):
+            calls.append("init")
+
+        def setWindowTitle(self, *_args):
+            pass
+
+        def setCancelButton(self, *_args):
+            pass
+
+        def setWindowModality(self, *_args):
+            pass
+
+        def setMinimumDuration(self, *_args):
+            pass
+
+        def setAutoClose(self, *_args):
+            pass
+
+        def setAutoReset(self, *_args):
+            pass
+
+        def setRange(self, *_args):
+            pass
+
+        def show(self):
+            calls.append("show")
+
+        def raise_(self):
+            calls.append("raise")
+
+        def activateWindow(self):
+            calls.append("activate")
+
+        def repaint(self):
+            calls.append("repaint")
+
+        def close(self):
+            calls.append("close")
+
+        def deleteLater(self):
+            calls.append("deleteLater")
+
+    monkeypatch.setattr(View.QtWidgets, "QProgressDialog", _FakeProgressDialog)
+
+    with View._BusyUiContext(None, "Working..."):
+        calls.append("inside")
+
+    assert calls[:5] == ["init", "show", "raise", "activate", "repaint"]
+    assert "inside" in calls
+    assert calls[-2:] == ["close", "deleteLater"]
+
+
 def test_import_wizard_loads_design_and_stock_tables(qapp):
     model = ExperimentModel(prof=CURRENT_PROFILE)
     wizard = View.ExperimentImportWizard(
@@ -983,6 +1039,11 @@ def test_upload_design_wizard_apply_mutates_model_once(qapp, monkeypatch):
 
     assert constructed["kwargs"]["printed_volume_nL"] == 500.0
     assert constructed["kwargs"]["printed_volume_tolerance_nL"] == 25.0
+    assert dialog.model.upload_calls == 0
+    assert len(run_calls) == 0
+
+    qapp.processEvents()
+
     assert dialog.model.upload_calls == 1
     assert dialog.model.upload_kwargs["source_path"] == "design.csv"
     assert dialog.model.factors[0].options[0].max_stock_conc == 10.0
