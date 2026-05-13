@@ -673,6 +673,8 @@ def test_uploaded_design_selected_plan_volume_budget_issue_reports_row_context()
     assert issue["row_label"] == "well B3"
     assert issue["required_volume_nL"] == pytest.approx(1000.0)
     assert issue["allowed_volume_nL"] == pytest.approx(550.0)
+    assert {row["label"] for row in issue["contributors"]} == {"Reagent A", "Reagent B"}
+    assert all(row["volume_nL"] == pytest.approx(500.0) for row in issue["contributors"])
     assert "Selected stock plan exceeds" in issue["message"]
 
 
@@ -736,6 +738,7 @@ def test_uploaded_design_selected_plan_overage_within_tolerance_warns():
     assert issue["effective_allowed_volume_nL"] == pytest.approx(1000.0)
     assert issue["printed_volume_tolerance_nL"] == pytest.approx(50.0)
     assert issue["overage_nL"] == pytest.approx(50.0)
+    assert {row["label"] for row in issue["contributors"]} == {"Reagent A", "Reagent B"}
 
 
 def test_uploaded_design_selected_plan_overage_without_tolerance_fails():

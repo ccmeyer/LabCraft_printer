@@ -5463,6 +5463,9 @@ class ExperimentDesignDialog(QDialog):
         self._progress_reset_confirmed: bool = False
         self._progress_lock_status_message: str = ""
         self._gripper_lock_connection = None
+        self._auto_update_suspended: bool = False
+        self._design_optimization_dirty: bool = True
+        self._last_optimization_result: dict | None = None
 
 
         # Debounced auto-update timer (4)
@@ -6376,43 +6379,83 @@ class ExperimentDesignDialog(QDialog):
         self._refresh_all_prior_availability()
         self._schedule_auto_update()
 
-    def _schedule_auto_update(self):
+    def _mark_design_optimization_dirty(self):
+        self._design_optimization_dirty = True
+
+    def _mark_design_optimization_clean(self, result: dict | None = None):
+        self._design_optimization_dirty = False
+        self._last_optimization_result = result
+        timer = getattr(self, "_auto_timer", None)
+        if timer is not None:
+            timer.stop()
+
+    def _has_current_generated_design(self) -> bool:
+        plans = getattr(self.model, "plans_per_option", None)
+        if not plans:
+            return False
+
+        reactions_df = getattr(self.model, "_reactions_df", None)
+        if reactions_df is not None:
+            try:
+                if not bool(getattr(reactions_df, "empty", True)):
+                    return True
+            except Exception:
+                pass
+
+        get_count = getattr(self.model, "get_number_of_reactions", None)
+        if callable(get_count):
+            try:
+                return int(get_count() or 0) > 0
+            except Exception:
+                return False
+        return False
+
+    def _can_reuse_current_generated_design(self) -> bool:
+        return (
+            not bool(getattr(self, "_design_optimization_dirty", True))
+            and self._has_current_generated_design()
+        )
+
+    def _schedule_auto_update(self, *_args, mark_dirty: bool = True):
+        if getattr(self, "_auto_update_suspended", False):
+            return
+
+        if mark_dirty:
+            self._mark_design_optimization_dirty()
+
+        if (
+            getattr(self, "_uploaded_design_active", False)
+            and not getattr(self, "_design_optimization_dirty", True)
+            and self._has_current_generated_design()
+        ):
+            return
+
         # Debounce rapid edits
-        self._auto_timer.start()
+        timer = getattr(self, "_auto_timer", None)
+        if timer is not None:
+            timer.start()
 
     def _recompute_silent(self):
+        if (
+            getattr(self, "_uploaded_design_active", False)
+            and self._can_reuse_current_generated_design()
+        ):
+            return
         self._run_design_optimization_flow(show_failure_dialog=False, show_capacity_dialog=False)
 
     def _load_factors_into_table(self):
         """Populate the reagent table from the model's current factors (if any)."""
-        self._clear_reagent_rows()
-        # Additives
-        for f in getattr(self.model, "factors", []):
-            if f.kind == "additive":
-                o = f.options[0]
-                self._add_reagent_row(
-                    name=o.name,
-                    group=self.GROUP_ADDITIVE,
-                    targets=", ".join(str(x) for x in o.targets),
-                    units=o.units,
-                    droplet_nL=o.droplet_nL,
-                    starting_conc=getattr(o, "starting_conc", 0.0),
-                    forced_stock_conc=getattr(o, "forced_stock_conc", None),
-                    max_stock_conc=getattr(o, "max_stock_conc", None),
-                    reagent_id=getattr(o, "reagent_id", None),
-                    reagent_display_name=getattr(o, "reagent_display_name", None),
-                    intended_head_type_id=getattr(o, "intended_head_type_id", None),
-                    intended_head_type_display_name=getattr(o, "intended_head_type_display_name", None),
-                    printing_mode=getattr(o, "printing_mode", None),
-                )
-        # Choice groups
-        for f in getattr(self.model, "factors", []):
-            if f.kind == "choice":
-                self.choice_groups.add(f.name)
-                for o in f.options:
+        previous_suspended = getattr(self, "_auto_update_suspended", False)
+        self._auto_update_suspended = True
+        try:
+            self._clear_reagent_rows()
+            # Additives
+            for f in getattr(self.model, "factors", []):
+                if f.kind == "additive":
+                    o = f.options[0]
                     self._add_reagent_row(
                         name=o.name,
-                        group=f.name,
+                        group=self.GROUP_ADDITIVE,
                         targets=", ".join(str(x) for x in o.targets),
                         units=o.units,
                         droplet_nL=o.droplet_nL,
@@ -6425,8 +6468,30 @@ class ExperimentDesignDialog(QDialog):
                         intended_head_type_display_name=getattr(o, "intended_head_type_display_name", None),
                         printing_mode=getattr(o, "printing_mode", None),
                     )
-        self._sync_reagent_tables_geometry()
-        self._refresh_all_prior_availability()
+            # Choice groups
+            for f in getattr(self.model, "factors", []):
+                if f.kind == "choice":
+                    self.choice_groups.add(f.name)
+                    for o in f.options:
+                        self._add_reagent_row(
+                            name=o.name,
+                            group=f.name,
+                            targets=", ".join(str(x) for x in o.targets),
+                            units=o.units,
+                            droplet_nL=o.droplet_nL,
+                            starting_conc=getattr(o, "starting_conc", 0.0),
+                            forced_stock_conc=getattr(o, "forced_stock_conc", None),
+                            max_stock_conc=getattr(o, "max_stock_conc", None),
+                            reagent_id=getattr(o, "reagent_id", None),
+                            reagent_display_name=getattr(o, "reagent_display_name", None),
+                            intended_head_type_id=getattr(o, "intended_head_type_id", None),
+                            intended_head_type_display_name=getattr(o, "intended_head_type_display_name", None),
+                            printing_mode=getattr(o, "printing_mode", None),
+                        )
+            self._sync_reagent_tables_geometry()
+            self._refresh_all_prior_availability()
+        finally:
+            self._auto_update_suspended = previous_suspended
     # -----------------------------
     # Uploaded design mode toggling
     # -----------------------------
@@ -7467,6 +7532,7 @@ class ExperimentDesignDialog(QDialog):
 
         raw_issues = self._collect_raw_stock_input_issues()
         if raw_issues:
+            self._mark_design_optimization_dirty()
             self._apply_stock_input_issue_state(raw_issues)
             self._clear_target_color_state()
             stale_msg = "Showing last valid stock plan; current stock inputs are invalid."
@@ -7493,6 +7559,7 @@ class ExperimentDesignDialog(QDialog):
         self._apply_stock_input_issue_state(merged_issues)
 
         if not res.get("best"):
+            self._mark_design_optimization_dirty()
             self._clear_target_color_state()
             stale_msg = "Showing last valid stock plan; current stock inputs are not feasible."
             self._set_stock_table_stale(True, stale_msg)
@@ -7521,6 +7588,7 @@ class ExperimentDesignDialog(QDialog):
         self._refresh_all_prior_availability()
         self._set_stock_table_stale(False, "")
         self._update_optimization_status(res)
+        self._mark_design_optimization_clean(res)
         if refresh_lock_states:
             self._refresh_all_lock_states()
         return bool(capacity_ok), res
@@ -8048,9 +8116,19 @@ class ExperimentDesignDialog(QDialog):
                 if not self.prepare_progress_policy_for_current_design():
                     return
 
-        # Reuse the same logic as Optimize & Generate
-        if not self._on_optimize_and_generate(show_capacity_dialog=True):
-            return
+        if self._can_reuse_current_generated_design():
+            timer = getattr(self, "_auto_timer", None)
+            if timer is not None:
+                timer.stop()
+            if not self._validate_plate_capacity(show_dialog=True):
+                return
+            self._refresh_stock_table()
+            self._update_summary_labels()
+            self._apply_target_color_state()
+        else:
+            # Reuse the same logic as Optimize & Generate
+            if not self._on_optimize_and_generate(show_capacity_dialog=True):
+                return
 
         # Ensure the folder exists and save the design itself
         self._ensure_experiment_dir()

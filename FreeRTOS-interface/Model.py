@@ -1778,6 +1778,47 @@ class ExperimentModel(QObject):
                     ch_two_idx[(gname, oname)] = None
 
         # Helpers
+        option_by_key: Dict[Tuple[str, Optional[str]], OptionSpec] = {
+            (name, None): opt for name, opt in additive_option_map.items()
+        }
+        option_by_key.update(choice_option_map)
+        selected_plan_cache: Dict[Tuple[str, Optional[str]], Any] = {}
+        uploaded_reactions = list(getattr(self, "_uploaded_reactions", None) or [])
+        uploaded_targets_by_key: Dict[Tuple[str, Optional[str]], List[Tuple[int, float]]] = {}
+        for row_index, rxn in enumerate(uploaded_reactions):
+            for key, target in (rxn or {}).items():
+                uploaded_targets_by_key.setdefault(key, []).append((int(row_index), float(target)))
+        uploaded_row_totals_cache: Optional[List[float]] = None
+        uploaded_key_volume_cache: Dict[Tuple[str, Optional[str]], List[float]] = {}
+        uploaded_volume_summary_cache: Optional[Dict[str, Any]] = None
+
+        def _invalidate_selected_volume_cache(*changed_keys: Tuple[str, Optional[str]]):
+            nonlocal uploaded_row_totals_cache, uploaded_volume_summary_cache
+            uploaded_volume_summary_cache = None
+            if not changed_keys:
+                selected_plan_cache.clear()
+                uploaded_row_totals_cache = None
+                uploaded_key_volume_cache.clear()
+                return
+
+            for key in changed_keys:
+                selected_plan_cache.pop(key, None)
+                if uploaded_row_totals_cache is None:
+                    uploaded_key_volume_cache.pop(key, None)
+                    continue
+
+                old_volumes = uploaded_key_volume_cache.pop(key, None)
+                if old_volumes is not None:
+                    for index, volume in enumerate(old_volumes):
+                        uploaded_row_totals_cache[index] -= float(volume)
+
+                if key not in uploaded_targets_by_key:
+                    continue
+                new_volumes = _uploaded_key_row_volumes(key)
+                uploaded_key_volume_cache[key] = new_volumes
+                for index, volume in enumerate(new_volumes):
+                    uploaded_row_totals_cache[index] += float(volume)
+
         def selection_counts() -> Tuple[int, float]:
             tot_stocks = 0
             sum_conc = 0.0
@@ -1805,15 +1846,23 @@ class ExperimentModel(QObject):
             return tot_stocks, sum_conc
 
         def _selected_plan_for_key(key: Tuple[str, Optional[str]]):
+            if key in selected_plan_cache:
+                return selected_plan_cache[key]
+
             factor_name, option_name = key
+            plan = None
             if option_name in (None, ""):
                 for name, singles, twos in additives:
                     if name != factor_name:
                         continue
                     if add_two_idx[name] is not None:
                         resolved_twos = twos if twos is not None else _ensure_additive_twos(name)
-                        return resolved_twos[add_two_idx[name]]
-                    return singles[add_idx[name]]
+                        plan = resolved_twos[add_two_idx[name]]
+                    else:
+                        plan = singles[add_idx[name]]
+                    selected_plan_cache[key] = plan
+                    return plan
+                selected_plan_cache[key] = None
                 return None
 
             bucket = choice_groups.get(factor_name, [])
@@ -1822,8 +1871,12 @@ class ExperimentModel(QObject):
                     continue
                 if ch_two_idx[(factor_name, oname)] is not None:
                     resolved_twos = twos if twos is not None else _ensure_choice_twos(factor_name, oname)
-                    return resolved_twos[ch_two_idx[(factor_name, oname)]]
-                return singles[ch_idx[(factor_name, oname)]]
+                    plan = resolved_twos[ch_two_idx[(factor_name, oname)]]
+                else:
+                    plan = singles[ch_idx[(factor_name, oname)]]
+                selected_plan_cache[key] = plan
+                return plan
+            selected_plan_cache[key] = None
             return None
 
         def _drops_from_mapping(mapping: Dict[float, Any], target_adjusted: float, quantum_hint: float = 1e-6):
@@ -1840,15 +1893,19 @@ class ExperimentModel(QObject):
                 return mapping[nearest_key], nearest_key
             return 0, nearest_key
 
-        def _selected_plan_volume_for_target(key: Tuple[str, Optional[str]], target: float) -> Tuple[float, Dict[str, Any]]:
+        def _selected_plan_volume_for_target(
+            key: Tuple[str, Optional[str]],
+            target: float,
+            *,
+            include_contributor: bool = True,
+        ) -> Tuple[float, Dict[str, Any]]:
             plan = _selected_plan_for_key(key)
-            opt = self._get_option_for_key(key)
+            opt = option_by_key.get(key)
             if plan is None or opt is None:
                 return 0.0, {}
 
             starting = float(getattr(opt, "starting_conc", 0.0) or 0.0)
             target_adjusted = max(0.0, float(target) - starting)
-            label = self._design_key_label(key)
 
             if isinstance(plan, SingleStockPlan):
                 drops, matched_key = _drops_from_mapping(
@@ -1857,9 +1914,11 @@ class ExperimentModel(QObject):
                     quantum_hint=float(plan.lookup_quantum or 1e-6),
                 )
                 volume_nL = int(drops) * float(plan.droplet_nL)
+                if not include_contributor:
+                    return volume_nL, {}
                 return volume_nL, {
                     "key": key,
-                    "label": label,
+                    "label": self._design_key_label(key),
                     "target": float(target),
                     "target_adjusted": float(target_adjusted),
                     "matched_target": float(matched_key) if matched_key is not None else None,
@@ -1877,9 +1936,11 @@ class ExperimentModel(QObject):
                 )
                 k1, k2 = (int(drops_pair[0]), int(drops_pair[1])) if drops_pair else (0, 0)
                 volume_nL = (k1 + k2) * float(plan.droplet_nL)
+                if not include_contributor:
+                    return volume_nL, {}
                 return volume_nL, {
                     "key": key,
-                    "label": label,
+                    "label": self._design_key_label(key),
                     "target": float(target),
                     "target_adjusted": float(target_adjusted),
                     "matched_target": float(matched_key) if matched_key is not None else None,
@@ -1891,30 +1952,71 @@ class ExperimentModel(QObject):
 
             return 0.0, {}
 
-        def _uploaded_selected_volume_details() -> Optional[Dict[str, Any]]:
-            reactions = getattr(self, "_uploaded_reactions", None)
-            if not reactions:
+        def _uploaded_key_row_volumes(key: Tuple[str, Optional[str]]) -> List[float]:
+            volumes = [0.0] * len(uploaded_reactions)
+            for row_index, target in uploaded_targets_by_key.get(key, []):
+                volume_nL, _contributor = _selected_plan_volume_for_target(
+                    key,
+                    float(target),
+                    include_contributor=False,
+                )
+                volumes[int(row_index)] += float(volume_nL)
+            return volumes
+
+        def _uploaded_row_totals() -> Optional[List[float]]:
+            nonlocal uploaded_row_totals_cache
+            if not uploaded_reactions:
+                return None
+            if uploaded_row_totals_cache is not None:
+                return uploaded_row_totals_cache
+
+            uploaded_key_volume_cache.clear()
+            totals = [0.0] * len(uploaded_reactions)
+            for key in uploaded_targets_by_key.keys():
+                volumes = _uploaded_key_row_volumes(key)
+                uploaded_key_volume_cache[key] = volumes
+                for index, volume in enumerate(volumes):
+                    totals[index] += float(volume)
+            uploaded_row_totals_cache = totals
+            return uploaded_row_totals_cache
+
+        def _uploaded_selected_volume_summary() -> Optional[Dict[str, Any]]:
+            nonlocal uploaded_volume_summary_cache
+            if uploaded_volume_summary_cache is not None:
+                return uploaded_volume_summary_cache
+
+            totals = _uploaded_row_totals()
+            if not totals:
                 return None
 
-            worst: Optional[Dict[str, Any]] = None
-            for index, rxn in enumerate(reactions):
-                total = 0.0
-                contributors: List[Dict[str, Any]] = []
-                for key, target in (rxn or {}).items():
-                    volume_nL, contributor = _selected_plan_volume_for_target(key, float(target))
-                    total += float(volume_nL)
-                    if contributor:
-                        contributors.append(contributor)
+            row_index, total = max(enumerate(totals), key=lambda item: float(item[1]))
+            uploaded_volume_summary_cache = {
+                "row_index": int(row_index),
+                "row_label": self._uploaded_reaction_label(row_index),
+                "required_volume_nL": float(total),
+            }
+            return uploaded_volume_summary_cache
 
-                contributors.sort(key=lambda row: float(row.get("volume_nL", 0.0)), reverse=True)
-                if worst is None or total > float(worst.get("required_volume_nL", 0.0)):
-                    worst = {
-                        "row_index": int(index),
-                        "row_label": self._uploaded_reaction_label(index),
-                        "required_volume_nL": float(total),
-                        "contributors": contributors,
-                    }
-            return worst
+        def _uploaded_selected_volume_details() -> Optional[Dict[str, Any]]:
+            summary = _uploaded_selected_volume_summary()
+            if not summary:
+                return None
+
+            row_index = int(summary.get("row_index", -1))
+            rxn = uploaded_reactions[row_index] if 0 <= row_index < len(uploaded_reactions) else {}
+            contributors: List[Dict[str, Any]] = []
+            for key, target in (rxn or {}).items():
+                _volume_nL, contributor = _selected_plan_volume_for_target(
+                    key,
+                    float(target),
+                    include_contributor=True,
+                )
+                if contributor:
+                    contributors.append(contributor)
+            contributors.sort(key=lambda row: float(row.get("volume_nL", 0.0)), reverse=True)
+            details = dict(summary)
+            details["contributors"] = contributors
+            return details
 
         def _record_uploaded_selected_volume_budget_issue(
             code: str,
@@ -1965,9 +2067,9 @@ class ExperimentModel(QObject):
             )
 
         def worst_case_nonfill_volume() -> float:
-            uploaded_details = _uploaded_selected_volume_details()
-            if uploaded_details is not None:
-                return float(uploaded_details.get("required_volume_nL", 0.0))
+            uploaded_summary = _uploaded_selected_volume_summary()
+            if uploaded_summary is not None:
+                return float(uploaded_summary.get("required_volume_nL", 0.0))
 
             total = 0.0
             for name, singles, twos in additives:
@@ -2193,9 +2295,12 @@ class ExperimentModel(QObject):
                 break
             if best_kind == "add":
                 add_idx[best_key] += 1
+                changed_key = (best_key, None)
             else:
                 g, o = best_key
                 ch_idx[(g, o)] += 1
+                changed_key = (g, o)
+            _invalidate_selected_volume_cache(changed_key)
 
         # -----------------------------
         # Step 2: two-stock switches
@@ -2312,9 +2417,12 @@ class ExperimentModel(QObject):
                 if best_switch[0] == "add":
                     _, name, i2 = best_switch
                     add_two_idx[name] = i2
+                    changed_key = (name, None)
                 else:
                     _, g, o, i2 = best_switch
                     ch_two_idx[(g, o)] = i2
+                    changed_key = (g, o)
+                _invalidate_selected_volume_cache(changed_key)
 
                 if worst_case_nonfill_volume() <= V_print + 1e-6:
                     break
@@ -2354,8 +2462,10 @@ class ExperimentModel(QObject):
                 add_two_idx[name] = None
                 singles = [fake_single] + singles
                 add_idx[name] = 0
+                _invalidate_selected_volume_cache((name, None))
                 if current_worst() > V_print + 1e-6:
                     add_two_idx[name] = saved_two
+                    _invalidate_selected_volume_cache((name, None))
                 else:
                     additives[idx] = (name, singles, twos)
                     continue
@@ -2365,11 +2475,13 @@ class ExperimentModel(QObject):
             for i, p1 in enumerate(singles):
                 add_two_idx[name] = None
                 add_idx[name] = i
+                _invalidate_selected_volume_cache((name, None))
                 if current_worst() <= V_print + 1e-6:
                     best_i = i
                     break
             if best_i is None:
                 add_two_idx[name] = saved_two
+                _invalidate_selected_volume_cache((name, None))
 
         # Choice groups
         for gname, bucket in list(choice_groups.items()):
@@ -2399,8 +2511,10 @@ class ExperimentModel(QObject):
                     ch_two_idx[key] = None
                     singles = [fake_single] + singles
                     ch_idx[key] = 0
+                    _invalidate_selected_volume_cache(key)
                     if current_worst() > V_print + 1e-6:
                         ch_two_idx[key] = saved_two
+                        _invalidate_selected_volume_cache(key)
 
                 if ch_two_idx[key] is not None:
                     saved_two = ch_two_idx[key]
@@ -2408,11 +2522,13 @@ class ExperimentModel(QObject):
                     for i, p1 in enumerate(singles):
                         ch_two_idx[key] = None
                         ch_idx[key] = i
+                        _invalidate_selected_volume_cache(key)
                         if current_worst() <= V_print + 1e-6:
                             best_i = i
                             break
                     if best_i is None:
                         ch_two_idx[key] = saved_two
+                        _invalidate_selected_volume_cache(key)
                 new_bucket.append((oname, singles, twos))
             choice_groups[gname] = new_bucket
 
@@ -2428,11 +2544,13 @@ class ExperimentModel(QObject):
                     while i > 0:
                         prev_i = i - 1
                         add_idx[name] = prev_i
+                        _invalidate_selected_volume_cache((name, None))
                         if worst_case_nonfill_volume() <= V_print + 1e-6:
                             changed = True
                             i = prev_i
                         else:
                             add_idx[name] = i
+                            _invalidate_selected_volume_cache((name, None))
                             break
                 for gname, bucket in choice_groups.items():
                     for oname, singles, _ in bucket:
@@ -2443,11 +2561,13 @@ class ExperimentModel(QObject):
                         while i > 0:
                             prev_i = i - 1
                             ch_idx[key] = prev_i
+                            _invalidate_selected_volume_cache(key)
                             if worst_case_nonfill_volume() <= V_print + 1e-6:
                                 changed = True
                                 i = prev_i
                             else:
                                 ch_idx[key] = i
+                                _invalidate_selected_volume_cache(key)
                                 break
 
         # Improve target matching without increasing local printed-volume demand.
@@ -2460,6 +2580,7 @@ class ExperimentModel(QObject):
                     add_two_idx[name] = _refine_two_selection(opt, twos, add_two_idx[name])
             else:
                 add_idx[name] = _refine_single_selection(opt, singles, add_idx[name])
+        _invalidate_selected_volume_cache()
 
         for gname, bucket in choice_groups.items():
             for oname, singles, twos in bucket:
@@ -2472,6 +2593,7 @@ class ExperimentModel(QObject):
                         ch_two_idx[key] = _refine_two_selection(opt, twos, ch_two_idx[key])
                 else:
                     ch_idx[key] = _refine_single_selection(opt, singles, ch_idx[key])
+        _invalidate_selected_volume_cache()
 
         final_worst = worst_case_nonfill_volume()
         if final_worst > V_accept + 1e-6:

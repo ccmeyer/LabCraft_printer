@@ -21,6 +21,8 @@ class _OptimizeModelStub:
         self._responses = list(responses)
         self.optimize_calls = 0
         self.generated = 0
+        self.plans_per_option = {}
+        self._reactions_df = pd.DataFrame()
         self._stock_rows = list(
             stock_rows
             or [
@@ -46,6 +48,8 @@ class _OptimizeModelStub:
 
     def generate_experiment(self):
         self.generated += 1
+        self.plans_per_option = {("AddA", None): {"n_stocks": 1}}
+        self._reactions_df = pd.DataFrame([{"well_id": "A1"}])
 
     def get_stock_table_rows(self, include_fill=True):
         return list(self._stock_rows)
@@ -58,6 +62,21 @@ class _OptimizeModelStub:
 
     def get_worst_nonfill_volume_nL(self):
         return 0.0
+
+    def get_number_of_reactions(self):
+        return int(len(self._reactions_df.index))
+
+
+class _FakeTimer:
+    def __init__(self):
+        self.starts = 0
+        self.stops = 0
+
+    def start(self):
+        self.starts += 1
+
+    def stop(self):
+        self.stops += 1
 
 
 def _build_dialog(*, fixed_text="", max_text="", responses=None, stock_rows=None):
@@ -90,6 +109,11 @@ def _build_dialog(*, fixed_text="", max_text="", responses=None, stock_rows=None
     dialog._allow_two_setting = lambda: False
     dialog._validate_plate_capacity = lambda show_dialog=False: True
     dialog._update_summary_labels = lambda *args, **kwargs: None
+    dialog._design_optimization_dirty = True
+    dialog._last_optimization_result = None
+    dialog._auto_update_suspended = False
+    dialog._uploaded_design_active = False
+    dialog._auto_timer = _FakeTimer()
 
     dialog.stock_table.insertRow(0)
     dialog.stock_table.setItem(0, 0, QTableWidgetItem("AddA"))
@@ -122,6 +146,23 @@ def test_negative_fixed_stock_is_treated_as_invalid_input(qapp):
     assert fixed_edit.styleSheet() == "border:1px solid #8a0303;"
     assert "must be greater than zero" in fixed_edit.toolTip()
     assert result["issues_by_key"][("AddA", None)][0]["code"] == "nonpositive_value"
+
+
+def test_successful_optimization_marks_design_clean(qapp):
+    dialog, _fixed_edit, _max_edit = _build_dialog(
+        responses=[{"best": True, "issues_by_key": {}, "two_stock_search_limited_keys": []}]
+    )
+    dialog._design_optimization_dirty = True
+
+    ok, result = ExperimentDesignDialog._run_design_optimization_flow(dialog, show_failure_dialog=False)
+
+    assert ok is True
+    assert result["best"] is True
+    assert dialog.model.optimize_calls == 1
+    assert dialog.model.generated == 1
+    assert dialog._design_optimization_dirty is False
+    assert dialog._last_optimization_result is result
+    assert dialog._auto_timer.stops == 1
 
 
 def test_failure_dialog_shows_detailed_issue_summary(qapp, monkeypatch):
@@ -500,7 +541,15 @@ def test_upload_design_wizard_apply_mutates_model_once(qapp, monkeypatch):
     dialog._load_factors_into_table = lambda: None
     dialog._update_metadata_from_controls = lambda: None
     run_calls = []
-    dialog._run_design_optimization_flow = lambda **kwargs: run_calls.append(kwargs)
+    dialog._design_optimization_dirty = True
+    dialog._auto_timer = _FakeTimer()
+
+    def fake_run_design_optimization_flow(**kwargs):
+        run_calls.append(kwargs)
+        ExperimentDesignDialog._mark_design_optimization_clean(dialog, {"best": True})
+        return True, {"best": True}
+
+    dialog._run_design_optimization_flow = fake_run_design_optimization_flow
 
     monkeypatch.setattr(View, "ExperimentImportWizard", _FakeWizard)
 
@@ -516,6 +565,128 @@ def test_upload_design_wizard_apply_mutates_model_once(qapp, monkeypatch):
     assert dialog.model.metadata["final_reaction_volume_nL"] == 1000.0
     assert dialog.model.metadata["allow_two_stock_solutions"] is True
     assert len(run_calls) == 1
+    assert dialog._design_optimization_dirty is False
+
+
+def _build_finish_dialog():
+    class _FinishModel:
+        def __init__(self):
+            self.plans_per_option = {("AddA", None): {"n_stocks": 1}}
+            self._reactions_df = pd.DataFrame([{"well_id": "A1"}])
+            self.save_calls = 0
+            self.experiment_file_path = "experiment_design.json"
+            self.experiment_dir_path = "experiment"
+
+        def get_number_of_reactions(self):
+            return 1
+
+        def save_experiment(self):
+            self.save_calls += 1
+
+    class _MainWindow:
+        def __init__(self):
+            self.complete_calls = 0
+
+        def complete_experiment_design(self, **kwargs):
+            self.complete_calls += 1
+            self.complete_kwargs = kwargs
+
+    dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    dialog.model = _FinishModel()
+    dialog.main_window = _MainWindow()
+    dialog._editing_locked_by_gripper = False
+    dialog._progress_protected = True
+    dialog._progress_reset_confirmed = False
+    dialog._preserve_progress_on_finish = False
+    dialog._apply_requested = False
+    dialog._uploaded_design_active = True
+    dialog._auto_update_suspended = False
+    dialog._auto_timer = _FakeTimer()
+    dialog._design_optimization_dirty = False
+    dialog._validate_plate_capacity = lambda show_dialog=True: True
+    dialog._refresh_stock_table = lambda: None
+    dialog._update_summary_labels = lambda *args, **kwargs: None
+    dialog._apply_target_color_state = lambda: None
+    dialog._ensure_experiment_dir = lambda: None
+    dialog._persist_design_identity_registry_entries = lambda: None
+    dialog._set_status = lambda msg: setattr(dialog, "_last_status", msg)
+    dialog.accept = lambda: setattr(dialog, "_accepted", True)
+    return dialog
+
+
+def test_finish_reuses_clean_generated_design_without_reoptimizing(qapp):
+    dialog = _build_finish_dialog()
+    optimize_calls = []
+    dialog._on_optimize_and_generate = lambda **kwargs: optimize_calls.append(kwargs) or True
+
+    ExperimentDesignDialog._on_finish(dialog)
+
+    assert optimize_calls == []
+    assert dialog.model.save_calls == 1
+    assert dialog.main_window.complete_calls == 1
+    assert dialog._apply_requested is True
+    assert getattr(dialog, "_accepted", False) is True
+
+
+def test_design_edit_marks_dirty_and_finish_reoptimizes(qapp):
+    dialog = _build_finish_dialog()
+    optimize_calls = []
+    dialog._on_optimize_and_generate = lambda **kwargs: optimize_calls.append(kwargs) or True
+
+    ExperimentDesignDialog._schedule_auto_update(dialog)
+    ExperimentDesignDialog._on_finish(dialog)
+
+    assert dialog._design_optimization_dirty is True
+    assert dialog._auto_timer.starts == 1
+    assert len(optimize_calls) == 1
+    assert dialog.model.save_calls == 1
+
+
+def test_schedule_auto_update_ignores_bulk_population(qapp):
+    dialog = _build_finish_dialog()
+    dialog._design_optimization_dirty = False
+    dialog._auto_update_suspended = True
+
+    ExperimentDesignDialog._schedule_auto_update(dialog)
+
+    assert dialog._design_optimization_dirty is False
+    assert dialog._auto_timer.starts == 0
+
+
+def test_load_factors_into_table_suspends_auto_update(qapp):
+    option = type(
+        "Option",
+        (),
+        {
+            "name": "AddA",
+            "targets": [1.0],
+            "units": "mM",
+            "droplet_nL": 10.0,
+        },
+    )()
+    factor = type("Factor", (), {"name": "AddA", "kind": "additive", "options": [option]})()
+    dialog = _build_finish_dialog()
+    dialog.model.factors = [factor]
+    dialog.choice_groups = set()
+    dialog._design_optimization_dirty = False
+    dialog._auto_update_suspended = False
+    dialog._clear_reagent_rows = lambda: None
+    dialog._sync_reagent_tables_geometry = lambda: None
+    dialog._refresh_all_prior_availability = lambda: None
+    add_calls = []
+
+    def fake_add_reagent_row(**kwargs):
+        add_calls.append(kwargs)
+        ExperimentDesignDialog._schedule_auto_update(dialog)
+
+    dialog._add_reagent_row = fake_add_reagent_row
+
+    ExperimentDesignDialog._load_factors_into_table(dialog)
+
+    assert len(add_calls) == 1
+    assert dialog._auto_update_suspended is False
+    assert dialog._design_optimization_dirty is False
+    assert dialog._auto_timer.starts == 0
 
 
 def test_upload_design_wizard_cancel_leaves_model_unchanged(qapp, monkeypatch):
