@@ -1,5 +1,6 @@
 import csv
 import json
+import copy
 
 from tools.qualification.artifacts import create_run_artifacts
 from tools.qualification.identity import load_or_create_identity
@@ -202,6 +203,7 @@ def _raw_gripper_seal_selftest():
                 "bursts": 1,
                 "head_valve_mode": "both",
                 "reg_vent": 0,
+                "reg_pause": 1,
                 "grip": 1,
                 "refresh": 0,
                 "p_drop": 20,
@@ -222,6 +224,7 @@ def _raw_gripper_seal_selftest():
                 "bursts": 6,
                 "head_valve_mode": "both",
                 "reg_vent": 0,
+                "reg_pause": 1,
                 "p_drop": 22,
                 "r_drop": 30,
                 "seal_ms": 60000,
@@ -241,9 +244,9 @@ def _raw_gripper_seal_selftest():
                 "bursts": 3,
                 "head_valve_mode": "both",
                 "reg_vent": 0,
+                "reg_pause": 1,
                 "grip": 1,
                 "refresh": 0,
-                "activations": 10,
                 "repeat_span_raw": 12,
                 "seal_ms_min": 5000,
                 "timeout": 0,
@@ -258,6 +261,15 @@ def _raw_gripper_seal_selftest():
         {"name": "gripper_teardown_release", "pass": True, "details": {"action": "release", "returncode": 0}},
         {"name": "gripper_teardown_off", "pass": True, "details": {"action": "off", "returncode": 0}},
     ]
+    return raw
+
+
+def _raw_gripper_empty_head_selftest():
+    raw = copy.deepcopy(_raw_gripper_seal_selftest())
+    raw["results"][0]["metrics"]["r_drop"] = 103
+    raw["results"][0]["metrics"]["drop_raw"] = 103
+    raw["results"][2]["metrics"]["repeat_span_raw"] = 1008
+    raw["results"][2]["metrics"]["seal_ms_min"] = 0
     return raw
 
 
@@ -440,8 +452,34 @@ def test_gripper_seal_synthetic_report_passes_expected_id_enforcement(tmp_path):
     assert report["results"][0]["metrics"]["pulse_ms"] == 2000
     assert report["results"][0]["metrics"]["tick_us"] == 100
     assert report["results"][0]["metrics"]["reg_vent"] == 0
+    assert report["results"][0]["metrics"]["reg_pause"] == 1
     assert report["results"][0]["metrics"]["head_valve_mode"] == "both"
     assert report["results"][0]["metrics"]["grip"] == 1
     assert report["results"][0]["metrics"]["refresh"] == 0
     metric_names = {item["metric_name"] for item in report["analysis"]["metric_evaluations"]}
-    assert {"pulse_ms", "tick_us", "drop_raw", "seal_ms", "repeat_span_raw", "seal_ms_min"}.issubset(metric_names)
+    assert {"pulse_ms", "tick_us", "reg_pause", "drop_raw", "seal_ms", "repeat_span_raw", "seal_ms_min"}.issubset(metric_names)
+
+
+def test_gripper_seal_empty_head_synthetic_report_fails_acceptance_metrics(tmp_path):
+    from tools.qualification.manifest import load_manifest
+
+    manifest = load_manifest("gripper_seal_v1")
+    artifacts = create_run_artifacts("LC-0001", output_root=tmp_path, timestamp="20260513T120000Z")
+
+    report = normalize_report(
+        _raw_gripper_empty_head_selftest(),
+        manifest,
+        _identity(tmp_path),
+        artifacts,
+        fixture_id="dummy_blocked_head_v1",
+        operator_interactions=[{"stage": "load_dummy_head", "message": "load", "confirmed_at": "2026-05-13T00:00:01Z"}],
+    )
+
+    assert report["overall_status"] == "fail"
+    assert report["verdict"]["blocking_issue_count"] == 2
+    blocking_metrics = {
+        item["metric_name"]
+        for item in report["analysis"]["metric_evaluations"]
+        if item["status"] == "fail"
+    }
+    assert {"repeat_span_raw", "seal_ms_min"}.issubset(blocking_metrics)

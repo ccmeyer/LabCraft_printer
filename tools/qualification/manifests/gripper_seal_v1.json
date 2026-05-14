@@ -28,6 +28,7 @@
       "metrics": {
         "pulse_ms": {"maturity": "candidate", "equals": 2000},
         "tick_us": {"maturity": "candidate", "equals": 100},
+        "reg_pause": {"maturity": "candidate", "equals": 1},
         "drop_raw": {"maturity": "candidate", "max": 100},
         "timeout": {"maturity": "candidate", "equals": 0}
       }
@@ -37,6 +38,7 @@
       "failure_domain": "machine_performance",
       "metrics": {
         "seal_ms": {"maturity": "candidate", "min": 60000},
+        "reg_pause": {"maturity": "candidate", "equals": 1},
         "drop_raw": {"maturity": "candidate", "max": 100},
         "timeout": {"maturity": "candidate", "equals": 0}
       }
@@ -45,8 +47,9 @@
       "category": "gripper",
       "failure_domain": "machine_performance",
       "metrics": {
-        "repeat_span_raw": {"maturity": "candidate", "max": 50},
-        "seal_ms_min": {"maturity": "candidate", "min": 5000},
+        "reg_pause": {"maturity": "candidate", "equals": 1},
+        "repeat_span_raw": {"maturity": "acceptance", "max": 50},
+        "seal_ms_min": {"maturity": "acceptance", "min": 5000},
         "timeout": {"maturity": "candidate", "equals": 0}
       }
     }

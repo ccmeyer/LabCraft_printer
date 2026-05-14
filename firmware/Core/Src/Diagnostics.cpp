@@ -826,7 +826,6 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         static constexpr uint32_t kSealTargetPsiMilli = 1000u;
                         static constexpr int32_t kSealTargetRaw = static_cast<int32_t>(
                             1638u + ((kSealTargetPsiMilli * 13107u + 7500u) / 15000u));
-                        uint32_t headValveActivationCount = 0u;
                         uint32_t gripperCloseCount = 0u;
                         const char* headValveMode =
                         #if (LC_PRESSURE_PORTS > 1)
@@ -839,6 +838,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           bool setupOk = false;
                           bool timeout = false;
                           bool headValveActive = false;
+                          bool regulatorPaused = false;
                           int32_t targetRaw = 0;
                           int32_t pStartRaw = 0;
                           int32_t pEndRaw = 0;
@@ -868,7 +868,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         auto emitSkippedSealRows = [&](bool gripperOk) -> bool {
                           char metrics[224];
                           snprintf(metrics, sizeof(metrics),
-                                   "target_raw=%ld;valve_drive=diagnostic_one_pulse;pulse_ms=%lu;tick_us=%lu;bursts=0;head_valve_mode=%s;reg_vent=0;grip=%lu;refresh=0;drop_raw=0;timeout=1;grip_ok=%u",
+                                   "target_raw=%ld;valve_drive=diagnostic_one_pulse;pulse_ms=%lu;tick_us=%lu;bursts=0;head_valve_mode=%s;reg_vent=0;reg_pause=0;grip=%lu;refresh=0;drop_raw=0;timeout=1;grip_ok=%u",
                                    static_cast<long>(kSealTargetRaw),
                                    static_cast<unsigned long>(kPulseMs),
                                    static_cast<unsigned long>(kPulseTickUs),
@@ -926,6 +926,11 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             return run;
                           }
 
+                          regP.pause();
+#if (LC_PRESSURE_PORTS > 1)
+                          regR.pause();
+#endif
+                          run.regulatorPaused = true;
                           run.pStartRaw = static_cast<int32_t>(sensor->getControlSample(0u).raw);
 #if (LC_PRESSURE_PORTS > 1)
                           run.rStartRaw = static_cast<int32_t>(sensor->getControlSample(1u).raw);
@@ -938,7 +943,6 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             closePressurePath();
                             return run;
                           }
-                          headValveActivationCount++;
 
                           int32_t currentP = run.pStartRaw;
                           int32_t currentR = run.rStartRaw;
@@ -979,6 +983,16 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           run.dropRaw = (run.rDropRaw > run.pDropRaw) ? run.rDropRaw : run.pDropRaw;
                           run.setupOk = !run.timeout && !_selfTestAbortRequested;
                           printer->endDiagnosticLongPulse();
+                          if (run.setupOk) {
+                            regP.closeValve();
+                            regP.start();
+                            regP.setTargetSafe(kSealTargetRaw);
+#if (LC_PRESSURE_PORTS > 1)
+                            regR.closeValve();
+                            regR.start();
+                            regR.setTargetSafe(kSealTargetRaw);
+#endif
+                          }
                           return run;
                         };
 
@@ -997,11 +1011,12 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         const SealRun shortRun = runSealBurst(kPulseMs);
                         char metrics2501[224];
                         snprintf(metrics2501, sizeof(metrics2501),
-                                 "target_raw=%ld;valve_drive=diagnostic_one_pulse;pulse_ms=%lu;tick_us=%lu;bursts=1;head_valve_mode=%s;reg_vent=0;grip=%lu;refresh=0;p_drop=%lu;r_drop=%lu;drop_raw=%lu;timeout=%u",
+                                 "target_raw=%ld;valve_drive=diagnostic_one_pulse;pulse_ms=%lu;tick_us=%lu;bursts=1;head_valve_mode=%s;reg_vent=0;reg_pause=%u;grip=%lu;refresh=0;p_drop=%lu;r_drop=%lu;drop_raw=%lu;timeout=%u",
                                  static_cast<long>(shortRun.targetRaw),
                                  static_cast<unsigned long>(kPulseMs),
                                  static_cast<unsigned long>(kPulseTickUs),
                                  headValveMode,
+                                 static_cast<unsigned>(shortRun.regulatorPaused ? 1u : 0u),
                                  static_cast<unsigned long>(gripperCloseCount),
                                  static_cast<unsigned long>(shortRun.pDropRaw),
                                  static_cast<unsigned long>(shortRun.rDropRaw),
@@ -1021,8 +1036,10 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         int32_t holdREnd = 0;
                         uint32_t holdPDropMax = 0u;
                         uint32_t holdRDropMax = 0u;
+                        bool holdRegulatorPaused = true;
                         for (uint32_t idx = 0u; idx < kHoldBurstCount; ++idx) {
                           const SealRun burstRun = runSealBurst(kPulseMs);
+                          holdRegulatorPaused = holdRegulatorPaused && burstRun.regulatorPaused;
                           if (!burstRun.setupOk) {
                             holdSetupOk = false;
                             break;
@@ -1052,12 +1069,13 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             kSealDropThresholdRaw);
                         char metrics2502[192];
                         snprintf(metrics2502, sizeof(metrics2502),
-                                 "target_raw=%ld;valve_drive=diagnostic_one_pulse;pulse_ms=%lu;tick_us=%lu;bursts=%lu;head_valve_mode=%s;reg_vent=0;p_drop=%lu;r_drop=%lu;drop_raw=%lu;seal_ms=%lu;timeout=%u",
+                                 "target_raw=%ld;valve_drive=diagnostic_one_pulse;pulse_ms=%lu;tick_us=%lu;bursts=%lu;head_valve_mode=%s;reg_vent=0;reg_pause=%u;p_drop=%lu;r_drop=%lu;drop_raw=%lu;seal_ms=%lu;timeout=%u",
                                  static_cast<long>(kSealTargetRaw),
                                  static_cast<unsigned long>(kPulseMs),
                                  static_cast<unsigned long>(kPulseTickUs),
                                  static_cast<unsigned long>(holdCompleted),
                                  headValveMode,
+                                 static_cast<unsigned>(holdRegulatorPaused ? 1u : 0u),
                                  static_cast<unsigned long>(holdPDropMax),
                                  static_cast<unsigned long>(holdRDropMax),
                                  static_cast<unsigned long>(holdSummary.maxDropRaw),
@@ -1079,8 +1097,10 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         uint32_t repeatSealMs[kRepeatBurstCount]{};
                         uint32_t repeatCompleted = 0u;
                         bool repeatSetupOk = true;
+                        bool repeatRegulatorPaused = true;
                         for (uint32_t idx = 0u; idx < kRepeatBurstCount; ++idx) {
                           const SealRun repeatRun = runSealBurst(kPulseMs);
+                          repeatRegulatorPaused = repeatRegulatorPaused && repeatRun.regulatorPaused;
                           if (!repeatRun.setupOk) {
                             repeatSetupOk = false;
                             break;
@@ -1102,14 +1122,14 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         const uint32_t sealMsMin = GripperSealQualificationMath::minValue(repeatSealMs, repeatCompleted);
                         char metrics2503[224];
                         snprintf(metrics2503, sizeof(metrics2503),
-                                 "target_raw=%ld;valve_drive=diagnostic_one_pulse;pulse_ms=%lu;tick_us=%lu;bursts=%lu;head_valve_mode=%s;reg_vent=0;grip=%lu;refresh=0;activations=%lu;repeat_span_raw=%lu;seal_ms_min=%lu;timeout=%u",
+                                 "target_raw=%ld;valve_drive=diagnostic_one_pulse;pulse_ms=%lu;tick_us=%lu;bursts=%lu;head_valve_mode=%s;reg_vent=0;reg_pause=%u;grip=%lu;refresh=0;repeat_span_raw=%lu;seal_ms_min=%lu;timeout=%u",
                                  static_cast<long>(kSealTargetRaw),
                                  static_cast<unsigned long>(kPulseMs),
                                  static_cast<unsigned long>(kPulseTickUs),
                                  static_cast<unsigned long>(repeatCompleted),
                                  headValveMode,
+                                 static_cast<unsigned>(repeatRegulatorPaused ? 1u : 0u),
                                  static_cast<unsigned long>(gripperCloseCount),
-                                 static_cast<unsigned long>(headValveActivationCount),
                                  static_cast<unsigned long>(repeatSpan),
                                  static_cast<unsigned long>(sealMsMin),
                                  static_cast<unsigned>(repeatSetupOk ? 0u : 1u));

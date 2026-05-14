@@ -41,6 +41,7 @@ def _raw_gripper_selftest():
                     "bursts": 1,
                     "head_valve_mode": "both",
                     "reg_vent": 0,
+                    "reg_pause": 1,
                     "grip": 1,
                     "refresh": 0,
                     "p_drop": 20,
@@ -53,13 +54,13 @@ def _raw_gripper_selftest():
                 "test_id": 2502,
                 "name": "gripper_seal_hold_duration_factory",
                 "pass": True,
-                "metrics": {"target_raw": 2512, "valve_drive": "diagnostic_one_pulse", "pulse_ms": 2000, "tick_us": 100, "bursts": 6, "head_valve_mode": "both", "reg_vent": 0, "seal_ms": 60000, "drop_raw": 30, "timeout": 0},
+                "metrics": {"target_raw": 2512, "valve_drive": "diagnostic_one_pulse", "pulse_ms": 2000, "tick_us": 100, "bursts": 6, "head_valve_mode": "both", "reg_vent": 0, "reg_pause": 1, "seal_ms": 60000, "drop_raw": 30, "timeout": 0},
             },
             {
                 "test_id": 2503,
                 "name": "gripper_seal_repeatability_factory",
                 "pass": True,
-                "metrics": {"valve_drive": "diagnostic_one_pulse", "pulse_ms": 2000, "tick_us": 100, "bursts": 3, "repeat_span_raw": 12, "seal_ms_min": 5000, "timeout": 0},
+                "metrics": {"valve_drive": "diagnostic_one_pulse", "pulse_ms": 2000, "tick_us": 100, "bursts": 3, "reg_pause": 1, "repeat_span_raw": 12, "seal_ms_min": 5000, "timeout": 0},
             },
         ],
         "host_checks": [

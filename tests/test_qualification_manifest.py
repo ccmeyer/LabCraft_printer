@@ -66,8 +66,11 @@ def test_load_gripper_seal_manifest_requires_local_operator_fixture():
     assert "slope_raw_min" not in manifest.analysis_rules["2501"]["metrics"]
     assert manifest.analysis_rules["2501"]["metrics"]["pulse_ms"]["equals"] == 2000
     assert manifest.analysis_rules["2501"]["metrics"]["tick_us"]["equals"] == 100
+    assert manifest.analysis_rules["2501"]["metrics"]["reg_pause"]["equals"] == 1
     assert manifest.analysis_rules["2502"]["metrics"]["seal_ms"]["maturity"] == "candidate"
     assert manifest.analysis_rules["2502"]["metrics"]["seal_ms"]["min"] == 60000
+    assert manifest.analysis_rules["2503"]["metrics"]["repeat_span_raw"]["maturity"] == "acceptance"
+    assert manifest.analysis_rules["2503"]["metrics"]["seal_ms_min"]["maturity"] == "acceptance"
 
 
 def test_load_manifest_from_path(tmp_path):
