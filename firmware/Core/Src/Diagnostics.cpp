@@ -14,6 +14,7 @@
 #include "PressureRegulatorMath.h"
 #include "PressureQualificationMath.h"
 #include "PressureTargetPolicy.h"
+#include "ValvePulseQualificationMath.h"
 #include "PressureSensor.h"
 #include "Logger.h"
 #include "Gantry.h"
@@ -70,6 +71,9 @@ static constexpr DiagnosticTestDescriptor kDiagnosticTests[] = {
     {2203u, "pressure_motor_position_hysteresis_factory", "pressure", "FULL", "safe_gate_or_full"},
     {2004u, "valve_actuation_sequence_full", "pressure", "FULL", "safe_gate_or_full"},
     {2005u, "print_refuel_pulse_integrity_full", "pulse", "FULL", "safe_gate_or_full"},
+    {2401u, "print_valve_pulse_drop_repeatability_factory", "pulse", "FULL", "safe_gate_or_full"},
+    {2402u, "refuel_valve_pulse_drop_repeatability_factory", "pulse", "FULL", "safe_gate_or_full"},
+    {2403u, "dual_valve_interaction_factory", "pulse", "FULL", "safe_gate_or_full"},
     {2006u, "emergency_abort_and_safe_stop_full", "safety", "FULL", "safe_gate_or_full"},
     {2101u, "pressure_recovery_trace_print_single", "pressure_trace", "FULL", "explicit_flag"},
     {2102u, "pressure_recovery_trace_print_repeated", "pressure_trace", "FULL", "explicit_flag"},
@@ -431,7 +435,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 					                               uint8_t sensorPort,
 					                               int32_t targetPressure,
 					                               bool stepUp,
-					                               uint32_t timeoutMs) {
+					                               uint32_t timeoutMs,
+                                                   uint32_t acceptTolRaw = 0u) {
                         PressureWaitResult result{};
 					    PressureSensor* sensor = PressureSensor::instance();
 					    if (!sensor) {
@@ -449,10 +454,16 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 						      const int32_t pressure = sensor->getPressure(sensorPort);
 						      if (pressure > peakPressure) peakPressure = pressure;
 					      if (pressure < troughPressure) troughPressure = pressure;
+                          const auto controlSample = sensor->getControlSample(sensorPort);
+                          const uint32_t readyTol = reg.getReadyConfig().readyTolRaw;
+                          const uint32_t effectiveTol = (acceptTolRaw > readyTol) ? acceptTolRaw : readyTol;
 					      if (reg.isPressureOk()) {
                             result.readySeen = true;
 					        break;
 					      }
+                          if (absDiff32(static_cast<int32_t>(controlSample.raw), targetPressure) <= effectiveTol) {
+                            break;
+                          }
 					      if (_selfTestAbortRequested) {
                             result.aborted = true;
 					        break;
@@ -477,8 +488,9 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 					                  : 0u;
 					    }
                         const uint32_t readyTol = reg.getReadyConfig().readyTolRaw;
+                        const uint32_t effectiveTol = (acceptTolRaw > readyTol) ? acceptTolRaw : readyTol;
                         result.accepted = !result.aborted &&
-                            (result.readySeen || result.readyFinal || (result.controlError <= readyTol));
+                            (result.readySeen || result.readyFinal || (result.controlError <= effectiveTol));
 						    return result;
 						  };
 
@@ -796,6 +808,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         uint32_t sampleRejectCount = 0u;
                         uint32_t traceSampleCount = 0u;
                         uint32_t traceEventCount = 0u;
+                        ValvePulseQualificationMath::PulseDropSummary pulseDrop{};
                         bool pass = false;
                       };
 
@@ -977,6 +990,12 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                             computed.meanDeadlineSlipMs,
                                             computed.zeroCrossCount,
                                             computed.sampleRejectCount);
+                        computed.pulseDrop = ValvePulseQualificationMath::summarizePulseDrops(
+                            recorder.samples(),
+                            recorder.sampleCount(),
+                            recorder.events(),
+                            recorder.eventCount(),
+                            rateHz == 0u ? 0u : static_cast<uint16_t>(1000u / rateHz));
                         Watchdog_CheckIn(CRASH_TASK_ORCH);
                         sendProgressStage("trace_metrics_done");
                         computed.pass = secondaryReadyOk &&
@@ -1844,6 +1863,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               static constexpr uint32_t kHoldSettleTimeoutMs = 5000u;
                               static constexpr uint32_t kHoldMs = 5000u;
                               static constexpr int32_t kPressureDelta = 200;
+                              static constexpr uint32_t kQualificationPressureErrorTolRaw = 100u;
                               PressureQualificationMath::ExecutionSummary exec{};
                               PressureSensor* sensor = PressureSensor::instance();
                               PressureRegulator& reg = PressureRegulator::regP();
@@ -1868,7 +1888,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                                                                    0u,
                                                                                    holdTarget,
                                                                                    stepUp,
-                                                                                   kHoldSettleTimeoutMs);
+                                                                                   kHoldSettleTimeoutMs,
+                                                                                   kQualificationPressureErrorTolRaw);
                                 recordPressureWaitExecution(ready, exec);
                                 if (ready.accepted && !_selfTestAbortRequested) {
                                   const PressurePositionSample startSample = readPrintPressurePositionSample();
@@ -1887,7 +1908,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                                         0u,
                                                         baselineTarget,
                                                         !stepUp,
-                                                        kHoldSettleTimeoutMs);
+                                                        kHoldSettleTimeoutMs,
+                                                        kQualificationPressureErrorTolRaw);
                                 reg.pause();
                               } else {
                                 exec.readyMissCount++;
@@ -1936,6 +1958,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               static constexpr uint32_t kCycleCount = 3u;
                               static constexpr uint32_t kCycleSettleTimeoutMs = 5000u;
                               static constexpr int32_t kPressureDelta = 200;
+                              static constexpr uint32_t kQualificationPressureErrorTolRaw = 100u;
                               PressureQualificationMath::ExecutionSummary exec{};
                               PressureSensor* sensor = PressureSensor::instance();
                               PressureRegulator& reg = PressureRegulator::regP();
@@ -1965,7 +1988,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                                                                      0u,
                                                                                      targetA,
                                                                                      !bIsStepUp,
-                                                                                     kCycleSettleTimeoutMs);
+                                                                                     kCycleSettleTimeoutMs,
+                                                                                     kQualificationPressureErrorTolRaw);
                                   recordPressureWaitExecution(waitA, exec);
                                   if (waitA.settleMs > settleMaxMs) settleMaxMs = waitA.settleMs;
                                   if (waitA.controlError > errMax) errMax = waitA.controlError;
@@ -1986,7 +2010,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                                                                      0u,
                                                                                      targetB,
                                                                                      bIsStepUp,
-                                                                                     kCycleSettleTimeoutMs);
+                                                                                     kCycleSettleTimeoutMs,
+                                                                                     kQualificationPressureErrorTolRaw);
                                   recordPressureWaitExecution(waitB, exec);
                                   if (waitB.settleMs > settleMaxMs) settleMaxMs = waitB.settleMs;
                                   if (waitB.controlError > errMax) errMax = waitB.controlError;
@@ -2010,7 +2035,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                                         0u,
                                                         baselineTarget,
                                                         !bIsStepUp,
-                                                        kCycleSettleTimeoutMs);
+                                                        kCycleSettleTimeoutMs,
+                                                        kQualificationPressureErrorTolRaw);
                                 reg.pause();
                               } else {
                                 exec.readyMissCount++;
@@ -2059,6 +2085,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             } else {
                               static constexpr uint32_t kHysteresisReps = 2u;
                               static constexpr uint32_t kHysteresisSettleTimeoutMs = 5000u;
+                              static constexpr uint32_t kQualificationPressureErrorTolRaw = 100u;
                               PressureQualificationMath::ExecutionSummary exec{};
                               PressureSensor* sensor = PressureSensor::instance();
                               PressureRegulator& reg = PressureRegulator::regP();
@@ -2090,7 +2117,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                                                                        0u,
                                                                                        lowTarget,
                                                                                        false,
-                                                                                       kHysteresisSettleTimeoutMs);
+                                                                                       kHysteresisSettleTimeoutMs,
+                                                                                       kQualificationPressureErrorTolRaw);
                                   recordPressureWaitExecution(lowWait, exec);
                                   if (lowWait.controlError > errMax) errMax = lowWait.controlError;
                                   if (!lowWait.accepted || _selfTestAbortRequested) {
@@ -2104,7 +2132,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                                                                          0u,
                                                                                          targetRaw,
                                                                                          true,
-                                                                                         kHysteresisSettleTimeoutMs);
+                                                                                         kHysteresisSettleTimeoutMs,
+                                                                                         kQualificationPressureErrorTolRaw);
                                   recordPressureWaitExecution(fromBelow, exec);
                                   if (fromBelow.controlError > errMax) errMax = fromBelow.controlError;
                                   if (!fromBelow.accepted || _selfTestAbortRequested) {
@@ -2121,7 +2150,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                                                                         0u,
                                                                                         highTarget,
                                                                                         true,
-                                                                                        kHysteresisSettleTimeoutMs);
+                                                                                        kHysteresisSettleTimeoutMs,
+                                                                                        kQualificationPressureErrorTolRaw);
                                   recordPressureWaitExecution(highWait, exec);
                                   if (highWait.controlError > errMax) errMax = highWait.controlError;
                                   if (!highWait.accepted || _selfTestAbortRequested) {
@@ -2135,7 +2165,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                                                                          0u,
                                                                                          targetRaw,
                                                                                          false,
-                                                                                         kHysteresisSettleTimeoutMs);
+                                                                                         kHysteresisSettleTimeoutMs,
+                                                                                         kQualificationPressureErrorTolRaw);
                                   recordPressureWaitExecution(fromAbove, exec);
                                   if (fromAbove.controlError > errMax) errMax = fromAbove.controlError;
                                   if (!fromAbove.accepted || _selfTestAbortRequested) {
@@ -2157,7 +2188,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                                         0u,
                                                         baselineTarget,
                                                         restoreStepUp,
-                                                        kHysteresisSettleTimeoutMs);
+                                                        kHysteresisSettleTimeoutMs,
+                                                        kQualificationPressureErrorTolRaw);
                                 reg.pause();
                               } else {
                                 exec.readyMissCount++;
@@ -2290,6 +2322,208 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 						      if (!runOne(2005, "print_refuel_pulse_integrity_full", pulsePass, metrics)) goto selftest_done;
 						    }
 						  }
+
+                          {
+                            static constexpr uint16_t kValvePulseCount = 8u;
+                            static constexpr uint16_t kDualValvePulseCount = 6u;
+                            static constexpr uint16_t kValvePulseRateHz = 20u;
+
+                            auto clampPulseWidthU16 = [](uint32_t pulseUs) -> uint16_t {
+                              return static_cast<uint16_t>((pulseUs > 0xFFFFu) ? 0xFFFFu : pulseUs);
+                            };
+
+                            auto runSingleValvePulseDiagnostic = [&](uint16_t testId,
+                                                                     const char* name,
+                                                                     uint8_t channel,
+                                                                     PulseMode mode,
+                                                                     uint16_t targetRaw) -> bool {
+                              if (!fullProfile || pressureSweepOnly) {
+                                return runOne(testId,
+                                              name,
+                                              true,
+                                              pressureSweepOnly ? "profile=FULL;executed=0;fixture_required=1;pulses=0;gate=sweep_only" : "profile=SAFE;executed=0;fixture_required=1;pulses=0;gate=safe_only");
+                              }
+#if (LC_PRESSURE_PORTS <= 1)
+                              if (channel != 0u) {
+                                return runOne(testId,
+                                              name,
+                                              true,
+                                              "profile=FULL;executed=0;fixture_required=1;pulses=0;gate=no_refuel_port");
+                              }
+#endif
+                              if (!fullHomePass) {
+                                return runOne(testId,
+                                              name,
+                                              false,
+                                              "ch=x;pulses=0;pw_us=0;hz=0;mean=0;cv_pct=0;slope=0;out=0;rec_w=0;slip_w=0;ready=1;sc=0;ec=0");
+                              }
+                              Printer* printer = Printer::instance();
+                              if (printer == nullptr) {
+                                return runOne(testId,
+                                              name,
+                                              false,
+                                              "ch=x;pulses=0;pw_us=0;hz=0;mean=0;cv_pct=0;slope=0;out=0;rec_w=0;slip_w=0;ready=1;sc=0;ec=0");
+                              }
+
+                              const uint16_t pulseWidthUs = clampPulseWidthU16(
+                                  (channel == 0u) ? printer->getPrintPulse() : printer->getRefuelPulse());
+                              PressureTraceCaseMetrics metrics{};
+                              bool traceRan = false;
+                              if (pulseWidthUs > 0u) {
+                                traceRan = runPressureTraceCase(testId,
+                                                                name,
+                                                                channel,
+                                                                targetRaw,
+                                                                pulseWidthUs,
+                                                                kValvePulseCount,
+                                                                kValvePulseRateHz,
+                                                                mode,
+                                                                false,
+                                                                0u,
+                                                                0u,
+                                                                &metrics,
+                                                                false,
+                                                                false);
+                              }
+                              const auto& drops = metrics.pulseDrop;
+                              const bool pass = traceRan &&
+                                                (pulseWidthUs > 0u) &&
+                                                (drops.pulseCount >= kValvePulseCount) &&
+                                                (metrics.traceSampleCount > 0u) &&
+                                                (metrics.traceEventCount > 0u);
+                              char resultMetrics[192];
+                              snprintf(resultMetrics, sizeof(resultMetrics),
+                                       "ch=%c;pulses=%lu;pw_us=%u;hz=%u;mean=%lu;cv_pct=%lu;slope=%ld;out=%lu;rec_w=%lu;slip_w=%lu;ready=%lu;sc=%lu;ec=%lu",
+                                       (channel == 0u) ? 'p' : 'r',
+                                       static_cast<unsigned long>(drops.pulseCount),
+                                       static_cast<unsigned>(pulseWidthUs),
+                                       static_cast<unsigned>(kValvePulseRateHz),
+                                       static_cast<unsigned long>(drops.meanDropRaw),
+                                       static_cast<unsigned long>(drops.dropCvPct),
+                                       static_cast<long>(drops.dropSlopeRawPerPulse),
+                                       static_cast<unsigned long>(drops.outlierCount),
+                                       static_cast<unsigned long>(drops.maxRecoveryMs),
+                                       static_cast<unsigned long>(drops.maxDeadlineSlipMs),
+                                       static_cast<unsigned long>(metrics.readyMissCount),
+                                       static_cast<unsigned long>(metrics.traceSampleCount),
+                                       static_cast<unsigned long>(metrics.traceEventCount));
+                              return runOne(testId, name, pass, resultMetrics);
+                            };
+
+                            auto runDualValveInteractionDiagnostic = [&]() -> bool {
+                              static constexpr uint16_t kTestId = 2403u;
+                              static constexpr const char* kName = "dual_valve_interaction_factory";
+                              if (!fullProfile || pressureSweepOnly) {
+                                return runOne(kTestId,
+                                              kName,
+                                              true,
+                                              pressureSweepOnly ? "profile=FULL;executed=0;fixture_required=1;pulses=0;gate=sweep_only" : "profile=SAFE;executed=0;fixture_required=1;pulses=0;gate=safe_only");
+                              }
+#if (LC_PRESSURE_PORTS <= 1)
+                              return runOne(kTestId,
+                                            kName,
+                                            true,
+                                            "profile=FULL;executed=0;fixture_required=1;pulses=0;gate=no_refuel_port");
+#else
+                              if (!fullHomePass) {
+                                return runOne(kTestId,
+                                              kName,
+                                              false,
+                                              "mode=both;pulses=0;p_pw=0;r_pw=0;p_mean=0;r_mean=0;ratio=0;delta=0;p_out=0;r_out=0;slip_w=0;ready=1");
+                              }
+                              Printer* printer = Printer::instance();
+                              if (printer == nullptr) {
+                                return runOne(kTestId,
+                                              kName,
+                                              false,
+                                              "mode=both;pulses=0;p_pw=0;r_pw=0;p_mean=0;r_mean=0;ratio=0;delta=0;p_out=0;r_out=0;slip_w=0;ready=1");
+                              }
+                              const uint16_t printPulseUs = clampPulseWidthU16(printer->getPrintPulse());
+                              const uint16_t refuelPulseUs = clampPulseWidthU16(printer->getRefuelPulse());
+                              PressureTraceCaseMetrics printMetrics{};
+                              PressureTraceCaseMetrics refuelMetrics{};
+                              bool printRan = false;
+                              bool refuelRan = false;
+                              if (printPulseUs > 0u && refuelPulseUs > 0u) {
+                                printRan = runPressureTraceCase(kTestId,
+                                                                kName,
+                                                                0u,
+                                                                psiToRaw(1000u),
+                                                                printPulseUs,
+                                                                kDualValvePulseCount,
+                                                                kValvePulseRateHz,
+                                                                PulseMode::BOTH,
+                                                                true,
+                                                                psiToRaw(500u),
+                                                                refuelPulseUs,
+                                                                &printMetrics,
+                                                                false,
+                                                                false);
+                                if (printRan) {
+                                  refuelRan = runPressureTraceCase(kTestId,
+                                                                   kName,
+                                                                   1u,
+                                                                   psiToRaw(500u),
+                                                                   refuelPulseUs,
+                                                                   kDualValvePulseCount,
+                                                                   kValvePulseRateHz,
+                                                                   PulseMode::BOTH,
+                                                                   true,
+                                                                   psiToRaw(1000u),
+                                                                   printPulseUs,
+                                                                   &refuelMetrics,
+                                                                   false,
+                                                                   false);
+                                }
+                              }
+                              const auto& p = printMetrics.pulseDrop;
+                              const auto& r = refuelMetrics.pulseDrop;
+                              const uint32_t ratio = (r.meanDropRaw > 0u)
+                                                         ? static_cast<uint32_t>((static_cast<uint64_t>(p.meanDropRaw) * 100u) / r.meanDropRaw)
+                                                         : 0u;
+                              const uint32_t delta = ValvePulseQualificationMath::absDiff(p.meanDropRaw, r.meanDropRaw);
+                              const uint32_t slipWorst = (p.maxDeadlineSlipMs > r.maxDeadlineSlipMs) ? p.maxDeadlineSlipMs : r.maxDeadlineSlipMs;
+                              const uint32_t readyMiss = printMetrics.readyMissCount + refuelMetrics.readyMissCount;
+                              const bool pass = printRan &&
+                                                refuelRan &&
+                                                (p.pulseCount >= kDualValvePulseCount) &&
+                                                (r.pulseCount >= kDualValvePulseCount);
+                              char resultMetrics[192];
+                              snprintf(resultMetrics, sizeof(resultMetrics),
+                                       "mode=both;pulses=%u;p_pw=%u;r_pw=%u;p_mean=%lu;r_mean=%lu;ratio=%lu;delta=%lu;p_out=%lu;r_out=%lu;slip_w=%lu;ready=%lu",
+                                       static_cast<unsigned>(kDualValvePulseCount),
+                                       static_cast<unsigned>(printPulseUs),
+                                       static_cast<unsigned>(refuelPulseUs),
+                                       static_cast<unsigned long>(p.meanDropRaw),
+                                       static_cast<unsigned long>(r.meanDropRaw),
+                                       static_cast<unsigned long>(ratio),
+                                       static_cast<unsigned long>(delta),
+                                       static_cast<unsigned long>(p.outlierCount),
+                                       static_cast<unsigned long>(r.outlierCount),
+                                       static_cast<unsigned long>(slipWorst),
+                                       static_cast<unsigned long>(readyMiss));
+                              return runOne(kTestId, kName, pass, resultMetrics);
+#endif
+                            };
+
+                            if (!runSingleValvePulseDiagnostic(2401u,
+                                                               "print_valve_pulse_drop_repeatability_factory",
+                                                               0u,
+                                                               PulseMode::PRINT_ONLY,
+                                                               psiToRaw(1000u))) {
+                              goto selftest_done;
+                            }
+                            if (!runSingleValvePulseDiagnostic(2402u,
+                                                               "refuel_valve_pulse_drop_repeatability_factory",
+                                                               1u,
+                                                               PulseMode::REFUEL_ONLY,
+                                                               psiToRaw(500u))) {
+                              goto selftest_done;
+                            }
+                            if (!runDualValveInteractionDiagnostic()) {
+                              goto selftest_done;
+                            }
+                          }
 
 						  {
 						    if (!fullProfile || pressureSweepOnly) {

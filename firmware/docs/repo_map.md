@@ -108,6 +108,8 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
   - Includes pressure sample validation, recovery/feedforward math, and deadline-slip helpers used by both runtime code and host tests.
   - `firmware/Core/Inc/PressureQualificationMath.h`, `firmware/Core/Src/PressureQualificationMath.cpp`
   - Includes bounded arithmetic and aggregation helpers for FULL pressure qualification diagnostics and host tests.
+  - `firmware/Core/Inc/ValvePulseQualificationMath.h`, `firmware/Core/Src/ValvePulseQualificationMath.cpp`
+  - Includes pressure-trace pulse-drop, recovery, deadline-slip, and outlier aggregation helpers for FULL valve pulse diagnostics and host tests.
 - Pressure trace capture:
   - `firmware/Core/Inc/PressureTraceRecorder.h`, `firmware/Core/Src/PressureTraceRecorder.cpp`
   - Records bounded pressure/control samples and events during pressure-focused FULL self-tests.
@@ -134,6 +136,7 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
   - Self-test entrypoint: `CMD_SELFTEST_START` remains dispatched from `Orchestrator::executeCommand`, but the SAFE/FULL diagnostic sequence now lives in `DiagnosticsRunner::runSelfTest`. `DiagnosticResultEmitter` owns the byte layout for `CMD_SELFTEST_RESULT` and `CMD_SELFTEST_DONE` payloads.
   - Motion qualification diagnostics `2007 motion_home_repeatability_factory` and `2008 motion_pattern_return_factory` live in `DiagnosticsRunner::runSelfTest`, use existing X/Y homing and gantry motion primitives, and publish compact repeatability metrics for Python-side candidate analysis.
   - Pressure qualification diagnostics `2201 pressure_hold_leak_factory`, `2202 pressure_target_cycle_repeatability_factory`, and `2203 pressure_motor_position_hysteresis_factory` live in `DiagnosticsRunner::runSelfTest`, use existing print-channel pressure regulator/sensor primitives, restore the baseline target, pause the regulator at exit, and publish compact hold/leak/repeatability/hysteresis metrics for Python-side candidate analysis.
+  - Valve pulse qualification diagnostics `2401 print_valve_pulse_drop_repeatability_factory`, `2402 refuel_valve_pulse_drop_repeatability_factory`, and `2403 dual_valve_interaction_factory` live in `DiagnosticsRunner::runSelfTest`, reuse `PressureTraceRecorder` and `Printer::enqueueWithTimeout`, restore pulse widths/regulator targets through the existing trace runner, and publish compact pressure-drop repeatability metrics for Python-side candidate analysis.
   - `SelfTestCommandPolicy` resolves the logical self-test `run_id` and optional timeout TLVs independently from transport `seq32`, keeping HIL self-test compatible with the sliding-window queue-ACK transport.
   - `OrchestratorCompletionPolicy` centralizes the pure “did an interruptible command really finish?” bookkeeping used to decide when executed/retired frontiers may advance after pause-aware waits.
   - Flash session safety lives here: `CMD_INIT_FLASH` / `CMD_STOP_FLASH`, PE8 arm/disarm policy, PE9 output ownership, and fault latch logging (`FLASH_ARMED`, `FLASH_DISARMED`, `FLASH_FAULT`). Active imaging sessions now only hard-fault on `line_high_on_arm`; once armed, duplicate triggers while a flash is already pending are ignored and the task simply waits for PE8 to return low without latching on slow release.

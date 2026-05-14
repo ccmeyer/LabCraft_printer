@@ -18,6 +18,7 @@ add_executable(fw_tests
     tests/test_nvm_codec.cpp
     tests/test_pressure_regulator_math.cpp
     tests/test_pressure_qualification_math.cpp
+    tests/test_valve_pulse_qualification_math.cpp
     tests/test_pressure_target_policy.cpp
     tests/test_pressure_trace_math.cpp
     tests/test_motion_qualification_math.cpp
@@ -40,6 +41,7 @@ add_executable(fw_tests
     ../Core/Src/nvm_codec.c
     ../Core/Src/PressureRegulatorMath.cpp
     ../Core/Src/PressureQualificationMath.cpp
+    ../Core/Src/ValvePulseQualificationMath.cpp
     ../Core/Src/MotionQualificationMath.cpp
     ../Core/Src/StepperProfileMath.cpp
     ../Core/Src/CrashLogCodec.c

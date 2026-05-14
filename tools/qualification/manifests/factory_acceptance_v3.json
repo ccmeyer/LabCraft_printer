@@ -1,0 +1,240 @@
+{
+  "schema_version": "qualification_manifest_v0",
+  "manifest_id": "factory_acceptance_v3",
+  "name": "Factory Acceptance v3",
+  "profile": "FULL",
+  "description": "Factory acceptance suite with valve pulse pressure-drop repeatability diagnostics added in Milestone 6.",
+  "expected_test_ids": [
+    1001,
+    1002,
+    1010,
+    1011,
+    1012,
+    1003,
+    1013,
+    1020,
+    1021,
+    1004,
+    1005,
+    1007,
+    1006,
+    1030,
+    1040,
+    1041,
+    1042,
+    2001,
+    2002,
+    2007,
+    2008,
+    2003,
+    2201,
+    2202,
+    2203,
+    2004,
+    2005,
+    2401,
+    2402,
+    2403,
+    2006
+  ],
+  "fixtures": [
+    {
+      "fixture_id": "motion_clear_envelope",
+      "required_for": [2001, 2002, 2007, 2008, 2006],
+      "operator_note": "Confirm the gantry envelope is clear before FULL motion, repeatability, and abort diagnostics."
+    },
+    {
+      "fixture_id": "pressure_hold_closed_loop",
+      "required_for": [2003, 2201, 2202, 2203],
+      "operator_note": "Confirm the pressure system is connected to the closed-loop pressure qualification fixture before FULL pressure diagnostics."
+    },
+    {
+      "fixture_id": "print_valve_pneumatic_drop",
+      "required_for": [2004, 2005, 2401, 2402, 2403],
+      "operator_note": "Confirm valve/pulse diagnostics are safe for the current fixture before FULL runs."
+    }
+  ],
+  "enforce_expected_test_ids": true,
+  "threshold_policy": "candidate_analysis_v1",
+  "analysis_rules": {
+    "1001": {"category": "protocol", "failure_domain": "infrastructure"},
+    "1002": {"category": "protocol", "failure_domain": "infrastructure"},
+    "1003": {"category": "status", "failure_domain": "infrastructure"},
+    "1004": {"category": "status", "failure_domain": "infrastructure"},
+    "1005": {"category": "flash", "failure_domain": "infrastructure"},
+    "1006": {"category": "build", "failure_domain": "infrastructure"},
+    "1007": {"category": "flash", "failure_domain": "infrastructure"},
+    "1010": {"category": "session", "failure_domain": "infrastructure"},
+    "1011": {"category": "session", "failure_domain": "infrastructure"},
+    "1012": {"category": "session", "failure_domain": "infrastructure"},
+    "1013": {"category": "session", "failure_domain": "infrastructure"},
+    "1020": {"category": "status", "failure_domain": "infrastructure"},
+    "1021": {
+      "category": "status",
+      "failure_domain": "infrastructure",
+      "metrics": {
+        "period_ms_avg": {"maturity": "candidate", "min": 20, "max": 200},
+        "period_ms_max_jitter": {"maturity": "candidate", "max": 100}
+      }
+    },
+    "1030": {"category": "protocol", "failure_domain": "infrastructure"},
+    "1040": {
+      "category": "memory",
+      "failure_domain": "infrastructure",
+      "metrics": {
+        "heap_min": {"maturity": "candidate", "min": 1024},
+        "stk_min": {"maturity": "candidate", "min": 32}
+      }
+    },
+    "1041": {"category": "crash", "failure_domain": "infrastructure"},
+    "1042": {"category": "watchdog", "failure_domain": "infrastructure"},
+    "2001": {
+      "category": "motion",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "home_time_ms": {"maturity": "candidate", "max": 5000},
+        "home_success_axes": {"maturity": "candidate", "min": 4},
+        "limit_hits": {"maturity": "candidate", "min": 1}
+      }
+    },
+    "2002": {
+      "category": "motion",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "final_error_steps": {"maturity": "candidate", "max": 10},
+        "bound_violation": {"maturity": "candidate", "equals": 0}
+      }
+    },
+    "2007": {
+      "category": "motion",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "x_span": {"maturity": "candidate", "max": 25},
+        "y_span": {"maturity": "candidate", "max": 25},
+        "ret_err": {"maturity": "candidate", "max": 10},
+        "move_to": {"maturity": "candidate", "equals": 0},
+        "home_to": {"maturity": "candidate", "equals": 0}
+      }
+    },
+    "2008": {
+      "category": "motion",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "ret_err": {"maturity": "candidate", "max": 10},
+        "x_ret": {"maturity": "candidate", "max": 10},
+        "y_ret": {"maturity": "candidate", "max": 10},
+        "move_to": {"maturity": "candidate", "equals": 0},
+        "home_to": {"maturity": "candidate", "equals": 0},
+        "bound": {"maturity": "candidate", "equals": 0}
+      }
+    },
+    "2003": {
+      "category": "pressure",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "settle_time_ms": {"maturity": "candidate", "max": 5000},
+        "overshoot": {"maturity": "candidate", "max": 250},
+        "steady_state_error": {"maturity": "candidate", "max": 100}
+      }
+    },
+    "2201": {
+      "category": "pressure",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "slope_raw_min": {"maturity": "candidate", "min": -1500, "max": 1500},
+        "corr_steps": {"maturity": "candidate", "max": 2000},
+        "ready_miss": {"maturity": "candidate", "equals": 0},
+        "timeout": {"maturity": "candidate", "equals": 0}
+      }
+    },
+    "2202": {
+      "category": "pressure",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "settle_max_ms": {"maturity": "candidate", "max": 5000},
+        "err_max": {"maturity": "candidate", "max": 100},
+        "low_span": {"maturity": "candidate", "max": 2000},
+        "high_span": {"maturity": "candidate", "max": 2000},
+        "ready_miss": {"maturity": "candidate", "equals": 0},
+        "timeout": {"maturity": "candidate", "equals": 0}
+      }
+    },
+    "2203": {
+      "category": "pressure",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "repeat_span": {"maturity": "candidate", "max": 2000},
+        "hyst_span": {"maturity": "candidate", "max": 2000},
+        "err_max": {"maturity": "candidate", "max": 100},
+        "ready_miss": {"maturity": "candidate", "equals": 0},
+        "timeout": {"maturity": "candidate", "equals": 0}
+      }
+    },
+    "2004": {
+      "category": "valve",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "valve_open_count": {"maturity": "candidate", "min": 2},
+        "valve_close_count": {"maturity": "candidate", "min": 2},
+        "sequence_order_ok": {"maturity": "candidate", "equals": 1}
+      }
+    },
+    "2005": {
+      "category": "pulse",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "pulse_count": {"maturity": "candidate", "min": 2},
+        "pulse_width_min_ns": {"maturity": "candidate", "min": 100000},
+        "pulse_width_max_ns": {"maturity": "candidate", "max": 5000000}
+      }
+    },
+    "2401": {
+      "category": "pulse",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "pulses": {"maturity": "candidate", "min": 8},
+        "mean": {"maturity": "candidate", "min": 1},
+        "cv_pct": {"maturity": "candidate", "max": 100},
+        "out": {"maturity": "candidate", "max": 2},
+        "slip_w": {"maturity": "candidate", "max": 250},
+        "ready": {"maturity": "candidate", "equals": 0}
+      }
+    },
+    "2402": {
+      "category": "pulse",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "pulses": {"maturity": "candidate", "min": 8},
+        "mean": {"maturity": "candidate", "min": 1},
+        "cv_pct": {"maturity": "candidate", "max": 100},
+        "out": {"maturity": "candidate", "max": 2},
+        "slip_w": {"maturity": "candidate", "max": 250},
+        "ready": {"maturity": "candidate", "equals": 0}
+      }
+    },
+    "2403": {
+      "category": "pulse",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "pulses": {"maturity": "candidate", "min": 6},
+        "p_mean": {"maturity": "candidate", "min": 1},
+        "r_mean": {"maturity": "candidate", "min": 1},
+        "ratio": {"maturity": "candidate", "min": 25, "max": 400},
+        "p_out": {"maturity": "candidate", "max": 2},
+        "r_out": {"maturity": "candidate", "max": 2},
+        "slip_w": {"maturity": "candidate", "max": 250},
+        "ready": {"maturity": "candidate", "equals": 0}
+      }
+    },
+    "2006": {
+      "category": "safety",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "abort_latency_ms": {"maturity": "candidate", "max": 2000},
+        "motors_disabled": {"maturity": "candidate", "equals": 1},
+        "regulators_stopped": {"maturity": "candidate", "equals": 1},
+        "valves_safe_state": {"maturity": "candidate", "equals": 1}
+      }
+    }
+  }
+}

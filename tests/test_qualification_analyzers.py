@@ -181,3 +181,46 @@ def test_pressure_candidate_threshold_warning_does_not_fail():
     assert analysis["verdict"]["status"] == "pass"
     assert analysis["metric_evaluations"][0]["status"] == "warning"
     assert analysis["metric_evaluations"][0]["failure_domain"] == "machine_performance"
+
+
+def test_valve_pulse_candidate_threshold_warning_does_not_fail():
+    manifest = parse_manifest(
+        {
+            "schema_version": "qualification_manifest_v0",
+            "manifest_id": "valve_pulse_manifest",
+            "name": "Valve Pulse Manifest",
+            "profile": "FULL",
+            "expected_test_ids": [2401],
+            "enforce_expected_test_ids": True,
+            "analysis_rules": {
+                "2401": {
+                    "category": "pulse",
+                    "failure_domain": "machine_performance",
+                    "metrics": {"cv_pct": {"maturity": "candidate", "max": 100}},
+                }
+            },
+        }
+    )
+    raw = {
+        "run_id": 1234,
+        "profile": "FULL",
+        "started_at": "2026-05-13T00:00:00Z",
+        "finished_at": "2026-05-13T00:00:05Z",
+        "aborted": False,
+        "summary": {"total": 1, "passed": 1, "failed": 0},
+        "results": [
+            {
+                "test_id": 2401,
+                "name": "print_valve_pulse_drop_repeatability_factory",
+                "pass": True,
+                "metrics": {"cv_pct": 150},
+            }
+        ],
+        "host_checks": [],
+    }
+
+    analysis = _analyze(raw, manifest)
+
+    assert analysis["verdict"]["status"] == "pass"
+    assert analysis["metric_evaluations"][0]["status"] == "warning"
+    assert analysis["metric_evaluations"][0]["failure_domain"] == "machine_performance"

@@ -12,7 +12,7 @@ from .identity import DEFAULT_IDENTITY_PATH, load_or_create_identity
 from .manifest import QualificationManifest, load_manifest
 from .report import write_json_atomic, write_qualification_artifacts
 
-DEFAULT_MANIFEST_REF = "factory_acceptance_v2"
+DEFAULT_MANIFEST_REF = "factory_acceptance_v3"
 
 
 @dataclass(frozen=True)

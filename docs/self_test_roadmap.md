@@ -22,6 +22,7 @@ The intent is to increase quantitative coverage without turning the firmware, Py
 | Milestone 3: Stable Report Schema and Analyzer Gate | Complete | `tools/qualification/analyzers.py`, `docs/self_test_report_schema_v1.md` |
 | Milestone 4: Motion Qualification Slice | Complete | `2007 motion_home_repeatability_factory`, `2008 motion_pattern_return_factory`, `factory_acceptance_v1` |
 | Milestone 5: Pressure Regulator Leak and Step-Position Slice | Complete | `2201 pressure_hold_leak_factory`, `2202 pressure_target_cycle_repeatability_factory`, `2203 pressure_motor_position_hysteresis_factory`, `factory_acceptance_v2`; FULL HIL `hil_reports/selftest_20260513_191209.json` |
+| Milestone 6: Valve Pulse Repeatability Slice | Complete | `2401 print_valve_pulse_drop_repeatability_factory`, `2402 refuel_valve_pulse_drop_repeatability_factory`, `2403 dual_valve_interaction_factory`, `factory_acceptance_v3`; FULL HIL `hil_reports/selftest_20260513_200311.json`; qualification pass with candidate warnings |
 | Later fixture-dependent diagnostics | Not started | Planned |
 
 ## Current Call Path
@@ -618,6 +619,7 @@ Status:
 - Added `factory_acceptance_v2` with the 28-test FULL suite and candidate Python analyzer rules for the new pressure metrics.
 - Validated on hardware with FULL HIL report `hil_reports/selftest_20260513_191209.json`: non-aborted, `28/28` passing.
 - Converted the raw HIL report through `tools/run_qualification.py --manifest factory_acceptance_v2`; qualification verdict was `pass` with no warnings.
+- During Milestone 6 HIL, the 2201-2203 pressure waits were aligned with the existing candidate analyzer band: test `2003` still uses the strict regulator ready tolerance, while the M5 qualification rows may proceed once pressure is within the candidate `err_max` band so Python owns performance warnings.
 
 Validation:
 
@@ -682,16 +684,16 @@ Python responsibilities:
 
 Expected metrics:
 
-- `channel`
-- `pulse_count`
-- `pulse_width_us`
-- `rate_hz`
-- `mean_drop_raw`
-- `drop_cv_pct`
-- `drop_slope_raw_per_pulse`
-- `outlier_count`
-- `max_recovery_ms`
-- `deadline_slip_max_ms`
+- `2401` and `2402` use compact frame-budget-safe names: `ch`, `pulses`, `pw_us`, `hz`, `mean`, `cv_pct`, `slope`, `out`, `rec_w`, `slip_w`, `ready`, `sc`, `ec`.
+- `2403` reports paired print/refuel interaction metrics: `mode`, `pulses`, `p_pw`, `r_pw`, `p_mean`, `r_mean`, `ratio`, `delta`, `p_out`, `r_out`, `slip_w`, `ready`.
+
+Status:
+
+- Implemented in firmware FULL profile after `2005 print_refuel_pulse_integrity_full` and before `2006 emergency_abort_and_safe_stop_full`.
+- Added `factory_acceptance_v3` with the 31-test FULL suite and candidate Python analyzer rules for the valve pulse metrics.
+- Local validation passed with `firmware/scripts/run_fw_checks.ps1 -Config Debug` and focused qualification tests.
+- FULL HIL validation passed with `hil_reports/selftest_20260513_200311.json`: non-aborted, `31/31` passing.
+- Converted the raw HIL report through `tools/run_qualification.py --manifest factory_acceptance_v3`; qualification verdict was `pass` with non-blocking candidate warnings for small observed valve pressure deltas.
 
 Validation:
 

@@ -113,12 +113,12 @@ def test_qualification_cli_accepts_fake_invoker(tmp_path, capsys):
     assert "Wrote qualification report" in captured.out
 
 
-def test_default_qualification_manifest_is_factory_acceptance_v2():
-    assert DEFAULT_MANIFEST_REF == "factory_acceptance_v2"
+def test_default_qualification_manifest_is_factory_acceptance_v3():
+    assert DEFAULT_MANIFEST_REF == "factory_acceptance_v3"
     parser = cli.build_parser()
     args = parser.parse_args([])
 
-    assert args.manifest == "factory_acceptance_v2"
+    assert args.manifest == "factory_acceptance_v3"
 
 
 def test_qualification_can_convert_existing_raw_report_without_invoker(tmp_path):

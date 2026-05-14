@@ -6,9 +6,9 @@ from tools.qualification.manifest import ManifestError, load_manifest, parse_man
 
 
 def test_load_builtin_factory_acceptance_manifest():
-    manifest = load_manifest("factory_acceptance_v2")
+    manifest = load_manifest("factory_acceptance_v3")
 
-    assert manifest.manifest_id == "factory_acceptance_v2"
+    assert manifest.manifest_id == "factory_acceptance_v3"
     assert manifest.profile == "FULL"
     assert 1001 in manifest.expected_test_ids
     assert 2006 in manifest.expected_test_ids
@@ -17,12 +17,24 @@ def test_load_builtin_factory_acceptance_manifest():
     assert 2201 in manifest.expected_test_ids
     assert 2202 in manifest.expected_test_ids
     assert 2203 in manifest.expected_test_ids
+    assert 2401 in manifest.expected_test_ids
+    assert 2402 in manifest.expected_test_ids
+    assert 2403 in manifest.expected_test_ids
     assert manifest.fixtures
     assert manifest.enforce_expected_test_ids is True
     assert manifest.analysis_rules["2003"]["category"] == "pressure"
     assert manifest.analysis_rules["2201"]["metrics"]["slope_raw_min"]["maturity"] == "candidate"
+    assert manifest.analysis_rules["2401"]["metrics"]["cv_pct"]["maturity"] == "candidate"
     assert manifest.analysis_rules["2007"]["metrics"]["x_span"]["maturity"] == "candidate"
     assert manifest.to_report_dict()["schema_version"] == "qualification_manifest_v0"
+
+
+def test_load_legacy_factory_acceptance_v2_manifest():
+    manifest = load_manifest("factory_acceptance_v2")
+
+    assert manifest.manifest_id == "factory_acceptance_v2"
+    assert 2203 in manifest.expected_test_ids
+    assert 2401 not in manifest.expected_test_ids
 
 
 def test_load_legacy_factory_acceptance_v1_manifest():

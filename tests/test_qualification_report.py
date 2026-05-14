@@ -130,6 +130,62 @@ def _raw_factory_v2_selftest():
     return raw
 
 
+def _raw_factory_v3_selftest():
+    raw = _raw_factory_v2_selftest()
+    additions = [
+        {
+            "test_id": 2401,
+            "name": "print_valve_pulse_drop_repeatability_factory",
+            "pass": True,
+            "metrics": {
+                "pulses": 8,
+                "mean": 14,
+                "cv_pct": 12,
+                "slope": 0,
+                "out": 0,
+                "slip_w": 8,
+                "ready": 0,
+            },
+        },
+        {
+            "test_id": 2402,
+            "name": "refuel_valve_pulse_drop_repeatability_factory",
+            "pass": True,
+            "metrics": {
+                "pulses": 8,
+                "mean": 10,
+                "cv_pct": 15,
+                "slope": 0,
+                "out": 0,
+                "slip_w": 9,
+                "ready": 0,
+            },
+        },
+        {
+            "test_id": 2403,
+            "name": "dual_valve_interaction_factory",
+            "pass": True,
+            "metrics": {
+                "pulses": 6,
+                "p_mean": 13,
+                "r_mean": 9,
+                "ratio": 144,
+                "delta": 4,
+                "p_out": 0,
+                "r_out": 0,
+                "slip_w": 10,
+                "ready": 0,
+            },
+        },
+    ]
+    rows = list(raw["results"])
+    insert_at = next(index for index, row in enumerate(rows) if row["test_id"] == 2006)
+    rows[insert_at:insert_at] = additions
+    raw["summary"] = {"total": len(rows), "passed": len(rows), "failed": 0}
+    raw["results"] = rows
+    return raw
+
+
 def _identity(tmp_path):
     return load_or_create_identity(
         tmp_path / "local" / "machine_identity.json",
@@ -248,3 +304,18 @@ def test_factory_v2_synthetic_full_report_passes_expected_id_enforcement(tmp_pat
     assert report["raw_summary"]["total"] == 28
     metric_names = {item["metric_name"] for item in report["analysis"]["metric_evaluations"]}
     assert {"slope_raw_min", "low_span", "high_span", "repeat_span", "hyst_span"}.issubset(metric_names)
+
+
+def test_factory_v3_synthetic_full_report_passes_expected_id_enforcement(tmp_path):
+    from tools.qualification.manifest import load_manifest
+
+    manifest = load_manifest("factory_acceptance_v3")
+    artifacts = create_run_artifacts("LC-0001", output_root=tmp_path, timestamp="20260513T120000Z")
+
+    report = normalize_report(_raw_factory_v3_selftest(), manifest, _identity(tmp_path), artifacts)
+
+    assert report["overall_status"] == "pass"
+    assert report["manifest_checks"]["missing_test_ids"] == []
+    assert report["raw_summary"]["total"] == 31
+    metric_names = {item["metric_name"] for item in report["analysis"]["metric_evaluations"]}
+    assert {"cv_pct", "p_mean", "r_mean", "ratio", "p_out", "r_out"}.issubset(metric_names)
