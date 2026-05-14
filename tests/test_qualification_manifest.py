@@ -63,6 +63,9 @@ def test_load_gripper_seal_manifest_requires_local_operator_fixture():
     assert manifest.requires_operator_prompts is True
     assert manifest.selftest_args == ("--gripper-seal-suite",)
     assert {item["fixture_id"] for item in manifest.fixtures} == {"dummy_blocked_head_v1"}
+    assert "slope_raw_min" not in manifest.analysis_rules["2501"]["metrics"]
+    assert manifest.analysis_rules["2501"]["metrics"]["pulse_ms"]["equals"] == 2000
+    assert manifest.analysis_rules["2501"]["metrics"]["tick_us"]["equals"] == 100
     assert manifest.analysis_rules["2502"]["metrics"]["seal_ms"]["maturity"] == "candidate"
     assert manifest.analysis_rules["2502"]["metrics"]["seal_ms"]["min"] == 60000
 

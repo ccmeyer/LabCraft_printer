@@ -46,3 +46,23 @@ TEST(GripperSealQualificationMath, ComputesWorstChannelDrop) {
     UNSIGNED_LONGS_EQUAL(35u, GripperSealQualificationMath::worstDropRaw(2500, 2475, true, 2510, 2475));
     UNSIGNED_LONGS_EQUAL(25u, GripperSealQualificationMath::worstDropRaw(2500, 2475, false, 2510, 2400));
 }
+
+TEST(GripperSealQualificationMath, SummarizesBurstDropsAcrossFullSealWindow) {
+    const uint32_t drops[] = {15u, 25u, 20u, 30u, 22u, 28u};
+
+    const auto summary = GripperSealQualificationMath::summarizeBurstDrops(drops, 6, 10000, 100);
+
+    UNSIGNED_LONGS_EQUAL(30u, summary.maxDropRaw);
+    UNSIGNED_LONGS_EQUAL(15u, summary.spanRaw);
+    UNSIGNED_LONGS_EQUAL(60000u, summary.sealPassDurationMs);
+}
+
+TEST(GripperSealQualificationMath, BurstSummaryStopsSealDurationAtFirstThresholdCrossing) {
+    const uint32_t drops[] = {15u, 25u, 120u, 30u};
+
+    const auto summary = GripperSealQualificationMath::summarizeBurstDrops(drops, 4, 10000, 100);
+
+    UNSIGNED_LONGS_EQUAL(120u, summary.maxDropRaw);
+    UNSIGNED_LONGS_EQUAL(105u, summary.spanRaw);
+    UNSIGNED_LONGS_EQUAL(20000u, summary.sealPassDurationMs);
+}

@@ -26,8 +26,9 @@
       "category": "gripper",
       "failure_domain": "machine_performance",
       "metrics": {
+        "pulse_ms": {"maturity": "candidate", "equals": 2000},
+        "tick_us": {"maturity": "candidate", "equals": 100},
         "drop_raw": {"maturity": "candidate", "max": 100},
-        "slope_raw_min": {"maturity": "candidate", "min": -200, "max": 200},
         "timeout": {"maturity": "candidate", "equals": 0}
       }
     },

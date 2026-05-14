@@ -23,7 +23,7 @@ The intent is to increase quantitative coverage without turning the firmware, Py
 | Milestone 4: Motion Qualification Slice | Complete | `2007 motion_home_repeatability_factory`, `2008 motion_pattern_return_factory`, `factory_acceptance_v1` |
 | Milestone 5: Pressure Regulator Leak and Step-Position Slice | Complete | `2201 pressure_hold_leak_factory`, `2202 pressure_target_cycle_repeatability_factory`, `2203 pressure_motor_position_hysteresis_factory`, `factory_acceptance_v2`; FULL HIL `hil_reports/selftest_20260513_191209.json` |
 | Milestone 6: Valve Pulse Repeatability Slice | Complete | `2401 print_valve_pulse_drop_repeatability_factory`, `2402 refuel_valve_pulse_drop_repeatability_factory`, `2403 dual_valve_interaction_factory`, `factory_acceptance_v3`; FULL HIL `hil_reports/selftest_20260513_200311.json`; qualification pass with candidate warnings |
-| Milestone 7: Local Operator-Gated Gripper Seal Qualification | Code complete; local operator HIL pending | `gripper_seal_v1`, selected firmware suite `2501`-`2503`; local operator HIL pending |
+| Milestone 7: Local Operator-Gated Gripper Seal Qualification | Burst revision code complete; local operator HIL pending | `gripper_seal_v1`, selected firmware suite `2501`-`2503`; extended one-pulse burst validation pending |
 | Later fixture-dependent diagnostics | Not started | Planned |
 
 ## Current Call Path
@@ -764,7 +764,7 @@ Python responsibilities:
 - Prompt the operator to support the dummy head before any gripper-open teardown action.
 - Prompt the operator to remove the dummy head after the gripper is opened.
 - Send normal shutdown after fixture removal so regulators, motors, and LEDs return through the standard disconnect path.
-- Analyze closed-grip pressure retention, seal decay rate, and how long the gripper maintains seal without refresh.
+- Analyze closed-grip pressure response to repeated burst stimuli and how long the gripper maintains seal without refresh.
 - Flag insufficient sealing, inconsistent clamp behavior, short hold duration, or fixture setup failure.
 - Store operator notes for fixture setup.
 
@@ -773,23 +773,18 @@ Expected metrics:
 - `fixture`
 - `cmd`
 - `refresh`
-- `target_psi_milli`
 - `target_raw`
-- `valve_hold_drive`
+- `valve_drive`
+- `pulse_ms`
+- `tick_us`
+- `bursts`
 - `head_valve_mode`
-- `head_valve_active`
 - `reg_vent`
-- `gripper_close_count`
-- `hold_ms`
-- `p_start`
-- `p_end`
+- `grip`
+- `activations`
 - `p_drop`
-- `r_start`
-- `r_end`
 - `r_drop`
 - `drop_raw`
-- `slope_raw_min`
-- `thr_ms`
 - `seal_ms`
 - `repeat_span_raw`
 - `seal_ms_min`
@@ -797,9 +792,9 @@ Expected metrics:
 
 Initial suite shape:
 
-- `2501` closes the gripper on the loaded dummy head, applies `1 psi` through a timer-output head-side print/refuel valve hold, then records 30 seconds of seal decay.
-- `2502` keeps the gripper closed without refreshing close pressure and records up to 60 seconds within the pressure-drop threshold for initial validation.
-- `2503` repeats three short pressure/decay cycles on the same loaded dummy head while keeping the gripper closed and without re-closing between cycles. Multi-load repeatability is deferred until a higher-level multi-run workflow can safely prompt for load/support/remove between runs.
+- `2501` closes the gripper on the loaded dummy head and applies one `2 s` diagnostic one-pulse burst at `1 psi` through the head-side print/refuel valves.
+- `2502` keeps the gripper closed without refreshing close pressure and applies six `2 s` bursts over roughly `60 s` to check whether the pressure response worsens over time.
+- `2503` repeats three `2 s` burst applications on the same loaded dummy head while keeping the gripper closed and without re-closing between cycles. Multi-load repeatability is deferred until a higher-level multi-run workflow can safely prompt for load/support/remove between runs.
 
 Validation:
 

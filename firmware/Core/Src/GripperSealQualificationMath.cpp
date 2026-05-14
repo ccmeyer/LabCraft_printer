@@ -82,4 +82,25 @@ uint32_t worstDropRaw(int32_t primaryStart,
   return (secondaryDrop > primaryDrop) ? secondaryDrop : primaryDrop;
 }
 
+BurstSummary summarizeBurstDrops(const uint32_t* drops,
+                                 size_t count,
+                                 uint32_t burstPeriodMs,
+                                 uint32_t thresholdRaw) {
+  BurstSummary summary{};
+  if (drops == nullptr || count == 0u || burstPeriodMs == 0u) {
+    return summary;
+  }
+
+  summary.maxDropRaw = maxValue(drops, count);
+  summary.spanRaw = spanRaw(drops, count);
+  summary.sealPassDurationMs = static_cast<uint32_t>(count) * burstPeriodMs;
+  for (size_t i = 0u; i < count; ++i) {
+    if (drops[i] > thresholdRaw) {
+      summary.sealPassDurationMs = static_cast<uint32_t>(i) * burstPeriodMs;
+      break;
+    }
+  }
+  return summary;
+}
+
 }  // namespace GripperSealQualificationMath

@@ -26,8 +26,7 @@ static Printer* _printerInstance = nullptr;
 
 namespace {
 
-constexpr uint32_t kDiagnosticValveHoldPeriodTicks = 99u;
-constexpr uint32_t kDiagnosticValveHoldPulseTicks = kDiagnosticValveHoldPeriodTicks + 1u;
+constexpr uint32_t kTimer16MaxTicks = 65535u;
 
 uint32_t alternateForTimer(TIM_HandleTypeDef* htim) {
   if (htim == nullptr) return 0u;
@@ -49,32 +48,51 @@ void restoreValvePinAlternate(TIM_HandleTypeDef* htim, GPIO_TypeDef* port, uint1
   HAL_GPIO_Init(port, &gpio);
 }
 
-bool configureValveTimerHold(TIM_HandleTypeDef* htim,
-                             uint32_t channel,
-                             GPIO_TypeDef* port,
-                             uint16_t pin) {
+bool configureValveTimerLongPulse(TIM_HandleTypeDef* htim,
+                                  uint32_t channel,
+                                  GPIO_TypeDef* port,
+                                  uint16_t pin,
+                                  uint32_t normalPrescaler,
+                                  uint32_t pulseMs,
+                                  uint32_t tickUs) {
   if (htim == nullptr || port == nullptr || pin == 0u) {
     return false;
   }
+  if (pulseMs == 0u || tickUs == 0u) {
+    return false;
+  }
+  const uint64_t pulseTicks = ((static_cast<uint64_t>(pulseMs) * 1000ULL) + tickUs - 1ULL) /
+                              static_cast<uint64_t>(tickUs);
+  const uint64_t periodTicks = pulseTicks * 2ULL;
+  if (pulseTicks == 0ULL || periodTicks == 0ULL || periodTicks > (static_cast<uint64_t>(kTimer16MaxTicks) + 1ULL)) {
+    return false;
+  }
+  const uint64_t prescalerTicks = (static_cast<uint64_t>(normalPrescaler) + 1ULL) *
+                                  static_cast<uint64_t>(tickUs);
+  if (prescalerTicks == 0ULL || prescalerTicks > (static_cast<uint64_t>(kTimer16MaxTicks) + 1ULL)) {
+    return false;
+  }
+
   restoreValvePinAlternate(htim, port, pin);
+  HAL_TIM_OnePulse_Stop(htim, channel);
   HAL_TIM_PWM_Stop(htim, channel);
   __HAL_TIM_DISABLE(htim);
 
-  htim->Init.Period = kDiagnosticValveHoldPeriodTicks;
+  htim->Init.Prescaler = static_cast<uint32_t>(prescalerTicks - 1ULL);
+  htim->Init.Period = static_cast<uint32_t>(periodTicks - 1ULL);
   htim->Init.CounterMode = TIM_COUNTERMODE_UP;
   htim->Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim->Init.RepetitionCounter = 0;
   if (HAL_TIM_Base_Init(htim) != HAL_OK) {
     return false;
   }
-  htim->Instance->CR1 &= ~TIM_CR1_OPM;
-  if (HAL_TIM_PWM_Init(htim) != HAL_OK) {
+  if (HAL_TIM_OnePulse_Init(htim, TIM_OPMODE_SINGLE) != HAL_OK) {
     return false;
   }
 
   TIM_OC_InitTypeDef sConfigOC = {0};
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = kDiagnosticValveHoldPulseTicks;
+  sConfigOC.Pulse = static_cast<uint32_t>(pulseTicks);
   sConfigOC.OCPolarity = TIM_OCPOLARITY_LOW;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
   if (HAL_TIM_PWM_ConfigChannel(htim, &sConfigOC, channel) != HAL_OK) {
@@ -82,7 +100,22 @@ bool configureValveTimerHold(TIM_HandleTypeDef* htim,
   }
 
   __HAL_TIM_SET_COUNTER(htim, 0);
-  return HAL_TIM_PWM_Start(htim, channel) == HAL_OK;
+  return true;
+}
+
+bool startValveTimerLongPulse(TIM_HandleTypeDef* htim, uint32_t channel) {
+  if (htim == nullptr) {
+    return false;
+  }
+  __HAL_TIM_DISABLE_IT(htim, TIM_IT_CC1);
+  __HAL_TIM_CLEAR_FLAG(htim, TIM_FLAG_CC1);
+  __HAL_TIM_CLEAR_FLAG(htim, TIM_FLAG_UPDATE);
+  __HAL_TIM_SET_COUNTER(htim, 0);
+  if (HAL_TIM_PWM_Start(htim, channel) != HAL_OK) {
+    return false;
+  }
+  (void)HAL_TIM_OnePulse_Start(htim, channel);
+  return true;
 }
 
 }  // namespace
@@ -113,6 +146,8 @@ void Printer::begin(
   _printPort  = printPort;   _printPin  = printPin;
   _printPulseUs  = printPulseUs;
   _refuelPulseUs = refuelPulseUs;
+  _normalPrintPrescaler = _htimPrint ? _htimPrint->Init.Prescaler : 0u;
+  _normalRefuelPrescaler = _htimRefuel ? _htimRefuel->Init.Prescaler : 0u;
   _flashOnLast = false;
 
   // Create queue and task
@@ -128,6 +163,7 @@ void Printer::configureTimerPrint() {
     TIM_OC_InitTypeDef sConfigOC = {0};
 
     // 1) Update base timer parameters
+    _htimPrint->Init.Prescaler         = _normalPrintPrescaler;
     _htimPrint->Init.Period            = (_printPulseUs*2) - 1;  // Set the period (time for one pulse)
     _htimPrint->Init.CounterMode       = TIM_COUNTERMODE_UP;
     _htimPrint->Init.ClockDivision     = TIM_CLOCKDIVISION_DIV1;
@@ -153,6 +189,7 @@ void Printer::configureTimerRefuel() {
   TIM_OC_InitTypeDef sConfigOC = {0};
 
   _htimRefuel->Init.Period            = (_refuelPulseUs * 2) - 1;
+  _htimRefuel->Init.Prescaler         = _normalRefuelPrescaler;
   _htimRefuel->Init.CounterMode       = TIM_COUNTERMODE_UP;
   _htimRefuel->Init.ClockDivision     = TIM_CLOCKDIVISION_DIV1;
   _htimRefuel->Init.RepetitionCounter = 0;
@@ -397,68 +434,94 @@ void Printer::cancelDispense() {
   if (_taskHandle) vTaskResume(_taskHandle);
 }
 
-bool Printer::beginDiagnosticValveHold(PulseMode mode) {
-  if (_diagnosticValveHoldActive) {
-    endDiagnosticValveHold();
+bool Printer::beginDiagnosticLongPulse(PulseMode mode, uint32_t pulseMs, uint32_t tickUs) {
+  if (_diagnosticLongPulseActive) {
+    endDiagnosticLongPulse();
   }
 
-  _diagnosticHoldPrint = false;
-  _diagnosticHoldRefuel = false;
+  _diagnosticPulsePrint = false;
+  _diagnosticPulseRefuel = false;
 
-  const bool holdPrint = (mode != PulseMode::REFUEL_ONLY) &&
-                         (_htimPrint != nullptr) &&
-                         (_printPort != nullptr) &&
-                         (_printPin != 0u);
+  const bool pulsePrint = (mode != PulseMode::REFUEL_ONLY) &&
+                          (_htimPrint != nullptr) &&
+                          (_printPort != nullptr) &&
+                          (_printPin != 0u);
 #if (LC_PRESSURE_PORTS > 1)
-  const bool holdRefuel = (mode != PulseMode::PRINT_ONLY) &&
-                          (_htimRefuel != nullptr) &&
-                          (_refuelPort != nullptr) &&
-                          (_refuelPin != 0u);
+  const bool pulseRefuel = (mode != PulseMode::PRINT_ONLY) &&
+                           (_htimRefuel != nullptr) &&
+                           (_refuelPort != nullptr) &&
+                           (_refuelPin != 0u);
 #else
-  const bool holdRefuel = false;
+  const bool pulseRefuel = false;
 #endif
-  if (!holdPrint && !holdRefuel) {
+  if (!pulsePrint && !pulseRefuel) {
     return false;
   }
 
-  if (holdPrint) {
-    if (!configureValveTimerHold(_htimPrint, _printChannel, _printPort, _printPin)) {
-      endDiagnosticValveHold();
+  if (pulsePrint) {
+    if (!configureValveTimerLongPulse(_htimPrint,
+                                      _printChannel,
+                                      _printPort,
+                                      _printPin,
+                                      _normalPrintPrescaler,
+                                      pulseMs,
+                                      tickUs)) {
+      endDiagnosticLongPulse();
       return false;
     }
-    _diagnosticHoldPrint = true;
+    _diagnosticPulsePrint = true;
   }
 
-  if (holdRefuel) {
+  if (pulseRefuel) {
 #if (LC_PRESSURE_PORTS > 1)
-    if (!configureValveTimerHold(_htimRefuel, _refuelChannel, _refuelPort, _refuelPin)) {
-      endDiagnosticValveHold();
+    if (!configureValveTimerLongPulse(_htimRefuel,
+                                      _refuelChannel,
+                                      _refuelPort,
+                                      _refuelPin,
+                                      _normalRefuelPrescaler,
+                                      pulseMs,
+                                      tickUs)) {
+      endDiagnosticLongPulse();
       return false;
     }
-    _diagnosticHoldRefuel = true;
+    _diagnosticPulseRefuel = true;
 #endif
   }
 
-  _diagnosticValveHoldActive = _diagnosticHoldPrint || _diagnosticHoldRefuel;
-  return _diagnosticValveHoldActive;
+  if (_diagnosticPulsePrint && !startValveTimerLongPulse(_htimPrint, _printChannel)) {
+    endDiagnosticLongPulse();
+    return false;
+  }
+
+#if (LC_PRESSURE_PORTS > 1)
+  if (_diagnosticPulseRefuel && !startValveTimerLongPulse(_htimRefuel, _refuelChannel)) {
+    endDiagnosticLongPulse();
+    return false;
+  }
+#endif
+
+  _diagnosticLongPulseActive = _diagnosticPulsePrint || _diagnosticPulseRefuel;
+  return _diagnosticLongPulseActive;
 }
 
-void Printer::endDiagnosticValveHold() {
-  if (_diagnosticHoldPrint) {
+void Printer::endDiagnosticLongPulse() {
+  if (_diagnosticPulsePrint) {
+    HAL_TIM_OnePulse_Stop(_htimPrint, _printChannel);
     HAL_TIM_PWM_Stop(_htimPrint, _printChannel);
     configureTimerPrint();
   }
 
 #if (LC_PRESSURE_PORTS > 1)
-  if (_diagnosticHoldRefuel) {
+  if (_diagnosticPulseRefuel) {
+    HAL_TIM_OnePulse_Stop(_htimRefuel, _refuelChannel);
     HAL_TIM_PWM_Stop(_htimRefuel, _refuelChannel);
     configureTimerRefuel();
   }
 #endif
 
-  _diagnosticHoldPrint = false;
-  _diagnosticHoldRefuel = false;
-  _diagnosticValveHoldActive = false;
+  _diagnosticPulsePrint = false;
+  _diagnosticPulseRefuel = false;
+  _diagnosticLongPulseActive = false;
 }
 
 void Printer::pulsePrint() {

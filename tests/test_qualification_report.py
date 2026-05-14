@@ -196,14 +196,17 @@ def _raw_gripper_seal_selftest():
             "metrics": {
                 "target_psi_milli": 1000,
                 "target_raw": 2512,
-                "valve_hold_drive": "timer_pwm",
+                "valve_drive": "diagnostic_one_pulse",
+                "pulse_ms": 2000,
+                "tick_us": 100,
+                "bursts": 1,
                 "head_valve_mode": "both",
-                "head_valve_active": 1,
                 "reg_vent": 0,
-                "gripper_close_count": 1,
+                "grip": 1,
                 "refresh": 0,
-                "drop_raw": 20,
-                "slope_raw_min": 40,
+                "p_drop": 20,
+                "r_drop": 25,
+                "drop_raw": 25,
                 "timeout": 0,
             },
         },
@@ -213,15 +216,13 @@ def _raw_gripper_seal_selftest():
             "pass": True,
             "metrics": {
                 "target_raw": 2512,
-                "valve_hold_drive": "timer_pwm",
+                "valve_drive": "diagnostic_one_pulse",
+                "pulse_ms": 2000,
+                "tick_us": 100,
+                "bursts": 6,
                 "head_valve_mode": "both",
                 "reg_vent": 0,
-                "hold_ms": 60000,
-                "p_start": 2512,
-                "p_end": 2490,
                 "p_drop": 22,
-                "r_start": 2511,
-                "r_end": 2481,
                 "r_drop": 30,
                 "seal_ms": 60000,
                 "drop_raw": 30,
@@ -234,12 +235,15 @@ def _raw_gripper_seal_selftest():
             "pass": True,
             "metrics": {
                 "target_raw": 2512,
-                "valve_hold_drive": "timer_pwm",
+                "valve_drive": "diagnostic_one_pulse",
+                "pulse_ms": 2000,
+                "tick_us": 100,
+                "bursts": 3,
                 "head_valve_mode": "both",
                 "reg_vent": 0,
-                "gripper_close_count": 1,
+                "grip": 1,
                 "refresh": 0,
-                "activations": 5,
+                "activations": 10,
                 "repeat_span_raw": 12,
                 "seal_ms_min": 5000,
                 "timeout": 0,
@@ -432,10 +436,12 @@ def test_gripper_seal_synthetic_report_passes_expected_id_enforcement(tmp_path):
     assert report["run"]["fixture_id"] == "dummy_blocked_head_v1"
     assert report["manifest_checks"]["missing_test_ids"] == []
     assert report["results"][0]["metrics"]["target_psi_milli"] == 1000
-    assert report["results"][0]["metrics"]["valve_hold_drive"] == "timer_pwm"
+    assert report["results"][0]["metrics"]["valve_drive"] == "diagnostic_one_pulse"
+    assert report["results"][0]["metrics"]["pulse_ms"] == 2000
+    assert report["results"][0]["metrics"]["tick_us"] == 100
     assert report["results"][0]["metrics"]["reg_vent"] == 0
     assert report["results"][0]["metrics"]["head_valve_mode"] == "both"
-    assert report["results"][0]["metrics"]["gripper_close_count"] == 1
+    assert report["results"][0]["metrics"]["grip"] == 1
     assert report["results"][0]["metrics"]["refresh"] == 0
     metric_names = {item["metric_name"] for item in report["analysis"]["metric_evaluations"]}
-    assert {"drop_raw", "slope_raw_min", "seal_ms", "repeat_span_raw", "seal_ms_min"}.issubset(metric_names)
+    assert {"pulse_ms", "tick_us", "drop_raw", "seal_ms", "repeat_span_raw", "seal_ms_min"}.issubset(metric_names)

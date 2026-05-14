@@ -112,9 +112,9 @@ public:
   void pulsePrint();
   void pulseRefuel();
 
-  /// Diagnostic-only: hold 3-way print/refuel valves active beyond one-pulse timing.
-  bool beginDiagnosticValveHold(PulseMode mode);
-  void endDiagnosticValveHold();
+  /// Diagnostic-only: start a longer one-pulse valve burst using scaled timer ticks.
+  bool beginDiagnosticLongPulse(PulseMode mode, uint32_t pulseMs, uint32_t tickUs = 100u);
+  void endDiagnosticLongPulse();
 
   void onCompareMatch(TIM_HandleTypeDef* htim);
 
@@ -150,9 +150,11 @@ private:
   volatile bool     _cancelRequested = false;
   bool _diagReadyTimeoutEnabled = false;
   TickType_t _diagReadyTimeoutTicks = 0;
-  bool _diagnosticValveHoldActive = false;
-  bool _diagnosticHoldPrint = false;
-  bool _diagnosticHoldRefuel = false;
+  bool _diagnosticLongPulseActive = false;
+  bool _diagnosticPulsePrint = false;
+  bool _diagnosticPulseRefuel = false;
+  uint32_t _normalPrintPrescaler = 0;
+  uint32_t _normalRefuelPrescaler = 0;
 
   bool  _flashOnLast     = false;
 
