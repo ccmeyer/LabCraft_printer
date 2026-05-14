@@ -28,6 +28,8 @@ CMD_SELFTEST_RESULT = 0xFB
 CMD_SELFTEST_DONE = 0xFC
 CMD_SELFTEST_ABORT = 0xFD
 CMD_QUEUE_ACK = 0xFE
+CMD_GRIPPER_OPEN = 0x10
+CMD_GRIPPER_OFF = 0x12
 
 TAG_PROFILE = 0x20
 TAG_RUN_ID = 0x21
@@ -700,7 +702,10 @@ def run(args: argparse.Namespace) -> int:
         tlvs += bytes([TAG_P2, 1, 1 if getattr(args, "pressure_trace", False) else 0])
         pressure_trace_test = getattr(args, "pressure_trace_test", None)
         pressure_sweep_suite = getattr(args, "pressure_sweep_suite", None)
-        selector = pressure_sweep_suite if pressure_sweep_suite is not None else pressure_trace_test
+        gripper_seal_suite = bool(getattr(args, "gripper_seal_suite", False))
+        selector = 2500 if gripper_seal_suite else (
+            pressure_sweep_suite if pressure_sweep_suite is not None else pressure_trace_test
+        )
         if selector is not None:
             tlvs += bytes([TAG_P3, 2]) + int(selector).to_bytes(2, "little")
         tlvs += bytes([TAG_PROFILE, 1, profile_val])
@@ -979,7 +984,8 @@ def run(args: argparse.Namespace) -> int:
                 requested_order=requested_bench_order,
             ) or camera_benchmark_runtime_error
 
-        if done_seen:
+        skip_goodbye = bool(getattr(args, "skip_goodbye", False) or gripper_seal_suite)
+        if done_seen and not skip_goodbye:
             goodbye_seq8 = 3
             ser.write(build_control(CMD_GOODBYE, goodbye_seq8, run_id))
 
@@ -1074,6 +1080,15 @@ def run(args: argparse.Namespace) -> int:
                 rc = 3
             elif not got_bye_done:
                 rc = 3
+        elif done_seen:
+            host_checks.append(
+                {
+                    "name": "goodbye_skipped",
+                    "pass": True,
+                    "details": {"reason": "operator_gated_gripper_teardown" if gripper_seal_suite else "requested"},
+                    "timestamp": now_iso(),
+                }
+            )
 
         host_checks.append(
             {
@@ -1166,6 +1181,8 @@ def main() -> int:
     selector_group = p.add_mutually_exclusive_group()
     selector_group.add_argument("--pressure-trace-test", type=int, choices=(2101, 2102, 2103, 2104))
     selector_group.add_argument("--pressure-sweep-suite", type=int, choices=(2301, 2302, 2303, 2304))
+    selector_group.add_argument("--gripper-seal-suite", action="store_true")
+    p.add_argument("--skip-goodbye", action="store_true")
     p.add_argument("--out", required=True)
     args = p.parse_args()
     try:

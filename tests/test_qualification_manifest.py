@@ -53,6 +53,20 @@ def test_load_legacy_factory_acceptance_v0_manifest():
     assert 2007 not in manifest.expected_test_ids
 
 
+def test_load_gripper_seal_manifest_requires_local_operator_fixture():
+    manifest = load_manifest("gripper_seal_v1")
+
+    assert manifest.manifest_id == "gripper_seal_v1"
+    assert manifest.profile == "FULL"
+    assert manifest.expected_test_ids == (2501, 2502, 2503)
+    assert manifest.enforce_expected_test_ids is True
+    assert manifest.requires_operator_prompts is True
+    assert manifest.selftest_args == ("--gripper-seal-suite",)
+    assert {item["fixture_id"] for item in manifest.fixtures} == {"dummy_blocked_head_v1"}
+    assert manifest.analysis_rules["2502"]["metrics"]["seal_ms"]["maturity"] == "candidate"
+    assert manifest.analysis_rules["2502"]["metrics"]["seal_ms"]["min"] == 60000
+
+
 def test_load_manifest_from_path(tmp_path):
     path = tmp_path / "custom.json"
     path.write_text(

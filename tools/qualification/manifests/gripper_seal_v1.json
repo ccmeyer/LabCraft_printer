@@ -1,0 +1,53 @@
+{
+  "schema_version": "qualification_manifest_v0",
+  "manifest_id": "gripper_seal_v1",
+  "name": "Gripper Seal Fixture v1",
+  "profile": "FULL",
+  "description": "Local-only operator-gated gripper seal suite for a non-captive dummy blocked printer head.",
+  "expected_test_ids": [
+    2501,
+    2502,
+    2503
+  ],
+  "enforce_expected_test_ids": true,
+  "requires_operator_prompts": true,
+  "selftest_args": [
+    "--gripper-seal-suite"
+  ],
+  "fixtures": [
+    {
+      "fixture_id": "dummy_blocked_head_v1",
+      "required_for": [2501, 2502, 2503],
+      "operator_note": "Run locally only. Load and support the non-captive dummy blocked printer head when prompted; support it before teardown release."
+    }
+  ],
+  "analysis_rules": {
+    "2501": {
+      "category": "gripper",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "drop_raw": {"maturity": "candidate", "max": 100},
+        "slope_raw_min": {"maturity": "candidate", "min": -200, "max": 200},
+        "timeout": {"maturity": "candidate", "equals": 0}
+      }
+    },
+    "2502": {
+      "category": "gripper",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "seal_ms": {"maturity": "candidate", "min": 60000},
+        "drop_raw": {"maturity": "candidate", "max": 100},
+        "timeout": {"maturity": "candidate", "equals": 0}
+      }
+    },
+    "2503": {
+      "category": "gripper",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "repeat_span_raw": {"maturity": "candidate", "max": 50},
+        "seal_ms_min": {"maturity": "candidate", "min": 5000},
+        "timeout": {"maturity": "candidate", "equals": 0}
+      }
+    }
+  }
+}

@@ -24,6 +24,46 @@ extern TIM_HandleTypeDef htim4; // APB1, TIM4
 // singleton pointer
 static Printer* _printerInstance = nullptr;
 
+namespace {
+
+// The one-pulse valve timers use LOW polarity for the active portion.
+constexpr GPIO_PinState kDiagnosticValveActiveState = GPIO_PIN_RESET;
+constexpr GPIO_PinState kDiagnosticValveInactiveState = GPIO_PIN_SET;
+
+uint32_t alternateForTimer(TIM_HandleTypeDef* htim) {
+  if (htim == nullptr) return 0u;
+  if (htim->Instance == TIM4) return GPIO_AF2_TIM4;
+  if (htim->Instance == TIM9) return GPIO_AF3_TIM9;
+  return 0u;
+}
+
+void configureValvePinOutput(GPIO_TypeDef* port, uint16_t pin, GPIO_PinState state) {
+  if (port == nullptr || pin == 0u) return;
+  HAL_GPIO_WritePin(port, pin, state);
+  GPIO_InitTypeDef gpio{};
+  gpio.Pin = pin;
+  gpio.Mode = GPIO_MODE_OUTPUT_PP;
+  gpio.Pull = GPIO_NOPULL;
+  gpio.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+  HAL_GPIO_Init(port, &gpio);
+  HAL_GPIO_WritePin(port, pin, state);
+}
+
+void restoreValvePinAlternate(TIM_HandleTypeDef* htim, GPIO_TypeDef* port, uint16_t pin) {
+  if (htim == nullptr || port == nullptr || pin == 0u) return;
+  const uint32_t alternate = alternateForTimer(htim);
+  if (alternate == 0u) return;
+  GPIO_InitTypeDef gpio{};
+  gpio.Pin = pin;
+  gpio.Mode = GPIO_MODE_AF_PP;
+  gpio.Pull = GPIO_PULLDOWN;
+  gpio.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+  gpio.Alternate = alternate;
+  HAL_GPIO_Init(port, &gpio);
+}
+
+}  // namespace
+
 Printer* Printer::instance() {
   return _printerInstance;
 }
@@ -60,6 +100,7 @@ void Printer::begin(
 
 void Printer::configureTimerPrint() {
 	if (!_htimPrint) return;
+    restoreValvePinAlternate(_htimPrint, _printPort, _printPin);
 
     TIM_OC_InitTypeDef sConfigOC = {0};
 
@@ -84,6 +125,7 @@ void Printer::configureTimerPrint() {
 void Printer::configureTimerRefuel() {
 #if (LC_PRESSURE_PORTS > 1)
   if (!_htimRefuel) return;
+  restoreValvePinAlternate(_htimRefuel, _refuelPort, _refuelPin);
 
   TIM_OC_InitTypeDef sConfigOC = {0};
 
@@ -330,6 +372,63 @@ void Printer::cancelDispense() {
 
   // 3) wake the task so it can see _cancelRequested
   if (_taskHandle) vTaskResume(_taskHandle);
+}
+
+bool Printer::beginDiagnosticValveHold(PulseMode mode) {
+  if (_diagnosticValveHoldActive) {
+    endDiagnosticValveHold();
+  }
+
+  const bool holdPrint = (mode != PulseMode::REFUEL_ONLY) && (_printPort != nullptr) && (_printPin != 0u);
+#if (LC_PRESSURE_PORTS > 1)
+  const bool holdRefuel = (mode != PulseMode::PRINT_ONLY) && (_refuelPort != nullptr) && (_refuelPin != 0u);
+#else
+  const bool holdRefuel = false;
+#endif
+  if (!holdPrint && !holdRefuel) {
+    return false;
+  }
+
+  if (holdPrint) {
+    if (_htimPrint != nullptr) {
+      HAL_TIM_PWM_Stop(_htimPrint, _printChannel);
+    }
+    configureValvePinOutput(_printPort, _printPin, kDiagnosticValveActiveState);
+    _diagnosticHoldPrint = true;
+  }
+
+  if (holdRefuel) {
+#if (LC_PRESSURE_PORTS > 1)
+    if (_htimRefuel != nullptr) {
+      HAL_TIM_PWM_Stop(_htimRefuel, _refuelChannel);
+    }
+    configureValvePinOutput(_refuelPort, _refuelPin, kDiagnosticValveActiveState);
+    _diagnosticHoldRefuel = true;
+#endif
+  }
+
+  _diagnosticValveHoldActive = _diagnosticHoldPrint || _diagnosticHoldRefuel;
+  return _diagnosticValveHoldActive;
+}
+
+void Printer::endDiagnosticValveHold() {
+  if (_diagnosticHoldPrint) {
+    configureValvePinOutput(_printPort, _printPin, kDiagnosticValveInactiveState);
+    restoreValvePinAlternate(_htimPrint, _printPort, _printPin);
+    configureTimerPrint();
+  }
+
+#if (LC_PRESSURE_PORTS > 1)
+  if (_diagnosticHoldRefuel) {
+    configureValvePinOutput(_refuelPort, _refuelPin, kDiagnosticValveInactiveState);
+    restoreValvePinAlternate(_htimRefuel, _refuelPort, _refuelPin);
+    configureTimerRefuel();
+  }
+#endif
+
+  _diagnosticHoldPrint = false;
+  _diagnosticHoldRefuel = false;
+  _diagnosticValveHoldActive = false;
 }
 
 void Printer::pulsePrint() {

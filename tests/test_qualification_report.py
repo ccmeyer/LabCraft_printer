@@ -186,6 +186,74 @@ def _raw_factory_v3_selftest():
     return raw
 
 
+def _raw_gripper_seal_selftest():
+    raw = _raw_selftest()
+    rows = [
+        {
+            "test_id": 2501,
+            "name": "gripper_seal_closed_decay_factory",
+            "pass": True,
+            "metrics": {
+                "target_psi_milli": 1000,
+                "target_raw": 2512,
+                "head_valve_mode": "both",
+                "head_valve_active": 1,
+                "reg_vent": 0,
+                "gripper_close_count": 1,
+                "refresh": 0,
+                "drop_raw": 20,
+                "slope_raw_min": 40,
+                "timeout": 0,
+            },
+        },
+        {
+            "test_id": 2502,
+            "name": "gripper_seal_hold_duration_factory",
+            "pass": True,
+            "metrics": {
+                "target_raw": 2512,
+                "head_valve_mode": "both",
+                "reg_vent": 0,
+                "hold_ms": 60000,
+                "p_start": 2512,
+                "p_end": 2490,
+                "p_drop": 22,
+                "r_start": 2511,
+                "r_end": 2481,
+                "r_drop": 30,
+                "seal_ms": 60000,
+                "drop_raw": 30,
+                "timeout": 0,
+            },
+        },
+        {
+            "test_id": 2503,
+            "name": "gripper_seal_repeatability_factory",
+            "pass": True,
+            "metrics": {
+                "target_raw": 2512,
+                "head_valve_mode": "both",
+                "reg_vent": 0,
+                "gripper_close_count": 1,
+                "refresh": 0,
+                "activations": 5,
+                "repeat_span_raw": 12,
+                "seal_ms_min": 5000,
+                "timeout": 0,
+            },
+        },
+    ]
+    raw["summary"] = {"total": len(rows), "passed": len(rows), "failed": 0}
+    raw["results"] = rows
+    raw["host_checks"] = [
+        {"name": "hello_ack", "pass": True, "details": {"seq8": 1}},
+        {"name": "goodbye_skipped", "pass": True, "details": {"reason": "operator_gated_gripper_teardown"}},
+        {"name": "gripper_teardown_release", "pass": True, "details": {"action": "release", "returncode": 0}},
+        {"name": "gripper_teardown_off", "pass": True, "details": {"action": "off", "returncode": 0}},
+    ]
+    return raw
+
+
 def _identity(tmp_path):
     return load_or_create_identity(
         tmp_path / "local" / "machine_identity.json",
@@ -223,6 +291,27 @@ def test_normalize_report_preserves_raw_summary_and_rows(tmp_path):
     assert report["results"][0]["test_id"] == 1001
     assert report["host_checks"][0]["name"] == "hello_ack"
     assert report["manifest_checks"]["enforced"] is False
+
+
+def test_normalize_report_records_fixture_and_operator_interactions(tmp_path):
+    manifest = _manifest()
+    artifacts = create_run_artifacts("LC-0001", output_root=tmp_path, timestamp="20260513T120000Z")
+    interactions = [
+        {"stage": "load_dummy_head", "message": "load", "confirmed_at": "2026-05-13T00:00:01Z"},
+        {"stage": "remove_dummy_head", "message": "remove", "confirmed_at": "2026-05-13T00:00:02Z"},
+    ]
+
+    report = normalize_report(
+        _raw_selftest(),
+        manifest,
+        _identity(tmp_path),
+        artifacts,
+        fixture_id="dummy_blocked_head_v1",
+        operator_interactions=interactions,
+    )
+
+    assert report["run"]["fixture_id"] == "dummy_blocked_head_v1"
+    assert report["operator_interactions"] == interactions
 
 
 def test_write_qualification_artifacts_writes_json_and_summary_csv(tmp_path):
@@ -319,3 +408,30 @@ def test_factory_v3_synthetic_full_report_passes_expected_id_enforcement(tmp_pat
     assert report["raw_summary"]["total"] == 31
     metric_names = {item["metric_name"] for item in report["analysis"]["metric_evaluations"]}
     assert {"cv_pct", "p_mean", "r_mean", "ratio", "p_out", "r_out"}.issubset(metric_names)
+
+
+def test_gripper_seal_synthetic_report_passes_expected_id_enforcement(tmp_path):
+    from tools.qualification.manifest import load_manifest
+
+    manifest = load_manifest("gripper_seal_v1")
+    artifacts = create_run_artifacts("LC-0001", output_root=tmp_path, timestamp="20260513T120000Z")
+
+    report = normalize_report(
+        _raw_gripper_seal_selftest(),
+        manifest,
+        _identity(tmp_path),
+        artifacts,
+        fixture_id="dummy_blocked_head_v1",
+        operator_interactions=[{"stage": "load_dummy_head", "message": "load", "confirmed_at": "2026-05-13T00:00:01Z"}],
+    )
+
+    assert report["overall_status"] == "pass"
+    assert report["run"]["fixture_id"] == "dummy_blocked_head_v1"
+    assert report["manifest_checks"]["missing_test_ids"] == []
+    assert report["results"][0]["metrics"]["target_psi_milli"] == 1000
+    assert report["results"][0]["metrics"]["reg_vent"] == 0
+    assert report["results"][0]["metrics"]["head_valve_mode"] == "both"
+    assert report["results"][0]["metrics"]["gripper_close_count"] == 1
+    assert report["results"][0]["metrics"]["refresh"] == 0
+    metric_names = {item["metric_name"] for item in report["analysis"]["metric_evaluations"]}
+    assert {"drop_raw", "slope_raw_min", "seal_ms", "repeat_span_raw", "seal_ms_min"}.issubset(metric_names)

@@ -1057,6 +1057,7 @@ void Orchestrator::executeCommand(const Command &cmd) {
 				  request.runPressureDiagnostics = (cmd.p2Len > 0u) && (cmd.p2u() != 0u);
 				  request.exportPressureTrace = request.runPressureDiagnostics;
 				  request.selectedPressureTraceTest = (cmd.p3Len >= 2u) ? static_cast<uint16_t>(cmd.p3u() & 0xFFFFu) : 0u;
+				  request.selectedDiagnosticId = request.selectedPressureTraceTest;
 
 				  (void)DiagnosticsRunner::runSelfTest(*this, request);
 				  _selfTestAbortRequested = false;

@@ -19,6 +19,8 @@ class QualificationManifest:
     expected_test_ids: tuple[int, ...]
     fixtures: tuple[dict[str, Any], ...]
     enforce_expected_test_ids: bool
+    requires_operator_prompts: bool
+    selftest_args: tuple[str, ...]
     analysis_rules: dict[str, Any]
     raw: dict[str, Any]
 
@@ -31,6 +33,8 @@ class QualificationManifest:
             "expected_test_ids": list(self.expected_test_ids),
             "fixtures": [dict(item) for item in self.fixtures],
             "enforce_expected_test_ids": bool(self.enforce_expected_test_ids),
+            "requires_operator_prompts": bool(self.requires_operator_prompts),
+            "selftest_args": list(self.selftest_args),
             "analysis_rules": dict(self.analysis_rules),
         }
 
@@ -124,6 +128,19 @@ def parse_manifest(payload: dict[str, Any]) -> QualificationManifest:
     if not isinstance(enforce_expected, bool):
         raise ManifestError("Manifest 'enforce_expected_test_ids' must be a boolean when present.")
 
+    requires_operator_prompts = payload.get("requires_operator_prompts", False)
+    if not isinstance(requires_operator_prompts, bool):
+        raise ManifestError("Manifest 'requires_operator_prompts' must be a boolean when present.")
+
+    selftest_args = payload.get("selftest_args", [])
+    if not isinstance(selftest_args, list):
+        raise ManifestError("Manifest 'selftest_args' must be a list when present.")
+    parsed_selftest_args: list[str] = []
+    for item in selftest_args:
+        if not isinstance(item, str) or not item.strip():
+            raise ManifestError("Manifest 'selftest_args' entries must be non-empty strings.")
+        parsed_selftest_args.append(item.strip())
+
     return QualificationManifest(
         schema_version=schema_version,
         manifest_id=manifest_id,
@@ -132,6 +149,8 @@ def parse_manifest(payload: dict[str, Any]) -> QualificationManifest:
         expected_test_ids=_parse_expected_test_ids(payload),
         fixtures=tuple(dict(item) for item in fixtures),
         enforce_expected_test_ids=enforce_expected,
+        requires_operator_prompts=requires_operator_prompts,
+        selftest_args=tuple(parsed_selftest_args),
         analysis_rules=_parse_analysis_rules(payload),
         raw=dict(payload),
     )

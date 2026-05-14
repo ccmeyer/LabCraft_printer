@@ -69,6 +69,8 @@ def normalize_report(
     artifacts: RunArtifacts,
     *,
     selftest_returncode: int = 0,
+    fixture_id: str | None = None,
+    operator_interactions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     summary = dict(raw_selftest.get("summary") or {})
     aborted = bool(raw_selftest.get("aborted"))
@@ -96,6 +98,7 @@ def normalize_report(
             "report_path": str(artifacts.report_path),
             "summary_csv_path": str(artifacts.summary_csv_path),
             "selftest_returncode": int(selftest_returncode),
+            "fixture_id": fixture_id,
         },
         "overall_status": overall_status,
         "raw_summary": summary,
@@ -111,6 +114,7 @@ def normalize_report(
         "verdict": verdict,
         "warnings": list(analysis.get("warnings") or []),
         "operator_notes": list(analysis.get("operator_notes") or []),
+        "operator_interactions": list(operator_interactions or []),
     }
 
 
@@ -276,6 +280,8 @@ def write_qualification_artifacts(
     *,
     raw_source_path: str | Path | None = None,
     selftest_returncode: int = 0,
+    fixture_id: str | None = None,
+    operator_interactions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if raw_source_path is None:
         write_json_atomic(artifacts.raw_selftest_path, raw_selftest)
@@ -290,6 +296,8 @@ def write_qualification_artifacts(
         identity,
         artifacts,
         selftest_returncode=selftest_returncode,
+        fixture_id=fixture_id,
+        operator_interactions=operator_interactions,
     )
     write_json_atomic(artifacts.report_path, report)
     write_summary_csv(artifacts.summary_csv_path, report)

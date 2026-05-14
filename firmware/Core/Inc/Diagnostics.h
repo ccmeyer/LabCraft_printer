@@ -14,6 +14,7 @@ struct DiagnosticsRequest {
     bool runPressureDiagnostics = false;
     bool exportPressureTrace = false;
     uint16_t selectedPressureTraceTest = 0;
+    uint16_t selectedDiagnosticId = 0;
 };
 
 struct DiagnosticsSummary {

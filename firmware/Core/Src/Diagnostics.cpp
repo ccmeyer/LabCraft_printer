@@ -13,6 +13,7 @@
 #include "MotionQualificationMath.h"
 #include "PressureRegulatorMath.h"
 #include "PressureQualificationMath.h"
+#include "GripperSealQualificationMath.h"
 #include "PressureTargetPolicy.h"
 #include "ValvePulseQualificationMath.h"
 #include "PressureSensor.h"
@@ -74,6 +75,9 @@ static constexpr DiagnosticTestDescriptor kDiagnosticTests[] = {
     {2401u, "print_valve_pulse_drop_repeatability_factory", "pulse", "FULL", "safe_gate_or_full"},
     {2402u, "refuel_valve_pulse_drop_repeatability_factory", "pulse", "FULL", "safe_gate_or_full"},
     {2403u, "dual_valve_interaction_factory", "pulse", "FULL", "safe_gate_or_full"},
+    {2501u, "gripper_seal_closed_decay_factory", "gripper", "FULL", "explicit_selection"},
+    {2502u, "gripper_seal_hold_duration_factory", "gripper", "FULL", "explicit_selection"},
+    {2503u, "gripper_seal_repeatability_factory", "gripper", "FULL", "explicit_selection"},
     {2006u, "emergency_abort_and_safe_stop_full", "safety", "FULL", "safe_gate_or_full"},
     {2101u, "pressure_recovery_trace_print_single", "pressure_trace", "FULL", "explicit_flag"},
     {2102u, "pressure_recovery_trace_print_repeated", "pressure_trace", "FULL", "explicit_flag"},
@@ -148,7 +152,10 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
     uint16_t passed = 0;
     uint16_t failed = 0;
     bool aborted = false;
+    const uint16_t selectedDiagnosticId =
+        (request.selectedDiagnosticId != 0u) ? request.selectedDiagnosticId : request.selectedPressureTraceTest;
     const uint16_t selectedPressureTraceTest = request.selectedPressureTraceTest;
+    const bool runGripperSealSuite = (selectedDiagnosticId == 2500u);
     const bool runPressureSweepCore = (selectedPressureTraceTest == 2301u);
     const bool runPressureSweepExtended = (selectedPressureTraceTest == 2302u);
     const bool runPressureSweepFocused = (selectedPressureTraceTest == 2303u);
@@ -157,7 +164,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
     const bool runSinglePressureTraceSelection =
         (selectedPressureTraceTest >= 2101u) && (selectedPressureTraceTest <= 2104u);
                   auto shouldRunPressureTraceCase = [&](uint16_t testId) {
-                    if (runPressureSweepCore || runPressureSweepExtended || runPressureSweepFocused || runPressureSweepMicro) {
+                    if (runPressureSweepCore || runPressureSweepExtended || runPressureSweepFocused || runPressureSweepMicro || runGripperSealSuite) {
                       return false;
                     }
                     if (runSinglePressureTraceSelection) {
@@ -200,6 +207,28 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 				    }
 				    return true;
 				  };
+
+                  auto finishSelfTestNow = [&]() -> DiagnosticsSummary {
+                    comm->setStatusPaused(true);
+                    uint8_t donePayload[64] = {0};
+                    const size_t doneLen = DiagnosticResultEmitter::buildDonePayload(
+                        donePayload,
+                        sizeof(donePayload),
+                        outSeq8,
+                        runId,
+                        total,
+                        passed,
+                        failed,
+                        aborted,
+                        HAL_GetTick());
+                    comm->sendFrame(comm->handle(), donePayload, doneLen);
+                    _selfTestAbortRequested = false;
+                    summary.total = total;
+                    summary.passed = passed;
+                    summary.failed = failed;
+                    summary.aborted = aborted;
+                    return summary;
+                  };
 
                   auto maybeSendProgress = [&](const char* stage) {
                     const uint32_t nowMs = HAL_GetTick();
@@ -784,6 +813,287 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 					    return pClosed;
 					#endif
 					  };
+
+                      if (runGripperSealSuite) {
+                        static constexpr uint32_t kSetupTimeoutMs = 5000u;
+                        static constexpr uint32_t kShortHoldMs = 30000u;
+                        static constexpr uint32_t kLongHoldMs = 60000u;
+                        static constexpr uint32_t kRepeatHoldMs = 5000u;
+                        static constexpr uint32_t kRepeatCount = 3u;
+                        static constexpr uint32_t kSealDropThresholdRaw = 100u;
+                        static constexpr uint32_t kSealTargetPsiMilli = 1000u;
+                        static constexpr int32_t kSealTargetRaw = static_cast<int32_t>(
+                            1638u + ((kSealTargetPsiMilli * 13107u + 7500u) / 15000u));
+                        uint32_t headValveActivationCount = 0u;
+                        uint32_t gripperCloseCount = 0u;
+                        const char* headValveMode =
+                        #if (LC_PRESSURE_PORTS > 1)
+                            "both";
+                        #else
+                            "print";
+                        #endif
+
+                        struct SealRun {
+                          bool setupOk = false;
+                          bool timeout = false;
+                          bool headValveActive = false;
+                          int32_t targetRaw = 0;
+                          int32_t pStartRaw = 0;
+                          int32_t pEndRaw = 0;
+                          int32_t rStartRaw = 0;
+                          int32_t rEndRaw = 0;
+                          uint32_t pDropRaw = 0u;
+                          uint32_t rDropRaw = 0u;
+                          uint32_t holdMs = 0u;
+                          GripperSealQualificationMath::DecaySummary decay{};
+                        };
+
+                        PressureSensor* sensor = PressureSensor::instance();
+                        Printer* printer = Printer::instance();
+
+                        auto closePressurePath = [&]() {
+                          if (printer != nullptr) {
+                            printer->endDiagnosticValveHold();
+                          }
+                          PressureRegulator::regP().pause();
+                          PressureRegulator::regP().closeValve();
+                        #if (LC_PRESSURE_PORTS > 1)
+                          PressureRegulator::regR().pause();
+                          PressureRegulator::regR().closeValve();
+                        #endif
+                        };
+
+                        auto emitSkippedSealRows = [&](bool gripperOk) -> bool {
+                          char metrics[224];
+                          snprintf(metrics, sizeof(metrics),
+                                   "target_psi_milli=%lu;target_raw=%ld;head_valve_mode=%s;head_valve_active=0;reg_vent=0;gripper_close_count=%lu;refresh=0;drop_raw=0;slope_raw_min=0;seal_ms=0;timeout=1;grip=%u",
+                                   static_cast<unsigned long>(kSealTargetPsiMilli),
+                                   static_cast<long>(kSealTargetRaw),
+                                   headValveMode,
+                                   static_cast<unsigned long>(gripperCloseCount),
+                                   static_cast<unsigned>(gripperOk ? 1u : 0u));
+                          if (!runOne(2501, "gripper_seal_closed_decay_factory", false, metrics)) return false;
+                          if (!runOne(2502, "gripper_seal_hold_duration_factory", false, metrics)) return false;
+                          if (!runOne(2503, "gripper_seal_repeatability_factory", false, metrics)) return false;
+                          return true;
+                        };
+
+                        auto runSealMeasurement = [&](uint32_t holdMs, bool stopAtThreshold) -> SealRun {
+                          SealRun run{};
+                          run.holdMs = holdMs;
+                          run.targetRaw = kSealTargetRaw;
+                          if (!sensor || !printer) {
+                            run.timeout = true;
+                            closePressurePath();
+                            return run;
+                          }
+
+                          PressureRegulator& regP = PressureRegulator::regP();
+                          const bool stepUpP = static_cast<int32_t>(sensor->getControlSample(0u).raw) <= kSealTargetRaw;
+                          regP.closeValve();
+                          regP.start();
+                          xEventGroupClearBits(_doneEvents, BIT_PRESSURE_P_READY);
+                          regP.setTargetSafe(kSealTargetRaw);
+                          run.targetRaw = static_cast<int32_t>(regP.getTarget());
+                          const PressureWaitResult readyP = waitPressureReady(regP,
+                                                                              0u,
+                                                                              run.targetRaw,
+                                                                              stepUpP,
+                                                                              kSetupTimeoutMs,
+                                                                              kSealDropThresholdRaw);
+                          bool readyOk = readyP.accepted;
+#if (LC_PRESSURE_PORTS > 1)
+                          PressureRegulator& regR = PressureRegulator::regR();
+                          const bool stepUpR = static_cast<int32_t>(sensor->getControlSample(1u).raw) <= kSealTargetRaw;
+                          regR.closeValve();
+                          regR.start();
+                          xEventGroupClearBits(_doneEvents, BIT_PRESSURE_R_READY);
+                          regR.setTargetSafe(kSealTargetRaw);
+                          const PressureWaitResult readyR = waitPressureReady(regR,
+                                                                              1u,
+                                                                              static_cast<int32_t>(regR.getTarget()),
+                                                                              stepUpR,
+                                                                              kSetupTimeoutMs,
+                                                                              kSealDropThresholdRaw);
+                          readyOk = readyOk && readyR.accepted;
+#endif
+                          if (!readyOk || _selfTestAbortRequested) {
+                            run.timeout = true;
+                            closePressurePath();
+                            return run;
+                          }
+
+                          run.headValveActive = printer->beginDiagnosticValveHold(PulseMode::BOTH);
+                          if (!run.headValveActive) {
+                            run.timeout = true;
+                            closePressurePath();
+                            return run;
+                          }
+                          headValveActivationCount++;
+                          if (!delayWithWatchdog(250u, "gripper_seal_pressurize")) {
+                            run.timeout = true;
+                            closePressurePath();
+                            return run;
+                          }
+
+                          regP.pause();
+#if (LC_PRESSURE_PORTS > 1)
+                          regR.pause();
+#endif
+                          run.pStartRaw = static_cast<int32_t>(sensor->getControlSample(0u).raw);
+#if (LC_PRESSURE_PORTS > 1)
+                          run.rStartRaw = static_cast<int32_t>(sensor->getControlSample(1u).raw);
+#endif
+                          int32_t currentP = run.pStartRaw;
+                          int32_t currentR = run.rStartRaw;
+                          uint32_t thresholdCrossMs = 0u;
+                          const uint32_t startMs = HAL_GetTick();
+                          while ((HAL_GetTick() - startMs) < holdMs) {
+                            Watchdog_CheckIn(CRASH_TASK_ORCH);
+                            maybeSendProgress("gripper_seal_hold");
+                            if (_selfTestAbortRequested) {
+                              run.timeout = true;
+                              break;
+                            }
+                            currentP = static_cast<int32_t>(sensor->getControlSample(0u).raw);
+#if (LC_PRESSURE_PORTS > 1)
+                            currentR = static_cast<int32_t>(sensor->getControlSample(1u).raw);
+#endif
+                            const uint32_t currentDrop = GripperSealQualificationMath::worstDropRaw(
+                                run.pStartRaw,
+                                currentP,
+#if (LC_PRESSURE_PORTS > 1)
+                                true,
+                                run.rStartRaw,
+                                currentR
+#else
+                                false,
+                                0,
+                                0
+#endif
+                            );
+                            if (thresholdCrossMs == 0u &&
+                                currentDrop > kSealDropThresholdRaw) {
+                              thresholdCrossMs = HAL_GetTick() - startMs;
+                              if (stopAtThreshold) {
+                                break;
+                              }
+                            }
+                            vTaskDelay(pdMS_TO_TICKS(100u));
+                          }
+                          run.pEndRaw = currentP;
+#if (LC_PRESSURE_PORTS > 1)
+                          run.rEndRaw = currentR;
+#endif
+                          run.pDropRaw = GripperSealQualificationMath::absDiff(run.pStartRaw, run.pEndRaw);
+#if (LC_PRESSURE_PORTS > 1)
+                          run.rDropRaw = GripperSealQualificationMath::absDiff(run.rStartRaw, run.rEndRaw);
+                          const bool useRefuelDrop = run.rDropRaw > run.pDropRaw;
+#else
+                          const bool useRefuelDrop = false;
+#endif
+                          const uint32_t elapsedMs = HAL_GetTick() - startMs;
+                          run.decay = GripperSealQualificationMath::summarizeDecay(useRefuelDrop ? run.rStartRaw : run.pStartRaw,
+                                                                                   useRefuelDrop ? run.rEndRaw : run.pEndRaw,
+                                                                                   elapsedMs,
+                                                                                   thresholdCrossMs,
+                                                                                   kSealDropThresholdRaw);
+                          run.setupOk = !run.timeout && !_selfTestAbortRequested;
+                          printer->endDiagnosticValveHold();
+                          return run;
+                        };
+
+                        xEventGroupClearBits(_doneEvents, BIT_GRIPPER_DONE);
+                        MX_GRIPPER_Close();
+                        gripperCloseCount++;
+                        const bool gripperCommandOk = waitForBit(BIT_GRIPPER_DONE);
+                        MX_GRIPPER_StopRefresh();
+
+                        if (!gripperCommandOk || !sensor || !printer) {
+                          closePressurePath();
+                          (void)emitSkippedSealRows(gripperCommandOk);
+                          return finishSelfTestNow();
+                        }
+
+                        const SealRun shortRun = runSealMeasurement(kShortHoldMs, false);
+                        char metrics2501[224];
+                        snprintf(metrics2501, sizeof(metrics2501),
+                                 "target_psi_milli=%lu;target_raw=%ld;head_valve_mode=%s;head_valve_active=%u;reg_vent=0;gripper_close_count=%lu;refresh=0;drop_raw=%lu;slope_raw_min=%ld;timeout=%u",
+                                 static_cast<unsigned long>(kSealTargetPsiMilli),
+                                 static_cast<long>(shortRun.targetRaw),
+                                 headValveMode,
+                                 static_cast<unsigned>(shortRun.headValveActive ? 1u : 0u),
+                                 static_cast<unsigned long>(gripperCloseCount),
+                                 static_cast<unsigned long>(shortRun.decay.dropRaw),
+                                 static_cast<long>(shortRun.decay.slopeRawPerMin),
+                                 static_cast<unsigned>(shortRun.timeout ? 1u : 0u));
+                        if (!runOne(2501, "gripper_seal_closed_decay_factory", shortRun.setupOk, metrics2501)) {
+                          closePressurePath();
+                          return finishSelfTestNow();
+                        }
+
+                        const SealRun holdRun = runSealMeasurement(kLongHoldMs, true);
+                        char metrics2502[192];
+                        snprintf(metrics2502, sizeof(metrics2502),
+                                 "target_raw=%ld;head_valve_mode=%s;reg_vent=0;hold_ms=%lu;p_start=%ld;p_end=%ld;p_drop=%lu;r_start=%ld;r_end=%ld;r_drop=%lu;drop_raw=%lu;thr_ms=%lu;seal_ms=%lu;timeout=%u",
+                                 static_cast<long>(holdRun.targetRaw),
+                                 headValveMode,
+                                 static_cast<unsigned long>(holdRun.holdMs),
+                                 static_cast<long>(holdRun.pStartRaw),
+                                 static_cast<long>(holdRun.pEndRaw),
+                                 static_cast<unsigned long>(holdRun.pDropRaw),
+                                 static_cast<long>(holdRun.rStartRaw),
+                                 static_cast<long>(holdRun.rEndRaw),
+                                 static_cast<unsigned long>(holdRun.rDropRaw),
+                                 static_cast<unsigned long>(holdRun.decay.dropRaw),
+                                 static_cast<unsigned long>(holdRun.decay.timeToThresholdMs),
+                                 static_cast<unsigned long>(holdRun.decay.sealPassDurationMs),
+                                 static_cast<unsigned>(holdRun.timeout ? 1u : 0u));
+                        if (!runOne(2502, "gripper_seal_hold_duration_factory", holdRun.setupOk, metrics2502)) {
+                          closePressurePath();
+                          return finishSelfTestNow();
+                        }
+
+                        uint32_t repeatDrops[kRepeatCount]{};
+                        uint32_t repeatSealMs[kRepeatCount]{};
+                        uint32_t repeatCompleted = 0u;
+                        bool repeatSetupOk = true;
+                        for (uint32_t idx = 0u; idx < kRepeatCount; ++idx) {
+                          const SealRun repeatRun = runSealMeasurement(kRepeatHoldMs, false);
+                          if (!repeatRun.setupOk) {
+                            repeatSetupOk = false;
+                            break;
+                          }
+                          repeatDrops[repeatCompleted] = repeatRun.decay.dropRaw;
+                          repeatSealMs[repeatCompleted] = repeatRun.decay.sealPassDurationMs;
+                          repeatCompleted++;
+                        }
+                        const uint32_t repeatSpan = GripperSealQualificationMath::spanRaw(repeatDrops, repeatCompleted);
+                        const uint32_t sealMsMin = GripperSealQualificationMath::minValue(repeatSealMs, repeatCompleted);
+                        char metrics2503[176];
+                        snprintf(metrics2503, sizeof(metrics2503),
+                                 "target_raw=%ld;head_valve_mode=%s;reg_vent=0;gripper_close_count=%lu;refresh=0;activations=%lu;cycles=%lu;drop_min=%lu;drop_max=%lu;repeat_span_raw=%lu;seal_ms_min=%lu;timeout=%u",
+                                 static_cast<long>(kSealTargetRaw),
+                                 headValveMode,
+                                 static_cast<unsigned long>(gripperCloseCount),
+                                 static_cast<unsigned long>(headValveActivationCount),
+                                 static_cast<unsigned long>(repeatCompleted),
+                                 static_cast<unsigned long>(repeatCompleted ? GripperSealQualificationMath::minValue(repeatDrops, repeatCompleted) : 0u),
+                                 static_cast<unsigned long>(repeatCompleted ? GripperSealQualificationMath::maxValue(repeatDrops, repeatCompleted) : 0u),
+                                 static_cast<unsigned long>(repeatSpan),
+                                 static_cast<unsigned long>(sealMsMin),
+                                 static_cast<unsigned>(repeatSetupOk ? 0u : 1u));
+                        if (!runOne(2503,
+                                    "gripper_seal_repeatability_factory",
+                                    repeatSetupOk && (repeatCompleted == kRepeatCount),
+                                    metrics2503)) {
+                          closePressurePath();
+                          return finishSelfTestNow();
+                        }
+
+                        closePressurePath();
+                        return finishSelfTestNow();
+                      }
 
                       auto psiToRaw = [](uint32_t psiMilli) -> uint16_t {
                         const uint32_t psiOffset = 1638u;

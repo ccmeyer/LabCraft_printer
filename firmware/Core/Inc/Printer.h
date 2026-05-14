@@ -112,6 +112,10 @@ public:
   void pulsePrint();
   void pulseRefuel();
 
+  /// Diagnostic-only: hold 3-way print/refuel valves active beyond one-pulse timing.
+  bool beginDiagnosticValveHold(PulseMode mode);
+  void endDiagnosticValveHold();
+
   void onCompareMatch(TIM_HandleTypeDef* htim);
 
   /// Call this _before_ enqueue() to flash after the last pulse
@@ -146,6 +150,9 @@ private:
   volatile bool     _cancelRequested = false;
   bool _diagReadyTimeoutEnabled = false;
   TickType_t _diagReadyTimeoutTicks = 0;
+  bool _diagnosticValveHoldActive = false;
+  bool _diagnosticHoldPrint = false;
+  bool _diagnosticHoldRefuel = false;
 
   bool  _flashOnLast     = false;
 

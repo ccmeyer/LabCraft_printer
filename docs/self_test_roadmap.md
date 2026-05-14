@@ -23,6 +23,7 @@ The intent is to increase quantitative coverage without turning the firmware, Py
 | Milestone 4: Motion Qualification Slice | Complete | `2007 motion_home_repeatability_factory`, `2008 motion_pattern_return_factory`, `factory_acceptance_v1` |
 | Milestone 5: Pressure Regulator Leak and Step-Position Slice | Complete | `2201 pressure_hold_leak_factory`, `2202 pressure_target_cycle_repeatability_factory`, `2203 pressure_motor_position_hysteresis_factory`, `factory_acceptance_v2`; FULL HIL `hil_reports/selftest_20260513_191209.json` |
 | Milestone 6: Valve Pulse Repeatability Slice | Complete | `2401 print_valve_pulse_drop_repeatability_factory`, `2402 refuel_valve_pulse_drop_repeatability_factory`, `2403 dual_valve_interaction_factory`, `factory_acceptance_v3`; FULL HIL `hil_reports/selftest_20260513_200311.json`; qualification pass with candidate warnings |
+| Milestone 7: Local Operator-Gated Gripper Seal Qualification | Code complete; local operator HIL pending | `gripper_seal_v1`, selected firmware suite `2501`-`2503`; local operator HIL pending |
 | Later fixture-dependent diagnostics | Not started | Planned |
 
 ## Current Call Path
@@ -733,39 +734,69 @@ Rollback:
 
 Objective:
 
-Add a fixture-gated gripper seal diagnostic using a dummy blocked printer head to compare pressure retention with the gripper engaged versus disengaged.
+Add a fixture-gated gripper seal diagnostic using a non-captive dummy blocked printer head. The test is local-only and operator-mediated: the operator loads the dummy head when prompted, the firmware closes the gripper and measures seal behavior without opening it during the diagnostic, then the operator supports/removes the dummy head during an explicit teardown prompt.
 
 Proposed test IDs:
 
 - `2501 gripper_seal_closed_decay_factory`
-- `2502 gripper_seal_open_control_factory`
-- `2503 gripper_clamp_repeatability_factory`
+- `2502 gripper_seal_hold_duration_factory`
+- `2503 gripper_seal_repeatability_factory`
+
+Deferred / not in the first implementation:
+
+- Open-control testing with the dummy head loaded. Because the dummy head is not captive and there is no gripper-position feedback sensor, opening the gripper is an operator teardown action, not an in-test control condition.
 
 Firmware responsibilities:
 
 - Confirm or require fixture-gated profile.
-- Apply gripper close/open using existing gripper primitives.
-- Apply conservative pressure stimulus.
+- Apply gripper close using existing gripper primitives after an operator load prompt.
+- Apply a conservative `1 psi` pressure stimulus through the head-side print/refuel 3-way valves.
 - Capture pressure decay/drop metrics.
-- Restore gripper and pressure system to safe state.
+- Keep the gripper closed during diagnostic execution; do not automatically open it on normal diagnostic completion.
+- On abort or completion, deactivate head-side valves, close regulator vent valves, and stop pressure safely while leaving the gripper closed until the operator confirms the dummy head is supported.
+- Open the gripper only in a separate operator-confirmed teardown step.
 
 Python responsibilities:
 
-- Compare closed-grip decay/drop against open/control decay/drop.
-- Flag insufficient sealing, inconsistent clamp behavior, or fixture failure.
+- Run this suite only from the local machine with interactive operator prompts; do not use unattended SSH/HIL automation for this fixture.
+- Prompt the operator to load the dummy blocked printer head, confirm it is supported/aligned, and continue.
+- Prompt the operator to support the dummy head before any gripper-open teardown action.
+- Prompt the operator to remove the dummy head after the gripper is opened.
+- Analyze closed-grip pressure retention, seal decay rate, and how long the gripper maintains seal without refresh.
+- Flag insufficient sealing, inconsistent clamp behavior, short hold duration, or fixture setup failure.
 - Store operator notes for fixture setup.
 
 Expected metrics:
 
-- `fixture_id`
-- `gripper_state`
-- `pressure_target_raw`
+- `fixture`
+- `cmd`
+- `refresh`
+- `target_psi_milli`
+- `target_raw`
+- `head_valve_mode`
+- `head_valve_active`
+- `reg_vent`
+- `gripper_close_count`
 - `hold_ms`
-- `pressure_drop_raw`
-- `decay_slope_raw_per_min`
-- `closed_open_drop_ratio`
+- `p_start`
+- `p_end`
+- `p_drop`
+- `r_start`
+- `r_end`
+- `r_drop`
+- `drop_raw`
+- `slope_raw_min`
+- `thr_ms`
+- `seal_ms`
 - `repeat_span_raw`
-- `gripper_cycle_count`
+- `seal_ms_min`
+- `timeout`
+
+Initial suite shape:
+
+- `2501` closes the gripper on the loaded dummy head, applies `1 psi` through the head-side print/refuel valve path, then records 30 seconds of seal decay.
+- `2502` keeps the gripper closed without refreshing close pressure and records up to 60 seconds within the pressure-drop threshold for initial validation.
+- `2503` repeats three short pressure/decay cycles on the same loaded dummy head while keeping the gripper closed and without re-closing between cycles. Multi-load repeatability is deferred until a higher-level multi-run workflow can safely prompt for load/support/remove between runs.
 
 Validation:
 
@@ -776,27 +807,33 @@ powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_checks.ps1 -Con
 Manual HIL run should be operator-gated:
 
 ```bash
-python3 tools/qualification/cli.py run --suite gripper_seal_v1 --machine-id <machine_id> --fixture dummy_blocked_head_v1 --port /dev/ttyAMA0
+python3 tools/run_qualification.py --manifest gripper_seal_v1 --machine-id <machine_id> --fixture dummy_blocked_head_v1 --operator-prompts --port /dev/ttyAMA0 --timeout-ms 420000
 ```
+
+The gripper seal suite is not intended for unattended SSH execution. If run over SSH, the operator running the command must be physically present at the machine and able to respond to prompts at the correct time.
 
 Manual checklist:
 
-- Dummy blocked printer head is installed.
+- Dummy blocked printer head is not loaded before the suite starts unless the first prompt explicitly requests it.
+- Operator is physically present at the machine and can support the dummy head during load/unload.
 - Fixture is rated for the selected pressure.
 - Operator confirms gripper area is clear.
-- Operator confirms release path is safe.
+- Operator confirms a soft catch/support path is available in case of power loss.
+- Operator confirms no test step will intentionally open the gripper while the dummy head is unsupported.
 
 Proceed only when:
 
-- Closed versus open fixture behavior is clearly separable on a known-good machine.
+- Closed-seal pressure retention is clearly measurable on a known-good machine.
 - A loose/incorrect fixture is flagged as setup failure, not silently as machine failure.
-- Gripper state is restored at the end.
+- The teardown prompt leaves the dummy head safely removed and the gripper state known.
 
 Stop conditions:
 
-- Fixture leaks before gripper comparison begins.
+- Fixture leaks before closed-seal measurement begins.
 - Pressure response cannot distinguish fixture state.
 - Gripper refresh settings are unknown or unsafe.
+- Operator cannot remain physically present through load, test, and unload prompts.
+- The dummy head is dropped or becomes unsupported.
 
 Rollback:
 

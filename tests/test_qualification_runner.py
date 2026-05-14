@@ -18,6 +18,52 @@ def _raw_selftest():
     }
 
 
+def _raw_gripper_selftest():
+    return {
+        "run_id": 5678,
+        "profile": "FULL",
+        "started_at": "2026-05-13T00:00:00Z",
+        "finished_at": "2026-05-13T00:05:00Z",
+        "aborted": False,
+        "summary": {"total": 3, "passed": 3, "failed": 0},
+        "results": [
+            {
+                "test_id": 2501,
+                "name": "gripper_seal_closed_decay_factory",
+                "pass": True,
+                "metrics": {
+                    "target_psi_milli": 1000,
+                    "target_raw": 2512,
+                    "head_valve_mode": "both",
+                    "head_valve_active": 1,
+                    "reg_vent": 0,
+                    "gripper_close_count": 1,
+                    "refresh": 0,
+                    "drop_raw": 20,
+                    "slope_raw_min": 40,
+                    "timeout": 0,
+                },
+            },
+            {
+                "test_id": 2502,
+                "name": "gripper_seal_hold_duration_factory",
+                "pass": True,
+                "metrics": {"target_raw": 2512, "head_valve_mode": "both", "reg_vent": 0, "seal_ms": 60000, "drop_raw": 30, "timeout": 0},
+            },
+            {
+                "test_id": 2503,
+                "name": "gripper_seal_repeatability_factory",
+                "pass": True,
+                "metrics": {"repeat_span_raw": 12, "seal_ms_min": 5000, "timeout": 0},
+            },
+        ],
+        "host_checks": [
+            {"name": "hello_ack", "pass": True, "details": {"seq8": 1}},
+            {"name": "goodbye_skipped", "pass": True, "details": {"reason": "operator_gated_gripper_teardown"}},
+        ],
+    }
+
+
 def _manifest_path(tmp_path):
     path = tmp_path / "unit_manifest.json"
     path.write_text(
@@ -34,6 +80,10 @@ def _manifest_path(tmp_path):
         encoding="utf-8",
     )
     return path
+
+
+def _gripper_manifest_ref():
+    return "gripper_seal_v1"
 
 
 def test_run_qualification_wraps_fake_selftest_invoker(tmp_path):
@@ -119,6 +169,16 @@ def test_default_qualification_manifest_is_factory_acceptance_v3():
     args = parser.parse_args([])
 
     assert args.manifest == "factory_acceptance_v3"
+    gripper_args = parser.parse_args([
+        "--manifest",
+        "gripper_seal_v1",
+        "--fixture",
+        "dummy_blocked_head_v1",
+        "--operator-prompts",
+    ])
+    assert gripper_args.manifest == "gripper_seal_v1"
+    assert gripper_args.fixture == "dummy_blocked_head_v1"
+    assert gripper_args.operator_prompts is True
 
 
 def test_qualification_can_convert_existing_raw_report_without_invoker(tmp_path):
@@ -144,6 +204,132 @@ def test_qualification_can_convert_existing_raw_report_without_invoker(tmp_path)
     assert called is False
     assert result.raw_selftest_path.read_text(encoding="utf-8") == raw_path.read_text(encoding="utf-8")
     assert result.report["schema_version"] == "qualification_report_v1"
+
+
+def test_gripper_seal_manifest_rejects_hardware_run_without_operator_prompts(tmp_path):
+    called = False
+
+    def fake_invoker(_invocation):
+        nonlocal called
+        called = True
+        return 0
+
+    result = run_qualification(
+        manifest_ref=_gripper_manifest_ref(),
+        machine_id="LC-0001",
+        identity_path=tmp_path / "local" / "machine_identity.json",
+        output_root=tmp_path / "qualification",
+        fixture_id="dummy_blocked_head_v1",
+        operator_prompts=False,
+        invoker=fake_invoker,
+    )
+
+    assert result.returncode == 3
+    assert called is False
+    assert result.report["overall_status"] == "fail"
+    assert result.report["host_checks"][0]["name"] == "operator_prompts_required"
+
+
+def test_gripper_seal_manifest_rejects_missing_required_fixture(tmp_path):
+    result = run_qualification(
+        manifest_ref=_gripper_manifest_ref(),
+        machine_id="LC-0001",
+        identity_path=tmp_path / "local" / "machine_identity.json",
+        output_root=tmp_path / "qualification",
+        operator_prompts=True,
+        invoker=lambda _invocation: 0,
+        prompter=lambda _message: None,
+    )
+
+    assert result.returncode == 3
+    assert result.report["host_checks"][0]["name"] == "fixture_required"
+    assert result.report["host_checks"][0]["details"]["allowed_fixture_ids"] == ["dummy_blocked_head_v1"]
+
+
+def test_gripper_seal_operator_prompt_order_and_teardown(tmp_path):
+    events = []
+
+    def fake_prompter(message):
+        if "Load" in message:
+            events.append("prompt:load")
+        elif "Support" in message:
+            events.append("prompt:support")
+        elif "Remove" in message:
+            events.append("prompt:remove")
+        else:
+            events.append(f"prompt:{message}")
+
+    def fake_invoker(invocation):
+        events.append("self-test")
+        assert "--gripper-seal-suite" in invocation.command
+        invocation.raw_report_path.write_text(json.dumps(_raw_gripper_selftest()), encoding="utf-8")
+        return 0
+
+    def fake_gripper_control(action, port, baud):
+        events.append(f"gripper:{action}:{port}:{baud}")
+        return 0
+
+    result = run_qualification(
+        manifest_ref=_gripper_manifest_ref(),
+        port="/dev/ttyAMA0",
+        baud=115200,
+        machine_id="LC-0001",
+        identity_path=tmp_path / "local" / "machine_identity.json",
+        output_root=tmp_path / "qualification",
+        timeout_ms=420000,
+        fixture_id="dummy_blocked_head_v1",
+        operator_prompts=True,
+        invoker=fake_invoker,
+        prompter=fake_prompter,
+        gripper_control=fake_gripper_control,
+    )
+
+    assert result.returncode == 0
+    assert events == [
+        "prompt:load",
+        "self-test",
+        "prompt:support",
+        "gripper:release:/dev/ttyAMA0:115200",
+        "prompt:remove",
+        "gripper:off:/dev/ttyAMA0:115200",
+    ]
+    assert result.report["run"]["fixture_id"] == "dummy_blocked_head_v1"
+    assert [item["stage"] for item in result.report["operator_interactions"]] == [
+        "load_dummy_head",
+        "support_before_release",
+        "remove_dummy_head",
+    ]
+    host_checks = {item["name"]: item for item in result.report["host_checks"]}
+    assert host_checks["gripper_teardown_release"]["pass"] is True
+    assert host_checks["gripper_teardown_off"]["pass"] is True
+
+
+def test_gripper_seal_raw_report_conversion_skips_prompts_and_invoker(tmp_path):
+    raw_path = tmp_path / "gripper_raw.json"
+    raw_path.write_text(json.dumps(_raw_gripper_selftest()), encoding="utf-8")
+    called = False
+
+    def fake_invoker(_invocation):
+        nonlocal called
+        called = True
+        return 99
+
+    result = run_qualification(
+        manifest_ref=_gripper_manifest_ref(),
+        machine_id="LC-0001",
+        identity_path=tmp_path / "local" / "machine_identity.json",
+        output_root=tmp_path / "qualification",
+        raw_report_path=raw_path,
+        fixture_id="dummy_blocked_head_v1",
+        operator_prompts=False,
+        invoker=fake_invoker,
+        prompter=lambda _message: (_ for _ in ()).throw(AssertionError("raw conversion should not prompt")),
+    )
+
+    assert result.returncode == 0
+    assert called is False
+    assert result.report["run"]["fixture_id"] == "dummy_blocked_head_v1"
+    assert result.report["operator_interactions"] == []
 
 
 def test_qualification_cli_raw_report_skips_invoker(tmp_path):
