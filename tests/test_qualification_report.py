@@ -196,6 +196,7 @@ def _raw_gripper_seal_selftest():
             "metrics": {
                 "target_psi_milli": 1000,
                 "target_raw": 2512,
+                "valve_hold_drive": "timer_pwm",
                 "head_valve_mode": "both",
                 "head_valve_active": 1,
                 "reg_vent": 0,
@@ -212,6 +213,7 @@ def _raw_gripper_seal_selftest():
             "pass": True,
             "metrics": {
                 "target_raw": 2512,
+                "valve_hold_drive": "timer_pwm",
                 "head_valve_mode": "both",
                 "reg_vent": 0,
                 "hold_ms": 60000,
@@ -232,6 +234,7 @@ def _raw_gripper_seal_selftest():
             "pass": True,
             "metrics": {
                 "target_raw": 2512,
+                "valve_hold_drive": "timer_pwm",
                 "head_valve_mode": "both",
                 "reg_vent": 0,
                 "gripper_close_count": 1,
@@ -429,6 +432,7 @@ def test_gripper_seal_synthetic_report_passes_expected_id_enforcement(tmp_path):
     assert report["run"]["fixture_id"] == "dummy_blocked_head_v1"
     assert report["manifest_checks"]["missing_test_ids"] == []
     assert report["results"][0]["metrics"]["target_psi_milli"] == 1000
+    assert report["results"][0]["metrics"]["valve_hold_drive"] == "timer_pwm"
     assert report["results"][0]["metrics"]["reg_vent"] == 0
     assert report["results"][0]["metrics"]["head_valve_mode"] == "both"
     assert report["results"][0]["metrics"]["gripper_close_count"] == 1

@@ -82,35 +82,99 @@ def default_gripper_control(action: str, port: str, baud: int) -> int:
         print("Missing dependency: pyserial (import serial failed).")
         return 3
 
-    command_by_action = {
-        "release": 0x10,  # CMD_GRIPPER_OPEN
-        "off": 0x12,      # CMD_GRIPPER_OFF
-    }
-    command = command_by_action.get(action)
-    if command is None:
-        return 3
-
-    seq8 = 0x41 if action == "release" else 0x42
-    seq32 = int(time.time() * 1000) & 0xFFFFFFFF
-    deadline = time.monotonic() + 3.0
-    reader = run_selftest.FrameReader()
-    with serial_mod.Serial(port, int(baud), timeout=0.1) as ser:
-        ser.write(run_selftest.build_control(command, seq8, seq32))
+    def read_matching_frame(ser, reader, deadline: float, predicate):
         while time.monotonic() < deadline:
             chunk = ser.read(128)
             for byte in chunk:
                 frame = reader.feed(byte)
-                if not frame or len(frame) < 2:
-                    continue
-                if frame[0] != run_selftest.CMD_QUEUE_ACK or frame[1] != seq8:
-                    continue
-                tlv = run_selftest.parse_tlvs(frame[2:])
-                ack_result = run_selftest._tlv_u8(tlv, run_selftest.TAG_ACK_RESULT)
-                if ack_result in (run_selftest.ACK_RESULT_ACCEPTED, run_selftest.ACK_RESULT_DUPLICATE):
-                    time.sleep(2.0 if action == "release" else 0.2)
-                    return 0
-                return 3
-    return 3
+                if frame and predicate(frame):
+                    return frame
+        return None
+
+    def send_hello(ser, reader, run_id: int) -> bool:
+        hello_seq8 = 0x40
+        ser.write(run_selftest.build_control(run_selftest.CMD_HELLO, hello_seq8, run_id))
+        deadline = time.monotonic() + 1.5
+        return read_matching_frame(
+            ser,
+            reader,
+            deadline,
+            lambda frame: len(frame) >= 2 and frame[0] == run_selftest.CMD_HELLO_ACK and frame[1] == hello_seq8,
+        ) is not None
+
+    def send_queue_command(ser, reader, command: int, seq8: int, seq32: int) -> bool:
+        ser.write(run_selftest.build_control(command, seq8, seq32))
+        deadline = time.monotonic() + 3.0
+
+        def accepted(frame) -> bool:
+            if len(frame) < 2 or frame[0] != run_selftest.CMD_QUEUE_ACK or frame[1] != seq8:
+                return False
+            tlv = run_selftest.parse_tlvs(frame[2:])
+            ack_seq32 = run_selftest._tlv_u32(tlv, run_selftest.TAG_SEQ32)
+            if ack_seq32 is not None and ack_seq32 != seq32:
+                return False
+            ack_result = run_selftest._tlv_u8(tlv, run_selftest.TAG_ACK_RESULT)
+            return ack_result in (run_selftest.ACK_RESULT_ACCEPTED, run_selftest.ACK_RESULT_DUPLICATE)
+
+        return read_matching_frame(ser, reader, deadline, accepted) is not None
+
+    def send_goodbye(ser, reader, run_id: int, seq32: int) -> bool:
+        goodbye_seq8 = 0x43
+        ser.write(run_selftest.build_control(run_selftest.CMD_GOODBYE, goodbye_seq8, seq32))
+        ack_deadline = time.monotonic() + 2.0
+        got_ack = read_matching_frame(
+            ser,
+            reader,
+            ack_deadline,
+            lambda frame: len(frame) >= 2 and frame[0] == run_selftest.CMD_BYE_ACK and frame[1] == goodbye_seq8,
+        ) is not None
+        if not got_ack:
+            return False
+
+        done_deadline = time.monotonic() + 5.0
+
+        def goodbye_done(frame) -> bool:
+            if len(frame) < 2 or frame[0] != run_selftest.CMD_BYE_DONE or frame[1] != goodbye_seq8:
+                return False
+            tlv = run_selftest.parse_tlvs(frame[2:])
+            observed_seq32 = run_selftest._tlv_u32(tlv, run_selftest.TAG_SEQ32)
+            return observed_seq32 is None or observed_seq32 == seq32
+
+        return read_matching_frame(ser, reader, done_deadline, goodbye_done) is not None
+
+    command_by_action = {
+        "preflight_print": 0x20,   # CMD_PRINT
+        "preflight_refuel": 0x21,  # CMD_REFUEL
+        "release": 0x10,  # CMD_GRIPPER_OPEN
+        "off": 0x12,      # CMD_GRIPPER_OFF
+    }
+    seq8_by_action = {
+        "preflight_print": 0x31,
+        "preflight_refuel": 0x32,
+        "release": 0x41,
+        "off": 0x42,
+    }
+    settle_s_by_action = {
+        "preflight_print": 0.1,
+        "preflight_refuel": 0.1,
+        "release": 2.0,
+        "off": 0.2,
+    }
+
+    run_id = int(time.time() * 1000) & 0xFFFFFFFF
+    reader = run_selftest.FrameReader()
+    with serial_mod.Serial(port, int(baud), timeout=0.1) as ser:
+        if not send_hello(ser, reader, run_id):
+            return 3
+        if action == "shutdown":
+            return 0 if send_goodbye(ser, reader, run_id, 1) else 3
+        command = command_by_action.get(action)
+        if command is None:
+            return 3
+        if not send_queue_command(ser, reader, command, seq8_by_action[action], 1):
+            return 3
+        time.sleep(settle_s_by_action[action])
+        return 0
 
 
 def _build_selftest_command(
@@ -185,6 +249,7 @@ def run_qualification(
     identity = load_or_create_identity(identity_path, machine_id=machine_id)
     artifacts = create_run_artifacts(identity["machine_id"], output_root=output_root)
     interactions: list[dict] = []
+    preflight_host_checks: list[dict] = []
     fixture_id = str(fixture_id or "").strip() or None
 
     if raw_report_path is not None:
@@ -258,6 +323,47 @@ def run_qualification(
             "Load the dummy blocked printer head into the gripper, support it, and confirm it is aligned.",
             prompter,
         )
+        for action, check_name in (
+            ("preflight_print", "gripper_valve_preflight_print"),
+            ("preflight_refuel", "gripper_valve_preflight_refuel"),
+        ):
+            rc = int(gripper_control(action, port, int(baud)))
+            preflight_host_checks.append(
+                {
+                    "name": check_name,
+                    "pass": rc == 0,
+                    "details": {"action": action, "returncode": rc},
+                    "timestamp": _now_iso(),
+                }
+            )
+        if not all(item["pass"] for item in preflight_host_checks):
+            raw_selftest = _raw_missing_report(manifest, 3)
+            raw_selftest["host_checks"] = preflight_host_checks
+            write_json_atomic(artifacts.raw_selftest_path, raw_selftest)
+            report = write_qualification_artifacts(
+                raw_selftest,
+                manifest,
+                identity,
+                artifacts,
+                raw_source_path=artifacts.raw_selftest_path,
+                selftest_returncode=3,
+                fixture_id=fixture_id,
+                operator_interactions=interactions,
+            )
+            return QualificationRunResult(
+                returncode=3,
+                run_dir=artifacts.run_dir,
+                raw_selftest_path=artifacts.raw_selftest_path,
+                report_path=artifacts.report_path,
+                summary_csv_path=artifacts.summary_csv_path,
+                report=report,
+            )
+        _record_prompt(
+            interactions,
+            "confirm_valve_clicks",
+            "Confirm you heard or felt the print/refuel valve clicks.",
+            prompter,
+        )
 
     command = _build_selftest_command(
         run_selftest_path=run_selftest_path,
@@ -286,7 +392,7 @@ def run_qualification(
         raw_source_path = artifacts.raw_selftest_path
 
     if manifest.requires_operator_prompts:
-        host_checks = list(raw_selftest.get("host_checks") or [])
+        host_checks = preflight_host_checks + list(raw_selftest.get("host_checks") or [])
         _record_prompt(
             interactions,
             "support_before_release",
@@ -318,6 +424,17 @@ def run_qualification(
                 "name": "gripper_teardown_off",
                 "pass": off_rc == 0,
                 "details": {"action": "off", "returncode": off_rc},
+                "timestamp": _now_iso(),
+            }
+        )
+        shutdown_rc = int(gripper_control("shutdown", port, int(baud)))
+        if shutdown_rc != 0:
+            print("WARNING: Normal shutdown command failed. Verify pressure regulators, motors, and LED state manually.")
+        host_checks.append(
+            {
+                "name": "gripper_teardown_shutdown",
+                "pass": shutdown_rc == 0,
+                "details": {"action": "shutdown", "returncode": shutdown_rc},
                 "timestamp": _now_iso(),
             }
         )

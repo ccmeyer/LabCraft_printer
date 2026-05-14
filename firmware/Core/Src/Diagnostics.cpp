@@ -866,7 +866,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         auto emitSkippedSealRows = [&](bool gripperOk) -> bool {
                           char metrics[224];
                           snprintf(metrics, sizeof(metrics),
-                                   "target_psi_milli=%lu;target_raw=%ld;head_valve_mode=%s;head_valve_active=0;reg_vent=0;gripper_close_count=%lu;refresh=0;drop_raw=0;slope_raw_min=0;seal_ms=0;timeout=1;grip=%u",
+                                   "target_psi_milli=%lu;target_raw=%ld;valve_hold_drive=timer_pwm;head_valve_mode=%s;head_valve_active=0;reg_vent=0;gripper_close_count=%lu;refresh=0;drop_raw=0;timeout=1;grip=%u",
                                    static_cast<unsigned long>(kSealTargetPsiMilli),
                                    static_cast<long>(kSealTargetRaw),
                                    headValveMode,
@@ -1018,7 +1018,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         const SealRun shortRun = runSealMeasurement(kShortHoldMs, false);
                         char metrics2501[224];
                         snprintf(metrics2501, sizeof(metrics2501),
-                                 "target_psi_milli=%lu;target_raw=%ld;head_valve_mode=%s;head_valve_active=%u;reg_vent=0;gripper_close_count=%lu;refresh=0;drop_raw=%lu;slope_raw_min=%ld;timeout=%u",
+                                 "target_psi_milli=%lu;target_raw=%ld;valve_hold_drive=timer_pwm;head_valve_mode=%s;head_valve_active=%u;reg_vent=0;gripper_close_count=%lu;refresh=0;drop_raw=%lu;slope_raw_min=%ld;timeout=%u",
                                  static_cast<unsigned long>(kSealTargetPsiMilli),
                                  static_cast<long>(shortRun.targetRaw),
                                  headValveMode,
@@ -1035,10 +1035,9 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         const SealRun holdRun = runSealMeasurement(kLongHoldMs, true);
                         char metrics2502[192];
                         snprintf(metrics2502, sizeof(metrics2502),
-                                 "target_raw=%ld;head_valve_mode=%s;reg_vent=0;hold_ms=%lu;p_start=%ld;p_end=%ld;p_drop=%lu;r_start=%ld;r_end=%ld;r_drop=%lu;drop_raw=%lu;thr_ms=%lu;seal_ms=%lu;timeout=%u",
+                                 "target_raw=%ld;valve_hold_drive=timer_pwm;head_valve_mode=%s;reg_vent=0;p_start=%ld;p_end=%ld;p_drop=%lu;r_start=%ld;r_end=%ld;r_drop=%lu;drop_raw=%lu;seal_ms=%lu;timeout=%u",
                                  static_cast<long>(holdRun.targetRaw),
                                  headValveMode,
-                                 static_cast<unsigned long>(holdRun.holdMs),
                                  static_cast<long>(holdRun.pStartRaw),
                                  static_cast<long>(holdRun.pEndRaw),
                                  static_cast<unsigned long>(holdRun.pDropRaw),
@@ -1046,7 +1045,6 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                  static_cast<long>(holdRun.rEndRaw),
                                  static_cast<unsigned long>(holdRun.rDropRaw),
                                  static_cast<unsigned long>(holdRun.decay.dropRaw),
-                                 static_cast<unsigned long>(holdRun.decay.timeToThresholdMs),
                                  static_cast<unsigned long>(holdRun.decay.sealPassDurationMs),
                                  static_cast<unsigned>(holdRun.timeout ? 1u : 0u));
                         if (!runOne(2502, "gripper_seal_hold_duration_factory", holdRun.setupOk, metrics2502)) {
@@ -1072,14 +1070,12 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         const uint32_t sealMsMin = GripperSealQualificationMath::minValue(repeatSealMs, repeatCompleted);
                         char metrics2503[176];
                         snprintf(metrics2503, sizeof(metrics2503),
-                                 "target_raw=%ld;head_valve_mode=%s;reg_vent=0;gripper_close_count=%lu;refresh=0;activations=%lu;cycles=%lu;drop_min=%lu;drop_max=%lu;repeat_span_raw=%lu;seal_ms_min=%lu;timeout=%u",
+                                 "target_raw=%ld;valve_hold_drive=timer_pwm;head_valve_mode=%s;reg_vent=0;gripper_close_count=%lu;refresh=0;activations=%lu;cycles=%lu;repeat_span_raw=%lu;seal_ms_min=%lu;timeout=%u",
                                  static_cast<long>(kSealTargetRaw),
                                  headValveMode,
                                  static_cast<unsigned long>(gripperCloseCount),
                                  static_cast<unsigned long>(headValveActivationCount),
                                  static_cast<unsigned long>(repeatCompleted),
-                                 static_cast<unsigned long>(repeatCompleted ? GripperSealQualificationMath::minValue(repeatDrops, repeatCompleted) : 0u),
-                                 static_cast<unsigned long>(repeatCompleted ? GripperSealQualificationMath::maxValue(repeatDrops, repeatCompleted) : 0u),
                                  static_cast<unsigned long>(repeatSpan),
                                  static_cast<unsigned long>(sealMsMin),
                                  static_cast<unsigned>(repeatSetupOk ? 0u : 1u));

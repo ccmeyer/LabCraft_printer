@@ -760,8 +760,10 @@ Python responsibilities:
 
 - Run this suite only from the local machine with interactive operator prompts; do not use unattended SSH/HIL automation for this fixture.
 - Prompt the operator to load the dummy blocked printer head, confirm it is supported/aligned, and continue.
+- Run a short print/refuel valve-click preflight using the normal command path and require operator confirmation before pressure timing begins.
 - Prompt the operator to support the dummy head before any gripper-open teardown action.
 - Prompt the operator to remove the dummy head after the gripper is opened.
+- Send normal shutdown after fixture removal so regulators, motors, and LEDs return through the standard disconnect path.
 - Analyze closed-grip pressure retention, seal decay rate, and how long the gripper maintains seal without refresh.
 - Flag insufficient sealing, inconsistent clamp behavior, short hold duration, or fixture setup failure.
 - Store operator notes for fixture setup.
@@ -773,6 +775,7 @@ Expected metrics:
 - `refresh`
 - `target_psi_milli`
 - `target_raw`
+- `valve_hold_drive`
 - `head_valve_mode`
 - `head_valve_active`
 - `reg_vent`
@@ -794,7 +797,7 @@ Expected metrics:
 
 Initial suite shape:
 
-- `2501` closes the gripper on the loaded dummy head, applies `1 psi` through the head-side print/refuel valve path, then records 30 seconds of seal decay.
+- `2501` closes the gripper on the loaded dummy head, applies `1 psi` through a timer-output head-side print/refuel valve hold, then records 30 seconds of seal decay.
 - `2502` keeps the gripper closed without refreshing close pressure and records up to 60 seconds within the pressure-drop threshold for initial validation.
 - `2503` repeats three short pressure/decay cycles on the same loaded dummy head while keeping the gripper closed and without re-closing between cycles. Multi-load repeatability is deferred until a higher-level multi-run workflow can safely prompt for load/support/remove between runs.
 
@@ -816,6 +819,7 @@ Manual checklist:
 
 - Dummy blocked printer head is not loaded before the suite starts unless the first prompt explicitly requests it.
 - Operator is physically present at the machine and can support the dummy head during load/unload.
+- Operator confirms the preflight print/refuel valve clicks before seal timing begins.
 - Fixture is rated for the selected pressure.
 - Operator confirms gripper area is clear.
 - Operator confirms a soft catch/support path is available in case of power loss.

@@ -1,8 +1,9 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from tools.qualification import cli
-from tools.qualification.runner import DEFAULT_MANIFEST_REF, run_qualification
+from tools.qualification.runner import DEFAULT_MANIFEST_REF, default_gripper_control, run_qualification
 
 
 def _raw_selftest():
@@ -34,6 +35,7 @@ def _raw_gripper_selftest():
                 "metrics": {
                     "target_psi_milli": 1000,
                     "target_raw": 2512,
+                    "valve_hold_drive": "timer_pwm",
                     "head_valve_mode": "both",
                     "head_valve_active": 1,
                     "reg_vent": 0,
@@ -48,13 +50,13 @@ def _raw_gripper_selftest():
                 "test_id": 2502,
                 "name": "gripper_seal_hold_duration_factory",
                 "pass": True,
-                "metrics": {"target_raw": 2512, "head_valve_mode": "both", "reg_vent": 0, "seal_ms": 60000, "drop_raw": 30, "timeout": 0},
+                "metrics": {"target_raw": 2512, "valve_hold_drive": "timer_pwm", "head_valve_mode": "both", "reg_vent": 0, "seal_ms": 60000, "drop_raw": 30, "timeout": 0},
             },
             {
                 "test_id": 2503,
                 "name": "gripper_seal_repeatability_factory",
                 "pass": True,
-                "metrics": {"repeat_span_raw": 12, "seal_ms_min": 5000, "timeout": 0},
+                "metrics": {"valve_hold_drive": "timer_pwm", "repeat_span_raw": 12, "seal_ms_min": 5000, "timeout": 0},
             },
         ],
         "host_checks": [
@@ -84,6 +86,67 @@ def _manifest_path(tmp_path):
 
 def _gripper_manifest_ref():
     return "gripper_seal_v1"
+
+
+class FakeSerial:
+    def __init__(self, inbound: bytes):
+        self._buf = bytearray(inbound)
+        self.writes = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self, n: int) -> bytes:
+        if not self._buf:
+            return b""
+        take = 1 if n > 0 else 0
+        out = bytes(self._buf[:take])
+        del self._buf[:take]
+        return out
+
+    def write(self, data: bytes):
+        self.writes.append(bytes(data))
+        return len(data)
+
+
+def _frame(mod, payload: bytes) -> bytes:
+    return mod.frame_payload(payload)
+
+
+def _hello_ack(mod) -> bytes:
+    return _frame(mod, bytes([mod.CMD_HELLO_ACK, 0x40]))
+
+
+def _queue_ack(mod, seq8: int, seq32: int) -> bytes:
+    payload = bytearray([mod.CMD_QUEUE_ACK, seq8])
+    payload += bytes([mod.TAG_SEQ32, 4]) + seq32.to_bytes(4, "little")
+    payload += bytes([mod.TAG_ACK_RESULT, 1, mod.ACK_RESULT_ACCEPTED])
+    return _frame(mod, bytes(payload))
+
+
+def _bye_ack(mod) -> bytes:
+    return _frame(mod, bytes([mod.CMD_BYE_ACK, 0x43]))
+
+
+def _bye_done(mod) -> bytes:
+    payload = bytearray([mod.CMD_BYE_DONE, 0x43])
+    payload += bytes([mod.TAG_SEQ32, 4]) + (1).to_bytes(4, "little")
+    return _frame(mod, bytes(payload))
+
+
+def _written_commands(mod, serial: FakeSerial):
+    commands = []
+    for outbound in serial.writes:
+        reader = mod.FrameReader()
+        for byte in outbound:
+            frame = reader.feed(byte)
+            if frame:
+                commands.append(frame[0])
+                break
+    return commands
 
 
 def test_run_qualification_wraps_fake_selftest_invoker(tmp_path):
@@ -181,6 +244,30 @@ def test_default_qualification_manifest_is_factory_acceptance_v3():
     assert gripper_args.operator_prompts is True
 
 
+def test_default_gripper_control_preflight_uses_hello_then_print(monkeypatch):
+    import tools.run_selftest as mod
+
+    serial = FakeSerial(_hello_ack(mod) + _queue_ack(mod, 0x31, 1))
+    monkeypatch.setattr(mod, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: serial))
+
+    rc = default_gripper_control("preflight_print", "/dev/ttyAMA0", 115200)
+
+    assert rc == 0
+    assert _written_commands(mod, serial) == [mod.CMD_HELLO, 0x20]
+
+
+def test_default_gripper_control_shutdown_sends_goodbye(monkeypatch):
+    import tools.run_selftest as mod
+
+    serial = FakeSerial(_hello_ack(mod) + _bye_ack(mod) + _bye_done(mod))
+    monkeypatch.setattr(mod, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: serial))
+
+    rc = default_gripper_control("shutdown", "/dev/ttyAMA0", 115200)
+
+    assert rc == 0
+    assert _written_commands(mod, serial) == [mod.CMD_HELLO, mod.CMD_GOODBYE]
+
+
 def test_qualification_can_convert_existing_raw_report_without_invoker(tmp_path):
     raw_path = tmp_path / "existing_raw.json"
     raw_path.write_text(json.dumps(_raw_selftest()), encoding="utf-8")
@@ -252,6 +339,8 @@ def test_gripper_seal_operator_prompt_order_and_teardown(tmp_path):
     def fake_prompter(message):
         if "Load" in message:
             events.append("prompt:load")
+        elif "heard or felt" in message:
+            events.append("prompt:valves")
         elif "Support" in message:
             events.append("prompt:support")
         elif "Remove" in message:
@@ -266,7 +355,7 @@ def test_gripper_seal_operator_prompt_order_and_teardown(tmp_path):
         return 0
 
     def fake_gripper_control(action, port, baud):
-        events.append(f"gripper:{action}:{port}:{baud}")
+        events.append(f"machine:{action}:{port}:{baud}")
         return 0
 
     result = run_qualification(
@@ -287,21 +376,61 @@ def test_gripper_seal_operator_prompt_order_and_teardown(tmp_path):
     assert result.returncode == 0
     assert events == [
         "prompt:load",
+        "machine:preflight_print:/dev/ttyAMA0:115200",
+        "machine:preflight_refuel:/dev/ttyAMA0:115200",
+        "prompt:valves",
         "self-test",
         "prompt:support",
-        "gripper:release:/dev/ttyAMA0:115200",
+        "machine:release:/dev/ttyAMA0:115200",
         "prompt:remove",
-        "gripper:off:/dev/ttyAMA0:115200",
+        "machine:off:/dev/ttyAMA0:115200",
+        "machine:shutdown:/dev/ttyAMA0:115200",
     ]
     assert result.report["run"]["fixture_id"] == "dummy_blocked_head_v1"
     assert [item["stage"] for item in result.report["operator_interactions"]] == [
         "load_dummy_head",
+        "confirm_valve_clicks",
         "support_before_release",
         "remove_dummy_head",
     ]
     host_checks = {item["name"]: item for item in result.report["host_checks"]}
+    assert host_checks["gripper_valve_preflight_print"]["pass"] is True
+    assert host_checks["gripper_valve_preflight_refuel"]["pass"] is True
     assert host_checks["gripper_teardown_release"]["pass"] is True
     assert host_checks["gripper_teardown_off"]["pass"] is True
+    assert host_checks["gripper_teardown_shutdown"]["pass"] is True
+
+
+def test_gripper_seal_preflight_failure_aborts_before_selftest(tmp_path):
+    events = []
+
+    def fake_invoker(_invocation):
+        raise AssertionError("preflight failure should abort before self-test")
+
+    def fake_gripper_control(action, port, baud):
+        events.append(action)
+        return 3 if action == "preflight_refuel" else 0
+
+    result = run_qualification(
+        manifest_ref=_gripper_manifest_ref(),
+        port="/dev/ttyAMA0",
+        baud=115200,
+        machine_id="LC-0001",
+        identity_path=tmp_path / "local" / "machine_identity.json",
+        output_root=tmp_path / "qualification",
+        timeout_ms=420000,
+        fixture_id="dummy_blocked_head_v1",
+        operator_prompts=True,
+        invoker=fake_invoker,
+        prompter=lambda _message: events.append("prompt"),
+        gripper_control=fake_gripper_control,
+    )
+
+    assert result.returncode == 3
+    assert events == ["prompt", "preflight_print", "preflight_refuel"]
+    host_checks = {item["name"]: item for item in result.report["host_checks"]}
+    assert host_checks["gripper_valve_preflight_print"]["pass"] is True
+    assert host_checks["gripper_valve_preflight_refuel"]["pass"] is False
 
 
 def test_gripper_seal_raw_report_conversion_skips_prompts_and_invoker(tmp_path):
