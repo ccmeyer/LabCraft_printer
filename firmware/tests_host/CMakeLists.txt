@@ -19,6 +19,7 @@ add_executable(fw_tests
     tests/test_pressure_regulator_math.cpp
     tests/test_pressure_target_policy.cpp
     tests/test_pressure_trace_math.cpp
+    tests/test_motion_qualification_math.cpp
     tests/test_stepper_profile_math.cpp
     tests/test_stepper_limit_policy.cpp
     tests/test_exti_debounce.cpp
@@ -37,6 +38,7 @@ add_executable(fw_tests
     ../Core/Src/OrchestratorDecode.cpp
     ../Core/Src/nvm_codec.c
     ../Core/Src/PressureRegulatorMath.cpp
+    ../Core/Src/MotionQualificationMath.cpp
     ../Core/Src/StepperProfileMath.cpp
     ../Core/Src/CrashLogCodec.c
     ../Core/Src/FlashSafety.cpp

@@ -10,6 +10,7 @@
 #include "Gripper.h"
 #include "Printer.h"
 #include "PressureRegulator.h"
+#include "MotionQualificationMath.h"
 #include "PressureRegulatorMath.h"
 #include "PressureTargetPolicy.h"
 #include "PressureSensor.h"
@@ -60,6 +61,8 @@ static constexpr DiagnosticTestDescriptor kDiagnosticTests[] = {
     {1042u, "watchdog_supervisor_safe", "watchdog", "SAFE", "compile_gate"},
     {2001u, "motion_home_cycle_full", "motion", "FULL", "safe_gate_or_full"},
     {2002u, "motion_absolute_move_bounds_full", "motion", "FULL", "safe_gate_or_full"},
+    {2007u, "motion_home_repeatability_factory", "motion", "FULL", "safe_gate_or_full"},
+    {2008u, "motion_pattern_return_factory", "motion", "FULL", "safe_gate_or_full"},
     {2003u, "pressure_regulator_step_response_full", "pressure", "FULL", "safe_gate_or_full"},
     {2004u, "valve_actuation_sequence_full", "pressure", "FULL", "safe_gate_or_full"},
     {2005u, "print_refuel_pulse_integrity_full", "pulse", "FULL", "safe_gate_or_full"},
@@ -392,6 +395,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 					  const bool fullProfile = request.fullProfile;
                       const bool pressureSweepOnly = runPressureSweepCore || runPressureSweepExtended || runPressureSweepFocused || runPressureSweepMicro;
 					  bool fullHomePass = pressureSweepOnly;
+					  bool fullMotionBoundsPass = pressureSweepOnly;
 
 					  auto absDiff32 = [](int32_t a, int32_t b) -> uint32_t {
 					    const int64_t diff = static_cast<int64_t>(a) - static_cast<int64_t>(b);
@@ -402,20 +406,27 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 					    return (pos >= 80) && (pos <= 140);
 					  };
 
+                      struct PressureWaitResult {
+                        bool readySeen = false;
+                        bool readyFinal = false;
+                        bool accepted = false;
+                        bool aborted = false;
+                        uint32_t settleMs = 0u;
+                        uint32_t overshoot = 0u;
+                        uint32_t controlError = 0u;
+                        uint32_t avgError = 0u;
+                      };
+
 					  auto waitPressureReady = [&](PressureRegulator& reg,
 					                               uint8_t sensorPort,
 					                               int32_t targetPressure,
 					                               bool stepUp,
-					                               uint32_t timeoutMs,
-					                               uint32_t& settleTimeMs,
-					                               uint32_t& overshoot,
-					                               uint32_t& steadyStateError) {
+					                               uint32_t timeoutMs) {
+                        PressureWaitResult result{};
 					    PressureSensor* sensor = PressureSensor::instance();
 					    if (!sensor) {
-					      settleTimeMs = timeoutMs;
-					      overshoot = 0u;
-					      steadyStateError = 0u;
-					      return false;
+                          result.settleMs = timeoutMs;
+					      return result;
 					    }
 
 					    const uint32_t startMs = HAL_GetTick();
@@ -429,28 +440,36 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 						      if (pressure > peakPressure) peakPressure = pressure;
 					      if (pressure < troughPressure) troughPressure = pressure;
 					      if (reg.isPressureOk()) {
+                            result.readySeen = true;
 					        break;
 					      }
 					      if (_selfTestAbortRequested) {
+                            result.aborted = true;
 					        break;
 					      }
 					      vTaskDelay(pdMS_TO_TICKS(20));
 					    }
 
 					    const uint32_t elapsedMs = HAL_GetTick() - startMs;
-					    settleTimeMs = elapsedMs;
-					    const int32_t finalPressure = sensor->getPressure(sensorPort);
-					    steadyStateError = absDiff32(finalPressure, targetPressure);
+					    result.settleMs = elapsedMs;
+                        result.readyFinal = reg.isPressureOk();
+					    const int32_t finalAvgPressure = sensor->getPressure(sensorPort);
+                        const auto finalControlSample = sensor->getControlSample(sensorPort);
+                        result.controlError = absDiff32(static_cast<int32_t>(finalControlSample.raw), targetPressure);
+					    result.avgError = absDiff32(finalAvgPressure, targetPressure);
 					    if (stepUp) {
-					      overshoot = (peakPressure > targetPressure)
+					      result.overshoot = (peakPressure > targetPressure)
 					                  ? static_cast<uint32_t>(peakPressure - targetPressure)
 					                  : 0u;
 					    } else {
-					      overshoot = (troughPressure < targetPressure)
+					      result.overshoot = (troughPressure < targetPressure)
 					                  ? static_cast<uint32_t>(targetPressure - troughPressure)
 					                  : 0u;
 					    }
-						    return reg.isPressureOk();
+                        const uint32_t readyTol = reg.getReadyConfig().readyTolRaw;
+                        result.accepted = !result.aborted &&
+                            (result.readySeen || result.readyFinal || (result.controlError <= readyTol));
+						    return result;
 						  };
 
 						  auto waitBitsWithTimeout = [&](EventBits_t bits, uint32_t timeoutMs) {
@@ -491,6 +510,49 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               vTaskDelay(msToAtLeast1Tick(sliceMs));
                             }
                             return true;
+                          };
+
+                          auto runXyHomeDiagnosticAttempt = [&](MotionQualificationMath::AxisHomeSample& xSample,
+                                                                MotionQualificationMath::AxisHomeSample& ySample,
+                                                                uint32_t fastHz,
+                                                                uint32_t slowHz,
+                                                                uint32_t backoffSteps,
+                                                                uint32_t timeoutMs) {
+                            Stepper::stepperX()->enableMotor();
+                            Stepper::stepperY()->enableMotor();
+                            xEventGroupClearBits(_doneEvents, BIT_HOME_X_DONE | BIT_HOME_Y_DONE);
+                            startHomeAsync(Stepper::stepperX(), fastHz, slowHz, backoffSteps, BIT_HOME_X_DONE);
+                            startHomeAsync(Stepper::stepperY(), fastHz, slowHz, backoffSteps, BIT_HOME_Y_DONE);
+                            const bool bothDone = waitBitsWithTimeout(BIT_HOME_X_DONE | BIT_HOME_Y_DONE, timeoutMs);
+                            const EventBits_t doneBits = xEventGroupGetBits(_doneEvents);
+                            const bool xDone = (doneBits & BIT_HOME_X_DONE) != 0u;
+                            const bool yDone = (doneBits & BIT_HOME_Y_DONE) != 0u;
+                            const Stepper::HomeDiagnosticSnapshot xDiag =
+                                Stepper::stepperX()->getLastHomeDiagnosticSnapshot();
+                            const Stepper::HomeDiagnosticSnapshot yDiag =
+                                Stepper::stepperY()->getLastHomeDiagnosticSnapshot();
+                            xSample.success = xDone && xDiag.success;
+                            xSample.limitTriggerSteps = xDiag.fineLimitPositionSteps;
+                            xSample.finalBackoffSteps = xDiag.finalBackoffPositionSteps;
+                            xSample.moveTimeoutCount = xDiag.moveTimeoutCount;
+                            ySample.success = yDone && yDiag.success;
+                            ySample.limitTriggerSteps = yDiag.fineLimitPositionSteps;
+                            ySample.finalBackoffSteps = yDiag.finalBackoffPositionSteps;
+                            ySample.moveTimeoutCount = yDiag.moveTimeoutCount;
+                            return bothDone && xSample.success && ySample.success;
+                          };
+
+                          auto moveGantryToWithTimeout = [&](int32_t x,
+                                                            int32_t y,
+                                                            uint32_t feedHz,
+                                                            uint32_t timeoutMs) {
+                            xEventGroupClearBits(_doneEvents, BIT_STEPPER1_DONE | BIT_STEPPER2_DONE);
+                            Gantry::instance()->moveTo(x, y, feedHz);
+                            const bool reached = waitBitsWithTimeout(BIT_STEPPER1_DONE | BIT_STEPPER2_DONE, timeoutMs);
+                            if (!reached) {
+                              Gantry::cancelXYZMotors();
+                            }
+                            return reached;
                           };
 
                           auto waitPrinterIdleWithTimeout = [&](Printer* printer, uint32_t timeoutMs) {
@@ -1441,6 +1503,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 						                       (returnPos.x > (kTargetX + 50)) || (returnPos.y > (kTargetY + 50));
 
 						      const bool movePass = reachedTarget && returnedHome && !boundViolation && (finalErrorSteps <= 4u);
+						      fullMotionBoundsPass = movePass;
 						      char metrics[96];
 						      snprintf(metrics, sizeof(metrics),
 						               "target_x=%ld;target_y=%ld;target_z=%ld;final_error_steps=%lu;bound_violation=%u",
@@ -1452,6 +1515,175 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 						      if (!runOne(2002, "motion_absolute_move_bounds_full", movePass, metrics)) goto selftest_done;
 						    }
 						  }
+
+                          {
+                            if (!fullProfile || pressureSweepOnly) {
+                              if (!runOne(2007,
+                                          "motion_home_repeatability_factory",
+                                          true,
+                                          pressureSweepOnly ? "profile=FULL;executed=0;fixture_required=1;motion=0;gate=sweep_only" : "profile=SAFE;executed=0;fixture_required=1;motion=0;gate=safe_only")) {
+                                goto selftest_done;
+                              }
+                            } else if (!fullHomePass) {
+                              if (!runOne(2007,
+                                          "motion_home_repeatability_factory",
+                                          false,
+                                          "axis=xy;rep=0;x_min=0;x_max=0;x_span=0;y_min=0;y_max=0;y_span=0;ret_err=0;move_to=0;home_to=1")) {
+                                goto selftest_done;
+                              }
+                            } else {
+                              static constexpr uint32_t kRepeatCount = 3u;
+                              static constexpr uint32_t kHomeFastHz = 30000u;
+                              static constexpr uint32_t kHomeSlowHz = 3000u;
+                              static constexpr uint32_t kHomeBackoffSteps = 400u;
+                              static constexpr uint32_t kHomeTimeoutMs = 20000u;
+                              static constexpr int32_t kExpectedBackoffSteps = 100;
+                              MotionQualificationMath::AxisHomeSample xSamples[kRepeatCount]{};
+                              MotionQualificationMath::AxisHomeSample ySamples[kRepeatCount]{};
+                              bool allHomesPassed = true;
+                              for (uint32_t rep = 0; rep < kRepeatCount; ++rep) {
+                                sendProgressStage("motion_home_repeatability");
+                                const bool homesPassed = runXyHomeDiagnosticAttempt(xSamples[rep],
+                                                                                     ySamples[rep],
+                                                                                     kHomeFastHz,
+                                                                                     kHomeSlowHz,
+                                                                                     kHomeBackoffSteps,
+                                                                                     kHomeTimeoutMs);
+                                allHomesPassed = allHomesPassed && homesPassed;
+                                if (_selfTestAbortRequested) {
+                                  break;
+                                }
+                              }
+                              const MotionQualificationMath::AxisHomeStats xStats =
+                                  MotionQualificationMath::summarizeAxisHomeSamples(xSamples,
+                                                                                   kRepeatCount,
+                                                                                   kExpectedBackoffSteps);
+                              const MotionQualificationMath::AxisHomeStats yStats =
+                                  MotionQualificationMath::summarizeAxisHomeSamples(ySamples,
+                                                                                   kRepeatCount,
+                                                                                   kExpectedBackoffSteps);
+                              const uint32_t moveTimeoutCount = xStats.moveTimeoutCount + yStats.moveTimeoutCount;
+                              const uint32_t homeTimeoutCount = xStats.homeTimeoutCount + yStats.homeTimeoutCount;
+                              const uint32_t returnErrorMax = (xStats.returnErrorMaxSteps > yStats.returnErrorMaxSteps)
+                                  ? xStats.returnErrorMaxSteps
+                                  : yStats.returnErrorMaxSteps;
+                              const bool repeatPass = allHomesPassed &&
+                                  MotionQualificationMath::axisHomeStatsPass(xStats, kRepeatCount) &&
+                                  MotionQualificationMath::axisHomeStatsPass(yStats, kRepeatCount);
+                              char metrics[192];
+                              snprintf(metrics, sizeof(metrics),
+                                       "axis=xy;rep=%lu;x_min=%ld;x_max=%ld;x_span=%lu;y_min=%ld;y_max=%ld;y_span=%lu;ret_err=%lu;move_to=%lu;home_to=%lu",
+                                       static_cast<unsigned long>(kRepeatCount),
+                                       static_cast<long>(xStats.limitTriggerMinSteps),
+                                       static_cast<long>(xStats.limitTriggerMaxSteps),
+                                       static_cast<unsigned long>(xStats.limitTriggerSpanSteps),
+                                       static_cast<long>(yStats.limitTriggerMinSteps),
+                                       static_cast<long>(yStats.limitTriggerMaxSteps),
+                                       static_cast<unsigned long>(yStats.limitTriggerSpanSteps),
+                                       static_cast<unsigned long>(returnErrorMax),
+                                       static_cast<unsigned long>(moveTimeoutCount),
+                                       static_cast<unsigned long>(homeTimeoutCount));
+                              if (!runOne(2007, "motion_home_repeatability_factory", repeatPass, metrics)) goto selftest_done;
+                            }
+                          }
+
+                          {
+                            if (!fullProfile || pressureSweepOnly) {
+                              if (!runOne(2008,
+                                          "motion_pattern_return_factory",
+                                          true,
+                                          pressureSweepOnly ? "profile=FULL;executed=0;fixture_required=1;motion=0;gate=sweep_only" : "profile=SAFE;executed=0;fixture_required=1;motion=0;gate=safe_only")) {
+                                goto selftest_done;
+                              }
+                            } else if (!fullHomePass || !fullMotionBoundsPass) {
+                              if (!runOne(2008,
+                                          "motion_pattern_return_factory",
+                                          false,
+                                          "axis=xy;rep=0;pts=0;ret_err=0;x_ret=0;y_ret=0;move_to=0;home_to=0;bound=1;executed=0;base_motion_bounds=0")) {
+                                goto selftest_done;
+                              }
+                            } else {
+                              static constexpr uint32_t kPatternRepetitions = 2u;
+                              static constexpr uint32_t kPatternPoints = 4u;
+                              static constexpr uint32_t kPatternFeedHz = 4000u;
+                              static constexpr uint32_t kPatternMoveTimeoutMs = 5000u;
+                              static constexpr uint32_t kHomeFastHz = 30000u;
+                              static constexpr uint32_t kHomeSlowHz = 3000u;
+                              static constexpr uint32_t kHomeBackoffSteps = 400u;
+                              static constexpr uint32_t kHomeTimeoutMs = 20000u;
+                              static constexpr int32_t kPatternStep = 200;
+                              static constexpr int32_t kAllowedMin = 0;
+                              static constexpr int32_t kAllowedMax = 450;
+                              const int32_t homeX = Stepper::stepperX()->getPosition();
+                              const int32_t homeY = Stepper::stepperY()->getPosition();
+                              const int32_t targets[kPatternPoints][2] = {
+                                  {homeX + kPatternStep, homeY},
+                                  {homeX + kPatternStep, homeY + kPatternStep},
+                                  {homeX, homeY + kPatternStep},
+                                  {homeX, homeY},
+                              };
+                              MotionQualificationMath::PatternReturnStats patternStats{};
+                              patternStats.repetitions = kPatternRepetitions;
+                              patternStats.patternPoints = kPatternPoints;
+
+                              bool allMovesCompleted = true;
+                              for (uint32_t rep = 0; rep < kPatternRepetitions; ++rep) {
+                                sendProgressStage("motion_pattern_return");
+                                bool repMovesCompleted = true;
+                                bool repBoundViolation = false;
+                                for (uint32_t point = 0; point < kPatternPoints; ++point) {
+                                  const bool reached = moveGantryToWithTimeout(targets[point][0],
+                                                                               targets[point][1],
+                                                                               kPatternFeedHz,
+                                                                               kPatternMoveTimeoutMs);
+                                  repMovesCompleted = repMovesCompleted && reached;
+                                  allMovesCompleted = allMovesCompleted && reached;
+                                  const GantryPosition pos = Gantry::instance()->getPosition();
+                                  repBoundViolation = repBoundViolation ||
+                                      (pos.x < kAllowedMin) || (pos.y < kAllowedMin) ||
+                                      (pos.x > kAllowedMax) || (pos.y > kAllowedMax);
+                                  if (!reached || _selfTestAbortRequested) {
+                                    break;
+                                  }
+                                }
+
+                                MotionQualificationMath::AxisHomeSample xHome{};
+                                MotionQualificationMath::AxisHomeSample yHome{};
+                                const bool homePassed = runXyHomeDiagnosticAttempt(xHome,
+                                                                                   yHome,
+                                                                                   kHomeFastHz,
+                                                                                   kHomeSlowHz,
+                                                                                   kHomeBackoffSteps,
+                                                                                   kHomeTimeoutMs);
+                                MotionQualificationMath::recordPatternReturn(patternStats,
+                                                                             homeX,
+                                                                             homeY,
+                                                                             Stepper::stepperX()->getPosition(),
+                                                                             Stepper::stepperY()->getPosition(),
+                                                                             repMovesCompleted,
+                                                                             homePassed,
+                                                                             repBoundViolation);
+                                patternStats.moveTimeoutCount += xHome.moveTimeoutCount + yHome.moveTimeoutCount;
+                                if (!allMovesCompleted || !homePassed || _selfTestAbortRequested) {
+                                  break;
+                                }
+                              }
+
+                              const bool patternPass = allMovesCompleted && MotionQualificationMath::patternReturnStatsPass(patternStats);
+                              char metrics[160];
+                              snprintf(metrics, sizeof(metrics),
+                                       "axis=xy;rep=%lu;pts=%lu;ret_err=%lu;x_ret=%lu;y_ret=%lu;move_to=%lu;home_to=%lu;bound=%lu",
+                                       static_cast<unsigned long>(patternStats.repetitions),
+                                       static_cast<unsigned long>(patternStats.patternPoints),
+                                       static_cast<unsigned long>(patternStats.returnErrorMaxSteps),
+                                       static_cast<unsigned long>(patternStats.xReturnErrorMaxSteps),
+                                       static_cast<unsigned long>(patternStats.yReturnErrorMaxSteps),
+                                       static_cast<unsigned long>(patternStats.moveTimeoutCount),
+                                       static_cast<unsigned long>(patternStats.homeTimeoutCount),
+                                       static_cast<unsigned long>(patternStats.boundViolationCount));
+                              if (!runOne(2008, "motion_pattern_return_factory", patternPass, metrics)) goto selftest_done;
+                            }
+                          }
 
 						  {
 						    if (!fullProfile || pressureSweepOnly) {
@@ -1484,58 +1716,76 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 						      uint32_t settleTimeMs = kSettleTimeoutMs;
 						      uint32_t overshoot = 0u;
 						      uint32_t steadyStateError = 0u;
+                              uint32_t avgError = 0u;
+                              bool baseReady = false;
+                              uint32_t baselineSettleMs = 0u;
+                              uint32_t baselineError = 0u;
+                              bool targetRun = false;
+                              bool targetReady = false;
 						      bool pressurePass = false;
+                              const uint32_t readyTol = reg.getReadyConfig().readyTolRaw;
 
 						      if (sensor && targetPressure != baselineTarget) {
 						        reg.start();
 						        xEventGroupClearBits(_doneEvents, BIT_PRESSURE_P_READY);
-						        uint32_t baselineSettleMs = 0u;
-						        uint32_t baselineOvershoot = 0u;
-						        uint32_t baselineError = 0u;
-						        const bool baselineReady = waitPressureReady(reg,
-						                                                0u,
-						                                                baselineTarget,
-						                                                true,
-						                                                kBaselineTimeoutMs,
-						                                                baselineSettleMs,
-						                                                baselineOvershoot,
-						                                                baselineError);
-						        xEventGroupClearBits(_doneEvents, BIT_PRESSURE_P_READY);
-						        reg.setTargetSafe(targetPressure);
-						        targetPressure = static_cast<int32_t>(reg.getTarget());
-						        pressurePass = baselineReady &&
-						                       waitPressureReady(reg,
-						                                         0u,
-						                                         targetPressure,
-						                                         stepUp,
-						                                         kSettleTimeoutMs,
-						                                         settleTimeMs,
-						                                         overshoot,
-						                                         steadyStateError);
+						        const PressureWaitResult baselineWait = waitPressureReady(reg,
+						                                                                  0u,
+						                                                                  baselineTarget,
+						                                                                  true,
+						                                                                  kBaselineTimeoutMs);
+                                baseReady = baselineWait.accepted;
+                                baselineSettleMs = baselineWait.settleMs;
+                                baselineError = baselineWait.controlError;
+                                if (baseReady && !_selfTestAbortRequested) {
+                                  xEventGroupClearBits(_doneEvents, BIT_PRESSURE_P_READY);
+                                  reg.setTargetSafe(targetPressure);
+                                  targetPressure = static_cast<int32_t>(reg.getTarget());
+                                  targetRun = true;
+                                  const PressureWaitResult targetWait = waitPressureReady(reg,
+                                                                                          0u,
+                                                                                          targetPressure,
+                                                                                          stepUp,
+                                                                                          kSettleTimeoutMs);
+                                  targetReady = targetWait.accepted;
+                                  settleTimeMs = targetWait.settleMs;
+                                  overshoot = targetWait.overshoot;
+                                  steadyStateError = targetWait.controlError;
+                                  avgError = targetWait.avgError;
+                                  pressurePass = targetReady &&
+                                                 (steadyStateError <= 120u) &&
+                                                 (overshoot <= 300u);
+                                } else {
+                                  settleTimeMs = 0u;
+                                  overshoot = 0u;
+                                  steadyStateError = 0u;
+                                  avgError = 0u;
+                                  pressurePass = false;
+                                }
 						        xEventGroupClearBits(_doneEvents, BIT_PRESSURE_P_READY);
 						        reg.setTargetSafe(baselineTarget);
-						        uint32_t restoreSettleMs = 0u;
-						        uint32_t restoreOvershoot = 0u;
-						        uint32_t restoreError = 0u;
 						        (void)waitPressureReady(reg,
 						                                0u,
 						                                baselineTarget,
 						                                !stepUp,
-						                                kSettleTimeoutMs,
-						                                restoreSettleMs,
-						                                restoreOvershoot,
-						                                restoreError);
+						                                kSettleTimeoutMs);
 						        reg.pause();
 						      }
 
-						      pressurePass = pressurePass && (steadyStateError <= 120u) && (overshoot <= 300u);
-						      char metrics[96];
+						      char metrics[224];
 						      snprintf(metrics, sizeof(metrics),
-						               "target_pressure=%ld;settle_time_ms=%lu;overshoot=%lu;steady_state_error=%lu",
+						               "target_pressure=%ld;settle_time_ms=%lu;overshoot=%lu;steady_state_error=%lu;base_ready=%u;base_ms=%lu;base_err=%lu;target_run=%u;target_ready=%u;control_error=%lu;avg_error=%lu;ready_tol=%lu",
 						               static_cast<long>(targetPressure),
 						               static_cast<unsigned long>(settleTimeMs),
 						               static_cast<unsigned long>(overshoot),
-						               static_cast<unsigned long>(steadyStateError));
+						               static_cast<unsigned long>(steadyStateError),
+                                       static_cast<unsigned>(baseReady ? 1u : 0u),
+                                       static_cast<unsigned long>(baselineSettleMs),
+                                       static_cast<unsigned long>(baselineError),
+                                       static_cast<unsigned>(targetRun ? 1u : 0u),
+                                       static_cast<unsigned>(targetReady ? 1u : 0u),
+						               static_cast<unsigned long>(steadyStateError),
+                                       static_cast<unsigned long>(avgError),
+                                       static_cast<unsigned long>(readyTol));
 						      if (!runOne(2003, "pressure_regulator_step_response_full", pressurePass, metrics)) goto selftest_done;
 						    }
 						  }

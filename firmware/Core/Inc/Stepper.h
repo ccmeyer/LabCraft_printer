@@ -111,6 +111,15 @@ public:
   int32_t getPosition() const { return _pos; }
   int32_t getTargetPosition() const { return _targetPos; }
 
+  struct HomeDiagnosticSnapshot {
+    int32_t fineLimitPositionSteps = 0;
+    int32_t finalBackoffPositionSteps = 0;
+    uint32_t moveTimeoutCount = 0;
+    bool success = false;
+  };
+
+  HomeDiagnosticSnapshot getLastHomeDiagnosticSnapshot() const { return _homeDiagnosticSnapshot; }
+
 
   void configureLimitPin(GPIO_TypeDef* port, uint16_t pin);
   /// Call this once (from your Init wrapper) to attach a switch
@@ -246,6 +255,7 @@ private:
   bool     _homeTowardLimitDir = false;     // default; set per-axis in init
   uint32_t _homeGuardSteps     = 300000;    // large but finite
   bool     _homeHardStopOnLimit = false;
+  HomeDiagnosticSnapshot _homeDiagnosticSnapshot{};
 
   // ISR entrypoint
   void _onRawLimitInterruptFromIsr();

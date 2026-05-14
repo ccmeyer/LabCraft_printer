@@ -288,6 +288,7 @@ uint32_t Stepper::recommendedWaitTimeoutMs(uint32_t steps, uint32_t freqHz)
 }
 
 bool Stepper::home(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps) {
+  _homeDiagnosticSnapshot = HomeDiagnosticSnapshot{};
 
 	Logger::instance()->log(
 	  "[Home %d] lim pin=%u activeHigh=%d initial=%s\r\n",
@@ -335,6 +336,7 @@ bool Stepper::home(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps) {
                             (int)_axis,
                             (unsigned long)steps,
                             (unsigned long)freqHz);
+    _homeDiagnosticSnapshot.moveTimeoutCount++;
     _logLimitDebug("move timeout");
     restoreHomeState();
     result.limitSeen = _limitSeenThisMove;
@@ -429,11 +431,14 @@ bool Stepper::home(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps) {
   }
 
   // Zero & move off switch slightly
+  _homeDiagnosticSnapshot.fineLimitPositionSteps = _pos;
   _pos = 0;
   _softstop_accel_override_sps2 = 0.f;
   if (!runMoveAndWait(!_homeTowardLimitDir, 100u, slowHz).completed) {
     return false;
   }
+  _homeDiagnosticSnapshot.finalBackoffPositionSteps = _pos;
+  _homeDiagnosticSnapshot.success = true;
 
   restoreHomeState();
   return true;

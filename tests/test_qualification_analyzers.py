@@ -95,3 +95,46 @@ def test_missing_metric_follows_threshold_maturity():
 
     assert analysis["verdict"]["status"] == "pass"
     assert analysis["metric_evaluations"][0]["status"] == "warning"
+
+
+def test_motion_candidate_threshold_warning_does_not_fail():
+    manifest = parse_manifest(
+        {
+            "schema_version": "qualification_manifest_v0",
+            "manifest_id": "motion_manifest",
+            "name": "Motion Manifest",
+            "profile": "FULL",
+            "expected_test_ids": [2007],
+            "enforce_expected_test_ids": True,
+            "analysis_rules": {
+                "2007": {
+                    "category": "motion",
+                    "failure_domain": "machine_performance",
+                    "metrics": {"x_span": {"maturity": "candidate", "max": 25}},
+                }
+            },
+        }
+    )
+    raw = {
+        "run_id": 1234,
+        "profile": "FULL",
+        "started_at": "2026-05-13T00:00:00Z",
+        "finished_at": "2026-05-13T00:00:05Z",
+        "aborted": False,
+        "summary": {"total": 1, "passed": 1, "failed": 0},
+        "results": [
+            {
+                "test_id": 2007,
+                "name": "motion_home_repeatability_factory",
+                "pass": True,
+                "metrics": {"x_span": 50},
+            }
+        ],
+        "host_checks": [],
+    }
+
+    analysis = _analyze(raw, manifest)
+
+    assert analysis["verdict"]["status"] == "pass"
+    assert analysis["metric_evaluations"][0]["status"] == "warning"
+    assert analysis["metric_evaluations"][0]["failure_domain"] == "machine_performance"

@@ -20,6 +20,7 @@ The intent is to increase quantitative coverage without turning the firmware, Py
 | Milestone 1: Python Qualification Skeleton, No Firmware Behavior Change | Complete | `tools/qualification/`, `tools/run_qualification.py`, `tools/qualification/manifests/factory_acceptance_v0.json` |
 | Milestone 2: Firmware Diagnostics Extraction, Behavior Preserved | Complete | `firmware/Core/Src/Diagnostics.cpp`, `firmware/Core/Src/DiagnosticResultEmitter.cpp`; FULL HIL `hil_reports/selftest_20260513_163220.json` |
 | Milestone 3: Stable Report Schema and Analyzer Gate | Complete | `tools/qualification/analyzers.py`, `docs/self_test_report_schema_v1.md` |
+| Milestone 4: Motion Qualification Slice | Complete | `2007 motion_home_repeatability_factory`, `2008 motion_pattern_return_factory`, `factory_acceptance_v1` |
 | Later fixture-dependent diagnostics | Not started | Planned |
 
 ## Current Call Path
@@ -543,14 +544,9 @@ Python responsibilities:
 
 Expected metrics:
 
-- `axis`
-- `repetitions`
-- `limit_trigger_min_steps`
-- `limit_trigger_max_steps`
-- `limit_trigger_span_steps`
-- `return_error_max_steps`
-- `move_timeout_count`
-- `home_timeout_count`
+- `2007` reports compact frame-budget-safe aliases: `axis`, `rep`, `x_min`, `x_max`, `x_span`, `y_min`, `y_max`, `y_span`, `ret_err`, `move_to`, `home_to`.
+- `2008` reports compact frame-budget-safe aliases: `axis`, `rep`, `pts`, `ret_err`, `x_ret`, `y_ret`, `move_to`, `home_to`, `bound`.
+- These metrics are repeatability/lost-step indicators from firmware positions and homing drift, not absolute metrology.
 
 Validation:
 

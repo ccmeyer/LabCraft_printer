@@ -5,14 +5,14 @@ from pathlib import Path
 from typing import Sequence
 
 from .identity import DEFAULT_IDENTITY_PATH
-from .runner import SelfTestInvoker, default_selftest_invoker, run_qualification
+from .runner import DEFAULT_MANIFEST_REF, SelfTestInvoker, default_selftest_invoker, run_qualification
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run a LabCraft qualification manifest through the existing self-test runner."
     )
-    parser.add_argument("--manifest", default="factory_acceptance_v0")
+    parser.add_argument("--manifest", default=DEFAULT_MANIFEST_REF)
     parser.add_argument("--port", default="/dev/ttyAMA0")
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--machine-id", default=None)

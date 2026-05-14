@@ -1,7 +1,7 @@
 {
   "schema_name": "labcraft.calibration_memory.reagents_registry",
   "schema_version": 1,
-  "updated_at_utc": "2026-03-18T22:19:11Z",
+  "updated_at_utc": "2026-05-14T00:21:20Z",
   "items": [
     {
       "reagent_id": "water",
@@ -79,7 +79,8 @@
       "display_name": "trna",
       "stock_ids": [],
       "aliases": [
-        "trna"
+        "trna",
+        "[tRNA]"
       ],
       "reagent_family": null,
       "glycerol_percent": null,
@@ -91,7 +92,92 @@
       "display_name": "magnesium_acetate",
       "stock_ids": [],
       "aliases": [
-        "magnesium_acetate"
+        "magnesium_acetate",
+        "[Magnesium acetate]"
+      ],
+      "reagent_family": null,
+      "glycerol_percent": null,
+      "tags": [],
+      "notes": ""
+    },
+    {
+      "reagent_id": "dna",
+      "display_name": "[DNA]",
+      "stock_ids": [],
+      "aliases": [
+        "[DNA]"
+      ],
+      "reagent_family": null,
+      "glycerol_percent": null,
+      "tags": [],
+      "notes": ""
+    },
+    {
+      "reagent_id": "creatine_phosphate",
+      "display_name": "[Creatine phosphate]",
+      "stock_ids": [],
+      "aliases": [
+        "[Creatine phosphate]"
+      ],
+      "reagent_family": null,
+      "glycerol_percent": null,
+      "tags": [],
+      "notes": ""
+    },
+    {
+      "reagent_id": "atp",
+      "display_name": "[ATP]",
+      "stock_ids": [],
+      "aliases": [
+        "[ATP]"
+      ],
+      "reagent_family": null,
+      "glycerol_percent": null,
+      "tags": [],
+      "notes": ""
+    },
+    {
+      "reagent_id": "gtp",
+      "display_name": "[GTP]",
+      "stock_ids": [],
+      "aliases": [
+        "[GTP]"
+      ],
+      "reagent_family": null,
+      "glycerol_percent": null,
+      "tags": [],
+      "notes": ""
+    },
+    {
+      "reagent_id": "aas",
+      "display_name": "[aas]",
+      "stock_ids": [],
+      "aliases": [
+        "[aas]"
+      ],
+      "reagent_family": null,
+      "glycerol_percent": null,
+      "tags": [],
+      "notes": ""
+    },
+    {
+      "reagent_id": "ppk",
+      "display_name": "[PPK]",
+      "stock_ids": [],
+      "aliases": [
+        "[PPK]"
+      ],
+      "reagent_family": null,
+      "glycerol_percent": null,
+      "tags": [],
+      "notes": ""
+    },
+    {
+      "reagent_id": "polyp",
+      "display_name": "[PolyP]",
+      "stock_ids": [],
+      "aliases": [
+        "[PolyP]"
       ],
       "reagent_family": null,
       "glycerol_percent": null,

@@ -12,6 +12,8 @@ from .identity import DEFAULT_IDENTITY_PATH, load_or_create_identity
 from .manifest import QualificationManifest, load_manifest
 from .report import write_json_atomic, write_qualification_artifacts
 
+DEFAULT_MANIFEST_REF = "factory_acceptance_v1"
+
 
 @dataclass(frozen=True)
 class SelfTestInvocation:
@@ -95,7 +97,7 @@ def _raw_missing_report(manifest: QualificationManifest, returncode: int) -> dic
 
 def run_qualification(
     *,
-    manifest_ref: str | Path = "factory_acceptance_v0",
+    manifest_ref: str | Path = DEFAULT_MANIFEST_REF,
     port: str = "/dev/ttyAMA0",
     baud: int = 115200,
     machine_id: str | None = None,

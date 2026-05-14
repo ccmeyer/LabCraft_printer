@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 from tools.qualification import cli
-from tools.qualification.runner import run_qualification
+from tools.qualification.runner import DEFAULT_MANIFEST_REF, run_qualification
 
 
 def _raw_selftest():
@@ -111,6 +111,14 @@ def test_qualification_cli_accepts_fake_invoker(tmp_path, capsys):
     captured = capsys.readouterr()
     assert rc == 0
     assert "Wrote qualification report" in captured.out
+
+
+def test_default_qualification_manifest_is_factory_acceptance_v1():
+    assert DEFAULT_MANIFEST_REF == "factory_acceptance_v1"
+    parser = cli.build_parser()
+    args = parser.parse_args([])
+
+    assert args.manifest == "factory_acceptance_v1"
 
 
 def test_qualification_can_convert_existing_raw_report_without_invoker(tmp_path):
