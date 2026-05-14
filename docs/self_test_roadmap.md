@@ -21,13 +21,14 @@ The intent is to increase quantitative coverage without turning the firmware, Py
 | Milestone 2: Firmware Diagnostics Extraction, Behavior Preserved | Complete | `firmware/Core/Src/Diagnostics.cpp`, `firmware/Core/Src/DiagnosticResultEmitter.cpp`; FULL HIL `hil_reports/selftest_20260513_163220.json` |
 | Milestone 3: Stable Report Schema and Analyzer Gate | Complete | `tools/qualification/analyzers.py`, `docs/self_test_report_schema_v1.md` |
 | Milestone 4: Motion Qualification Slice | Complete | `2007 motion_home_repeatability_factory`, `2008 motion_pattern_return_factory`, `factory_acceptance_v1` |
+| Milestone 5: Pressure Regulator Leak and Step-Position Slice | Complete | `2201 pressure_hold_leak_factory`, `2202 pressure_target_cycle_repeatability_factory`, `2203 pressure_motor_position_hysteresis_factory`, `factory_acceptance_v2`; FULL HIL `hil_reports/selftest_20260513_191209.json` |
 | Later fixture-dependent diagnostics | Not started | Planned |
 
 ## Current Call Path
 
 Existing HIL self-test flow:
 
-`firmware/scripts/run_fw_hil_windows.ps1 -> firmware/hil/flash_and_test.sh -> tools/run_selftest.py -> CMD_SELFTEST_START -> Orchestrator self-test block -> hardware primitives -> CMD_SELFTEST_RESULT/CMD_SELFTEST_DONE -> JSON report`
+`firmware/scripts/run_fw_hil_windows.ps1 -> firmware/hil/flash_and_test.sh -> tools/run_selftest.py -> CMD_SELFTEST_START -> Orchestrator dispatcher -> DiagnosticsRunner::runSelfTest -> hardware primitives -> CMD_SELFTEST_RESULT/CMD_SELFTEST_DONE -> JSON report`
 
 Existing main app control flow:
 
@@ -605,20 +606,18 @@ Python responsibilities:
 - Compare motor position at repeated target pressures.
 - Flag likely leaks, step loss, hysteresis, or settling problems.
 
-Expected metrics:
+Implemented metrics use compact names to stay inside the existing self-test result frame budget:
 
-- `channel`
-- `target_raw`
-- `hold_ms`
-- `pressure_start_raw`
-- `pressure_end_raw`
-- `pressure_slope_raw_per_min`
-- `correction_step_count`
-- `motor_pos_start`
-- `motor_pos_end`
-- `target_repeat_span_steps`
-- `settle_time_ms`
-- `steady_state_error_raw`
+- `2201`: `channel`, `target_raw`, `hold_ms`, `p_start`, `p_end`, `slope_raw_min`, `corr_steps`, `motor_start`, `motor_end`, `ready_miss`, `timeout`
+- `2202`: `channel`, `cycles`, `low_raw`, `high_raw`, `settle_max_ms`, `err_max`, `low_span`, `high_span`, `ready_miss`, `timeout`
+- `2203`: `channel`, `target_raw`, `visits`, `pos_min`, `pos_max`, `repeat_span`, `hyst_span`, `err_max`, `ready_miss`, `timeout`
+
+Status:
+
+- Implemented in firmware FULL profile after the existing pressure step-response test and before valve/pulse tests.
+- Added `factory_acceptance_v2` with the 28-test FULL suite and candidate Python analyzer rules for the new pressure metrics.
+- Validated on hardware with FULL HIL report `hil_reports/selftest_20260513_191209.json`: non-aborted, `28/28` passing.
+- Converted the raw HIL report through `tools/run_qualification.py --manifest factory_acceptance_v2`; qualification verdict was `pass` with no warnings.
 
 Validation:
 

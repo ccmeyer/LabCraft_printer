@@ -6,19 +6,31 @@ from tools.qualification.manifest import ManifestError, load_manifest, parse_man
 
 
 def test_load_builtin_factory_acceptance_manifest():
-    manifest = load_manifest("factory_acceptance_v1")
+    manifest = load_manifest("factory_acceptance_v2")
 
-    assert manifest.manifest_id == "factory_acceptance_v1"
+    assert manifest.manifest_id == "factory_acceptance_v2"
     assert manifest.profile == "FULL"
     assert 1001 in manifest.expected_test_ids
     assert 2006 in manifest.expected_test_ids
     assert 2007 in manifest.expected_test_ids
     assert 2008 in manifest.expected_test_ids
+    assert 2201 in manifest.expected_test_ids
+    assert 2202 in manifest.expected_test_ids
+    assert 2203 in manifest.expected_test_ids
     assert manifest.fixtures
     assert manifest.enforce_expected_test_ids is True
     assert manifest.analysis_rules["2003"]["category"] == "pressure"
+    assert manifest.analysis_rules["2201"]["metrics"]["slope_raw_min"]["maturity"] == "candidate"
     assert manifest.analysis_rules["2007"]["metrics"]["x_span"]["maturity"] == "candidate"
     assert manifest.to_report_dict()["schema_version"] == "qualification_manifest_v0"
+
+
+def test_load_legacy_factory_acceptance_v1_manifest():
+    manifest = load_manifest("factory_acceptance_v1")
+
+    assert manifest.manifest_id == "factory_acceptance_v1"
+    assert 2008 in manifest.expected_test_ids
+    assert 2201 not in manifest.expected_test_ids
 
 
 def test_load_legacy_factory_acceptance_v0_manifest():

@@ -82,6 +82,54 @@ def _raw_factory_v1_selftest():
     return raw
 
 
+def _raw_factory_v2_selftest():
+    raw = _raw_factory_v1_selftest()
+    additions = [
+        {
+            "test_id": 2201,
+            "name": "pressure_hold_leak_factory",
+            "pass": True,
+            "metrics": {
+                "slope_raw_min": 10,
+                "corr_steps": 4,
+                "ready_miss": 0,
+                "timeout": 0,
+            },
+        },
+        {
+            "test_id": 2202,
+            "name": "pressure_target_cycle_repeatability_factory",
+            "pass": True,
+            "metrics": {
+                "settle_max_ms": 1200,
+                "err_max": 5,
+                "low_span": 12,
+                "high_span": 14,
+                "ready_miss": 0,
+                "timeout": 0,
+            },
+        },
+        {
+            "test_id": 2203,
+            "name": "pressure_motor_position_hysteresis_factory",
+            "pass": True,
+            "metrics": {
+                "repeat_span": 18,
+                "hyst_span": 6,
+                "err_max": 5,
+                "ready_miss": 0,
+                "timeout": 0,
+            },
+        },
+    ]
+    rows = list(raw["results"])
+    insert_at = next(index for index, row in enumerate(rows) if row["test_id"] == 2004)
+    rows[insert_at:insert_at] = additions
+    raw["summary"] = {"total": len(rows), "passed": len(rows), "failed": 0}
+    raw["results"] = rows
+    return raw
+
+
 def _identity(tmp_path):
     return load_or_create_identity(
         tmp_path / "local" / "machine_identity.json",
@@ -185,3 +233,18 @@ def test_factory_v1_synthetic_full_report_passes_expected_id_enforcement(tmp_pat
     assert report["raw_summary"]["total"] == 25
     metric_names = {item["metric_name"] for item in report["analysis"]["metric_evaluations"]}
     assert {"x_span", "y_span", "x_ret", "y_ret"}.issubset(metric_names)
+
+
+def test_factory_v2_synthetic_full_report_passes_expected_id_enforcement(tmp_path):
+    from tools.qualification.manifest import load_manifest
+
+    manifest = load_manifest("factory_acceptance_v2")
+    artifacts = create_run_artifacts("LC-0001", output_root=tmp_path, timestamp="20260513T120000Z")
+
+    report = normalize_report(_raw_factory_v2_selftest(), manifest, _identity(tmp_path), artifacts)
+
+    assert report["overall_status"] == "pass"
+    assert report["manifest_checks"]["missing_test_ids"] == []
+    assert report["raw_summary"]["total"] == 28
+    metric_names = {item["metric_name"] for item in report["analysis"]["metric_evaluations"]}
+    assert {"slope_raw_min", "low_span", "high_span", "repeat_span", "hyst_span"}.issubset(metric_names)

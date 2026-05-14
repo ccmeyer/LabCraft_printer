@@ -12,6 +12,7 @@
 #include "PressureRegulator.h"
 #include "MotionQualificationMath.h"
 #include "PressureRegulatorMath.h"
+#include "PressureQualificationMath.h"
 #include "PressureTargetPolicy.h"
 #include "PressureSensor.h"
 #include "Logger.h"
@@ -64,6 +65,9 @@ static constexpr DiagnosticTestDescriptor kDiagnosticTests[] = {
     {2007u, "motion_home_repeatability_factory", "motion", "FULL", "safe_gate_or_full"},
     {2008u, "motion_pattern_return_factory", "motion", "FULL", "safe_gate_or_full"},
     {2003u, "pressure_regulator_step_response_full", "pressure", "FULL", "safe_gate_or_full"},
+    {2201u, "pressure_hold_leak_factory", "pressure", "FULL", "safe_gate_or_full"},
+    {2202u, "pressure_target_cycle_repeatability_factory", "pressure", "FULL", "safe_gate_or_full"},
+    {2203u, "pressure_motor_position_hysteresis_factory", "pressure", "FULL", "safe_gate_or_full"},
     {2004u, "valve_actuation_sequence_full", "pressure", "FULL", "safe_gate_or_full"},
     {2005u, "print_refuel_pulse_integrity_full", "pulse", "FULL", "safe_gate_or_full"},
     {2006u, "emergency_abort_and_safe_stop_full", "safety", "FULL", "safe_gate_or_full"},
@@ -417,6 +421,12 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         uint32_t avgError = 0u;
                       };
 
+                      struct PressurePositionSample {
+                        int32_t pressureRaw = 0;
+                        int32_t pressureAvg = 0;
+                        int32_t motorPosition = 0;
+                      };
+
 					  auto waitPressureReady = [&](PressureRegulator& reg,
 					                               uint8_t sensorPort,
 					                               int32_t targetPressure,
@@ -471,6 +481,31 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             (result.readySeen || result.readyFinal || (result.controlError <= readyTol));
 						    return result;
 						  };
+
+                      auto readPrintPressurePositionSample = [&]() {
+                        PressurePositionSample sample{};
+                        PressureSensor* sensor = PressureSensor::instance();
+                        if (sensor != nullptr) {
+                          const auto controlSample = sensor->getControlSample(0u);
+                          sample.pressureRaw = static_cast<int32_t>(controlSample.raw);
+                          sample.pressureAvg = sensor->getPressure(0u);
+                        }
+                        sample.motorPosition = Stepper::stepperP()->getPosition();
+                        return sample;
+                      };
+
+                      auto recordPressureWaitExecution = [](const PressureWaitResult& wait,
+                                                            PressureQualificationMath::ExecutionSummary& summary) {
+                        if (wait.accepted) {
+                          return;
+                        }
+                        summary.readyMissCount++;
+                        if (wait.aborted) {
+                          summary.abortCount++;
+                        } else {
+                          summary.timeoutCount++;
+                        }
+                      };
 
 						  auto waitBitsWithTimeout = [&](EventBits_t bits, uint32_t timeoutMs) {
                             sendProgressStage("wait_bits_enter");
@@ -1789,6 +1824,370 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 						      if (!runOne(2003, "pressure_regulator_step_response_full", pressurePass, metrics)) goto selftest_done;
 						    }
 						  }
+
+                          {
+                            if (!fullProfile || pressureSweepOnly) {
+                              if (!runOne(2201,
+                                          "pressure_hold_leak_factory",
+                                          true,
+                                          pressureSweepOnly ? "profile=FULL;executed=0;fixture_required=1;pressure=0;gate=sweep_only" : "profile=SAFE;executed=0;fixture_required=1;pressure=0;gate=safe_only")) {
+                                goto selftest_done;
+                              }
+                            } else if (!fullHomePass) {
+                              if (!runOne(2201,
+                                          "pressure_hold_leak_factory",
+                                          false,
+                                          "channel=p;target_raw=0;hold_ms=0;p_start=0;p_end=0;slope_raw_min=0;corr_steps=0;motor_start=0;motor_end=0;ready_miss=1;timeout=0")) {
+                                goto selftest_done;
+                              }
+                            } else {
+                              static constexpr uint32_t kHoldSettleTimeoutMs = 5000u;
+                              static constexpr uint32_t kHoldMs = 5000u;
+                              static constexpr int32_t kPressureDelta = 200;
+                              PressureQualificationMath::ExecutionSummary exec{};
+                              PressureSensor* sensor = PressureSensor::instance();
+                              PressureRegulator& reg = PressureRegulator::regP();
+                              const int32_t baselineTarget = static_cast<int32_t>(reg.getTarget());
+                              int32_t holdTarget = baselineTarget + kPressureDelta;
+                              bool stepUp = true;
+                              if (holdTarget > 5600) {
+                                holdTarget = baselineTarget - kPressureDelta;
+                                stepUp = false;
+                              }
+                              int32_t pressureStart = 0;
+                              int32_t pressureEnd = 0;
+                              int32_t motorStart = 0;
+                              int32_t motorEnd = 0;
+
+                              if (sensor && holdTarget != baselineTarget) {
+                                reg.start();
+                                xEventGroupClearBits(_doneEvents, BIT_PRESSURE_P_READY);
+                                reg.setTargetSafe(holdTarget);
+                                holdTarget = static_cast<int32_t>(reg.getTarget());
+                                const PressureWaitResult ready = waitPressureReady(reg,
+                                                                                   0u,
+                                                                                   holdTarget,
+                                                                                   stepUp,
+                                                                                   kHoldSettleTimeoutMs);
+                                recordPressureWaitExecution(ready, exec);
+                                if (ready.accepted && !_selfTestAbortRequested) {
+                                  const PressurePositionSample startSample = readPrintPressurePositionSample();
+                                  pressureStart = startSample.pressureRaw;
+                                  motorStart = startSample.motorPosition;
+                                  if (!delayWithWatchdog(kHoldMs, "pressure_hold_leak")) {
+                                    exec.abortCount++;
+                                  }
+                                  const PressurePositionSample endSample = readPrintPressurePositionSample();
+                                  pressureEnd = endSample.pressureRaw;
+                                  motorEnd = endSample.motorPosition;
+                                }
+                                xEventGroupClearBits(_doneEvents, BIT_PRESSURE_P_READY);
+                                reg.setTargetSafe(baselineTarget);
+                                (void)waitPressureReady(reg,
+                                                        0u,
+                                                        baselineTarget,
+                                                        !stepUp,
+                                                        kHoldSettleTimeoutMs);
+                                reg.pause();
+                              } else {
+                                exec.readyMissCount++;
+                              }
+
+                              const int32_t slopeRawPerMin =
+                                  PressureQualificationMath::slopeRawPerMin(pressureStart, pressureEnd, kHoldMs);
+                              const uint32_t correctionSteps =
+                                  PressureQualificationMath::absDiff(motorStart, motorEnd);
+                              const bool holdPass = sensor &&
+                                                    (holdTarget != baselineTarget) &&
+                                                    PressureQualificationMath::executionPass(exec);
+                              char metrics[192];
+                              snprintf(metrics, sizeof(metrics),
+                                       "channel=p;target_raw=%ld;hold_ms=%lu;p_start=%ld;p_end=%ld;slope_raw_min=%ld;corr_steps=%lu;motor_start=%ld;motor_end=%ld;ready_miss=%lu;timeout=%lu",
+                                       static_cast<long>(holdTarget),
+                                       static_cast<unsigned long>(kHoldMs),
+                                       static_cast<long>(pressureStart),
+                                       static_cast<long>(pressureEnd),
+                                       static_cast<long>(slopeRawPerMin),
+                                       static_cast<unsigned long>(correctionSteps),
+                                       static_cast<long>(motorStart),
+                                       static_cast<long>(motorEnd),
+                                       static_cast<unsigned long>(exec.readyMissCount),
+                                       static_cast<unsigned long>(exec.timeoutCount));
+                              if (!runOne(2201, "pressure_hold_leak_factory", holdPass, metrics)) goto selftest_done;
+                            }
+                          }
+
+                          {
+                            if (!fullProfile || pressureSweepOnly) {
+                              if (!runOne(2202,
+                                          "pressure_target_cycle_repeatability_factory",
+                                          true,
+                                          pressureSweepOnly ? "profile=FULL;executed=0;fixture_required=1;pressure=0;gate=sweep_only" : "profile=SAFE;executed=0;fixture_required=1;pressure=0;gate=safe_only")) {
+                                goto selftest_done;
+                              }
+                            } else if (!fullHomePass) {
+                              if (!runOne(2202,
+                                          "pressure_target_cycle_repeatability_factory",
+                                          false,
+                                          "channel=p;cycles=0;low_raw=0;high_raw=0;settle_max_ms=0;err_max=0;low_span=0;high_span=0;ready_miss=1;timeout=0")) {
+                                goto selftest_done;
+                              }
+                            } else {
+                              static constexpr uint32_t kCycleCount = 3u;
+                              static constexpr uint32_t kCycleSettleTimeoutMs = 5000u;
+                              static constexpr int32_t kPressureDelta = 200;
+                              PressureQualificationMath::ExecutionSummary exec{};
+                              PressureSensor* sensor = PressureSensor::instance();
+                              PressureRegulator& reg = PressureRegulator::regP();
+                              const int32_t baselineTarget = static_cast<int32_t>(reg.getTarget());
+                              int32_t targetA = baselineTarget;
+                              int32_t targetB = baselineTarget + kPressureDelta;
+                              bool bIsStepUp = true;
+                              if (targetB > 5600) {
+                                targetB = baselineTarget - kPressureDelta;
+                                bIsStepUp = false;
+                              }
+                              int32_t lowPositions[kCycleCount]{};
+                              int32_t highPositions[kCycleCount]{};
+                              size_t lowCount = 0u;
+                              size_t highCount = 0u;
+                              uint32_t settleMaxMs = 0u;
+                              uint32_t errMax = 0u;
+
+                              if (sensor && targetB != targetA) {
+                                reg.start();
+                                for (uint32_t cycle = 0; cycle < kCycleCount; ++cycle) {
+                                  sendProgressStage("pressure_cycle_repeat");
+                                  xEventGroupClearBits(_doneEvents, BIT_PRESSURE_P_READY);
+                                  reg.setTargetSafe(targetA);
+                                  targetA = static_cast<int32_t>(reg.getTarget());
+                                  const PressureWaitResult waitA = waitPressureReady(reg,
+                                                                                     0u,
+                                                                                     targetA,
+                                                                                     !bIsStepUp,
+                                                                                     kCycleSettleTimeoutMs);
+                                  recordPressureWaitExecution(waitA, exec);
+                                  if (waitA.settleMs > settleMaxMs) settleMaxMs = waitA.settleMs;
+                                  if (waitA.controlError > errMax) errMax = waitA.controlError;
+                                  if (!waitA.accepted || _selfTestAbortRequested) {
+                                    break;
+                                  }
+                                  const PressurePositionSample sampleA = readPrintPressurePositionSample();
+                                  if (targetA <= targetB) {
+                                    if (lowCount < kCycleCount) lowPositions[lowCount++] = sampleA.motorPosition;
+                                  } else {
+                                    if (highCount < kCycleCount) highPositions[highCount++] = sampleA.motorPosition;
+                                  }
+
+                                  xEventGroupClearBits(_doneEvents, BIT_PRESSURE_P_READY);
+                                  reg.setTargetSafe(targetB);
+                                  targetB = static_cast<int32_t>(reg.getTarget());
+                                  const PressureWaitResult waitB = waitPressureReady(reg,
+                                                                                     0u,
+                                                                                     targetB,
+                                                                                     bIsStepUp,
+                                                                                     kCycleSettleTimeoutMs);
+                                  recordPressureWaitExecution(waitB, exec);
+                                  if (waitB.settleMs > settleMaxMs) settleMaxMs = waitB.settleMs;
+                                  if (waitB.controlError > errMax) errMax = waitB.controlError;
+                                  if (!waitB.accepted || _selfTestAbortRequested) {
+                                    break;
+                                  }
+                                  const PressurePositionSample sampleB = readPrintPressurePositionSample();
+                                  if (targetB <= targetA) {
+                                    if (lowCount < kCycleCount) lowPositions[lowCount++] = sampleB.motorPosition;
+                                  } else {
+                                    if (highCount < kCycleCount) highPositions[highCount++] = sampleB.motorPosition;
+                                  }
+                                  if (_selfTestAbortRequested) {
+                                    exec.abortCount++;
+                                    break;
+                                  }
+                                }
+                                xEventGroupClearBits(_doneEvents, BIT_PRESSURE_P_READY);
+                                reg.setTargetSafe(baselineTarget);
+                                (void)waitPressureReady(reg,
+                                                        0u,
+                                                        baselineTarget,
+                                                        !bIsStepUp,
+                                                        kCycleSettleTimeoutMs);
+                                reg.pause();
+                              } else {
+                                exec.readyMissCount++;
+                              }
+
+                              const PressureQualificationMath::Int32Span lowStats =
+                                  PressureQualificationMath::summarizeInt32Span(lowPositions, lowCount);
+                              const PressureQualificationMath::Int32Span highStats =
+                                  PressureQualificationMath::summarizeInt32Span(highPositions, highCount);
+                              const int32_t lowRaw = (targetA < targetB) ? targetA : targetB;
+                              const int32_t highRaw = (targetA > targetB) ? targetA : targetB;
+                              const bool cyclePass = sensor &&
+                                                     (targetA != targetB) &&
+                                                     PressureQualificationMath::executionPass(exec);
+                              char metrics[192];
+                              snprintf(metrics, sizeof(metrics),
+                                       "channel=p;cycles=%lu;low_raw=%ld;high_raw=%ld;settle_max_ms=%lu;err_max=%lu;low_span=%lu;high_span=%lu;ready_miss=%lu;timeout=%lu",
+                                       static_cast<unsigned long>(kCycleCount),
+                                       static_cast<long>(lowRaw),
+                                       static_cast<long>(highRaw),
+                                       static_cast<unsigned long>(settleMaxMs),
+                                       static_cast<unsigned long>(errMax),
+                                       static_cast<unsigned long>(lowStats.span),
+                                       static_cast<unsigned long>(highStats.span),
+                                       static_cast<unsigned long>(exec.readyMissCount),
+                                       static_cast<unsigned long>(exec.timeoutCount));
+                              if (!runOne(2202, "pressure_target_cycle_repeatability_factory", cyclePass, metrics)) goto selftest_done;
+                            }
+                          }
+
+                          {
+                            if (!fullProfile || pressureSweepOnly) {
+                              if (!runOne(2203,
+                                          "pressure_motor_position_hysteresis_factory",
+                                          true,
+                                          pressureSweepOnly ? "profile=FULL;executed=0;fixture_required=1;pressure=0;gate=sweep_only" : "profile=SAFE;executed=0;fixture_required=1;pressure=0;gate=safe_only")) {
+                                goto selftest_done;
+                              }
+                            } else if (!fullHomePass) {
+                              if (!runOne(2203,
+                                          "pressure_motor_position_hysteresis_factory",
+                                          false,
+                                          "channel=p;target_raw=0;visits=0;pos_min=0;pos_max=0;repeat_span=0;hyst_span=0;err_max=0;ready_miss=1;timeout=0")) {
+                                goto selftest_done;
+                              }
+                            } else {
+                              static constexpr uint32_t kHysteresisReps = 2u;
+                              static constexpr uint32_t kHysteresisSettleTimeoutMs = 5000u;
+                              PressureQualificationMath::ExecutionSummary exec{};
+                              PressureSensor* sensor = PressureSensor::instance();
+                              PressureRegulator& reg = PressureRegulator::regP();
+                              const int32_t baselineTarget = static_cast<int32_t>(reg.getTarget());
+                              int32_t lowTarget = baselineTarget;
+                              int32_t targetRaw = baselineTarget + 100;
+                              int32_t highTarget = baselineTarget + 200;
+                              if (highTarget > 5600) {
+                                highTarget = baselineTarget;
+                                targetRaw = baselineTarget - 100;
+                                lowTarget = baselineTarget - 200;
+                              }
+                              int32_t belowPositions[kHysteresisReps]{};
+                              int32_t abovePositions[kHysteresisReps]{};
+                              int32_t allPositions[kHysteresisReps * 2u]{};
+                              size_t belowCount = 0u;
+                              size_t aboveCount = 0u;
+                              size_t allCount = 0u;
+                              uint32_t errMax = 0u;
+
+                              if (sensor && (lowTarget != highTarget) && (targetRaw != baselineTarget)) {
+                                reg.start();
+                                for (uint32_t rep = 0; rep < kHysteresisReps; ++rep) {
+                                  sendProgressStage("pressure_hysteresis");
+                                  xEventGroupClearBits(_doneEvents, BIT_PRESSURE_P_READY);
+                                  reg.setTargetSafe(lowTarget);
+                                  lowTarget = static_cast<int32_t>(reg.getTarget());
+                                  const PressureWaitResult lowWait = waitPressureReady(reg,
+                                                                                       0u,
+                                                                                       lowTarget,
+                                                                                       false,
+                                                                                       kHysteresisSettleTimeoutMs);
+                                  recordPressureWaitExecution(lowWait, exec);
+                                  if (lowWait.controlError > errMax) errMax = lowWait.controlError;
+                                  if (!lowWait.accepted || _selfTestAbortRequested) {
+                                    break;
+                                  }
+
+                                  xEventGroupClearBits(_doneEvents, BIT_PRESSURE_P_READY);
+                                  reg.setTargetSafe(targetRaw);
+                                  targetRaw = static_cast<int32_t>(reg.getTarget());
+                                  const PressureWaitResult fromBelow = waitPressureReady(reg,
+                                                                                         0u,
+                                                                                         targetRaw,
+                                                                                         true,
+                                                                                         kHysteresisSettleTimeoutMs);
+                                  recordPressureWaitExecution(fromBelow, exec);
+                                  if (fromBelow.controlError > errMax) errMax = fromBelow.controlError;
+                                  if (!fromBelow.accepted || _selfTestAbortRequested) {
+                                    break;
+                                  }
+                                  const PressurePositionSample belowSample = readPrintPressurePositionSample();
+                                  if (belowCount < kHysteresisReps) belowPositions[belowCount++] = belowSample.motorPosition;
+                                  if (allCount < (kHysteresisReps * 2u)) allPositions[allCount++] = belowSample.motorPosition;
+
+                                  xEventGroupClearBits(_doneEvents, BIT_PRESSURE_P_READY);
+                                  reg.setTargetSafe(highTarget);
+                                  highTarget = static_cast<int32_t>(reg.getTarget());
+                                  const PressureWaitResult highWait = waitPressureReady(reg,
+                                                                                        0u,
+                                                                                        highTarget,
+                                                                                        true,
+                                                                                        kHysteresisSettleTimeoutMs);
+                                  recordPressureWaitExecution(highWait, exec);
+                                  if (highWait.controlError > errMax) errMax = highWait.controlError;
+                                  if (!highWait.accepted || _selfTestAbortRequested) {
+                                    break;
+                                  }
+
+                                  xEventGroupClearBits(_doneEvents, BIT_PRESSURE_P_READY);
+                                  reg.setTargetSafe(targetRaw);
+                                  targetRaw = static_cast<int32_t>(reg.getTarget());
+                                  const PressureWaitResult fromAbove = waitPressureReady(reg,
+                                                                                         0u,
+                                                                                         targetRaw,
+                                                                                         false,
+                                                                                         kHysteresisSettleTimeoutMs);
+                                  recordPressureWaitExecution(fromAbove, exec);
+                                  if (fromAbove.controlError > errMax) errMax = fromAbove.controlError;
+                                  if (!fromAbove.accepted || _selfTestAbortRequested) {
+                                    break;
+                                  }
+                                  const PressurePositionSample aboveSample = readPrintPressurePositionSample();
+                                  if (aboveCount < kHysteresisReps) abovePositions[aboveCount++] = aboveSample.motorPosition;
+                                  if (allCount < (kHysteresisReps * 2u)) allPositions[allCount++] = aboveSample.motorPosition;
+
+                                  if (_selfTestAbortRequested) {
+                                    exec.abortCount++;
+                                    break;
+                                  }
+                                }
+                                xEventGroupClearBits(_doneEvents, BIT_PRESSURE_P_READY);
+                                reg.setTargetSafe(baselineTarget);
+                                const bool restoreStepUp = baselineTarget >= targetRaw;
+                                (void)waitPressureReady(reg,
+                                                        0u,
+                                                        baselineTarget,
+                                                        restoreStepUp,
+                                                        kHysteresisSettleTimeoutMs);
+                                reg.pause();
+                              } else {
+                                exec.readyMissCount++;
+                              }
+
+                              const PressureQualificationMath::Int32Span repeatStats =
+                                  PressureQualificationMath::summarizeInt32Span(allPositions, allCount);
+                              const uint32_t hystSpan =
+                                  PressureQualificationMath::meanDifferenceAbs(belowPositions,
+                                                                               belowCount,
+                                                                               abovePositions,
+                                                                               aboveCount);
+                              const bool hysteresisPass = sensor &&
+                                                          (targetRaw != baselineTarget) &&
+                                                          PressureQualificationMath::executionPass(exec);
+                              char metrics[192];
+                              snprintf(metrics, sizeof(metrics),
+                                       "channel=p;target_raw=%ld;visits=%lu;pos_min=%ld;pos_max=%ld;repeat_span=%lu;hyst_span=%lu;err_max=%lu;ready_miss=%lu;timeout=%lu",
+                                       static_cast<long>(targetRaw),
+                                       static_cast<unsigned long>(allCount),
+                                       static_cast<long>(repeatStats.minValue),
+                                       static_cast<long>(repeatStats.maxValue),
+                                       static_cast<unsigned long>(repeatStats.span),
+                                       static_cast<unsigned long>(hystSpan),
+                                       static_cast<unsigned long>(errMax),
+                                       static_cast<unsigned long>(exec.readyMissCount),
+                                       static_cast<unsigned long>(exec.timeoutCount));
+                              if (!runOne(2203, "pressure_motor_position_hysteresis_factory", hysteresisPass, metrics)) goto selftest_done;
+                            }
+                          }
 
 						  {
 						    if (!fullProfile || pressureSweepOnly) {
