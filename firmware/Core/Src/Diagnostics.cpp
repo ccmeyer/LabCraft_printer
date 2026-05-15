@@ -1363,16 +1363,46 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           return checkPointSafety(actual, stats, boundViolation, guardViolation);
                         };
 
+                        auto runReferenceHomeSequence = [&](MotionQualificationMath::AxisHomeSample& xReference,
+                                                            MotionQualificationMath::AxisHomeSample& yReference,
+                                                            const char* settleStage,
+                                                            const char* referenceStage,
+                                                            const char*& failedStage) -> bool {
+                          MotionQualificationMath::AxisHomeSample xSettle{};
+                          MotionQualificationMath::AxisHomeSample ySettle{};
+                          failedStage = settleStage;
+                          sendProgressStage(settleStage);
+                          if (!runXyHomeDiagnosticAttempt(xSettle,
+                                                          ySettle,
+                                                          kHomeFastHz,
+                                                          kHomeSlowHz,
+                                                          kHomeBackoffSteps,
+                                                          kHomeTimeoutMs)) {
+                            return false;
+                          }
+                          failedStage = referenceStage;
+                          sendProgressStage(referenceStage);
+                          if (!runXyHomeDiagnosticAttempt(xReference,
+                                                          yReference,
+                                                          kHomeFastHz,
+                                                          kHomeSlowHz,
+                                                          kHomeBackoffSteps,
+                                                          kHomeTimeoutMs)) {
+                            return false;
+                          }
+                          failedStage = nullptr;
+                          return true;
+                        };
+
                         MotionQualificationMath::AxisHomeSample xReference{};
                         MotionQualificationMath::AxisHomeSample yReference{};
-                        sendProgressStage("xy_motion_reference_home");
-                        if (!runXyHomeDiagnosticAttempt(xReference,
-                                                        yReference,
-                                                        kHomeFastHz,
-                                                        kHomeSlowHz,
-                                                        kHomeBackoffSteps,
-                                                        kHomeTimeoutMs)) {
-                          (void)emitSkippedXyMotion(2010u, "reference_home");
+                        const char* referenceHomeFailureStage = nullptr;
+                        if (!runReferenceHomeSequence(xReference,
+                                                      yReference,
+                                                      "xy_long_settle_home",
+                                                      "xy_long_reference_home",
+                                                      referenceHomeFailureStage)) {
+                          (void)emitSkippedXyMotion(2010u, referenceHomeFailureStage ? referenceHomeFailureStage : "reference_home");
                           return finishSelfTestNow();
                         }
 
@@ -1452,7 +1482,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             MotionQualificationMath::xyMotionStatsPass(longStats);
                         char metrics2010[224];
                         snprintf(metrics2010, sizeof(metrics2010),
-                                 "rep=%lu;pts=%lu;xmax=%ld;ymax=%ld;dx=%ld;dy=%ld;x_span=%lu;y_span=%lu;x_drift=%lu;y_drift=%lu;x_ret=%lu;y_ret=%lu;ret_err=%lu;move_to=%lu;home_to=%lu;guard=%lu;bound=%lu",
+                                 "rep=%lu;ref=2;pts=%lu;xmax=%ld;ymax=%ld;dx=%ld;dy=%ld;x_span=%lu;y_span=%lu;x_drift=%lu;y_drift=%lu;x_ret=%lu;y_ret=%lu;ret_err=%lu;move_to=%lu;home_to=%lu;guard=%lu;bound=%lu",
                                  static_cast<unsigned long>(longCompleted),
                                  static_cast<unsigned long>(kLongPointCount),
                                  static_cast<long>(kLongXMax),
@@ -1480,14 +1510,13 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 
                         MotionQualificationMath::AxisHomeSample xRasterReference{};
                         MotionQualificationMath::AxisHomeSample yRasterReference{};
-                        sendProgressStage("xy_raster_reference_home");
-                        if (!runXyHomeDiagnosticAttempt(xRasterReference,
-                                                        yRasterReference,
-                                                        kHomeFastHz,
-                                                        kHomeSlowHz,
-                                                        kHomeBackoffSteps,
-                                                        kHomeTimeoutMs)) {
-                          (void)emitSkippedXyMotion(2011u, "raster_reference_home");
+                        referenceHomeFailureStage = nullptr;
+                        if (!runReferenceHomeSequence(xRasterReference,
+                                                      yRasterReference,
+                                                      "xy_raster_settle_home",
+                                                      "xy_raster_reference_home",
+                                                      referenceHomeFailureStage)) {
+                          (void)emitSkippedXyMotion(2011u, referenceHomeFailureStage ? referenceHomeFailureStage : "raster_reference_home");
                           return finishSelfTestNow();
                         }
 
@@ -1576,7 +1605,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             MotionQualificationMath::xyMotionStatsPass(rasterStats);
                         char metrics2011[224];
                         snprintf(metrics2011, sizeof(metrics2011),
-                                 "rep=%lu;rows=%lu;cols=%lu;step=%ld;moves=%lu;xmax=%ld;ymax=%ld;dx=%ld;dy=%ld;x_span=%lu;y_span=%lu;x_drift=%lu;y_drift=%lu;x_ret=%lu;y_ret=%lu;ret_err=%lu;move_to=%lu;home_to=%lu;guard=%lu;bound=%lu",
+                                 "rep=%lu;ref=2;rows=%lu;cols=%lu;step=%ld;moves=%lu;xmax=%ld;ymax=%ld;dx=%ld;dy=%ld;x_span=%lu;y_span=%lu;x_drift=%lu;y_drift=%lu;x_ret=%lu;y_ret=%lu;ret_err=%lu;move_to=%lu;home_to=%lu;guard=%lu;bound=%lu",
                                  static_cast<unsigned long>(rasterCompleted),
                                  static_cast<unsigned long>(kRasterRows),
                                  static_cast<unsigned long>(kRasterCols),
