@@ -186,6 +186,28 @@ def test_run_qualification_wraps_fake_selftest_invoker(tmp_path):
     assert "--profile" in command
     assert "FULL" in command
     assert str(result.raw_selftest_path) in command
+    assert "--progress-jsonl" not in command
+
+
+def test_run_qualification_can_request_progress_jsonl(tmp_path):
+    invocations = []
+
+    def fake_invoker(invocation):
+        invocations.append(invocation)
+        invocation.raw_report_path.write_text(json.dumps(_raw_selftest()), encoding="utf-8")
+        return 0
+
+    result = run_qualification(
+        manifest_ref=_manifest_path(tmp_path),
+        machine_id="LC-0001",
+        identity_path=tmp_path / "local" / "machine_identity.json",
+        output_root=tmp_path / "qualification",
+        progress_jsonl=True,
+        invoker=fake_invoker,
+    )
+
+    assert result.returncode == 0
+    assert "--progress-jsonl" in invocations[0].command
 
 
 def test_run_qualification_writes_failure_report_when_raw_missing(tmp_path):

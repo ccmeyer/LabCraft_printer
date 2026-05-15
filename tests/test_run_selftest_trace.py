@@ -124,6 +124,15 @@ def _selftest_result_trace(
     return _frame_payload(mod, bytes(payload))
 
 
+def _captured_selftest_events(mod, captured_text: str) -> list[dict]:
+    prefix = mod.SELFTEST_EVENT_PREFIX
+    return [
+        mod.json.loads(line[len(prefix):])
+        for line in captured_text.splitlines()
+        if line.startswith(prefix)
+    ]
+
+
 def test_decode_pressure_trace_payloads():
     mod = _load_run_selftest()
 
@@ -331,6 +340,20 @@ def test_run_sends_gripper_seal_selector_and_skips_goodbye(monkeypatch, tmp_path
     mod = _load_run_selftest()
     run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF
     clock = FakeClock()
+    sample_payload = struct.pack(
+        "<HHHHHhhHHBB",
+        25,
+        2100,
+        2096,
+        2088,
+        2050,
+        46,
+        -3,
+        3200,
+        3000,
+        0x11,
+        2,
+    )
 
     inbound = b"".join(
         [
@@ -381,7 +404,7 @@ def test_run_sends_gripper_seal_selector_and_skips_goodbye(monkeypatch, tmp_path
     assert checks["goodbye_skipped"]["details"]["reason"] == "operator_gated_gripper_teardown"
 
 
-def test_run_sweep_selector_and_artifacts(monkeypatch, tmp_path):
+def test_run_sweep_selector_and_artifacts(monkeypatch, tmp_path, capsys):
     mod = _load_run_selftest()
     run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF
     clock = FakeClock()
@@ -459,6 +482,7 @@ def test_run_sweep_selector_and_artifacts(monkeypatch, tmp_path):
         pressure_trace=True,
         pressure_trace_test=None,
         pressure_sweep_suite=2301,
+        progress_jsonl=True,
         out=str(out_path),
     )
 
@@ -489,6 +513,76 @@ def test_run_sweep_selector_and_artifacts(monkeypatch, tmp_path):
     assert len(sweep["combos"]) == 1
     assert sweep["combos"][0]["test_id"] == 2310
     assert sweep["combos"][0]["trace_file"] is not None
+    events = _captured_selftest_events(mod, capsys.readouterr().out)
+    assert [event["event"] for event in events] == [
+        "selftest_result",
+        "selftest_result",
+        "selftest_done",
+    ]
+    assert [event["test_id"] for event in events if event["event"] == "selftest_result"] == [2310, 2391]
+
+
+def test_progress_jsonl_emits_progress_result_and_done_events(monkeypatch, tmp_path, capsys):
+    mod = _load_run_selftest()
+    run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF
+    clock = FakeClock()
+
+    inbound = b"".join(
+        [
+            _hello_ack(mod),
+            _selftest_result_metrics(
+                mod,
+                0,
+                "selftest_progress",
+                True,
+                "kind=progress;stage=sweep_combo;elapsed_ms=1200",
+            ),
+            _selftest_result_metrics(
+                mod,
+                2007,
+                "motion_home_repeatability_factory",
+                True,
+                "x_span=6;y_span=5;ret_err=0",
+            ),
+            _selftest_done(mod, run_id),
+            _bye_ack(mod, 3),
+            _bye_done(mod, 3, run_id),
+        ]
+    )
+    serial = FakeSerial(inbound)
+    monkeypatch.setattr(mod, "time", SimpleNamespace(monotonic=clock.monotonic, time=clock.time))
+    monkeypatch.setattr(mod, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: serial))
+
+    out_path = tmp_path / "selftest.json"
+    args = SimpleNamespace(
+        port="/dev/ttyAMA0",
+        baud=115200,
+        profile="SAFE",
+        timeout_ms=2000,
+        hello_timeout_ms=1000,
+        hello_retry_ms=50,
+        fast_fail_on_missing_hello=False,
+        pressure_trace=False,
+        pressure_trace_test=None,
+        pressure_sweep_suite=None,
+        progress_timeout_ms=500,
+        progress_jsonl=True,
+        out=str(out_path),
+    )
+
+    rc = mod.run(args)
+
+    assert rc == 0
+    events = _captured_selftest_events(mod, capsys.readouterr().out)
+    assert [event["event"] for event in events] == [
+        "selftest_progress",
+        "selftest_result",
+        "selftest_done",
+    ]
+    assert events[0]["stage"] == "sweep_combo"
+    assert events[1]["test_id"] == 2007
+    assert events[1]["metrics"]["ret_err"] == 0
+    assert events[2]["summary"] == {"total": 1, "passed": 1, "failed": 0}
 
 
 def test_progress_heartbeat_is_not_recorded_as_result(monkeypatch, tmp_path):
@@ -528,6 +622,7 @@ def test_progress_heartbeat_is_not_recorded_as_result(monkeypatch, tmp_path):
         pressure_trace_test=None,
         pressure_sweep_suite=None,
         progress_timeout_ms=500,
+        progress_jsonl=False,
         out=str(out_path),
     )
 
@@ -540,7 +635,7 @@ def test_progress_heartbeat_is_not_recorded_as_result(monkeypatch, tmp_path):
     assert checks["selftest_progress_watchdog"]["details"]["progress_count"] == 1
 
 
-def test_reset_report_during_selftest_is_classified(monkeypatch, tmp_path):
+def test_reset_report_during_selftest_is_classified(monkeypatch, tmp_path, capsys):
     mod = _load_run_selftest()
     clock = FakeClock()
 
@@ -575,6 +670,7 @@ def test_reset_report_during_selftest_is_classified(monkeypatch, tmp_path):
         pressure_sweep_suite=None,
         gripper_seal_suite=True,
         progress_timeout_ms=500,
+        progress_jsonl=True,
         out=str(out_path),
     )
 
@@ -592,3 +688,43 @@ def test_reset_report_during_selftest_is_classified(monkeypatch, tmp_path):
     reset_frames = [frame for frame in details["recent_frames"] if frame["cmd"] == mod.CMD_RESET_REPORT]
     assert reset_frames
     assert reset_frames[-1]["reset_seq32"] == 4321
+    events = _captured_selftest_events(mod, capsys.readouterr().out)
+    assert [event["event"] for event in events] == [
+        "selftest_progress",
+        "selftest_reset_report",
+        "selftest_timeout",
+    ]
+    assert events[1]["reset_report"]["reset_seq32"] == 4321
+    assert events[2]["reason"] == "mcu_reset_report_seen"
+
+
+def test_progress_jsonl_emits_timeout_event_when_done_missing(monkeypatch, tmp_path, capsys):
+    mod = _load_run_selftest()
+    clock = FakeClock(step=0.05)
+
+    serial = FakeSerial(_hello_ack(mod))
+    monkeypatch.setattr(mod, "time", SimpleNamespace(monotonic=clock.monotonic, time=clock.time))
+    monkeypatch.setattr(mod, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: serial))
+
+    out_path = tmp_path / "selftest.json"
+    args = SimpleNamespace(
+        port="/dev/ttyAMA0",
+        baud=115200,
+        profile="SAFE",
+        timeout_ms=200,
+        hello_timeout_ms=1000,
+        hello_retry_ms=50,
+        fast_fail_on_missing_hello=False,
+        pressure_trace=False,
+        pressure_trace_test=None,
+        pressure_sweep_suite=None,
+        progress_timeout_ms=100,
+        progress_jsonl=True,
+        out=str(out_path),
+    )
+
+    rc = mod.run(args)
+
+    assert rc == 3
+    events = _captured_selftest_events(mod, capsys.readouterr().out)
+    assert events[-1]["event"] == "selftest_timeout"

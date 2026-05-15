@@ -170,6 +170,61 @@ def test_run_tab_populates_selected_suite_test_plan(tmp_path, qapp):
     window.close()
 
 
+def test_run_tab_marks_first_row_in_progress_after_queueing(tmp_path, qapp):
+    _write_sample_report(tmp_path)
+    main_window = QtWidgets.QWidget()
+    main_window.popup_message = lambda *_args: None
+    window = MachineQualificationWindow(main_window, _ReportController(tmp_path))
+    window.suite_list.setCurrentRow(_suite_row(window, "factory_acceptance_v3"))
+
+    window._set_all_plan_status("Queued")
+    window._mark_next_queued_in_progress()
+
+    assert window.test_plan_table.item(0, 0).text() == "In progress"
+
+    window.close()
+
+
+def test_selftest_result_event_updates_row_and_advances_next_queued(tmp_path, qapp):
+    _write_sample_report(tmp_path)
+    main_window = QtWidgets.QWidget()
+    main_window.popup_message = lambda *_args: None
+    window = MachineQualificationWindow(main_window, _ReportController(tmp_path))
+    window.suite_list.setCurrentRow(_suite_row(window, "factory_acceptance_v3"))
+    first_id = int(window.test_plan_table.item(0, 1).text())
+
+    window._set_all_plan_status("Queued")
+    window._mark_next_queued_in_progress()
+    window._on_selftest_event(
+        {
+            "schema": "selftest_event_v1",
+            "event": "selftest_result",
+            "test_id": first_id,
+            "name": "first",
+            "pass": True,
+        }
+    )
+
+    assert window.test_plan_table.item(0, 0).text() == "Passed"
+    assert window.test_plan_table.item(1, 0).text() == "In progress"
+
+    window.close()
+
+
+def test_selftest_progress_event_updates_status_label(tmp_path, qapp):
+    _write_sample_report(tmp_path)
+    main_window = QtWidgets.QWidget()
+    main_window.popup_message = lambda *_args: None
+    window = MachineQualificationWindow(main_window, _ReportController(tmp_path))
+
+    window._on_selftest_event({"event": "selftest_progress", "stage": "sweep_combo"})
+
+    assert window.run_status_label.text() == "sweep_combo"
+    assert "Progress: sweep_combo" in window.run_log.toPlainText()
+
+    window.close()
+
+
 def test_gripper_suite_requires_explicit_fixture_selection(tmp_path, qapp):
     _write_sample_report(tmp_path)
     main_window = QtWidgets.QWidget()

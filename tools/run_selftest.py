@@ -31,6 +31,7 @@ CMD_SELFTEST_ABORT = 0xFD
 CMD_QUEUE_ACK = 0xFE
 CMD_GRIPPER_OPEN = 0x10
 CMD_GRIPPER_OFF = 0x12
+SELFTEST_EVENT_PREFIX = "SELFTEST_EVENT "
 
 TAG_PROFILE = 0x20
 TAG_RUN_ID = 0x21
@@ -333,6 +334,14 @@ class FrameReader:
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _emit_selftest_event(args, payload: dict) -> None:
+    if not bool(getattr(args, "progress_jsonl", False)):
+        return
+    event = {"schema": "selftest_event_v1", **dict(payload)}
+    event.setdefault("timestamp", now_iso())
+    print(f"{SELFTEST_EVENT_PREFIX}{json.dumps(event, sort_keys=True, separators=(',', ':'))}", flush=True)
 
 
 def write_json_atomic(path: str, obj: dict) -> None:
@@ -906,6 +915,13 @@ def run(args: argparse.Namespace) -> int:
                     reset_report_details = decode_reset_report(tlv)
                     frame_snapshot.update(reset_report_details)
                     recent_frames.append(frame_snapshot)
+                    _emit_selftest_event(
+                        args,
+                        {
+                            "event": "selftest_reset_report",
+                            "reset_report": reset_report_details,
+                        },
+                    )
                     timeout_reason = "mcu_reset_report_seen"
                     done_seen = False
                     break
@@ -926,6 +942,17 @@ def run(args: argparse.Namespace) -> int:
                         frame_snapshot["progress"] = True
                         frame_snapshot["stage"] = str(last_progress.get("stage", ""))
                         recent_frames.append(frame_snapshot)
+                        _emit_selftest_event(
+                            args,
+                            {
+                                "event": "selftest_progress",
+                                "test_id": test_id,
+                                "name": name,
+                                "pass": passed,
+                                "stage": str(last_progress.get("stage", "")),
+                                "metrics": dict(last_progress),
+                            },
+                        )
                         continue
                     if TAG_TRACE_KIND in tlv:
                         trace_kind = int.from_bytes(tlv.get(TAG_TRACE_KIND, b"\x00"), "little")
@@ -950,14 +977,26 @@ def run(args: argparse.Namespace) -> int:
                         recent_frames.append(frame_snapshot)
                         continue
                     metrics_raw = tlv.get(TAG_METRICS, b"").decode("utf-8", errors="replace")
-                    results.append(
+                    metrics = parse_metrics(metrics_raw)
+                    timestamp = now_iso()
+                    result = {
+                        "test_id": test_id,
+                        "name": name,
+                        "pass": passed,
+                        "metrics": metrics,
+                        "timestamp": timestamp,
+                    }
+                    results.append(result)
+                    _emit_selftest_event(
+                        args,
                         {
+                            "event": "selftest_result",
+                            "timestamp": timestamp,
                             "test_id": test_id,
                             "name": name,
                             "pass": passed,
-                            "metrics": parse_metrics(metrics_raw),
-                            "timestamp": now_iso(),
-                        }
+                            "metrics": metrics,
+                        },
                     )
                     recent_frames.append(frame_snapshot)
                     continue
@@ -977,6 +1016,15 @@ def run(args: argparse.Namespace) -> int:
                         "failed": int.from_bytes(tlv.get(TAG_FAILED, b"\x00\x00"), "little"),
                     }
                     aborted = bool(tlv.get(TAG_ABORTED, b"\x00")[0] if tlv.get(TAG_ABORTED) else 0)
+                    _emit_selftest_event(
+                        args,
+                        {
+                            "event": "selftest_done",
+                            "run_id": done_run,
+                            "summary": dict(summary),
+                            "aborted": aborted,
+                        },
+                    )
                     done_seen = True
                     break
             if done_seen:
@@ -985,6 +1033,15 @@ def run(args: argparse.Namespace) -> int:
                 break
 
         if not done_seen:
+            _emit_selftest_event(
+                args,
+                {
+                    "event": "selftest_timeout",
+                    "reason": timeout_reason,
+                    "selftest_frames_seen": selftest_frames_seen,
+                    "status_frames_since_selftest": status_frames_since_selftest,
+                },
+            )
             print(f"Timed out waiting for CMD_SELFTEST_DONE ({timeout_reason}).")
             aborted = True
             rc = 3
@@ -1211,6 +1268,7 @@ def main() -> int:
     p.add_argument("--progress-timeout-ms", type=int, default=15000)
     p.add_argument("--activity-timeout-ms", type=int, default=60000)
     p.add_argument("--status-only-timeout-ms", type=int, default=5000)
+    p.add_argument("--progress-jsonl", action="store_true", help="Emit structured SELFTEST_EVENT JSONL progress lines.")
     p.add_argument("--hello-timeout-ms", type=int, default=8000)
     p.add_argument("--hello-retry-ms", type=int, default=250)
     p.add_argument("--fast-fail-on-missing-hello", action="store_true")

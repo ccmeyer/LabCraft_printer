@@ -100,6 +100,7 @@ def test_worker_successful_fake_run_emits_final_report(tmp_path):
     assert "Running self-test" in stages
     assert any("Self-test invoker returned 0" in item for item in outputs)
     assert len(invocations) == 1
+    assert "--progress-jsonl" in invocations[0].command
 
 
 def test_worker_missing_raw_report_produces_failure_report(tmp_path):
@@ -172,3 +173,32 @@ def test_worker_gripper_prompt_flow_uses_operator_prompts(tmp_path):
         "support_before_release",
         "remove_dummy_head",
     ]
+
+
+def test_worker_parses_selftest_event_lines(qapp):
+    worker = QualificationRunWorker({}, repo_root=REPO_ROOT)
+    events = []
+    outputs = []
+    worker.selftest_event.connect(events.append)
+    worker.output.connect(outputs.append)
+
+    worker._handle_selftest_output_line(
+        'SELFTEST_EVENT {"schema":"selftest_event_v1","event":"selftest_result","test_id":2007,"pass":true}'
+    )
+    worker._handle_selftest_output_line("ordinary output")
+
+    assert events == [{"schema": "selftest_event_v1", "event": "selftest_result", "test_id": 2007, "pass": True}]
+    assert outputs == ["ordinary output"]
+
+
+def test_worker_malformed_event_line_stays_output(qapp):
+    worker = QualificationRunWorker({}, repo_root=REPO_ROOT)
+    events = []
+    outputs = []
+    worker.selftest_event.connect(events.append)
+    worker.output.connect(outputs.append)
+
+    worker._handle_selftest_output_line("SELFTEST_EVENT {bad")
+
+    assert events == []
+    assert outputs == ["SELFTEST_EVENT {bad"]

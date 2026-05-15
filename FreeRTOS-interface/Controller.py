@@ -42,6 +42,7 @@ class Controller(QObject):
     qualification_stage = QtCore.Signal(str)
     qualification_output = QtCore.Signal(str)
     qualification_prompt = QtCore.Signal(str)
+    qualification_selftest_event = QtCore.Signal(object)
     qualification_finished = QtCore.Signal(bool, str, object)
 
     # Preprogrammed sequence signals
@@ -436,6 +437,7 @@ class Controller(QObject):
         self._qualification_worker.stage.connect(lambda msg: self.qualification_stage.emit(msg))
         self._qualification_worker.output.connect(lambda msg: self.qualification_output.emit(msg))
         self._qualification_worker.prompt.connect(lambda msg: self.qualification_prompt.emit(msg))
+        self._qualification_worker.selftest_event.connect(lambda event: self.qualification_selftest_event.emit(event))
         self._qualification_worker.run_finished.connect(self._on_qualification_finished)
         self._qualification_worker.start()
         return True

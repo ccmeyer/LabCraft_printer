@@ -22,6 +22,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-selftest-path", default=None)
     parser.add_argument("--fixture", default=None)
     parser.add_argument("--operator-prompts", action="store_true")
+    parser.add_argument("--progress-jsonl", action="store_true")
     parser.add_argument(
         "--raw-report",
         default=None,
@@ -44,6 +45,7 @@ def main(argv: Sequence[str] | None = None, *, invoker: SelfTestInvoker | None =
         raw_report_path=args.raw_report,
         fixture_id=args.fixture,
         operator_prompts=args.operator_prompts,
+        progress_jsonl=args.progress_jsonl,
         invoker=invoker if invoker is not None else default_selftest_invoker,
     )
     print(f"Wrote qualification report: {result.report_path}")

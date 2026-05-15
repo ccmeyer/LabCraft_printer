@@ -309,6 +309,7 @@ class MachineQualificationWindow(QtWidgets.QDialog):
             ("qualification_stage", self._on_qualification_stage),
             ("qualification_output", self._on_qualification_output),
             ("qualification_prompt", self._on_qualification_prompt),
+            ("qualification_selftest_event", self._on_selftest_event),
             ("qualification_finished", self._on_qualification_finished),
         ]
         for signal_name, slot in connections:
@@ -471,6 +472,16 @@ class MachineQualificationWindow(QtWidgets.QDialog):
             if col_item is not None:
                 self._apply_plan_status_brush(col_item, status)
 
+    def _plan_status(self, row_idx: int) -> str:
+        item = self.test_plan_table.item(row_idx, 0)
+        return item.text() if item is not None else ""
+
+    def _mark_next_queued_in_progress(self, *, after_row: int = -1):
+        for row_idx in range(max(0, after_row + 1), self.test_plan_table.rowCount()):
+            if self._plan_status(row_idx) == "Queued":
+                self._set_plan_status(row_idx, "In progress")
+                return
+
     def _apply_plan_status_brush(self, item: QtWidgets.QTableWidgetItem, status: str):
         value = str(status or "").lower()
         colors = {
@@ -545,6 +556,7 @@ class MachineQualificationWindow(QtWidgets.QDialog):
         self.run_log.clear()
         self._set_run_busy(True)
         self._set_all_plan_status("Queued")
+        self._mark_next_queued_in_progress()
         self._on_qualification_stage("Preparing qualification run")
         starter = getattr(self.controller, "start_qualification_run", None)
         if not callable(starter) or not starter(config):
@@ -608,6 +620,65 @@ class MachineQualificationWindow(QtWidgets.QDialog):
         responder = getattr(self.controller, "respond_qualification_prompt", None)
         if callable(responder):
             responder(response == QtWidgets.QMessageBox.Ok)
+
+    @QtCore.Slot(object)
+    def _on_selftest_event(self, event: object):
+        if not isinstance(event, dict):
+            return
+        event_type = str(event.get("event") or "")
+        if event_type == "selftest_progress":
+            stage = str(event.get("stage") or "").strip()
+            if stage:
+                self.run_status_label.setText(stage)
+                self._append_run_log(f"Progress: {stage}")
+            test_id = self._event_test_id(event)
+            if test_id is not None and test_id in self._plan_row_by_test_id:
+                self._set_plan_status(self._plan_row_by_test_id[test_id], "In progress")
+            return
+
+        if event_type == "selftest_result":
+            test_id = self._event_test_id(event)
+            if test_id is None:
+                return
+            row_idx = self._plan_row_by_test_id.get(test_id)
+            if row_idx is None:
+                return
+            status = "Passed" if bool(event.get("pass")) else "Failed"
+            self._set_plan_status(row_idx, status)
+            name = str(event.get("name") or test_id)
+            self._append_run_log(f"Result {test_id} {name}: {status}")
+            self._mark_next_queued_in_progress(after_row=row_idx)
+            return
+
+        if event_type == "selftest_done":
+            summary = event.get("summary") if isinstance(event.get("summary"), dict) else {}
+            text = (
+                f"Self-test done: total={summary.get('total', '?')}, "
+                f"passed={summary.get('passed', '?')}, failed={summary.get('failed', '?')}"
+            )
+            self.run_status_label.setText(text)
+            self._append_run_log(text)
+            return
+
+        if event_type == "selftest_timeout":
+            reason = str(event.get("reason") or "timeout")
+            text = f"Self-test timeout: {reason}"
+            self.run_status_label.setText(text)
+            self._append_run_log(text)
+            return
+
+        if event_type == "selftest_reset_report":
+            text = "MCU reset report seen during self-test"
+            self.run_status_label.setText(text)
+            self._append_run_log(text)
+
+    @staticmethod
+    def _event_test_id(event: dict[str, Any]) -> int | None:
+        try:
+            test_id = int(event.get("test_id"))
+        except (TypeError, ValueError):
+            return None
+        return test_id if test_id > 0 else None
 
     @QtCore.Slot(bool, str, object)
     def _on_qualification_finished(self, ok: bool, message: str, payload: object):

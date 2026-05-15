@@ -185,6 +185,7 @@ def _build_selftest_command(
     profile: str,
     raw_report_path: Path,
     timeout_ms: int | None,
+    progress_jsonl: bool = False,
     extra_args: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
     script = Path(run_selftest_path) if run_selftest_path is not None else _repo_root() / "tools" / "run_selftest.py"
@@ -202,6 +203,8 @@ def _build_selftest_command(
     ]
     if timeout_ms is not None:
         command.extend(["--timeout-ms", str(int(timeout_ms))])
+    if progress_jsonl:
+        command.append("--progress-jsonl")
     command.extend(str(item) for item in extra_args)
     return tuple(command)
 
@@ -241,6 +244,7 @@ def run_qualification(
     raw_report_path: str | Path | None = None,
     fixture_id: str | None = None,
     operator_prompts: bool = False,
+    progress_jsonl: bool = False,
     invoker: SelfTestInvoker = default_selftest_invoker,
     prompter: OperatorPrompter = default_operator_prompter,
     gripper_control: GripperControl = default_gripper_control,
@@ -372,6 +376,7 @@ def run_qualification(
         profile=manifest.profile,
         raw_report_path=artifacts.raw_selftest_path,
         timeout_ms=timeout_ms,
+        progress_jsonl=progress_jsonl,
         extra_args=manifest.selftest_args,
     )
     invocation = SelfTestInvocation(

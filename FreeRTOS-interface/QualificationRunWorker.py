@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import threading
@@ -13,7 +14,10 @@ class QualificationRunWorker(QtCore.QThread):
     stage = QtCore.Signal(str)
     output = QtCore.Signal(str)
     prompt = QtCore.Signal(str)
+    selftest_event = QtCore.Signal(object)
     run_finished = QtCore.Signal(bool, str, object)
+
+    SELFTEST_EVENT_PREFIX = "SELFTEST_EVENT "
 
     def __init__(
         self,
@@ -59,6 +63,7 @@ class QualificationRunWorker(QtCore.QThread):
                 run_selftest_path=self.config.get("run_selftest_path") or self.repo_root / "tools" / "run_selftest.py",
                 fixture_id=self._optional_text(self.config.get("fixture_id")),
                 operator_prompts=bool(self.config.get("operator_prompts")),
+                progress_jsonl=True,
                 invoker=self._run_selftest_invoker,
                 prompter=self._external_prompter or self._prompt_operator,
                 gripper_control=self._external_gripper_control or default_gripper_control,
@@ -117,11 +122,27 @@ class QualificationRunWorker(QtCore.QThread):
 
         if proc.stdout is not None:
             for line in proc.stdout:
-                self.output.emit(line.rstrip())
+                self._handle_selftest_output_line(line.rstrip())
         rc = int(proc.wait())
         self.output.emit(f"Self-test runner exited with {rc}")
         self.stage.emit("Writing report")
         return rc
+
+    def _handle_selftest_output_line(self, line: str) -> None:
+        text = str(line)
+        if not text.startswith(self.SELFTEST_EVENT_PREFIX):
+            self.output.emit(text)
+            return
+        raw = text[len(self.SELFTEST_EVENT_PREFIX) :]
+        try:
+            event = json.loads(raw)
+        except json.JSONDecodeError:
+            self.output.emit(text)
+            return
+        if not isinstance(event, dict):
+            self.output.emit(text)
+            return
+        self.selftest_event.emit(event)
 
     def _prompt_operator(self, message: str) -> None:
         self.stage.emit("Operator prompt")

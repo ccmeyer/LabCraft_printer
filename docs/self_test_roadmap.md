@@ -26,6 +26,7 @@ The intent is to increase quantitative coverage without turning the firmware, Py
 | Milestone 7: Local Operator-Gated Gripper Seal Qualification | Complete enough to move on | `gripper_seal_v1`, selected firmware suite `2501`-`2503`; regulators home through watchdog-safe async tasks before conditioning, then pause during valve-open bursts |
 | Milestone 8A: Read-Only Qualification Window Prototype | Complete | Main app `Machine Qualification` window displays existing `qualification_report_v1` reports without launching hardware tests |
 | Milestone 8B: Qualification Run Shell | In progress | `Run Qualification` tab launches existing manifests through the Python qualification backend with coarse progress and final row coloring |
+| Milestone 8C: Live Per-Test Qualification Events | In progress | `tools/run_selftest.py --progress-jsonl` emits backend-owned per-test events consumed by the qualification window |
 | Later fixture-dependent diagnostics | Not started | Planned |
 
 ## Current Call Path
@@ -885,6 +886,12 @@ Initial run shell:
 - Launch `tools.qualification.runner.run_qualification()` through a Qt worker thread with coarse stage/log updates.
 - Color expected-test rows from the final `qualification_report_v1`; live per-frame progress remains a later backend event API.
 - Do not add a GUI abort button until the backend owns a safe abort path.
+
+Live per-test event slice:
+
+- Add additive `SELFTEST_EVENT` JSONL lines from `tools/run_selftest.py` while it decodes existing self-test frames.
+- Forward event dictionaries through the qualification worker and controller without duplicating firmware protocol logic in the UI.
+- Update expected-test rows during a run from raw result events, then keep final analyzer reconciliation from `qualification_report_v1`.
 
 Validation:
 
