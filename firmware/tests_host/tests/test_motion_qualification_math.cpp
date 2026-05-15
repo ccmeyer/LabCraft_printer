@@ -121,3 +121,26 @@ TEST(MotionQualificationMath, XyMotionStatsPassOnlyWhenSafetyCountersAreZero)
     stats.boundViolationCount = 1u;
     CHECK_FALSE(MotionQualificationMath::xyMotionStatsPass(stats));
 }
+
+TEST(MotionQualificationMath, ZSafetyRejectsOutOfEnvelopePositions)
+{
+    const MotionQualificationMath::ZSafetyEnvelope envelope{};
+
+    CHECK_TRUE(MotionQualificationMath::zPositionInBounds(0, envelope));
+    CHECK_TRUE(MotionQualificationMath::zPositionInBounds(40000, envelope));
+    CHECK_FALSE(MotionQualificationMath::zPositionInBounds(-1, envelope));
+    CHECK_FALSE(MotionQualificationMath::zPositionInBounds(40001, envelope));
+}
+
+TEST(MotionQualificationMath, EndpointInterpolationHitsPlateRasterCorners)
+{
+    LONGS_EQUAL(43000, MotionQualificationMath::interpolateEndpoint(43000, 33000, 0, 16));
+    LONGS_EQUAL(33000, MotionQualificationMath::interpolateEndpoint(43000, 33000, 15, 16));
+    LONGS_EQUAL(13000, MotionQualificationMath::interpolateEndpoint(13000, 30000, 0, 24));
+    LONGS_EQUAL(30000, MotionQualificationMath::interpolateEndpoint(13000, 30000, 23, 24));
+
+    const int32_t firstInteriorY = MotionQualificationMath::interpolateEndpoint(13000, 30000, 1, 24);
+    const int32_t nextInteriorY = MotionQualificationMath::interpolateEndpoint(13000, 30000, 2, 24);
+    CHECK_TRUE(firstInteriorY > 13000);
+    CHECK_TRUE(nextInteriorY > firstInteriorY);
+}

@@ -478,7 +478,7 @@ class MachineQualificationWindow(QtWidgets.QDialog):
         if not self.port_edit.text().strip():
             self.port_edit.setText(self._default_port())
 
-        self.timeout_edit.setText("420000" if manifest.manifest_id == "gripper_seal_v1" else "")
+        self.timeout_edit.setText("420000" if manifest.manifest_id in {"gripper_seal_v1", "motion_envelope_v1"} else "")
         self.fixture_combo.blockSignals(True)
         self.fixture_combo.clear()
         self.fixture_combo.addItem("")

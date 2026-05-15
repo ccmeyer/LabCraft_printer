@@ -18,6 +18,7 @@ def test_discover_suite_entries_lists_current_manifests():
         "factory_acceptance_v3",
         "gripper_seal_v1",
         "xy_motion_v1",
+        "motion_envelope_v1",
     }.issubset(manifest_ids)
     assert entries[0].manifest_id == "factory_acceptance_v3"
 
@@ -58,3 +59,21 @@ def test_xy_motion_suite_exposes_operator_fixture_and_catalog_rows():
     assert "safe gantry envelope" in rows[2010].evaluates
     assert rows[2011].name == "XY raster repeatability"
     assert "well-plate" in rows[2011].evaluates
+
+
+def test_motion_envelope_suite_exposes_operator_fixture_and_catalog_rows():
+    entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
+    motion = entries["motion_envelope_v1"].manifest
+
+    assert motion.requires_operator_prompts is True
+    assert required_fixture_ids(motion) == ("motion_full_envelope_v1",)
+    rows = {row.test_id: row for row in build_test_plan_rows(motion)}
+    assert list(rows) == [2012, 2013, 2014, 2015, 2016]
+    assert rows[2012].name == "XY long reverse travel"
+    assert rows[2013].name == "XY diagonal travel"
+    assert rows[2014].name == "384-well plate raster"
+    assert rows[2015].name == "Z long travel"
+    assert rows[2016].name == "Triggered-limit homing"
+    assert all(row.subsystem == "Motion" for row in rows.values())
+    assert "z_span" in rows[2015].metrics
+    assert "limit_start" in rows[2016].metrics

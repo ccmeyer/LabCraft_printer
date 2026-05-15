@@ -119,6 +119,7 @@ public:
   };
 
   HomeDiagnosticSnapshot getLastHomeDiagnosticSnapshot() const { return _homeDiagnosticSnapshot; }
+  bool isLimitAssertedForDiagnostics() const { return _isLimitAsserted(); }
 
 
   void configureLimitPin(GPIO_TypeDef* port, uint16_t pin);

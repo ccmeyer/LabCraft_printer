@@ -111,6 +111,32 @@ bool xyPointIsSafe(const XyPoint& point, const XySafetyEnvelope& envelope)
   return xyPointInBounds(point, envelope) && xyPointPassesCableGuard(point, envelope);
 }
 
+bool zPositionInBounds(int32_t z, const ZSafetyEnvelope& envelope)
+{
+  return (z >= envelope.minZ) && (z <= envelope.maxZ);
+}
+
+int32_t interpolateEndpoint(int32_t start, int32_t end, uint32_t index, uint32_t count)
+{
+  if (count <= 1u) {
+    return start;
+  }
+  if (index == 0u) {
+    return start;
+  }
+  if (index >= (count - 1u)) {
+    return end;
+  }
+
+  const int64_t delta = static_cast<int64_t>(end) - static_cast<int64_t>(start);
+  const int64_t denominator = static_cast<int64_t>(count - 1u);
+  const int64_t numerator = delta * static_cast<int64_t>(index);
+  const int64_t rounded = (numerator >= 0)
+      ? ((numerator + (denominator / 2)) / denominator)
+      : ((numerator - (denominator / 2)) / denominator);
+  return static_cast<int32_t>(static_cast<int64_t>(start) + rounded);
+}
+
 void recordXyMotionSample(XyMotionStats& stats,
                           int32_t startX,
                           int32_t startY,

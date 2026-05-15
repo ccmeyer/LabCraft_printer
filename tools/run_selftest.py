@@ -751,7 +751,8 @@ def run(args: argparse.Namespace) -> int:
         pressure_sweep_suite = getattr(args, "pressure_sweep_suite", None)
         gripper_seal_suite = bool(getattr(args, "gripper_seal_suite", False))
         xy_motion_suite = bool(getattr(args, "xy_motion_suite", False))
-        selector = 2009 if xy_motion_suite else 2500 if gripper_seal_suite else (
+        motion_envelope_suite = bool(getattr(args, "motion_envelope_suite", False))
+        selector = 2019 if motion_envelope_suite else 2009 if xy_motion_suite else 2500 if gripper_seal_suite else (
             pressure_sweep_suite if pressure_sweep_suite is not None else pressure_trace_test
         )
         if selector is not None:
@@ -1289,6 +1290,7 @@ def main() -> int:
     selector_group.add_argument("--pressure-trace-test", type=int, choices=(2101, 2102, 2103, 2104))
     selector_group.add_argument("--pressure-sweep-suite", type=int, choices=(2301, 2302, 2303, 2304))
     selector_group.add_argument("--xy-motion-suite", action="store_true")
+    selector_group.add_argument("--motion-envelope-suite", action="store_true")
     selector_group.add_argument("--gripper-seal-suite", action="store_true")
     p.add_argument("--skip-goodbye", action="store_true")
     p.add_argument("--out", required=True)

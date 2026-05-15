@@ -1,0 +1,107 @@
+{
+  "schema_version": "qualification_manifest_v0",
+  "manifest_id": "motion_envelope_v1",
+  "name": "Motion Envelope Qualification v1",
+  "profile": "FULL",
+  "description": "Operator-gated full motion envelope suite covering reverse XY travel, diagonal XY travel, 384-well raster movement, Z long travel, and already-triggered limit homing.",
+  "expected_test_ids": [
+    2012,
+    2013,
+    2014,
+    2015,
+    2016
+  ],
+  "enforce_expected_test_ids": true,
+  "requires_operator_prompts": true,
+  "selftest_args": [
+    "--motion-envelope-suite"
+  ],
+  "fixtures": [
+    {
+      "fixture_id": "motion_full_envelope_v1",
+      "required_for": [2012, 2013, 2014, 2015, 2016],
+      "operator_note": "Confirm the full XY and Z motion envelope is clear: X<=45000, Y<=35000, Z<=40000. No plate, head, fixture, cable, hand, or tool may be inside the motion volume."
+    }
+  ],
+  "analysis_rules": {
+    "2012": {
+      "category": "motion",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "x_span": {"maturity": "candidate", "max": 25},
+        "y_span": {"maturity": "candidate", "max": 25},
+        "x_drift": {"maturity": "candidate", "max": 25},
+        "y_drift": {"maturity": "candidate", "max": 25},
+        "x_ret": {"maturity": "candidate", "max": 10},
+        "y_ret": {"maturity": "candidate", "max": 10},
+        "ret_err": {"maturity": "candidate", "max": 10},
+        "move_to": {"maturity": "candidate", "equals": 0},
+        "home_to": {"maturity": "candidate", "equals": 0},
+        "guard": {"maturity": "candidate", "equals": 0},
+        "bound": {"maturity": "candidate", "equals": 0}
+      }
+    },
+    "2013": {
+      "category": "motion",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "x_span": {"maturity": "candidate", "max": 25},
+        "y_span": {"maturity": "candidate", "max": 25},
+        "x_drift": {"maturity": "candidate", "max": 25},
+        "y_drift": {"maturity": "candidate", "max": 25},
+        "x_ret": {"maturity": "candidate", "max": 10},
+        "y_ret": {"maturity": "candidate", "max": 10},
+        "ret_err": {"maturity": "candidate", "max": 10},
+        "move_to": {"maturity": "candidate", "equals": 0},
+        "home_to": {"maturity": "candidate", "equals": 0},
+        "guard": {"maturity": "candidate", "equals": 0},
+        "bound": {"maturity": "candidate", "equals": 0}
+      }
+    },
+    "2014": {
+      "category": "motion",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "x_span": {"maturity": "candidate", "max": 25},
+        "y_span": {"maturity": "candidate", "max": 25},
+        "x_drift": {"maturity": "candidate", "max": 25},
+        "y_drift": {"maturity": "candidate", "max": 25},
+        "x_ret": {"maturity": "candidate", "max": 10},
+        "y_ret": {"maturity": "candidate", "max": 10},
+        "ret_err": {"maturity": "candidate", "max": 10},
+        "move_to": {"maturity": "candidate", "equals": 0},
+        "home_to": {"maturity": "candidate", "equals": 0},
+        "guard": {"maturity": "candidate", "equals": 0},
+        "bound": {"maturity": "candidate", "equals": 0}
+      }
+    },
+    "2015": {
+      "category": "motion",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "z_span": {"maturity": "candidate", "max": 25},
+        "z_drift": {"maturity": "candidate", "max": 25},
+        "z_ret": {"maturity": "candidate", "max": 10},
+        "ret_err": {"maturity": "candidate", "max": 10},
+        "move_to": {"maturity": "candidate", "equals": 0},
+        "home_to": {"maturity": "candidate", "equals": 0},
+        "bound": {"maturity": "candidate", "equals": 0}
+      }
+    },
+    "2016": {
+      "category": "motion",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "x_span": {"maturity": "candidate", "max": 25},
+        "y_span": {"maturity": "candidate", "max": 25},
+        "z_span": {"maturity": "candidate", "max": 25},
+        "x_drift": {"maturity": "candidate", "max": 25},
+        "y_drift": {"maturity": "candidate", "max": 25},
+        "z_drift": {"maturity": "candidate", "max": 25},
+        "move_to": {"maturity": "candidate", "equals": 0},
+        "home_to": {"maturity": "candidate", "equals": 0},
+        "limit_start": {"maturity": "candidate", "equals": 0}
+      }
+    }
+  }
+}

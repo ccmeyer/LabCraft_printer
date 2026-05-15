@@ -135,6 +135,90 @@ def _raw_xy_motion_selftest():
     }
 
 
+def _raw_motion_envelope_selftest():
+    metric_common = {
+        "rep": 3,
+        "ref": 2,
+        "pts": 5,
+        "xmax": 44000,
+        "ymax": 34000,
+        "dx": 43900,
+        "dy": 33500,
+        "x_span": 2,
+        "y_span": 3,
+        "x_drift": 2,
+        "y_drift": 3,
+        "x_ret": 0,
+        "y_ret": 0,
+        "ret_err": 0,
+        "move_to": 0,
+        "home_to": 0,
+        "guard": 0,
+        "bound": 0,
+    }
+    return {
+        "run_id": 3456,
+        "profile": "FULL",
+        "started_at": "2026-05-13T00:00:00Z",
+        "finished_at": "2026-05-13T00:07:00Z",
+        "aborted": False,
+        "summary": {"total": 5, "passed": 5, "failed": 0},
+        "results": [
+            {"test_id": 2012, "name": "motion_xy_reverse_travel_factory", "pass": True, "metrics": metric_common},
+            {"test_id": 2013, "name": "motion_xy_diagonal_factory", "pass": True, "metrics": metric_common},
+            {
+                "test_id": 2014,
+                "name": "motion_384_plate_raster_factory",
+                "pass": True,
+                "metrics": {
+                    **metric_common,
+                    "rep": 1,
+                    "rows": 16,
+                    "cols": 24,
+                    "moves": 385,
+                },
+            },
+            {
+                "test_id": 2015,
+                "name": "motion_z_long_travel_factory",
+                "pass": True,
+                "metrics": {
+                    "rep": 3,
+                    "ref": 2,
+                    "zmax": 39000,
+                    "dz": 38900,
+                    "z_span": 2,
+                    "z_drift": 2,
+                    "z_ret": 0,
+                    "ret_err": 0,
+                    "move_to": 0,
+                    "home_to": 0,
+                    "bound": 0,
+                },
+            },
+            {
+                "test_id": 2016,
+                "name": "motion_limit_triggered_home_fact",
+                "pass": True,
+                "metrics": {
+                    "axis": "xyz",
+                    "offset": 200,
+                    "x_span": 2,
+                    "y_span": 2,
+                    "z_span": 2,
+                    "x_drift": 2,
+                    "y_drift": 2,
+                    "z_drift": 2,
+                    "move_to": 0,
+                    "home_to": 0,
+                    "limit_start": 0,
+                },
+            },
+        ],
+        "host_checks": [{"name": "hello_ack", "pass": True, "details": {"seq8": 1}}],
+    }
+
+
 def _manifest_path(tmp_path):
     path = tmp_path / "unit_manifest.json"
     path.write_text(
@@ -159,6 +243,10 @@ def _gripper_manifest_ref():
 
 def _xy_motion_manifest_ref():
     return "xy_motion_v1"
+
+
+def _motion_envelope_manifest_ref():
+    return "motion_envelope_v1"
 
 
 class FakeSerial:
@@ -467,6 +555,45 @@ def test_xy_motion_manifest_rejects_missing_required_fixture(tmp_path):
     assert result.report["host_checks"][0]["details"]["allowed_fixture_ids"] == ["motion_clear_envelope_v1"]
 
 
+def test_motion_envelope_manifest_rejects_without_operator_prompts(tmp_path):
+    called = False
+
+    def fake_invoker(_invocation):
+        nonlocal called
+        called = True
+        return 0
+
+    result = run_qualification(
+        manifest_ref=_motion_envelope_manifest_ref(),
+        machine_id="LC-0001",
+        identity_path=tmp_path / "local" / "machine_identity.json",
+        output_root=tmp_path / "qualification",
+        fixture_id="motion_full_envelope_v1",
+        operator_prompts=False,
+        invoker=fake_invoker,
+    )
+
+    assert result.returncode == 3
+    assert called is False
+    assert result.report["host_checks"][0]["name"] == "operator_prompts_required"
+
+
+def test_motion_envelope_manifest_rejects_missing_required_fixture(tmp_path):
+    result = run_qualification(
+        manifest_ref=_motion_envelope_manifest_ref(),
+        machine_id="LC-0001",
+        identity_path=tmp_path / "local" / "machine_identity.json",
+        output_root=tmp_path / "qualification",
+        operator_prompts=True,
+        invoker=lambda _invocation: 0,
+        prompter=lambda _message: None,
+    )
+
+    assert result.returncode == 3
+    assert result.report["host_checks"][0]["name"] == "fixture_required"
+    assert result.report["host_checks"][0]["details"]["allowed_fixture_ids"] == ["motion_full_envelope_v1"]
+
+
 def test_xy_motion_operator_prompt_runs_selected_suite_without_gripper_teardown(tmp_path):
     events = []
 
@@ -504,6 +631,47 @@ def test_xy_motion_operator_prompt_runs_selected_suite_without_gripper_teardown(
     assert "hardware envelope is clear" in events[0]
     assert events == [events[0], "self-test"]
     assert result.report["run"]["fixture_id"] == "motion_clear_envelope_v1"
+    assert [item["stage"] for item in result.report["operator_interactions"]] == ["confirm_fixture_setup"]
+    assert result.report["overall_status"] == "pass"
+
+
+def test_motion_envelope_operator_prompt_runs_selected_suite_without_gripper_teardown(tmp_path):
+    events = []
+
+    def fake_prompter(message):
+        events.append(f"prompt:{message}")
+
+    def fake_invoker(invocation):
+        events.append("self-test")
+        assert "--motion-envelope-suite" in invocation.command
+        assert "--xy-motion-suite" not in invocation.command
+        assert "--gripper-seal-suite" not in invocation.command
+        invocation.raw_report_path.write_text(json.dumps(_raw_motion_envelope_selftest()), encoding="utf-8")
+        return 0
+
+    def fake_gripper_control(action, port, baud):
+        raise AssertionError(f"Motion envelope suite should not call gripper control: {action}:{port}:{baud}")
+
+    result = run_qualification(
+        manifest_ref=_motion_envelope_manifest_ref(),
+        port="/dev/ttyAMA0",
+        baud=115200,
+        machine_id="LC-0001",
+        identity_path=tmp_path / "local" / "machine_identity.json",
+        output_root=tmp_path / "qualification",
+        timeout_ms=420000,
+        fixture_id="motion_full_envelope_v1",
+        operator_prompts=True,
+        invoker=fake_invoker,
+        prompter=fake_prompter,
+        gripper_control=fake_gripper_control,
+    )
+
+    assert result.returncode == 0
+    assert events[0].startswith("prompt:Confirm qualification setup")
+    assert "motion_full_envelope_v1" in events[0]
+    assert events == [events[0], "self-test"]
+    assert result.report["run"]["fixture_id"] == "motion_full_envelope_v1"
     assert [item["stage"] for item in result.report["operator_interactions"]] == ["confirm_fixture_setup"]
     assert result.report["overall_status"] == "pass"
 

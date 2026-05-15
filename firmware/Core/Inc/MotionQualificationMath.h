@@ -48,6 +48,11 @@ struct XySafetyEnvelope {
   int32_t cableGuardMinY = 500;
 };
 
+struct ZSafetyEnvelope {
+  int32_t minZ = 0;
+  int32_t maxZ = 40000;
+};
+
 struct XyMotionStats {
   uint32_t repetitions = 0;
   uint32_t points = 0;
@@ -83,6 +88,8 @@ bool patternReturnStatsPass(const PatternReturnStats& stats);
 bool xyPointInBounds(const XyPoint& point, const XySafetyEnvelope& envelope);
 bool xyPointPassesCableGuard(const XyPoint& point, const XySafetyEnvelope& envelope);
 bool xyPointIsSafe(const XyPoint& point, const XySafetyEnvelope& envelope);
+bool zPositionInBounds(int32_t z, const ZSafetyEnvelope& envelope);
+int32_t interpolateEndpoint(int32_t start, int32_t end, uint32_t index, uint32_t count);
 void recordXyMotionSample(XyMotionStats& stats,
                           int32_t startX,
                           int32_t startY,

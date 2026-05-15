@@ -89,6 +89,23 @@ def test_load_xy_motion_manifest_requires_operator_clear_envelope_fixture():
     assert manifest.analysis_rules["2011"]["metrics"]["ret_err"]["maturity"] == "candidate"
 
 
+def test_load_motion_envelope_manifest_requires_operator_full_envelope_fixture():
+    manifest = load_manifest("motion_envelope_v1")
+
+    assert manifest.manifest_id == "motion_envelope_v1"
+    assert manifest.profile == "FULL"
+    assert manifest.expected_test_ids == (2012, 2013, 2014, 2015, 2016)
+    assert manifest.enforce_expected_test_ids is True
+    assert manifest.requires_operator_prompts is True
+    assert manifest.selftest_args == ("--motion-envelope-suite",)
+    assert {item["fixture_id"] for item in manifest.fixtures} == {"motion_full_envelope_v1"}
+    assert manifest.analysis_rules["2012"]["metrics"]["move_to"]["equals"] == 0
+    assert manifest.analysis_rules["2012"]["metrics"]["guard"]["equals"] == 0
+    assert manifest.analysis_rules["2014"]["metrics"]["ret_err"]["maturity"] == "candidate"
+    assert manifest.analysis_rules["2015"]["metrics"]["z_span"]["maturity"] == "candidate"
+    assert manifest.analysis_rules["2016"]["metrics"]["limit_start"]["equals"] == 0
+
+
 def test_load_manifest_from_path(tmp_path):
     path = tmp_path / "custom.json"
     path.write_text(

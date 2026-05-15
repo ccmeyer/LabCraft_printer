@@ -28,7 +28,8 @@ The intent is to increase quantitative coverage without turning the firmware, Py
 | Milestone 8B: Qualification Run Shell | In progress | `Run Qualification` tab launches existing manifests through the Python qualification backend with coarse progress and final row coloring |
 | Milestone 8C: Live Per-Test Qualification Events | In progress | `tools/run_selftest.py --progress-jsonl` emits backend-owned per-test events consumed by the qualification window |
 | Milestone 8D: Qualification Timing and Compact History | Complete | Machine Qualification window estimates typical test durations from local reports, shows elapsed/remaining time during runs, and compacts report history labels |
-| Milestone 8E: XY Motion Qualification Suite | In progress | Standalone operator-gated `xy_motion_v1` suite selects firmware XY long-travel/raster diagnostics `2010`-`2011` without adding them to default FULL |
+| Milestone 8E: XY Motion Qualification Suite | Complete enough to move on | Standalone operator-gated `xy_motion_v1` suite selects firmware XY long-travel/raster diagnostics `2010`-`2011` without adding them to default FULL |
+| Milestone 8F: Motion Envelope Qualification Suite | In progress | Standalone operator-gated `motion_envelope_v1` suite selects firmware motion envelope diagnostics `2012`-`2016` without adding them to default FULL |
 | Later fixture-dependent diagnostics | Not started | Planned |
 
 ## Current Call Path
@@ -908,6 +909,13 @@ XY motion qualification slice:
 - Select the suite with existing `CMD_SELFTEST_START` selector field value `2009`; no protocol layout or opcode changes.
 - Firmware rows `2010 motion_xy_long_travel_factory` and `2011 motion_xy_raster_repeatability_factory` exercise X/Y travel inside `X<=45000`, `Y<=35000`, with a cable-chain guard requiring `Y>=500` whenever `X>1000`.
 - Keep the suite out of `factory_acceptance_v3` until enough local data exists to tune thresholds and runtime.
+
+Motion envelope qualification slice:
+
+- Add `motion_envelope_v1` as a separate operator-gated FULL manifest requiring fixture `motion_full_envelope_v1`.
+- Select the suite with existing `CMD_SELFTEST_START` selector field value `2019`; no protocol layout or opcode changes.
+- Firmware rows `2012`-`2016` cover reverse long XY travel, diagonal XY travel, a 16 x 24 plate raster from `(43000,13000)` toward `(33000,30000)`, Z long travel to `39000`, and homing from already-triggered X/Y/Z limit starts.
+- Keep `motion_envelope_v1` out of `factory_acceptance_v3`; use it for explicit, operator-confirmed full-envelope qualification runs.
 
 Validation:
 
