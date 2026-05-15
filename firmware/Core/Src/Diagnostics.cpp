@@ -1660,7 +1660,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         static constexpr int32_t kPlateEndY = 30000;
                         static constexpr uint32_t kPlateFeedHz = 6000u;
                         static constexpr uint32_t kPlateMoveTimeoutMs = 12000u;
-                        static constexpr uint32_t kZFeedHz = 6000u;
+                        static constexpr uint32_t kZFeedHz = 30000u;
                         static constexpr uint32_t kZMoveTimeoutMs = 45000u;
                         static constexpr uint32_t kHomeFastHz = 30000u;
                         static constexpr uint32_t kHomeSlowHz = 3000u;
@@ -1673,6 +1673,9 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         const MotionQualificationMath::XySafetyEnvelope envelope{
                             0, kSafeXMax, 0, kSafeYMax, kCableGuardX, kCableGuardMinY};
                         const MotionQualificationMath::ZSafetyEnvelope zEnvelope{0, kSafeZMax};
+                        const uint32_t zAxisMaxSpeedHz = Stepper::stepperZ()->maxSpeedHz();
+                        const uint32_t zAxisAccelStepsPerSec2 =
+                            static_cast<uint32_t>(Stepper::stepperZ()->accelStepsPerSec2());
 
                         auto emitSkippedMotionEnvelope = [&](uint16_t firstTestId, const char* phase) -> bool {
                           char xyMetrics[192];
@@ -1681,10 +1684,13 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                    phase,
                                    static_cast<long>(kSafeXMax),
                                    static_cast<long>(kSafeYMax));
-                          char zMetrics[160];
+                          char zMetrics[192];
                           snprintf(zMetrics, sizeof(zMetrics),
-                                   "phase=%s;rep=0;ref=0;zmax=%ld;dz=0;z_span=0;z_drift=0;z_ret=0;ret_err=0;move_to=0;home_to=1;bound=0",
+                                   "phase=%s;rep=0;ref=0;zhz=%lu;zcap=%lu;zacc=%lu;zmax=%ld;dz=0;z_span=0;z_drift=0;z_ret=0;ret_err=0;move_to=0;home_to=1;bound=0",
                                    phase,
+                                   static_cast<unsigned long>(kZFeedHz),
+                                   static_cast<unsigned long>(zAxisMaxSpeedHz),
+                                   static_cast<unsigned long>(zAxisAccelStepsPerSec2),
                                    static_cast<long>(kZLongMax));
                           char limitMetrics[176];
                           snprintf(limitMetrics, sizeof(limitMetrics),
@@ -2283,10 +2289,13 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             (zHomeStats.homeTimeoutCount == 0u) &&
                             (zHomeStats.moveTimeoutCount == 0u) &&
                             (zBoundViolations == 0u);
-                        char metrics2015[192];
+                        char metrics2015[224];
                         snprintf(metrics2015, sizeof(metrics2015),
-                                 "rep=%lu;ref=2;zmax=%ld;dz=%ld;z_span=%lu;z_drift=%lu;z_ret=%lu;ret_err=%lu;move_to=%lu;home_to=%lu;bound=%lu",
+                                 "rep=%lu;ref=2;zhz=%lu;zcap=%lu;zacc=%lu;zmax=%ld;dz=%ld;z_span=%lu;z_drift=%lu;z_ret=%lu;ret_err=%lu;move_to=%lu;home_to=%lu;bound=%lu",
                                  static_cast<unsigned long>(zCompleted),
+                                 static_cast<unsigned long>(kZFeedHz),
+                                 static_cast<unsigned long>(zAxisMaxSpeedHz),
+                                 static_cast<unsigned long>(zAxisAccelStepsPerSec2),
                                  static_cast<long>(kZLongMax),
                                  static_cast<long>(kZLongMax - zReference.finalBackoffSteps),
                                  static_cast<unsigned long>(zHomeStats.limitTriggerSpanSteps),
