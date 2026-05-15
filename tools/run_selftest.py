@@ -23,6 +23,7 @@ CMD_HELLO_ACK = 0xF4
 CMD_GOODBYE = 0xF5
 CMD_BYE_ACK = 0xF6
 CMD_BYE_DONE = 0xF8
+CMD_RESET_REPORT = 0xF9
 CMD_SELFTEST_START = 0xFA
 CMD_SELFTEST_RESULT = 0xFB
 CMD_SELFTEST_DONE = 0xFC
@@ -54,6 +55,22 @@ TAG_P3 = 0x03
 TAG_ACK_RESULT = 0x11
 TAG_EXPECTED_SEQ32 = 0x12
 TAG_CAPABILITIES = 0x13
+TAG_RESET_SEQ32 = 0x10
+TAG_RESET_CAUSE = 0x11
+TAG_RESET_FLAGS = 0x12
+TAG_RESET_LAST_FAULT = 0x13
+TAG_RESET_LAST_TASK = 0x14
+TAG_RESET_BOOT_COUNT = 0x15
+TAG_RESET_FAULT_COUNT = 0x16
+TAG_RESET_WATCHDOG_COUNT = 0x17
+TAG_RESET_WATCHDOG_STICKY_CT = 0x18
+TAG_RESET_WATCHDOG_RAW_SR = 0x19
+TAG_RESET_UPTIME_MS = 0x1A
+TAG_RESET_BOOT_STAGE = 0x1B
+TAG_RESET_RECOVERY_BOOT = 0x1C
+TAG_RESET_FAULT_STAGE = 0x1D
+TAG_RESET_WATCHDOG_LATE_TASK = 0x1E
+TAG_RESET_ACTIVE_COMMAND = 0x1F
 
 ACK_RESULT_ACCEPTED = 1
 ACK_RESULT_DUPLICATE = 2
@@ -132,6 +149,27 @@ def _tlv_u8(tlv: dict[int, bytes], tag: int) -> int | None:
     if raw is None or len(raw) != 1:
         return None
     return raw[0]
+
+
+def decode_reset_report(tlv: dict[int, bytes]) -> dict:
+    return {
+        "reset_seq32": _tlv_u32(tlv, TAG_RESET_SEQ32),
+        "reset_cause": _tlv_u8(tlv, TAG_RESET_CAUSE),
+        "reset_flags": _tlv_u32(tlv, TAG_RESET_FLAGS),
+        "last_fault": _tlv_u8(tlv, TAG_RESET_LAST_FAULT),
+        "last_task": _tlv_u8(tlv, TAG_RESET_LAST_TASK),
+        "boot_count": _tlv_u32(tlv, TAG_RESET_BOOT_COUNT),
+        "fault_count": _tlv_u32(tlv, TAG_RESET_FAULT_COUNT),
+        "watchdog_count": _tlv_u32(tlv, TAG_RESET_WATCHDOG_COUNT),
+        "watchdog_sticky_count": _tlv_u32(tlv, TAG_RESET_WATCHDOG_STICKY_CT),
+        "watchdog_raw_sr": _tlv_u32(tlv, TAG_RESET_WATCHDOG_RAW_SR),
+        "uptime_ms": _tlv_u32(tlv, TAG_RESET_UPTIME_MS),
+        "boot_stage": _tlv_u8(tlv, TAG_RESET_BOOT_STAGE),
+        "recovery_boot": _tlv_u8(tlv, TAG_RESET_RECOVERY_BOOT),
+        "fault_stage": _tlv_u8(tlv, TAG_RESET_FAULT_STAGE),
+        "watchdog_late_task": _tlv_u8(tlv, TAG_RESET_WATCHDOG_LATE_TASK),
+        "active_command": _tlv_u8(tlv, TAG_RESET_ACTIVE_COMMAND),
+    }
 
 
 def supports_selftest_transport(capabilities: int | None) -> bool:
@@ -816,6 +854,7 @@ def run(args: argparse.Namespace) -> int:
         status_only_timeout_ms = max(1000, int(getattr(args, "status_only_timeout_ms", 5000)))
         status_frames_since_selftest = 0
         selftest_frames_seen = 0
+        reset_report_details = None
         while True:
             now = time.monotonic()
             if now >= hard_deadline:
@@ -862,6 +901,14 @@ def run(args: argparse.Namespace) -> int:
                     frame_snapshot["expected_seq32"] = _tlv_u32(tlv, TAG_EXPECTED_SEQ32)
                     recent_frames.append(frame_snapshot)
                     continue
+
+                if cmd == CMD_RESET_REPORT:
+                    reset_report_details = decode_reset_report(tlv)
+                    frame_snapshot.update(reset_report_details)
+                    recent_frames.append(frame_snapshot)
+                    timeout_reason = "mcu_reset_report_seen"
+                    done_seen = False
+                    break
 
                 if cmd == CMD_SELFTEST_RESULT:
                     selftest_frames_seen += 1
@@ -934,7 +981,7 @@ def run(args: argparse.Namespace) -> int:
                     break
             if done_seen:
                 break
-            if timeout_reason == "status_only_after_selftest":
+            if timeout_reason in ("status_only_after_selftest", "mcu_reset_report_seen"):
                 break
 
         if not done_seen:
@@ -1106,6 +1153,7 @@ def run(args: argparse.Namespace) -> int:
                     "total_rx_bytes": total_rx_bytes,
                     "status_frames_since_selftest": status_frames_since_selftest,
                     "selftest_frames_seen": selftest_frames_seen,
+                    "reset_report": reset_report_details,
                     "last_valid_frame_age_ms": int(max(0.0, (time.monotonic() - last_valid_frame_monotonic) * 1000.0)),
                     "last_rx_byte_age_ms": int(max(0.0, (time.monotonic() - last_rx_byte_monotonic) * 1000.0)),
                     "last_selftest_frame_age_ms": int(max(0.0, (time.monotonic() - last_selftest_frame_monotonic) * 1000.0)),

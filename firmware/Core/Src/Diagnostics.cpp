@@ -1014,17 +1014,54 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           return run;
                         };
 
+                        auto waitForRegulatorHome = [&](EventBits_t doneBits,
+                                                         uint32_t timeoutMs) -> bool {
+                          const uint32_t startMs = HAL_GetTick();
+                          while ((HAL_GetTick() - startMs) < timeoutMs) {
+                            Watchdog_CheckIn(CRASH_TASK_ORCH);
+                            maybeSendProgress("gripper_seal_reg_home");
+                            if (_selfTestAbortRequested) {
+                              return false;
+                            }
+                            const EventBits_t observed = xEventGroupGetBits(_doneEvents);
+                            if ((observed & doneBits) == doneBits) {
+                              return true;
+                            }
+                            vTaskDelay(msToAtLeast1Tick(25u));
+                          }
+                          return false;
+                        };
+
                         auto homePressureRegulators = [&]() -> bool {
+                          static constexpr uint32_t kRegHomeFastHz = 30000u;
+                          static constexpr uint32_t kRegHomeSlowHz = 3000u;
+                          static constexpr uint32_t kRegHomeBackoffSteps = 400u;
+                          static constexpr uint32_t kRegHomeTimeoutMs = 20000u;
+
                           closePressurePath();
                           sendProgressStage("gripper_seal_reg_home");
-                          PressureRegulator::regP().homeWithValveFast();
-                          Watchdog_CheckIn(CRASH_TASK_ORCH);
-                          bool homeOk = (Stepper::stepperP() != nullptr) &&
+                          EventBits_t homeBits = BIT_HOME_P_DONE;
+#if (LC_PRESSURE_PORTS > 1)
+                          homeBits |= BIT_HOME_R_DONE;
+#endif
+                          xEventGroupClearBits(_doneEvents, homeBits);
+                          startRegHomeAsync(&PressureRegulator::regP(),
+                                            kRegHomeFastHz,
+                                            kRegHomeSlowHz,
+                                            kRegHomeBackoffSteps,
+                                            BIT_HOME_P_DONE);
+#if (LC_PRESSURE_PORTS > 1)
+                          startRegHomeAsync(&PressureRegulator::regR(),
+                                            kRegHomeFastHz,
+                                            kRegHomeSlowHz,
+                                            kRegHomeBackoffSteps,
+                                            BIT_HOME_R_DONE);
+#endif
+                          const bool homesDone = waitForRegulatorHome(homeBits, kRegHomeTimeoutMs);
+                          bool homeOk = homesDone &&
+                              (Stepper::stepperP() != nullptr) &&
                               Stepper::stepperP()->getLastHomeDiagnosticSnapshot().success;
 #if (LC_PRESSURE_PORTS > 1)
-                          sendProgressStage("gripper_seal_reg_home");
-                          PressureRegulator::regR().homeWithValveFast();
-                          Watchdog_CheckIn(CRASH_TASK_ORCH);
                           homeOk = homeOk &&
                               (Stepper::stepperR() != nullptr) &&
                               Stepper::stepperR()->getLastHomeDiagnosticSnapshot().success;
@@ -1035,6 +1072,10 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 
                         if (!homePressureRegulators()) {
                           closePressurePath();
+                          if (_selfTestAbortRequested) {
+                            aborted = true;
+                            return finishSelfTestNow();
+                          }
                           (void)emitFailureRowsFrom(2501u, "home", 0u, false, false, 0u);
                           return finishSelfTestNow();
                         }

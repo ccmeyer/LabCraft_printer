@@ -23,7 +23,7 @@ The intent is to increase quantitative coverage without turning the firmware, Py
 | Milestone 4: Motion Qualification Slice | Complete | `2007 motion_home_repeatability_factory`, `2008 motion_pattern_return_factory`, `factory_acceptance_v1` |
 | Milestone 5: Pressure Regulator Leak and Step-Position Slice | Complete | `2201 pressure_hold_leak_factory`, `2202 pressure_target_cycle_repeatability_factory`, `2203 pressure_motor_position_hysteresis_factory`, `factory_acceptance_v2`; FULL HIL `hil_reports/selftest_20260513_191209.json` |
 | Milestone 6: Valve Pulse Repeatability Slice | Complete | `2401 print_valve_pulse_drop_repeatability_factory`, `2402 refuel_valve_pulse_drop_repeatability_factory`, `2403 dual_valve_interaction_factory`, `factory_acceptance_v3`; FULL HIL `hil_reports/selftest_20260513_200311.json`; qualification pass with candidate warnings |
-| Milestone 7: Local Operator-Gated Gripper Seal Qualification | Regulator precondition/conditioning revision in progress | `gripper_seal_v1`, selected firmware suite `2501`-`2503`; regulators home before the suite, condition the seal, then pause during valve-open bursts |
+| Milestone 7: Local Operator-Gated Gripper Seal Qualification | Async regulator-home reset fix in progress | `gripper_seal_v1`, selected firmware suite `2501`-`2503`; regulators home through watchdog-safe async tasks before conditioning, then pause during valve-open bursts |
 | Later fixture-dependent diagnostics | Not started | Planned |
 
 ## Current Call Path
@@ -793,11 +793,11 @@ Expected metrics:
 
 Initial suite shape:
 
-- Before scored rows, the firmware homes P/R regulators through the regulator vent path with head-side print/refuel valves inactive, closes the gripper once, disables gripper refresh, then runs two unscored `2 s` conditioning bursts at `1 psi`.
+- Before scored rows, the firmware homes P/R regulators through the regulator vent path with head-side print/refuel valves inactive, using the existing async regulator-home tasks so the orchestrator can keep checking into the watchdog. It then closes the gripper once, disables gripper refresh, and runs two unscored `2 s` conditioning bursts at `1 psi`.
 - `2501` uses the conditioned loaded dummy head, charges the regulators to `1 psi`, pauses regulation, then applies one `2 s` diagnostic one-pulse burst through the head-side print/refuel valves.
 - `2502` keeps the gripper closed without refreshing close pressure and applies six `2 s` paused-regulator bursts over roughly `60 s` to check whether the pressure response worsens over time.
 - `2503` repeats three paused-regulator `2 s` burst applications on the same loaded dummy head while keeping the gripper closed and without re-closing between cycles. Multi-load repeatability is deferred until a higher-level multi-run workflow can safely prompt for load/support/remove between runs.
-- Setup failures should emit rows for all expected IDs and a normal `CMD_SELFTEST_DONE`; only explicit self-test aborts should mark the run aborted.
+- Setup failures should emit rows for all expected IDs and a normal `CMD_SELFTEST_DONE`; only explicit self-test aborts should mark the run aborted. The Python runner also decodes any `CMD_RESET_REPORT` seen during the wait loop so MCU resets are reported as `mcu_reset_report_seen` with compact reset fields instead of only a status-only timeout.
 
 Validation:
 

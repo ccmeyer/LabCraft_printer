@@ -90,6 +90,18 @@ def _selftest_result_metrics(mod, test_id: int, name: str, passed: bool, metrics
     return _frame_payload(mod, bytes(payload))
 
 
+def _reset_report(mod, seq32: int = 1234) -> bytes:
+    payload = bytearray([mod.CMD_RESET_REPORT, 2])
+    payload += bytes([mod.TAG_RESET_SEQ32, 4]) + seq32.to_bytes(4, "little")
+    payload += bytes([mod.TAG_RESET_LAST_FAULT, 1, 2])
+    payload += bytes([mod.TAG_RESET_LAST_TASK, 1, 3])
+    payload += bytes([mod.TAG_RESET_WATCHDOG_COUNT, 4]) + (7).to_bytes(4, "little")
+    payload += bytes([mod.TAG_RESET_WATCHDOG_LATE_TASK, 1, 1])
+    payload += bytes([mod.TAG_RESET_ACTIVE_COMMAND, 1, mod.CMD_SELFTEST_START])
+    payload += bytes([mod.TAG_RESET_BOOT_STAGE, 1, 9])
+    return _frame_payload(mod, bytes(payload))
+
+
 def _selftest_result_trace(
     mod,
     test_id: int,
@@ -526,3 +538,57 @@ def test_progress_heartbeat_is_not_recorded_as_result(monkeypatch, tmp_path):
     assert report["results"] == []
     checks = {c["name"]: c for c in report["host_checks"]}
     assert checks["selftest_progress_watchdog"]["details"]["progress_count"] == 1
+
+
+def test_reset_report_during_selftest_is_classified(monkeypatch, tmp_path):
+    mod = _load_run_selftest()
+    clock = FakeClock()
+
+    inbound = b"".join(
+        [
+            _hello_ack(mod),
+            _selftest_result_metrics(
+                mod,
+                0,
+                "selftest_progress",
+                True,
+                "kind=progress;stage=gripper_seal_reg_home;elapsed_ms=1200",
+            ),
+            _reset_report(mod, seq32=4321),
+        ]
+    )
+    serial = FakeSerial(inbound)
+    monkeypatch.setattr(mod, "time", SimpleNamespace(monotonic=clock.monotonic, time=clock.time))
+    monkeypatch.setattr(mod, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: serial))
+
+    out_path = tmp_path / "selftest.json"
+    args = SimpleNamespace(
+        port="/dev/ttyAMA0",
+        baud=115200,
+        profile="FULL",
+        timeout_ms=2000,
+        hello_timeout_ms=1000,
+        hello_retry_ms=50,
+        fast_fail_on_missing_hello=False,
+        pressure_trace=False,
+        pressure_trace_test=None,
+        pressure_sweep_suite=None,
+        gripper_seal_suite=True,
+        progress_timeout_ms=500,
+        out=str(out_path),
+    )
+
+    rc = mod.run(args)
+
+    assert rc == 3
+    report = mod.json.loads(out_path.read_text(encoding="utf-8"))
+    assert report["aborted"] is True
+    checks = {c["name"]: c for c in report["host_checks"]}
+    details = checks["selftest_progress_watchdog"]["details"]
+    assert details["timeout_reason"] == "mcu_reset_report_seen"
+    assert details["reset_report"]["watchdog_count"] == 7
+    assert details["reset_report"]["watchdog_late_task"] == 1
+    assert details["reset_report"]["active_command"] == mod.CMD_SELFTEST_START
+    reset_frames = [frame for frame in details["recent_frames"] if frame["cmd"] == mod.CMD_RESET_REPORT]
+    assert reset_frames
+    assert reset_frames[-1]["reset_seq32"] == 4321
