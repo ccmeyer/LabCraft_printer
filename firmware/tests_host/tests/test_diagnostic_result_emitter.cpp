@@ -116,6 +116,49 @@ TEST(DiagnosticResultEmitter, ResultPayloadCapsLongNamesAndMetricsLikeFirmware)
     UNSIGNED_LONGS_EQUAL(198u, payload[metrics + 1]);
 }
 
+TEST(DiagnosticResultEmitter, GripperSealMetricsFitWithoutTruncatingAnalyzerFields)
+{
+    const char successMetrics[] =
+        "target_raw=2512;valve_drive=diagnostic_one_pulse;pulse_ms=2000;tick_us=100;bursts=1;"
+        "head_valve_mode=both;reg_vent=0;reg_pause=1;grip=1;refresh=0;"
+        "p_drop=100;r_drop=100;drop_raw=100;timeout=0";
+    const char failureMetrics[] =
+        "target_raw=2512;valve_drive=diagnostic_one_pulse;pulse_ms=2000;tick_us=100;bursts=0;"
+        "phase=condition;cond_done=2;reg_pause=0;grip=1;refresh=0;"
+        "drop_raw=0;ready_ms=5000;timeout=1;grip_ok=1";
+
+    uint8_t payload[256] = {0};
+    size_t len = DiagnosticResultEmitter::buildResultPayload(
+        payload,
+        sizeof(payload),
+        0x01u,
+        0x02u,
+        2501u,
+        "gripper_seal_closed_decay_factory",
+        true,
+        successMetrics,
+        0x04u);
+    size_t metrics = findTag(payload, len, DiagnosticResultEmitter::kTagMetrics);
+    CHECK_TRUE(metrics < len);
+    UNSIGNED_LONGS_EQUAL(std::strlen(successMetrics), payload[metrics + 1]);
+    MEMCMP_EQUAL(successMetrics, &payload[metrics + 2], std::strlen(successMetrics));
+
+    len = DiagnosticResultEmitter::buildResultPayload(
+        payload,
+        sizeof(payload),
+        0x01u,
+        0x02u,
+        2503u,
+        "gripper_seal_repeatability_factory",
+        false,
+        failureMetrics,
+        0x04u);
+    metrics = findTag(payload, len, DiagnosticResultEmitter::kTagMetrics);
+    CHECK_TRUE(metrics < len);
+    UNSIGNED_LONGS_EQUAL(std::strlen(failureMetrics), payload[metrics + 1]);
+    MEMCMP_EQUAL(failureMetrics, &payload[metrics + 2], std::strlen(failureMetrics));
+}
+
 TEST(DiagnosticResultEmitter, DonePayloadPreservesCurrentLayout)
 {
     uint8_t payload[64] = {0};

@@ -818,6 +818,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         static constexpr uint32_t kSetupTimeoutMs = 5000u;
                         static constexpr uint32_t kPulseMs = 2000u;
                         static constexpr uint32_t kPulseTickUs = 100u;
+                        static constexpr uint32_t kConditioningBurstCount = 2u;
+                        static constexpr uint32_t kConditioningBurstPeriodMs = 5000u;
                         static constexpr uint32_t kHoldBurstCount = 6u;
                         static constexpr uint32_t kHoldBurstPeriodMs = 10000u;
                         static constexpr uint32_t kRepeatBurstCount = 3u;
@@ -848,6 +850,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           uint32_t rDropRaw = 0u;
                           uint32_t dropRaw = 0u;
                           uint32_t pulseMs = 0u;
+                          uint32_t readyMs = 0u;
                         };
 
                         PressureSensor* sensor = PressureSensor::instance();
@@ -865,19 +868,30 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         #endif
                         };
 
-                        auto emitSkippedSealRows = [&](bool gripperOk) -> bool {
+                        auto emitFailureRowsFrom = [&](uint16_t firstTestId,
+                                                       const char* phase,
+                                                       uint32_t conditioningCompleted,
+                                                       bool gripperOk,
+                                                       bool regulatorPaused,
+                                                       uint32_t readyMs) -> bool {
                           char metrics[224];
                           snprintf(metrics, sizeof(metrics),
-                                   "target_raw=%ld;valve_drive=diagnostic_one_pulse;pulse_ms=%lu;tick_us=%lu;bursts=0;head_valve_mode=%s;reg_vent=0;reg_pause=0;grip=%lu;refresh=0;drop_raw=0;timeout=1;grip_ok=%u",
+                                   "target_raw=%ld;valve_drive=diagnostic_one_pulse;pulse_ms=%lu;tick_us=%lu;bursts=0;phase=%s;cond_done=%lu;reg_pause=%u;grip=%lu;refresh=0;drop_raw=0;ready_ms=%lu;timeout=1;grip_ok=%u",
                                    static_cast<long>(kSealTargetRaw),
                                    static_cast<unsigned long>(kPulseMs),
                                    static_cast<unsigned long>(kPulseTickUs),
-                                   headValveMode,
+                                   phase,
+                                   static_cast<unsigned long>(conditioningCompleted),
+                                   static_cast<unsigned>(regulatorPaused ? 1u : 0u),
                                    static_cast<unsigned long>(gripperCloseCount),
+                                   static_cast<unsigned long>(readyMs),
                                    static_cast<unsigned>(gripperOk ? 1u : 0u));
-                          if (!runOne(2501, "gripper_seal_closed_decay_factory", false, metrics)) return false;
-                          if (!runOne(2502, "gripper_seal_hold_duration_factory", false, metrics)) return false;
-                          if (!runOne(2503, "gripper_seal_repeatability_factory", false, metrics)) return false;
+                          if ((firstTestId <= 2501u) &&
+                              !runOne(2501, "gripper_seal_closed_decay_factory", false, metrics)) return false;
+                          if ((firstTestId <= 2502u) &&
+                              !runOne(2502, "gripper_seal_hold_duration_factory", false, metrics)) return false;
+                          if ((firstTestId <= 2503u) &&
+                              !runOne(2503, "gripper_seal_repeatability_factory", false, metrics)) return false;
                           return true;
                         };
 
@@ -904,6 +918,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                                                               stepUpP,
                                                                               kSetupTimeoutMs,
                                                                               kSealDropThresholdRaw);
+                          run.readyMs = readyP.settleMs;
                           bool readyOk = readyP.accepted;
 #if (LC_PRESSURE_PORTS > 1)
                           PressureRegulator& regR = PressureRegulator::regR();
@@ -918,6 +933,9 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                                                               stepUpR,
                                                                               kSetupTimeoutMs,
                                                                               kSealDropThresholdRaw);
+                          if (readyR.settleMs > run.readyMs) {
+                            run.readyMs = readyR.settleMs;
+                          }
                           readyOk = readyOk && readyR.accepted;
 #endif
                           if (!readyOk || _selfTestAbortRequested) {
@@ -996,6 +1014,31 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           return run;
                         };
 
+                        auto homePressureRegulators = [&]() -> bool {
+                          closePressurePath();
+                          sendProgressStage("gripper_seal_reg_home");
+                          PressureRegulator::regP().homeWithValveFast();
+                          Watchdog_CheckIn(CRASH_TASK_ORCH);
+                          bool homeOk = (Stepper::stepperP() != nullptr) &&
+                              Stepper::stepperP()->getLastHomeDiagnosticSnapshot().success;
+#if (LC_PRESSURE_PORTS > 1)
+                          sendProgressStage("gripper_seal_reg_home");
+                          PressureRegulator::regR().homeWithValveFast();
+                          Watchdog_CheckIn(CRASH_TASK_ORCH);
+                          homeOk = homeOk &&
+                              (Stepper::stepperR() != nullptr) &&
+                              Stepper::stepperR()->getLastHomeDiagnosticSnapshot().success;
+#endif
+                          closePressurePath();
+                          return homeOk && !_selfTestAbortRequested;
+                        };
+
+                        if (!homePressureRegulators()) {
+                          closePressurePath();
+                          (void)emitFailureRowsFrom(2501u, "home", 0u, false, false, 0u);
+                          return finishSelfTestNow();
+                        }
+
                         xEventGroupClearBits(_doneEvents, BIT_GRIPPER_DONE);
                         MX_GRIPPER_Close();
                         gripperCloseCount++;
@@ -1004,7 +1047,42 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 
                         if (!gripperCommandOk || !sensor || !printer) {
                           closePressurePath();
-                          (void)emitSkippedSealRows(gripperCommandOk);
+                          (void)emitFailureRowsFrom(2501u, "grip", 0u, gripperCommandOk, false, 0u);
+                          return finishSelfTestNow();
+                        }
+
+                        uint32_t conditioningCompleted = 0u;
+                        uint32_t conditioningReadyMs = 0u;
+                        bool conditioningRegulatorPaused = true;
+                        bool conditioningOk = true;
+                        for (uint32_t idx = 0u; idx < kConditioningBurstCount; ++idx) {
+                          sendProgressStage("gripper_seal_conditioning");
+                          const SealRun conditioningRun = runSealBurst(kPulseMs);
+                          conditioningReadyMs = conditioningRun.readyMs;
+                          conditioningRegulatorPaused = conditioningRegulatorPaused && conditioningRun.regulatorPaused;
+                          if (!conditioningRun.setupOk) {
+                            conditioningOk = false;
+                            break;
+                          }
+                          conditioningCompleted++;
+                          if ((idx + 1u) < kConditioningBurstCount) {
+                            const uint32_t waitMs = (kConditioningBurstPeriodMs > kPulseMs)
+                                ? (kConditioningBurstPeriodMs - kPulseMs)
+                                : 1u;
+                            if (!delayWithWatchdog(waitMs, "gripper_seal_conditioning")) {
+                              conditioningOk = false;
+                              break;
+                            }
+                          }
+                        }
+                        if (!conditioningOk || (conditioningCompleted != kConditioningBurstCount)) {
+                          closePressurePath();
+                          (void)emitFailureRowsFrom(2501u,
+                                                    "condition",
+                                                    conditioningCompleted,
+                                                    gripperCommandOk,
+                                                    conditioningRegulatorPaused,
+                                                    conditioningReadyMs);
                           return finishSelfTestNow();
                         }
 
@@ -1024,6 +1102,16 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                  static_cast<unsigned>(shortRun.timeout ? 1u : 0u));
                         if (!runOne(2501, "gripper_seal_closed_decay_factory", shortRun.setupOk, metrics2501)) {
                           closePressurePath();
+                          return finishSelfTestNow();
+                        }
+                        if (!shortRun.setupOk) {
+                          closePressurePath();
+                          (void)emitFailureRowsFrom(2502u,
+                                                    "skipped",
+                                                    conditioningCompleted,
+                                                    gripperCommandOk,
+                                                    shortRun.regulatorPaused,
+                                                    shortRun.readyMs);
                           return finishSelfTestNow();
                         }
 
@@ -1090,6 +1178,16 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                     holdSetupOk && (holdCompleted == kHoldBurstCount),
                                     metrics2502)) {
                           closePressurePath();
+                          return finishSelfTestNow();
+                        }
+                        if (!holdSetupOk || (holdCompleted != kHoldBurstCount)) {
+                          closePressurePath();
+                          (void)emitFailureRowsFrom(2503u,
+                                                    "skipped",
+                                                    conditioningCompleted,
+                                                    gripperCommandOk,
+                                                    holdRegulatorPaused,
+                                                    0u);
                           return finishSelfTestNow();
                         }
 

@@ -273,6 +273,75 @@ def _raw_gripper_empty_head_selftest():
     return raw
 
 
+def _raw_gripper_setup_timeout_selftest():
+    raw = copy.deepcopy(_raw_gripper_seal_selftest())
+    rows = [
+        {
+            "test_id": 2501,
+            "name": "gripper_seal_closed_decay_factory",
+            "pass": False,
+            "metrics": {
+                "target_raw": 2512,
+                "valve_drive": "diagnostic_one_pulse",
+                "pulse_ms": 2000,
+                "tick_us": 100,
+                "bursts": 0,
+                "phase": "condition",
+                "cond_done": 1,
+                "reg_pause": 0,
+                "grip": 1,
+                "refresh": 0,
+                "drop_raw": 0,
+                "ready_ms": 5000,
+                "timeout": 1,
+                "grip_ok": 1,
+            },
+        },
+        {
+            "test_id": 2502,
+            "name": "gripper_seal_hold_duration_factory",
+            "pass": False,
+            "metrics": {
+                "target_raw": 2512,
+                "valve_drive": "diagnostic_one_pulse",
+                "pulse_ms": 2000,
+                "tick_us": 100,
+                "bursts": 0,
+                "phase": "condition",
+                "cond_done": 1,
+                "reg_pause": 0,
+                "drop_raw": 0,
+                "ready_ms": 5000,
+                "timeout": 1,
+                "grip_ok": 1,
+            },
+        },
+        {
+            "test_id": 2503,
+            "name": "gripper_seal_repeatability_factory",
+            "pass": False,
+            "metrics": {
+                "target_raw": 2512,
+                "valve_drive": "diagnostic_one_pulse",
+                "pulse_ms": 2000,
+                "tick_us": 100,
+                "bursts": 0,
+                "phase": "condition",
+                "cond_done": 1,
+                "reg_pause": 0,
+                "drop_raw": 0,
+                "ready_ms": 5000,
+                "timeout": 1,
+                "grip_ok": 1,
+            },
+        },
+    ]
+    raw["aborted"] = False
+    raw["summary"] = {"total": len(rows), "passed": 0, "failed": len(rows)}
+    raw["results"] = rows
+    return raw
+
+
 def _identity(tmp_path):
     return load_or_create_identity(
         tmp_path / "local" / "machine_identity.json",
@@ -483,3 +552,28 @@ def test_gripper_seal_empty_head_synthetic_report_fails_acceptance_metrics(tmp_p
         if item["status"] == "fail"
     }
     assert {"repeat_span_raw", "seal_ms_min"}.issubset(blocking_metrics)
+
+
+def test_gripper_seal_setup_timeout_completes_with_all_expected_ids(tmp_path):
+    from tools.qualification.manifest import load_manifest
+
+    manifest = load_manifest("gripper_seal_v1")
+    artifacts = create_run_artifacts("LC-0001", output_root=tmp_path, timestamp="20260513T120000Z")
+
+    report = normalize_report(
+        _raw_gripper_setup_timeout_selftest(),
+        manifest,
+        _identity(tmp_path),
+        artifacts,
+        fixture_id="dummy_blocked_head_v1",
+        operator_interactions=[{"stage": "load_dummy_head", "message": "load", "confirmed_at": "2026-05-13T00:00:01Z"}],
+    )
+
+    assert report["overall_status"] == "fail"
+    assert report["aborted"] is False
+    assert report["raw_summary"] == {"total": 3, "passed": 0, "failed": 3}
+    assert report["manifest_checks"]["missing_test_ids"] == []
+    assert [row["test_id"] for row in report["results"]] == [2501, 2502, 2503]
+    assert report["results"][0]["metrics"]["phase"] == "condition"
+    assert report["results"][0]["metrics"]["ready_ms"] == 5000
+    assert report["verdict"]["blocking_issue_count"] >= 3
