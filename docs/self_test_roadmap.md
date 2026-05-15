@@ -915,6 +915,7 @@ Motion envelope qualification slice:
 - Add `motion_envelope_v1` as a separate operator-gated FULL manifest requiring fixture `motion_full_envelope_v1`.
 - Select the suite with existing `CMD_SELFTEST_START` selector field value `2019`; no protocol layout or opcode changes.
 - Firmware rows `2012`-`2016` cover reverse long XY travel, diagonal XY travel, a 16 x 24 plate raster from `(43000,13000)` toward `(33000,30000)`, Z long travel to `39000`, and homing from already-triggered X/Y/Z limit starts.
+- The `2014` plate raster returns to a near-home `Y=500` measurement anchor before the post-raster home so drift is not inflated by a long-distance homing approach artifact.
 - Keep `motion_envelope_v1` out of `factory_acceptance_v3`; use it for explicit, operator-confirmed full-envelope qualification runs.
 
 Validation:

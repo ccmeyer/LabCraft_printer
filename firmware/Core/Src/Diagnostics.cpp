@@ -2093,7 +2093,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         MotionQualificationMath::AxisHomeSample xPlateSample{};
                         MotionQualificationMath::AxisHomeSample yPlateSample{};
                         MotionQualificationMath::XyMotionStats plateStats{};
-                        plateStats.points = (kPlateRows * kPlateCols) + 1u;
+                        plateStats.points = (kPlateRows * kPlateCols) + 2u;
                         bool plateMovesCompleted = true;
                         bool plateBoundViolation = false;
                         bool plateGuardViolation = false;
@@ -2131,12 +2131,25 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                                             plateBoundViolation,
                                                             plateGuardViolation);
                         }
-                        const bool plateHomePassed = runXyHomeDiagnosticAttempt(xPlateSample,
-                                                                                yPlateSample,
-                                                                                kHomeFastHz,
-                                                                                kHomeSlowHz,
-                                                                                kHomeBackoffSteps,
-                                                                                kHomeTimeoutMs);
+                        const MotionQualificationMath::XyPoint plateHomeAnchor{
+                            xPlateReference.finalBackoffSteps,
+                            kCableGuardMinY};
+                        if (plateMovesCompleted) {
+                          sendProgressStage("xy_plate_home_anchor");
+                          plateMovesCompleted = moveChecked(plateHomeAnchor,
+                                                            kPlateFeedHz,
+                                                            kPlateMoveTimeoutMs,
+                                                            plateStats,
+                                                            plateBoundViolation,
+                                                            plateGuardViolation);
+                        }
+                        const bool plateHomePassed = plateMovesCompleted &&
+                            runXyHomeDiagnosticAttempt(xPlateSample,
+                                                       yPlateSample,
+                                                       kHomeFastHz,
+                                                       kHomeSlowHz,
+                                                       kHomeBackoffSteps,
+                                                       kHomeTimeoutMs);
                         MotionQualificationMath::recordXyMotionSample(plateStats,
                                                                        xPlateReference.finalBackoffSteps,
                                                                        yPlateReference.finalBackoffSteps,
@@ -2166,7 +2179,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             MotionQualificationMath::xyMotionStatsPass(plateStats);
                         char metrics2014[224];
                         snprintf(metrics2014, sizeof(metrics2014),
-                                 "rep=%lu;ref=2;rows=%lu;cols=%lu;moves=%lu;xmax=%ld;ymax=%ld;dx=%ld;dy=%ld;x_span=%lu;y_span=%lu;x_drift=%lu;y_drift=%lu;x_ret=%lu;y_ret=%lu;ret_err=%lu;move_to=%lu;home_to=%lu;guard=%lu;bound=%lu",
+                                 "rep=%lu;ref=2;rows=%lu;cols=%lu;moves=%lu;xmax=%ld;ymax=%ld;dx=%ld;dy=%ld;home_y=%ld;x_span=%lu;y_span=%lu;x_drift=%lu;y_drift=%lu;x_ret=%lu;y_ret=%lu;ret_err=%lu;move_to=%lu;home_to=%lu;guard=%lu;bound=%lu",
                                  static_cast<unsigned long>(plateStats.repetitions),
                                  static_cast<unsigned long>(kPlateRows),
                                  static_cast<unsigned long>(kPlateCols),
@@ -2175,6 +2188,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                  static_cast<long>(kPlateEndY),
                                  static_cast<long>(kPlateStartX - kPlateEndX),
                                  static_cast<long>(kPlateEndY - kPlateStartY),
+                                 static_cast<long>(plateHomeAnchor.y),
                                  static_cast<unsigned long>(xPlateHomeStats.limitTriggerSpanSteps),
                                  static_cast<unsigned long>(yPlateHomeStats.limitTriggerSpanSteps),
                                  static_cast<unsigned long>(plateStats.xDriftMaxSteps),
