@@ -219,6 +219,63 @@ def _raw_motion_envelope_selftest():
     }
 
 
+def _raw_pressure_regulator_selftest():
+    return {
+        "run_id": 7890,
+        "profile": "FULL",
+        "started_at": "2026-05-13T00:00:00Z",
+        "finished_at": "2026-05-13T00:04:00Z",
+        "aborted": False,
+        "summary": {"total": 10, "passed": 10, "failed": 0},
+        "results": [
+            {
+                "test_id": 2210,
+                "name": "pressure_sensor_idle_stability_factory",
+                "pass": True,
+                "metrics": {
+                    "dur_ms": 10000,
+                    "p_mean": 1640,
+                    "r_mean": 1642,
+                    "p_span": 4,
+                    "r_span": 5,
+                    "p_drift": 1,
+                    "r_drift": 1,
+                    "p_rej": 0,
+                    "r_rej": 0,
+                    "p_fault": 0,
+                    "r_fault": 0,
+                    "timeout": 0,
+                },
+            },
+            {
+                "test_id": 2211,
+                "name": "pressure_regulator_home_repeatability_factory",
+                "pass": True,
+                "metrics": {
+                    "rep": 3,
+                    "p_span": 2,
+                    "r_span": 2,
+                    "p_drift": 1,
+                    "r_drift": 1,
+                    "p_move_to": 0,
+                    "r_move_to": 0,
+                    "p_home_to": 0,
+                    "r_home_to": 0,
+                },
+            },
+            {"test_id": 2212, "name": "pressure_hold_leak_print_factory", "pass": True, "metrics": {"ch": "p", "psi": 2000, "target_raw": 3386, "hold_ms": 15000, "slope_raw_min": 0, "corr_steps": 10, "ready_miss": 0, "timeout": 0}},
+            {"test_id": 2213, "name": "pressure_hold_leak_refuel_factory", "pass": True, "metrics": {"ch": "r", "psi": 2000, "target_raw": 3386, "hold_ms": 15000, "slope_raw_min": 0, "corr_steps": 10, "ready_miss": 0, "timeout": 0}},
+            {"test_id": 2214, "name": "pressure_target_cycle_print_factory", "pass": True, "metrics": {"ch": "p", "cycles": 3, "low_raw": 2512, "high_raw": 4259, "settle_max_ms": 500, "err_max": 5, "low_span": 8, "high_span": 8, "ready_miss": 0, "timeout": 0}},
+            {"test_id": 2215, "name": "pressure_target_cycle_refuel_factory", "pass": True, "metrics": {"ch": "r", "cycles": 3, "low_raw": 2512, "high_raw": 4259, "settle_max_ms": 500, "err_max": 5, "low_span": 8, "high_span": 8, "ready_miss": 0, "timeout": 0}},
+            {"test_id": 2216, "name": "pressure_motor_hysteresis_print_factory", "pass": True, "metrics": {"ch": "p", "target_raw": 3386, "repeat_span": 8, "hyst_span": 4, "err_max": 5, "ready_miss": 0, "timeout": 0}},
+            {"test_id": 2217, "name": "pressure_motor_hysteresis_refuel_factory", "pass": True, "metrics": {"ch": "r", "target_raw": 3386, "repeat_span": 8, "hyst_span": 4, "err_max": 5, "ready_miss": 0, "timeout": 0}},
+            {"test_id": 2218, "name": "pressure_step_ladder_print_factory", "pass": True, "metrics": {"ch": "p", "pts": 5, "raw1": 2512, "raw2": 3386, "raw3": 4259, "settle_max_ms": 500, "err_max": 5, "ready_miss": 0, "timeout": 0}},
+            {"test_id": 2219, "name": "pressure_step_ladder_refuel_factory", "pass": True, "metrics": {"ch": "r", "pts": 5, "raw1": 2512, "raw2": 3386, "raw3": 4259, "settle_max_ms": 500, "err_max": 5, "ready_miss": 0, "timeout": 0}},
+        ],
+        "host_checks": [{"name": "hello_ack", "pass": True, "details": {"seq8": 1}}],
+    }
+
+
 def _manifest_path(tmp_path):
     path = tmp_path / "unit_manifest.json"
     path.write_text(
@@ -247,6 +304,10 @@ def _xy_motion_manifest_ref():
 
 def _motion_envelope_manifest_ref():
     return "motion_envelope_v1"
+
+
+def _pressure_regulator_manifest_ref():
+    return "pressure_regulator_v1"
 
 
 class FakeSerial:
@@ -594,6 +655,45 @@ def test_motion_envelope_manifest_rejects_missing_required_fixture(tmp_path):
     assert result.report["host_checks"][0]["details"]["allowed_fixture_ids"] == ["motion_full_envelope_v1"]
 
 
+def test_pressure_regulator_manifest_rejects_without_operator_prompts(tmp_path):
+    called = False
+
+    def fake_invoker(_invocation):
+        nonlocal called
+        called = True
+        return 0
+
+    result = run_qualification(
+        manifest_ref=_pressure_regulator_manifest_ref(),
+        machine_id="LC-0001",
+        identity_path=tmp_path / "local" / "machine_identity.json",
+        output_root=tmp_path / "qualification",
+        fixture_id="pressure_closed_loop_v1",
+        operator_prompts=False,
+        invoker=fake_invoker,
+    )
+
+    assert result.returncode == 3
+    assert called is False
+    assert result.report["host_checks"][0]["name"] == "operator_prompts_required"
+
+
+def test_pressure_regulator_manifest_rejects_missing_required_fixture(tmp_path):
+    result = run_qualification(
+        manifest_ref=_pressure_regulator_manifest_ref(),
+        machine_id="LC-0001",
+        identity_path=tmp_path / "local" / "machine_identity.json",
+        output_root=tmp_path / "qualification",
+        operator_prompts=True,
+        invoker=lambda _invocation: 0,
+        prompter=lambda _message: None,
+    )
+
+    assert result.returncode == 3
+    assert result.report["host_checks"][0]["name"] == "fixture_required"
+    assert result.report["host_checks"][0]["details"]["allowed_fixture_ids"] == ["pressure_closed_loop_v1"]
+
+
 def test_xy_motion_operator_prompt_runs_selected_suite_without_gripper_teardown(tmp_path):
     events = []
 
@@ -631,6 +731,47 @@ def test_xy_motion_operator_prompt_runs_selected_suite_without_gripper_teardown(
     assert "hardware envelope is clear" in events[0]
     assert events == [events[0], "self-test"]
     assert result.report["run"]["fixture_id"] == "motion_clear_envelope_v1"
+    assert [item["stage"] for item in result.report["operator_interactions"]] == ["confirm_fixture_setup"]
+    assert result.report["overall_status"] == "pass"
+
+
+def test_pressure_regulator_operator_prompt_runs_selected_suite_without_gripper_teardown(tmp_path):
+    events = []
+
+    def fake_prompter(message):
+        events.append(f"prompt:{message}")
+
+    def fake_invoker(invocation):
+        events.append("self-test")
+        assert "--pressure-regulator-suite" in invocation.command
+        assert "--gripper-seal-suite" not in invocation.command
+        invocation.raw_report_path.write_text(json.dumps(_raw_pressure_regulator_selftest()), encoding="utf-8")
+        return 0
+
+    def fake_gripper_control(action, port, baud):
+        raise AssertionError(f"Pressure regulator suite should not call gripper control: {action}:{port}:{baud}")
+
+    result = run_qualification(
+        manifest_ref=_pressure_regulator_manifest_ref(),
+        port="/dev/ttyAMA0",
+        baud=115200,
+        machine_id="LC-0001",
+        identity_path=tmp_path / "local" / "machine_identity.json",
+        output_root=tmp_path / "qualification",
+        timeout_ms=420000,
+        fixture_id="pressure_closed_loop_v1",
+        operator_prompts=True,
+        invoker=fake_invoker,
+        prompter=fake_prompter,
+        gripper_control=fake_gripper_control,
+    )
+
+    assert result.returncode == 0
+    assert events[0].startswith("prompt:Confirm qualification setup")
+    assert "pressure_closed_loop_v1" in events[0]
+    assert "hardware envelope is clear" in events[0]
+    assert events == [events[0], "self-test"]
+    assert result.report["run"]["fixture_id"] == "pressure_closed_loop_v1"
     assert [item["stage"] for item in result.report["operator_interactions"]] == ["confirm_fixture_setup"]
     assert result.report["overall_status"] == "pass"
 

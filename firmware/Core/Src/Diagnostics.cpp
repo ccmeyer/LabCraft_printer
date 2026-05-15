@@ -77,6 +77,16 @@ static constexpr DiagnosticTestDescriptor kDiagnosticTests[] = {
     {2201u, "pressure_hold_leak_factory", "pressure", "FULL", "safe_gate_or_full"},
     {2202u, "pressure_target_cycle_repeatability_factory", "pressure", "FULL", "safe_gate_or_full"},
     {2203u, "pressure_motor_position_hysteresis_factory", "pressure", "FULL", "safe_gate_or_full"},
+    {2210u, "pressure_sensor_idle_stability_factory", "pressure", "FULL", "explicit_selection"},
+    {2211u, "pressure_regulator_home_repeatability_factory", "pressure", "FULL", "explicit_selection"},
+    {2212u, "pressure_hold_leak_print_factory", "pressure", "FULL", "explicit_selection"},
+    {2213u, "pressure_hold_leak_refuel_factory", "pressure", "FULL", "explicit_selection"},
+    {2214u, "pressure_target_cycle_print_factory", "pressure", "FULL", "explicit_selection"},
+    {2215u, "pressure_target_cycle_refuel_factory", "pressure", "FULL", "explicit_selection"},
+    {2216u, "pressure_motor_hysteresis_print_factory", "pressure", "FULL", "explicit_selection"},
+    {2217u, "pressure_motor_hysteresis_refuel_factory", "pressure", "FULL", "explicit_selection"},
+    {2218u, "pressure_step_ladder_print_factory", "pressure", "FULL", "explicit_selection"},
+    {2219u, "pressure_step_ladder_refuel_factory", "pressure", "FULL", "explicit_selection"},
     {2004u, "valve_actuation_sequence_full", "pressure", "FULL", "safe_gate_or_full"},
     {2005u, "print_refuel_pulse_integrity_full", "pulse", "FULL", "safe_gate_or_full"},
     {2401u, "print_valve_pulse_drop_repeatability_factory", "pulse", "FULL", "safe_gate_or_full"},
@@ -165,6 +175,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
     const bool runGripperSealSuite = (selectedDiagnosticId == 2500u);
     const bool runXyMotionSuite = (selectedDiagnosticId == 2009u);
     const bool runMotionEnvelopeSuite = (selectedDiagnosticId == 2019u);
+    const bool runPressureRegulatorSuite = (selectedDiagnosticId == 2299u);
     const bool runPressureSweepCore = (selectedPressureTraceTest == 2301u);
     const bool runPressureSweepExtended = (selectedPressureTraceTest == 2302u);
     const bool runPressureSweepFocused = (selectedPressureTraceTest == 2303u);
@@ -173,7 +184,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
     const bool runSinglePressureTraceSelection =
         (selectedPressureTraceTest >= 2101u) && (selectedPressureTraceTest <= 2104u);
                   auto shouldRunPressureTraceCase = [&](uint16_t testId) {
-                    if (runPressureSweepCore || runPressureSweepExtended || runPressureSweepFocused || runPressureSweepMicro || runGripperSealSuite || runXyMotionSuite || runMotionEnvelopeSuite) {
+                    if (runPressureSweepCore || runPressureSweepExtended || runPressureSweepFocused || runPressureSweepMicro || runGripperSealSuite || runXyMotionSuite || runMotionEnvelopeSuite || runPressureRegulatorSuite) {
                       return false;
                     }
                     if (runSinglePressureTraceSelection) {
@@ -2437,12 +2448,736 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                       }
 
                       auto psiToRaw = [](uint32_t psiMilli) -> uint16_t {
-                        const uint32_t psiOffset = 1638u;
-                        const uint32_t fss = 13107u;
-                        const uint32_t psiMaxMilli = 15000u;
-                        const uint32_t scaled = (psiMilli * fss + (psiMaxMilli / 2u)) / psiMaxMilli;
-                        return static_cast<uint16_t>(psiOffset + scaled);
+                        return PressureQualificationMath::pressureRawFromPsiMilli(psiMilli);
                       };
+
+                      if (runPressureRegulatorSuite) {
+                        static constexpr uint32_t kPressureIdleMs = 10000u;
+                        static constexpr uint32_t kPressureIdleSampleMs = 50u;
+                        static constexpr uint32_t kPressureHoldMs = 15000u;
+                        static constexpr uint32_t kPressureSettleTimeoutMs = 5000u;
+                        static constexpr uint32_t kQualificationPressureErrorTolRaw = 100u;
+                        static constexpr uint32_t kRegHomeFastHz = 30000u;
+                        static constexpr uint32_t kRegHomeSlowHz = 3000u;
+                        static constexpr uint32_t kRegHomeBackoffSteps = 400u;
+                        static constexpr uint32_t kRegHomeTimeoutMs = 20000u;
+                        static constexpr uint32_t kRegHomeReps = 3u;
+                        static constexpr uint32_t kCycleCount = 3u;
+                        static constexpr uint32_t kHysteresisReps = 2u;
+                        static constexpr uint32_t kLadderPointCount = 5u;
+                        static constexpr uint16_t kPressure1Raw =
+                            PressureQualificationMath::pressureRawFromPsiMilli(1000u);
+                        static constexpr uint16_t kPressure2Raw =
+                            PressureQualificationMath::pressureRawFromPsiMilli(2000u);
+                        static constexpr uint16_t kPressure3Raw =
+                            PressureQualificationMath::pressureRawFromPsiMilli(3000u);
+
+                        PressureSensor* sensor = PressureSensor::instance();
+
+                        auto regulatorFor = [&](uint8_t channel) -> PressureRegulator& {
+#if (LC_PRESSURE_PORTS > 1)
+                          return (channel == 0u) ? PressureRegulator::regP() : PressureRegulator::regR();
+#else
+                          (void)channel;
+                          return PressureRegulator::regP();
+#endif
+                        };
+
+                        auto stepperFor = [&](uint8_t channel) -> Stepper* {
+                          if (channel == 0u) {
+                            return Stepper::stepperP();
+                          }
+#if (LC_PRESSURE_PORTS > 1)
+                          return Stepper::stepperR();
+#else
+                          (void)channel;
+                          return nullptr;
+#endif
+                        };
+
+                        auto readyBitFor = [&](uint8_t channel) -> EventBits_t {
+#if (LC_PRESSURE_PORTS > 1)
+                          return (channel == 0u) ? BIT_PRESSURE_P_READY : BIT_PRESSURE_R_READY;
+#else
+                          (void)channel;
+                          return BIT_PRESSURE_P_READY;
+#endif
+                        };
+
+                        auto homeBitFor = [&](uint8_t channel) -> EventBits_t {
+#if (LC_PRESSURE_PORTS > 1)
+                          return (channel == 0u) ? BIT_HOME_P_DONE : BIT_HOME_R_DONE;
+#else
+                          (void)channel;
+                          return BIT_HOME_P_DONE;
+#endif
+                        };
+
+                        auto channelAvailable = [&](uint8_t channel) -> bool {
+                          if ((sensor == nullptr) || (sensor->numPorts() <= channel)) {
+                            return false;
+                          }
+                          return stepperFor(channel) != nullptr;
+                        };
+
+                        auto channelCode = [](uint8_t channel) -> char {
+                          return (channel == 0u) ? 'p' : 'r';
+                        };
+
+                        auto closePressureSuitePaths = [&]() {
+                          PressureRegulator::regP().pause();
+                          PressureRegulator::regP().closeValve();
+#if (LC_PRESSURE_PORTS > 1)
+                          PressureRegulator::regR().pause();
+                          PressureRegulator::regR().closeValve();
+#endif
+                        };
+
+                        auto deltaCounter = [](uint32_t start, uint32_t finish) -> uint32_t {
+                          return (finish >= start) ? (finish - start) : 0u;
+                        };
+
+                        auto updateMax = [](uint32_t& current, uint32_t candidate) {
+                          if (candidate > current) {
+                            current = candidate;
+                          }
+                        };
+
+                        auto driftFromSamples = [](const int32_t* values, size_t count) -> uint32_t {
+                          if ((values == nullptr) || (count == 0u)) {
+                            return 0u;
+                          }
+                          return PressureQualificationMath::absDiff(values[0], values[count - 1u]);
+                        };
+
+                        auto meanOf = [](const int32_t* values, size_t count) -> int32_t {
+                          if ((values == nullptr) || (count == 0u)) {
+                            return 0;
+                          }
+                          int64_t sum = 0;
+                          for (size_t idx = 0u; idx < count; ++idx) {
+                            sum += static_cast<int64_t>(values[idx]);
+                          }
+                          return static_cast<int32_t>(sum / static_cast<int64_t>(count));
+                        };
+
+                        auto readPressurePositionSample = [&](uint8_t channel) {
+                          PressurePositionSample sample{};
+                          if ((sensor != nullptr) && (sensor->numPorts() > channel)) {
+                            const auto controlSample = sensor->getControlSample(channel);
+                            sample.pressureRaw = static_cast<int32_t>(controlSample.raw);
+                            sample.pressureAvg = static_cast<int32_t>(controlSample.avg);
+                          }
+                          Stepper* stepper = stepperFor(channel);
+                          if (stepper != nullptr) {
+                            sample.motorPosition = stepper->getPosition();
+                          }
+                          return sample;
+                        };
+
+                        auto emitUnavailableChannel = [&](uint16_t testId,
+                                                          const char* name,
+                                                          uint8_t channel,
+                                                          const char* metricsTail) -> bool {
+                          char metrics[224];
+                          snprintf(metrics, sizeof(metrics),
+                                   "ch=%c;gate=no_refuel_port;%s",
+                                   channelCode(channel),
+                                   metricsTail);
+                          return runOne(testId, name, false, metrics);
+                        };
+
+                        auto waitForPressureTarget = [&](uint8_t channel,
+                                                         int32_t targetRaw,
+                                                         PressureQualificationMath::ExecutionSummary& exec,
+                                                         uint32_t& settleMaxMs,
+                                                         uint32_t& errMax,
+                                                         uint32_t* overMax,
+                                                         uint32_t* underMax) -> PressureWaitResult {
+                          PressureRegulator& reg = regulatorFor(channel);
+                          const auto sample = sensor->getControlSample(channel);
+                          const bool stepUp = static_cast<int32_t>(sample.raw) <= targetRaw;
+                          xEventGroupClearBits(_doneEvents, readyBitFor(channel));
+                          reg.setTargetSafe(targetRaw);
+                          const int32_t acceptedTarget = static_cast<int32_t>(reg.getTarget());
+                          const PressureWaitResult wait = waitPressureReady(reg,
+                                                                            channel,
+                                                                            acceptedTarget,
+                                                                            stepUp,
+                                                                            kPressureSettleTimeoutMs,
+                                                                            kQualificationPressureErrorTolRaw);
+                          recordPressureWaitExecution(wait, exec);
+                          updateMax(settleMaxMs, wait.settleMs);
+                          updateMax(errMax, wait.controlError);
+                          if (stepUp && (overMax != nullptr)) {
+                            updateMax(*overMax, wait.overshoot);
+                          }
+                          if (!stepUp && (underMax != nullptr)) {
+                            updateMax(*underMax, wait.overshoot);
+                          }
+                          return wait;
+                        };
+
+                        auto restorePressureChannel = [&](uint8_t channel,
+                                                          int32_t baselineTarget,
+                                                          int32_t lastTarget) {
+                          if (!channelAvailable(channel)) {
+                            return;
+                          }
+                          PressureQualificationMath::ExecutionSummary restoreExec{};
+                          uint32_t settleMaxMs = 0u;
+                          uint32_t errMax = 0u;
+                          (void)lastTarget;
+                          (void)waitForPressureTarget(channel,
+                                                      baselineTarget,
+                                                      restoreExec,
+                                                      settleMaxMs,
+                                                      errMax,
+                                                      nullptr,
+                                                      nullptr);
+                          regulatorFor(channel).pause();
+                          regulatorFor(channel).closeValve();
+                        };
+
+                        struct IdleStats {
+                          uint32_t count = 0u;
+                          int64_t sum = 0;
+                          int32_t first = 0;
+                          int32_t last = 0;
+                          int32_t minValue = 0;
+                          int32_t maxValue = 0;
+                        };
+
+                        auto updateIdleStats = [&](IdleStats& stats, uint8_t channel) {
+                          if ((sensor == nullptr) || (sensor->numPorts() <= channel)) {
+                            return;
+                          }
+                          const auto sample = sensor->getControlSample(channel);
+                          const int32_t raw = static_cast<int32_t>(sample.raw);
+                          if (stats.count == 0u) {
+                            stats.first = raw;
+                            stats.minValue = raw;
+                            stats.maxValue = raw;
+                          }
+                          stats.last = raw;
+                          if (raw < stats.minValue) stats.minValue = raw;
+                          if (raw > stats.maxValue) stats.maxValue = raw;
+                          stats.sum += static_cast<int64_t>(raw);
+                          stats.count++;
+                        };
+
+                        auto meanIdle = [](const IdleStats& stats) -> int32_t {
+                          return (stats.count == 0u)
+                              ? 0
+                              : static_cast<int32_t>(stats.sum / static_cast<int64_t>(stats.count));
+                        };
+
+                        auto spanIdle = [](const IdleStats& stats) -> uint32_t {
+                          return (stats.count == 0u)
+                              ? 0u
+                              : PressureQualificationMath::absDiff(stats.maxValue, stats.minValue);
+                        };
+
+                        closePressureSuitePaths();
+
+                        {
+                          sendProgressStage("pressure_idle_stability");
+                          IdleStats pIdle{};
+                          IdleStats rIdle{};
+                          const bool hasP = channelAvailable(0u);
+                          const bool hasR = channelAvailable(1u);
+                          const auto pStart = hasP ? sensor->getControlSample(0u) : PressureSensor::ControlSample{};
+                          const auto rStart = hasR ? sensor->getControlSample(1u) : PressureSensor::ControlSample{};
+                          bool timeout = false;
+                          if (sensor != nullptr) {
+                            const uint32_t startMs = HAL_GetTick();
+                            while ((HAL_GetTick() - startMs) < kPressureIdleMs) {
+                              Watchdog_CheckIn(CRASH_TASK_ORCH);
+                              maybeSendProgress("pressure_idle_stability");
+                              if (_selfTestAbortRequested) {
+                                timeout = true;
+                                break;
+                              }
+                              if (hasP) updateIdleStats(pIdle, 0u);
+                              if (hasR) updateIdleStats(rIdle, 1u);
+                              vTaskDelay(msToAtLeast1Tick(kPressureIdleSampleMs));
+                            }
+                          } else {
+                            timeout = true;
+                          }
+                          const auto pEnd = hasP ? sensor->getControlSample(0u) : PressureSensor::ControlSample{};
+                          const auto rEnd = hasR ? sensor->getControlSample(1u) : PressureSensor::ControlSample{};
+                          const uint32_t pRejects = hasP ? deltaCounter(pStart.rejectCount, pEnd.rejectCount) : 0u;
+                          const uint32_t rRejects = hasR ? deltaCounter(rStart.rejectCount, rEnd.rejectCount) : 0u;
+                          const uint32_t pFault = hasP && sensor->isSafetyFaultLatched(0u) ? 1u : (hasP ? 0u : 1u);
+                          const uint32_t rFault = hasR && sensor->isSafetyFaultLatched(1u) ? 1u : (hasR ? 0u : 1u);
+                          const uint32_t pDrift = PressureQualificationMath::absDiff(pIdle.first, pIdle.last);
+                          const uint32_t rDrift = PressureQualificationMath::absDiff(rIdle.first, rIdle.last);
+                          const bool idlePass = sensor && hasP && hasR &&
+                                                !timeout &&
+                                                (pFault == 0u) &&
+                                                (rFault == 0u);
+                          char metrics[192];
+                          snprintf(metrics, sizeof(metrics),
+                                   "dur_ms=%lu;p_mean=%ld;r_mean=%ld;p_span=%lu;r_span=%lu;p_drift=%lu;r_drift=%lu;p_rej=%lu;r_rej=%lu;p_fault=%lu;r_fault=%lu;timeout=%u",
+                                   static_cast<unsigned long>(kPressureIdleMs),
+                                   static_cast<long>(meanIdle(pIdle)),
+                                   static_cast<long>(meanIdle(rIdle)),
+                                   static_cast<unsigned long>(spanIdle(pIdle)),
+                                   static_cast<unsigned long>(spanIdle(rIdle)),
+                                   static_cast<unsigned long>(pDrift),
+                                   static_cast<unsigned long>(rDrift),
+                                   static_cast<unsigned long>(pRejects),
+                                   static_cast<unsigned long>(rRejects),
+                                   static_cast<unsigned long>(pFault),
+                                   static_cast<unsigned long>(rFault),
+                                   static_cast<unsigned>(timeout ? 1u : 0u));
+                          if (!runOne(2210, "pressure_sensor_idle_stability_factory", idlePass, metrics)) {
+                            closePressureSuitePaths();
+                            return finishSelfTestNow();
+                          }
+                        }
+
+                        {
+                          sendProgressStage("pressure_reg_home_repeat");
+                          const bool hasP = channelAvailable(0u);
+                          const bool hasR = channelAvailable(1u);
+                          int32_t pHomes[kRegHomeReps]{};
+                          int32_t rHomes[kRegHomeReps]{};
+                          size_t pCount = 0u;
+                          size_t rCount = 0u;
+                          uint32_t pMoveTo = 0u;
+                          uint32_t rMoveTo = 0u;
+                          uint32_t pHomeTo = hasP ? 0u : 1u;
+                          uint32_t rHomeTo = hasR ? 0u : 1u;
+                          for (uint32_t rep = 0u; rep < kRegHomeReps; ++rep) {
+                            closePressureSuitePaths();
+                            EventBits_t homeBits = 0u;
+                            if (hasP) homeBits |= homeBitFor(0u);
+                            if (hasR) homeBits |= homeBitFor(1u);
+                            if (homeBits == 0u) {
+                              break;
+                            }
+                            xEventGroupClearBits(_doneEvents, homeBits);
+                            if (hasP) {
+                              startRegHomeAsync(&PressureRegulator::regP(),
+                                                kRegHomeFastHz,
+                                                kRegHomeSlowHz,
+                                                kRegHomeBackoffSteps,
+                                                BIT_HOME_P_DONE);
+                            }
+#if (LC_PRESSURE_PORTS > 1)
+                            if (hasR) {
+                              startRegHomeAsync(&PressureRegulator::regR(),
+                                                kRegHomeFastHz,
+                                                kRegHomeSlowHz,
+                                                kRegHomeBackoffSteps,
+                                                BIT_HOME_R_DONE);
+                            }
+#endif
+                            const bool homesDone = waitBitsWithTimeout(homeBits, kRegHomeTimeoutMs);
+                            const EventBits_t doneBits = xEventGroupGetBits(_doneEvents);
+                            if (hasP) {
+                              const Stepper::HomeDiagnosticSnapshot pDiag =
+                                  Stepper::stepperP()->getLastHomeDiagnosticSnapshot();
+                              pMoveTo += pDiag.moveTimeoutCount;
+                              if (homesDone && ((doneBits & BIT_HOME_P_DONE) != 0u) && pDiag.success) {
+                                pHomes[pCount++] = pDiag.fineLimitPositionSteps;
+                              } else {
+                                pHomeTo++;
+                              }
+                            }
+#if (LC_PRESSURE_PORTS > 1)
+                            if (hasR) {
+                              const Stepper::HomeDiagnosticSnapshot rDiag =
+                                  Stepper::stepperR()->getLastHomeDiagnosticSnapshot();
+                              rMoveTo += rDiag.moveTimeoutCount;
+                              if (homesDone && ((doneBits & BIT_HOME_R_DONE) != 0u) && rDiag.success) {
+                                rHomes[rCount++] = rDiag.fineLimitPositionSteps;
+                              } else {
+                                rHomeTo++;
+                              }
+                            }
+#endif
+                            if (_selfTestAbortRequested) {
+                              break;
+                            }
+                          }
+                          closePressureSuitePaths();
+                          const auto pStats = PressureQualificationMath::summarizeInt32Span(pHomes, pCount);
+                          const auto rStats = PressureQualificationMath::summarizeInt32Span(rHomes, rCount);
+                          const uint32_t pDrift = driftFromSamples(pHomes, pCount);
+                          const uint32_t rDrift = driftFromSamples(rHomes, rCount);
+                          const bool homePass = hasP && hasR &&
+                                                (pCount == kRegHomeReps) &&
+                                                (rCount == kRegHomeReps) &&
+                                                (pMoveTo == 0u) &&
+                                                (rMoveTo == 0u) &&
+                                                (pHomeTo == 0u) &&
+                                                (rHomeTo == 0u);
+                          char metrics[160];
+                          snprintf(metrics, sizeof(metrics),
+                                   "rep=%lu;p_span=%lu;r_span=%lu;p_drift=%lu;r_drift=%lu;p_move_to=%lu;r_move_to=%lu;p_home_to=%lu;r_home_to=%lu",
+                                   static_cast<unsigned long>(kRegHomeReps),
+                                   static_cast<unsigned long>(pStats.span),
+                                   static_cast<unsigned long>(rStats.span),
+                                   static_cast<unsigned long>(pDrift),
+                                   static_cast<unsigned long>(rDrift),
+                                   static_cast<unsigned long>(pMoveTo),
+                                   static_cast<unsigned long>(rMoveTo),
+                                   static_cast<unsigned long>(pHomeTo),
+                                   static_cast<unsigned long>(rHomeTo));
+                          if (!runOne(2211, "pressure_regulator_home_repeatability_factory", homePass, metrics)) {
+                            return finishSelfTestNow();
+                          }
+                        }
+
+                        auto runPressureHold = [&](uint16_t testId, const char* name, uint8_t channel) -> bool {
+                          if (!channelAvailable(channel)) {
+                            return emitUnavailableChannel(
+                                testId,
+                                name,
+                                channel,
+                                "psi=2000;target_raw=3386;hold_ms=15000;raw_start=0;raw_end=0;slope_raw_min=0;corr_steps=0;motor_start=0;motor_end=0;ready_miss=1;timeout=0");
+                          }
+                          sendProgressStage((channel == 0u) ? "pressure_hold_print" : "pressure_hold_refuel");
+                          PressureQualificationMath::ExecutionSummary exec{};
+                          PressureRegulator& reg = regulatorFor(channel);
+                          const int32_t baselineTarget = static_cast<int32_t>(reg.getTarget());
+                          uint32_t settleMaxMs = 0u;
+                          uint32_t errMax = 0u;
+                          int32_t pressureStart = 0;
+                          int32_t pressureEnd = 0;
+                          int32_t motorStart = 0;
+                          int32_t motorEnd = 0;
+                          reg.closeValve();
+                          reg.start();
+                          const PressureWaitResult ready = waitForPressureTarget(channel,
+                                                                                  kPressure2Raw,
+                                                                                  exec,
+                                                                                  settleMaxMs,
+                                                                                  errMax,
+                                                                                  nullptr,
+                                                                                  nullptr);
+                          const int32_t targetRaw = static_cast<int32_t>(reg.getTarget());
+                          if (ready.accepted && !_selfTestAbortRequested) {
+                            const PressurePositionSample startSample = readPressurePositionSample(channel);
+                            pressureStart = startSample.pressureRaw;
+                            motorStart = startSample.motorPosition;
+                            if (!delayWithWatchdog(kPressureHoldMs, "pressure_reg_hold")) {
+                              exec.abortCount++;
+                            }
+                            const PressurePositionSample endSample = readPressurePositionSample(channel);
+                            pressureEnd = endSample.pressureRaw;
+                            motorEnd = endSample.motorPosition;
+                          }
+                          restorePressureChannel(channel, baselineTarget, targetRaw);
+                          const int32_t slopeRawPerMin =
+                              PressureQualificationMath::slopeRawPerMin(pressureStart, pressureEnd, kPressureHoldMs);
+                          const uint32_t correctionSteps =
+                              PressureQualificationMath::absDiff(motorStart, motorEnd);
+                          const bool pass = PressureQualificationMath::executionPass(exec);
+                          char metrics[192];
+                          snprintf(metrics, sizeof(metrics),
+                                   "ch=%c;psi=2000;target_raw=%ld;hold_ms=%lu;raw_start=%ld;raw_end=%ld;slope_raw_min=%ld;corr_steps=%lu;motor_start=%ld;motor_end=%ld;ready_miss=%lu;timeout=%lu",
+                                   channelCode(channel),
+                                   static_cast<long>(targetRaw),
+                                   static_cast<unsigned long>(kPressureHoldMs),
+                                   static_cast<long>(pressureStart),
+                                   static_cast<long>(pressureEnd),
+                                   static_cast<long>(slopeRawPerMin),
+                                   static_cast<unsigned long>(correctionSteps),
+                                   static_cast<long>(motorStart),
+                                   static_cast<long>(motorEnd),
+                                   static_cast<unsigned long>(exec.readyMissCount),
+                                   static_cast<unsigned long>(exec.timeoutCount + exec.abortCount));
+                          return runOne(testId, name, pass, metrics);
+                        };
+
+                        auto runPressureCycle = [&](uint16_t testId, const char* name, uint8_t channel) -> bool {
+                          if (!channelAvailable(channel)) {
+                            return emitUnavailableChannel(
+                                testId,
+                                name,
+                                channel,
+                                "cycles=3;low_raw=2512;high_raw=4259;settle_max_ms=0;err_max=0;low_span=0;high_span=0;ready_miss=1;timeout=0");
+                          }
+                          sendProgressStage((channel == 0u) ? "pressure_cycle_print" : "pressure_cycle_refuel");
+                          PressureQualificationMath::ExecutionSummary exec{};
+                          PressureRegulator& reg = regulatorFor(channel);
+                          const int32_t baselineTarget = static_cast<int32_t>(reg.getTarget());
+                          int32_t lowPositions[kCycleCount]{};
+                          int32_t highPositions[kCycleCount]{};
+                          size_t lowCount = 0u;
+                          size_t highCount = 0u;
+                          uint32_t settleMaxMs = 0u;
+                          uint32_t errMax = 0u;
+                          reg.closeValve();
+                          reg.start();
+                          int32_t lastTarget = baselineTarget;
+                          for (uint32_t cycle = 0u; cycle < kCycleCount; ++cycle) {
+                            const PressureWaitResult lowWait = waitForPressureTarget(channel,
+                                                                                     kPressure1Raw,
+                                                                                     exec,
+                                                                                     settleMaxMs,
+                                                                                     errMax,
+                                                                                     nullptr,
+                                                                                     nullptr);
+                            lastTarget = static_cast<int32_t>(reg.getTarget());
+                            if (!lowWait.accepted || _selfTestAbortRequested) break;
+                            const PressurePositionSample lowSample = readPressurePositionSample(channel);
+                            if (lowCount < kCycleCount) lowPositions[lowCount++] = lowSample.motorPosition;
+                            const PressureWaitResult highWait = waitForPressureTarget(channel,
+                                                                                      kPressure3Raw,
+                                                                                      exec,
+                                                                                      settleMaxMs,
+                                                                                      errMax,
+                                                                                      nullptr,
+                                                                                      nullptr);
+                            lastTarget = static_cast<int32_t>(reg.getTarget());
+                            if (!highWait.accepted || _selfTestAbortRequested) break;
+                            const PressurePositionSample highSample = readPressurePositionSample(channel);
+                            if (highCount < kCycleCount) highPositions[highCount++] = highSample.motorPosition;
+                          }
+                          restorePressureChannel(channel, baselineTarget, lastTarget);
+                          const auto lowStats = PressureQualificationMath::summarizeInt32Span(lowPositions, lowCount);
+                          const auto highStats = PressureQualificationMath::summarizeInt32Span(highPositions, highCount);
+                          const bool pass = (lowCount == kCycleCount) &&
+                                            (highCount == kCycleCount) &&
+                                            PressureQualificationMath::executionPass(exec);
+                          char metrics[176];
+                          snprintf(metrics, sizeof(metrics),
+                                   "ch=%c;cycles=%lu;low_raw=%lu;high_raw=%lu;settle_max_ms=%lu;err_max=%lu;low_span=%lu;high_span=%lu;ready_miss=%lu;timeout=%lu",
+                                   channelCode(channel),
+                                   static_cast<unsigned long>(kCycleCount),
+                                   static_cast<unsigned long>(kPressure1Raw),
+                                   static_cast<unsigned long>(kPressure3Raw),
+                                   static_cast<unsigned long>(settleMaxMs),
+                                   static_cast<unsigned long>(errMax),
+                                   static_cast<unsigned long>(lowStats.span),
+                                   static_cast<unsigned long>(highStats.span),
+                                   static_cast<unsigned long>(exec.readyMissCount),
+                                   static_cast<unsigned long>(exec.timeoutCount + exec.abortCount));
+                          return runOne(testId, name, pass, metrics);
+                        };
+
+                        auto runPressureHysteresis = [&](uint16_t testId, const char* name, uint8_t channel) -> bool {
+                          if (!channelAvailable(channel)) {
+                            return emitUnavailableChannel(
+                                testId,
+                                name,
+                                channel,
+                                "target_raw=3386;low_raw=2512;high_raw=4259;visits=0;pos_min=0;pos_max=0;repeat_span=0;hyst_span=0;err_max=0;ready_miss=1;timeout=0");
+                          }
+                          sendProgressStage((channel == 0u) ? "pressure_hyst_print" : "pressure_hyst_refuel");
+                          PressureQualificationMath::ExecutionSummary exec{};
+                          PressureRegulator& reg = regulatorFor(channel);
+                          const int32_t baselineTarget = static_cast<int32_t>(reg.getTarget());
+                          int32_t belowPositions[kHysteresisReps]{};
+                          int32_t abovePositions[kHysteresisReps]{};
+                          int32_t allPositions[kHysteresisReps * 2u]{};
+                          size_t belowCount = 0u;
+                          size_t aboveCount = 0u;
+                          size_t allCount = 0u;
+                          uint32_t settleMaxMs = 0u;
+                          uint32_t errMax = 0u;
+                          int32_t lastTarget = baselineTarget;
+                          reg.closeValve();
+                          reg.start();
+                          for (uint32_t rep = 0u; rep < kHysteresisReps; ++rep) {
+                            const PressureWaitResult lowWait = waitForPressureTarget(channel,
+                                                                                     kPressure1Raw,
+                                                                                     exec,
+                                                                                     settleMaxMs,
+                                                                                     errMax,
+                                                                                     nullptr,
+                                                                                     nullptr);
+                            lastTarget = static_cast<int32_t>(reg.getTarget());
+                            if (!lowWait.accepted || _selfTestAbortRequested) break;
+                            const PressureWaitResult fromBelow = waitForPressureTarget(channel,
+                                                                                       kPressure2Raw,
+                                                                                       exec,
+                                                                                       settleMaxMs,
+                                                                                       errMax,
+                                                                                       nullptr,
+                                                                                       nullptr);
+                            lastTarget = static_cast<int32_t>(reg.getTarget());
+                            if (!fromBelow.accepted || _selfTestAbortRequested) break;
+                            const PressurePositionSample belowSample = readPressurePositionSample(channel);
+                            if (belowCount < kHysteresisReps) belowPositions[belowCount++] = belowSample.motorPosition;
+                            if (allCount < (kHysteresisReps * 2u)) allPositions[allCount++] = belowSample.motorPosition;
+
+                            const PressureWaitResult highWait = waitForPressureTarget(channel,
+                                                                                      kPressure3Raw,
+                                                                                      exec,
+                                                                                      settleMaxMs,
+                                                                                      errMax,
+                                                                                      nullptr,
+                                                                                      nullptr);
+                            lastTarget = static_cast<int32_t>(reg.getTarget());
+                            if (!highWait.accepted || _selfTestAbortRequested) break;
+                            const PressureWaitResult fromAbove = waitForPressureTarget(channel,
+                                                                                       kPressure2Raw,
+                                                                                       exec,
+                                                                                       settleMaxMs,
+                                                                                       errMax,
+                                                                                       nullptr,
+                                                                                       nullptr);
+                            lastTarget = static_cast<int32_t>(reg.getTarget());
+                            if (!fromAbove.accepted || _selfTestAbortRequested) break;
+                            const PressurePositionSample aboveSample = readPressurePositionSample(channel);
+                            if (aboveCount < kHysteresisReps) abovePositions[aboveCount++] = aboveSample.motorPosition;
+                            if (allCount < (kHysteresisReps * 2u)) allPositions[allCount++] = aboveSample.motorPosition;
+                          }
+                          restorePressureChannel(channel, baselineTarget, lastTarget);
+                          const auto repeatStats = PressureQualificationMath::summarizeInt32Span(allPositions, allCount);
+                          const uint32_t hystSpan =
+                              PressureQualificationMath::meanDifferenceAbs(belowPositions,
+                                                                           belowCount,
+                                                                           abovePositions,
+                                                                           aboveCount);
+                          const bool pass = (belowCount == kHysteresisReps) &&
+                                            (aboveCount == kHysteresisReps) &&
+                                            PressureQualificationMath::executionPass(exec);
+                          char metrics[192];
+                          snprintf(metrics, sizeof(metrics),
+                                   "ch=%c;target_raw=%lu;low_raw=%lu;high_raw=%lu;visits=%lu;pos_min=%ld;pos_max=%ld;repeat_span=%lu;hyst_span=%lu;err_max=%lu;ready_miss=%lu;timeout=%lu",
+                                   channelCode(channel),
+                                   static_cast<unsigned long>(kPressure2Raw),
+                                   static_cast<unsigned long>(kPressure1Raw),
+                                   static_cast<unsigned long>(kPressure3Raw),
+                                   static_cast<unsigned long>(allCount),
+                                   static_cast<long>(repeatStats.minValue),
+                                   static_cast<long>(repeatStats.maxValue),
+                                   static_cast<unsigned long>(repeatStats.span),
+                                   static_cast<unsigned long>(hystSpan),
+                                   static_cast<unsigned long>(errMax),
+                                   static_cast<unsigned long>(exec.readyMissCount),
+                                   static_cast<unsigned long>(exec.timeoutCount + exec.abortCount));
+                          return runOne(testId, name, pass, metrics);
+                        };
+
+                        auto runPressureStepLadder = [&](uint16_t testId, const char* name, uint8_t channel) -> bool {
+                          if (!channelAvailable(channel)) {
+                            return emitUnavailableChannel(
+                                testId,
+                                name,
+                                channel,
+                                "pts=5;raw1=2512;raw2=3386;raw3=4259;settle_max_ms=0;err_max=0;over=0;under=0;pos_span=0;lin_err=0;ready_miss=1;timeout=0");
+                          }
+                          sendProgressStage((channel == 0u) ? "pressure_ladder_print" : "pressure_ladder_refuel");
+                          const uint16_t targets[kLadderPointCount] = {
+                              kPressure1Raw,
+                              kPressure2Raw,
+                              kPressure3Raw,
+                              kPressure2Raw,
+                              kPressure1Raw,
+                          };
+                          PressureQualificationMath::ExecutionSummary exec{};
+                          PressureRegulator& reg = regulatorFor(channel);
+                          const int32_t baselineTarget = static_cast<int32_t>(reg.getTarget());
+                          int32_t allPositions[kLadderPointCount]{};
+                          int32_t p1Positions[2]{};
+                          int32_t p2Positions[2]{};
+                          int32_t p3Positions[1]{};
+                          size_t allCount = 0u;
+                          size_t p1Count = 0u;
+                          size_t p2Count = 0u;
+                          size_t p3Count = 0u;
+                          uint32_t settleMaxMs = 0u;
+                          uint32_t errMax = 0u;
+                          uint32_t overMax = 0u;
+                          uint32_t underMax = 0u;
+                          int32_t lastTarget = baselineTarget;
+                          reg.closeValve();
+                          reg.start();
+                          for (uint32_t idx = 0u; idx < kLadderPointCount; ++idx) {
+                            const uint16_t target = targets[idx];
+                            const PressureWaitResult wait = waitForPressureTarget(channel,
+                                                                                  target,
+                                                                                  exec,
+                                                                                  settleMaxMs,
+                                                                                  errMax,
+                                                                                  &overMax,
+                                                                                  &underMax);
+                            lastTarget = static_cast<int32_t>(reg.getTarget());
+                            if (!wait.accepted || _selfTestAbortRequested) break;
+                            const PressurePositionSample sample = readPressurePositionSample(channel);
+                            if (allCount < kLadderPointCount) allPositions[allCount++] = sample.motorPosition;
+                            if ((target == kPressure1Raw) && (p1Count < 2u)) {
+                              p1Positions[p1Count++] = sample.motorPosition;
+                            } else if ((target == kPressure2Raw) && (p2Count < 2u)) {
+                              p2Positions[p2Count++] = sample.motorPosition;
+                            } else if ((target == kPressure3Raw) && (p3Count < 1u)) {
+                              p3Positions[p3Count++] = sample.motorPosition;
+                            }
+                          }
+                          restorePressureChannel(channel, baselineTarget, lastTarget);
+                          const auto allStats = PressureQualificationMath::summarizeInt32Span(allPositions, allCount);
+                          uint32_t linErr = 0u;
+                          if ((p1Count > 0u) && (p2Count > 0u) && (p3Count > 0u)) {
+                            const int32_t mean1 = meanOf(p1Positions, p1Count);
+                            const int32_t mean2 = meanOf(p2Positions, p2Count);
+                            const int32_t mean3 = meanOf(p3Positions, p3Count);
+                            linErr = PressureQualificationMath::absDiff(mean2 - mean1, mean3 - mean2);
+                          }
+                          const bool pass = (allCount == kLadderPointCount) &&
+                                            PressureQualificationMath::executionPass(exec);
+                          char metrics[192];
+                          snprintf(metrics, sizeof(metrics),
+                                   "ch=%c;pts=%lu;raw1=%lu;raw2=%lu;raw3=%lu;settle_max_ms=%lu;err_max=%lu;over=%lu;under=%lu;pos_span=%lu;lin_err=%lu;ready_miss=%lu;timeout=%lu",
+                                   channelCode(channel),
+                                   static_cast<unsigned long>(kLadderPointCount),
+                                   static_cast<unsigned long>(kPressure1Raw),
+                                   static_cast<unsigned long>(kPressure2Raw),
+                                   static_cast<unsigned long>(kPressure3Raw),
+                                   static_cast<unsigned long>(settleMaxMs),
+                                   static_cast<unsigned long>(errMax),
+                                   static_cast<unsigned long>(overMax),
+                                   static_cast<unsigned long>(underMax),
+                                   static_cast<unsigned long>(allStats.span),
+                                   static_cast<unsigned long>(linErr),
+                                   static_cast<unsigned long>(exec.readyMissCount),
+                                   static_cast<unsigned long>(exec.timeoutCount + exec.abortCount));
+                          return runOne(testId, name, pass, metrics);
+                        };
+
+                        if (!runPressureHold(2212, "pressure_hold_leak_print_factory", 0u)) {
+                          closePressureSuitePaths();
+                          return finishSelfTestNow();
+                        }
+                        if (!runPressureHold(2213, "pressure_hold_leak_refuel_factory", 1u)) {
+                          closePressureSuitePaths();
+                          return finishSelfTestNow();
+                        }
+                        if (!runPressureCycle(2214, "pressure_target_cycle_print_factory", 0u)) {
+                          closePressureSuitePaths();
+                          return finishSelfTestNow();
+                        }
+                        if (!runPressureCycle(2215, "pressure_target_cycle_refuel_factory", 1u)) {
+                          closePressureSuitePaths();
+                          return finishSelfTestNow();
+                        }
+                        if (!runPressureHysteresis(2216, "pressure_motor_hysteresis_print_factory", 0u)) {
+                          closePressureSuitePaths();
+                          return finishSelfTestNow();
+                        }
+                        if (!runPressureHysteresis(2217, "pressure_motor_hysteresis_refuel_factory", 1u)) {
+                          closePressureSuitePaths();
+                          return finishSelfTestNow();
+                        }
+                        if (!runPressureStepLadder(2218, "pressure_step_ladder_print_factory", 0u)) {
+                          closePressureSuitePaths();
+                          return finishSelfTestNow();
+                        }
+                        if (!runPressureStepLadder(2219, "pressure_step_ladder_refuel_factory", 1u)) {
+                          closePressureSuitePaths();
+                          return finishSelfTestNow();
+                        }
+
+                        closePressureSuitePaths();
+                        return finishSelfTestNow();
+                      }
 
                       struct PressureTraceCaseMetrics {
                         uint32_t baselinePressure = 0u;

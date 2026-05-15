@@ -65,9 +65,10 @@ def _suite_sort_key(manifest_id: str) -> tuple[int, str]:
         "gripper_seal_v1": 1,
         "xy_motion_v1": 2,
         "motion_envelope_v1": 3,
-        "factory_acceptance_v2": 4,
-        "factory_acceptance_v1": 5,
-        "factory_acceptance_v0": 6,
+        "pressure_regulator_v1": 4,
+        "factory_acceptance_v2": 5,
+        "factory_acceptance_v1": 6,
+        "factory_acceptance_v0": 7,
     }
     return (preferred.get(manifest_id, 100), manifest_id)
 

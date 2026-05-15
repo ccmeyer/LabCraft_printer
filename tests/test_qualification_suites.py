@@ -19,8 +19,16 @@ def test_discover_suite_entries_lists_current_manifests():
         "gripper_seal_v1",
         "xy_motion_v1",
         "motion_envelope_v1",
+        "pressure_regulator_v1",
     }.issubset(manifest_ids)
     assert entries[0].manifest_id == "factory_acceptance_v3"
+    assert [entry.manifest_id for entry in entries[:5]] == [
+        "factory_acceptance_v3",
+        "gripper_seal_v1",
+        "xy_motion_v1",
+        "motion_envelope_v1",
+        "pressure_regulator_v1",
+    ]
 
 
 def test_suite_rows_include_catalog_metadata_metrics_and_fixtures():
@@ -77,3 +85,21 @@ def test_motion_envelope_suite_exposes_operator_fixture_and_catalog_rows():
     assert all(row.subsystem == "Motion" for row in rows.values())
     assert "z_span" in rows[2015].metrics
     assert "limit_start" in rows[2016].metrics
+
+
+def test_pressure_regulator_suite_exposes_operator_fixture_and_catalog_rows():
+    entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
+    pressure = entries["pressure_regulator_v1"].manifest
+
+    assert pressure.requires_operator_prompts is True
+    assert required_fixture_ids(pressure) == ("pressure_closed_loop_v1",)
+    rows = {row.test_id: row for row in build_test_plan_rows(pressure)}
+    assert list(rows) == [2210, 2211, 2212, 2213, 2214, 2215, 2216, 2217, 2218, 2219]
+    assert rows[2210].name == "Pressure idle stability"
+    assert rows[2211].name == "Pressure regulator homing"
+    assert rows[2218].name == "Print pressure step ladder"
+    assert rows[2219].name == "Refuel pressure step ladder"
+    assert all(row.subsystem == "Pressure" for row in rows.values())
+    assert "p_fault" in rows[2210].metrics
+    assert "settle_max_ms" in rows[2218].metrics
+    assert "1, 2, 3, 2, 1 psi" in rows[2218].evaluates

@@ -30,6 +30,7 @@ The intent is to increase quantitative coverage without turning the firmware, Py
 | Milestone 8D: Qualification Timing and Compact History | Complete | Machine Qualification window estimates typical test durations from local reports, shows elapsed/remaining time during runs, and compacts report history labels |
 | Milestone 8E: XY Motion Qualification Suite | Complete enough to move on | Standalone operator-gated `xy_motion_v1` suite selects firmware XY long-travel/raster diagnostics `2010`-`2011` without adding them to default FULL |
 | Milestone 8F: Motion Envelope Qualification Suite | In progress | Standalone operator-gated `motion_envelope_v1` suite selects firmware motion envelope diagnostics `2012`-`2016` without adding them to default FULL |
+| Milestone 8G: Pressure Regulator Qualification Suite | In progress | Standalone operator-gated `pressure_regulator_v1` suite selects firmware pressure regulator diagnostics `2210`-`2219` without adding them to default FULL |
 | Later fixture-dependent diagnostics | Not started | Planned |
 
 ## Current Call Path
@@ -95,6 +96,7 @@ Potential future fixture IDs:
 
 - `motion_clear_envelope`
 - `pressure_hold_closed_loop`
+- `pressure_closed_loop_v1`
 - `print_valve_pneumatic_drop`
 - `refuel_valve_pneumatic_drop`
 - `dummy_blocked_head_v1`
@@ -917,6 +919,14 @@ Motion envelope qualification slice:
 - Firmware rows `2012`-`2016` cover reverse long XY travel, diagonal XY travel, a 16 x 24 plate raster from `(43000,13000)` toward `(33000,30000)`, Z long travel to `39000`, and homing from already-triggered X/Y/Z limit starts.
 - The `2014` plate raster returns to a near-home `Y=500` measurement anchor before the post-raster home so drift is not inflated by a long-distance homing approach artifact.
 - Keep `motion_envelope_v1` out of `factory_acceptance_v3`; use it for explicit, operator-confirmed full-envelope qualification runs.
+
+Pressure regulator qualification slice:
+
+- Add `pressure_regulator_v1` as a separate operator-gated FULL manifest requiring fixture `pressure_closed_loop_v1`.
+- Select the suite with existing `CMD_SELFTEST_START` selector field value `2299`; no protocol layout or opcode changes.
+- Firmware rows `2210`-`2219` cover idle P/R pressure stability, regulator homing repeatability, print/refuel 2 psi holds, print/refuel 1 psi to 3 psi cycling, print/refuel 2 psi hysteresis approaches, and print/refuel `1 -> 2 -> 3 -> 2 -> 1 psi` step ladders.
+- The ladder targets use the existing raw conversion: `1 psi=2512`, `2 psi=3386`, and `3 psi=4259`.
+- Keep `pressure_regulator_v1` out of `factory_acceptance_v3`; use it for explicit, operator-confirmed pressure regulator qualification runs before deciding whether any rows belong in the default FULL suite.
 
 Validation:
 

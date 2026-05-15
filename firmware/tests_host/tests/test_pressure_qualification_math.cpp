@@ -12,6 +12,13 @@ TEST(PressureQualificationMath, ComputesSignedPressureSlopePerMinute)
     LONGS_EQUAL(0, PressureQualificationMath::slopeRawPerMin(1800, 1900, 0));
 }
 
+TEST(PressureQualificationMath, ConvertsPsiMilliToPressureRaw)
+{
+    UNSIGNED_LONGS_EQUAL(2512u, PressureQualificationMath::pressureRawFromPsiMilli(1000u));
+    UNSIGNED_LONGS_EQUAL(3386u, PressureQualificationMath::pressureRawFromPsiMilli(2000u));
+    UNSIGNED_LONGS_EQUAL(4259u, PressureQualificationMath::pressureRawFromPsiMilli(3000u));
+}
+
 TEST(PressureQualificationMath, SummarizesMotorPositionSpan)
 {
     const int32_t positions[] = {105, 100, 111, 103};

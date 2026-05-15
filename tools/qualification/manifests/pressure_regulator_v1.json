@@ -1,0 +1,148 @@
+{
+  "schema_version": "qualification_manifest_v0",
+  "manifest_id": "pressure_regulator_v1",
+  "name": "Pressure Regulator Qualification v1",
+  "profile": "FULL",
+  "description": "Operator-gated pressure regulator suite covering idle stability, P/R homing repeatability, hold stability, target cycling, hysteresis, and 1/2/3 psi step ladders.",
+  "expected_test_ids": [
+    2210,
+    2211,
+    2212,
+    2213,
+    2214,
+    2215,
+    2216,
+    2217,
+    2218,
+    2219
+  ],
+  "enforce_expected_test_ids": true,
+  "requires_operator_prompts": true,
+  "selftest_args": [
+    "--pressure-regulator-suite"
+  ],
+  "fixtures": [
+    {
+      "fixture_id": "pressure_closed_loop_v1",
+      "required_for": [2210, 2211, 2212, 2213, 2214, 2215, 2216, 2217, 2218, 2219],
+      "operator_note": "Connect the approved closed-loop pressure fixture. Confirm print/refuel pressure paths are safe, no head/open outlet is attached unless intentionally fixtured, and the fixture is rated for at least 3 psi."
+    }
+  ],
+  "analysis_rules": {
+    "2210": {
+      "category": "pressure",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "p_span": {"maturity": "candidate", "max": 100},
+        "r_span": {"maturity": "candidate", "max": 100},
+        "p_drift": {"maturity": "candidate", "max": 100},
+        "r_drift": {"maturity": "candidate", "max": 100},
+        "p_rej": {"maturity": "candidate", "equals": 0},
+        "r_rej": {"maturity": "candidate", "equals": 0},
+        "p_fault": {"maturity": "candidate", "equals": 0},
+        "r_fault": {"maturity": "candidate", "equals": 0},
+        "timeout": {"maturity": "candidate", "equals": 0}
+      }
+    },
+    "2211": {
+      "category": "pressure",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "p_span": {"maturity": "candidate", "max": 25},
+        "r_span": {"maturity": "candidate", "max": 25},
+        "p_drift": {"maturity": "candidate", "max": 25},
+        "r_drift": {"maturity": "candidate", "max": 25},
+        "p_move_to": {"maturity": "candidate", "equals": 0},
+        "r_move_to": {"maturity": "candidate", "equals": 0},
+        "p_home_to": {"maturity": "candidate", "equals": 0},
+        "r_home_to": {"maturity": "candidate", "equals": 0}
+      }
+    },
+    "2212": {
+      "category": "pressure",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "slope_raw_min": {"maturity": "candidate", "min": -1500, "max": 1500},
+        "corr_steps": {"maturity": "candidate", "max": 10000},
+        "ready_miss": {"maturity": "candidate", "equals": 0},
+        "timeout": {"maturity": "candidate", "equals": 0}
+      }
+    },
+    "2213": {
+      "category": "pressure",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "slope_raw_min": {"maturity": "candidate", "min": -1500, "max": 1500},
+        "corr_steps": {"maturity": "candidate", "max": 10000},
+        "ready_miss": {"maturity": "candidate", "equals": 0},
+        "timeout": {"maturity": "candidate", "equals": 0}
+      }
+    },
+    "2214": {
+      "category": "pressure",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "settle_max_ms": {"maturity": "candidate", "max": 5000},
+        "err_max": {"maturity": "candidate", "max": 100},
+        "low_span": {"maturity": "candidate", "max": 2000},
+        "high_span": {"maturity": "candidate", "max": 2000},
+        "ready_miss": {"maturity": "candidate", "equals": 0},
+        "timeout": {"maturity": "candidate", "equals": 0}
+      }
+    },
+    "2215": {
+      "category": "pressure",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "settle_max_ms": {"maturity": "candidate", "max": 5000},
+        "err_max": {"maturity": "candidate", "max": 100},
+        "low_span": {"maturity": "candidate", "max": 2000},
+        "high_span": {"maturity": "candidate", "max": 2000},
+        "ready_miss": {"maturity": "candidate", "equals": 0},
+        "timeout": {"maturity": "candidate", "equals": 0}
+      }
+    },
+    "2216": {
+      "category": "pressure",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "repeat_span": {"maturity": "candidate", "max": 2000},
+        "hyst_span": {"maturity": "candidate", "max": 2000},
+        "err_max": {"maturity": "candidate", "max": 100},
+        "ready_miss": {"maturity": "candidate", "equals": 0},
+        "timeout": {"maturity": "candidate", "equals": 0}
+      }
+    },
+    "2217": {
+      "category": "pressure",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "repeat_span": {"maturity": "candidate", "max": 2000},
+        "hyst_span": {"maturity": "candidate", "max": 2000},
+        "err_max": {"maturity": "candidate", "max": 100},
+        "ready_miss": {"maturity": "candidate", "equals": 0},
+        "timeout": {"maturity": "candidate", "equals": 0}
+      }
+    },
+    "2218": {
+      "category": "pressure",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "settle_max_ms": {"maturity": "candidate", "max": 5000},
+        "err_max": {"maturity": "candidate", "max": 100},
+        "ready_miss": {"maturity": "candidate", "equals": 0},
+        "timeout": {"maturity": "candidate", "equals": 0}
+      }
+    },
+    "2219": {
+      "category": "pressure",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "settle_max_ms": {"maturity": "candidate", "max": 5000},
+        "err_max": {"maturity": "candidate", "max": 100},
+        "ready_miss": {"maturity": "candidate", "equals": 0},
+        "timeout": {"maturity": "candidate", "equals": 0}
+      }
+    }
+  }
+}

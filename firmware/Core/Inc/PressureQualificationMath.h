@@ -20,6 +20,10 @@ struct ExecutionSummary {
 };
 
 uint32_t absDiff(int32_t a, int32_t b);
+constexpr uint16_t pressureRawFromPsiMilli(uint32_t psiMilli)
+{
+  return static_cast<uint16_t>(1638u + ((psiMilli * 13107u + 7500u) / 15000u));
+}
 int32_t slopeRawPerMin(int32_t startRaw, int32_t endRaw, uint32_t durationMs);
 Int32Span summarizeInt32Span(const int32_t* values, size_t count);
 uint32_t meanDifferenceAbs(const int32_t* a, size_t aCount, const int32_t* b, size_t bCount);

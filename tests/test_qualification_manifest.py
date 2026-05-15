@@ -106,6 +106,22 @@ def test_load_motion_envelope_manifest_requires_operator_full_envelope_fixture()
     assert manifest.analysis_rules["2016"]["metrics"]["limit_start"]["equals"] == 0
 
 
+def test_load_pressure_regulator_manifest_requires_operator_closed_loop_fixture():
+    manifest = load_manifest("pressure_regulator_v1")
+
+    assert manifest.manifest_id == "pressure_regulator_v1"
+    assert manifest.profile == "FULL"
+    assert manifest.expected_test_ids == (2210, 2211, 2212, 2213, 2214, 2215, 2216, 2217, 2218, 2219)
+    assert manifest.enforce_expected_test_ids is True
+    assert manifest.requires_operator_prompts is True
+    assert manifest.selftest_args == ("--pressure-regulator-suite",)
+    assert {item["fixture_id"] for item in manifest.fixtures} == {"pressure_closed_loop_v1"}
+    assert manifest.analysis_rules["2210"]["metrics"]["p_fault"]["equals"] == 0
+    assert manifest.analysis_rules["2211"]["metrics"]["r_home_to"]["equals"] == 0
+    assert manifest.analysis_rules["2212"]["metrics"]["slope_raw_min"]["maturity"] == "candidate"
+    assert manifest.analysis_rules["2218"]["metrics"]["settle_max_ms"]["maturity"] == "candidate"
+
+
 def test_load_manifest_from_path(tmp_path):
     path = tmp_path / "custom.json"
     path.write_text(
