@@ -1,0 +1,59 @@
+{
+  "schema_version": "qualification_manifest_v0",
+  "manifest_id": "xy_motion_v1",
+  "name": "XY Motion Qualification v1",
+  "profile": "FULL",
+  "description": "Operator-gated XY motion suite that exercises long-travel and well-plate-like raster movement within the safe gantry envelope.",
+  "expected_test_ids": [
+    2010,
+    2011
+  ],
+  "enforce_expected_test_ids": true,
+  "requires_operator_prompts": true,
+  "selftest_args": [
+    "--xy-motion-suite"
+  ],
+  "fixtures": [
+    {
+      "fixture_id": "motion_clear_envelope_v1",
+      "required_for": [2010, 2011],
+      "operator_note": "Confirm the full XY gantry envelope is clear. No plate, fixture, tool, cable, or hand may be inside the X<=45000, Y<=35000 travel region."
+    }
+  ],
+  "analysis_rules": {
+    "2010": {
+      "category": "motion",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "x_span": {"maturity": "candidate", "max": 25},
+        "y_span": {"maturity": "candidate", "max": 25},
+        "x_drift": {"maturity": "candidate", "max": 25},
+        "y_drift": {"maturity": "candidate", "max": 25},
+        "x_ret": {"maturity": "candidate", "max": 10},
+        "y_ret": {"maturity": "candidate", "max": 10},
+        "ret_err": {"maturity": "candidate", "max": 10},
+        "move_to": {"maturity": "candidate", "equals": 0},
+        "home_to": {"maturity": "candidate", "equals": 0},
+        "guard": {"maturity": "candidate", "equals": 0},
+        "bound": {"maturity": "candidate", "equals": 0}
+      }
+    },
+    "2011": {
+      "category": "motion",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "x_span": {"maturity": "candidate", "max": 25},
+        "y_span": {"maturity": "candidate", "max": 25},
+        "x_drift": {"maturity": "candidate", "max": 25},
+        "y_drift": {"maturity": "candidate", "max": 25},
+        "x_ret": {"maturity": "candidate", "max": 10},
+        "y_ret": {"maturity": "candidate", "max": 10},
+        "ret_err": {"maturity": "candidate", "max": 10},
+        "move_to": {"maturity": "candidate", "equals": 0},
+        "home_to": {"maturity": "candidate", "equals": 0},
+        "guard": {"maturity": "candidate", "equals": 0},
+        "bound": {"maturity": "candidate", "equals": 0}
+      }
+    }
+  }
+}

@@ -28,6 +28,7 @@ The intent is to increase quantitative coverage without turning the firmware, Py
 | Milestone 8B: Qualification Run Shell | In progress | `Run Qualification` tab launches existing manifests through the Python qualification backend with coarse progress and final row coloring |
 | Milestone 8C: Live Per-Test Qualification Events | In progress | `tools/run_selftest.py --progress-jsonl` emits backend-owned per-test events consumed by the qualification window |
 | Milestone 8D: Qualification Timing and Compact History | Complete | Machine Qualification window estimates typical test durations from local reports, shows elapsed/remaining time during runs, and compacts report history labels |
+| Milestone 8E: XY Motion Qualification Suite | In progress | Standalone operator-gated `xy_motion_v1` suite selects firmware XY long-travel/raster diagnostics `2010`-`2011` without adding them to default FULL |
 | Later fixture-dependent diagnostics | Not started | Planned |
 
 ## Current Call Path
@@ -901,10 +902,18 @@ Timing and compact history slice:
 - Keep timing empirical and local-only; do not add a persistent timing database or protocol changes.
 - Show report history entries as compact `YYYY-MM-DD HH:MM:SS` labels while keeping report details in tooltips.
 
+XY motion qualification slice:
+
+- Add `xy_motion_v1` as a separate operator-gated FULL manifest requiring fixture `motion_clear_envelope_v1`.
+- Select the suite with existing `CMD_SELFTEST_START` selector field value `2009`; no protocol layout or opcode changes.
+- Firmware rows `2010 motion_xy_long_travel_factory` and `2011 motion_xy_raster_repeatability_factory` exercise X/Y travel inside `X<=45000`, `Y<=35000`, with a cable-chain guard requiring `Y>=500` whenever `X>1000`.
+- Keep the suite out of `factory_acceptance_v3` until enough local data exists to tune thresholds and runtime.
+
 Validation:
 
 ```powershell
 .\env\Scripts\python.exe -m pytest -q
+powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_checks.ps1 -Config Debug
 ```
 
 Manual app validation for the read-only prototype:

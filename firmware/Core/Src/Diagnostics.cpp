@@ -66,6 +66,8 @@ static constexpr DiagnosticTestDescriptor kDiagnosticTests[] = {
     {2002u, "motion_absolute_move_bounds_full", "motion", "FULL", "safe_gate_or_full"},
     {2007u, "motion_home_repeatability_factory", "motion", "FULL", "safe_gate_or_full"},
     {2008u, "motion_pattern_return_factory", "motion", "FULL", "safe_gate_or_full"},
+    {2010u, "motion_xy_long_travel_factory", "motion", "FULL", "explicit_selection"},
+    {2011u, "motion_xy_raster_repeatability_factory", "motion", "FULL", "explicit_selection"},
     {2003u, "pressure_regulator_step_response_full", "pressure", "FULL", "safe_gate_or_full"},
     {2201u, "pressure_hold_leak_factory", "pressure", "FULL", "safe_gate_or_full"},
     {2202u, "pressure_target_cycle_repeatability_factory", "pressure", "FULL", "safe_gate_or_full"},
@@ -156,6 +158,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
         (request.selectedDiagnosticId != 0u) ? request.selectedDiagnosticId : request.selectedPressureTraceTest;
     const uint16_t selectedPressureTraceTest = request.selectedPressureTraceTest;
     const bool runGripperSealSuite = (selectedDiagnosticId == 2500u);
+    const bool runXyMotionSuite = (selectedDiagnosticId == 2009u);
     const bool runPressureSweepCore = (selectedPressureTraceTest == 2301u);
     const bool runPressureSweepExtended = (selectedPressureTraceTest == 2302u);
     const bool runPressureSweepFocused = (selectedPressureTraceTest == 2303u);
@@ -164,7 +167,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
     const bool runSinglePressureTraceSelection =
         (selectedPressureTraceTest >= 2101u) && (selectedPressureTraceTest <= 2104u);
                   auto shouldRunPressureTraceCase = [&](uint16_t testId) {
-                    if (runPressureSweepCore || runPressureSweepExtended || runPressureSweepFocused || runPressureSweepMicro || runGripperSealSuite) {
+                    if (runPressureSweepCore || runPressureSweepExtended || runPressureSweepFocused || runPressureSweepMicro || runGripperSealSuite || runXyMotionSuite) {
                       return false;
                     }
                     if (runSinglePressureTraceSelection) {
@@ -1281,6 +1284,322 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         }
 
                         closePressurePath();
+                        return finishSelfTestNow();
+                      }
+
+                      if (runXyMotionSuite) {
+                        static constexpr int32_t kSafeXMax = 45000;
+                        static constexpr int32_t kSafeYMax = 35000;
+                        static constexpr int32_t kCableGuardX = 1000;
+                        static constexpr int32_t kCableGuardMinY = 500;
+                        static constexpr int32_t kLongXMax = 44000;
+                        static constexpr int32_t kLongYMax = 34000;
+                        static constexpr uint32_t kLongRepetitions = 3u;
+                        static constexpr uint32_t kLongPointCount = 5u;
+                        static constexpr uint32_t kLongFeedHz = 6000u;
+                        static constexpr uint32_t kLongMoveTimeoutMs = 45000u;
+                        static constexpr uint32_t kRasterRepetitions = 2u;
+                        static constexpr uint32_t kRasterRows = 8u;
+                        static constexpr uint32_t kRasterCols = 12u;
+                        static constexpr int32_t kRasterAnchorX = 3000;
+                        static constexpr int32_t kRasterAnchorY = 1000;
+                        static constexpr int32_t kRasterStep = 400;
+                        static constexpr uint32_t kRasterFeedHz = 6000u;
+                        static constexpr uint32_t kRasterMoveTimeoutMs = 8000u;
+                        static constexpr uint32_t kHomeFastHz = 30000u;
+                        static constexpr uint32_t kHomeSlowHz = 3000u;
+                        static constexpr uint32_t kHomeBackoffSteps = 400u;
+                        static constexpr uint32_t kHomeTimeoutMs = 20000u;
+                        static constexpr int32_t kExpectedBackoffSteps = 100;
+                        const MotionQualificationMath::XySafetyEnvelope envelope{
+                            0, kSafeXMax, 0, kSafeYMax, kCableGuardX, kCableGuardMinY};
+
+                        auto emitSkippedXyMotion = [&](uint16_t firstTestId, const char* phase) -> bool {
+                          char metrics[192];
+                          snprintf(metrics, sizeof(metrics),
+                                   "phase=%s;rep=0;pts=0;xmax=%ld;ymax=%ld;dx=0;dy=0;x_span=0;y_span=0;x_drift=0;y_drift=0;x_ret=0;y_ret=0;ret_err=0;move_to=0;home_to=1;guard=0;bound=0",
+                                   phase,
+                                   static_cast<long>(kSafeXMax),
+                                   static_cast<long>(kSafeYMax));
+                          if ((firstTestId <= 2010u) &&
+                              !runOne(2010, "motion_xy_long_travel_factory", false, metrics)) return false;
+                          if ((firstTestId <= 2011u) &&
+                              !runOne(2011, "motion_xy_raster_repeatability_factory", false, metrics)) return false;
+                          return true;
+                        };
+
+                        auto checkPointSafety = [&](const MotionQualificationMath::XyPoint& point,
+                                                    MotionQualificationMath::XyMotionStats& stats,
+                                                    bool& boundViolation,
+                                                    bool& guardViolation) -> bool {
+                          const bool inBounds = MotionQualificationMath::xyPointInBounds(point, envelope);
+                          const bool guardOk = MotionQualificationMath::xyPointPassesCableGuard(point, envelope);
+                          if (!inBounds) {
+                            boundViolation = true;
+                            stats.boundViolationCount++;
+                          }
+                          if (!guardOk) {
+                            guardViolation = true;
+                            stats.guardViolationCount++;
+                          }
+                          return inBounds && guardOk;
+                        };
+
+                        auto moveChecked = [&](const MotionQualificationMath::XyPoint& target,
+                                               uint32_t feedHz,
+                                               uint32_t timeoutMs,
+                                               MotionQualificationMath::XyMotionStats& stats,
+                                               bool& boundViolation,
+                                               bool& guardViolation) -> bool {
+                          if (!checkPointSafety(target, stats, boundViolation, guardViolation)) {
+                            return false;
+                          }
+                          const bool reached = moveGantryToWithTimeout(target.x, target.y, feedHz, timeoutMs);
+                          if (!reached) {
+                            return false;
+                          }
+                          const GantryPosition pos = Gantry::instance()->getPosition();
+                          const MotionQualificationMath::XyPoint actual{pos.x, pos.y};
+                          return checkPointSafety(actual, stats, boundViolation, guardViolation);
+                        };
+
+                        MotionQualificationMath::AxisHomeSample xReference{};
+                        MotionQualificationMath::AxisHomeSample yReference{};
+                        sendProgressStage("xy_motion_reference_home");
+                        if (!runXyHomeDiagnosticAttempt(xReference,
+                                                        yReference,
+                                                        kHomeFastHz,
+                                                        kHomeSlowHz,
+                                                        kHomeBackoffSteps,
+                                                        kHomeTimeoutMs)) {
+                          (void)emitSkippedXyMotion(2010u, "reference_home");
+                          return finishSelfTestNow();
+                        }
+
+                        const int32_t baseX = xReference.finalBackoffSteps;
+                        const int32_t baseY = yReference.finalBackoffSteps;
+                        const MotionQualificationMath::XyPoint longTargets[kLongPointCount] = {
+                            {baseX, kCableGuardMinY},
+                            {kLongXMax, kCableGuardMinY},
+                            {kLongXMax, kLongYMax},
+                            {baseX, kLongYMax},
+                            {baseX, kCableGuardMinY},
+                        };
+                        MotionQualificationMath::AxisHomeSample xLongSamples[kLongRepetitions]{};
+                        MotionQualificationMath::AxisHomeSample yLongSamples[kLongRepetitions]{};
+                        MotionQualificationMath::XyMotionStats longStats{};
+                        longStats.points = kLongPointCount;
+                        uint32_t longCompleted = 0u;
+                        bool longMoveOk = true;
+                        for (uint32_t rep = 0u; rep < kLongRepetitions; ++rep) {
+                          sendProgressStage("xy_long_travel");
+                          bool repMovesCompleted = true;
+                          bool repBoundViolation = false;
+                          bool repGuardViolation = false;
+                          for (uint32_t point = 0u; point < kLongPointCount; ++point) {
+                            maybeSendProgress("xy_long_travel_move");
+                            if (!moveChecked(longTargets[point],
+                                             kLongFeedHz,
+                                             kLongMoveTimeoutMs,
+                                             longStats,
+                                             repBoundViolation,
+                                             repGuardViolation)) {
+                              repMovesCompleted = false;
+                              longMoveOk = false;
+                              break;
+                            }
+                            if (_selfTestAbortRequested) {
+                              break;
+                            }
+                          }
+                          const bool homePassed = runXyHomeDiagnosticAttempt(xLongSamples[rep],
+                                                                             yLongSamples[rep],
+                                                                             kHomeFastHz,
+                                                                             kHomeSlowHz,
+                                                                             kHomeBackoffSteps,
+                                                                             kHomeTimeoutMs);
+                          MotionQualificationMath::recordXyMotionSample(longStats,
+                                                                         baseX,
+                                                                         baseY,
+                                                                         Stepper::stepperX()->getPosition(),
+                                                                         Stepper::stepperY()->getPosition(),
+                                                                         xReference.limitTriggerSteps,
+                                                                         yReference.limitTriggerSteps,
+                                                                         xLongSamples[rep],
+                                                                         yLongSamples[rep],
+                                                                         repMovesCompleted && homePassed,
+                                                                         repBoundViolation,
+                                                                         repGuardViolation);
+                          longCompleted++;
+                          if (!repMovesCompleted || !homePassed || _selfTestAbortRequested) {
+                            break;
+                          }
+                        }
+                        longStats.repetitions = longCompleted;
+                        const MotionQualificationMath::AxisHomeStats xLongHomeStats =
+                            MotionQualificationMath::summarizeAxisHomeSamples(xLongSamples,
+                                                                              longCompleted,
+                                                                              kExpectedBackoffSteps);
+                        const MotionQualificationMath::AxisHomeStats yLongHomeStats =
+                            MotionQualificationMath::summarizeAxisHomeSamples(yLongSamples,
+                                                                              longCompleted,
+                                                                              kExpectedBackoffSteps);
+                        uint32_t longReturnError = longStats.returnErrorMaxSteps;
+                        if (xLongHomeStats.returnErrorMaxSteps > longReturnError) longReturnError = xLongHomeStats.returnErrorMaxSteps;
+                        if (yLongHomeStats.returnErrorMaxSteps > longReturnError) longReturnError = yLongHomeStats.returnErrorMaxSteps;
+                        const bool longPass = longMoveOk &&
+                            (longCompleted == kLongRepetitions) &&
+                            MotionQualificationMath::xyMotionStatsPass(longStats);
+                        char metrics2010[224];
+                        snprintf(metrics2010, sizeof(metrics2010),
+                                 "rep=%lu;pts=%lu;xmax=%ld;ymax=%ld;dx=%ld;dy=%ld;x_span=%lu;y_span=%lu;x_drift=%lu;y_drift=%lu;x_ret=%lu;y_ret=%lu;ret_err=%lu;move_to=%lu;home_to=%lu;guard=%lu;bound=%lu",
+                                 static_cast<unsigned long>(longCompleted),
+                                 static_cast<unsigned long>(kLongPointCount),
+                                 static_cast<long>(kLongXMax),
+                                 static_cast<long>(kLongYMax),
+                                 static_cast<long>(kLongXMax - baseX),
+                                 static_cast<long>(kLongYMax - kCableGuardMinY),
+                                 static_cast<unsigned long>(xLongHomeStats.limitTriggerSpanSteps),
+                                 static_cast<unsigned long>(yLongHomeStats.limitTriggerSpanSteps),
+                                 static_cast<unsigned long>(longStats.xDriftMaxSteps),
+                                 static_cast<unsigned long>(longStats.yDriftMaxSteps),
+                                 static_cast<unsigned long>(longStats.xReturnErrorMaxSteps),
+                                 static_cast<unsigned long>(longStats.yReturnErrorMaxSteps),
+                                 static_cast<unsigned long>(longReturnError),
+                                 static_cast<unsigned long>(longStats.moveTimeoutCount),
+                                 static_cast<unsigned long>(longStats.homeTimeoutCount),
+                                 static_cast<unsigned long>(longStats.guardViolationCount),
+                                 static_cast<unsigned long>(longStats.boundViolationCount));
+                        if (!runOne(2010, "motion_xy_long_travel_factory", longPass, metrics2010)) {
+                          return finishSelfTestNow();
+                        }
+                        if (!longPass) {
+                          (void)emitSkippedXyMotion(2011u, "long_travel_failed");
+                          return finishSelfTestNow();
+                        }
+
+                        MotionQualificationMath::AxisHomeSample xRasterReference{};
+                        MotionQualificationMath::AxisHomeSample yRasterReference{};
+                        sendProgressStage("xy_raster_reference_home");
+                        if (!runXyHomeDiagnosticAttempt(xRasterReference,
+                                                        yRasterReference,
+                                                        kHomeFastHz,
+                                                        kHomeSlowHz,
+                                                        kHomeBackoffSteps,
+                                                        kHomeTimeoutMs)) {
+                          (void)emitSkippedXyMotion(2011u, "raster_reference_home");
+                          return finishSelfTestNow();
+                        }
+
+                        MotionQualificationMath::AxisHomeSample xRasterSamples[kRasterRepetitions]{};
+                        MotionQualificationMath::AxisHomeSample yRasterSamples[kRasterRepetitions]{};
+                        MotionQualificationMath::XyMotionStats rasterStats{};
+                        rasterStats.points = (kRasterRows * kRasterCols) + 1u;
+                        uint32_t rasterCompleted = 0u;
+                        bool rasterMoveOk = true;
+                        const MotionQualificationMath::XyPoint rasterAnchor{kRasterAnchorX, kRasterAnchorY};
+                        for (uint32_t rep = 0u; rep < kRasterRepetitions; ++rep) {
+                          sendProgressStage("xy_raster_repeatability");
+                          bool repMovesCompleted = true;
+                          bool repBoundViolation = false;
+                          bool repGuardViolation = false;
+                          for (uint32_t row = 0u; row < kRasterRows; ++row) {
+                            for (uint32_t colIdx = 0u; colIdx < kRasterCols; ++colIdx) {
+                              const uint32_t col = ((row & 1u) == 0u) ? colIdx : (kRasterCols - 1u - colIdx);
+                              const MotionQualificationMath::XyPoint target{
+                                  kRasterAnchorX + static_cast<int32_t>(col) * kRasterStep,
+                                  kRasterAnchorY + static_cast<int32_t>(row) * kRasterStep};
+                              maybeSendProgress("xy_raster_move");
+                              if (!moveChecked(target,
+                                               kRasterFeedHz,
+                                               kRasterMoveTimeoutMs,
+                                               rasterStats,
+                                               repBoundViolation,
+                                               repGuardViolation)) {
+                                repMovesCompleted = false;
+                                rasterMoveOk = false;
+                                break;
+                              }
+                              if (_selfTestAbortRequested) {
+                                break;
+                              }
+                            }
+                            if (!repMovesCompleted || _selfTestAbortRequested) {
+                              break;
+                            }
+                          }
+                          if (repMovesCompleted) {
+                            repMovesCompleted = moveChecked(rasterAnchor,
+                                                            kRasterFeedHz,
+                                                            kRasterMoveTimeoutMs,
+                                                            rasterStats,
+                                                            repBoundViolation,
+                                                            repGuardViolation);
+                          }
+                          const bool homePassed = runXyHomeDiagnosticAttempt(xRasterSamples[rep],
+                                                                             yRasterSamples[rep],
+                                                                             kHomeFastHz,
+                                                                             kHomeSlowHz,
+                                                                             kHomeBackoffSteps,
+                                                                             kHomeTimeoutMs);
+                          MotionQualificationMath::recordXyMotionSample(rasterStats,
+                                                                         xRasterReference.finalBackoffSteps,
+                                                                         yRasterReference.finalBackoffSteps,
+                                                                         Stepper::stepperX()->getPosition(),
+                                                                         Stepper::stepperY()->getPosition(),
+                                                                         xRasterReference.limitTriggerSteps,
+                                                                         yRasterReference.limitTriggerSteps,
+                                                                         xRasterSamples[rep],
+                                                                         yRasterSamples[rep],
+                                                                         repMovesCompleted && homePassed,
+                                                                         repBoundViolation,
+                                                                         repGuardViolation);
+                          rasterCompleted++;
+                          if (!repMovesCompleted || !homePassed || _selfTestAbortRequested) {
+                            break;
+                          }
+                        }
+                        rasterStats.repetitions = rasterCompleted;
+                        const MotionQualificationMath::AxisHomeStats xRasterHomeStats =
+                            MotionQualificationMath::summarizeAxisHomeSamples(xRasterSamples,
+                                                                              rasterCompleted,
+                                                                              kExpectedBackoffSteps);
+                        const MotionQualificationMath::AxisHomeStats yRasterHomeStats =
+                            MotionQualificationMath::summarizeAxisHomeSamples(yRasterSamples,
+                                                                              rasterCompleted,
+                                                                              kExpectedBackoffSteps);
+                        uint32_t rasterReturnError = rasterStats.returnErrorMaxSteps;
+                        if (xRasterHomeStats.returnErrorMaxSteps > rasterReturnError) rasterReturnError = xRasterHomeStats.returnErrorMaxSteps;
+                        if (yRasterHomeStats.returnErrorMaxSteps > rasterReturnError) rasterReturnError = yRasterHomeStats.returnErrorMaxSteps;
+                        const bool rasterPass = rasterMoveOk &&
+                            (rasterCompleted == kRasterRepetitions) &&
+                            MotionQualificationMath::xyMotionStatsPass(rasterStats);
+                        char metrics2011[224];
+                        snprintf(metrics2011, sizeof(metrics2011),
+                                 "rep=%lu;rows=%lu;cols=%lu;step=%ld;moves=%lu;xmax=%ld;ymax=%ld;dx=%ld;dy=%ld;x_span=%lu;y_span=%lu;x_drift=%lu;y_drift=%lu;x_ret=%lu;y_ret=%lu;ret_err=%lu;move_to=%lu;home_to=%lu;guard=%lu;bound=%lu",
+                                 static_cast<unsigned long>(rasterCompleted),
+                                 static_cast<unsigned long>(kRasterRows),
+                                 static_cast<unsigned long>(kRasterCols),
+                                 static_cast<long>(kRasterStep),
+                                 static_cast<unsigned long>(rasterStats.points * rasterCompleted),
+                                 static_cast<long>(kRasterAnchorX + static_cast<int32_t>(kRasterCols - 1u) * kRasterStep),
+                                 static_cast<long>(kRasterAnchorY + static_cast<int32_t>(kRasterRows - 1u) * kRasterStep),
+                                 static_cast<long>(static_cast<int32_t>(kRasterCols - 1u) * kRasterStep),
+                                 static_cast<long>(static_cast<int32_t>(kRasterRows - 1u) * kRasterStep),
+                                 static_cast<unsigned long>(xRasterHomeStats.limitTriggerSpanSteps),
+                                 static_cast<unsigned long>(yRasterHomeStats.limitTriggerSpanSteps),
+                                 static_cast<unsigned long>(rasterStats.xDriftMaxSteps),
+                                 static_cast<unsigned long>(rasterStats.yDriftMaxSteps),
+                                 static_cast<unsigned long>(rasterStats.xReturnErrorMaxSteps),
+                                 static_cast<unsigned long>(rasterStats.yReturnErrorMaxSteps),
+                                 static_cast<unsigned long>(rasterReturnError),
+                                 static_cast<unsigned long>(rasterStats.moveTimeoutCount),
+                                 static_cast<unsigned long>(rasterStats.homeTimeoutCount),
+                                 static_cast<unsigned long>(rasterStats.guardViolationCount),
+                                 static_cast<unsigned long>(rasterStats.boundViolationCount));
+                        if (!runOne(2011, "motion_xy_raster_repeatability_factory", rasterPass, metrics2011)) {
+                          return finishSelfTestNow();
+                        }
                         return finishSelfTestNow();
                       }
 

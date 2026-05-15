@@ -72,6 +72,23 @@ def _fixture_ids(manifest: QualificationManifest) -> set[str]:
     }
 
 
+def _fixture_prompt_message(manifest: QualificationManifest, fixture_id: str | None) -> str:
+    notes: list[str] = []
+    for item in manifest.fixtures:
+        item_fixture_id = str(item.get("fixture_id") or "").strip()
+        operator_note = str(item.get("operator_note") or "").strip()
+        if operator_note and (fixture_id is None or item_fixture_id == fixture_id):
+            notes.append(operator_note)
+    note_text = "\n".join(notes) if notes else "Confirm the required fixture and machine state are ready."
+    return (
+        f"Confirm qualification setup before running {manifest.name} ({manifest.manifest_id}).\n\n"
+        f"Profile: {manifest.profile}\n"
+        f"Fixture: {fixture_id or 'none'}\n\n"
+        f"{note_text}\n\n"
+        "Confirm the operator is present and the hardware envelope is clear."
+    )
+
+
 def default_gripper_control(action: str, port: str, baud: int) -> int:
     try:
         run_selftest = importlib.import_module("tools.run_selftest")
@@ -255,6 +272,7 @@ def run_qualification(
     interactions: list[dict] = []
     preflight_host_checks: list[dict] = []
     fixture_id = str(fixture_id or "").strip() or None
+    gripper_seal_manifest = manifest.manifest_id == "gripper_seal_v1"
 
     if raw_report_path is not None:
         source_path = Path(raw_report_path)
@@ -321,6 +339,15 @@ def run_qualification(
                 report=report,
             )
 
+        if not gripper_seal_manifest:
+            _record_prompt(
+                interactions,
+                "confirm_fixture_setup",
+                _fixture_prompt_message(manifest, fixture_id),
+                prompter,
+            )
+
+    if manifest.requires_operator_prompts and gripper_seal_manifest:
         _record_prompt(
             interactions,
             "load_dummy_head",
@@ -396,7 +423,7 @@ def run_qualification(
         write_json_atomic(artifacts.raw_selftest_path, raw_selftest)
         raw_source_path = artifacts.raw_selftest_path
 
-    if manifest.requires_operator_prompts:
+    if manifest.requires_operator_prompts and gripper_seal_manifest:
         host_checks = preflight_host_checks + list(raw_selftest.get("host_checks") or [])
         _record_prompt(
             interactions,

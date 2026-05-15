@@ -93,4 +93,80 @@ bool patternReturnStatsPass(const PatternReturnStats& stats)
          (stats.boundViolationCount == 0u);
 }
 
+bool xyPointInBounds(const XyPoint& point, const XySafetyEnvelope& envelope)
+{
+  return (point.x >= envelope.minX) &&
+         (point.x <= envelope.maxX) &&
+         (point.y >= envelope.minY) &&
+         (point.y <= envelope.maxY);
+}
+
+bool xyPointPassesCableGuard(const XyPoint& point, const XySafetyEnvelope& envelope)
+{
+  return (point.x <= envelope.cableGuardX) || (point.y >= envelope.cableGuardMinY);
+}
+
+bool xyPointIsSafe(const XyPoint& point, const XySafetyEnvelope& envelope)
+{
+  return xyPointInBounds(point, envelope) && xyPointPassesCableGuard(point, envelope);
+}
+
+void recordXyMotionSample(XyMotionStats& stats,
+                          int32_t startX,
+                          int32_t startY,
+                          int32_t returnX,
+                          int32_t returnY,
+                          int32_t referenceXLimit,
+                          int32_t referenceYLimit,
+                          const AxisHomeSample& xHome,
+                          const AxisHomeSample& yHome,
+                          bool moveCompleted,
+                          bool boundViolation,
+                          bool guardViolation)
+{
+  const uint32_t xReturnError = absDiffSteps(returnX, startX);
+  const uint32_t yReturnError = absDiffSteps(returnY, startY);
+  if (xReturnError > stats.xReturnErrorMaxSteps) {
+    stats.xReturnErrorMaxSteps = xReturnError;
+  }
+  if (yReturnError > stats.yReturnErrorMaxSteps) {
+    stats.yReturnErrorMaxSteps = yReturnError;
+  }
+  const uint32_t worstReturn = (xReturnError > yReturnError) ? xReturnError : yReturnError;
+  if (worstReturn > stats.returnErrorMaxSteps) {
+    stats.returnErrorMaxSteps = worstReturn;
+  }
+
+  const uint32_t xDrift = absDiffSteps(xHome.limitTriggerSteps, referenceXLimit);
+  const uint32_t yDrift = absDiffSteps(yHome.limitTriggerSteps, referenceYLimit);
+  if (xDrift > stats.xDriftMaxSteps) {
+    stats.xDriftMaxSteps = xDrift;
+  }
+  if (yDrift > stats.yDriftMaxSteps) {
+    stats.yDriftMaxSteps = yDrift;
+  }
+
+  if (!moveCompleted) {
+    stats.moveTimeoutCount++;
+  }
+  stats.moveTimeoutCount += xHome.moveTimeoutCount + yHome.moveTimeoutCount;
+  if (!xHome.success || !yHome.success) {
+    stats.homeTimeoutCount++;
+  }
+  if (boundViolation) {
+    stats.boundViolationCount++;
+  }
+  if (guardViolation) {
+    stats.guardViolationCount++;
+  }
+}
+
+bool xyMotionStatsPass(const XyMotionStats& stats)
+{
+  return (stats.moveTimeoutCount == 0u) &&
+         (stats.homeTimeoutCount == 0u) &&
+         (stats.guardViolationCount == 0u) &&
+         (stats.boundViolationCount == 0u);
+}
+
 }  // namespace MotionQualificationMath

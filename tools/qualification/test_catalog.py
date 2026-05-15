@@ -39,6 +39,8 @@ TEST_CATALOG: dict[int, TestCatalogEntry] = {
     2006: TestCatalogEntry(2006, "Safety abort", "Abort latency and safe state of motion, pressure, and valves."),
     2007: TestCatalogEntry(2007, "Motion home repeatability", "Repeated homing span and return error for gantry axes."),
     2008: TestCatalogEntry(2008, "Motion pattern return", "Pattern move return accuracy and envelope bounds."),
+    2010: TestCatalogEntry(2010, "XY long travel", "Long X/Y travel repeatability across the safe gantry envelope."),
+    2011: TestCatalogEntry(2011, "XY raster repeatability", "Small serpentine moves that mimic well-plate printing motion."),
     2201: TestCatalogEntry(2201, "Pressure hold leak", "Closed-loop pressure decay and correction effort."),
     2202: TestCatalogEntry(2202, "Pressure target cycling", "Repeated low/high target settling and pressure span."),
     2203: TestCatalogEntry(2203, "Pressure hysteresis", "Regulator motor repeatability and hysteresis span."),

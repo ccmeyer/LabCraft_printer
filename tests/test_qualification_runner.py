@@ -70,6 +70,71 @@ def _raw_gripper_selftest():
     }
 
 
+def _raw_xy_motion_selftest():
+    return {
+        "run_id": 9012,
+        "profile": "FULL",
+        "started_at": "2026-05-13T00:00:00Z",
+        "finished_at": "2026-05-13T00:03:00Z",
+        "aborted": False,
+        "summary": {"total": 2, "passed": 2, "failed": 0},
+        "results": [
+            {
+                "test_id": 2010,
+                "name": "motion_xy_long_travel_factory",
+                "pass": True,
+                "metrics": {
+                    "rep": 3,
+                    "pts": 5,
+                    "xmax": 44000,
+                    "ymax": 34000,
+                    "dx": 43900,
+                    "dy": 33500,
+                    "x_span": 2,
+                    "y_span": 3,
+                    "x_drift": 2,
+                    "y_drift": 3,
+                    "x_ret": 0,
+                    "y_ret": 0,
+                    "ret_err": 0,
+                    "move_to": 0,
+                    "home_to": 0,
+                    "guard": 0,
+                    "bound": 0,
+                },
+            },
+            {
+                "test_id": 2011,
+                "name": "motion_xy_raster_repeatability_factory",
+                "pass": True,
+                "metrics": {
+                    "rep": 2,
+                    "rows": 8,
+                    "cols": 12,
+                    "step": 400,
+                    "moves": 194,
+                    "xmax": 7400,
+                    "ymax": 3800,
+                    "dx": 4400,
+                    "dy": 2800,
+                    "x_span": 1,
+                    "y_span": 2,
+                    "x_drift": 1,
+                    "y_drift": 2,
+                    "x_ret": 0,
+                    "y_ret": 0,
+                    "ret_err": 0,
+                    "move_to": 0,
+                    "home_to": 0,
+                    "guard": 0,
+                    "bound": 0,
+                },
+            },
+        ],
+        "host_checks": [{"name": "hello_ack", "pass": True, "details": {"seq8": 1}}],
+    }
+
+
 def _manifest_path(tmp_path):
     path = tmp_path / "unit_manifest.json"
     path.write_text(
@@ -90,6 +155,10 @@ def _manifest_path(tmp_path):
 
 def _gripper_manifest_ref():
     return "gripper_seal_v1"
+
+
+def _xy_motion_manifest_ref():
+    return "xy_motion_v1"
 
 
 class FakeSerial:
@@ -357,6 +426,86 @@ def test_gripper_seal_manifest_rejects_missing_required_fixture(tmp_path):
     assert result.returncode == 3
     assert result.report["host_checks"][0]["name"] == "fixture_required"
     assert result.report["host_checks"][0]["details"]["allowed_fixture_ids"] == ["dummy_blocked_head_v1"]
+
+
+def test_xy_motion_manifest_rejects_without_operator_prompts(tmp_path):
+    called = False
+
+    def fake_invoker(_invocation):
+        nonlocal called
+        called = True
+        return 0
+
+    result = run_qualification(
+        manifest_ref=_xy_motion_manifest_ref(),
+        machine_id="LC-0001",
+        identity_path=tmp_path / "local" / "machine_identity.json",
+        output_root=tmp_path / "qualification",
+        fixture_id="motion_clear_envelope_v1",
+        operator_prompts=False,
+        invoker=fake_invoker,
+    )
+
+    assert result.returncode == 3
+    assert called is False
+    assert result.report["host_checks"][0]["name"] == "operator_prompts_required"
+
+
+def test_xy_motion_manifest_rejects_missing_required_fixture(tmp_path):
+    result = run_qualification(
+        manifest_ref=_xy_motion_manifest_ref(),
+        machine_id="LC-0001",
+        identity_path=tmp_path / "local" / "machine_identity.json",
+        output_root=tmp_path / "qualification",
+        operator_prompts=True,
+        invoker=lambda _invocation: 0,
+        prompter=lambda _message: None,
+    )
+
+    assert result.returncode == 3
+    assert result.report["host_checks"][0]["name"] == "fixture_required"
+    assert result.report["host_checks"][0]["details"]["allowed_fixture_ids"] == ["motion_clear_envelope_v1"]
+
+
+def test_xy_motion_operator_prompt_runs_selected_suite_without_gripper_teardown(tmp_path):
+    events = []
+
+    def fake_prompter(message):
+        events.append(f"prompt:{message}")
+
+    def fake_invoker(invocation):
+        events.append("self-test")
+        assert "--xy-motion-suite" in invocation.command
+        assert "--gripper-seal-suite" not in invocation.command
+        invocation.raw_report_path.write_text(json.dumps(_raw_xy_motion_selftest()), encoding="utf-8")
+        return 0
+
+    def fake_gripper_control(action, port, baud):
+        raise AssertionError(f"XY motion suite should not call gripper control: {action}:{port}:{baud}")
+
+    result = run_qualification(
+        manifest_ref=_xy_motion_manifest_ref(),
+        port="/dev/ttyAMA0",
+        baud=115200,
+        machine_id="LC-0001",
+        identity_path=tmp_path / "local" / "machine_identity.json",
+        output_root=tmp_path / "qualification",
+        timeout_ms=300000,
+        fixture_id="motion_clear_envelope_v1",
+        operator_prompts=True,
+        invoker=fake_invoker,
+        prompter=fake_prompter,
+        gripper_control=fake_gripper_control,
+    )
+
+    assert result.returncode == 0
+    assert events[0].startswith("prompt:Confirm qualification setup")
+    assert "motion_clear_envelope_v1" in events[0]
+    assert "hardware envelope is clear" in events[0]
+    assert events == [events[0], "self-test"]
+    assert result.report["run"]["fixture_id"] == "motion_clear_envelope_v1"
+    assert [item["stage"] for item in result.report["operator_interactions"]] == ["confirm_fixture_setup"]
+    assert result.report["overall_status"] == "pass"
 
 
 def test_gripper_seal_operator_prompt_order_and_teardown(tmp_path):
