@@ -27,6 +27,7 @@ The intent is to increase quantitative coverage without turning the firmware, Py
 | Milestone 8A: Read-Only Qualification Window Prototype | Complete | Main app `Machine Qualification` window displays existing `qualification_report_v1` reports without launching hardware tests |
 | Milestone 8B: Qualification Run Shell | In progress | `Run Qualification` tab launches existing manifests through the Python qualification backend with coarse progress and final row coloring |
 | Milestone 8C: Live Per-Test Qualification Events | In progress | `tools/run_selftest.py --progress-jsonl` emits backend-owned per-test events consumed by the qualification window |
+| Milestone 8D: Qualification Timing and Compact History | Complete | Machine Qualification window estimates typical test durations from local reports, shows elapsed/remaining time during runs, and compacts report history labels |
 | Later fixture-dependent diagnostics | Not started | Planned |
 
 ## Current Call Path
@@ -892,6 +893,13 @@ Live per-test event slice:
 - Add additive `SELFTEST_EVENT` JSONL lines from `tools/run_selftest.py` while it decodes existing self-test frames.
 - Forward event dictionaries through the qualification worker and controller without duplicating firmware protocol logic in the UI.
 - Update expected-test rows during a run from raw result events, then keep final analyzer reconciliation from `qualification_report_v1`.
+
+Timing and compact history slice:
+
+- Estimate typical per-test duration from prior local `qualification_report_v1` result timestamps.
+- Show suite elapsed time, expected remaining time, typical total time, and per-row typical/elapsed timing in the run tab.
+- Keep timing empirical and local-only; do not add a persistent timing database or protocol changes.
+- Show report history entries as compact `YYYY-MM-DD HH:MM:SS` labels while keeping report details in tooltips.
 
 Validation:
 

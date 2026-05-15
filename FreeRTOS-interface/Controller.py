@@ -418,6 +418,11 @@ class Controller(QObject):
 
         return discover_suite_entries(self.qualification_manifest_root())
 
+    def qualification_timing_estimates(self):
+        from QualificationTiming import build_timing_model
+
+        return build_timing_model(self.qualification_report_root())
+
     def is_qualification_running(self):
         worker = getattr(self, "_qualification_worker", None)
         is_running = getattr(worker, "isRunning", None)

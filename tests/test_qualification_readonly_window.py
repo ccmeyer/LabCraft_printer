@@ -40,12 +40,14 @@ def _sample_report(run_dir: Path):
                 "name": "motion_home_repeatability_factory",
                 "pass": True,
                 "metrics": {"x_span": 6, "y_span": 5, "ret_err": 0},
+                "timestamp": "2026-05-15T00:00:04Z",
             },
             {
                 "test_id": 2201,
                 "name": "pressure_hold_leak_factory",
                 "pass": True,
                 "metrics": {"slope_raw_min": 1164, "ready_miss": 0, "timeout": 0},
+                "timestamp": "2026-05-15T00:00:10Z",
             },
         ],
         "host_checks": [
@@ -105,6 +107,11 @@ class _ReportController:
     def load_qualification_report(self, report_path):
         return load_report(report_path)
 
+    def qualification_timing_estimates(self):
+        from QualificationTiming import build_timing_model
+
+        return build_timing_model(self.root)
+
 
 def test_machine_qualification_window_loads_report_into_subsystem_tabs(tmp_path, qapp):
     _write_sample_report(tmp_path)
@@ -148,6 +155,8 @@ def test_machine_qualification_window_has_run_and_review_tabs(tmp_path, qapp):
     assert window.main_tabs.tabText(0) == "Run Qualification"
     assert window.main_tabs.tabText(1) == "Review Results"
     assert window.suite_list.count() >= 5
+    assert window.minimumWidth() >= 1280
+    assert window.minimumHeight() >= 820
 
     window.close()
 
@@ -165,7 +174,8 @@ def test_run_tab_populates_selected_suite_test_plan(tmp_path, qapp):
     assert window.test_plan_table.item(row, 0).text() == "Not run"
     assert window.test_plan_table.item(row, 2).text() == "Motion"
     assert window.test_plan_table.item(row, 3).text() == "Motion home repeatability"
-    assert "x_span" in window.test_plan_table.item(row, 5).text()
+    assert window.test_plan_table.item(row, 4).text() == "00:04"
+    assert "x_span" in window.test_plan_table.item(row, 7).text()
 
     window.close()
 
@@ -206,6 +216,42 @@ def test_selftest_result_event_updates_row_and_advances_next_queued(tmp_path, qa
     )
 
     assert window.test_plan_table.item(0, 0).text() == "Passed"
+    assert window.test_plan_table.item(1, 0).text() == "In progress"
+
+    window.close()
+
+
+def test_run_tab_updates_elapsed_and_remaining_time_during_run(tmp_path, qapp):
+    _write_sample_report(tmp_path)
+    clock = [100.0]
+    main_window = QtWidgets.QWidget()
+    main_window.popup_message = lambda *_args: None
+    window = MachineQualificationWindow(main_window, _ReportController(tmp_path), monotonic_fn=lambda: clock[0])
+    window.suite_list.setCurrentRow(_suite_row(window, "factory_acceptance_v3"))
+    qapp.processEvents()
+
+    window._set_all_plan_status("Queued")
+    window._begin_run_timing()
+    window._mark_next_queued_in_progress()
+    clock[0] = 103.2
+    window._update_timing_display()
+
+    assert window.elapsed_time_label.text() == "Elapsed: 00:03"
+    assert window.test_plan_table.item(0, 5).text() == "00:03"
+    assert "Expected remaining:" in window.remaining_time_label.text()
+
+    first_id = int(window.test_plan_table.item(0, 1).text())
+    window._on_selftest_event(
+        {
+            "schema": "selftest_event_v1",
+            "event": "selftest_result",
+            "test_id": first_id,
+            "name": "first",
+            "pass": True,
+        }
+    )
+
+    assert window.test_plan_table.item(0, 5).text() == "00:03"
     assert window.test_plan_table.item(1, 0).text() == "In progress"
 
     window.close()
@@ -262,7 +308,9 @@ def test_finished_run_colors_plan_rows_and_selects_new_report(tmp_path, qapp):
 
     assert status_item.text() == "Passed"
     assert status_item.background().color().name() == "#1f4f32"
-    assert window.report_list.currentItem().toolTip() == str(report_path)
+    assert window.report_list.currentItem().text() == "2026-05-15 00:00:00"
+    assert str(report_path) in window.report_list.currentItem().toolTip()
+    assert "LC-TEST" in window.report_list.currentItem().toolTip()
 
     window.close()
 

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -62,6 +64,10 @@ class QualificationReportIndexEntry:
         return self.started_at or self.run_dir.name
 
     @property
+    def compact_display_time(self) -> str:
+        return compact_report_time(self.started_at, self.run_dir.name)
+
+    @property
     def display_name(self) -> str:
         status = self.overall_status.upper() if self.overall_status else "UNKNOWN"
         manifest = self.manifest_id or "unknown_manifest"
@@ -82,6 +88,35 @@ class QualificationResultRow:
     metric_summary: str
     message: str
     details: dict[str, Any]
+
+
+def parse_report_timestamp(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+
+    run_dir_match = re.fullmatch(r"(\d{8})T(\d{6})Z?", text)
+    if run_dir_match:
+        try:
+            return datetime.strptime(text.rstrip("Z"), "%Y%m%dT%H%M%S")
+        except ValueError:
+            return None
+
+    normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def compact_report_time(started_at: Any, fallback_name: Any = "") -> str:
+    timestamp = parse_report_timestamp(started_at) or parse_report_timestamp(fallback_name)
+    if timestamp is None:
+        return str(started_at or fallback_name or "")
+    return timestamp.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def default_report_root(repo_root: str | Path) -> Path:

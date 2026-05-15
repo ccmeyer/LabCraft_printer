@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ from QualificationReports import (
     QualificationReportIndexEntry,
     QualificationResultRow,
     artifact_paths,
+    compact_report_time,
     discover_report_entries,
     load_report,
     normalize_result_rows,
@@ -23,22 +25,42 @@ from QualificationSuites import (
     fixture_notes,
     required_fixture_ids,
 )
+from QualificationTiming import QualificationTimingModel, build_timing_model
+
+
+PLAN_STATUS_COL = 0
+PLAN_ID_COL = 1
+PLAN_SUBSYSTEM_COL = 2
+PLAN_TEST_COL = 3
+PLAN_TYPICAL_COL = 4
+PLAN_ELAPSED_COL = 5
+PLAN_EVALUATES_COL = 6
+PLAN_METRICS_COL = 7
+PLAN_FIXTURE_COL = 8
 
 
 class MachineQualificationWindow(QtWidgets.QDialog):
     """Run qualification suites and browse qualification_report_v1 artifacts."""
 
-    def __init__(self, parent, controller, *, report_root: str | Path | None = None):
+    def __init__(self, parent, controller, *, report_root: str | Path | None = None, monotonic_fn=None):
         super().__init__(parent)
         self.main_window = parent
         self.controller = controller
         self.report_root = Path(report_root) if report_root is not None else None
+        self._monotonic_fn = monotonic_fn or time.monotonic
 
         self._suite_entries: list[QualificationSuiteEntry] = []
         self._current_suite: QualificationSuiteEntry | None = None
         self._test_plan_rows: list[QualificationTestPlanRow] = []
         self._plan_row_by_test_id: dict[int, int] = {}
         self._run_busy = False
+        self._timing_estimates = QualificationTimingModel()
+        self._plan_typical_seconds: dict[int, float | None] = {}
+        self._plan_elapsed_seconds: dict[int, float] = {}
+        self._run_started_monotonic: float | None = None
+        self._run_finished_monotonic: float | None = None
+        self._current_run_row: int | None = None
+        self._current_test_started_monotonic: float | None = None
 
         self._entries: list[QualificationReportIndexEntry] = []
         self._current_entry: QualificationReportIndexEntry | None = None
@@ -47,11 +69,31 @@ class MachineQualificationWindow(QtWidgets.QDialog):
         self.result_tables: dict[str, QtWidgets.QTableWidget] = {}
 
         self.setWindowTitle("Machine Qualification")
-        self.setMinimumSize(1180, 760)
+        self.setMinimumSize(1280, 820)
+        self._timing_timer = QtCore.QTimer(self)
+        self._timing_timer.setInterval(1000)
+        self._timing_timer.timeout.connect(self._update_timing_display)
         self._build_ui()
+        self._resize_near_parent_or_screen()
         self._connect_controller_signals()
+        self._refresh_timing_estimates()
         self.refresh_suites()
         self.refresh_reports()
+
+    def _resize_near_parent_or_screen(self):
+        target_width = self.minimumWidth()
+        target_height = self.minimumHeight()
+        parent = self.parentWidget()
+        if parent is not None and parent.width() > 200 and parent.height() > 200:
+            target_width = max(target_width, int(parent.width() * 0.94))
+            target_height = max(target_height, int(parent.height() * 0.94))
+        else:
+            screen = self.screen() or QtWidgets.QApplication.primaryScreen()
+            if screen is not None:
+                available = screen.availableGeometry()
+                target_width = max(target_width, int(available.width() * 0.92))
+                target_height = max(target_height, int(available.height() * 0.92))
+        self.resize(target_width, target_height)
 
     def _build_ui(self):
         root = QtWidgets.QVBoxLayout(self)
@@ -157,14 +199,30 @@ class MachineQualificationWindow(QtWidgets.QDialog):
         self.run_progress = QtWidgets.QProgressBar()
         self.run_progress.setRange(0, 1)
         self.run_progress.setValue(0)
+        self.elapsed_time_label = QtWidgets.QLabel("Elapsed: 00:00")
+        self.remaining_time_label = QtWidgets.QLabel("Expected remaining: unknown")
+        self.typical_total_time_label = QtWidgets.QLabel("Typical total: unknown")
         config_grid.addWidget(self.run_status_label, 3, 0, 1, 2)
         config_grid.addWidget(self.run_progress, 3, 2)
         config_grid.addWidget(self.start_button, 3, 3)
+        config_grid.addWidget(self.elapsed_time_label, 4, 0)
+        config_grid.addWidget(self.remaining_time_label, 4, 1, 1, 2)
+        config_grid.addWidget(self.typical_total_time_label, 4, 3)
         right_layout.addWidget(config_group)
 
-        self.test_plan_table = QtWidgets.QTableWidget(0, 7, self.run_tab)
+        self.test_plan_table = QtWidgets.QTableWidget(0, 9, self.run_tab)
         self.test_plan_table.setHorizontalHeaderLabels(
-            ["Status", "ID", "Subsystem", "Test", "Evaluates", "Key Metrics", "Fixture/Safety"]
+            [
+                "Status",
+                "ID",
+                "Subsystem",
+                "Test",
+                "Typical",
+                "Elapsed",
+                "Evaluates",
+                "Key Metrics",
+                "Fixture/Safety",
+            ]
         )
         self.test_plan_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.test_plan_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
@@ -172,12 +230,12 @@ class MachineQualificationWindow(QtWidgets.QDialog):
         self.test_plan_table.setAlternatingRowColors(True)
         self.test_plan_table.setWordWrap(True)
         self.test_plan_table.verticalHeader().setVisible(False)
-        for idx in (0, 1, 2):
+        for idx in (PLAN_STATUS_COL, PLAN_ID_COL, PLAN_SUBSYSTEM_COL, PLAN_TYPICAL_COL, PLAN_ELAPSED_COL):
             self.test_plan_table.horizontalHeader().setSectionResizeMode(idx, QtWidgets.QHeaderView.ResizeToContents)
-        self.test_plan_table.horizontalHeader().setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeToContents)
-        self.test_plan_table.horizontalHeader().setSectionResizeMode(4, QtWidgets.QHeaderView.Stretch)
-        self.test_plan_table.horizontalHeader().setSectionResizeMode(5, QtWidgets.QHeaderView.Stretch)
-        self.test_plan_table.horizontalHeader().setSectionResizeMode(6, QtWidgets.QHeaderView.Stretch)
+        self.test_plan_table.horizontalHeader().setSectionResizeMode(PLAN_TEST_COL, QtWidgets.QHeaderView.ResizeToContents)
+        self.test_plan_table.horizontalHeader().setSectionResizeMode(PLAN_EVALUATES_COL, QtWidgets.QHeaderView.Stretch)
+        self.test_plan_table.horizontalHeader().setSectionResizeMode(PLAN_METRICS_COL, QtWidgets.QHeaderView.Stretch)
+        self.test_plan_table.horizontalHeader().setSectionResizeMode(PLAN_FIXTURE_COL, QtWidgets.QHeaderView.Stretch)
         right_layout.addWidget(self.test_plan_table, stretch=1)
 
         self.run_log = QtWidgets.QPlainTextEdit(self.run_tab)
@@ -345,6 +403,17 @@ class MachineQualificationWindow(QtWidgets.QDialog):
         repo_root = Path(__file__).resolve().parents[1]
         return discover_suite_entries(repo_root / "tools" / "qualification" / "manifests")
 
+    def _refresh_timing_estimates(self):
+        getter = getattr(self.controller, "qualification_timing_estimates", None)
+        if callable(getter):
+            try:
+                self._timing_estimates = getter()
+                return
+            except Exception:
+                pass
+        root = self.report_root or Path("hil_reports")
+        self._timing_estimates = build_timing_model(root)
+
     @QtCore.Slot()
     def refresh_suites(self):
         previous = self._current_suite.manifest_id if self._current_suite is not None else ""
@@ -388,6 +457,8 @@ class MachineQualificationWindow(QtWidgets.QDialog):
         self._test_plan_rows = build_test_plan_rows(manifest)
         self._populate_test_plan_table(self._test_plan_rows)
         self._populate_run_defaults(manifest, fixture_ids)
+        self._reset_run_timing_state()
+        self._update_timing_display()
         self._update_start_enabled()
 
     def _clear_suite_display(self, message: str):
@@ -397,6 +468,8 @@ class MachineQualificationWindow(QtWidgets.QDialog):
             label.setText("")
         self.test_plan_table.setRowCount(0)
         self.run_status_label.setText(message)
+        self._reset_run_timing_state()
+        self._update_timing_display()
         self.start_button.setEnabled(False)
 
     def _populate_run_defaults(self, manifest, fixture_ids: tuple[str, ...]):
@@ -436,14 +509,20 @@ class MachineQualificationWindow(QtWidgets.QDialog):
 
     def _populate_test_plan_table(self, rows: list[QualificationTestPlanRow]):
         self._plan_row_by_test_id = {}
+        self._plan_typical_seconds = {}
+        self._plan_elapsed_seconds = {}
         self.test_plan_table.setRowCount(len(rows))
         for row_idx, row in enumerate(rows):
             self._plan_row_by_test_id[row.test_id] = row_idx
+            typical_s = self._typical_seconds_for(row.test_id)
+            self._plan_typical_seconds[row.test_id] = typical_s
             values = [
                 row.status,
                 str(row.test_id),
                 row.subsystem,
                 row.name,
+                self._format_duration(typical_s, unknown="unknown"),
+                "",
                 row.evaluates,
                 row.metrics,
                 row.fixture_summary,
@@ -451,21 +530,43 @@ class MachineQualificationWindow(QtWidgets.QDialog):
             for col_idx, value in enumerate(values):
                 item = QtWidgets.QTableWidgetItem(value)
                 item.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable)
-                if col_idx == 0:
+                if col_idx == PLAN_STATUS_COL:
                     item.setData(QtCore.Qt.UserRole, row)
                 self._apply_plan_status_brush(item, row.status)
                 self.test_plan_table.setItem(row_idx, col_idx, item)
         self.test_plan_table.resizeRowsToContents()
+        self._update_timing_display()
+
+    def _typical_seconds_for(self, test_id: int) -> float | None:
+        manifest_id = self._current_suite.manifest_id if self._current_suite is not None else ""
+        estimate = self._timing_estimates.estimate_for(manifest_id, int(test_id))
+        return estimate.typical_seconds if estimate is not None else None
+
+    def _refresh_plan_timing_columns(self):
+        for row_idx in range(self.test_plan_table.rowCount()):
+            test_id = self._test_id_for_row(row_idx)
+            if test_id is None:
+                continue
+            typical_s = self._typical_seconds_for(test_id)
+            self._plan_typical_seconds[test_id] = typical_s
+            item = self.test_plan_table.item(row_idx, PLAN_TYPICAL_COL)
+            if item is None:
+                item = QtWidgets.QTableWidgetItem()
+                item.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable)
+                self.test_plan_table.setItem(row_idx, PLAN_TYPICAL_COL, item)
+            item.setText(self._format_duration(typical_s, unknown="unknown"))
+            self._apply_plan_status_brush(item, self._plan_status(row_idx))
+        self._update_timing_display()
 
     def _set_all_plan_status(self, status: str):
         for row_idx in range(self.test_plan_table.rowCount()):
             self._set_plan_status(row_idx, status)
 
     def _set_plan_status(self, row_idx: int, status: str):
-        item = self.test_plan_table.item(row_idx, 0)
+        item = self.test_plan_table.item(row_idx, PLAN_STATUS_COL)
         if item is None:
             item = QtWidgets.QTableWidgetItem()
-            self.test_plan_table.setItem(row_idx, 0, item)
+            self.test_plan_table.setItem(row_idx, PLAN_STATUS_COL, item)
         item.setText(status)
         for col_idx in range(self.test_plan_table.columnCount()):
             col_item = self.test_plan_table.item(row_idx, col_idx)
@@ -473,14 +574,157 @@ class MachineQualificationWindow(QtWidgets.QDialog):
                 self._apply_plan_status_brush(col_item, status)
 
     def _plan_status(self, row_idx: int) -> str:
-        item = self.test_plan_table.item(row_idx, 0)
+        item = self.test_plan_table.item(row_idx, PLAN_STATUS_COL)
         return item.text() if item is not None else ""
 
     def _mark_next_queued_in_progress(self, *, after_row: int = -1):
         for row_idx in range(max(0, after_row + 1), self.test_plan_table.rowCount()):
             if self._plan_status(row_idx) == "Queued":
-                self._set_plan_status(row_idx, "In progress")
+                self._mark_plan_row_in_progress(row_idx)
                 return
+
+    def _mark_plan_row_in_progress(self, row_idx: int):
+        self._set_plan_status(row_idx, "In progress")
+        if self._run_started_monotonic is None:
+            return
+        if self._current_run_row != row_idx:
+            self._current_run_row = row_idx
+            self._current_test_started_monotonic = self._monotonic_fn()
+        self._set_elapsed_for_row(row_idx, 0.0)
+        self._update_timing_display()
+
+    def _begin_run_timing(self):
+        now = self._monotonic_fn()
+        self._run_started_monotonic = now
+        self._run_finished_monotonic = None
+        self._current_run_row = None
+        self._current_test_started_monotonic = None
+        self._plan_elapsed_seconds = {}
+        for row_idx in range(self.test_plan_table.rowCount()):
+            self._set_elapsed_for_row(row_idx, None)
+        self._timing_timer.start()
+        self._update_timing_display()
+
+    def _stop_run_timing(self):
+        self._timing_timer.stop()
+        if self._run_started_monotonic is not None and self._run_finished_monotonic is None:
+            self._run_finished_monotonic = self._monotonic_fn()
+        self._update_timing_display()
+
+    def _reset_run_timing_state(self):
+        self._timing_timer.stop()
+        self._plan_elapsed_seconds = {}
+        self._run_started_monotonic = None
+        self._run_finished_monotonic = None
+        self._current_run_row = None
+        self._current_test_started_monotonic = None
+        for row_idx in range(self.test_plan_table.rowCount()):
+            self._set_elapsed_for_row(row_idx, None)
+
+    def _finish_timing_for_row(self, row_idx: int):
+        if self._run_started_monotonic is None:
+            return
+        now = self._monotonic_fn()
+        if self._current_run_row == row_idx and self._current_test_started_monotonic is not None:
+            elapsed_s = max(0.0, now - self._current_test_started_monotonic)
+        else:
+            elapsed_s = 0.0
+        self._set_elapsed_for_row(row_idx, elapsed_s)
+        self._current_run_row = None
+        self._current_test_started_monotonic = None
+        self._update_timing_display()
+
+    def _set_elapsed_for_row(self, row_idx: int, elapsed_s: float | None):
+        test_id = self._test_id_for_row(row_idx)
+        if test_id is not None:
+            if elapsed_s is None:
+                self._plan_elapsed_seconds.pop(test_id, None)
+            else:
+                self._plan_elapsed_seconds[test_id] = elapsed_s
+        item = self.test_plan_table.item(row_idx, PLAN_ELAPSED_COL)
+        if item is None:
+            item = QtWidgets.QTableWidgetItem()
+            item.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable)
+            self.test_plan_table.setItem(row_idx, PLAN_ELAPSED_COL, item)
+        item.setText("" if elapsed_s is None else self._format_duration(elapsed_s))
+
+    def _test_id_for_row(self, row_idx: int) -> int | None:
+        item = self.test_plan_table.item(row_idx, PLAN_ID_COL)
+        if item is None:
+            return None
+        try:
+            return int(item.text())
+        except (TypeError, ValueError):
+            return None
+
+    def _update_timing_display(self):
+        now = self._monotonic_fn()
+        if self._run_started_monotonic is None:
+            elapsed_s = 0.0
+        elif self._run_finished_monotonic is not None:
+            elapsed_s = max(0.0, self._run_finished_monotonic - self._run_started_monotonic)
+        else:
+            elapsed_s = max(0.0, now - self._run_started_monotonic)
+
+        if self._current_run_row is not None and self._current_test_started_monotonic is not None:
+            self._set_elapsed_for_row(self._current_run_row, max(0.0, now - self._current_test_started_monotonic))
+
+        remaining_s, remaining_unknown = self._remaining_seconds(now)
+        total_s, total_unknown = self._typical_total_seconds()
+        self.elapsed_time_label.setText(f"Elapsed: {self._format_duration(elapsed_s)}")
+        self.remaining_time_label.setText(f"Expected remaining: {self._format_estimate(remaining_s, remaining_unknown)}")
+        self.typical_total_time_label.setText(f"Typical total: {self._format_estimate(total_s, total_unknown)}")
+
+    def _remaining_seconds(self, now: float) -> tuple[float, bool]:
+        total = 0.0
+        unknown = False
+        terminal = {"passed", "failed", "warning", "missing", "blocked", "skipped"}
+        for row_idx in range(self.test_plan_table.rowCount()):
+            status = self._plan_status(row_idx).strip().lower()
+            if status in terminal:
+                continue
+            test_id = self._test_id_for_row(row_idx)
+            if test_id is None:
+                continue
+            typical_s = self._plan_typical_seconds.get(test_id)
+            if typical_s is None:
+                unknown = True
+                continue
+            if row_idx == self._current_run_row and self._current_test_started_monotonic is not None:
+                elapsed_s = max(0.0, now - self._current_test_started_monotonic)
+                total += max(0.0, typical_s - elapsed_s)
+            else:
+                total += typical_s
+        return total, unknown
+
+    def _typical_total_seconds(self) -> tuple[float, bool]:
+        total = 0.0
+        unknown = False
+        for row in self._test_plan_rows:
+            typical_s = self._plan_typical_seconds.get(row.test_id)
+            if typical_s is None:
+                unknown = True
+            else:
+                total += typical_s
+        return total, unknown
+
+    @staticmethod
+    def _format_duration(seconds: float | None, *, unknown: str = "") -> str:
+        if seconds is None:
+            return unknown
+        whole = int(round(max(0.0, float(seconds))))
+        minutes, sec = divmod(whole, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours:
+            return f"{hours}:{minutes:02d}:{sec:02d}"
+        return f"{minutes:02d}:{sec:02d}"
+
+    def _format_estimate(self, seconds: float, unknown: bool) -> str:
+        if unknown and seconds <= 0:
+            return "unknown"
+        prefix = "~" if seconds > 0 else ""
+        suffix = " + unknown" if unknown else ""
+        return f"{prefix}{self._format_duration(seconds)}{suffix}"
 
     def _apply_plan_status_brush(self, item: QtWidgets.QTableWidgetItem, status: str):
         value = str(status or "").lower()
@@ -556,10 +800,12 @@ class MachineQualificationWindow(QtWidgets.QDialog):
         self.run_log.clear()
         self._set_run_busy(True)
         self._set_all_plan_status("Queued")
+        self._begin_run_timing()
         self._mark_next_queued_in_progress()
         self._on_qualification_stage("Preparing qualification run")
         starter = getattr(self.controller, "start_qualification_run", None)
         if not callable(starter) or not starter(config):
+            self._stop_run_timing()
             self._set_run_busy(False)
             self._on_qualification_stage("Failed")
             self._popup_message("Machine Qualification", "Could not start qualification run.")
@@ -597,6 +843,8 @@ class MachineQualificationWindow(QtWidgets.QDialog):
         self.baud_spin.setEnabled(not busy)
         self.timeout_edit.setEnabled(not busy)
         self.fixture_combo.setEnabled(not busy)
+        if not busy:
+            self._timing_timer.stop()
         self._update_start_enabled()
 
     @QtCore.Slot(str)
@@ -633,7 +881,7 @@ class MachineQualificationWindow(QtWidgets.QDialog):
                 self._append_run_log(f"Progress: {stage}")
             test_id = self._event_test_id(event)
             if test_id is not None and test_id in self._plan_row_by_test_id:
-                self._set_plan_status(self._plan_row_by_test_id[test_id], "In progress")
+                self._mark_plan_row_in_progress(self._plan_row_by_test_id[test_id])
             return
 
         if event_type == "selftest_result":
@@ -644,6 +892,7 @@ class MachineQualificationWindow(QtWidgets.QDialog):
             if row_idx is None:
                 return
             status = "Passed" if bool(event.get("pass")) else "Failed"
+            self._finish_timing_for_row(row_idx)
             self._set_plan_status(row_idx, status)
             name = str(event.get("name") or test_id)
             self._append_run_log(f"Result {test_id} {name}: {status}")
@@ -682,6 +931,7 @@ class MachineQualificationWindow(QtWidgets.QDialog):
 
     @QtCore.Slot(bool, str, object)
     def _on_qualification_finished(self, ok: bool, message: str, payload: object):
+        self._stop_run_timing()
         self._set_run_busy(False)
         self._on_qualification_stage("Finished" if ok else "Failed")
         self._append_run_log(str(message))
@@ -690,6 +940,8 @@ class MachineQualificationWindow(QtWidgets.QDialog):
         if report is not None:
             self._apply_final_report_to_plan(report)
         self.refresh_reports(select_report_path=data.get("report_path"))
+        self._refresh_timing_estimates()
+        self._refresh_plan_timing_columns()
 
     def _append_run_log(self, message: str):
         if message:
@@ -745,8 +997,8 @@ class MachineQualificationWindow(QtWidgets.QDialog):
 
         select_row = 0
         for idx, entry in enumerate(self._entries):
-            item = QtWidgets.QListWidgetItem(entry.display_name)
-            item.setToolTip(str(entry.report_path))
+            item = QtWidgets.QListWidgetItem(entry.compact_display_time)
+            item.setToolTip(self._report_list_tooltip(entry))
             self.report_list.addItem(item)
             if str(entry.report_path) == wanted:
                 select_row = idx
@@ -757,6 +1009,22 @@ class MachineQualificationWindow(QtWidgets.QDialog):
             self._load_report_at_row(select_row)
         else:
             self._clear_report_display("No qualification reports found.")
+        self._refresh_timing_estimates()
+        self._refresh_plan_timing_columns()
+
+    @staticmethod
+    def _report_list_tooltip(entry: QualificationReportIndexEntry) -> str:
+        manifest = entry.manifest_name or entry.manifest_id or "unknown"
+        if entry.manifest_name and entry.manifest_id and entry.manifest_name != entry.manifest_id:
+            manifest = f"{entry.manifest_name} ({entry.manifest_id})"
+        return (
+            f"Machine: {entry.machine_id or 'unknown'}\n"
+            f"Manifest: {manifest}\n"
+            f"Profile: {entry.profile or 'unknown'}\n"
+            f"Status: {entry.overall_status or 'unknown'}\n"
+            f"Started: {compact_report_time(entry.started_at, entry.run_dir.name)}\n"
+            f"Path: {entry.report_path}"
+        )
 
     @QtCore.Slot(int)
     def _load_report_at_row(self, row: int):
