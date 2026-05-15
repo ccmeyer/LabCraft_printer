@@ -2677,6 +2677,7 @@ class SpeedProfilesTab(QtWidgets.QWidget):
         self.color_dict = color_dict
         self.setObjectName("SpeedProfilesTab")
         self._dfu_manual_session = False 
+        self._qualification_window = None
 
         # Prevent feedback loops when we update widgets from model signals
         self._updating = False
@@ -2789,6 +2790,12 @@ class SpeedProfilesTab(QtWidgets.QWidget):
         fw_v.addWidget(self.fw_status)
         fw_v.addWidget(self.fw_bar)
         fw_v.addWidget(self.firmware_update_button)
+
+        self.machine_qualification_button = QtWidgets.QPushButton("Machine Qualification...")
+        self.machine_qualification_button.setObjectName("machineQualificationButton")
+        self.machine_qualification_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.machine_qualification_button.clicked.connect(self._on_machine_qualification_requested)
+        fw_v.addWidget(self.machine_qualification_button)
 
         layout.addWidget(fw_group, row_after_table + 1, 0, 1, 3)
 
@@ -3080,6 +3087,28 @@ class SpeedProfilesTab(QtWidgets.QWidget):
         # elif hasattr(self.controller, "update_firmware"):
         #     self.fw_status.setText("Running (UI will freeze)…")
         #     self.controller.update_firmware()
+
+    @QtCore.Slot()
+    def _on_machine_qualification_requested(self):
+        window = getattr(self, "_qualification_window", None)
+        if window is not None:
+            try:
+                window.show()
+                window.raise_()
+                window.activateWindow()
+                return
+            except RuntimeError:
+                self._qualification_window = None
+
+        from QualificationView import MachineQualificationWindow
+
+        self._qualification_window = MachineQualificationWindow(self.main_window, self.controller)
+        self._qualification_window.destroyed.connect(
+            lambda *_args: setattr(self, "_qualification_window", None)
+        )
+        self._qualification_window.show()
+        self._qualification_window.raise_()
+        self._qualification_window.activateWindow()
 
     @QtCore.Slot()
     def _on_reset_mcu_requested(self):

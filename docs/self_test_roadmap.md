@@ -23,7 +23,9 @@ The intent is to increase quantitative coverage without turning the firmware, Py
 | Milestone 4: Motion Qualification Slice | Complete | `2007 motion_home_repeatability_factory`, `2008 motion_pattern_return_factory`, `factory_acceptance_v1` |
 | Milestone 5: Pressure Regulator Leak and Step-Position Slice | Complete | `2201 pressure_hold_leak_factory`, `2202 pressure_target_cycle_repeatability_factory`, `2203 pressure_motor_position_hysteresis_factory`, `factory_acceptance_v2`; FULL HIL `hil_reports/selftest_20260513_191209.json` |
 | Milestone 6: Valve Pulse Repeatability Slice | Complete | `2401 print_valve_pulse_drop_repeatability_factory`, `2402 refuel_valve_pulse_drop_repeatability_factory`, `2403 dual_valve_interaction_factory`, `factory_acceptance_v3`; FULL HIL `hil_reports/selftest_20260513_200311.json`; qualification pass with candidate warnings |
-| Milestone 7: Local Operator-Gated Gripper Seal Qualification | Async regulator-home reset fix in progress | `gripper_seal_v1`, selected firmware suite `2501`-`2503`; regulators home through watchdog-safe async tasks before conditioning, then pause during valve-open bursts |
+| Milestone 7: Local Operator-Gated Gripper Seal Qualification | Complete enough to move on | `gripper_seal_v1`, selected firmware suite `2501`-`2503`; regulators home through watchdog-safe async tasks before conditioning, then pause during valve-open bursts |
+| Milestone 8A: Read-Only Qualification Window Prototype | Complete | Main app `Machine Qualification` window displays existing `qualification_report_v1` reports without launching hardware tests |
+| Milestone 8B: Qualification Run Shell | In progress | `Run Qualification` tab launches existing manifests through the Python qualification backend with coarse progress and final row coloring |
 | Later fixture-dependent diagnostics | Not started | Planned |
 
 ## Current Call Path
@@ -869,17 +871,37 @@ Expected UI sections:
 - Artifacts: report folder, plots, raw files.
 - History: previous machine reports.
 
+Initial read-only prototype:
+
+- Add a button in the Firmware tab that opens a separate `Machine Qualification` window.
+- Browse existing reports under `hil_reports/qualification/`.
+- Show run summary, warnings/failures, subsystem result tables, selected-row details, and artifact paths.
+- Do not start qualification runs, open serial ports, or invoke firmware diagnostics from this prototype.
+
+Initial run shell:
+
+- Add a `Run Qualification` tab beside `Review Results`.
+- List available manifests from `tools/qualification/manifests/` and show expected tests, fixture notes, metrics, and operator-gated status.
+- Launch `tools.qualification.runner.run_qualification()` through a Qt worker thread with coarse stage/log updates.
+- Color expected-test rows from the final `qualification_report_v1`; live per-frame progress remains a later backend event API.
+- Do not add a GUI abort button until the backend owns a safe abort path.
+
 Validation:
 
 ```powershell
 .\env\Scripts\python.exe -m pytest -q
 ```
 
-Manual app validation:
+Manual app validation for the read-only prototype:
 
 - Launch app.
 - Open qualification window.
 - Load an existing report.
+- Confirm subsystem tabs, warnings/failures, selected-row details, and artifact paths match `report.json`.
+- Confirm the window can be closed and reopened from the Firmware tab.
+
+Manual app validation before enabling run launch:
+
 - Start a dry-run or SAFE-only suite if hardware is connected.
 - Confirm abort/cancel path does not leave backend process running.
 

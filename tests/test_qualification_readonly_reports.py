@@ -1,0 +1,159 @@
+import json
+from pathlib import Path
+
+from QualificationReports import (
+    artifact_paths,
+    discover_report_entries,
+    normalize_result_rows,
+    subsystem_for,
+)
+
+
+def _report(*, started_at="2026-05-15T00:00:00Z"):
+    return {
+        "schema_version": "qualification_report_v1",
+        "manifest": {
+            "manifest_id": "factory_acceptance_v3",
+            "name": "Factory Acceptance v3",
+            "profile": "FULL",
+        },
+        "machine": {
+            "machine_id": "LC-TEST",
+            "machine_uuid": "uuid",
+            "assigned_at": "2026-05-15T00:00:00Z",
+        },
+        "run": {
+            "run_dir": "hil_reports/qualification/LC-TEST/20260515T000000Z",
+            "raw_selftest_path": "hil_reports/qualification/LC-TEST/20260515T000000Z/raw_selftest.json",
+            "report_path": "hil_reports/qualification/LC-TEST/20260515T000000Z/report.json",
+            "summary_csv_path": "hil_reports/qualification/LC-TEST/20260515T000000Z/summary.csv",
+            "fixture_id": "",
+        },
+        "overall_status": "pass",
+        "run_id": 123,
+        "profile": "FULL",
+        "started_at": started_at,
+        "finished_at": "2026-05-15T00:00:10Z",
+        "results": [
+            {
+                "test_id": 2007,
+                "name": "motion_home_repeatability_factory",
+                "pass": True,
+                "metrics": {"x_span": 6, "y_span": 5, "ret_err": 0},
+            },
+            {
+                "test_id": 2401,
+                "name": "print_valve_pulse_drop_repeatability_factory",
+                "pass": True,
+                "metrics": {"mean": 0, "cv_pct": 200, "ready": 1},
+            },
+        ],
+        "host_checks": [
+            {"name": "hello_ack", "pass": True, "details": {"seq8": 1}},
+        ],
+        "analysis": {
+            "items": [
+                {
+                    "item_kind": "firmware_result",
+                    "test_id": 2007,
+                    "name": "motion_home_repeatability_factory",
+                    "category": "motion",
+                    "status": "pass",
+                    "failure_domain": "none",
+                    "message": "Raw firmware result passed.",
+                },
+                {
+                    "item_kind": "firmware_result",
+                    "test_id": 2401,
+                    "name": "print_valve_pulse_drop_repeatability_factory",
+                    "category": "pulse",
+                    "status": "pass",
+                    "failure_domain": "none",
+                    "message": "Raw firmware result passed.",
+                },
+                {
+                    "item_kind": "host_check",
+                    "name": "hello_ack",
+                    "status": "pass",
+                    "failure_domain": "none",
+                    "message": "Host check passed.",
+                },
+            ],
+            "metric_evaluations": [
+                {
+                    "item_kind": "metric",
+                    "test_id": 2401,
+                    "name": "print_valve_pulse_drop_repeatability_factory",
+                    "metric_name": "mean",
+                    "status": "warning",
+                    "failure_domain": "machine_performance",
+                    "message": "Candidate metric outside threshold: mean=0, min=1.",
+                }
+            ],
+            "warnings": [
+                {
+                    "item_kind": "metric",
+                    "test_id": 2401,
+                    "name": "print_valve_pulse_drop_repeatability_factory",
+                    "message": "Candidate metric outside threshold: mean=0, min=1.",
+                }
+            ],
+        },
+        "warnings": [
+            {
+                "item_kind": "metric",
+                "test_id": 2401,
+                "name": "print_valve_pulse_drop_repeatability_factory",
+                "message": "Candidate metric outside threshold: mean=0, min=1.",
+            }
+        ],
+    }
+
+
+def _write_report(path: Path, payload: dict):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_discover_report_entries_filters_schema_and_sorts_newest_first(tmp_path):
+    old_path = tmp_path / "qualification" / "LC-TEST" / "old" / "report.json"
+    new_path = tmp_path / "qualification" / "LC-TEST" / "new" / "report.json"
+    bad_path = tmp_path / "qualification" / "LC-TEST" / "bad" / "report.json"
+    _write_report(old_path, _report(started_at="2026-05-14T00:00:00Z"))
+    _write_report(new_path, _report(started_at="2026-05-15T00:00:00Z"))
+    _write_report(bad_path, {"schema_version": "old"})
+
+    entries = discover_report_entries(tmp_path)
+
+    assert [entry.report_path for entry in entries] == [new_path, old_path]
+    assert entries[0].machine_id == "LC-TEST"
+    assert entries[0].manifest_id == "factory_acceptance_v3"
+    assert entries[0].run_dir == new_path.parent
+    assert entries[0].warning_count == 1
+
+
+def test_normalize_result_rows_groups_subsystems_and_promotes_metric_warnings():
+    rows = normalize_result_rows(_report())
+    by_id = {row.item_id or row.name: row for row in rows}
+
+    assert by_id["2007"].subsystem == "Motion"
+    assert by_id["2007"].analysis_status == "pass"
+    assert by_id["2401"].subsystem == "Valves/Pulses"
+    assert by_id["2401"].analysis_status == "warning"
+    assert by_id["2401"].failure_domain == "machine_performance"
+    assert "mean=0" in by_id["2401"].message
+    assert by_id["hello_ack"].subsystem == "Host Checks"
+
+
+def test_fallback_subsystem_mapping_uses_category_and_kind():
+    assert subsystem_for("pressure") == "Pressure"
+    assert subsystem_for("pulse") == "Valves/Pulses"
+    assert subsystem_for("gripper") == "Gripper"
+    assert subsystem_for("anything", "host_check") == "Host Checks"
+
+
+def test_artifact_paths_exposes_canonical_report_files():
+    paths = artifact_paths(_report(), report_path="fallback_report.json")
+
+    labels = [label for label, _path in paths]
+    assert labels == ["Run folder", "Report JSON", "Raw self-test JSON", "Summary CSV"]

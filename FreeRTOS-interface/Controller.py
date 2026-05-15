@@ -38,6 +38,12 @@ class Controller(QObject):
     dfu_finished = QtCore.Signal(bool, str)
     dfu_output   = QtCore.Signal(str)
 
+    # Qualification run signals
+    qualification_stage = QtCore.Signal(str)
+    qualification_output = QtCore.Signal(str)
+    qualification_prompt = QtCore.Signal(str)
+    qualification_finished = QtCore.Signal(bool, str, object)
+
     # Preprogrammed sequence signals
     sequence_state_changed = QtCore.Signal(str)         # "idle" | "countdown" | "running"
     sequence_countdown_s   = QtCore.Signal(float)       # seconds remaining
@@ -67,6 +73,7 @@ class Controller(QObject):
         self.expected_location = self.model.machine_model.get_current_location()
 
         self._dfu_thread: DfuUpdateWorker | None = None
+        self._qualification_worker = None
 
         # Defaults; tweak if you keep them elsewhere
         self._dfu_script = Path(__file__).resolve().parent / "dfu_update.py"
@@ -374,6 +381,74 @@ class Controller(QObject):
         self._dfu_thread.finished.connect(self.dfu_finished)
         self._dfu_thread.output.connect(self.dfu_output)
         self._dfu_thread.start()
+
+    def qualification_report_root(self):
+        return self._repo_root / "hil_reports"
+
+    def qualification_manifest_root(self):
+        return self._repo_root / "tools" / "qualification" / "manifests"
+
+    def qualification_output_root(self):
+        return self._repo_root / "hil_reports" / "qualification"
+
+    def qualification_identity_path(self):
+        return self._repo_root / "local" / "machine_identity.json"
+
+    def qualification_default_machine_id(self):
+        path = self.qualification_identity_path()
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return ""
+        return str(payload.get("machine_id") or "")
+
+    def list_qualification_reports(self):
+        from QualificationReports import discover_report_entries
+
+        return discover_report_entries(self.qualification_report_root())
+
+    def load_qualification_report(self, report_path):
+        from QualificationReports import load_report
+
+        return load_report(report_path)
+
+    def list_qualification_suites(self):
+        from QualificationSuites import discover_suite_entries
+
+        return discover_suite_entries(self.qualification_manifest_root())
+
+    def is_qualification_running(self):
+        worker = getattr(self, "_qualification_worker", None)
+        is_running = getattr(worker, "isRunning", None)
+        return bool(worker is not None and callable(is_running) and is_running())
+
+    def start_qualification_run(self, config):
+        if self.is_qualification_running():
+            return False
+
+        from QualificationRunWorker import QualificationRunWorker
+
+        run_config = dict(config)
+        run_config.setdefault("identity_path", self.qualification_identity_path())
+        run_config.setdefault("output_root", self.qualification_output_root())
+        run_config.setdefault("run_selftest_path", self._repo_root / "tools" / "run_selftest.py")
+        self._qualification_worker = QualificationRunWorker(run_config, repo_root=self._repo_root)
+        self._qualification_worker.stage.connect(lambda msg: self.qualification_stage.emit(msg))
+        self._qualification_worker.output.connect(lambda msg: self.qualification_output.emit(msg))
+        self._qualification_worker.prompt.connect(lambda msg: self.qualification_prompt.emit(msg))
+        self._qualification_worker.run_finished.connect(self._on_qualification_finished)
+        self._qualification_worker.start()
+        return True
+
+    def respond_qualification_prompt(self, accepted: bool):
+        worker = getattr(self, "_qualification_worker", None)
+        if worker is not None:
+            worker.resolve_prompt(bool(accepted))
+
+    @QtCore.Slot(bool, str, object)
+    def _on_qualification_finished(self, ok, message, payload):
+        self.qualification_finished.emit(bool(ok), str(message), payload)
+        self._qualification_worker = None
 
     def reset_mcu_board(self):
         """Reset the MCU board."""

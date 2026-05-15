@@ -1,0 +1,134 @@
+from __future__ import annotations
+
+import subprocess
+import sys
+import threading
+from pathlib import Path
+from typing import Any, Callable
+
+from PySide6 import QtCore
+
+
+class QualificationRunWorker(QtCore.QThread):
+    stage = QtCore.Signal(str)
+    output = QtCore.Signal(str)
+    prompt = QtCore.Signal(str)
+    run_finished = QtCore.Signal(bool, str, object)
+
+    def __init__(
+        self,
+        config: dict[str, Any],
+        *,
+        repo_root: str | Path,
+        invoker: Callable[[Any], int] | None = None,
+        prompter: Callable[[str], None] | None = None,
+        gripper_control: Callable[[str, str, int], int] | None = None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.config = dict(config)
+        self.repo_root = Path(repo_root)
+        self._external_invoker = invoker
+        self._external_prompter = prompter
+        self._external_gripper_control = gripper_control
+        self._prompt_event: threading.Event | None = None
+        self._prompt_accepted = False
+
+    def resolve_prompt(self, accepted: bool):
+        self._prompt_accepted = bool(accepted)
+        event = self._prompt_event
+        if event is not None:
+            event.set()
+
+    def run(self):
+        if str(self.repo_root) not in sys.path:
+            sys.path.insert(0, str(self.repo_root))
+
+        try:
+            from tools.qualification.runner import default_gripper_control, run_qualification
+
+            self.stage.emit("Preparing qualification run")
+            result = run_qualification(
+                manifest_ref=self.config["manifest_ref"],
+                port=str(self.config.get("port") or "/dev/ttyAMA0"),
+                baud=int(self.config.get("baud") or 115200),
+                machine_id=self._optional_text(self.config.get("machine_id")),
+                identity_path=self.config.get("identity_path") or self.repo_root / "local" / "machine_identity.json",
+                output_root=self.config.get("output_root") or self.repo_root / "hil_reports" / "qualification",
+                timeout_ms=self._optional_int(self.config.get("timeout_ms")),
+                run_selftest_path=self.config.get("run_selftest_path") or self.repo_root / "tools" / "run_selftest.py",
+                fixture_id=self._optional_text(self.config.get("fixture_id")),
+                operator_prompts=bool(self.config.get("operator_prompts")),
+                invoker=self._run_selftest_invoker,
+                prompter=self._external_prompter or self._prompt_operator,
+                gripper_control=self._external_gripper_control or default_gripper_control,
+            )
+            ok = int(result.returncode) == 0
+            self.stage.emit("Finished" if ok else "Failed")
+            payload = {
+                "returncode": int(result.returncode),
+                "run_dir": str(result.run_dir),
+                "raw_selftest_path": str(result.raw_selftest_path),
+                "report_path": str(result.report_path),
+                "summary_csv_path": str(result.summary_csv_path),
+                "report": result.report,
+            }
+            message = f"Qualification {'passed' if ok else 'failed'}: {result.report_path}"
+            self.run_finished.emit(ok, message, payload)
+        except Exception as exc:
+            self.stage.emit("Failed")
+            self.run_finished.emit(False, f"Qualification run failed: {exc}", {})
+
+    @staticmethod
+    def _optional_text(value: Any) -> str | None:
+        text = str(value or "").strip()
+        return text or None
+
+    @staticmethod
+    def _optional_int(value: Any) -> int | None:
+        if value in (None, ""):
+            return None
+        return int(value)
+
+    def _run_selftest_invoker(self, invocation) -> int:
+        if self._external_invoker is not None:
+            self.stage.emit("Running self-test")
+            rc = int(self._external_invoker(invocation))
+            self.output.emit(f"Self-test invoker returned {rc}")
+            self.stage.emit("Writing report")
+            return rc
+
+        command = [str(item) for item in invocation.command]
+        self.stage.emit("Running self-test")
+        self.output.emit(" ".join(command))
+        try:
+            proc = subprocess.Popen(
+                command,
+                cwd=str(self.repo_root),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+        except Exception as exc:
+            self.output.emit(f"Failed to launch self-test runner: {exc}")
+            self.stage.emit("Writing report")
+            return 3
+
+        if proc.stdout is not None:
+            for line in proc.stdout:
+                self.output.emit(line.rstrip())
+        rc = int(proc.wait())
+        self.output.emit(f"Self-test runner exited with {rc}")
+        self.stage.emit("Writing report")
+        return rc
+
+    def _prompt_operator(self, message: str) -> None:
+        self.stage.emit("Operator prompt")
+        self._prompt_accepted = False
+        self._prompt_event = threading.Event()
+        self.prompt.emit(str(message))
+        self._prompt_event.wait()
+        self._prompt_event = None
+        if not self._prompt_accepted:
+            raise RuntimeError("Operator prompt cancelled.")
