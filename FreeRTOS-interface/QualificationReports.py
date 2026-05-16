@@ -215,6 +215,7 @@ def artifact_paths(report: dict[str, Any], *, report_path: str | Path | None = N
                 ("Valve trace artifact error JSON", "valve_trace_artifact_error.json"),
                 ("Valve trace replicate CSV", "valve_trace_replicates.csv"),
                 ("Valve response summary plot", "valve_char_response_by_width.png"),
+                ("Valve motor-position plot", "valve_char_settled_drop_vs_motor_position.png"),
                 ("Valve ringing summary plot", "valve_char_ringing_by_width.png"),
                 ("Print valve time-course plot", "valve_char_p_full_timecourse.png"),
                 ("Refuel valve time-course plot", "valve_char_r_full_timecourse.png"),

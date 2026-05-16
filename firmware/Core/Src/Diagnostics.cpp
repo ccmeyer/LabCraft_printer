@@ -3804,7 +3804,11 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                       if (runValveCharacterizationSuite) {
                         static constexpr uint16_t kValveCharWidthsUs[3] = {1500u, 3000u, 4500u};
                         static constexpr uint16_t kValveCharReplicates = 10u;
-                        static constexpr uint16_t kValveCharPulseCount = kValveCharReplicates;
+                        static constexpr uint16_t kValveCharWidthCount = 3u;
+                        static constexpr uint16_t kValveCharPatternLength = 6u;
+                        static constexpr uint16_t kValveCharMeasuredPulses =
+                            kValveCharReplicates * kValveCharWidthCount;
+                        static constexpr uint16_t kValveCharPulseCount = kValveCharMeasuredPulses;
                         static constexpr uint32_t kValveCharStabilizeMs = 500u;
                         static constexpr uint32_t kValveCharRegHomeFastHz = 30000u;
                         static constexpr uint32_t kValveCharRegHomeSlowHz = 3000u;
@@ -3817,22 +3821,6 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         static constexpr uint32_t kValveCharRingWindowMs = 60u;
                         static constexpr uint32_t kValveCharSettledStartMs = 80u;
                         static constexpr uint32_t kValveCharSettledEndMs = 150u;
-
-                        struct ValveCharWidthResult {
-                          uint32_t mean = 0u;
-                          uint32_t cv = 0u;
-                          uint32_t span = 0u;
-                          uint32_t ring = 0u;
-                          uint32_t latency = 0u;
-                          uint32_t out = 0u;
-                          uint32_t rej = 0u;
-                          uint32_t ready = 0u;
-                          uint32_t freshTo = 0u;
-                          uint32_t sc = 0u;
-                          uint32_t ec = 0u;
-                          uint32_t timeout = 0u;
-                          bool pass = false;
-                        };
 
                         struct ValveCharRowSummary {
                           uint32_t mean[3] = {0u, 0u, 0u};
@@ -3906,24 +3894,6 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           return homeOk && !_selfTestAbortRequested;
                         };
 
-                        auto accumulateValveWidth = [&](ValveCharRowSummary& row,
-                                                        uint8_t widthIndex,
-                                                        const ValveCharWidthResult& result) {
-                          row.mean[widthIndex] = result.mean;
-                          row.cv[widthIndex] = result.cv;
-                          row.span[widthIndex] = result.span;
-                          row.ring[widthIndex] = result.ring;
-                          row.latency[widthIndex] = result.latency;
-                          row.out += result.out;
-                          row.rej += result.rej;
-                          row.ready += result.ready;
-                          row.freshTo += result.freshTo;
-                          row.sc += result.sc;
-                          row.ec += result.ec;
-                          row.timeout += result.timeout;
-                          row.pass = row.pass && result.pass;
-                        };
-
                         auto finalizeValveRowLinearity = [&](ValveCharRowSummary& row) {
                           const auto lin = ValvePulseQualificationMath::summarizeThreeWidthLinearity(
                               row.mean[0],
@@ -3932,6 +3902,15 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           row.mono = lin.monotonic;
                           row.gain = lin.gainRaw;
                           row.lin = lin.midpointLinearityErrorPct;
+                        };
+
+                        auto valveWidthIndex = [&](uint16_t widthUs) -> uint8_t {
+                          for (uint8_t i = 0u; i < kValveCharWidthCount; ++i) {
+                            if (kValveCharWidthsUs[i] == widthUs) {
+                              return i;
+                            }
+                          }
+                          return 0u;
                         };
 
                         auto waitFreshValveCharSample = [&](uint8_t channel, uint32_t timeoutMs) -> bool {
@@ -3952,24 +3931,25 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           return false;
                         };
 
-                        auto runIsolatedValveWidth = [&](uint16_t testId,
-                                                         uint8_t channel,
-                                                         uint16_t targetRaw,
-                                                         uint16_t pulseWidthUs) -> ValveCharWidthResult {
-                          ValveCharWidthResult result{};
+                        auto runIsolatedValveSequence = [&](uint16_t testId,
+                                                            uint8_t channel,
+                                                            uint16_t targetRaw) -> ValveCharRowSummary {
+                          ValveCharRowSummary row{};
 #if (LC_PRESSURE_PORTS <= 1)
                           if (channel != 0u) {
-                            result.rej = kValveCharPulseCount;
-                            result.ready = 1u;
-                            return result;
+                            row.rej = kValveCharPulseCount;
+                            row.ready = 1u;
+                            row.pass = false;
+                            return row;
                           }
 #endif
                           Printer* printer = Printer::instance();
                           PressureSensor* sensor = PressureSensor::instance();
                           if (printer == nullptr || sensor == nullptr) {
-                            result.rej = kValveCharPulseCount;
-                            result.ready = 1u;
-                            return result;
+                            row.rej = kValveCharPulseCount;
+                            row.ready = 1u;
+                            row.pass = false;
+                            return row;
                           }
                           struct ScopedPressureFocus {
                             PressureSensor* sensor = nullptr;
@@ -3983,41 +3963,61 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           focusScope.sensor = sensor;
                           focusScope.active = sensor->beginDiagnosticFocus(channel);
                           if (!focusScope.active) {
-                            result.rej = kValveCharPulseCount;
-                            result.ready = 1u;
-                            return result;
+                            row.rej = kValveCharPulseCount;
+                            row.ready = 1u;
+                            row.pass = false;
+                            return row;
                           }
 
                           PressureRegulator& reg = regulatorForValveChannel(channel);
+                          Stepper* stepper = (channel == 0u) ? Stepper::stepperP() : Stepper::stepperR();
                           const uint32_t originalPrintPulse = printer->getPrintPulse();
                           const uint32_t originalRefuelPulse = printer->getRefuelPulse();
-                          if (channel == 0u) {
-                            printer->setPrintPulse(pulseWidthUs);
-                          } else {
-                            printer->setRefuelPulse(pulseWidthUs);
-                          }
 
-                          uint32_t responses[kValveCharReplicates]{};
-                          uint32_t rings[kValveCharReplicates]{};
-                          uint32_t latencies[kValveCharReplicates]{};
-                          uint32_t responseCount = 0u;
-                          for (uint16_t cycle = 0u; cycle < (kValveCharReplicates + 1u) && !_selfTestAbortRequested; ++cycle) {
-                            const bool measured = cycle > 0u;
-                            const uint16_t rep = measured ? static_cast<uint16_t>(cycle - 1u) : 0u;
+                          uint32_t responses[kValveCharWidthCount][kValveCharReplicates]{};
+                          uint32_t rings[kValveCharWidthCount][kValveCharReplicates]{};
+                          uint32_t latencies[kValveCharWidthCount][kValveCharReplicates]{};
+                          uint32_t responseCount[kValveCharWidthCount]{};
+                          uint32_t scheduledCount[kValveCharWidthCount]{};
+
+                          auto recordValveCharEvent = [&](PressureTraceChannel traceChannel,
+                                                          PressureTraceEventType type,
+                                                          uint16_t value0,
+                                                          uint16_t value1,
+                                                          uint32_t traceStartTick) {
+                            const uint32_t dt = HAL_GetTick() - traceStartTick;
+                            PressureTraceEvent event{};
+                            event.dtMs = static_cast<uint16_t>((dt > 0xFFFFu) ? 0xFFFFu : dt);
+                            event.type = static_cast<uint8_t>(type);
+                            event.value0 = value0;
+                            event.value1 = value1;
+                            PressureTraceRecorder::instance().recordEvent(traceChannel, event);
+                          };
+
+                          auto runOnePulse = [&](uint16_t pulseWidthUs,
+                                                 uint16_t sequenceIndex,
+                                                 uint16_t replicateForWidth,
+                                                 bool measured) -> bool {
+                            if (channel == 0u) {
+                              printer->setPrintPulse(pulseWidthUs);
+                            } else {
+                              printer->setRefuelPulse(pulseWidthUs);
+                            }
                             reg.start();
                             xEventGroupClearBits(_doneEvents, pressureBitForChannel(channel));
                             reg.setTargetSafe(targetRaw);
                             const bool readyOk = waitBitsWithTimeout(pressureBitForChannel(channel), 7000u);
                             if (!readyOk) {
-                              result.ready++;
-                              result.rej++;
-                              continue;
+                              row.ready++;
+                              row.rej++;
+                              return true;
                             }
                             if (!delayWithWatchdog(kValveCharStabilizeMs, "valve_char_stabilize")) {
-                              result.timeout++;
-                              result.rej++;
-                              break;
+                              row.timeout++;
+                              row.rej++;
+                              return false;
                             }
+                            const int32_t motorPosition = (stepper != nullptr) ? stepper->getPosition() : 0;
 
                             auto& recorder = PressureTraceRecorder::instance();
                             recorder.reset();
@@ -4029,13 +4029,27 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 
                             reg.beginDispenseQuiet(0u);
                             recorder.arm();
-                            recorder.start(HAL_GetTick());
+                            const uint32_t traceStartTick = HAL_GetTick();
+                            recorder.start(traceStartTick);
+                            if (measured) {
+                              recordValveCharEvent(traceCfg.channel,
+                                                   PressureTraceEventType::ValveSequence,
+                                                   sequenceIndex,
+                                                   pulseWidthUs,
+                                                   traceStartTick);
+                              const uint32_t encodedMotorPosition = static_cast<uint32_t>(motorPosition);
+                              recordValveCharEvent(traceCfg.channel,
+                                                   PressureTraceEventType::MotorPosition,
+                                                   static_cast<uint16_t>(encodedMotorPosition & 0xFFFFu),
+                                                   static_cast<uint16_t>((encodedMotorPosition >> 16) & 0xFFFFu),
+                                                   traceStartTick);
+                            }
                             bool timeout = !delayWithWatchdog(traceCfg.preRollMs, "valve_char_pause_preroll");
                             bool freshOk = false;
                             if (!timeout && !_selfTestAbortRequested) {
                               freshOk = waitFreshValveCharSample(channel, kValveCharFreshSampleTimeoutMs);
                               if (!freshOk) {
-                                result.freshTo++;
+                                row.freshTo++;
                               }
                             }
                             if (!timeout && freshOk && !_selfTestAbortRequested) {
@@ -4065,12 +4079,12 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 
                             if (!measured) {
                               if (timeout) {
-                                result.timeout++;
-                                result.rej++;
+                                row.timeout++;
+                                row.rej++;
                               } else if (!freshOk) {
-                                result.rej++;
+                                row.rej++;
                               }
-                              continue;
+                              return !timeout;
                             }
 
                             const auto response = ValvePulseQualificationMath::summarizeWindowedValveCharacterization(
@@ -4082,59 +4096,83 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                 kValveCharRingWindowMs,
                                 kValveCharSettledStartMs,
                                 kValveCharSettledEndMs);
+                            const uint8_t widthIndex = valveWidthIndex(pulseWidthUs);
                             char traceName[48];
                             snprintf(traceName,
                                      sizeof(traceName),
-                                     "valve_char_%c_w%u_rep%02u",
+                                     "valve_char_%c_seq%02u_w%u_rep%02u",
                                      (channel == 0u) ? 'p' : 'r',
+                                     static_cast<unsigned>(sequenceIndex),
                                      static_cast<unsigned>(pulseWidthUs),
-                                     static_cast<unsigned>(rep + 1u));
+                                     static_cast<unsigned>(replicateForWidth));
                             (void)exportTrace(testId, traceName, !timeout && (response.pulseCount >= 1u));
-                            result.rej += response.rejectCount;
+                            row.rej += response.rejectCount;
                             if (response.pulseCount < 1u) {
-                              result.rej++;
-                            } else if (responseCount < kValveCharReplicates) {
-                              responses[responseCount] = response.meanSettledDropRaw;
-                              rings[responseCount] = response.meanRingRaw;
-                              latencies[responseCount] = response.meanLatencyMs;
-                              responseCount++;
+                              row.rej++;
+                            } else if (responseCount[widthIndex] < kValveCharReplicates) {
+                              const uint32_t idx = responseCount[widthIndex]++;
+                              responses[widthIndex][idx] = response.meanSettledDropRaw;
+                              rings[widthIndex][idx] = response.meanRingRaw;
+                              latencies[widthIndex][idx] = response.meanLatencyMs;
                             }
-                            result.out += response.outlierCount;
-                            result.sc += recorder.sampleCount();
-                            result.ec += recorder.eventCount();
+                            row.out += response.outlierCount;
+                            row.sc += recorder.sampleCount();
+                            row.ec += recorder.eventCount();
                             if (timeout) {
-                              result.timeout++;
-                              result.rej++;
+                              row.timeout++;
+                              row.rej++;
+                            }
+                            return !timeout;
+                          };
+
+                          bool valveSequenceOk = true;
+                          for (uint16_t slot = 0u; slot < kValveCharPatternLength && valveSequenceOk && !_selfTestAbortRequested; ++slot) {
+                            const uint16_t widthUs = ValvePulseQualificationMath::interleavedValvePulseWidthUs(slot);
+                            if (!runOnePulse(widthUs, 0u, 0u, false)) {
+                              valveSequenceOk = false;
                             }
                           }
 
-                          const auto aggregate = ValvePulseQualificationMath::summarizeResponseValues(
-                              responses,
-                              responseCount);
-                          result.mean = aggregate.meanRaw;
-                          result.cv = aggregate.cvPct;
-                          result.span = aggregate.spanRaw;
-                          result.out += aggregate.outlierCount;
-                          const auto ringAggregate = ValvePulseQualificationMath::summarizeResponseValues(
-                              rings,
-                              responseCount);
-                          result.ring = ringAggregate.meanRaw;
-                          const auto latencyAggregate = ValvePulseQualificationMath::summarizeResponseValues(
-                              latencies,
-                              responseCount);
-                          result.latency = latencyAggregate.meanRaw;
-                          result.pass = !_selfTestAbortRequested &&
-                                        (responseCount == kValveCharReplicates) &&
-                                        (result.ready == 0u) &&
-                                        (result.rej == 0u) &&
-                                        (result.freshTo == 0u) &&
-                                        (result.timeout == 0u) &&
-                                        (result.sc > 0u) &&
-                                        (result.ec > 0u);
+                          for (uint16_t seq = 0u; seq < kValveCharMeasuredPulses && valveSequenceOk && !_selfTestAbortRequested; ++seq) {
+                            const uint16_t widthUs = ValvePulseQualificationMath::interleavedValvePulseWidthUs(seq);
+                            const uint8_t widthIndex = valveWidthIndex(widthUs);
+                            const uint16_t repForWidth = static_cast<uint16_t>(++scheduledCount[widthIndex]);
+                            if (!runOnePulse(widthUs, static_cast<uint16_t>(seq + 1u), repForWidth, true)) {
+                              valveSequenceOk = false;
+                            }
+                          }
+
+                          for (uint8_t i = 0u; i < kValveCharWidthCount; ++i) {
+                            const auto aggregate = ValvePulseQualificationMath::summarizeResponseValues(
+                                responses[i],
+                                responseCount[i]);
+                            row.mean[i] = aggregate.meanRaw;
+                            row.cv[i] = aggregate.cvPct;
+                            row.span[i] = aggregate.spanRaw;
+                            row.out += aggregate.outlierCount;
+                            const auto ringAggregate = ValvePulseQualificationMath::summarizeResponseValues(
+                                rings[i],
+                                responseCount[i]);
+                            row.ring[i] = ringAggregate.meanRaw;
+                            const auto latencyAggregate = ValvePulseQualificationMath::summarizeResponseValues(
+                                latencies[i],
+                                responseCount[i]);
+                            row.latency[i] = latencyAggregate.meanRaw;
+                            row.pass = row.pass && (responseCount[i] == kValveCharReplicates);
+                          }
+                          row.pass = row.pass &&
+                                     !_selfTestAbortRequested &&
+                                     (row.ready == 0u) &&
+                                     (row.rej == 0u) &&
+                                     (row.freshTo == 0u) &&
+                                     (row.timeout == 0u) &&
+                                     (row.sc > 0u) &&
+                                     (row.ec > 0u);
                           reg.pause();
                           printer->setPrintPulse(originalPrintPulse);
                           printer->setRefuelPulse(originalRefuelPulse);
-                          return result;
+                          finalizeValveRowLinearity(row);
+                          return row;
                         };
 
                         auto emitValveChannelRow = [&](uint16_t testId,
@@ -4188,12 +4226,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                                       uint8_t channel,
                                                       uint16_t targetRaw,
                                                       ValveCharRowSummary* outRow) -> bool {
-                          ValveCharRowSummary row{};
-                          for (uint8_t i = 0u; i < 3u; ++i) {
-                            ValveCharWidthResult result = runIsolatedValveWidth(testId, channel, targetRaw, kValveCharWidthsUs[i]);
-                            accumulateValveWidth(row, i, result);
-                          }
-                          finalizeValveRowLinearity(row);
+                          ValveCharRowSummary row = runIsolatedValveSequence(testId, channel, targetRaw);
                           if (outRow != nullptr) {
                             *outRow = row;
                           }

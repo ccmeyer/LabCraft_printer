@@ -86,6 +86,25 @@ TEST(ValvePulseQualificationMath, ThreeWidthLinearityReportsNonMonotonicResponse
     CHECK(summary.midpointLinearityErrorPct > 0u);
 }
 
+TEST(ValvePulseQualificationMath, InterleavedValvePulseWidthSequenceIsBalancedAcrossThirtyPulses) {
+    uint32_t count1500 = 0;
+    uint32_t count3000 = 0;
+    uint32_t count4500 = 0;
+    const uint16_t expectedPattern[] = {1500, 3000, 4500, 4500, 3000, 1500};
+
+    for (size_t i = 0; i < 30; ++i) {
+        const uint16_t width = ValvePulseQualificationMath::interleavedValvePulseWidthUs(i);
+        UNSIGNED_LONGS_EQUAL(expectedPattern[i % 6], width);
+        if (width == 1500) count1500++;
+        if (width == 3000) count3000++;
+        if (width == 4500) count4500++;
+    }
+
+    UNSIGNED_LONGS_EQUAL(10u, count1500);
+    UNSIGNED_LONGS_EQUAL(10u, count3000);
+    UNSIGNED_LONGS_EQUAL(10u, count4500);
+}
+
 TEST(ValvePulseQualificationMath, ResponseValueSummaryReportsMeanCvSpanAndOutliers) {
     uint32_t responses[] = {30, 31, 29, 80};
 

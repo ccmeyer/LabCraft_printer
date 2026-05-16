@@ -168,6 +168,7 @@ def test_artifact_paths_exposes_valve_trace_outputs(tmp_path):
     (plot_dir / "valve_trace_analysis.json").write_text("{}", encoding="utf-8")
     (plot_dir / "valve_trace_replicates.csv").write_text("header\n", encoding="utf-8")
     (plot_dir / "valve_char_response_by_width.png").write_bytes(b"png")
+    (plot_dir / "valve_char_settled_drop_vs_motor_position.png").write_bytes(b"png")
     (plot_dir / "valve_char_ringing_by_width.png").write_bytes(b"png")
     (plot_dir / "valve_char_r_w1500_overlay.png").write_bytes(b"png")
 
@@ -181,5 +182,6 @@ def test_artifact_paths_exposes_valve_trace_outputs(tmp_path):
     assert "Valve trace analysis JSON" in labels
     assert "Valve trace replicate CSV" in labels
     assert "Valve response summary plot" in labels
+    assert "Valve motor-position plot" in labels
     assert "Valve ringing summary plot" in labels
     assert "Valve overlay plot valve_char_r_w1500_overlay" in labels

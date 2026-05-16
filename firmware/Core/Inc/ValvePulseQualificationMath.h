@@ -81,6 +81,7 @@ struct ResponseValueSummary {
 };
 
 uint32_t absDiff(uint32_t a, uint32_t b);
+uint16_t interleavedValvePulseWidthUs(size_t sequenceIndexZeroBased);
 ResponseValueSummary summarizeResponseValues(const uint32_t* responses, size_t responseCount);
 ThreeWidthLinearitySummary summarizeThreeWidthLinearity(uint32_t response15,
                                                         uint32_t response30,

@@ -272,6 +272,8 @@ def decode_pressure_trace_events_v1(payload: bytes) -> list[dict]:
         7: "recovery_end",
         8: "ready_enter",
         9: "ready_exit",
+        10: "valve_sequence",
+        11: "motor_position",
     }
     rows = []
     for off in range(0, len(payload), size):
@@ -279,15 +281,19 @@ def decode_pressure_trace_events_v1(payload: bytes) -> list[dict]:
         if len(chunk) != size:
             break
         dt_ms, event_type, _reserved, value0, value1 = struct.unpack(fmt, chunk)
-        rows.append(
-            {
-                "dt_ms": dt_ms,
-                "event_type": event_type,
-                "event_name": names.get(event_type, f"unknown_{event_type}"),
-                "value0": value0,
-                "value1": value1,
-            }
-        )
+        row = {
+            "dt_ms": dt_ms,
+            "event_type": event_type,
+            "event_name": names.get(event_type, f"unknown_{event_type}"),
+            "value0": value0,
+            "value1": value1,
+        }
+        if event_type == 11:
+            raw_i32 = value0 | (value1 << 16)
+            if raw_i32 >= 0x80000000:
+                raw_i32 -= 0x100000000
+            row["value_i32"] = raw_i32
+        rows.append(row)
     return rows
 
 

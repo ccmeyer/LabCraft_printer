@@ -12,7 +12,7 @@ from typing import Any
 from .artifacts import RunArtifacts
 
 
-VALVE_TRACE_RE = re.compile(r"^valve_char_(?P<channel>[pr])_w(?P<width>\d+)_rep(?P<rep>\d+)$")
+VALVE_TRACE_RE = re.compile(r"^valve_char_(?P<channel>[pr])_(?:seq(?P<sequence>\d+)_)?w(?P<width>\d+)_rep(?P<rep>\d+)$")
 BASELINE_WINDOW_MS = 10.0
 RING_WINDOW_AFTER_PULSE_END_MS = 60.0
 SETTLED_START_AFTER_PULSE_END_MS = 80.0
@@ -57,6 +57,19 @@ def _median(values: list[float]) -> float:
     return (ordered[mid - 1] + ordered[mid]) / 2.0
 
 
+def _corr(xs: list[float], ys: list[float]) -> float | None:
+    if len(xs) < 2 or len(xs) != len(ys):
+        return None
+    x_mean = _mean(xs)
+    y_mean = _mean(ys)
+    x_var = sum((x - x_mean) ** 2 for x in xs)
+    y_var = sum((y - y_mean) ** 2 for y in ys)
+    if x_var <= 0.0 or y_var <= 0.0:
+        return None
+    cov = sum((x - x_mean) * (y - y_mean) for x, y in zip(xs, ys))
+    return cov / math.sqrt(x_var * y_var)
+
+
 def _first_event(events: list[dict[str, Any]], event_name: str) -> dict[str, Any] | None:
     for event in events:
         if event.get("event_name") == event_name:
@@ -64,11 +77,15 @@ def _first_event(events: list[dict[str, Any]], event_name: str) -> dict[str, Any
     return None
 
 
-def _sample_at_dt(samples: list[dict[str, Any]], dt_ms: float) -> dict[str, Any] | None:
-    for sample in samples:
-        if float(sample.get("dt_ms", 0)) == dt_ms:
-            return sample
-    return None
+def _event_i32(event: dict[str, Any] | None) -> int | None:
+    if event is None:
+        return None
+    if "value_i32" in event:
+        return int(event["value_i32"])
+    raw = int(event.get("value0") or 0) | (int(event.get("value1") or 0) << 16)
+    if raw >= 0x80000000:
+        raw -= 0x100000000
+    return raw
 
 
 def _parse_trace_name(name: str) -> dict[str, Any] | None:
@@ -76,9 +93,13 @@ def _parse_trace_name(name: str) -> dict[str, Any] | None:
     if not match:
         return None
     channel = match.group("channel")
+    sequence = match.group("sequence")
+    sequence_index = int(sequence) if sequence else None
     return {
         "channel": channel,
         "channel_name": "print" if channel == "p" else "refuel",
+        "sequence_index": sequence_index,
+        "sequence_slot": None if sequence_index is None else ((sequence_index - 1) % 6) + 1,
         "width_us": int(match.group("width")),
         "replicate": int(match.group("rep")),
     }
@@ -90,6 +111,8 @@ def analyze_valve_trace(trace: dict[str, Any], *, source_path: str | Path | None
     events = _safe_list(trace, "events")
     pulse_start = _first_event(events, "pulse_start")
     pulse_end = _first_event(events, "pulse_end")
+    valve_sequence = _first_event(events, "valve_sequence")
+    motor_position_event = _first_event(events, "motor_position")
     row: dict[str, Any] = {
         "trace_file": "" if source_path is None else str(source_path),
         "test_id": trace.get("test_id"),
@@ -97,6 +120,13 @@ def analyze_valve_trace(trace: dict[str, Any], *, source_path: str | Path | None
         **metadata,
         "valid": False,
     }
+    if valve_sequence is not None:
+        sequence_index = int(valve_sequence.get("value0") or 0)
+        row["sequence_index"] = sequence_index
+        row["sequence_slot"] = ((sequence_index - 1) % 6) + 1 if sequence_index > 0 else None
+        row["sequence_width_us"] = int(valve_sequence.get("value1") or 0)
+    if motor_position_event is not None:
+        row["motor_position"] = _event_i32(motor_position_event)
     if not samples or pulse_start is None or pulse_end is None:
         row["reason"] = "missing_samples_or_pulse_events"
         return row
@@ -245,6 +275,34 @@ def _copy_trace_sources(sources: list[Path], trace_dir: Path) -> list[Path]:
     return copied
 
 
+def _row_sort_key(row: dict[str, Any]) -> tuple[str, int, int, int]:
+    sequence = row.get("sequence_index")
+    if sequence is None or sequence == "":
+        sequence_value = 100000 + int(row.get("width_us") or 0)
+    else:
+        sequence_value = int(sequence)
+    return (
+        str(row.get("channel") or ""),
+        sequence_value,
+        int(row.get("width_us") or 0),
+        int(row.get("replicate") or 0),
+    )
+
+
+def _annotate_motor_position_deltas(rows: list[dict[str, Any]]) -> None:
+    first_by_channel: dict[str, int] = {}
+    for row in sorted(rows, key=_row_sort_key):
+        channel = str(row.get("channel") or "")
+        position = row.get("motor_position")
+        if channel and position not in (None, ""):
+            first_by_channel.setdefault(channel, int(position))
+    for row in rows:
+        channel = str(row.get("channel") or "")
+        position = row.get("motor_position")
+        if channel in first_by_channel and position not in (None, ""):
+            row["motor_position_delta_from_first"] = int(position) - first_by_channel[channel]
+
+
 def _load_rows(trace_paths: list[Path]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     traces: list[dict[str, Any]] = []
     rows: list[dict[str, Any]] = []
@@ -252,7 +310,8 @@ def _load_rows(trace_paths: list[Path]) -> tuple[list[dict[str, Any]], list[dict
         trace = json.loads(path.read_text(encoding="utf-8"))
         traces.append({"path": str(path), "payload": trace})
         rows.append(analyze_valve_trace(trace, source_path=path))
-    rows.sort(key=lambda row: (str(row.get("channel") or ""), int(row.get("width_us") or 0), int(row.get("replicate") or 0)))
+    _annotate_motor_position_deltas(rows)
+    rows.sort(key=_row_sort_key)
     return traces, rows
 
 
@@ -265,6 +324,16 @@ def _summary_by_condition(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         ring = [float(row.get("ring_amp_raw") or 0) for row in subset]
         latency = [float(row.get("latency_ms") or 0) for row in subset]
         baseline_std = [float(row.get("baseline_std_raw") or 0) for row in subset]
+        motor_positions = [
+            float(row["motor_position"])
+            for row in subset
+            if row.get("motor_position") not in (None, "")
+        ]
+        motor_responses = [
+            float(row.get("settled_drop_raw") or 0)
+            for row in subset
+            if row.get("motor_position") not in (None, "")
+        ]
         summary.append(
             {
                 "channel": channel,
@@ -279,6 +348,10 @@ def _summary_by_condition(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "latency_mean_ms": _mean(latency),
                 "latency_std_ms": _std(latency),
                 "baseline_std_mean_raw": _mean(baseline_std),
+                "motor_position_min": min(motor_positions) if motor_positions else None,
+                "motor_position_max": max(motor_positions) if motor_positions else None,
+                "motor_position_span": (max(motor_positions) - min(motor_positions)) if motor_positions else None,
+                "settled_drop_motor_position_corr": _corr(motor_positions, motor_responses),
                 "drop_mean_raw": _mean(settled),
                 "drop_std_raw": _std(settled),
                 "drop_span_raw": (max(settled) - min(settled)) if settled else 0.0,
@@ -295,8 +368,13 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "name",
         "channel",
         "channel_name",
+        "sequence_index",
+        "sequence_slot",
+        "sequence_width_us",
         "width_us",
         "replicate",
+        "motor_position",
+        "motor_position_delta_from_first",
         "valid",
         "sample_count",
         "event_count",
@@ -363,7 +441,7 @@ def _plot_inputs(traces: list[dict[str, Any]], rows: list[dict[str, Any]]) -> li
         if row is None or not row.get("valid"):
             continue
         result.append((path, item["payload"], row))
-    result.sort(key=lambda item: (str(item[2].get("channel") or ""), int(item[2].get("width_us") or 0), int(item[2].get("replicate") or 0)))
+    result.sort(key=lambda item: _row_sort_key(item[2]))
     return result
 
 
@@ -386,7 +464,10 @@ def _plot_full_timecourse(plot_items: list[tuple[Path, dict[str, Any], dict[str,
         t = [offset + float(sample.get("dt_ms", 0)) for sample in samples]
         y = [float(sample.get("raw_pressure", 0)) for sample in samples]
         y_values.extend(y)
-        label = f"{int(row.get('width_us') or 0)} us rep {int(row.get('replicate') or 0):02d}"
+        if row.get("sequence_index") not in (None, ""):
+            label = f"seq {int(row.get('sequence_index') or 0):02d} / {int(row.get('width_us') or 0)} us"
+        else:
+            label = f"{int(row.get('width_us') or 0)} us rep {int(row.get('replicate') or 0):02d}"
         ax.plot(t, y, linewidth=1.0, alpha=0.75, label=label)
         start = offset + float(row.get("pulse_start_ms") or 0)
         end = offset + float(row.get("pulse_end_ms") or 0)
@@ -540,6 +621,43 @@ def _plot_response_summary(rows: list[dict[str, Any]], plot_dir: Path) -> Path |
     return path
 
 
+def _plot_motor_position_summary(rows: list[dict[str, Any]], plot_dir: Path) -> Path | None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    valid = [
+        row
+        for row in rows
+        if row.get("valid") and row.get("motor_position") not in (None, "")
+    ]
+    if not valid:
+        return None
+    fig, (ax_p, ax_r) = plt.subplots(2, 1, figsize=(10, 8), sharex=True, sharey=True)
+    axes = {"p": ax_p, "r": ax_r}
+    colors = {1500: "tab:blue", 3000: "tab:orange", 4500: "tab:green"}
+    for channel, ax in axes.items():
+        subset = [row for row in valid if row.get("channel") == channel]
+        for width in (1500, 3000, 4500):
+            width_rows = [row for row in subset if int(row.get("width_us") or 0) == width]
+            if not width_rows:
+                continue
+            xs = [float(row.get("motor_position") or 0) for row in width_rows]
+            ys = [float(row.get("settled_drop_raw") or 0) for row in width_rows]
+            ax.scatter(xs, ys, color=colors[width], alpha=0.7, label=f"{width} us")
+        ax.set_title(f"{'Print' if channel == 'p' else 'Refuel'} settled drop vs regulator motor position")
+        ax.set_ylabel("Settled pressure drop (raw)")
+        ax.grid(True, alpha=0.25)
+        ax.legend(loc="best", fontsize=8)
+    ax_r.set_xlabel("Regulator motor position (steps)")
+    fig.tight_layout()
+    path = plot_dir / "valve_char_settled_drop_vs_motor_position.png"
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return path
+
+
 def _plot_ringing_summary(rows: list[dict[str, Any]], plot_dir: Path) -> Path | None:
     import matplotlib
 
@@ -598,7 +716,7 @@ def generate_valve_trace_artifacts(artifacts: RunArtifacts) -> ValveTraceArtifac
     analysis_json.write_text(
         json.dumps(
             {
-                "schema_version": "valve_trace_analysis_v3",
+                "schema_version": "valve_trace_analysis_v4",
                 "baseline_window_ms": BASELINE_WINDOW_MS,
                 "ring_window_after_pulse_end_ms": RING_WINDOW_AFTER_PULSE_END_MS,
                 "settled_start_after_pulse_end_ms": SETTLED_START_AFTER_PULSE_END_MS,
@@ -630,6 +748,9 @@ def generate_valve_trace_artifacts(artifacts: RunArtifacts) -> ValveTraceArtifac
     summary_plot = _plot_response_summary(rows, plot_dir)
     if summary_plot is not None:
         plot_paths.append(summary_plot)
+    motor_plot = _plot_motor_position_summary(rows, plot_dir)
+    if motor_plot is not None:
+        plot_paths.append(motor_plot)
     ringing_plot = _plot_ringing_summary(rows, plot_dir)
     if ringing_plot is not None:
         plot_paths.append(ringing_plot)

@@ -55,6 +55,11 @@ uint32_t absDiff(uint32_t a, uint32_t b) {
   return (a >= b) ? (a - b) : (b - a);
 }
 
+uint16_t interleavedValvePulseWidthUs(size_t sequenceIndexZeroBased) {
+  static constexpr uint16_t kPattern[] = {1500u, 3000u, 4500u, 4500u, 3000u, 1500u};
+  return kPattern[sequenceIndexZeroBased % (sizeof(kPattern) / sizeof(kPattern[0]))];
+}
+
 ResponseValueSummary summarizeResponseValues(const uint32_t* responses, size_t responseCount) {
   ResponseValueSummary summary{};
   if (responses == nullptr || responseCount == 0u) {

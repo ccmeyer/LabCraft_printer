@@ -18,7 +18,9 @@ enum class PressureTraceEventType : uint8_t {
   RecoveryStart,
   RecoveryEnd,
   ReadyEnter,
-  ReadyExit
+  ReadyExit,
+  ValveSequence,
+  MotorPosition
 };
 
 struct PressureTraceSample {

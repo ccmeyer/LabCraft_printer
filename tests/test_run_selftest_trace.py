@@ -392,6 +392,24 @@ def test_run_writes_named_trace_artifacts_for_same_test_id(monkeypatch, tmp_path
     assert not (tmp_path / "selftest_trace_2474.json").exists()
 
 
+def test_decode_pressure_trace_events_names_valve_sequence_and_motor_position():
+    mod = _load_run_selftest()
+    payload = b"".join(
+        [
+            struct.pack("<HBBHH", 4, 10, 0, 12, 1500),
+            struct.pack("<HBBHH", 4, 11, 0, 0xCFC7, 0xFFFF),
+        ]
+    )
+
+    rows = mod.decode_pressure_trace_events_v1(payload)
+
+    assert rows[0]["event_name"] == "valve_sequence"
+    assert rows[0]["value0"] == 12
+    assert rows[0]["value1"] == 1500
+    assert rows[1]["event_name"] == "motor_position"
+    assert rows[1]["value_i32"] == -12345
+
+
 def test_run_sends_pressure_trace_test_selector(monkeypatch, tmp_path):
     mod = _load_run_selftest()
     run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF

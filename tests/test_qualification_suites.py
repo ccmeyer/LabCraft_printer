@@ -145,6 +145,8 @@ def test_valve_characterization_suite_exposes_operator_fixture_and_catalog_rows(
     assert "r15" in rows[2475].metrics
     assert "home_to" in rows[2475].metrics
     assert "1500, 3000, and 4500 us" in rows[2473].evaluates
+    assert "interleaved" in rows[2473].evaluates
+    assert "regulator-position context" in rows[2473].evaluates
     assert "settled pressure-drop" in rows[2473].evaluates
     assert "actuation latency" in rows[2473].evaluates
     assert "without additional valve actuation" in rows[2475].evaluates
