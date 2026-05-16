@@ -244,3 +244,114 @@ TEST(ValvePulseQualificationMath, WindowedValveDropRejectsPulseWithoutPostPulseS
     UNSIGNED_LONGS_EQUAL(0u, summary.pulseCount);
     UNSIGNED_LONGS_EQUAL(1u, summary.rejectCount);
 }
+
+TEST(ValvePulseQualificationMath, ValveCharacterizationReportsSettledDropRingAndLatency) {
+    PressureTraceSample samples[] = {
+        sampleAt(0, 1000),
+        sampleAt(5, 1000),
+        sampleAt(10, 1000),
+        sampleAt(15, 1120),
+        sampleAt(25, 840),
+        sampleAt(60, 990),
+        sampleAt(100, 990),
+        sampleAt(105, 989),
+        sampleAt(110, 991),
+    };
+    PressureTraceEvent events[] = {
+        eventAt(10, PressureTraceEventType::PulseStart, 1500, 1000),
+        eventAt(15, PressureTraceEventType::PulseEnd, 1500, 1000),
+    };
+
+    auto summary = ValvePulseQualificationMath::summarizeWindowedValveCharacterization(
+        samples,
+        sizeof(samples) / sizeof(samples[0]),
+        events,
+        sizeof(events) / sizeof(events[0]),
+        10,
+        60,
+        80,
+        150);
+
+    UNSIGNED_LONGS_EQUAL(1u, summary.pulseCount);
+    UNSIGNED_LONGS_EQUAL(10u, summary.meanSettledDropRaw);
+    UNSIGNED_LONGS_EQUAL(160u, summary.meanRingRaw);
+    UNSIGNED_LONGS_EQUAL(5u, summary.meanLatencyMs);
+    UNSIGNED_LONGS_EQUAL(0u, summary.rejectCount);
+}
+
+TEST(ValvePulseQualificationMath, ValveCharacterizationUsesSettledMedianAfterRinging) {
+    PressureTraceSample samples[] = {
+        sampleAt(0, 1000),
+        sampleAt(5, 1000),
+        sampleAt(10, 1000),
+        sampleAt(15, 1070),
+        sampleAt(30, 920),
+        sampleAt(100, 991),
+        sampleAt(105, 990),
+        sampleAt(110, 800),
+        sampleAt(115, 990),
+    };
+    PressureTraceEvent events[] = {
+        eventAt(10, PressureTraceEventType::PulseStart, 3000, 1000),
+        eventAt(15, PressureTraceEventType::PulseEnd, 3000, 1000),
+    };
+
+    auto summary = ValvePulseQualificationMath::summarizeWindowedValveCharacterization(
+        samples,
+        sizeof(samples) / sizeof(samples[0]),
+        events,
+        sizeof(events) / sizeof(events[0]),
+        10,
+        60,
+        80,
+        150);
+
+    UNSIGNED_LONGS_EQUAL(1u, summary.pulseCount);
+    UNSIGNED_LONGS_EQUAL(10u, summary.meanSettledDropRaw);
+    UNSIGNED_LONGS_EQUAL(80u, summary.meanRingRaw);
+}
+
+TEST(ValvePulseQualificationMath, ValveCharacterizationRejectsMissingLatencyOrSettledSamples) {
+    PressureTraceSample noLatencySamples[] = {
+        sampleAt(0, 1000),
+        sampleAt(5, 1000),
+        sampleAt(10, 1000),
+        sampleAt(15, 1001),
+        sampleAt(100, 990),
+    };
+    PressureTraceSample noSettledSamples[] = {
+        sampleAt(0, 1000),
+        sampleAt(5, 1000),
+        sampleAt(10, 1000),
+        sampleAt(15, 1070),
+        sampleAt(30, 920),
+    };
+    PressureTraceEvent events[] = {
+        eventAt(10, PressureTraceEventType::PulseStart, 3000, 1000),
+        eventAt(15, PressureTraceEventType::PulseEnd, 3000, 1000),
+    };
+
+    auto noLatency = ValvePulseQualificationMath::summarizeWindowedValveCharacterization(
+        noLatencySamples,
+        sizeof(noLatencySamples) / sizeof(noLatencySamples[0]),
+        events,
+        sizeof(events) / sizeof(events[0]),
+        10,
+        60,
+        80,
+        150);
+    auto noSettled = ValvePulseQualificationMath::summarizeWindowedValveCharacterization(
+        noSettledSamples,
+        sizeof(noSettledSamples) / sizeof(noSettledSamples[0]),
+        events,
+        sizeof(events) / sizeof(events[0]),
+        10,
+        60,
+        80,
+        150);
+
+    UNSIGNED_LONGS_EQUAL(0u, noLatency.pulseCount);
+    UNSIGNED_LONGS_EQUAL(1u, noLatency.rejectCount);
+    UNSIGNED_LONGS_EQUAL(0u, noSettled.pulseCount);
+    UNSIGNED_LONGS_EQUAL(1u, noSettled.rejectCount);
+}

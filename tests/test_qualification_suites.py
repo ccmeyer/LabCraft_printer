@@ -140,10 +140,11 @@ def test_valve_characterization_suite_exposes_operator_fixture_and_catalog_rows(
     assert "cv15" in rows[2473].metrics
     assert "home_to" in rows[2473].metrics
     assert "fresh_to" in rows[2473].metrics
-    assert "pk15" in rows[2473].metrics
+    assert "rg15" in rows[2473].metrics
+    assert "lt15" in rows[2473].metrics
     assert "r15" in rows[2475].metrics
     assert "home_to" in rows[2475].metrics
     assert "1500, 3000, and 4500 us" in rows[2473].evaluates
-    assert "focused pressure sampling" in rows[2473].evaluates
-    assert "regulator recovery between replicates" in rows[2473].evaluates
+    assert "settled pressure-drop" in rows[2473].evaluates
+    assert "actuation latency" in rows[2473].evaluates
     assert "without additional valve actuation" in rows[2475].evaluates

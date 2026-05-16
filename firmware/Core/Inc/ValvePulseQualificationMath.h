@@ -46,6 +46,24 @@ struct WindowedValveDropSummary {
   uint32_t maxSpikeRaw = 0;
 };
 
+struct WindowedValveCharacterizationSummary {
+  uint32_t pulseCount = 0;
+  uint32_t meanSettledDropRaw = 0;
+  uint32_t settledDropCvPct = 0;
+  int32_t settledDropSlopeRawPerPulse = 0;
+  uint32_t outlierCount = 0;
+  uint32_t rejectCount = 0;
+  uint32_t minSettledDropRaw = 0;
+  uint32_t maxSettledDropRaw = 0;
+  uint32_t spanSettledDropRaw = 0;
+  uint32_t meanRingRaw = 0;
+  uint32_t minRingRaw = 0;
+  uint32_t maxRingRaw = 0;
+  uint32_t meanLatencyMs = 0;
+  uint32_t minLatencyMs = 0;
+  uint32_t maxLatencyMs = 0;
+};
+
 struct ThreeWidthLinearitySummary {
   uint32_t monotonic = 0;
   uint32_t gainRaw = 0;
@@ -84,6 +102,15 @@ WindowedValveDropSummary summarizeWindowedValveDrops(const PressureTraceSample* 
                                                      size_t eventCount,
                                                      uint32_t baselineWindowMs,
                                                      uint32_t dropWindowAfterPulseEndMs);
+WindowedValveCharacterizationSummary summarizeWindowedValveCharacterization(
+    const PressureTraceSample* samples,
+    size_t sampleCount,
+    const PressureTraceEvent* events,
+    size_t eventCount,
+    uint32_t baselineWindowMs,
+    uint32_t ringWindowAfterPulseEndMs,
+    uint32_t settledStartAfterPulseEndMs,
+    uint32_t settledEndAfterPulseEndMs);
 
 }  // namespace ValvePulseQualificationMath
 

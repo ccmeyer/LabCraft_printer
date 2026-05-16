@@ -5,6 +5,7 @@ namespace ValvePulseQualificationMath {
 namespace {
 
 static constexpr size_t kMaxAnalyzedPulses = 64u;
+static constexpr size_t kMaxSettledWindowSamples = 64u;
 
 uint32_t integerSqrt(uint64_t value) {
   uint64_t result = 0;
@@ -26,6 +27,26 @@ uint32_t integerSqrt(uint64_t value) {
 
 uint16_t eventType(PressureTraceEventType type) {
   return static_cast<uint16_t>(static_cast<uint8_t>(type));
+}
+
+uint32_t medianOf(uint32_t* values, size_t count) {
+  if (values == nullptr || count == 0u) {
+    return 0u;
+  }
+  for (size_t i = 1u; i < count; ++i) {
+    const uint32_t value = values[i];
+    size_t j = i;
+    while (j > 0u && values[j - 1u] > value) {
+      values[j] = values[j - 1u];
+      --j;
+    }
+    values[j] = value;
+  }
+  const size_t mid = count / 2u;
+  if ((count & 1u) != 0u) {
+    return values[mid];
+  }
+  return static_cast<uint32_t>((static_cast<uint64_t>(values[mid - 1u]) + values[mid] + 1u) / 2u);
 }
 
 }  // namespace
@@ -443,6 +464,151 @@ WindowedValveDropSummary summarizeWindowedValveDrops(const PressureTraceSample* 
   if (summary.pulseCount > 1u) {
     summary.dropSlopeRawPerPulse =
         (static_cast<int32_t>(drops[summary.pulseCount - 1u]) - static_cast<int32_t>(drops[0])) /
+        static_cast<int32_t>(summary.pulseCount - 1u);
+  }
+
+  return summary;
+}
+
+WindowedValveCharacterizationSummary summarizeWindowedValveCharacterization(
+    const PressureTraceSample* samples,
+    size_t sampleCount,
+    const PressureTraceEvent* events,
+    size_t eventCount,
+    uint32_t baselineWindowMs,
+    uint32_t ringWindowAfterPulseEndMs,
+    uint32_t settledStartAfterPulseEndMs,
+    uint32_t settledEndAfterPulseEndMs) {
+  WindowedValveCharacterizationSummary summary{};
+  if (samples == nullptr || sampleCount == 0u || events == nullptr || eventCount == 0u ||
+      settledEndAfterPulseEndMs <= settledStartAfterPulseEndMs) {
+    return summary;
+  }
+
+  uint32_t settledDrops[kMaxAnalyzedPulses]{};
+  uint32_t ringAmps[kMaxAnalyzedPulses]{};
+  uint32_t latencies[kMaxAnalyzedPulses]{};
+
+  for (size_t i = 0; i < eventCount; ++i) {
+    const PressureTraceEvent& startEv = events[i];
+    if (startEv.type != eventType(PressureTraceEventType::PulseStart)) {
+      continue;
+    }
+
+    const PressureTraceEvent* endEv = nullptr;
+    for (size_t j = i + 1u; j < eventCount; ++j) {
+      if (events[j].type == eventType(PressureTraceEventType::PulseEnd)) {
+        endEv = &events[j];
+        break;
+      }
+    }
+    if (endEv == nullptr) {
+      summary.rejectCount++;
+      continue;
+    }
+
+    const uint32_t startDt = startEv.dtMs;
+    const uint32_t endDt = endEv->dtMs;
+    const uint32_t baselineStart = (startDt > baselineWindowMs) ? (startDt - baselineWindowMs) : 0u;
+
+    uint64_t baselineSum = 0u;
+    uint32_t baselineCount = 0u;
+    for (size_t s = 0; s < sampleCount; ++s) {
+      const uint32_t sampleDt = samples[s].dtMs;
+      if (sampleDt >= baselineStart && sampleDt <= startDt) {
+        baselineSum += samples[s].rawPressure;
+        baselineCount++;
+      }
+    }
+    if (baselineCount == 0u) {
+      summary.rejectCount++;
+      continue;
+    }
+    const uint32_t baseline = static_cast<uint32_t>((baselineSum + (baselineCount / 2u)) / baselineCount);
+
+    uint64_t baselineSquaredDiff = 0u;
+    for (size_t s = 0; s < sampleCount; ++s) {
+      const uint32_t sampleDt = samples[s].dtMs;
+      if (sampleDt >= baselineStart && sampleDt <= startDt) {
+        const uint32_t diff = absDiff(samples[s].rawPressure, baseline);
+        baselineSquaredDiff += static_cast<uint64_t>(diff) * static_cast<uint64_t>(diff);
+      }
+    }
+    const uint32_t baselineStd = integerSqrt(baselineSquaredDiff / baselineCount);
+    uint32_t latencyThreshold = baselineStd * 6u;
+    if (latencyThreshold < 5u) {
+      latencyThreshold = 5u;
+    }
+
+    const uint32_t ringEnd = endDt + ringWindowAfterPulseEndMs;
+    bool haveRingSample = false;
+    bool haveLatency = false;
+    uint32_t ringAmp = 0u;
+    uint32_t latencyMs = 0u;
+    for (size_t s = 0; s < sampleCount; ++s) {
+      const uint32_t sampleDt = samples[s].dtMs;
+      if (sampleDt < startDt || sampleDt > ringEnd) {
+        continue;
+      }
+      const uint32_t deviation = absDiff(samples[s].rawPressure, baseline);
+      if (!haveRingSample || deviation > ringAmp) {
+        ringAmp = deviation;
+      }
+      haveRingSample = true;
+      if (!haveLatency && deviation >= latencyThreshold) {
+        latencyMs = sampleDt - startDt;
+        haveLatency = true;
+      }
+    }
+
+    uint32_t settledPressures[kMaxSettledWindowSamples]{};
+    size_t settledCount = 0u;
+    const uint32_t settledStart = endDt + settledStartAfterPulseEndMs;
+    const uint32_t settledEnd = endDt + settledEndAfterPulseEndMs;
+    for (size_t s = 0; s < sampleCount && settledCount < kMaxSettledWindowSamples; ++s) {
+      const uint32_t sampleDt = samples[s].dtMs;
+      if (sampleDt >= settledStart && sampleDt <= settledEnd) {
+        settledPressures[settledCount++] = samples[s].rawPressure;
+      }
+    }
+
+    if (!haveRingSample || !haveLatency || settledCount == 0u || summary.pulseCount >= kMaxAnalyzedPulses) {
+      summary.rejectCount++;
+      continue;
+    }
+
+    const uint32_t settledPressure = medianOf(settledPressures, settledCount);
+    const uint32_t settledDrop = (baseline > settledPressure) ? (baseline - settledPressure) : 0u;
+    settledDrops[summary.pulseCount] = settledDrop;
+    ringAmps[summary.pulseCount] = ringAmp;
+    latencies[summary.pulseCount] = latencyMs;
+    summary.pulseCount++;
+  }
+
+  if (summary.pulseCount == 0u) {
+    return summary;
+  }
+
+  const auto settledSummary = summarizeResponseValues(settledDrops, summary.pulseCount);
+  const auto ringSummary = summarizeResponseValues(ringAmps, summary.pulseCount);
+  const auto latencySummary = summarizeResponseValues(latencies, summary.pulseCount);
+
+  summary.meanSettledDropRaw = settledSummary.meanRaw;
+  summary.settledDropCvPct = settledSummary.cvPct;
+  summary.outlierCount = settledSummary.outlierCount;
+  summary.minSettledDropRaw = settledSummary.minRaw;
+  summary.maxSettledDropRaw = settledSummary.maxRaw;
+  summary.spanSettledDropRaw = settledSummary.spanRaw;
+  summary.meanRingRaw = ringSummary.meanRaw;
+  summary.minRingRaw = ringSummary.minRaw;
+  summary.maxRingRaw = ringSummary.maxRaw;
+  summary.meanLatencyMs = latencySummary.meanRaw;
+  summary.minLatencyMs = latencySummary.minRaw;
+  summary.maxLatencyMs = latencySummary.maxRaw;
+
+  if (summary.pulseCount > 1u) {
+    summary.settledDropSlopeRawPerPulse =
+        (static_cast<int32_t>(settledDrops[summary.pulseCount - 1u]) - static_cast<int32_t>(settledDrops[0])) /
         static_cast<int32_t>(summary.pulseCount - 1u);
   }
 

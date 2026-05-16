@@ -940,12 +940,12 @@ Valve characterization qualification slice:
 
 - Add `valve_characterization_v1` as a separate operator-gated FULL manifest requiring fixture `valve_closed_loop_pulse_matrix_v1`.
 - Select the suite with existing `CMD_SELFTEST_START` selector field value `2499`; no protocol layout or opcode changes.
-- Firmware rows `2473` and `2474` compare print and refuel valves at `2 psi=3386`, across matched `1500`, `3000`, and `4500 us` pulse widths with regulator recovery between independent pulse replicates.
+- Firmware rows `2473` and `2474` compare print and refuel valves at `2 psi=3386`, across matched `1500`, `3000`, and `4500 us` pulse widths with one unmeasured conditioning pulse per width and regulator recovery between independent measured replicates.
 - The suite homes P/R regulators asynchronously once at startup and reports `home_to` on every row so selected valve rows do not depend on the default FULL-suite motion-home gate.
 - Row `2475` derives print/refuel channel balance from the isolated 2 psi rows without additional valve actuation.
 - Active-regulator recovery behavior is deferred to a future dummy-head or restricted-flow fixture suite so this slice focuses on valve actuation repeatability and pulse-width linearity.
-- Valve response is computed from trace sample windows around each pulse rather than immediate pulse-start/pulse-end event deltas, so the metric reflects the observed post-pulse pressure response.
-- When `valve_characterization_v1` runs, it focuses pressure sampling on the tested channel, aligns each pulse to a fresh sample, and exports per-replicate annotated pressure trace artifacts and static plots for stitched time-course review, replicate overlays, response-vs-width trends, and baseline noise / signal-to-noise inspection. Linearity uses post-pulse trough/drop response while positive spikes are reported separately.
+- Valve response is computed from trace sample windows around each pulse rather than immediate pulse-start/pulse-end event deltas. The main `m15/m30/m45` linearity metrics now use the post-ring settled pressure drop, measured from the median pressure in the `pulse_end+80 ms` to `pulse_end+150 ms` window.
+- When `valve_characterization_v1` runs, it focuses pressure sampling on the tested channel, aligns each pulse to a fresh sample, and exports per-replicate annotated pressure trace artifacts and static plots for stitched time-course review, replicate overlays, settled response-vs-width trends, ringing amplitude, actuation latency, and baseline noise / signal-to-noise inspection. Transient ringing amplitude and first-deviation latency are reported separately as `rg*` and `lt*`.
 - Keep response magnitude and balance metrics informational for the first data-collection slice; analyzer rules focus on execution integrity such as timeout, readiness, sample/event availability, rejects, and deadline slip.
 - Keep `valve_characterization_v1` out of `factory_acceptance_v3` until enough fixture data exists to set meaningful acceptance thresholds.
 

@@ -163,7 +163,12 @@ def test_load_valve_characterization_manifest_requires_operator_closed_loop_fixt
     assert manifest.analysis_rules["2473"]["metrics"]["focus"]["equals"] == 1
     assert manifest.analysis_rules["2473"]["metrics"]["mono"]["equals"] == 1
     assert manifest.analysis_rules["2473"]["metrics"]["m15"]["maturity"] == "informational"
-    assert manifest.analysis_rules["2473"]["metrics"]["pk15"]["maturity"] == "informational"
+    assert manifest.analysis_rules["2473"]["metrics"]["rg15"]["maturity"] == "informational"
+    assert manifest.analysis_rules["2473"]["metrics"]["lt15"]["maturity"] == "informational"
+    assert manifest.analysis_rules["2473"]["metrics"]["rw"]["maturity"] == "informational"
+    assert manifest.analysis_rules["2473"]["metrics"]["sw"]["maturity"] == "informational"
+    assert "pk15" not in manifest.analysis_rules["2473"]["metrics"]
+    assert "sp15" not in manifest.analysis_rules["2473"]["metrics"]
     assert "slip_w" not in manifest.analysis_rules["2473"]["metrics"]
     assert "gain" not in manifest.analysis_rules["2473"]["metrics"]
     assert manifest.analysis_rules["2475"]["metrics"]["home_to"]["equals"] == 0

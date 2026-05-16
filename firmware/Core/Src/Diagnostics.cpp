@@ -3814,13 +3814,16 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         static constexpr uint32_t kValveCharFocusedSampleMs = 5u;
                         static constexpr uint32_t kValveCharFreshSampleTimeoutMs = 60u;
                         static constexpr uint32_t kValveCharBaselineWindowMs = 10u;
-                        static constexpr uint32_t kValveCharDropWindowMs = 80u;
+                        static constexpr uint32_t kValveCharRingWindowMs = 60u;
+                        static constexpr uint32_t kValveCharSettledStartMs = 80u;
+                        static constexpr uint32_t kValveCharSettledEndMs = 150u;
 
                         struct ValveCharWidthResult {
                           uint32_t mean = 0u;
                           uint32_t cv = 0u;
                           uint32_t span = 0u;
-                          uint32_t peak = 0u;
+                          uint32_t ring = 0u;
+                          uint32_t latency = 0u;
                           uint32_t out = 0u;
                           uint32_t rej = 0u;
                           uint32_t ready = 0u;
@@ -3835,7 +3838,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           uint32_t mean[3] = {0u, 0u, 0u};
                           uint32_t cv[3] = {0u, 0u, 0u};
                           uint32_t span[3] = {0u, 0u, 0u};
-                          uint32_t peak[3] = {0u, 0u, 0u};
+                          uint32_t ring[3] = {0u, 0u, 0u};
+                          uint32_t latency[3] = {0u, 0u, 0u};
                           uint32_t out = 0u;
                           uint32_t rej = 0u;
                           uint32_t ready = 0u;
@@ -3908,7 +3912,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           row.mean[widthIndex] = result.mean;
                           row.cv[widthIndex] = result.cv;
                           row.span[widthIndex] = result.span;
-                          row.peak[widthIndex] = result.peak;
+                          row.ring[widthIndex] = result.ring;
+                          row.latency[widthIndex] = result.latency;
                           row.out += result.out;
                           row.rej += result.rej;
                           row.ready += result.ready;
@@ -3993,9 +3998,12 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           }
 
                           uint32_t responses[kValveCharReplicates]{};
-                          uint32_t spikes[kValveCharReplicates]{};
+                          uint32_t rings[kValveCharReplicates]{};
+                          uint32_t latencies[kValveCharReplicates]{};
                           uint32_t responseCount = 0u;
-                          for (uint16_t rep = 0u; rep < kValveCharReplicates && !_selfTestAbortRequested; ++rep) {
+                          for (uint16_t cycle = 0u; cycle < (kValveCharReplicates + 1u) && !_selfTestAbortRequested; ++cycle) {
+                            const bool measured = cycle > 0u;
+                            const uint16_t rep = measured ? static_cast<uint16_t>(cycle - 1u) : 0u;
                             reg.start();
                             xEventGroupClearBits(_doneEvents, pressureBitForChannel(channel));
                             reg.setTargetSafe(targetRaw);
@@ -4055,13 +4063,25 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             reg.endDispenseQuiet(2u);
                             (void)delayWithWatchdog(10u, "valve_char_pause_release");
 
-                            const auto response = ValvePulseQualificationMath::summarizeWindowedValveDrops(
+                            if (!measured) {
+                              if (timeout) {
+                                result.timeout++;
+                                result.rej++;
+                              } else if (!freshOk) {
+                                result.rej++;
+                              }
+                              continue;
+                            }
+
+                            const auto response = ValvePulseQualificationMath::summarizeWindowedValveCharacterization(
                                 recorder.samples(),
                                 recorder.sampleCount(),
                                 recorder.events(),
                                 recorder.eventCount(),
                                 kValveCharBaselineWindowMs,
-                                kValveCharDropWindowMs);
+                                kValveCharRingWindowMs,
+                                kValveCharSettledStartMs,
+                                kValveCharSettledEndMs);
                             char traceName[48];
                             snprintf(traceName,
                                      sizeof(traceName),
@@ -4074,8 +4094,10 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             if (response.pulseCount < 1u) {
                               result.rej++;
                             } else if (responseCount < kValveCharReplicates) {
-                              responses[responseCount++] = response.meanDropRaw;
-                              spikes[responseCount - 1u] = response.meanSpikeRaw;
+                              responses[responseCount] = response.meanSettledDropRaw;
+                              rings[responseCount] = response.meanRingRaw;
+                              latencies[responseCount] = response.meanLatencyMs;
+                              responseCount++;
                             }
                             result.out += response.outlierCount;
                             result.sc += recorder.sampleCount();
@@ -4093,10 +4115,14 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           result.cv = aggregate.cvPct;
                           result.span = aggregate.spanRaw;
                           result.out += aggregate.outlierCount;
-                          const auto spikeAggregate = ValvePulseQualificationMath::summarizeResponseValues(
-                              spikes,
+                          const auto ringAggregate = ValvePulseQualificationMath::summarizeResponseValues(
+                              rings,
                               responseCount);
-                          result.peak = spikeAggregate.meanRaw;
+                          result.ring = ringAggregate.meanRaw;
+                          const auto latencyAggregate = ValvePulseQualificationMath::summarizeResponseValues(
+                              latencies,
+                              responseCount);
+                          result.latency = latencyAggregate.meanRaw;
                           result.pass = !_selfTestAbortRequested &&
                                         (responseCount == kValveCharReplicates) &&
                                         (result.ready == 0u) &&
@@ -4117,7 +4143,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                                        const ValveCharRowSummary& row) -> bool {
                           char metrics[256];
                           snprintf(metrics, sizeof(metrics),
-                                   "ch=%c;home_to=0;timeout=%lu;ready=%lu;rej=%lu;sc=%lu;ec=%lu;focus=1;sm=%lu;fresh_to=%lu;dw=%lu;m15=%lu;m30=%lu;m45=%lu;cv15=%lu;cv30=%lu;cv45=%lu;sp15=%lu;sp30=%lu;sp45=%lu;pk15=%lu;pk30=%lu;pk45=%lu;mono=%lu",
+                                   "ch=%c;home_to=0;timeout=%lu;ready=%lu;rej=%lu;sc=%lu;ec=%lu;focus=1;sm=%lu;fresh_to=%lu;rw=%lu;sw=%lu;m15=%lu;m30=%lu;m45=%lu;cv15=%lu;cv30=%lu;cv45=%lu;rg15=%lu;rg30=%lu;rg45=%lu;lt15=%lu;lt30=%lu;lt45=%lu;mono=%lu",
                                    ch,
                                    static_cast<unsigned long>(row.timeout),
                                    static_cast<unsigned long>(row.ready),
@@ -4126,19 +4152,20 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                    static_cast<unsigned long>(row.ec),
                                    static_cast<unsigned long>(kValveCharFocusedSampleMs),
                                    static_cast<unsigned long>(row.freshTo),
-                                   static_cast<unsigned long>(kValveCharDropWindowMs),
+                                   static_cast<unsigned long>(kValveCharRingWindowMs),
+                                   static_cast<unsigned long>(kValveCharSettledStartMs),
                                    static_cast<unsigned long>(row.mean[0]),
                                    static_cast<unsigned long>(row.mean[1]),
                                    static_cast<unsigned long>(row.mean[2]),
                                    static_cast<unsigned long>(row.cv[0]),
                                    static_cast<unsigned long>(row.cv[1]),
                                    static_cast<unsigned long>(row.cv[2]),
-                                   static_cast<unsigned long>(row.span[0]),
-                                   static_cast<unsigned long>(row.span[1]),
-                                   static_cast<unsigned long>(row.span[2]),
-                                   static_cast<unsigned long>(row.peak[0]),
-                                   static_cast<unsigned long>(row.peak[1]),
-                                   static_cast<unsigned long>(row.peak[2]),
+                                   static_cast<unsigned long>(row.ring[0]),
+                                   static_cast<unsigned long>(row.ring[1]),
+                                   static_cast<unsigned long>(row.ring[2]),
+                                   static_cast<unsigned long>(row.latency[0]),
+                                   static_cast<unsigned long>(row.latency[1]),
+                                   static_cast<unsigned long>(row.latency[2]),
                                    static_cast<unsigned long>(row.mono));
                           return runOne(testId, name, row.pass, metrics);
                         };
@@ -4148,10 +4175,11 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                                                   char ch) -> bool {
                           char metrics[256];
                           snprintf(metrics, sizeof(metrics),
-                                   "ch=%c;home_to=1;timeout=0;ready=0;rej=30;sc=0;ec=0;focus=0;sm=%lu;fresh_to=0;dw=%lu;m15=0;m30=0;m45=0;cv15=0;cv30=0;cv45=0;sp15=0;sp30=0;sp45=0;pk15=0;pk30=0;pk45=0;mono=0;gate=home_reference",
+                                   "ch=%c;home_to=1;timeout=0;ready=0;rej=30;sc=0;ec=0;focus=0;sm=%lu;fresh_to=0;rw=%lu;sw=%lu;m15=0;m30=0;m45=0;cv15=0;cv30=0;cv45=0;rg15=0;rg30=0;rg45=0;lt15=0;lt30=0;lt45=0;mono=0;gate=home_reference",
                                    ch,
                                    static_cast<unsigned long>(kValveCharFocusedSampleMs),
-                                   static_cast<unsigned long>(kValveCharDropWindowMs));
+                                   static_cast<unsigned long>(kValveCharRingWindowMs),
+                                   static_cast<unsigned long>(kValveCharSettledStartMs));
                           return runOne(testId, name, false, metrics);
                         };
 

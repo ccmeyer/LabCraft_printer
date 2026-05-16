@@ -14,7 +14,11 @@ from .artifacts import RunArtifacts
 
 VALVE_TRACE_RE = re.compile(r"^valve_char_(?P<channel>[pr])_w(?P<width>\d+)_rep(?P<rep>\d+)$")
 BASELINE_WINDOW_MS = 10.0
-DROP_WINDOW_AFTER_PULSE_END_MS = 80.0
+RING_WINDOW_AFTER_PULSE_END_MS = 60.0
+SETTLED_START_AFTER_PULSE_END_MS = 80.0
+SETTLED_END_AFTER_PULSE_END_MS = 150.0
+LATENCY_MIN_THRESHOLD_RAW = 5.0
+LATENCY_BASELINE_STD_MULTIPLIER = 6.0
 
 
 @dataclass(frozen=True)
@@ -43,6 +47,16 @@ def _std(values: list[float]) -> float:
     return math.sqrt(sum((value - avg) ** 2 for value in values) / float(len(values)))
 
 
+def _median(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
 def _first_event(events: list[dict[str, Any]], event_name: str) -> dict[str, Any] | None:
     for event in events:
         if event.get("event_name") == event_name:
@@ -50,10 +64,9 @@ def _first_event(events: list[dict[str, Any]], event_name: str) -> dict[str, Any
     return None
 
 
-def _point_for_pressure(samples: list[dict[str, Any]], pressure: float, start_ms: float, end_ms: float) -> dict[str, Any] | None:
+def _sample_at_dt(samples: list[dict[str, Any]], dt_ms: float) -> dict[str, Any] | None:
     for sample in samples:
-        dt = float(sample.get("dt_ms", 0))
-        if start_ms <= dt <= end_ms and float(sample.get("raw_pressure", 0)) == pressure:
+        if float(sample.get("dt_ms", 0)) == dt_ms:
             return sample
     return None
 
@@ -91,44 +104,72 @@ def analyze_valve_trace(trace: dict[str, Any], *, source_path: str | Path | None
     start_ms = float(pulse_start.get("dt_ms", 0))
     end_ms = float(pulse_end.get("dt_ms", start_ms))
     baseline_start_ms = max(0.0, start_ms - BASELINE_WINDOW_MS)
-    drop_start_ms = end_ms
-    drop_end_ms = end_ms + DROP_WINDOW_AFTER_PULSE_END_MS
+    ring_start_ms = start_ms
+    ring_end_ms = end_ms + RING_WINDOW_AFTER_PULSE_END_MS
+    settled_start_ms = end_ms + SETTLED_START_AFTER_PULSE_END_MS
+    settled_end_ms = end_ms + SETTLED_END_AFTER_PULSE_END_MS
 
     baseline_samples = [
         float(sample.get("raw_pressure", 0))
         for sample in samples
         if baseline_start_ms <= float(sample.get("dt_ms", 0)) <= start_ms
     ]
-    drop_samples = [
+    ring_samples = [
         sample
         for sample in samples
-        if drop_start_ms <= float(sample.get("dt_ms", 0)) <= drop_end_ms
+        if ring_start_ms <= float(sample.get("dt_ms", 0)) <= ring_end_ms
     ]
-    spike_samples = [
+    settled_samples = [
         sample
         for sample in samples
-        if start_ms <= float(sample.get("dt_ms", 0)) <= drop_end_ms
+        if settled_start_ms <= float(sample.get("dt_ms", 0)) <= settled_end_ms
     ]
-    if not baseline_samples or not drop_samples:
-        row["reason"] = "missing_baseline_or_drop_samples"
+    if not baseline_samples or not ring_samples or not settled_samples:
+        row["reason"] = "missing_baseline_ring_or_settled_samples"
         return row
 
     baseline_mean = _mean(baseline_samples)
     baseline_std = _std(baseline_samples)
     baseline_min = min(baseline_samples)
     baseline_max = max(baseline_samples)
+    latency_threshold = max(LATENCY_MIN_THRESHOLD_RAW, baseline_std * LATENCY_BASELINE_STD_MULTIPLIER)
 
-    drop_pressures = [float(sample.get("raw_pressure", 0)) for sample in drop_samples]
-    spike_pressures = [float(sample.get("raw_pressure", 0)) for sample in spike_samples] or drop_pressures
-    min_pressure = min(drop_pressures)
-    max_pressure = max(spike_pressures)
-    drop_raw = max(0.0, baseline_mean - min_pressure)
+    ring_pressures = [float(sample.get("raw_pressure", 0)) for sample in ring_samples]
+    min_pressure = min(ring_pressures)
+    max_pressure = max(ring_pressures)
+    trough_dt = float(min(ring_samples, key=lambda sample: float(sample.get("raw_pressure", 0))).get("dt_ms", end_ms))
+    peak_dt = float(max(ring_samples, key=lambda sample: float(sample.get("raw_pressure", 0))).get("dt_ms", start_ms))
+    trough_drop_raw = max(0.0, baseline_mean - min_pressure)
     spike_raw = max(0.0, max_pressure - baseline_mean)
-    response_raw = drop_raw
-    trough_sample = _point_for_pressure(samples, min_pressure, drop_start_ms, drop_end_ms)
-    trough_ms = float(trough_sample.get("dt_ms", end_ms)) if trough_sample is not None else end_ms
-    peak_sample = _point_for_pressure(samples, max_pressure, start_ms, drop_end_ms)
-    peak_ms = float(peak_sample.get("dt_ms", start_ms)) if peak_sample is not None else start_ms
+
+    ring_sample = max(
+        ring_samples,
+        key=lambda sample: abs(float(sample.get("raw_pressure", 0)) - baseline_mean),
+    )
+    ring_dt = float(ring_sample.get("dt_ms", start_ms))
+    ring_pressure = float(ring_sample.get("raw_pressure", baseline_mean))
+    ring_amp = abs(ring_pressure - baseline_mean)
+
+    latency_sample = next(
+        (
+            sample
+            for sample in ring_samples
+            if abs(float(sample.get("raw_pressure", 0)) - baseline_mean) >= latency_threshold
+        ),
+        None,
+    )
+    if latency_sample is None:
+        row["reason"] = "missing_latency_threshold_crossing"
+        return row
+    latency_dt = float(latency_sample.get("dt_ms", start_ms))
+    latency_pressure = float(latency_sample.get("raw_pressure", baseline_mean))
+
+    settled_pressures = [float(sample.get("raw_pressure", 0)) for sample in settled_samples]
+    settled_pressure = _median(settled_pressures)
+    settled_mean = _mean(settled_pressures)
+    settled_std = _std(settled_pressures)
+    settled_span = max(settled_pressures) - min(settled_pressures)
+    settled_drop = max(0.0, baseline_mean - settled_pressure)
 
     row.update(
         {
@@ -139,32 +180,47 @@ def analyze_valve_trace(trace: dict[str, Any], *, source_path: str | Path | None
             "pulse_end_ms": end_ms,
             "baseline_start_ms": baseline_start_ms,
             "baseline_end_ms": start_ms,
-            "drop_start_ms": drop_start_ms,
-            "drop_end_ms": drop_end_ms,
-            "response_end_ms": drop_end_ms,
             "baseline_mean_raw": baseline_mean,
             "baseline_std_raw": baseline_std,
             "baseline_span_raw": baseline_max - baseline_min,
+            "ring_start_ms": ring_start_ms,
+            "ring_end_ms": ring_end_ms,
+            "ring_amp_raw": ring_amp,
+            "ring_dt_ms": ring_dt,
+            "ring_after_start_ms": ring_dt - start_ms,
+            "ring_pressure_raw": ring_pressure,
+            "latency_threshold_raw": latency_threshold,
+            "latency_ms": latency_dt - start_ms,
+            "latency_dt_ms": latency_dt,
+            "latency_pressure_raw": latency_pressure,
+            "settled_start_ms": settled_start_ms,
+            "settled_end_ms": settled_end_ms,
+            "settled_pressure_raw": settled_pressure,
+            "settled_mean_pressure_raw": settled_mean,
+            "settled_std_raw": settled_std,
+            "settled_span_raw": settled_span,
+            "settled_drop_raw": settled_drop,
             "min_pressure_raw": min_pressure,
             "max_pressure_raw": max_pressure,
             "trough_pressure_raw": min_pressure,
-            "trough_dt_ms": trough_ms,
-            "trough_after_start_ms": trough_ms - start_ms,
-            "trough_after_end_ms": trough_ms - end_ms,
+            "trough_dt_ms": trough_dt,
+            "trough_after_start_ms": trough_dt - start_ms,
+            "trough_after_end_ms": trough_dt - end_ms,
+            "trough_drop_raw": trough_drop_raw,
             "peak_pressure_raw": max_pressure,
-            "peak_dt_ms": peak_ms,
-            "peak_after_start_ms": peak_ms - start_ms,
-            "peak_after_end_ms": peak_ms - end_ms,
-            "selected_pressure_raw": min_pressure,
-            "selected_dt_ms": trough_ms,
-            "selected_after_start_ms": trough_ms - start_ms,
-            "drop_raw": drop_raw,
+            "peak_dt_ms": peak_dt,
+            "peak_after_start_ms": peak_dt - start_ms,
+            "peak_after_end_ms": peak_dt - end_ms,
             "spike_raw": spike_raw,
             "rise_raw": spike_raw,
-            "response_raw": response_raw,
-            "response_kind": "drop",
-            "snr_std": None if baseline_std <= 0.0 else response_raw / baseline_std,
-            "snr_span": None if (baseline_max - baseline_min) <= 0.0 else response_raw / (baseline_max - baseline_min),
+            "drop_raw": settled_drop,
+            "response_raw": settled_drop,
+            "response_kind": "settled_drop",
+            "selected_pressure_raw": settled_pressure,
+            "selected_dt_ms": (settled_start_ms + settled_end_ms) / 2.0,
+            "selected_after_start_ms": ((settled_start_ms + settled_end_ms) / 2.0) - start_ms,
+            "snr_std": None if baseline_std <= 0.0 else settled_drop / baseline_std,
+            "snr_span": None if (baseline_max - baseline_min) <= 0.0 else settled_drop / (baseline_max - baseline_min),
         }
     )
     return row
@@ -205,8 +261,9 @@ def _summary_by_condition(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     keys = sorted({(row.get("channel"), row.get("width_us")) for row in rows if row.get("valid")})
     for channel, width_us in keys:
         subset = [row for row in rows if row.get("valid") and row.get("channel") == channel and row.get("width_us") == width_us]
-        responses = [float(row.get("drop_raw") or 0) for row in subset]
-        spikes = [float(row.get("spike_raw") or 0) for row in subset]
+        settled = [float(row.get("settled_drop_raw") or 0) for row in subset]
+        ring = [float(row.get("ring_amp_raw") or 0) for row in subset]
+        latency = [float(row.get("latency_ms") or 0) for row in subset]
         baseline_std = [float(row.get("baseline_std_raw") or 0) for row in subset]
         summary.append(
             {
@@ -214,11 +271,17 @@ def _summary_by_condition(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "channel_name": "print" if channel == "p" else "refuel",
                 "width_us": width_us,
                 "replicate_count": len(subset),
-                "drop_mean_raw": _mean(responses),
-                "drop_std_raw": _std(responses),
-                "drop_span_raw": (max(responses) - min(responses)) if responses else 0.0,
-                "spike_mean_raw": _mean(spikes),
+                "settled_drop_mean_raw": _mean(settled),
+                "settled_drop_std_raw": _std(settled),
+                "settled_drop_span_raw": (max(settled) - min(settled)) if settled else 0.0,
+                "ring_amp_mean_raw": _mean(ring),
+                "ring_amp_std_raw": _std(ring),
+                "latency_mean_ms": _mean(latency),
+                "latency_std_ms": _std(latency),
                 "baseline_std_mean_raw": _mean(baseline_std),
+                "drop_mean_raw": _mean(settled),
+                "drop_std_raw": _std(settled),
+                "drop_span_raw": (max(settled) - min(settled)) if settled else 0.0,
             }
         )
     return summary
@@ -241,30 +304,45 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "pulse_end_ms",
         "baseline_start_ms",
         "baseline_end_ms",
-        "drop_start_ms",
-        "drop_end_ms",
-        "response_end_ms",
         "baseline_mean_raw",
         "baseline_std_raw",
         "baseline_span_raw",
+        "ring_start_ms",
+        "ring_end_ms",
+        "ring_amp_raw",
+        "ring_dt_ms",
+        "ring_after_start_ms",
+        "ring_pressure_raw",
+        "latency_threshold_raw",
+        "latency_ms",
+        "latency_dt_ms",
+        "latency_pressure_raw",
+        "settled_start_ms",
+        "settled_end_ms",
+        "settled_pressure_raw",
+        "settled_mean_pressure_raw",
+        "settled_std_raw",
+        "settled_span_raw",
+        "settled_drop_raw",
         "min_pressure_raw",
         "max_pressure_raw",
         "trough_pressure_raw",
         "trough_dt_ms",
         "trough_after_start_ms",
         "trough_after_end_ms",
+        "trough_drop_raw",
         "peak_pressure_raw",
         "peak_dt_ms",
         "peak_after_start_ms",
         "peak_after_end_ms",
+        "spike_raw",
+        "rise_raw",
+        "drop_raw",
+        "response_raw",
+        "response_kind",
         "selected_pressure_raw",
         "selected_dt_ms",
         "selected_after_start_ms",
-        "drop_raw",
-        "spike_raw",
-        "rise_raw",
-        "response_raw",
-        "response_kind",
         "snr_std",
         "snr_span",
         "reason",
@@ -312,12 +390,14 @@ def _plot_full_timecourse(plot_items: list[tuple[Path, dict[str, Any], dict[str,
         ax.plot(t, y, linewidth=1.0, alpha=0.75, label=label)
         start = offset + float(row.get("pulse_start_ms") or 0)
         end = offset + float(row.get("pulse_end_ms") or 0)
-        trough = offset + float(row.get("trough_dt_ms") or 0)
-        peak = offset + float(row.get("peak_dt_ms") or 0)
+        latency = offset + float(row.get("latency_dt_ms") or 0)
+        ring = offset + float(row.get("ring_dt_ms") or 0)
+        settled_start = offset + float(row.get("settled_start_ms") or 0)
+        settled_end = offset + float(row.get("settled_end_ms") or 0)
         ax.axvline(start, color="tab:orange", linestyle="--", linewidth=0.7, alpha=0.5)
         ax.axvline(end, color="tab:gray", linestyle=":", linewidth=0.7, alpha=0.45)
-        ax.scatter([trough], [float(row.get("trough_pressure_raw") or 0)], color="tab:red", s=18, zorder=4)
-        ax.scatter([peak], [float(row.get("peak_pressure_raw") or 0)], color="tab:purple", s=14, zorder=4)
+        ax.scatter([latency], [float(row.get("latency_pressure_raw") or 0)], color="tab:green", s=18, zorder=4)
+        ax.scatter([ring], [float(row.get("ring_pressure_raw") or 0)], color="tab:red", s=18, zorder=4)
         ax.hlines(
             float(row.get("baseline_mean_raw") or 0),
             offset + float(row.get("baseline_start_ms") or 0),
@@ -325,6 +405,14 @@ def _plot_full_timecourse(plot_items: list[tuple[Path, dict[str, Any], dict[str,
             color="black",
             linewidth=1.0,
             alpha=0.7,
+        )
+        ax.hlines(
+            float(row.get("settled_pressure_raw") or 0),
+            settled_start,
+            settled_end,
+            color="tab:purple",
+            linewidth=1.0,
+            alpha=0.65,
         )
         offset += max(float(sample.get("dt_ms", 0)) for sample in samples) + 45.0
     ax.set_title(f"{'Print' if channel == 'p' else 'Refuel'} valve stitched pulse windows")
@@ -353,38 +441,57 @@ def _plot_overlay(plot_items: list[tuple[Path, dict[str, Any], dict[str, Any]]],
         return None
     fig, ax = plt.subplots(figsize=(10, 6))
     pulse_end_offsets: list[float] = []
+    settled_start_offsets: list[float] = []
+    settled_end_offsets: list[float] = []
     for _path, trace, row in subset:
         samples = _safe_list(trace, "samples")
         start = float(row.get("pulse_start_ms") or 0)
         pulse_end_offset = float(row.get("pulse_end_ms") or start) - start
         pulse_end_offsets.append(pulse_end_offset)
+        settled_start_offsets.append(float(row.get("settled_start_ms") or start) - start)
+        settled_end_offsets.append(float(row.get("settled_end_ms") or start) - start)
         baseline = float(row.get("baseline_mean_raw") or 0)
         x = [float(sample.get("dt_ms", 0)) - start for sample in samples]
         y = [baseline - float(sample.get("raw_pressure", 0)) for sample in samples]
         ax.plot(x, y, linewidth=1.1, alpha=0.65)
         ax.axvline(pulse_end_offset, color="tab:gray", linestyle=":", linewidth=0.6, alpha=0.25)
         ax.scatter(
-            [float(row.get("trough_dt_ms") or start) - start],
-            [baseline - float(row.get("trough_pressure_raw") or baseline)],
-            color="tab:red",
-            s=14,
+            [float(row.get("latency_dt_ms") or start) - start],
+            [baseline - float(row.get("latency_pressure_raw") or baseline)],
+            color="tab:green",
+            s=16,
             alpha=0.75,
         )
         ax.scatter(
-            [float(row.get("peak_dt_ms") or start) - start],
-            [baseline - float(row.get("peak_pressure_raw") or baseline)],
+            [float(row.get("ring_dt_ms") or start) - start],
+            [baseline - float(row.get("ring_pressure_raw") or baseline)],
+            color="tab:red",
+            s=16,
+            alpha=0.75,
+        )
+        ax.hlines(
+            float(row.get("settled_drop_raw") or 0),
+            float(row.get("settled_start_ms") or start) - start,
+            float(row.get("settled_end_ms") or start) - start,
             color="tab:purple",
-            s=12,
-            alpha=0.65,
+            linewidth=1.2,
+            alpha=0.55,
         )
     ax.axvline(0, color="tab:orange", linestyle="--", linewidth=1.0, label="pulse start")
     if pulse_end_offsets:
         ax.axvspan(
-            min(pulse_end_offsets),
-            max(pulse_end_offsets) + DROP_WINDOW_AFTER_PULSE_END_MS,
-            color="tab:blue",
+            0,
+            max(pulse_end_offsets) + RING_WINDOW_AFTER_PULSE_END_MS,
+            color="tab:red",
+            alpha=0.04,
+            label="ring window",
+        )
+        ax.axvspan(
+            min(settled_start_offsets),
+            max(settled_end_offsets),
+            color="tab:purple",
             alpha=0.08,
-            label="drop window",
+            label="settled window",
         )
         ax.plot([], [], color="tab:gray", linestyle=":", linewidth=1.0, label="pulse end")
     ax.axhline(0, color="black", linewidth=0.8)
@@ -415,19 +522,62 @@ def _plot_response_summary(rows: list[dict[str, Any]], plot_dir: Path) -> Path |
         if not subset:
             continue
         xs = [float(row.get("width_us") or 0) for row in subset]
-        ys = [float(row.get("drop_raw") or 0) for row in subset]
+        ys = [float(row.get("settled_drop_raw") or 0) for row in subset]
         ax.scatter(xs, ys, color=color, alpha=0.45, label=f"{label} replicates")
         for width in sorted({int(row.get("width_us") or 0) for row in subset}):
-            responses = [float(row.get("drop_raw") or 0) for row in subset if int(row.get("width_us") or 0) == width]
+            responses = [float(row.get("settled_drop_raw") or 0) for row in subset if int(row.get("width_us") or 0) == width]
             if responses:
                 ax.errorbar([width], [_mean(responses)], yerr=[_std(responses)], fmt="o", color=color, markersize=8)
-    ax.set_title("Valve pressure drop by pulse width")
+    ax.set_title("Valve settled pressure drop by pulse width")
     ax.set_xlabel("Pulse width (us)")
-    ax.set_ylabel("Post-pulse pressure drop (raw)")
+    ax.set_ylabel("Settled pressure drop (raw)")
     ax.grid(True, alpha=0.25)
     ax.legend(loc="best", fontsize=8)
     fig.tight_layout()
     path = plot_dir / "valve_char_response_by_width.png"
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return path
+
+
+def _plot_ringing_summary(rows: list[dict[str, Any]], plot_dir: Path) -> Path | None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    valid = [row for row in rows if row.get("valid")]
+    if not valid:
+        return None
+    fig, (ax_amp, ax_lat) = plt.subplots(2, 1, figsize=(9, 8), sharex=True)
+    for channel, color, label in (("p", "tab:blue", "print"), ("r", "tab:green", "refuel")):
+        subset = [row for row in valid if row.get("channel") == channel]
+        if not subset:
+            continue
+        xs = [float(row.get("width_us") or 0) for row in subset]
+        amps = [float(row.get("ring_amp_raw") or 0) for row in subset]
+        lats = [float(row.get("latency_ms") or 0) for row in subset]
+        ax_amp.scatter(xs, amps, color=color, alpha=0.4, label=f"{label} ring")
+        ax_lat.scatter(xs, lats, color=color, alpha=0.4, label=f"{label} latency")
+        for width in sorted({int(row.get("width_us") or 0) for row in subset}):
+            width_rows = [row for row in subset if int(row.get("width_us") or 0) == width]
+            amp_values = [float(row.get("ring_amp_raw") or 0) for row in width_rows]
+            lat_values = [float(row.get("latency_ms") or 0) for row in width_rows]
+            if amp_values:
+                ax_amp.errorbar([width], [_mean(amp_values)], yerr=[_std(amp_values)], fmt="o", color=color, markersize=8)
+            if lat_values:
+                ax_lat.errorbar([width], [_mean(lat_values)], yerr=[_std(lat_values)], fmt="o", color=color, markersize=8)
+    ax_amp.set_title("Valve ringing amplitude by pulse width")
+    ax_amp.set_ylabel("Ring amplitude (raw)")
+    ax_amp.grid(True, alpha=0.25)
+    ax_amp.legend(loc="best", fontsize=8)
+    ax_lat.set_title("Valve latency by pulse width")
+    ax_lat.set_xlabel("Pulse width (us)")
+    ax_lat.set_ylabel("Latency from pulse start (ms)")
+    ax_lat.grid(True, alpha=0.25)
+    ax_lat.legend(loc="best", fontsize=8)
+    fig.tight_layout()
+    path = plot_dir / "valve_char_ringing_by_width.png"
     fig.savefig(path, dpi=150)
     plt.close(fig)
     return path
@@ -448,9 +598,13 @@ def generate_valve_trace_artifacts(artifacts: RunArtifacts) -> ValveTraceArtifac
     analysis_json.write_text(
         json.dumps(
             {
-                "schema_version": "valve_trace_analysis_v2",
+                "schema_version": "valve_trace_analysis_v3",
                 "baseline_window_ms": BASELINE_WINDOW_MS,
-                "drop_window_after_pulse_end_ms": DROP_WINDOW_AFTER_PULSE_END_MS,
+                "ring_window_after_pulse_end_ms": RING_WINDOW_AFTER_PULSE_END_MS,
+                "settled_start_after_pulse_end_ms": SETTLED_START_AFTER_PULSE_END_MS,
+                "settled_end_after_pulse_end_ms": SETTLED_END_AFTER_PULSE_END_MS,
+                "latency_min_threshold_raw": LATENCY_MIN_THRESHOLD_RAW,
+                "latency_baseline_std_multiplier": LATENCY_BASELINE_STD_MULTIPLIER,
                 "replicate_count": len(rows),
                 "valid_replicate_count": sum(1 for row in rows if row.get("valid")),
                 "conditions": summary,
@@ -476,6 +630,9 @@ def generate_valve_trace_artifacts(artifacts: RunArtifacts) -> ValveTraceArtifac
     summary_plot = _plot_response_summary(rows, plot_dir)
     if summary_plot is not None:
         plot_paths.append(summary_plot)
+    ringing_plot = _plot_ringing_summary(rows, plot_dir)
+    if ringing_plot is not None:
+        plot_paths.append(ringing_plot)
 
     return ValveTraceArtifacts(
         trace_dir=trace_dir,

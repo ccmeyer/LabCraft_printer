@@ -14,9 +14,12 @@ def _trace(name: str, test_id: int = 2474):
             {"dt_ms": 0, "raw_pressure": 3385, "control_pressure": 3385, "avg_pressure": 3385, "target": 3386, "error": -1, "derror": 0, "requested_hz": 0, "applied_hz": 0, "flags": 0x08, "ff_boost_hz": 0},
             {"dt_ms": 5, "raw_pressure": 3386, "control_pressure": 3386, "avg_pressure": 3386, "target": 3386, "error": 0, "derror": 1, "requested_hz": 0, "applied_hz": 0, "flags": 0x08, "ff_boost_hz": 0},
             {"dt_ms": 10, "raw_pressure": 3387, "control_pressure": 3387, "avg_pressure": 3387, "target": 3386, "error": 1, "derror": 1, "requested_hz": 0, "applied_hz": 0, "flags": 0x08, "ff_boost_hz": 0},
-            {"dt_ms": 15, "raw_pressure": 3376, "control_pressure": 3376, "avg_pressure": 3376, "target": 3386, "error": -10, "derror": -11, "requested_hz": 0, "applied_hz": 0, "flags": 0x08, "ff_boost_hz": 0},
-            {"dt_ms": 25, "raw_pressure": 3380, "control_pressure": 3380, "avg_pressure": 3380, "target": 3386, "error": -6, "derror": 4, "requested_hz": 0, "applied_hz": 0, "flags": 0x08, "ff_boost_hz": 0},
-            {"dt_ms": 40, "raw_pressure": 3384, "control_pressure": 3384, "avg_pressure": 3384, "target": 3386, "error": -2, "derror": 4, "requested_hz": 0, "applied_hz": 0, "flags": 0x08, "ff_boost_hz": 0},
+            {"dt_ms": 15, "raw_pressure": 3436, "control_pressure": 3436, "avg_pressure": 3436, "target": 3386, "error": 50, "derror": 49, "requested_hz": 0, "applied_hz": 0, "flags": 0x08, "ff_boost_hz": 0},
+            {"dt_ms": 25, "raw_pressure": 3306, "control_pressure": 3306, "avg_pressure": 3306, "target": 3386, "error": -80, "derror": -130, "requested_hz": 0, "applied_hz": 0, "flags": 0x08, "ff_boost_hz": 0},
+            {"dt_ms": 100, "raw_pressure": 3381, "control_pressure": 3381, "avg_pressure": 3381, "target": 3386, "error": -5, "derror": 75, "requested_hz": 0, "applied_hz": 0, "flags": 0x08, "ff_boost_hz": 0},
+            {"dt_ms": 105, "raw_pressure": 3380, "control_pressure": 3380, "avg_pressure": 3380, "target": 3386, "error": -6, "derror": -1, "requested_hz": 0, "applied_hz": 0, "flags": 0x08, "ff_boost_hz": 0},
+            {"dt_ms": 110, "raw_pressure": 3379, "control_pressure": 3379, "avg_pressure": 3379, "target": 3386, "error": -7, "derror": -1, "requested_hz": 0, "applied_hz": 0, "flags": 0x08, "ff_boost_hz": 0},
+            {"dt_ms": 160, "raw_pressure": 3380, "control_pressure": 3380, "avg_pressure": 3380, "target": 3386, "error": -6, "derror": 1, "requested_hz": 0, "applied_hz": 0, "flags": 0x08, "ff_boost_hz": 0},
         ],
         "events": [
             {"dt_ms": 0, "event_type": 0, "event_name": "trace_start", "value0": 0, "value1": 0},
@@ -36,16 +39,18 @@ def test_analyze_valve_trace_marks_baseline_response_and_snr():
     assert row["replicate"] == 1
     assert row["baseline_mean_raw"] == 3386
     assert row["baseline_span_raw"] == 2
-    assert row["drop_raw"] == 10
-    assert row["spike_raw"] == 1
-    assert row["response_raw"] == 10
-    assert row["response_kind"] == "drop"
-    assert row["trough_after_end_ms"] == 2
-    assert row["selected_after_start_ms"] == 5
-    assert row["snr_span"] == 5
+    assert row["settled_drop_raw"] == 6
+    assert row["drop_raw"] == 6
+    assert row["ring_amp_raw"] == 80
+    assert row["spike_raw"] == 50
+    assert row["latency_ms"] == 5
+    assert row["response_raw"] == 6
+    assert row["response_kind"] == "settled_drop"
+    assert row["settled_pressure_raw"] == 3380
+    assert row["snr_span"] == 3
 
 
-def test_analyze_valve_trace_keeps_spike_separate_from_later_drop():
+def test_analyze_valve_trace_keeps_ringing_separate_from_settled_drop():
     trace = _trace("valve_char_p_w3000_rep02", test_id=2473)
     trace["samples"] = [
         {"dt_ms": 0, "raw_pressure": 3386},
@@ -54,6 +59,10 @@ def test_analyze_valve_trace_keeps_spike_separate_from_later_drop():
         {"dt_ms": 14, "raw_pressure": 3456},
         {"dt_ms": 32, "raw_pressure": 3400},
         {"dt_ms": 48, "raw_pressure": 3356},
+        {"dt_ms": 100, "raw_pressure": 3381},
+        {"dt_ms": 105, "raw_pressure": 3380},
+        {"dt_ms": 110, "raw_pressure": 3379},
+        {"dt_ms": 115, "raw_pressure": 3380},
     ]
     trace["events"] = [
         {"dt_ms": 10, "event_type": 2, "event_name": "pulse_start", "value0": 3000, "value1": 3386},
@@ -63,10 +72,12 @@ def test_analyze_valve_trace_keeps_spike_separate_from_later_drop():
     row = analyze_valve_trace(trace)
 
     assert row["valid"] is True
-    assert row["drop_raw"] == 30
+    assert row["settled_drop_raw"] == 6
+    assert row["drop_raw"] == 6
     assert row["spike_raw"] == 70
-    assert row["response_raw"] == 30
-    assert row["trough_dt_ms"] == 48
+    assert row["trough_drop_raw"] == 30
+    assert row["ring_amp_raw"] == 70
+    assert row["response_raw"] == 6
     assert row["peak_dt_ms"] == 14
 
 
@@ -87,6 +98,9 @@ def test_generate_valve_trace_artifacts_writes_plots_csv_and_analysis(tmp_path):
     assert (result.plot_dir / "valve_char_r_w1500_overlay.png").exists()
     assert (result.plot_dir / "valve_char_p_full_timecourse.png").exists()
     assert (result.plot_dir / "valve_char_response_by_width.png").exists()
+    assert (result.plot_dir / "valve_char_ringing_by_width.png").exists()
     analysis = json.loads(result.analysis_json.read_text(encoding="utf-8"))
-    assert analysis["schema_version"] == "valve_trace_analysis_v2"
+    assert analysis["schema_version"] == "valve_trace_analysis_v3"
     assert analysis["valid_replicate_count"] == 2
+    assert analysis["conditions"][0]["settled_drop_mean_raw"] == 6
+    assert "ring_amp_raw" in analysis["replicates"][0]
