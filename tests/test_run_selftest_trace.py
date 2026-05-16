@@ -286,6 +286,112 @@ def test_run_writes_pressure_trace_artifact(monkeypatch, tmp_path):
     assert sent_p2 == b"\x01"
 
 
+def test_run_writes_named_trace_artifacts_for_same_test_id(monkeypatch, tmp_path):
+    mod = _load_run_selftest()
+    run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF
+    clock = FakeClock()
+
+    sample_payload = struct.pack(
+        "<HHHHHhhHHBB",
+        25,
+        3380,
+        3380,
+        3380,
+        3386,
+        -6,
+        0,
+        0,
+        0,
+        0x08,
+        0,
+    )
+    event_payload = struct.pack("<HBBHH", 10, 2, 0, 1500, 3386)
+    inbound = b"".join(
+        [
+            _hello_ack(mod),
+            _selftest_result_trace(
+                mod,
+                2474,
+                "valve_char_r_w1500_rep01",
+                mod.TRACE_KIND_SAMPLES,
+                mod.TRACE_FORMAT_SAMPLE_V1,
+                0,
+                1,
+                sample_payload,
+            ),
+            _selftest_result_trace(
+                mod,
+                2474,
+                "valve_char_r_w1500_rep01",
+                mod.TRACE_KIND_EVENTS,
+                mod.TRACE_FORMAT_EVENT_V1,
+                0,
+                1,
+                event_payload,
+            ),
+            _selftest_result_trace(
+                mod,
+                2474,
+                "valve_char_r_w3000_rep01",
+                mod.TRACE_KIND_SAMPLES,
+                mod.TRACE_FORMAT_SAMPLE_V1,
+                0,
+                1,
+                sample_payload,
+            ),
+            _selftest_result_trace(
+                mod,
+                2474,
+                "valve_char_r_w3000_rep01",
+                mod.TRACE_KIND_EVENTS,
+                mod.TRACE_FORMAT_EVENT_V1,
+                0,
+                1,
+                event_payload,
+            ),
+            _selftest_result_metrics(
+                mod,
+                2474,
+                "valve_char_refuel_2psi_repeat_linearity",
+                True,
+                "m15=10;m30=12;m45=18",
+            ),
+            _selftest_done(mod, run_id),
+            _bye_ack(mod, 3),
+            _bye_done(mod, 3, run_id),
+        ]
+    )
+    serial = FakeSerial(inbound)
+    monkeypatch.setattr(mod, "time", SimpleNamespace(monotonic=clock.monotonic, time=clock.time))
+    monkeypatch.setattr(mod, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: serial))
+
+    out_path = tmp_path / "selftest.json"
+    args = SimpleNamespace(
+        port="/dev/ttyAMA0",
+        baud=115200,
+        profile="FULL",
+        timeout_ms=1000,
+        hello_timeout_ms=1000,
+        hello_retry_ms=50,
+        fast_fail_on_missing_hello=False,
+        pressure_trace=True,
+        pressure_trace_test=None,
+        pressure_sweep_suite=None,
+        out=str(out_path),
+    )
+
+    rc = mod.run(args)
+
+    assert rc == 0
+    trace_15 = tmp_path / "selftest_trace_2474_valve_char_r_w1500_rep01.json"
+    trace_30 = tmp_path / "selftest_trace_2474_valve_char_r_w3000_rep01.json"
+    assert trace_15.exists()
+    assert trace_30.exists()
+    assert mod.json.loads(trace_15.read_text(encoding="utf-8"))["name"] == "valve_char_r_w1500_rep01"
+    assert mod.json.loads(trace_30.read_text(encoding="utf-8"))["name"] == "valve_char_r_w3000_rep01"
+    assert not (tmp_path / "selftest_trace_2474.json").exists()
+
+
 def test_run_sends_pressure_trace_test_selector(monkeypatch, tmp_path):
     mod = _load_run_selftest()
     run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF

@@ -12,7 +12,8 @@
   "enforce_expected_test_ids": true,
   "requires_operator_prompts": true,
   "selftest_args": [
-    "--valve-characterization-suite"
+    "--valve-characterization-suite",
+    "--pressure-trace"
   ],
   "fixtures": [
     {

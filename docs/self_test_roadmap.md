@@ -945,6 +945,7 @@ Valve characterization qualification slice:
 - Row `2475` derives print/refuel channel balance from the isolated 2 psi rows without additional valve actuation.
 - Active-regulator recovery behavior is deferred to a future dummy-head or restricted-flow fixture suite so this slice focuses on valve actuation repeatability and pulse-width linearity.
 - Valve response is computed from trace sample windows around each pulse rather than immediate pulse-start/pulse-end event deltas, so the metric reflects the observed post-pulse pressure response.
+- When `valve_characterization_v1` runs, it also exports per-replicate annotated pressure trace artifacts and static plots for stitched time-course review, replicate overlays, response-vs-width trends, and baseline noise / signal-to-noise inspection.
 - Keep response magnitude and balance metrics informational for the first data-collection slice; analyzer rules focus on execution integrity such as timeout, readiness, sample/event availability, rejects, and deadline slip.
 - Keep `valve_characterization_v1` out of `factory_acceptance_v3` until enough fixture data exists to set meaningful acceptance thresholds.
 

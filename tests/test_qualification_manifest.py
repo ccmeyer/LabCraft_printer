@@ -153,7 +153,7 @@ def test_load_valve_characterization_manifest_requires_operator_closed_loop_fixt
     assert manifest.expected_test_ids == (2473, 2474, 2475)
     assert manifest.enforce_expected_test_ids is True
     assert manifest.requires_operator_prompts is True
-    assert manifest.selftest_args == ("--valve-characterization-suite",)
+    assert manifest.selftest_args == ("--valve-characterization-suite", "--pressure-trace")
     assert {item["fixture_id"] for item in manifest.fixtures} == {"valve_closed_loop_pulse_matrix_v1"}
     assert manifest.analysis_rules["2473"]["metrics"]["timeout"]["equals"] == 0
     assert manifest.analysis_rules["2473"]["metrics"]["ready"]["equals"] == 0

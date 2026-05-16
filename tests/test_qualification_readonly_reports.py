@@ -156,4 +156,28 @@ def test_artifact_paths_exposes_canonical_report_files():
     paths = artifact_paths(_report(), report_path="fallback_report.json")
 
     labels = [label for label, _path in paths]
-    assert labels == ["Run folder", "Report JSON", "Raw self-test JSON", "Summary CSV"]
+    assert labels[:4] == ["Run folder", "Report JSON", "Raw self-test JSON", "Summary CSV"]
+
+
+def test_artifact_paths_exposes_valve_trace_outputs(tmp_path):
+    run_dir = tmp_path / "qualification" / "LC-TEST" / "20260516T000000Z"
+    plot_dir = run_dir / "plots" / "valve_characterization"
+    trace_dir = run_dir / "traces" / "valve_characterization"
+    plot_dir.mkdir(parents=True)
+    trace_dir.mkdir(parents=True)
+    (plot_dir / "valve_trace_analysis.json").write_text("{}", encoding="utf-8")
+    (plot_dir / "valve_trace_replicates.csv").write_text("header\n", encoding="utf-8")
+    (plot_dir / "valve_char_response_by_width.png").write_bytes(b"png")
+    (plot_dir / "valve_char_r_w1500_overlay.png").write_bytes(b"png")
+
+    report = _report()
+    report["run"]["run_dir"] = str(run_dir)
+    paths = artifact_paths(report, report_path=run_dir / "report.json")
+
+    labels = [label for label, _path in paths]
+    assert "Valve trace folder" in labels
+    assert "Valve plot folder" in labels
+    assert "Valve trace analysis JSON" in labels
+    assert "Valve trace replicate CSV" in labels
+    assert "Valve response summary plot" in labels
+    assert "Valve overlay plot valve_char_r_w1500_overlay" in labels

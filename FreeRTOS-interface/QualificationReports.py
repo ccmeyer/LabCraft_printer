@@ -200,6 +200,29 @@ def artifact_paths(report: dict[str, Any], *, report_path: str | Path | None = N
     ]
     if report_path is not None and not pairs[1][1]:
         pairs[1] = ("Report JSON", str(report_path))
+    run_dir = Path(str(run.get("run_dir") or "")).expanduser() if run.get("run_dir") else None
+    if run_dir is None and report_path is not None:
+        run_dir = Path(report_path).expanduser().parent
+    if run_dir is not None:
+        valve_trace_dir = run_dir / "traces" / "valve_characterization"
+        valve_plot_dir = run_dir / "plots" / "valve_characterization"
+        if valve_trace_dir.exists():
+            pairs.append(("Valve trace folder", str(valve_trace_dir)))
+        if valve_plot_dir.exists():
+            pairs.append(("Valve plot folder", str(valve_plot_dir)))
+            for label, filename in (
+                ("Valve trace analysis JSON", "valve_trace_analysis.json"),
+                ("Valve trace artifact error JSON", "valve_trace_artifact_error.json"),
+                ("Valve trace replicate CSV", "valve_trace_replicates.csv"),
+                ("Valve response summary plot", "valve_char_response_by_width.png"),
+                ("Print valve time-course plot", "valve_char_p_full_timecourse.png"),
+                ("Refuel valve time-course plot", "valve_char_r_full_timecourse.png"),
+            ):
+                path = valve_plot_dir / filename
+                if path.exists():
+                    pairs.append((label, str(path)))
+            for path in sorted(valve_plot_dir.glob("valve_char_*_w*_overlay.png")):
+                pairs.append((f"Valve overlay plot {path.stem}", str(path)))
     return [(label, str(value or "")) for label, value in pairs]
 
 

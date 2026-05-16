@@ -14,6 +14,7 @@ from .artifacts import RunArtifacts, create_run_artifacts
 from .identity import DEFAULT_IDENTITY_PATH, load_or_create_identity
 from .manifest import QualificationManifest, load_manifest
 from .report import write_json_atomic, write_qualification_artifacts
+from .valve_trace_artifacts import generate_valve_trace_artifacts
 
 DEFAULT_MANIFEST_REF = "factory_acceptance_v3"
 
@@ -248,6 +249,23 @@ def _raw_missing_report(manifest: QualificationManifest, returncode: int) -> dic
     }
 
 
+def _maybe_generate_valve_trace_artifacts(manifest: QualificationManifest, artifacts: RunArtifacts) -> None:
+    if manifest.manifest_id != "valve_characterization_v1":
+        return
+    try:
+        generate_valve_trace_artifacts(artifacts)
+    except Exception as exc:
+        error_dir = artifacts.plots_dir / "valve_characterization"
+        error_dir.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(
+            error_dir / "valve_trace_artifact_error.json",
+            {
+                "schema_version": "valve_trace_artifact_error_v1",
+                "error": str(exc),
+            },
+        )
+
+
 def run_qualification(
     *,
     manifest_ref: str | Path = DEFAULT_MANIFEST_REF,
@@ -287,6 +305,7 @@ def run_qualification(
             fixture_id=fixture_id,
             operator_interactions=interactions,
         )
+        _maybe_generate_valve_trace_artifacts(manifest, artifacts)
         qualification_returncode = 0 if report.get("overall_status") == "pass" else 3
         return QualificationRunResult(
             returncode=qualification_returncode,
@@ -482,6 +501,7 @@ def run_qualification(
         fixture_id=fixture_id,
         operator_interactions=interactions,
     )
+    _maybe_generate_valve_trace_artifacts(manifest, artifacts)
     qualification_returncode = 0 if report.get("overall_status") == "pass" else 3
     return QualificationRunResult(
         returncode=qualification_returncode,

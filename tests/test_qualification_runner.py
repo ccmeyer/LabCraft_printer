@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from tools.qualification import cli
+from tools.qualification import runner as qualification_runner
 from tools.qualification.runner import DEFAULT_MANIFEST_REF, default_gripper_control, run_qualification
 
 
@@ -911,8 +912,9 @@ def test_pressure_regulator_operator_prompt_runs_selected_suite_without_gripper_
     assert result.report["overall_status"] == "pass"
 
 
-def test_valve_characterization_operator_prompt_runs_selected_suite_without_gripper_teardown(tmp_path):
+def test_valve_characterization_operator_prompt_runs_selected_suite_without_gripper_teardown(tmp_path, monkeypatch):
     events = []
+    generated_artifacts = []
 
     def fake_prompter(message):
         events.append(f"prompt:{message}")
@@ -920,6 +922,7 @@ def test_valve_characterization_operator_prompt_runs_selected_suite_without_grip
     def fake_invoker(invocation):
         events.append("self-test")
         assert "--valve-characterization-suite" in invocation.command
+        assert "--pressure-trace" in invocation.command
         assert "--pressure-regulator-suite" not in invocation.command
         assert "--gripper-seal-suite" not in invocation.command
         invocation.raw_report_path.write_text(json.dumps(_raw_valve_characterization_selftest()), encoding="utf-8")
@@ -927,6 +930,12 @@ def test_valve_characterization_operator_prompt_runs_selected_suite_without_grip
 
     def fake_gripper_control(action, port, baud):
         raise AssertionError(f"Valve characterization suite should not call gripper control: {action}:{port}:{baud}")
+
+    monkeypatch.setattr(
+        qualification_runner,
+        "generate_valve_trace_artifacts",
+        lambda artifacts: generated_artifacts.append(artifacts.run_dir),
+    )
 
     result = run_qualification(
         manifest_ref=_valve_characterization_manifest_ref(),
@@ -950,6 +959,7 @@ def test_valve_characterization_operator_prompt_runs_selected_suite_without_grip
     assert result.report["run"]["fixture_id"] == "valve_closed_loop_pulse_matrix_v1"
     assert [item["stage"] for item in result.report["operator_interactions"]] == ["confirm_fixture_setup"]
     assert result.report["overall_status"] == "pass"
+    assert generated_artifacts == [result.run_dir]
 
 
 def test_motion_envelope_operator_prompt_runs_selected_suite_without_gripper_teardown(tmp_path):

@@ -3919,7 +3919,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           row.lin = lin.midpointLinearityErrorPct;
                         };
 
-                        auto runIsolatedValveWidth = [&](uint8_t channel,
+                        auto runIsolatedValveWidth = [&](uint16_t testId,
+                                                         uint8_t channel,
                                                          uint16_t targetRaw,
                                                          uint16_t pulseWidthUs) -> ValveCharWidthResult {
                           ValveCharWidthResult result{};
@@ -4008,6 +4009,14 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                 recorder.eventCount(),
                                 10u,
                                 30u);
+                            char traceName[48];
+                            snprintf(traceName,
+                                     sizeof(traceName),
+                                     "valve_char_%c_w%u_rep%02u",
+                                     (channel == 0u) ? 'p' : 'r',
+                                     static_cast<unsigned>(pulseWidthUs),
+                                     static_cast<unsigned>(rep + 1u));
+                            (void)exportTrace(testId, traceName, !timeout && (response.pulseCount >= 1u));
                             result.rej += response.rejectCount;
                             if (response.pulseCount < 1u) {
                               result.rej++;
@@ -4089,7 +4098,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                                       ValveCharRowSummary* outRow) -> bool {
                           ValveCharRowSummary row{};
                           for (uint8_t i = 0u; i < 3u; ++i) {
-                            ValveCharWidthResult result = runIsolatedValveWidth(channel, targetRaw, kValveCharWidthsUs[i]);
+                            ValveCharWidthResult result = runIsolatedValveWidth(testId, channel, targetRaw, kValveCharWidthsUs[i]);
                             accumulateValveWidth(row, i, result);
                           }
                           finalizeValveRowLinearity(row);

@@ -4,6 +4,7 @@ from collections import deque
 import csv
 import json
 import os
+import re
 import struct
 import tempfile
 import time
@@ -358,8 +359,21 @@ def write_json_atomic(path: str, obj: dict) -> None:
             os.unlink(tmp)
 
 
-def _trace_artifact_path(base_out: str, test_id: int) -> str:
+def _slug_trace_name(name: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(name or "")).strip("._-")
+    return slug or "trace"
+
+
+def _trace_artifact_path(
+    base_out: str,
+    test_id: int,
+    *,
+    trace_name: str | None = None,
+    canonical_name: str | None = None,
+) -> str:
     base = os.path.splitext(base_out)[0]
+    if trace_name and trace_name != canonical_name:
+        return f"{base}_trace_{test_id}_{_slug_trace_name(trace_name)}.json"
     return f"{base}_trace_{test_id}.json"
 
 
@@ -967,7 +981,7 @@ def run(args: argparse.Namespace) -> int:
                         frame_snapshot["trace_kind"] = trace_kind
                         frame_snapshot["trace_chunk_index"] = chunk_index
                         frame_snapshot["trace_chunk_total"] = chunk_total
-                        key = (test_id, trace_kind, trace_format)
+                        key = (test_id, name, trace_kind, trace_format)
                         slot = trace_chunks.setdefault(
                             key,
                             {
@@ -1236,11 +1250,16 @@ def run(args: argparse.Namespace) -> int:
         }
         write_json_atomic(args.out, report)
         if trace_chunks:
-            base = os.path.splitext(args.out)[0]
-            for (test_id, trace_kind, trace_format), info in trace_chunks.items():
+            result_name_by_id = {int(r["test_id"]): str(r.get("name") or "") for r in results}
+            for (test_id, _trace_name, trace_kind, trace_format), info in trace_chunks.items():
                 parts = info["parts"]
                 ordered = b"".join(parts[i] for i in sorted(parts))
-                existing_path = _trace_artifact_path(args.out, test_id)
+                existing_path = _trace_artifact_path(
+                    args.out,
+                    test_id,
+                    trace_name=info["name"],
+                    canonical_name=result_name_by_id.get(test_id),
+                )
                 payload = {}
                 if os.path.exists(existing_path):
                     with open(existing_path, "r", encoding="utf-8") as fh:
