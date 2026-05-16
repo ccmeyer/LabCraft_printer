@@ -31,6 +31,7 @@ The intent is to increase quantitative coverage without turning the firmware, Py
 | Milestone 8E: XY Motion Qualification Suite | Complete enough to move on | Standalone operator-gated `xy_motion_v1` suite selects firmware XY long-travel/raster diagnostics `2010`-`2011` without adding them to default FULL |
 | Milestone 8F: Motion Envelope Qualification Suite | In progress | Standalone operator-gated `motion_envelope_v1` suite selects firmware motion envelope diagnostics `2012`-`2016` without adding them to default FULL |
 | Milestone 8G: Pressure Regulator Qualification Suite | In progress | Standalone operator-gated `pressure_regulator_v1` suite selects firmware pressure regulator diagnostics `2210`-`2219` without adding them to default FULL |
+| Milestone 8H: Valve Characterization Qualification Suite | In progress | Standalone operator-gated `valve_characterization_v1` suite selects firmware valve matrix diagnostics `2460`-`2472` without adding them to default FULL |
 | Later fixture-dependent diagnostics | Not started | Planned |
 
 ## Current Call Path
@@ -934,6 +935,17 @@ Pressure regulator qualification slice:
 - `2214`/`2215` report same-direction cycle spans as `low_dn_span` and `high_up_span`; `2216`/`2217` report same-direction `below_span`/`above_span` and keep cross-direction `hyst_span` informational.
 - `2214`/`2215` and `2218`/`2219` report informational `over`/`under` raw-pressure transient metrics to support regulator speed tuning.
 - Keep `pressure_regulator_v1` out of `factory_acceptance_v3`; use it for explicit, operator-confirmed pressure regulator qualification runs before deciding whether any rows belong in the default FULL suite.
+
+Valve characterization qualification slice:
+
+- Add `valve_characterization_v1` as a separate operator-gated FULL manifest requiring fixture `valve_closed_loop_pulse_matrix_v1`.
+- Select the suite with existing `CMD_SELFTEST_START` selector field value `2499`; no protocol layout or opcode changes.
+- Firmware rows `2460`-`2471` compare print and refuel valves at `1 psi=2512`, `2 psi=3386`, and `3 psi=4259`, across matched `1500`, `3000`, and `4500 us` pulse widths.
+- Rows `2460`-`2465` measure isolated valve response with the tested regulator paused during the pulse train; rows `2466`-`2471` measure normal active-regulator recovery response.
+- Row `2472` measures dual active print/refuel interaction at `2 psi` across the same matched pulse widths.
+- Valve response is computed from trace sample windows around each pulse rather than immediate pulse-start/pulse-end event deltas, so the metric reflects the observed post-pulse pressure response.
+- Keep response magnitude and balance metrics informational for the first data-collection slice; analyzer rules focus on execution integrity such as timeout, readiness, sample/event availability, rejects, and deadline slip.
+- Keep `valve_characterization_v1` out of `factory_acceptance_v3` until enough fixture data exists to set meaningful acceptance thresholds.
 
 Validation:
 

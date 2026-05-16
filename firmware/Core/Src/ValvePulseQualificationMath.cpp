@@ -164,4 +164,116 @@ PulseDropSummary summarizePulseDrops(const PressureTraceSample* samples,
   return summary;
 }
 
+WindowedPulseResponseSummary summarizeWindowedPulseResponses(const PressureTraceSample* samples,
+                                                             size_t sampleCount,
+                                                             const PressureTraceEvent* events,
+                                                             size_t eventCount,
+                                                             uint32_t baselineWindowMs,
+                                                             uint32_t responseWindowMs) {
+  WindowedPulseResponseSummary summary{};
+  if (samples == nullptr || sampleCount == 0u || events == nullptr || eventCount == 0u || responseWindowMs == 0u) {
+    return summary;
+  }
+
+  uint32_t responses[kMaxAnalyzedPulses]{};
+  for (size_t i = 0; i < eventCount; ++i) {
+    const PressureTraceEvent& ev = events[i];
+    if (ev.type != eventType(PressureTraceEventType::PulseStart)) {
+      continue;
+    }
+
+    const uint32_t startDt = ev.dtMs;
+    uint64_t baselineSum = 0u;
+    uint32_t baselineCount = 0u;
+    const uint32_t baselineStart = (startDt > baselineWindowMs) ? (startDt - baselineWindowMs) : 0u;
+    for (size_t s = 0; s < sampleCount; ++s) {
+      const uint32_t sampleDt = samples[s].dtMs;
+      if (sampleDt >= baselineStart && sampleDt <= startDt) {
+        baselineSum += samples[s].rawPressure;
+        baselineCount++;
+      }
+    }
+    const uint32_t baseline = (baselineCount > 0u)
+                                  ? static_cast<uint32_t>((baselineSum + (baselineCount / 2u)) / baselineCount)
+                                  : static_cast<uint32_t>(ev.value1);
+
+    bool haveResponseSample = false;
+    uint32_t minPressure = baseline;
+    uint32_t maxPressure = baseline;
+    const uint32_t responseEnd = startDt + responseWindowMs;
+    for (size_t s = 0; s < sampleCount; ++s) {
+      const uint32_t sampleDt = samples[s].dtMs;
+      if (sampleDt < startDt || sampleDt > responseEnd) {
+        continue;
+      }
+      const uint32_t pressure = samples[s].rawPressure;
+      if (!haveResponseSample) {
+        minPressure = pressure;
+        maxPressure = pressure;
+        haveResponseSample = true;
+      } else {
+        if (pressure < minPressure) minPressure = pressure;
+        if (pressure > maxPressure) maxPressure = pressure;
+      }
+    }
+
+    if (!haveResponseSample || summary.pulseCount >= kMaxAnalyzedPulses) {
+      summary.rejectCount++;
+      continue;
+    }
+
+    const uint32_t downResponse = (baseline >= minPressure) ? (baseline - minPressure) : (minPressure - baseline);
+    const uint32_t upResponse = (maxPressure >= baseline) ? (maxPressure - baseline) : (baseline - maxPressure);
+    responses[summary.pulseCount++] = (downResponse >= upResponse) ? downResponse : upResponse;
+  }
+
+  if (summary.pulseCount == 0u) {
+    return summary;
+  }
+
+  uint64_t sum = 0u;
+  summary.minResponseRaw = responses[0];
+  summary.maxResponseRaw = responses[0];
+  for (uint32_t i = 0; i < summary.pulseCount; ++i) {
+    const uint32_t response = responses[i];
+    sum += response;
+    if (response < summary.minResponseRaw) summary.minResponseRaw = response;
+    if (response > summary.maxResponseRaw) summary.maxResponseRaw = response;
+  }
+  summary.meanResponseRaw = static_cast<uint32_t>((sum + (summary.pulseCount / 2u)) / summary.pulseCount);
+
+  if (summary.pulseCount > 1u) {
+    summary.responseSlopeRawPerPulse =
+        (static_cast<int32_t>(responses[summary.pulseCount - 1u]) - static_cast<int32_t>(responses[0])) /
+        static_cast<int32_t>(summary.pulseCount - 1u);
+  }
+
+  uint64_t squaredDiffSum = 0u;
+  uint64_t absDiffSum = 0u;
+  for (uint32_t i = 0; i < summary.pulseCount; ++i) {
+    const uint32_t diff = absDiff(responses[i], summary.meanResponseRaw);
+    squaredDiffSum += static_cast<uint64_t>(diff) * static_cast<uint64_t>(diff);
+    absDiffSum += diff;
+  }
+  const uint32_t stdDev = integerSqrt(squaredDiffSum / summary.pulseCount);
+  if (summary.meanResponseRaw > 0u) {
+    summary.responseCvPct = static_cast<uint32_t>(
+        ((static_cast<uint64_t>(stdDev) * 100u) + (summary.meanResponseRaw / 2u)) / summary.meanResponseRaw);
+  }
+
+  const uint32_t meanAbsDiff = static_cast<uint32_t>((absDiffSum + (summary.pulseCount / 2u)) / summary.pulseCount);
+  uint32_t outlierThreshold = meanAbsDiff;
+  const uint32_t halfMean = summary.meanResponseRaw / 2u;
+  if (outlierThreshold < halfMean) {
+    outlierThreshold = halfMean;
+  }
+  for (uint32_t i = 0; i < summary.pulseCount; ++i) {
+    if (absDiff(responses[i], summary.meanResponseRaw) > outlierThreshold) {
+      summary.outlierCount++;
+    }
+  }
+
+  return summary;
+}
+
 }  // namespace ValvePulseQualificationMath

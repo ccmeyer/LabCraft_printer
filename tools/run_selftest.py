@@ -753,7 +753,8 @@ def run(args: argparse.Namespace) -> int:
         xy_motion_suite = bool(getattr(args, "xy_motion_suite", False))
         motion_envelope_suite = bool(getattr(args, "motion_envelope_suite", False))
         pressure_regulator_suite = bool(getattr(args, "pressure_regulator_suite", False))
-        selector = 2299 if pressure_regulator_suite else 2019 if motion_envelope_suite else 2009 if xy_motion_suite else 2500 if gripper_seal_suite else (
+        valve_characterization_suite = bool(getattr(args, "valve_characterization_suite", False))
+        selector = 2499 if valve_characterization_suite else 2299 if pressure_regulator_suite else 2019 if motion_envelope_suite else 2009 if xy_motion_suite else 2500 if gripper_seal_suite else (
             pressure_sweep_suite if pressure_sweep_suite is not None else pressure_trace_test
         )
         if selector is not None:
@@ -1294,6 +1295,7 @@ def main() -> int:
     selector_group.add_argument("--xy-motion-suite", action="store_true")
     selector_group.add_argument("--motion-envelope-suite", action="store_true")
     selector_group.add_argument("--gripper-seal-suite", action="store_true")
+    selector_group.add_argument("--valve-characterization-suite", action="store_true")
     p.add_argument("--skip-goodbye", action="store_true")
     p.add_argument("--out", required=True)
     args = p.parse_args()

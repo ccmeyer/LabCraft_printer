@@ -287,6 +287,74 @@ def _raw_pressure_regulator_selftest():
     }
 
 
+def _raw_valve_characterization_selftest():
+    rows = []
+    for test_id in range(2460, 2472):
+        rows.append(
+            {
+                "test_id": test_id,
+                "name": f"valve_characterization_{test_id}",
+                "pass": True,
+                "metrics": {
+                    "ch": "p" if test_id < 2463 or 2466 <= test_id < 2469 else "r",
+                    "mode": "pause" if test_id < 2466 else "active",
+                    "psi": 1000 + ((test_id - 2460) % 3) * 1000,
+                    "pulses": 18,
+                    "hz": 20,
+                    "w15": 1500,
+                    "w30": 3000,
+                    "w45": 4500,
+                    "m15": 20,
+                    "m30": 35,
+                    "m45": 50,
+                    "cv": 5,
+                    "out": 0,
+                    "rej": 0,
+                    "ready": 0,
+                    "slip_w": 0,
+                    "sc": 10,
+                    "ec": 12,
+                    "timeout": 0,
+                },
+            }
+        )
+    rows.append(
+        {
+            "test_id": 2472,
+            "name": "valve_characterization_dual_active",
+            "pass": True,
+            "metrics": {
+                "mode": "dual",
+                "psi": 2000,
+                "pulses": 36,
+                "m15p": 20,
+                "m15r": 21,
+                "m30p": 35,
+                "m30r": 36,
+                "m45p": 50,
+                "m45r": 51,
+                "ratio": 100,
+                "delta": 1,
+                "ready": 0,
+                "slip_w": 0,
+                "sc": 10,
+                "ec": 12,
+                "timeout": 0,
+            },
+        }
+    )
+    return {
+        "run_id": 2468,
+        "profile": "FULL",
+        "started_at": "2026-05-13T00:00:00Z",
+        "finished_at": "2026-05-13T00:06:00Z",
+        "aborted": False,
+        "summary": {"total": 13, "passed": 13, "failed": 0},
+        "results": rows,
+        "host_checks": [{"name": "hello_ack", "pass": True, "details": {"seq8": 1}}],
+    }
+
+
 def _manifest_path(tmp_path):
     path = tmp_path / "unit_manifest.json"
     path.write_text(
@@ -319,6 +387,10 @@ def _motion_envelope_manifest_ref():
 
 def _pressure_regulator_manifest_ref():
     return "pressure_regulator_v1"
+
+
+def _valve_characterization_manifest_ref():
+    return "valve_characterization_v1"
 
 
 class FakeSerial:
@@ -705,6 +777,47 @@ def test_pressure_regulator_manifest_rejects_missing_required_fixture(tmp_path):
     assert result.report["host_checks"][0]["details"]["allowed_fixture_ids"] == ["pressure_closed_loop_v1"]
 
 
+def test_valve_characterization_manifest_rejects_without_operator_prompts(tmp_path):
+    called = False
+
+    def fake_invoker(_invocation):
+        nonlocal called
+        called = True
+        return 0
+
+    result = run_qualification(
+        manifest_ref=_valve_characterization_manifest_ref(),
+        machine_id="LC-0001",
+        identity_path=tmp_path / "local" / "machine_identity.json",
+        output_root=tmp_path / "qualification",
+        fixture_id="valve_closed_loop_pulse_matrix_v1",
+        operator_prompts=False,
+        invoker=fake_invoker,
+    )
+
+    assert result.returncode == 3
+    assert called is False
+    assert result.report["host_checks"][0]["name"] == "operator_prompts_required"
+
+
+def test_valve_characterization_manifest_rejects_missing_required_fixture(tmp_path):
+    result = run_qualification(
+        manifest_ref=_valve_characterization_manifest_ref(),
+        machine_id="LC-0001",
+        identity_path=tmp_path / "local" / "machine_identity.json",
+        output_root=tmp_path / "qualification",
+        operator_prompts=True,
+        invoker=lambda _invocation: 0,
+        prompter=lambda _message: None,
+    )
+
+    assert result.returncode == 3
+    assert result.report["host_checks"][0]["name"] == "fixture_required"
+    assert result.report["host_checks"][0]["details"]["allowed_fixture_ids"] == [
+        "valve_closed_loop_pulse_matrix_v1"
+    ]
+
+
 def test_xy_motion_operator_prompt_runs_selected_suite_without_gripper_teardown(tmp_path):
     events = []
 
@@ -783,6 +896,47 @@ def test_pressure_regulator_operator_prompt_runs_selected_suite_without_gripper_
     assert "hardware envelope is clear" in events[0]
     assert events == [events[0], "self-test"]
     assert result.report["run"]["fixture_id"] == "pressure_closed_loop_v1"
+    assert [item["stage"] for item in result.report["operator_interactions"]] == ["confirm_fixture_setup"]
+    assert result.report["overall_status"] == "pass"
+
+
+def test_valve_characterization_operator_prompt_runs_selected_suite_without_gripper_teardown(tmp_path):
+    events = []
+
+    def fake_prompter(message):
+        events.append(f"prompt:{message}")
+
+    def fake_invoker(invocation):
+        events.append("self-test")
+        assert "--valve-characterization-suite" in invocation.command
+        assert "--pressure-regulator-suite" not in invocation.command
+        assert "--gripper-seal-suite" not in invocation.command
+        invocation.raw_report_path.write_text(json.dumps(_raw_valve_characterization_selftest()), encoding="utf-8")
+        return 0
+
+    def fake_gripper_control(action, port, baud):
+        raise AssertionError(f"Valve characterization suite should not call gripper control: {action}:{port}:{baud}")
+
+    result = run_qualification(
+        manifest_ref=_valve_characterization_manifest_ref(),
+        port="/dev/ttyAMA0",
+        baud=115200,
+        machine_id="LC-0001",
+        identity_path=tmp_path / "local" / "machine_identity.json",
+        output_root=tmp_path / "qualification",
+        timeout_ms=420000,
+        fixture_id="valve_closed_loop_pulse_matrix_v1",
+        operator_prompts=True,
+        invoker=fake_invoker,
+        prompter=fake_prompter,
+        gripper_control=fake_gripper_control,
+    )
+
+    assert result.returncode == 0
+    assert events[0].startswith("prompt:Confirm qualification setup")
+    assert "valve_closed_loop_pulse_matrix_v1" in events[0]
+    assert events == [events[0], "self-test"]
+    assert result.report["run"]["fixture_id"] == "valve_closed_loop_pulse_matrix_v1"
     assert [item["stage"] for item in result.report["operator_interactions"]] == ["confirm_fixture_setup"]
     assert result.report["overall_status"] == "pass"
 

@@ -478,7 +478,12 @@ class MachineQualificationWindow(QtWidgets.QDialog):
         if not self.port_edit.text().strip():
             self.port_edit.setText(self._default_port())
 
-        long_timeout_suites = {"gripper_seal_v1", "motion_envelope_v1", "pressure_regulator_v1"}
+        long_timeout_suites = {
+            "gripper_seal_v1",
+            "motion_envelope_v1",
+            "pressure_regulator_v1",
+            "valve_characterization_v1",
+        }
         self.timeout_edit.setText("420000" if manifest.manifest_id in long_timeout_suites else "")
         self.fixture_combo.blockSignals(True)
         self.fixture_combo.clear()

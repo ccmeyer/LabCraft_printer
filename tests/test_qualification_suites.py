@@ -20,14 +20,16 @@ def test_discover_suite_entries_lists_current_manifests():
         "xy_motion_v1",
         "motion_envelope_v1",
         "pressure_regulator_v1",
+        "valve_characterization_v1",
     }.issubset(manifest_ids)
     assert entries[0].manifest_id == "factory_acceptance_v3"
-    assert [entry.manifest_id for entry in entries[:5]] == [
+    assert [entry.manifest_id for entry in entries[:6]] == [
         "factory_acceptance_v3",
         "gripper_seal_v1",
         "xy_motion_v1",
         "motion_envelope_v1",
         "pressure_regulator_v1",
+        "valve_characterization_v1",
     ]
 
 
@@ -120,3 +122,25 @@ def test_pressure_regulator_suite_exposes_operator_fixture_and_catalog_rows():
     assert "over" in rows[2218].metrics
     assert "under" in rows[2218].metrics
     assert "1, 2, 3, 2, 1 psi" in rows[2218].evaluates
+
+
+def test_valve_characterization_suite_exposes_operator_fixture_and_catalog_rows():
+    entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
+    valves = entries["valve_characterization_v1"].manifest
+
+    assert valves.requires_operator_prompts is True
+    assert required_fixture_ids(valves) == ("valve_closed_loop_pulse_matrix_v1",)
+    rows = {row.test_id: row for row in build_test_plan_rows(valves)}
+    assert list(rows) == list(range(2460, 2473))
+    assert rows[2460].name == "Paused print valve at 1 psi"
+    assert rows[2465].name == "Paused refuel valve at 3 psi"
+    assert rows[2466].name == "Active print valve at 1 psi"
+    assert rows[2471].name == "Active refuel valve at 3 psi"
+    assert rows[2472].name == "Dual active valve interaction"
+    assert all(row.subsystem == "Valves/Pulses" for row in rows.values())
+    assert "m15" in rows[2460].metrics
+    assert "m45" in rows[2471].metrics
+    assert "ratio" in rows[2472].metrics
+    assert "1500, 3000, and 4500 us" in rows[2460].evaluates
+    assert "regulator paused" in rows[2460].evaluates
+    assert "active pressure recovery" in rows[2466].evaluates

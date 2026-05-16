@@ -643,6 +643,12 @@ void PressureRegulator::controlLoop() {
 
 	  // ---- Quiet window handling ----
 	  if (_quietActive) {
+        if (PressureSensor::instance() != nullptr) {
+          const auto quietSample = PressureSensor::instance()->getControlSample(_sensorPort);
+          const int32_t quietTarget = controlTargetRaw();
+          const int32_t quietError = static_cast<int32_t>(quietSample.raw) - quietTarget;
+          recordTraceSample(quietSample, quietTarget, quietError, 0, 0, 0, _lastDir);
+        }
 	    if (_quietPreHold) {
 	      // Still in the pre-hold phase: remain quiet indefinitely until endDispenseQuiet()
 	      vTaskDelay(period);

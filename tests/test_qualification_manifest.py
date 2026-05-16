@@ -145,6 +145,23 @@ def test_load_pressure_regulator_manifest_requires_operator_closed_loop_fixture(
     assert manifest.analysis_rules["2219"]["metrics"]["err_max"]["max"] == 8
 
 
+def test_load_valve_characterization_manifest_requires_operator_closed_loop_fixture():
+    manifest = load_manifest("valve_characterization_v1")
+
+    assert manifest.manifest_id == "valve_characterization_v1"
+    assert manifest.profile == "FULL"
+    assert manifest.expected_test_ids == tuple(range(2460, 2473))
+    assert manifest.enforce_expected_test_ids is True
+    assert manifest.requires_operator_prompts is True
+    assert manifest.selftest_args == ("--valve-characterization-suite",)
+    assert {item["fixture_id"] for item in manifest.fixtures} == {"valve_closed_loop_pulse_matrix_v1"}
+    assert manifest.analysis_rules["2460"]["metrics"]["timeout"]["equals"] == 0
+    assert manifest.analysis_rules["2460"]["metrics"]["ready"]["equals"] == 0
+    assert manifest.analysis_rules["2460"]["metrics"]["m15"]["maturity"] == "informational"
+    assert manifest.analysis_rules["2466"]["metrics"]["slip_w"]["max"] == 250
+    assert manifest.analysis_rules["2472"]["metrics"]["ratio"]["maturity"] == "informational"
+
+
 def test_load_manifest_from_path(tmp_path):
     path = tmp_path / "custom.json"
     path.write_text(

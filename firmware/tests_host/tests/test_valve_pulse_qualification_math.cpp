@@ -16,6 +16,16 @@ PressureTraceEvent eventAt(uint16_t dtMs, PressureTraceEventType type, uint16_t 
     return ev;
 }
 
+PressureTraceSample sampleAt(uint16_t dtMs, uint16_t raw) {
+    PressureTraceSample sample{};
+    sample.dtMs = dtMs;
+    sample.rawPressure = raw;
+    sample.controlPressure = raw;
+    sample.avgPressure = raw;
+    sample.target = raw;
+    return sample;
+}
+
 }  // namespace
 
 TEST(ValvePulseQualificationMath, EmptyTraceProducesZeroSummary) {
@@ -94,4 +104,61 @@ TEST(ValvePulseQualificationMath, ReportsCvAndOutlierCountForUnevenDrops) {
     UNSIGNED_LONGS_EQUAL(3u, summary.pulseCount);
     CHECK(summary.dropCvPct > 50u);
     UNSIGNED_LONGS_EQUAL(1u, summary.outlierCount);
+}
+
+TEST(ValvePulseQualificationMath, WindowedResponseUsesSamplesAfterPulseStart) {
+    PressureTraceSample samples[] = {
+        sampleAt(8, 2500),
+        sampleAt(10, 2500),
+        sampleAt(12, 2499),
+        sampleAt(16, 2470),
+        sampleAt(24, 2488),
+        sampleAt(58, 2502),
+        sampleAt(60, 2502),
+        sampleAt(63, 2495),
+        sampleAt(70, 2460),
+        sampleAt(78, 2490),
+    };
+    PressureTraceEvent events[] = {
+        eventAt(10, PressureTraceEventType::PulseStart, 1500, 2500),
+        eventAt(11, PressureTraceEventType::PulseEnd, 1500, 2500),
+        eventAt(60, PressureTraceEventType::PulseStart, 1500, 2502),
+        eventAt(61, PressureTraceEventType::PulseEnd, 1500, 2502),
+    };
+
+    auto summary = ValvePulseQualificationMath::summarizeWindowedPulseResponses(
+        samples,
+        sizeof(samples) / sizeof(samples[0]),
+        events,
+        sizeof(events) / sizeof(events[0]),
+        5,
+        20);
+
+    UNSIGNED_LONGS_EQUAL(2u, summary.pulseCount);
+    UNSIGNED_LONGS_EQUAL(36u, summary.meanResponseRaw);
+    UNSIGNED_LONGS_EQUAL(30u, summary.minResponseRaw);
+    UNSIGNED_LONGS_EQUAL(42u, summary.maxResponseRaw);
+    UNSIGNED_LONGS_EQUAL(0u, summary.rejectCount);
+}
+
+TEST(ValvePulseQualificationMath, WindowedResponseRejectsPulseWithoutSamples) {
+    PressureTraceSample samples[] = {
+        sampleAt(5, 2500),
+        sampleAt(90, 2500),
+    };
+    PressureTraceEvent events[] = {
+        eventAt(20, PressureTraceEventType::PulseStart, 3000, 2500),
+    };
+
+    auto summary = ValvePulseQualificationMath::summarizeWindowedPulseResponses(
+        samples,
+        sizeof(samples) / sizeof(samples[0]),
+        events,
+        sizeof(events) / sizeof(events[0]),
+        5,
+        20);
+
+    UNSIGNED_LONGS_EQUAL(0u, summary.pulseCount);
+    UNSIGNED_LONGS_EQUAL(1u, summary.rejectCount);
+    UNSIGNED_LONGS_EQUAL(0u, summary.meanResponseRaw);
 }

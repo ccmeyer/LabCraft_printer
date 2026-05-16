@@ -92,6 +92,19 @@ static constexpr DiagnosticTestDescriptor kDiagnosticTests[] = {
     {2401u, "print_valve_pulse_drop_repeatability_factory", "pulse", "FULL", "safe_gate_or_full"},
     {2402u, "refuel_valve_pulse_drop_repeatability_factory", "pulse", "FULL", "safe_gate_or_full"},
     {2403u, "dual_valve_interaction_factory", "pulse", "FULL", "safe_gate_or_full"},
+    {2460u, "valve_char_pause_print_1psi", "pulse", "FULL", "explicit_selection"},
+    {2461u, "valve_char_pause_print_2psi", "pulse", "FULL", "explicit_selection"},
+    {2462u, "valve_char_pause_print_3psi", "pulse", "FULL", "explicit_selection"},
+    {2463u, "valve_char_pause_refuel_1psi", "pulse", "FULL", "explicit_selection"},
+    {2464u, "valve_char_pause_refuel_2psi", "pulse", "FULL", "explicit_selection"},
+    {2465u, "valve_char_pause_refuel_3psi", "pulse", "FULL", "explicit_selection"},
+    {2466u, "valve_char_active_print_1psi", "pulse", "FULL", "explicit_selection"},
+    {2467u, "valve_char_active_print_2psi", "pulse", "FULL", "explicit_selection"},
+    {2468u, "valve_char_active_print_3psi", "pulse", "FULL", "explicit_selection"},
+    {2469u, "valve_char_active_refuel_1psi", "pulse", "FULL", "explicit_selection"},
+    {2470u, "valve_char_active_refuel_2psi", "pulse", "FULL", "explicit_selection"},
+    {2471u, "valve_char_active_refuel_3psi", "pulse", "FULL", "explicit_selection"},
+    {2472u, "valve_char_dual_active_2psi", "pulse", "FULL", "explicit_selection"},
     {2501u, "gripper_seal_closed_decay_factory", "gripper", "FULL", "explicit_selection"},
     {2502u, "gripper_seal_hold_duration_factory", "gripper", "FULL", "explicit_selection"},
     {2503u, "gripper_seal_repeatability_factory", "gripper", "FULL", "explicit_selection"},
@@ -176,6 +189,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
     const bool runXyMotionSuite = (selectedDiagnosticId == 2009u);
     const bool runMotionEnvelopeSuite = (selectedDiagnosticId == 2019u);
     const bool runPressureRegulatorSuite = (selectedDiagnosticId == 2299u);
+    const bool runValveCharacterizationSuite = (selectedDiagnosticId == 2499u);
     const bool runPressureSweepCore = (selectedPressureTraceTest == 2301u);
     const bool runPressureSweepExtended = (selectedPressureTraceTest == 2302u);
     const bool runPressureSweepFocused = (selectedPressureTraceTest == 2303u);
@@ -184,7 +198,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
     const bool runSinglePressureTraceSelection =
         (selectedPressureTraceTest >= 2101u) && (selectedPressureTraceTest <= 2104u);
                   auto shouldRunPressureTraceCase = [&](uint16_t testId) {
-                    if (runPressureSweepCore || runPressureSweepExtended || runPressureSweepFocused || runPressureSweepMicro || runGripperSealSuite || runXyMotionSuite || runMotionEnvelopeSuite || runPressureRegulatorSuite) {
+                    if (runPressureSweepCore || runPressureSweepExtended || runPressureSweepFocused || runPressureSweepMicro || runGripperSealSuite || runXyMotionSuite || runMotionEnvelopeSuite || runPressureRegulatorSuite || runValveCharacterizationSuite) {
                       return false;
                     }
                     if (runSinglePressureTraceSelection) {
@@ -3554,6 +3568,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         uint32_t traceSampleCount = 0u;
                         uint32_t traceEventCount = 0u;
                         ValvePulseQualificationMath::PulseDropSummary pulseDrop{};
+                        ValvePulseQualificationMath::WindowedPulseResponseSummary pulseResponse{};
                         bool pass = false;
                       };
 
@@ -3741,6 +3756,13 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             recorder.events(),
                             recorder.eventCount(),
                             rateHz == 0u ? 0u : static_cast<uint16_t>(1000u / rateHz));
+                        computed.pulseResponse = ValvePulseQualificationMath::summarizeWindowedPulseResponses(
+                            recorder.samples(),
+                            recorder.sampleCount(),
+                            recorder.events(),
+                            recorder.eventCount(),
+                            10u,
+                            30u);
                         Watchdog_CheckIn(CRASH_TASK_ORCH);
                         sendProgressStage("trace_metrics_done");
                         computed.pass = secondaryReadyOk &&
@@ -3787,6 +3809,366 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 
                         return true;
                       };
+
+                      if (runValveCharacterizationSuite) {
+                        static constexpr uint16_t kValveCharWidthsUs[3] = {1500u, 3000u, 4500u};
+                        static constexpr uint16_t kValveCharPulseCount = 6u;
+                        static constexpr uint16_t kValveCharRateHz = 20u;
+                        static constexpr uint32_t kValveCharStabilizeMs = 1000u;
+
+                        struct ValveCharWidthResult {
+                          uint32_t mean = 0u;
+                          uint32_t cv = 0u;
+                          uint32_t out = 0u;
+                          uint32_t rej = 0u;
+                          uint32_t ready = 0u;
+                          uint32_t slip = 0u;
+                          uint32_t sc = 0u;
+                          uint32_t ec = 0u;
+                          uint32_t timeout = 0u;
+                          bool pass = false;
+                        };
+
+                        struct ValveCharRowSummary {
+                          uint32_t mean[3] = {0u, 0u, 0u};
+                          uint32_t cvMax = 0u;
+                          uint32_t out = 0u;
+                          uint32_t rej = 0u;
+                          uint32_t ready = 0u;
+                          uint32_t slip = 0u;
+                          uint32_t sc = 0u;
+                          uint32_t ec = 0u;
+                          uint32_t timeout = 0u;
+                          bool pass = true;
+                        };
+
+                        auto pressureBitForChannel = [&](uint8_t channel) -> EventBits_t {
+                          return (channel == 0u) ? BIT_PRESSURE_P_READY : BIT_PRESSURE_R_READY;
+                        };
+
+                        auto pulseModeForChannel = [&](uint8_t channel) -> PulseMode {
+                          return (channel == 0u) ? PulseMode::PRINT_ONLY : PulseMode::REFUEL_ONLY;
+                        };
+
+                        auto regulatorForValveChannel = [&](uint8_t channel) -> PressureRegulator& {
+                          return (channel == 0u) ? PressureRegulator::regP() : PressureRegulator::regR();
+                        };
+
+                        auto accumulateValveWidth = [&](ValveCharRowSummary& row,
+                                                        uint8_t widthIndex,
+                                                        const ValveCharWidthResult& result) {
+                          row.mean[widthIndex] = result.mean;
+                          if (result.cv > row.cvMax) row.cvMax = result.cv;
+                          row.out += result.out;
+                          row.rej += result.rej;
+                          row.ready += result.ready;
+                          if (result.slip > row.slip) row.slip = result.slip;
+                          row.sc += result.sc;
+                          row.ec += result.ec;
+                          row.timeout += result.timeout;
+                          row.pass = row.pass && result.pass;
+                        };
+
+                        auto runActiveValveWidth = [&](uint16_t testId,
+                                                       const char* name,
+                                                       uint8_t channel,
+                                                       uint16_t targetRaw,
+                                                       uint16_t pulseWidthUs,
+                                                       PulseMode mode,
+                                                       bool requireBothReady,
+                                                       uint16_t secondaryTargetRaw) -> ValveCharWidthResult {
+                          ValveCharWidthResult result{};
+#if (LC_PRESSURE_PORTS <= 1)
+                          if (channel != 0u || requireBothReady) {
+                            result.rej = kValveCharPulseCount;
+                            result.ready = 1u;
+                            return result;
+                          }
+#endif
+                          PressureTraceCaseMetrics metrics{};
+                          const bool ran = runPressureTraceCase(testId,
+                                                                name,
+                                                                channel,
+                                                                targetRaw,
+                                                                pulseWidthUs,
+                                                                kValveCharPulseCount,
+                                                                kValveCharRateHz,
+                                                                mode,
+                                                                requireBothReady,
+                                                                secondaryTargetRaw,
+                                                                pulseWidthUs,
+                                                                &metrics,
+                                                                false,
+                                                                false);
+                          result.mean = metrics.pulseResponse.meanResponseRaw;
+                          result.cv = metrics.pulseResponse.responseCvPct;
+                          result.out = metrics.pulseResponse.outlierCount;
+                          result.rej = metrics.pulseResponse.rejectCount;
+                          if (metrics.pulseResponse.pulseCount < kValveCharPulseCount) {
+                            result.rej += static_cast<uint32_t>(kValveCharPulseCount - metrics.pulseResponse.pulseCount);
+                          }
+                          result.ready = metrics.readyMissCount;
+                          result.slip = metrics.pulseDrop.maxDeadlineSlipMs;
+                          result.sc = metrics.traceSampleCount;
+                          result.ec = metrics.traceEventCount;
+                          result.timeout = ran ? 0u : 1u;
+                          result.pass = ran &&
+                                        metrics.pass &&
+                                        (metrics.pulseResponse.pulseCount >= kValveCharPulseCount) &&
+                                        (metrics.traceSampleCount > 0u) &&
+                                        (metrics.traceEventCount > 0u);
+                          return result;
+                        };
+
+                        auto runPausedValveWidth = [&](uint8_t channel,
+                                                       uint16_t targetRaw,
+                                                       uint16_t pulseWidthUs) -> ValveCharWidthResult {
+                          ValveCharWidthResult result{};
+#if (LC_PRESSURE_PORTS <= 1)
+                          if (channel != 0u) {
+                            result.rej = kValveCharPulseCount;
+                            result.ready = 1u;
+                            return result;
+                          }
+#endif
+                          Printer* printer = Printer::instance();
+                          if (printer == nullptr || PressureSensor::instance() == nullptr) {
+                            result.rej = kValveCharPulseCount;
+                            result.ready = 1u;
+                            return result;
+                          }
+
+                          PressureRegulator& reg = regulatorForValveChannel(channel);
+                          const uint32_t originalPrintPulse = printer->getPrintPulse();
+                          const uint32_t originalRefuelPulse = printer->getRefuelPulse();
+                          if (channel == 0u) {
+                            printer->setPrintPulse(pulseWidthUs);
+                          } else {
+                            printer->setRefuelPulse(pulseWidthUs);
+                          }
+
+                          reg.start();
+                          xEventGroupClearBits(_doneEvents, pressureBitForChannel(channel));
+                          reg.setTargetSafe(targetRaw);
+                          const bool readyOk = waitBitsWithTimeout(pressureBitForChannel(channel), 7000u);
+                          if (!readyOk) {
+                            result.ready = 1u;
+                            result.rej = kValveCharPulseCount;
+                          } else if (!delayWithWatchdog(kValveCharStabilizeMs, "valve_char_pause_stabilize")) {
+                            result.timeout = 1u;
+                            result.rej = kValveCharPulseCount;
+                          } else {
+                            auto& recorder = PressureTraceRecorder::instance();
+                            recorder.reset();
+                            PressureTraceConfig traceCfg{};
+                            traceCfg.channel = (channel == 0u) ? PressureTraceChannel::Print : PressureTraceChannel::Refuel;
+                            traceCfg.maxSamples = PressureTraceRecorder::kMaxSamples;
+                            traceCfg.maxEvents = PressureTraceRecorder::kMaxEvents;
+                            recorder.configure(traceCfg);
+
+                            reg.beginDispenseQuiet(0u);
+                            recorder.arm();
+                            recorder.start(HAL_GetTick());
+                            bool timeout = !delayWithWatchdog(traceCfg.preRollMs, "valve_char_pause_preroll");
+                            for (uint16_t pulse = 0u; pulse < kValveCharPulseCount && !timeout && !_selfTestAbortRequested; ++pulse) {
+                              const uint32_t pulseStartMs = HAL_GetTick();
+                              PressureRegulator::DisturbanceEvent ev{};
+                              ev.type = (channel == 0u) ? PressureRegulator::PulseType::Print : PressureRegulator::PulseType::Refuel;
+                              ev.pulseWidthUs = pulseWidthUs;
+                              ev.pressureAtTrigger = PressureSensor::instance()->getLatestRaw(channel);
+                              ev.tickMs = pulseStartMs;
+                              reg.notifyPulseStart(ev);
+                              if (channel == 0u) {
+                                printer->pulsePrint();
+                              } else {
+                                printer->pulseRefuel();
+                              }
+                              const uint32_t pulseHoldMs = (static_cast<uint32_t>(pulseWidthUs) + 999u) / 1000u + 2u;
+                              timeout = !delayWithWatchdog(pulseHoldMs, "valve_char_pause_pulse");
+                              ev.tickMs = HAL_GetTick();
+                              ev.pressureAtTrigger = PressureSensor::instance()->getLatestRaw(channel);
+                              reg.notifyPulseEnd(ev);
+                              const uint32_t elapsedMs = HAL_GetTick() - pulseStartMs;
+                              const uint32_t periodMs = 1000u / kValveCharRateHz;
+                              if (!timeout && elapsedMs < periodMs) {
+                                timeout = !delayWithWatchdog(periodMs - elapsedMs, "valve_char_pause_period");
+                              }
+                            }
+                            if (!timeout && !_selfTestAbortRequested) {
+                              timeout = !delayWithWatchdog(traceCfg.postRollMs, "valve_char_pause_postroll");
+                            }
+                            recorder.stop(HAL_GetTick());
+                            reg.endDispenseQuiet(2u);
+                            (void)delayWithWatchdog(10u, "valve_char_pause_release");
+
+                            const auto response = ValvePulseQualificationMath::summarizeWindowedPulseResponses(
+                                recorder.samples(),
+                                recorder.sampleCount(),
+                                recorder.events(),
+                                recorder.eventCount(),
+                                10u,
+                                30u);
+                            const auto pulseTiming = ValvePulseQualificationMath::summarizePulseDrops(
+                                recorder.samples(),
+                                recorder.sampleCount(),
+                                recorder.events(),
+                                recorder.eventCount(),
+                                1000u / kValveCharRateHz);
+                            result.mean = response.meanResponseRaw;
+                            result.cv = response.responseCvPct;
+                            result.out = response.outlierCount;
+                            result.rej = response.rejectCount;
+                            if (response.pulseCount < kValveCharPulseCount) {
+                              result.rej += static_cast<uint32_t>(kValveCharPulseCount - response.pulseCount);
+                            }
+                            result.slip = pulseTiming.maxDeadlineSlipMs;
+                            result.sc = recorder.sampleCount();
+                            result.ec = recorder.eventCount();
+                            result.timeout = timeout ? 1u : 0u;
+                            result.pass = !timeout &&
+                                          !_selfTestAbortRequested &&
+                                          (response.pulseCount >= kValveCharPulseCount) &&
+                                          (recorder.sampleCount() > 0u) &&
+                                          (recorder.eventCount() > 0u);
+                          }
+
+                          reg.pause();
+                          printer->setPrintPulse(originalPrintPulse);
+                          printer->setRefuelPulse(originalRefuelPulse);
+                          return result;
+                        };
+
+                        auto emitValveMatrixRow = [&](uint16_t testId,
+                                                      const char* name,
+                                                      char ch,
+                                                      char mode,
+                                                      uint16_t psiMilli,
+                                                      const ValveCharRowSummary& row) -> bool {
+                          char metrics[224];
+                          snprintf(metrics, sizeof(metrics),
+                                   "ch=%c;mode=%c;psi=%u;pulses=18;hz=20;w15=1500;w30=3000;w45=4500;m15=%lu;m30=%lu;m45=%lu;cv=%lu;out=%lu;rej=%lu;ready=%lu;slip_w=%lu;sc=%lu;ec=%lu;timeout=%lu",
+                                   ch,
+                                   mode,
+                                   static_cast<unsigned>(psiMilli),
+                                   static_cast<unsigned long>(row.mean[0]),
+                                   static_cast<unsigned long>(row.mean[1]),
+                                   static_cast<unsigned long>(row.mean[2]),
+                                   static_cast<unsigned long>(row.cvMax),
+                                   static_cast<unsigned long>(row.out),
+                                   static_cast<unsigned long>(row.rej),
+                                   static_cast<unsigned long>(row.ready),
+                                   static_cast<unsigned long>(row.slip),
+                                   static_cast<unsigned long>(row.sc),
+                                   static_cast<unsigned long>(row.ec),
+                                   static_cast<unsigned long>(row.timeout));
+                          return runOne(testId, name, row.pass, metrics);
+                        };
+
+                        auto runValveMatrixRow = [&](uint16_t testId,
+                                                     const char* name,
+                                                     uint8_t channel,
+                                                     uint16_t targetRaw,
+                                                     uint16_t psiMilli,
+                                                     bool pausedMode) -> bool {
+                          ValveCharRowSummary row{};
+                          for (uint8_t i = 0u; i < 3u; ++i) {
+                            ValveCharWidthResult result = pausedMode
+                                ? runPausedValveWidth(channel, targetRaw, kValveCharWidthsUs[i])
+                                : runActiveValveWidth(testId,
+                                                      name,
+                                                      channel,
+                                                      targetRaw,
+                                                      kValveCharWidthsUs[i],
+                                                      pulseModeForChannel(channel),
+                                                      false,
+                                                      0u);
+                            accumulateValveWidth(row, i, result);
+                          }
+                          return emitValveMatrixRow(testId,
+                                                    name,
+                                                    (channel == 0u) ? 'p' : 'r',
+                                                    pausedMode ? 'p' : 'a',
+                                                    psiMilli,
+                                                    row);
+                        };
+
+                        auto runValveDualActiveRow = [&]() -> bool {
+                          static constexpr uint16_t kTestId = 2472u;
+                          static constexpr const char* kName = "valve_char_dual_active_2psi";
+#if (LC_PRESSURE_PORTS <= 1)
+                          return runOne(kTestId,
+                                        kName,
+                                        false,
+                                        "mode=dual;psi=2000;pulses=0;m15p=0;m15r=0;m30p=0;m30r=0;m45p=0;m45r=0;ratio=0;delta=0;ready=1;slip_w=0;sc=0;ec=0;timeout=0;gate=no_refuel_port");
+#else
+                          ValveCharRowSummary printRow{};
+                          ValveCharRowSummary refuelRow{};
+                          const uint16_t targetRaw = psiToRaw(2000u);
+                          for (uint8_t i = 0u; i < 3u; ++i) {
+                            ValveCharWidthResult printResult = runActiveValveWidth(kTestId,
+                                                                                   kName,
+                                                                                   0u,
+                                                                                   targetRaw,
+                                                                                   kValveCharWidthsUs[i],
+                                                                                   PulseMode::BOTH,
+                                                                                   true,
+                                                                                   targetRaw);
+                            ValveCharWidthResult refuelResult = runActiveValveWidth(kTestId,
+                                                                                    kName,
+                                                                                    1u,
+                                                                                    targetRaw,
+                                                                                    kValveCharWidthsUs[i],
+                                                                                    PulseMode::BOTH,
+                                                                                    true,
+                                                                                    targetRaw);
+                            accumulateValveWidth(printRow, i, printResult);
+                            accumulateValveWidth(refuelRow, i, refuelResult);
+                          }
+                          const uint32_t pMeanAvg = (printRow.mean[0] + printRow.mean[1] + printRow.mean[2] + 1u) / 3u;
+                          const uint32_t rMeanAvg = (refuelRow.mean[0] + refuelRow.mean[1] + refuelRow.mean[2] + 1u) / 3u;
+                          const uint32_t ratio = (rMeanAvg > 0u)
+                                                     ? static_cast<uint32_t>((static_cast<uint64_t>(pMeanAvg) * 100u) / rMeanAvg)
+                                                     : 0u;
+                          const uint32_t delta = ValvePulseQualificationMath::absDiff(pMeanAvg, rMeanAvg);
+                          char metrics[224];
+                          snprintf(metrics, sizeof(metrics),
+                                   "mode=dual;psi=2000;pulses=36;m15p=%lu;m15r=%lu;m30p=%lu;m30r=%lu;m45p=%lu;m45r=%lu;ratio=%lu;delta=%lu;ready=%lu;slip_w=%lu;sc=%lu;ec=%lu;timeout=%lu",
+                                   static_cast<unsigned long>(printRow.mean[0]),
+                                   static_cast<unsigned long>(refuelRow.mean[0]),
+                                   static_cast<unsigned long>(printRow.mean[1]),
+                                   static_cast<unsigned long>(refuelRow.mean[1]),
+                                   static_cast<unsigned long>(printRow.mean[2]),
+                                   static_cast<unsigned long>(refuelRow.mean[2]),
+                                   static_cast<unsigned long>(ratio),
+                                   static_cast<unsigned long>(delta),
+                                   static_cast<unsigned long>(printRow.ready + refuelRow.ready),
+                                   static_cast<unsigned long>((printRow.slip > refuelRow.slip) ? printRow.slip : refuelRow.slip),
+                                   static_cast<unsigned long>(printRow.sc + refuelRow.sc),
+                                   static_cast<unsigned long>(printRow.ec + refuelRow.ec),
+                                   static_cast<unsigned long>(printRow.timeout + refuelRow.timeout));
+                          return runOne(kTestId, kName, printRow.pass && refuelRow.pass, metrics);
+#endif
+                        };
+
+                        const uint16_t raw1 = psiToRaw(1000u);
+                        const uint16_t raw2 = psiToRaw(2000u);
+                        const uint16_t raw3 = psiToRaw(3000u);
+
+                        if (!runValveMatrixRow(2460u, "valve_char_pause_print_1psi", 0u, raw1, 1000u, true)) return finishSelfTestNow();
+                        if (!runValveMatrixRow(2461u, "valve_char_pause_print_2psi", 0u, raw2, 2000u, true)) return finishSelfTestNow();
+                        if (!runValveMatrixRow(2462u, "valve_char_pause_print_3psi", 0u, raw3, 3000u, true)) return finishSelfTestNow();
+                        if (!runValveMatrixRow(2463u, "valve_char_pause_refuel_1psi", 1u, raw1, 1000u, true)) return finishSelfTestNow();
+                        if (!runValveMatrixRow(2464u, "valve_char_pause_refuel_2psi", 1u, raw2, 2000u, true)) return finishSelfTestNow();
+                        if (!runValveMatrixRow(2465u, "valve_char_pause_refuel_3psi", 1u, raw3, 3000u, true)) return finishSelfTestNow();
+                        if (!runValveMatrixRow(2466u, "valve_char_active_print_1psi", 0u, raw1, 1000u, false)) return finishSelfTestNow();
+                        if (!runValveMatrixRow(2467u, "valve_char_active_print_2psi", 0u, raw2, 2000u, false)) return finishSelfTestNow();
+                        if (!runValveMatrixRow(2468u, "valve_char_active_print_3psi", 0u, raw3, 3000u, false)) return finishSelfTestNow();
+                        if (!runValveMatrixRow(2469u, "valve_char_active_refuel_1psi", 1u, raw1, 1000u, false)) return finishSelfTestNow();
+                        if (!runValveMatrixRow(2470u, "valve_char_active_refuel_2psi", 1u, raw2, 2000u, false)) return finishSelfTestNow();
+                        if (!runValveMatrixRow(2471u, "valve_char_active_refuel_3psi", 1u, raw3, 3000u, false)) return finishSelfTestNow();
+                        if (!runValveDualActiveRow()) return finishSelfTestNow();
+                        return finishSelfTestNow();
+                      }
 
 				  {
 				    static const uint8_t known[] = {'1','2','3','4','5','6','7','8','9'};
