@@ -941,6 +941,7 @@ Valve characterization qualification slice:
 - Add `valve_characterization_v1` as a separate operator-gated FULL manifest requiring fixture `valve_closed_loop_pulse_matrix_v1`.
 - Select the suite with existing `CMD_SELFTEST_START` selector field value `2499`; no protocol layout or opcode changes.
 - Firmware rows `2460`-`2471` compare print and refuel valves at `1 psi=2512`, `2 psi=3386`, and `3 psi=4259`, across matched `1500`, `3000`, and `4500 us` pulse widths.
+- The suite homes P/R regulators asynchronously once at startup and reports `home_to` on every row so active trace rows do not depend on the default FULL-suite motion-home gate.
 - Rows `2460`-`2465` measure isolated valve response with the tested regulator paused during the pulse train; rows `2466`-`2471` measure normal active-regulator recovery response.
 - Row `2472` measures dual active print/refuel interaction at `2 psi` across the same matched pulse widths.
 - Valve response is computed from trace sample windows around each pulse rather than immediate pulse-start/pulse-end event deltas, so the metric reflects the observed post-pulse pressure response.

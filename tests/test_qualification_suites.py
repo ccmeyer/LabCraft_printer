@@ -139,8 +139,10 @@ def test_valve_characterization_suite_exposes_operator_fixture_and_catalog_rows(
     assert rows[2472].name == "Dual active valve interaction"
     assert all(row.subsystem == "Valves/Pulses" for row in rows.values())
     assert "m15" in rows[2460].metrics
+    assert "home_to" in rows[2460].metrics
     assert "m45" in rows[2471].metrics
     assert "ratio" in rows[2472].metrics
+    assert "home_to" in rows[2472].metrics
     assert "1500, 3000, and 4500 us" in rows[2460].evaluates
     assert "regulator paused" in rows[2460].evaluates
     assert "active pressure recovery" in rows[2466].evaluates

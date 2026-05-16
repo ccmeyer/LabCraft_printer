@@ -467,6 +467,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                       const bool pressureSweepOnly = runPressureSweepCore || runPressureSweepExtended || runPressureSweepFocused || runPressureSweepMicro;
 					  bool fullHomePass = pressureSweepOnly;
 					  bool fullMotionBoundsPass = pressureSweepOnly;
+                      bool selectedPressureHomePass = false;
 
 					  auto absDiff32 = [](int32_t a, int32_t b) -> uint32_t {
 					    const int64_t diff = static_cast<int64_t>(a) - static_cast<int64_t>(b);
@@ -3607,7 +3608,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           if (outMetrics) *outMetrics = computed;
                           return true;
                         }
-                        if (!fullHomePass && !pressureSweepOnly) {
+                        if (!fullHomePass && !pressureSweepOnly && !selectedPressureHomePass) {
                           if (emitResult) {
                             return runOne(testId, name, false, "base=0;min=0;max=0;under=0;over=0;rec_w=0;rec_m=0;ready_miss=1;slip_w=0;slip_m=0;zero=0;rejects=0;sc=0;ec=0");
                           }
@@ -3815,6 +3816,10 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         static constexpr uint16_t kValveCharPulseCount = 6u;
                         static constexpr uint16_t kValveCharRateHz = 20u;
                         static constexpr uint32_t kValveCharStabilizeMs = 1000u;
+                        static constexpr uint32_t kValveCharRegHomeFastHz = 30000u;
+                        static constexpr uint32_t kValveCharRegHomeSlowHz = 3000u;
+                        static constexpr uint32_t kValveCharRegHomeBackoffSteps = 400u;
+                        static constexpr uint32_t kValveCharRegHomeTimeoutMs = 20000u;
 
                         struct ValveCharWidthResult {
                           uint32_t mean = 0u;
@@ -3852,6 +3857,51 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 
                         auto regulatorForValveChannel = [&](uint8_t channel) -> PressureRegulator& {
                           return (channel == 0u) ? PressureRegulator::regP() : PressureRegulator::regR();
+                        };
+
+                        auto closeValveCharPressurePaths = [&]() {
+                          PressureRegulator::regP().pause();
+                          PressureRegulator::regP().closeValve();
+#if (LC_PRESSURE_PORTS > 1)
+                          PressureRegulator::regR().pause();
+                          PressureRegulator::regR().closeValve();
+#endif
+                        };
+
+                        auto homeValveCharPressureRegulators = [&]() -> bool {
+                          closeValveCharPressurePaths();
+                          sendProgressStage("valve_char_reg_home");
+                          EventBits_t homeBits = BIT_HOME_P_DONE;
+#if (LC_PRESSURE_PORTS > 1)
+                          homeBits |= BIT_HOME_R_DONE;
+#endif
+                          xEventGroupClearBits(_doneEvents, homeBits);
+                          startRegHomeAsync(&PressureRegulator::regP(),
+                                            kValveCharRegHomeFastHz,
+                                            kValveCharRegHomeSlowHz,
+                                            kValveCharRegHomeBackoffSteps,
+                                            BIT_HOME_P_DONE);
+#if (LC_PRESSURE_PORTS > 1)
+                          startRegHomeAsync(&PressureRegulator::regR(),
+                                            kValveCharRegHomeFastHz,
+                                            kValveCharRegHomeSlowHz,
+                                            kValveCharRegHomeBackoffSteps,
+                                            BIT_HOME_R_DONE);
+#endif
+                          const bool homesDone = waitBitsWithTimeout(homeBits, kValveCharRegHomeTimeoutMs);
+                          const EventBits_t doneBits = xEventGroupGetBits(_doneEvents);
+                          bool homeOk = homesDone &&
+                              ((doneBits & BIT_HOME_P_DONE) != 0u) &&
+                              (Stepper::stepperP() != nullptr) &&
+                              Stepper::stepperP()->getLastHomeDiagnosticSnapshot().success;
+#if (LC_PRESSURE_PORTS > 1)
+                          homeOk = homeOk &&
+                              ((doneBits & BIT_HOME_R_DONE) != 0u) &&
+                              (Stepper::stepperR() != nullptr) &&
+                              Stepper::stepperR()->getLastHomeDiagnosticSnapshot().success;
+#endif
+                          closeValveCharPressurePaths();
+                          return homeOk && !_selfTestAbortRequested;
                         };
 
                         auto accumulateValveWidth = [&](ValveCharRowSummary& row,
@@ -4046,7 +4096,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                                       const ValveCharRowSummary& row) -> bool {
                           char metrics[224];
                           snprintf(metrics, sizeof(metrics),
-                                   "ch=%c;mode=%c;psi=%u;pulses=18;hz=20;w15=1500;w30=3000;w45=4500;m15=%lu;m30=%lu;m45=%lu;cv=%lu;out=%lu;rej=%lu;ready=%lu;slip_w=%lu;sc=%lu;ec=%lu;timeout=%lu",
+                                   "ch=%c;mode=%c;psi=%u;pulses=18;hz=20;w15=1500;w30=3000;w45=4500;m15=%lu;m30=%lu;m45=%lu;cv=%lu;out=%lu;rej=%lu;ready=%lu;slip_w=%lu;sc=%lu;ec=%lu;home_to=0;timeout=%lu",
                                    ch,
                                    mode,
                                    static_cast<unsigned>(psiMilli),
@@ -4062,6 +4112,20 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                    static_cast<unsigned long>(row.ec),
                                    static_cast<unsigned long>(row.timeout));
                           return runOne(testId, name, row.pass, metrics);
+                        };
+
+                        auto emitValveHomeFailureMatrixRow = [&](uint16_t testId,
+                                                                 const char* name,
+                                                                 char ch,
+                                                                 char mode,
+                                                                 uint16_t psiMilli) -> bool {
+                          char metrics[224];
+                          snprintf(metrics, sizeof(metrics),
+                                   "ch=%c;mode=%c;psi=%u;pulses=18;hz=20;w15=1500;w30=3000;w45=4500;m15=0;m30=0;m45=0;cv=0;out=0;rej=18;ready=0;slip_w=0;sc=0;ec=0;home_to=1;timeout=0;gate=home_reference",
+                                   ch,
+                                   mode,
+                                   static_cast<unsigned>(psiMilli));
+                          return runOne(testId, name, false, metrics);
                         };
 
                         auto runValveMatrixRow = [&](uint16_t testId,
@@ -4099,7 +4163,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           return runOne(kTestId,
                                         kName,
                                         false,
-                                        "mode=dual;psi=2000;pulses=0;m15p=0;m15r=0;m30p=0;m30r=0;m45p=0;m45r=0;ratio=0;delta=0;ready=1;slip_w=0;sc=0;ec=0;timeout=0;gate=no_refuel_port");
+                                        "mode=dual;psi=2000;pulses=0;m15p=0;m15r=0;m30p=0;m30r=0;m45p=0;m45r=0;ratio=0;delta=0;ready=1;slip_w=0;sc=0;ec=0;home_to=0;timeout=0;gate=no_refuel_port");
 #else
                           ValveCharRowSummary printRow{};
                           ValveCharRowSummary refuelRow{};
@@ -4132,7 +4196,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           const uint32_t delta = ValvePulseQualificationMath::absDiff(pMeanAvg, rMeanAvg);
                           char metrics[224];
                           snprintf(metrics, sizeof(metrics),
-                                   "mode=dual;psi=2000;pulses=36;m15p=%lu;m15r=%lu;m30p=%lu;m30r=%lu;m45p=%lu;m45r=%lu;ratio=%lu;delta=%lu;ready=%lu;slip_w=%lu;sc=%lu;ec=%lu;timeout=%lu",
+                                   "mode=dual;psi=2000;pulses=36;m15p=%lu;m15r=%lu;m30p=%lu;m30r=%lu;m45p=%lu;m45r=%lu;ratio=%lu;delta=%lu;ready=%lu;slip_w=%lu;sc=%lu;ec=%lu;home_to=0;timeout=%lu",
                                    static_cast<unsigned long>(printRow.mean[0]),
                                    static_cast<unsigned long>(refuelRow.mean[0]),
                                    static_cast<unsigned long>(printRow.mean[1]),
@@ -4150,9 +4214,39 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 #endif
                         };
 
+                        auto emitValveHomeFailureRows = [&]() -> bool {
+                          if (!emitValveHomeFailureMatrixRow(2460u, "valve_char_pause_print_1psi", 'p', 'p', 1000u)) return false;
+                          if (!emitValveHomeFailureMatrixRow(2461u, "valve_char_pause_print_2psi", 'p', 'p', 2000u)) return false;
+                          if (!emitValveHomeFailureMatrixRow(2462u, "valve_char_pause_print_3psi", 'p', 'p', 3000u)) return false;
+                          if (!emitValveHomeFailureMatrixRow(2463u, "valve_char_pause_refuel_1psi", 'r', 'p', 1000u)) return false;
+                          if (!emitValveHomeFailureMatrixRow(2464u, "valve_char_pause_refuel_2psi", 'r', 'p', 2000u)) return false;
+                          if (!emitValveHomeFailureMatrixRow(2465u, "valve_char_pause_refuel_3psi", 'r', 'p', 3000u)) return false;
+                          if (!emitValveHomeFailureMatrixRow(2466u, "valve_char_active_print_1psi", 'p', 'a', 1000u)) return false;
+                          if (!emitValveHomeFailureMatrixRow(2467u, "valve_char_active_print_2psi", 'p', 'a', 2000u)) return false;
+                          if (!emitValveHomeFailureMatrixRow(2468u, "valve_char_active_print_3psi", 'p', 'a', 3000u)) return false;
+                          if (!emitValveHomeFailureMatrixRow(2469u, "valve_char_active_refuel_1psi", 'r', 'a', 1000u)) return false;
+                          if (!emitValveHomeFailureMatrixRow(2470u, "valve_char_active_refuel_2psi", 'r', 'a', 2000u)) return false;
+                          if (!emitValveHomeFailureMatrixRow(2471u, "valve_char_active_refuel_3psi", 'r', 'a', 3000u)) return false;
+                          return runOne(2472u,
+                                        "valve_char_dual_active_2psi",
+                                        false,
+                                        "mode=dual;psi=2000;pulses=36;m15p=0;m15r=0;m30p=0;m30r=0;m45p=0;m45r=0;ratio=0;delta=0;ready=0;slip_w=0;sc=0;ec=0;home_to=1;timeout=0;gate=home_reference");
+                        };
+
                         const uint16_t raw1 = psiToRaw(1000u);
                         const uint16_t raw2 = psiToRaw(2000u);
                         const uint16_t raw3 = psiToRaw(3000u);
+
+                        selectedPressureHomePass = homeValveCharPressureRegulators();
+                        if (!selectedPressureHomePass) {
+                          closeValveCharPressurePaths();
+                          if (_selfTestAbortRequested) {
+                            aborted = true;
+                            return finishSelfTestNow();
+                          }
+                          (void)emitValveHomeFailureRows();
+                          return finishSelfTestNow();
+                        }
 
                         if (!runValveMatrixRow(2460u, "valve_char_pause_print_1psi", 0u, raw1, 1000u, true)) return finishSelfTestNow();
                         if (!runValveMatrixRow(2461u, "valve_char_pause_print_2psi", 0u, raw2, 2000u, true)) return finishSelfTestNow();
