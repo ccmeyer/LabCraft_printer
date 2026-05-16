@@ -227,7 +227,7 @@ def _raw_pressure_regulator_selftest():
         "motor_delta_max": 5000,
         "max_jump": 874,
         "slew": 1,
-        "cap_hz": 8000,
+        "cap_hz": 16000,
     }
     return {
         "run_id": 7890,
@@ -276,12 +276,12 @@ def _raw_pressure_regulator_selftest():
             },
             {"test_id": 2212, "name": "pressure_hold_leak_print_factory", "pass": True, "metrics": {"ch": "p", "target_raw": 3386, "hold_ms": 15000, "slope_raw_min": 0, "corr_steps": 10, "ready_miss": 0, "timeout": 0, **guard_ok}},
             {"test_id": 2213, "name": "pressure_hold_leak_refuel_factory", "pass": True, "metrics": {"ch": "r", "target_raw": 3386, "hold_ms": 15000, "slope_raw_min": 0, "corr_steps": 10, "ready_miss": 0, "timeout": 0, **guard_ok}},
-            {"test_id": 2214, "name": "pressure_target_cycle_print_factory", "pass": True, "metrics": {"ch": "p", "settle_max_ms": 500, "err_max": 4, "low_dn_span": 8, "high_up_span": 8, "ready_miss": 0, "timeout": 0, **guard_ok}},
-            {"test_id": 2215, "name": "pressure_target_cycle_refuel_factory", "pass": True, "metrics": {"ch": "r", "settle_max_ms": 500, "err_max": 5, "low_dn_span": 8, "high_up_span": 8, "ready_miss": 0, "timeout": 0, **guard_ok}},
+            {"test_id": 2214, "name": "pressure_target_cycle_print_factory", "pass": True, "metrics": {"ch": "p", "settle_max_ms": 500, "err_max": 4, "low_dn_span": 8, "high_up_span": 8, "over": 2, "under": 3, "ready_miss": 0, "timeout": 0, **guard_ok}},
+            {"test_id": 2215, "name": "pressure_target_cycle_refuel_factory", "pass": True, "metrics": {"ch": "r", "settle_max_ms": 500, "err_max": 5, "low_dn_span": 8, "high_up_span": 8, "over": 2, "under": 3, "ready_miss": 0, "timeout": 0, **guard_ok}},
             {"test_id": 2216, "name": "pressure_motor_hysteresis_print_factory", "pass": True, "metrics": {"ch": "p", "target_raw": 3386, "below_span": 8, "above_span": 7, "hyst_span": 4, "err_max": 4, "ready_miss": 0, "timeout": 0, **guard_ok}},
             {"test_id": 2217, "name": "pressure_motor_hysteresis_refuel_factory", "pass": True, "metrics": {"ch": "r", "target_raw": 3386, "below_span": 8, "above_span": 7, "hyst_span": 4, "err_max": 5, "ready_miss": 0, "timeout": 0, **guard_ok}},
-            {"test_id": 2218, "name": "pressure_step_ladder_print_factory", "pass": True, "metrics": {"ch": "p", "raw1": 2512, "raw2": 3386, "raw3": 4259, "settle_max_ms": 500, "err_max": 4, "ready_miss": 0, "timeout": 0, **guard_ok}},
-            {"test_id": 2219, "name": "pressure_step_ladder_refuel_factory", "pass": True, "metrics": {"ch": "r", "raw1": 2512, "raw2": 3386, "raw3": 4259, "settle_max_ms": 500, "err_max": 5, "ready_miss": 0, "timeout": 0, **guard_ok}},
+            {"test_id": 2218, "name": "pressure_step_ladder_print_factory", "pass": True, "metrics": {"ch": "p", "raw1": 2512, "raw2": 3386, "raw3": 4259, "settle_max_ms": 500, "err_max": 4, "over": 2, "under": 3, "ready_miss": 0, "timeout": 0, **guard_ok}},
+            {"test_id": 2219, "name": "pressure_step_ladder_refuel_factory", "pass": True, "metrics": {"ch": "r", "raw1": 2512, "raw2": 3386, "raw3": 4259, "settle_max_ms": 500, "err_max": 5, "over": 2, "under": 3, "ready_miss": 0, "timeout": 0, **guard_ok}},
         ],
         "host_checks": [{"name": "hello_ack", "pass": True, "details": {"seq8": 1}}],
     }

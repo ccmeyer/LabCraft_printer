@@ -3018,7 +3018,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                 testId,
                                 name,
                                 channel,
-                                "target_raw=3386;hold_ms=15000;slope_raw_min=0;corr_steps=0;home_to=1;ready_miss=0;timeout=0;guard=0;motor_abs_max=0;motor_delta_max=0;max_jump=874;slew=1;cap_hz=8000");
+                                "target_raw=3386;hold_ms=15000;slope_raw_min=0;corr_steps=0;home_to=1;ready_miss=0;timeout=0;guard=0;motor_abs_max=0;motor_delta_max=0;max_jump=874;slew=1;cap_hz=16000");
                           }
                           sendProgressStage((channel == 0u) ? "pressure_hold_print" : "pressure_hold_refuel");
                           const PressureHomeReference homeRef = homePressureReference(
@@ -3100,7 +3100,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                 testId,
                                 name,
                                 channel,
-                                "settle_max_ms=0;err_max=0;low_dn_span=0;high_up_span=0;home_to=1;ready_miss=0;timeout=0;guard=0;motor_abs_max=0;motor_delta_max=0;max_jump=874;slew=1;cap_hz=8000");
+                                "settle_max_ms=0;err_max=0;low_dn_span=0;high_up_span=0;over=0;under=0;home_to=1;ready_miss=0;timeout=0;guard=0;motor_abs_max=0;motor_delta_max=0;max_jump=874;slew=1;cap_hz=16000");
                           }
                           sendProgressStage((channel == 0u) ? "pressure_cycle_print" : "pressure_cycle_refuel");
                           const PressureHomeReference homeRef = homePressureReference(
@@ -3109,7 +3109,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           if (!homeRef.ok) {
                             char metrics[224];
                             snprintf(metrics, sizeof(metrics),
-                                     "ch=%c;gate=home_reference;settle_max_ms=0;err_max=0;low_dn_span=0;high_up_span=0;home_to=%lu;ready_miss=0;timeout=0;guard=0;motor_abs_max=0;motor_delta_max=0;max_jump=0;slew=1;cap_hz=%lu",
+                                     "ch=%c;gate=home_reference;settle_max_ms=0;err_max=0;low_dn_span=0;high_up_span=0;over=0;under=0;home_to=%lu;ready_miss=0;timeout=0;guard=0;motor_abs_max=0;motor_delta_max=0;max_jump=0;slew=1;cap_hz=%lu",
                                      channelCode(channel),
                                      static_cast<unsigned long>((homeRef.homeTo > 0u) ? homeRef.homeTo : 1u),
                                      static_cast<unsigned long>(PressureRegulator::kSetpointSlewSpeedCapHz));
@@ -3125,6 +3125,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           size_t highCount = 0u;
                           uint32_t settleMaxMs = 0u;
                           uint32_t errMax = 0u;
+                          uint32_t overMax = 0u;
+                          uint32_t underMax = 0u;
                           uint32_t maxJumpRaw = 0u;
                           reg.closeValve();
                           reg.start();
@@ -3133,8 +3135,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                                                                              exec,
                                                                                              settleMaxMs,
                                                                                              errMax,
-                                                                                             nullptr,
-                                                                                             nullptr,
+                                                                                             &overMax,
+                                                                                             &underMax,
                                                                                              guardState,
                                                                                              maxJumpRaw);
                           for (uint32_t cycle = 0u; cycle < kCycleCount; ++cycle) {
@@ -3144,8 +3146,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                                                                              exec,
                                                                                              settleMaxMs,
                                                                                              errMax,
-                                                                                             nullptr,
-                                                                                             nullptr,
+                                                                                             &overMax,
+                                                                                             &underMax,
                                                                                              guardState,
                                                                                              maxJumpRaw);
                             if (!lowWait.accepted || pressureMotorGuardTripped || _selfTestAbortRequested) break;
@@ -3156,8 +3158,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                                                                              exec,
                                                                                              settleMaxMs,
                                                                                              errMax,
-                                                                                             nullptr,
-                                                                                             nullptr,
+                                                                                             &overMax,
+                                                                                             &underMax,
                                                                                              guardState,
                                                                                              maxJumpRaw);
                             if (!midWait.accepted || pressureMotorGuardTripped || _selfTestAbortRequested) break;
@@ -3166,8 +3168,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                                                                               exec,
                                                                                               settleMaxMs,
                                                                                               errMax,
-                                                                                              nullptr,
-                                                                                              nullptr,
+                                                                                              &overMax,
+                                                                                              &underMax,
                                                                                               guardState,
                                                                                               maxJumpRaw);
                             if (!highWait.accepted || pressureMotorGuardTripped || _selfTestAbortRequested) break;
@@ -3178,8 +3180,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                                                                                    exec,
                                                                                                    settleMaxMs,
                                                                                                    errMax,
-                                                                                                   nullptr,
-                                                                                                   nullptr,
+                                                                                                   &overMax,
+                                                                                                   &underMax,
                                                                                                    guardState,
                                                                                                    maxJumpRaw);
                             if (!returnMidWait.accepted || pressureMotorGuardTripped || _selfTestAbortRequested) break;
@@ -3192,12 +3194,14 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                             PressureQualificationMath::executionPass(exec);
                           char metrics[256];
                           snprintf(metrics, sizeof(metrics),
-                                   "ch=%c;settle_max_ms=%lu;err_max=%lu;low_dn_span=%lu;high_up_span=%lu;home_to=%lu;ready_miss=%lu;timeout=%lu;guard=%lu;motor_abs_max=%lu;motor_delta_max=%lu;max_jump=%lu;slew=1;cap_hz=%lu",
+                                   "ch=%c;settle_max_ms=%lu;err_max=%lu;low_dn_span=%lu;high_up_span=%lu;over=%lu;under=%lu;home_to=%lu;ready_miss=%lu;timeout=%lu;guard=%lu;motor_abs_max=%lu;motor_delta_max=%lu;max_jump=%lu;slew=1;cap_hz=%lu",
                                    channelCode(channel),
                                    static_cast<unsigned long>(settleMaxMs),
                                    static_cast<unsigned long>(errMax),
                                    static_cast<unsigned long>(lowStats.span),
                                    static_cast<unsigned long>(highStats.span),
+                                   static_cast<unsigned long>(overMax),
+                                   static_cast<unsigned long>(underMax),
                                    static_cast<unsigned long>(homeRef.homeTo),
                                    static_cast<unsigned long>(exec.readyMissCount),
                                    static_cast<unsigned long>(exec.timeoutCount + exec.abortCount),
@@ -3215,7 +3219,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                 testId,
                                 name,
                                 channel,
-                                "target_raw=3386;below_span=0;above_span=0;hyst_span=0;err_max=0;home_to=1;ready_miss=0;timeout=0;guard=0;motor_abs_max=0;motor_delta_max=0;max_jump=874;slew=1;cap_hz=8000");
+                                "target_raw=3386;below_span=0;above_span=0;hyst_span=0;err_max=0;home_to=1;ready_miss=0;timeout=0;guard=0;motor_abs_max=0;motor_delta_max=0;max_jump=874;slew=1;cap_hz=16000");
                           }
                           sendProgressStage((channel == 0u) ? "pressure_hyst_print" : "pressure_hyst_refuel");
                           const PressureHomeReference homeRef = homePressureReference(
@@ -3328,7 +3332,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                 testId,
                                 name,
                                 channel,
-                                "raw1=2512;raw2=3386;raw3=4259;settle_max_ms=0;err_max=0;home_to=1;ready_miss=0;timeout=0;guard=0;motor_abs_max=0;motor_delta_max=0;max_jump=874;slew=1;cap_hz=8000");
+                                "raw1=2512;raw2=3386;raw3=4259;settle_max_ms=0;err_max=0;over=0;under=0;home_to=1;ready_miss=0;timeout=0;guard=0;motor_abs_max=0;motor_delta_max=0;max_jump=874;slew=1;cap_hz=16000");
                           }
                           sendProgressStage((channel == 0u) ? "pressure_ladder_print" : "pressure_ladder_refuel");
                           const PressureHomeReference homeRef = homePressureReference(
@@ -3337,7 +3341,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           if (!homeRef.ok) {
                             char metrics[224];
                             snprintf(metrics, sizeof(metrics),
-                                     "ch=%c;gate=home_reference;raw1=%lu;raw2=%lu;raw3=%lu;settle_max_ms=0;err_max=0;home_to=%lu;ready_miss=0;timeout=0;guard=0;motor_abs_max=0;motor_delta_max=0;max_jump=0;slew=1;cap_hz=%lu",
+                                     "ch=%c;gate=home_reference;raw1=%lu;raw2=%lu;raw3=%lu;settle_max_ms=0;err_max=0;over=0;under=0;home_to=%lu;ready_miss=0;timeout=0;guard=0;motor_abs_max=0;motor_delta_max=0;max_jump=0;slew=1;cap_hz=%lu",
                                      channelCode(channel),
                                      static_cast<unsigned long>(kPressure1Raw),
                                      static_cast<unsigned long>(kPressure2Raw),
@@ -3384,13 +3388,15 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                             PressureQualificationMath::executionPass(exec);
                           char metrics[256];
                           snprintf(metrics, sizeof(metrics),
-                                   "ch=%c;raw1=%lu;raw2=%lu;raw3=%lu;settle_max_ms=%lu;err_max=%lu;home_to=%lu;ready_miss=%lu;timeout=%lu;guard=%lu;motor_abs_max=%lu;motor_delta_max=%lu;max_jump=%lu;slew=1;cap_hz=%lu",
+                                   "ch=%c;raw1=%lu;raw2=%lu;raw3=%lu;settle_max_ms=%lu;err_max=%lu;over=%lu;under=%lu;home_to=%lu;ready_miss=%lu;timeout=%lu;guard=%lu;motor_abs_max=%lu;motor_delta_max=%lu;max_jump=%lu;slew=1;cap_hz=%lu",
                                    channelCode(channel),
                                    static_cast<unsigned long>(kPressure1Raw),
                                    static_cast<unsigned long>(kPressure2Raw),
                                    static_cast<unsigned long>(kPressure3Raw),
                                    static_cast<unsigned long>(settleMaxMs),
                                    static_cast<unsigned long>(errMax),
+                                   static_cast<unsigned long>(overMax),
+                                   static_cast<unsigned long>(underMax),
                                    static_cast<unsigned long>(homeRef.homeTo),
                                    static_cast<unsigned long>(exec.readyMissCount),
                                    static_cast<unsigned long>(exec.timeoutCount + exec.abortCount),
@@ -3417,7 +3423,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           auto emitCycle = [&](uint16_t testId, const char* name, uint8_t channel) -> bool {
                             char metrics[256];
                             snprintf(metrics, sizeof(metrics),
-                                     "ch=%c;gate=motor_guard;settle_max_ms=0;err_max=0;low_dn_span=0;high_up_span=0;home_to=0;ready_miss=0;timeout=0;guard=1;motor_abs_max=0;motor_delta_max=0;max_jump=%lu;slew=1;cap_hz=%lu",
+                                     "ch=%c;gate=motor_guard;settle_max_ms=0;err_max=0;low_dn_span=0;high_up_span=0;over=0;under=0;home_to=0;ready_miss=0;timeout=0;guard=1;motor_abs_max=0;motor_delta_max=0;max_jump=%lu;slew=1;cap_hz=%lu",
                                      channelCode(channel),
                                      static_cast<unsigned long>(kMaxPressureJumpRaw),
                                      static_cast<unsigned long>(PressureRegulator::kSetpointSlewSpeedCapHz));
@@ -3436,7 +3442,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           auto emitLadder = [&](uint16_t testId, const char* name, uint8_t channel) -> bool {
                             char metrics[256];
                             snprintf(metrics, sizeof(metrics),
-                                     "ch=%c;gate=motor_guard;raw1=%lu;raw2=%lu;raw3=%lu;settle_max_ms=0;err_max=0;home_to=0;ready_miss=0;timeout=0;guard=1;motor_abs_max=0;motor_delta_max=0;max_jump=%lu;slew=1;cap_hz=%lu",
+                                     "ch=%c;gate=motor_guard;raw1=%lu;raw2=%lu;raw3=%lu;settle_max_ms=0;err_max=0;over=0;under=0;home_to=0;ready_miss=0;timeout=0;guard=1;motor_abs_max=0;motor_delta_max=0;max_jump=%lu;slew=1;cap_hz=%lu",
                                      channelCode(channel),
                                      static_cast<unsigned long>(kPressure1Raw),
                                      static_cast<unsigned long>(kPressure2Raw),

@@ -105,6 +105,8 @@ def test_pressure_regulator_suite_exposes_operator_fixture_and_catalog_rows():
     assert "home_to" in rows[2214].metrics
     assert "low_dn_span" in rows[2214].metrics
     assert "high_up_span" in rows[2214].metrics
+    assert "over" in rows[2214].metrics
+    assert "under" in rows[2214].metrics
     assert "max_jump" in rows[2215].metrics
     assert "cap_hz" in rows[2215].metrics
     assert "below_span" in rows[2216].metrics
@@ -115,4 +117,6 @@ def test_pressure_regulator_suite_exposes_operator_fixture_and_catalog_rows():
     assert "same-direction" in rows[2216].evaluates
     assert "informational approach-direction hysteresis" in rows[2216].evaluates
     assert "settle_max_ms" in rows[2218].metrics
+    assert "over" in rows[2218].metrics
+    assert "under" in rows[2218].metrics
     assert "1, 2, 3, 2, 1 psi" in rows[2218].evaluates

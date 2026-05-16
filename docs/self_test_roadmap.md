@@ -927,11 +927,12 @@ Pressure regulator qualification slice:
 - Firmware rows `2210`-`2219` cover idle P/R pressure stability, regulator homing repeatability, print/refuel 2 psi holds, print/refuel cycling through adjacent 1 psi target steps, print/refuel 2 psi hysteresis approaches, and print/refuel `1 -> 2 -> 3 -> 2 -> 1 psi` step ladders.
 - The ladder targets use the existing raw conversion: `1 psi=2512`, `2 psi=3386`, and `3 psi=4259`.
 - Pressure-regulator qualification target changes are split into at most 1 psi waits and include a diagnostic motor-travel guard so excessive regulator travel fails rows cleanly instead of relying on the regulator internal step-limit/watchdog path.
-- Normal pressure-regulator setpoint changes now slew the control target at `1 psi/sec` (`874 raw/sec`) and cap commanded motor speed at `8000 Hz` only while a setpoint transition is active. Once the ramp reaches the requested target, ordinary pressure maintenance and dispense recovery use the existing behavior.
+- Normal pressure-regulator setpoint changes now slew the control target at `1 psi/sec` (`874 raw/sec`) and cap commanded motor speed at `16000 Hz` only while a setpoint transition is active. Once the ramp reaches the requested target, ordinary pressure maintenance and dispense recovery use the existing behavior.
 - Active pressure qualification rows `2212`-`2219` perform a fresh regulator home before starting pressure motion and report `home_to`, `slew`, and `cap_hz` so stale home references and no-slew regressions are visible in `qualification_report_v1`.
 - `2211` performs an unscored setup home before measured P/R homing repetitions and reports measured success counts (`p_n`, `r_n`); span and drift are computed only from successful measured homes.
 - `pressure_regulator_v1` target waits rely on the production regulator ready state, with no qualification-only `100 raw` acceptance fallback.
 - `2214`/`2215` report same-direction cycle spans as `low_dn_span` and `high_up_span`; `2216`/`2217` report same-direction `below_span`/`above_span` and keep cross-direction `hyst_span` informational.
+- `2214`/`2215` and `2218`/`2219` report informational `over`/`under` raw-pressure transient metrics to support regulator speed tuning.
 - Keep `pressure_regulator_v1` out of `factory_acceptance_v3`; use it for explicit, operator-confirmed pressure regulator qualification runs before deciding whether any rows belong in the default FULL suite.
 
 Validation:
