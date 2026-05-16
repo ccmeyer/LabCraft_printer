@@ -65,7 +65,11 @@
         "slope_raw_min": {"maturity": "candidate", "min": -1500, "max": 1500},
         "corr_steps": {"maturity": "candidate", "max": 10000},
         "ready_miss": {"maturity": "candidate", "equals": 0},
-        "timeout": {"maturity": "candidate", "equals": 0}
+        "timeout": {"maturity": "candidate", "equals": 0},
+        "guard": {"maturity": "candidate", "equals": 0},
+        "max_jump": {"maturity": "candidate", "max": 874},
+        "motor_abs_max": {"maturity": "candidate", "max": 80000},
+        "motor_delta_max": {"maturity": "candidate", "max": 50000}
       }
     },
     "2213": {
@@ -75,7 +79,11 @@
         "slope_raw_min": {"maturity": "candidate", "min": -1500, "max": 1500},
         "corr_steps": {"maturity": "candidate", "max": 10000},
         "ready_miss": {"maturity": "candidate", "equals": 0},
-        "timeout": {"maturity": "candidate", "equals": 0}
+        "timeout": {"maturity": "candidate", "equals": 0},
+        "guard": {"maturity": "candidate", "equals": 0},
+        "max_jump": {"maturity": "candidate", "max": 874},
+        "motor_abs_max": {"maturity": "candidate", "max": 80000},
+        "motor_delta_max": {"maturity": "candidate", "max": 50000}
       }
     },
     "2214": {
@@ -87,7 +95,11 @@
         "low_span": {"maturity": "candidate", "max": 2000},
         "high_span": {"maturity": "candidate", "max": 2000},
         "ready_miss": {"maturity": "candidate", "equals": 0},
-        "timeout": {"maturity": "candidate", "equals": 0}
+        "timeout": {"maturity": "candidate", "equals": 0},
+        "guard": {"maturity": "candidate", "equals": 0},
+        "max_jump": {"maturity": "candidate", "max": 874},
+        "motor_abs_max": {"maturity": "candidate", "max": 80000},
+        "motor_delta_max": {"maturity": "candidate", "max": 50000}
       }
     },
     "2215": {
@@ -99,7 +111,11 @@
         "low_span": {"maturity": "candidate", "max": 2000},
         "high_span": {"maturity": "candidate", "max": 2000},
         "ready_miss": {"maturity": "candidate", "equals": 0},
-        "timeout": {"maturity": "candidate", "equals": 0}
+        "timeout": {"maturity": "candidate", "equals": 0},
+        "guard": {"maturity": "candidate", "equals": 0},
+        "max_jump": {"maturity": "candidate", "max": 874},
+        "motor_abs_max": {"maturity": "candidate", "max": 80000},
+        "motor_delta_max": {"maturity": "candidate", "max": 50000}
       }
     },
     "2216": {
@@ -110,7 +126,11 @@
         "hyst_span": {"maturity": "candidate", "max": 2000},
         "err_max": {"maturity": "candidate", "max": 100},
         "ready_miss": {"maturity": "candidate", "equals": 0},
-        "timeout": {"maturity": "candidate", "equals": 0}
+        "timeout": {"maturity": "candidate", "equals": 0},
+        "guard": {"maturity": "candidate", "equals": 0},
+        "max_jump": {"maturity": "candidate", "max": 874},
+        "motor_abs_max": {"maturity": "candidate", "max": 80000},
+        "motor_delta_max": {"maturity": "candidate", "max": 50000}
       }
     },
     "2217": {
@@ -121,7 +141,11 @@
         "hyst_span": {"maturity": "candidate", "max": 2000},
         "err_max": {"maturity": "candidate", "max": 100},
         "ready_miss": {"maturity": "candidate", "equals": 0},
-        "timeout": {"maturity": "candidate", "equals": 0}
+        "timeout": {"maturity": "candidate", "equals": 0},
+        "guard": {"maturity": "candidate", "equals": 0},
+        "max_jump": {"maturity": "candidate", "max": 874},
+        "motor_abs_max": {"maturity": "candidate", "max": 80000},
+        "motor_delta_max": {"maturity": "candidate", "max": 50000}
       }
     },
     "2218": {
@@ -131,7 +155,11 @@
         "settle_max_ms": {"maturity": "candidate", "max": 5000},
         "err_max": {"maturity": "candidate", "max": 100},
         "ready_miss": {"maturity": "candidate", "equals": 0},
-        "timeout": {"maturity": "candidate", "equals": 0}
+        "timeout": {"maturity": "candidate", "equals": 0},
+        "guard": {"maturity": "candidate", "equals": 0},
+        "max_jump": {"maturity": "candidate", "max": 874},
+        "motor_abs_max": {"maturity": "candidate", "max": 80000},
+        "motor_delta_max": {"maturity": "candidate", "max": 50000}
       }
     },
     "2219": {
@@ -141,7 +169,11 @@
         "settle_max_ms": {"maturity": "candidate", "max": 5000},
         "err_max": {"maturity": "candidate", "max": 100},
         "ready_miss": {"maturity": "candidate", "equals": 0},
-        "timeout": {"maturity": "candidate", "equals": 0}
+        "timeout": {"maturity": "candidate", "equals": 0},
+        "guard": {"maturity": "candidate", "equals": 0},
+        "max_jump": {"maturity": "candidate", "max": 874},
+        "motor_abs_max": {"maturity": "candidate", "max": 80000},
+        "motor_delta_max": {"maturity": "candidate", "max": 50000}
       }
     }
   }

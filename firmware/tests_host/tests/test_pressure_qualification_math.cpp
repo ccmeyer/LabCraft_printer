@@ -14,9 +14,69 @@ TEST(PressureQualificationMath, ComputesSignedPressureSlopePerMinute)
 
 TEST(PressureQualificationMath, ConvertsPsiMilliToPressureRaw)
 {
+    UNSIGNED_LONGS_EQUAL(1638u, PressureQualificationMath::pressureRawFromPsiMilli(0u));
     UNSIGNED_LONGS_EQUAL(2512u, PressureQualificationMath::pressureRawFromPsiMilli(1000u));
     UNSIGNED_LONGS_EQUAL(3386u, PressureQualificationMath::pressureRawFromPsiMilli(2000u));
     UNSIGNED_LONGS_EQUAL(4259u, PressureQualificationMath::pressureRawFromPsiMilli(3000u));
+}
+
+TEST(PressureQualificationMath, SplitsPressureTargetsIntoAdjacentOnePsiSteps)
+{
+    const uint32_t onePsiRaw =
+        PressureQualificationMath::pressureRawFromPsiMilli(1000u) -
+        PressureQualificationMath::pressureRawFromPsiMilli(0u);
+    int32_t targets[4] = {};
+
+    size_t count = PressureQualificationMath::buildAdjacentTargetSequence(1638, 3386, onePsiRaw, targets, 4);
+    UNSIGNED_LONGS_EQUAL(2u, count);
+    LONGS_EQUAL(2512, targets[0]);
+    LONGS_EQUAL(3386, targets[1]);
+
+    count = PressureQualificationMath::buildAdjacentTargetSequence(2512, 4259, onePsiRaw, targets, 4);
+    UNSIGNED_LONGS_EQUAL(2u, count);
+    LONGS_EQUAL(3386, targets[0]);
+    LONGS_EQUAL(4259, targets[1]);
+
+    count = PressureQualificationMath::buildAdjacentTargetSequence(4259, 1638, onePsiRaw, targets, 4);
+    UNSIGNED_LONGS_EQUAL(3u, count);
+    LONGS_EQUAL(3385, targets[0]);
+    LONGS_EQUAL(2511, targets[1]);
+    LONGS_EQUAL(1638, targets[2]);
+}
+
+TEST(PressureQualificationMath, ExactOnePsiTransitionIsNotSubdivided)
+{
+    const uint32_t onePsiRaw =
+        PressureQualificationMath::pressureRawFromPsiMilli(1000u) -
+        PressureQualificationMath::pressureRawFromPsiMilli(0u);
+    int32_t targets[2] = {};
+
+    const size_t count = PressureQualificationMath::buildAdjacentTargetSequence(1638, 2512, onePsiRaw, targets, 2);
+
+    UNSIGNED_LONGS_EQUAL(1u, count);
+    LONGS_EQUAL(2512, targets[0]);
+}
+
+TEST(PressureQualificationMath, MotorTravelGuardTracksAbsoluteAndTransitionLimits)
+{
+    PressureQualificationMath::MotorTravelGuardLimits limits{};
+    limits.absoluteLimitSteps = 80000;
+    limits.transitionLimitSteps = 50000;
+    PressureQualificationMath::MotorTravelGuardState state{};
+
+    CHECK_FALSE(PressureQualificationMath::updateMotorTravelGuard(49999, 10000, limits, state));
+    UNSIGNED_LONGS_EQUAL(49999u, state.motorAbsMax);
+    UNSIGNED_LONGS_EQUAL(39999u, state.motorDeltaMax);
+
+    CHECK_TRUE(PressureQualificationMath::updateMotorTravelGuard(60000, 10000, limits, state));
+    CHECK_FALSE(state.guardAbs);
+    CHECK_TRUE(state.guardDelta);
+
+    CHECK_TRUE(PressureQualificationMath::updateMotorTravelGuard(-80000, 10000, limits, state));
+    CHECK_TRUE(state.guardAbs);
+    CHECK_TRUE(state.guardDelta);
+    UNSIGNED_LONGS_EQUAL(80000u, state.motorAbsMax);
+    UNSIGNED_LONGS_EQUAL(90000u, state.motorDeltaMax);
 }
 
 TEST(PressureQualificationMath, SummarizesMotorPositionSpan)
@@ -64,5 +124,9 @@ TEST(PressureQualificationMath, ExecutionPassRequiresNoMissesOrTimeouts)
 
     summary.timeoutCount = 0;
     summary.abortCount = 1;
+    CHECK_FALSE(PressureQualificationMath::executionPass(summary));
+
+    summary.abortCount = 0;
+    summary.motorGuardCount = 1;
     CHECK_FALSE(PressureQualificationMath::executionPass(summary));
 }

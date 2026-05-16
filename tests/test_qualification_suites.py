@@ -101,5 +101,8 @@ def test_pressure_regulator_suite_exposes_operator_fixture_and_catalog_rows():
     assert rows[2219].name == "Refuel pressure step ladder"
     assert all(row.subsystem == "Pressure" for row in rows.values())
     assert "p_fault" in rows[2210].metrics
+    assert "guard" in rows[2214].metrics
+    assert "max_jump" in rows[2215].metrics
+    assert "adjacent 1 psi target steps" in rows[2214].evaluates
     assert "settle_max_ms" in rows[2218].metrics
     assert "1, 2, 3, 2, 1 psi" in rows[2218].evaluates

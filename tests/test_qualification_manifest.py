@@ -119,6 +119,10 @@ def test_load_pressure_regulator_manifest_requires_operator_closed_loop_fixture(
     assert manifest.analysis_rules["2210"]["metrics"]["p_fault"]["equals"] == 0
     assert manifest.analysis_rules["2211"]["metrics"]["r_home_to"]["equals"] == 0
     assert manifest.analysis_rules["2212"]["metrics"]["slope_raw_min"]["maturity"] == "candidate"
+    assert manifest.analysis_rules["2212"]["metrics"]["guard"]["equals"] == 0
+    assert manifest.analysis_rules["2214"]["metrics"]["max_jump"]["max"] == 874
+    assert manifest.analysis_rules["2215"]["metrics"]["motor_abs_max"]["max"] == 80000
+    assert manifest.analysis_rules["2217"]["metrics"]["motor_delta_max"]["max"] == 50000
     assert manifest.analysis_rules["2218"]["metrics"]["settle_max_ms"]["maturity"] == "candidate"
 
 

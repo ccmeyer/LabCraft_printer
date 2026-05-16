@@ -924,8 +924,9 @@ Pressure regulator qualification slice:
 
 - Add `pressure_regulator_v1` as a separate operator-gated FULL manifest requiring fixture `pressure_closed_loop_v1`.
 - Select the suite with existing `CMD_SELFTEST_START` selector field value `2299`; no protocol layout or opcode changes.
-- Firmware rows `2210`-`2219` cover idle P/R pressure stability, regulator homing repeatability, print/refuel 2 psi holds, print/refuel 1 psi to 3 psi cycling, print/refuel 2 psi hysteresis approaches, and print/refuel `1 -> 2 -> 3 -> 2 -> 1 psi` step ladders.
+- Firmware rows `2210`-`2219` cover idle P/R pressure stability, regulator homing repeatability, print/refuel 2 psi holds, print/refuel cycling through adjacent 1 psi target steps, print/refuel 2 psi hysteresis approaches, and print/refuel `1 -> 2 -> 3 -> 2 -> 1 psi` step ladders.
 - The ladder targets use the existing raw conversion: `1 psi=2512`, `2 psi=3386`, and `3 psi=4259`.
+- Pressure-regulator qualification target changes are split into at most 1 psi waits and include a diagnostic motor-travel guard so excessive regulator travel fails rows cleanly instead of relying on the regulator internal step-limit/watchdog path.
 - Keep `pressure_regulator_v1` out of `factory_acceptance_v3`; use it for explicit, operator-confirmed pressure regulator qualification runs before deciding whether any rows belong in the default FULL suite.
 
 Validation:

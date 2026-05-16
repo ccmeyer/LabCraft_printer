@@ -17,6 +17,60 @@ int32_t slopeRawPerMin(int32_t startRaw, int32_t endRaw, uint32_t durationMs)
   return static_cast<int32_t>((delta * 60000LL) / static_cast<int64_t>(durationMs));
 }
 
+size_t buildAdjacentTargetSequence(int32_t currentRaw,
+                                   int32_t targetRaw,
+                                   uint32_t maxDeltaRaw,
+                                   int32_t* outTargets,
+                                   size_t capacity)
+{
+  if ((outTargets == nullptr) || (capacity == 0u) || (currentRaw == targetRaw)) {
+    return 0u;
+  }
+
+  if (maxDeltaRaw == 0u) {
+    outTargets[0] = targetRaw;
+    return 1u;
+  }
+
+  size_t count = 0u;
+  int32_t current = currentRaw;
+  while ((current != targetRaw) && (count < capacity)) {
+    const int64_t remaining = static_cast<int64_t>(targetRaw) - static_cast<int64_t>(current);
+    const int64_t absRemaining = (remaining < 0) ? -remaining : remaining;
+    if (absRemaining <= static_cast<int64_t>(maxDeltaRaw)) {
+      current = targetRaw;
+    } else if (remaining > 0) {
+      current += static_cast<int32_t>(maxDeltaRaw);
+    } else {
+      current -= static_cast<int32_t>(maxDeltaRaw);
+    }
+    outTargets[count++] = current;
+  }
+  return count;
+}
+
+bool updateMotorTravelGuard(int32_t position,
+                            int32_t transitionStartPosition,
+                            const MotorTravelGuardLimits& limits,
+                            MotorTravelGuardState& state)
+{
+  const uint32_t absPosition = absDiff(position, 0);
+  const uint32_t transitionDelta = absDiff(position, transitionStartPosition);
+  if (absPosition > state.motorAbsMax) {
+    state.motorAbsMax = absPosition;
+  }
+  if (transitionDelta > state.motorDeltaMax) {
+    state.motorDeltaMax = transitionDelta;
+  }
+  if ((limits.absoluteLimitSteps > 0u) && (absPosition >= limits.absoluteLimitSteps)) {
+    state.guardAbs = true;
+  }
+  if ((limits.transitionLimitSteps > 0u) && (transitionDelta >= limits.transitionLimitSteps)) {
+    state.guardDelta = true;
+  }
+  return state.guardAbs || state.guardDelta;
+}
+
 Int32Span summarizeInt32Span(const int32_t* values, size_t count)
 {
   Int32Span span{};
@@ -64,7 +118,8 @@ bool executionPass(const ExecutionSummary& summary)
 {
   return (summary.readyMissCount == 0u) &&
          (summary.timeoutCount == 0u) &&
-         (summary.abortCount == 0u);
+         (summary.abortCount == 0u) &&
+         (summary.motorGuardCount == 0u);
 }
 
 }  // namespace PressureQualificationMath
