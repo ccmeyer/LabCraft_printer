@@ -103,9 +103,16 @@ def test_pressure_regulator_suite_exposes_operator_fixture_and_catalog_rows():
     assert "p_fault" in rows[2210].metrics
     assert "guard" in rows[2214].metrics
     assert "home_to" in rows[2214].metrics
+    assert "low_dn_span" in rows[2214].metrics
+    assert "high_up_span" in rows[2214].metrics
     assert "max_jump" in rows[2215].metrics
     assert "cap_hz" in rows[2215].metrics
+    assert "below_span" in rows[2216].metrics
+    assert "above_span" in rows[2216].metrics
+    assert "hyst_span" in rows[2216].metrics
     assert "adjacent 1 psi target steps" in rows[2214].evaluates
     assert "production setpoint slew" in rows[2214].evaluates
+    assert "same-direction" in rows[2216].evaluates
+    assert "informational approach-direction hysteresis" in rows[2216].evaluates
     assert "settle_max_ms" in rows[2218].metrics
     assert "1, 2, 3, 2, 1 psi" in rows[2218].evaluates

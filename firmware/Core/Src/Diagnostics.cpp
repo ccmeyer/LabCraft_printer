@@ -2463,7 +2463,6 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         static constexpr uint32_t kPressureIdleSampleMs = 50u;
                         static constexpr uint32_t kPressureHoldMs = 15000u;
                         static constexpr uint32_t kPressureSettleTimeoutMs = 5000u;
-                        static constexpr uint32_t kQualificationPressureErrorTolRaw = 100u;
                         static constexpr uint32_t kRegHomeFastHz = 30000u;
                         static constexpr uint32_t kRegHomeSlowHz = 3000u;
                         static constexpr uint32_t kRegHomeBackoffSteps = 400u;
@@ -2689,16 +2688,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             const int32_t pressure = sensor->getPressure(channel);
                             if (pressure > peakPressure) peakPressure = pressure;
                             if (pressure < troughPressure) troughPressure = pressure;
-                            const auto controlSample = sensor->getControlSample(channel);
-                            const uint32_t readyTol = reg.getReadyConfig().readyTolRaw;
-                            const uint32_t effectiveTol =
-                                (kQualificationPressureErrorTolRaw > readyTol) ? kQualificationPressureErrorTolRaw : readyTol;
                             if (reg.isPressureOk()) {
                               wait.readySeen = true;
-                              break;
-                            }
-                            if (!reg.isTargetRamping() &&
-                                (absDiff32(static_cast<int32_t>(controlSample.raw), acceptedTarget) <= effectiveTol)) {
                               break;
                             }
                             if (_selfTestAbortRequested) {
@@ -2722,13 +2713,9 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                 ? static_cast<uint32_t>(acceptedTarget - troughPressure)
                                 : 0u;
                           }
-                          const uint32_t readyTol = reg.getReadyConfig().readyTolRaw;
-                          const uint32_t effectiveTol =
-                              (kQualificationPressureErrorTolRaw > readyTol) ? kQualificationPressureErrorTolRaw : readyTol;
                           wait.accepted = !wait.aborted &&
                               !wait.motorGuarded &&
-                              (wait.readySeen || wait.readyFinal ||
-                               (!reg.isTargetRamping() && (wait.controlError <= effectiveTol)));
+                              (wait.readySeen || wait.readyFinal);
                           recordPressureWaitExecution(wait, exec);
                           updateMax(settleMaxMs, wait.settleMs);
                           updateMax(errMax, wait.controlError);
@@ -3113,7 +3100,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                 testId,
                                 name,
                                 channel,
-                                "settle_max_ms=0;err_max=0;low_span=0;high_span=0;home_to=1;ready_miss=0;timeout=0;guard=0;motor_abs_max=0;motor_delta_max=0;max_jump=874;slew=1;cap_hz=8000");
+                                "settle_max_ms=0;err_max=0;low_dn_span=0;high_up_span=0;home_to=1;ready_miss=0;timeout=0;guard=0;motor_abs_max=0;motor_delta_max=0;max_jump=874;slew=1;cap_hz=8000");
                           }
                           sendProgressStage((channel == 0u) ? "pressure_cycle_print" : "pressure_cycle_refuel");
                           const PressureHomeReference homeRef = homePressureReference(
@@ -3122,7 +3109,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           if (!homeRef.ok) {
                             char metrics[224];
                             snprintf(metrics, sizeof(metrics),
-                                     "ch=%c;gate=home_reference;settle_max_ms=0;err_max=0;low_span=0;high_span=0;home_to=%lu;ready_miss=0;timeout=0;guard=0;motor_abs_max=0;motor_delta_max=0;max_jump=0;slew=1;cap_hz=%lu",
+                                     "ch=%c;gate=home_reference;settle_max_ms=0;err_max=0;low_dn_span=0;high_up_span=0;home_to=%lu;ready_miss=0;timeout=0;guard=0;motor_abs_max=0;motor_delta_max=0;max_jump=0;slew=1;cap_hz=%lu",
                                      channelCode(channel),
                                      static_cast<unsigned long>((homeRef.homeTo > 0u) ? homeRef.homeTo : 1u),
                                      static_cast<unsigned long>(PressureRegulator::kSetpointSlewSpeedCapHz));
@@ -3141,7 +3128,17 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           uint32_t maxJumpRaw = 0u;
                           reg.closeValve();
                           reg.start();
+                          const PressureWaitResult setupWait = waitForAdjacentPressureTarget(channel,
+                                                                                             kPressure2Raw,
+                                                                                             exec,
+                                                                                             settleMaxMs,
+                                                                                             errMax,
+                                                                                             nullptr,
+                                                                                             nullptr,
+                                                                                             guardState,
+                                                                                             maxJumpRaw);
                           for (uint32_t cycle = 0u; cycle < kCycleCount; ++cycle) {
+                            if (!setupWait.accepted || pressureMotorGuardTripped || _selfTestAbortRequested) break;
                             const PressureWaitResult lowWait = waitForAdjacentPressureTarget(channel,
                                                                                              kPressure1Raw,
                                                                                              exec,
@@ -3195,7 +3192,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                             PressureQualificationMath::executionPass(exec);
                           char metrics[256];
                           snprintf(metrics, sizeof(metrics),
-                                   "ch=%c;settle_max_ms=%lu;err_max=%lu;low_span=%lu;high_span=%lu;home_to=%lu;ready_miss=%lu;timeout=%lu;guard=%lu;motor_abs_max=%lu;motor_delta_max=%lu;max_jump=%lu;slew=1;cap_hz=%lu",
+                                   "ch=%c;settle_max_ms=%lu;err_max=%lu;low_dn_span=%lu;high_up_span=%lu;home_to=%lu;ready_miss=%lu;timeout=%lu;guard=%lu;motor_abs_max=%lu;motor_delta_max=%lu;max_jump=%lu;slew=1;cap_hz=%lu",
                                    channelCode(channel),
                                    static_cast<unsigned long>(settleMaxMs),
                                    static_cast<unsigned long>(errMax),
@@ -3218,7 +3215,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                 testId,
                                 name,
                                 channel,
-                                "target_raw=3386;repeat_span=0;hyst_span=0;err_max=0;home_to=1;ready_miss=0;timeout=0;guard=0;motor_abs_max=0;motor_delta_max=0;max_jump=874;slew=1;cap_hz=8000");
+                                "target_raw=3386;below_span=0;above_span=0;hyst_span=0;err_max=0;home_to=1;ready_miss=0;timeout=0;guard=0;motor_abs_max=0;motor_delta_max=0;max_jump=874;slew=1;cap_hz=8000");
                           }
                           sendProgressStage((channel == 0u) ? "pressure_hyst_print" : "pressure_hyst_refuel");
                           const PressureHomeReference homeRef = homePressureReference(
@@ -3227,7 +3224,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           if (!homeRef.ok) {
                             char metrics[224];
                             snprintf(metrics, sizeof(metrics),
-                                     "ch=%c;gate=home_reference;target_raw=%lu;repeat_span=0;hyst_span=0;err_max=0;home_to=%lu;ready_miss=0;timeout=0;guard=0;motor_abs_max=0;motor_delta_max=0;max_jump=0;slew=1;cap_hz=%lu",
+                                     "ch=%c;gate=home_reference;target_raw=%lu;below_span=0;above_span=0;hyst_span=0;err_max=0;home_to=%lu;ready_miss=0;timeout=0;guard=0;motor_abs_max=0;motor_delta_max=0;max_jump=0;slew=1;cap_hz=%lu",
                                      channelCode(channel),
                                      static_cast<unsigned long>(kPressure2Raw),
                                      static_cast<unsigned long>((homeRef.homeTo > 0u) ? homeRef.homeTo : 1u),
@@ -3240,10 +3237,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           const int32_t baselineTarget = static_cast<int32_t>(reg.getTarget());
                           int32_t belowPositions[kHysteresisReps]{};
                           int32_t abovePositions[kHysteresisReps]{};
-                          int32_t allPositions[kHysteresisReps * 2u]{};
                           size_t belowCount = 0u;
                           size_t aboveCount = 0u;
-                          size_t allCount = 0u;
                           uint32_t settleMaxMs = 0u;
                           uint32_t errMax = 0u;
                           uint32_t maxJumpRaw = 0u;
@@ -3272,7 +3267,6 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             if (!fromBelow.accepted || pressureMotorGuardTripped || _selfTestAbortRequested) break;
                             const PressurePositionSample belowSample = readPressurePositionSample(channel);
                             if (belowCount < kHysteresisReps) belowPositions[belowCount++] = belowSample.motorPosition;
-                            if (allCount < (kHysteresisReps * 2u)) allPositions[allCount++] = belowSample.motorPosition;
 
                             const PressureWaitResult highWait = waitForAdjacentPressureTarget(channel,
                                                                                               kPressure3Raw,
@@ -3296,10 +3290,10 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             if (!fromAbove.accepted || pressureMotorGuardTripped || _selfTestAbortRequested) break;
                             const PressurePositionSample aboveSample = readPressurePositionSample(channel);
                             if (aboveCount < kHysteresisReps) abovePositions[aboveCount++] = aboveSample.motorPosition;
-                            if (allCount < (kHysteresisReps * 2u)) allPositions[allCount++] = aboveSample.motorPosition;
                           }
                           restorePressureChannel(channel, baselineTarget, exec, settleMaxMs, errMax, guardState, maxJumpRaw);
-                          const auto repeatStats = PressureQualificationMath::summarizeInt32Span(allPositions, allCount);
+                          const auto belowStats = PressureQualificationMath::summarizeInt32Span(belowPositions, belowCount);
+                          const auto aboveStats = PressureQualificationMath::summarizeInt32Span(abovePositions, aboveCount);
                           const uint32_t hystSpan =
                               PressureQualificationMath::meanDifferenceAbs(belowPositions,
                                                                            belowCount,
@@ -3310,10 +3304,11 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                             PressureQualificationMath::executionPass(exec);
                           char metrics[256];
                           snprintf(metrics, sizeof(metrics),
-                                   "ch=%c;target_raw=%lu;repeat_span=%lu;hyst_span=%lu;err_max=%lu;home_to=%lu;ready_miss=%lu;timeout=%lu;guard=%lu;motor_abs_max=%lu;motor_delta_max=%lu;max_jump=%lu;slew=1;cap_hz=%lu",
+                                   "ch=%c;target_raw=%lu;below_span=%lu;above_span=%lu;hyst_span=%lu;err_max=%lu;home_to=%lu;ready_miss=%lu;timeout=%lu;guard=%lu;motor_abs_max=%lu;motor_delta_max=%lu;max_jump=%lu;slew=1;cap_hz=%lu",
                                    channelCode(channel),
                                    static_cast<unsigned long>(kPressure2Raw),
-                                   static_cast<unsigned long>(repeatStats.span),
+                                   static_cast<unsigned long>(belowStats.span),
+                                   static_cast<unsigned long>(aboveStats.span),
                                    static_cast<unsigned long>(hystSpan),
                                    static_cast<unsigned long>(errMax),
                                    static_cast<unsigned long>(homeRef.homeTo),
@@ -3422,7 +3417,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           auto emitCycle = [&](uint16_t testId, const char* name, uint8_t channel) -> bool {
                             char metrics[256];
                             snprintf(metrics, sizeof(metrics),
-                                     "ch=%c;gate=motor_guard;settle_max_ms=0;err_max=0;low_span=0;high_span=0;home_to=0;ready_miss=0;timeout=0;guard=1;motor_abs_max=0;motor_delta_max=0;max_jump=%lu;slew=1;cap_hz=%lu",
+                                     "ch=%c;gate=motor_guard;settle_max_ms=0;err_max=0;low_dn_span=0;high_up_span=0;home_to=0;ready_miss=0;timeout=0;guard=1;motor_abs_max=0;motor_delta_max=0;max_jump=%lu;slew=1;cap_hz=%lu",
                                      channelCode(channel),
                                      static_cast<unsigned long>(kMaxPressureJumpRaw),
                                      static_cast<unsigned long>(PressureRegulator::kSetpointSlewSpeedCapHz));
@@ -3431,7 +3426,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           auto emitHysteresis = [&](uint16_t testId, const char* name, uint8_t channel) -> bool {
                             char metrics[256];
                             snprintf(metrics, sizeof(metrics),
-                                     "ch=%c;gate=motor_guard;target_raw=%lu;repeat_span=0;hyst_span=0;err_max=0;home_to=0;ready_miss=0;timeout=0;guard=1;motor_abs_max=0;motor_delta_max=0;max_jump=%lu;slew=1;cap_hz=%lu",
+                                     "ch=%c;gate=motor_guard;target_raw=%lu;below_span=0;above_span=0;hyst_span=0;err_max=0;home_to=0;ready_miss=0;timeout=0;guard=1;motor_abs_max=0;motor_delta_max=0;max_jump=%lu;slew=1;cap_hz=%lu",
                                      channelCode(channel),
                                      static_cast<unsigned long>(kPressure2Raw),
                                      static_cast<unsigned long>(kMaxPressureJumpRaw),

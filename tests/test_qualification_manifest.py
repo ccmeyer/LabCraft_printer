@@ -125,9 +125,20 @@ def test_load_pressure_regulator_manifest_requires_operator_closed_loop_fixture(
     assert manifest.analysis_rules["2212"]["metrics"]["slew"]["equals"] == 1
     assert manifest.analysis_rules["2212"]["metrics"]["cap_hz"]["equals"] == 8000
     assert manifest.analysis_rules["2214"]["metrics"]["max_jump"]["max"] == 874
+    assert manifest.analysis_rules["2214"]["metrics"]["err_max"]["max"] == 4
+    assert manifest.analysis_rules["2214"]["metrics"]["low_dn_span"]["max"] == 2000
+    assert manifest.analysis_rules["2214"]["metrics"]["high_up_span"]["max"] == 2000
     assert manifest.analysis_rules["2215"]["metrics"]["motor_abs_max"]["max"] == 80000
+    assert manifest.analysis_rules["2215"]["metrics"]["err_max"]["max"] == 8
+    assert manifest.analysis_rules["2216"]["metrics"]["below_span"]["max"] == 2000
+    assert manifest.analysis_rules["2216"]["metrics"]["above_span"]["max"] == 2000
+    assert manifest.analysis_rules["2216"]["metrics"]["hyst_span"]["maturity"] == "informational"
+    assert "max" not in manifest.analysis_rules["2216"]["metrics"]["hyst_span"]
     assert manifest.analysis_rules["2217"]["metrics"]["motor_delta_max"]["max"] == 50000
+    assert manifest.analysis_rules["2217"]["metrics"]["err_max"]["max"] == 8
     assert manifest.analysis_rules["2218"]["metrics"]["settle_max_ms"]["maturity"] == "candidate"
+    assert manifest.analysis_rules["2218"]["metrics"]["err_max"]["max"] == 4
+    assert manifest.analysis_rules["2219"]["metrics"]["err_max"]["max"] == 8
 
 
 def test_load_manifest_from_path(tmp_path):
