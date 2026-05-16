@@ -31,7 +31,27 @@ struct WindowedPulseResponseSummary {
   uint32_t maxResponseRaw = 0;
 };
 
+struct ThreeWidthLinearitySummary {
+  uint32_t monotonic = 0;
+  uint32_t gainRaw = 0;
+  uint32_t midpointLinearityErrorPct = 0;
+};
+
+struct ResponseValueSummary {
+  uint32_t count = 0;
+  uint32_t meanRaw = 0;
+  uint32_t cvPct = 0;
+  uint32_t outlierCount = 0;
+  uint32_t minRaw = 0;
+  uint32_t maxRaw = 0;
+  uint32_t spanRaw = 0;
+};
+
 uint32_t absDiff(uint32_t a, uint32_t b);
+ResponseValueSummary summarizeResponseValues(const uint32_t* responses, size_t responseCount);
+ThreeWidthLinearitySummary summarizeThreeWidthLinearity(uint32_t response15,
+                                                        uint32_t response30,
+                                                        uint32_t response45);
 PulseDropSummary summarizePulseDrops(const PressureTraceSample* samples,
                                       size_t sampleCount,
                                       const PressureTraceEvent* events,

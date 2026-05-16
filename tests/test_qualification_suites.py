@@ -131,18 +131,16 @@ def test_valve_characterization_suite_exposes_operator_fixture_and_catalog_rows(
     assert valves.requires_operator_prompts is True
     assert required_fixture_ids(valves) == ("valve_closed_loop_pulse_matrix_v1",)
     rows = {row.test_id: row for row in build_test_plan_rows(valves)}
-    assert list(rows) == list(range(2460, 2473))
-    assert rows[2460].name == "Paused print valve at 1 psi"
-    assert rows[2465].name == "Paused refuel valve at 3 psi"
-    assert rows[2466].name == "Active print valve at 1 psi"
-    assert rows[2471].name == "Active refuel valve at 3 psi"
-    assert rows[2472].name == "Dual active valve interaction"
+    assert list(rows) == [2473, 2474, 2475]
+    assert rows[2473].name == "Print valve 2 psi repeatability"
+    assert rows[2474].name == "Refuel valve 2 psi repeatability"
+    assert rows[2475].name == "Valve channel balance at 2 psi"
     assert all(row.subsystem == "Valves/Pulses" for row in rows.values())
-    assert "m15" in rows[2460].metrics
-    assert "home_to" in rows[2460].metrics
-    assert "m45" in rows[2471].metrics
-    assert "ratio" in rows[2472].metrics
-    assert "home_to" in rows[2472].metrics
-    assert "1500, 3000, and 4500 us" in rows[2460].evaluates
-    assert "regulator paused" in rows[2460].evaluates
-    assert "active pressure recovery" in rows[2466].evaluates
+    assert "m15" in rows[2473].metrics
+    assert "cv15" in rows[2473].metrics
+    assert "home_to" in rows[2473].metrics
+    assert "r15" in rows[2475].metrics
+    assert "home_to" in rows[2475].metrics
+    assert "1500, 3000, and 4500 us" in rows[2473].evaluates
+    assert "regulator recovery between replicates" in rows[2473].evaluates
+    assert "without additional valve actuation" in rows[2475].evaluates

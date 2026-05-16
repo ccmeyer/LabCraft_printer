@@ -70,6 +70,38 @@ TEST(ValvePulseQualificationMath, UsesPressureChangeMagnitudeWhenPulsePressureRi
     UNSIGNED_LONGS_EQUAL(12u, summary.maxDropRaw);
 }
 
+TEST(ValvePulseQualificationMath, ThreeWidthLinearityReportsMonotonicProportionalResponses) {
+    auto summary = ValvePulseQualificationMath::summarizeThreeWidthLinearity(30, 60, 90);
+
+    UNSIGNED_LONGS_EQUAL(1u, summary.monotonic);
+    UNSIGNED_LONGS_EQUAL(60u, summary.gainRaw);
+    UNSIGNED_LONGS_EQUAL(0u, summary.midpointLinearityErrorPct);
+}
+
+TEST(ValvePulseQualificationMath, ThreeWidthLinearityReportsNonMonotonicResponses) {
+    auto summary = ValvePulseQualificationMath::summarizeThreeWidthLinearity(30, 20, 90);
+
+    UNSIGNED_LONGS_EQUAL(0u, summary.monotonic);
+    UNSIGNED_LONGS_EQUAL(60u, summary.gainRaw);
+    CHECK(summary.midpointLinearityErrorPct > 0u);
+}
+
+TEST(ValvePulseQualificationMath, ResponseValueSummaryReportsMeanCvSpanAndOutliers) {
+    uint32_t responses[] = {30, 31, 29, 80};
+
+    auto summary = ValvePulseQualificationMath::summarizeResponseValues(
+        responses,
+        sizeof(responses) / sizeof(responses[0]));
+
+    UNSIGNED_LONGS_EQUAL(4u, summary.count);
+    UNSIGNED_LONGS_EQUAL(43u, summary.meanRaw);
+    UNSIGNED_LONGS_EQUAL(29u, summary.minRaw);
+    UNSIGNED_LONGS_EQUAL(80u, summary.maxRaw);
+    UNSIGNED_LONGS_EQUAL(51u, summary.spanRaw);
+    CHECK(summary.cvPct > 40u);
+    UNSIGNED_LONGS_EQUAL(1u, summary.outlierCount);
+}
+
 TEST(ValvePulseQualificationMath, ComputesDeadlineSlipAndRecoveryWindow) {
     PressureTraceEvent events[] = {
         eventAt(10, PressureTraceEventType::PulseStart, 1300, 2500),

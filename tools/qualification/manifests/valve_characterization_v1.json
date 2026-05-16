@@ -3,21 +3,11 @@
   "manifest_id": "valve_characterization_v1",
   "name": "Valve Characterization v1",
   "profile": "FULL",
-  "description": "Operator-gated valve characterization suite comparing print and refuel valves under matched pressure and pulse-width conditions.",
+  "description": "Operator-gated isolated valve characterization suite measuring 2 psi repeatability, pulse-width linearity, and print/refuel channel balance.",
   "expected_test_ids": [
-    2460,
-    2461,
-    2462,
-    2463,
-    2464,
-    2465,
-    2466,
-    2467,
-    2468,
-    2469,
-    2470,
-    2471,
-    2472
+    2473,
+    2474,
+    2475
   ],
   "enforce_expected_test_ids": true,
   "requires_operator_prompts": true,
@@ -27,215 +17,83 @@
   "fixtures": [
     {
       "fixture_id": "valve_closed_loop_pulse_matrix_v1",
-      "required_for": [2460, 2461, 2462, 2463, 2464, 2465, 2466, 2467, 2468, 2469, 2470, 2471, 2472],
+      "required_for": [2473, 2474, 2475],
       "operator_note": "Connect the closed-loop valve qualification fixture. Confirm print/refuel paths are safe, the fixture is rated for at least 3 psi, and no open outlet or printer head is attached unless explicitly approved."
     }
   ],
   "analysis_rules": {
-    "2460": {
+    "2473": {
       "category": "pulse",
       "failure_domain": "machine_performance",
       "metrics": {
+        "home_to": {"maturity": "candidate", "equals": 0},
         "timeout": {"maturity": "candidate", "equals": 0},
         "ready": {"maturity": "candidate", "equals": 0},
-        "home_to": {"maturity": "candidate", "equals": 0},
-        "rej": {"maturity": "candidate", "max": 3},
-        "slip_w": {"maturity": "candidate", "max": 250},
+        "rej": {"maturity": "candidate", "equals": 0},
         "sc": {"maturity": "candidate", "min": 1},
         "ec": {"maturity": "candidate", "min": 1},
+        "mono": {"maturity": "candidate", "equals": 1},
         "m15": {"maturity": "informational"},
         "m30": {"maturity": "informational"},
-        "m45": {"maturity": "informational"}
+        "m45": {"maturity": "informational"},
+        "cv15": {"maturity": "informational"},
+        "cv30": {"maturity": "informational"},
+        "cv45": {"maturity": "informational"},
+        "sp15": {"maturity": "informational"},
+        "sp30": {"maturity": "informational"},
+        "sp45": {"maturity": "informational"},
+        "gain": {"maturity": "informational"},
+        "lin": {"maturity": "informational"},
+        "out": {"maturity": "informational"}
       }
     },
-    "2461": {
+    "2474": {
       "category": "pulse",
       "failure_domain": "machine_performance",
       "metrics": {
+        "home_to": {"maturity": "candidate", "equals": 0},
         "timeout": {"maturity": "candidate", "equals": 0},
         "ready": {"maturity": "candidate", "equals": 0},
-        "home_to": {"maturity": "candidate", "equals": 0},
-        "rej": {"maturity": "candidate", "max": 3},
-        "slip_w": {"maturity": "candidate", "max": 250},
+        "rej": {"maturity": "candidate", "equals": 0},
         "sc": {"maturity": "candidate", "min": 1},
         "ec": {"maturity": "candidate", "min": 1},
+        "mono": {"maturity": "candidate", "equals": 1},
         "m15": {"maturity": "informational"},
         "m30": {"maturity": "informational"},
-        "m45": {"maturity": "informational"}
+        "m45": {"maturity": "informational"},
+        "cv15": {"maturity": "informational"},
+        "cv30": {"maturity": "informational"},
+        "cv45": {"maturity": "informational"},
+        "sp15": {"maturity": "informational"},
+        "sp30": {"maturity": "informational"},
+        "sp45": {"maturity": "informational"},
+        "gain": {"maturity": "informational"},
+        "lin": {"maturity": "informational"},
+        "out": {"maturity": "informational"}
       }
     },
-    "2462": {
+    "2475": {
       "category": "pulse",
       "failure_domain": "machine_performance",
       "metrics": {
+        "home_to": {"maturity": "candidate", "equals": 0},
         "timeout": {"maturity": "candidate", "equals": 0},
         "ready": {"maturity": "candidate", "equals": 0},
-        "home_to": {"maturity": "candidate", "equals": 0},
-        "rej": {"maturity": "candidate", "max": 3},
-        "slip_w": {"maturity": "candidate", "max": 250},
+        "rej": {"maturity": "candidate", "equals": 0},
         "sc": {"maturity": "candidate", "min": 1},
         "ec": {"maturity": "candidate", "min": 1},
-        "m15": {"maturity": "informational"},
-        "m30": {"maturity": "informational"},
-        "m45": {"maturity": "informational"}
-      }
-    },
-    "2463": {
-      "category": "pulse",
-      "failure_domain": "machine_performance",
-      "metrics": {
-        "timeout": {"maturity": "candidate", "equals": 0},
-        "ready": {"maturity": "candidate", "equals": 0},
-        "home_to": {"maturity": "candidate", "equals": 0},
-        "rej": {"maturity": "candidate", "max": 3},
-        "slip_w": {"maturity": "candidate", "max": 250},
-        "sc": {"maturity": "candidate", "min": 1},
-        "ec": {"maturity": "candidate", "min": 1},
-        "m15": {"maturity": "informational"},
-        "m30": {"maturity": "informational"},
-        "m45": {"maturity": "informational"}
-      }
-    },
-    "2464": {
-      "category": "pulse",
-      "failure_domain": "machine_performance",
-      "metrics": {
-        "timeout": {"maturity": "candidate", "equals": 0},
-        "ready": {"maturity": "candidate", "equals": 0},
-        "home_to": {"maturity": "candidate", "equals": 0},
-        "rej": {"maturity": "candidate", "max": 3},
-        "slip_w": {"maturity": "candidate", "max": 250},
-        "sc": {"maturity": "candidate", "min": 1},
-        "ec": {"maturity": "candidate", "min": 1},
-        "m15": {"maturity": "informational"},
-        "m30": {"maturity": "informational"},
-        "m45": {"maturity": "informational"}
-      }
-    },
-    "2465": {
-      "category": "pulse",
-      "failure_domain": "machine_performance",
-      "metrics": {
-        "timeout": {"maturity": "candidate", "equals": 0},
-        "ready": {"maturity": "candidate", "equals": 0},
-        "home_to": {"maturity": "candidate", "equals": 0},
-        "rej": {"maturity": "candidate", "max": 3},
-        "slip_w": {"maturity": "candidate", "max": 250},
-        "sc": {"maturity": "candidate", "min": 1},
-        "ec": {"maturity": "candidate", "min": 1},
-        "m15": {"maturity": "informational"},
-        "m30": {"maturity": "informational"},
-        "m45": {"maturity": "informational"}
-      }
-    },
-    "2466": {
-      "category": "pulse",
-      "failure_domain": "machine_performance",
-      "metrics": {
-        "timeout": {"maturity": "candidate", "equals": 0},
-        "ready": {"maturity": "candidate", "equals": 0},
-        "home_to": {"maturity": "candidate", "equals": 0},
-        "rej": {"maturity": "candidate", "max": 3},
-        "slip_w": {"maturity": "candidate", "max": 250},
-        "sc": {"maturity": "candidate", "min": 1},
-        "ec": {"maturity": "candidate", "min": 1},
-        "m15": {"maturity": "informational"},
-        "m30": {"maturity": "informational"},
-        "m45": {"maturity": "informational"}
-      }
-    },
-    "2467": {
-      "category": "pulse",
-      "failure_domain": "machine_performance",
-      "metrics": {
-        "timeout": {"maturity": "candidate", "equals": 0},
-        "ready": {"maturity": "candidate", "equals": 0},
-        "home_to": {"maturity": "candidate", "equals": 0},
-        "rej": {"maturity": "candidate", "max": 3},
-        "slip_w": {"maturity": "candidate", "max": 250},
-        "sc": {"maturity": "candidate", "min": 1},
-        "ec": {"maturity": "candidate", "min": 1},
-        "m15": {"maturity": "informational"},
-        "m30": {"maturity": "informational"},
-        "m45": {"maturity": "informational"}
-      }
-    },
-    "2468": {
-      "category": "pulse",
-      "failure_domain": "machine_performance",
-      "metrics": {
-        "timeout": {"maturity": "candidate", "equals": 0},
-        "ready": {"maturity": "candidate", "equals": 0},
-        "home_to": {"maturity": "candidate", "equals": 0},
-        "rej": {"maturity": "candidate", "max": 3},
-        "slip_w": {"maturity": "candidate", "max": 250},
-        "sc": {"maturity": "candidate", "min": 1},
-        "ec": {"maturity": "candidate", "min": 1},
-        "m15": {"maturity": "informational"},
-        "m30": {"maturity": "informational"},
-        "m45": {"maturity": "informational"}
-      }
-    },
-    "2469": {
-      "category": "pulse",
-      "failure_domain": "machine_performance",
-      "metrics": {
-        "timeout": {"maturity": "candidate", "equals": 0},
-        "ready": {"maturity": "candidate", "equals": 0},
-        "home_to": {"maturity": "candidate", "equals": 0},
-        "rej": {"maturity": "candidate", "max": 3},
-        "slip_w": {"maturity": "candidate", "max": 250},
-        "sc": {"maturity": "candidate", "min": 1},
-        "ec": {"maturity": "candidate", "min": 1},
-        "m15": {"maturity": "informational"},
-        "m30": {"maturity": "informational"},
-        "m45": {"maturity": "informational"}
-      }
-    },
-    "2470": {
-      "category": "pulse",
-      "failure_domain": "machine_performance",
-      "metrics": {
-        "timeout": {"maturity": "candidate", "equals": 0},
-        "ready": {"maturity": "candidate", "equals": 0},
-        "home_to": {"maturity": "candidate", "equals": 0},
-        "rej": {"maturity": "candidate", "max": 3},
-        "slip_w": {"maturity": "candidate", "max": 250},
-        "sc": {"maturity": "candidate", "min": 1},
-        "ec": {"maturity": "candidate", "min": 1},
-        "m15": {"maturity": "informational"},
-        "m30": {"maturity": "informational"},
-        "m45": {"maturity": "informational"}
-      }
-    },
-    "2471": {
-      "category": "pulse",
-      "failure_domain": "machine_performance",
-      "metrics": {
-        "timeout": {"maturity": "candidate", "equals": 0},
-        "ready": {"maturity": "candidate", "equals": 0},
-        "home_to": {"maturity": "candidate", "equals": 0},
-        "rej": {"maturity": "candidate", "max": 3},
-        "slip_w": {"maturity": "candidate", "max": 250},
-        "sc": {"maturity": "candidate", "min": 1},
-        "ec": {"maturity": "candidate", "min": 1},
-        "m15": {"maturity": "informational"},
-        "m30": {"maturity": "informational"},
-        "m45": {"maturity": "informational"}
-      }
-    },
-    "2472": {
-      "category": "pulse",
-      "failure_domain": "machine_performance",
-      "metrics": {
-        "timeout": {"maturity": "candidate", "equals": 0},
-        "ready": {"maturity": "candidate", "equals": 0},
-        "home_to": {"maturity": "candidate", "equals": 0},
-        "slip_w": {"maturity": "candidate", "max": 250},
-        "sc": {"maturity": "candidate", "min": 1},
-        "ec": {"maturity": "candidate", "min": 1},
-        "ratio": {"maturity": "informational"},
-        "delta": {"maturity": "informational"}
+        "m15p": {"maturity": "informational"},
+        "m15r": {"maturity": "informational"},
+        "m30p": {"maturity": "informational"},
+        "m30r": {"maturity": "informational"},
+        "m45p": {"maturity": "informational"},
+        "m45r": {"maturity": "informational"},
+        "r15": {"maturity": "informational"},
+        "r30": {"maturity": "informational"},
+        "r45": {"maturity": "informational"},
+        "d15": {"maturity": "informational"},
+        "d30": {"maturity": "informational"},
+        "d45": {"maturity": "informational"}
       }
     }
   }

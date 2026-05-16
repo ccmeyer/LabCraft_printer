@@ -34,6 +34,74 @@ uint32_t absDiff(uint32_t a, uint32_t b) {
   return (a >= b) ? (a - b) : (b - a);
 }
 
+ResponseValueSummary summarizeResponseValues(const uint32_t* responses, size_t responseCount) {
+  ResponseValueSummary summary{};
+  if (responses == nullptr || responseCount == 0u) {
+    return summary;
+  }
+
+  const size_t count = (responseCount > kMaxAnalyzedPulses) ? kMaxAnalyzedPulses : responseCount;
+  summary.count = static_cast<uint32_t>(count);
+  uint64_t sum = 0u;
+  summary.minRaw = responses[0];
+  summary.maxRaw = responses[0];
+  for (size_t i = 0; i < count; ++i) {
+    const uint32_t response = responses[i];
+    sum += response;
+    if (response < summary.minRaw) summary.minRaw = response;
+    if (response > summary.maxRaw) summary.maxRaw = response;
+  }
+  summary.meanRaw = static_cast<uint32_t>((sum + (count / 2u)) / count);
+  summary.spanRaw = summary.maxRaw - summary.minRaw;
+
+  uint64_t squaredDiffSum = 0u;
+  uint64_t absDiffSum = 0u;
+  for (size_t i = 0; i < count; ++i) {
+    const uint32_t diff = absDiff(responses[i], summary.meanRaw);
+    squaredDiffSum += static_cast<uint64_t>(diff) * static_cast<uint64_t>(diff);
+    absDiffSum += diff;
+  }
+  const uint32_t stdDev = integerSqrt(squaredDiffSum / count);
+  if (summary.meanRaw > 0u) {
+    summary.cvPct = static_cast<uint32_t>(
+        ((static_cast<uint64_t>(stdDev) * 100u) + (summary.meanRaw / 2u)) / summary.meanRaw);
+  }
+
+  const uint32_t meanAbsDiff = static_cast<uint32_t>((absDiffSum + (count / 2u)) / count);
+  uint32_t outlierThreshold = meanAbsDiff;
+  const uint32_t halfMean = summary.meanRaw / 2u;
+  if (outlierThreshold < halfMean) {
+    outlierThreshold = halfMean;
+  }
+  for (size_t i = 0; i < count; ++i) {
+    if (absDiff(responses[i], summary.meanRaw) > outlierThreshold) {
+      summary.outlierCount++;
+    }
+  }
+
+  return summary;
+}
+
+ThreeWidthLinearitySummary summarizeThreeWidthLinearity(uint32_t response15,
+                                                        uint32_t response30,
+                                                        uint32_t response45) {
+  ThreeWidthLinearitySummary summary{};
+  summary.monotonic = (response15 <= response30 && response30 <= response45) ? 1u : 0u;
+  summary.gainRaw = summary.monotonic ? (response45 - response15) : absDiff(response45, response15);
+
+  if (summary.gainRaw == 0u) {
+    summary.midpointLinearityErrorPct = (response30 == response15) ? 0u : 100u;
+    return summary;
+  }
+
+  const uint64_t doubledMid = static_cast<uint64_t>(response30) * 2u;
+  const uint64_t endpointSum = static_cast<uint64_t>(response15) + static_cast<uint64_t>(response45);
+  const uint64_t doubledError = (doubledMid >= endpointSum) ? (doubledMid - endpointSum) : (endpointSum - doubledMid);
+  summary.midpointLinearityErrorPct = static_cast<uint32_t>(
+      ((doubledError * 100u) + summary.gainRaw) / (2u * static_cast<uint64_t>(summary.gainRaw)));
+  return summary;
+}
+
 PulseDropSummary summarizePulseDrops(const PressureTraceSample* samples,
                                       size_t sampleCount,
                                       const PressureTraceEvent* events,

@@ -288,70 +288,79 @@ def _raw_pressure_regulator_selftest():
 
 
 def _raw_valve_characterization_selftest():
-    rows = []
-    for test_id in range(2460, 2472):
-        rows.append(
-            {
-                "test_id": test_id,
-                "name": f"valve_characterization_{test_id}",
-                "pass": True,
-                "metrics": {
-                    "ch": "p" if test_id < 2463 or 2466 <= test_id < 2469 else "r",
-                    "mode": "pause" if test_id < 2466 else "active",
-                    "psi": 1000 + ((test_id - 2460) % 3) * 1000,
-                    "pulses": 18,
-                    "hz": 20,
-                    "w15": 1500,
-                    "w30": 3000,
-                    "w45": 4500,
-                    "m15": 20,
-                    "m30": 35,
-                    "m45": 50,
-                    "cv": 5,
-                    "out": 0,
-                    "rej": 0,
-                    "ready": 0,
-                    "home_to": 0,
-                    "slip_w": 0,
-                    "sc": 10,
-                    "ec": 12,
-                    "timeout": 0,
-                },
-            }
-        )
-    rows.append(
+    common = {
+        "psi": 2000,
+        "rep": 10,
+        "pulses": 30,
+        "m15": 20,
+        "m30": 35,
+        "m45": 50,
+        "cv15": 4,
+        "cv30": 5,
+        "cv45": 5,
+        "sp15": 3,
+        "sp30": 4,
+        "sp45": 5,
+        "out": 0,
+        "rej": 0,
+        "ready": 0,
+        "home_to": 0,
+        "mono": 1,
+        "gain": 30,
+        "lin": 0,
+        "sc": 120,
+        "ec": 30,
+        "timeout": 0,
+    }
+    rows = [
         {
-            "test_id": 2472,
-            "name": "valve_characterization_dual_active",
+            "test_id": 2473,
+            "name": "valve_char_print_2psi_repeat_linearity",
+            "pass": True,
+            "metrics": {"ch": "p", **common},
+        },
+        {
+            "test_id": 2474,
+            "name": "valve_char_refuel_2psi_repeat_linearity",
+            "pass": True,
+            "metrics": {"ch": "r", **common},
+        },
+        {
+            "test_id": 2475,
+            "name": "valve_char_channel_balance_2psi",
             "pass": True,
             "metrics": {
-                "mode": "dual",
                 "psi": 2000,
-                "pulses": 36,
+                "rep": 10,
+                "pulses": 60,
                 "m15p": 20,
                 "m15r": 21,
                 "m30p": 35,
                 "m30r": 36,
                 "m45p": 50,
                 "m45r": 51,
-                "ratio": 100,
-                "delta": 1,
+                "r15": 95,
+                "r30": 97,
+                "r45": 98,
+                "d15": 1,
+                "d30": 1,
+                "d45": 1,
+                "rej": 0,
                 "ready": 0,
                 "home_to": 0,
-                "slip_w": 0,
-                "sc": 10,
-                "ec": 12,
+                "sc": 240,
+                "ec": 60,
                 "timeout": 0,
             },
-        }
-    )
+        },
+    ]
     return {
         "run_id": 2468,
         "profile": "FULL",
         "started_at": "2026-05-13T00:00:00Z",
         "finished_at": "2026-05-13T00:06:00Z",
         "aborted": False,
-        "summary": {"total": 13, "passed": 13, "failed": 0},
+        "summary": {"total": 3, "passed": 3, "failed": 0},
         "results": rows,
         "host_checks": [{"name": "hello_ack", "pass": True, "details": {"seq8": 1}}],
     }
