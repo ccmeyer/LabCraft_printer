@@ -18,7 +18,7 @@
 
 class PressureRegulator {
 public:
-  static constexpr uint32_t kSetpointSlewRawPerSec = 874u;
+  static constexpr uint32_t kSetpointSlewRawPerSec = 1311u;
   static constexpr uint32_t kSetpointSlewSpeedCapHz = 16000u;
   static constexpr uint32_t kTransitionTravelWarnAbsSteps = 80000u;
   static constexpr uint32_t kTransitionTravelWarnDeltaSteps = 50000u;
