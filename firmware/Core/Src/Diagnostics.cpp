@@ -511,7 +511,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             result.readySeen = true;
 					        break;
 					      }
-                          if (absDiff32(static_cast<int32_t>(controlSample.raw), targetPressure) <= effectiveTol) {
+                          if (!reg.isTargetRamping() &&
+                              (absDiff32(static_cast<int32_t>(controlSample.raw), targetPressure) <= effectiveTol)) {
                             break;
                           }
 					      if (_selfTestAbortRequested) {
@@ -540,7 +541,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         const uint32_t readyTol = reg.getReadyConfig().readyTolRaw;
                         const uint32_t effectiveTol = (acceptTolRaw > readyTol) ? acceptTolRaw : readyTol;
                         result.accepted = !result.aborted &&
-                            (result.readySeen || result.readyFinal || (result.controlError <= effectiveTol));
+                            (result.readySeen || result.readyFinal ||
+                             (!reg.isTargetRamping() && (result.controlError <= effectiveTol)));
 						    return result;
 						  };
 
@@ -2561,13 +2563,6 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           }
                         };
 
-                        auto driftFromSamples = [](const int32_t* values, size_t count) -> uint32_t {
-                          if ((values == nullptr) || (count == 0u)) {
-                            return 0u;
-                          }
-                          return PressureQualificationMath::absDiff(values[0], values[count - 1u]);
-                        };
-
                         auto readPressurePositionSample = [&](uint8_t channel) {
                           PressurePositionSample sample{};
                           if ((sensor != nullptr) && (sensor->numPorts() > channel)) {
@@ -2592,6 +2587,60 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                    channelCode(channel),
                                    metricsTail);
                           return runOne(testId, name, false, metrics);
+                        };
+
+                        struct PressureHomeReference {
+                          bool ok = false;
+                          uint32_t moveTo = 0u;
+                          uint32_t homeTo = 0u;
+                          int32_t fineLimitSteps = 0;
+                        };
+
+                        auto homePressureReference = [&](uint8_t channel,
+                                                         const char* stage) -> PressureHomeReference {
+                          PressureHomeReference ref{};
+                          if (!channelAvailable(channel)) {
+                            ref.homeTo = 1u;
+                            return ref;
+                          }
+                          closePressureSuitePaths();
+                          sendProgressStage(stage);
+                          const EventBits_t homeBit = homeBitFor(channel);
+                          xEventGroupClearBits(_doneEvents, homeBit);
+                          if (channel == 0u) {
+                            startRegHomeAsync(&PressureRegulator::regP(),
+                                              kRegHomeFastHz,
+                                              kRegHomeSlowHz,
+                                              kRegHomeBackoffSteps,
+                                              BIT_HOME_P_DONE);
+                          }
+#if (LC_PRESSURE_PORTS > 1)
+                          else {
+                            startRegHomeAsync(&PressureRegulator::regR(),
+                                              kRegHomeFastHz,
+                                              kRegHomeSlowHz,
+                                              kRegHomeBackoffSteps,
+                                              BIT_HOME_R_DONE);
+                          }
+#endif
+                          const bool homeDone = waitBitsWithTimeout(homeBit, kRegHomeTimeoutMs);
+                          const EventBits_t doneBits = xEventGroupGetBits(_doneEvents);
+                          Stepper* stepper = stepperFor(channel);
+                          if (stepper == nullptr) {
+                            ref.homeTo = 1u;
+                            return ref;
+                          }
+                          const Stepper::HomeDiagnosticSnapshot diag =
+                              stepper->getLastHomeDiagnosticSnapshot();
+                          ref.moveTo = diag.moveTimeoutCount;
+                          ref.fineLimitSteps = diag.fineLimitPositionSteps;
+                          ref.ok = homeDone && ((doneBits & homeBit) != 0u) && diag.success;
+                          if (!ref.ok) {
+                            ref.homeTo = 1u;
+                          }
+                          regulatorFor(channel).pause();
+                          regulatorFor(channel).closeValve();
+                          return ref;
                         };
 
                         auto waitForPressureTarget = [&](uint8_t channel,
@@ -2648,7 +2697,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               wait.readySeen = true;
                               break;
                             }
-                            if (absDiff32(static_cast<int32_t>(controlSample.raw), acceptedTarget) <= effectiveTol) {
+                            if (!reg.isTargetRamping() &&
+                                (absDiff32(static_cast<int32_t>(controlSample.raw), acceptedTarget) <= effectiveTol)) {
                               break;
                             }
                             if (_selfTestAbortRequested) {
@@ -2677,7 +2727,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               (kQualificationPressureErrorTolRaw > readyTol) ? kQualificationPressureErrorTolRaw : readyTol;
                           wait.accepted = !wait.aborted &&
                               !wait.motorGuarded &&
-                              (wait.readySeen || wait.readyFinal || (wait.controlError <= effectiveTol));
+                              (wait.readySeen || wait.readyFinal ||
+                               (!reg.isTargetRamping() && (wait.controlError <= effectiveTol)));
                           recordPressureWaitExecution(wait, exec);
                           updateMax(settleMaxMs, wait.settleMs);
                           updateMax(errMax, wait.controlError);
@@ -2874,16 +2925,30 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           uint32_t rMoveTo = 0u;
                           uint32_t pHomeTo = hasP ? 0u : 1u;
                           uint32_t rHomeTo = hasR ? 0u : 1u;
+                          bool pSetupOk = hasP;
+                          bool rSetupOk = hasR;
+                          if (hasP) {
+                            const PressureHomeReference setup = homePressureReference(0u, "pressure_reg_home_setup_p");
+                            pMoveTo += setup.moveTo;
+                            pHomeTo += setup.homeTo;
+                            pSetupOk = setup.ok;
+                          }
+                          if (hasR) {
+                            const PressureHomeReference setup = homePressureReference(1u, "pressure_reg_home_setup_r");
+                            rMoveTo += setup.moveTo;
+                            rHomeTo += setup.homeTo;
+                            rSetupOk = setup.ok;
+                          }
                           for (uint32_t rep = 0u; rep < kRegHomeReps; ++rep) {
                             closePressureSuitePaths();
                             EventBits_t homeBits = 0u;
-                            if (hasP) homeBits |= homeBitFor(0u);
-                            if (hasR) homeBits |= homeBitFor(1u);
+                            if (hasP && pSetupOk) homeBits |= homeBitFor(0u);
+                            if (hasR && rSetupOk) homeBits |= homeBitFor(1u);
                             if (homeBits == 0u) {
                               break;
                             }
                             xEventGroupClearBits(_doneEvents, homeBits);
-                            if (hasP) {
+                            if (hasP && pSetupOk) {
                               startRegHomeAsync(&PressureRegulator::regP(),
                                                 kRegHomeFastHz,
                                                 kRegHomeSlowHz,
@@ -2891,7 +2956,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                                 BIT_HOME_P_DONE);
                             }
 #if (LC_PRESSURE_PORTS > 1)
-                            if (hasR) {
+                            if (hasR && rSetupOk) {
                               startRegHomeAsync(&PressureRegulator::regR(),
                                                 kRegHomeFastHz,
                                                 kRegHomeSlowHz,
@@ -2901,7 +2966,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 #endif
                             const bool homesDone = waitBitsWithTimeout(homeBits, kRegHomeTimeoutMs);
                             const EventBits_t doneBits = xEventGroupGetBits(_doneEvents);
-                            if (hasP) {
+                            if (hasP && pSetupOk) {
                               const Stepper::HomeDiagnosticSnapshot pDiag =
                                   Stepper::stepperP()->getLastHomeDiagnosticSnapshot();
                               pMoveTo += pDiag.moveTimeoutCount;
@@ -2912,7 +2977,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               }
                             }
 #if (LC_PRESSURE_PORTS > 1)
-                            if (hasR) {
+                            if (hasR && rSetupOk) {
                               const Stepper::HomeDiagnosticSnapshot rDiag =
                                   Stepper::stepperR()->getLastHomeDiagnosticSnapshot();
                               rMoveTo += rDiag.moveTimeoutCount;
@@ -2928,25 +2993,29 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             }
                           }
                           closePressureSuitePaths();
-                          const auto pStats = PressureQualificationMath::summarizeInt32Span(pHomes, pCount);
-                          const auto rStats = PressureQualificationMath::summarizeInt32Span(rHomes, rCount);
-                          const uint32_t pDrift = driftFromSamples(pHomes, pCount);
-                          const uint32_t rDrift = driftFromSamples(rHomes, rCount);
-                          const bool homePass = hasP && hasR &&
-                                                (pCount == kRegHomeReps) &&
-                                                (rCount == kRegHomeReps) &&
-                                                (pMoveTo == 0u) &&
-                                                (rMoveTo == 0u) &&
-                                                (pHomeTo == 0u) &&
-                                                (rHomeTo == 0u);
+                          const auto pSummary = PressureQualificationMath::summarizeHomeRepeatability(
+                              pHomes,
+                              pCount,
+                              kRegHomeReps,
+                              pMoveTo,
+                              pHomeTo);
+                          const auto rSummary = PressureQualificationMath::summarizeHomeRepeatability(
+                              rHomes,
+                              rCount,
+                              kRegHomeReps,
+                              rMoveTo,
+                              rHomeTo);
+                          const bool homePass = hasP && hasR && pSummary.pass && rSummary.pass;
                           char metrics[160];
                           snprintf(metrics, sizeof(metrics),
-                                   "rep=%lu;p_span=%lu;r_span=%lu;p_drift=%lu;r_drift=%lu;p_move_to=%lu;r_move_to=%lu;p_home_to=%lu;r_home_to=%lu",
+                                   "rep=%lu;p_n=%lu;r_n=%lu;p_span=%lu;r_span=%lu;p_drift=%lu;r_drift=%lu;p_move_to=%lu;r_move_to=%lu;p_home_to=%lu;r_home_to=%lu",
                                    static_cast<unsigned long>(kRegHomeReps),
-                                   static_cast<unsigned long>(pStats.span),
-                                   static_cast<unsigned long>(rStats.span),
-                                   static_cast<unsigned long>(pDrift),
-                                   static_cast<unsigned long>(rDrift),
+                                   static_cast<unsigned long>(pSummary.sampleCount),
+                                   static_cast<unsigned long>(rSummary.sampleCount),
+                                   static_cast<unsigned long>(pSummary.span),
+                                   static_cast<unsigned long>(rSummary.span),
+                                   static_cast<unsigned long>(pSummary.drift),
+                                   static_cast<unsigned long>(rSummary.drift),
                                    static_cast<unsigned long>(pMoveTo),
                                    static_cast<unsigned long>(rMoveTo),
                                    static_cast<unsigned long>(pHomeTo),
@@ -2962,9 +3031,23 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                 testId,
                                 name,
                                 channel,
-                                "psi=2000;target_raw=3386;hold_ms=15000;raw_start=0;raw_end=0;slope_raw_min=0;corr_steps=0;motor_start=0;motor_end=0;ready_miss=1;timeout=0;guard=0;guard_abs=0;guard_delta=0;motor_abs_max=0;motor_delta_max=0;max_jump=874");
+                                "target_raw=3386;hold_ms=15000;slope_raw_min=0;corr_steps=0;home_to=1;ready_miss=0;timeout=0;guard=0;motor_abs_max=0;motor_delta_max=0;max_jump=874;slew=1;cap_hz=8000");
                           }
                           sendProgressStage((channel == 0u) ? "pressure_hold_print" : "pressure_hold_refuel");
+                          const PressureHomeReference homeRef = homePressureReference(
+                              channel,
+                              (channel == 0u) ? "pressure_hold_home_print" : "pressure_hold_home_refuel");
+                          if (!homeRef.ok) {
+                            char metrics[224];
+                            snprintf(metrics, sizeof(metrics),
+                                     "ch=%c;gate=home_reference;target_raw=%lu;hold_ms=%lu;slope_raw_min=0;corr_steps=0;home_to=%lu;ready_miss=0;timeout=0;guard=0;motor_abs_max=0;motor_delta_max=0;max_jump=0;slew=1;cap_hz=%lu",
+                                     channelCode(channel),
+                                     static_cast<unsigned long>(kPressure2Raw),
+                                     static_cast<unsigned long>(kPressureHoldMs),
+                                     static_cast<unsigned long>((homeRef.homeTo > 0u) ? homeRef.homeTo : 1u),
+                                     static_cast<unsigned long>(PressureRegulator::kSetpointSlewSpeedCapHz));
+                            return runOne(testId, name, false, metrics);
+                          }
                           PressureQualificationMath::ExecutionSummary exec{};
                           PressureQualificationMath::MotorTravelGuardState guardState{};
                           PressureRegulator& reg = regulatorFor(channel);
@@ -3007,20 +3090,20 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           const bool pass = PressureQualificationMath::executionPass(exec);
                           char metrics[256];
                           snprintf(metrics, sizeof(metrics),
-                                   "ch=%c;psi=2000;target_raw=%ld;hold_ms=%lu;slope_raw_min=%ld;corr_steps=%lu;ready_miss=%lu;timeout=%lu;guard=%lu;guard_abs=%u;guard_delta=%u;motor_abs_max=%lu;motor_delta_max=%lu;max_jump=%lu",
+                                   "ch=%c;target_raw=%ld;hold_ms=%lu;slope_raw_min=%ld;corr_steps=%lu;home_to=%lu;ready_miss=%lu;timeout=%lu;guard=%lu;motor_abs_max=%lu;motor_delta_max=%lu;max_jump=%lu;slew=1;cap_hz=%lu",
                                    channelCode(channel),
                                    static_cast<long>(targetRaw),
                                    static_cast<unsigned long>(kPressureHoldMs),
                                    static_cast<long>(slopeRawPerMin),
                                    static_cast<unsigned long>(correctionSteps),
+                                   static_cast<unsigned long>(homeRef.homeTo),
                                    static_cast<unsigned long>(exec.readyMissCount),
                                    static_cast<unsigned long>(exec.timeoutCount + exec.abortCount),
                                    static_cast<unsigned long>(exec.motorGuardCount),
-                                   static_cast<unsigned>(guardState.guardAbs ? 1u : 0u),
-                                   static_cast<unsigned>(guardState.guardDelta ? 1u : 0u),
                                    static_cast<unsigned long>(guardState.motorAbsMax),
                                    static_cast<unsigned long>(guardState.motorDeltaMax),
-                                   static_cast<unsigned long>(maxJumpRaw));
+                                   static_cast<unsigned long>(maxJumpRaw),
+                                   static_cast<unsigned long>(PressureRegulator::kSetpointSlewSpeedCapHz));
                           return runOne(testId, name, pass, metrics);
                         };
 
@@ -3030,9 +3113,21 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                 testId,
                                 name,
                                 channel,
-                                "cycles=3;low_raw=2512;mid_raw=3386;high_raw=4259;settle_max_ms=0;err_max=0;low_span=0;high_span=0;ready_miss=1;timeout=0;guard=0;guard_abs=0;guard_delta=0;motor_abs_max=0;motor_delta_max=0;max_jump=874");
+                                "settle_max_ms=0;err_max=0;low_span=0;high_span=0;home_to=1;ready_miss=0;timeout=0;guard=0;motor_abs_max=0;motor_delta_max=0;max_jump=874;slew=1;cap_hz=8000");
                           }
                           sendProgressStage((channel == 0u) ? "pressure_cycle_print" : "pressure_cycle_refuel");
+                          const PressureHomeReference homeRef = homePressureReference(
+                              channel,
+                              (channel == 0u) ? "pressure_cycle_home_print" : "pressure_cycle_home_refuel");
+                          if (!homeRef.ok) {
+                            char metrics[224];
+                            snprintf(metrics, sizeof(metrics),
+                                     "ch=%c;gate=home_reference;settle_max_ms=0;err_max=0;low_span=0;high_span=0;home_to=%lu;ready_miss=0;timeout=0;guard=0;motor_abs_max=0;motor_delta_max=0;max_jump=0;slew=1;cap_hz=%lu",
+                                     channelCode(channel),
+                                     static_cast<unsigned long>((homeRef.homeTo > 0u) ? homeRef.homeTo : 1u),
+                                     static_cast<unsigned long>(PressureRegulator::kSetpointSlewSpeedCapHz));
+                            return runOne(testId, name, false, metrics);
+                          }
                           PressureQualificationMath::ExecutionSummary exec{};
                           PressureQualificationMath::MotorTravelGuardState guardState{};
                           PressureRegulator& reg = regulatorFor(channel);
@@ -3100,21 +3195,20 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                             PressureQualificationMath::executionPass(exec);
                           char metrics[256];
                           snprintf(metrics, sizeof(metrics),
-                                   "ch=%c;mid_raw=%lu;settle_max_ms=%lu;err_max=%lu;low_span=%lu;high_span=%lu;ready_miss=%lu;timeout=%lu;guard=%lu;guard_abs=%u;guard_delta=%u;motor_abs_max=%lu;motor_delta_max=%lu;max_jump=%lu",
+                                   "ch=%c;settle_max_ms=%lu;err_max=%lu;low_span=%lu;high_span=%lu;home_to=%lu;ready_miss=%lu;timeout=%lu;guard=%lu;motor_abs_max=%lu;motor_delta_max=%lu;max_jump=%lu;slew=1;cap_hz=%lu",
                                    channelCode(channel),
-                                   static_cast<unsigned long>(kPressure2Raw),
                                    static_cast<unsigned long>(settleMaxMs),
                                    static_cast<unsigned long>(errMax),
                                    static_cast<unsigned long>(lowStats.span),
                                    static_cast<unsigned long>(highStats.span),
+                                   static_cast<unsigned long>(homeRef.homeTo),
                                    static_cast<unsigned long>(exec.readyMissCount),
                                    static_cast<unsigned long>(exec.timeoutCount + exec.abortCount),
                                    static_cast<unsigned long>(exec.motorGuardCount),
-                                   static_cast<unsigned>(guardState.guardAbs ? 1u : 0u),
-                                   static_cast<unsigned>(guardState.guardDelta ? 1u : 0u),
                                    static_cast<unsigned long>(guardState.motorAbsMax),
                                    static_cast<unsigned long>(guardState.motorDeltaMax),
-                                   static_cast<unsigned long>(maxJumpRaw));
+                                   static_cast<unsigned long>(maxJumpRaw),
+                                   static_cast<unsigned long>(PressureRegulator::kSetpointSlewSpeedCapHz));
                           return runOne(testId, name, pass, metrics);
                         };
 
@@ -3124,9 +3218,22 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                 testId,
                                 name,
                                 channel,
-                                "target_raw=3386;low_raw=2512;high_raw=4259;visits=0;pos_min=0;pos_max=0;repeat_span=0;hyst_span=0;err_max=0;ready_miss=1;timeout=0;guard=0;guard_abs=0;guard_delta=0;motor_abs_max=0;motor_delta_max=0;max_jump=874");
+                                "target_raw=3386;repeat_span=0;hyst_span=0;err_max=0;home_to=1;ready_miss=0;timeout=0;guard=0;motor_abs_max=0;motor_delta_max=0;max_jump=874;slew=1;cap_hz=8000");
                           }
                           sendProgressStage((channel == 0u) ? "pressure_hyst_print" : "pressure_hyst_refuel");
+                          const PressureHomeReference homeRef = homePressureReference(
+                              channel,
+                              (channel == 0u) ? "pressure_hyst_home_print" : "pressure_hyst_home_refuel");
+                          if (!homeRef.ok) {
+                            char metrics[224];
+                            snprintf(metrics, sizeof(metrics),
+                                     "ch=%c;gate=home_reference;target_raw=%lu;repeat_span=0;hyst_span=0;err_max=0;home_to=%lu;ready_miss=0;timeout=0;guard=0;motor_abs_max=0;motor_delta_max=0;max_jump=0;slew=1;cap_hz=%lu",
+                                     channelCode(channel),
+                                     static_cast<unsigned long>(kPressure2Raw),
+                                     static_cast<unsigned long>((homeRef.homeTo > 0u) ? homeRef.homeTo : 1u),
+                                     static_cast<unsigned long>(PressureRegulator::kSetpointSlewSpeedCapHz));
+                            return runOne(testId, name, false, metrics);
+                          }
                           PressureQualificationMath::ExecutionSummary exec{};
                           PressureQualificationMath::MotorTravelGuardState guardState{};
                           PressureRegulator& reg = regulatorFor(channel);
@@ -3203,20 +3310,20 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                             PressureQualificationMath::executionPass(exec);
                           char metrics[256];
                           snprintf(metrics, sizeof(metrics),
-                                   "ch=%c;target_raw=%lu;repeat_span=%lu;hyst_span=%lu;err_max=%lu;ready_miss=%lu;timeout=%lu;guard=%lu;guard_abs=%u;guard_delta=%u;motor_abs_max=%lu;motor_delta_max=%lu;max_jump=%lu",
+                                   "ch=%c;target_raw=%lu;repeat_span=%lu;hyst_span=%lu;err_max=%lu;home_to=%lu;ready_miss=%lu;timeout=%lu;guard=%lu;motor_abs_max=%lu;motor_delta_max=%lu;max_jump=%lu;slew=1;cap_hz=%lu",
                                    channelCode(channel),
                                    static_cast<unsigned long>(kPressure2Raw),
                                    static_cast<unsigned long>(repeatStats.span),
                                    static_cast<unsigned long>(hystSpan),
                                    static_cast<unsigned long>(errMax),
+                                   static_cast<unsigned long>(homeRef.homeTo),
                                    static_cast<unsigned long>(exec.readyMissCount),
                                    static_cast<unsigned long>(exec.timeoutCount + exec.abortCount),
                                    static_cast<unsigned long>(exec.motorGuardCount),
-                                   static_cast<unsigned>(guardState.guardAbs ? 1u : 0u),
-                                   static_cast<unsigned>(guardState.guardDelta ? 1u : 0u),
                                    static_cast<unsigned long>(guardState.motorAbsMax),
                                    static_cast<unsigned long>(guardState.motorDeltaMax),
-                                   static_cast<unsigned long>(maxJumpRaw));
+                                   static_cast<unsigned long>(maxJumpRaw),
+                                   static_cast<unsigned long>(PressureRegulator::kSetpointSlewSpeedCapHz));
                           return runOne(testId, name, pass, metrics);
                         };
 
@@ -3226,9 +3333,24 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                 testId,
                                 name,
                                 channel,
-                                "pts=5;raw1=2512;raw2=3386;raw3=4259;settle_max_ms=0;err_max=0;over=0;under=0;pos_span=0;lin_err=0;ready_miss=1;timeout=0;guard=0;guard_abs=0;guard_delta=0;motor_abs_max=0;motor_delta_max=0;max_jump=874");
+                                "raw1=2512;raw2=3386;raw3=4259;settle_max_ms=0;err_max=0;home_to=1;ready_miss=0;timeout=0;guard=0;motor_abs_max=0;motor_delta_max=0;max_jump=874;slew=1;cap_hz=8000");
                           }
                           sendProgressStage((channel == 0u) ? "pressure_ladder_print" : "pressure_ladder_refuel");
+                          const PressureHomeReference homeRef = homePressureReference(
+                              channel,
+                              (channel == 0u) ? "pressure_ladder_home_print" : "pressure_ladder_home_refuel");
+                          if (!homeRef.ok) {
+                            char metrics[224];
+                            snprintf(metrics, sizeof(metrics),
+                                     "ch=%c;gate=home_reference;raw1=%lu;raw2=%lu;raw3=%lu;settle_max_ms=0;err_max=0;home_to=%lu;ready_miss=0;timeout=0;guard=0;motor_abs_max=0;motor_delta_max=0;max_jump=0;slew=1;cap_hz=%lu",
+                                     channelCode(channel),
+                                     static_cast<unsigned long>(kPressure1Raw),
+                                     static_cast<unsigned long>(kPressure2Raw),
+                                     static_cast<unsigned long>(kPressure3Raw),
+                                     static_cast<unsigned long>((homeRef.homeTo > 0u) ? homeRef.homeTo : 1u),
+                                     static_cast<unsigned long>(PressureRegulator::kSetpointSlewSpeedCapHz));
+                            return runOne(testId, name, false, metrics);
+                          }
                           const uint16_t targets[kLadderPointCount] = {
                               kPressure1Raw,
                               kPressure2Raw,
@@ -3267,21 +3389,21 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                             PressureQualificationMath::executionPass(exec);
                           char metrics[256];
                           snprintf(metrics, sizeof(metrics),
-                                   "ch=%c;raw1=%lu;raw2=%lu;raw3=%lu;settle_max_ms=%lu;err_max=%lu;ready_miss=%lu;timeout=%lu;guard=%lu;guard_abs=%u;guard_delta=%u;motor_abs_max=%lu;motor_delta_max=%lu;max_jump=%lu",
+                                   "ch=%c;raw1=%lu;raw2=%lu;raw3=%lu;settle_max_ms=%lu;err_max=%lu;home_to=%lu;ready_miss=%lu;timeout=%lu;guard=%lu;motor_abs_max=%lu;motor_delta_max=%lu;max_jump=%lu;slew=1;cap_hz=%lu",
                                    channelCode(channel),
                                    static_cast<unsigned long>(kPressure1Raw),
                                    static_cast<unsigned long>(kPressure2Raw),
                                    static_cast<unsigned long>(kPressure3Raw),
                                    static_cast<unsigned long>(settleMaxMs),
                                    static_cast<unsigned long>(errMax),
+                                   static_cast<unsigned long>(homeRef.homeTo),
                                    static_cast<unsigned long>(exec.readyMissCount),
                                    static_cast<unsigned long>(exec.timeoutCount + exec.abortCount),
                                    static_cast<unsigned long>(exec.motorGuardCount),
-                                   static_cast<unsigned>(guardState.guardAbs ? 1u : 0u),
-                                   static_cast<unsigned>(guardState.guardDelta ? 1u : 0u),
                                    static_cast<unsigned long>(guardState.motorAbsMax),
                                    static_cast<unsigned long>(guardState.motorDeltaMax),
-                                   static_cast<unsigned long>(maxJumpRaw));
+                                   static_cast<unsigned long>(maxJumpRaw),
+                                   static_cast<unsigned long>(PressureRegulator::kSetpointSlewSpeedCapHz));
                           return runOne(testId, name, pass, metrics);
                         };
 
@@ -3289,40 +3411,43 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           auto emitHold = [&](uint16_t testId, const char* name, uint8_t channel) -> bool {
                             char metrics[256];
                             snprintf(metrics, sizeof(metrics),
-                                     "ch=%c;gate=motor_guard;psi=2000;target_raw=%lu;hold_ms=%lu;slope_raw_min=0;corr_steps=0;ready_miss=0;timeout=0;guard=1;guard_abs=0;guard_delta=0;motor_abs_max=0;motor_delta_max=0;max_jump=%lu",
+                                     "ch=%c;gate=motor_guard;target_raw=%lu;hold_ms=%lu;slope_raw_min=0;corr_steps=0;home_to=0;ready_miss=0;timeout=0;guard=1;motor_abs_max=0;motor_delta_max=0;max_jump=%lu;slew=1;cap_hz=%lu",
                                      channelCode(channel),
                                      static_cast<unsigned long>(kPressure2Raw),
                                      static_cast<unsigned long>(kPressureHoldMs),
-                                     static_cast<unsigned long>(kMaxPressureJumpRaw));
+                                     static_cast<unsigned long>(kMaxPressureJumpRaw),
+                                     static_cast<unsigned long>(PressureRegulator::kSetpointSlewSpeedCapHz));
                             return runOne(testId, name, false, metrics);
                           };
                           auto emitCycle = [&](uint16_t testId, const char* name, uint8_t channel) -> bool {
                             char metrics[256];
                             snprintf(metrics, sizeof(metrics),
-                                     "ch=%c;gate=motor_guard;mid_raw=%lu;settle_max_ms=0;err_max=0;low_span=0;high_span=0;ready_miss=0;timeout=0;guard=1;guard_abs=0;guard_delta=0;motor_abs_max=0;motor_delta_max=0;max_jump=%lu",
+                                     "ch=%c;gate=motor_guard;settle_max_ms=0;err_max=0;low_span=0;high_span=0;home_to=0;ready_miss=0;timeout=0;guard=1;motor_abs_max=0;motor_delta_max=0;max_jump=%lu;slew=1;cap_hz=%lu",
                                      channelCode(channel),
-                                     static_cast<unsigned long>(kPressure2Raw),
-                                     static_cast<unsigned long>(kMaxPressureJumpRaw));
+                                     static_cast<unsigned long>(kMaxPressureJumpRaw),
+                                     static_cast<unsigned long>(PressureRegulator::kSetpointSlewSpeedCapHz));
                             return runOne(testId, name, false, metrics);
                           };
                           auto emitHysteresis = [&](uint16_t testId, const char* name, uint8_t channel) -> bool {
                             char metrics[256];
                             snprintf(metrics, sizeof(metrics),
-                                     "ch=%c;gate=motor_guard;target_raw=%lu;repeat_span=0;hyst_span=0;err_max=0;ready_miss=0;timeout=0;guard=1;guard_abs=0;guard_delta=0;motor_abs_max=0;motor_delta_max=0;max_jump=%lu",
+                                     "ch=%c;gate=motor_guard;target_raw=%lu;repeat_span=0;hyst_span=0;err_max=0;home_to=0;ready_miss=0;timeout=0;guard=1;motor_abs_max=0;motor_delta_max=0;max_jump=%lu;slew=1;cap_hz=%lu",
                                      channelCode(channel),
                                      static_cast<unsigned long>(kPressure2Raw),
-                                     static_cast<unsigned long>(kMaxPressureJumpRaw));
+                                     static_cast<unsigned long>(kMaxPressureJumpRaw),
+                                     static_cast<unsigned long>(PressureRegulator::kSetpointSlewSpeedCapHz));
                             return runOne(testId, name, false, metrics);
                           };
                           auto emitLadder = [&](uint16_t testId, const char* name, uint8_t channel) -> bool {
                             char metrics[256];
                             snprintf(metrics, sizeof(metrics),
-                                     "ch=%c;gate=motor_guard;raw1=%lu;raw2=%lu;raw3=%lu;settle_max_ms=0;err_max=0;ready_miss=0;timeout=0;guard=1;guard_abs=0;guard_delta=0;motor_abs_max=0;motor_delta_max=0;max_jump=%lu",
+                                     "ch=%c;gate=motor_guard;raw1=%lu;raw2=%lu;raw3=%lu;settle_max_ms=0;err_max=0;home_to=0;ready_miss=0;timeout=0;guard=1;motor_abs_max=0;motor_delta_max=0;max_jump=%lu;slew=1;cap_hz=%lu",
                                      channelCode(channel),
                                      static_cast<unsigned long>(kPressure1Raw),
                                      static_cast<unsigned long>(kPressure2Raw),
                                      static_cast<unsigned long>(kPressure3Raw),
-                                     static_cast<unsigned long>(kMaxPressureJumpRaw));
+                                     static_cast<unsigned long>(kMaxPressureJumpRaw),
+                                     static_cast<unsigned long>(PressureRegulator::kSetpointSlewSpeedCapHz));
                             return runOne(testId, name, false, metrics);
                           };
                           if ((firstTestId <= 2212u) && !emitHold(2212, "pressure_hold_leak_print_factory", 0u)) return false;

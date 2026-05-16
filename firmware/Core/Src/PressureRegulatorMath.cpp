@@ -24,6 +24,73 @@ int32_t clampRelativeTarget(const TargetLimits& limits, bool sign, int32_t delta
   return next;
 }
 
+int32_t targetRawToFixed(int32_t targetRaw, uint8_t fractionalBits) {
+  return static_cast<int32_t>(static_cast<int64_t>(targetRaw) *
+                              (static_cast<int64_t>(1) << fractionalBits));
+}
+
+int32_t targetFixedToRaw(int32_t targetFixed, uint8_t fractionalBits) {
+  if (fractionalBits == 0u) {
+    return targetFixed;
+  }
+  const int32_t half = static_cast<int32_t>(1L << (fractionalBits - 1u));
+  if (targetFixed >= 0) {
+    return (targetFixed + half) / static_cast<int32_t>(1L << fractionalBits);
+  }
+  return (targetFixed - half) / static_cast<int32_t>(1L << fractionalBits);
+}
+
+bool isTargetRampActive(int32_t rampedTargetFixed,
+                        int32_t requestedTargetRaw,
+                        uint8_t fractionalBits) {
+  return rampedTargetFixed != targetRawToFixed(requestedTargetRaw, fractionalBits);
+}
+
+int32_t advanceRampedTarget(int32_t rampedTargetFixed,
+                            int32_t requestedTargetRaw,
+                            uint32_t slewRawPerSec,
+                            uint32_t elapsedMs,
+                            uint8_t fractionalBits) {
+  const int32_t targetFixed = targetRawToFixed(requestedTargetRaw, fractionalBits);
+  if ((rampedTargetFixed == targetFixed) || (slewRawPerSec == 0u) || (elapsedMs == 0u)) {
+    return rampedTargetFixed;
+  }
+
+  const int64_t delta = static_cast<int64_t>(targetFixed) - static_cast<int64_t>(rampedTargetFixed);
+  const int64_t absDelta = (delta < 0) ? -delta : delta;
+  int64_t step = (static_cast<int64_t>(slewRawPerSec) *
+                  static_cast<int64_t>(elapsedMs) *
+                  (static_cast<int64_t>(1) << fractionalBits)) / 1000LL;
+  if (step <= 0) {
+    step = 1;
+  }
+  if (step >= absDelta) {
+    return targetFixed;
+  }
+  return static_cast<int32_t>(static_cast<int64_t>(rampedTargetFixed) + ((delta > 0) ? step : -step));
+}
+
+uint32_t capRequestedHzForTargetRamp(uint32_t requestedHz,
+                                     bool rampActive,
+                                     uint32_t capHz) {
+  if (rampActive && (capHz > 0u) && (requestedHz > capHz)) {
+    return capHz;
+  }
+  return requestedHz;
+}
+
+bool pressureReadyForRequestedTarget(int32_t pressureRaw,
+                                     int32_t requestedTargetRaw,
+                                     uint32_t readyTolRaw,
+                                     bool rampActive) {
+  if (rampActive) {
+    return false;
+  }
+  const int64_t error = static_cast<int64_t>(pressureRaw) - static_cast<int64_t>(requestedTargetRaw);
+  const uint64_t absError = static_cast<uint64_t>((error < 0) ? -error : error);
+  return absError <= static_cast<uint64_t>(readyTolRaw);
+}
+
 ProfileState applyPrintProfile(const ProfileState& state, bool enabled) {
   ProfileState next = state;
   const int64_t prevIContrib = static_cast<int64_t>(state.kiCurrent) * state.integral;

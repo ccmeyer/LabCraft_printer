@@ -84,6 +84,23 @@ struct SlewConfig {
 
 int32_t clampTarget(const TargetLimits& limits, int32_t requested);
 int32_t clampRelativeTarget(const TargetLimits& limits, bool sign, int32_t delta);
+int32_t targetRawToFixed(int32_t targetRaw, uint8_t fractionalBits);
+int32_t targetFixedToRaw(int32_t targetFixed, uint8_t fractionalBits);
+bool isTargetRampActive(int32_t rampedTargetFixed,
+                        int32_t requestedTargetRaw,
+                        uint8_t fractionalBits);
+int32_t advanceRampedTarget(int32_t rampedTargetFixed,
+                            int32_t requestedTargetRaw,
+                            uint32_t slewRawPerSec,
+                            uint32_t elapsedMs,
+                            uint8_t fractionalBits);
+uint32_t capRequestedHzForTargetRamp(uint32_t requestedHz,
+                                     bool rampActive,
+                                     uint32_t capHz);
+bool pressureReadyForRequestedTarget(int32_t pressureRaw,
+                                     int32_t requestedTargetRaw,
+                                     uint32_t readyTolRaw,
+                                     bool rampActive);
 ProfileState applyPrintProfile(const ProfileState& state, bool enabled);
 ValidationResult validatePressureSample(uint16_t previous,
                                         uint16_t incoming,

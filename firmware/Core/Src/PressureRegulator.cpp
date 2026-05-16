@@ -79,6 +79,7 @@ void PressureRegulator::begin(
   _htim    = htim;
   _sensorPort = sensorPort;
   _target  = targetPressure;
+  seedControlTarget(_target, HAL_GetTick());
   _minHz   = minRateHz;
   _maxHz   = maxRateHz;
   _tol     = tolerance;
@@ -172,6 +173,100 @@ void PressureRegulator::begin(
   _stepper->stop();
 }
 
+uint32_t PressureRegulator::getControlTarget() const {
+  const int32_t raw = controlTargetRaw();
+  return (raw < 0) ? 0u : static_cast<uint32_t>(raw);
+}
+
+bool PressureRegulator::isTargetRamping() const {
+  if (!_targetRampInitialized) {
+    return false;
+  }
+  return PressureRegulatorMath::isTargetRampActive(
+      _controlTargetFixed,
+      _target,
+      TARGET_RAMP_FRACTIONAL_BITS);
+}
+
+void PressureRegulator::seedControlTarget(int32_t targetRaw, uint32_t tickMs) {
+  _controlTargetFixed = PressureRegulatorMath::targetRawToFixed(
+      targetRaw,
+      TARGET_RAMP_FRACTIONAL_BITS);
+  _targetRampLastTickMs = tickMs;
+  _targetRampInitialized = true;
+}
+
+int32_t PressureRegulator::controlTargetRaw() const {
+  if (!_targetRampInitialized) {
+    return _target;
+  }
+  return PressureRegulatorMath::targetFixedToRaw(
+      _controlTargetFixed,
+      TARGET_RAMP_FRACTIONAL_BITS);
+}
+
+int32_t PressureRegulator::advanceControlTarget(uint32_t tickMs) {
+  if (!_targetRampInitialized) {
+    seedControlTarget(_target, tickMs);
+    return _target;
+  }
+  const uint32_t elapsedMs = tickMs - _targetRampLastTickMs;
+  _controlTargetFixed = PressureRegulatorMath::advanceRampedTarget(
+      _controlTargetFixed,
+      _target,
+      kSetpointSlewRawPerSec,
+      elapsedMs,
+      TARGET_RAMP_FRACTIONAL_BITS);
+  _targetRampLastTickMs = tickMs;
+  return controlTargetRaw();
+}
+
+void PressureRegulator::updateRequestedTarget(int32_t requestedTarget) {
+  const uint32_t nowMs = HAL_GetTick();
+  (void)advanceControlTarget(nowMs);
+
+  const bool changed = (requestedTarget != _target);
+  _target = requestedTarget;
+  _pressureOk = false;
+  _readyConsecutiveCount = 0;
+  if (changed && _active && (_stepper != nullptr)) {
+    _targetTransitionMonitorActive = true;
+    _targetTransitionTravelLogged = false;
+    _targetTransitionStartPosition = _stepper->getPosition();
+  } else if (changed) {
+    _targetTransitionMonitorActive = false;
+    _targetTransitionTravelLogged = false;
+  }
+}
+
+void PressureRegulator::updateTargetTransitionMonitor(int32_t position,
+                                                      bool rampActive,
+                                                      bool pressureReady) {
+  if (!_targetTransitionMonitorActive) {
+    return;
+  }
+
+  const uint32_t absPosition = static_cast<uint32_t>(llabs(static_cast<long long>(position)));
+  const int64_t delta = static_cast<int64_t>(position) -
+                        static_cast<int64_t>(_targetTransitionStartPosition);
+  const uint32_t absDelta = static_cast<uint32_t>((delta < 0) ? -delta : delta);
+  if (!_targetTransitionTravelLogged &&
+      ((absPosition >= kTransitionTravelWarnAbsSteps) ||
+       (absDelta >= kTransitionTravelWarnDeltaSteps))) {
+    Logger::instance()->log("[PReg] setpoint travel warn port=%u pos=%ld delta=%lu target=%ld control=%ld\r\n",
+                            static_cast<unsigned>(_sensorPort),
+                            static_cast<long>(position),
+                            static_cast<unsigned long>(absDelta),
+                            static_cast<long>(_target),
+                            static_cast<long>(controlTargetRaw()));
+    _targetTransitionTravelLogged = true;
+  }
+
+  if (!rampActive && pressureReady) {
+    _targetTransitionMonitorActive = false;
+  }
+}
+
 
 void PressureRegulator::start() {
   if (_active) return;
@@ -199,7 +294,15 @@ void PressureRegulator::start() {
   if (PressureSensor::instance()) {
     measured = static_cast<int32_t>(PressureSensor::instance()->getLatestRaw(_sensorPort));
   }
-  _lastError = measured - _target;
+  int32_t rampStart = measured;
+  if (rampStart < _minTarget) rampStart = _minTarget;
+  if (rampStart > _maxTarget) rampStart = _maxTarget;
+  seedControlTarget(rampStart, HAL_GetTick());
+  _targetTransitionMonitorActive = (rampStart != _target) && (_stepper != nullptr);
+  _targetTransitionTravelLogged = false;
+  _targetTransitionStartPosition = (_stepper != nullptr) ? _stepper->getPosition() : 0;
+
+  _lastError = measured - controlTargetRaw();
   _integral  = 0;
 
   // seed step speed from proportional term only
@@ -226,6 +329,8 @@ void PressureRegulator::pause() {
   Watchdog_DisableTask((_sensorPort == 0u) ? CRASH_TASK_PREG_P : CRASH_TASK_PREG_R);
   if (_stepping) { _stepper->stop(); _stepping = false; }
   _integral = 0;
+  _targetTransitionMonitorActive = false;
+  _targetTransitionTravelLogged = false;
 }
 
 //void PressureRegulator::setPrintProfile(bool enabled) {
@@ -284,7 +389,7 @@ void PressureRegulator::beginDispenseQuiet(uint32_t /*pre_ms*/) {
   if (PressureSensor::instance()) {
     p = static_cast<int32_t>(PressureSensor::instance()->getLatestRaw(_sensorPort));
   }
-  _lastError = p - _target;
+  _lastError = p - controlTargetRaw();
 }
 
 void PressureRegulator::endDispenseQuiet(uint32_t post_ms) {
@@ -335,9 +440,13 @@ void PressureRegulator::notifyPulseEnd(const DisturbanceEvent& ev) {
   }
 }
 
+void PressureRegulator::setTarget(int32_t p) {
+  updateRequestedTarget(p);
+}
+
 void PressureRegulator::setRelativeTarget(bool sign, int32_t p) {
-	if (sign) _target += p;
-	else _target -= p;
+	if (sign) updateRequestedTarget(_target + p);
+	else updateRequestedTarget(_target - p);
 }
 
 static inline float clampf(float v, float lo, float hi) {
@@ -353,8 +462,7 @@ void PressureRegulator::setTargetSafe(int32_t requested) {
 		  limits.maxTarget = _maxTarget;
 		  limits.maxCmdStep = _maxCmdStep;
 		  limits.maxRelStep = _maxRelStep;
-		  _target = PressureRegulatorMath::clampTarget(limits, requested);
-		  _pressureOk = false;
+		  updateRequestedTarget(PressureRegulatorMath::clampTarget(limits, requested));
 		}
 
 void PressureRegulator::setRelativeTargetSafe(bool sign, int32_t delta) {
@@ -364,8 +472,7 @@ void PressureRegulator::setRelativeTargetSafe(bool sign, int32_t delta) {
 		  limits.maxTarget = _maxTarget;
 		  limits.maxCmdStep = _maxCmdStep;
 		  limits.maxRelStep = _maxRelStep;
-		  _target = PressureRegulatorMath::clampRelativeTarget(limits, sign, delta);
-		  _pressureOk = false;
+		  updateRequestedTarget(PressureRegulatorMath::clampRelativeTarget(limits, sign, delta));
 }
 
 void PressureRegulator::openValve() {
@@ -594,15 +701,23 @@ void PressureRegulator::controlLoop() {
     if (_target < _minTarget || _target > _maxTarget) {
       Logger::instance()->log("[PReg] target out of range: %ld\r\n", (long)_target);
       // bring target back gently toward measured within rails
-      if (_target < _minTarget) _target = _minTarget;
-      if (_target > _maxTarget) _target = _maxTarget;
+      int32_t clampedTarget = _target;
+      if (clampedTarget < _minTarget) clampedTarget = _minTarget;
+      if (clampedTarget > _maxTarget) clampedTarget = _maxTarget;
+      updateRequestedTarget(clampedTarget);
       vTaskDelay(period);
       continue;
     }
 
-    int32_t error = pressure - _target;
+    const int32_t controlTarget = advanceControlTarget(HAL_GetTick());
+    const bool targetRamping = isTargetRamping();
+    int32_t error = pressure - controlTarget;
 
-    const bool inReadyBand = ( llabs((long long)error) <= _printTol );
+    const bool inReadyBand = PressureRegulatorMath::pressureReadyForRequestedTarget(
+        pressure,
+        _target,
+        _printTol,
+        targetRamping);
     if (inReadyBand) {
       if (_readyConsecutiveCount < _readyCfg.consecutiveSamples) {
         _readyConsecutiveCount++;
@@ -619,6 +734,7 @@ void PressureRegulator::controlLoop() {
     if (_pressureOk && _doneBit != 0) {
       xEventGroupSetBits(Orchestrator::getDoneEvents(), _doneBit);
     }
+    updateTargetTransitionMonitor(pos, targetRamping, _pressureOk);
 
     // 2) Integer PID with runtime gains
     if (!_freezeI && _KIc != 0) {
@@ -685,6 +801,10 @@ void PressureRegulator::controlLoop() {
             _recoveryCfg.recoveryFloorHz});
     if (requestedHz == 0u) requestedHz = (_minHz ? _minHz : 1u);
 
+    requestedHz = PressureRegulatorMath::capRequestedHzForTargetRamp(
+        requestedHz,
+        targetRamping,
+        kSetpointSlewSpeedCapHz);
 
     // Asymmetric slew limiting: faster up, slower down to reduce overshoot risk.
     if (_stepping) {
@@ -745,7 +865,7 @@ void PressureRegulator::controlLoop() {
       _integral = 0;
     }
 
-    recordTraceSample(controlSample, error, dErr, requestedHz, _lastRateHz, dir);
+    recordTraceSample(controlSample, controlTarget, error, dErr, requestedHz, _lastRateHz, dir);
 
     vTaskDelay(period);
   }
@@ -760,6 +880,7 @@ uint32_t PressureRegulator::computeRecoveryBoostHz() const {
 }
 
 void PressureRegulator::recordTraceSample(const PressureSensor::ControlSample& sample,
+                                          int32_t controlTargetRaw,
                                           int32_t error,
                                           int32_t dErr,
                                           uint32_t requestedHz,
@@ -776,7 +897,7 @@ void PressureRegulator::recordTraceSample(const PressureSensor::ControlSample& s
   trace.rawPressure = sample.raw;
   trace.controlPressure = sample.raw;
   trace.avgPressure = sample.avg;
-  trace.target = static_cast<uint16_t>(_target);
+  trace.target = static_cast<uint16_t>((controlTargetRaw < 0) ? 0 : controlTargetRaw);
   trace.error = static_cast<int16_t>(error);
   trace.dError = static_cast<int16_t>(dErr);
   trace.requestedHz = static_cast<uint16_t>((requestedHz > 0xFFFFu) ? 0xFFFFu : requestedHz);

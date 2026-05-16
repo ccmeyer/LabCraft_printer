@@ -32,6 +32,17 @@ struct MotorTravelGuardState {
   bool guardDelta = false;
 };
 
+struct HomeRepeatabilitySummary {
+  uint32_t expectedCount = 0;
+  uint32_t sampleCount = 0;
+  uint32_t missingCount = 0;
+  uint32_t span = 0;
+  uint32_t drift = 0;
+  uint32_t moveTimeoutCount = 0;
+  uint32_t homeTimeoutCount = 0;
+  bool pass = false;
+};
+
 uint32_t absDiff(int32_t a, int32_t b);
 constexpr uint16_t pressureRawFromPsiMilli(uint32_t psiMilli)
 {
@@ -48,6 +59,12 @@ bool updateMotorTravelGuard(int32_t position,
                             const MotorTravelGuardLimits& limits,
                             MotorTravelGuardState& state);
 Int32Span summarizeInt32Span(const int32_t* values, size_t count);
+uint32_t driftFromInt32Samples(const int32_t* values, size_t count);
+HomeRepeatabilitySummary summarizeHomeRepeatability(const int32_t* successfulPositions,
+                                                    size_t successfulCount,
+                                                    uint32_t expectedCount,
+                                                    uint32_t moveTimeoutCount,
+                                                    uint32_t homeTimeoutCount);
 uint32_t meanDifferenceAbs(const int32_t* a, size_t aCount, const int32_t* b, size_t bCount);
 bool executionPass(const ExecutionSummary& summary);
 

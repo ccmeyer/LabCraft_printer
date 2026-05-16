@@ -93,6 +93,36 @@ Int32Span summarizeInt32Span(const int32_t* values, size_t count)
   return span;
 }
 
+uint32_t driftFromInt32Samples(const int32_t* values, size_t count)
+{
+  if ((values == nullptr) || (count == 0u)) {
+    return 0u;
+  }
+  return absDiff(values[0], values[count - 1u]);
+}
+
+HomeRepeatabilitySummary summarizeHomeRepeatability(const int32_t* successfulPositions,
+                                                    size_t successfulCount,
+                                                    uint32_t expectedCount,
+                                                    uint32_t moveTimeoutCount,
+                                                    uint32_t homeTimeoutCount)
+{
+  HomeRepeatabilitySummary summary{};
+  summary.expectedCount = expectedCount;
+  summary.sampleCount = static_cast<uint32_t>(successfulCount);
+  summary.missingCount = (expectedCount > summary.sampleCount) ? (expectedCount - summary.sampleCount) : 0u;
+  summary.moveTimeoutCount = moveTimeoutCount;
+  summary.homeTimeoutCount = homeTimeoutCount;
+
+  const Int32Span span = summarizeInt32Span(successfulPositions, successfulCount);
+  summary.span = span.span;
+  summary.drift = driftFromInt32Samples(successfulPositions, successfulCount);
+  summary.pass = (summary.sampleCount == expectedCount) &&
+                 (summary.moveTimeoutCount == 0u) &&
+                 (summary.homeTimeoutCount == 0u);
+  return summary;
+}
+
 uint32_t meanDifferenceAbs(const int32_t* a, size_t aCount, const int32_t* b, size_t bCount)
 {
   if ((a == nullptr) || (b == nullptr) || (aCount == 0u) || (bCount == 0u)) {

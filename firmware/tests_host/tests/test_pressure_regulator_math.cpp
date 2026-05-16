@@ -29,6 +29,48 @@ TEST(PressureRegulatorMath, RelativeTargetUsesMagnitudeClampAndBounds) {
     LONGS_EQUAL(1638, PressureRegulatorMath::clampRelativeTarget(limits, false, 1000));
 }
 
+TEST(PressureRegulatorMath, RampedTargetAdvancesOnePsiOverAboutOneSecond) {
+    const uint8_t qBits = 8;
+    int32_t ramped = PressureRegulatorMath::targetRawToFixed(2512, qBits);
+
+    ramped = PressureRegulatorMath::advanceRampedTarget(ramped, 3386, 874, 500, qBits);
+    LONGS_EQUAL(2949, PressureRegulatorMath::targetFixedToRaw(ramped, qBits));
+    CHECK_TRUE(PressureRegulatorMath::isTargetRampActive(ramped, 3386, qBits));
+
+    ramped = PressureRegulatorMath::advanceRampedTarget(ramped, 3386, 874, 500, qBits);
+    LONGS_EQUAL(3386, PressureRegulatorMath::targetFixedToRaw(ramped, qBits));
+    CHECK_FALSE(PressureRegulatorMath::isTargetRampActive(ramped, 3386, qBits));
+}
+
+TEST(PressureRegulatorMath, RampedTargetWorksDownwardAndAvoidsOvershoot) {
+    const uint8_t qBits = 8;
+    int32_t ramped = PressureRegulatorMath::targetRawToFixed(3386, qBits);
+
+    ramped = PressureRegulatorMath::advanceRampedTarget(ramped, 2512, 874, 2000, qBits);
+
+    LONGS_EQUAL(2512, PressureRegulatorMath::targetFixedToRaw(ramped, qBits));
+    CHECK_FALSE(PressureRegulatorMath::isTargetRampActive(ramped, 2512, qBits));
+}
+
+TEST(PressureRegulatorMath, RampedTargetSmallStepConvergesWithoutStalling) {
+    const uint8_t qBits = 8;
+    int32_t ramped = PressureRegulatorMath::targetRawToFixed(2000, qBits);
+
+    ramped = PressureRegulatorMath::advanceRampedTarget(ramped, 2001, 874, 1, qBits);
+
+    CHECK_TRUE(PressureRegulatorMath::targetFixedToRaw(ramped, qBits) >= 2000);
+    ramped = PressureRegulatorMath::advanceRampedTarget(ramped, 2001, 874, 100, qBits);
+    LONGS_EQUAL(2001, PressureRegulatorMath::targetFixedToRaw(ramped, qBits));
+}
+
+TEST(PressureRegulatorMath, TargetRampCapsSpeedAndBlocksReady) {
+    UNSIGNED_LONGS_EQUAL(8000u, PressureRegulatorMath::capRequestedHzForTargetRamp(30000u, true, 8000u));
+    UNSIGNED_LONGS_EQUAL(30000u, PressureRegulatorMath::capRequestedHzForTargetRamp(30000u, false, 8000u));
+    CHECK_FALSE(PressureRegulatorMath::pressureReadyForRequestedTarget(3386, 3386, 4, true));
+    CHECK_TRUE(PressureRegulatorMath::pressureReadyForRequestedTarget(3388, 3386, 4, false));
+    CHECK_FALSE(PressureRegulatorMath::pressureReadyForRequestedTarget(3398, 3386, 4, false));
+}
+
 TEST(PressureRegulatorMath, PrintProfilePreservesIContributionAcrossGainChange) {
     PressureRegulatorMath::ProfileState state{};
     state.kpCurrent = 100;

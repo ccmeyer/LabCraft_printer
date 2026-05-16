@@ -101,6 +101,45 @@ TEST(PressureQualificationMath, EmptySpanIsZero)
     UNSIGNED_LONGS_EQUAL(0u, stats.span);
 }
 
+TEST(PressureQualificationMath, HomeRepeatabilitySummaryUsesOnlySuccessfulHomes)
+{
+    const int32_t successfulHomes[] = {100, 103};
+
+    const auto summary = PressureQualificationMath::summarizeHomeRepeatability(
+        successfulHomes,
+        2,
+        3,
+        0,
+        1);
+
+    UNSIGNED_LONGS_EQUAL(3u, summary.expectedCount);
+    UNSIGNED_LONGS_EQUAL(2u, summary.sampleCount);
+    UNSIGNED_LONGS_EQUAL(1u, summary.missingCount);
+    UNSIGNED_LONGS_EQUAL(3u, summary.span);
+    UNSIGNED_LONGS_EQUAL(3u, summary.drift);
+    UNSIGNED_LONGS_EQUAL(0u, summary.moveTimeoutCount);
+    UNSIGNED_LONGS_EQUAL(1u, summary.homeTimeoutCount);
+    CHECK_FALSE(summary.pass);
+}
+
+TEST(PressureQualificationMath, HomeRepeatabilitySummaryPassesCleanMeasuredHomes)
+{
+    const int32_t successfulHomes[] = {100, 101, 99};
+
+    const auto summary = PressureQualificationMath::summarizeHomeRepeatability(
+        successfulHomes,
+        3,
+        3,
+        0,
+        0);
+
+    UNSIGNED_LONGS_EQUAL(3u, summary.sampleCount);
+    UNSIGNED_LONGS_EQUAL(0u, summary.missingCount);
+    UNSIGNED_LONGS_EQUAL(2u, summary.span);
+    UNSIGNED_LONGS_EQUAL(1u, summary.drift);
+    CHECK_TRUE(summary.pass);
+}
+
 TEST(PressureQualificationMath, ComputesMeanDifferenceBetweenPositionGroups)
 {
     const int32_t fromBelow[] = {100, 104};

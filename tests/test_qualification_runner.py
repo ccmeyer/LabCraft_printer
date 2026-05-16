@@ -222,11 +222,12 @@ def _raw_motion_envelope_selftest():
 def _raw_pressure_regulator_selftest():
     guard_ok = {
         "guard": 0,
-        "guard_abs": 0,
-        "guard_delta": 0,
+        "home_to": 0,
         "motor_abs_max": 24000,
         "motor_delta_max": 5000,
         "max_jump": 874,
+        "slew": 1,
+        "cap_hz": 8000,
     }
     return {
         "run_id": 7890,
@@ -261,6 +262,8 @@ def _raw_pressure_regulator_selftest():
                 "pass": True,
                 "metrics": {
                     "rep": 3,
+                    "p_n": 3,
+                    "r_n": 3,
                     "p_span": 2,
                     "r_span": 2,
                     "p_drift": 1,
@@ -271,10 +274,10 @@ def _raw_pressure_regulator_selftest():
                     "r_home_to": 0,
                 },
             },
-            {"test_id": 2212, "name": "pressure_hold_leak_print_factory", "pass": True, "metrics": {"ch": "p", "psi": 2000, "target_raw": 3386, "hold_ms": 15000, "slope_raw_min": 0, "corr_steps": 10, "ready_miss": 0, "timeout": 0, **guard_ok}},
-            {"test_id": 2213, "name": "pressure_hold_leak_refuel_factory", "pass": True, "metrics": {"ch": "r", "psi": 2000, "target_raw": 3386, "hold_ms": 15000, "slope_raw_min": 0, "corr_steps": 10, "ready_miss": 0, "timeout": 0, **guard_ok}},
-            {"test_id": 2214, "name": "pressure_target_cycle_print_factory", "pass": True, "metrics": {"ch": "p", "mid_raw": 3386, "settle_max_ms": 500, "err_max": 5, "low_span": 8, "high_span": 8, "ready_miss": 0, "timeout": 0, **guard_ok}},
-            {"test_id": 2215, "name": "pressure_target_cycle_refuel_factory", "pass": True, "metrics": {"ch": "r", "mid_raw": 3386, "settle_max_ms": 500, "err_max": 5, "low_span": 8, "high_span": 8, "ready_miss": 0, "timeout": 0, **guard_ok}},
+            {"test_id": 2212, "name": "pressure_hold_leak_print_factory", "pass": True, "metrics": {"ch": "p", "target_raw": 3386, "hold_ms": 15000, "slope_raw_min": 0, "corr_steps": 10, "ready_miss": 0, "timeout": 0, **guard_ok}},
+            {"test_id": 2213, "name": "pressure_hold_leak_refuel_factory", "pass": True, "metrics": {"ch": "r", "target_raw": 3386, "hold_ms": 15000, "slope_raw_min": 0, "corr_steps": 10, "ready_miss": 0, "timeout": 0, **guard_ok}},
+            {"test_id": 2214, "name": "pressure_target_cycle_print_factory", "pass": True, "metrics": {"ch": "p", "settle_max_ms": 500, "err_max": 5, "low_span": 8, "high_span": 8, "ready_miss": 0, "timeout": 0, **guard_ok}},
+            {"test_id": 2215, "name": "pressure_target_cycle_refuel_factory", "pass": True, "metrics": {"ch": "r", "settle_max_ms": 500, "err_max": 5, "low_span": 8, "high_span": 8, "ready_miss": 0, "timeout": 0, **guard_ok}},
             {"test_id": 2216, "name": "pressure_motor_hysteresis_print_factory", "pass": True, "metrics": {"ch": "p", "target_raw": 3386, "repeat_span": 8, "hyst_span": 4, "err_max": 5, "ready_miss": 0, "timeout": 0, **guard_ok}},
             {"test_id": 2217, "name": "pressure_motor_hysteresis_refuel_factory", "pass": True, "metrics": {"ch": "r", "target_raw": 3386, "repeat_span": 8, "hyst_span": 4, "err_max": 5, "ready_miss": 0, "timeout": 0, **guard_ok}},
             {"test_id": 2218, "name": "pressure_step_ladder_print_factory", "pass": True, "metrics": {"ch": "p", "raw1": 2512, "raw2": 3386, "raw3": 4259, "settle_max_ms": 500, "err_max": 5, "ready_miss": 0, "timeout": 0, **guard_ok}},

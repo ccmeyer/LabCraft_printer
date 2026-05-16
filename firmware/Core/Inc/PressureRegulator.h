@@ -18,6 +18,11 @@
 
 class PressureRegulator {
 public:
+  static constexpr uint32_t kSetpointSlewRawPerSec = 874u;
+  static constexpr uint32_t kSetpointSlewSpeedCapHz = 8000u;
+  static constexpr uint32_t kTransitionTravelWarnAbsSteps = 80000u;
+  static constexpr uint32_t kTransitionTravelWarnDeltaSteps = 50000u;
+
   enum class PulseType : uint8_t {
     Print = 0,
     Refuel = 1
@@ -82,12 +87,14 @@ public:
   void pause();
 
   /// Change the target on the fly
-  void setTarget(int32_t p) { _target = p; }
+  void setTarget(int32_t p);
   void setRelativeTarget(bool sign, int32_t p);
   void setTargetSafe(int32_t requested);
   void setRelativeTargetSafe(bool sign, int32_t delta);
   uint32_t getCurrentArr() const { return _currentArr; }
   uint32_t getTarget() const { return _target; }
+  uint32_t getControlTarget() const;
+  bool isTargetRamping() const;
 
   bool isActive() const { return _active; }
 
@@ -195,6 +202,15 @@ private:
 
   static constexpr uint32_t MAX_STEPS = 10000000;  // “infinite” for our purposes
 
+  static constexpr uint8_t TARGET_RAMP_FRACTIONAL_BITS = 8u;
+
+  int32_t  _controlTargetFixed = 0;
+  uint32_t _targetRampLastTickMs = 0;
+  bool     _targetRampInitialized = false;
+  bool     _targetTransitionMonitorActive = false;
+  bool     _targetTransitionTravelLogged = false;
+  int32_t  _targetTransitionStartPosition = 0;
+
   // registry machinery:
 #if (LC_PRESSURE_PORTS > 1)
   	static constexpr int MAX_REGS = 2;
@@ -266,6 +282,7 @@ private:
     return (_sensorPort == 0u) ? PressureTraceChannel::Print : PressureTraceChannel::Refuel;
   }
   void recordTraceSample(const PressureSensor::ControlSample& sample,
+                         int32_t controlTargetRaw,
                          int32_t error,
                          int32_t dErr,
                          uint32_t requestedHz,
@@ -273,6 +290,11 @@ private:
                          bool dir);
   void recordTraceEvent(PressureTraceEventType type, uint16_t value0 = 0, uint16_t value1 = 0);
   uint32_t computeRecoveryBoostHz() const;
+  void seedControlTarget(int32_t targetRaw, uint32_t tickMs);
+  int32_t advanceControlTarget(uint32_t tickMs);
+  int32_t controlTargetRaw() const;
+  void updateRequestedTarget(int32_t requestedTarget);
+  void updateTargetTransitionMonitor(int32_t position, bool rampActive, bool pressureReady);
 
 
   // ---------- Inner-limit (syringe end) support ----------
