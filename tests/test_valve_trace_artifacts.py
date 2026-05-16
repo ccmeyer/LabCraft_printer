@@ -37,11 +37,37 @@ def test_analyze_valve_trace_marks_baseline_response_and_snr():
     assert row["baseline_mean_raw"] == 3386
     assert row["baseline_span_raw"] == 2
     assert row["drop_raw"] == 10
-    assert row["rise_raw"] == 1
+    assert row["spike_raw"] == 1
     assert row["response_raw"] == 10
     assert row["response_kind"] == "drop"
+    assert row["trough_after_end_ms"] == 2
     assert row["selected_after_start_ms"] == 5
     assert row["snr_span"] == 5
+
+
+def test_analyze_valve_trace_keeps_spike_separate_from_later_drop():
+    trace = _trace("valve_char_p_w3000_rep02", test_id=2473)
+    trace["samples"] = [
+        {"dt_ms": 0, "raw_pressure": 3386},
+        {"dt_ms": 5, "raw_pressure": 3386},
+        {"dt_ms": 10, "raw_pressure": 3386},
+        {"dt_ms": 14, "raw_pressure": 3456},
+        {"dt_ms": 32, "raw_pressure": 3400},
+        {"dt_ms": 48, "raw_pressure": 3356},
+    ]
+    trace["events"] = [
+        {"dt_ms": 10, "event_type": 2, "event_name": "pulse_start", "value0": 3000, "value1": 3386},
+        {"dt_ms": 13, "event_type": 3, "event_name": "pulse_end", "value0": 3000, "value1": 3386},
+    ]
+
+    row = analyze_valve_trace(trace)
+
+    assert row["valid"] is True
+    assert row["drop_raw"] == 30
+    assert row["spike_raw"] == 70
+    assert row["response_raw"] == 30
+    assert row["trough_dt_ms"] == 48
+    assert row["peak_dt_ms"] == 14
 
 
 def test_generate_valve_trace_artifacts_writes_plots_csv_and_analysis(tmp_path):
@@ -62,5 +88,5 @@ def test_generate_valve_trace_artifacts_writes_plots_csv_and_analysis(tmp_path):
     assert (result.plot_dir / "valve_char_p_full_timecourse.png").exists()
     assert (result.plot_dir / "valve_char_response_by_width.png").exists()
     analysis = json.loads(result.analysis_json.read_text(encoding="utf-8"))
-    assert analysis["schema_version"] == "valve_trace_analysis_v1"
+    assert analysis["schema_version"] == "valve_trace_analysis_v2"
     assert analysis["valid_replicate_count"] == 2

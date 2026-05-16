@@ -344,4 +344,109 @@ WindowedPulseResponseSummary summarizeWindowedPulseResponses(const PressureTrace
   return summary;
 }
 
+WindowedValveDropSummary summarizeWindowedValveDrops(const PressureTraceSample* samples,
+                                                     size_t sampleCount,
+                                                     const PressureTraceEvent* events,
+                                                     size_t eventCount,
+                                                     uint32_t baselineWindowMs,
+                                                     uint32_t dropWindowAfterPulseEndMs) {
+  WindowedValveDropSummary summary{};
+  if (samples == nullptr || sampleCount == 0u || events == nullptr || eventCount == 0u ||
+      dropWindowAfterPulseEndMs == 0u) {
+    return summary;
+  }
+
+  uint32_t drops[kMaxAnalyzedPulses]{};
+  uint32_t spikes[kMaxAnalyzedPulses]{};
+  for (size_t i = 0; i < eventCount; ++i) {
+    const PressureTraceEvent& startEv = events[i];
+    if (startEv.type != eventType(PressureTraceEventType::PulseStart)) {
+      continue;
+    }
+
+    const PressureTraceEvent* endEv = nullptr;
+    for (size_t j = i + 1u; j < eventCount; ++j) {
+      if (events[j].type == eventType(PressureTraceEventType::PulseEnd)) {
+        endEv = &events[j];
+        break;
+      }
+    }
+    if (endEv == nullptr) {
+      summary.rejectCount++;
+      continue;
+    }
+
+    const uint32_t startDt = startEv.dtMs;
+    const uint32_t endDt = endEv->dtMs;
+    uint64_t baselineSum = 0u;
+    uint32_t baselineCount = 0u;
+    const uint32_t baselineStart = (startDt > baselineWindowMs) ? (startDt - baselineWindowMs) : 0u;
+    for (size_t s = 0; s < sampleCount; ++s) {
+      const uint32_t sampleDt = samples[s].dtMs;
+      if (sampleDt >= baselineStart && sampleDt <= startDt) {
+        baselineSum += samples[s].rawPressure;
+        baselineCount++;
+      }
+    }
+    const uint32_t baseline = (baselineCount > 0u)
+                                  ? static_cast<uint32_t>((baselineSum + (baselineCount / 2u)) / baselineCount)
+                                  : static_cast<uint32_t>(startEv.value1);
+
+    bool haveDropSample = false;
+    bool haveSpikeSample = false;
+    uint32_t minPressure = baseline;
+    uint32_t maxPressure = baseline;
+    const uint32_t windowEnd = endDt + dropWindowAfterPulseEndMs;
+    for (size_t s = 0; s < sampleCount; ++s) {
+      const uint32_t sampleDt = samples[s].dtMs;
+      const uint32_t pressure = samples[s].rawPressure;
+      if (sampleDt >= endDt && sampleDt <= windowEnd) {
+        if (!haveDropSample || pressure < minPressure) {
+          minPressure = pressure;
+        }
+        haveDropSample = true;
+      }
+      if (sampleDt >= startDt && sampleDt <= windowEnd) {
+        if (!haveSpikeSample || pressure > maxPressure) {
+          maxPressure = pressure;
+        }
+        haveSpikeSample = true;
+      }
+    }
+
+    if (!haveDropSample || summary.pulseCount >= kMaxAnalyzedPulses) {
+      summary.rejectCount++;
+      continue;
+    }
+
+    drops[summary.pulseCount] = (baseline > minPressure) ? (baseline - minPressure) : 0u;
+    spikes[summary.pulseCount] = (haveSpikeSample && maxPressure > baseline) ? (maxPressure - baseline) : 0u;
+    summary.pulseCount++;
+  }
+
+  if (summary.pulseCount == 0u) {
+    return summary;
+  }
+
+  const auto dropSummary = summarizeResponseValues(drops, summary.pulseCount);
+  const auto spikeSummary = summarizeResponseValues(spikes, summary.pulseCount);
+  summary.meanDropRaw = dropSummary.meanRaw;
+  summary.dropCvPct = dropSummary.cvPct;
+  summary.outlierCount = dropSummary.outlierCount;
+  summary.minDropRaw = dropSummary.minRaw;
+  summary.maxDropRaw = dropSummary.maxRaw;
+  summary.spanDropRaw = dropSummary.spanRaw;
+  summary.meanSpikeRaw = spikeSummary.meanRaw;
+  summary.minSpikeRaw = spikeSummary.minRaw;
+  summary.maxSpikeRaw = spikeSummary.maxRaw;
+
+  if (summary.pulseCount > 1u) {
+    summary.dropSlopeRawPerPulse =
+        (static_cast<int32_t>(drops[summary.pulseCount - 1u]) - static_cast<int32_t>(drops[0])) /
+        static_cast<int32_t>(summary.pulseCount - 1u);
+  }
+
+  return summary;
+}
+
 }  // namespace ValvePulseQualificationMath

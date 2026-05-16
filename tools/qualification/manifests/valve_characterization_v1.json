@@ -31,9 +31,13 @@
         "timeout": {"maturity": "candidate", "equals": 0},
         "ready": {"maturity": "candidate", "equals": 0},
         "rej": {"maturity": "candidate", "equals": 0},
+        "fresh_to": {"maturity": "candidate", "equals": 0},
+        "focus": {"maturity": "candidate", "equals": 1},
         "sc": {"maturity": "candidate", "min": 1},
         "ec": {"maturity": "candidate", "min": 1},
         "mono": {"maturity": "candidate", "equals": 1},
+        "sm": {"maturity": "informational"},
+        "dw": {"maturity": "informational"},
         "m15": {"maturity": "informational"},
         "m30": {"maturity": "informational"},
         "m45": {"maturity": "informational"},
@@ -43,9 +47,9 @@
         "sp15": {"maturity": "informational"},
         "sp30": {"maturity": "informational"},
         "sp45": {"maturity": "informational"},
-        "gain": {"maturity": "informational"},
-        "lin": {"maturity": "informational"},
-        "out": {"maturity": "informational"}
+        "pk15": {"maturity": "informational"},
+        "pk30": {"maturity": "informational"},
+        "pk45": {"maturity": "informational"}
       }
     },
     "2474": {
@@ -56,9 +60,13 @@
         "timeout": {"maturity": "candidate", "equals": 0},
         "ready": {"maturity": "candidate", "equals": 0},
         "rej": {"maturity": "candidate", "equals": 0},
+        "fresh_to": {"maturity": "candidate", "equals": 0},
+        "focus": {"maturity": "candidate", "equals": 1},
         "sc": {"maturity": "candidate", "min": 1},
         "ec": {"maturity": "candidate", "min": 1},
         "mono": {"maturity": "candidate", "equals": 1},
+        "sm": {"maturity": "informational"},
+        "dw": {"maturity": "informational"},
         "m15": {"maturity": "informational"},
         "m30": {"maturity": "informational"},
         "m45": {"maturity": "informational"},
@@ -68,9 +76,9 @@
         "sp15": {"maturity": "informational"},
         "sp30": {"maturity": "informational"},
         "sp45": {"maturity": "informational"},
-        "gain": {"maturity": "informational"},
-        "lin": {"maturity": "informational"},
-        "out": {"maturity": "informational"}
+        "pk15": {"maturity": "informational"},
+        "pk30": {"maturity": "informational"},
+        "pk45": {"maturity": "informational"}
       }
     },
     "2475": {

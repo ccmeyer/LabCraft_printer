@@ -22,6 +22,7 @@ add_executable(fw_tests
     tests/test_valve_pulse_qualification_math.cpp
     tests/test_pressure_target_policy.cpp
     tests/test_pressure_trace_math.cpp
+    tests/test_pressure_sensor_focus_policy.cpp
     tests/test_motion_qualification_math.cpp
     tests/test_stepper_profile_math.cpp
     tests/test_stepper_limit_policy.cpp
@@ -41,6 +42,7 @@ add_executable(fw_tests
     ../Core/Src/OrchestratorDecode.cpp
     ../Core/Src/nvm_codec.c
     ../Core/Src/PressureRegulatorMath.cpp
+    ../Core/Src/PressureSensorFocusPolicy.cpp
     ../Core/Src/PressureQualificationMath.cpp
     ../Core/Src/GripperSealQualificationMath.cpp
     ../Core/Src/ValvePulseQualificationMath.cpp

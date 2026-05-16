@@ -6,6 +6,7 @@
  */
 
 #include "PressureSensor.h"
+#include "PressureSensorFocusPolicy.h"
 #include "PressureRegulator.h"
 #include "PressureRegulatorMath.h"
 #include "Logger.h"
@@ -148,6 +149,13 @@ void PressureSensor::taskLoop() {
     for (;;) {
         Watchdog_CheckIn(CRASH_TASK_PRESSURE);
 //    	Logger::instance()->log("TEST %u\r\n", port);
+        bool focusEnabled = false;
+        uint8_t focusPort = 0;
+        taskENTER_CRITICAL();
+        focusEnabled = _diagnosticFocusEnabled;
+        focusPort = _diagnosticFocusPort;
+        taskEXIT_CRITICAL();
+        port = PressureSensorFocusPolicy::portForRead(port, _numPorts, focusEnabled, focusPort);
         // 1) switch the I²C multiplexer
     	HAL_StatusTypeDef st;
         st = selectPort(port);
@@ -235,9 +243,12 @@ void PressureSensor::taskLoop() {
           }
         }
 
-        // 4) next port (works for 1 or 2)
-        port++;
-        if (port >= _numPorts) port = 0;
+        // 4) next port (works for 1 or 2; diagnostic focus holds one port)
+        taskENTER_CRITICAL();
+        focusEnabled = _diagnosticFocusEnabled;
+        focusPort = _diagnosticFocusPort;
+        taskEXIT_CRITICAL();
+        port = PressureSensorFocusPolicy::nextPortAfterRead(port, _numPorts, focusEnabled, focusPort);
         // 5) delay before the next read
         vTaskDelay(_readInterval);
     }
@@ -298,6 +309,24 @@ void PressureSensor::setValidationConfig(uint8_t port, const ValidationConfig& c
 PressureSensor::ValidationConfig PressureSensor::getValidationConfig(uint8_t port) const {
   if (port >= MAX_PORTS) port = MAX_PORTS - 1;
   return _validationCfg[port];
+}
+
+bool PressureSensor::beginDiagnosticFocus(uint8_t port) {
+  if (port >= _numPorts) {
+    return false;
+  }
+  taskENTER_CRITICAL();
+  _diagnosticFocusPort = port;
+  _diagnosticFocusEnabled = true;
+  taskEXIT_CRITICAL();
+  return true;
+}
+
+void PressureSensor::endDiagnosticFocus() {
+  taskENTER_CRITICAL();
+  _diagnosticFocusEnabled = false;
+  _diagnosticFocusPort = 0;
+  taskEXIT_CRITICAL();
 }
 
 extern "C" {

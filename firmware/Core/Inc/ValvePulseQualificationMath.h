@@ -31,6 +31,21 @@ struct WindowedPulseResponseSummary {
   uint32_t maxResponseRaw = 0;
 };
 
+struct WindowedValveDropSummary {
+  uint32_t pulseCount = 0;
+  uint32_t meanDropRaw = 0;
+  uint32_t dropCvPct = 0;
+  int32_t dropSlopeRawPerPulse = 0;
+  uint32_t outlierCount = 0;
+  uint32_t rejectCount = 0;
+  uint32_t minDropRaw = 0;
+  uint32_t maxDropRaw = 0;
+  uint32_t spanDropRaw = 0;
+  uint32_t meanSpikeRaw = 0;
+  uint32_t minSpikeRaw = 0;
+  uint32_t maxSpikeRaw = 0;
+};
+
 struct ThreeWidthLinearitySummary {
   uint32_t monotonic = 0;
   uint32_t gainRaw = 0;
@@ -63,6 +78,12 @@ WindowedPulseResponseSummary summarizeWindowedPulseResponses(const PressureTrace
                                                              size_t eventCount,
                                                              uint32_t baselineWindowMs,
                                                              uint32_t responseWindowMs);
+WindowedValveDropSummary summarizeWindowedValveDrops(const PressureTraceSample* samples,
+                                                     size_t sampleCount,
+                                                     const PressureTraceEvent* events,
+                                                     size_t eventCount,
+                                                     uint32_t baselineWindowMs,
+                                                     uint32_t dropWindowAfterPulseEndMs);
 
 }  // namespace ValvePulseQualificationMath
 

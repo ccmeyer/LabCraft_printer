@@ -14,7 +14,7 @@ from .artifacts import RunArtifacts
 
 VALVE_TRACE_RE = re.compile(r"^valve_char_(?P<channel>[pr])_w(?P<width>\d+)_rep(?P<rep>\d+)$")
 BASELINE_WINDOW_MS = 10.0
-RESPONSE_WINDOW_MS = 30.0
+DROP_WINDOW_AFTER_PULSE_END_MS = 80.0
 
 
 @dataclass(frozen=True)
@@ -84,27 +84,33 @@ def analyze_valve_trace(trace: dict[str, Any], *, source_path: str | Path | None
         **metadata,
         "valid": False,
     }
-    if not samples or pulse_start is None:
-        row["reason"] = "missing_samples_or_pulse_start"
+    if not samples or pulse_start is None or pulse_end is None:
+        row["reason"] = "missing_samples_or_pulse_events"
         return row
 
     start_ms = float(pulse_start.get("dt_ms", 0))
-    end_ms = float(pulse_end.get("dt_ms", start_ms)) if pulse_end is not None else start_ms
+    end_ms = float(pulse_end.get("dt_ms", start_ms))
     baseline_start_ms = max(0.0, start_ms - BASELINE_WINDOW_MS)
-    response_end_ms = start_ms + RESPONSE_WINDOW_MS
+    drop_start_ms = end_ms
+    drop_end_ms = end_ms + DROP_WINDOW_AFTER_PULSE_END_MS
 
     baseline_samples = [
         float(sample.get("raw_pressure", 0))
         for sample in samples
         if baseline_start_ms <= float(sample.get("dt_ms", 0)) <= start_ms
     ]
-    response_samples = [
+    drop_samples = [
         sample
         for sample in samples
-        if start_ms <= float(sample.get("dt_ms", 0)) <= response_end_ms
+        if drop_start_ms <= float(sample.get("dt_ms", 0)) <= drop_end_ms
     ]
-    if not baseline_samples or not response_samples:
-        row["reason"] = "missing_baseline_or_response_samples"
+    spike_samples = [
+        sample
+        for sample in samples
+        if start_ms <= float(sample.get("dt_ms", 0)) <= drop_end_ms
+    ]
+    if not baseline_samples or not drop_samples:
+        row["reason"] = "missing_baseline_or_drop_samples"
         return row
 
     baseline_mean = _mean(baseline_samples)
@@ -112,20 +118,17 @@ def analyze_valve_trace(trace: dict[str, Any], *, source_path: str | Path | None
     baseline_min = min(baseline_samples)
     baseline_max = max(baseline_samples)
 
-    response_pressures = [float(sample.get("raw_pressure", 0)) for sample in response_samples]
-    min_pressure = min(response_pressures)
-    max_pressure = max(response_pressures)
+    drop_pressures = [float(sample.get("raw_pressure", 0)) for sample in drop_samples]
+    spike_pressures = [float(sample.get("raw_pressure", 0)) for sample in spike_samples] or drop_pressures
+    min_pressure = min(drop_pressures)
+    max_pressure = max(spike_pressures)
     drop_raw = max(0.0, baseline_mean - min_pressure)
-    rise_raw = max(0.0, max_pressure - baseline_mean)
-    if drop_raw >= rise_raw:
-        selected_pressure = min_pressure
-        response_kind = "drop"
-    else:
-        selected_pressure = max_pressure
-        response_kind = "rise"
-    response_raw = max(drop_raw, rise_raw)
-    selected_sample = _point_for_pressure(samples, selected_pressure, start_ms, response_end_ms)
-    selected_ms = float(selected_sample.get("dt_ms", start_ms)) if selected_sample is not None else start_ms
+    spike_raw = max(0.0, max_pressure - baseline_mean)
+    response_raw = drop_raw
+    trough_sample = _point_for_pressure(samples, min_pressure, drop_start_ms, drop_end_ms)
+    trough_ms = float(trough_sample.get("dt_ms", end_ms)) if trough_sample is not None else end_ms
+    peak_sample = _point_for_pressure(samples, max_pressure, start_ms, drop_end_ms)
+    peak_ms = float(peak_sample.get("dt_ms", start_ms)) if peak_sample is not None else start_ms
 
     row.update(
         {
@@ -136,19 +139,30 @@ def analyze_valve_trace(trace: dict[str, Any], *, source_path: str | Path | None
             "pulse_end_ms": end_ms,
             "baseline_start_ms": baseline_start_ms,
             "baseline_end_ms": start_ms,
-            "response_end_ms": response_end_ms,
+            "drop_start_ms": drop_start_ms,
+            "drop_end_ms": drop_end_ms,
+            "response_end_ms": drop_end_ms,
             "baseline_mean_raw": baseline_mean,
             "baseline_std_raw": baseline_std,
             "baseline_span_raw": baseline_max - baseline_min,
             "min_pressure_raw": min_pressure,
             "max_pressure_raw": max_pressure,
-            "selected_pressure_raw": selected_pressure,
-            "selected_dt_ms": selected_ms,
-            "selected_after_start_ms": selected_ms - start_ms,
+            "trough_pressure_raw": min_pressure,
+            "trough_dt_ms": trough_ms,
+            "trough_after_start_ms": trough_ms - start_ms,
+            "trough_after_end_ms": trough_ms - end_ms,
+            "peak_pressure_raw": max_pressure,
+            "peak_dt_ms": peak_ms,
+            "peak_after_start_ms": peak_ms - start_ms,
+            "peak_after_end_ms": peak_ms - end_ms,
+            "selected_pressure_raw": min_pressure,
+            "selected_dt_ms": trough_ms,
+            "selected_after_start_ms": trough_ms - start_ms,
             "drop_raw": drop_raw,
-            "rise_raw": rise_raw,
+            "spike_raw": spike_raw,
+            "rise_raw": spike_raw,
             "response_raw": response_raw,
-            "response_kind": response_kind,
+            "response_kind": "drop",
             "snr_std": None if baseline_std <= 0.0 else response_raw / baseline_std,
             "snr_span": None if (baseline_max - baseline_min) <= 0.0 else response_raw / (baseline_max - baseline_min),
         }
@@ -191,7 +205,8 @@ def _summary_by_condition(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     keys = sorted({(row.get("channel"), row.get("width_us")) for row in rows if row.get("valid")})
     for channel, width_us in keys:
         subset = [row for row in rows if row.get("valid") and row.get("channel") == channel and row.get("width_us") == width_us]
-        responses = [float(row.get("response_raw") or 0) for row in subset]
+        responses = [float(row.get("drop_raw") or 0) for row in subset]
+        spikes = [float(row.get("spike_raw") or 0) for row in subset]
         baseline_std = [float(row.get("baseline_std_raw") or 0) for row in subset]
         summary.append(
             {
@@ -199,9 +214,10 @@ def _summary_by_condition(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "channel_name": "print" if channel == "p" else "refuel",
                 "width_us": width_us,
                 "replicate_count": len(subset),
-                "response_mean_raw": _mean(responses),
-                "response_std_raw": _std(responses),
-                "response_span_raw": (max(responses) - min(responses)) if responses else 0.0,
+                "drop_mean_raw": _mean(responses),
+                "drop_std_raw": _std(responses),
+                "drop_span_raw": (max(responses) - min(responses)) if responses else 0.0,
+                "spike_mean_raw": _mean(spikes),
                 "baseline_std_mean_raw": _mean(baseline_std),
             }
         )
@@ -225,16 +241,27 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "pulse_end_ms",
         "baseline_start_ms",
         "baseline_end_ms",
+        "drop_start_ms",
+        "drop_end_ms",
         "response_end_ms",
         "baseline_mean_raw",
         "baseline_std_raw",
         "baseline_span_raw",
         "min_pressure_raw",
         "max_pressure_raw",
+        "trough_pressure_raw",
+        "trough_dt_ms",
+        "trough_after_start_ms",
+        "trough_after_end_ms",
+        "peak_pressure_raw",
+        "peak_dt_ms",
+        "peak_after_start_ms",
+        "peak_after_end_ms",
         "selected_pressure_raw",
         "selected_dt_ms",
         "selected_after_start_ms",
         "drop_raw",
+        "spike_raw",
         "rise_raw",
         "response_raw",
         "response_kind",
@@ -284,9 +311,13 @@ def _plot_full_timecourse(plot_items: list[tuple[Path, dict[str, Any], dict[str,
         label = f"{int(row.get('width_us') or 0)} us rep {int(row.get('replicate') or 0):02d}"
         ax.plot(t, y, linewidth=1.0, alpha=0.75, label=label)
         start = offset + float(row.get("pulse_start_ms") or 0)
-        selected = offset + float(row.get("selected_dt_ms") or 0)
+        end = offset + float(row.get("pulse_end_ms") or 0)
+        trough = offset + float(row.get("trough_dt_ms") or 0)
+        peak = offset + float(row.get("peak_dt_ms") or 0)
         ax.axvline(start, color="tab:orange", linestyle="--", linewidth=0.7, alpha=0.5)
-        ax.scatter([selected], [float(row.get("selected_pressure_raw") or 0)], color="tab:red", s=18, zorder=4)
+        ax.axvline(end, color="tab:gray", linestyle=":", linewidth=0.7, alpha=0.45)
+        ax.scatter([trough], [float(row.get("trough_pressure_raw") or 0)], color="tab:red", s=18, zorder=4)
+        ax.scatter([peak], [float(row.get("peak_pressure_raw") or 0)], color="tab:purple", s=14, zorder=4)
         ax.hlines(
             float(row.get("baseline_mean_raw") or 0),
             offset + float(row.get("baseline_start_ms") or 0),
@@ -321,22 +352,41 @@ def _plot_overlay(plot_items: list[tuple[Path, dict[str, Any], dict[str, Any]]],
     if not subset:
         return None
     fig, ax = plt.subplots(figsize=(10, 6))
+    pulse_end_offsets: list[float] = []
     for _path, trace, row in subset:
         samples = _safe_list(trace, "samples")
         start = float(row.get("pulse_start_ms") or 0)
+        pulse_end_offset = float(row.get("pulse_end_ms") or start) - start
+        pulse_end_offsets.append(pulse_end_offset)
         baseline = float(row.get("baseline_mean_raw") or 0)
         x = [float(sample.get("dt_ms", 0)) - start for sample in samples]
         y = [baseline - float(sample.get("raw_pressure", 0)) for sample in samples]
         ax.plot(x, y, linewidth=1.1, alpha=0.65)
+        ax.axvline(pulse_end_offset, color="tab:gray", linestyle=":", linewidth=0.6, alpha=0.25)
         ax.scatter(
-            [float(row.get("selected_dt_ms") or start) - start],
-            [baseline - float(row.get("selected_pressure_raw") or baseline)],
+            [float(row.get("trough_dt_ms") or start) - start],
+            [baseline - float(row.get("trough_pressure_raw") or baseline)],
             color="tab:red",
             s=14,
             alpha=0.75,
         )
+        ax.scatter(
+            [float(row.get("peak_dt_ms") or start) - start],
+            [baseline - float(row.get("peak_pressure_raw") or baseline)],
+            color="tab:purple",
+            s=12,
+            alpha=0.65,
+        )
     ax.axvline(0, color="tab:orange", linestyle="--", linewidth=1.0, label="pulse start")
-    ax.axvspan(0, RESPONSE_WINDOW_MS, color="tab:blue", alpha=0.08, label="response window")
+    if pulse_end_offsets:
+        ax.axvspan(
+            min(pulse_end_offsets),
+            max(pulse_end_offsets) + DROP_WINDOW_AFTER_PULSE_END_MS,
+            color="tab:blue",
+            alpha=0.08,
+            label="drop window",
+        )
+        ax.plot([], [], color="tab:gray", linestyle=":", linewidth=1.0, label="pulse end")
     ax.axhline(0, color="black", linewidth=0.8)
     ax.set_title(f"{'Print' if channel == 'p' else 'Refuel'} valve {width_us} us replicate overlay")
     ax.set_xlabel("Time from pulse start (ms)")
@@ -365,15 +415,15 @@ def _plot_response_summary(rows: list[dict[str, Any]], plot_dir: Path) -> Path |
         if not subset:
             continue
         xs = [float(row.get("width_us") or 0) for row in subset]
-        ys = [float(row.get("response_raw") or 0) for row in subset]
+        ys = [float(row.get("drop_raw") or 0) for row in subset]
         ax.scatter(xs, ys, color=color, alpha=0.45, label=f"{label} replicates")
         for width in sorted({int(row.get("width_us") or 0) for row in subset}):
-            responses = [float(row.get("response_raw") or 0) for row in subset if int(row.get("width_us") or 0) == width]
+            responses = [float(row.get("drop_raw") or 0) for row in subset if int(row.get("width_us") or 0) == width]
             if responses:
                 ax.errorbar([width], [_mean(responses)], yerr=[_std(responses)], fmt="o", color=color, markersize=8)
-    ax.set_title("Valve response by pulse width")
+    ax.set_title("Valve pressure drop by pulse width")
     ax.set_xlabel("Pulse width (us)")
-    ax.set_ylabel("Windowed response (raw)")
+    ax.set_ylabel("Post-pulse pressure drop (raw)")
     ax.grid(True, alpha=0.25)
     ax.legend(loc="best", fontsize=8)
     fig.tight_layout()
@@ -398,9 +448,9 @@ def generate_valve_trace_artifacts(artifacts: RunArtifacts) -> ValveTraceArtifac
     analysis_json.write_text(
         json.dumps(
             {
-                "schema_version": "valve_trace_analysis_v1",
+                "schema_version": "valve_trace_analysis_v2",
                 "baseline_window_ms": BASELINE_WINDOW_MS,
-                "response_window_ms": RESPONSE_WINDOW_MS,
+                "drop_window_after_pulse_end_ms": DROP_WINDOW_AFTER_PULSE_END_MS,
                 "replicate_count": len(rows),
                 "valid_replicate_count": sum(1 for row in rows if row.get("valid")),
                 "conditions": summary,

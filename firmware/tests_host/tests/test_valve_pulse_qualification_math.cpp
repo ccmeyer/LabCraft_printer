@@ -194,3 +194,53 @@ TEST(ValvePulseQualificationMath, WindowedResponseRejectsPulseWithoutSamples) {
     UNSIGNED_LONGS_EQUAL(1u, summary.rejectCount);
     UNSIGNED_LONGS_EQUAL(0u, summary.meanResponseRaw);
 }
+
+TEST(ValvePulseQualificationMath, WindowedValveDropUsesPostPulseTroughInsteadOfEarlierSpike) {
+    PressureTraceSample samples[] = {
+        sampleAt(5, 2500),
+        sampleAt(10, 2500),
+        sampleAt(14, 2560),
+        sampleAt(24, 2510),
+        sampleAt(48, 2470),
+        sampleAt(70, 2485),
+    };
+    PressureTraceEvent events[] = {
+        eventAt(10, PressureTraceEventType::PulseStart, 1500, 2500),
+        eventAt(12, PressureTraceEventType::PulseEnd, 1500, 2500),
+    };
+
+    auto summary = ValvePulseQualificationMath::summarizeWindowedValveDrops(
+        samples,
+        sizeof(samples) / sizeof(samples[0]),
+        events,
+        sizeof(events) / sizeof(events[0]),
+        5,
+        80);
+
+    UNSIGNED_LONGS_EQUAL(1u, summary.pulseCount);
+    UNSIGNED_LONGS_EQUAL(30u, summary.meanDropRaw);
+    UNSIGNED_LONGS_EQUAL(60u, summary.meanSpikeRaw);
+    UNSIGNED_LONGS_EQUAL(0u, summary.rejectCount);
+}
+
+TEST(ValvePulseQualificationMath, WindowedValveDropRejectsPulseWithoutPostPulseSamples) {
+    PressureTraceSample samples[] = {
+        sampleAt(5, 2500),
+        sampleAt(10, 2500),
+    };
+    PressureTraceEvent events[] = {
+        eventAt(10, PressureTraceEventType::PulseStart, 3000, 2500),
+        eventAt(12, PressureTraceEventType::PulseEnd, 3000, 2500),
+    };
+
+    auto summary = ValvePulseQualificationMath::summarizeWindowedValveDrops(
+        samples,
+        sizeof(samples) / sizeof(samples[0]),
+        events,
+        sizeof(events) / sizeof(events[0]),
+        5,
+        20);
+
+    UNSIGNED_LONGS_EQUAL(0u, summary.pulseCount);
+    UNSIGNED_LONGS_EQUAL(1u, summary.rejectCount);
+}

@@ -92,6 +92,9 @@ public:
 
     uint8_t numPorts() const { return _numPorts; }
 
+    bool beginDiagnosticFocus(uint8_t port);
+    void endDiagnosticFocus();
+
     static void I2C1_BusRecovery();
 
     void setSafetyRawMax(uint8_t port, uint16_t rawMax);
@@ -140,6 +143,8 @@ private:
     ControlSample _controlSample[MAX_PORTS];
     ValidationConfig _validationCfg[MAX_PORTS];
     uint8_t _rejectStreak[MAX_PORTS] = {0, 0};
+    bool _diagnosticFocusEnabled = false;
+    uint8_t _diagnosticFocusPort = 0;
 };
 #ifdef __cplusplus
 extern "C" {
