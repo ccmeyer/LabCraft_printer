@@ -84,6 +84,9 @@ def test_load_gripper_seal_stress_manifest_requires_motion_dummy_head_fixture():
     assert manifest.selftest_args == ("--gripper-seal-stress-suite", "--pressure-trace")
     assert {item["fixture_id"] for item in manifest.fixtures} == {"dummy_blocked_head_motion_v1"}
     assert manifest.analysis_rules["2510"]["metrics"]["pulse_ms"]["equals"] == 2000
+    assert manifest.analysis_rules["2510"]["metrics"]["pulses"]["min"] == 30
+    assert manifest.analysis_rules["2510"]["metrics"]["cond"]["equals"] == 3
+    assert manifest.analysis_rules["2510"]["metrics"]["reps"]["equals"] == 5
     assert manifest.analysis_rules["2511"]["metrics"]["refresh_ms"]["equals"] == 30000
     assert manifest.analysis_rules["2512"]["metrics"]["xy_home_to"]["equals"] == 0
     assert manifest.analysis_rules["2512"]["metrics"]["guard"]["equals"] == 0

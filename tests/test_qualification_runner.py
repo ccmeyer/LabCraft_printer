@@ -84,7 +84,7 @@ def _raw_gripper_stress_selftest():
                 "test_id": 2510,
                 "name": "gripper_static_pressure_matrix_factory",
                 "pass": True,
-                "metrics": {"pulse_ms": 2000, "pulses": 18, "ready": 0, "timeout": 0, "focus": 1, "trace": 1, "sc": 96, "stride": 5, "sample_ms": 25},
+                "metrics": {"pulse_ms": 2000, "pulses": 30, "cond": 3, "reps": 5, "ready": 0, "timeout": 0, "focus": 1, "trace": 1, "sc": 96, "stride": 5, "sample_ms": 25},
             },
             {
                 "test_id": 2511,

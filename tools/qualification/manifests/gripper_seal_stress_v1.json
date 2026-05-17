@@ -29,7 +29,9 @@
       "failure_domain": "machine_performance",
       "metrics": {
         "pulse_ms": {"maturity": "candidate", "equals": 2000},
-        "pulses": {"maturity": "candidate", "min": 18},
+        "pulses": {"maturity": "candidate", "min": 30},
+        "cond": {"maturity": "candidate", "equals": 3},
+        "reps": {"maturity": "candidate", "equals": 5},
         "ready": {"maturity": "candidate", "equals": 0},
         "timeout": {"maturity": "candidate", "equals": 0},
         "focus": {"maturity": "candidate", "equals": 1},

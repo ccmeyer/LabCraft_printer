@@ -1197,6 +1197,38 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           return finishStressTrace(testId, traceName, traceOk, row);
                         };
 
+                        auto runStressConditioningPulse = [&](uint16_t targetRaw,
+                                                              GripperStressRowSummary& row,
+                                                              const char* stage) -> bool {
+                          Printer* conditioningPrinter = Printer::instance();
+                          if (conditioningPrinter == nullptr) {
+                            row.ready++;
+                            row.pass = false;
+                            return false;
+                          }
+                          if (!prepareStressPressure(targetRaw, row)) {
+                            return false;
+                          }
+                          beginStressQuiet();
+                          bool timeout = false;
+                          const bool started = conditioningPrinter->beginDiagnosticLongPulse(PulseMode::BOTH,
+                                                                                            kStressPulseMs,
+                                                                                            kStressPulseTickUs);
+                          if (!started) {
+                            timeout = true;
+                          } else {
+                            timeout = !delayWithWatchdog(kStressPulseMs, stage);
+                          }
+                          conditioningPrinter->endDiagnosticLongPulse();
+                          endStressQuiet("gripper_static_condition_release");
+                          if (timeout || _selfTestAbortRequested) {
+                            row.timeout++;
+                            row.pass = false;
+                            return false;
+                          }
+                          return true;
+                        };
+
                         auto emitStressSetupFailureRows = [&](const char* gate) -> bool {
                           char metrics[192];
                           snprintf(metrics,
@@ -1244,8 +1276,15 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         };
                         const uint16_t stressPsiMilli[3] = {1000u, 2000u, 3000u};
                         sendProgressStage("gripper_static_matrix");
+                        uint32_t row2510Conditioning = 0u;
+                        static constexpr uint16_t kStressStaticMeasuredReps = 5u;
                         for (uint16_t pIdx = 0u; pIdx < 3u && !_selfTestAbortRequested; ++pIdx) {
-                          for (uint16_t rep = 1u; rep <= 3u && !_selfTestAbortRequested; ++rep) {
+                          if (runStressConditioningPulse(stressTargets[pIdx],
+                                                         row2510,
+                                                         "gripper_static_condition")) {
+                            row2510Conditioning++;
+                          }
+                          for (uint16_t rep = 1u; rep <= kStressStaticMeasuredReps && !_selfTestAbortRequested; ++rep) {
                             for (uint8_t channel = 0u; channel < 2u && !_selfTestAbortRequested; ++channel) {
                               char traceName[56];
                               snprintf(traceName,
@@ -1269,10 +1308,12 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         char metrics2510[256];
                         snprintf(metrics2510,
                                  sizeof(metrics2510),
-                                 "pulse_ms=%lu;tick_us=%lu;pulses=%lu;targets=1_2_3;ready=%lu;timeout=%lu;fresh_to=%lu;focus=1;trace=%u;sc=%lu;ec=%lu;stride=%lu;sample_ms=%lu",
+                                 "pulse_ms=%lu;tick_us=%lu;pulses=%lu;cond=%lu;reps=%lu;targets=1_2_3;ready=%lu;timeout=%lu;fresh_to=%lu;focus=1;trace=%u;sc=%lu;ec=%lu;stride=%lu;sample_ms=%lu",
                                  static_cast<unsigned long>(kStressPulseMs),
                                  static_cast<unsigned long>(kStressPulseTickUs),
                                  static_cast<unsigned long>(row2510.pulses),
+                                 static_cast<unsigned long>(row2510Conditioning),
+                                 static_cast<unsigned long>(kStressStaticMeasuredReps),
                                  static_cast<unsigned long>(row2510.ready),
                                  static_cast<unsigned long>(row2510.timeout),
                                  static_cast<unsigned long>(row2510.freshTo),

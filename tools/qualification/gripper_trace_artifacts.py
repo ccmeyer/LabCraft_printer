@@ -392,7 +392,6 @@ def _plot_static_matrix(rows: list[dict[str, Any]], plot_dir: Path) -> Path | No
     channels = ("p", "r")
     pressures = (1000, 2000, 3000)
     offsets = {"p": -0.18, "r": 0.18}
-    jitter = {-1: -0.05, 0: 0.0, 1: 0.05}
     labels = {"p": "Print", "r": "Refuel"}
     colors = {"p": "tab:blue", "r": "tab:orange"}
     seen_channels: set[str] = set()
@@ -407,8 +406,8 @@ def _plot_static_matrix(rows: list[dict[str, Any]], plot_dir: Path) -> Path | No
             values = [float(row.get("drop_raw") or 0) for row in subset]
             base_x = idx + offsets[channel]
             xs = [
-                base_x + jitter.get(int(row.get("replicate") or 0) - 2, 0.0)
-                for row in subset
+                base_x + ((position - ((len(subset) - 1) / 2.0)) * 0.035)
+                for position, _row in enumerate(subset)
             ]
             ax.scatter(
                 xs,
@@ -597,7 +596,13 @@ def _plot_overlay(rows: list[dict[str, Any]], trace_by_name: dict[str, dict[str,
     from matplotlib.lines import Line2D
 
     paths: list[Path] = []
-    static_rep_colors = {1: "tab:blue", 2: "tab:orange", 3: "tab:green"}
+    static_rep_colors = {
+        1: "tab:blue",
+        2: "tab:orange",
+        3: "tab:green",
+        4: "tab:red",
+        5: "tab:purple",
+    }
     phase_colors = {"pre": "tab:blue", "post": "tab:orange"}
     for family in ("static", "refresh", "motion", "compare"):
         for channel in ("p", "r"):

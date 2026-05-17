@@ -67,6 +67,7 @@ def test_gripper_stress_suite_exposes_operator_fixture_and_catalog_rows():
     rows = {row.test_id: row for row in build_test_plan_rows(gripper)}
     assert list(rows) == [2510, 2511, 2512, 2513]
     assert rows[2510].name == "Gripper static pressure matrix"
+    assert "conditioning pulse" in rows[2510].evaluates
     assert rows[2511].name == "Gripper refreshed 3 psi hold"
     assert rows[2512].name == "Gripper raster motion stress"
     assert rows[2513].name == "Gripper post-motion seal compare"

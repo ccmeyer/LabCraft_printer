@@ -56,14 +56,17 @@ def test_analyze_gripper_trace_computes_drop_and_snr():
 
 def test_generate_gripper_trace_artifacts_writes_plots_csv_and_analysis(tmp_path):
     artifacts = create_run_artifacts("LC-TEST", output_root=tmp_path, timestamp="20260517T000000Z")
-    sources = [
-        ("raw_selftest_trace_2510_grip_static_chp_psi3000_rep01.json", _trace("grip_static_chp_psi3000_rep01", 2510)),
-        ("raw_selftest_trace_2510_grip_static_chr_psi3000_rep01.json", _trace("grip_static_chr_psi3000_rep01", 2510)),
+    sources = []
+    for channel in ("p", "r"):
+        for rep in range(1, 6):
+            name = f"grip_static_ch{channel}_psi3000_rep{rep:02d}"
+            sources.append((f"raw_selftest_trace_2510_{name}.json", _trace(name, 2510)))
+    sources.extend([
         ("raw_selftest_trace_2511_grip_refresh_chp_psi3000_seq01.json", _trace("grip_refresh_chp_psi3000_seq01", 2511)),
         ("raw_selftest_trace_2512_grip_motion_chp_psi3000_seq01_x43000_y13000.json", _trace("grip_motion_chp_psi3000_seq01_x43000_y13000", 2512)),
         ("raw_selftest_trace_2513_grip_compare_chp_pre_psi3000.json", _trace("grip_compare_chp_pre_psi3000", 2513)),
         ("raw_selftest_trace_2513_grip_compare_chp_post_psi3000.json", _trace("grip_compare_chp_post_psi3000", 2513)),
-    ]
+    ])
     for filename, payload in sources:
         (artifacts.run_dir / filename).write_text(json.dumps(payload), encoding="utf-8")
 
@@ -83,6 +86,13 @@ def test_generate_gripper_trace_artifacts_writes_plots_csv_and_analysis(tmp_path
     assert analysis["schema_version"] == "gripper_trace_analysis_v1"
     assert analysis["valid_replicate_count"] == len(sources)
     assert analysis["replicates"][0]["since_refresh_ms"] == 1700
+    static_reps = sorted(
+        row["replicate"]
+        for row in analysis["replicates"]
+        if row.get("trace_family") == "static" and row.get("channel") == "p"
+    )
+    assert static_reps == [1, 2, 3, 4, 5]
+    assert result.report_metrics[2510]["traces_py"] == 10
     assert result.report_metrics[2510]["d3"] == 42
     assert result.report_metrics[2512]["drop_mean"] == 42
     assert result.report_metrics[2513]["p_delta"] == 0
