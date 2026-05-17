@@ -885,6 +885,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         static constexpr uint32_t kStressPlateCols = 24u;
                         static constexpr uint32_t kStressPlateFeedHz = 6000u;
                         static constexpr uint32_t kStressPlateMoveTimeoutMs = 12000u;
+                        static constexpr int32_t kStressParkX = 500;
+                        static constexpr int32_t kStressParkY = 500;
                         static constexpr uint32_t kStressTargetRaw1Psi = 2512u;
                         static constexpr uint32_t kStressTargetRaw2Psi = 3386u;
                         static constexpr uint32_t kStressTargetRaw3Psi = 4259u;
@@ -998,6 +1000,21 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           PressureTraceRecorder::instance().recordEvent(traceChannel, event);
                         };
 
+                        auto beginStressQuiet = [&]() {
+                          PressureRegulator::regP().beginDispenseQuiet(0u);
+#if (LC_PRESSURE_PORTS > 1)
+                          PressureRegulator::regR().beginDispenseQuiet(0u);
+#endif
+                        };
+
+                        auto endStressQuiet = [&](const char* stage) {
+                          PressureRegulator::regP().endDispenseQuiet(2u);
+#if (LC_PRESSURE_PORTS > 1)
+                          PressureRegulator::regR().endDispenseQuiet(2u);
+#endif
+                          (void)delayWithWatchdog(10u, stage);
+                        };
+
                         auto prepareStressPressure = [&](uint16_t targetRaw,
                                                          GripperStressRowSummary& row) -> bool {
                           PressureRegulator::regP().closeValve();
@@ -1084,12 +1101,10 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           if (!prepareStressPressure(targetRaw, row)) {
                             return true;
                           }
-                          PressureRegulator::regP().pause();
-#if (LC_PRESSURE_PORTS > 1)
-                          PressureRegulator::regR().pause();
-#endif
+                          beginStressQuiet();
                           const bool focusOk = sensor->beginDiagnosticFocus(channel);
                           if (!focusOk) {
+                            endStressQuiet("gripper_stress_quiet_release");
                             row.ready++;
                             row.pass = false;
                             return true;
@@ -1134,6 +1149,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           }
                           recorder.stop(HAL_GetTick());
                           sensor->endDiagnosticFocus();
+                          endStressQuiet("gripper_stress_quiet_release");
                           row.pulses++;
                           if (timeout || _selfTestAbortRequested) {
                             row.timeout++;
@@ -1306,6 +1322,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         uint32_t moveTimeout = 0u;
                         uint32_t guardViolation = 0u;
                         uint32_t boundViolation = 0u;
+                        uint32_t parkTimeout = 0u;
                         uint32_t moveCount = 0u;
                         MotionQualificationMath::AxisHomeSample xStressHome{};
                         MotionQualificationMath::AxisHomeSample yStressHome{};
@@ -1386,12 +1403,10 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                 nextPulseDueMs += kStressPulseIntervalMs;
                                 continue;
                               }
-                              PressureRegulator::regP().pause();
-#if (LC_PRESSURE_PORTS > 1)
-                              PressureRegulator::regR().pause();
-#endif
+                              beginStressQuiet();
                               const bool focusOk = sensor->beginDiagnosticFocus(channel);
                               if (!focusOk) {
+                                endStressQuiet("gripper_motion_quiet_release");
                                 row2512.ready++;
                                 row2512.pass = false;
                                 nextPulseDueMs += kStressPulseIntervalMs;
@@ -1450,6 +1465,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               }
                               recorder.stop(HAL_GetTick());
                               sensor->endDiagnosticFocus();
+                              endStressQuiet("gripper_motion_quiet_release");
                               row2512.pulses++;
                               if (timeout || _selfTestAbortRequested) {
                                 row2512.timeout++;
@@ -1478,6 +1494,19 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               break;
                             }
                           }
+                          if (!_selfTestAbortRequested && moveTimeout == 0u && guardViolation == 0u && boundViolation == 0u) {
+                            sendProgressStage("gripper_motion_park");
+                            if (!pointSafe(kStressParkX, kStressParkY)) {
+                              row2512.pass = false;
+                            } else if (!moveGantryToWithTimeout(kStressParkX,
+                                                                kStressParkY,
+                                                                kStressPlateFeedHz,
+                                                                kStressPlateMoveTimeoutMs)) {
+                              parkTimeout++;
+                              moveTimeout++;
+                              row2512.pass = false;
+                            }
+                          }
                         }
                         row2512.pass = row2512.pass &&
                                        !_selfTestAbortRequested &&
@@ -1485,14 +1514,15 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                        (moveTimeout == 0u) &&
                                        (guardViolation == 0u) &&
                                        (boundViolation == 0u) &&
+                                       (parkTimeout == 0u) &&
                                        (row2512.ready == 0u) &&
                                        (row2512.timeout == 0u) &&
                                        (row2512.traceFail == 0u) &&
                                        (row2512.pulses > 0u);
-                        char metrics2512[256];
+                        char metrics2512[320];
                         snprintf(metrics2512,
                                  sizeof(metrics2512),
-                                 "psi=3000;pulse_ms=%lu;pulse_int=%lu;rows=%lu;cols=%lu;moves=%lu;pulses=%lu;xy_home_to=%lu;move_to=%lu;guard=%lu;bound=%lu;ready=%lu;timeout=%lu;fresh_to=%lu;focus=1;trace=%u;sc=%lu;ec=%lu",
+                                 "psi=3000;pulse_ms=%lu;pulse_int=%lu;rows=%lu;cols=%lu;moves=%lu;pulses=%lu;xy_home_to=%lu;move_to=%lu;guard=%lu;bound=%lu;park_x=%ld;park_y=%ld;park_to=%lu;ready=%lu;timeout=%lu;fresh_to=%lu;focus=1;trace=%u;sc=%lu;ec=%lu",
                                  static_cast<unsigned long>(kStressPulseMs),
                                  static_cast<unsigned long>(kStressPulseIntervalMs),
                                  static_cast<unsigned long>(kStressPlateRows),
@@ -1503,6 +1533,9 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                  static_cast<unsigned long>(moveTimeout),
                                  static_cast<unsigned long>(guardViolation),
                                  static_cast<unsigned long>(boundViolation),
+                                 static_cast<long>(kStressParkX),
+                                 static_cast<long>(kStressParkY),
+                                 static_cast<unsigned long>(parkTimeout),
                                  static_cast<unsigned long>(row2512.ready),
                                  static_cast<unsigned long>(row2512.timeout),
                                  static_cast<unsigned long>(row2512.freshTo),

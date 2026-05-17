@@ -87,6 +87,10 @@ def test_load_gripper_seal_stress_manifest_requires_motion_dummy_head_fixture():
     assert manifest.analysis_rules["2511"]["metrics"]["refresh_ms"]["equals"] == 30000
     assert manifest.analysis_rules["2512"]["metrics"]["xy_home_to"]["equals"] == 0
     assert manifest.analysis_rules["2512"]["metrics"]["guard"]["equals"] == 0
+    assert manifest.analysis_rules["2512"]["metrics"]["park_x"]["equals"] == 500
+    assert manifest.analysis_rules["2512"]["metrics"]["park_y"]["equals"] == 500
+    assert manifest.analysis_rules["2512"]["metrics"]["park_to"]["equals"] == 0
+    assert manifest.analysis_rules["2512"]["metrics"]["sc"]["min"] == 1
     assert manifest.analysis_rules["2513"]["metrics"]["p_delta"]["maturity"] == "candidate"
     assert manifest.analysis_rules["2513"]["metrics"]["rej_py"]["equals"] == 0
 

@@ -72,7 +72,9 @@ def test_gripper_stress_suite_exposes_operator_fixture_and_catalog_rows():
     assert rows[2513].name == "Gripper post-motion seal compare"
     assert all(row.subsystem == "Gripper" for row in rows.values())
     assert "xy_home_to" in rows[2512].metrics
+    assert "park_to" in rows[2512].metrics
     assert "384-well XY raster" in rows[2512].evaluates
+    assert "X=500, Y=500" in rows[2512].evaluates
     assert "pre/post raster" in rows[2513].evaluates
 
 
