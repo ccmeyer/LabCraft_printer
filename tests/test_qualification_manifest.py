@@ -162,6 +162,9 @@ def test_load_valve_characterization_manifest_requires_operator_closed_loop_fixt
     assert manifest.analysis_rules["2473"]["metrics"]["fresh_to"]["equals"] == 0
     assert manifest.analysis_rules["2473"]["metrics"]["focus"]["equals"] == 1
     assert manifest.analysis_rules["2473"]["metrics"]["mono"]["equals"] == 1
+    assert manifest.analysis_rules["2473"]["metrics"]["lat_miss"]["maturity"] == "informational"
+    assert manifest.analysis_rules["2473"]["metrics"]["ring_miss"]["maturity"] == "informational"
+    assert manifest.analysis_rules["2473"]["metrics"]["excl"]["maturity"] == "informational"
     assert manifest.analysis_rules["2473"]["metrics"]["m15"]["maturity"] == "informational"
     assert manifest.analysis_rules["2473"]["metrics"]["rg15"]["maturity"] == "informational"
     assert manifest.analysis_rules["2473"]["metrics"]["lt15"]["maturity"] == "informational"
@@ -172,6 +175,7 @@ def test_load_valve_characterization_manifest_requires_operator_closed_loop_fixt
     assert "slip_w" not in manifest.analysis_rules["2473"]["metrics"]
     assert "gain" not in manifest.analysis_rules["2473"]["metrics"]
     assert manifest.analysis_rules["2475"]["metrics"]["home_to"]["equals"] == 0
+    assert manifest.analysis_rules["2475"]["metrics"]["lat_miss"]["maturity"] == "informational"
     assert manifest.analysis_rules["2475"]["metrics"]["r15"]["maturity"] == "informational"
 
 
@@ -191,6 +195,8 @@ def test_load_valve_gap_sweep_manifest_requires_operator_closed_loop_fixture():
     assert manifest.analysis_rules["2476"]["metrics"]["rej"]["equals"] == 0
     assert manifest.analysis_rules["2476"]["metrics"]["fresh_to"]["equals"] == 0
     assert manifest.analysis_rules["2476"]["metrics"]["focus"]["equals"] == 1
+    assert manifest.analysis_rules["2476"]["metrics"]["lat_miss"]["maturity"] == "informational"
+    assert manifest.analysis_rules["2476"]["metrics"]["ring_miss"]["maturity"] == "informational"
     assert manifest.analysis_rules["2476"]["metrics"]["g250"]["maturity"] == "informational"
     assert manifest.analysis_rules["2476"]["metrics"]["g5000"]["maturity"] == "informational"
     assert manifest.analysis_rules["2478"]["metrics"]["m30g500"]["maturity"] == "informational"

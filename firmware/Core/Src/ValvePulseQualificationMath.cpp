@@ -67,6 +67,10 @@ uint16_t groupedValvePulseWidthUs(size_t sequenceIndexZeroBased, size_t replicat
   return kWidths[widthIndex];
 }
 
+bool isSteadyValveCharacterizationReplicate(uint16_t replicateForWidth) {
+  return replicateForWidth > 1u;
+}
+
 uint32_t valveGapSweepDetailedGapMs(size_t gapIndexZeroBased) {
   static constexpr uint32_t kGapsMs[] = {250u, 500u, 1000u, 2000u, 5000u};
   return kGapsMs[gapIndexZeroBased % (sizeof(kGapsMs) / sizeof(kGapsMs[0]))];
@@ -599,7 +603,7 @@ WindowedValveCharacterizationSummary summarizeWindowedValveCharacterization(
       }
     }
 
-    if (!haveRingSample || !haveLatency || settledCount == 0u || summary.pulseCount >= kMaxAnalyzedPulses) {
+    if (settledCount == 0u || summary.pulseCount >= kMaxAnalyzedPulses) {
       summary.rejectCount++;
       continue;
     }
@@ -607,9 +611,17 @@ WindowedValveCharacterizationSummary summarizeWindowedValveCharacterization(
     const uint32_t settledPressure = medianOf(settledPressures, settledCount);
     const uint32_t settledDrop = (baseline > settledPressure) ? (baseline - settledPressure) : 0u;
     settledDrops[summary.pulseCount] = settledDrop;
-    ringAmps[summary.pulseCount] = ringAmp;
-    latencies[summary.pulseCount] = latencyMs;
     summary.pulseCount++;
+    if (haveRingSample && summary.ringCount < kMaxAnalyzedPulses) {
+      ringAmps[summary.ringCount++] = ringAmp;
+    } else {
+      summary.ringMissingCount++;
+    }
+    if (haveLatency && summary.latencyCount < kMaxAnalyzedPulses) {
+      latencies[summary.latencyCount++] = latencyMs;
+    } else {
+      summary.latencyMissingCount++;
+    }
   }
 
   if (summary.pulseCount == 0u) {
@@ -617,8 +629,8 @@ WindowedValveCharacterizationSummary summarizeWindowedValveCharacterization(
   }
 
   const auto settledSummary = summarizeResponseValues(settledDrops, summary.pulseCount);
-  const auto ringSummary = summarizeResponseValues(ringAmps, summary.pulseCount);
-  const auto latencySummary = summarizeResponseValues(latencies, summary.pulseCount);
+  const auto ringSummary = summarizeResponseValues(ringAmps, summary.ringCount);
+  const auto latencySummary = summarizeResponseValues(latencies, summary.latencyCount);
 
   summary.meanSettledDropRaw = settledSummary.meanRaw;
   summary.settledDropCvPct = settledSummary.cvPct;

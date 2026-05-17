@@ -92,6 +92,10 @@ def test_analyze_valve_trace_marks_baseline_response_and_snr():
     row = analyze_valve_trace(_trace("valve_char_r_w1500_rep01"))
 
     assert row["valid"] is True
+    assert row["excluded"] is True
+    assert row["exclude_reason"] == "first_after_width_change"
+    assert row["latency_valid"] is True
+    assert row["ring_valid"] is True
     assert row["channel"] == "r"
     assert row["width_us"] == 1500
     assert row["replicate"] == 1
@@ -106,6 +110,32 @@ def test_analyze_valve_trace_marks_baseline_response_and_snr():
     assert row["response_kind"] == "settled_drop"
     assert row["settled_pressure_raw"] == 3380
     assert row["snr_span"] == 3
+
+
+def test_analyze_valve_trace_keeps_settled_drop_valid_when_latency_is_missing():
+    trace = _trace("valve_char_p_w1500_rep02", test_id=2473)
+    trace["samples"] = [
+        {"dt_ms": 0, "raw_pressure": 3386},
+        {"dt_ms": 5, "raw_pressure": 3386},
+        {"dt_ms": 10, "raw_pressure": 3386},
+        {"dt_ms": 15, "raw_pressure": 3388},
+        {"dt_ms": 25, "raw_pressure": 3384},
+        {"dt_ms": 100, "raw_pressure": 3380},
+        {"dt_ms": 105, "raw_pressure": 3380},
+        {"dt_ms": 110, "raw_pressure": 3380},
+    ]
+    trace["events"] = [
+        {"dt_ms": 10, "event_type": 2, "event_name": "pulse_start", "value0": 1500, "value1": 3386},
+        {"dt_ms": 13, "event_type": 3, "event_name": "pulse_end", "value0": 1500, "value1": 3386},
+    ]
+
+    row = analyze_valve_trace(trace)
+
+    assert row["valid"] is True
+    assert row["latency_valid"] is False
+    assert row["ring_valid"] is True
+    assert row["latency_reason"] == "missing_latency_threshold_crossing"
+    assert row["settled_drop_raw"] == 6
 
 
 def test_analyze_valve_trace_parses_sequence_and_motor_position_context():
@@ -174,13 +204,15 @@ def test_generate_valve_trace_artifacts_writes_plots_csv_and_analysis(tmp_path):
     artifacts = create_run_artifacts("LC-TEST", output_root=tmp_path, timestamp="20260516T000000Z")
     source = artifacts.run_dir / "raw_selftest_trace_2474_valve_char_r_seq01_w1500_rep01.json"
     source.write_text(json.dumps(_with_context(_trace("valve_char_r_seq01_w1500_rep01"), 1, -12000)), encoding="utf-8")
-    source_p = artifacts.run_dir / "raw_selftest_trace_2473_valve_char_p_seq02_w3000_rep01.json"
-    source_p.write_text(json.dumps(_with_context(_trace("valve_char_p_seq02_w3000_rep01", test_id=2473), 2, 5400)), encoding="utf-8")
+    source_p = artifacts.run_dir / "raw_selftest_trace_2473_valve_char_p_seq02_w3000_rep02.json"
+    source_p.write_text(json.dumps(_with_context(_trace("valve_char_p_seq02_w3000_rep02", test_id=2473), 2, 5400)), encoding="utf-8")
+    source_p2 = artifacts.run_dir / "raw_selftest_trace_2473_valve_char_p_seq03_w3000_rep03.json"
+    source_p2.write_text(json.dumps(_with_context(_trace("valve_char_p_seq03_w3000_rep03", test_id=2473), 3, 5300)), encoding="utf-8")
 
     result = generate_valve_trace_artifacts(artifacts)
 
     assert result is not None
-    assert result.replicate_count == 2
+    assert result.replicate_count == 3
     assert (result.trace_dir / source.name).exists()
     assert result.analysis_json.exists()
     assert result.replicate_csv.exists()
@@ -190,13 +222,17 @@ def test_generate_valve_trace_artifacts_writes_plots_csv_and_analysis(tmp_path):
     assert (result.plot_dir / "valve_char_settled_drop_vs_motor_position.png").exists()
     assert (result.plot_dir / "valve_char_ringing_by_width.png").exists()
     analysis = json.loads(result.analysis_json.read_text(encoding="utf-8"))
-    assert analysis["schema_version"] == "valve_trace_analysis_v5"
-    assert analysis["valid_replicate_count"] == 2
+    assert analysis["schema_version"] == "valve_trace_analysis_v6"
+    assert analysis["valid_replicate_count"] == 3
+    assert analysis["steady_replicate_count"] == 2
+    assert analysis["excluded_replicate_count"] == 1
     assert analysis["conditions"][0]["settled_drop_mean_raw"] == 6
-    assert analysis["conditions"][0]["motor_position_span"] == 0
+    assert analysis["conditions"][0]["motor_position_span"] == 100
+    assert analysis["conditions"][0]["steady_replicate_count"] == 2
     assert analysis["replicates"][0]["sequence_index"] == 2
     assert analysis["replicates"][0]["motor_position"] == 5400
     assert analysis["replicates"][0]["motor_position_delta_from_first"] == 0
+    assert analysis["replicates"][1]["motor_position_delta_from_first"] == -100
     assert "ring_amp_raw" in analysis["replicates"][0]
 
 
@@ -221,7 +257,7 @@ def test_generate_valve_gap_trace_artifacts_writes_gap_plots(tmp_path):
     assert (result.plot_dir / "valve_gap_1500_drop_by_replicate.png").exists()
     assert (result.plot_dir / "valve_gap_drop_vs_actual_interval.png").exists()
     analysis = json.loads(result.analysis_json.read_text(encoding="utf-8"))
-    assert analysis["schema_version"] == "valve_trace_analysis_v5"
+    assert analysis["schema_version"] == "valve_trace_analysis_v6"
     assert analysis["gap_conditions"][0]["gap_ms"] == 500
     assert analysis["replicates"][0]["actual_interval_ms"] == 0
     assert analysis["replicates"][1]["actual_interval_ms"] == 2800

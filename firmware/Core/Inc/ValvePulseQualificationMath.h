@@ -48,11 +48,15 @@ struct WindowedValveDropSummary {
 
 struct WindowedValveCharacterizationSummary {
   uint32_t pulseCount = 0;
+  uint32_t ringCount = 0;
+  uint32_t latencyCount = 0;
   uint32_t meanSettledDropRaw = 0;
   uint32_t settledDropCvPct = 0;
   int32_t settledDropSlopeRawPerPulse = 0;
   uint32_t outlierCount = 0;
   uint32_t rejectCount = 0;
+  uint32_t ringMissingCount = 0;
+  uint32_t latencyMissingCount = 0;
   uint32_t minSettledDropRaw = 0;
   uint32_t maxSettledDropRaw = 0;
   uint32_t spanSettledDropRaw = 0;
@@ -83,6 +87,7 @@ struct ResponseValueSummary {
 uint32_t absDiff(uint32_t a, uint32_t b);
 uint16_t interleavedValvePulseWidthUs(size_t sequenceIndexZeroBased);
 uint16_t groupedValvePulseWidthUs(size_t sequenceIndexZeroBased, size_t replicatesPerWidth);
+bool isSteadyValveCharacterizationReplicate(uint16_t replicateForWidth);
 uint32_t valveGapSweepDetailedGapMs(size_t gapIndexZeroBased);
 uint16_t valveGapSweepControlWidthUs(size_t conditionIndexZeroBased);
 uint32_t valveGapSweepControlGapMs(size_t conditionIndexZeroBased);

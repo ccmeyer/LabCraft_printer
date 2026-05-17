@@ -353,20 +353,13 @@ TEST(ValvePulseQualificationMath, ValveCharacterizationUsesSettledMedianAfterRin
     UNSIGNED_LONGS_EQUAL(80u, summary.meanRingRaw);
 }
 
-TEST(ValvePulseQualificationMath, ValveCharacterizationRejectsMissingLatencyOrSettledSamples) {
+TEST(ValvePulseQualificationMath, ValveCharacterizationAcceptsSettledDropWhenLatencyIsMissing) {
     PressureTraceSample noLatencySamples[] = {
         sampleAt(0, 1000),
         sampleAt(5, 1000),
         sampleAt(10, 1000),
         sampleAt(15, 1001),
         sampleAt(100, 990),
-    };
-    PressureTraceSample noSettledSamples[] = {
-        sampleAt(0, 1000),
-        sampleAt(5, 1000),
-        sampleAt(10, 1000),
-        sampleAt(15, 1070),
-        sampleAt(30, 920),
     };
     PressureTraceEvent events[] = {
         eventAt(10, PressureTraceEventType::PulseStart, 3000, 1000),
@@ -382,6 +375,28 @@ TEST(ValvePulseQualificationMath, ValveCharacterizationRejectsMissingLatencyOrSe
         60,
         80,
         150);
+
+    UNSIGNED_LONGS_EQUAL(1u, noLatency.pulseCount);
+    UNSIGNED_LONGS_EQUAL(0u, noLatency.rejectCount);
+    UNSIGNED_LONGS_EQUAL(10u, noLatency.meanSettledDropRaw);
+    UNSIGNED_LONGS_EQUAL(1u, noLatency.ringCount);
+    UNSIGNED_LONGS_EQUAL(0u, noLatency.latencyCount);
+    UNSIGNED_LONGS_EQUAL(1u, noLatency.latencyMissingCount);
+}
+
+TEST(ValvePulseQualificationMath, ValveCharacterizationRejectsMissingSettledSamplesOnce) {
+    PressureTraceSample noSettledSamples[] = {
+        sampleAt(0, 1000),
+        sampleAt(5, 1000),
+        sampleAt(10, 1000),
+        sampleAt(15, 1070),
+        sampleAt(30, 920),
+    };
+    PressureTraceEvent events[] = {
+        eventAt(10, PressureTraceEventType::PulseStart, 3000, 1000),
+        eventAt(15, PressureTraceEventType::PulseEnd, 3000, 1000),
+    };
+
     auto noSettled = ValvePulseQualificationMath::summarizeWindowedValveCharacterization(
         noSettledSamples,
         sizeof(noSettledSamples) / sizeof(noSettledSamples[0]),
@@ -392,8 +407,12 @@ TEST(ValvePulseQualificationMath, ValveCharacterizationRejectsMissingLatencyOrSe
         80,
         150);
 
-    UNSIGNED_LONGS_EQUAL(0u, noLatency.pulseCount);
-    UNSIGNED_LONGS_EQUAL(1u, noLatency.rejectCount);
     UNSIGNED_LONGS_EQUAL(0u, noSettled.pulseCount);
     UNSIGNED_LONGS_EQUAL(1u, noSettled.rejectCount);
+}
+
+TEST(ValvePulseQualificationMath, ValveCharacterizationSteadyReplicatesStartAfterFirstWidthChangePulse) {
+    CHECK_FALSE(ValvePulseQualificationMath::isSteadyValveCharacterizationReplicate(0));
+    CHECK_FALSE(ValvePulseQualificationMath::isSteadyValveCharacterizationReplicate(1));
+    CHECK_TRUE(ValvePulseQualificationMath::isSteadyValveCharacterizationReplicate(2));
 }
