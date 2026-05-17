@@ -1329,6 +1329,133 @@ def test_gripper_seal_stress_uses_gripper_prompts_teardown_and_enriches_report(t
     assert "d3" not in raw_row["metrics"]
 
 
+def test_gripper_teardown_release_succeeds_on_retry(tmp_path, monkeypatch):
+    monkeypatch.setattr(qualification_runner, "GRIPPER_TEARDOWN_RETRY_DELAY_S", 0)
+    release_calls = 0
+
+    def fake_invoker(invocation):
+        invocation.raw_report_path.write_text(json.dumps(_raw_gripper_selftest()), encoding="utf-8")
+        return 0
+
+    def fake_gripper_control(action, port, baud):
+        nonlocal release_calls
+        if action == "release":
+            release_calls += 1
+            return 3 if release_calls == 1 else 0
+        return 0
+
+    result = run_qualification(
+        manifest_ref=_gripper_manifest_ref(),
+        port="/dev/ttyAMA0",
+        baud=115200,
+        machine_id="LC-0001",
+        identity_path=tmp_path / "local" / "machine_identity.json",
+        output_root=tmp_path / "qualification",
+        timeout_ms=420000,
+        fixture_id="dummy_blocked_head_v1",
+        operator_prompts=True,
+        invoker=fake_invoker,
+        prompter=lambda _message: None,
+        gripper_control=fake_gripper_control,
+    )
+
+    assert result.returncode == 0
+    host_checks = {item["name"]: item for item in result.report["host_checks"]}
+    release = host_checks["gripper_teardown_release"]
+    assert release["pass"] is True
+    assert release["details"]["attempts"] == 2
+    assert release["details"]["returncodes"] == [3, 0]
+    assert release["details"]["ack_success"] is True
+    assert release["details"]["manual_confirmed"] is False
+
+
+def test_gripper_teardown_release_manual_recovery_keeps_successful_suite_passing(tmp_path, monkeypatch):
+    monkeypatch.setattr(qualification_runner, "GRIPPER_TEARDOWN_RETRY_DELAY_S", 0)
+    prompts = []
+
+    def fake_invoker(invocation):
+        invocation.raw_report_path.write_text(json.dumps(_raw_gripper_selftest()), encoding="utf-8")
+        return 0
+
+    def fake_prompter(message):
+        prompts.append(message)
+
+    def fake_gripper_control(action, port, baud):
+        return 3 if action == "release" else 0
+
+    result = run_qualification(
+        manifest_ref=_gripper_manifest_ref(),
+        port="/dev/ttyAMA0",
+        baud=115200,
+        machine_id="LC-0001",
+        identity_path=tmp_path / "local" / "machine_identity.json",
+        output_root=tmp_path / "qualification",
+        timeout_ms=420000,
+        fixture_id="dummy_blocked_head_v1",
+        operator_prompts=True,
+        invoker=fake_invoker,
+        prompter=fake_prompter,
+        gripper_control=fake_gripper_control,
+    )
+
+    assert result.returncode == 0
+    assert result.report["overall_status"] == "pass"
+    assert any("automatic gripper release command" in prompt for prompt in prompts)
+    assert [item["stage"] for item in result.report["operator_interactions"]] == [
+        "load_dummy_head",
+        "confirm_valve_clicks",
+        "support_before_release",
+        "manual_gripper_release_recovery",
+        "remove_dummy_head",
+    ]
+    host_checks = {item["name"]: item for item in result.report["host_checks"]}
+    release = host_checks["gripper_teardown_release"]
+    assert release["pass"] is True
+    assert release["details"]["attempts"] == 3
+    assert release["details"]["returncodes"] == [3, 3, 3]
+    assert release["details"]["ack_success"] is False
+    assert release["details"]["manual_confirmed"] is True
+
+
+def test_gripper_teardown_off_failure_remains_blocking(tmp_path, monkeypatch):
+    monkeypatch.setattr(qualification_runner, "GRIPPER_TEARDOWN_RETRY_DELAY_S", 0)
+    off_calls = 0
+
+    def fake_invoker(invocation):
+        invocation.raw_report_path.write_text(json.dumps(_raw_gripper_selftest()), encoding="utf-8")
+        return 0
+
+    def fake_gripper_control(action, port, baud):
+        nonlocal off_calls
+        if action == "off":
+            off_calls += 1
+            return 3
+        return 0
+
+    result = run_qualification(
+        manifest_ref=_gripper_manifest_ref(),
+        port="/dev/ttyAMA0",
+        baud=115200,
+        machine_id="LC-0001",
+        identity_path=tmp_path / "local" / "machine_identity.json",
+        output_root=tmp_path / "qualification",
+        timeout_ms=420000,
+        fixture_id="dummy_blocked_head_v1",
+        operator_prompts=True,
+        invoker=fake_invoker,
+        prompter=lambda _message: None,
+        gripper_control=fake_gripper_control,
+    )
+
+    assert result.returncode == 3
+    assert off_calls == 2
+    host_checks = {item["name"]: item for item in result.report["host_checks"]}
+    assert host_checks["gripper_teardown_release"]["pass"] is True
+    assert host_checks["gripper_teardown_off"]["pass"] is False
+    assert host_checks["gripper_teardown_off"]["details"]["attempts"] == 2
+    assert host_checks["gripper_teardown_shutdown"]["pass"] is True
+
+
 def test_gripper_seal_preflight_failure_aborts_before_selftest(tmp_path):
     events = []
 

@@ -65,6 +65,17 @@ def test_load_builtin_machine_full_campaign():
     assert [step.timeout_ms for step in campaign.steps] == [420000, 420000, 420000, 900000]
 
 
+def test_load_builtin_gripper_stress_campaign():
+    campaign = load_campaign("gripper_seal_stress_campaign_v1")
+
+    assert campaign.campaign_id == "gripper_seal_stress_campaign_v1"
+    assert campaign.name == "Gripper Seal Stress Qualification"
+    assert campaign.requires_operator_prompts is True
+    assert [step.manifest_id for step in campaign.steps] == ["gripper_seal_stress_v1"]
+    assert [step.fixture_id for step in campaign.steps] == ["dummy_blocked_head_motion_v1"]
+    assert [step.timeout_ms for step in campaign.steps] == [900000]
+
+
 def test_load_campaign_rejects_unknown_campaign():
     with pytest.raises(CampaignError, match="not found"):
         load_campaign("does_not_exist")
@@ -130,6 +141,29 @@ def test_run_campaign_runs_steps_in_order_and_writes_parent_artifacts(tmp_path):
     assert all(call["output_root"] == tmp_path / "qualification" for call in calls)
     rows = list(csv.DictReader(result.summary_csv_path.open(newline="", encoding="utf-8")))
     assert [row["manifest_id"] for row in rows] == [step["manifest_id"] for step in result.report["steps"]]
+
+
+def test_run_gripper_stress_campaign_invokes_only_gripper_suite(tmp_path):
+    calls = []
+
+    def fake_runner(**kwargs):
+        calls.append(kwargs)
+        return _fake_result(tmp_path, kwargs["manifest_ref"], index=len(calls))
+
+    result = run_campaign(
+        campaign_ref="gripper_seal_stress_campaign_v1",
+        machine_id="LC-TEST",
+        identity_path=_identity_path(tmp_path),
+        campaign_output_root=tmp_path / "campaigns",
+        suite_output_root=tmp_path / "qualification",
+        operator_prompts=True,
+        qualification_runner=fake_runner,
+    )
+
+    assert result.returncode == 0
+    assert [call["manifest_ref"] for call in calls] == ["gripper_seal_stress_v1"]
+    assert [call["fixture_id"] for call in calls] == ["dummy_blocked_head_motion_v1"]
+    assert [call["timeout_ms"] for call in calls] == [900000]
 
 
 def test_run_campaign_requires_operator_prompts_before_launching_hardware(tmp_path):
@@ -238,6 +272,19 @@ def test_campaign_cli_dry_run_prints_queue_without_invocation(capsys):
     assert "Full Machine Qualification" in captured.out
     assert "motion_envelope_v1" in captured.out
     assert "gripper_seal_stress_v1" in captured.out
+
+
+def test_campaign_cli_dry_run_prints_gripper_only_queue(capsys):
+    def fake_runner(**_kwargs):
+        raise AssertionError("dry-run should not invoke suites")
+
+    rc = campaign_cli.main(["--campaign", "gripper_seal_stress_campaign_v1", "--operator-prompts", "--dry-run"], qualification_runner=fake_runner)
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "Gripper Seal Stress Qualification" in captured.out
+    assert "gripper_seal_stress_v1" in captured.out
+    assert "motion_envelope_v1" not in captured.out
 
 
 def test_campaign_cli_returns_success_and_failure_codes(tmp_path):

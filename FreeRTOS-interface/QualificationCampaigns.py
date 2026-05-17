@@ -43,5 +43,6 @@ def discover_campaign_entries(root: str | Path) -> list[QualificationCampaignEnt
 def _campaign_sort_key(campaign_id: str) -> tuple[int, str]:
     preferred = {
         "machine_full_qualification_v1": 0,
+        "gripper_seal_stress_campaign_v1": 1,
     }
     return (preferred.get(campaign_id, 100), campaign_id)

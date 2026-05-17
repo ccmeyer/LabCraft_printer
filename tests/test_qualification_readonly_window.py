@@ -162,6 +162,10 @@ def test_machine_qualification_window_has_run_and_review_tabs(tmp_path, qapp):
     assert window.main_tabs.tabText(0) == "Run Qualification"
     assert window.main_tabs.tabText(1) == "Review Results"
     assert window.campaign_list.count() >= 1
+    assert [entry.campaign_id for entry in window._campaign_entries[:2]] == [
+        "machine_full_qualification_v1",
+        "gripper_seal_stress_campaign_v1",
+    ]
     assert window.suite_list.count() >= 5
     assert window.minimumWidth() >= 1280
     assert window.minimumHeight() >= 820

@@ -27,6 +27,9 @@ from .valve_trace_artifacts import (
 
 DEFAULT_MANIFEST_REF = "factory_acceptance_v3"
 GRIPPER_OPERATOR_MANIFEST_IDS = {"gripper_seal_v1", "gripper_seal_stress_v1"}
+GRIPPER_RELEASE_ATTEMPTS = 3
+GRIPPER_CLEANUP_ATTEMPTS = 2
+GRIPPER_TEARDOWN_RETRY_DELAY_S = 0.5
 
 
 @dataclass(frozen=True)
@@ -98,6 +101,41 @@ def _fixture_prompt_message(manifest: QualificationManifest, fixture_id: str | N
         f"{note_text}\n\n"
         "Confirm the operator is present and the hardware envelope is clear."
     )
+
+
+def _run_gripper_teardown_action(
+    *,
+    action: str,
+    port: str,
+    baud: int,
+    gripper_control: GripperControl,
+    attempts: int,
+    retry_delay_s: float = GRIPPER_TEARDOWN_RETRY_DELAY_S,
+) -> dict:
+    returncodes: list[int] = []
+    total_attempts = max(1, int(attempts))
+    for attempt_idx in range(total_attempts):
+        rc = int(gripper_control(action, port, int(baud)))
+        returncodes.append(rc)
+        if rc == 0:
+            return {
+                "action": action,
+                "returncode": 0,
+                "attempts": len(returncodes),
+                "returncodes": returncodes,
+                "ack_success": True,
+                "manual_confirmed": False,
+            }
+        if attempt_idx < total_attempts - 1:
+            time.sleep(max(0.0, float(retry_delay_s)))
+    return {
+        "action": action,
+        "returncode": returncodes[-1] if returncodes else 3,
+        "attempts": len(returncodes),
+        "returncodes": returncodes,
+        "ack_success": False,
+        "manual_confirmed": False,
+    }
 
 
 def default_gripper_control(action: str, port: str, baud: int) -> int:
@@ -496,14 +534,33 @@ def run_qualification(
             "Support the dummy blocked printer head before gripper release.",
             prompter,
         )
-        release_rc = int(gripper_control("release", port, int(baud)))
-        if release_rc != 0:
+        release_details = _run_gripper_teardown_action(
+            action="release",
+            port=port,
+            baud=int(baud),
+            gripper_control=gripper_control,
+            attempts=GRIPPER_RELEASE_ATTEMPTS,
+            retry_delay_s=GRIPPER_TEARDOWN_RETRY_DELAY_S,
+        )
+        if not release_details["ack_success"]:
             print("WARNING: Gripper release command failed. Keep supporting the dummy head and resolve manually.")
+            _record_prompt(
+                interactions,
+                "manual_gripper_release_recovery",
+                (
+                    "The automatic gripper release command did not receive an acknowledgement after "
+                    f"{release_details['attempts']} attempt(s).\n\n"
+                    "Keep supporting the dummy blocked printer head. Confirm only after the head is safely "
+                    "released/removed manually, or you have verified it is safe to continue to gripper off/shutdown."
+                ),
+                prompter,
+            )
+            release_details["manual_confirmed"] = True
         host_checks.append(
             {
                 "name": "gripper_teardown_release",
-                "pass": release_rc == 0,
-                "details": {"action": "release", "returncode": release_rc},
+                "pass": bool(release_details["ack_success"] or release_details["manual_confirmed"]),
+                "details": release_details,
                 "timestamp": _now_iso(),
             }
         )
@@ -513,25 +570,39 @@ def run_qualification(
             "Remove the dummy blocked printer head from the gripper.",
             prompter,
         )
-        off_rc = int(gripper_control("off", port, int(baud)))
-        if off_rc != 0:
+        off_details = _run_gripper_teardown_action(
+            action="off",
+            port=port,
+            baud=int(baud),
+            gripper_control=gripper_control,
+            attempts=GRIPPER_CLEANUP_ATTEMPTS,
+            retry_delay_s=GRIPPER_TEARDOWN_RETRY_DELAY_S,
+        )
+        if not off_details["ack_success"]:
             print("WARNING: Gripper off/idle command failed. Verify the gripper state manually before leaving the machine.")
         host_checks.append(
             {
                 "name": "gripper_teardown_off",
-                "pass": off_rc == 0,
-                "details": {"action": "off", "returncode": off_rc},
+                "pass": bool(off_details["ack_success"]),
+                "details": off_details,
                 "timestamp": _now_iso(),
             }
         )
-        shutdown_rc = int(gripper_control("shutdown", port, int(baud)))
-        if shutdown_rc != 0:
+        shutdown_details = _run_gripper_teardown_action(
+            action="shutdown",
+            port=port,
+            baud=int(baud),
+            gripper_control=gripper_control,
+            attempts=GRIPPER_CLEANUP_ATTEMPTS,
+            retry_delay_s=GRIPPER_TEARDOWN_RETRY_DELAY_S,
+        )
+        if not shutdown_details["ack_success"]:
             print("WARNING: Normal shutdown command failed. Verify pressure regulators, motors, and LED state manually.")
         host_checks.append(
             {
                 "name": "gripper_teardown_shutdown",
-                "pass": shutdown_rc == 0,
-                "details": {"action": "shutdown", "returncode": shutdown_rc},
+                "pass": bool(shutdown_details["ack_success"]),
+                "details": shutdown_details,
                 "timestamp": _now_iso(),
             }
         )
