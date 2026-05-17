@@ -159,6 +159,39 @@ TEST(DiagnosticResultEmitter, GripperSealMetricsFitWithoutTruncatingAnalyzerFiel
     MEMCMP_EQUAL(failureMetrics, &payload[metrics + 2], std::strlen(failureMetrics));
 }
 
+TEST(DiagnosticResultEmitter, GripperStressRasterMetricsFitWithoutTruncatingDecimationFields)
+{
+    const char metricsText[] =
+        "psi=3000;pulses=10;moves=384;xy_home_to=0;move_to=0;guard=0;bound=0;"
+        "park_x=500;park_y=500;park_to=0;ready=0;timeout=0;fresh_to=0;focus=1;"
+        "trace=1;sc=1031;stride=5;sample_ms=25";
+    const char name[] = "gripper_motion_raster_3psi_factory";
+    const size_t metricsBudget =
+        DiagnosticResultEmitter::kResultMetricsFrameBudget -
+        DiagnosticResultEmitter::kMaxResultNameBytes;
+
+    CHECK_TRUE(std::strlen(metricsText) <= metricsBudget);
+
+    uint8_t payload[256] = {0};
+    const size_t len = DiagnosticResultEmitter::buildResultPayload(
+        payload,
+        sizeof(payload),
+        0x01u,
+        0x02u,
+        2512u,
+        name,
+        true,
+        metricsText,
+        0x04u);
+
+    const size_t metrics = findTag(payload, len, DiagnosticResultEmitter::kTagMetrics);
+    CHECK_TRUE(metrics < len);
+    UNSIGNED_LONGS_EQUAL(std::strlen(metricsText), payload[metrics + 1]);
+    MEMCMP_EQUAL(metricsText, &payload[metrics + 2], std::strlen(metricsText));
+    CHECK_TRUE(std::strstr(metricsText, "stride=5") != nullptr);
+    CHECK_TRUE(std::strstr(metricsText, "sample_ms=25") != nullptr);
+}
+
 TEST(DiagnosticResultEmitter, DonePayloadPreservesCurrentLayout)
 {
     uint8_t payload[64] = {0};

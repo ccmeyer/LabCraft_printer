@@ -1534,16 +1534,14 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                        (row2512.timeout == 0u) &&
                                        (row2512.traceFail == 0u) &&
                                        (row2512.pulses > 0u);
-                        char metrics2512[384];
+                        // Keep this row under the self-test result metric budget for the
+                        // 32-byte truncated test name; trace artifacts carry detailed data.
+                        char metrics2512[224];
                         snprintf(metrics2512,
                                  sizeof(metrics2512),
-                                 "psi=3000;pulse_ms=%lu;pulse_int=%lu;rows=%lu;cols=%lu;moves=%lu;pulses=%lu;xy_home_to=%lu;move_to=%lu;guard=%lu;bound=%lu;park_x=%ld;park_y=%ld;park_to=%lu;ready=%lu;timeout=%lu;fresh_to=%lu;focus=1;trace=%u;sc=%lu;ec=%lu;stride=%lu;sample_ms=%lu",
-                                 static_cast<unsigned long>(kStressPulseMs),
-                                 static_cast<unsigned long>(kStressPulseIntervalMs),
-                                 static_cast<unsigned long>(kStressPlateRows),
-                                 static_cast<unsigned long>(kStressPlateCols),
-                                 static_cast<unsigned long>(moveCount),
+                                 "psi=3000;pulses=%lu;moves=%lu;xy_home_to=%lu;move_to=%lu;guard=%lu;bound=%lu;park_x=%ld;park_y=%ld;park_to=%lu;ready=%lu;timeout=%lu;fresh_to=%lu;focus=1;trace=%u;sc=%lu;stride=%lu;sample_ms=%lu",
                                  static_cast<unsigned long>(row2512.pulses),
+                                 static_cast<unsigned long>(moveCount),
                                  static_cast<unsigned long>(xyHomeTimeout),
                                  static_cast<unsigned long>(moveTimeout),
                                  static_cast<unsigned long>(guardViolation),
@@ -1556,7 +1554,6 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                  static_cast<unsigned long>(row2512.freshTo),
                                  static_cast<unsigned>((row2512.traceFail == 0u) ? 1u : 0u),
                                  static_cast<unsigned long>(row2512.sc),
-                                 static_cast<unsigned long>(row2512.ec),
                                  static_cast<unsigned long>(kStressTraceSampleStride),
                                  static_cast<unsigned long>(kStressTraceSampleMs));
                         if (!runOne(2512u, "gripper_motion_raster_3psi_factory", row2512.pass, metrics2512)) {
