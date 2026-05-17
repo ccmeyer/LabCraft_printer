@@ -43,6 +43,7 @@ class Controller(QObject):
     qualification_output = QtCore.Signal(str)
     qualification_prompt = QtCore.Signal(str)
     qualification_selftest_event = QtCore.Signal(object)
+    qualification_campaign_event = QtCore.Signal(object)
     qualification_finished = QtCore.Signal(bool, str, object)
 
     # Preprogrammed sequence signals
@@ -389,8 +390,14 @@ class Controller(QObject):
     def qualification_manifest_root(self):
         return self._repo_root / "tools" / "qualification" / "manifests"
 
+    def qualification_campaign_root(self):
+        return self._repo_root / "tools" / "qualification" / "campaigns"
+
     def qualification_output_root(self):
         return self._repo_root / "hil_reports" / "qualification"
+
+    def qualification_campaign_output_root(self):
+        return self._repo_root / "hil_reports" / "qualification_campaigns"
 
     def qualification_identity_path(self):
         return self._repo_root / "local" / "machine_identity.json"
@@ -418,6 +425,11 @@ class Controller(QObject):
 
         return discover_suite_entries(self.qualification_manifest_root())
 
+    def list_qualification_campaigns(self):
+        from QualificationCampaigns import discover_campaign_entries
+
+        return discover_campaign_entries(self.qualification_campaign_root())
+
     def qualification_timing_estimates(self):
         from QualificationTiming import build_timing_model
 
@@ -437,12 +449,15 @@ class Controller(QObject):
         run_config = dict(config)
         run_config.setdefault("identity_path", self.qualification_identity_path())
         run_config.setdefault("output_root", self.qualification_output_root())
+        run_config.setdefault("suite_output_root", self.qualification_output_root())
+        run_config.setdefault("campaign_output_root", self.qualification_campaign_output_root())
         run_config.setdefault("run_selftest_path", self._repo_root / "tools" / "run_selftest.py")
         self._qualification_worker = QualificationRunWorker(run_config, repo_root=self._repo_root)
         self._qualification_worker.stage.connect(lambda msg: self.qualification_stage.emit(msg))
         self._qualification_worker.output.connect(lambda msg: self.qualification_output.emit(msg))
         self._qualification_worker.prompt.connect(lambda msg: self.qualification_prompt.emit(msg))
         self._qualification_worker.selftest_event.connect(lambda event: self.qualification_selftest_event.emit(event))
+        self._qualification_worker.campaign_event.connect(lambda event: self.qualification_campaign_event.emit(event))
         self._qualification_worker.run_finished.connect(self._on_qualification_finished)
         self._qualification_worker.start()
         return True

@@ -1,0 +1,32 @@
+{
+  "schema_version": "qualification_campaign_v1",
+  "campaign_id": "machine_full_qualification_v1",
+  "name": "Full Machine Qualification",
+  "description": "Runs the production rigorous qualification suites without exploratory or baseline duplicate suites.",
+  "steps": [
+    {
+      "manifest": "motion_envelope_v1",
+      "fixture": "motion_full_envelope_v1",
+      "timeout_ms": 420000,
+      "notes": "Confirm the full XY/Z motion envelope is clear."
+    },
+    {
+      "manifest": "pressure_regulator_v1",
+      "fixture": "pressure_closed_loop_v1",
+      "timeout_ms": 420000,
+      "notes": "Connect the closed-loop pressure fixture rated for at least 3 psi."
+    },
+    {
+      "manifest": "valve_characterization_v1",
+      "fixture": "valve_closed_loop_pulse_matrix_v1",
+      "timeout_ms": 420000,
+      "notes": "Connect the closed-loop valve pulse fixture rated for at least 3 psi."
+    },
+    {
+      "manifest": "gripper_seal_stress_v1",
+      "fixture": "dummy_blocked_head_motion_v1",
+      "timeout_ms": 900000,
+      "notes": "Load the dummy blocked head only when prompted; keep the XY envelope clear."
+    }
+  ]
+}

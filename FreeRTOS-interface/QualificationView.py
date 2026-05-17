@@ -17,6 +17,7 @@ from QualificationReports import (
     load_report,
     normalize_result_rows,
 )
+from QualificationCampaigns import QualificationCampaignEntry, discover_campaign_entries
 from QualificationSuites import (
     QualificationSuiteEntry,
     QualificationTestPlanRow,
@@ -29,14 +30,22 @@ from QualificationTiming import QualificationTimingModel, build_timing_model
 
 
 PLAN_STATUS_COL = 0
-PLAN_ID_COL = 1
-PLAN_SUBSYSTEM_COL = 2
-PLAN_TEST_COL = 3
-PLAN_TYPICAL_COL = 4
-PLAN_ELAPSED_COL = 5
-PLAN_EVALUATES_COL = 6
-PLAN_METRICS_COL = 7
-PLAN_FIXTURE_COL = 8
+PLAN_SUITE_COL = 1
+PLAN_ID_COL = 2
+PLAN_SUBSYSTEM_COL = 3
+PLAN_TEST_COL = 4
+PLAN_TYPICAL_COL = 5
+PLAN_ELAPSED_COL = 6
+PLAN_EVALUATES_COL = 7
+PLAN_METRICS_COL = 8
+PLAN_FIXTURE_COL = 9
+
+CAMPAIGN_STATUS_COL = 0
+CAMPAIGN_STEP_COL = 1
+CAMPAIGN_SUITE_COL = 2
+CAMPAIGN_FIXTURE_COL = 3
+CAMPAIGN_TIMEOUT_COL = 4
+CAMPAIGN_REPORT_COL = 5
 
 
 class MachineQualificationWindow(QtWidgets.QDialog):
@@ -50,17 +59,25 @@ class MachineQualificationWindow(QtWidgets.QDialog):
         self._monotonic_fn = monotonic_fn or time.monotonic
 
         self._suite_entries: list[QualificationSuiteEntry] = []
+        self._campaign_entries: list[QualificationCampaignEntry] = []
         self._current_suite: QualificationSuiteEntry | None = None
+        self._current_campaign: QualificationCampaignEntry | None = None
+        self._selected_run_kind = "suite"
         self._test_plan_rows: list[QualificationTestPlanRow] = []
         self._plan_row_by_test_id: dict[int, int] = {}
+        self._plan_row_by_key: dict[tuple[int, int], int] = {}
+        self._plan_key_by_row: dict[int, tuple[int, int]] = {}
+        self._plan_manifest_by_key: dict[tuple[int, int], str] = {}
         self._run_busy = False
         self._timing_estimates = QualificationTimingModel()
-        self._plan_typical_seconds: dict[int, float | None] = {}
-        self._plan_elapsed_seconds: dict[int, float] = {}
+        self._plan_typical_seconds: dict[tuple[int, int], float | None] = {}
+        self._plan_elapsed_seconds: dict[tuple[int, int], float] = {}
         self._run_started_monotonic: float | None = None
         self._run_finished_monotonic: float | None = None
         self._current_run_row: int | None = None
         self._current_test_started_monotonic: float | None = None
+        self._campaign_step_row_by_index: dict[int, int] = {}
+        self._active_campaign_step_index: int | None = None
 
         self._entries: list[QualificationReportIndexEntry] = []
         self._current_entry: QualificationReportIndexEntry | None = None
@@ -117,7 +134,7 @@ class MachineQualificationWindow(QtWidgets.QDialog):
         left_layout = QtWidgets.QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 8, 0)
         header = QtWidgets.QHBoxLayout()
-        title = QtWidgets.QLabel("Qualification Suites")
+        title = QtWidgets.QLabel("Qualification Runs")
         font = title.font()
         font.setBold(True)
         title.setFont(font)
@@ -126,6 +143,26 @@ class MachineQualificationWindow(QtWidgets.QDialog):
         header.addWidget(title, stretch=1)
         header.addWidget(self.refresh_suites_button)
         left_layout.addLayout(header)
+
+        self.campaign_list = QtWidgets.QListWidget(self.run_tab)
+        self.campaign_list.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.campaign_list.currentRowChanged.connect(self._load_campaign_at_row)
+        campaign_title = QtWidgets.QLabel("Campaigns")
+        campaign_title_font = campaign_title.font()
+        campaign_title_font.setBold(True)
+        campaign_title.setFont(campaign_title_font)
+        left_layout.addWidget(campaign_title)
+        left_layout.addWidget(self.campaign_list, stretch=1)
+
+        self.campaign_count_label = QtWidgets.QLabel("")
+        self.campaign_count_label.setWordWrap(True)
+        left_layout.addWidget(self.campaign_count_label)
+
+        suite_title = QtWidgets.QLabel("Individual Suites")
+        suite_title_font = suite_title.font()
+        suite_title_font.setBold(True)
+        suite_title.setFont(suite_title_font)
+        left_layout.addWidget(suite_title)
 
         self.suite_list = QtWidgets.QListWidget(self.run_tab)
         self.suite_list.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
@@ -141,7 +178,7 @@ class MachineQualificationWindow(QtWidgets.QDialog):
         right_layout = QtWidgets.QVBoxLayout(right)
         right_layout.setContentsMargins(8, 0, 0, 0)
 
-        self.suite_group = QtWidgets.QGroupBox("Suite Details")
+        self.suite_group = QtWidgets.QGroupBox("Selection Details")
         suite_grid = QtWidgets.QGridLayout(self.suite_group)
         self.suite_labels: dict[str, QtWidgets.QLabel] = {}
         fields = [
@@ -176,6 +213,8 @@ class MachineQualificationWindow(QtWidgets.QDialog):
         self.fixture_combo.currentTextChanged.connect(self._update_start_enabled)
         self.operator_prompts_check = QtWidgets.QCheckBox("Operator prompts required")
         self.operator_prompts_check.setEnabled(False)
+        self.continue_on_failure_check = QtWidgets.QCheckBox("Continue on failure")
+        self.continue_on_failure_check.setToolTip("Campaign runs stop after the first failed suite unless this is checked.")
 
         defaults = [
             ("Machine ID", self.machine_id_edit),
@@ -189,6 +228,7 @@ class MachineQualificationWindow(QtWidgets.QDialog):
             if label:
                 config_grid.addWidget(QtWidgets.QLabel(f"{label}:"), idx // 2, (idx % 2) * 2)
             config_grid.addWidget(widget, idx // 2, (idx % 2) * 2 + 1)
+        config_grid.addWidget(self.continue_on_failure_check, 3, 1)
         self.port_edit.textChanged.connect(self._update_start_enabled)
         self.timeout_edit.textChanged.connect(self._update_start_enabled)
 
@@ -202,18 +242,34 @@ class MachineQualificationWindow(QtWidgets.QDialog):
         self.elapsed_time_label = QtWidgets.QLabel("Elapsed: 00:00")
         self.remaining_time_label = QtWidgets.QLabel("Expected remaining: unknown")
         self.typical_total_time_label = QtWidgets.QLabel("Typical total: unknown")
-        config_grid.addWidget(self.run_status_label, 3, 0, 1, 2)
-        config_grid.addWidget(self.run_progress, 3, 2)
-        config_grid.addWidget(self.start_button, 3, 3)
-        config_grid.addWidget(self.elapsed_time_label, 4, 0)
-        config_grid.addWidget(self.remaining_time_label, 4, 1, 1, 2)
-        config_grid.addWidget(self.typical_total_time_label, 4, 3)
+        config_grid.addWidget(self.run_status_label, 4, 0, 1, 2)
+        config_grid.addWidget(self.run_progress, 4, 2)
+        config_grid.addWidget(self.start_button, 4, 3)
+        config_grid.addWidget(self.elapsed_time_label, 5, 0)
+        config_grid.addWidget(self.remaining_time_label, 5, 1, 1, 2)
+        config_grid.addWidget(self.typical_total_time_label, 5, 3)
         right_layout.addWidget(config_group)
 
-        self.test_plan_table = QtWidgets.QTableWidget(0, 9, self.run_tab)
+        self.campaign_queue_table = QtWidgets.QTableWidget(0, 6, self.run_tab)
+        self.campaign_queue_table.setHorizontalHeaderLabels(["Status", "Step", "Suite", "Fixture", "Timeout", "Report"])
+        self.campaign_queue_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.campaign_queue_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.campaign_queue_table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.campaign_queue_table.setAlternatingRowColors(True)
+        self.campaign_queue_table.verticalHeader().setVisible(False)
+        for idx in (CAMPAIGN_STATUS_COL, CAMPAIGN_STEP_COL, CAMPAIGN_TIMEOUT_COL):
+            self.campaign_queue_table.horizontalHeader().setSectionResizeMode(idx, QtWidgets.QHeaderView.ResizeToContents)
+        self.campaign_queue_table.horizontalHeader().setSectionResizeMode(CAMPAIGN_SUITE_COL, QtWidgets.QHeaderView.Stretch)
+        self.campaign_queue_table.horizontalHeader().setSectionResizeMode(CAMPAIGN_FIXTURE_COL, QtWidgets.QHeaderView.Stretch)
+        self.campaign_queue_table.horizontalHeader().setSectionResizeMode(CAMPAIGN_REPORT_COL, QtWidgets.QHeaderView.Stretch)
+        self.campaign_queue_table.setVisible(False)
+        right_layout.addWidget(self.campaign_queue_table)
+
+        self.test_plan_table = QtWidgets.QTableWidget(0, 10, self.run_tab)
         self.test_plan_table.setHorizontalHeaderLabels(
             [
                 "Status",
+                "Suite",
                 "ID",
                 "Subsystem",
                 "Test",
@@ -230,7 +286,7 @@ class MachineQualificationWindow(QtWidgets.QDialog):
         self.test_plan_table.setAlternatingRowColors(True)
         self.test_plan_table.setWordWrap(True)
         self.test_plan_table.verticalHeader().setVisible(False)
-        for idx in (PLAN_STATUS_COL, PLAN_ID_COL, PLAN_SUBSYSTEM_COL, PLAN_TYPICAL_COL, PLAN_ELAPSED_COL):
+        for idx in (PLAN_STATUS_COL, PLAN_SUITE_COL, PLAN_ID_COL, PLAN_SUBSYSTEM_COL, PLAN_TYPICAL_COL, PLAN_ELAPSED_COL):
             self.test_plan_table.horizontalHeader().setSectionResizeMode(idx, QtWidgets.QHeaderView.ResizeToContents)
         self.test_plan_table.horizontalHeader().setSectionResizeMode(PLAN_TEST_COL, QtWidgets.QHeaderView.ResizeToContents)
         self.test_plan_table.horizontalHeader().setSectionResizeMode(PLAN_EVALUATES_COL, QtWidgets.QHeaderView.Stretch)
@@ -368,6 +424,7 @@ class MachineQualificationWindow(QtWidgets.QDialog):
             ("qualification_output", self._on_qualification_output),
             ("qualification_prompt", self._on_qualification_prompt),
             ("qualification_selftest_event", self._on_selftest_event),
+            ("qualification_campaign_event", self._on_campaign_event),
             ("qualification_finished", self._on_qualification_finished),
         ]
         for signal_name, slot in connections:
@@ -403,6 +460,12 @@ class MachineQualificationWindow(QtWidgets.QDialog):
         repo_root = Path(__file__).resolve().parents[1]
         return discover_suite_entries(repo_root / "tools" / "qualification" / "manifests")
 
+    def _campaign_entries_from_controller(self) -> list[QualificationCampaignEntry]:
+        if hasattr(self.controller, "list_qualification_campaigns"):
+            return list(self.controller.list_qualification_campaigns())
+        repo_root = Path(__file__).resolve().parents[1]
+        return discover_campaign_entries(repo_root / "tools" / "qualification" / "campaigns")
+
     def _refresh_timing_estimates(self):
         getter = getattr(self.controller, "qualification_timing_estimates", None)
         if callable(getter):
@@ -416,7 +479,28 @@ class MachineQualificationWindow(QtWidgets.QDialog):
 
     @QtCore.Slot()
     def refresh_suites(self):
-        previous = self._current_suite.manifest_id if self._current_suite is not None else ""
+        previous_suite = self._current_suite.manifest_id if self._current_suite is not None else ""
+        previous_campaign = self._current_campaign.campaign_id if self._current_campaign is not None else ""
+        previous_kind = self._selected_run_kind
+
+        self.campaign_list.blockSignals(True)
+        self.campaign_list.clear()
+        try:
+            self._campaign_entries = self._campaign_entries_from_controller()
+            self.campaign_count_label.setText(f"{len(self._campaign_entries)} campaign(s) found.")
+        except Exception as exc:
+            self._campaign_entries = []
+            self.campaign_count_label.setText(f"Could not scan campaigns: {exc}")
+
+        campaign_select_row = 0
+        for idx, entry in enumerate(self._campaign_entries):
+            item = QtWidgets.QListWidgetItem(entry.display_name)
+            item.setToolTip(str(entry.campaign_path))
+            self.campaign_list.addItem(item)
+            if entry.campaign_id == previous_campaign:
+                campaign_select_row = idx
+        self.campaign_list.blockSignals(False)
+
         self.suite_list.blockSignals(True)
         self.suite_list.clear()
         try:
@@ -431,13 +515,19 @@ class MachineQualificationWindow(QtWidgets.QDialog):
             item = QtWidgets.QListWidgetItem(entry.display_name)
             item.setToolTip(str(entry.manifest_path))
             self.suite_list.addItem(item)
-            if entry.manifest_id == previous:
+            if entry.manifest_id == previous_suite:
                 select_row = idx
         self.suite_list.blockSignals(False)
 
-        if self._suite_entries:
+        if previous_kind == "campaign" and self._campaign_entries:
+            self.campaign_list.setCurrentRow(campaign_select_row)
+            self._load_campaign_at_row(campaign_select_row)
+        elif self._suite_entries:
             self.suite_list.setCurrentRow(select_row)
             self._load_suite_at_row(select_row)
+        elif self._campaign_entries:
+            self.campaign_list.setCurrentRow(campaign_select_row)
+            self._load_campaign_at_row(campaign_select_row)
         else:
             self._clear_suite_display("No qualification suites found.")
 
@@ -445,6 +535,16 @@ class MachineQualificationWindow(QtWidgets.QDialog):
     def _load_suite_at_row(self, row: int):
         if row < 0 or row >= len(self._suite_entries):
             return
+        if self._run_busy:
+            return
+        self._selected_run_kind = "suite"
+        self._current_campaign = None
+        self._active_campaign_step_index = None
+        self.campaign_list.blockSignals(True)
+        self.campaign_list.clearSelection()
+        self.campaign_list.blockSignals(False)
+        self.campaign_queue_table.setVisible(False)
+        self.campaign_queue_table.setRowCount(0)
         self._current_suite = self._suite_entries[row]
         manifest = self._current_suite.manifest
         self.suite_labels["manifest"].setText(f"{manifest.name} ({manifest.manifest_id})")
@@ -455,18 +555,63 @@ class MachineQualificationWindow(QtWidgets.QDialog):
         self.suite_labels["description"].setText(str(manifest.raw.get("description") or ""))
 
         self._test_plan_rows = build_test_plan_rows(manifest)
-        self._populate_test_plan_table(self._test_plan_rows)
+        self._populate_test_plan_table(self._test_plan_rows, manifest_id=manifest.manifest_id)
         self._populate_run_defaults(manifest, fixture_ids)
+        self._reset_run_timing_state()
+        self._update_timing_display()
+        self._update_start_enabled()
+
+    @QtCore.Slot(int)
+    def _load_campaign_at_row(self, row: int):
+        if row < 0 or row >= len(self._campaign_entries):
+            return
+        if self._run_busy:
+            return
+        self._selected_run_kind = "campaign"
+        self._current_campaign = self._campaign_entries[row]
+        self._current_suite = None
+        self._active_campaign_step_index = None
+        self.suite_list.blockSignals(True)
+        self.suite_list.clearSelection()
+        self.suite_list.blockSignals(False)
+
+        campaign = self._current_campaign.campaign
+        fixtures = [step.fixture_id or "none" for step in campaign.steps]
+        timeouts = [f"{step.manifest_id}: {step.timeout_ms or 'default'} ms" for step in campaign.steps]
+        self.suite_labels["manifest"].setText(f"{campaign.name} ({campaign.campaign_id})")
+        self.suite_labels["profile"].setText("campaign")
+        self.suite_labels["operator_gated"].setText("yes" if campaign.requires_operator_prompts else "no")
+        self.suite_labels["fixtures"].setText(" -> ".join(fixtures))
+        self.suite_labels["description"].setText(
+            "\n".join(
+                [
+                    campaign.description,
+                    f"{len(campaign.steps)} suite step(s).",
+                    "Timeouts: " + "; ".join(timeouts),
+                ]
+            ).strip()
+        )
+
+        self._populate_campaign_queue(campaign)
+        self._populate_campaign_test_plan(campaign)
+        self._populate_campaign_run_defaults(campaign)
         self._reset_run_timing_state()
         self._update_timing_display()
         self._update_start_enabled()
 
     def _clear_suite_display(self, message: str):
         self._current_suite = None
+        self._current_campaign = None
         self._test_plan_rows = []
+        self._plan_row_by_test_id = {}
+        self._plan_row_by_key = {}
+        self._plan_key_by_row = {}
+        self._plan_manifest_by_key = {}
         for label in self.suite_labels.values():
             label.setText("")
         self.test_plan_table.setRowCount(0)
+        self.campaign_queue_table.setRowCount(0)
+        self.campaign_queue_table.setVisible(False)
         self.run_status_label.setText(message)
         self._reset_run_timing_state()
         self._update_timing_display()
@@ -498,6 +643,28 @@ class MachineQualificationWindow(QtWidgets.QDialog):
             self.fixture_combo.addItem(fixture_id)
         self.fixture_combo.blockSignals(False)
         self.operator_prompts_check.setChecked(bool(manifest.requires_operator_prompts))
+        self.timeout_edit.setEnabled(not self._run_busy)
+        self.fixture_combo.setEnabled(not self._run_busy)
+        self.continue_on_failure_check.setChecked(False)
+        self.continue_on_failure_check.setEnabled(False)
+        self.start_button.setText("Start Qualification")
+
+    def _populate_campaign_run_defaults(self, campaign):
+        if not self.machine_id_edit.text().strip():
+            self.machine_id_edit.setText(self._default_machine_id())
+        if not self.port_edit.text().strip():
+            self.port_edit.setText(self._default_port())
+        self.timeout_edit.setText("per campaign step")
+        self.timeout_edit.setEnabled(False)
+        self.fixture_combo.blockSignals(True)
+        self.fixture_combo.clear()
+        self.fixture_combo.addItem("per campaign step")
+        self.fixture_combo.blockSignals(False)
+        self.fixture_combo.setEnabled(False)
+        self.operator_prompts_check.setChecked(bool(campaign.requires_operator_prompts))
+        self.continue_on_failure_check.setEnabled(not self._run_busy)
+        self.continue_on_failure_check.setChecked(False)
+        self.start_button.setText("Start Campaign")
 
     def _default_machine_id(self) -> str:
         getter = getattr(self.controller, "qualification_default_machine_id", None)
@@ -519,17 +686,78 @@ class MachineQualificationWindow(QtWidgets.QDialog):
                 pass
         return "/dev/ttyAMA0"
 
-    def _populate_test_plan_table(self, rows: list[QualificationTestPlanRow]):
+    def _suite_entry_for_manifest_id(self, manifest_id: str) -> QualificationSuiteEntry | None:
+        for entry in self._suite_entries:
+            if entry.manifest_id == manifest_id:
+                return entry
+        return None
+
+    def _populate_campaign_queue(self, campaign):
+        self._campaign_step_row_by_index = {}
+        self.campaign_queue_table.setRowCount(len(campaign.steps))
+        self.campaign_queue_table.setVisible(True)
+        for row_idx, step in enumerate(campaign.steps):
+            self._campaign_step_row_by_index[int(step.index)] = row_idx
+            values = [
+                "Not run",
+                str(step.index),
+                f"{step.manifest_name} ({step.manifest_id})",
+                step.fixture_id or "none",
+                "" if step.timeout_ms is None else str(step.timeout_ms),
+                "",
+            ]
+            for col_idx, value in enumerate(values):
+                item = QtWidgets.QTableWidgetItem(value)
+                item.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable)
+                self._apply_plan_status_brush(item, values[0])
+                self.campaign_queue_table.setItem(row_idx, col_idx, item)
+        self.campaign_queue_table.resizeRowsToContents()
+
+    def _populate_campaign_test_plan(self, campaign):
+        rows: list[tuple[int, str, QualificationTestPlanRow]] = []
+        self._test_plan_rows = []
+        for step in campaign.steps:
+            entry = self._suite_entry_for_manifest_id(step.manifest_id)
+            if entry is None:
+                continue
+            step_rows = build_test_plan_rows(entry.manifest)
+            self._test_plan_rows.extend(step_rows)
+            for plan_row in step_rows:
+                rows.append((int(step.index), step.manifest_id, plan_row))
+        self._populate_test_plan_table(rows)
+
+    def _populate_test_plan_table(
+        self,
+        rows: list[QualificationTestPlanRow] | list[tuple[int, str, QualificationTestPlanRow]],
+        *,
+        manifest_id: str | None = None,
+    ):
         self._plan_row_by_test_id = {}
+        self._plan_row_by_key = {}
+        self._plan_key_by_row = {}
+        self._plan_manifest_by_key = {}
         self._plan_typical_seconds = {}
         self._plan_elapsed_seconds = {}
         self.test_plan_table.setRowCount(len(rows))
-        for row_idx, row in enumerate(rows):
+        for row_idx, raw_row in enumerate(rows):
+            if isinstance(raw_row, tuple):
+                step_index, row_manifest_id, row = raw_row
+                suite_label = row_manifest_id
+            else:
+                step_index = 0
+                row_manifest_id = manifest_id or (self._current_suite.manifest_id if self._current_suite else "")
+                row = raw_row
+                suite_label = row_manifest_id
+            key = (int(step_index), int(row.test_id))
             self._plan_row_by_test_id[row.test_id] = row_idx
-            typical_s = self._typical_seconds_for(row.test_id)
-            self._plan_typical_seconds[row.test_id] = typical_s
+            self._plan_row_by_key[key] = row_idx
+            self._plan_key_by_row[row_idx] = key
+            self._plan_manifest_by_key[key] = row_manifest_id
+            typical_s = self._typical_seconds_for(row.test_id, manifest_id=row_manifest_id)
+            self._plan_typical_seconds[key] = typical_s
             values = [
                 row.status,
+                suite_label,
                 str(row.test_id),
                 row.subsystem,
                 row.name,
@@ -549,18 +777,20 @@ class MachineQualificationWindow(QtWidgets.QDialog):
         self.test_plan_table.resizeRowsToContents()
         self._update_timing_display()
 
-    def _typical_seconds_for(self, test_id: int) -> float | None:
-        manifest_id = self._current_suite.manifest_id if self._current_suite is not None else ""
+    def _typical_seconds_for(self, test_id: int, *, manifest_id: str | None = None) -> float | None:
+        if manifest_id is None:
+            manifest_id = self._current_suite.manifest_id if self._current_suite is not None else ""
         estimate = self._timing_estimates.estimate_for(manifest_id, int(test_id))
         return estimate.typical_seconds if estimate is not None else None
 
     def _refresh_plan_timing_columns(self):
         for row_idx in range(self.test_plan_table.rowCount()):
-            test_id = self._test_id_for_row(row_idx)
+            key = self._plan_key_for_row(row_idx)
+            test_id = None if key is None else key[1]
             if test_id is None:
                 continue
-            typical_s = self._typical_seconds_for(test_id)
-            self._plan_typical_seconds[test_id] = typical_s
+            typical_s = self._typical_seconds_for(test_id, manifest_id=self._plan_manifest_by_key.get(key, ""))
+            self._plan_typical_seconds[key] = typical_s
             item = self.test_plan_table.item(row_idx, PLAN_TYPICAL_COL)
             if item is None:
                 item = QtWidgets.QTableWidgetItem()
@@ -573,6 +803,46 @@ class MachineQualificationWindow(QtWidgets.QDialog):
     def _set_all_plan_status(self, status: str):
         for row_idx in range(self.test_plan_table.rowCount()):
             self._set_plan_status(row_idx, status)
+
+    def _set_all_campaign_status(self, status: str):
+        for row_idx in range(self.campaign_queue_table.rowCount()):
+            step_item = self.campaign_queue_table.item(row_idx, CAMPAIGN_STEP_COL)
+            if step_item is None:
+                continue
+            try:
+                step_index = int(step_item.text())
+            except ValueError:
+                continue
+            self._set_campaign_step_status(step_index, status, report_path="")
+
+    def _set_campaign_step_status(self, step_index: int, status: str, report_path: str | None = None):
+        row_idx = self._campaign_step_row_by_index.get(int(step_index))
+        if row_idx is None:
+            return
+        status_item = self.campaign_queue_table.item(row_idx, CAMPAIGN_STATUS_COL)
+        if status_item is None:
+            status_item = QtWidgets.QTableWidgetItem()
+            status_item.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable)
+            self.campaign_queue_table.setItem(row_idx, CAMPAIGN_STATUS_COL, status_item)
+        status_item.setText(status)
+        if report_path is not None:
+            report_item = self.campaign_queue_table.item(row_idx, CAMPAIGN_REPORT_COL)
+            if report_item is None:
+                report_item = QtWidgets.QTableWidgetItem()
+                report_item.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable)
+                self.campaign_queue_table.setItem(row_idx, CAMPAIGN_REPORT_COL, report_item)
+            report_item.setText(str(report_path or ""))
+            report_item.setToolTip(str(report_path or ""))
+        for col_idx in range(self.campaign_queue_table.columnCount()):
+            item = self.campaign_queue_table.item(row_idx, col_idx)
+            if item is not None:
+                self._apply_plan_status_brush(item, status)
+
+    def _set_plan_status_for_step(self, step_index: int, status: str):
+        for row_idx in range(self.test_plan_table.rowCount()):
+            key = self._plan_key_for_row(row_idx)
+            if key is not None and key[0] == int(step_index):
+                self._set_plan_status(row_idx, status)
 
     def _set_plan_status(self, row_idx: int, status: str):
         item = self.test_plan_table.item(row_idx, PLAN_STATUS_COL)
@@ -594,6 +864,22 @@ class MachineQualificationWindow(QtWidgets.QDialog):
             if self._plan_status(row_idx) == "Queued":
                 self._mark_plan_row_in_progress(row_idx)
                 return
+
+    def _mark_next_queued_in_progress_for_step(self, step_index: int, *, after_row: int = -1):
+        for row_idx in range(max(0, after_row + 1), self.test_plan_table.rowCount()):
+            key = self._plan_key_for_row(row_idx)
+            if key is None or key[0] != int(step_index):
+                continue
+            if self._plan_status(row_idx) == "Queued":
+                self._mark_plan_row_in_progress(row_idx)
+                return
+
+    def _step_has_plan_status(self, step_index: int, status: str) -> bool:
+        for row_idx in range(self.test_plan_table.rowCount()):
+            key = self._plan_key_for_row(row_idx)
+            if key is not None and key[0] == int(step_index) and self._plan_status(row_idx) == status:
+                return True
+        return False
 
     def _mark_plan_row_in_progress(self, row_idx: int):
         self._set_plan_status(row_idx, "In progress")
@@ -647,18 +933,21 @@ class MachineQualificationWindow(QtWidgets.QDialog):
         self._update_timing_display()
 
     def _set_elapsed_for_row(self, row_idx: int, elapsed_s: float | None):
-        test_id = self._test_id_for_row(row_idx)
-        if test_id is not None:
+        key = self._plan_key_for_row(row_idx)
+        if key is not None:
             if elapsed_s is None:
-                self._plan_elapsed_seconds.pop(test_id, None)
+                self._plan_elapsed_seconds.pop(key, None)
             else:
-                self._plan_elapsed_seconds[test_id] = elapsed_s
+                self._plan_elapsed_seconds[key] = elapsed_s
         item = self.test_plan_table.item(row_idx, PLAN_ELAPSED_COL)
         if item is None:
             item = QtWidgets.QTableWidgetItem()
             item.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable)
             self.test_plan_table.setItem(row_idx, PLAN_ELAPSED_COL, item)
         item.setText("" if elapsed_s is None else self._format_duration(elapsed_s))
+
+    def _plan_key_for_row(self, row_idx: int) -> tuple[int, int] | None:
+        return self._plan_key_by_row.get(row_idx)
 
     def _test_id_for_row(self, row_idx: int) -> int | None:
         item = self.test_plan_table.item(row_idx, PLAN_ID_COL)
@@ -696,9 +985,10 @@ class MachineQualificationWindow(QtWidgets.QDialog):
             if status in terminal:
                 continue
             test_id = self._test_id_for_row(row_idx)
-            if test_id is None:
+            key = self._plan_key_for_row(row_idx)
+            if test_id is None or key is None:
                 continue
-            typical_s = self._plan_typical_seconds.get(test_id)
+            typical_s = self._plan_typical_seconds.get(key)
             if typical_s is None:
                 unknown = True
                 continue
@@ -712,8 +1002,11 @@ class MachineQualificationWindow(QtWidgets.QDialog):
     def _typical_total_seconds(self) -> tuple[float, bool]:
         total = 0.0
         unknown = False
-        for row in self._test_plan_rows:
-            typical_s = self._plan_typical_seconds.get(row.test_id)
+        for row_idx in range(self.test_plan_table.rowCount()):
+            key = self._plan_key_for_row(row_idx)
+            if key is None:
+                continue
+            typical_s = self._plan_typical_seconds.get(key)
             if typical_s is None:
                 unknown = True
             else:
@@ -758,18 +1051,63 @@ class MachineQualificationWindow(QtWidgets.QDialog):
             item.setBackground(QtGui.QBrush())
             item.setForeground(QtGui.QBrush())
 
+    @staticmethod
+    def _safe_int(value: Any) -> int | None:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _campaign_ui_status(step_result: dict[str, Any]) -> str:
+        status = str(step_result.get("status") or "").lower()
+        if status == "pass":
+            return "Warning" if int(step_result.get("warning_count") or 0) else "Passed"
+        if status == "skipped":
+            return "Skipped"
+        if status in {"fail", "error"}:
+            return "Failed"
+        return "Missing"
+
     def _update_start_enabled(self):
-        if self._run_busy or self._current_suite is None:
+        if self._run_busy:
+            self.start_button.setEnabled(False)
+            return
+        port_ok = bool(self.port_edit.text().strip())
+        if self._selected_run_kind == "campaign":
+            self.start_button.setEnabled(port_ok and self._current_campaign is not None)
+            return
+        if self._current_suite is None:
             self.start_button.setEnabled(False)
             return
         manifest = self._current_suite.manifest
-        port_ok = bool(self.port_edit.text().strip())
         fixture_ok = True
         if manifest.requires_operator_prompts:
             fixture_ok = self.fixture_combo.currentText().strip() in set(required_fixture_ids(manifest))
         self.start_button.setEnabled(port_ok and fixture_ok)
 
     def _run_config(self) -> dict[str, Any] | None:
+        if self._selected_run_kind == "campaign":
+            if self._current_campaign is None:
+                return None
+            config = {
+                "run_kind": "campaign",
+                "campaign_ref": str(self._current_campaign.campaign_path),
+                "campaign_id": self._current_campaign.campaign_id,
+                "port": self.port_edit.text().strip(),
+                "baud": int(self.baud_spin.value()),
+                "machine_id": self.machine_id_edit.text().strip(),
+                "operator_prompts": bool(self._current_campaign.campaign.requires_operator_prompts),
+                "continue_on_failure": bool(self.continue_on_failure_check.isChecked()),
+            }
+            campaign_output_root = getattr(self.controller, "qualification_campaign_output_root", None)
+            suite_output_root = getattr(self.controller, "qualification_output_root", None)
+            if callable(campaign_output_root):
+                config["campaign_output_root"] = campaign_output_root()
+            if callable(suite_output_root):
+                config["suite_output_root"] = suite_output_root()
+            return config
+
         if self._current_suite is None:
             return None
         timeout_text = self.timeout_edit.text().strip()
@@ -811,10 +1149,15 @@ class MachineQualificationWindow(QtWidgets.QDialog):
 
         self.run_log.clear()
         self._set_run_busy(True)
+        if config.get("run_kind") == "campaign":
+            self._set_all_campaign_status("Queued")
+            self._set_campaign_step_status(1, "In progress")
         self._set_all_plan_status("Queued")
         self._begin_run_timing()
         self._mark_next_queued_in_progress()
-        self._on_qualification_stage("Preparing qualification run")
+        self._on_qualification_stage(
+            "Preparing qualification campaign" if config.get("run_kind") == "campaign" else "Preparing qualification run"
+        )
         starter = getattr(self.controller, "start_qualification_run", None)
         if not callable(starter) or not starter(config):
             self._stop_run_timing()
@@ -823,6 +1166,33 @@ class MachineQualificationWindow(QtWidgets.QDialog):
             self._popup_message("Machine Qualification", "Could not start qualification run.")
 
     def _confirm_qualification_start(self, config: dict[str, Any]) -> bool:
+        if config.get("run_kind") == "campaign":
+            if self._current_campaign is None:
+                return False
+            campaign = self._current_campaign.campaign
+            steps = "\n".join(
+                f"{step.index}. {step.manifest_name} ({step.fixture_id or 'no fixture'}, {step.timeout_ms or 'default'} ms)"
+                for step in campaign.steps
+            )
+            stop_text = "Continue after failed suites." if config.get("continue_on_failure") else "Stop after the first failed suite."
+            message = (
+                f"Campaign: {campaign.name}\n"
+                f"Port: {config['port']}\n"
+                f"Operator prompts: {'yes' if campaign.requires_operator_prompts else 'no'}\n"
+                f"{stop_text}\n\n"
+                f"Steps:\n{steps}\n\n"
+                "This campaign will run multiple hardware-active suites in sequence. "
+                "Confirm each fixture transition before continuing."
+            )
+            response = QtWidgets.QMessageBox.question(
+                self,
+                "Start Machine Qualification Campaign",
+                message,
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No,
+            )
+            return response == QtWidgets.QMessageBox.Yes
+
         if self._current_suite is None:
             return False
         manifest = self._current_suite.manifest
@@ -848,13 +1218,15 @@ class MachineQualificationWindow(QtWidgets.QDialog):
         self._run_busy = bool(busy)
         self.run_progress.setRange(0, 0 if busy else 1)
         self.run_progress.setValue(0)
+        self.campaign_list.setEnabled(not busy)
         self.suite_list.setEnabled(not busy)
         self.refresh_suites_button.setEnabled(not busy)
         self.machine_id_edit.setEnabled(not busy)
         self.port_edit.setEnabled(not busy)
         self.baud_spin.setEnabled(not busy)
-        self.timeout_edit.setEnabled(not busy)
-        self.fixture_combo.setEnabled(not busy)
+        self.timeout_edit.setEnabled((not busy) and self._selected_run_kind != "campaign")
+        self.fixture_combo.setEnabled((not busy) and self._selected_run_kind != "campaign")
+        self.continue_on_failure_check.setEnabled((not busy) and self._selected_run_kind == "campaign")
         if not busy:
             self._timing_timer.stop()
         self._update_start_enabled()
@@ -882,6 +1254,59 @@ class MachineQualificationWindow(QtWidgets.QDialog):
             responder(response == QtWidgets.QMessageBox.Ok)
 
     @QtCore.Slot(object)
+    def _on_campaign_event(self, event: object):
+        if not isinstance(event, dict):
+            return
+        event_type = str(event.get("event") or "")
+        if event_type == "campaign_started":
+            text = f"Campaign started: {event.get('name') or event.get('campaign_id') or ''}".strip()
+            self.run_status_label.setText(text)
+            self._append_run_log(text)
+            return
+
+        if event_type == "campaign_step_started":
+            step = event.get("step") if isinstance(event.get("step"), dict) else {}
+            step_index = self._safe_int(step.get("index"))
+            manifest_id = str(step.get("manifest_id") or step.get("manifest") or "suite")
+            self._active_campaign_step_index = step_index
+            if step_index is not None:
+                self._set_campaign_step_status(step_index, "In progress")
+                if not self._step_has_plan_status(step_index, "In progress"):
+                    self._mark_next_queued_in_progress_for_step(step_index)
+            text = f"Campaign step {step_index or '?'} started: {manifest_id}"
+            self.run_status_label.setText(text)
+            self._append_run_log(text)
+            return
+
+        if event_type == "campaign_step_finished":
+            step = event.get("step") if isinstance(event.get("step"), dict) else {}
+            step_result = event.get("step_result") if isinstance(event.get("step_result"), dict) else {}
+            step_index = self._safe_int(step_result.get("index")) or self._safe_int(step.get("index"))
+            ui_status = self._campaign_ui_status(step_result)
+            report = event.get("report") if isinstance(event.get("report"), dict) else None
+            if report is not None and step_index is not None:
+                self._apply_final_report_to_plan(report, step_index=step_index)
+            elif step_index is not None:
+                self._set_plan_status_for_step(step_index, "Skipped" if ui_status == "Skipped" else ui_status)
+            if step_index is not None:
+                self._set_campaign_step_status(step_index, ui_status, report_path=str(step_result.get("report_path") or ""))
+            text = f"Campaign step {step_index or '?'} finished: {ui_status}"
+            self.run_status_label.setText(text)
+            self._append_run_log(text)
+            self._active_campaign_step_index = None
+            return
+
+        if event_type == "campaign_finished":
+            report_path = str(event.get("campaign_report_path") or "")
+            status = str(event.get("status") or "unknown")
+            text = f"Campaign finished: {status}"
+            self.run_status_label.setText(text)
+            self._append_run_log(text)
+            if report_path:
+                self._append_run_log(f"Campaign report: {report_path}")
+            self._active_campaign_step_index = None
+
+    @QtCore.Slot(object)
     def _on_selftest_event(self, event: object):
         if not isinstance(event, dict):
             return
@@ -892,15 +1317,16 @@ class MachineQualificationWindow(QtWidgets.QDialog):
                 self.run_status_label.setText(stage)
                 self._append_run_log(f"Progress: {stage}")
             test_id = self._event_test_id(event)
-            if test_id is not None and test_id in self._plan_row_by_test_id:
-                self._mark_plan_row_in_progress(self._plan_row_by_test_id[test_id])
+            key = self._event_plan_key(event)
+            if test_id is not None and key in self._plan_row_by_key:
+                self._mark_plan_row_in_progress(self._plan_row_by_key[key])
             return
 
         if event_type == "selftest_result":
             test_id = self._event_test_id(event)
             if test_id is None:
                 return
-            row_idx = self._plan_row_by_test_id.get(test_id)
+            row_idx = self._plan_row_by_key.get(self._event_plan_key(event))
             if row_idx is None:
                 return
             status = "Passed" if bool(event.get("pass")) else "Failed"
@@ -908,7 +1334,11 @@ class MachineQualificationWindow(QtWidgets.QDialog):
             self._set_plan_status(row_idx, status)
             name = str(event.get("name") or test_id)
             self._append_run_log(f"Result {test_id} {name}: {status}")
-            self._mark_next_queued_in_progress(after_row=row_idx)
+            step_index = self._event_plan_key(event)[0]
+            if step_index:
+                self._mark_next_queued_in_progress_for_step(step_index, after_row=row_idx)
+            else:
+                self._mark_next_queued_in_progress(after_row=row_idx)
             return
 
         if event_type == "selftest_done":
@@ -941,6 +1371,14 @@ class MachineQualificationWindow(QtWidgets.QDialog):
             return None
         return test_id if test_id > 0 else None
 
+    def _event_plan_key(self, event: dict[str, Any]) -> tuple[int, int]:
+        test_id = self._event_test_id(event) or 0
+        try:
+            step_index = int(event.get("campaign_step_index"))
+        except (TypeError, ValueError):
+            step_index = self._active_campaign_step_index if self._active_campaign_step_index is not None else 0
+        return (int(step_index or 0), int(test_id))
+
     @QtCore.Slot(bool, str, object)
     def _on_qualification_finished(self, ok: bool, message: str, payload: object):
         self._stop_run_timing()
@@ -948,6 +1386,15 @@ class MachineQualificationWindow(QtWidgets.QDialog):
         self._on_qualification_stage("Finished" if ok else "Failed")
         self._append_run_log(str(message))
         data = payload if isinstance(payload, dict) else {}
+        if data.get("run_kind") == "campaign":
+            campaign_report_path = str(data.get("campaign_report_path") or "")
+            if campaign_report_path:
+                self._append_run_log(f"Campaign report: {campaign_report_path}")
+            self.refresh_reports(select_report_path=data.get("report_path"))
+            self._refresh_timing_estimates()
+            self._refresh_plan_timing_columns()
+            return
+
         report = data.get("report") if isinstance(data.get("report"), dict) else None
         if report is not None:
             self._apply_final_report_to_plan(report)
@@ -959,10 +1406,13 @@ class MachineQualificationWindow(QtWidgets.QDialog):
         if message:
             self.run_log.appendPlainText(message)
 
-    def _apply_final_report_to_plan(self, report: dict[str, Any]):
+    def _apply_final_report_to_plan(self, report: dict[str, Any], *, step_index: int = 0):
         rows = normalize_result_rows(report)
         rows_by_id = {int(row.item_id): row for row in rows if row.item_id and str(row.item_id).isdigit()}
-        for test_id, row_idx in self._plan_row_by_test_id.items():
+        for key, row_idx in self._plan_row_by_key.items():
+            if key[0] != int(step_index):
+                continue
+            test_id = key[1]
             result_row = rows_by_id.get(int(test_id))
             if result_row is None:
                 status = "Missing"

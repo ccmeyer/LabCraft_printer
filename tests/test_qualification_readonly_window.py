@@ -138,9 +138,16 @@ def _suite_row(window, manifest_id):
     raise AssertionError(f"Suite not found: {manifest_id}")
 
 
+def _campaign_row(window, campaign_id):
+    for idx, entry in enumerate(window._campaign_entries):
+        if entry.campaign_id == campaign_id:
+            return idx
+    raise AssertionError(f"Campaign not found: {campaign_id}")
+
+
 def _plan_row_for_test(window, test_id):
     for row in range(window.test_plan_table.rowCount()):
-        item = window.test_plan_table.item(row, 1)
+        item = window.test_plan_table.item(row, 2)
         if item is not None and item.text() == str(test_id):
             return row
     raise AssertionError(f"Test row not found: {test_id}")
@@ -154,10 +161,74 @@ def test_machine_qualification_window_has_run_and_review_tabs(tmp_path, qapp):
 
     assert window.main_tabs.tabText(0) == "Run Qualification"
     assert window.main_tabs.tabText(1) == "Review Results"
+    assert window.campaign_list.count() >= 1
     assert window.suite_list.count() >= 5
     assert window.minimumWidth() >= 1280
     assert window.minimumHeight() >= 820
 
+    window.close()
+
+
+def test_run_tab_lists_campaigns_and_populates_campaign_plan(tmp_path, qapp):
+    _write_sample_report(tmp_path)
+    main_window = QtWidgets.QWidget()
+    main_window.popup_message = lambda *_args: None
+    window = MachineQualificationWindow(main_window, _ReportController(tmp_path))
+
+    window.campaign_list.setCurrentRow(_campaign_row(window, "machine_full_qualification_v1"))
+    qapp.processEvents()
+
+    assert window._selected_run_kind == "campaign"
+    assert window.campaign_queue_table.isHidden() is False
+    assert window.campaign_queue_table.rowCount() == 4
+    assert "motion_envelope_v1" in window.campaign_queue_table.item(0, 2).text()
+    assert "pressure_regulator_v1" in window.campaign_queue_table.item(1, 2).text()
+    assert (1, 2012) in window._plan_row_by_key
+    assert (2, 2210) in window._plan_row_by_key
+    assert (3, 2473) in window._plan_row_by_key
+    assert (4, 2510) in window._plan_row_by_key
+    row = window._plan_row_by_key[(3, 2473)]
+    assert window.test_plan_table.item(row, 1).text() == "valve_characterization_v1"
+
+    window.close()
+
+
+class _CampaignStartController(_ReportController):
+    def __init__(self, root: Path):
+        super().__init__(root)
+        self.started_config = None
+
+    def qualification_campaign_output_root(self):
+        return self.root / "qualification_campaigns"
+
+    def qualification_output_root(self):
+        return self.root / "qualification"
+
+    def start_qualification_run(self, config):
+        self.started_config = dict(config)
+        return True
+
+
+def test_campaign_start_config_includes_campaign_fields(tmp_path, qapp):
+    _write_sample_report(tmp_path)
+    controller = _CampaignStartController(tmp_path)
+    main_window = QtWidgets.QWidget()
+    main_window.popup_message = lambda *_args: None
+    window = MachineQualificationWindow(main_window, controller)
+
+    window.campaign_list.setCurrentRow(_campaign_row(window, "machine_full_qualification_v1"))
+    window.continue_on_failure_check.setChecked(True)
+    window._confirm_qualification_start = lambda _config: True
+    window._on_start_clicked()
+
+    assert controller.started_config["run_kind"] == "campaign"
+    assert controller.started_config["campaign_id"] == "machine_full_qualification_v1"
+    assert str(controller.started_config["campaign_output_root"]).endswith("qualification_campaigns")
+    assert str(controller.started_config["suite_output_root"]).endswith("qualification")
+    assert controller.started_config["continue_on_failure"] is True
+    assert window.campaign_queue_table.item(0, 0).text() == "In progress"
+
+    window._set_run_busy(False)
     window.close()
 
 
@@ -172,10 +243,10 @@ def test_run_tab_populates_selected_suite_test_plan(tmp_path, qapp):
     row = _plan_row_for_test(window, 2007)
 
     assert window.test_plan_table.item(row, 0).text() == "Not run"
-    assert window.test_plan_table.item(row, 2).text() == "Motion"
-    assert window.test_plan_table.item(row, 3).text() == "Motion home repeatability"
-    assert window.test_plan_table.item(row, 4).text() == "00:04"
-    assert "x_span" in window.test_plan_table.item(row, 7).text()
+    assert window.test_plan_table.item(row, 3).text() == "Motion"
+    assert window.test_plan_table.item(row, 4).text() == "Motion home repeatability"
+    assert window.test_plan_table.item(row, 5).text() == "00:04"
+    assert "x_span" in window.test_plan_table.item(row, 8).text()
 
     window.close()
 
@@ -201,7 +272,7 @@ def test_selftest_result_event_updates_row_and_advances_next_queued(tmp_path, qa
     main_window.popup_message = lambda *_args: None
     window = MachineQualificationWindow(main_window, _ReportController(tmp_path))
     window.suite_list.setCurrentRow(_suite_row(window, "factory_acceptance_v3"))
-    first_id = int(window.test_plan_table.item(0, 1).text())
+    first_id = int(window.test_plan_table.item(0, 2).text())
 
     window._set_all_plan_status("Queued")
     window._mark_next_queued_in_progress()
@@ -217,6 +288,70 @@ def test_selftest_result_event_updates_row_and_advances_next_queued(tmp_path, qa
 
     assert window.test_plan_table.item(0, 0).text() == "Passed"
     assert window.test_plan_table.item(1, 0).text() == "In progress"
+
+    window.close()
+
+
+def test_campaign_events_update_queue_and_scoped_test_rows(tmp_path, qapp):
+    _write_sample_report(tmp_path)
+    main_window = QtWidgets.QWidget()
+    main_window.popup_message = lambda *_args: None
+    window = MachineQualificationWindow(main_window, _ReportController(tmp_path))
+    window.campaign_list.setCurrentRow(_campaign_row(window, "machine_full_qualification_v1"))
+    qapp.processEvents()
+
+    window._set_all_campaign_status("Queued")
+    window._set_all_plan_status("Queued")
+    window._on_campaign_event(
+        {
+            "event": "campaign_step_started",
+            "step": {"index": 1, "manifest_id": "motion_envelope_v1"},
+        }
+    )
+
+    row_2012 = window._plan_row_by_key[(1, 2012)]
+    assert window.campaign_queue_table.item(0, 0).text() == "In progress"
+    assert window.test_plan_table.item(row_2012, 0).text() == "In progress"
+
+    window._on_selftest_event(
+        {
+            "schema": "selftest_event_v1",
+            "event": "selftest_result",
+            "campaign_step_index": 1,
+            "test_id": 2012,
+            "name": "motion_xy_long_reverse_travel_factory",
+            "pass": True,
+        }
+    )
+
+    assert window.test_plan_table.item(row_2012, 0).text() == "Passed"
+
+    child_report = {
+        "schema_version": "qualification_report_v1",
+        "results": [
+            {"test_id": 2012, "name": "motion_xy_long_reverse_travel_factory", "pass": True, "metrics": {}},
+            {"test_id": 2013, "name": "motion_xy_diagonal_travel_factory", "pass": True, "metrics": {}},
+        ],
+        "analysis": {
+            "items": [
+                {"item_kind": "firmware_result", "test_id": 2012, "status": "pass"},
+                {"item_kind": "firmware_result", "test_id": 2013, "status": "warning"},
+            ],
+            "metric_evaluations": [],
+        },
+        "warnings": [{"test_id": 2013, "message": "candidate warning"}],
+    }
+    window._on_campaign_event(
+        {
+            "event": "campaign_step_finished",
+            "step": {"index": 1, "manifest_id": "motion_envelope_v1"},
+            "step_result": {"index": 1, "status": "pass", "warning_count": 1, "report_path": "motion/report.json"},
+            "report": child_report,
+        }
+    )
+
+    assert window.campaign_queue_table.item(0, 0).text() == "Warning"
+    assert window.test_plan_table.item(window._plan_row_by_key[(1, 2013)], 0).text() == "Warning"
 
     window.close()
 
@@ -237,10 +372,10 @@ def test_run_tab_updates_elapsed_and_remaining_time_during_run(tmp_path, qapp):
     window._update_timing_display()
 
     assert window.elapsed_time_label.text() == "Elapsed: 00:03"
-    assert window.test_plan_table.item(0, 5).text() == "00:03"
+    assert window.test_plan_table.item(0, 6).text() == "00:03"
     assert "Expected remaining:" in window.remaining_time_label.text()
 
-    first_id = int(window.test_plan_table.item(0, 1).text())
+    first_id = int(window.test_plan_table.item(0, 2).text())
     window._on_selftest_event(
         {
             "schema": "selftest_event_v1",
@@ -251,7 +386,7 @@ def test_run_tab_updates_elapsed_and_remaining_time_during_run(tmp_path, qapp):
         }
     )
 
-    assert window.test_plan_table.item(0, 5).text() == "00:03"
+    assert window.test_plan_table.item(0, 6).text() == "00:03"
     assert window.test_plan_table.item(1, 0).text() == "In progress"
 
     window.close()

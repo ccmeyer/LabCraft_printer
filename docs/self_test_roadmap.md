@@ -968,6 +968,13 @@ Gripper seal stress qualification slice:
 - Gripper trace analysis is Python-derived from exported pressure traces. `raw_selftest.json` remains the MCU source of truth; `report.json` and `summary.csv` are enriched with baseline, end-of-pulse drop, post-pulse pressure, slope, noise, SNR, matrix, refresh, raster, and pre/post comparison summaries. Gripper stress traces use `sampleStride=5` (about `25 ms` spacing) and a longer cooperative export yield to keep long dummy-head pulse windows small enough for reliable MCU export.
 - Keep `gripper_seal_v1` as the quick local baseline and keep `gripper_seal_stress_v1` out of `factory_acceptance_v3` until enough dummy-head motion-stress data exists to set acceptance thresholds.
 
+Campaign runner backend slice:
+
+- Add `machine_full_qualification_v1` as a Python-only campaign that queues the production rigorous suites: `motion_envelope_v1`, `pressure_regulator_v1`, `valve_characterization_v1`, and `gripper_seal_stress_v1`.
+- Campaign execution calls the existing `run_qualification()` backend once per suite so fixture prompts, gripper teardown, trace artifact generation, and `qualification_report_v1` normalization stay owned by the suite runner.
+- Campaign artifacts live under `hil_reports/qualification_campaigns/<machine_id>/<timestamp>/` and reference the child suite report folders under `hil_reports/qualification/`; raw suite rows are not merged into one giant report.
+- The safe default stops after the first failed suite and marks remaining steps skipped. `--continue-on-failure` is available for deliberate bench investigation.
+
 Validation:
 
 ```powershell

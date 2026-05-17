@@ -66,6 +66,28 @@ If your repo venv is in `env` on Windows:
 .\env\Scripts\python.exe -m pytest -q
 ```
 
+## Qualification Campaign CLI
+
+The qualification campaign runner executes multiple existing qualification manifests in sequence and writes a parent campaign report while preserving each suite's normal report folder.
+
+Dry-run the default production rigorous campaign:
+
+```bash
+python tools/run_qualification_campaign.py --campaign machine_full_qualification_v1 --operator-prompts --dry-run
+```
+
+Run the campaign on the Pi serial port:
+
+```bash
+python tools/run_qualification_campaign.py --campaign machine_full_qualification_v1 --operator-prompts --port /dev/ttyAMA0
+```
+
+Outputs:
+
+- Suite reports: `hil_reports/qualification/<machine_id>/<timestamp>/`
+- Campaign report: `hil_reports/qualification_campaigns/<machine_id>/<timestamp>/campaign_report.json`
+- Campaign CSV: `hil_reports/qualification_campaigns/<machine_id>/<timestamp>/campaign_summary.csv`
+
 ## Firmware HIL + Camera Benchmark
 
 Run full firmware checks + Pi flash + selftest + optional camera benchmark:

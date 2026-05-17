@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from QualificationRunWorker import QualificationRunWorker
 
@@ -76,6 +77,15 @@ def _run_worker(worker):
     worker.run_finished.connect(lambda ok, msg, payload: finished.append((ok, msg, payload)))
     worker.run()
     return finished[0], stages, outputs
+
+
+def _run_worker_with_campaign_events(worker):
+    finished = []
+    events = []
+    worker.campaign_event.connect(events.append)
+    worker.run_finished.connect(lambda ok, msg, payload: finished.append((ok, msg, payload)))
+    worker.run()
+    return finished[0], events
 
 
 def test_worker_successful_fake_run_emits_final_report(tmp_path):
@@ -202,3 +212,78 @@ def test_worker_malformed_event_line_stays_output(qapp):
 
     assert events == []
     assert outputs == ["SELFTEST_EVENT {bad"]
+
+
+def test_campaign_worker_calls_campaign_runner_and_emits_events(tmp_path, qapp):
+    campaign_report = tmp_path / "campaign_report.json"
+    summary_csv = tmp_path / "campaign_summary.csv"
+    child_report = tmp_path / "qualification" / "LC-0001" / "run" / "report.json"
+    child_report.parent.mkdir(parents=True)
+    child_report.write_text("{}", encoding="utf-8")
+    captured = {}
+
+    def fake_campaign_runner(**kwargs):
+        captured.update(kwargs)
+        callback = kwargs["event_callback"]
+        callback({"event": "campaign_started", "campaign_id": "campaign"})
+        callback({"event": "campaign_step_started", "step": {"index": 1, "manifest_id": "motion_envelope_v1"}})
+        callback(
+            {
+                "event": "campaign_step_finished",
+                "step": {"index": 1, "manifest_id": "motion_envelope_v1"},
+                "step_result": {"index": 1, "status": "pass", "report_path": str(child_report)},
+                "report": {"overall_status": "pass", "warnings": []},
+            }
+        )
+        callback({"event": "campaign_finished", "status": "pass", "campaign_report_path": str(campaign_report)})
+        return SimpleNamespace(
+            returncode=0,
+            campaign_dir=tmp_path,
+            report_path=campaign_report,
+            summary_csv_path=summary_csv,
+            report={"overall_status": "pass", "steps": [{"report_path": str(child_report)}]},
+        )
+
+    worker = QualificationRunWorker(
+        {
+            "run_kind": "campaign",
+            "campaign_ref": "machine_full_qualification_v1",
+            "port": "COM9",
+            "baud": 57600,
+            "machine_id": "LC-0001",
+            "identity_path": tmp_path / "local" / "machine_identity.json",
+            "campaign_output_root": tmp_path / "campaigns",
+            "suite_output_root": tmp_path / "qualification",
+            "operator_prompts": True,
+            "continue_on_failure": True,
+        },
+        repo_root=REPO_ROOT,
+        campaign_runner=fake_campaign_runner,
+    )
+
+    (ok, _msg, payload), events = _run_worker_with_campaign_events(worker)
+
+    assert ok is True
+    assert payload["run_kind"] == "campaign"
+    assert payload["campaign_report_path"] == str(campaign_report)
+    assert payload["report_path"] == str(child_report)
+    assert captured["continue_on_failure"] is True
+    assert [event["event"] for event in events] == [
+        "campaign_started",
+        "campaign_step_started",
+        "campaign_step_finished",
+        "campaign_finished",
+    ]
+
+
+def test_campaign_worker_enriches_selftest_events_with_active_step(qapp):
+    worker = QualificationRunWorker({}, repo_root=REPO_ROOT)
+    events = []
+    worker.selftest_event.connect(events.append)
+    worker._handle_campaign_event({"event": "campaign_step_started", "step": {"index": 3, "manifest_id": "valve_characterization_v1"}})
+    worker._handle_selftest_output_line(
+        'SELFTEST_EVENT {"schema":"selftest_event_v1","event":"selftest_result","test_id":2473,"pass":true}'
+    )
+
+    assert events[0]["campaign_step_index"] == 3
+    assert events[0]["manifest_id"] == "valve_characterization_v1"
