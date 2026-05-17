@@ -17,6 +17,7 @@ def test_discover_suite_entries_lists_current_manifests():
         "factory_acceptance_v2",
         "factory_acceptance_v3",
         "gripper_seal_v1",
+        "gripper_seal_stress_v1",
         "xy_motion_v1",
         "motion_envelope_v1",
         "pressure_regulator_v1",
@@ -27,11 +28,11 @@ def test_discover_suite_entries_lists_current_manifests():
     assert [entry.manifest_id for entry in entries[:7]] == [
         "factory_acceptance_v3",
         "gripper_seal_v1",
+        "gripper_seal_stress_v1",
         "xy_motion_v1",
         "motion_envelope_v1",
         "pressure_regulator_v1",
         "valve_characterization_v1",
-        "valve_gap_sweep_v1",
     ]
 
 
@@ -55,6 +56,24 @@ def test_gripper_suite_exposes_operator_fixture_requirement():
     rows = build_test_plan_rows(gripper)
     assert [row.test_id for row in rows] == [2501, 2502, 2503]
     assert all(row.subsystem == "Gripper" for row in rows)
+
+
+def test_gripper_stress_suite_exposes_operator_fixture_and_catalog_rows():
+    entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
+    gripper = entries["gripper_seal_stress_v1"].manifest
+
+    assert gripper.requires_operator_prompts is True
+    assert required_fixture_ids(gripper) == ("dummy_blocked_head_motion_v1",)
+    rows = {row.test_id: row for row in build_test_plan_rows(gripper)}
+    assert list(rows) == [2510, 2511, 2512, 2513]
+    assert rows[2510].name == "Gripper static pressure matrix"
+    assert rows[2511].name == "Gripper refreshed 3 psi hold"
+    assert rows[2512].name == "Gripper raster motion stress"
+    assert rows[2513].name == "Gripper post-motion seal compare"
+    assert all(row.subsystem == "Gripper" for row in rows.values())
+    assert "xy_home_to" in rows[2512].metrics
+    assert "384-well XY raster" in rows[2512].evaluates
+    assert "pre/post raster" in rows[2513].evaluates
 
 
 def test_xy_motion_suite_exposes_operator_fixture_and_catalog_rows():

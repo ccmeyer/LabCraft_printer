@@ -37,6 +37,8 @@ public:
   void stopPump();
   /// Stop pump refresh
   void stopRefresh();
+  /// Resume background refresh without issuing an immediate open/close pulse
+  void startRefresh();
   /// Force gripper hardware to a safe idle state
   void forceOff();
 
@@ -101,6 +103,7 @@ void MX_GRIPPER_Open(void);
 void MX_GRIPPER_Close(void);
 void MX_GRIPPER_StopPump(void);
 void MX_GRIPPER_StopRefresh(void);
+void MX_GRIPPER_StartRefresh(void);
 void MX_GRIPPER_ForceOff(void);
 
 void     MX_GRIPPER_SetRefreshPeriodMs(uint32_t ms);

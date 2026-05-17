@@ -1,0 +1,97 @@
+{
+  "schema_version": "qualification_manifest_v0",
+  "manifest_id": "gripper_seal_stress_v1",
+  "name": "Gripper Seal Stress v1",
+  "profile": "FULL",
+  "description": "Operator-gated dummy-head gripper seal stress suite with higher pressure challenges, normal refresh behavior, and print-like XY raster motion.",
+  "expected_test_ids": [
+    2510,
+    2511,
+    2512,
+    2513
+  ],
+  "enforce_expected_test_ids": true,
+  "requires_operator_prompts": true,
+  "selftest_args": [
+    "--gripper-seal-stress-suite",
+    "--pressure-trace"
+  ],
+  "fixtures": [
+    {
+      "fixture_id": "dummy_blocked_head_motion_v1",
+      "required_for": [2510, 2511, 2512, 2513],
+      "operator_note": "Run locally only with the dummy blocked printer head loaded and supported when prompted. Keep the operator physically present, verify the clear XY envelope, and provide a soft support/catch path before release."
+    }
+  ],
+  "analysis_rules": {
+    "2510": {
+      "category": "gripper",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "pulse_ms": {"maturity": "candidate", "equals": 2000},
+        "pulses": {"maturity": "candidate", "min": 18},
+        "ready": {"maturity": "candidate", "equals": 0},
+        "timeout": {"maturity": "candidate", "equals": 0},
+        "focus": {"maturity": "candidate", "equals": 1},
+        "trace": {"maturity": "candidate", "equals": 1},
+        "d1": {"maturity": "informational"},
+        "d2": {"maturity": "informational"},
+        "d3": {"maturity": "informational"},
+        "d3_max": {"maturity": "candidate", "max": 250},
+        "rej_py": {"maturity": "candidate", "equals": 0}
+      }
+    },
+    "2511": {
+      "category": "gripper",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "psi": {"maturity": "candidate", "equals": 3000},
+        "refresh_ms": {"maturity": "candidate", "equals": 30000},
+        "pulse_int": {"maturity": "candidate", "equals": 10000},
+        "ready": {"maturity": "candidate", "equals": 0},
+        "timeout": {"maturity": "candidate", "equals": 0},
+        "focus": {"maturity": "candidate", "equals": 1},
+        "trace": {"maturity": "candidate", "equals": 1},
+        "drop_mean": {"maturity": "informational"},
+        "drop_span": {"maturity": "candidate", "max": 250},
+        "rej_py": {"maturity": "candidate", "equals": 0}
+      }
+    },
+    "2512": {
+      "category": "gripper",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "psi": {"maturity": "candidate", "equals": 3000},
+        "xy_home_to": {"maturity": "candidate", "equals": 0},
+        "move_to": {"maturity": "candidate", "equals": 0},
+        "guard": {"maturity": "candidate", "equals": 0},
+        "bound": {"maturity": "candidate", "equals": 0},
+        "ready": {"maturity": "candidate", "equals": 0},
+        "timeout": {"maturity": "candidate", "equals": 0},
+        "focus": {"maturity": "candidate", "equals": 1},
+        "trace": {"maturity": "candidate", "equals": 1},
+        "drop_mean": {"maturity": "informational"},
+        "drop_span": {"maturity": "candidate", "max": 300},
+        "rej_py": {"maturity": "candidate", "equals": 0}
+      }
+    },
+    "2513": {
+      "category": "gripper",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "psi": {"maturity": "candidate", "equals": 3000},
+        "ready": {"maturity": "candidate", "equals": 0},
+        "timeout": {"maturity": "candidate", "equals": 0},
+        "focus": {"maturity": "candidate", "equals": 1},
+        "trace": {"maturity": "candidate", "equals": 1},
+        "p_pre": {"maturity": "informational"},
+        "p_post": {"maturity": "informational"},
+        "p_delta": {"maturity": "candidate", "max": 150},
+        "r_pre": {"maturity": "informational"},
+        "r_post": {"maturity": "informational"},
+        "r_delta": {"maturity": "candidate", "max": 150},
+        "rej_py": {"maturity": "candidate", "equals": 0}
+      }
+    }
+  }
+}

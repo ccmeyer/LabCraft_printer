@@ -14,6 +14,11 @@ from .artifacts import RunArtifacts, create_run_artifacts
 from .identity import DEFAULT_IDENTITY_PATH, load_or_create_identity
 from .manifest import QualificationManifest, load_manifest
 from .report import write_json_atomic, write_qualification_artifacts
+from .gripper_trace_artifacts import (
+    GripperTraceArtifacts,
+    enrich_raw_selftest_with_gripper_metrics,
+    generate_gripper_trace_artifacts,
+)
 from .valve_trace_artifacts import (
     ValveTraceArtifacts,
     enrich_raw_selftest_with_valve_metrics,
@@ -21,6 +26,7 @@ from .valve_trace_artifacts import (
 )
 
 DEFAULT_MANIFEST_REF = "factory_acceptance_v3"
+GRIPPER_OPERATOR_MANIFEST_IDS = {"gripper_seal_v1", "gripper_seal_stress_v1"}
 
 
 @dataclass(frozen=True)
@@ -271,6 +277,39 @@ def _maybe_generate_valve_trace_artifacts(manifest: QualificationManifest, artif
     return None
 
 
+def _maybe_generate_gripper_trace_artifacts(manifest: QualificationManifest, artifacts: RunArtifacts) -> GripperTraceArtifacts | None:
+    if manifest.manifest_id != "gripper_seal_stress_v1":
+        return None
+    try:
+        return generate_gripper_trace_artifacts(artifacts)
+    except Exception as exc:
+        error_dir = artifacts.plots_dir / "gripper_seal_stress"
+        error_dir.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(
+            error_dir / "gripper_trace_artifact_error.json",
+            {
+                "schema_version": "gripper_trace_artifact_error_v1",
+                "error": str(exc),
+            },
+        )
+    return None
+
+
+def _enrich_raw_selftest_with_trace_metrics(
+    raw_selftest: dict,
+    valve_artifacts: ValveTraceArtifacts | None,
+    gripper_artifacts: GripperTraceArtifacts | None,
+) -> dict:
+    report_raw_selftest = enrich_raw_selftest_with_valve_metrics(
+        raw_selftest,
+        None if valve_artifacts is None else valve_artifacts.report_metrics,
+    )
+    return enrich_raw_selftest_with_gripper_metrics(
+        report_raw_selftest,
+        None if gripper_artifacts is None else gripper_artifacts.report_metrics,
+    )
+
+
 def run_qualification(
     *,
     manifest_ref: str | Path = DEFAULT_MANIFEST_REF,
@@ -295,16 +334,14 @@ def run_qualification(
     interactions: list[dict] = []
     preflight_host_checks: list[dict] = []
     fixture_id = str(fixture_id or "").strip() or None
-    gripper_seal_manifest = manifest.manifest_id == "gripper_seal_v1"
+    gripper_seal_manifest = manifest.manifest_id in GRIPPER_OPERATOR_MANIFEST_IDS
 
     if raw_report_path is not None:
         source_path = Path(raw_report_path)
         raw_selftest = json.loads(source_path.read_text(encoding="utf-8"))
         valve_artifacts = _maybe_generate_valve_trace_artifacts(manifest, artifacts)
-        report_raw_selftest = enrich_raw_selftest_with_valve_metrics(
-            raw_selftest,
-            None if valve_artifacts is None else valve_artifacts.report_metrics,
-        )
+        gripper_artifacts = _maybe_generate_gripper_trace_artifacts(manifest, artifacts)
+        report_raw_selftest = _enrich_raw_selftest_with_trace_metrics(raw_selftest, valve_artifacts, gripper_artifacts)
         report = write_qualification_artifacts(
             report_raw_selftest,
             manifest,
@@ -501,10 +538,8 @@ def run_qualification(
         raw_selftest["host_checks"] = host_checks
 
     valve_artifacts = _maybe_generate_valve_trace_artifacts(manifest, artifacts)
-    report_raw_selftest = enrich_raw_selftest_with_valve_metrics(
-        raw_selftest,
-        None if valve_artifacts is None else valve_artifacts.report_metrics,
-    )
+    gripper_artifacts = _maybe_generate_gripper_trace_artifacts(manifest, artifacts)
+    report_raw_selftest = _enrich_raw_selftest_with_trace_metrics(raw_selftest, valve_artifacts, gripper_artifacts)
 
     report = write_qualification_artifacts(
         report_raw_selftest,

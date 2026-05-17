@@ -176,6 +176,13 @@ void Gripper::stopRefresh() {
   HAL_GPIO_WritePin(_pumpPort, _pumpPin, GPIO_PIN_RESET);
 }
 
+void Gripper::startRefresh() {
+  _refreshEnabled = true;
+  if (_refreshTimer) {
+    xTimerStart(_refreshTimer, 0);
+  }
+}
+
 void Gripper::forceOff() {
   _refreshEnabled = false;
   if (_refreshTimer) {
@@ -329,6 +336,7 @@ void MX_GRIPPER_Init(void) {
 void MX_GRIPPER_Open(void)  { Gripper::instance().open(); }
 void MX_GRIPPER_Close(void) { Gripper::instance().close(); }
 void MX_GRIPPER_StopRefresh(void) { Gripper::instance().stopRefresh(); }
+void MX_GRIPPER_StartRefresh(void) { Gripper::instance().startRefresh(); }
 void MX_GRIPPER_StopPump(void)    { Gripper::instance().stopPump(); }
 void MX_GRIPPER_ForceOff(void)    { Gripper::instance().forceOff(); }
 

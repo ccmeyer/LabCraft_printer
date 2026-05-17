@@ -102,6 +102,10 @@ static constexpr DiagnosticTestDescriptor kDiagnosticTests[] = {
     {2501u, "gripper_seal_closed_decay_factory", "gripper", "FULL", "explicit_selection"},
     {2502u, "gripper_seal_hold_duration_factory", "gripper", "FULL", "explicit_selection"},
     {2503u, "gripper_seal_repeatability_factory", "gripper", "FULL", "explicit_selection"},
+    {2510u, "gripper_static_pressure_matrix_factory", "gripper", "FULL", "explicit_selection"},
+    {2511u, "gripper_refresh_hold_3psi_factory", "gripper", "FULL", "explicit_selection"},
+    {2512u, "gripper_motion_raster_3psi_factory", "gripper", "FULL", "explicit_selection"},
+    {2513u, "gripper_post_motion_seal_compare_factory", "gripper", "FULL", "explicit_selection"},
     {2006u, "emergency_abort_and_safe_stop_full", "safety", "FULL", "safe_gate_or_full"},
     {2101u, "pressure_recovery_trace_print_single", "pressure_trace", "FULL", "explicit_flag"},
     {2102u, "pressure_recovery_trace_print_repeated", "pressure_trace", "FULL", "explicit_flag"},
@@ -180,6 +184,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
         (request.selectedDiagnosticId != 0u) ? request.selectedDiagnosticId : request.selectedPressureTraceTest;
     const uint16_t selectedPressureTraceTest = request.selectedPressureTraceTest;
     const bool runGripperSealSuite = (selectedDiagnosticId == 2500u);
+    const bool runGripperSealStressSuite = (selectedDiagnosticId == 2599u);
     const bool runXyMotionSuite = (selectedDiagnosticId == 2009u);
     const bool runMotionEnvelopeSuite = (selectedDiagnosticId == 2019u);
     const bool runPressureRegulatorSuite = (selectedDiagnosticId == 2299u);
@@ -193,7 +198,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
     const bool runSinglePressureTraceSelection =
         (selectedPressureTraceTest >= 2101u) && (selectedPressureTraceTest <= 2104u);
                   auto shouldRunPressureTraceCase = [&](uint16_t testId) {
-                    if (runPressureSweepCore || runPressureSweepExtended || runPressureSweepFocused || runPressureSweepMicro || runGripperSealSuite || runXyMotionSuite || runMotionEnvelopeSuite || runPressureRegulatorSuite || runValveCharacterizationSuite || runValveGapSweepSuite) {
+                    if (runPressureSweepCore || runPressureSweepExtended || runPressureSweepFocused || runPressureSweepMicro || runGripperSealSuite || runGripperSealStressSuite || runXyMotionSuite || runMotionEnvelopeSuite || runPressureRegulatorSuite || runValveCharacterizationSuite || runValveGapSweepSuite) {
                       return false;
                     }
                     if (runSinglePressureTraceSelection) {
@@ -850,6 +855,718 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 					    return pClosed;
 					#endif
 					  };
+
+                      if (runGripperSealStressSuite) {
+                        static constexpr uint32_t kStressPulseMs = 2000u;
+                        static constexpr uint32_t kStressPulseTickUs = 100u;
+                        static constexpr uint32_t kStressTracePreRollMs = 250u;
+                        static constexpr uint32_t kStressTracePostRollMs = 250u;
+                        static constexpr uint32_t kStressReadyTimeoutMs = 9000u;
+                        static constexpr uint32_t kStressFreshSampleTimeoutMs = 80u;
+                        static constexpr uint32_t kStressRefreshMs = 30000u;
+                        static constexpr uint32_t kStressPulseIntervalMs = 10000u;
+                        static constexpr uint32_t kStressRefreshHoldMs = 90000u;
+                        static constexpr uint32_t kStressRegHomeFastHz = 30000u;
+                        static constexpr uint32_t kStressRegHomeSlowHz = 3000u;
+                        static constexpr uint32_t kStressRegHomeBackoffSteps = 400u;
+                        static constexpr uint32_t kStressRegHomeTimeoutMs = 20000u;
+                        static constexpr uint32_t kStressXyHomeFastHz = 30000u;
+                        static constexpr uint32_t kStressXyHomeSlowHz = 3000u;
+                        static constexpr uint32_t kStressXyHomeBackoffSteps = 400u;
+                        static constexpr uint32_t kStressXyHomeTimeoutMs = 20000u;
+                        static constexpr int32_t kStressMaxX = 45000;
+                        static constexpr int32_t kStressMaxY = 35000;
+                        static constexpr int32_t kStressCableGuardMinY = 500;
+                        static constexpr int32_t kStressPlateStartX = 43000;
+                        static constexpr int32_t kStressPlateStartY = 13000;
+                        static constexpr int32_t kStressPlateEndX = 33000;
+                        static constexpr int32_t kStressPlateEndY = 30000;
+                        static constexpr uint32_t kStressPlateRows = 16u;
+                        static constexpr uint32_t kStressPlateCols = 24u;
+                        static constexpr uint32_t kStressPlateFeedHz = 6000u;
+                        static constexpr uint32_t kStressPlateMoveTimeoutMs = 12000u;
+                        static constexpr uint32_t kStressTargetRaw1Psi = 2512u;
+                        static constexpr uint32_t kStressTargetRaw2Psi = 3386u;
+                        static constexpr uint32_t kStressTargetRaw3Psi = 4259u;
+
+                        struct GripperStressRowSummary {
+                          uint32_t pulses = 0u;
+                          uint32_t ready = 0u;
+                          uint32_t timeout = 0u;
+                          uint32_t freshTo = 0u;
+                          uint32_t sc = 0u;
+                          uint32_t ec = 0u;
+                          uint32_t traceFail = 0u;
+                          bool pass = true;
+                        };
+
+                        auto closeStressPressurePath = [&]() {
+                          if (Printer::instance() != nullptr) {
+                            Printer::instance()->endDiagnosticLongPulse();
+                          }
+                          if (PressureSensor::instance() != nullptr) {
+                            PressureSensor::instance()->endDiagnosticFocus();
+                          }
+                          PressureRegulator::regP().pause();
+                          PressureRegulator::regP().closeValve();
+#if (LC_PRESSURE_PORTS > 1)
+                          PressureRegulator::regR().pause();
+                          PressureRegulator::regR().closeValve();
+#endif
+                        };
+
+                        auto waitStressRegulatorHome = [&](EventBits_t doneBits,
+                                                           uint32_t timeoutMs) -> bool {
+                          const uint32_t startMs = HAL_GetTick();
+                          while ((HAL_GetTick() - startMs) < timeoutMs) {
+                            Watchdog_CheckIn(CRASH_TASK_ORCH);
+                            maybeSendProgress("gripper_stress_reg_home");
+                            if (_selfTestAbortRequested) {
+                              return false;
+                            }
+                            const EventBits_t observed = xEventGroupGetBits(_doneEvents);
+                            if ((observed & doneBits) == doneBits) {
+                              return true;
+                            }
+                            vTaskDelay(msToAtLeast1Tick(25u));
+                          }
+                          return false;
+                        };
+
+                        auto homeStressPressureRegulators = [&]() -> bool {
+                          closeStressPressurePath();
+                          sendProgressStage("gripper_stress_reg_home");
+                          EventBits_t homeBits = BIT_HOME_P_DONE;
+#if (LC_PRESSURE_PORTS > 1)
+                          homeBits |= BIT_HOME_R_DONE;
+#endif
+                          xEventGroupClearBits(_doneEvents, homeBits);
+                          startRegHomeAsync(&PressureRegulator::regP(),
+                                            kStressRegHomeFastHz,
+                                            kStressRegHomeSlowHz,
+                                            kStressRegHomeBackoffSteps,
+                                            BIT_HOME_P_DONE);
+#if (LC_PRESSURE_PORTS > 1)
+                          startRegHomeAsync(&PressureRegulator::regR(),
+                                            kStressRegHomeFastHz,
+                                            kStressRegHomeSlowHz,
+                                            kStressRegHomeBackoffSteps,
+                                            BIT_HOME_R_DONE);
+#endif
+                          const bool homesDone = waitStressRegulatorHome(homeBits, kStressRegHomeTimeoutMs);
+                          bool homeOk = homesDone &&
+                              (Stepper::stepperP() != nullptr) &&
+                              Stepper::stepperP()->getLastHomeDiagnosticSnapshot().success;
+#if (LC_PRESSURE_PORTS > 1)
+                          homeOk = homeOk &&
+                              (Stepper::stepperR() != nullptr) &&
+                              Stepper::stepperR()->getLastHomeDiagnosticSnapshot().success;
+#endif
+                          closeStressPressurePath();
+                          return homeOk && !_selfTestAbortRequested;
+                        };
+
+                        auto waitFreshStressSample = [&](uint8_t channel, uint32_t timeoutMs) -> bool {
+                          PressureSensor* sensor = PressureSensor::instance();
+                          if (sensor == nullptr) {
+                            return false;
+                          }
+                          const uint32_t priorTick = sensor->getControlSample(channel).tickMs;
+                          const uint32_t startTick = HAL_GetTick();
+                          while (!_selfTestAbortRequested && ((HAL_GetTick() - startTick) < timeoutMs)) {
+                            Watchdog_CheckIn(CRASH_TASK_ORCH);
+                            const auto sample = sensor->getControlSample(channel);
+                            if (sample.valid && sample.tickMs != priorTick) {
+                              return true;
+                            }
+                            vTaskDelay(msToAtLeast1Tick(1u));
+                          }
+                          return false;
+                        };
+
+                        auto recordStressTraceEvent = [&](PressureTraceChannel traceChannel,
+                                                          PressureTraceEventType type,
+                                                          uint16_t value0,
+                                                          uint16_t value1,
+                                                          uint32_t traceStartTick) {
+                          const uint32_t dt = HAL_GetTick() - traceStartTick;
+                          PressureTraceEvent event{};
+                          event.dtMs = static_cast<uint16_t>((dt > 0xFFFFu) ? 0xFFFFu : dt);
+                          event.type = static_cast<uint8_t>(type);
+                          event.value0 = value0;
+                          event.value1 = value1;
+                          PressureTraceRecorder::instance().recordEvent(traceChannel, event);
+                        };
+
+                        auto prepareStressPressure = [&](uint16_t targetRaw,
+                                                         GripperStressRowSummary& row) -> bool {
+                          PressureRegulator::regP().closeValve();
+                          PressureRegulator::regP().start();
+#if (LC_PRESSURE_PORTS > 1)
+                          PressureRegulator::regR().closeValve();
+                          PressureRegulator::regR().start();
+#endif
+                          xEventGroupClearBits(_doneEvents, BIT_PRESSURE_P_READY
+#if (LC_PRESSURE_PORTS > 1)
+                              | BIT_PRESSURE_R_READY
+#endif
+                          );
+                          PressureRegulator::regP().setTargetSafe(targetRaw);
+#if (LC_PRESSURE_PORTS > 1)
+                          PressureRegulator::regR().setTargetSafe(targetRaw);
+#endif
+                          const PressureWaitResult pWait = waitPressureReady(PressureRegulator::regP(),
+                                                                              0u,
+                                                                              targetRaw,
+                                                                              true,
+                                                                              kStressReadyTimeoutMs);
+                          bool readyOk = pWait.accepted;
+#if (LC_PRESSURE_PORTS > 1)
+                          const PressureWaitResult rWait = waitPressureReady(PressureRegulator::regR(),
+                                                                              1u,
+                                                                              targetRaw,
+                                                                              true,
+                                                                              kStressReadyTimeoutMs);
+                          readyOk = readyOk && rWait.accepted;
+#endif
+                          if (!readyOk) {
+                            row.ready++;
+                            row.pass = false;
+                          }
+                          return readyOk;
+                        };
+
+                        auto configureStressTrace = [&](uint8_t channel) {
+                          auto& recorder = PressureTraceRecorder::instance();
+                          recorder.reset();
+                          PressureTraceConfig traceCfg{};
+                          traceCfg.channel = (channel == 0u) ? PressureTraceChannel::Print : PressureTraceChannel::Refuel;
+                          traceCfg.maxSamples = PressureTraceRecorder::kMaxSamples;
+                          traceCfg.maxEvents = PressureTraceRecorder::kMaxEvents;
+                          traceCfg.preRollMs = static_cast<uint16_t>(kStressTracePreRollMs);
+                          traceCfg.postRollMs = static_cast<uint16_t>(kStressTracePostRollMs);
+                          recorder.configure(traceCfg);
+                          return traceCfg;
+                        };
+
+                        auto finishStressTrace = [&](uint16_t testId,
+                                                     const char* traceName,
+                                                     bool traceOk,
+                                                     GripperStressRowSummary& row) -> bool {
+                          auto& recorder = PressureTraceRecorder::instance();
+                          row.sc += recorder.sampleCount();
+                          row.ec += recorder.eventCount();
+                          if (!traceOk) {
+                            row.traceFail++;
+                            row.pass = false;
+                          }
+                          if (!exportTrace(testId, traceName, traceOk)) {
+                            row.traceFail++;
+                            row.pass = false;
+                            return false;
+                          }
+                          return true;
+                        };
+
+                        auto runStressTracePulse = [&](uint16_t testId,
+                                                       const char* traceName,
+                                                       uint8_t channel,
+                                                       uint16_t targetRaw,
+                                                       GripperStressRowSummary& row,
+                                                       const char* stage) -> bool {
+                          Printer* printer = Printer::instance();
+                          PressureSensor* sensor = PressureSensor::instance();
+                          if (printer == nullptr || sensor == nullptr) {
+                            row.ready++;
+                            row.pass = false;
+                            return true;
+                          }
+                          if (!prepareStressPressure(targetRaw, row)) {
+                            return true;
+                          }
+                          PressureRegulator::regP().pause();
+#if (LC_PRESSURE_PORTS > 1)
+                          PressureRegulator::regR().pause();
+#endif
+                          const bool focusOk = sensor->beginDiagnosticFocus(channel);
+                          if (!focusOk) {
+                            row.ready++;
+                            row.pass = false;
+                            return true;
+                          }
+                          const PressureTraceConfig traceCfg = configureStressTrace(channel);
+                          auto& recorder = PressureTraceRecorder::instance();
+                          recorder.arm();
+                          const uint32_t traceStartTick = HAL_GetTick();
+                          recorder.start(traceStartTick);
+                          bool timeout = !delayWithWatchdog(traceCfg.preRollMs, stage);
+                          bool freshOk = false;
+                          if (!timeout && !_selfTestAbortRequested) {
+                            freshOk = waitFreshStressSample(channel, kStressFreshSampleTimeoutMs);
+                            if (!freshOk) {
+                              row.freshTo++;
+                            }
+                          }
+                          if (!timeout && freshOk && !_selfTestAbortRequested) {
+                            const PressureTraceChannel traceChannel = traceCfg.channel;
+                            recordStressTraceEvent(traceChannel,
+                                                   PressureTraceEventType::PulseStart,
+                                                   static_cast<uint16_t>(kStressPulseMs),
+                                                   sensor->getLatestRaw(channel),
+                                                   traceStartTick);
+                            const bool started = printer->beginDiagnosticLongPulse(PulseMode::BOTH,
+                                                                                   kStressPulseMs,
+                                                                                   kStressPulseTickUs);
+                            if (!started) {
+                              timeout = true;
+                            } else {
+                              timeout = !delayWithWatchdog(kStressPulseMs, stage);
+                            }
+                            printer->endDiagnosticLongPulse();
+                            recordStressTraceEvent(traceChannel,
+                                                   PressureTraceEventType::PulseEnd,
+                                                   static_cast<uint16_t>(kStressPulseMs),
+                                                   sensor->getLatestRaw(channel),
+                                                   traceStartTick);
+                          }
+                          if (!timeout && !_selfTestAbortRequested) {
+                            timeout = !delayWithWatchdog(traceCfg.postRollMs, stage);
+                          }
+                          recorder.stop(HAL_GetTick());
+                          sensor->endDiagnosticFocus();
+                          row.pulses++;
+                          if (timeout || _selfTestAbortRequested) {
+                            row.timeout++;
+                            row.pass = false;
+                          }
+                          const bool traceOk = !timeout && freshOk && (recorder.sampleCount() > 0u) && (recorder.eventCount() > 0u);
+                          return finishStressTrace(testId, traceName, traceOk, row);
+                        };
+
+                        auto emitStressSetupFailureRows = [&](const char* gate) -> bool {
+                          char metrics[160];
+                          snprintf(metrics, sizeof(metrics), "home_to=1;timeout=0;ready=1;trace=0;gate=%s", gate);
+                          if (!runOne(2510u, "gripper_static_pressure_matrix_factory", false, metrics)) return false;
+                          if (!runOne(2511u, "gripper_refresh_hold_3psi_factory", false, metrics)) return false;
+                          if (!runOne(2512u, "gripper_motion_raster_3psi_factory", false, metrics)) return false;
+                          return runOne(2513u, "gripper_post_motion_seal_compare_factory", false, metrics);
+                        };
+
+                        Printer* printer = Printer::instance();
+                        PressureSensor* sensor = PressureSensor::instance();
+                        if (!homeStressPressureRegulators() || printer == nullptr || sensor == nullptr) {
+                          closeStressPressurePath();
+                          if (_selfTestAbortRequested) {
+                            aborted = true;
+                            return finishSelfTestNow();
+                          }
+                          (void)emitStressSetupFailureRows("home_reference");
+                          return finishSelfTestNow();
+                        }
+
+                        const uint32_t originalRefreshMs = MX_GRIPPER_GetRefreshPeriodMs();
+                        MX_GRIPPER_SetRefreshPeriodMs(kStressRefreshMs);
+                        xEventGroupClearBits(_doneEvents, BIT_GRIPPER_DONE);
+                        MX_GRIPPER_Close();
+                        const bool gripperClosed = waitBitsWithTimeout(BIT_GRIPPER_DONE, 7000u);
+                        MX_GRIPPER_StopRefresh();
+                        if (!gripperClosed) {
+                          MX_GRIPPER_SetRefreshPeriodMs(originalRefreshMs);
+                          closeStressPressurePath();
+                          (void)emitStressSetupFailureRows("gripper_close");
+                          return finishSelfTestNow();
+                        }
+
+                        GripperStressRowSummary row2510{};
+                        const uint16_t stressTargets[3] = {
+                            static_cast<uint16_t>(kStressTargetRaw1Psi),
+                            static_cast<uint16_t>(kStressTargetRaw2Psi),
+                            static_cast<uint16_t>(kStressTargetRaw3Psi),
+                        };
+                        const uint16_t stressPsiMilli[3] = {1000u, 2000u, 3000u};
+                        sendProgressStage("gripper_static_matrix");
+                        for (uint16_t pIdx = 0u; pIdx < 3u && !_selfTestAbortRequested; ++pIdx) {
+                          for (uint16_t rep = 1u; rep <= 3u && !_selfTestAbortRequested; ++rep) {
+                            for (uint8_t channel = 0u; channel < 2u && !_selfTestAbortRequested; ++channel) {
+                              char traceName[56];
+                              snprintf(traceName,
+                                       sizeof(traceName),
+                                       "grip_static_ch%c_psi%u_rep%02u",
+                                       (channel == 0u) ? 'p' : 'r',
+                                       static_cast<unsigned>(stressPsiMilli[pIdx]),
+                                       static_cast<unsigned>(rep));
+                              if (!runStressTracePulse(2510u,
+                                                       traceName,
+                                                       channel,
+                                                       stressTargets[pIdx],
+                                                       row2510,
+                                                       "gripper_static_pulse")) {
+                                aborted = true;
+                                return finishSelfTestNow();
+                              }
+                            }
+                          }
+                        }
+                        char metrics2510[224];
+                        snprintf(metrics2510,
+                                 sizeof(metrics2510),
+                                 "pulse_ms=%lu;tick_us=%lu;pulses=%lu;targets=1_2_3;ready=%lu;timeout=%lu;fresh_to=%lu;focus=1;trace=%u;sc=%lu;ec=%lu",
+                                 static_cast<unsigned long>(kStressPulseMs),
+                                 static_cast<unsigned long>(kStressPulseTickUs),
+                                 static_cast<unsigned long>(row2510.pulses),
+                                 static_cast<unsigned long>(row2510.ready),
+                                 static_cast<unsigned long>(row2510.timeout),
+                                 static_cast<unsigned long>(row2510.freshTo),
+                                 static_cast<unsigned>((row2510.traceFail == 0u) ? 1u : 0u),
+                                 static_cast<unsigned long>(row2510.sc),
+                                 static_cast<unsigned long>(row2510.ec));
+                        if (!runOne(2510u, "gripper_static_pressure_matrix_factory", row2510.pass, metrics2510)) {
+                          return finishSelfTestNow();
+                        }
+
+                        GripperStressRowSummary row2511{};
+                        MX_GRIPPER_SetRefreshPeriodMs(kStressRefreshMs);
+                        MX_GRIPPER_StartRefresh();
+                        sendProgressStage("gripper_refresh_hold");
+                        const uint32_t refreshStartMs = HAL_GetTick();
+                        uint16_t refreshSeq = 0u;
+                        while (!_selfTestAbortRequested && ((HAL_GetTick() - refreshStartMs) < kStressRefreshHoldMs)) {
+                          const uint32_t elapsedMs = HAL_GetTick() - refreshStartMs;
+                          if (elapsedMs < static_cast<uint32_t>(refreshSeq) * kStressPulseIntervalMs) {
+                            const uint32_t waitMs = (static_cast<uint32_t>(refreshSeq) * kStressPulseIntervalMs) - elapsedMs;
+                            if (!delayWithWatchdog((waitMs > 100u) ? 100u : waitMs, "gripper_refresh_wait")) {
+                              row2511.timeout++;
+                              row2511.pass = false;
+                              break;
+                            }
+                            continue;
+                          }
+                          refreshSeq++;
+                          const uint8_t channel = (refreshSeq % 2u == 0u) ? 1u : 0u;
+                          char traceName[56];
+                          snprintf(traceName,
+                                   sizeof(traceName),
+                                   "grip_refresh_ch%c_psi3000_seq%02u",
+                                   (channel == 0u) ? 'p' : 'r',
+                                   static_cast<unsigned>(refreshSeq));
+                          if (!runStressTracePulse(2511u,
+                                                   traceName,
+                                                   channel,
+                                                   static_cast<uint16_t>(kStressTargetRaw3Psi),
+                                                   row2511,
+                                                   "gripper_refresh_pulse")) {
+                            aborted = true;
+                            return finishSelfTestNow();
+                          }
+                          if (refreshSeq >= 9u) {
+                            break;
+                          }
+                        }
+                        char metrics2511[224];
+                        snprintf(metrics2511,
+                                 sizeof(metrics2511),
+                                 "psi=3000;pulse_ms=%lu;pulse_int=%lu;dur_ms=%lu;pulses=%lu;refresh_ms=%lu;refresh=%u;ready=%lu;timeout=%lu;fresh_to=%lu;focus=1;trace=%u;sc=%lu;ec=%lu",
+                                 static_cast<unsigned long>(kStressPulseMs),
+                                 static_cast<unsigned long>(kStressPulseIntervalMs),
+                                 static_cast<unsigned long>(kStressRefreshHoldMs),
+                                 static_cast<unsigned long>(row2511.pulses),
+                                 static_cast<unsigned long>(kStressRefreshMs),
+                                 static_cast<unsigned>(Gripper::instance().isRefreshing() ? 1u : 0u),
+                                 static_cast<unsigned long>(row2511.ready),
+                                 static_cast<unsigned long>(row2511.timeout),
+                                 static_cast<unsigned long>(row2511.freshTo),
+                                 static_cast<unsigned>((row2511.traceFail == 0u) ? 1u : 0u),
+                                 static_cast<unsigned long>(row2511.sc),
+                                 static_cast<unsigned long>(row2511.ec));
+                        if (!runOne(2511u, "gripper_refresh_hold_3psi_factory", row2511.pass, metrics2511)) {
+                          return finishSelfTestNow();
+                        }
+
+                        GripperStressRowSummary comparePre{};
+                        MX_GRIPPER_StopRefresh();
+                        for (uint8_t channel = 0u; channel < 2u && !_selfTestAbortRequested; ++channel) {
+                          char traceName[56];
+                          snprintf(traceName,
+                                   sizeof(traceName),
+                                   "grip_compare_ch%c_pre_psi3000",
+                                   (channel == 0u) ? 'p' : 'r');
+                          if (!runStressTracePulse(2513u,
+                                                   traceName,
+                                                   channel,
+                                                   static_cast<uint16_t>(kStressTargetRaw3Psi),
+                                                   comparePre,
+                                                   "gripper_compare_pre")) {
+                            aborted = true;
+                            return finishSelfTestNow();
+                          }
+                        }
+
+                        GripperStressRowSummary row2512{};
+                        uint32_t xyHomeTimeout = 0u;
+                        uint32_t moveTimeout = 0u;
+                        uint32_t guardViolation = 0u;
+                        uint32_t boundViolation = 0u;
+                        uint32_t moveCount = 0u;
+                        MotionQualificationMath::AxisHomeSample xStressHome{};
+                        MotionQualificationMath::AxisHomeSample yStressHome{};
+                        sendProgressStage("gripper_motion_xy_home");
+                        const bool xyHomeOk = runXyHomeDiagnosticAttempt(xStressHome,
+                                                                         yStressHome,
+                                                                         kStressXyHomeFastHz,
+                                                                         kStressXyHomeSlowHz,
+                                                                         kStressXyHomeBackoffSteps,
+                                                                         kStressXyHomeTimeoutMs);
+                        if (!xyHomeOk) {
+                          xyHomeTimeout = 1u;
+                          row2512.pass = false;
+                        } else {
+                          MX_GRIPPER_SetRefreshPeriodMs(kStressRefreshMs);
+                          MX_GRIPPER_StartRefresh();
+
+                          uint32_t routeIndex = 0u;
+                          const uint32_t totalPoints = kStressPlateRows * kStressPlateCols;
+                          uint16_t pulseSeq = 0u;
+                          auto nextRasterPoint = [&](int32_t& x, int32_t& y) -> bool {
+                            if (routeIndex >= totalPoints) {
+                              return false;
+                            }
+                            const uint32_t row = routeIndex / kStressPlateCols;
+                            const uint32_t colIdx = routeIndex % kStressPlateCols;
+                            const uint32_t col = ((row % 2u) == 0u) ? colIdx : (kStressPlateCols - 1u - colIdx);
+                            x = MotionQualificationMath::interpolateEndpoint(kStressPlateStartX,
+                                                                             kStressPlateEndX,
+                                                                             row,
+                                                                             kStressPlateRows);
+                            y = MotionQualificationMath::interpolateEndpoint(kStressPlateStartY,
+                                                                             kStressPlateEndY,
+                                                                             col,
+                                                                             kStressPlateCols);
+                            routeIndex++;
+                            return true;
+                          };
+                          auto pointSafe = [&](int32_t x, int32_t y) -> bool {
+                            if (x < 0 || y < 0 || x > kStressMaxX || y > kStressMaxY) {
+                              boundViolation++;
+                              return false;
+                            }
+                            if (x > 1000 && y < kStressCableGuardMinY) {
+                              guardViolation++;
+                              return false;
+                            }
+                            return true;
+                          };
+                          auto moveNextPoint = [&]() -> bool {
+                            int32_t x = 0;
+                            int32_t y = 0;
+                            if (!nextRasterPoint(x, y)) {
+                              return false;
+                            }
+                            if (!pointSafe(x, y)) {
+                              row2512.pass = false;
+                              return false;
+                            }
+                            if (!moveGantryToWithTimeout(x, y, kStressPlateFeedHz, kStressPlateMoveTimeoutMs)) {
+                              moveTimeout++;
+                              row2512.pass = false;
+                              return false;
+                            }
+                            moveCount++;
+                            return true;
+                          };
+
+                          sendProgressStage("gripper_motion_raster");
+                          const uint32_t rasterStartMs = HAL_GetTick();
+                          uint32_t nextPulseDueMs = 0u;
+                          while (!_selfTestAbortRequested && routeIndex < totalPoints) {
+                            const uint32_t elapsedMs = HAL_GetTick() - rasterStartMs;
+                            if (elapsedMs >= nextPulseDueMs) {
+                              pulseSeq++;
+                              const uint8_t channel = (pulseSeq % 2u == 0u) ? 1u : 0u;
+                              if (!prepareStressPressure(static_cast<uint16_t>(kStressTargetRaw3Psi), row2512)) {
+                                nextPulseDueMs += kStressPulseIntervalMs;
+                                continue;
+                              }
+                              PressureRegulator::regP().pause();
+#if (LC_PRESSURE_PORTS > 1)
+                              PressureRegulator::regR().pause();
+#endif
+                              const bool focusOk = sensor->beginDiagnosticFocus(channel);
+                              if (!focusOk) {
+                                row2512.ready++;
+                                row2512.pass = false;
+                                nextPulseDueMs += kStressPulseIntervalMs;
+                                continue;
+                              }
+                              const PressureTraceConfig traceCfg = configureStressTrace(channel);
+                              auto& recorder = PressureTraceRecorder::instance();
+                              recorder.arm();
+                              const uint32_t traceStartTick = HAL_GetTick();
+                              recorder.start(traceStartTick);
+                              bool timeout = !delayWithWatchdog(traceCfg.preRollMs, "gripper_motion_preroll");
+                              bool freshOk = false;
+                              if (!timeout && !_selfTestAbortRequested) {
+                                freshOk = waitFreshStressSample(channel, kStressFreshSampleTimeoutMs);
+                                if (!freshOk) {
+                                  row2512.freshTo++;
+                                }
+                              }
+                              int32_t pulseX = Stepper::stepperX()->getPosition();
+                              int32_t pulseY = Stepper::stepperY()->getPosition();
+                              if (!timeout && freshOk && !_selfTestAbortRequested) {
+                                const PressureTraceChannel traceChannel = traceCfg.channel;
+                                recordStressTraceEvent(traceChannel,
+                                                       PressureTraceEventType::PulseStart,
+                                                       static_cast<uint16_t>(kStressPulseMs),
+                                                       sensor->getLatestRaw(channel),
+                                                       traceStartTick);
+                                const bool started = printer->beginDiagnosticLongPulse(PulseMode::BOTH,
+                                                                                       kStressPulseMs,
+                                                                                       kStressPulseTickUs);
+                                if (!started) {
+                                  timeout = true;
+                                } else {
+                                  const uint32_t pulseStartMs = HAL_GetTick();
+                                  while (!_selfTestAbortRequested && ((HAL_GetTick() - pulseStartMs) < kStressPulseMs) && routeIndex < totalPoints) {
+                                    if (!moveNextPoint()) {
+                                      break;
+                                    }
+                                  }
+                                  const uint32_t elapsedPulseMs = HAL_GetTick() - pulseStartMs;
+                                  if (elapsedPulseMs < kStressPulseMs) {
+                                    timeout = !delayWithWatchdog(kStressPulseMs - elapsedPulseMs, "gripper_motion_pulse_wait");
+                                  }
+                                }
+                                printer->endDiagnosticLongPulse();
+                                pulseX = Stepper::stepperX()->getPosition();
+                                pulseY = Stepper::stepperY()->getPosition();
+                                recordStressTraceEvent(traceChannel,
+                                                       PressureTraceEventType::PulseEnd,
+                                                       static_cast<uint16_t>(kStressPulseMs),
+                                                       sensor->getLatestRaw(channel),
+                                                       traceStartTick);
+                              }
+                              if (!timeout && !_selfTestAbortRequested) {
+                                timeout = !delayWithWatchdog(traceCfg.postRollMs, "gripper_motion_postroll");
+                              }
+                              recorder.stop(HAL_GetTick());
+                              sensor->endDiagnosticFocus();
+                              row2512.pulses++;
+                              if (timeout || _selfTestAbortRequested) {
+                                row2512.timeout++;
+                                row2512.pass = false;
+                              }
+                              char traceName[72];
+                              snprintf(traceName,
+                                       sizeof(traceName),
+                                       "grip_motion_ch%c_psi3000_seq%02u_x%ld_y%ld",
+                                       (channel == 0u) ? 'p' : 'r',
+                                       static_cast<unsigned>(pulseSeq),
+                                       static_cast<long>(pulseX),
+                                       static_cast<long>(pulseY));
+                              const bool traceOk = !timeout && freshOk && (recorder.sampleCount() > 0u) && (recorder.eventCount() > 0u);
+                              if (!finishStressTrace(2512u, traceName, traceOk, row2512)) {
+                                aborted = true;
+                                return finishSelfTestNow();
+                              }
+                              nextPulseDueMs += kStressPulseIntervalMs;
+                            } else if (!moveNextPoint()) {
+                              break;
+                            }
+                          }
+                          while (!_selfTestAbortRequested && routeIndex < totalPoints && moveTimeout == 0u && guardViolation == 0u && boundViolation == 0u) {
+                            if (!moveNextPoint()) {
+                              break;
+                            }
+                          }
+                        }
+                        row2512.pass = row2512.pass &&
+                                       !_selfTestAbortRequested &&
+                                       (xyHomeTimeout == 0u) &&
+                                       (moveTimeout == 0u) &&
+                                       (guardViolation == 0u) &&
+                                       (boundViolation == 0u) &&
+                                       (row2512.ready == 0u) &&
+                                       (row2512.timeout == 0u) &&
+                                       (row2512.traceFail == 0u) &&
+                                       (row2512.pulses > 0u);
+                        char metrics2512[256];
+                        snprintf(metrics2512,
+                                 sizeof(metrics2512),
+                                 "psi=3000;pulse_ms=%lu;pulse_int=%lu;rows=%lu;cols=%lu;moves=%lu;pulses=%lu;xy_home_to=%lu;move_to=%lu;guard=%lu;bound=%lu;ready=%lu;timeout=%lu;fresh_to=%lu;focus=1;trace=%u;sc=%lu;ec=%lu",
+                                 static_cast<unsigned long>(kStressPulseMs),
+                                 static_cast<unsigned long>(kStressPulseIntervalMs),
+                                 static_cast<unsigned long>(kStressPlateRows),
+                                 static_cast<unsigned long>(kStressPlateCols),
+                                 static_cast<unsigned long>(moveCount),
+                                 static_cast<unsigned long>(row2512.pulses),
+                                 static_cast<unsigned long>(xyHomeTimeout),
+                                 static_cast<unsigned long>(moveTimeout),
+                                 static_cast<unsigned long>(guardViolation),
+                                 static_cast<unsigned long>(boundViolation),
+                                 static_cast<unsigned long>(row2512.ready),
+                                 static_cast<unsigned long>(row2512.timeout),
+                                 static_cast<unsigned long>(row2512.freshTo),
+                                 static_cast<unsigned>((row2512.traceFail == 0u) ? 1u : 0u),
+                                 static_cast<unsigned long>(row2512.sc),
+                                 static_cast<unsigned long>(row2512.ec));
+                        if (!runOne(2512u, "gripper_motion_raster_3psi_factory", row2512.pass, metrics2512)) {
+                          return finishSelfTestNow();
+                        }
+                        if (xyHomeTimeout != 0u || _selfTestAbortRequested) {
+                          char skipMetrics[160];
+                          snprintf(skipMetrics,
+                                   sizeof(skipMetrics),
+                                   "psi=3000;pulse_ms=%lu;pre=%lu;post=0;ready=0;timeout=0;fresh_to=0;focus=0;trace=0;sc=0;ec=0;gate=xy_home",
+                                   static_cast<unsigned long>(kStressPulseMs),
+                                   static_cast<unsigned long>(comparePre.pulses));
+                          (void)runOne(2513u, "gripper_post_motion_seal_compare_factory", false, skipMetrics);
+                          MX_GRIPPER_SetRefreshPeriodMs(originalRefreshMs);
+                          closeStressPressurePath();
+                          return finishSelfTestNow();
+                        }
+
+                        GripperStressRowSummary comparePost{};
+                        MX_GRIPPER_StopRefresh();
+                        for (uint8_t channel = 0u; channel < 2u && !_selfTestAbortRequested; ++channel) {
+                          char traceName[56];
+                          snprintf(traceName,
+                                   sizeof(traceName),
+                                   "grip_compare_ch%c_post_psi3000",
+                                   (channel == 0u) ? 'p' : 'r');
+                          if (!runStressTracePulse(2513u,
+                                                   traceName,
+                                                   channel,
+                                                   static_cast<uint16_t>(kStressTargetRaw3Psi),
+                                                   comparePost,
+                                                   "gripper_compare_post")) {
+                            aborted = true;
+                            return finishSelfTestNow();
+                          }
+                        }
+                        const bool comparePass = comparePre.pass &&
+                                                 comparePost.pass &&
+                                                 !_selfTestAbortRequested;
+                        char metrics2513[224];
+                        snprintf(metrics2513,
+                                 sizeof(metrics2513),
+                                 "psi=3000;pulse_ms=%lu;pre=%lu;post=%lu;ready=%lu;timeout=%lu;fresh_to=%lu;focus=1;trace=%u;sc=%lu;ec=%lu",
+                                 static_cast<unsigned long>(kStressPulseMs),
+                                 static_cast<unsigned long>(comparePre.pulses),
+                                 static_cast<unsigned long>(comparePost.pulses),
+                                 static_cast<unsigned long>(comparePre.ready + comparePost.ready),
+                                 static_cast<unsigned long>(comparePre.timeout + comparePost.timeout),
+                                 static_cast<unsigned long>(comparePre.freshTo + comparePost.freshTo),
+                                 static_cast<unsigned>(((comparePre.traceFail + comparePost.traceFail) == 0u) ? 1u : 0u),
+                                 static_cast<unsigned long>(comparePre.sc + comparePost.sc),
+                                 static_cast<unsigned long>(comparePre.ec + comparePost.ec));
+                        if (!runOne(2513u, "gripper_post_motion_seal_compare_factory", comparePass, metrics2513)) {
+                          return finishSelfTestNow();
+                        }
+
+                        MX_GRIPPER_SetRefreshPeriodMs(originalRefreshMs);
+                        closeStressPressurePath();
+                        return finishSelfTestNow();
+                      }
 
                       if (runGripperSealSuite) {
                         static constexpr uint32_t kSetupTimeoutMs = 5000u;

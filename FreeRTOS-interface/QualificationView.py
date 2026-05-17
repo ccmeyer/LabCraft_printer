@@ -480,12 +480,17 @@ class MachineQualificationWindow(QtWidgets.QDialog):
 
         long_timeout_suites = {
             "gripper_seal_v1",
+            "gripper_seal_stress_v1",
             "motion_envelope_v1",
             "pressure_regulator_v1",
             "valve_characterization_v1",
             "valve_gap_sweep_v1",
         }
-        self.timeout_edit.setText("420000" if manifest.manifest_id in long_timeout_suites else "")
+        self.timeout_edit.setText(
+            "900000"
+            if manifest.manifest_id == "gripper_seal_stress_v1"
+            else "420000" if manifest.manifest_id in long_timeout_suites else ""
+        )
         self.fixture_combo.blockSignals(True)
         self.fixture_combo.clear()
         self.fixture_combo.addItem("")

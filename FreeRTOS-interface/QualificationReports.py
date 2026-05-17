@@ -225,6 +225,26 @@ def artifact_paths(report: dict[str, Any], *, report_path: str | Path | None = N
                     pairs.append((label, str(path)))
             for path in sorted(valve_plot_dir.glob("valve_char_*_w*_overlay.png")):
                 pairs.append((f"Valve overlay plot {path.stem}", str(path)))
+        gripper_trace_dir = run_dir / "traces" / "gripper_seal_stress"
+        gripper_plot_dir = run_dir / "plots" / "gripper_seal_stress"
+        if gripper_trace_dir.exists():
+            pairs.append(("Gripper trace folder", str(gripper_trace_dir)))
+        if gripper_plot_dir.exists():
+            pairs.append(("Gripper plot folder", str(gripper_plot_dir)))
+            for label, filename in (
+                ("Gripper trace analysis JSON", "gripper_trace_analysis.json"),
+                ("Gripper trace artifact error JSON", "gripper_trace_artifact_error.json"),
+                ("Gripper trace replicate CSV", "gripper_trace_replicates.csv"),
+                ("Gripper static pressure matrix plot", "gripper_static_pressure_matrix.png"),
+                ("Gripper refresh hold timeline plot", "gripper_refresh_hold_timeline.png"),
+                ("Gripper raster drop timeline plot", "gripper_motion_raster_drop_timeline.png"),
+                ("Gripper raster drop map plot", "gripper_motion_raster_drop_map.png"),
+            ):
+                path = gripper_plot_dir / filename
+                if path.exists():
+                    pairs.append((label, str(path)))
+            for path in sorted(gripper_plot_dir.glob("gripper_*_overlay.png")):
+                pairs.append((f"Gripper overlay plot {path.stem}", str(path)))
     return [(label, str(value or "")) for label, value in pairs]
 
 

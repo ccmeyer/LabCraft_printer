@@ -71,6 +71,47 @@ def _raw_gripper_selftest():
     }
 
 
+def _raw_gripper_stress_selftest():
+    return {
+        "run_id": 5680,
+        "profile": "FULL",
+        "started_at": "2026-05-13T00:00:00Z",
+        "finished_at": "2026-05-13T00:15:00Z",
+        "aborted": False,
+        "summary": {"total": 4, "passed": 4, "failed": 0},
+        "results": [
+            {
+                "test_id": 2510,
+                "name": "gripper_static_pressure_matrix_factory",
+                "pass": True,
+                "metrics": {"pulse_ms": 2000, "pulses": 18, "ready": 0, "timeout": 0, "focus": 1, "trace": 1},
+            },
+            {
+                "test_id": 2511,
+                "name": "gripper_refresh_hold_3psi_factory",
+                "pass": True,
+                "metrics": {"psi": 3000, "refresh_ms": 30000, "pulse_int": 10000, "ready": 0, "timeout": 0, "focus": 1, "trace": 1},
+            },
+            {
+                "test_id": 2512,
+                "name": "gripper_motion_raster_3psi_factory",
+                "pass": True,
+                "metrics": {"psi": 3000, "xy_home_to": 0, "move_to": 0, "guard": 0, "bound": 0, "ready": 0, "timeout": 0, "focus": 1, "trace": 1},
+            },
+            {
+                "test_id": 2513,
+                "name": "gripper_post_motion_seal_compare_factory",
+                "pass": True,
+                "metrics": {"psi": 3000, "ready": 0, "timeout": 0, "focus": 1, "trace": 1},
+            },
+        ],
+        "host_checks": [
+            {"name": "hello_ack", "pass": True, "details": {"seq8": 1}},
+            {"name": "goodbye_skipped", "pass": True, "details": {"reason": "operator_gated_gripper_teardown"}},
+        ],
+    }
+
+
 def _raw_xy_motion_selftest():
     return {
         "run_id": 9012,
@@ -468,6 +509,10 @@ def _manifest_path(tmp_path):
 
 def _gripper_manifest_ref():
     return "gripper_seal_v1"
+
+
+def _gripper_stress_manifest_ref():
+    return "gripper_seal_stress_v1"
 
 
 def _xy_motion_manifest_ref():
@@ -1212,6 +1257,76 @@ def test_gripper_seal_operator_prompt_order_and_teardown(tmp_path):
     assert host_checks["gripper_teardown_release"]["pass"] is True
     assert host_checks["gripper_teardown_off"]["pass"] is True
     assert host_checks["gripper_teardown_shutdown"]["pass"] is True
+
+
+def test_gripper_seal_stress_uses_gripper_prompts_teardown_and_enriches_report(tmp_path, monkeypatch):
+    events = []
+    generated_artifacts = []
+
+    def fake_prompter(message):
+        if "Load" in message:
+            events.append("prompt:load")
+        elif "heard or felt" in message:
+            events.append("prompt:valves")
+        elif "Support" in message:
+            events.append("prompt:support")
+        elif "Remove" in message:
+            events.append("prompt:remove")
+        else:
+            events.append(f"prompt:{message}")
+
+    def fake_invoker(invocation):
+        events.append("self-test")
+        assert "--gripper-seal-stress-suite" in invocation.command
+        assert "--pressure-trace" in invocation.command
+        assert "--gripper-seal-suite" not in invocation.command
+        invocation.raw_report_path.write_text(json.dumps(_raw_gripper_stress_selftest()), encoding="utf-8")
+        return 0
+
+    def fake_gripper_control(action, port, baud):
+        events.append(f"machine:{action}:{port}:{baud}")
+        return 0
+
+    def fake_generate_gripper_artifacts(artifacts):
+        generated_artifacts.append(artifacts.run_dir)
+        return SimpleNamespace(report_metrics={2510: {"d3": 22, "rej_py": 0}, 2512: {"drop_mean": 12, "rej_py": 0}})
+
+    monkeypatch.setattr(qualification_runner, "generate_gripper_trace_artifacts", fake_generate_gripper_artifacts)
+
+    result = run_qualification(
+        manifest_ref=_gripper_stress_manifest_ref(),
+        port="/dev/ttyAMA0",
+        baud=115200,
+        machine_id="LC-0001",
+        identity_path=tmp_path / "local" / "machine_identity.json",
+        output_root=tmp_path / "qualification",
+        timeout_ms=900000,
+        fixture_id="dummy_blocked_head_motion_v1",
+        operator_prompts=True,
+        invoker=fake_invoker,
+        prompter=fake_prompter,
+        gripper_control=fake_gripper_control,
+    )
+
+    assert result.returncode == 0
+    assert events == [
+        "prompt:load",
+        "machine:preflight_print:/dev/ttyAMA0:115200",
+        "machine:preflight_refuel:/dev/ttyAMA0:115200",
+        "prompt:valves",
+        "self-test",
+        "prompt:support",
+        "machine:release:/dev/ttyAMA0:115200",
+        "prompt:remove",
+        "machine:off:/dev/ttyAMA0:115200",
+        "machine:shutdown:/dev/ttyAMA0:115200",
+    ]
+    assert result.report["run"]["fixture_id"] == "dummy_blocked_head_motion_v1"
+    assert generated_artifacts == [result.run_dir]
+    report_row = next(row for row in result.report["results"] if row["test_id"] == 2510)
+    assert report_row["metrics"]["d3"] == 22
+    raw_row = next(row for row in json.loads(result.raw_selftest_path.read_text(encoding="utf-8"))["results"] if row["test_id"] == 2510)
+    assert "d3" not in raw_row["metrics"]
 
 
 def test_gripper_seal_preflight_failure_aborts_before_selftest(tmp_path):

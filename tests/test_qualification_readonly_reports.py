@@ -185,3 +185,33 @@ def test_artifact_paths_exposes_valve_trace_outputs(tmp_path):
     assert "Valve motor-position plot" in labels
     assert "Valve ringing summary plot" in labels
     assert "Valve overlay plot valve_char_r_w1500_overlay" in labels
+
+
+def test_artifact_paths_exposes_gripper_trace_outputs(tmp_path):
+    run_dir = tmp_path / "qualification" / "LC-TEST" / "20260517T000000Z"
+    plot_dir = run_dir / "plots" / "gripper_seal_stress"
+    trace_dir = run_dir / "traces" / "gripper_seal_stress"
+    plot_dir.mkdir(parents=True)
+    trace_dir.mkdir(parents=True)
+    (plot_dir / "gripper_trace_analysis.json").write_text("{}", encoding="utf-8")
+    (plot_dir / "gripper_trace_replicates.csv").write_text("header\n", encoding="utf-8")
+    (plot_dir / "gripper_static_pressure_matrix.png").write_bytes(b"png")
+    (plot_dir / "gripper_refresh_hold_timeline.png").write_bytes(b"png")
+    (plot_dir / "gripper_motion_raster_drop_timeline.png").write_bytes(b"png")
+    (plot_dir / "gripper_motion_raster_drop_map.png").write_bytes(b"png")
+    (plot_dir / "gripper_static_chp_overlay.png").write_bytes(b"png")
+
+    report = _report()
+    report["run"]["run_dir"] = str(run_dir)
+    paths = artifact_paths(report, report_path=run_dir / "report.json")
+
+    labels = [label for label, _path in paths]
+    assert "Gripper trace folder" in labels
+    assert "Gripper plot folder" in labels
+    assert "Gripper trace analysis JSON" in labels
+    assert "Gripper trace replicate CSV" in labels
+    assert "Gripper static pressure matrix plot" in labels
+    assert "Gripper refresh hold timeline plot" in labels
+    assert "Gripper raster drop timeline plot" in labels
+    assert "Gripper raster drop map plot" in labels
+    assert "Gripper overlay plot gripper_static_chp_overlay" in labels

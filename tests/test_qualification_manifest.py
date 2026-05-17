@@ -73,6 +73,24 @@ def test_load_gripper_seal_manifest_requires_local_operator_fixture():
     assert manifest.analysis_rules["2503"]["metrics"]["seal_ms_min"]["maturity"] == "acceptance"
 
 
+def test_load_gripper_seal_stress_manifest_requires_motion_dummy_head_fixture():
+    manifest = load_manifest("gripper_seal_stress_v1")
+
+    assert manifest.manifest_id == "gripper_seal_stress_v1"
+    assert manifest.profile == "FULL"
+    assert manifest.expected_test_ids == (2510, 2511, 2512, 2513)
+    assert manifest.enforce_expected_test_ids is True
+    assert manifest.requires_operator_prompts is True
+    assert manifest.selftest_args == ("--gripper-seal-stress-suite", "--pressure-trace")
+    assert {item["fixture_id"] for item in manifest.fixtures} == {"dummy_blocked_head_motion_v1"}
+    assert manifest.analysis_rules["2510"]["metrics"]["pulse_ms"]["equals"] == 2000
+    assert manifest.analysis_rules["2511"]["metrics"]["refresh_ms"]["equals"] == 30000
+    assert manifest.analysis_rules["2512"]["metrics"]["xy_home_to"]["equals"] == 0
+    assert manifest.analysis_rules["2512"]["metrics"]["guard"]["equals"] == 0
+    assert manifest.analysis_rules["2513"]["metrics"]["p_delta"]["maturity"] == "candidate"
+    assert manifest.analysis_rules["2513"]["metrics"]["rej_py"]["equals"] == 0
+
+
 def test_load_xy_motion_manifest_requires_operator_clear_envelope_fixture():
     manifest = load_manifest("xy_motion_v1")
 
