@@ -55,11 +55,6 @@ uint32_t absDiff(uint32_t a, uint32_t b) {
   return (a >= b) ? (a - b) : (b - a);
 }
 
-uint16_t interleavedValvePulseWidthUs(size_t sequenceIndexZeroBased) {
-  static constexpr uint16_t kPattern[] = {1500u, 3000u, 4500u, 4500u, 3000u, 1500u};
-  return kPattern[sequenceIndexZeroBased % (sizeof(kPattern) / sizeof(kPattern[0]))];
-}
-
 uint16_t groupedValvePulseWidthUs(size_t sequenceIndexZeroBased, size_t replicatesPerWidth) {
   static constexpr uint16_t kWidths[] = {1500u, 3000u, 4500u};
   const size_t safeReplicates = (replicatesPerWidth == 0u) ? 1u : replicatesPerWidth;

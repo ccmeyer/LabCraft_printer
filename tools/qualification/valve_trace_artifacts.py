@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import copy
 import json
 import math
 import re
@@ -30,6 +31,7 @@ class ValveTraceArtifacts:
     replicate_csv: Path
     plot_paths: tuple[Path, ...]
     replicate_count: int
+    report_metrics: dict[int, dict[str, Any]]
 
 
 def _safe_list(obj: dict[str, Any], key: str) -> list[dict[str, Any]]:
@@ -56,6 +58,34 @@ def _median(values: list[float]) -> float:
     if len(ordered) % 2:
         return ordered[mid]
     return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
+def _metric_round(value: float | int | None) -> int:
+    if value is None:
+        return 0
+    numeric = float(value)
+    if not math.isfinite(numeric):
+        return 0
+    if numeric >= 0:
+        return int(numeric + 0.5)
+    return int(numeric - 0.5)
+
+
+def _cv_pct(values: list[float]) -> int:
+    mean = _mean(values)
+    if mean <= 0.0:
+        return 0
+    return _metric_round((_std(values) * 100.0) / mean)
+
+
+def _linearity_metrics(m15: int, m30: int, m45: int) -> dict[str, int]:
+    monotonic = 1 if m15 <= m30 <= m45 else 0
+    gain = (m45 - m15) if monotonic else abs(m45 - m15)
+    if gain <= 0:
+        lin = 0 if m30 == m15 else 100
+    else:
+        lin = _metric_round((abs((2 * m30) - (m15 + m45)) * 100.0) / (2.0 * gain))
+    return {"mono": monotonic, "gain": gain, "lin": lin}
 
 
 def _corr(xs: list[float], ys: list[float]) -> float | None:
@@ -445,6 +475,148 @@ def _summary_by_gap_condition(rows: list[dict[str, Any]]) -> list[dict[str, Any]
             }
         )
     return summary
+
+
+def _rows_for(rows: list[dict[str, Any]], *, family: str, channel: str, width_us: int | None = None, gap_ms: int | None = None) -> list[dict[str, Any]]:
+    subset = [
+        row
+        for row in rows
+        if row.get("trace_family") == family and row.get("channel") == channel
+    ]
+    if width_us is not None:
+        subset = [row for row in subset if int(row.get("width_us") or 0) == width_us]
+    if gap_ms is not None:
+        subset = [row for row in subset if int(row.get("gap_ms") or 0) == gap_ms]
+    return subset
+
+
+def _valid_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [row for row in rows if row.get("valid")]
+
+
+def _values(rows: list[dict[str, Any]], key: str) -> list[float]:
+    return [float(row.get(key) or 0.0) for row in rows]
+
+
+def _mean_metric(rows: list[dict[str, Any]], key: str) -> int:
+    return _metric_round(_mean(_values(rows, key)))
+
+
+def _valve_char_channel_metrics(rows: list[dict[str, Any]], channel: str) -> dict[str, Any]:
+    expected_replicates_per_width = 10
+    expected_total = expected_replicates_per_width * 3
+    channel_rows = _rows_for(rows, family="valve_char", channel=channel)
+    valid = _valid_rows(channel_rows)
+    metrics: dict[str, Any] = {
+        "rej": max(0, expected_total - len(valid)),
+        "lat_miss": sum(1 for row in valid if not row.get("latency_valid")),
+        "ring_miss": sum(1 for row in valid if not row.get("ring_valid")),
+        "excl": sum(1 for row in channel_rows if row.get("excluded")),
+        "rw": _metric_round(RING_WINDOW_AFTER_PULSE_END_MS),
+        "sw": _metric_round(SETTLED_START_AFTER_PULSE_END_MS),
+    }
+    means: dict[int, int] = {}
+    for width, label in ((1500, "15"), (3000, "30"), (4500, "45")):
+        width_rows = _rows_for(rows, family="valve_char", channel=channel, width_us=width)
+        steady = [row for row in _valid_rows(width_rows) if not row.get("excluded")]
+        means[width] = _mean_metric(steady, "settled_drop_raw")
+        metrics[f"m{label}"] = means[width]
+        metrics[f"cv{label}"] = _cv_pct(_values(steady, "settled_drop_raw"))
+        metrics[f"rg{label}"] = _mean_metric([row for row in steady if row.get("ring_valid")], "ring_amp_raw")
+        metrics[f"lt{label}"] = _mean_metric([row for row in steady if row.get("latency_valid")], "latency_ms")
+    metrics["mono"] = _linearity_metrics(means[1500], means[3000], means[4500])["mono"]
+    return metrics
+
+
+def _valve_balance_metrics(print_metrics: dict[str, Any], refuel_metrics: dict[str, Any]) -> dict[str, Any]:
+    metrics: dict[str, Any] = {
+        "rej": int(print_metrics.get("rej") or 0) + int(refuel_metrics.get("rej") or 0),
+        "lat_miss": int(print_metrics.get("lat_miss") or 0) + int(refuel_metrics.get("lat_miss") or 0),
+        "ring_miss": int(print_metrics.get("ring_miss") or 0) + int(refuel_metrics.get("ring_miss") or 0),
+        "excl": int(print_metrics.get("excl") or 0) + int(refuel_metrics.get("excl") or 0),
+    }
+    for label in ("15", "30", "45"):
+        p_value = int(print_metrics.get(f"m{label}") or 0)
+        r_value = int(refuel_metrics.get(f"m{label}") or 0)
+        metrics[f"m{label}p"] = p_value
+        metrics[f"m{label}r"] = r_value
+        metrics[f"r{label}"] = int((p_value * 100) / r_value) if r_value > 0 else 0
+        metrics[f"d{label}"] = abs(p_value - r_value)
+    return metrics
+
+
+def _gap_detailed_metrics(rows: list[dict[str, Any]], channel: str) -> dict[str, Any]:
+    expected_total = 5 * 8
+    channel_rows = [
+        row
+        for row in _rows_for(rows, family="valve_gap", channel=channel, width_us=1500)
+        if row.get("gap_ms") in {250, 500, 1000, 2000, 5000}
+    ]
+    valid = _valid_rows(channel_rows)
+    metrics: dict[str, Any] = {
+        "rej": max(0, expected_total - len(valid)),
+        "lat_miss": sum(1 for row in valid if not row.get("latency_valid")),
+        "ring_miss": sum(1 for row in valid if not row.get("ring_valid")),
+    }
+    for gap in (250, 500, 1000, 2000, 5000):
+        metrics[f"g{gap}"] = _mean_metric(_valid_rows(_rows_for(rows, family="valve_gap", channel=channel, width_us=1500, gap_ms=gap)), "settled_drop_raw")
+    return metrics
+
+
+def _gap_control_metrics(rows: list[dict[str, Any]], channel: str) -> dict[str, Any]:
+    expected_total = 4 * 4
+    condition_rows = [
+        row
+        for row in _rows_for(rows, family="valve_gap", channel=channel)
+        if int(row.get("width_us") or 0) in {3000, 4500} and int(row.get("gap_ms") or 0) in {500, 2000}
+    ]
+    valid = _valid_rows(condition_rows)
+    metrics: dict[str, Any] = {
+        "rej": max(0, expected_total - len(valid)),
+        "lat_miss": sum(1 for row in valid if not row.get("latency_valid")),
+        "ring_miss": sum(1 for row in valid if not row.get("ring_valid")),
+    }
+    for width, label in ((3000, "30"), (4500, "45")):
+        for gap in (500, 2000):
+            metrics[f"m{label}g{gap}"] = _mean_metric(
+                _valid_rows(_rows_for(rows, family="valve_gap", channel=channel, width_us=width, gap_ms=gap)),
+                "settled_drop_raw",
+            )
+    return metrics
+
+
+def _build_report_metrics(rows: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    report_metrics: dict[int, dict[str, Any]] = {}
+    if any(row.get("trace_family") == "valve_char" for row in rows):
+        print_metrics = _valve_char_channel_metrics(rows, "p")
+        refuel_metrics = _valve_char_channel_metrics(rows, "r")
+        report_metrics[2473] = print_metrics
+        report_metrics[2474] = refuel_metrics
+        report_metrics[2475] = _valve_balance_metrics(print_metrics, refuel_metrics)
+    if any(row.get("trace_family") == "valve_gap" for row in rows):
+        report_metrics[2476] = _gap_detailed_metrics(rows, "p")
+        report_metrics[2477] = _gap_detailed_metrics(rows, "r")
+        report_metrics[2478] = _gap_control_metrics(rows, "p")
+        report_metrics[2479] = _gap_control_metrics(rows, "r")
+    return report_metrics
+
+
+def enrich_raw_selftest_with_valve_metrics(raw_selftest: dict[str, Any], report_metrics: dict[int, dict[str, Any]] | None) -> dict[str, Any]:
+    if not report_metrics:
+        return raw_selftest
+    enriched = copy.deepcopy(raw_selftest)
+    for result in enriched.get("results") or []:
+        try:
+            test_id = int(result.get("test_id"))
+        except (TypeError, ValueError):
+            continue
+        derived = report_metrics.get(test_id)
+        if not derived:
+            continue
+        metrics = dict(result.get("metrics") or {})
+        metrics.update(derived)
+        result["metrics"] = metrics
+    return enriched
 
 
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -968,12 +1140,13 @@ def generate_valve_trace_artifacts(artifacts: RunArtifacts) -> ValveTraceArtifac
     traces, rows = _load_rows(copied)
     summary = _summary_by_condition(rows)
     gap_summary = _summary_by_gap_condition(rows)
+    report_metrics = _build_report_metrics(rows)
 
     analysis_json = plot_dir / "valve_trace_analysis.json"
     analysis_json.write_text(
         json.dumps(
             {
-                "schema_version": "valve_trace_analysis_v6",
+                "schema_version": "valve_trace_analysis_v7",
                 "baseline_window_ms": BASELINE_WINDOW_MS,
                 "ring_window_after_pulse_end_ms": RING_WINDOW_AFTER_PULSE_END_MS,
                 "settled_start_after_pulse_end_ms": SETTLED_START_AFTER_PULSE_END_MS,
@@ -986,6 +1159,7 @@ def generate_valve_trace_artifacts(artifacts: RunArtifacts) -> ValveTraceArtifac
                 "excluded_replicate_count": sum(1 for row in rows if row.get("valid") and row.get("excluded")),
                 "conditions": summary,
                 "gap_conditions": gap_summary,
+                "report_metrics": report_metrics,
                 "replicates": rows,
             },
             indent=2,
@@ -1031,4 +1205,5 @@ def generate_valve_trace_artifacts(artifacts: RunArtifacts) -> ValveTraceArtifac
         replicate_csv=replicate_csv,
         plot_paths=tuple(plot_paths),
         replicate_count=len(rows),
+        report_metrics=report_metrics,
     )

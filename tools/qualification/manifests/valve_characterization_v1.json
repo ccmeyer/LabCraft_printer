@@ -3,7 +3,7 @@
   "manifest_id": "valve_characterization_v1",
   "name": "Valve Characterization v1",
   "profile": "FULL",
-  "description": "Operator-gated isolated valve characterization suite measuring 2 psi grouped pulse-width repeatability, pulse-width linearity, regulator-position context, and print/refuel channel balance.",
+  "description": "Operator-gated isolated valve characterization suite executing 2 psi grouped pulse-width repeats and deriving repeatability, linearity, regulator-position context, and print/refuel balance from Python trace analysis.",
   "expected_test_ids": [
     2473,
     2474,

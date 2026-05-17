@@ -293,27 +293,11 @@ def _raw_valve_characterization_selftest():
         "psi": 2000,
         "rep": 10,
         "pulses": 30,
-        "m15": 20,
-        "m30": 35,
-        "m45": 50,
-        "cv15": 4,
-        "cv30": 5,
-        "cv45": 5,
-        "rg15": 80,
-        "rg30": 120,
-        "rg45": 160,
-        "lt15": 5,
-        "lt30": 6,
-        "lt45": 7,
-        "rej": 0,
         "ready": 0,
         "home_to": 0,
         "fresh_to": 0,
         "focus": 1,
         "sm": 5,
-        "rw": 60,
-        "sw": 80,
-        "mono": 1,
         "sc": 120,
         "ec": 30,
         "timeout": 0,
@@ -339,21 +323,9 @@ def _raw_valve_characterization_selftest():
                 "psi": 2000,
                 "rep": 10,
                 "pulses": 60,
-                "m15p": 20,
-                "m15r": 21,
-                "m30p": 35,
-                "m30r": 36,
-                "m45p": 50,
-                "m45r": 51,
-                "r15": 95,
-                "r30": 97,
-                "r45": 98,
-                "d15": 1,
-                "d30": 1,
-                "d45": 1,
-                "rej": 0,
                 "ready": 0,
                 "home_to": 0,
+                "fresh_to": 0,
                 "sc": 240,
                 "ec": 60,
                 "timeout": 0,
@@ -372,12 +344,57 @@ def _raw_valve_characterization_selftest():
     }
 
 
+def _derived_valve_characterization_metrics():
+    common = {
+        "m15": 20,
+        "m30": 35,
+        "m45": 50,
+        "cv15": 4,
+        "cv30": 5,
+        "cv45": 5,
+        "rg15": 80,
+        "rg30": 120,
+        "rg45": 160,
+        "lt15": 5,
+        "lt30": 6,
+        "lt45": 7,
+        "rej": 0,
+        "lat_miss": 0,
+        "ring_miss": 0,
+        "excl": 3,
+        "rw": 60,
+        "sw": 80,
+        "mono": 1,
+    }
+    return {
+        2473: common,
+        2474: {**common, "m15": 21, "m30": 36, "m45": 51},
+        2475: {
+            "m15p": 20,
+            "m15r": 21,
+            "m30p": 35,
+            "m30r": 36,
+            "m45p": 50,
+            "m45r": 51,
+            "r15": 95,
+            "r30": 97,
+            "r45": 98,
+            "d15": 1,
+            "d30": 1,
+            "d45": 1,
+            "rej": 0,
+            "lat_miss": 0,
+            "ring_miss": 0,
+            "excl": 6,
+        },
+    }
+
+
 def _raw_valve_gap_sweep_selftest():
     common = {
         "home_to": 0,
         "timeout": 0,
         "ready": 0,
-        "rej": 0,
         "fresh_to": 0,
         "focus": 1,
         "sc": 120,
@@ -388,25 +405,25 @@ def _raw_valve_gap_sweep_selftest():
             "test_id": 2476,
             "name": "valve_gap_print_1500us_2psi",
             "pass": True,
-            "metrics": {"ch": "p", "pw": 1500, "rep": 8, "g250": 4, "g500": 5, "g1000": 5, "g2000": 6, "g5000": 6, **common},
+            "metrics": {"ch": "p", "pw": 1500, "rep": 8, "pulses": 40, "gaps": 5, **common},
         },
         {
             "test_id": 2477,
             "name": "valve_gap_refuel_1500us_2psi",
             "pass": True,
-            "metrics": {"ch": "r", "pw": 1500, "rep": 8, "g250": 3, "g500": 4, "g1000": 4, "g2000": 5, "g5000": 5, **common},
+            "metrics": {"ch": "r", "pw": 1500, "rep": 8, "pulses": 40, "gaps": 5, **common},
         },
         {
             "test_id": 2478,
             "name": "valve_gap_print_control_2psi",
             "pass": True,
-            "metrics": {"ch": "p", "rep": 4, "m30g500": 9, "m30g2000": 10, "m45g500": 16, "m45g2000": 17, **common},
+            "metrics": {"ch": "p", "rep": 4, "pulses": 16, "cond": 4, **common},
         },
         {
             "test_id": 2479,
             "name": "valve_gap_refuel_control_2psi",
             "pass": True,
-            "metrics": {"ch": "r", "rep": 4, "m30g500": 9, "m30g2000": 10, "m45g500": 16, "m45g2000": 17, **common},
+            "metrics": {"ch": "r", "rep": 4, "pulses": 16, "cond": 4, **common},
         },
     ]
     return {
@@ -418,6 +435,16 @@ def _raw_valve_gap_sweep_selftest():
         "summary": {"total": 4, "passed": 4, "failed": 0},
         "results": rows,
         "host_checks": [{"name": "hello_ack", "pass": True, "details": {"seq8": 1}}],
+    }
+
+
+def _derived_valve_gap_sweep_metrics():
+    common = {"rej": 0, "lat_miss": 0, "ring_miss": 0}
+    return {
+        2476: {"g250": 4, "g500": 5, "g1000": 5, "g2000": 6, "g5000": 6, **common},
+        2477: {"g250": 3, "g500": 4, "g1000": 4, "g2000": 5, "g5000": 5, **common},
+        2478: {"m30g500": 9, "m30g2000": 10, "m45g500": 16, "m45g2000": 17, **common},
+        2479: {"m30g500": 9, "m30g2000": 10, "m45g500": 16, "m45g2000": 17, **common},
     }
 
 
@@ -989,11 +1016,11 @@ def test_valve_characterization_operator_prompt_runs_selected_suite_without_grip
     def fake_gripper_control(action, port, baud):
         raise AssertionError(f"Valve characterization suite should not call gripper control: {action}:{port}:{baud}")
 
-    monkeypatch.setattr(
-        qualification_runner,
-        "generate_valve_trace_artifacts",
-        lambda artifacts: generated_artifacts.append(artifacts.run_dir),
-    )
+    def fake_generate_valve_artifacts(artifacts):
+        generated_artifacts.append(artifacts.run_dir)
+        return SimpleNamespace(report_metrics=_derived_valve_characterization_metrics())
+
+    monkeypatch.setattr(qualification_runner, "generate_valve_trace_artifacts", fake_generate_valve_artifacts)
 
     result = run_qualification(
         manifest_ref=_valve_characterization_manifest_ref(),
@@ -1018,6 +1045,10 @@ def test_valve_characterization_operator_prompt_runs_selected_suite_without_grip
     assert [item["stage"] for item in result.report["operator_interactions"]] == ["confirm_fixture_setup"]
     assert result.report["overall_status"] == "pass"
     assert generated_artifacts == [result.run_dir]
+    report_row = next(row for row in result.report["results"] if row["test_id"] == 2473)
+    assert report_row["metrics"]["mono"] == 1
+    raw_row = next(row for row in json.loads(result.raw_selftest_path.read_text(encoding="utf-8"))["results"] if row["test_id"] == 2473)
+    assert "mono" not in raw_row["metrics"]
 
 
 def test_valve_gap_sweep_operator_prompt_runs_selected_suite_without_gripper_teardown(tmp_path, monkeypatch):
@@ -1039,11 +1070,11 @@ def test_valve_gap_sweep_operator_prompt_runs_selected_suite_without_gripper_tea
     def fake_gripper_control(action, port, baud):
         raise AssertionError(f"Valve gap sweep suite should not call gripper control: {action}:{port}:{baud}")
 
-    monkeypatch.setattr(
-        qualification_runner,
-        "generate_valve_trace_artifacts",
-        lambda artifacts: generated_artifacts.append(artifacts.run_dir),
-    )
+    def fake_generate_valve_artifacts(artifacts):
+        generated_artifacts.append(artifacts.run_dir)
+        return SimpleNamespace(report_metrics=_derived_valve_gap_sweep_metrics())
+
+    monkeypatch.setattr(qualification_runner, "generate_valve_trace_artifacts", fake_generate_valve_artifacts)
 
     result = run_qualification(
         manifest_ref=_valve_gap_sweep_manifest_ref(),
@@ -1068,6 +1099,10 @@ def test_valve_gap_sweep_operator_prompt_runs_selected_suite_without_gripper_tea
     assert [item["stage"] for item in result.report["operator_interactions"]] == ["confirm_fixture_setup"]
     assert result.report["overall_status"] == "pass"
     assert generated_artifacts == [result.run_dir]
+    report_row = next(row for row in result.report["results"] if row["test_id"] == 2476)
+    assert report_row["metrics"]["g500"] == 5
+    raw_row = next(row for row in json.loads(result.raw_selftest_path.read_text(encoding="utf-8"))["results"] if row["test_id"] == 2476)
+    assert "g500" not in raw_row["metrics"]
 
 
 def test_motion_envelope_operator_prompt_runs_selected_suite_without_gripper_teardown(tmp_path):

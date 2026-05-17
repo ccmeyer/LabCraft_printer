@@ -14,7 +14,11 @@ from .artifacts import RunArtifacts, create_run_artifacts
 from .identity import DEFAULT_IDENTITY_PATH, load_or_create_identity
 from .manifest import QualificationManifest, load_manifest
 from .report import write_json_atomic, write_qualification_artifacts
-from .valve_trace_artifacts import generate_valve_trace_artifacts
+from .valve_trace_artifacts import (
+    ValveTraceArtifacts,
+    enrich_raw_selftest_with_valve_metrics,
+    generate_valve_trace_artifacts,
+)
 
 DEFAULT_MANIFEST_REF = "factory_acceptance_v3"
 
@@ -249,11 +253,11 @@ def _raw_missing_report(manifest: QualificationManifest, returncode: int) -> dic
     }
 
 
-def _maybe_generate_valve_trace_artifacts(manifest: QualificationManifest, artifacts: RunArtifacts) -> None:
+def _maybe_generate_valve_trace_artifacts(manifest: QualificationManifest, artifacts: RunArtifacts) -> ValveTraceArtifacts | None:
     if manifest.manifest_id not in {"valve_characterization_v1", "valve_gap_sweep_v1"}:
-        return
+        return None
     try:
-        generate_valve_trace_artifacts(artifacts)
+        return generate_valve_trace_artifacts(artifacts)
     except Exception as exc:
         error_dir = artifacts.plots_dir / "valve_characterization"
         error_dir.mkdir(parents=True, exist_ok=True)
@@ -264,6 +268,7 @@ def _maybe_generate_valve_trace_artifacts(manifest: QualificationManifest, artif
                 "error": str(exc),
             },
         )
+    return None
 
 
 def run_qualification(
@@ -295,8 +300,13 @@ def run_qualification(
     if raw_report_path is not None:
         source_path = Path(raw_report_path)
         raw_selftest = json.loads(source_path.read_text(encoding="utf-8"))
-        report = write_qualification_artifacts(
+        valve_artifacts = _maybe_generate_valve_trace_artifacts(manifest, artifacts)
+        report_raw_selftest = enrich_raw_selftest_with_valve_metrics(
             raw_selftest,
+            None if valve_artifacts is None else valve_artifacts.report_metrics,
+        )
+        report = write_qualification_artifacts(
+            report_raw_selftest,
             manifest,
             identity,
             artifacts,
@@ -305,7 +315,6 @@ def run_qualification(
             fixture_id=fixture_id,
             operator_interactions=interactions,
         )
-        _maybe_generate_valve_trace_artifacts(manifest, artifacts)
         qualification_returncode = 0 if report.get("overall_status") == "pass" else 3
         return QualificationRunResult(
             returncode=qualification_returncode,
@@ -491,8 +500,14 @@ def run_qualification(
         )
         raw_selftest["host_checks"] = host_checks
 
-    report = write_qualification_artifacts(
+    valve_artifacts = _maybe_generate_valve_trace_artifacts(manifest, artifacts)
+    report_raw_selftest = enrich_raw_selftest_with_valve_metrics(
         raw_selftest,
+        None if valve_artifacts is None else valve_artifacts.report_metrics,
+    )
+
+    report = write_qualification_artifacts(
+        report_raw_selftest,
         manifest,
         identity,
         artifacts,
@@ -501,7 +516,6 @@ def run_qualification(
         fixture_id=fixture_id,
         operator_interactions=interactions,
     )
-    _maybe_generate_valve_trace_artifacts(manifest, artifacts)
     qualification_returncode = 0 if report.get("overall_status") == "pass" else 3
     return QualificationRunResult(
         returncode=qualification_returncode,

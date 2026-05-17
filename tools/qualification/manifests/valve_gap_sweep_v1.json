@@ -3,7 +3,7 @@
   "manifest_id": "valve_gap_sweep_v1",
   "name": "Valve Gap Sweep v1",
   "profile": "FULL",
-  "description": "Operator-gated exploratory 2 psi valve gap sweep measuring whether short-pulse settled pressure drop depends on post-ready settle time.",
+  "description": "Operator-gated exploratory 2 psi valve gap sweep executing fixed-gap pulses and deriving settled-drop gap summaries from Python trace analysis.",
   "expected_test_ids": [
     2476,
     2477,

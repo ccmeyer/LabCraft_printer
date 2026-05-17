@@ -85,7 +85,6 @@ struct ResponseValueSummary {
 };
 
 uint32_t absDiff(uint32_t a, uint32_t b);
-uint16_t interleavedValvePulseWidthUs(size_t sequenceIndexZeroBased);
 uint16_t groupedValvePulseWidthUs(size_t sequenceIndexZeroBased, size_t replicatesPerWidth);
 bool isSteadyValveCharacterizationReplicate(uint16_t replicateForWidth);
 uint32_t valveGapSweepDetailedGapMs(size_t gapIndexZeroBased);

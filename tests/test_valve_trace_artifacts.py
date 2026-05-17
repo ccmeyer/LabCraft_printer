@@ -222,7 +222,7 @@ def test_generate_valve_trace_artifacts_writes_plots_csv_and_analysis(tmp_path):
     assert (result.plot_dir / "valve_char_settled_drop_vs_motor_position.png").exists()
     assert (result.plot_dir / "valve_char_ringing_by_width.png").exists()
     analysis = json.loads(result.analysis_json.read_text(encoding="utf-8"))
-    assert analysis["schema_version"] == "valve_trace_analysis_v6"
+    assert analysis["schema_version"] == "valve_trace_analysis_v7"
     assert analysis["valid_replicate_count"] == 3
     assert analysis["steady_replicate_count"] == 2
     assert analysis["excluded_replicate_count"] == 1
@@ -234,6 +234,11 @@ def test_generate_valve_trace_artifacts_writes_plots_csv_and_analysis(tmp_path):
     assert analysis["replicates"][0]["motor_position_delta_from_first"] == 0
     assert analysis["replicates"][1]["motor_position_delta_from_first"] == -100
     assert "ring_amp_raw" in analysis["replicates"][0]
+    assert result.report_metrics[2473]["m30"] == 6
+    assert result.report_metrics[2473]["rej"] == 28
+    assert result.report_metrics[2473]["excl"] == 0
+    assert result.report_metrics[2474]["excl"] == 1
+    assert analysis["report_metrics"]["2473"]["m30"] == 6
 
 
 def test_generate_valve_gap_trace_artifacts_writes_gap_plots(tmp_path):
@@ -257,7 +262,9 @@ def test_generate_valve_gap_trace_artifacts_writes_gap_plots(tmp_path):
     assert (result.plot_dir / "valve_gap_1500_drop_by_replicate.png").exists()
     assert (result.plot_dir / "valve_gap_drop_vs_actual_interval.png").exists()
     analysis = json.loads(result.analysis_json.read_text(encoding="utf-8"))
-    assert analysis["schema_version"] == "valve_trace_analysis_v6"
+    assert analysis["schema_version"] == "valve_trace_analysis_v7"
     assert analysis["gap_conditions"][0]["gap_ms"] == 500
     assert analysis["replicates"][0]["actual_interval_ms"] == 0
     assert analysis["replicates"][1]["actual_interval_ms"] == 2800
+    assert result.report_metrics[2476]["g500"] == 6
+    assert result.report_metrics[2476]["rej"] == 39
