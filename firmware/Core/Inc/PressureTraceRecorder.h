@@ -54,6 +54,8 @@ struct PressureTraceConfig {
   uint16_t maxEvents = 192;
   uint16_t preRollMs = 100;
   uint16_t postRollMs = 150;
+  uint16_t sampleStride = 1;
+  uint16_t exportYieldMs = 1;
   bool includeAverage = true;
 };
 
@@ -94,6 +96,7 @@ private:
   PressureTraceEvent _events[kMaxEvents]{};
   uint16_t _sampleCount = 0;
   uint16_t _eventCount = 0;
+  uint16_t _sampleStrideCounter = 0;
   uint32_t _startTickMs = 0;
   bool _armed = false;
   bool _capturing = false;

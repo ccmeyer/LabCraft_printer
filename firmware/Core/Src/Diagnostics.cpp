@@ -359,6 +359,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                       sendProgressStage("trace_sample_chunk_oob");
                       return false;
                     }
+                    const TickType_t exportYieldTicks = msToAtLeast1Tick(recorder.config().exportYieldMs);
                     for (uint16_t chunkIndex = 0; chunkIndex < sampleChunks; ++chunkIndex) {
                       if ((xTaskGetTickCount() - exportStart) > kExportMaxTicks) {
                         sendProgressStage("trace_export_to");
@@ -370,7 +371,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                       const uint16_t remain = static_cast<uint16_t>(totalSampleBytes - offset);
                       const uint8_t chunkLen = static_cast<uint8_t>((remain > kSampleChunkBytes) ? kSampleChunkBytes : remain);
                       sendTraceChunk(testId, name, pass, TRACE_KIND_SAMPLES, TRACE_FORMAT_SAMPLE_V1, chunkIndex, sampleChunks, samples + offset, chunkLen);
-                      vTaskDelay(1);
+                      vTaskDelay(exportYieldTicks);
                     }
                     const auto* events = reinterpret_cast<const uint8_t*>(recorder.events());
                     const uint16_t totalEventBytes = static_cast<uint16_t>(recorder.eventCount() * sizeof(PressureTraceEvent));
@@ -390,7 +391,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                       const uint16_t remain = static_cast<uint16_t>(totalEventBytes - offset);
                       const uint8_t chunkLen = static_cast<uint8_t>((remain > kEventChunkBytes) ? kEventChunkBytes : remain);
                       sendTraceChunk(testId, name, pass, TRACE_KIND_EVENTS, TRACE_FORMAT_EVENT_V1, chunkIndex, eventChunks, events + offset, chunkLen);
-                      vTaskDelay(1);
+                      vTaskDelay(exportYieldTicks);
                     }
                     return true;
                   };
@@ -861,6 +862,9 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         static constexpr uint32_t kStressPulseTickUs = 100u;
                         static constexpr uint32_t kStressTracePreRollMs = 250u;
                         static constexpr uint32_t kStressTracePostRollMs = 250u;
+                        static constexpr uint32_t kStressTraceSampleStride = 5u;
+                        static constexpr uint32_t kStressTraceSampleMs = 25u;
+                        static constexpr uint32_t kStressTraceExportYieldMs = 5u;
                         static constexpr uint32_t kStressReadyTimeoutMs = 9000u;
                         static constexpr uint32_t kStressFreshSampleTimeoutMs = 80u;
                         static constexpr uint32_t kStressRefreshMs = 30000u;
@@ -1062,6 +1066,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           traceCfg.maxEvents = PressureTraceRecorder::kMaxEvents;
                           traceCfg.preRollMs = static_cast<uint16_t>(kStressTracePreRollMs);
                           traceCfg.postRollMs = static_cast<uint16_t>(kStressTracePostRollMs);
+                          traceCfg.sampleStride = static_cast<uint16_t>(kStressTraceSampleStride);
+                          traceCfg.exportYieldMs = static_cast<uint16_t>(kStressTraceExportYieldMs);
                           recorder.configure(traceCfg);
                           return traceCfg;
                         };
@@ -1160,8 +1166,13 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         };
 
                         auto emitStressSetupFailureRows = [&](const char* gate) -> bool {
-                          char metrics[160];
-                          snprintf(metrics, sizeof(metrics), "home_to=1;timeout=0;ready=1;trace=0;gate=%s", gate);
+                          char metrics[192];
+                          snprintf(metrics,
+                                   sizeof(metrics),
+                                   "home_to=1;timeout=0;ready=1;trace=0;stride=%lu;sample_ms=%lu;gate=%s",
+                                   static_cast<unsigned long>(kStressTraceSampleStride),
+                                   static_cast<unsigned long>(kStressTraceSampleMs),
+                                   gate);
                           if (!runOne(2510u, "gripper_static_pressure_matrix_factory", false, metrics)) return false;
                           if (!runOne(2511u, "gripper_refresh_hold_3psi_factory", false, metrics)) return false;
                           if (!runOne(2512u, "gripper_motion_raster_3psi_factory", false, metrics)) return false;
@@ -1223,10 +1234,10 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             }
                           }
                         }
-                        char metrics2510[224];
+                        char metrics2510[256];
                         snprintf(metrics2510,
                                  sizeof(metrics2510),
-                                 "pulse_ms=%lu;tick_us=%lu;pulses=%lu;targets=1_2_3;ready=%lu;timeout=%lu;fresh_to=%lu;focus=1;trace=%u;sc=%lu;ec=%lu",
+                                 "pulse_ms=%lu;tick_us=%lu;pulses=%lu;targets=1_2_3;ready=%lu;timeout=%lu;fresh_to=%lu;focus=1;trace=%u;sc=%lu;ec=%lu;stride=%lu;sample_ms=%lu",
                                  static_cast<unsigned long>(kStressPulseMs),
                                  static_cast<unsigned long>(kStressPulseTickUs),
                                  static_cast<unsigned long>(row2510.pulses),
@@ -1235,7 +1246,9 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                  static_cast<unsigned long>(row2510.freshTo),
                                  static_cast<unsigned>((row2510.traceFail == 0u) ? 1u : 0u),
                                  static_cast<unsigned long>(row2510.sc),
-                                 static_cast<unsigned long>(row2510.ec));
+                                 static_cast<unsigned long>(row2510.ec),
+                                 static_cast<unsigned long>(kStressTraceSampleStride),
+                                 static_cast<unsigned long>(kStressTraceSampleMs));
                         if (!runOne(2510u, "gripper_static_pressure_matrix_factory", row2510.pass, metrics2510)) {
                           return finishSelfTestNow();
                         }
@@ -1278,10 +1291,10 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             break;
                           }
                         }
-                        char metrics2511[224];
+                        char metrics2511[256];
                         snprintf(metrics2511,
                                  sizeof(metrics2511),
-                                 "psi=3000;pulse_ms=%lu;pulse_int=%lu;dur_ms=%lu;pulses=%lu;refresh_ms=%lu;refresh=%u;ready=%lu;timeout=%lu;fresh_to=%lu;focus=1;trace=%u;sc=%lu;ec=%lu",
+                                 "psi=3000;pulse_ms=%lu;pulse_int=%lu;dur_ms=%lu;pulses=%lu;refresh_ms=%lu;refresh=%u;ready=%lu;timeout=%lu;fresh_to=%lu;focus=1;trace=%u;sc=%lu;ec=%lu;stride=%lu;sample_ms=%lu",
                                  static_cast<unsigned long>(kStressPulseMs),
                                  static_cast<unsigned long>(kStressPulseIntervalMs),
                                  static_cast<unsigned long>(kStressRefreshHoldMs),
@@ -1293,7 +1306,9 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                  static_cast<unsigned long>(row2511.freshTo),
                                  static_cast<unsigned>((row2511.traceFail == 0u) ? 1u : 0u),
                                  static_cast<unsigned long>(row2511.sc),
-                                 static_cast<unsigned long>(row2511.ec));
+                                 static_cast<unsigned long>(row2511.ec),
+                                 static_cast<unsigned long>(kStressTraceSampleStride),
+                                 static_cast<unsigned long>(kStressTraceSampleMs));
                         if (!runOne(2511u, "gripper_refresh_hold_3psi_factory", row2511.pass, metrics2511)) {
                           return finishSelfTestNow();
                         }
@@ -1519,10 +1534,10 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                        (row2512.timeout == 0u) &&
                                        (row2512.traceFail == 0u) &&
                                        (row2512.pulses > 0u);
-                        char metrics2512[320];
+                        char metrics2512[384];
                         snprintf(metrics2512,
                                  sizeof(metrics2512),
-                                 "psi=3000;pulse_ms=%lu;pulse_int=%lu;rows=%lu;cols=%lu;moves=%lu;pulses=%lu;xy_home_to=%lu;move_to=%lu;guard=%lu;bound=%lu;park_x=%ld;park_y=%ld;park_to=%lu;ready=%lu;timeout=%lu;fresh_to=%lu;focus=1;trace=%u;sc=%lu;ec=%lu",
+                                 "psi=3000;pulse_ms=%lu;pulse_int=%lu;rows=%lu;cols=%lu;moves=%lu;pulses=%lu;xy_home_to=%lu;move_to=%lu;guard=%lu;bound=%lu;park_x=%ld;park_y=%ld;park_to=%lu;ready=%lu;timeout=%lu;fresh_to=%lu;focus=1;trace=%u;sc=%lu;ec=%lu;stride=%lu;sample_ms=%lu",
                                  static_cast<unsigned long>(kStressPulseMs),
                                  static_cast<unsigned long>(kStressPulseIntervalMs),
                                  static_cast<unsigned long>(kStressPlateRows),
@@ -1541,17 +1556,21 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                  static_cast<unsigned long>(row2512.freshTo),
                                  static_cast<unsigned>((row2512.traceFail == 0u) ? 1u : 0u),
                                  static_cast<unsigned long>(row2512.sc),
-                                 static_cast<unsigned long>(row2512.ec));
+                                 static_cast<unsigned long>(row2512.ec),
+                                 static_cast<unsigned long>(kStressTraceSampleStride),
+                                 static_cast<unsigned long>(kStressTraceSampleMs));
                         if (!runOne(2512u, "gripper_motion_raster_3psi_factory", row2512.pass, metrics2512)) {
                           return finishSelfTestNow();
                         }
                         if (xyHomeTimeout != 0u || _selfTestAbortRequested) {
-                          char skipMetrics[160];
+                          char skipMetrics[192];
                           snprintf(skipMetrics,
                                    sizeof(skipMetrics),
-                                   "psi=3000;pulse_ms=%lu;pre=%lu;post=0;ready=0;timeout=0;fresh_to=0;focus=0;trace=0;sc=0;ec=0;gate=xy_home",
+                                   "psi=3000;pulse_ms=%lu;pre=%lu;post=0;ready=0;timeout=0;fresh_to=0;focus=0;trace=0;sc=0;ec=0;stride=%lu;sample_ms=%lu;gate=xy_home",
                                    static_cast<unsigned long>(kStressPulseMs),
-                                   static_cast<unsigned long>(comparePre.pulses));
+                                   static_cast<unsigned long>(comparePre.pulses),
+                                   static_cast<unsigned long>(kStressTraceSampleStride),
+                                   static_cast<unsigned long>(kStressTraceSampleMs));
                           (void)runOne(2513u, "gripper_post_motion_seal_compare_factory", false, skipMetrics);
                           MX_GRIPPER_SetRefreshPeriodMs(originalRefreshMs);
                           closeStressPressurePath();
@@ -1579,10 +1598,10 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         const bool comparePass = comparePre.pass &&
                                                  comparePost.pass &&
                                                  !_selfTestAbortRequested;
-                        char metrics2513[224];
+                        char metrics2513[256];
                         snprintf(metrics2513,
                                  sizeof(metrics2513),
-                                 "psi=3000;pulse_ms=%lu;pre=%lu;post=%lu;ready=%lu;timeout=%lu;fresh_to=%lu;focus=1;trace=%u;sc=%lu;ec=%lu",
+                                 "psi=3000;pulse_ms=%lu;pre=%lu;post=%lu;ready=%lu;timeout=%lu;fresh_to=%lu;focus=1;trace=%u;sc=%lu;ec=%lu;stride=%lu;sample_ms=%lu",
                                  static_cast<unsigned long>(kStressPulseMs),
                                  static_cast<unsigned long>(comparePre.pulses),
                                  static_cast<unsigned long>(comparePost.pulses),
@@ -1591,7 +1610,9 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                  static_cast<unsigned long>(comparePre.freshTo + comparePost.freshTo),
                                  static_cast<unsigned>(((comparePre.traceFail + comparePost.traceFail) == 0u) ? 1u : 0u),
                                  static_cast<unsigned long>(comparePre.sc + comparePost.sc),
-                                 static_cast<unsigned long>(comparePre.ec + comparePost.ec));
+                                 static_cast<unsigned long>(comparePre.ec + comparePost.ec),
+                                 static_cast<unsigned long>(kStressTraceSampleStride),
+                                 static_cast<unsigned long>(kStressTraceSampleMs));
                         if (!runOne(2513u, "gripper_post_motion_seal_compare_factory", comparePass, metrics2513)) {
                           return finishSelfTestNow();
                         }

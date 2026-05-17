@@ -42,6 +42,7 @@ add_executable(fw_tests
     ../Core/Src/OrchestratorDecode.cpp
     ../Core/Src/nvm_codec.c
     ../Core/Src/PressureRegulatorMath.cpp
+    ../Core/Src/PressureTraceRecorder.cpp
     ../Core/Src/PressureSensorFocusPolicy.cpp
     ../Core/Src/PressureQualificationMath.cpp
     ../Core/Src/GripperSealQualificationMath.cpp
