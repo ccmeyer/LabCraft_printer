@@ -53,6 +53,12 @@ public:
   void     setPulseDurationMs(uint32_t ms);
   uint32_t getRefreshPeriodMs() const;
   uint32_t getPulseDurationMs() const;
+  uint32_t getPumpPulseCount() const { return _pumpPulseCount; }
+  uint32_t getRefreshPulseCount() const { return _refreshPulseCount; }
+  uint32_t getLastPumpPulseTickMs() const { return _lastPumpPulseTickMs; }
+  uint32_t getLastClosePulseTickMs() const { return _lastClosePulseTickMs; }
+  bool     hasPumpPulseTelemetry() const { return _hasPumpPulseTelemetry; }
+  bool     hasClosePulseTelemetry() const { return _hasClosePulseTelemetry; }
 
   // ---- coordination helpers ----
   bool lockVacuumGate(TickType_t waitTicks);   // take the gate (Printer uses this at job start)
@@ -70,6 +76,7 @@ private:
 
   bool _busy = false;
 
+  void recordPumpPulse(bool backgroundRefresh);
   void pulsePump();
 
   GPIO_TypeDef* _pumpPort;
@@ -91,6 +98,13 @@ private:
   volatile bool  _refreshEnabled = false; // true while background refresh may pulse
   volatile bool  _isRefreshing = false;  // true while a refresh/open/close pulse is active
   bool           _gateHeld     = false;  // true if THIS gripper instance took the gate
+
+  volatile uint32_t _pumpPulseCount = 0;
+  volatile uint32_t _refreshPulseCount = 0;
+  volatile uint32_t _lastPumpPulseTickMs = 0;
+  volatile uint32_t _lastClosePulseTickMs = 0;
+  volatile bool     _hasPumpPulseTelemetry = false;
+  volatile bool     _hasClosePulseTelemetry = false;
 };
 
 

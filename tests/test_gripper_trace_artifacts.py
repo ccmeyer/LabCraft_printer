@@ -24,6 +24,8 @@ def _trace(name: str, test_id: int = 2510):
         ],
         "events": [
             {"dt_ms": 0, "event_type": 0, "event_name": "trace_start", "value0": 0, "value1": 0},
+            {"dt_ms": 0, "event_type": 15, "event_name": "gripper_timing", "value0": 42, "value1": 17},
+            {"dt_ms": 0, "event_type": 16, "event_name": "gripper_refresh_count", "value0": 3, "value1": 300},
             {"dt_ms": 500, "event_type": 2, "event_name": "pulse_start", "value0": 2000, "value1": 4259},
             {"dt_ms": 2000, "event_type": 3, "event_name": "pulse_end", "value0": 2000, "value1": 4216},
             {"dt_ms": 2250, "event_type": 1, "event_name": "trace_stop", "value0": 0, "value1": 0},
@@ -45,6 +47,11 @@ def test_analyze_gripper_trace_computes_drop_and_snr():
     assert row["post_drop_raw"] == 39
     assert row["slope_raw_min"] > 0
     assert row["snr"] > 0
+    assert row["since_close_ms"] == 4200
+    assert row["since_refresh_ms"] == 1700
+    assert row["refresh_count"] == 3
+    assert row["refresh_period_ms"] == 30000
+    assert row["seal_age_ms"] == 1700
 
 
 def test_generate_gripper_trace_artifacts_writes_plots_csv_and_analysis(tmp_path):
@@ -67,12 +74,15 @@ def test_generate_gripper_trace_artifacts_writes_plots_csv_and_analysis(tmp_path
     assert result.analysis_json.exists()
     assert result.replicate_csv.exists()
     assert (result.plot_dir / "gripper_static_pressure_matrix.png").exists()
+    assert (result.plot_dir / "gripper_static_drop_by_replicate.png").exists()
+    assert (result.plot_dir / "gripper_static_drop_vs_seal_age.png").exists()
     assert (result.plot_dir / "gripper_refresh_hold_timeline.png").exists()
     assert (result.plot_dir / "gripper_motion_raster_drop_timeline.png").exists()
     assert (result.plot_dir / "gripper_motion_raster_drop_map.png").exists()
     analysis = json.loads(result.analysis_json.read_text(encoding="utf-8"))
     assert analysis["schema_version"] == "gripper_trace_analysis_v1"
     assert analysis["valid_replicate_count"] == len(sources)
+    assert analysis["replicates"][0]["since_refresh_ms"] == 1700
     assert result.report_metrics[2510]["d3"] == 42
     assert result.report_metrics[2512]["drop_mean"] == 42
     assert result.report_metrics[2513]["p_delta"] == 0

@@ -196,6 +196,8 @@ def test_artifact_paths_exposes_gripper_trace_outputs(tmp_path):
     (plot_dir / "gripper_trace_analysis.json").write_text("{}", encoding="utf-8")
     (plot_dir / "gripper_trace_replicates.csv").write_text("header\n", encoding="utf-8")
     (plot_dir / "gripper_static_pressure_matrix.png").write_bytes(b"png")
+    (plot_dir / "gripper_static_drop_by_replicate.png").write_bytes(b"png")
+    (plot_dir / "gripper_static_drop_vs_seal_age.png").write_bytes(b"png")
     (plot_dir / "gripper_refresh_hold_timeline.png").write_bytes(b"png")
     (plot_dir / "gripper_motion_raster_drop_timeline.png").write_bytes(b"png")
     (plot_dir / "gripper_motion_raster_drop_map.png").write_bytes(b"png")
@@ -211,6 +213,8 @@ def test_artifact_paths_exposes_gripper_trace_outputs(tmp_path):
     assert "Gripper trace analysis JSON" in labels
     assert "Gripper trace replicate CSV" in labels
     assert "Gripper static pressure matrix plot" in labels
+    assert "Gripper static drop by replicate plot" in labels
+    assert "Gripper static drop vs seal age plot" in labels
     assert "Gripper refresh hold timeline plot" in labels
     assert "Gripper raster drop timeline plot" in labels
     assert "Gripper raster drop map plot" in labels

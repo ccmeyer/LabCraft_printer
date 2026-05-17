@@ -1004,6 +1004,37 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           PressureTraceRecorder::instance().recordEvent(traceChannel, event);
                         };
 
+                        auto toTraceDeciseconds = [](uint32_t ms) -> uint16_t {
+                          const uint32_t ds = (ms + 50u) / 100u;
+                          return static_cast<uint16_t>((ds > 0xFFFFu) ? 0xFFFFu : ds);
+                        };
+
+                        auto toTraceU16 = [](uint32_t value) -> uint16_t {
+                          return static_cast<uint16_t>((value > 0xFFFFu) ? 0xFFFFu : value);
+                        };
+
+                        auto recordStressGripperMetadata = [&](PressureTraceChannel traceChannel,
+                                                               uint32_t traceStartTick) {
+                          const Gripper& gripper = Gripper::instance();
+                          const uint32_t nowMs = HAL_GetTick();
+                          const uint32_t sinceCloseMs = gripper.hasClosePulseTelemetry()
+                              ? (nowMs - gripper.getLastClosePulseTickMs())
+                              : 0u;
+                          const uint32_t sinceRefreshMs = gripper.hasPumpPulseTelemetry()
+                              ? (nowMs - gripper.getLastPumpPulseTickMs())
+                              : sinceCloseMs;
+                          recordStressTraceEvent(traceChannel,
+                                                 PressureTraceEventType::GripperTiming,
+                                                 toTraceDeciseconds(sinceCloseMs),
+                                                 toTraceDeciseconds(sinceRefreshMs),
+                                                 traceStartTick);
+                          recordStressTraceEvent(traceChannel,
+                                                 PressureTraceEventType::GripperRefreshCount,
+                                                 toTraceU16(gripper.getRefreshPulseCount()),
+                                                 toTraceDeciseconds(MX_GRIPPER_GetRefreshPeriodMs()),
+                                                 traceStartTick);
+                        };
+
                         auto beginStressQuiet = [&]() {
                           PressureRegulator::regP().beginDispenseQuiet(0u);
 #if (LC_PRESSURE_PORTS > 1)
@@ -1120,6 +1151,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           recorder.arm();
                           const uint32_t traceStartTick = HAL_GetTick();
                           recorder.start(traceStartTick);
+                          recordStressGripperMetadata(traceCfg.channel, traceStartTick);
                           bool timeout = !delayWithWatchdog(traceCfg.preRollMs, stage);
                           bool freshOk = false;
                           if (!timeout && !_selfTestAbortRequested) {
@@ -1432,6 +1464,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               recorder.arm();
                               const uint32_t traceStartTick = HAL_GetTick();
                               recorder.start(traceStartTick);
+                              recordStressGripperMetadata(traceCfg.channel, traceStartTick);
                               bool timeout = !delayWithWatchdog(traceCfg.preRollMs, "gripper_motion_preroll");
                               bool freshOk = false;
                               if (!timeout && !_selfTestAbortRequested) {

@@ -277,6 +277,8 @@ def decode_pressure_trace_events_v1(payload: bytes) -> list[dict]:
         12: "valve_gap",
         13: "valve_previous_width",
         14: "valve_interval",
+        15: "gripper_timing",
+        16: "gripper_refresh_count",
     }
     rows = []
     for off in range(0, len(payload), size):

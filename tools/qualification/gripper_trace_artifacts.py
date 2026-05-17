@@ -23,6 +23,11 @@ COMPARE_TRACE_RE = re.compile(r"^grip_compare_ch(?P<channel>[pr])_(?P<phase>pre|
 BASELINE_WINDOW_MS = 250.0
 END_WINDOW_MS = 250.0
 POST_WINDOW_MS = 250.0
+PRESSURE_TARGETS_RAW = {
+    1000: 2512,
+    2000: 3386,
+    3000: 4259,
+}
 
 
 @dataclass(frozen=True)
@@ -80,6 +85,15 @@ def _first_event(events: list[dict[str, Any]], event_name: str) -> dict[str, Any
     return None
 
 
+def _event_value_u16(event: dict[str, Any] | None, key: str) -> int | None:
+    if event is None:
+        return None
+    try:
+        return int(event.get(key))
+    except (TypeError, ValueError):
+        return None
+
+
 def _parse_trace_name(name: str) -> dict[str, Any] | None:
     for family, regex in (
         ("static", STATIC_TRACE_RE),
@@ -116,12 +130,23 @@ def analyze_gripper_trace(trace: dict[str, Any], *, source_path: str | Path | No
     events = _safe_list(trace, "events")
     pulse_start = _first_event(events, "pulse_start")
     pulse_end = _first_event(events, "pulse_end")
+    gripper_timing = _first_event(events, "gripper_timing")
+    gripper_refresh = _first_event(events, "gripper_refresh_count")
+    since_close_ds = _event_value_u16(gripper_timing, "value0")
+    since_refresh_ds = _event_value_u16(gripper_timing, "value1")
+    refresh_count = _event_value_u16(gripper_refresh, "value0")
+    refresh_period_ds = _event_value_u16(gripper_refresh, "value1")
     row: dict[str, Any] = {
         "trace_file": "" if source_path is None else str(source_path),
         "test_id": trace.get("test_id"),
         "name": trace.get("name"),
         **metadata,
         "valid": False,
+        "since_close_ms": None if since_close_ds is None else since_close_ds * 100,
+        "since_refresh_ms": None if since_refresh_ds is None else since_refresh_ds * 100,
+        "refresh_count": refresh_count,
+        "refresh_period_ms": None if refresh_period_ds is None else refresh_period_ds * 100,
+        "seal_age_ms": None if since_refresh_ds is None else since_refresh_ds * 100,
     }
     if not samples or pulse_start is None or pulse_end is None:
         row["reason"] = "missing_samples_or_pulse_events"
@@ -343,6 +368,11 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "abs_dev_raw",
         "slope_raw_min",
         "snr",
+        "since_close_ms",
+        "since_refresh_ms",
+        "refresh_count",
+        "refresh_period_ms",
+        "seal_age_ms",
     ]
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
@@ -358,22 +388,142 @@ def _plot_static_matrix(rows: list[dict[str, Any]], plot_dir: Path) -> Path | No
     import matplotlib.pyplot as plt
 
     path = plot_dir / "gripper_static_pressure_matrix.png"
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(9, 5.5))
     channels = ("p", "r")
     pressures = (1000, 2000, 3000)
     offsets = {"p": -0.18, "r": 0.18}
+    jitter = {-1: -0.05, 0: 0.0, 1: 0.05}
     labels = {"p": "Print", "r": "Refuel"}
+    colors = {"p": "tab:blue", "r": "tab:orange"}
+    seen_channels: set[str] = set()
     for channel in channels:
-        means = [
-            _mean_metric(_valid_rows(_rows_for(rows, family="static", channel=channel, psi_milli=psi)), "drop_raw")
-            for psi in pressures
-        ]
-        xs = [idx + offsets[channel] for idx, _psi in enumerate(pressures)]
-        ax.bar(xs, means, width=0.34, label=labels[channel])
+        for idx, psi in enumerate(pressures):
+            subset = sorted(
+                _valid_rows(_rows_for(rows, family="static", channel=channel, psi_milli=psi)),
+                key=lambda row: int(row.get("replicate") or 0),
+            )
+            if not subset:
+                continue
+            values = [float(row.get("drop_raw") or 0) for row in subset]
+            base_x = idx + offsets[channel]
+            xs = [
+                base_x + jitter.get(int(row.get("replicate") or 0) - 2, 0.0)
+                for row in subset
+            ]
+            ax.scatter(
+                xs,
+                values,
+                color=colors[channel],
+                edgecolor="black",
+                linewidth=0.4,
+                alpha=0.8,
+                label=labels[channel] if channel not in seen_channels else None,
+                zorder=3,
+            )
+            seen_channels.add(channel)
+            avg = _mean(values)
+            std = _std(values)
+            ax.errorbar(
+                [base_x],
+                [avg],
+                yerr=[[std], [std]],
+                fmt="D",
+                color=colors[channel],
+                markerfacecolor="white",
+                markeredgecolor=colors[channel],
+                capsize=4,
+                markersize=6,
+                zorder=4,
+            )
     ax.set_xticks(range(len(pressures)), ["1 psi", "2 psi", "3 psi"])
     ax.set_ylabel("End-of-pulse drop (raw)")
-    ax.set_title("Gripper Static Pressure Matrix")
-    ax.legend()
+    ax.set_title("Gripper Static Pressure Matrix (Replicates + Mean +/- SD)")
+    ax.grid(axis="y", alpha=0.2)
+    if seen_channels:
+        ax.legend()
+    fig.tight_layout()
+    fig.savefig(path, dpi=140)
+    plt.close(fig)
+    return path
+
+
+def _plot_static_drop_by_replicate(rows: list[dict[str, Any]], plot_dir: Path) -> Path | None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    subset = _valid_rows(_rows_for(rows, family="static"))
+    if not subset:
+        return None
+    path = plot_dir / "gripper_static_drop_by_replicate.png"
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.8), sharey=True)
+    colors = {1000: "tab:blue", 2000: "tab:orange", 3000: "tab:green"}
+    for ax, channel, title in zip(axes, ("p", "r"), ("Print", "Refuel")):
+        for psi, color in colors.items():
+            pressure_rows = sorted(
+                [row for row in subset if row.get("channel") == channel and int(row.get("psi_milli") or 0) == psi],
+                key=lambda row: int(row.get("replicate") or 0),
+            )
+            if not pressure_rows:
+                continue
+            ax.plot(
+                [int(row.get("replicate") or 0) for row in pressure_rows],
+                [float(row.get("drop_raw") or 0) for row in pressure_rows],
+                marker="o",
+                color=color,
+                label=f"{psi // 1000} psi",
+            )
+        ax.set_title(title)
+        ax.set_xlabel("Replicate")
+        ax.grid(alpha=0.25)
+    axes[0].set_ylabel("End-of-pulse drop (raw)")
+    axes[-1].legend(title="Pressure")
+    fig.suptitle("Gripper Static Drop by Replicate")
+    fig.tight_layout()
+    fig.savefig(path, dpi=140)
+    plt.close(fig)
+    return path
+
+
+def _plot_static_drop_vs_seal_age(rows: list[dict[str, Any]], plot_dir: Path) -> Path | None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    subset = [
+        row
+        for row in _valid_rows(_rows_for(rows, family="static"))
+        if row.get("seal_age_ms") is not None
+    ]
+    if not subset:
+        return None
+    path = plot_dir / "gripper_static_drop_vs_seal_age.png"
+    fig, ax = plt.subplots(figsize=(9, 5.2))
+    colors = {1000: "tab:blue", 2000: "tab:orange", 3000: "tab:green"}
+    markers = {"p": "o", "r": "s"}
+    labels_seen: set[tuple[int, str]] = set()
+    for row in sorted(subset, key=lambda item: (int(item.get("psi_milli") or 0), str(item.get("channel") or ""))):
+        psi = int(row.get("psi_milli") or 0)
+        channel = str(row.get("channel") or "")
+        key = (psi, channel)
+        ax.scatter(
+            float(row.get("seal_age_ms") or 0) / 1000.0,
+            float(row.get("drop_raw") or 0),
+            color=colors.get(psi, "tab:gray"),
+            marker=markers.get(channel, "o"),
+            edgecolor="black",
+            linewidth=0.4,
+            alpha=0.85,
+            label=f"{psi // 1000} psi {'print' if channel == 'p' else 'refuel'}" if key not in labels_seen else None,
+        )
+        labels_seen.add(key)
+    ax.set_xlabel("Time since last gripper close/refresh (s)")
+    ax.set_ylabel("End-of-pulse drop (raw)")
+    ax.set_title("Gripper Static Drop vs Seal Age")
+    ax.grid(alpha=0.25)
+    ax.legend(ncol=2, fontsize="small")
     fig.tight_layout()
     fig.savefig(path, dpi=140)
     plt.close(fig)
@@ -444,8 +594,11 @@ def _plot_overlay(rows: list[dict[str, Any]], trace_by_name: dict[str, dict[str,
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
 
     paths: list[Path] = []
+    static_rep_colors = {1: "tab:blue", 2: "tab:orange", 3: "tab:green"}
+    phase_colors = {"pre": "tab:blue", "post": "tab:orange"}
     for family in ("static", "refresh", "motion", "compare"):
         for channel in ("p", "r"):
             subset = _rows_for(rows, family=family, channel=channel)
@@ -453,6 +606,8 @@ def _plot_overlay(rows: list[dict[str, Any]], trace_by_name: dict[str, dict[str,
                 continue
             path = plot_dir / f"gripper_{family}_ch{channel}_overlay.png"
             fig, ax = plt.subplots(figsize=(10, 5))
+            legend_handles: list[Any] = []
+            legend_labels: list[str] = []
             for row in subset:
                 trace = trace_by_name.get(str(row.get("name") or ""))
                 if not trace:
@@ -460,15 +615,71 @@ def _plot_overlay(rows: list[dict[str, Any]], trace_by_name: dict[str, dict[str,
                 samples = _safe_list(trace, "samples")
                 if not samples:
                     continue
+                color = "tab:blue"
+                label = None
+                if family == "static":
+                    replicate = int(row.get("replicate") or 0)
+                    color = static_rep_colors.get(replicate, "tab:gray")
+                    label = f"rep {replicate}"
+                elif family == "compare":
+                    phase = str(row.get("phase") or "")
+                    color = phase_colors.get(phase, "tab:gray")
+                    label = phase
+                else:
+                    sequence = int(row.get("sequence_index") or row.get("replicate") or 0)
+                    cmap = plt.get_cmap("viridis")
+                    denominator = max(1, len(subset) - 1)
+                    color = cmap((sequence - 1) / denominator if sequence > 0 else 0.0)
+                    label = f"seq {sequence:02d}" if sequence > 0 else "trace"
                 ax.plot(
                     [float(sample.get("dt_ms", 0)) for sample in samples],
                     [float(sample.get("raw_pressure", 0)) for sample in samples],
                     alpha=0.55,
                     linewidth=1.0,
+                    color=color,
+                    label=label,
                 )
+            if family == "static":
+                for psi, raw in PRESSURE_TARGETS_RAW.items():
+                    ax.axhline(raw, linestyle="--", linewidth=0.9, alpha=0.7, color="black")
+                    ax.text(
+                        1.01,
+                        raw,
+                        f"{psi // 1000} psi",
+                        transform=ax.get_yaxis_transform(),
+                        va="center",
+                        fontsize="small",
+                    )
+                for replicate, color in static_rep_colors.items():
+                    legend_handles.append(Line2D([0], [0], color=color, lw=2))
+                    legend_labels.append(f"rep {replicate}")
+            else:
+                valid_subset = _valid_rows(subset)
+                baselines = [float(row.get("baseline_mean_raw") or 0) for row in valid_subset]
+                if baselines:
+                    reference = _median(baselines)
+                    ax.axhline(
+                        reference,
+                        linestyle="--",
+                        linewidth=1.0,
+                        color="black",
+                        alpha=0.65,
+                        label=f"start median {int(reference + 0.5)}",
+                    )
+            handles, labels = ax.get_legend_handles_labels()
+            if legend_handles:
+                handles = legend_handles + handles
+                labels = legend_labels + labels
+            unique: dict[str, Any] = {}
+            for handle, label in zip(handles, labels):
+                if label and label not in unique:
+                    unique[label] = handle
             ax.set_title(f"Gripper {family} channel {channel.upper()} traces")
             ax.set_xlabel("Trace time (ms)")
             ax.set_ylabel("Raw pressure")
+            if unique:
+                ax.legend(unique.values(), unique.keys(), fontsize="x-small", ncol=2)
+            ax.grid(alpha=0.2)
             fig.tight_layout()
             fig.savefig(path, dpi=140)
             plt.close(fig)
@@ -481,6 +692,8 @@ def _write_plots(rows: list[dict[str, Any]], trace_by_name: dict[str, dict[str, 
     plot_paths: list[Path] = []
     for maybe_path in (
         _plot_static_matrix(rows, plot_dir),
+        _plot_static_drop_by_replicate(rows, plot_dir),
+        _plot_static_drop_vs_seal_age(rows, plot_dir),
         _plot_drop_timeline(rows, plot_dir, "refresh", "gripper_refresh_hold_timeline.png", "Gripper Refresh Hold Drop"),
         _plot_drop_timeline(rows, plot_dir, "motion", "gripper_motion_raster_drop_timeline.png", "Gripper Raster Pulse Drop"),
         _plot_motion_map(rows, plot_dir),

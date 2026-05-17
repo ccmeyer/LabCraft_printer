@@ -236,6 +236,8 @@ def artifact_paths(report: dict[str, Any], *, report_path: str | Path | None = N
                 ("Gripper trace artifact error JSON", "gripper_trace_artifact_error.json"),
                 ("Gripper trace replicate CSV", "gripper_trace_replicates.csv"),
                 ("Gripper static pressure matrix plot", "gripper_static_pressure_matrix.png"),
+                ("Gripper static drop by replicate plot", "gripper_static_drop_by_replicate.png"),
+                ("Gripper static drop vs seal age plot", "gripper_static_drop_vs_seal_age.png"),
                 ("Gripper refresh hold timeline plot", "gripper_refresh_hold_timeline.png"),
                 ("Gripper raster drop timeline plot", "gripper_motion_raster_drop_timeline.png"),
                 ("Gripper raster drop map plot", "gripper_motion_raster_drop_map.png"),

@@ -32,6 +32,15 @@ TEST(PressureTraceMath, TraceRecordLayoutsRemainStable) {
     UNSIGNED_LONGS_EQUAL(8u, sizeof(PressureTraceEvent));
 }
 
+TEST(PressureTraceMath, GripperMetadataEventTypesRemainCompact) {
+    UNSIGNED_LONGS_EQUAL(15u, static_cast<uint8_t>(PressureTraceEventType::GripperTiming));
+    UNSIGNED_LONGS_EQUAL(16u, static_cast<uint8_t>(PressureTraceEventType::GripperRefreshCount));
+    const uint16_t gripperEventsPerTrace =
+        1u + 2u + 2u + 1u; // trace start, metadata, pulse start/end, trace stop
+    CHECK_TRUE(gripperEventsPerTrace < PressureTraceRecorder::kMaxEvents);
+    UNSIGNED_LONGS_EQUAL(16u, 2u * sizeof(PressureTraceEvent));
+}
+
 TEST(PressureTraceMath, DefaultStrideRecordsEveryAcceptedSample) {
     PressureTraceConfig cfg{};
     cfg.channel = PressureTraceChannel::Print;

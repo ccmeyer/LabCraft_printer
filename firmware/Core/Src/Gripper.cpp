@@ -122,6 +122,7 @@ void Gripper::open() {
   _isRefreshing = true;
   _refreshEnabled = true;
 
+  recordPumpPulse(false);
   EXTI8_SoftwareTrigger();
   // start refreshing from now on
   if (_refreshTimer) {
@@ -149,6 +150,10 @@ void Gripper::close() {
   _gateHeld = true;
   _isRefreshing = true;
   _refreshEnabled = true;
+  _refreshPulseCount = 0;
+  _lastClosePulseTickMs = HAL_GetTick();
+  _hasClosePulseTelemetry = true;
+  recordPumpPulse(false);
 
   // start refreshing from now on
   if (_refreshTimer) {
@@ -315,7 +320,18 @@ void Gripper::pumpOffTimerCallback(TimerHandle_t) {
   g._busy = false;
 }
 
+void Gripper::recordPumpPulse(bool backgroundRefresh) {
+  const uint32_t nowMs = HAL_GetTick();
+  _pumpPulseCount++;
+  _lastPumpPulseTickMs = nowMs;
+  _hasPumpPulseTelemetry = true;
+  if (backgroundRefresh) {
+    _refreshPulseCount++;
+  }
+}
+
 void Gripper::pulsePump() {
+  recordPumpPulse(true);
   HAL_GPIO_WritePin(_pumpPort, _pumpPin, GPIO_PIN_SET);
   xTimerStart(_pumpOffTimer, 0);
 }

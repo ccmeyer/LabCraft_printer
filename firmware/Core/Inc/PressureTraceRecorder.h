@@ -23,7 +23,9 @@ enum class PressureTraceEventType : uint8_t {
   MotorPosition,
   ValveGap,
   ValvePreviousWidth,
-  ValveInterval
+  ValveInterval,
+  GripperTiming,
+  GripperRefreshCount
 };
 
 struct PressureTraceSample {

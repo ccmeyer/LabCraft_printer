@@ -392,7 +392,7 @@ def test_run_writes_named_trace_artifacts_for_same_test_id(monkeypatch, tmp_path
     assert not (tmp_path / "selftest_trace_2474.json").exists()
 
 
-def test_decode_pressure_trace_events_names_valve_sequence_and_motor_position():
+def test_decode_pressure_trace_events_names_valve_and_gripper_metadata():
     mod = _load_run_selftest()
     payload = b"".join(
         [
@@ -401,6 +401,8 @@ def test_decode_pressure_trace_events_names_valve_sequence_and_motor_position():
             struct.pack("<HBBHH", 4, 12, 0, 500, 0),
             struct.pack("<HBBHH", 4, 13, 0, 1500, 3000),
             struct.pack("<HBBHH", 4, 14, 0, 1234, 0),
+            struct.pack("<HBBHH", 4, 15, 0, 42, 17),
+            struct.pack("<HBBHH", 4, 16, 0, 3, 300),
         ]
     )
 
@@ -418,6 +420,12 @@ def test_decode_pressure_trace_events_names_valve_sequence_and_motor_position():
     assert rows[3]["value1"] == 3000
     assert rows[4]["event_name"] == "valve_interval"
     assert rows[4]["value0"] == 1234
+    assert rows[5]["event_name"] == "gripper_timing"
+    assert rows[5]["value0"] == 42
+    assert rows[5]["value1"] == 17
+    assert rows[6]["event_name"] == "gripper_refresh_count"
+    assert rows[6]["value0"] == 3
+    assert rows[6]["value1"] == 300
 
 
 def test_run_sends_pressure_trace_test_selector(monkeypatch, tmp_path):
