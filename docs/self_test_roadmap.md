@@ -940,7 +940,7 @@ Valve characterization qualification slice:
 
 - Add `valve_characterization_v1` as a separate operator-gated FULL manifest requiring fixture `valve_closed_loop_pulse_matrix_v1`.
 - Select the suite with existing `CMD_SELFTEST_START` selector field value `2499`; no protocol layout or opcode changes.
-- Firmware rows `2473` and `2474` compare print and refuel valves at `2 psi=3386`, across matched `1500`, `3000`, and `4500 us` pulse widths with a deterministic interleaved order (`1500 -> 3000 -> 4500 -> 4500 -> 3000 -> 1500`) repeated five times after one unmeasured conditioning pass through the same pattern.
+- Firmware rows `2473` and `2474` compare print and refuel valves at `2 psi=3386`, across matched grouped `1500`, `3000`, and `4500 us` pulse widths with one unmeasured conditioning pulse before each channel/width group.
 - The suite homes P/R regulators asynchronously once at startup and reports `home_to` on every row so selected valve rows do not depend on the default FULL-suite motion-home gate.
 - Row `2475` derives print/refuel channel balance from the isolated 2 psi rows without additional valve actuation.
 - Active-regulator recovery behavior is deferred to a future dummy-head or restricted-flow fixture suite so this slice focuses on valve actuation repeatability and pulse-width linearity.
@@ -948,6 +948,14 @@ Valve characterization qualification slice:
 - When `valve_characterization_v1` runs, it focuses pressure sampling on the tested channel, aligns each pulse to a fresh sample, records per-replicate regulator motor position context, and exports annotated pressure trace artifacts and static plots for stitched time-course review, replicate overlays, settled response-vs-width trends, settled drop versus motor position, ringing amplitude, actuation latency, and baseline noise / signal-to-noise inspection. Transient ringing amplitude and first-deviation latency are reported separately as `rg*` and `lt*`.
 - Keep response magnitude and balance metrics informational for the first data-collection slice; analyzer rules focus on execution integrity such as timeout, readiness, sample/event availability, rejects, and deadline slip.
 - Keep `valve_characterization_v1` out of `factory_acceptance_v3` until enough fixture data exists to set meaningful acceptance thresholds.
+
+Valve gap sweep exploratory slice:
+
+- Add `valve_gap_sweep_v1` as a separate operator-gated FULL manifest using the same closed-loop valve fixture and selector field value `2498`.
+- Firmware rows `2476` and `2477` test print/refuel `1500 us` pulses at `2 psi` with post-ready settle gaps of `250`, `500`, `1000`, `2000`, and `5000 ms`, eight measured replicates per gap.
+- Firmware rows `2478` and `2479` provide print/refuel `3000` and `4500 us` controls at `500` and `2000 ms`, four measured replicates per condition.
+- Per-replicate traces record requested gap, previous pulse width, actual pulse-to-pulse interval, and regulator motor position so fixed-width short-pulse decay can be separated from timing and pneumatic memory effects.
+- Gap sweep settled-drop magnitudes remain informational; execution checks still require startup homing, pressure readiness, fresh samples, trace sample/event capture, and zero rejects.
 
 Validation:
 

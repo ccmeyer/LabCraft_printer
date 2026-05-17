@@ -372,6 +372,55 @@ def _raw_valve_characterization_selftest():
     }
 
 
+def _raw_valve_gap_sweep_selftest():
+    common = {
+        "home_to": 0,
+        "timeout": 0,
+        "ready": 0,
+        "rej": 0,
+        "fresh_to": 0,
+        "focus": 1,
+        "sc": 120,
+        "ec": 30,
+    }
+    rows = [
+        {
+            "test_id": 2476,
+            "name": "valve_gap_print_1500us_2psi",
+            "pass": True,
+            "metrics": {"ch": "p", "pw": 1500, "rep": 8, "g250": 4, "g500": 5, "g1000": 5, "g2000": 6, "g5000": 6, **common},
+        },
+        {
+            "test_id": 2477,
+            "name": "valve_gap_refuel_1500us_2psi",
+            "pass": True,
+            "metrics": {"ch": "r", "pw": 1500, "rep": 8, "g250": 3, "g500": 4, "g1000": 4, "g2000": 5, "g5000": 5, **common},
+        },
+        {
+            "test_id": 2478,
+            "name": "valve_gap_print_control_2psi",
+            "pass": True,
+            "metrics": {"ch": "p", "rep": 4, "m30g500": 9, "m30g2000": 10, "m45g500": 16, "m45g2000": 17, **common},
+        },
+        {
+            "test_id": 2479,
+            "name": "valve_gap_refuel_control_2psi",
+            "pass": True,
+            "metrics": {"ch": "r", "rep": 4, "m30g500": 9, "m30g2000": 10, "m45g500": 16, "m45g2000": 17, **common},
+        },
+    ]
+    return {
+        "run_id": 1357,
+        "profile": "FULL",
+        "started_at": "2026-05-13T00:00:00Z",
+        "finished_at": "2026-05-13T00:06:00Z",
+        "aborted": False,
+        "summary": {"total": 4, "passed": 4, "failed": 0},
+        "results": rows,
+        "host_checks": [{"name": "hello_ack", "pass": True, "details": {"seq8": 1}}],
+    }
+
+
 def _manifest_path(tmp_path):
     path = tmp_path / "unit_manifest.json"
     path.write_text(
@@ -408,6 +457,10 @@ def _pressure_regulator_manifest_ref():
 
 def _valve_characterization_manifest_ref():
     return "valve_characterization_v1"
+
+
+def _valve_gap_sweep_manifest_ref():
+    return "valve_gap_sweep_v1"
 
 
 class FakeSerial:
@@ -944,6 +997,56 @@ def test_valve_characterization_operator_prompt_runs_selected_suite_without_grip
 
     result = run_qualification(
         manifest_ref=_valve_characterization_manifest_ref(),
+        port="/dev/ttyAMA0",
+        baud=115200,
+        machine_id="LC-0001",
+        identity_path=tmp_path / "local" / "machine_identity.json",
+        output_root=tmp_path / "qualification",
+        timeout_ms=420000,
+        fixture_id="valve_closed_loop_pulse_matrix_v1",
+        operator_prompts=True,
+        invoker=fake_invoker,
+        prompter=fake_prompter,
+        gripper_control=fake_gripper_control,
+    )
+
+    assert result.returncode == 0
+    assert events[0].startswith("prompt:Confirm qualification setup")
+    assert "valve_closed_loop_pulse_matrix_v1" in events[0]
+    assert events == [events[0], "self-test"]
+    assert result.report["run"]["fixture_id"] == "valve_closed_loop_pulse_matrix_v1"
+    assert [item["stage"] for item in result.report["operator_interactions"]] == ["confirm_fixture_setup"]
+    assert result.report["overall_status"] == "pass"
+    assert generated_artifacts == [result.run_dir]
+
+
+def test_valve_gap_sweep_operator_prompt_runs_selected_suite_without_gripper_teardown(tmp_path, monkeypatch):
+    events = []
+    generated_artifacts = []
+
+    def fake_prompter(message):
+        events.append(f"prompt:{message}")
+
+    def fake_invoker(invocation):
+        events.append("self-test")
+        assert "--valve-gap-sweep-suite" in invocation.command
+        assert "--pressure-trace" in invocation.command
+        assert "--valve-characterization-suite" not in invocation.command
+        assert "--gripper-seal-suite" not in invocation.command
+        invocation.raw_report_path.write_text(json.dumps(_raw_valve_gap_sweep_selftest()), encoding="utf-8")
+        return 0
+
+    def fake_gripper_control(action, port, baud):
+        raise AssertionError(f"Valve gap sweep suite should not call gripper control: {action}:{port}:{baud}")
+
+    monkeypatch.setattr(
+        qualification_runner,
+        "generate_valve_trace_artifacts",
+        lambda artifacts: generated_artifacts.append(artifacts.run_dir),
+    )
+
+    result = run_qualification(
+        manifest_ref=_valve_gap_sweep_manifest_ref(),
         port="/dev/ttyAMA0",
         baud=115200,
         machine_id="LC-0001",

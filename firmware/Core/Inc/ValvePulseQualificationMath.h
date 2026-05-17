@@ -82,6 +82,10 @@ struct ResponseValueSummary {
 
 uint32_t absDiff(uint32_t a, uint32_t b);
 uint16_t interleavedValvePulseWidthUs(size_t sequenceIndexZeroBased);
+uint16_t groupedValvePulseWidthUs(size_t sequenceIndexZeroBased, size_t replicatesPerWidth);
+uint32_t valveGapSweepDetailedGapMs(size_t gapIndexZeroBased);
+uint16_t valveGapSweepControlWidthUs(size_t conditionIndexZeroBased);
+uint32_t valveGapSweepControlGapMs(size_t conditionIndexZeroBased);
 ResponseValueSummary summarizeResponseValues(const uint32_t* responses, size_t responseCount);
 ThreeWidthLinearitySummary summarizeThreeWidthLinearity(uint32_t response15,
                                                         uint32_t response30,

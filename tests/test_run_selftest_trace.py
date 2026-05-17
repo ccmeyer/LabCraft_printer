@@ -398,6 +398,9 @@ def test_decode_pressure_trace_events_names_valve_sequence_and_motor_position():
         [
             struct.pack("<HBBHH", 4, 10, 0, 12, 1500),
             struct.pack("<HBBHH", 4, 11, 0, 0xCFC7, 0xFFFF),
+            struct.pack("<HBBHH", 4, 12, 0, 500, 0),
+            struct.pack("<HBBHH", 4, 13, 0, 1500, 3000),
+            struct.pack("<HBBHH", 4, 14, 0, 1234, 0),
         ]
     )
 
@@ -408,6 +411,13 @@ def test_decode_pressure_trace_events_names_valve_sequence_and_motor_position():
     assert rows[0]["value1"] == 1500
     assert rows[1]["event_name"] == "motor_position"
     assert rows[1]["value_i32"] == -12345
+    assert rows[2]["event_name"] == "valve_gap"
+    assert rows[2]["value0"] == 500
+    assert rows[3]["event_name"] == "valve_previous_width"
+    assert rows[3]["value0"] == 1500
+    assert rows[3]["value1"] == 3000
+    assert rows[4]["event_name"] == "valve_interval"
+    assert rows[4]["value0"] == 1234
 
 
 def test_run_sends_pressure_trace_test_selector(monkeypatch, tmp_path):
@@ -747,6 +757,64 @@ def test_run_sends_valve_characterization_selector_and_keeps_goodbye(monkeypatch
                 tlv = mod.parse_tlvs(frame[2:])
                 sent_p3 = tlv.get(mod.TAG_P3)
     assert sent_p3 == (2499).to_bytes(2, "little")
+    assert sent_goodbye is True
+
+
+def test_run_sends_valve_gap_sweep_selector_and_keeps_goodbye(monkeypatch, tmp_path):
+    mod = _load_run_selftest()
+    run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF
+    clock = FakeClock()
+
+    inbound = b"".join(
+        [
+            _hello_ack(mod),
+            _selftest_done(mod, run_id),
+            _bye_ack(mod, 3),
+            _bye_done(mod, 3, run_id),
+        ]
+    )
+    serial = FakeSerial(inbound)
+    monkeypatch.setattr(mod, "time", SimpleNamespace(monotonic=clock.monotonic, time=clock.time))
+    monkeypatch.setattr(mod, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: serial))
+
+    out_path = tmp_path / "selftest.json"
+    args = SimpleNamespace(
+        port="/dev/ttyAMA0",
+        baud=115200,
+        profile="FULL",
+        timeout_ms=1000,
+        hello_timeout_ms=1000,
+        hello_retry_ms=50,
+        fast_fail_on_missing_hello=False,
+        pressure_trace=False,
+        pressure_trace_test=None,
+        pressure_sweep_suite=None,
+        pressure_regulator_suite=False,
+        valve_characterization_suite=False,
+        valve_gap_sweep_suite=True,
+        gripper_seal_suite=False,
+        xy_motion_suite=False,
+        motion_envelope_suite=False,
+        out=str(out_path),
+    )
+
+    rc = mod.run(args)
+
+    assert rc == 0
+    sent_p3 = None
+    sent_goodbye = False
+    for outbound in serial.writes:
+        reader = mod.FrameReader()
+        for byte in outbound:
+            frame = reader.feed(byte)
+            if not frame:
+                continue
+            if frame[0] == mod.CMD_GOODBYE:
+                sent_goodbye = True
+            if frame[0] == mod.CMD_SELFTEST_START:
+                tlv = mod.parse_tlvs(frame[2:])
+                sent_p3 = tlv.get(mod.TAG_P3)
+    assert sent_p3 == (2498).to_bytes(2, "little")
     assert sent_goodbye is True
 
 

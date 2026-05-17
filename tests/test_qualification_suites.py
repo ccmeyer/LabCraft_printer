@@ -21,15 +21,17 @@ def test_discover_suite_entries_lists_current_manifests():
         "motion_envelope_v1",
         "pressure_regulator_v1",
         "valve_characterization_v1",
+        "valve_gap_sweep_v1",
     }.issubset(manifest_ids)
     assert entries[0].manifest_id == "factory_acceptance_v3"
-    assert [entry.manifest_id for entry in entries[:6]] == [
+    assert [entry.manifest_id for entry in entries[:7]] == [
         "factory_acceptance_v3",
         "gripper_seal_v1",
         "xy_motion_v1",
         "motion_envelope_v1",
         "pressure_regulator_v1",
         "valve_characterization_v1",
+        "valve_gap_sweep_v1",
     ]
 
 
@@ -145,8 +147,28 @@ def test_valve_characterization_suite_exposes_operator_fixture_and_catalog_rows(
     assert "r15" in rows[2475].metrics
     assert "home_to" in rows[2475].metrics
     assert "1500, 3000, and 4500 us" in rows[2473].evaluates
-    assert "interleaved" in rows[2473].evaluates
+    assert "grouped" in rows[2473].evaluates
     assert "regulator-position context" in rows[2473].evaluates
     assert "settled pressure-drop" in rows[2473].evaluates
     assert "actuation latency" in rows[2473].evaluates
     assert "without additional valve actuation" in rows[2475].evaluates
+
+
+def test_valve_gap_sweep_suite_exposes_operator_fixture_and_catalog_rows():
+    entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
+    gap = entries["valve_gap_sweep_v1"].manifest
+
+    assert gap.requires_operator_prompts is True
+    assert required_fixture_ids(gap) == ("valve_closed_loop_pulse_matrix_v1",)
+    rows = {row.test_id: row for row in build_test_plan_rows(gap)}
+    assert list(rows) == [2476, 2477, 2478, 2479]
+    assert rows[2476].name == "Print valve 1500 us gap sweep"
+    assert rows[2477].name == "Refuel valve 1500 us gap sweep"
+    assert rows[2478].name == "Print valve gap controls"
+    assert rows[2479].name == "Refuel valve gap controls"
+    assert all(row.subsystem == "Valves/Pulses" for row in rows.values())
+    assert "g250" in rows[2476].metrics
+    assert "g5000" in rows[2476].metrics
+    assert "m30g500" in rows[2478].metrics
+    assert "m45g2000" in rows[2479].metrics
+    assert "post-ready settle gap" in rows[2476].evaluates

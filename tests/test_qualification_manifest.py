@@ -175,6 +175,28 @@ def test_load_valve_characterization_manifest_requires_operator_closed_loop_fixt
     assert manifest.analysis_rules["2475"]["metrics"]["r15"]["maturity"] == "informational"
 
 
+def test_load_valve_gap_sweep_manifest_requires_operator_closed_loop_fixture():
+    manifest = load_manifest("valve_gap_sweep_v1")
+
+    assert manifest.manifest_id == "valve_gap_sweep_v1"
+    assert manifest.profile == "FULL"
+    assert manifest.expected_test_ids == (2476, 2477, 2478, 2479)
+    assert manifest.enforce_expected_test_ids is True
+    assert manifest.requires_operator_prompts is True
+    assert manifest.selftest_args == ("--valve-gap-sweep-suite", "--pressure-trace")
+    assert {item["fixture_id"] for item in manifest.fixtures} == {"valve_closed_loop_pulse_matrix_v1"}
+    assert manifest.analysis_rules["2476"]["metrics"]["timeout"]["equals"] == 0
+    assert manifest.analysis_rules["2476"]["metrics"]["ready"]["equals"] == 0
+    assert manifest.analysis_rules["2476"]["metrics"]["home_to"]["equals"] == 0
+    assert manifest.analysis_rules["2476"]["metrics"]["rej"]["equals"] == 0
+    assert manifest.analysis_rules["2476"]["metrics"]["fresh_to"]["equals"] == 0
+    assert manifest.analysis_rules["2476"]["metrics"]["focus"]["equals"] == 1
+    assert manifest.analysis_rules["2476"]["metrics"]["g250"]["maturity"] == "informational"
+    assert manifest.analysis_rules["2476"]["metrics"]["g5000"]["maturity"] == "informational"
+    assert manifest.analysis_rules["2478"]["metrics"]["m30g500"]["maturity"] == "informational"
+    assert manifest.analysis_rules["2479"]["metrics"]["m45g2000"]["maturity"] == "informational"
+
+
 def test_load_manifest_from_path(tmp_path):
     path = tmp_path / "custom.json"
     path.write_text(

@@ -105,6 +105,29 @@ TEST(ValvePulseQualificationMath, InterleavedValvePulseWidthSequenceIsBalancedAc
     UNSIGNED_LONGS_EQUAL(10u, count4500);
 }
 
+TEST(ValvePulseQualificationMath, GroupedValvePulseWidthSequenceProducesTenRepeatsPerWidth) {
+    for (size_t i = 0; i < 30; ++i) {
+        const uint16_t expected = (i < 10) ? 1500 : (i < 20) ? 3000 : 4500;
+        UNSIGNED_LONGS_EQUAL(expected, ValvePulseQualificationMath::groupedValvePulseWidthUs(i, 10));
+    }
+}
+
+TEST(ValvePulseQualificationMath, ValveGapSweepDetailedPlanUsesExpectedGaps) {
+    const uint32_t expected[] = {250, 500, 1000, 2000, 5000};
+    for (size_t i = 0; i < 5; ++i) {
+        UNSIGNED_LONGS_EQUAL(expected[i], ValvePulseQualificationMath::valveGapSweepDetailedGapMs(i));
+    }
+}
+
+TEST(ValvePulseQualificationMath, ValveGapSweepControlPlanUsesExpectedWidthsAndGaps) {
+    const uint16_t expectedWidths[] = {3000, 3000, 4500, 4500};
+    const uint32_t expectedGaps[] = {500, 2000, 500, 2000};
+    for (size_t i = 0; i < 4; ++i) {
+        UNSIGNED_LONGS_EQUAL(expectedWidths[i], ValvePulseQualificationMath::valveGapSweepControlWidthUs(i));
+        UNSIGNED_LONGS_EQUAL(expectedGaps[i], ValvePulseQualificationMath::valveGapSweepControlGapMs(i));
+    }
+}
+
 TEST(ValvePulseQualificationMath, ResponseValueSummaryReportsMeanCvSpanAndOutliers) {
     uint32_t responses[] = {30, 31, 29, 80};
 

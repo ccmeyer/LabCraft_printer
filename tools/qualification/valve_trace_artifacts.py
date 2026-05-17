@@ -13,6 +13,7 @@ from .artifacts import RunArtifacts
 
 
 VALVE_TRACE_RE = re.compile(r"^valve_char_(?P<channel>[pr])_(?:seq(?P<sequence>\d+)_)?w(?P<width>\d+)_rep(?P<rep>\d+)$")
+VALVE_GAP_TRACE_RE = re.compile(r"^valve_gap_(?P<channel>[pr])_w(?P<width>\d+)_g(?P<gap>\d+)_rep(?P<rep>\d+)$")
 BASELINE_WINDOW_MS = 10.0
 RING_WINDOW_AFTER_PULSE_END_MS = 60.0
 SETTLED_START_AFTER_PULSE_END_MS = 80.0
@@ -90,19 +91,31 @@ def _event_i32(event: dict[str, Any] | None) -> int | None:
 
 def _parse_trace_name(name: str) -> dict[str, Any] | None:
     match = VALVE_TRACE_RE.match(str(name or ""))
-    if not match:
-        return None
-    channel = match.group("channel")
-    sequence = match.group("sequence")
-    sequence_index = int(sequence) if sequence else None
-    return {
-        "channel": channel,
-        "channel_name": "print" if channel == "p" else "refuel",
-        "sequence_index": sequence_index,
-        "sequence_slot": None if sequence_index is None else ((sequence_index - 1) % 6) + 1,
-        "width_us": int(match.group("width")),
-        "replicate": int(match.group("rep")),
-    }
+    if match:
+        channel = match.group("channel")
+        sequence = match.group("sequence")
+        sequence_index = int(sequence) if sequence else None
+        return {
+            "trace_family": "valve_char",
+            "channel": channel,
+            "channel_name": "print" if channel == "p" else "refuel",
+            "sequence_index": sequence_index,
+            "sequence_slot": None if sequence_index is None else ((sequence_index - 1) % 6) + 1,
+            "width_us": int(match.group("width")),
+            "replicate": int(match.group("rep")),
+        }
+    gap_match = VALVE_GAP_TRACE_RE.match(str(name or ""))
+    if gap_match:
+        channel = gap_match.group("channel")
+        return {
+            "trace_family": "valve_gap",
+            "channel": channel,
+            "channel_name": "print" if channel == "p" else "refuel",
+            "width_us": int(gap_match.group("width")),
+            "gap_ms": int(gap_match.group("gap")),
+            "replicate": int(gap_match.group("rep")),
+        }
+    return None
 
 
 def analyze_valve_trace(trace: dict[str, Any], *, source_path: str | Path | None = None) -> dict[str, Any]:
@@ -112,6 +125,9 @@ def analyze_valve_trace(trace: dict[str, Any], *, source_path: str | Path | None
     pulse_start = _first_event(events, "pulse_start")
     pulse_end = _first_event(events, "pulse_end")
     valve_sequence = _first_event(events, "valve_sequence")
+    valve_gap = _first_event(events, "valve_gap")
+    valve_previous_width = _first_event(events, "valve_previous_width")
+    valve_interval = _first_event(events, "valve_interval")
     motor_position_event = _first_event(events, "motor_position")
     row: dict[str, Any] = {
         "trace_file": "" if source_path is None else str(source_path),
@@ -127,6 +143,13 @@ def analyze_valve_trace(trace: dict[str, Any], *, source_path: str | Path | None
         row["sequence_width_us"] = int(valve_sequence.get("value1") or 0)
     if motor_position_event is not None:
         row["motor_position"] = _event_i32(motor_position_event)
+    if valve_gap is not None:
+        row["gap_ms"] = int(valve_gap.get("value0") or 0)
+    if valve_previous_width is not None:
+        row["previous_width_us"] = int(valve_previous_width.get("value0") or 0)
+        row["sequence_width_us"] = int(valve_previous_width.get("value1") or row.get("width_us") or 0)
+    if valve_interval is not None:
+        row["actual_interval_ms"] = int(valve_interval.get("value0") or 0)
     if not samples or pulse_start is None or pulse_end is None:
         row["reason"] = "missing_samples_or_pulse_events"
         return row
@@ -259,7 +282,7 @@ def analyze_valve_trace(trace: dict[str, Any], *, source_path: str | Path | None
 def _trace_sources(run_dir: Path) -> list[Path]:
     return sorted(
         path
-        for path in run_dir.glob("*_trace_247[34]_valve_char_*.json")
+        for path in run_dir.glob("*_trace_247[3-9]_valve_*.json")
         if path.is_file()
     )
 
@@ -278,7 +301,8 @@ def _copy_trace_sources(sources: list[Path], trace_dir: Path) -> list[Path]:
 def _row_sort_key(row: dict[str, Any]) -> tuple[str, int, int, int]:
     sequence = row.get("sequence_index")
     if sequence is None or sequence == "":
-        sequence_value = 100000 + int(row.get("width_us") or 0)
+        gap = int(row.get("gap_ms") or 0)
+        sequence_value = 100000 + (int(row.get("width_us") or 0) * 10000) + gap
     else:
         sequence_value = int(sequence)
     return (
@@ -360,6 +384,39 @@ def _summary_by_condition(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return summary
 
 
+def _summary_by_gap_condition(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    summary: list[dict[str, Any]] = []
+    valid = _gap_rows(rows)
+    keys = sorted({(row.get("channel"), row.get("width_us"), row.get("gap_ms")) for row in valid})
+    for channel, width_us, gap_ms in keys:
+        subset = [
+            row
+            for row in valid
+            if row.get("channel") == channel and row.get("width_us") == width_us and row.get("gap_ms") == gap_ms
+        ]
+        settled = [float(row.get("settled_drop_raw") or 0) for row in subset]
+        intervals = [
+            float(row.get("actual_interval_ms") or 0)
+            for row in subset
+            if float(row.get("actual_interval_ms") or 0) > 0
+        ]
+        summary.append(
+            {
+                "channel": channel,
+                "channel_name": "print" if channel == "p" else "refuel",
+                "width_us": width_us,
+                "gap_ms": gap_ms,
+                "replicate_count": len(subset),
+                "settled_drop_mean_raw": _mean(settled),
+                "settled_drop_std_raw": _std(settled),
+                "settled_drop_span_raw": (max(settled) - min(settled)) if settled else 0.0,
+                "actual_interval_mean_ms": _mean(intervals),
+                "actual_interval_span_ms": (max(intervals) - min(intervals)) if intervals else 0.0,
+            }
+        )
+    return summary
+
+
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
@@ -368,11 +425,15 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "name",
         "channel",
         "channel_name",
+        "trace_family",
         "sequence_index",
         "sequence_slot",
         "sequence_width_us",
         "width_us",
+        "gap_ms",
         "replicate",
+        "previous_width_us",
+        "actual_interval_ms",
         "motor_position",
         "motor_position_delta_from_first",
         "valid",
@@ -701,6 +762,117 @@ def _plot_ringing_summary(rows: list[dict[str, Any]], plot_dir: Path) -> Path | 
     return path
 
 
+def _gap_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [row for row in rows if row.get("valid") and row.get("gap_ms") not in (None, "")]
+
+
+def _plot_gap_response_by_gap(rows: list[dict[str, Any]], plot_dir: Path) -> Path | None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    valid = _gap_rows(rows)
+    if not valid:
+        return None
+    fig, (ax_p, ax_r) = plt.subplots(2, 1, figsize=(10, 8), sharex=True, sharey=True)
+    axes = {"p": ax_p, "r": ax_r}
+    colors = {1500: "tab:blue", 3000: "tab:orange", 4500: "tab:green"}
+    for channel, ax in axes.items():
+        subset = [row for row in valid if row.get("channel") == channel]
+        for width in (1500, 3000, 4500):
+            width_rows = [row for row in subset if int(row.get("width_us") or 0) == width]
+            if not width_rows:
+                continue
+            xs = [float(row.get("gap_ms") or 0) for row in width_rows]
+            ys = [float(row.get("settled_drop_raw") or 0) for row in width_rows]
+            ax.scatter(xs, ys, color=colors[width], alpha=0.45, label=f"{width} us")
+            for gap in sorted({int(row.get("gap_ms") or 0) for row in width_rows}):
+                responses = [float(row.get("settled_drop_raw") or 0) for row in width_rows if int(row.get("gap_ms") or 0) == gap]
+                if responses:
+                    ax.errorbar([gap], [_mean(responses)], yerr=[_std(responses)], fmt="o", color=colors[width], markersize=8)
+        ax.set_title(f"{'Print' if channel == 'p' else 'Refuel'} settled drop vs post-ready gap")
+        ax.set_ylabel("Settled pressure drop (raw)")
+        ax.grid(True, alpha=0.25)
+        ax.legend(loc="best", fontsize=8)
+    ax_r.set_xlabel("Post-ready settle gap (ms)")
+    fig.tight_layout()
+    path = plot_dir / "valve_gap_settled_drop_by_gap.png"
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return path
+
+
+def _plot_gap_replicates(rows: list[dict[str, Any]], plot_dir: Path) -> Path | None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    valid_or_gap = [row for row in rows if row.get("gap_ms") not in (None, "")]
+    if not valid_or_gap:
+        return None
+    detailed = [row for row in valid_or_gap if int(row.get("width_us") or 0) == 1500]
+    if not detailed:
+        return None
+    fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True, sharey=True)
+    colors = {250: "tab:blue", 500: "tab:orange", 1000: "tab:green", 2000: "tab:red", 5000: "tab:purple"}
+    for ax, channel in zip(axes, ("p", "r")):
+        subset = [row for row in detailed if row.get("channel") == channel]
+        for gap in (250, 500, 1000, 2000, 5000):
+            gap_rows = sorted([row for row in subset if int(row.get("gap_ms") or 0) == gap], key=lambda row: int(row.get("replicate") or 0))
+            if not gap_rows:
+                continue
+            xs = [int(row.get("replicate") or 0) for row in gap_rows]
+            ys = [float(row.get("settled_drop_raw") or 0) if row.get("valid") else math.nan for row in gap_rows]
+            ax.plot(xs, ys, marker="o", color=colors[gap], linewidth=1.2, label=f"{gap} ms")
+        ax.set_title(f"{'Print' if channel == 'p' else 'Refuel'} 1500 us drop by replicate")
+        ax.set_ylabel("Settled pressure drop (raw)")
+        ax.grid(True, alpha=0.25)
+        ax.legend(loc="best", fontsize=8)
+    axes[-1].set_xlabel("Replicate within gap")
+    fig.tight_layout()
+    path = plot_dir / "valve_gap_1500_drop_by_replicate.png"
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return path
+
+
+def _plot_gap_interval_response(rows: list[dict[str, Any]], plot_dir: Path) -> Path | None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    valid = [row for row in _gap_rows(rows) if row.get("actual_interval_ms") not in (None, "")]
+    if not valid:
+        return None
+    fig, ax = plt.subplots(figsize=(10, 6))
+    colors = {1500: "tab:blue", 3000: "tab:orange", 4500: "tab:green"}
+    for channel, marker in (("p", "o"), ("r", "s")):
+        for width in (1500, 3000, 4500):
+            subset = [
+                row
+                for row in valid
+                if row.get("channel") == channel and int(row.get("width_us") or 0) == width and float(row.get("actual_interval_ms") or 0) > 0
+            ]
+            if not subset:
+                continue
+            xs = [float(row.get("actual_interval_ms") or 0) for row in subset]
+            ys = [float(row.get("settled_drop_raw") or 0) for row in subset]
+            ax.scatter(xs, ys, marker=marker, color=colors[width], alpha=0.55, label=f"{'print' if channel == 'p' else 'refuel'} {width} us")
+    ax.set_title("Valve settled drop vs actual pulse-to-pulse interval")
+    ax.set_xlabel("Actual pulse-to-pulse interval (ms)")
+    ax.set_ylabel("Settled pressure drop (raw)")
+    ax.grid(True, alpha=0.25)
+    ax.legend(loc="best", fontsize=8)
+    fig.tight_layout()
+    path = plot_dir / "valve_gap_drop_vs_actual_interval.png"
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return path
+
+
 def generate_valve_trace_artifacts(artifacts: RunArtifacts) -> ValveTraceArtifacts | None:
     sources = _trace_sources(artifacts.run_dir)
     if not sources:
@@ -711,12 +883,13 @@ def generate_valve_trace_artifacts(artifacts: RunArtifacts) -> ValveTraceArtifac
     copied = _copy_trace_sources(sources, trace_dir)
     traces, rows = _load_rows(copied)
     summary = _summary_by_condition(rows)
+    gap_summary = _summary_by_gap_condition(rows)
 
     analysis_json = plot_dir / "valve_trace_analysis.json"
     analysis_json.write_text(
         json.dumps(
             {
-                "schema_version": "valve_trace_analysis_v4",
+                "schema_version": "valve_trace_analysis_v5",
                 "baseline_window_ms": BASELINE_WINDOW_MS,
                 "ring_window_after_pulse_end_ms": RING_WINDOW_AFTER_PULSE_END_MS,
                 "settled_start_after_pulse_end_ms": SETTLED_START_AFTER_PULSE_END_MS,
@@ -726,6 +899,7 @@ def generate_valve_trace_artifacts(artifacts: RunArtifacts) -> ValveTraceArtifac
                 "replicate_count": len(rows),
                 "valid_replicate_count": sum(1 for row in rows if row.get("valid")),
                 "conditions": summary,
+                "gap_conditions": gap_summary,
                 "replicates": rows,
             },
             indent=2,
@@ -754,6 +928,15 @@ def generate_valve_trace_artifacts(artifacts: RunArtifacts) -> ValveTraceArtifac
     ringing_plot = _plot_ringing_summary(rows, plot_dir)
     if ringing_plot is not None:
         plot_paths.append(ringing_plot)
+    gap_plot = _plot_gap_response_by_gap(rows, plot_dir)
+    if gap_plot is not None:
+        plot_paths.append(gap_plot)
+    gap_replicates = _plot_gap_replicates(rows, plot_dir)
+    if gap_replicates is not None:
+        plot_paths.append(gap_replicates)
+    gap_interval = _plot_gap_interval_response(rows, plot_dir)
+    if gap_interval is not None:
+        plot_paths.append(gap_interval)
 
     return ValveTraceArtifacts(
         trace_dir=trace_dir,

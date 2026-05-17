@@ -1,0 +1,108 @@
+{
+  "schema_version": "qualification_manifest_v0",
+  "manifest_id": "valve_gap_sweep_v1",
+  "name": "Valve Gap Sweep v1",
+  "profile": "FULL",
+  "description": "Operator-gated exploratory 2 psi valve gap sweep measuring whether short-pulse settled pressure drop depends on post-ready settle time.",
+  "expected_test_ids": [
+    2476,
+    2477,
+    2478,
+    2479
+  ],
+  "enforce_expected_test_ids": true,
+  "requires_operator_prompts": true,
+  "selftest_args": [
+    "--valve-gap-sweep-suite",
+    "--pressure-trace"
+  ],
+  "fixtures": [
+    {
+      "fixture_id": "valve_closed_loop_pulse_matrix_v1",
+      "required_for": [2476, 2477, 2478, 2479],
+      "operator_note": "Connect the closed-loop valve qualification fixture. Confirm print/refuel paths are safe, the fixture is rated for at least 3 psi, and no open outlet or printer head is attached unless explicitly approved."
+    }
+  ],
+  "analysis_rules": {
+    "2476": {
+      "category": "pulse",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "home_to": {"maturity": "candidate", "equals": 0},
+        "timeout": {"maturity": "candidate", "equals": 0},
+        "ready": {"maturity": "candidate", "equals": 0},
+        "rej": {"maturity": "candidate", "equals": 0},
+        "fresh_to": {"maturity": "candidate", "equals": 0},
+        "focus": {"maturity": "candidate", "equals": 1},
+        "sc": {"maturity": "candidate", "min": 1},
+        "ec": {"maturity": "candidate", "min": 1},
+        "pw": {"maturity": "informational"},
+        "rep": {"maturity": "informational"},
+        "g250": {"maturity": "informational"},
+        "g500": {"maturity": "informational"},
+        "g1000": {"maturity": "informational"},
+        "g2000": {"maturity": "informational"},
+        "g5000": {"maturity": "informational"}
+      }
+    },
+    "2477": {
+      "category": "pulse",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "home_to": {"maturity": "candidate", "equals": 0},
+        "timeout": {"maturity": "candidate", "equals": 0},
+        "ready": {"maturity": "candidate", "equals": 0},
+        "rej": {"maturity": "candidate", "equals": 0},
+        "fresh_to": {"maturity": "candidate", "equals": 0},
+        "focus": {"maturity": "candidate", "equals": 1},
+        "sc": {"maturity": "candidate", "min": 1},
+        "ec": {"maturity": "candidate", "min": 1},
+        "pw": {"maturity": "informational"},
+        "rep": {"maturity": "informational"},
+        "g250": {"maturity": "informational"},
+        "g500": {"maturity": "informational"},
+        "g1000": {"maturity": "informational"},
+        "g2000": {"maturity": "informational"},
+        "g5000": {"maturity": "informational"}
+      }
+    },
+    "2478": {
+      "category": "pulse",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "home_to": {"maturity": "candidate", "equals": 0},
+        "timeout": {"maturity": "candidate", "equals": 0},
+        "ready": {"maturity": "candidate", "equals": 0},
+        "rej": {"maturity": "candidate", "equals": 0},
+        "fresh_to": {"maturity": "candidate", "equals": 0},
+        "focus": {"maturity": "candidate", "equals": 1},
+        "sc": {"maturity": "candidate", "min": 1},
+        "ec": {"maturity": "candidate", "min": 1},
+        "rep": {"maturity": "informational"},
+        "m30g500": {"maturity": "informational"},
+        "m30g2000": {"maturity": "informational"},
+        "m45g500": {"maturity": "informational"},
+        "m45g2000": {"maturity": "informational"}
+      }
+    },
+    "2479": {
+      "category": "pulse",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "home_to": {"maturity": "candidate", "equals": 0},
+        "timeout": {"maturity": "candidate", "equals": 0},
+        "ready": {"maturity": "candidate", "equals": 0},
+        "rej": {"maturity": "candidate", "equals": 0},
+        "fresh_to": {"maturity": "candidate", "equals": 0},
+        "focus": {"maturity": "candidate", "equals": 1},
+        "sc": {"maturity": "candidate", "min": 1},
+        "ec": {"maturity": "candidate", "min": 1},
+        "rep": {"maturity": "informational"},
+        "m30g500": {"maturity": "informational"},
+        "m30g2000": {"maturity": "informational"},
+        "m45g500": {"maturity": "informational"},
+        "m45g2000": {"maturity": "informational"}
+      }
+    }
+  }
+}

@@ -250,7 +250,7 @@ def _raw_missing_report(manifest: QualificationManifest, returncode: int) -> dic
 
 
 def _maybe_generate_valve_trace_artifacts(manifest: QualificationManifest, artifacts: RunArtifacts) -> None:
-    if manifest.manifest_id != "valve_characterization_v1":
+    if manifest.manifest_id not in {"valve_characterization_v1", "valve_gap_sweep_v1"}:
         return
     try:
         generate_valve_trace_artifacts(artifacts)

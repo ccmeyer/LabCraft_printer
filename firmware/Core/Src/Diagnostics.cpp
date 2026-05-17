@@ -95,6 +95,10 @@ static constexpr DiagnosticTestDescriptor kDiagnosticTests[] = {
     {2473u, "valve_char_print_2psi_repeat_linearity", "pulse", "FULL", "explicit_selection"},
     {2474u, "valve_char_refuel_2psi_repeat_linearity", "pulse", "FULL", "explicit_selection"},
     {2475u, "valve_char_channel_balance_2psi", "pulse", "FULL", "explicit_selection"},
+    {2476u, "valve_gap_print_1500us_2psi", "pulse", "FULL", "explicit_selection"},
+    {2477u, "valve_gap_refuel_1500us_2psi", "pulse", "FULL", "explicit_selection"},
+    {2478u, "valve_gap_print_control_2psi", "pulse", "FULL", "explicit_selection"},
+    {2479u, "valve_gap_refuel_control_2psi", "pulse", "FULL", "explicit_selection"},
     {2501u, "gripper_seal_closed_decay_factory", "gripper", "FULL", "explicit_selection"},
     {2502u, "gripper_seal_hold_duration_factory", "gripper", "FULL", "explicit_selection"},
     {2503u, "gripper_seal_repeatability_factory", "gripper", "FULL", "explicit_selection"},
@@ -180,6 +184,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
     const bool runMotionEnvelopeSuite = (selectedDiagnosticId == 2019u);
     const bool runPressureRegulatorSuite = (selectedDiagnosticId == 2299u);
     const bool runValveCharacterizationSuite = (selectedDiagnosticId == 2499u);
+    const bool runValveGapSweepSuite = (selectedDiagnosticId == 2498u);
     const bool runPressureSweepCore = (selectedPressureTraceTest == 2301u);
     const bool runPressureSweepExtended = (selectedPressureTraceTest == 2302u);
     const bool runPressureSweepFocused = (selectedPressureTraceTest == 2303u);
@@ -188,7 +193,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
     const bool runSinglePressureTraceSelection =
         (selectedPressureTraceTest >= 2101u) && (selectedPressureTraceTest <= 2104u);
                   auto shouldRunPressureTraceCase = [&](uint16_t testId) {
-                    if (runPressureSweepCore || runPressureSweepExtended || runPressureSweepFocused || runPressureSweepMicro || runGripperSealSuite || runXyMotionSuite || runMotionEnvelopeSuite || runPressureRegulatorSuite || runValveCharacterizationSuite) {
+                    if (runPressureSweepCore || runPressureSweepExtended || runPressureSweepFocused || runPressureSweepMicro || runGripperSealSuite || runXyMotionSuite || runMotionEnvelopeSuite || runPressureRegulatorSuite || runValveCharacterizationSuite || runValveGapSweepSuite) {
                       return false;
                     }
                     if (runSinglePressureTraceSelection) {
@@ -3801,14 +3806,17 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         return true;
                       };
 
-                      if (runValveCharacterizationSuite) {
+                      if (runValveCharacterizationSuite || runValveGapSweepSuite) {
                         static constexpr uint16_t kValveCharWidthsUs[3] = {1500u, 3000u, 4500u};
                         static constexpr uint16_t kValveCharReplicates = 10u;
                         static constexpr uint16_t kValveCharWidthCount = 3u;
-                        static constexpr uint16_t kValveCharPatternLength = 6u;
                         static constexpr uint16_t kValveCharMeasuredPulses =
                             kValveCharReplicates * kValveCharWidthCount;
                         static constexpr uint16_t kValveCharPulseCount = kValveCharMeasuredPulses;
+                        static constexpr uint16_t kValveGapDetailedReplicates = 8u;
+                        static constexpr uint16_t kValveGapDetailedGapCount = 5u;
+                        static constexpr uint16_t kValveGapControlReplicates = 4u;
+                        static constexpr uint16_t kValveGapControlConditionCount = 4u;
                         static constexpr uint32_t kValveCharStabilizeMs = 500u;
                         static constexpr uint32_t kValveCharRegHomeFastHz = 30000u;
                         static constexpr uint32_t kValveCharRegHomeSlowHz = 3000u;
@@ -4100,9 +4108,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             char traceName[48];
                             snprintf(traceName,
                                      sizeof(traceName),
-                                     "valve_char_%c_seq%02u_w%u_rep%02u",
+                                     "valve_char_%c_w%u_rep%02u",
                                      (channel == 0u) ? 'p' : 'r',
-                                     static_cast<unsigned>(sequenceIndex),
                                      static_cast<unsigned>(pulseWidthUs),
                                      static_cast<unsigned>(replicateForWidth));
                             (void)exportTrace(testId, traceName, !timeout && (response.pulseCount >= 1u));
@@ -4126,15 +4133,15 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           };
 
                           bool valveSequenceOk = true;
-                          for (uint16_t slot = 0u; slot < kValveCharPatternLength && valveSequenceOk && !_selfTestAbortRequested; ++slot) {
-                            const uint16_t widthUs = ValvePulseQualificationMath::interleavedValvePulseWidthUs(slot);
+                          for (uint16_t widthIndex = 0u; widthIndex < kValveCharWidthCount && valveSequenceOk && !_selfTestAbortRequested; ++widthIndex) {
+                            const uint16_t widthUs = kValveCharWidthsUs[widthIndex];
                             if (!runOnePulse(widthUs, 0u, 0u, false)) {
                               valveSequenceOk = false;
                             }
                           }
 
                           for (uint16_t seq = 0u; seq < kValveCharMeasuredPulses && valveSequenceOk && !_selfTestAbortRequested; ++seq) {
-                            const uint16_t widthUs = ValvePulseQualificationMath::interleavedValvePulseWidthUs(seq);
+                            const uint16_t widthUs = ValvePulseQualificationMath::groupedValvePulseWidthUs(seq, kValveCharReplicates);
                             const uint8_t widthIndex = valveWidthIndex(widthUs);
                             const uint16_t repForWidth = static_cast<uint16_t>(++scheduledCount[widthIndex]);
                             if (!runOnePulse(widthUs, static_cast<uint16_t>(seq + 1u), repForWidth, true)) {
@@ -4285,6 +4292,303 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                         "psi=2000;rep=10;pulses=60;home_to=1;timeout=0;ready=0;rej=60;sc=0;ec=0;m15p=0;m15r=0;m30p=0;m30r=0;m45p=0;m45r=0;r15=0;r30=0;r45=0;d15=0;d30=0;d45=0;gate=home_reference");
                         };
 
+                        struct ValveGapRowSummary {
+                          uint32_t mean[5] = {0u, 0u, 0u, 0u, 0u};
+                          uint32_t rej = 0u;
+                          uint32_t ready = 0u;
+                          uint32_t freshTo = 0u;
+                          uint32_t sc = 0u;
+                          uint32_t ec = 0u;
+                          uint32_t timeout = 0u;
+                          bool pass = true;
+                        };
+
+                        auto runValveGapSequence = [&](uint8_t channel,
+                                                       uint16_t targetRaw,
+                                                       bool controlMode) -> ValveGapRowSummary {
+                          ValveGapRowSummary row{};
+                          const uint16_t conditionCount = controlMode ? kValveGapControlConditionCount : kValveGapDetailedGapCount;
+                          const uint16_t replicateCount = controlMode ? kValveGapControlReplicates : kValveGapDetailedReplicates;
+                          const uint16_t expectedPulseCount = conditionCount * replicateCount;
+#if (LC_PRESSURE_PORTS <= 1)
+                          if (channel != 0u) {
+                            row.rej = expectedPulseCount;
+                            row.ready = 1u;
+                            row.pass = false;
+                            return row;
+                          }
+#endif
+                          Printer* printer = Printer::instance();
+                          PressureSensor* sensor = PressureSensor::instance();
+                          if (printer == nullptr || sensor == nullptr) {
+                            row.rej = expectedPulseCount;
+                            row.ready = 1u;
+                            row.pass = false;
+                            return row;
+                          }
+                          struct ScopedPressureFocus {
+                            PressureSensor* sensor = nullptr;
+                            bool active = false;
+                            ~ScopedPressureFocus() {
+                              if (active && sensor != nullptr) {
+                                sensor->endDiagnosticFocus();
+                              }
+                            }
+                          } focusScope;
+                          focusScope.sensor = sensor;
+                          focusScope.active = sensor->beginDiagnosticFocus(channel);
+                          if (!focusScope.active) {
+                            row.rej = expectedPulseCount;
+                            row.ready = 1u;
+                            row.pass = false;
+                            return row;
+                          }
+
+                          PressureRegulator& reg = regulatorForValveChannel(channel);
+                          Stepper* stepper = (channel == 0u) ? Stepper::stepperP() : Stepper::stepperR();
+                          const uint32_t originalPrintPulse = printer->getPrintPulse();
+                          const uint32_t originalRefuelPulse = printer->getRefuelPulse();
+
+                          uint32_t responses[5][8]{};
+                          uint32_t responseCount[5]{};
+                          uint16_t previousWidthUs = 0u;
+                          uint32_t previousPulseStartTick = 0u;
+
+                          auto recordGapEvent = [&](PressureTraceChannel traceChannel,
+                                                    PressureTraceEventType type,
+                                                    uint16_t value0,
+                                                    uint16_t value1,
+                                                    uint32_t traceStartTick) {
+                            const uint32_t dt = HAL_GetTick() - traceStartTick;
+                            PressureTraceEvent event{};
+                            event.dtMs = static_cast<uint16_t>((dt > 0xFFFFu) ? 0xFFFFu : dt);
+                            event.type = static_cast<uint8_t>(type);
+                            event.value0 = value0;
+                            event.value1 = value1;
+                            PressureTraceRecorder::instance().recordEvent(traceChannel, event);
+                          };
+
+                          auto runOneGapPulse = [&](uint16_t pulseWidthUs,
+                                                    uint32_t gapMs,
+                                                    uint16_t conditionIndex,
+                                                    uint16_t replicate) -> bool {
+                            if (channel == 0u) {
+                              printer->setPrintPulse(pulseWidthUs);
+                            } else {
+                              printer->setRefuelPulse(pulseWidthUs);
+                            }
+                            reg.start();
+                            xEventGroupClearBits(_doneEvents, pressureBitForChannel(channel));
+                            reg.setTargetSafe(targetRaw);
+                            const bool readyOk = waitBitsWithTimeout(pressureBitForChannel(channel), 7000u);
+                            if (!readyOk) {
+                              row.ready++;
+                              row.rej++;
+                              return true;
+                            }
+                            if (!delayWithWatchdog(gapMs, "valve_gap_settle")) {
+                              row.timeout++;
+                              row.rej++;
+                              return false;
+                            }
+                            const int32_t motorPosition = (stepper != nullptr) ? stepper->getPosition() : 0;
+
+                            auto& recorder = PressureTraceRecorder::instance();
+                            recorder.reset();
+                            PressureTraceConfig traceCfg{};
+                            traceCfg.channel = (channel == 0u) ? PressureTraceChannel::Print : PressureTraceChannel::Refuel;
+                            traceCfg.maxSamples = PressureTraceRecorder::kMaxSamples;
+                            traceCfg.maxEvents = PressureTraceRecorder::kMaxEvents;
+                            recorder.configure(traceCfg);
+
+                            reg.beginDispenseQuiet(0u);
+                            recorder.arm();
+                            const uint32_t traceStartTick = HAL_GetTick();
+                            recorder.start(traceStartTick);
+                            recordGapEvent(traceCfg.channel,
+                                           PressureTraceEventType::ValveGap,
+                                           static_cast<uint16_t>((gapMs > 0xFFFFu) ? 0xFFFFu : gapMs),
+                                           0u,
+                                           traceStartTick);
+                            recordGapEvent(traceCfg.channel,
+                                           PressureTraceEventType::ValvePreviousWidth,
+                                           previousWidthUs,
+                                           pulseWidthUs,
+                                           traceStartTick);
+                            const uint32_t encodedMotorPosition = static_cast<uint32_t>(motorPosition);
+                            recordGapEvent(traceCfg.channel,
+                                           PressureTraceEventType::MotorPosition,
+                                           static_cast<uint16_t>(encodedMotorPosition & 0xFFFFu),
+                                           static_cast<uint16_t>((encodedMotorPosition >> 16) & 0xFFFFu),
+                                           traceStartTick);
+
+                            bool timeout = !delayWithWatchdog(traceCfg.preRollMs, "valve_gap_pause_preroll");
+                            bool freshOk = false;
+                            if (!timeout && !_selfTestAbortRequested) {
+                              freshOk = waitFreshValveCharSample(channel, kValveCharFreshSampleTimeoutMs);
+                              if (!freshOk) {
+                                row.freshTo++;
+                              }
+                            }
+                            uint32_t pulseStartTick = 0u;
+                            if (!timeout && freshOk && !_selfTestAbortRequested) {
+                              PressureRegulator::DisturbanceEvent ev{};
+                              ev.type = (channel == 0u) ? PressureRegulator::PulseType::Print : PressureRegulator::PulseType::Refuel;
+                              ev.pulseWidthUs = pulseWidthUs;
+                              ev.pressureAtTrigger = sensor->getLatestRaw(channel);
+                              pulseStartTick = HAL_GetTick();
+                              const uint32_t intervalMs = (previousPulseStartTick == 0u) ? 0u : (pulseStartTick - previousPulseStartTick);
+                              recordGapEvent(traceCfg.channel,
+                                             PressureTraceEventType::ValveInterval,
+                                             static_cast<uint16_t>((intervalMs > 0xFFFFu) ? 0xFFFFu : intervalMs),
+                                             0u,
+                                             traceStartTick);
+                              ev.tickMs = pulseStartTick;
+                              reg.notifyPulseStart(ev);
+                              if (channel == 0u) {
+                                printer->pulsePrint();
+                              } else {
+                                printer->pulseRefuel();
+                              }
+                              const uint32_t pulseHoldMs = (static_cast<uint32_t>(pulseWidthUs) + 999u) / 1000u + 2u;
+                              timeout = !delayWithWatchdog(pulseHoldMs, "valve_gap_pause_pulse");
+                              ev.tickMs = HAL_GetTick();
+                              ev.pressureAtTrigger = sensor->getLatestRaw(channel);
+                              reg.notifyPulseEnd(ev);
+                            }
+                            if (!timeout && !_selfTestAbortRequested) {
+                              timeout = !delayWithWatchdog(traceCfg.postRollMs, "valve_gap_pause_postroll");
+                            }
+                            recorder.stop(HAL_GetTick());
+                            reg.endDispenseQuiet(2u);
+                            (void)delayWithWatchdog(10u, "valve_gap_pause_release");
+
+                            const auto response = ValvePulseQualificationMath::summarizeWindowedValveCharacterization(
+                                recorder.samples(),
+                                recorder.sampleCount(),
+                                recorder.events(),
+                                recorder.eventCount(),
+                                kValveCharBaselineWindowMs,
+                                kValveCharRingWindowMs,
+                                kValveCharSettledStartMs,
+                                kValveCharSettledEndMs);
+                            char traceName[48];
+                            snprintf(traceName,
+                                     sizeof(traceName),
+                                     "valve_gap_%c_w%u_g%04lu_rep%02u",
+                                     (channel == 0u) ? 'p' : 'r',
+                                     static_cast<unsigned>(pulseWidthUs),
+                                     static_cast<unsigned long>(gapMs),
+                                     static_cast<unsigned>(replicate));
+                            const uint16_t testId = (channel == 0u)
+                                ? (controlMode ? 2478u : 2476u)
+                                : (controlMode ? 2479u : 2477u);
+                            (void)exportTrace(testId, traceName, !timeout && (response.pulseCount >= 1u));
+                            row.rej += response.rejectCount;
+                            if (response.pulseCount < 1u) {
+                              row.rej++;
+                            } else if (conditionIndex < 5u && responseCount[conditionIndex] < 8u) {
+                              responses[conditionIndex][responseCount[conditionIndex]++] = response.meanSettledDropRaw;
+                            }
+                            row.sc += recorder.sampleCount();
+                            row.ec += recorder.eventCount();
+                            if (timeout) {
+                              row.timeout++;
+                              row.rej++;
+                            }
+                            if (pulseStartTick != 0u) {
+                              previousPulseStartTick = pulseStartTick;
+                              previousWidthUs = pulseWidthUs;
+                            }
+                            return !timeout;
+                          };
+
+                          bool valveSequenceOk = true;
+                          for (uint16_t condition = 0u; condition < conditionCount && valveSequenceOk && !_selfTestAbortRequested; ++condition) {
+                            const uint16_t widthUs = controlMode
+                                ? ValvePulseQualificationMath::valveGapSweepControlWidthUs(condition)
+                                : 1500u;
+                            const uint32_t gapMs = controlMode
+                                ? ValvePulseQualificationMath::valveGapSweepControlGapMs(condition)
+                                : ValvePulseQualificationMath::valveGapSweepDetailedGapMs(condition);
+                            for (uint16_t rep = 1u; rep <= replicateCount && valveSequenceOk && !_selfTestAbortRequested; ++rep) {
+                              if (!runOneGapPulse(widthUs, gapMs, condition, rep)) {
+                                valveSequenceOk = false;
+                              }
+                            }
+                          }
+
+                          for (uint16_t condition = 0u; condition < conditionCount; ++condition) {
+                            const auto aggregate = ValvePulseQualificationMath::summarizeResponseValues(
+                                responses[condition],
+                                responseCount[condition]);
+                            row.mean[condition] = aggregate.meanRaw;
+                            row.pass = row.pass && (responseCount[condition] == replicateCount);
+                          }
+                          row.pass = row.pass &&
+                                     !_selfTestAbortRequested &&
+                                     (row.ready == 0u) &&
+                                     (row.rej == 0u) &&
+                                     (row.freshTo == 0u) &&
+                                     (row.timeout == 0u) &&
+                                     (row.sc > 0u) &&
+                                     (row.ec > 0u);
+                          reg.pause();
+                          printer->setPrintPulse(originalPrintPulse);
+                          printer->setRefuelPulse(originalRefuelPulse);
+                          return row;
+                        };
+
+                        auto emitValveGapDetailedRow = [&](uint16_t testId,
+                                                           const char* name,
+                                                           char ch,
+                                                           const ValveGapRowSummary& row) -> bool {
+                          char metrics[256];
+                          snprintf(metrics, sizeof(metrics),
+                                   "ch=%c;pw=1500;rep=8;home_to=0;timeout=%lu;ready=%lu;rej=%lu;fresh_to=%lu;focus=1;sc=%lu;ec=%lu;g250=%lu;g500=%lu;g1000=%lu;g2000=%lu;g5000=%lu",
+                                   ch,
+                                   static_cast<unsigned long>(row.timeout),
+                                   static_cast<unsigned long>(row.ready),
+                                   static_cast<unsigned long>(row.rej),
+                                   static_cast<unsigned long>(row.freshTo),
+                                   static_cast<unsigned long>(row.sc),
+                                   static_cast<unsigned long>(row.ec),
+                                   static_cast<unsigned long>(row.mean[0]),
+                                   static_cast<unsigned long>(row.mean[1]),
+                                   static_cast<unsigned long>(row.mean[2]),
+                                   static_cast<unsigned long>(row.mean[3]),
+                                   static_cast<unsigned long>(row.mean[4]));
+                          return runOne(testId, name, row.pass, metrics);
+                        };
+
+                        auto emitValveGapControlRow = [&](uint16_t testId,
+                                                          const char* name,
+                                                          char ch,
+                                                          const ValveGapRowSummary& row) -> bool {
+                          char metrics[256];
+                          snprintf(metrics, sizeof(metrics),
+                                   "ch=%c;rep=4;home_to=0;timeout=%lu;ready=%lu;rej=%lu;fresh_to=%lu;focus=1;sc=%lu;ec=%lu;m30g500=%lu;m30g2000=%lu;m45g500=%lu;m45g2000=%lu",
+                                   ch,
+                                   static_cast<unsigned long>(row.timeout),
+                                   static_cast<unsigned long>(row.ready),
+                                   static_cast<unsigned long>(row.rej),
+                                   static_cast<unsigned long>(row.freshTo),
+                                   static_cast<unsigned long>(row.sc),
+                                   static_cast<unsigned long>(row.ec),
+                                   static_cast<unsigned long>(row.mean[0]),
+                                   static_cast<unsigned long>(row.mean[1]),
+                                   static_cast<unsigned long>(row.mean[2]),
+                                   static_cast<unsigned long>(row.mean[3]));
+                          return runOne(testId, name, row.pass, metrics);
+                        };
+
+                        auto emitValveGapHomeFailureRows = [&]() -> bool {
+                          if (!runOne(2476u, "valve_gap_print_1500us_2psi", false, "ch=p;pw=1500;rep=8;home_to=1;timeout=0;ready=0;rej=40;fresh_to=0;focus=0;sc=0;ec=0;g250=0;g500=0;g1000=0;g2000=0;g5000=0;gate=home_reference")) return false;
+                          if (!runOne(2477u, "valve_gap_refuel_1500us_2psi", false, "ch=r;pw=1500;rep=8;home_to=1;timeout=0;ready=0;rej=40;fresh_to=0;focus=0;sc=0;ec=0;g250=0;g500=0;g1000=0;g2000=0;g5000=0;gate=home_reference")) return false;
+                          if (!runOne(2478u, "valve_gap_print_control_2psi", false, "ch=p;rep=4;home_to=1;timeout=0;ready=0;rej=16;fresh_to=0;focus=0;sc=0;ec=0;m30g500=0;m30g2000=0;m45g500=0;m45g2000=0;gate=home_reference")) return false;
+                          return runOne(2479u, "valve_gap_refuel_control_2psi", false, "ch=r;rep=4;home_to=1;timeout=0;ready=0;rej=16;fresh_to=0;focus=0;sc=0;ec=0;m30g500=0;m30g2000=0;m45g500=0;m45g2000=0;gate=home_reference");
+                        };
+
                         const uint16_t raw2 = psiToRaw(kValveCharPsiMilli);
 
                         selectedPressureHomePass = homeValveCharPressureRegulators();
@@ -4294,7 +4598,28 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             aborted = true;
                             return finishSelfTestNow();
                           }
-                          (void)emitValveHomeFailureRows();
+                          if (runValveGapSweepSuite) {
+                            (void)emitValveGapHomeFailureRows();
+                          } else {
+                            (void)emitValveHomeFailureRows();
+                          }
+                          return finishSelfTestNow();
+                        }
+
+                        if (runValveGapSweepSuite) {
+                          ValveGapRowSummary printDetailed{};
+                          ValveGapRowSummary refuelDetailed{};
+                          ValveGapRowSummary printControl{};
+                          ValveGapRowSummary refuelControl{};
+                          printDetailed = runValveGapSequence(0u, raw2, false);
+                          if (!emitValveGapDetailedRow(2476u, "valve_gap_print_1500us_2psi", 'p', printDetailed)) return finishSelfTestNow();
+                          refuelDetailed = runValveGapSequence(1u, raw2, false);
+                          if (!emitValveGapDetailedRow(2477u, "valve_gap_refuel_1500us_2psi", 'r', refuelDetailed)) return finishSelfTestNow();
+                          printControl = runValveGapSequence(0u, raw2, true);
+                          if (!emitValveGapControlRow(2478u, "valve_gap_print_control_2psi", 'p', printControl)) return finishSelfTestNow();
+                          refuelControl = runValveGapSequence(1u, raw2, true);
+                          if (!emitValveGapControlRow(2479u, "valve_gap_refuel_control_2psi", 'r', refuelControl)) return finishSelfTestNow();
+                          closeValveCharPressurePaths();
                           return finishSelfTestNow();
                         }
 

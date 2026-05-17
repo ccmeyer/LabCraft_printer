@@ -20,7 +20,10 @@ enum class PressureTraceEventType : uint8_t {
   ReadyEnter,
   ReadyExit,
   ValveSequence,
-  MotorPosition
+  MotorPosition,
+  ValveGap,
+  ValvePreviousWidth,
+  ValveInterval
 };
 
 struct PressureTraceSample {

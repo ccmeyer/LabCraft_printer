@@ -60,6 +60,28 @@ uint16_t interleavedValvePulseWidthUs(size_t sequenceIndexZeroBased) {
   return kPattern[sequenceIndexZeroBased % (sizeof(kPattern) / sizeof(kPattern[0]))];
 }
 
+uint16_t groupedValvePulseWidthUs(size_t sequenceIndexZeroBased, size_t replicatesPerWidth) {
+  static constexpr uint16_t kWidths[] = {1500u, 3000u, 4500u};
+  const size_t safeReplicates = (replicatesPerWidth == 0u) ? 1u : replicatesPerWidth;
+  const size_t widthIndex = (sequenceIndexZeroBased / safeReplicates) % (sizeof(kWidths) / sizeof(kWidths[0]));
+  return kWidths[widthIndex];
+}
+
+uint32_t valveGapSweepDetailedGapMs(size_t gapIndexZeroBased) {
+  static constexpr uint32_t kGapsMs[] = {250u, 500u, 1000u, 2000u, 5000u};
+  return kGapsMs[gapIndexZeroBased % (sizeof(kGapsMs) / sizeof(kGapsMs[0]))];
+}
+
+uint16_t valveGapSweepControlWidthUs(size_t conditionIndexZeroBased) {
+  static constexpr uint16_t kWidths[] = {3000u, 3000u, 4500u, 4500u};
+  return kWidths[conditionIndexZeroBased % (sizeof(kWidths) / sizeof(kWidths[0]))];
+}
+
+uint32_t valveGapSweepControlGapMs(size_t conditionIndexZeroBased) {
+  static constexpr uint32_t kGapsMs[] = {500u, 2000u, 500u, 2000u};
+  return kGapsMs[conditionIndexZeroBased % (sizeof(kGapsMs) / sizeof(kGapsMs[0]))];
+}
+
 ResponseValueSummary summarizeResponseValues(const uint32_t* responses, size_t responseCount) {
   ResponseValueSummary summary{};
   if (responses == nullptr || responseCount == 0u) {
