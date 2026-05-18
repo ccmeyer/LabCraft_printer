@@ -19,6 +19,10 @@ except Exception:  # pragma: no cover - scipy is a project dependency, keep impo
 
 
 IMAGE_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff"}
+MOTION_MIN_FIT_COUNT = 20
+MOTION_MIN_REPEAT_GROUPS = 3
+MOTION_MAX_RMSE_2D_PX = 15.0
+MOTION_MAX_P95_2D_RESIDUAL_PX = 25.0
 METADATA_FIELDS = (
     "index",
     "saved_at",
@@ -662,6 +666,17 @@ def _regression_eligible(row: dict[str, Any]) -> bool:
     )
 
 
+def _mark_manual_rejection(row: dict[str, Any]) -> dict[str, Any]:
+    flags = list(row.get("quality_flags") or [])
+    if "manual_rejected" not in flags:
+        flags.append("manual_rejected")
+    row["status"] = "rejected"
+    row["error"] = "manual_rejected"
+    row["quality_flags"] = flags
+    row["used_for_motion_fit"] = False
+    return row
+
+
 def _fit_motion(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     fit_rows = [row for row in rows if _regression_eligible(row)]
     if len(fit_rows) < 3:
@@ -702,6 +717,65 @@ def _fit_motion(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
         "median_2d_residual_px": float(np.median(residual_norm)),
         "p95_2d_residual_px": float(np.percentile(residual_norm, 95)),
         "max_2d_residual_px": float(np.max(residual_norm)),
+    }
+
+
+def summarize_motion_fit_quality(
+    payload: dict[str, Any],
+    *,
+    min_fit_count: int = MOTION_MIN_FIT_COUNT,
+    min_repeat_groups: int = MOTION_MIN_REPEAT_GROUPS,
+    max_rmse_2d_px: float = MOTION_MAX_RMSE_2D_PX,
+    max_p95_2d_residual_px: float = MOTION_MAX_P95_2D_RESIDUAL_PX,
+) -> dict[str, Any]:
+    """Return compact apply-gate status for a motion-conversion analysis payload."""
+    summary = dict((payload or {}).get("summary") or {})
+    fit = dict((payload or {}).get("motion_fit") or {})
+    failed = []
+
+    fit_count = int(fit.get("fit_count") or summary.get("motion_fit_count") or 0)
+    repeat_group_count = int(summary.get("repeat_position_group_count") or 0)
+    rmse_2d = _finite_float(fit.get("rmse_2d_px"))
+    p95_2d = _finite_float(fit.get("p95_2d_residual_px"))
+    determinant = _finite_float(fit.get("determinant"))
+    matrix = fit.get("matrix")
+    try:
+        matrix_arr = np.asarray(matrix, dtype=float)
+    except Exception:
+        matrix_arr = np.asarray([])
+    matrix_valid = bool(matrix_arr.shape == (2, 2) and np.all(np.isfinite(matrix_arr)))
+
+    if fit.get("status") != "ok":
+        failed.append("motion_fit_failed")
+    if fit_count < int(min_fit_count):
+        failed.append(f"fit_count<{int(min_fit_count)}")
+    if repeat_group_count < int(min_repeat_groups):
+        failed.append(f"repeat_groups<{int(min_repeat_groups)}")
+    if not matrix_valid:
+        failed.append("matrix_invalid")
+    if determinant is None or abs(float(determinant)) <= 1e-12:
+        failed.append("matrix_not_invertible")
+    if rmse_2d is None or float(rmse_2d) > float(max_rmse_2d_px):
+        failed.append(f"rmse_2d>{float(max_rmse_2d_px):g}")
+    if p95_2d is None or float(p95_2d) > float(max_p95_2d_residual_px):
+        failed.append(f"p95_2d>{float(max_p95_2d_residual_px):g}")
+
+    return {
+        "schema_version": 1,
+        "status": "ok" if not failed else "failed",
+        "apply_ready": not failed,
+        "failed_criteria": failed,
+        "fit_count": int(fit_count),
+        "repeat_position_group_count": int(repeat_group_count),
+        "rmse_2d_px": rmse_2d,
+        "p95_2d_residual_px": p95_2d,
+        "determinant": determinant,
+        "thresholds": {
+            "min_fit_count": int(min_fit_count),
+            "min_repeat_groups": int(min_repeat_groups),
+            "max_rmse_2d_px": float(max_rmse_2d_px),
+            "max_p95_2d_residual_px": float(max_p95_2d_residual_px),
+        },
     }
 
 
@@ -756,6 +830,7 @@ def analyze_scale_bar_motion_directory(
     options: ScaleBarMotionOptions | dict[str, Any] | None = None,
     metadata_filename: str = "metadata.jsonl",
     image_limit: int | None = None,
+    rejected_filenames: set[str] | list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Analyze a capture directory and fit scale-bar center against machine X/Z."""
     directory = Path(path)
@@ -766,11 +841,15 @@ def analyze_scale_bar_motion_directory(
     metadata_by_filename = _load_metadata_by_filename(metadata_path)
     all_image_paths = sorted(p for p in directory.iterdir() if p.suffix.lower() in IMAGE_EXTENSIONS)
     image_paths = _select_image_paths(all_image_paths, image_limit=image_limit)
+    rejected_names = {Path(str(name)).name for name in (rejected_filenames or [])}
 
     results = []
     for image_path in image_paths:
         metadata = metadata_by_filename.get(image_path.name)
-        results.append(analyze_scale_bar_center_image(image_path, metadata=metadata, options=opts))
+        row = analyze_scale_bar_center_image(image_path, metadata=metadata, options=opts)
+        if image_path.name in rejected_names:
+            row = _mark_manual_rejection(row)
+        results.append(row)
 
     for row in results:
         row["used_for_motion_fit"] = False
@@ -789,11 +868,12 @@ def analyze_scale_bar_motion_directory(
         "accepted_count": int(accepted_count),
         "rejected_count": int(rejected_count),
         "error_count": int(error_count),
+        "manual_rejected_count": int(sum(1 for row in results if row.get("error") == "manual_rejected")),
         "motion_fit_count": int(fit_count),
         "repeat_position_group_count": int(len(repeat_groups)),
         "options": _options_payload(opts),
     }
-    return {
+    payload = {
         "schema_version": 1,
         "status": "ok" if accepted_count else "error",
         "summary": summary,
@@ -801,6 +881,8 @@ def analyze_scale_bar_motion_directory(
         "repeat_position_groups": repeat_groups,
         "results": results,
     }
+    payload["motion_quality"] = summarize_motion_fit_quality(payload)
+    return payload
 
 
 def _options_payload(options: ScaleBarMotionOptions) -> dict[str, Any]:
@@ -1221,6 +1303,7 @@ def write_debug_outputs(
     debug_all: bool = False,
     debug_limit: int = 10,
     contact_limit: int = 3,
+    summary_only: bool = False,
 ) -> dict[str, Any]:
     """Generate diagnostic image panels and an HTML index for a result payload."""
     opts = ScaleBarMotionOptions.from_value(options or result.get("summary", {}).get("options"))
@@ -1236,7 +1319,7 @@ def write_debug_outputs(
             "results": [result],
         }
 
-    selected = _select_debug_filenames(result, debug_all=debug_all, debug_limit=debug_limit)
+    selected = [] if summary_only else _select_debug_filenames(result, debug_all=debug_all, debug_limit=debug_limit)
     by_filename = _result_by_filename(result)
     written = []
     written.extend(_save_fit_summary_plots(result, output))
@@ -1246,7 +1329,8 @@ def write_debug_outputs(
             continue
         written.append(_save_debug_panel(Path(row["path"]), row, opts, output))
 
-    for idx, group in enumerate(result.get("repeat_position_groups", [])[: max(0, int(contact_limit))], start=1):
+    contact_groups = [] if summary_only else result.get("repeat_position_groups", [])[: max(0, int(contact_limit))]
+    for idx, group in enumerate(contact_groups, start=1):
         contact = _save_contact_sheet(
             result,
             list(group.get("filenames", [])),
@@ -1264,6 +1348,7 @@ def write_debug_outputs(
         "debug_all": bool(debug_all),
         "debug_limit": int(debug_limit),
         "contact_limit": int(contact_limit),
+        "summary_only": bool(summary_only),
         "selected_debug_files": selected,
         "written_files": [str(path) for path in written],
     }
@@ -1336,6 +1421,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--debug-all", action="store_true", help="Render every frame instead of selected debug examples.")
     parser.add_argument("--debug-limit", type=int, default=10, help="Number of per-image debug panels to render.")
     parser.add_argument("--debug-contact-limit", type=int, default=3, help="Number of repeat-position contact sheets to render.")
+    parser.add_argument("--debug-summary-only", action="store_true", help="Write only summary fit plots and the HTML index.")
     parser.add_argument("--image-limit", type=int, default=0, help="Evenly sample at most this many images in directory mode.")
     parser.add_argument("--min-main-peaks", type=int, default=80, help="Minimum accepted tick peaks for an accepted frame.")
     parser.add_argument("--min-spine-long", type=float, default=580.0, help="Minimum eroded spine long side in pixels.")
@@ -1386,6 +1472,7 @@ def main(argv: list[str] | None = None) -> int:
             debug_all=bool(args.debug_all),
             debug_limit=int(args.debug_limit),
             contact_limit=int(args.debug_contact_limit),
+            summary_only=bool(args.debug_summary_only),
         )
 
     print(json.dumps(payload, indent=2, default=_json_default))

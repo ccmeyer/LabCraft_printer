@@ -11,6 +11,7 @@ from tools.scale_bar_motion_conversion import (
     analyze_scale_bar_center_image,
     analyze_scale_bar_motion_directory,
     main,
+    summarize_motion_fit_quality,
 )
 
 
@@ -152,6 +153,44 @@ def test_directory_mode_joins_metadata_excludes_non_idle_and_reports_repeat_scat
     assert payload["repeat_position_groups"][0]["n"] == 2
 
 
+def test_directory_mode_excludes_manual_rejections_from_regression(tmp_path):
+    metadata_rows = []
+    for index, (filename, x_pos, z_pos, center) in enumerate(
+        [
+            ("scale_bar_000001.png", 1000, 5000, (260, 340)),
+            ("scale_bar_000002.png", 1040, 5000, (360, 342)),
+            ("scale_bar_000003.png", 1000, 5060, (262, 520)),
+            ("scale_bar_000004.png", 1040, 5060, (362, 522)),
+        ],
+        start=1,
+    ):
+        _write_motion_scale(tmp_path / filename, center=center)
+        metadata_rows.append(
+            {
+                "index": index,
+                "filename": filename,
+                "X_position": x_pos,
+                "Y_position": 0,
+                "Z_position": z_pos,
+                "commands_idle_at_frame": True,
+            }
+        )
+    _write_metadata(tmp_path / "metadata.jsonl", metadata_rows)
+
+    payload = analyze_scale_bar_motion_directory(
+        tmp_path,
+        options=_motion_options(),
+        rejected_filenames={"scale_bar_000004.png"},
+    )
+
+    rejected = next(row for row in payload["results"] if row["filename"] == "scale_bar_000004.png")
+    assert rejected["status"] == "rejected"
+    assert rejected["error"] == "manual_rejected"
+    assert rejected["used_for_motion_fit"] is False
+    assert payload["motion_fit"]["fit_count"] == 3
+    assert payload["summary"]["manual_rejected_count"] == 1
+
+
 def test_cli_writes_json_csv_and_debug_index(tmp_path):
     for index, (filename, x_pos, z_pos, center) in enumerate(
         [
@@ -221,6 +260,9 @@ def test_cli_writes_json_csv_and_debug_index(tmp_path):
     assert any(path.name.startswith("debug_") and path.suffix == ".png" for path in debug_dir.iterdir())
     assert (debug_dir / "summary_fit_observed_predicted_residuals.png").exists()
     assert (debug_dir / "summary_fit_residual_vectors.png").exists()
+
+    quality = summarize_motion_fit_quality(json.loads(output.read_text(encoding="utf-8")), min_fit_count=3, min_repeat_groups=0)
+    assert quality["apply_ready"] is True
 
 
 def test_directory_mode_can_limit_images_for_quick_debug_runs(tmp_path):

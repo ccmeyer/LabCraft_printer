@@ -367,10 +367,12 @@ class MainWindow(QMainWindow):
         cam = getattr(self.model, "droplet_camera_model", None)
         value = 1.5696
         source = "default"
+        step_source = "preset"
         config_path = "local/droplet_imager_optics.json"
         if cam is not None:
             getter = getattr(cam, "get_um_per_pixel", None)
             source_getter = getattr(cam, "get_um_per_pixel_source", None)
+            step_source_getter = getattr(cam, "get_step_conversion_source", None)
             path_getter = getattr(cam, "optics_config_path", None)
             try:
                 if callable(getter):
@@ -383,6 +385,11 @@ class MainWindow(QMainWindow):
             except Exception:
                 source = "default"
             try:
+                if callable(step_source_getter):
+                    step_source = str(step_source_getter())
+            except Exception:
+                step_source = "preset"
+            try:
                 if callable(path_getter):
                     config_path = str(path_getter())
             except Exception:
@@ -390,7 +397,8 @@ class MainWindow(QMainWindow):
 
         if hasattr(self, "optics_calibration_factor_label"):
             self.optics_calibration_factor_label.setText(
-                f"Current micrometer/pixel factor: {value:.6f} um/pixel ({source})."
+                f"Current micrometer/pixel factor: {value:.6f} um/pixel ({source}).\n"
+                f"Current motion conversion: {step_source}."
             )
         if hasattr(self, "optics_calibration_config_label"):
             self.optics_calibration_config_label.setText(f"Config: {config_path}")

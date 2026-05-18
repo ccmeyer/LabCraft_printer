@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -179,3 +181,144 @@ def test_optics_capture_previews_without_session_and_without_save_context():
     assert dialog.statuses == [
         ("Preview capture requested. Start a session when ready to save frames.", "green")
     ]
+
+
+def test_optics_end_analyze_runs_scale_then_motion_and_writes_combined_payload(tmp_path, monkeypatch):
+    import tools.scale_bar_conversion as scale_mod
+    import tools.scale_bar_motion_conversion as motion_mod
+
+    scale_analysis = {
+        "schema_version": 1,
+        "status": "ok",
+        "summary": {
+            "status": "ok",
+            "median_um_per_pixel": 1.5,
+            "mean_um_per_pixel": 1.51,
+            "std_um_per_pixel": 0.01,
+            "cv_pct": 0.5,
+            "division_um": 10.0,
+            "accepted_count": 30,
+            "rejected_count": 1,
+            "failed_count": 0,
+            "run_directory": str(tmp_path),
+        },
+    }
+    motion_analysis = {
+        "schema_version": 1,
+        "status": "ok",
+        "summary": {
+            "status": "ok",
+            "run_directory": str(tmp_path),
+            "accepted_count": 30,
+            "rejected_count": 1,
+            "error_count": 0,
+            "repeat_position_group_count": 4,
+        },
+        "motion_fit": {
+            "status": "ok",
+            "fit_count": 29,
+            "intercept": [10.0, 20.0],
+            "matrix": [[2.0, 0.0], [0.0, 4.0]],
+            "inverse_matrix": [[0.5, 0.0], [0.0, 0.25]],
+            "determinant": 8.0,
+            "rmse_2d_px": 5.0,
+            "p95_2d_residual_px": 9.0,
+            "max_2d_residual_px": 10.0,
+        },
+    }
+    quality = {"apply_ready": True, "failed_criteria": [], "fit_count": 29}
+    scale_call = Mock(return_value=scale_analysis)
+    motion_call = Mock(return_value=motion_analysis)
+    quality_call = Mock(return_value=quality)
+
+    def fake_debug(payload, output_dir, **kwargs):
+        output = Path(output_dir)
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "index.html").write_text("debug", encoding="utf-8")
+        return {"output_dir": str(output), "summary_only": kwargs.get("summary_only")}
+
+    monkeypatch.setattr(scale_mod, "analyze_scale_bar_directory", scale_call)
+    monkeypatch.setattr(motion_mod, "analyze_scale_bar_motion_directory", motion_call)
+    monkeypatch.setattr(motion_mod, "summarize_motion_fit_quality", quality_call)
+    monkeypatch.setattr(motion_mod, "write_debug_outputs", fake_debug)
+
+    dialog = DropletImagingDialog.__new__(DropletImagingDialog)
+    dialog._optics_session_active = True
+    dialog._optics_session_dir = str(tmp_path)
+    dialog._optics_rejected_filenames = ["scale_bar_000004.png"]
+    dialog._optics_last_analysis = None
+    dialog.optics_division_um_spin = SimpleNamespace(value=Mock(return_value=10.0))
+    dialog.optics_results_text = SimpleNamespace(setPlainText=Mock())
+    dialog.statuses = []
+    dialog._set_optics_status = lambda message, color=None: dialog.statuses.append((message, color))
+    dialog._refresh_optics_controls = Mock()
+    dialog._optics_camera_model = Mock(return_value=SimpleNamespace(stop_saving=Mock()))
+
+    DropletImagingDialog.end_and_analyze_optics_session(dialog)
+
+    scale_call.assert_called_once_with(
+        str(tmp_path),
+        division_um=10.0,
+        rejected_filenames={"scale_bar_000004.png"},
+    )
+    motion_call.assert_called_once_with(
+        str(tmp_path),
+        rejected_filenames={"scale_bar_000004.png"},
+    )
+    assert dialog._optics_last_analysis["summary"]["apply_ready"] is True
+    assert "scale_bar_analysis" in dialog._optics_last_analysis
+    assert "motion_analysis" in dialog._optics_last_analysis
+    assert (tmp_path / "scale_bar_analysis.json").exists()
+    assert (tmp_path / "scale_bar_motion_analysis.json").exists()
+    combined = json.loads((tmp_path / "optics_calibration_analysis.json").read_text(encoding="utf-8"))
+    assert combined["summary"]["motion_debug_index_path"].endswith("motion_fit_summary\\index.html") or combined["summary"]["motion_debug_index_path"].endswith("motion_fit_summary/index.html")
+
+
+class _FakeButton:
+    def __init__(self):
+        self.enabled = None
+        self.tooltip = ""
+
+    def setEnabled(self, enabled):
+        self.enabled = bool(enabled)
+
+    def setToolTip(self, text):
+        self.tooltip = str(text)
+
+
+class _FakeLabel:
+    def __init__(self):
+        self.text = ""
+
+    def setText(self, text):
+        self.text = str(text)
+
+
+def test_optics_apply_button_requires_combined_quality_gate():
+    dialog = DropletImagingDialog.__new__(DropletImagingDialog)
+    dialog._optics_session_active = False
+    dialog._capture_request_pending = False
+    dialog._optics_last_analysis = {
+        "summary": {
+            "status": "ok",
+            "apply_ready": False,
+            "failed_criteria": ["rmse_2d>15"],
+        }
+    }
+    dialog._is_flash_fault_latched = Mock(return_value=False)
+    dialog._optics_current_factor = Mock(return_value=1.5)
+    dialog._optics_current_source = Mock(return_value="unit")
+    dialog._optics_step_conversion_source = Mock(return_value="preset")
+    dialog.optics_current_factor_label = _FakeLabel()
+    dialog.optics_session_dir_label = _FakeLabel()
+    dialog.optics_start_session_button = _FakeButton()
+    dialog.optics_capture_frame_button = _FakeButton()
+    dialog.optics_reject_last_button = _FakeButton()
+    dialog.optics_analyze_button = _FakeButton()
+    dialog.optics_apply_button = _FakeButton()
+    dialog.optics_manual_override_button = _FakeButton()
+
+    DropletImagingDialog._refresh_optics_controls(dialog)
+
+    assert dialog.optics_apply_button.enabled is False
+    assert "rmse_2d>15" in dialog.optics_apply_button.tooltip

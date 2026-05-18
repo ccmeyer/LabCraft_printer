@@ -70,6 +70,112 @@ def test_droplet_camera_ignores_invalid_optics_config(tmp_path, monkeypatch):
     assert cam.get_um_per_pixel_source() == "default"
 
 
+def test_droplet_camera_motion_conversion_falls_back_to_preset_when_missing_or_invalid(tmp_path, monkeypatch):
+    config_path = tmp_path / "optics.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "um_per_pixel": 2.0,
+                "motion_conversion": {
+                    "intercept_cx": 1.0,
+                    "intercept_cy": 2.0,
+                    "A": [[1.0, 0.0], [0.0, 0.0]],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cam = _make_camera(tmp_path, monkeypatch, config_path=config_path)
+
+    assert cam.get_um_per_pixel() == 2.0
+    assert cam.get_motion_conversion_config() == {}
+    assert cam.get_step_conversion_source().startswith("preset:")
+    assert cam.compute_stage_move(5, 7) == (5, 0.0, 7)
+
+
+def test_droplet_camera_valid_local_motion_conversion_overrides_preset(tmp_path, monkeypatch):
+    config_path = tmp_path / "optics.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "um_per_pixel": 2.0,
+                "source": "unit_test",
+                "motion_conversion": {
+                    "intercept_cx": 10.0,
+                    "intercept_cy": 20.0,
+                    "A": [[2.0, 0.0], [0.0, 4.0]],
+                    "source": "unit_motion",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cam = _make_camera(tmp_path, monkeypatch, config_path=config_path)
+
+    assert cam.get_step_conversion_source() == "unit_motion"
+    assert cam.get_motion_conversion_config()["intercept_cx"] == 10.0
+    assert cam.compute_stage_move(8, 12) == (4, 0.0, 3)
+
+
+def test_droplet_camera_apply_combined_optics_payload_persists_motion_conversion(tmp_path, monkeypatch):
+    config_path = tmp_path / "optics.json"
+    cam = _make_camera(tmp_path, monkeypatch, config_path=config_path)
+    payload = {
+        "summary": {
+            "status": "ok",
+            "apply_ready": True,
+            "motion_debug_index_path": str(tmp_path / "debug" / "index.html"),
+        },
+        "scale_bar_analysis": {
+            "summary": {
+                "status": "ok",
+                "median_um_per_pixel": 2.5,
+                "mean_um_per_pixel": 2.51,
+                "std_um_per_pixel": 0.01,
+                "cv_pct": 0.4,
+                "division_um": 10.0,
+                "accepted_count": 25,
+                "run_directory": str(tmp_path / "run"),
+            }
+        },
+        "motion_analysis": {
+            "summary": {
+                "status": "ok",
+                "run_directory": str(tmp_path / "run"),
+                "accepted_count": 25,
+                "rejected_count": 1,
+                "error_count": 0,
+                "repeat_position_group_count": 4,
+            },
+            "motion_fit": {
+                "status": "ok",
+                "fit_count": 24,
+                "intercept": [100.0, 200.0],
+                "matrix": [[2.0, 0.0], [0.0, 4.0]],
+                "inverse_matrix": [[0.5, 0.0], [0.0, 0.25]],
+                "determinant": 8.0,
+                "rmse_x_px": 3.0,
+                "rmse_y_px": 2.0,
+                "rmse_2d_px": 4.0,
+                "median_2d_residual_px": 3.0,
+                "p95_2d_residual_px": 8.0,
+                "max_2d_residual_px": 9.0,
+            },
+        },
+    }
+
+    written = cam.apply_optics_calibration(payload)
+    reloaded = _make_camera(tmp_path, monkeypatch, config_path=config_path)
+
+    assert written["um_per_pixel"] == 2.5
+    assert written["motion_conversion"]["A"] == [[2.0, 0.0], [0.0, 4.0]]
+    assert reloaded.get_um_per_pixel() == 2.5
+    assert reloaded.get_step_conversion_source() == "scale_bar_motion_calibration"
+    assert reloaded.compute_stage_move(8, 12) == (4, 0.0, 3)
+
+
 def test_characterize_droplet_uses_configured_factor_unless_explicit(tmp_path, monkeypatch):
     cam = _make_camera(tmp_path, monkeypatch)
     cam.set_um_per_pixel(2.0, source="unit_test")

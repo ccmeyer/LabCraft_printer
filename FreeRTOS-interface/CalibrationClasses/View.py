@@ -2242,6 +2242,16 @@ class DropletImagingDialog(QtWidgets.QDialog):
             pass
         return "default"
 
+    def _optics_step_conversion_source(self):
+        cam = self._optics_camera_model()
+        getter = getattr(cam, "get_step_conversion_source", None)
+        try:
+            if callable(getter):
+                return str(getter())
+        except Exception:
+            pass
+        return "preset"
+
     def _set_optics_status(self, text, color=None):
         if not hasattr(self, "optics_status_label"):
             return
@@ -2271,18 +2281,27 @@ class DropletImagingDialog(QtWidgets.QDialog):
         active = bool(getattr(self, "_optics_session_active", False))
         capture_pending = bool(getattr(self, "_capture_request_pending", False))
         flash_fault_latched = self._is_flash_fault_latched()
-        summary = dict((getattr(self, "_optics_last_analysis", None) or {}).get("summary") or {})
-        accepted_count = int(summary.get("accepted_count") or 0)
-        cv_pct = summary.get("cv_pct")
-        try:
-            cv_pct = float(cv_pct)
-        except Exception:
-            cv_pct = None
-        result_ready = summary.get("status") == "ok"
-        auto_apply_ok = bool(result_ready and accepted_count >= 5 and cv_pct is not None and cv_pct <= 2.0)
+        analysis = getattr(self, "_optics_last_analysis", None) or {}
+        summary = dict(analysis.get("summary") or {})
+        if "apply_ready" in summary:
+            result_ready = summary.get("status") == "ok"
+            auto_apply_ok = bool(summary.get("apply_ready"))
+            failed_criteria = list(summary.get("failed_criteria") or [])
+        else:
+            scale_summary = dict(summary)
+            accepted_count = int(scale_summary.get("accepted_count") or 0)
+            cv_pct = scale_summary.get("cv_pct")
+            try:
+                cv_pct = float(cv_pct)
+            except Exception:
+                cv_pct = None
+            result_ready = scale_summary.get("status") == "ok"
+            auto_apply_ok = bool(result_ready and accepted_count >= 5 and cv_pct is not None and cv_pct <= 2.0)
+            failed_criteria = [] if auto_apply_ok else ["scale gate failed"]
 
         self.optics_current_factor_label.setText(
-            f"Current: {self._optics_current_factor():.6f} um/pixel ({self._optics_current_source()})"
+            f"Current: {self._optics_current_factor():.6f} um/pixel ({self._optics_current_source()}); "
+            f"motion conversion: {self._optics_step_conversion_source()}"
         )
         session_dir = getattr(self, "_optics_session_dir", None)
         self.optics_session_dir_label.setText(f"Session: {session_dir or 'none'}")
@@ -2292,7 +2311,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.optics_analyze_button.setEnabled(active and not capture_pending)
         self.optics_apply_button.setEnabled(auto_apply_ok)
         if result_ready and not auto_apply_ok:
-            self.optics_apply_button.setToolTip("Requires at least 5 valid images and CV at most 2%. Use Manual Override for exceptions.")
+            detail = ", ".join(failed_criteria) if failed_criteria else "quality gates failed"
+            self.optics_apply_button.setToolTip(f"Cannot apply until optics quality gates pass: {detail}.")
         else:
             self.optics_apply_button.setToolTip("")
         self.optics_manual_override_button.setEnabled(True)
@@ -2429,7 +2449,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         try:
             from tools.scale_bar_conversion import analyze_scale_bar_directory
 
-            analysis = analyze_scale_bar_directory(
+            scale_analysis = analyze_scale_bar_directory(
                 session_dir,
                 division_um=float(self.optics_division_um_spin.value()),
                 rejected_filenames=set(self._optics_rejected_filenames),
@@ -2439,13 +2459,152 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._refresh_optics_controls()
             return
 
+        self._write_optics_session_json("scale_bar_analysis.json", scale_analysis)
+        scale_summary = dict((scale_analysis or {}).get("summary") or {})
+        if scale_summary.get("status") != "ok":
+            self._optics_last_analysis = scale_analysis
+            self._render_optics_analysis(scale_analysis)
+            self._refresh_optics_controls()
+            return
+
+        try:
+            from tools.scale_bar_motion_conversion import (
+                analyze_scale_bar_motion_directory,
+                summarize_motion_fit_quality,
+                write_debug_outputs,
+            )
+
+            motion_analysis = analyze_scale_bar_motion_directory(
+                session_dir,
+                rejected_filenames=set(self._optics_rejected_filenames),
+            )
+            motion_quality = summarize_motion_fit_quality(motion_analysis)
+            motion_analysis["motion_quality"] = motion_quality
+            debug_dir = Path(session_dir) / "motion_fit_summary"
+            debug_summary = write_debug_outputs(
+                motion_analysis,
+                debug_dir,
+                debug_limit=0,
+                contact_limit=0,
+                summary_only=True,
+            )
+            debug_index = str(debug_dir / "index.html")
+            motion_analysis.setdefault("summary", {})["debug_index_path"] = debug_index
+            motion_analysis["debug_summary"] = debug_summary
+        except Exception as exc:
+            self._set_optics_status(f"Motion conversion analysis failed: {exc}", "red")
+            motion_analysis = {
+                "schema_version": 1,
+                "status": "error",
+                "summary": {"status": "error", "run_directory": str(session_dir)},
+                "motion_fit": {"status": "error", "error": str(exc), "fit_count": 0},
+                "motion_quality": {
+                    "schema_version": 1,
+                    "status": "failed",
+                    "apply_ready": False,
+                    "failed_criteria": ["motion_analysis_failed"],
+                },
+            }
+            motion_quality = dict(motion_analysis["motion_quality"])
+            debug_index = None
+
+        self._write_optics_session_json("scale_bar_motion_analysis.json", motion_analysis)
+        analysis = self._build_combined_optics_analysis(scale_analysis, motion_analysis, motion_quality, debug_index)
         self._optics_last_analysis = analysis
-        self._write_optics_session_json("scale_bar_analysis.json", analysis)
+        self._write_optics_session_json("optics_calibration_analysis.json", analysis)
         self._render_optics_analysis(analysis)
         self._refresh_optics_controls()
 
+    def _scale_apply_ready(self, scale_summary):
+        try:
+            accepted_count = int(scale_summary.get("accepted_count") or 0)
+            cv_pct = float(scale_summary.get("cv_pct"))
+        except Exception:
+            return False
+        return bool(scale_summary.get("status") == "ok" and accepted_count >= 5 and cv_pct <= 2.0)
+
+    def _build_combined_optics_analysis(self, scale_analysis, motion_analysis, motion_quality, debug_index):
+        scale_summary = dict((scale_analysis or {}).get("summary") or {})
+        motion_summary = dict((motion_analysis or {}).get("summary") or {})
+        motion_fit = dict((motion_analysis or {}).get("motion_fit") or {})
+        motion_quality = dict(motion_quality or {})
+        scale_ready = self._scale_apply_ready(scale_summary)
+        motion_ready = bool(motion_quality.get("apply_ready"))
+        failed = []
+        if not scale_ready:
+            failed.append("scale_gate_failed")
+        failed.extend(str(item) for item in (motion_quality.get("failed_criteria") or []))
+        summary = {
+            "schema_version": 1,
+            "status": "ok" if scale_summary.get("status") == "ok" and motion_summary.get("status") == "ok" else "error",
+            "apply_ready": bool(scale_ready and motion_ready),
+            "failed_criteria": failed,
+            "scale_apply_ready": bool(scale_ready),
+            "motion_apply_ready": bool(motion_ready),
+            "median_um_per_pixel": scale_summary.get("median_um_per_pixel"),
+            "mean_um_per_pixel": scale_summary.get("mean_um_per_pixel"),
+            "std_um_per_pixel": scale_summary.get("std_um_per_pixel"),
+            "cv_pct": scale_summary.get("cv_pct"),
+            "division_um": scale_summary.get("division_um"),
+            "accepted_count": scale_summary.get("accepted_count"),
+            "rejected_count": scale_summary.get("rejected_count"),
+            "failed_count": scale_summary.get("failed_count"),
+            "run_directory": scale_summary.get("run_directory"),
+            "motion_fit_count": motion_fit.get("fit_count"),
+            "motion_repeat_position_group_count": motion_summary.get("repeat_position_group_count"),
+            "motion_rmse_2d_px": motion_fit.get("rmse_2d_px"),
+            "motion_p95_2d_residual_px": motion_fit.get("p95_2d_residual_px"),
+            "motion_max_2d_residual_px": motion_fit.get("max_2d_residual_px"),
+            "motion_debug_index_path": debug_index or motion_summary.get("debug_index_path"),
+        }
+        return {
+            "schema_version": 1,
+            "status": "ok" if summary["apply_ready"] else "warning",
+            "summary": summary,
+            "scale_bar_analysis": scale_analysis,
+            "motion_analysis": motion_analysis,
+            "motion_quality": motion_quality,
+        }
+
     def _render_optics_analysis(self, analysis):
-        summary = dict((analysis or {}).get("summary") or {})
+        analysis = analysis or {}
+        if "scale_bar_analysis" in analysis:
+            summary = dict(analysis.get("summary") or {})
+            scale_summary = dict((analysis.get("scale_bar_analysis") or {}).get("summary") or {})
+            motion_fit = dict((analysis.get("motion_analysis") or {}).get("motion_fit") or {})
+            motion_summary = dict((analysis.get("motion_analysis") or {}).get("summary") or {})
+            motion_quality = dict(analysis.get("motion_quality") or {})
+            lines = [
+                "Measurement conversion",
+                f"Median: {float(scale_summary.get('median_um_per_pixel')):.6f} um/pixel",
+                f"Mean: {float(scale_summary.get('mean_um_per_pixel')):.6f} um/pixel",
+                f"Std: {float(scale_summary.get('std_um_per_pixel')):.6f} um/pixel",
+                f"CV: {float(scale_summary.get('cv_pct')):.3f}%",
+                f"Accepted images: {int(scale_summary.get('accepted_count') or 0)}",
+                f"Rejected images: {int(scale_summary.get('rejected_count') or 0)}",
+                f"Failed images: {int(scale_summary.get('failed_count') or 0)}",
+                "",
+                "Motion conversion",
+                f"Fit frames: {int(motion_fit.get('fit_count') or 0)}",
+                f"Repeat groups: {int(motion_summary.get('repeat_position_group_count') or 0)}",
+                f"2D RMSE: {float(motion_fit.get('rmse_2d_px') or 0.0):.3f} px",
+                f"2D residual P95: {float(motion_fit.get('p95_2d_residual_px') or 0.0):.3f} px",
+                f"2D residual max: {float(motion_fit.get('max_2d_residual_px') or 0.0):.3f} px",
+                f"Debug report: {summary.get('motion_debug_index_path') or 'not available'}",
+                f"Run directory: {scale_summary.get('run_directory')}",
+            ]
+            failed = list(summary.get("failed_criteria") or motion_quality.get("failed_criteria") or [])
+            if bool(summary.get("apply_ready")):
+                lines.append("Apply status: ready")
+                self.optics_results_text.setPlainText("\n".join(lines))
+                self._set_optics_status("Analysis complete. Measurement and motion calibration are ready to apply.", "green")
+            else:
+                lines.append(f"Apply status: blocked ({', '.join(failed) if failed else 'quality gates failed'})")
+                self.optics_results_text.setPlainText("\n".join(lines))
+                self._set_optics_status("Analysis complete, but apply requires measurement and motion quality gates to pass.", "red")
+            return
+
+        summary = dict(analysis.get("summary") or {})
         if summary.get("status") != "ok":
             self.optics_results_text.setPlainText(json.dumps(analysis, indent=2, default=str))
             self._set_optics_status("No valid scale-bar images were found.", "red")

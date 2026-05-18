@@ -68,7 +68,7 @@ If your repo venv is in `env` on Windows:
 
 ## Droplet Imager Optics Calibration
 
-The standard optics-calibration workflow uses a guided load/approach wizard, then reuses the imager `Optics` tab for manual focus, image capture, scale-bar analysis, and applying the micrometer-per-pixel factor. The wizard does not require a printer head, print profile, or regulated pressure, and it does not change firmware or the device protocol.
+The standard optics-calibration workflow uses a guided load/approach wizard, then reuses the imager `Optics` tab for manual focus, image capture, scale-bar analysis, and applying the micrometer-per-pixel and camera motion-conversion factors. The wizard does not require a printer head, print profile, or regulated pressure, and it does not change firmware or the device protocol.
 
 App workflow:
 
@@ -80,16 +80,19 @@ App workflow:
 6. When the service-mode imager opens to the `Optics` tab, manually jog/focus as needed.
 7. Keep `Division size` at `10.0 um` unless your micrometer differs.
 8. Select `Start Session`, use `Capture Frame` for each micrometer image, and use `Reject Last Frame` for bad frames.
-9. Select `End Session and Analyze`; if at least 5 valid images have CV at most 2%, select `Apply Result`.
+9. Select `End Session and Analyze`; the app first computes the micrometer-per-pixel factor, then fits image-center movement against recorded machine `X/Z` positions.
+10. Inspect the displayed motion fit metrics and the generated `motion_fit_summary/index.html` report in the session directory.
+11. Select `Apply Result` when both quality gates pass. The measurement gate requires at least 5 valid images and CV at most 2%; the motion gate requires at least 20 fit frames, at least 3 repeat-position groups, 2D RMSE at most 15 px, and P95 residual at most 25 px.
 
 `Open Manual Optics Calibration` remains available as an advanced fallback. It opens the same service-mode imager `Optics` tab but performs no automatic homing, gripper, or camera-approach motion.
 
-Accepted calibrations are written to `local/droplet_imager_optics.json` and loaded by droplet and stream volume analysis. Deleting or renaming that file rolls analysis back to the historical fallback of `1.5696 um/pixel`.
+Accepted calibrations are written to `local/droplet_imager_optics.json`. The top-level `um_per_pixel` value is loaded by droplet and stream volume analysis, and the nested `motion_conversion` value is loaded by droplet-imager stage conversion. Deleting or renaming that file rolls analysis back to the historical fallback of `1.5696 um/pixel` and the preset step-conversion matrix in `FreeRTOS-interface/Presets/step_conv_250813.json`.
 
-The same analyzer can be run from the command line:
+The measurement and motion analyzers can be run from the command line:
 
 ```bash
 py tools/scale_bar_conversion.py path\to\scale_bar_run --division-um 10.0 --output path\to\summary.json
+py tools/scale_bar_motion_conversion.py path\to\scale_bar_run --debug --debug-summary-only
 ```
 
 ## Qualification Campaign CLI

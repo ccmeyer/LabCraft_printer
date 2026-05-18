@@ -26664,15 +26664,17 @@ class DropletCameraModel(QObject):
         # optional: store last capture info
         self._last_capture_info = None
 
+        self.steps_conv_path = steps_conv_path
+        self._step_conversion_source = "preset"
+        self._motion_conversion_config = {}
+        self._load_preset_step_conversion()
+
         # Optics calibration state. The default preserves historical behavior
         # when no per-machine calibration has been accepted yet.
         self._um_per_pixel = float(self.DEFAULT_UM_PER_PIXEL)
         self._um_per_pixel_source = "default"
         self._optics_config = {}
         self._load_optics_config()
-
-        self.steps_conv_path = steps_conv_path
-        self.intercept_cx, self.intercept_cy, self.A, self.A_inv = self.load_step_calibration(self.steps_conv_path)
 
     @staticmethod
     def _json_default(o):
@@ -26699,10 +26701,115 @@ class DropletCameraModel(QObject):
             return None
         return value
 
+    @staticmethod
+    def _finite_float_or_none(value):
+        try:
+            value = float(value)
+        except Exception:
+            return None
+        return value if math.isfinite(value) else None
+
+    @classmethod
+    def _normalize_motion_conversion(cls, value):
+        if not isinstance(value, dict):
+            return None
+        raw = dict(value)
+        matrix_value = raw.get("A", raw.get("matrix"))
+        try:
+            A = np.asarray(matrix_value, dtype=float)
+        except Exception:
+            return None
+        if A.shape != (2, 2) or not np.all(np.isfinite(A)):
+            return None
+        determinant = float(np.linalg.det(A))
+        if not math.isfinite(determinant) or abs(determinant) <= 1e-12:
+            return None
+        intercept_cx = cls._finite_float_or_none(raw.get("intercept_cx"))
+        intercept_cy = cls._finite_float_or_none(raw.get("intercept_cy"))
+        intercept = raw.get("intercept")
+        if (intercept_cx is None or intercept_cy is None) and isinstance(intercept, (list, tuple)) and len(intercept) >= 2:
+            intercept_cx = cls._finite_float_or_none(intercept[0])
+            intercept_cy = cls._finite_float_or_none(intercept[1])
+        if intercept_cx is None or intercept_cy is None:
+            return None
+
+        A_inv = np.linalg.inv(A)
+        out = {
+            "intercept_cx": float(intercept_cx),
+            "intercept_cy": float(intercept_cy),
+            "A": A.tolist(),
+            "A_inv": A_inv.tolist(),
+            "determinant": determinant,
+        }
+        for key in (
+            "source",
+            "timestamp",
+            "run_directory",
+            "debug_index_path",
+            "fit_count",
+            "accepted_count",
+            "rejected_count",
+            "error_count",
+            "repeat_position_group_count",
+            "rmse_x_px",
+            "rmse_y_px",
+            "rmse_2d_px",
+            "median_2d_residual_px",
+            "p95_2d_residual_px",
+            "max_2d_residual_px",
+        ):
+            if key in raw and raw.get(key) is not None:
+                out[key] = raw.get(key)
+        return out
+
+    def _load_preset_step_conversion(self):
+        self.intercept_cx, self.intercept_cy, self.A, self.A_inv = self.load_step_calibration(self.steps_conv_path)
+        self._step_conversion_source = f"preset:{Path(str(self.steps_conv_path)).name}"
+        self._motion_conversion_config = {}
+        return self.intercept_cx, self.intercept_cy, self.A, self.A_inv
+
+    def _apply_motion_conversion_config(self, motion_conversion):
+        normalized = self._normalize_motion_conversion(motion_conversion)
+        if normalized is None:
+            raise ValueError("motion_conversion must include finite intercepts and an invertible 2x2 A matrix")
+        self.intercept_cx = float(normalized["intercept_cx"])
+        self.intercept_cy = float(normalized["intercept_cy"])
+        self.A = np.asarray(normalized["A"], dtype=float)
+        self.A_inv = np.asarray(normalized["A_inv"], dtype=float)
+        self._motion_conversion_config = dict(normalized)
+        self._step_conversion_source = str(normalized.get("source") or "local_optics_config")
+        return dict(normalized)
+
+    def _write_optics_config(self, data):
+        path = self.optics_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=str(path.parent),
+            text=True,
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, default=self._json_default)
+                f.write("\n")
+            os.replace(tmp_name, path)
+        except Exception:
+            try:
+                os.unlink(tmp_name)
+            except Exception:
+                pass
+            raise
+
     def _load_optics_config(self):
         self._um_per_pixel = float(self.DEFAULT_UM_PER_PIXEL)
         self._um_per_pixel_source = "default"
         self._optics_config = {}
+        if hasattr(self, "steps_conv_path"):
+            try:
+                self._load_preset_step_conversion()
+            except Exception as exc:
+                print(f"[DropletCameraModel] Could not load preset step conversion {self.steps_conv_path}: {exc}")
 
         path = self.optics_config_path()
         try:
@@ -26722,6 +26829,13 @@ class DropletCameraModel(QObject):
         self._um_per_pixel = value
         self._um_per_pixel_source = str(data.get("source") or "config")
         self._optics_config = dict(data)
+        motion = data.get("motion_conversion")
+        if motion is not None:
+            try:
+                normalized_motion = self._apply_motion_conversion_config(motion)
+                self._optics_config["motion_conversion"] = normalized_motion
+            except Exception as exc:
+                print(f"[DropletCameraModel] Ignoring invalid motion conversion in {path}: {exc}")
         return dict(self._optics_config)
 
     def load_optics_config(self):
@@ -26735,6 +26849,12 @@ class DropletCameraModel(QObject):
 
     def get_um_per_pixel_source(self):
         return str(getattr(self, "_um_per_pixel_source", "default"))
+
+    def get_step_conversion_source(self):
+        return str(getattr(self, "_step_conversion_source", "preset"))
+
+    def get_motion_conversion_config(self):
+        return dict(getattr(self, "_motion_conversion_config", {}) or {})
 
     def get_last_saved_capture(self):
         return None if self._last_saved is None else dict(self._last_saved)
@@ -26786,47 +26906,130 @@ class DropletCameraModel(QObject):
             data["run_directory"] = str(run_directory)
         if summary is not None:
             data["summary"] = dict(summary)
+        existing_motion = self.get_motion_conversion_config()
+        if existing_motion:
+            data["motion_conversion"] = existing_motion
 
-        path = self.optics_config_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            dir=str(path.parent),
-            text=True,
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, default=self._json_default)
-                f.write("\n")
-            os.replace(tmp_name, path)
-        except Exception:
-            try:
-                os.unlink(tmp_name)
-            except Exception:
-                pass
-            raise
-
+        self._write_optics_config(data)
         self._um_per_pixel = float(um_per_pixel)
         self._um_per_pixel_source = data["source"]
         self._optics_config = dict(data)
         return dict(data)
 
+    def _motion_conversion_from_analysis(self, motion_payload, *, source="scale_bar_motion_calibration", debug_index_path=None):
+        if not isinstance(motion_payload, dict):
+            return None
+        fit = dict(motion_payload.get("motion_fit") or {})
+        summary = dict(motion_payload.get("summary") or {})
+        if fit.get("status") != "ok":
+            return None
+        intercept = fit.get("intercept")
+        matrix = fit.get("matrix")
+        timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        candidate = {
+            "intercept": intercept,
+            "A": matrix,
+            "A_inv": fit.get("inverse_matrix"),
+            "source": str(source or "scale_bar_motion_calibration"),
+            "timestamp": timestamp,
+            "run_directory": summary.get("run_directory"),
+            "debug_index_path": debug_index_path,
+            "fit_count": fit.get("fit_count"),
+            "accepted_count": summary.get("accepted_count"),
+            "rejected_count": summary.get("rejected_count"),
+            "error_count": summary.get("error_count"),
+            "repeat_position_group_count": summary.get("repeat_position_group_count"),
+            "rmse_x_px": fit.get("rmse_x_px"),
+            "rmse_y_px": fit.get("rmse_y_px"),
+            "rmse_2d_px": fit.get("rmse_2d_px"),
+            "median_2d_residual_px": fit.get("median_2d_residual_px"),
+            "p95_2d_residual_px": fit.get("p95_2d_residual_px"),
+            "max_2d_residual_px": fit.get("max_2d_residual_px"),
+        }
+        return self._normalize_motion_conversion(candidate)
+
+    def set_motion_conversion(self, motion_conversion, *, source="manual_motion_override", summary=None):
+        normalized = self._normalize_motion_conversion({**dict(motion_conversion or {}), "source": source})
+        if normalized is None:
+            raise ValueError("motion_conversion must include finite intercepts and an invertible 2x2 A matrix")
+        timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        normalized["timestamp"] = timestamp
+        if summary is not None:
+            normalized["summary"] = dict(summary)
+        data = dict(self._optics_config or {})
+        if "schema_version" not in data:
+            data["schema_version"] = 1
+        if "um_per_pixel" not in data:
+            data.update(
+                {
+                    "um_per_pixel": self.get_um_per_pixel(),
+                    "source": self.get_um_per_pixel_source(),
+                    "timestamp": timestamp,
+                }
+            )
+        data["motion_conversion"] = normalized
+        self._write_optics_config(data)
+        self._apply_motion_conversion_config(normalized)
+        self._optics_config = dict(data)
+        return dict(normalized)
+
     def apply_optics_calibration(self, analysis_payload, *, source="scale_bar_calibration"):
-        summary = dict((analysis_payload or {}).get("summary") or {})
+        analysis_payload = analysis_payload or {}
+        scale_payload = analysis_payload.get("scale_bar_analysis") if isinstance(analysis_payload, dict) else None
+        if not isinstance(scale_payload, dict):
+            scale_payload = analysis_payload
+        summary = dict((scale_payload or {}).get("summary") or {})
         value = summary.get("median_um_per_pixel") or summary.get("mean_um_per_pixel")
-        return self.set_um_per_pixel(
-            value,
-            source=source,
-            division_um=summary.get("division_um"),
-            accepted_image_count=summary.get("accepted_count"),
-            mean_um_per_pixel=summary.get("mean_um_per_pixel"),
-            median_um_per_pixel=summary.get("median_um_per_pixel"),
-            std_um_per_pixel=summary.get("std_um_per_pixel"),
-            cv_pct=summary.get("cv_pct"),
-            run_directory=summary.get("run_directory"),
-            summary=summary,
-        )
+        um_per_pixel = self._valid_um_per_pixel(value)
+        if um_per_pixel is None:
+            raise ValueError("No valid um_per_pixel calibration value is available to apply.")
+
+        combined_summary = dict(analysis_payload.get("summary") or {}) if isinstance(analysis_payload, dict) else {}
+        if "apply_ready" in combined_summary and not bool(combined_summary.get("apply_ready")):
+            failed = ", ".join(combined_summary.get("failed_criteria") or ["quality gate failed"])
+            raise ValueError(f"Optics calibration is not ready to apply: {failed}")
+
+        timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        data = {
+            "schema_version": 1,
+            "um_per_pixel": float(um_per_pixel),
+            "source": str(source or "scale_bar_calibration"),
+            "timestamp": timestamp,
+            "division_um": summary.get("division_um"),
+            "accepted_image_count": summary.get("accepted_count"),
+            "mean_um_per_pixel": summary.get("mean_um_per_pixel"),
+            "median_um_per_pixel": summary.get("median_um_per_pixel"),
+            "std_um_per_pixel": summary.get("std_um_per_pixel"),
+            "cv_pct": summary.get("cv_pct"),
+            "run_directory": summary.get("run_directory"),
+            "summary": summary,
+        }
+
+        motion_payload = analysis_payload.get("motion_analysis") if isinstance(analysis_payload, dict) else None
+        motion_config = None
+        if isinstance(motion_payload, dict):
+            motion_config = self._motion_conversion_from_analysis(
+                motion_payload,
+                source="scale_bar_motion_calibration",
+                debug_index_path=combined_summary.get("motion_debug_index_path"),
+            )
+            if motion_config is None:
+                raise ValueError("No valid motion conversion calibration is available to apply.")
+            data["motion_conversion"] = motion_config
+            data["combined_summary"] = combined_summary
+        else:
+            existing_motion = self.get_motion_conversion_config()
+            if existing_motion:
+                data["motion_conversion"] = existing_motion
+
+        data = {key: value for key, value in data.items() if value is not None}
+        self._write_optics_config(data)
+        self._um_per_pixel = float(um_per_pixel)
+        self._um_per_pixel_source = data["source"]
+        if motion_config is not None:
+            self._apply_motion_conversion_config(motion_config)
+        self._optics_config = dict(data)
+        return dict(data)
 
     def get_image_size(self):
         return self.image_width, self.image_height
@@ -29130,11 +29333,13 @@ class DropletCameraModel(QObject):
         with open(json_path, 'r') as f:
             data = json.load(f)
         
-        intercept_cx = data["intercept_cx"]
-        intercept_cy = data["intercept_cy"]
+        intercept_cx = float(data["intercept_cx"])
+        intercept_cy = float(data["intercept_cy"])
         
         # Convert the Python list to a NumPy array
-        A = np.array(data["A"])
+        A = np.asarray(data["A"], dtype=float)
+        if A.shape != (2, 2) or not np.all(np.isfinite(A)):
+            raise ValueError("Step conversion A matrix must be finite 2x2")
         
         # Compute or store the inverse
         A_inv = np.linalg.inv(A)
