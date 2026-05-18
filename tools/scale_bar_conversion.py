@@ -16,6 +16,8 @@ except Exception:  # pragma: no cover - scipy is a project dependency, keep impo
 
 
 IMAGE_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff"}
+MIN_ACCEPTED_SPACINGS = 4
+MAX_SPACING_CV_PCT = 20.0
 
 
 def _json_default(value):
@@ -67,23 +69,31 @@ def _deskew_foreground(binary: np.ndarray) -> tuple[np.ndarray, float]:
     return rotated, float(angle)
 
 
-def _crop_foreground_band(binary: np.ndarray) -> np.ndarray:
-    row_counts = binary.sum(axis=1).astype(np.float32) / 255.0
-    if row_counts.size == 0 or float(row_counts.max(initial=0.0)) <= 0.0:
+def _crop_foreground_band(binary: np.ndarray, *, measurement_axis: str) -> np.ndarray:
+    if measurement_axis == "y":
+        counts = binary.sum(axis=0).astype(np.float32) / 255.0
+        length = binary.shape[1]
+    else:
+        counts = binary.sum(axis=1).astype(np.float32) / 255.0
+        length = binary.shape[0]
+
+    if counts.size == 0 or float(counts.max(initial=0.0)) <= 0.0:
         return binary
 
-    kernel_width = max(5, min(81, int(round(binary.shape[0] * 0.06)) | 1))
-    smooth = cv2.GaussianBlur(row_counts.reshape(-1, 1), (1, kernel_width), 0).ravel()
+    kernel_width = max(5, min(81, int(round(length * 0.06)) | 1))
+    smooth = cv2.GaussianBlur(counts.reshape(-1, 1), (1, kernel_width), 0).ravel()
     threshold = max(3.0, float(smooth.max()) * 0.20)
-    rows = np.flatnonzero(smooth >= threshold)
-    if rows.size == 0:
+    indices = np.flatnonzero(smooth >= threshold)
+    if indices.size == 0:
         return binary
 
-    top = max(0, int(rows[0]) - 6)
-    bottom = min(binary.shape[0], int(rows[-1]) + 7)
-    if bottom <= top:
+    start = max(0, int(indices[0]) - 6)
+    stop = min(length, int(indices[-1]) + 7)
+    if stop <= start:
         return binary
-    return binary[top:bottom, :]
+    if measurement_axis == "y":
+        return binary[:, start:stop]
+    return binary[start:stop, :]
 
 
 def _local_contrast_binary(gray: np.ndarray) -> np.ndarray:
@@ -152,14 +162,20 @@ def _analyze_binary_scale_bar(
     *,
     division_um: float,
     mask_source: str,
+    measurement_axis: str,
+    deskew: bool = True,
 ) -> dict:
-    binary, angle_deg = _deskew_foreground(binary)
-    band = _crop_foreground_band(binary)
+    if deskew:
+        binary, angle_deg = _deskew_foreground(binary)
+    else:
+        angle_deg = 0.0
+    measurement_axis = "y" if measurement_axis == "y" else "x"
+    band = _crop_foreground_band(binary, measurement_axis=measurement_axis)
 
-    col_counts = band.sum(axis=0).astype(np.float32) / 255.0
-    peaks = _find_tick_peaks(col_counts)
+    signal = band.sum(axis=1 if measurement_axis == "y" else 0).astype(np.float32) / 255.0
+    peaks = _find_tick_peaks(signal)
     spacings_px, raw_spacings_px = _robust_spacing(peaks)
-    if len(spacings_px) < 2:
+    if len(spacings_px) < MIN_ACCEPTED_SPACINGS:
         return {
             "path": str(image_path),
             "filename": image_path.name,
@@ -167,6 +183,8 @@ def _analyze_binary_scale_bar(
             "error": "not_enough_tick_spacing",
             "division_um": float(division_um),
             "mask_source": mask_source,
+            "measurement_axis": measurement_axis,
+            "deskew": bool(deskew),
             "peak_count": int(len(peaks)),
             "peaks_px": [int(x) for x in peaks.tolist()],
             "raw_spacings_px": raw_spacings_px,
@@ -175,6 +193,27 @@ def _analyze_binary_scale_bar(
 
     spacing_px = float(np.mean(spacings_px))
     spacing_std = float(np.std(spacings_px, ddof=1)) if len(spacings_px) > 1 else 0.0
+    spacing_cv_pct = float((spacing_std / spacing_px) * 100.0) if spacing_px else 0.0
+    if spacing_cv_pct > MAX_SPACING_CV_PCT:
+        return {
+            "path": str(image_path),
+            "filename": image_path.name,
+            "status": "error",
+            "error": "inconsistent_tick_spacing",
+            "division_um": float(division_um),
+            "mask_source": mask_source,
+            "measurement_axis": measurement_axis,
+            "deskew": bool(deskew),
+            "peak_count": int(len(peaks)),
+            "peaks_px": [int(x) for x in peaks.tolist()],
+            "raw_spacings_px": raw_spacings_px,
+            "accepted_spacings_px": spacings_px,
+            "spacing_px": spacing_px,
+            "spacing_px_std": spacing_std,
+            "spacing_px_cv_pct": spacing_cv_pct,
+            "rotation_deg": float(angle_deg),
+        }
+
     um_per_pixel = float(division_um / spacing_px)
     return {
         "path": str(image_path),
@@ -182,12 +221,14 @@ def _analyze_binary_scale_bar(
         "status": "ok",
         "division_um": float(division_um),
         "mask_source": mask_source,
+        "measurement_axis": measurement_axis,
+        "deskew": bool(deskew),
         "um_per_pixel": um_per_pixel,
         "spacing_px": spacing_px,
         "spacing_px_median": float(median(spacings_px)),
         "spacing_px_mean": float(np.mean(spacings_px)),
         "spacing_px_std": spacing_std,
-        "spacing_px_cv_pct": float((spacing_std / spacing_px) * 100.0) if spacing_px else 0.0,
+        "spacing_px_cv_pct": spacing_cv_pct,
         "spacing_count": int(len(spacings_px)),
         "peak_count": int(len(peaks)),
         "peaks_px": [int(x) for x in peaks.tolist()],
@@ -217,30 +258,31 @@ def analyze_scale_bar_image(path: str | Path, division_um: float = 10.0) -> dict
     _threshold, dark_binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
     dark_binary = cv2.morphologyEx(dark_binary, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8), iterations=1)
 
-    candidates = [
-        _analyze_binary_scale_bar(
-            image_path,
-            gray,
-            local_binary,
-            division_um=division_um,
-            mask_source="local_contrast",
-        ),
-        _analyze_binary_scale_bar(
-            image_path,
-            gray,
-            dark_binary,
-            division_um=division_um,
-            mask_source="dark_otsu",
-        ),
-    ]
+    candidates = []
+    for mask_source, binary in (("local_contrast", local_binary), ("dark_otsu", dark_binary)):
+        for measurement_axis in ("x", "y"):
+            for deskew in (False, True):
+                candidates.append(
+                    _analyze_binary_scale_bar(
+                        image_path,
+                        gray,
+                        binary,
+                        division_um=division_um,
+                        mask_source=mask_source,
+                        measurement_axis=measurement_axis,
+                        deskew=deskew,
+                    )
+                )
     valid = [row for row in candidates if row.get("status") == "ok"]
     if not valid:
         return candidates[0]
 
     def _candidate_score(row):
+        cv_pct = row.get("spacing_px_cv_pct")
+        spacing_count = row.get("spacing_count")
         return (
-            float(row.get("spacing_px_cv_pct") or 999.0),
-            -int(row.get("spacing_count") or 0),
+            float(cv_pct) if cv_pct is not None else 999.0,
+            -int(spacing_count) if spacing_count is not None else 0,
         )
 
     return sorted(valid, key=_candidate_score)[0]

@@ -34,6 +34,32 @@ def _write_scale_image(path, *, spacing_px=50, rotation_deg=0.0, noise=False):
     cv2.imwrite(str(path), image)
 
 
+def _write_vertical_scale_image(path, *, spacing_px=40, rotation_deg=0.0, noise=False):
+    image = np.full((720, 220), 245, dtype=np.uint8)
+    for idx, y in enumerate(range(80, 631, spacing_px)):
+        width = 150 if idx % 5 == 0 else 95
+        x0 = 35
+        x1 = min(image.shape[1] - 20, x0 + width)
+        cv2.line(image, (x0, y), (x1, y), 0, 4)
+    cv2.line(image, (36, 80), (36, 630), 0, 2)
+    if noise:
+        rng = np.random.default_rng(456)
+        noisy = image.astype(np.int16) + rng.normal(0, 4, image.shape).astype(np.int16)
+        image = np.clip(noisy, 0, 255).astype(np.uint8)
+    if rotation_deg:
+        h, w = image.shape[:2]
+        matrix = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), float(rotation_deg), 1.0)
+        image = cv2.warpAffine(
+            image,
+            matrix,
+            (w, h),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=245,
+        )
+    cv2.imwrite(str(path), image)
+
+
 def test_analyze_scale_bar_image_handles_rotation_and_noise(tmp_path):
     path = tmp_path / "scale.png"
     _write_scale_image(path, spacing_px=50, rotation_deg=1.5, noise=True)
@@ -43,6 +69,18 @@ def test_analyze_scale_bar_image_handles_rotation_and_noise(tmp_path):
     assert result["status"] == "ok"
     assert result["spacing_count"] >= 5
     assert math.isclose(result["um_per_pixel"], 0.2, rel_tol=0.03)
+
+
+def test_analyze_scale_bar_image_handles_vertical_ruler_orientation(tmp_path):
+    path = tmp_path / "vertical_scale.png"
+    _write_vertical_scale_image(path, spacing_px=40, rotation_deg=-1.0, noise=True)
+
+    result = analyze_scale_bar_image(path, division_um=10.0)
+
+    assert result["status"] == "ok"
+    assert result["measurement_axis"] == "y"
+    assert result["spacing_count"] >= 5
+    assert math.isclose(result["um_per_pixel"], 0.25, rel_tol=0.03)
 
 
 def test_analyze_scale_bar_directory_skips_rejected_frames(tmp_path):
