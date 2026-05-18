@@ -559,42 +559,46 @@ class DropletCamera(QObject):
         while self._edge_in.event_wait(0):
             self._edge_in.event_consume()
 
-        # Raise trigger to MCU
-        self._trigger_high()
-
-        # Wait for MCU "flash fired" ACK
+        trigger_asserted = False
         try:
-            fired = self._edge_in.event_wait(timeout_s)
-        except Exception as e:
-            print(f"Error while waiting for flash-fired edge: {e}")
-            self._trigger_low()
-            with self._cv:
-                self._cap_active = False
-                self._cap_result = {
-                    "arr": None,
-                    "md": None,
-                    "mean": 0.0,
-                    "reason": "edge_wait_error",
-                    "error": str(e),
-                    "threshold": 0.0,
-                    "cap_id": self._cap_id,
-                }
-                self._cap_done.set()
-            return
+            # Raise trigger to MCU
+            self._trigger_high()
+            trigger_asserted = True
 
-        if not fired:
-            print("Timed out waiting for flash-fired edge.")
-            self._trigger_low()
-            with self._cv:
-                self._cap_active = False
-                self._cap_result = {"arr": None, "md": None, "mean": 0.0,
-                                    "reason": "edge_timeout", "threshold": 0.0, "cap_id": self._cap_id}
-                self._cap_done.set()
-            return
-        self._edge_in.event_consume()
+            # Wait for MCU "flash fired" ACK
+            try:
+                fired = self._edge_in.event_wait(timeout_s)
+            except Exception as e:
+                print(f"Error while waiting for flash-fired edge: {e}")
+                with self._cv:
+                    self._cap_active = False
+                    self._cap_result = {
+                        "arr": None,
+                        "md": None,
+                        "mean": 0.0,
+                        "reason": "edge_wait_error",
+                        "error": str(e),
+                        "threshold": 0.0,
+                        "cap_id": self._cap_id,
+                    }
+                    self._cap_done.set()
+                return
 
-        # Immediately deassert trigger to avoid EXTI re-notifications while high
-        self._trigger_low()
+            if not fired:
+                print("Timed out waiting for flash-fired edge.")
+                with self._cv:
+                    self._cap_active = False
+                    self._cap_result = {"arr": None, "md": None, "mean": 0.0,
+                                        "reason": "edge_timeout", "threshold": 0.0, "cap_id": self._cap_id}
+                    self._cap_done.set()
+                return
+            self._edge_in.event_consume()
+        finally:
+            if trigger_asserted:
+                # Always deassert the Pi trigger, even if edge consumption or
+                # GPIO waiting raises. Leaving it high can latch firmware flash
+                # safety and block later captures until restart.
+                self._trigger_low()
 
         # Arm the time gate AFTER the ack
         arm_ns = time.monotonic_ns()

@@ -97,6 +97,7 @@ class Controller(QObject):
         # This variable will temporarily hold the callback for the next capture.
         self.pending_capture_callback = None
         self.pending_capture_context = None
+        self.pending_capture_active = False
 
         self._array_state = "idle"
         self._array_context = None
@@ -2104,6 +2105,9 @@ class Controller(QObject):
         if self._is_flash_fault_latched():
             self._handle_blocked_capture(callback)
             return False
+        if bool(getattr(self, "pending_capture_active", False)):
+            print("Capture already pending; dropping new capture request.")
+            return False
         if capture_context is not None and getattr(self, "pending_capture_context", None) is not None:
             print("Capture context already pending; dropping new capture request.")
             return False
@@ -2114,6 +2118,7 @@ class Controller(QObject):
             self.pending_capture_callback = callback
         if capture_context is not None:
             self.pending_capture_context = str(capture_context)
+        self.pending_capture_active = True
         try:
             queued = self.machine.capture_droplet_image(throughput_mode=throughput_mode)
         except Exception:
@@ -2121,12 +2126,14 @@ class Controller(QObject):
                 self.pending_capture_callback = None
             if capture_context is not None:
                 self.pending_capture_context = None
+            self.pending_capture_active = False
             raise
         if queued is False:
             if callback is not None and self.pending_capture_callback is callback:
                 self.pending_capture_callback = None
             if capture_context is not None:
                 self.pending_capture_context = None
+            self.pending_capture_active = False
             return False
         return True
 
@@ -2431,33 +2438,34 @@ class Controller(QObject):
         capture_context = getattr(self, "pending_capture_context", None)
         save_metadata = self._build_droplet_capture_save_metadata(capture_context=capture_context)
 
+        callback = self.pending_capture_callback
+
         # Update the model and/or view (assuming your model has such a method)
         try:
             self.model.droplet_camera_model.update_image(frame, capture_info=cap_info, save_metadata=save_metadata)
         finally:
             self.pending_capture_context = None
+            self.pending_capture_callback = None
+            self.pending_capture_active = False
         
         # If a callback was set for the capture, call it.
-        if self.pending_capture_callback:
-            callback = self.pending_capture_callback
-            self.pending_capture_callback = None  # Clear for future captures.
+        if callback:
             callback(frame)
 
     @QtCore.Slot(str)
     def _on_capture_failed(self, msg: str):
         print(f"[Camera] capture failed: {msg}")
         # 1) If a caller is waiting via callback, resolve it with sentinel None
-        if self.pending_capture_callback:
-            cb = self.pending_capture_callback
-            self.pending_capture_callback = None
-            self.pending_capture_context = None
+        cb = self.pending_capture_callback
+        self.pending_capture_callback = None
+        self.pending_capture_context = None
+        self.pending_capture_active = False
+        if cb:
             try:
                 cb(None)                # <- sentinel for failure
             except Exception as e:
                 # If some callback signature changed, at least fail loudly
                 print(f"Callback raised after capture failure: {e}")
-        else:
-            self.pending_capture_context = None
         # 2) Also notify the calibration layer (optional, but handy for QState transitions)
         self.model.calibration_manager.captureFailed.emit(msg)
 

@@ -918,6 +918,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._optics_session_dir = None
         self._optics_rejected_filenames = []
         self._optics_last_analysis = None
+        self._capture_request_pending = False
         try:
             self.model.calibration_manager.clear_calibration_memory_ui_recommendation_state()
         except Exception:
@@ -1820,6 +1821,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         # ---------------- Connections ----------------
         self.model.droplet_camera_model.droplet_image_updated.connect(self.update_image)
+        self.model.droplet_camera_model.droplet_image_updated.connect(self._on_droplet_capture_finished)
         self.model.droplet_camera_model.flash_signal.connect(self.update_flash_info)
         self.model.calibration_manager.analyzedImageUpdated.connect(self.display_analyzed_image)
         online_stream_debug_signal = getattr(self.model.calibration_manager, "onlineStreamDebugUpdated", None)
@@ -1842,6 +1844,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.model.calibration_manager.calibrationCompleted.connect(self.on_calibration_completed)
         self.model.calibration_manager.calibrationQueueCompleted.connect(self.on_calibration_queue_completed)
         self.model.calibration_manager.calibrationError.connect(self.on_calibration_error)
+        capture_failed_signal = getattr(self.model.calibration_manager, "captureFailed", None)
+        if capture_failed_signal is not None:
+            capture_failed_signal.connect(self._on_droplet_capture_failed)
         self.model.calibration_manager.position_diff_dict_signal.connect(self.update_position_diffs)
         self.model.calibration_manager.characterizationSummaryUpdated.connect(self.populate_summary_table)
         self.model.calibration_manager.calibrationStageChanged.connect(self._refresh_manual_control_lock_state)
@@ -2243,10 +2248,29 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.optics_status_label.setText(str(text))
         self.optics_status_label.setStyleSheet("" if not color else f"color:{color};")
 
+    def _set_capture_request_pending(self, pending):
+        self._capture_request_pending = bool(pending)
+        self._refresh_manual_control_lock_state()
+        self._refresh_optics_controls()
+
+    def _on_droplet_capture_finished(self, *_args):
+        if getattr(self, "_capture_request_pending", False):
+            self._set_capture_request_pending(False)
+
+    def _on_droplet_capture_failed(self, message=""):
+        if getattr(self, "_capture_request_pending", False):
+            self._set_capture_request_pending(False)
+        tabs = getattr(self, "calibration_tabs", None)
+        if tabs is not None and tabs.currentWidget() is getattr(self, "optics_tab", None):
+            detail = str(message or "Camera did not return a frame.")
+            self._set_optics_status(f"Capture failed: {detail}", "red")
+
     def _refresh_optics_controls(self):
         if not hasattr(self, "optics_start_session_button"):
             return
         active = bool(getattr(self, "_optics_session_active", False))
+        capture_pending = bool(getattr(self, "_capture_request_pending", False))
+        flash_fault_latched = self._is_flash_fault_latched()
         summary = dict((getattr(self, "_optics_last_analysis", None) or {}).get("summary") or {})
         accepted_count = int(summary.get("accepted_count") or 0)
         cv_pct = summary.get("cv_pct")
@@ -2263,9 +2287,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         session_dir = getattr(self, "_optics_session_dir", None)
         self.optics_session_dir_label.setText(f"Session: {session_dir or 'none'}")
         self.optics_start_session_button.setEnabled(not active)
-        self.optics_capture_frame_button.setEnabled(True)
-        self.optics_reject_last_button.setEnabled(active)
-        self.optics_analyze_button.setEnabled(active)
+        self.optics_capture_frame_button.setEnabled((not capture_pending) and (not flash_fault_latched))
+        self.optics_reject_last_button.setEnabled(active and not capture_pending)
+        self.optics_analyze_button.setEnabled(active and not capture_pending)
         self.optics_apply_button.setEnabled(auto_apply_ok)
         if result_ready and not auto_apply_ok:
             self.optics_apply_button.setToolTip("Requires at least 5 valid images and CV at most 2%. Use Manual Override for exceptions.")
@@ -2320,6 +2344,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._refresh_optics_controls()
 
     def capture_optics_frame(self):
+        if getattr(self, "_capture_request_pending", False):
+            self._set_optics_status("Capture already pending; wait for it to finish before requesting another.", "red")
+            return
         active = bool(getattr(self, "_optics_session_active", False))
         checker = getattr(self.controller, "check_if_all_completed", None)
         try:
@@ -2343,6 +2370,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if ok is False:
             self._set_optics_status("Capture was not queued; another capture may already be pending.", "red")
             return
+        self._set_capture_request_pending(True)
         if active:
             self._set_optics_status("Capture requested.", "green")
         else:
@@ -2847,13 +2875,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
         busy = DropletImagingDialog._is_calibration_busy(self)
         was_locked = getattr(self, "_manual_controls_locked", False)
         flash_fault_latched = self._is_flash_fault_latched()
+        capture_pending = bool(getattr(self, "_capture_request_pending", False))
 
         if busy and not was_locked:
             DropletImagingDialog._clear_manual_control_edit_state(self)
             DropletImagingDialog._sync_manual_controls_from_model(self, force=True)
 
         self._manual_controls_locked = busy
-        enabled = (not busy) and (not flash_fault_latched)
+        enabled = (not busy) and (not flash_fault_latched) and (not capture_pending)
 
         for widget in getattr(self, "_manual_lock_widgets", ()):
             if widget is not None:
@@ -3603,9 +3632,13 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         if DropletImagingDialog._is_calibration_busy(self):
             return
+        if getattr(self, "_capture_request_pending", False):
+            return
         if self._is_flash_fault_latched():
             return
-        self.controller.capture_droplet_image()
+        ok = self.controller.capture_droplet_image()
+        if ok is not False:
+            self._set_capture_request_pending(True)
 
     def toggle_saving(self):
         if self.saving_active:
@@ -4278,7 +4311,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.controller.start_droplet_camera()
 
     def capture_image(self):
-        self.controller.capture_droplet_image(throughput_mode=bool(self.capturing))
+        if getattr(self, "_capture_request_pending", False):
+            return
+        ok = self.controller.capture_droplet_image(throughput_mode=bool(self.capturing))
+        if ok is not False:
+            self._set_capture_request_pending(True)
 
     def stop_droplet_camera(self):
         self.controller.stop_droplet_camera()
