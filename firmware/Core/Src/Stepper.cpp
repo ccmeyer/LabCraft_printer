@@ -47,7 +47,7 @@ static constexpr uint32_t kMoveWaitMaxMs = 30000u;
 static constexpr uint8_t kHomeLimitStableSampleCount = 5u;
 static constexpr uint8_t kHomeLimitStableRequiredSamples = 3u;
 static constexpr uint32_t kHomeLimitStableSampleIntervalMs = 2u;
-static constexpr uint32_t kHomeLimitLevelPollMs = 2u;
+static constexpr uint32_t kHomeLimitLevelPollMs = 5u;
 static constexpr uint8_t kHomeLimitLevelPollRequiredSamples = 2u;
 
 static TickType_t stepperMsToAtLeast1Tick(uint32_t ms)
@@ -565,18 +565,13 @@ bool Stepper::_waitUntilDoneForHomeMove(bool direction, uint32_t timeoutMs)
       assertedStreak = 0u;
     }
 
-    if (!levelPollHandled && assertedStreak >= kHomeLimitLevelPollRequiredSamples) {
-      if (!_limitSeenThisMove) {
-        _limitSeenThisMove = true;
-        ++_limitHitCount;
-      }
+    if (!levelPollHandled &&
+        StepperLimitPolicy::homeLevelPollConfirmed(assertedStreak,
+                                                   kHomeLimitLevelPollRequiredSamples)) {
       if (!_limitHandledThisMove) {
-        _limitHandledThisMove = true;
-        Logger::instance()->log("[Home %d] level-poll limit hit pos=%ld rem=%lu\r\n",
-                                (int)_axis,
-                                (long)_pos,
-                                (unsigned long)_togglesRemaining);
-        onLimitTriggered();
+        if (_stopHomeMoveFromLevelPoll()) {
+          return true;
+        }
       }
       levelPollHandled = true;
     }
@@ -592,6 +587,27 @@ bool Stepper::_waitUntilDoneForHomeMove(bool direction, uint32_t timeoutMs)
       return false;
     }
   }
+  return true;
+}
+
+bool Stepper::_stopHomeMoveFromLevelPoll()
+{
+  if (_togglesRemaining == 0u || _limitHandledThisMove) {
+    return false;
+  }
+
+  if (!_limitSeenThisMove) {
+    _limitSeenThisMove = true;
+    ++_limitHitCount;
+  }
+
+  _limitHandledThisMove = true;
+  Logger::instance()->log("[Home %d] level-poll hard stop pos=%ld rem=%lu\r\n",
+                          (int)_axis,
+                          (long)_pos,
+                          (unsigned long)_togglesRemaining);
+  stop();
+  xEventGroupSetBits(Orchestrator::getDoneEvents(), _doneBit);
   return true;
 }
 

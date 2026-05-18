@@ -54,6 +54,13 @@ constexpr bool shouldPollHomeLimitLevel(bool moveDirection, bool homeTowardLimit
   return moveDirection == homeTowardLimitDirection;
 }
 
+constexpr bool homeLevelPollConfirmed(uint8_t assertedStreak,
+                                      uint8_t requiredAssertedSamples)
+{
+  return (requiredAssertedSamples != 0u) &&
+         (assertedStreak >= requiredAssertedSamples);
+}
+
 constexpr uint32_t releaseSearchGuardSteps(uint32_t backoffSteps)
 {
   const uint32_t chunk = normalizeBackoffSteps(backoffSteps);

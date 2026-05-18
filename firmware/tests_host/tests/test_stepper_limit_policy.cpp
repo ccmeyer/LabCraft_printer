@@ -56,6 +56,15 @@ TEST(StepperLimitPolicyHelpers, HomeLevelPollingOnlyAppliesTowardLimit)
     CHECK_FALSE(StepperLimitPolicy::shouldPollHomeLimitLevel(false, true));
 }
 
+TEST(StepperLimitPolicyHelpers, HomeLevelPollRequiresConfiguredConsecutiveSamples)
+{
+    CHECK_FALSE(StepperLimitPolicy::homeLevelPollConfirmed(0u, 2u));
+    CHECK_FALSE(StepperLimitPolicy::homeLevelPollConfirmed(1u, 2u));
+    CHECK_TRUE(StepperLimitPolicy::homeLevelPollConfirmed(2u, 2u));
+    CHECK_TRUE(StepperLimitPolicy::homeLevelPollConfirmed(3u, 2u));
+    CHECK_FALSE(StepperLimitPolicy::homeLevelPollConfirmed(3u, 0u));
+}
+
 TEST(StepperLimitPolicyHelpers, ReleaseSearchGuardScalesFromBackoffSteps)
 {
     LONGS_EQUAL(1024L, static_cast<long>(StepperLimitPolicy::releaseSearchGuardSteps(0u)));

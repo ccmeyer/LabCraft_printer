@@ -273,6 +273,7 @@ private:
   void _prepareForNewMove();
   LimitStableSample _sampleLimitStable() const;
   bool _waitUntilDoneForHomeMove(bool direction, uint32_t timeoutMs);
+  bool _stopHomeMoveFromLevelPoll();
   bool _backOffLimitUntilReleased(uint32_t chunkSteps,
                                   uint32_t freqHz,
                                   uint32_t releaseGuardSteps,
