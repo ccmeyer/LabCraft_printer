@@ -66,6 +66,32 @@ If your repo venv is in `env` on Windows:
 .\env\Scripts\python.exe -m pytest -q
 ```
 
+## Droplet Imager Optics Calibration
+
+The standard optics-calibration workflow uses a guided load/approach wizard, then reuses the imager `Optics` tab for manual focus, image capture, scale-bar analysis, and applying the micrometer-per-pixel factor. The wizard does not require a printer head, print profile, or regulated pressure, and it does not change firmware or the device protocol.
+
+App workflow:
+
+1. Connect the machine, enable motors, and confirm saved `home` and `camera` locations are valid.
+2. Open the main-window `Calibrations` tab.
+3. Select `Start Guided Optics Calibration` and confirm the imager area is clear.
+4. The wizard homes the machine, opens the gripper, prompts for micrometer insertion, closes the gripper, prompts for waste-holder removal, moves to camera X/Y at home Z, and then stops at `camera.Z - 1000`.
+5. If the micrometer is not lined up with the imager entry, choose the manual-alignment branch and jog with the dialog controls. The wizard blocks Z jogging below the guarded approach height and never commands final camera Z.
+6. When the service-mode imager opens to the `Optics` tab, manually jog/focus as needed.
+7. Keep `Division size` at `10.0 um` unless your micrometer differs.
+8. Select `Start Session`, use `Capture Frame` for each micrometer image, and use `Reject Last Frame` for bad frames.
+9. Select `End Session and Analyze`; if at least 5 valid images have CV at most 2%, select `Apply Result`.
+
+`Open Manual Optics Calibration` remains available as an advanced fallback. It opens the same service-mode imager `Optics` tab but performs no automatic homing, gripper, or camera-approach motion.
+
+Accepted calibrations are written to `local/droplet_imager_optics.json` and loaded by droplet and stream volume analysis. Deleting or renaming that file rolls analysis back to the historical fallback of `1.5696 um/pixel`.
+
+The same analyzer can be run from the command line:
+
+```bash
+py tools/scale_bar_conversion.py path\to\scale_bar_run --division-um 10.0 --output path\to\summary.json
+```
+
 ## Qualification Campaign CLI
 
 The qualification campaign runner executes multiple existing qualification manifests in sequence and writes a parent campaign report while preserving each suite's normal report folder.

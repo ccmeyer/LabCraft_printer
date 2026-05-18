@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import json
 from pathlib import Path
 
 import cv2
@@ -20,6 +21,9 @@ from tools.stream_analysis import silhouette as silhouette_mod
 
 VOLUME_STAGE_DIRNAME = "stage_04_volume"
 PIXEL_SIZE_UM = 1.5696
+DEFAULT_PIXEL_SIZE_UM = PIXEL_SIZE_UM
+REPO_ROOT = Path(__file__).resolve().parents[2]
+OPTICS_CONFIG_PATH = REPO_ROOT / "local" / "droplet_imager_optics.json"
 UM3_PER_NL = 1_000_000.0
 
 FRAME_METRIC_COLUMNS = [
@@ -112,16 +116,42 @@ def _capture_key(row: dict):
     return None if capture_index is None else f"capture_index:{capture_index}"
 
 
-def _row_volume_um3(edge_row: dict):
+def _valid_pixel_size_um(value):
+    try:
+        out = float(value)
+    except Exception:
+        return None
+    if not math.isfinite(out) or out <= 0:
+        return None
+    return out
+
+
+def resolve_pixel_size_um(pixel_size_um: float | None = None, *, config_path: str | Path | None = None):
+    explicit = _valid_pixel_size_um(pixel_size_um)
+    if explicit is not None:
+        return explicit
+
+    path = Path(config_path) if config_path is not None else OPTICS_CONFIG_PATH
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            configured = _valid_pixel_size_um(json.load(f).get("um_per_pixel"))
+    except Exception:
+        configured = None
+    return configured if configured is not None else float(DEFAULT_PIXEL_SIZE_UM)
+
+
+def _row_volume_um3(edge_row: dict, *, pixel_size_um: float | None = None):
+    pixel_size_um = resolve_pixel_size_um(pixel_size_um)
     # Edge traces are inclusive pixel bounds, so convert the occupied span to
     # diameter with a +1 px width before halving to a radius.
     radius_px = max(0.0, (float(edge_row["x_right_px"]) - float(edge_row["x_left_px"]) + 1.0) / 2.0)
-    radius_um = radius_px * float(PIXEL_SIZE_UM)
-    return math.pi * (radius_um**2) * float(PIXEL_SIZE_UM)
+    radius_um = radius_px * float(pixel_size_um)
+    return math.pi * (radius_um**2) * float(pixel_size_um)
 
 
-def _component_volume_um3(edge_rows: list[dict]):
-    return float(sum(_row_volume_um3(row) for row in edge_rows))
+def _component_volume_um3(edge_rows: list[dict], *, pixel_size_um: float | None = None):
+    pixel_size_um = resolve_pixel_size_um(pixel_size_um)
+    return float(sum(_row_volume_um3(row, pixel_size_um=pixel_size_um) for row in edge_rows))
 
 
 def _um3_to_nl(value_um3: float | None):
@@ -319,7 +349,8 @@ def _build_sample_panel(
     return cv2.hconcat(row_images)
 
 
-def _component_volume_rows(component_rows: list[dict], edge_rows: list[dict]):
+def _component_volume_rows(component_rows: list[dict], edge_rows: list[dict], *, pixel_size_um: float | None = None):
+    pixel_size_um = resolve_pixel_size_um(pixel_size_um)
     edges_by_component = {}
     for row in edge_rows:
         edges_by_component.setdefault(_component_row_key(row), []).append(row)
@@ -337,7 +368,9 @@ def _component_volume_rows(component_rows: list[dict], edge_rows: list[dict]):
                 "component_id": component_row.get("component_id"),
                 "component_role": component_row.get("component_role"),
                 "component_rank": _int_or_none(component_row.get("component_rank")),
-                "component_volume_nl": _um3_to_nl(_component_volume_um3(component_edge_rows)),
+                "component_volume_nl": _um3_to_nl(
+                    _component_volume_um3(component_edge_rows, pixel_size_um=pixel_size_um)
+                ),
                 "valid_row_count": _int_or_none(component_row.get("valid_row_count")),
                 "top_y_px": _int_or_none(component_row.get("top_y_px")),
                 "bottom_y_px": _int_or_none(component_row.get("bottom_y_px")),
@@ -350,7 +383,13 @@ def _component_volume_rows(component_rows: list[dict], edge_rows: list[dict]):
     return volume_rows
 
 
-def _analyze_stage4_frame(stage3_frame: dict, *, near_bottom_px: int = fov_mod.FOV_NEAR_BOTTOM_PX):
+def _analyze_stage4_frame(
+    stage3_frame: dict,
+    *,
+    near_bottom_px: int = fov_mod.FOV_NEAR_BOTTOM_PX,
+    pixel_size_um: float | None = None,
+):
+    pixel_size_um = resolve_pixel_size_um(pixel_size_um)
     stage3_metric_row = dict(stage3_frame.get("metric_row") or {})
     component_rows = [dict(row) for row in list(stage3_frame.get("component_rows") or [])]
     edge_rows = [dict(row) for row in list(stage3_frame.get("edge_rows") or [])]
@@ -359,9 +398,10 @@ def _analyze_stage4_frame(stage3_frame: dict, *, near_bottom_px: int = fov_mod.F
         component_rows,
         near_bottom_px=int(near_bottom_px),
     )
-    component_volume_rows = _component_volume_rows(component_rows, edge_rows)
+    component_volume_rows = _component_volume_rows(component_rows, edge_rows, pixel_size_um=pixel_size_um)
     frame_metric_rows = _frame_metric_rows(labeled_stage3_rows, component_volume_rows)
     return {
+        "pixel_size_um": float(pixel_size_um),
         "labeled_stage3_row": (
             dict(labeled_stage3_rows[0])
             if labeled_stage3_rows
@@ -694,7 +734,9 @@ def _build_stage4_run(
     corridor_width_frac: float,
     nozzle_guard_px: int,
     min_component_area_px: int,
+    pixel_size_um: float | None = None,
 ):
+    pixel_size_um = resolve_pixel_size_um(pixel_size_um)
     stage3_run = silhouette_mod._build_stage3_run(
         run_id,
         frame_rows,
@@ -723,6 +765,7 @@ def _build_stage4_run(
     component_volume_rows = _component_volume_rows(
         list(stage3_run["component_rows"]),
         list(stage3_run["edge_rows"]),
+        pixel_size_um=pixel_size_um,
     )
     frame_metric_rows = _frame_metric_rows(
         labeled_stage3_rows,
@@ -732,6 +775,7 @@ def _build_stage4_run(
     summary_counts = _summary_from_frame_rows(frame_metric_rows, component_volume_rows)
     return {
         **stage3_run,
+        "pixel_size_um": float(pixel_size_um),
         "labeled_stage3_rows": labeled_stage3_rows,
         "component_volume_rows": component_volume_rows,
         "frame_metric_rows": frame_metric_rows,
@@ -763,7 +807,9 @@ def export_stage4_volume(
     corridor_width_frac: float = 0.70,
     nozzle_guard_px: int = 2,
     min_component_area_px: int = 120,
+    pixel_size_um: float | None = None,
 ):
+    pixel_size_um = resolve_pixel_size_um(pixel_size_um)
     inventory = build_stage0_inventory(
         experiment_root,
         include_unmatched=include_unmatched,
@@ -801,6 +847,7 @@ def export_stage4_volume(
             corridor_width_frac=corridor_width_frac,
             nozzle_guard_px=nozzle_guard_px,
             min_component_area_px=min_component_area_px,
+            pixel_size_um=pixel_size_um,
         )
         component_volume_rows = list(stage4_run["component_volume_rows"])
         frame_metric_rows = list(stage4_run["frame_metric_rows"])
@@ -892,7 +939,7 @@ def export_stage4_volume(
             "stage": "volume",
             "run_id": run_id,
             "run_dir": run_row["run_dir"],
-            "pixel_size_um": float(PIXEL_SIZE_UM),
+            "pixel_size_um": float(pixel_size_um),
             "volume_unit": "nL",
             "fov_near_bottom_px": int(fov_mod.FOV_NEAR_BOTTOM_PX),
             "sample_capture_indices": list(stage4_run["sample_indices"]),
@@ -938,7 +985,7 @@ def export_stage4_volume(
         "stage": "volume",
         "experiment_root": inventory["experiment_root"],
         "output_root": str(output_path),
-        "pixel_size_um": float(PIXEL_SIZE_UM),
+        "pixel_size_um": float(pixel_size_um),
         "volume_unit": "nL",
         "fov_near_bottom_px": int(fov_mod.FOV_NEAR_BOTTOM_PX),
         "selected_run_count": len(run_manifests),

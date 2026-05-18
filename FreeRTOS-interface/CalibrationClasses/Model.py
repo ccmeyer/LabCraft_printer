@@ -26593,6 +26593,8 @@ class DropletCameraModel(QObject):
     droplet_image_updated = Signal()
     flash_signal = Signal()
     record_metadata_signal = Signal(str)
+    DEFAULT_UM_PER_PIXEL = 1.5696
+    OPTICS_CONFIG_PATH = REPO_ROOT / "local" / "droplet_imager_optics.json"
     FLASH_FAULT_REASON_LABELS = {
         "line_high_on_arm": "Trigger line high while arming",
         "retrigger_while_high": "Repeated trigger while line was still high",
@@ -26662,6 +26664,13 @@ class DropletCameraModel(QObject):
         # optional: store last capture info
         self._last_capture_info = None
 
+        # Optics calibration state. The default preserves historical behavior
+        # when no per-machine calibration has been accepted yet.
+        self._um_per_pixel = float(self.DEFAULT_UM_PER_PIXEL)
+        self._um_per_pixel_source = "default"
+        self._optics_config = {}
+        self._load_optics_config()
+
         self.steps_conv_path = steps_conv_path
         self.intercept_cx, self.intercept_cy, self.A, self.A_inv = self.load_step_calibration(self.steps_conv_path)
 
@@ -26675,6 +26684,149 @@ class DropletCameraModel(QObject):
         if isinstance(o, (tuple, set)):
             return list(o)
         return str(o)
+
+    @classmethod
+    def optics_config_path(cls):
+        return Path(cls.OPTICS_CONFIG_PATH)
+
+    @staticmethod
+    def _valid_um_per_pixel(value):
+        try:
+            value = float(value)
+        except Exception:
+            return None
+        if not math.isfinite(value) or value <= 0:
+            return None
+        return value
+
+    def _load_optics_config(self):
+        self._um_per_pixel = float(self.DEFAULT_UM_PER_PIXEL)
+        self._um_per_pixel_source = "default"
+        self._optics_config = {}
+
+        path = self.optics_config_path()
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            return {}
+        except Exception as exc:
+            print(f"[DropletCameraModel] Could not read optics config {path}: {exc}")
+            return {}
+
+        value = self._valid_um_per_pixel(data.get("um_per_pixel"))
+        if value is None:
+            print(f"[DropletCameraModel] Ignoring invalid optics config value in {path}")
+            return {}
+
+        self._um_per_pixel = value
+        self._um_per_pixel_source = str(data.get("source") or "config")
+        self._optics_config = dict(data)
+        return dict(self._optics_config)
+
+    def load_optics_config(self):
+        return self._load_optics_config()
+
+    def get_optics_config(self):
+        return dict(self._optics_config)
+
+    def get_um_per_pixel(self):
+        return float(getattr(self, "_um_per_pixel", self.DEFAULT_UM_PER_PIXEL))
+
+    def get_um_per_pixel_source(self):
+        return str(getattr(self, "_um_per_pixel_source", "default"))
+
+    def get_last_saved_capture(self):
+        return None if self._last_saved is None else dict(self._last_saved)
+
+    def _resolve_um_per_pixel(self, value=None):
+        resolved = self._valid_um_per_pixel(value)
+        if resolved is not None:
+            return resolved
+        return self.get_um_per_pixel()
+
+    def set_um_per_pixel(
+        self,
+        value,
+        *,
+        source="manual_override",
+        division_um=None,
+        accepted_image_count=None,
+        mean_um_per_pixel=None,
+        median_um_per_pixel=None,
+        std_um_per_pixel=None,
+        cv_pct=None,
+        run_directory=None,
+        summary=None,
+    ):
+        um_per_pixel = self._valid_um_per_pixel(value)
+        if um_per_pixel is None:
+            raise ValueError("um_per_pixel must be a positive finite value")
+
+        timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        data = {
+            "schema_version": 1,
+            "um_per_pixel": float(um_per_pixel),
+            "source": str(source or "manual_override"),
+            "timestamp": timestamp,
+        }
+        if division_um is not None:
+            data["division_um"] = float(division_um)
+        if accepted_image_count is not None:
+            data["accepted_image_count"] = int(accepted_image_count)
+        if mean_um_per_pixel is not None:
+            data["mean_um_per_pixel"] = float(mean_um_per_pixel)
+        if median_um_per_pixel is not None:
+            data["median_um_per_pixel"] = float(median_um_per_pixel)
+        if std_um_per_pixel is not None:
+            data["std_um_per_pixel"] = float(std_um_per_pixel)
+        if cv_pct is not None:
+            data["cv_pct"] = float(cv_pct)
+        if run_directory is not None:
+            data["run_directory"] = str(run_directory)
+        if summary is not None:
+            data["summary"] = dict(summary)
+
+        path = self.optics_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=str(path.parent),
+            text=True,
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, default=self._json_default)
+                f.write("\n")
+            os.replace(tmp_name, path)
+        except Exception:
+            try:
+                os.unlink(tmp_name)
+            except Exception:
+                pass
+            raise
+
+        self._um_per_pixel = float(um_per_pixel)
+        self._um_per_pixel_source = data["source"]
+        self._optics_config = dict(data)
+        return dict(data)
+
+    def apply_optics_calibration(self, analysis_payload, *, source="scale_bar_calibration"):
+        summary = dict((analysis_payload or {}).get("summary") or {})
+        value = summary.get("median_um_per_pixel") or summary.get("mean_um_per_pixel")
+        return self.set_um_per_pixel(
+            value,
+            source=source,
+            division_um=summary.get("division_um"),
+            accepted_image_count=summary.get("accepted_count"),
+            mean_um_per_pixel=summary.get("mean_um_per_pixel"),
+            median_um_per_pixel=summary.get("median_um_per_pixel"),
+            std_um_per_pixel=summary.get("std_um_per_pixel"),
+            cv_pct=summary.get("cv_pct"),
+            run_directory=summary.get("run_directory"),
+            summary=summary,
+        )
 
     def get_image_size(self):
         return self.image_width, self.image_height
@@ -26797,7 +26949,7 @@ class DropletCameraModel(QObject):
             os.makedirs(save_dir, exist_ok=True)
 
         self._save_dir = save_dir
-        self._save_prefix = "frame"
+        self._save_prefix = "frame" if str(prefix or "capture") == "capture" else str(prefix)
         self._save_ext = image_ext.lstrip(".").lower()
         self._jpeg_quality = int(jpeg_quality)
         self._save_index = 0
@@ -27116,6 +27268,12 @@ class DropletCameraModel(QObject):
             # hand a copy to the writer to avoid accidental mutation
             try:
                 self._save_queue.put_nowait((fpath, frame.copy(), meta))
+                self._last_saved = {
+                    "index": int(self._save_index),
+                    "filename": fname,
+                    "path": fpath,
+                    "saved_at": meta["saved_at"],
+                }
             except queue.Full:
                 print("[DropletCameraModel] Save queue full — dropping frame.")
 
@@ -27183,7 +27341,7 @@ class DropletCameraModel(QObject):
     def analyze_droplets(
         self,
         image,
-        um_per_pixel=1.5696,
+        um_per_pixel=None,
         intensity_threshold=150,
         circularity_threshold=1.18,
         min_area_threshold=10,
@@ -27203,6 +27361,7 @@ class DropletCameraModel(QObject):
         if image is None:
             print(f"No image was provided for droplet analysis.")
             return [], None
+        um_per_pixel = self._resolve_um_per_pixel(um_per_pixel)
 
         # 1) Compute focus metric
         focus = self.calc_droplet_focus(image, intensity_threshold)
@@ -27290,6 +27449,7 @@ class DropletCameraModel(QObject):
                 "ellipse_volume_nL": ellipse_volume_nL,
                 "ellipse_center_px": center_ellipse,
                 "focus": focus,
+                "um_per_pixel": float(um_per_pixel),
                 "near_edge_ellipse": near_edge_ellipse,
                 "warning": "; ".join(warning_msg) if warning_msg else None
             }
@@ -28778,7 +28938,7 @@ class DropletCameraModel(QObject):
     def reset_droplet_contour_tracker(self):
         self._last_droplet_center_px = None
 
-    def characterize_droplet(self, image, background, um_per_pixel=1.5696, *, return_details: bool = False):
+    def characterize_droplet(self, image, background, um_per_pixel=None, *, return_details: bool = False):
         """
         Characterizes the droplet in the image.
         - Uses the background image to compute the difference image.
@@ -28798,6 +28958,8 @@ class DropletCameraModel(QObject):
             "bbox_area": 0,
             "p95": 0.0,
         }
+        um_per_pixel = self._resolve_um_per_pixel(um_per_pixel)
+        details["um_per_pixel"] = float(um_per_pixel)
 
         image_gray, diff = self.calc_diff_image(image, background)
         if diff is None:
@@ -28919,7 +29081,8 @@ class DropletCameraModel(QObject):
             "circularity_ellipse": ellipse_roundness,
             "ellipse_roundness": ellipse_roundness,
             "volume": ellipse_volume_nL,
-            "focus": focus
+            "focus": focus,
+            "um_per_pixel": float(um_per_pixel),
         }
         self._last_droplet_center_px = center_ellipse
         details.update({

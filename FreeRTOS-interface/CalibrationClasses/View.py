@@ -856,7 +856,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         "restoring_gripper_refresh",
     }
 
-    def __init__(self, main_window, model, controller):
+    def __init__(self, main_window, model, controller, service_mode=False, initial_tab=None):
         super().__init__()
         print('\n---Created new droplet imaging dialog---\n')
         self.main_window = main_window
@@ -864,6 +864,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.model = model
         self.droplet_camera_model = model.droplet_camera_model
         self.controller = controller
+        self.service_mode = bool(service_mode)
+        self.initial_tab = str(initial_tab or "").strip().lower()
 
         # Hardware bounds for pressures (used globally)
         try:
@@ -912,6 +914,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._stream_calibration_sequence_gripper_restore_attempted = False
         self._droplet_calibration_sequence_gripper_preamble_attempted = False
         self._droplet_calibration_sequence_gripper_restore_attempted = False
+        self._optics_session_active = False
+        self._optics_session_dir = None
+        self._optics_rejected_filenames = []
+        self._optics_last_analysis = None
         try:
             self.model.calibration_manager.clear_calibration_memory_ui_recommendation_state()
         except Exception:
@@ -991,7 +997,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.droplet_tab = QtWidgets.QWidget()
         self.stream_tab = QtWidgets.QWidget()
         self.debug_tab = QtWidgets.QWidget()
-        for tab_page in (self.droplet_tab, self.stream_tab):
+        self.optics_tab = QtWidgets.QWidget()
+        for tab_page in (self.droplet_tab, self.stream_tab, self.optics_tab):
             tab_layout = QtWidgets.QVBoxLayout(tab_page)
             tab_layout.setContentsMargins(10, 10, 10, 0)
             tab_layout.setSpacing(8)
@@ -1001,6 +1008,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.calibration_tabs.addTab(self.droplet_tab, "Droplet")
         self.calibration_tabs.addTab(self.stream_tab, "Stream")
         self.calibration_tabs.addTab(self.debug_tab, "Debug / Specialty")
+        self.calibration_tabs.addTab(self.optics_tab, "Optics")
         self.calibration_tabs.currentChanged.connect(self._refresh_calibration_tab_lock_state)
         self.calibration_tabs.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
 
@@ -1446,6 +1454,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.stream_tab.layout().addWidget(self.stream_workflow_widget)
         self.stream_tab.layout().addStretch(1)
         self.debug_tab.layout().addWidget(self.debug_scroll)
+        self._build_optics_tab()
 
         control_panel_v.addWidget(self.reagent_title_widget)
         control_panel_v.addWidget(self.acquisition_controls_section)
@@ -1870,9 +1879,13 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.set_imaging_droplets(self.droplet_camera_model.num_droplets)
         self.set_start_pressure(self.start_pressure_spin.value())
         self.set_num_pressure_tests(self.num_pressure_tests_spin.value())
-        self._apply_default_calibration_tab_from_printing_mode()
+        if self.initial_tab == "optics":
+            self.calibration_tabs.setCurrentWidget(self.optics_tab)
+        else:
+            self._apply_default_calibration_tab_from_printing_mode()
         self.populate_summary_table()
         self._refresh_manual_control_lock_state()
+        self._refresh_optics_controls()
         self._apply_flash_safety_ui_state()
         self._sync_stream_capture_panel_state()
         QTimer.singleShot(0, self._ensure_stream_capture_followup_state)
@@ -2136,6 +2149,338 @@ class DropletImagingDialog(QtWidgets.QDialog):
         current_index = tabs.currentIndex()
         for idx in range(tabs.count()):
             tab_bar.setTabEnabled(idx, (not lock_tabs) or idx == current_index)
+
+    def _build_optics_tab(self):
+        layout = self.optics_tab.layout()
+        layout.addWidget(self._create_lightweight_tab_section_header("Scale Bar Capture"))
+
+        current_group = QtWidgets.QGroupBox("Current Factor")
+        current_layout = QtWidgets.QVBoxLayout(current_group)
+        current_layout.setContentsMargins(8, 8, 8, 8)
+        current_layout.setSpacing(6)
+        self.optics_current_factor_label = QtWidgets.QLabel()
+        self.optics_current_factor_label.setWordWrap(True)
+        self.optics_session_dir_label = QtWidgets.QLabel("Session: none")
+        self.optics_session_dir_label.setWordWrap(True)
+        self.optics_session_dir_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        current_layout.addWidget(self.optics_current_factor_label)
+        current_layout.addWidget(self.optics_session_dir_label)
+        layout.addWidget(current_group)
+
+        setup_group = QtWidgets.QGroupBox("Session")
+        setup_grid = QtWidgets.QGridLayout(setup_group)
+        setup_grid.setHorizontalSpacing(8)
+        setup_grid.setVerticalSpacing(6)
+        self.optics_division_um_spin = QtWidgets.QDoubleSpinBox()
+        self.optics_division_um_spin.setRange(0.001, 1000.0)
+        self.optics_division_um_spin.setDecimals(3)
+        self.optics_division_um_spin.setSingleStep(1.0)
+        self.optics_division_um_spin.setSuffix(" um")
+        self.optics_division_um_spin.setValue(10.0)
+        self.optics_division_um_spin.valueChanged.connect(lambda *_args: self._refresh_optics_controls())
+        setup_grid.addWidget(QtWidgets.QLabel("Division size:"), 0, 0)
+        setup_grid.addWidget(self.optics_division_um_spin, 0, 1)
+
+        self.optics_start_session_button = QtWidgets.QPushButton("Start Session")
+        self.optics_start_session_button.clicked.connect(self.start_optics_capture_session)
+        self.optics_capture_frame_button = QtWidgets.QPushButton("Capture Frame")
+        self.optics_capture_frame_button.clicked.connect(self.capture_optics_frame)
+        self.optics_reject_last_button = QtWidgets.QPushButton("Reject Last Frame")
+        self.optics_reject_last_button.clicked.connect(self.reject_last_optics_frame)
+        self.optics_analyze_button = QtWidgets.QPushButton("End Session and Analyze")
+        self.optics_analyze_button.clicked.connect(self.end_and_analyze_optics_session)
+        self.optics_apply_button = QtWidgets.QPushButton("Apply Result")
+        self.optics_apply_button.clicked.connect(self.apply_optics_result)
+        self.optics_manual_override_button = QtWidgets.QPushButton("Manual Override")
+        self.optics_manual_override_button.clicked.connect(self.manual_override_optics_factor)
+
+        setup_grid.addWidget(self.optics_start_session_button, 1, 0, 1, 2)
+        setup_grid.addWidget(self.optics_capture_frame_button, 2, 0, 1, 2)
+        setup_grid.addWidget(self.optics_reject_last_button, 3, 0, 1, 2)
+        setup_grid.addWidget(self.optics_analyze_button, 4, 0, 1, 2)
+        setup_grid.addWidget(self.optics_apply_button, 5, 0, 1, 2)
+        setup_grid.addWidget(self.optics_manual_override_button, 6, 0, 1, 2)
+        layout.addWidget(setup_group)
+
+        self.optics_status_label = QtWidgets.QLabel("Ready.")
+        self.optics_status_label.setWordWrap(True)
+        layout.addWidget(self.optics_status_label)
+
+        self.optics_results_text = QtWidgets.QPlainTextEdit()
+        self.optics_results_text.setReadOnly(True)
+        self.optics_results_text.setMaximumHeight(180)
+        self.optics_results_text.setPlainText("No optics analysis has been run yet.")
+        layout.addWidget(self.optics_results_text)
+        layout.addStretch(1)
+        self._refresh_optics_controls()
+
+    def _optics_camera_model(self):
+        return getattr(self.model, "droplet_camera_model", None)
+
+    def _optics_current_factor(self):
+        cam = self._optics_camera_model()
+        getter = getattr(cam, "get_um_per_pixel", None)
+        try:
+            if callable(getter):
+                return float(getter())
+        except Exception:
+            pass
+        return 1.5696
+
+    def _optics_current_source(self):
+        cam = self._optics_camera_model()
+        getter = getattr(cam, "get_um_per_pixel_source", None)
+        try:
+            if callable(getter):
+                return str(getter())
+        except Exception:
+            pass
+        return "default"
+
+    def _set_optics_status(self, text, color=None):
+        if not hasattr(self, "optics_status_label"):
+            return
+        self.optics_status_label.setText(str(text))
+        self.optics_status_label.setStyleSheet("" if not color else f"color:{color};")
+
+    def _refresh_optics_controls(self):
+        if not hasattr(self, "optics_start_session_button"):
+            return
+        active = bool(getattr(self, "_optics_session_active", False))
+        summary = dict((getattr(self, "_optics_last_analysis", None) or {}).get("summary") or {})
+        accepted_count = int(summary.get("accepted_count") or 0)
+        cv_pct = summary.get("cv_pct")
+        try:
+            cv_pct = float(cv_pct)
+        except Exception:
+            cv_pct = None
+        result_ready = summary.get("status") == "ok"
+        auto_apply_ok = bool(result_ready and accepted_count >= 5 and cv_pct is not None and cv_pct <= 2.0)
+
+        self.optics_current_factor_label.setText(
+            f"Current: {self._optics_current_factor():.6f} um/pixel ({self._optics_current_source()})"
+        )
+        session_dir = getattr(self, "_optics_session_dir", None)
+        self.optics_session_dir_label.setText(f"Session: {session_dir or 'none'}")
+        self.optics_start_session_button.setEnabled(not active)
+        self.optics_capture_frame_button.setEnabled(active)
+        self.optics_reject_last_button.setEnabled(active)
+        self.optics_analyze_button.setEnabled(active)
+        self.optics_apply_button.setEnabled(auto_apply_ok)
+        if result_ready and not auto_apply_ok:
+            self.optics_apply_button.setToolTip("Requires at least 5 valid images and CV at most 2%. Use Manual Override for exceptions.")
+        else:
+            self.optics_apply_button.setToolTip("")
+        self.optics_manual_override_button.setEnabled(True)
+
+    def _write_optics_session_json(self, filename, payload):
+        session_dir = getattr(self, "_optics_session_dir", None)
+        if not session_dir:
+            return None
+        path = Path(session_dir) / filename
+        try:
+            path.write_text(json.dumps(payload, indent=2, default=str) + "\n", encoding="utf-8")
+            return path
+        except Exception as exc:
+            self._set_optics_status(f"Could not write {filename}: {exc}", "red")
+            return None
+
+    def start_optics_capture_session(self):
+        cam = self._optics_camera_model()
+        starter = getattr(cam, "start_saving", None)
+        if not callable(starter):
+            self._set_optics_status("Camera saving is not available in this model.", "red")
+            return
+        try:
+            self.set_imaging_droplets(0)
+        except Exception:
+            pass
+        try:
+            session_dir = starter(prefix="scale_bar", image_ext="png")
+        except TypeError:
+            session_dir = starter()
+        except Exception as exc:
+            self._set_optics_status(f"Could not start optics capture session: {exc}", "red")
+            return
+
+        self._optics_session_active = True
+        self._optics_session_dir = session_dir
+        self._optics_rejected_filenames = []
+        self._optics_last_analysis = None
+        self.optics_results_text.setPlainText("Capture multiple micrometer frames, reject any bad frame, then end and analyze.")
+        self._set_optics_status("Optics capture session started.", "green")
+        self._write_optics_session_json(
+            "scale_bar_rejections.json",
+            {
+                "schema_version": 1,
+                "rejected_filenames": [],
+                "updated_at": datetime.now().isoformat(),
+            },
+        )
+        self._refresh_optics_controls()
+
+    def capture_optics_frame(self):
+        if not getattr(self, "_optics_session_active", False):
+            self._set_optics_status("Start a session before capturing optics frames.", "red")
+            return
+        try:
+            ok = self.controller.capture_droplet_image()
+        except Exception as exc:
+            self._set_optics_status(f"Capture request failed: {exc}", "red")
+            return
+        if ok is False:
+            self._set_optics_status("Capture was not queued; another capture may already be pending.", "red")
+            return
+        self._set_optics_status("Capture requested.", "green")
+
+    def reject_last_optics_frame(self):
+        if not getattr(self, "_optics_session_active", False):
+            self._set_optics_status("Start a session before rejecting frames.", "red")
+            return
+        cam = self._optics_camera_model()
+        getter = getattr(cam, "get_last_saved_capture", None)
+        last_saved = None
+        try:
+            if callable(getter):
+                last_saved = getter()
+            else:
+                last_saved = getattr(cam, "_last_saved", None)
+        except Exception:
+            last_saved = None
+        filename = (last_saved or {}).get("filename") if isinstance(last_saved, dict) else None
+        if not filename:
+            self._set_optics_status("No saved frame is available to reject yet.", "red")
+            return
+        if filename not in self._optics_rejected_filenames:
+            self._optics_rejected_filenames.append(filename)
+        self._write_optics_session_json(
+            "scale_bar_rejections.json",
+            {
+                "schema_version": 1,
+                "rejected_filenames": list(self._optics_rejected_filenames),
+                "updated_at": datetime.now().isoformat(),
+            },
+        )
+        self._set_optics_status(f"Rejected {filename}.", "green")
+        self._refresh_optics_controls()
+
+    def end_and_analyze_optics_session(self):
+        if not getattr(self, "_optics_session_active", False):
+            self._set_optics_status("No optics session is active.", "red")
+            return
+        session_dir = getattr(self, "_optics_session_dir", None)
+        cam = self._optics_camera_model()
+        stopper = getattr(cam, "stop_saving", None)
+        try:
+            if callable(stopper):
+                stopper()
+        except Exception:
+            pass
+        self._optics_session_active = False
+
+        if not session_dir:
+            self._set_optics_status("No session directory is available for analysis.", "red")
+            self._refresh_optics_controls()
+            return
+
+        try:
+            from tools.scale_bar_conversion import analyze_scale_bar_directory
+
+            analysis = analyze_scale_bar_directory(
+                session_dir,
+                division_um=float(self.optics_division_um_spin.value()),
+                rejected_filenames=set(self._optics_rejected_filenames),
+            )
+        except Exception as exc:
+            self._set_optics_status(f"Scale-bar analysis failed: {exc}", "red")
+            self._refresh_optics_controls()
+            return
+
+        self._optics_last_analysis = analysis
+        self._write_optics_session_json("scale_bar_analysis.json", analysis)
+        self._render_optics_analysis(analysis)
+        self._refresh_optics_controls()
+
+    def _render_optics_analysis(self, analysis):
+        summary = dict((analysis or {}).get("summary") or {})
+        if summary.get("status") != "ok":
+            self.optics_results_text.setPlainText(json.dumps(analysis, indent=2, default=str))
+            self._set_optics_status("No valid scale-bar images were found.", "red")
+            return
+        lines = [
+            f"Median: {float(summary.get('median_um_per_pixel')):.6f} um/pixel",
+            f"Mean: {float(summary.get('mean_um_per_pixel')):.6f} um/pixel",
+            f"Std: {float(summary.get('std_um_per_pixel')):.6f} um/pixel",
+            f"CV: {float(summary.get('cv_pct')):.3f}%",
+            f"Accepted images: {int(summary.get('accepted_count') or 0)}",
+            f"Rejected images: {int(summary.get('rejected_count') or 0)}",
+            f"Failed images: {int(summary.get('failed_count') or 0)}",
+            f"Run directory: {summary.get('run_directory')}",
+        ]
+        self.optics_results_text.setPlainText("\n".join(lines))
+        if int(summary.get("accepted_count") or 0) >= 5 and float(summary.get("cv_pct") or 999.0) <= 2.0:
+            self._set_optics_status("Analysis complete. Result is ready to apply.", "green")
+        else:
+            self._set_optics_status("Analysis complete, but apply requires at least 5 valid images and CV <= 2%.", "red")
+
+    def apply_optics_result(self):
+        analysis = getattr(self, "_optics_last_analysis", None)
+        if not analysis:
+            self._set_optics_status("Run analysis before applying an optics result.", "red")
+            return
+        cam = self._optics_camera_model()
+        applier = getattr(cam, "apply_optics_calibration", None)
+        try:
+            if callable(applier):
+                applier(analysis)
+            else:
+                summary = dict(analysis.get("summary") or {})
+                setter = getattr(cam, "set_um_per_pixel", None)
+                if not callable(setter):
+                    raise RuntimeError("Camera model cannot persist optics calibration.")
+                setter(float(summary["median_um_per_pixel"]), source="scale_bar_calibration", summary=summary)
+        except Exception as exc:
+            self._set_optics_status(f"Could not apply optics calibration: {exc}", "red")
+            return
+        self._set_optics_status("Optics calibration applied.", "green")
+        self._refresh_optics_controls()
+
+    def manual_override_optics_factor(self):
+        current = self._optics_current_factor()
+        value, ok = QtWidgets.QInputDialog.getDouble(
+            self,
+            "Manual Optics Override",
+            "Micrometers per pixel:",
+            current,
+            0.000001,
+            10000.0,
+            6,
+        )
+        if not ok:
+            return
+        response = self.main_window.popup_yes_no(
+            "Apply Manual Override",
+            f"Apply {float(value):.6f} um/pixel as the droplet imager optics calibration?",
+        )
+        if not self.main_window._is_yes_response(response):
+            return
+        cam = self._optics_camera_model()
+        setter = getattr(cam, "set_um_per_pixel", None)
+        if not callable(setter):
+            self._set_optics_status("Camera model cannot persist optics calibration.", "red")
+            return
+        try:
+            setter(
+                float(value),
+                source="manual_override",
+                division_um=float(self.optics_division_um_spin.value()),
+                run_directory=getattr(self, "_optics_session_dir", None),
+            )
+        except Exception as exc:
+            self._set_optics_status(f"Could not apply manual override: {exc}", "red")
+            return
+        self._set_optics_status("Manual optics override applied.", "green")
+        self._refresh_optics_controls()
 
     def _is_calibration_busy(self):
         manager = getattr(getattr(self, "model", None), "calibration_manager", None)
@@ -5990,6 +6335,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
     def closeEvent(self, event):
         """Handle the closing of the dialog."""
         self._stream_capture_dialog_closing = True
+        if getattr(self, "_optics_session_active", False):
+            try:
+                self.model.droplet_camera_model.stop_saving()
+            except Exception:
+                pass
+            self._optics_session_active = False
         self._close_stream_capture_mass_dialog()
         self._reset_online_stream_debug_view(hide=True)
         self.camera_timer.stop()

@@ -202,7 +202,7 @@ class _ControllerStub:
         self.stop_calibration_calls += 1
 
 
-def _build_dialog(monkeypatch, qapp, *, printing_mode=None):
+def _build_dialog(monkeypatch, qapp, *, printing_mode=None, **dialog_kwargs):
     monkeypatch.setattr(DropletImagingDialog, "_quick_controls_expanded_default", False, raising=False)
     for method_name in (
         "setup_shortcuts",
@@ -235,7 +235,7 @@ def _build_dialog(monkeypatch, qapp, *, printing_mode=None):
         ),
         rack_model=SimpleNamespace(get_gripper_printer_head=lambda: printer_head),
     )
-    dialog = DropletImagingDialog(SimpleNamespace(color_dict={}, model=model), model, controller)
+    dialog = DropletImagingDialog(SimpleNamespace(color_dict={}, model=model), model, controller, **dialog_kwargs)
     qapp.processEvents()
     return dialog, manager, controller
 
@@ -252,6 +252,19 @@ def test_droplet_imaging_dialog_defaults_to_stream_tab_for_stream_head(monkeypat
     dialog, _manager, _controller = _build_dialog(monkeypatch, qapp, printing_mode="stream")
 
     assert dialog.calibration_tabs.currentWidget() is dialog.stream_tab
+
+    dialog.deleteLater()
+
+
+def test_droplet_imaging_dialog_opens_optics_tab_in_service_mode(monkeypatch, qapp):
+    dialog, _manager, _controller = _build_dialog(
+        monkeypatch,
+        qapp,
+        service_mode=True,
+        initial_tab="optics",
+    )
+
+    assert dialog.calibration_tabs.currentWidget() is dialog.optics_tab
 
     dialog.deleteLater()
 

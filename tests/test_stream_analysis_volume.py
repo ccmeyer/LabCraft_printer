@@ -5,9 +5,16 @@ import json
 import math
 from pathlib import Path
 
+import pytest
+
 from tools.stream_analysis import fov as fov_mod
 from tools.stream_analysis import volume as mod
 from tests.test_stream_analysis_silhouette import _fake_stage2_run, _make_silhouette_experiment
+
+
+@pytest.fixture(autouse=True)
+def _isolate_optics_config(tmp_path, monkeypatch):
+    monkeypatch.setattr(mod, "OPTICS_CONFIG_PATH", tmp_path / "missing_optics.json")
 
 
 def _stage3_metric_row(
@@ -78,6 +85,27 @@ def test_row_volume_uses_inclusive_edge_span():
     expected_um3 = math.pi * (expected_radius_um**2) * float(mod.PIXEL_SIZE_UM)
 
     assert math.isclose(mod._row_volume_um3(edge_row), expected_um3, rel_tol=1e-9)
+
+
+def test_row_volume_accepts_explicit_pixel_size():
+    edge_row = {"x_left_px": 50, "x_right_px": 60}
+
+    expected_radius_px = 5.5
+    expected_radius_um = expected_radius_px * 2.0
+    expected_um3 = math.pi * (expected_radius_um**2) * 2.0
+
+    assert math.isclose(mod._row_volume_um3(edge_row, pixel_size_um=2.0), expected_um3, rel_tol=1e-9)
+
+
+def test_resolve_pixel_size_uses_config_then_fallback(tmp_path, monkeypatch):
+    config_path = tmp_path / "droplet_imager_optics.json"
+    monkeypatch.setattr(mod, "OPTICS_CONFIG_PATH", config_path)
+
+    assert mod.resolve_pixel_size_um() == mod.DEFAULT_PIXEL_SIZE_UM
+
+    config_path.write_text(json.dumps({"um_per_pixel": 2.25}), encoding="utf-8")
+    assert mod.resolve_pixel_size_um() == 2.25
+    assert mod.resolve_pixel_size_um(pixel_size_um=3.0) == 3.0
 
 
 def test_component_volume_rows_sum_when_components_overlap_in_y():

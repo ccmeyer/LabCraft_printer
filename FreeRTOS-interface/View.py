@@ -202,6 +202,10 @@ class MainWindow(QMainWindow):
         self.sequences_tab.setStyleSheet(f"background-color: {self.color_dict['darker_gray']};")
         self.tab_widget.addTab(self.sequences_tab, "Sequences")
 
+        self.calibrations_tab = self._create_calibrations_tab()
+        self.calibrations_tab.setStyleSheet(f"background-color: {self.color_dict['darker_gray']};")
+        self.tab_widget.addTab(self.calibrations_tab, "Calibrations")
+
         mid_layout.addWidget(self.tab_widget)
 
         self.rack_box = RackBox(self,self.model,self.controller)
@@ -321,6 +325,97 @@ class MainWindow(QMainWindow):
         idx = self.tab_widget.indexOf(self.well_plate_widget)
         if idx != -1:
             self.tab_widget.setCurrentIndex(idx)
+
+    def _create_calibrations_tab(self):
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        optics_group = QtWidgets.QGroupBox("Droplet Imager Optics Calibration")
+        optics_layout = QtWidgets.QVBoxLayout(optics_group)
+        optics_layout.setContentsMargins(12, 12, 12, 12)
+        optics_layout.setSpacing(8)
+
+        self.optics_calibration_factor_label = QtWidgets.QLabel()
+        self.optics_calibration_factor_label.setWordWrap(True)
+        self.optics_calibration_config_label = QtWidgets.QLabel()
+        self.optics_calibration_config_label.setWordWrap(True)
+        self.optics_calibration_config_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+        button_row = QtWidgets.QHBoxLayout()
+        self.start_guided_optics_calibration_button = QtWidgets.QPushButton("Start Guided Optics Calibration")
+        self.start_guided_optics_calibration_button.clicked.connect(self._start_guided_optics_calibration)
+        self.open_manual_optics_calibration_button = QtWidgets.QPushButton("Open Manual Optics Calibration")
+        self.open_manual_optics_calibration_button.clicked.connect(self._open_manual_optics_calibration)
+        self.refresh_optics_calibration_button = QtWidgets.QPushButton("Refresh")
+        self.refresh_optics_calibration_button.clicked.connect(self._refresh_optics_calibration_display)
+        button_row.addWidget(self.start_guided_optics_calibration_button)
+        button_row.addWidget(self.open_manual_optics_calibration_button)
+        button_row.addWidget(self.refresh_optics_calibration_button)
+        button_row.addStretch(1)
+
+        optics_layout.addWidget(self.optics_calibration_factor_label)
+        optics_layout.addWidget(self.optics_calibration_config_label)
+        optics_layout.addLayout(button_row)
+        layout.addWidget(optics_group)
+        layout.addStretch(1)
+        self._refresh_optics_calibration_display()
+        return tab
+
+    def _refresh_optics_calibration_display(self):
+        cam = getattr(self.model, "droplet_camera_model", None)
+        value = 1.5696
+        source = "default"
+        config_path = "local/droplet_imager_optics.json"
+        if cam is not None:
+            getter = getattr(cam, "get_um_per_pixel", None)
+            source_getter = getattr(cam, "get_um_per_pixel_source", None)
+            path_getter = getattr(cam, "optics_config_path", None)
+            try:
+                if callable(getter):
+                    value = float(getter())
+            except Exception:
+                value = 1.5696
+            try:
+                if callable(source_getter):
+                    source = str(source_getter())
+            except Exception:
+                source = "default"
+            try:
+                if callable(path_getter):
+                    config_path = str(path_getter())
+            except Exception:
+                pass
+
+        if hasattr(self, "optics_calibration_factor_label"):
+            self.optics_calibration_factor_label.setText(
+                f"Current micrometer/pixel factor: {value:.6f} um/pixel ({source})."
+            )
+        if hasattr(self, "optics_calibration_config_label"):
+            self.optics_calibration_config_label.setText(f"Config: {config_path}")
+
+    def _open_manual_optics_calibration(self):
+        launcher = getattr(getattr(self, "pressure_box", None), "open_manual_optics_calibration", None)
+        if callable(launcher):
+            launcher()
+        else:
+            self.popup_message(
+                "Optics Calibration Unavailable",
+                "The droplet imager launcher is not available yet.",
+            )
+        self._refresh_optics_calibration_display()
+
+    def _start_guided_optics_calibration(self):
+        launcher = getattr(getattr(self, "pressure_box", None), "start_guided_optics_calibration", None)
+        if callable(launcher):
+            launcher()
+        else:
+            self.popup_message(
+                "Optics Calibration Unavailable",
+                "The guided droplet imager optics calibration wizard is not available yet.",
+            )
+        self._refresh_optics_calibration_display()
 
     def popup_message(self, title, message):
         """Display a popup message with a title and message."""
@@ -1125,6 +1220,521 @@ class MotorPositionWidget(QGroupBox):
             self.home_button.setEnabled(False)
 
 
+class OpticsCalibrationApproachWizardDialog(QtWidgets.QDialog):
+    """Guided, guarded setup for loading a micrometer into the droplet imager."""
+
+    APPROACH_CLEARANCE_STEPS = 1000
+
+    def __init__(self, main_window, model, controller):
+        super().__init__(main_window if isinstance(main_window, QtWidgets.QWidget) else None)
+        self.main_window = main_window
+        self.model = model
+        self.controller = controller
+        self.machine_model = getattr(model, "machine_model", None)
+        self.location_model = getattr(model, "location_model", None)
+        self.home_location = self._read_location("home")
+        self.camera_location = self._read_location("camera")
+        self.approach_z = self._clamp_z(int(self.camera_location["Z"]) - self.APPROACH_CLEARANCE_STEPS)
+        self._motion_active = False
+        self._cleanup_recommended = False
+        self._home_signal_connected = False
+        self._step_size_signal_connected = False
+        self.step_name = "ready"
+
+        self.setWindowTitle("Guided Optics Calibration Setup")
+        self.resize(560, 420)
+        self._build_ui()
+        self._connect_step_size_signal()
+        self._setup_shortcuts()
+        self._refresh_step_size_label()
+        self._refresh_buttons()
+
+    @staticmethod
+    def coerce_location(raw, name):
+        if not isinstance(raw, dict):
+            raise ValueError(f"Location '{name}' is missing.")
+        out = {}
+        for axis in ("X", "Y", "Z"):
+            if axis not in raw:
+                raise ValueError(f"Location '{name}' is missing {axis}.")
+            try:
+                out[axis] = int(raw[axis])
+            except (TypeError, ValueError):
+                raise ValueError(f"Location '{name}' has non-numeric {axis}.")
+        return out
+
+    @classmethod
+    def validate_locations(cls, model):
+        location_model = getattr(model, "location_model", None)
+        getter = getattr(location_model, "get_location_dict", None)
+        if not callable(getter):
+            raise ValueError("Location model is not available.")
+        home = cls.coerce_location(getter("home"), "home")
+        camera = cls.coerce_location(getter("camera"), "camera")
+        return home, camera
+
+    def _read_location(self, name):
+        getter = getattr(self.location_model, "get_location_dict", None)
+        raw = getter(name) if callable(getter) else None
+        return self.coerce_location(raw, name)
+
+    def _clamp_z(self, z):
+        return int(max(0, min(130000, int(z))))
+
+    def _build_ui(self):
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        self.step_label = QtWidgets.QLabel("Ready to begin guided optics calibration.")
+        self.step_label.setWordWrap(True)
+        self.status_label = QtWidgets.QLabel(
+            "This wizard will home the machine, open the gripper, guide micrometer loading, move to camera X/Y at home Z, then stop at the guarded approach height."
+        )
+        self.status_label.setWordWrap(True)
+        self.approach_label = QtWidgets.QLabel(
+            f"Guarded approach height: Z={self.approach_z} (camera Z {int(self.camera_location['Z'])} - {self.APPROACH_CLEARANCE_STEPS})."
+        )
+        self.approach_label.setWordWrap(True)
+        layout.addWidget(self.step_label)
+        layout.addWidget(self.status_label)
+        layout.addWidget(self.approach_label)
+
+        self.manual_group = QtWidgets.QGroupBox("Manual Alignment")
+        manual_layout = QtWidgets.QGridLayout(self.manual_group)
+        manual_layout.setHorizontalSpacing(6)
+        manual_layout.setVerticalSpacing(6)
+        self.step_size_label = QtWidgets.QLabel("Step: -")
+        manual_layout.addWidget(self.step_size_label, 0, 0, 1, 3)
+        self.x_minus_btn = QtWidgets.QPushButton("X-")
+        self.x_plus_btn = QtWidgets.QPushButton("X+")
+        self.y_minus_btn = QtWidgets.QPushButton("Y-")
+        self.y_plus_btn = QtWidgets.QPushButton("Y+")
+        self.z_up_btn = QtWidgets.QPushButton("Z Up")
+        self.z_down_btn = QtWidgets.QPushButton("Z Down")
+        self.step_down_btn = QtWidgets.QPushButton("Step -")
+        self.step_up_btn = QtWidgets.QPushButton("Step +")
+        self.x_minus_btn.clicked.connect(lambda: self.manual_jog("X", -1))
+        self.x_plus_btn.clicked.connect(lambda: self.manual_jog("X", 1))
+        self.y_minus_btn.clicked.connect(lambda: self.manual_jog("Y", -1))
+        self.y_plus_btn.clicked.connect(lambda: self.manual_jog("Y", 1))
+        self.z_up_btn.clicked.connect(lambda: self.manual_jog("Z", -1))
+        self.z_down_btn.clicked.connect(lambda: self.manual_jog("Z", 1))
+        self.step_down_btn.clicked.connect(self.decrease_step_size)
+        self.step_up_btn.clicked.connect(self.increase_step_size)
+        manual_layout.addWidget(self.x_minus_btn, 1, 0)
+        manual_layout.addWidget(self.x_plus_btn, 1, 1)
+        manual_layout.addWidget(self.y_minus_btn, 2, 0)
+        manual_layout.addWidget(self.y_plus_btn, 2, 1)
+        manual_layout.addWidget(self.z_up_btn, 3, 0)
+        manual_layout.addWidget(self.z_down_btn, 3, 1)
+        manual_layout.addWidget(self.step_down_btn, 4, 0)
+        manual_layout.addWidget(self.step_up_btn, 4, 1)
+        self.manual_group.hide()
+        layout.addWidget(self.manual_group)
+
+        button_row = QtWidgets.QHBoxLayout()
+        self.primary_button = QtWidgets.QPushButton("Begin")
+        self.primary_button.clicked.connect(self.advance_step)
+        self.pause_button = QtWidgets.QPushButton("Pause Machine")
+        self.pause_button.clicked.connect(self.pause_machine)
+        self.cancel_button = QtWidgets.QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self.reject)
+        button_row.addWidget(self.primary_button)
+        button_row.addWidget(self.pause_button)
+        button_row.addStretch(1)
+        button_row.addWidget(self.cancel_button)
+        layout.addLayout(button_row)
+
+    def _setup_shortcuts(self):
+        self._wizard_shortcuts = [
+            QShortcut(QKeySequence("Left"), self, activated=lambda: self.manual_jog("X", -1)),
+            QShortcut(QKeySequence("Right"), self, activated=lambda: self.manual_jog("X", 1)),
+            QShortcut(QKeySequence("Up"), self, activated=lambda: self.manual_jog("Y", 1)),
+            QShortcut(QKeySequence("Down"), self, activated=lambda: self.manual_jog("Y", -1)),
+            QShortcut(QKeySequence("K"), self, activated=lambda: self.manual_jog("Z", -1)),
+            QShortcut(QKeySequence("M"), self, activated=lambda: self.manual_jog("Z", 1)),
+            QShortcut(QKeySequence("Ctrl+Up"), self, activated=self.increase_step_size),
+            QShortcut(QKeySequence("Ctrl+Down"), self, activated=self.decrease_step_size),
+        ]
+
+    def _connect_step_size_signal(self):
+        signal = getattr(self.machine_model, "step_size_changed", None)
+        if signal is None:
+            return
+        try:
+            signal.connect(self._refresh_step_size_label)
+            self._step_size_signal_connected = True
+        except Exception:
+            self._step_size_signal_connected = False
+
+    def _disconnect_step_size_signal(self):
+        if not self._step_size_signal_connected:
+            return
+        signal = getattr(self.machine_model, "step_size_changed", None)
+        try:
+            signal.disconnect(self._refresh_step_size_label)
+        except Exception:
+            pass
+        self._step_size_signal_connected = False
+
+    def _connect_home_signal(self):
+        signal = getattr(self.machine_model, "home_status_signal", None)
+        if signal is None:
+            return False
+        try:
+            signal.connect(self._on_home_complete)
+            self._home_signal_connected = True
+            return True
+        except Exception:
+            self._home_signal_connected = False
+            return False
+
+    def _disconnect_home_signal(self):
+        if not self._home_signal_connected:
+            return
+        signal = getattr(self.machine_model, "home_status_signal", None)
+        try:
+            signal.disconnect(self._on_home_complete)
+        except Exception:
+            pass
+        self._home_signal_connected = False
+
+    def _is_yes_response(self, response):
+        checker = getattr(self.main_window, "_is_yes_response", None)
+        if callable(checker):
+            return bool(checker(response))
+        return MainWindow._is_yes_response(response)
+
+    def _popup_yes_no(self, title, message):
+        popup = getattr(self.main_window, "popup_yes_no", None)
+        if callable(popup):
+            return popup(title, message)
+        return QtWidgets.QMessageBox.question(self, title, message)
+
+    def _popup_message(self, title, message):
+        popup = getattr(self.main_window, "popup_message", None)
+        if callable(popup):
+            popup(title, message)
+        else:
+            QtWidgets.QMessageBox.information(self, title, message)
+
+    def _commands_idle(self):
+        checker = getattr(self.controller, "check_if_all_completed", None)
+        try:
+            return bool(checker()) if callable(checker) else True
+        except Exception:
+            return False
+
+    def _current_z(self):
+        expected = getattr(self.controller, "expected_position", None)
+        if isinstance(expected, dict) and "Z" in expected:
+            try:
+                return int(expected["Z"])
+            except Exception:
+                pass
+        getter = getattr(self.machine_model, "get_current_position_dict", None)
+        try:
+            pos = getter() if callable(getter) else {}
+            return int(pos.get("Z"))
+        except Exception:
+            pass
+        return int(getattr(self.machine_model, "current_z", self.home_location["Z"]))
+
+    def _step_size(self):
+        try:
+            return int(getattr(self.machine_model, "step_size"))
+        except Exception:
+            return 500
+
+    def _refresh_step_size_label(self, *_args):
+        if hasattr(self, "step_size_label"):
+            self.step_size_label.setText(f"Step: {self._step_size()} steps")
+
+    def _set_status(self, step_text, status_text=None, color=None):
+        self.step_label.setText(str(step_text))
+        if status_text is not None:
+            self.status_label.setText(str(status_text))
+        self.status_label.setStyleSheet("" if not color else f"color:{color};")
+
+    def _set_motion_active(self, active):
+        self._motion_active = bool(active)
+        self._refresh_buttons()
+
+    def _refresh_buttons(self):
+        active = bool(self._motion_active)
+        manual = self.step_name == "manual_alignment"
+        self.primary_button.setEnabled((not active) and self.step_name not in {"failed"})
+        self.cancel_button.setEnabled(not active)
+        self.pause_button.setEnabled(active)
+        self.manual_group.setVisible(manual)
+        for widget in (
+            self.x_minus_btn,
+            self.x_plus_btn,
+            self.y_minus_btn,
+            self.y_plus_btn,
+            self.z_up_btn,
+            self.z_down_btn,
+            self.step_down_btn,
+            self.step_up_btn,
+        ):
+            widget.setEnabled((not active) and manual)
+
+    def advance_step(self):
+        if self._motion_active:
+            return
+        if self.step_name == "ready":
+            self.begin()
+        elif self.step_name == "waiting_micrometer":
+            self.confirm_micrometer_inserted()
+        elif self.step_name == "waiting_waste_holder":
+            self.confirm_waste_holder_removed()
+        elif self.step_name == "waiting_entry_alignment":
+            self.confirm_entry_alignment()
+        elif self.step_name == "manual_alignment":
+            self.continue_manual_alignment()
+
+    def begin(self):
+        if not self._commands_idle():
+            self._set_status("Commands still running.", "Wait for the current commands to finish before starting.", "red")
+            return
+        response = self._popup_yes_no(
+            "Begin Guided Optics Calibration",
+            "This wizard will home the machine, open the gripper, and move near the imager. Confirm that the area is clear and the micrometer slide is ready.",
+        )
+        if not self._is_yes_response(response):
+            self.reject()
+            return
+        self.step_name = "homing"
+        self.primary_button.setText("Homing...")
+        self._set_status("Homing machine.", "Waiting for the home-complete signal.")
+        self._set_motion_active(True)
+        if not self._connect_home_signal():
+            self.fail_step("Home status signal is unavailable.")
+            return
+        result = self.controller.home_machine()
+        if result is False:
+            self._disconnect_home_signal()
+            self.fail_step("Failed to queue homing.")
+
+    def _on_home_complete(self, *_args):
+        self._disconnect_home_signal()
+        self._set_motion_active(False)
+        self.queue_open_gripper()
+
+    def queue_open_gripper(self):
+        self.step_name = "opening_gripper"
+        self.primary_button.setText("Opening Gripper...")
+        self._set_status("Opening gripper.", "Waiting for the gripper to open.")
+        self._set_motion_active(True)
+        opener = getattr(self.controller, "open_gripper", None)
+        result = opener(handler=self._after_gripper_opened) if callable(opener) else False
+        if result is False:
+            self.fail_step("Failed to queue gripper open.")
+
+    def _after_gripper_opened(self):
+        self._cleanup_recommended = True
+        self.step_name = "waiting_micrometer"
+        self.primary_button.setText("Micrometer Inserted - Close Gripper")
+        self._set_motion_active(False)
+        self._set_status(
+            "Insert micrometer slide.",
+            "Insert the micrometer adapter into the gripper, then continue to close the gripper.",
+        )
+
+    def confirm_micrometer_inserted(self):
+        if not self._commands_idle():
+            self._set_status("Commands still running.", "Wait for the gripper-open command to finish before closing.", "red")
+            return
+        self.step_name = "closing_gripper"
+        self.primary_button.setText("Closing Gripper...")
+        self._set_status("Closing gripper.", "Waiting for the micrometer slide to be held.")
+        self._set_motion_active(True)
+        closer = getattr(self.controller, "close_gripper", None)
+        result = closer(handler=self._after_gripper_closed) if callable(closer) else False
+        if result is False:
+            self.fail_step("Failed to queue gripper close.")
+
+    def _after_gripper_closed(self):
+        self.step_name = "waiting_waste_holder"
+        self.primary_button.setText("Waste Holder Removed")
+        self._set_motion_active(False)
+        self._set_status(
+            "Remove waste tube holder.",
+            "Remove the waste tube holder from the imager area, then continue.",
+        )
+
+    def confirm_waste_holder_removed(self):
+        response = self._popup_yes_no(
+            "Waste Tube Holder Removed",
+            "Confirm the waste tube holder has been removed from the droplet imager area.",
+        )
+        if not self._is_yes_response(response):
+            self._set_status(
+                "Remove waste tube holder.",
+                "The wizard will not move to the imager until this is confirmed.",
+                "red",
+            )
+            return
+        self.queue_camera_xy()
+
+    def queue_camera_xy(self):
+        if not self._commands_idle():
+            self._set_status("Commands still running.", "Wait for the current command to finish before moving to camera X/Y.", "red")
+            return
+        self.step_name = "moving_camera_xy"
+        self.primary_button.setText("Moving To Camera X/Y...")
+        self._set_status(
+            "Moving to camera X/Y at home Z.",
+            f"Target X={self.camera_location['X']}, Y={self.camera_location['Y']}; Z stays at home height.",
+        )
+        self._set_motion_active(True)
+        mover = getattr(self.controller, "set_absolute_XY", None)
+        result = (
+            mover(
+                int(self.camera_location["X"]),
+                int(self.camera_location["Y"]),
+                manual=True,
+                handler=self._after_camera_xy,
+            )
+            if callable(mover)
+            else False
+        )
+        if result is False:
+            self.fail_step("Failed to queue camera X/Y move.")
+
+    def _after_camera_xy(self):
+        self.step_name = "waiting_entry_alignment"
+        self.primary_button.setText("Confirm Entry Alignment")
+        self._set_motion_active(False)
+        self._set_status(
+            "Confirm micrometer entry alignment.",
+            "If the micrometer is lined up with the imager entry, continue. Otherwise choose No in the next prompt to jog manually.",
+        )
+
+    def confirm_entry_alignment(self):
+        response = self._popup_yes_no(
+            "Micrometer Entry Alignment",
+            "Is the micrometer lined up with the imager entry position?",
+        )
+        if self._is_yes_response(response):
+            self.queue_guarded_approach()
+        else:
+            self.enter_manual_alignment()
+
+    def enter_manual_alignment(self):
+        self.step_name = "manual_alignment"
+        self.primary_button.setText("Continue To Guarded Height")
+        self._set_status(
+            "Manual alignment.",
+            "Jog the machine until the micrometer is lined up. Z jogging is blocked below the guarded approach height.",
+        )
+        self._refresh_buttons()
+
+    def manual_jog(self, axis, direction):
+        if self.step_name != "manual_alignment" or self._motion_active:
+            return False
+        if not self._commands_idle():
+            self._set_status("Commands still running.", "Wait for the current jog to complete before sending another.", "red")
+            return False
+        axis = str(axis).upper()
+        delta = int(direction) * self._step_size()
+        if axis == "Z":
+            target_z = self._current_z() + delta
+            if target_z > self.approach_z:
+                self._set_status(
+                    "Z jog blocked.",
+                    f"Guardrail blocked Z={target_z}; guarded approach limit is Z={self.approach_z}.",
+                    "red",
+                )
+                return False
+        method = getattr(self.controller, f"set_relative_{axis}", None)
+        if not callable(method):
+            self._set_status("Jog unavailable.", f"Controller does not support relative {axis} jogs.", "red")
+            return False
+        result = method(delta, manual=True)
+        if result is False:
+            self._set_status("Jog blocked.", f"The controller rejected the {axis} jog.", "red")
+            return False
+        self._set_status("Manual alignment.", f"Queued {axis} jog of {delta} steps.")
+        return True
+
+    def increase_step_size(self):
+        method = getattr(self.machine_model, "increase_step_size", None)
+        if callable(method):
+            method()
+        self._refresh_step_size_label()
+
+    def decrease_step_size(self):
+        method = getattr(self.machine_model, "decrease_step_size", None)
+        if callable(method):
+            method()
+        self._refresh_step_size_label()
+
+    def continue_manual_alignment(self):
+        if not self._commands_idle():
+            self._set_status("Commands still running.", "Wait for the current jog to complete before continuing.", "red")
+            return
+        self.queue_guarded_approach()
+
+    def queue_guarded_approach(self):
+        if not self._commands_idle():
+            self._set_status("Commands still running.", "Wait for the current command to finish before descending.", "red")
+            return
+        self.step_name = "guarded_approach"
+        self.primary_button.setText("Moving To Guarded Height...")
+        self._set_status(
+            "Moving to guarded approach height.",
+            f"Descending only to Z={self.approach_z}, never to final camera Z={int(self.camera_location['Z'])}.",
+        )
+        self._set_motion_active(True)
+        if self._current_z() == self.approach_z:
+            self._after_guarded_approach()
+            return
+        mover = getattr(self.controller, "set_absolute_Z", None)
+        result = mover(self.approach_z, manual=True, handler=self._after_guarded_approach) if callable(mover) else False
+        if result is False:
+            self.fail_step("Failed to queue guarded Z approach.")
+
+    def _after_guarded_approach(self):
+        self.step_name = "approach_complete"
+        self._cleanup_recommended = True
+        self._set_motion_active(False)
+        self.accept()
+
+    def pause_machine(self):
+        method = getattr(self.controller, "pause_machine", None)
+        if callable(method):
+            method()
+
+    def fail_step(self, message):
+        self.step_name = "failed"
+        self.primary_button.setText("Failed")
+        self._set_motion_active(False)
+        self._set_status("Guided optics setup failed.", str(message), "red")
+
+    def should_prompt_cleanup(self):
+        return bool(self._cleanup_recommended)
+
+    def _cleanup_signal_connections(self):
+        self._disconnect_home_signal()
+        self._disconnect_step_size_signal()
+
+    def done(self, result):
+        self._cleanup_signal_connections()
+        super().done(result)
+
+    def reject(self):
+        if self._motion_active:
+            self._set_status("Motion in progress.", "Pause the machine if needed. Cancel is available between steps.", "red")
+            return
+        super().reject()
+
+    def closeEvent(self, event):
+        self._cleanup_signal_connections()
+        super().closeEvent(event)
+
+
 class PressurePlotBox(QtWidgets.QGroupBox):
     """
     A widget to display the pressure readings and target
@@ -1713,6 +2323,151 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         droplet_imaging_dialog = CalibrationClasses.DropletImagingDialog(self.main_window,self.model,self.controller)
         droplet_imaging_dialog.exec()
 
+    def _launch_manual_optics_calibration_dialog(self):
+        """Open the droplet imager directly to the manual optics-calibration tab."""
+        try:
+            self.controller.disconnect_droplet_camera_signals()
+        except Exception:
+            pass
+        importlib.reload(CalibrationClasses.View)
+        importlib.reload(CalibrationClasses)
+        try:
+            self.model.reload_droplet_model()
+        except Exception:
+            pass
+        try:
+            self.controller.connect_droplet_camera_signals()
+        except Exception:
+            pass
+        droplet_imaging_dialog = CalibrationClasses.DropletImagingDialog(
+            self.main_window,
+            self.model,
+            self.controller,
+            service_mode=True,
+            initial_tab="optics",
+        )
+        droplet_imaging_dialog.exec()
+
+    def _guided_optics_location_pair(self):
+        try:
+            return OpticsCalibrationApproachWizardDialog.validate_locations(self.model)
+        except ValueError as exc:
+            self.popup_message_signal.emit("Invalid Optics Locations", str(exc))
+            return None
+
+    def _machine_is_connected_for_guided_optics(self):
+        getter = getattr(self.model.machine_model, "is_connected", None)
+        try:
+            return bool(getter()) if callable(getter) else bool(getattr(self.model.machine_model, "machine_connected", False))
+        except Exception:
+            return False
+
+    def _motors_enabled_for_guided_optics(self):
+        getter = getattr(self.model.machine_model, "motors_are_enabled", None)
+        try:
+            return bool(getter()) if callable(getter) else bool(getattr(self.model.machine_model, "motors_enabled", False))
+        except Exception:
+            return False
+
+    def start_guided_optics_calibration(self):
+        """Start the guided micrometer load/approach wizard for optics calibration."""
+        if not self.controller.check_if_all_completed():
+            self.popup_message_signal.emit(
+                "Commands Still Running",
+                "Please wait for the current commands to finish before starting guided optics calibration.",
+            )
+            return
+
+        if not self._machine_is_connected_for_guided_optics():
+            self.popup_message_signal.emit(
+                "Machine Not Connected",
+                "Please connect to the machine before starting guided optics calibration.",
+            )
+            return
+
+        if not self._motors_enabled_for_guided_optics():
+            self.popup_message_signal.emit(
+                "Motors Not Enabled",
+                "Please enable the motors before starting guided optics calibration.",
+            )
+            return
+
+        if self._guided_optics_location_pair() is None:
+            return
+
+        self._launch_guided_optics_calibration_dialog()
+
+    def _launch_guided_optics_calibration_dialog(self):
+        wizard = OpticsCalibrationApproachWizardDialog(self.main_window, self.model, self.controller)
+        result = wizard.exec()
+        accepted = int(result) == int(QtWidgets.QDialog.Accepted)
+        try:
+            prompt_cleanup = bool(wizard.should_prompt_cleanup())
+        except Exception:
+            prompt_cleanup = False
+        if accepted:
+            self._launch_manual_optics_calibration_dialog()
+            self._prompt_guided_optics_cleanup()
+        elif prompt_cleanup:
+            self._prompt_guided_optics_cleanup()
+
+    def _prompt_guided_optics_cleanup(self):
+        if self._guided_optics_location_pair() is None:
+            return
+        response = self.main_window.popup_yes_no(
+            "Clean Up Optics Calibration Setup",
+            "Would you like to raise to home Z, move to home X/Y, open the gripper, and remove the micrometer now?",
+        )
+        if not self.main_window._is_yes_response(response):
+            self.popup_message_signal.emit(
+                "Optics Cleanup Reminder",
+                "Leave the machine safe and remove the micrometer and adapter before returning to normal operation.",
+            )
+            return
+
+        if not self.controller.check_if_all_completed():
+            self.popup_message_signal.emit(
+                "Cleanup Deferred",
+                "Commands are still running. Please clean up manually once the command queue is clear.",
+            )
+            return
+
+        home, _camera = self._guided_optics_location_pair()
+        if home is None:
+            return
+
+        def _after_open():
+            self.popup_message_signal.emit(
+                "Remove Micrometer",
+                "The gripper is open. Remove the micrometer adapter before normal operation.",
+            )
+
+        def _after_xy():
+            opener = getattr(self.controller, "open_gripper", None)
+            if not callable(opener) or opener(handler=_after_open) is False:
+                self.popup_message_signal.emit(
+                    "Cleanup Incomplete",
+                    "Failed to queue gripper open. Remove the micrometer manually when safe.",
+                )
+
+        def _after_z():
+            mover = getattr(self.controller, "set_absolute_XY", None)
+            if (
+                not callable(mover)
+                or mover(int(home["X"]), int(home["Y"]), manual=True, handler=_after_xy) is False
+            ):
+                self.popup_message_signal.emit(
+                    "Cleanup Incomplete",
+                    "Failed to queue the home X/Y move. Remove the micrometer manually when safe.",
+                )
+
+        mover_z = getattr(self.controller, "set_absolute_Z", None)
+        if not callable(mover_z) or mover_z(int(home["Z"]), manual=True, handler=_after_z) is False:
+            self.popup_message_signal.emit(
+                "Cleanup Incomplete",
+                "Failed to queue the home Z move. Remove the micrometer manually when safe.",
+            )
+
     def _launch_refuel_camera_dialog(self):
         """Open the refuel camera dialog after preflight checks have passed."""
         importlib.reload(CalibrationClasses.View)
@@ -1770,6 +2525,24 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             manual=True,
             on_complete=self._launch_droplet_imager_dialog,
         )
+
+    def open_manual_optics_calibration(self):
+        """Start the manual optics calibration slice without motion or pressure preflight."""
+        if not self.controller.check_if_all_completed():
+            self.popup_message_signal.emit(
+                "Commands Still Running",
+                "Please wait for the current commands to finish before starting optics calibration.",
+            )
+            return
+
+        response = self.main_window.popup_yes_no(
+            "Begin Optics Calibration",
+            "This opens the droplet imager for manual micrometer positioning and capture. No automatic homing, gripper, or camera-approach motion will run. Continue?",
+        )
+        if not self.main_window._is_yes_response(response):
+            return
+
+        self._launch_manual_optics_calibration_dialog()
 
     def refuel_camera(self):
         """Open the refuel camera dialog after verifying prerequisites."""

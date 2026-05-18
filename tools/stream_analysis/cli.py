@@ -636,6 +636,12 @@ def build_parser():
         default=120,
         help="Minimum filled connected-component area eligible for selection.",
     )
+    volume.add_argument(
+        "--pixel-size-um",
+        type=float,
+        default=0.0,
+        help="Explicit micrometer-per-pixel value. Defaults to optics config, then 1.5696.",
+    )
 
     fit = subparsers.add_parser(
         "fit",
@@ -1563,6 +1569,7 @@ def main(argv=None):
             corridor_width_frac=float(args.corridor_width_frac),
             nozzle_guard_px=int(args.nozzle_guard_px),
             min_component_area_px=int(args.min_component_area_px),
+            pixel_size_um=(float(args.pixel_size_um) if float(args.pixel_size_um or 0.0) > 0 else None),
         )
     elif args.command == "fit":
         payload = export_stage5_fit(
