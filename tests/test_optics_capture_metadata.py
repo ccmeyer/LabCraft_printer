@@ -67,6 +67,7 @@ def _make_controller():
     controller.expected_position = {"X": 111, "Y": 222, "Z": 333}
     controller.pending_capture_callback = None
     controller.pending_capture_context = None
+    controller.pending_capture_active = False
     return controller, machine, camera_model
 
 
@@ -76,10 +77,12 @@ def test_controller_capture_context_is_written_to_next_frame_metadata():
     assert controller.capture_droplet_image(capture_context="optics_scale_bar") is True
     assert machine.capture_calls == [{"throughput_mode": False}]
     assert controller.pending_capture_context == "optics_scale_bar"
+    assert controller.pending_capture_active is True
 
     controller._on_image_captured()
 
     assert controller.pending_capture_context is None
+    assert controller.pending_capture_active is False
     assert len(camera_model.update_calls) == 1
     call = camera_model.update_calls[0]
     assert call["capture_info"] == {"cap_id": 123, "reason": "threshold"}
@@ -114,14 +117,30 @@ def test_controller_clears_pending_callback_when_camera_rejects_capture():
 
     assert controller.pending_capture_callback is None
     assert controller.pending_capture_context is None
+    assert controller.pending_capture_active is False
     callback.assert_not_called()
+
+
+def test_controller_blocks_overlapping_capture_until_frame_finishes():
+    controller, machine, _camera_model = _make_controller()
+
+    assert controller.capture_droplet_image() is True
+    assert controller.capture_droplet_image() is False
+    assert len(machine.capture_calls) == 1
+
+    controller._on_image_captured()
+
+    assert controller.capture_droplet_image() is True
+    assert len(machine.capture_calls) == 2
 
 
 def _make_optics_dialog(*, commands_idle=True, active=True):
     dialog = DropletImagingDialog.__new__(DropletImagingDialog)
     dialog._optics_session_active = active
+    dialog._capture_request_pending = False
     dialog.statuses = []
     dialog._set_optics_status = lambda message, color=None: dialog.statuses.append((message, color))
+    dialog._set_capture_request_pending = lambda pending: setattr(dialog, "_capture_request_pending", bool(pending))
     dialog.controller = SimpleNamespace(
         check_if_all_completed=Mock(return_value=commands_idle),
         capture_droplet_image=Mock(return_value=True),
@@ -146,6 +165,7 @@ def test_optics_capture_passes_scale_bar_context_when_idle():
     DropletImagingDialog.capture_optics_frame(dialog)
 
     dialog.controller.capture_droplet_image.assert_called_once_with(capture_context="optics_scale_bar")
+    assert dialog._capture_request_pending is True
     assert dialog.statuses == [("Capture requested.", "green")]
 
 
@@ -155,6 +175,7 @@ def test_optics_capture_previews_without_session_and_without_save_context():
     DropletImagingDialog.capture_optics_frame(dialog)
 
     dialog.controller.capture_droplet_image.assert_called_once_with()
+    assert dialog._capture_request_pending is True
     assert dialog.statuses == [
         ("Preview capture requested. Start a session when ready to save frames.", "green")
     ]
