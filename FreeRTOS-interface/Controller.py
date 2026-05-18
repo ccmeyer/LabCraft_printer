@@ -96,6 +96,7 @@ class Controller(QObject):
 
         # This variable will temporarily hold the callback for the next capture.
         self.pending_capture_callback = None
+        self.pending_capture_context = None
 
         self._array_state = "idle"
         self._array_context = None
@@ -2095,7 +2096,7 @@ class Controller(QObject):
     def start_droplet_camera(self):
         self.machine.start_droplet_camera()
 
-    def capture_droplet_image(self, callback=None, *, throughput_mode=False):
+    def capture_droplet_image(self, callback=None, *, throughput_mode=False, capture_context=None):
         """
         Initiates a non-blocking image capture. If a callback is provided,
         it will be invoked with the captured frame once the capture completes.
@@ -2103,12 +2104,30 @@ class Controller(QObject):
         if self._is_flash_fault_latched():
             self._handle_blocked_capture(callback)
             return False
+        if capture_context is not None and getattr(self, "pending_capture_context", None) is not None:
+            print("Capture context already pending; dropping new capture request.")
+            return False
         if callback is not None:
             if self.pending_capture_callback is not None:
                 print("Capture already pending; dropping new capture callback.")
                 return False
             self.pending_capture_callback = callback
-        self.machine.capture_droplet_image(throughput_mode=throughput_mode)
+        if capture_context is not None:
+            self.pending_capture_context = str(capture_context)
+        try:
+            queued = self.machine.capture_droplet_image(throughput_mode=throughput_mode)
+        except Exception:
+            if callback is not None and self.pending_capture_callback is callback:
+                self.pending_capture_callback = None
+            if capture_context is not None:
+                self.pending_capture_context = None
+            raise
+        if queued is False:
+            if callback is not None and self.pending_capture_callback is callback:
+                self.pending_capture_callback = None
+            if capture_context is not None:
+                self.pending_capture_context = None
+            return False
         return True
 
     def stop_droplet_camera(self):
@@ -2144,18 +2163,8 @@ class Controller(QObject):
         self.model.droplet_camera_model.set_save_directory(directory)      
 
     def handle_capture_request(self, callback):
-            # protect against overlapping requests
-        if self._is_flash_fault_latched():
-            self._handle_blocked_capture(callback)
-            return
-        if self.pending_capture_callback is not None:
-            print("Capture already pending; dropping new request.")
-            return
-        self.pending_capture_callback = callback
-        # Use your defaults or pipe through parameters as needed
-        # Start the non-blocking capture process, then invoke the callback with the captured image.
-        # self.capture_droplet_image(callback=callback)
-        self.machine.capture_droplet_image()
+        # protect against overlapping requests
+        self.capture_droplet_image(callback=callback)
 
     def _emit_active_calibration_error(self, message: str):
         """
@@ -2212,6 +2221,50 @@ class Controller(QObject):
             except Exception as exc:
                 print(f"Callback raised after blocked capture: {exc}")
         self._emit_active_calibration_error(message)
+
+    @staticmethod
+    def _coerce_xyz_position_dict(position):
+        if not isinstance(position, dict):
+            return None
+        out = {}
+        for axis in ("X", "Y", "Z"):
+            try:
+                out[axis] = int(position[axis])
+            except (KeyError, TypeError, ValueError):
+                return None
+        return out
+
+    def _build_droplet_capture_save_metadata(self, capture_context=None):
+        metadata = {
+            "position_source": "controller_expected_position",
+            "position_recorded_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+        if capture_context is not None:
+            metadata["capture_context"] = str(capture_context)
+
+        expected = self._coerce_xyz_position_dict(getattr(self, "expected_position", None))
+        if expected is not None:
+            metadata["controller_expected_position"] = expected
+            metadata["X_position"] = expected["X"]
+            metadata["Y_position"] = expected["Y"]
+            metadata["Z_position"] = expected["Z"]
+
+        machine_position = None
+        try:
+            getter = getattr(getattr(self.model, "machine_model", None), "get_current_position_dict", None)
+            if callable(getter):
+                machine_position = self._coerce_xyz_position_dict(getter())
+        except Exception:
+            machine_position = None
+        if machine_position is not None:
+            metadata["machine_position"] = machine_position
+
+        try:
+            metadata["commands_idle_at_frame"] = bool(self.check_if_all_completed())
+        except Exception:
+            metadata["commands_idle_at_frame"] = None
+
+        return metadata
 
     def handle_move_request(self, move_vector, callback):
         # Perform the move command then call the callback.
@@ -2374,9 +2427,15 @@ class Controller(QObject):
             cap_info = self.machine.droplet_camera.get_last_capture_result()
         except Exception:
             cap_info = None
-            
+
+        capture_context = getattr(self, "pending_capture_context", None)
+        save_metadata = self._build_droplet_capture_save_metadata(capture_context=capture_context)
+
         # Update the model and/or view (assuming your model has such a method)
-        self.model.droplet_camera_model.update_image(frame, capture_info=cap_info)
+        try:
+            self.model.droplet_camera_model.update_image(frame, capture_info=cap_info, save_metadata=save_metadata)
+        finally:
+            self.pending_capture_context = None
         
         # If a callback was set for the capture, call it.
         if self.pending_capture_callback:
@@ -2391,11 +2450,14 @@ class Controller(QObject):
         if self.pending_capture_callback:
             cb = self.pending_capture_callback
             self.pending_capture_callback = None
+            self.pending_capture_context = None
             try:
                 cb(None)                # <- sentinel for failure
             except Exception as e:
                 # If some callback signature changed, at least fail loudly
                 print(f"Callback raised after capture failure: {e}")
+        else:
+            self.pending_capture_context = None
         # 2) Also notify the calibration layer (optional, but handy for QState transitions)
         self.model.calibration_manager.captureFailed.emit(msg)
 

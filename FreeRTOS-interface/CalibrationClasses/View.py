@@ -2263,7 +2263,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         session_dir = getattr(self, "_optics_session_dir", None)
         self.optics_session_dir_label.setText(f"Session: {session_dir or 'none'}")
         self.optics_start_session_button.setEnabled(not active)
-        self.optics_capture_frame_button.setEnabled(active)
+        self.optics_capture_frame_button.setEnabled(True)
         self.optics_reject_last_button.setEnabled(active)
         self.optics_analyze_button.setEnabled(active)
         self.optics_apply_button.setEnabled(auto_apply_ok)
@@ -2320,18 +2320,33 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._refresh_optics_controls()
 
     def capture_optics_frame(self):
-        if not getattr(self, "_optics_session_active", False):
-            self._set_optics_status("Start a session before capturing optics frames.", "red")
+        active = bool(getattr(self, "_optics_session_active", False))
+        checker = getattr(self.controller, "check_if_all_completed", None)
+        try:
+            commands_idle = bool(checker()) if callable(checker) else True
+        except Exception:
+            commands_idle = False
+        if not commands_idle:
+            self._set_optics_status(
+                "Wait for all machine commands to finish before capturing an optics frame.",
+                "red",
+            )
             return
         try:
-            ok = self.controller.capture_droplet_image()
+            if active:
+                ok = self.controller.capture_droplet_image(capture_context="optics_scale_bar")
+            else:
+                ok = self.controller.capture_droplet_image()
         except Exception as exc:
             self._set_optics_status(f"Capture request failed: {exc}", "red")
             return
         if ok is False:
             self._set_optics_status("Capture was not queued; another capture may already be pending.", "red")
             return
-        self._set_optics_status("Capture requested.", "green")
+        if active:
+            self._set_optics_status("Capture requested.", "green")
+        else:
+            self._set_optics_status("Preview capture requested. Start a session when ready to save frames.", "green")
 
     def reject_last_optics_frame(self):
         if not getattr(self, "_optics_session_active", False):

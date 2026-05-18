@@ -27230,7 +27230,12 @@ class DropletCameraModel(QObject):
     #     self.dir_name = dir
     #     self.save_dir = os.path.join(self.image_dir, self.dir_name)
     
-    def update_image(self, frame: np.ndarray, capture_info: dict | None = None):
+    def update_image(
+        self,
+        frame: np.ndarray,
+        capture_info: dict | None = None,
+        save_metadata: dict | None = None,
+    ):
         """
         Called by Controller when a new droplet image arrives.
         """
@@ -27264,6 +27269,13 @@ class DropletCameraModel(QObject):
                 "exposure_time_us": exposure_time,
                 "capture_info": capture_info,  # includes cap_id/reason/threshold/mean if provided
             }
+            if isinstance(save_metadata, dict):
+                protected_keys = {"index", "filename", "saved_at", "capture_info"}
+                for key, value in save_metadata.items():
+                    key = str(key)
+                    if key in protected_keys:
+                        continue
+                    meta[key] = value
 
             # hand a copy to the writer to avoid accidental mutation
             try:
