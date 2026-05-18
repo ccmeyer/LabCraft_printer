@@ -44,6 +44,11 @@ static constexpr uint32_t kMoveWaitPollMs = 20u;
 static constexpr uint32_t kMoveWaitSlackMs = 4000u;
 static constexpr uint32_t kMoveWaitMinMs = 1000u;
 static constexpr uint32_t kMoveWaitMaxMs = 30000u;
+static constexpr uint8_t kHomeLimitStableSampleCount = 5u;
+static constexpr uint8_t kHomeLimitStableRequiredSamples = 3u;
+static constexpr uint32_t kHomeLimitStableSampleIntervalMs = 2u;
+static constexpr uint32_t kHomeLimitLevelPollMs = 2u;
+static constexpr uint8_t kHomeLimitLevelPollRequiredSamples = 2u;
 
 static TickType_t stepperMsToAtLeast1Tick(uint32_t ms)
 {
@@ -57,6 +62,18 @@ static TickType_t stepperMsToAtLeast1Tick(uint32_t ms)
 static inline bool stepper_rtos_running()
 {
   return xTaskGetSchedulerState() == taskSCHEDULER_RUNNING;
+}
+
+static void stepperDelayMs(uint32_t ms)
+{
+  if (ms == 0u) {
+    return;
+  }
+  if (stepper_rtos_running()) {
+    vTaskDelay(stepperMsToAtLeast1Tick(ms));
+  } else {
+    HAL_Delay(ms);
+  }
 }
 // Compute ARR from desired square-wave frequency
 static inline uint32_t arr_for_freq(uint32_t tclk_eff, uint32_t freq_hz) {
@@ -290,10 +307,15 @@ uint32_t Stepper::recommendedWaitTimeoutMs(uint32_t steps, uint32_t freqHz)
 bool Stepper::home(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps) {
   _homeDiagnosticSnapshot = HomeDiagnosticSnapshot{};
 
+  const bool initialRawLimit = _isLimitAsserted();
+  const LimitStableSample initialLimit = _sampleLimitStable();
 	Logger::instance()->log(
-	  "[Home %d] lim pin=%u activeHigh=%d initial=%s\r\n",
+	  "[Home %d] lim pin=%u activeHigh=%d initial_raw=%s initial_stable=%s samples=%u/%u\r\n",
 	  (int)_axis, (unsigned)_limPin, (int)_limitActiveHigh,
-	  _isLimitAsserted() ? "PRESSED" : "released");
+	  initialRawLimit ? "PRESSED" : "released",
+	  initialLimit.asserted ? "PRESSED" : "released",
+	  (unsigned)initialLimit.assertedCount,
+	  (unsigned)initialLimit.sampleCount);
 
   const float    saved_override = _softstop_accel_override_sps2;
   const uint32_t saved_floor    = _softstop_floor_hz;
@@ -325,7 +347,12 @@ bool Stepper::home(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps) {
       return result;
     }
     const uint32_t timeoutMs = Stepper::recommendedWaitTimeoutMs(steps, freqHz);
-    if (waitUntilDone(timeoutMs)) {
+    const bool useHomeLevelPoll = _softStopOnLimit &&
+        StepperLimitPolicy::shouldPollHomeLimitLevel(direction, _homeTowardLimitDir);
+    const bool moveCompleted = useHomeLevelPoll
+        ? _waitUntilDoneForHomeMove(direction, timeoutMs)
+        : waitUntilDone(timeoutMs);
+    if (moveCompleted) {
       result.completed = true;
       result.limitSeen = _limitSeenThisMove;
       result.limitAsserted = _isLimitAsserted();
@@ -345,7 +372,7 @@ bool Stepper::home(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps) {
     return result;
   };
 
-  if (_isLimitAsserted()) {
+  if (initialLimit.asserted) {
     if (!_backOffLimitUntilReleased(releaseChunkSteps, slowHz, releaseGuardSteps, false, "initial release")) {
       restoreHomeState();
       return false;
@@ -485,6 +512,89 @@ bool Stepper::waitUntilDone(uint32_t timeoutMs) {
   return true;
 }
 
+Stepper::LimitStableSample Stepper::_sampleLimitStable() const
+{
+  LimitStableSample sample{};
+  sample.sampleCount = kHomeLimitStableSampleCount;
+  for (uint8_t idx = 0u; idx < kHomeLimitStableSampleCount; ++idx) {
+    if (_isLimitAsserted()) {
+      sample.assertedCount++;
+    }
+    if ((idx + 1u) < kHomeLimitStableSampleCount) {
+      stepperDelayMs(kHomeLimitStableSampleIntervalMs);
+    }
+  }
+  sample.asserted = StepperLimitPolicy::stableLimitAsserted(
+      sample.assertedCount,
+      sample.sampleCount,
+      kHomeLimitStableRequiredSamples);
+  return sample;
+}
+
+bool Stepper::_waitUntilDoneForHomeMove(bool direction, uint32_t timeoutMs)
+{
+  if (!StepperLimitPolicy::shouldPollHomeLimitLevel(direction, _homeTowardLimitDir)) {
+    return waitUntilDone(timeoutMs);
+  }
+
+  if (_togglesRemaining == 0u) {
+    return true;
+  }
+
+  const TickType_t pollTicks = stepperMsToAtLeast1Tick(kHomeLimitLevelPollMs);
+  const uint32_t startMs = HAL_GetTick();
+  uint8_t assertedStreak = 0u;
+  bool levelPollHandled = false;
+
+  while (_togglesRemaining != 0u) {
+    const EventBits_t result = xEventGroupWaitBits(
+        Orchestrator::getDoneEvents(),
+        _doneBit,
+        pdTRUE, pdTRUE,
+        pollTicks
+    );
+    if ((result & _doneBit) != 0u || _togglesRemaining == 0u) {
+      return true;
+    }
+
+    if (_isLimitAsserted()) {
+      if (assertedStreak < 0xFFu) {
+        assertedStreak++;
+      }
+    } else {
+      assertedStreak = 0u;
+    }
+
+    if (!levelPollHandled && assertedStreak >= kHomeLimitLevelPollRequiredSamples) {
+      if (!_limitSeenThisMove) {
+        _limitSeenThisMove = true;
+        ++_limitHitCount;
+      }
+      if (!_limitHandledThisMove) {
+        _limitHandledThisMove = true;
+        Logger::instance()->log("[Home %d] level-poll limit hit pos=%ld rem=%lu\r\n",
+                                (int)_axis,
+                                (long)_pos,
+                                (unsigned long)_togglesRemaining);
+        onLimitTriggered();
+      }
+      levelPollHandled = true;
+    }
+
+    if ((timeoutMs != 0u) && ((HAL_GetTick() - startMs) >= timeoutMs)) {
+      Logger::instance()->log("[Stepper %d] home wait timeout rem=%lu pos=%ld target=%ld\r\n",
+                              (int)_axis,
+                              (unsigned long)_togglesRemaining,
+                              (long)_pos,
+                              (long)_targetPos);
+      stop();
+      xEventGroupClearBits(Orchestrator::getDoneEvents(), _doneBit);
+      return false;
+    }
+  }
+  return true;
+}
+
 
 void Stepper::stop() {
 
@@ -517,7 +627,7 @@ bool Stepper::_backOffLimitUntilReleased(uint32_t chunkSteps,
   const uint32_t chunk = StepperLimitPolicy::normalizeBackoffSteps(chunkSteps);
   const uint32_t guard = (releaseGuardSteps == 0u) ? chunk : releaseGuardSteps;
   uint32_t moved = 0u;
-  bool shouldMove = alwaysBackOffOnce || _isLimitAsserted();
+  bool shouldMove = alwaysBackOffOnce || _sampleLimitStable().asserted;
 
   while (shouldMove && moved < guard) {
     uint32_t stepThisMove = chunk;
@@ -542,10 +652,10 @@ bool Stepper::_backOffLimitUntilReleased(uint32_t chunkSteps,
     }
 
     moved += stepThisMove;
-    shouldMove = _isLimitAsserted();
+    shouldMove = _sampleLimitStable().asserted;
   }
 
-  if (_isLimitAsserted()) {
+  if (_sampleLimitStable().asserted) {
     Logger::instance()->log("[Home %d] limit release not detected phase=%s after %lu steps\r\n",
                             (int)_axis,
                             (phaseLabel != nullptr) ? phaseLabel : "release",

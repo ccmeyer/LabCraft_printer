@@ -258,6 +258,12 @@ private:
   bool     _homeHardStopOnLimit = false;
   HomeDiagnosticSnapshot _homeDiagnosticSnapshot{};
 
+  struct LimitStableSample {
+    bool asserted = false;
+    uint8_t assertedCount = 0u;
+    uint8_t sampleCount = 0u;
+  };
+
   // ISR entrypoint
   void _onRawLimitInterruptFromIsr();
   void _maskExtiLineFromIsr();
@@ -265,6 +271,8 @@ private:
   void _unmaskExtiLine();
   void _onLimitTriggeredFromIsr(BaseType_t* pxHigherPriorityTaskWoken);
   void _prepareForNewMove();
+  LimitStableSample _sampleLimitStable() const;
+  bool _waitUntilDoneForHomeMove(bool direction, uint32_t timeoutMs);
   bool _backOffLimitUntilReleased(uint32_t chunkSteps,
                                   uint32_t freqHz,
                                   uint32_t releaseGuardSteps,

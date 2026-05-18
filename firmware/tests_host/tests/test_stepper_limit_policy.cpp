@@ -32,6 +32,30 @@ TEST(StepperLimitPolicyHelpers, HomeLimitDetectedAcceptsLatchedOrCurrentAssertio
     CHECK_FALSE(StepperLimitPolicy::homeLimitDetected(false, false));
 }
 
+TEST(StepperLimitPolicyHelpers, StableLimitAssertedUsesConfiguredMajority)
+{
+    CHECK_FALSE(StepperLimitPolicy::stableLimitAsserted(0u, 5u, 3u));
+    CHECK_FALSE(StepperLimitPolicy::stableLimitAsserted(1u, 5u, 3u));
+    CHECK_FALSE(StepperLimitPolicy::stableLimitAsserted(2u, 5u, 3u));
+    CHECK_TRUE(StepperLimitPolicy::stableLimitAsserted(3u, 5u, 3u));
+    CHECK_TRUE(StepperLimitPolicy::stableLimitAsserted(4u, 5u, 3u));
+    CHECK_TRUE(StepperLimitPolicy::stableLimitAsserted(5u, 5u, 3u));
+}
+
+TEST(StepperLimitPolicyHelpers, StableLimitAssertedRejectsInvalidSampleConfig)
+{
+    CHECK_FALSE(StepperLimitPolicy::stableLimitAsserted(5u, 0u, 3u));
+    CHECK_FALSE(StepperLimitPolicy::stableLimitAsserted(5u, 5u, 0u));
+}
+
+TEST(StepperLimitPolicyHelpers, HomeLevelPollingOnlyAppliesTowardLimit)
+{
+    CHECK_TRUE(StepperLimitPolicy::shouldPollHomeLimitLevel(true, true));
+    CHECK_TRUE(StepperLimitPolicy::shouldPollHomeLimitLevel(false, false));
+    CHECK_FALSE(StepperLimitPolicy::shouldPollHomeLimitLevel(true, false));
+    CHECK_FALSE(StepperLimitPolicy::shouldPollHomeLimitLevel(false, true));
+}
+
 TEST(StepperLimitPolicyHelpers, ReleaseSearchGuardScalesFromBackoffSteps)
 {
     LONGS_EQUAL(1024L, static_cast<long>(StepperLimitPolicy::releaseSearchGuardSteps(0u)));
