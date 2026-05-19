@@ -903,6 +903,36 @@ def select_online_stream_tail_left_anchor(
             "left_bracket_confirmed": True,
             "last_plateau_delay_us": _to_int(last_plateau_row.get("delay_us")),
         }
+    last_resolver_plateau_row = None
+    for row in reversed(prior_rows):
+        if bool(row.get("resolver_plateau_candidate")):
+            last_resolver_plateau_row = dict(row)
+            break
+    if last_resolver_plateau_row is not None:
+        return {
+            "left_endpoint_delay_us": _to_int(last_resolver_plateau_row.get("delay_us")),
+            "left_bracket_confirmed": True,
+            "last_plateau_delay_us": _to_int(last_resolver_plateau_row.get("delay_us")),
+        }
+    last_noncollapse_width_row = None
+    for row in reversed(prior_rows):
+        if (
+            bool(row.get("tail_width_usable"))
+            and _to_float_or_none(row.get("median_width_px")) is not None
+            and not bool(row.get("landmark_detected"))
+            and not bool(row.get("separated_from_nozzle_landmark"))
+            and not bool(row.get("attached_width_unavailable_landmark"))
+            and not bool(row.get("backup_width_collapse_landmark"))
+            and not bool(row.get("resolver_collapse_candidate"))
+        ):
+            last_noncollapse_width_row = dict(row)
+            break
+    if last_noncollapse_width_row is not None:
+        return {
+            "left_endpoint_delay_us": _to_int(last_noncollapse_width_row.get("delay_us")),
+            "left_bracket_confirmed": False,
+            "last_plateau_delay_us": None,
+        }
     prior_delays = [
         int(dict(row or {}).get("delay_us"))
         for row in prior_rows

@@ -79,6 +79,27 @@ def _tail_frame_row(
     return row
 
 
+def _tail_delay_summary(
+    *,
+    delay_us: int,
+    delay_from_emergence_us: int,
+    baseline_width_px: float,
+    width_px=None,
+    **row_overrides,
+):
+    return mod.summarize_online_stream_tail_delay(
+        [
+            _tail_frame_row(
+                delay_us=delay_us,
+                delay_from_emergence_us=delay_from_emergence_us,
+                width_px=width_px,
+                **row_overrides,
+            )
+        ],
+        baseline_width_px=baseline_width_px,
+    )
+
+
 def _window_candidate(step_index, width_px, *, y0_px=None, usable=True):
     y0 = 100 + int(step_index) * 20 if y0_px is None else int(y0_px)
     return {
@@ -790,6 +811,166 @@ def test_summarize_online_stream_tail_delay_adds_resolver_width_drop_metrics():
     assert transition["resolver_collapse_candidate"] is False
     assert collapse["width_drop_from_baseline_px"] == 4.0
     assert collapse["resolver_collapse_candidate"] is True
+
+
+def test_select_online_stream_tail_left_anchor_uses_resolver_plateau_when_strict_plateau_misses():
+    baseline_width_px = 66.5
+    scout_summaries = [
+        _tail_delay_summary(
+            delay_us=6450,
+            delay_from_emergence_us=2150,
+            width_px=66.0,
+            baseline_width_px=baseline_width_px,
+        ),
+        _tail_delay_summary(
+            delay_us=6950,
+            delay_from_emergence_us=2650,
+            width_px=66.0,
+            baseline_width_px=baseline_width_px,
+        ),
+        _tail_delay_summary(
+            delay_us=7450,
+            delay_from_emergence_us=3150,
+            width_px=24.0,
+            baseline_width_px=baseline_width_px,
+        ),
+        _tail_delay_summary(
+            delay_us=7950,
+            delay_from_emergence_us=3650,
+            width_px=None,
+            baseline_width_px=baseline_width_px,
+            separated_from_nozzle_landmark=True,
+        ),
+    ]
+
+    assert scout_summaries[1]["plateau_candidate"] is False
+    assert scout_summaries[1]["resolver_plateau_candidate"] is True
+    assert scout_summaries[2]["resolver_collapse_candidate"] is True
+
+    anchor = mod.select_online_stream_tail_left_anchor(
+        scout_summaries=scout_summaries,
+        scout_anchor_delay_us=5750,
+        landmark_delay_us=7950,
+    )
+    plan = mod.build_online_stream_tail_backtrack_plan(
+        scout_anchor_delay_us=5750,
+        left_endpoint_delay_us=anchor["left_endpoint_delay_us"],
+        landmark_delay_us=7950,
+        backtrack_step_us=50,
+        fine_prepad_us=100,
+        fine_postpad_us=100,
+    )
+
+    assert anchor == {
+        "left_endpoint_delay_us": 6950,
+        "left_bracket_confirmed": True,
+        "last_plateau_delay_us": 6950,
+    }
+    assert plan[0] == 6850
+
+
+def test_select_online_stream_tail_left_anchor_uses_latest_noncollapse_width_when_no_plateau():
+    baseline_width_px = 67.0
+    scout_summaries = [
+        _tail_delay_summary(
+            delay_us=6350,
+            delay_from_emergence_us=2050,
+            width_px=66.0,
+            baseline_width_px=baseline_width_px,
+        ),
+        _tail_delay_summary(
+            delay_us=6850,
+            delay_from_emergence_us=2550,
+            width_px=65.5,
+            baseline_width_px=baseline_width_px,
+        ),
+        _tail_delay_summary(
+            delay_us=7350,
+            delay_from_emergence_us=3050,
+            width_px=52.0,
+            baseline_width_px=baseline_width_px,
+        ),
+        _tail_delay_summary(
+            delay_us=7850,
+            delay_from_emergence_us=3550,
+            width_px=None,
+            baseline_width_px=baseline_width_px,
+            separated_from_nozzle_landmark=True,
+        ),
+    ]
+
+    assert scout_summaries[0]["plateau_candidate"] is False
+    assert scout_summaries[0]["resolver_plateau_candidate"] is False
+    assert scout_summaries[1]["resolver_plateau_candidate"] is False
+    assert scout_summaries[2]["resolver_collapse_candidate"] is True
+
+    anchor = mod.select_online_stream_tail_left_anchor(
+        scout_summaries=scout_summaries,
+        scout_anchor_delay_us=5850,
+        landmark_delay_us=7850,
+    )
+    plan = mod.build_online_stream_tail_backtrack_plan(
+        scout_anchor_delay_us=5850,
+        left_endpoint_delay_us=anchor["left_endpoint_delay_us"],
+        landmark_delay_us=7850,
+        backtrack_step_us=50,
+        fine_prepad_us=100,
+        fine_postpad_us=100,
+    )
+
+    assert anchor == {
+        "left_endpoint_delay_us": 6850,
+        "left_bracket_confirmed": False,
+        "last_plateau_delay_us": None,
+    }
+    assert plan[0] == 6750
+
+
+def test_select_online_stream_tail_left_anchor_keeps_strict_plateau_priority():
+    baseline_width_px = 66.0
+    scout_summaries = [
+        _tail_delay_summary(
+            delay_us=6250,
+            delay_from_emergence_us=1950,
+            width_px=66.0,
+            baseline_width_px=baseline_width_px,
+        ),
+        _tail_delay_summary(
+            delay_us=6750,
+            delay_from_emergence_us=2450,
+            width_px=65.5,
+            baseline_width_px=baseline_width_px,
+        ),
+        _tail_delay_summary(
+            delay_us=7250,
+            delay_from_emergence_us=2950,
+            width_px=52.0,
+            baseline_width_px=baseline_width_px,
+        ),
+        _tail_delay_summary(
+            delay_us=7750,
+            delay_from_emergence_us=3450,
+            width_px=None,
+            baseline_width_px=baseline_width_px,
+            separated_from_nozzle_landmark=True,
+        ),
+    ]
+
+    assert scout_summaries[0]["plateau_candidate"] is True
+    assert scout_summaries[1]["plateau_candidate"] is False
+    assert scout_summaries[1]["resolver_plateau_candidate"] is True
+
+    anchor = mod.select_online_stream_tail_left_anchor(
+        scout_summaries=scout_summaries,
+        scout_anchor_delay_us=5750,
+        landmark_delay_us=7750,
+    )
+
+    assert anchor == {
+        "left_endpoint_delay_us": 6250,
+        "left_bracket_confirmed": True,
+        "last_plateau_delay_us": 6250,
+    }
 
 
 def test_lower_window_width_drop_is_not_classified_from_root_flow_baseline_without_window_baseline():
