@@ -22,6 +22,7 @@ import joblib
 import shutil
 import subprocess
 import glob
+import select
 
 from hardware.profile import CURRENT_PROFILE, HardwareProfile
 from hardware.null_devices import NullCamera
@@ -270,10 +271,35 @@ def _make_rising_edge_input(chip_name, offset, consumer="gpio_in"):
         if hasattr(gpiod, "LINE_REQ_FLAG_BIAS_PULL_DOWN"):
             flags |= gpiod.LINE_REQ_FLAG_BIAS_PULL_DOWN
         line.request(consumer=consumer, type=gpiod.LINE_REQ_EV_RISING_EDGE, flags=flags)
+        event_get_fd = getattr(line, "event_get_fd", None)
+        if not callable(event_get_fd):
+            try:
+                line.release()
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"gpio_edge_fd_unavailable: libgpiod v1 edge line {chip_name}:{offset} "
+                "does not expose event_get_fd(); refusing unbounded event_wait."
+            )
+        try:
+            event_fd = int(event_get_fd())
+        except Exception as exc:
+            try:
+                line.release()
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"gpio_edge_fd_unavailable: could not get event fd for {chip_name}:{offset}: {exc}"
+            ) from exc
 
         class InV1:
             def event_wait(self, timeout):
-                return _wait_edge_events_compat(line.event_wait, timeout)
+                try:
+                    timeout_s = max(0.0, float(timeout))
+                except Exception:
+                    timeout_s = 0.0
+                ready, _w, _x = select.select([event_fd], [], [], timeout_s)
+                return bool(ready)
             def event_consume(self):
                 _ = line.event_read()
             def release(self):
@@ -422,6 +448,8 @@ class DropletCamera(QObject):
         self._capture_backend = None
         self._trig_line = None
         self._edge_in = None
+        self._last_backend_error = None
+        self._last_backend_create_step = None
         self._replace_capture_backend(reason="init")
 
         # camera
@@ -515,20 +543,57 @@ class DropletCamera(QObject):
     def _make_capture_backend(self, *, reason=""):
         self._capture_backend_seq = int(getattr(self, "_capture_backend_seq", 0)) + 1
         backend_id = self._capture_backend_seq
-        trigger_line = _make_output_line(
-            self._trig_chip_name,
-            self._trig_offset,
-            initial=0,
-            consumer="droplet_trigger",
-        )
-        edge_line = _make_rising_edge_input(
-            self._flash_chip_name,
-            self._flash_offset,
-            consumer="droplet_flash_edge",
-        )
-        backend = _DropletCaptureBackend(backend_id, trigger_line, edge_line)
-        self._log_capture_phase("backend_created", backend=backend, reason=str(reason or ""))
-        return backend
+        trigger_line = None
+        edge_line = None
+        step = "edge_input"
+        try:
+            edge_line = _make_rising_edge_input(
+                self._flash_chip_name,
+                self._flash_offset,
+                consumer="droplet_flash_edge",
+            )
+            step = "trigger_output"
+            trigger_line = _make_output_line(
+                self._trig_chip_name,
+                self._trig_offset,
+                initial=0,
+                consumer="droplet_trigger",
+            )
+            backend = _DropletCaptureBackend(backend_id, trigger_line, edge_line)
+            self._last_backend_error = None
+            self._last_backend_create_step = None
+            self._log_capture_phase("backend_created", backend=backend, reason=str(reason or ""))
+            return backend
+        except Exception as exc:
+            self._last_backend_error = str(exc)
+            self._last_backend_create_step = step
+            self._log_capture_phase(
+                "backend_create_failed",
+                backend_id=backend_id,
+                reason=str(reason or ""),
+                step=step,
+                trigger_chip=self._trig_chip_name,
+                trigger_offset=self._trig_offset,
+                edge_chip=self._flash_chip_name,
+                edge_offset=self._flash_offset,
+                error=str(exc),
+                level="warning",
+            )
+            for line in (trigger_line, edge_line):
+                if line is None:
+                    continue
+                try:
+                    if line is trigger_line:
+                        line.set_value(0)
+                except Exception:
+                    pass
+                release = getattr(line, "release", None)
+                if callable(release):
+                    try:
+                        release()
+                    except Exception:
+                        pass
+            raise
 
     def _replace_capture_backend(self, *, reason=""):
         old_backend = None
@@ -698,6 +763,9 @@ class DropletCamera(QObject):
                 "camera_started": self.camera is not None,
                 "backend_id": getattr(backend, "backend_id", None),
                 "backend_open": bool(getattr(backend, "is_open", False)) if backend is not None else False,
+                "backend_available": backend is not None and bool(getattr(backend, "is_open", False)),
+                "backend_error": getattr(self, "_last_backend_error", None),
+                "backend_create_step": getattr(self, "_last_backend_create_step", None),
                 "grabber_running": bool(getattr(self, "_grab_running", False)),
             }
 

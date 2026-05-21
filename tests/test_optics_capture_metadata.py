@@ -202,6 +202,34 @@ def test_controller_clears_pending_callback_when_camera_rejects_capture():
     assert getattr(callback, "_capture_rejection_reason") == "machine_rejected"
 
 
+def test_controller_classifies_backend_unavailable_queue_rejection():
+    controller, machine, _camera_model = _make_controller()
+    callback = Mock()
+    machine.capture_return = False
+    machine.capture_state.update(
+        {
+            "backend_available": False,
+            "backend_error": "[Errno 16] Device or resource busy",
+            "backend_create_step": "edge_input",
+        }
+    )
+
+    assert controller.capture_droplet_image(callback=callback, capture_context="optics_scale_bar") is False
+
+    callback.assert_called_once_with(None)
+    assert getattr(callback, "_capture_rejection_reason") == "camera_backend_unavailable"
+
+
+def test_controller_classifies_missing_gpio_fd_as_backend_unsupported():
+    assert Controller._classify_capture_queue_rejection(
+        {
+            "camera_started": True,
+            "backend_available": False,
+            "backend_error": "gpio_edge_fd_unavailable: missing event_get_fd",
+        }
+    ) == "camera_backend_unsupported"
+
+
 def test_controller_blocks_overlapping_capture_until_frame_finishes():
     controller, machine, _camera_model = _make_controller()
 
@@ -213,6 +241,35 @@ def test_controller_blocks_overlapping_capture_until_frame_finishes():
 
     assert controller.capture_droplet_image() is True
     assert len(machine.capture_calls) == 2
+
+
+def test_controller_failed_edge_timeout_completion_clears_pending_before_guard_timeout():
+    controller, machine, _camera_model = _make_controller()
+    callback = Mock()
+
+    assert controller.capture_droplet_image(callback=callback) is True
+    request_id = controller.pending_capture_request_id
+    timer = controller.pending_capture_guard_timer
+
+    controller._on_capture_completed_payload(
+        {
+            "status": "failed",
+            "request_id": request_id,
+            "cap_id": 0,
+            "reason": "edge_timeout",
+            "error": "Flash capture failed after 1 attempts (last_reason=edge_timeout)",
+        }
+    )
+
+    callback.assert_called_once_with(None)
+    controller.model.calibration_manager.captureFailed.emit.assert_called_once()
+    assert controller.pending_capture_active is False
+    assert machine.recover_calls == []
+
+    controller._test_clock["value"] = 109.0
+    timer.fire()
+
+    assert machine.recover_calls == []
 
 
 def test_controller_overlapping_capture_resolves_waiting_callback():

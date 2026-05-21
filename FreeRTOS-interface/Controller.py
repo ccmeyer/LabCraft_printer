@@ -2576,6 +2576,11 @@ class Controller(QObject):
             return "camera_capture_active"
         if state.get("camera_started") is False:
             return "camera_not_started"
+        backend_error = str(state.get("backend_error") or "")
+        if "gpio_edge_fd_unavailable" in backend_error:
+            return "camera_backend_unsupported"
+        if backend_error or state.get("backend_available") is False:
+            return "camera_backend_unavailable"
         if state.get("flash_fault"):
             return "flash_fault"
         return "machine_rejected"

@@ -1,9 +1,12 @@
+import sys
 import threading
 import time
+import types
 
 import numpy as np
 import pytest
 
+import Machine_FreeRTOS as machine_mod
 from Machine_FreeRTOS import DropletCamera, StaleCaptureBackend
 
 
@@ -62,6 +65,23 @@ class _EdgeNoStaleThenFired:
 
     def release(self):
         pass
+
+
+class _EdgeNeverReady:
+    def __init__(self):
+        self.wait_calls = []
+        self.consume_count = 0
+        self.release_count = 0
+
+    def event_wait(self, timeout):
+        self.wait_calls.append(timeout)
+        return False
+
+    def event_consume(self):
+        self.consume_count += 1
+
+    def release(self):
+        self.release_count += 1
 
 
 class _TriggerLine:
@@ -146,6 +166,193 @@ def _install_fake_backend_factory(camera):
 
     camera._make_capture_backend = _make_capture_backend
     return created
+
+
+class _FakeGpiodLine:
+    def __init__(self, *, event_fd=None, has_event_fd=True):
+        self.event_fd = event_fd
+        self.has_event_fd = has_event_fd
+        self.request_calls = []
+        self.event_read_count = 0
+        self.event_wait_count = 0
+        self.release_count = 0
+
+    def request(self, **kwargs):
+        self.request_calls.append(dict(kwargs))
+
+    def event_get_fd(self):
+        if not self.has_event_fd:
+            raise AttributeError("event_get_fd unavailable")
+        return self.event_fd
+
+    def event_wait(self, _timeout):
+        self.event_wait_count += 1
+        raise AssertionError("native event_wait must not be called")
+
+    def event_read(self):
+        self.event_read_count += 1
+
+    def release(self):
+        self.release_count += 1
+
+
+class _FakeGpiodChip:
+    def __init__(self, line):
+        self.line = line
+
+    def get_line(self, _offset):
+        return self.line
+
+
+def _install_fake_gpiod(monkeypatch, line):
+    fake_gpiod = types.SimpleNamespace(
+        Chip=lambda _name: _FakeGpiodChip(line),
+        LINE_REQ_EV_RISING_EDGE=17,
+        LINE_REQ_FLAG_BIAS_PULL_DOWN=4,
+    )
+    monkeypatch.setitem(sys.modules, "gpiod", fake_gpiod)
+    return fake_gpiod
+
+
+def test_gpiod_v1_edge_wait_uses_fd_select_and_consumes_one_event(monkeypatch):
+    readiness = {"ready": False}
+    select_calls = []
+    monkeypatch.setattr(
+        machine_mod.select,
+        "select",
+        lambda r, w, x, timeout: select_calls.append((list(r), timeout))
+        or ((list(r) if readiness["ready"] else []), [], []),
+    )
+    line = _FakeGpiodLine(event_fd=123)
+    _install_fake_gpiod(monkeypatch, line)
+    edge = machine_mod._make_rising_edge_input("gpiochip-test", 22, consumer="unit")
+
+    assert edge.event_wait(0) is False
+    readiness["ready"] = True
+    assert edge.event_wait(0) is True
+    edge.event_consume()
+    edge.release()
+
+    assert select_calls == [([123], 0.0), ([123], 0.0)]
+    assert line.event_read_count == 1
+    assert line.event_wait_count == 0
+    assert line.release_count == 1
+
+
+def test_gpiod_v1_edge_wait_times_out_without_native_wait(monkeypatch):
+    select_calls = []
+    monkeypatch.setattr(
+        machine_mod.select,
+        "select",
+        lambda r, w, x, timeout: select_calls.append((list(r), timeout)) or ([], [], []),
+    )
+    line = _FakeGpiodLine(event_fd=456)
+    _install_fake_gpiod(monkeypatch, line)
+    edge = machine_mod._make_rising_edge_input("gpiochip-test", 22, consumer="unit")
+
+    assert edge.event_wait(0.001) is False
+    edge.release()
+
+    assert select_calls == [([456], 0.001)]
+    assert line.event_wait_count == 0
+
+
+def test_gpiod_v1_missing_event_fd_fails_without_unbounded_wait(monkeypatch):
+    line = _FakeGpiodLine(has_event_fd=False)
+    _install_fake_gpiod(monkeypatch, line)
+
+    with pytest.raises(RuntimeError, match="gpio_edge_fd_unavailable"):
+        machine_mod._make_rising_edge_input("gpiochip-test", 22, consumer="unit")
+
+    assert line.release_count == 1
+    assert line.event_wait_count == 0
+
+
+def _make_backend_creation_camera():
+    camera = DropletCamera.__new__(DropletCamera)
+    camera._capture_backend_seq = 0
+    camera._trig_chip_name = "gpiochip-trigger"
+    camera._trig_offset = 17
+    camera._flash_chip_name = "gpiochip-edge"
+    camera._flash_offset = 22
+    camera._cap_id = 0
+    camera._last_backend_error = None
+    camera._last_backend_create_step = None
+    camera.capture_phase_signal = _Signal()
+    camera._log_capture_phase = lambda *_args, **_kwargs: None
+    return camera
+
+
+def test_capture_backend_creation_opens_edge_before_trigger(monkeypatch):
+    camera = _make_backend_creation_camera()
+    calls = []
+    edge_line = _EdgeNeverReady()
+    trigger_line = _TriggerLine()
+
+    def _edge_factory(*_args, **_kwargs):
+        calls.append("edge")
+        return edge_line
+
+    def _trigger_factory(*_args, **_kwargs):
+        calls.append("trigger")
+        return trigger_line
+
+    monkeypatch.setattr(machine_mod, "_make_rising_edge_input", _edge_factory)
+    monkeypatch.setattr(machine_mod, "_make_output_line", _trigger_factory)
+
+    backend = DropletCamera._make_capture_backend(camera, reason="unit")
+
+    assert calls == ["edge", "trigger"]
+    assert backend.edge_line is edge_line
+    assert backend.trigger_line is trigger_line
+    assert camera._last_backend_error is None
+    assert camera._last_backend_create_step is None
+
+
+def test_capture_backend_creation_releases_edge_if_trigger_open_fails(monkeypatch):
+    camera = _make_backend_creation_camera()
+    edge_line = _EdgeNeverReady()
+    phases = []
+    camera._log_capture_phase = lambda phase, **payload: phases.append((phase, dict(payload)))
+
+    monkeypatch.setattr(machine_mod, "_make_rising_edge_input", lambda *_args, **_kwargs: edge_line)
+
+    def _trigger_factory(*_args, **_kwargs):
+        raise OSError(16, "Device or resource busy")
+
+    monkeypatch.setattr(machine_mod, "_make_output_line", _trigger_factory)
+
+    with pytest.raises(OSError):
+        DropletCamera._make_capture_backend(camera, reason="unit")
+
+    assert edge_line.wait_calls == []
+    assert edge_line.release_count == 1
+    assert camera._last_backend_create_step == "trigger_output"
+    assert "Device or resource busy" in camera._last_backend_error
+    assert phases[-1][0] == "backend_create_failed"
+    assert phases[-1][1]["step"] == "trigger_output"
+
+
+def test_capture_backend_creation_does_not_open_trigger_if_edge_open_fails(monkeypatch):
+    camera = _make_backend_creation_camera()
+    trigger_calls = []
+
+    def _edge_factory(*_args, **_kwargs):
+        raise RuntimeError("gpio_edge_fd_unavailable: missing fd")
+
+    def _trigger_factory(*_args, **_kwargs):
+        trigger_calls.append("trigger")
+        return _TriggerLine()
+
+    monkeypatch.setattr(machine_mod, "_make_rising_edge_input", _edge_factory)
+    monkeypatch.setattr(machine_mod, "_make_output_line", _trigger_factory)
+
+    with pytest.raises(RuntimeError, match="gpio_edge_fd_unavailable"):
+        DropletCamera._make_capture_backend(camera, reason="unit")
+
+    assert trigger_calls == []
+    assert camera._last_backend_create_step == "edge_input"
+    assert "gpio_edge_fd_unavailable" in camera._last_backend_error
 
 
 def test_capture_non_blocking_drops_trigger_when_edge_consume_raises():
@@ -315,6 +522,32 @@ def test_capture_worker_emits_exactly_one_failure_result_after_retry_failure():
     assert payloads[0]["request_id"] == "req-fail"
     assert failures == ["retry budget exhausted"]
     assert camera._capture_worker_active.is_set() is False
+
+
+def test_capture_worker_finishes_on_missing_flash_edge_without_stuck_active():
+    camera = _make_async_camera()
+    backend = _install_backend(camera, _FakeBackend("2", edge=_EdgeNeverReady()))
+    completion_seen = threading.Event()
+    payloads = []
+    failures = []
+
+    camera.capture_completed_signal.connect(lambda payload: payloads.append(dict(payload)) or completion_seen.set())
+    camera.capture_failed_signal.connect(lambda msg: failures.append(str(msg)))
+
+    assert DropletCamera.capture_with_retry_async(
+        camera,
+        attempts=1,
+        attempt_timeout_s=0.001,
+        request_id="req-no-edge",
+    ) is True
+    assert completion_seen.wait(1.0)
+
+    assert backend.edge_line.wait_calls == [0, 0.001]
+    assert backend.trigger_line.values == [1, 0]
+    assert payloads[0]["status"] == "failed"
+    assert payloads[0]["reason"] == "edge_timeout"
+    assert camera._capture_worker_active.is_set() is False
+    assert failures
 
 
 def test_recover_stale_capture_releases_trigger_done_and_worker_active():
