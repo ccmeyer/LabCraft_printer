@@ -60,6 +60,49 @@ def test_disconnect_droplet_camera_signals_only_removes_controller_handlers():
     assert external_calls["img"] == 1
 
 
+def test_camera_capture_phase_signal_records_active_calibration_event():
+    c = Controller.__new__(Controller)
+
+    capture = FakeSignal()
+    move = FakeSignal()
+    move_abs = FakeSignal()
+    settings = FakeSignal()
+    completion = FakeSignal()
+    phase = FakeSignal()
+    recorded = []
+
+    c.model = SimpleNamespace(
+        calibration_manager=SimpleNamespace(
+            captureImageRequested=capture,
+            moveRequested=move,
+            moveAbsoluteRequested=move_abs,
+            changeSettingsRequested=settings,
+            activeCalibration=SimpleNamespace(
+                _record_event=lambda event_type, payload, level="info": recorded.append(
+                    (event_type, dict(payload), level)
+                )
+            ),
+        )
+    )
+    c.machine = SimpleNamespace(
+        droplet_camera=SimpleNamespace(
+            capture_completed_signal=completion,
+            capture_phase_signal=phase,
+        )
+    )
+
+    Controller.connect_droplet_camera_signals(c)
+    phase.emit({"phase": "backend_created", "backend_id": "2", "level": "warning"})
+
+    assert recorded == [
+        (
+            "camera_capture_phase",
+            {"phase": "backend_created", "backend_id": "2", "level": "warning"},
+            "warning",
+        )
+    ]
+
+
 def test_handle_settings_change_request_binds_traced_commands_to_machine_snapshot():
     c = Controller.__new__(Controller)
 

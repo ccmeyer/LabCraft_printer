@@ -68,7 +68,7 @@ class _Machine:
         self.recover_calls = []
         self.commands_idle = True
         self.capture_return = True
-        self.recover_return = {"ok": True}
+        self.recover_return = {"ok": True, "ready_for_retry": True}
         self.capture_state = {
             "cap_active": False,
             "worker_active": False,
@@ -142,6 +142,8 @@ def _make_controller():
     controller.pending_capture_request_id = None
     controller.pending_capture_recovery_attempted = False
     controller.pending_capture_throughput_mode = False
+    controller.last_capture_queue_rejection_reason = None
+    controller.last_capture_queue_rejection_state = None
     controller._timer_factory = lambda _parent: _CaptureGuardTimer()
     controller._monotonic_fn = lambda: clock["value"]
     controller._test_clock = clock
@@ -197,6 +199,7 @@ def test_controller_clears_pending_callback_when_camera_rejects_capture():
     assert controller.pending_capture_context is None
     assert controller.pending_capture_active is False
     callback.assert_called_once_with(None)
+    assert getattr(callback, "_capture_rejection_reason") == "machine_rejected"
 
 
 def test_controller_blocks_overlapping_capture_until_frame_finishes():
@@ -284,6 +287,7 @@ def test_controller_second_capture_timeout_fails_cleanly_and_allows_manual_captu
     controller._test_clock["value"] = 116.50
     controller.pending_capture_guard_timer.fire()
 
+    assert len(machine.recover_calls) == 2
     callback.assert_called_once_with(None)
     controller.model.calibration_manager.captureFailed.emit.assert_called_once()
     assert controller.pending_capture_callback is None
@@ -291,6 +295,26 @@ def test_controller_second_capture_timeout_fails_cleanly_and_allows_manual_captu
 
     assert controller.capture_droplet_image() is True
     assert len(machine.capture_calls) == 3
+
+
+def test_controller_timeout_without_retry_ready_fails_and_allows_manual_capture():
+    controller, machine, _camera_model = _make_controller()
+    callback = Mock()
+    machine.recover_return = {"ok": True, "ready_for_retry": False}
+
+    assert controller.capture_droplet_image(callback=callback) is True
+    controller._test_clock["value"] = 108.25
+    controller.pending_capture_guard_timer.fire()
+
+    assert len(machine.recover_calls) == 1
+    assert len(machine.capture_calls) == 1
+    callback.assert_called_once_with(None)
+    controller.model.calibration_manager.captureFailed.emit.assert_called_once()
+    assert controller.pending_capture_callback is None
+    assert controller.pending_capture_active is False
+
+    assert controller.capture_droplet_image() is True
+    assert len(machine.capture_calls) == 2
 
 
 def test_controller_late_stale_completion_cannot_satisfy_requeued_capture():

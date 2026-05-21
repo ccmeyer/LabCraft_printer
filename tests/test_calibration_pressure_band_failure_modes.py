@@ -7,7 +7,88 @@ from tests.calibration_test_utils import Recorder, SignalStub, ensure_calibratio
 
 ensure_calibration_import_stubs()
 
-from CalibrationClasses.Model import PressureBandCalibrationProcess  # noqa: E402
+import CalibrationClasses.Model as calibration_model  # noqa: E402
+from CalibrationClasses.Model import BaseCalibrationProcess, PressureBandCalibrationProcess  # noqa: E402
+
+
+class _BusyThenSuccessCaptureSignal:
+    def __init__(self):
+        self.emit_count = 0
+
+    def emit(self, callback):
+        self.emit_count += 1
+        if self.emit_count == 1:
+            callback._capture_rejection_reason = "controller_pending"
+            callback._capture_rejection_state = {"worker_active": True}
+            callback(None)
+            return
+        callback(np.zeros((8, 8, 3), dtype=np.uint8))
+
+
+def test_capture_policy_busy_rejection_backs_off_without_consuming_attempt(monkeypatch):
+    proc = BaseCalibrationProcess.__new__(BaseCalibrationProcess)
+    events = []
+    saved = []
+    completed = []
+    scheduled = []
+    proc._record_event = lambda event_type, payload=None, **kwargs: events.append(
+        (str(event_type), dict(payload or {}), dict(kwargs or {}))
+    )
+    proc._record_error = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("busy rejection should not fail the capture")
+    )
+    proc._start_timeout = lambda *_args, **_kwargs: object()
+    proc._cancel_timeout = lambda *_args, **_kwargs: None
+    proc._last_capture_refs = {}
+    proc._active_capture_pair_id = None
+    proc._record_capture = lambda frame, role="capture", metadata=None: saved.append(
+        {"role": role, "metadata": dict(metadata or {})}
+    ) or {"capture_id": "cap-test", "image_relpath": "captures/cap-test.jpg"}
+    proc.calibration_manager = SimpleNamespace(
+        captureImageRequested=_BusyThenSuccessCaptureSignal(),
+        emitCaptureCompleted=lambda: completed.append(True),
+    )
+    monkeypatch.setattr(
+        calibration_model.QTimer,
+        "singleShot",
+        lambda delay_ms, callback: scheduled.append((int(delay_ms), callback)),
+    )
+
+    BaseCalibrationProcess._capture_with_policy(
+        proc,
+        set_attr="droplet_image",
+        stage_text="unit capture",
+        attempts_total=2,
+        guard_timeout_ms=5_000,
+        busy_retry_delay_ms=1_000,
+    )
+
+    assert scheduled and scheduled[0][0] == 1_000
+    busy_events = [payload for event_type, payload, _kwargs in events if event_type == "capture_busy_retry"]
+    assert busy_events
+    assert busy_events[0]["attempt"] == 1
+
+    scheduled.pop(0)[1]()
+
+    success_events = [payload for event_type, payload, _kwargs in events if event_type == "capture_result"]
+    assert success_events[-1]["status"] == "success"
+    assert success_events[-1]["attempt"] == 1
+    assert saved and saved[-1]["metadata"]["attempt"] == 1
+    assert completed == [True]
+
+
+def test_pressure_band_replicate_capture_uses_extended_guard_for_recovery_retry():
+    proc = PressureBandCalibrationProcess.__new__(PressureBandCalibrationProcess)
+    proc._current_pressure = 0.65
+    proc.reps = []
+    proc.replicates_target = 3
+    captured = {}
+    proc._capture_with_policy = lambda **kwargs: captured.update(kwargs)
+
+    proc.onCaptureReplicate()
+
+    assert captured["attempts_total"] == 5
+    assert captured["guard_timeout_ms"] == 15_000
 
 
 def _rep(cls_name: str, *, dy: int | None = None, cy: int | None = None, h: int = 1536):

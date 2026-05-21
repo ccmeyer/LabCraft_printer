@@ -6794,6 +6794,7 @@ class BaseCalibrationProcess(QObject):
         attempts_total: int = 3,      # total number of tries (first + retries)
         retry_delay_ms: int = 75,     # delay between tries
         guard_timeout_ms: int = 10_000,  # hard guard for each try
+        busy_retry_delay_ms: int = 1_000,
         retry_stage_suffix: str = " (retry {i}/{n})",  # appended to stage text on retries
         on_success = None,  # called after setting the attribute (optional)
         on_final_failure = None,  # called after we exhaust attempts (optional)
@@ -6806,8 +6807,11 @@ class BaseCalibrationProcess(QObject):
         """
 
         # We track attempts in a small closure state
-        state = {"attempt": 1}  # 1-based for user-friendly messages
+        state = {"attempt": 1, "busy_retries": 0}  # 1-based for user-friendly messages
         guard_timer_ref = {"t": None}  # so we can cancel from inner callback
+        busy_retry_reasons = {"controller_pending", "camera_worker_active"}
+        busy_retry_delay_ms = int(max(1, busy_retry_delay_ms))
+        busy_retry_limit = max(1, int(math.ceil(max(1, int(guard_timeout_ms)) / busy_retry_delay_ms)))
 
         def _arm_one_attempt():
             self._record_event(
@@ -6841,6 +6845,39 @@ class BaseCalibrationProcess(QObject):
                 guard_timer_ref["t"] = None
 
                 if frame is None:
+                    rejection_reason = str(getattr(_on_result, "_capture_rejection_reason", "") or "")
+                    if rejection_reason in busy_retry_reasons and state["busy_retries"] < busy_retry_limit:
+                        state["busy_retries"] += 1
+                        self._record_event(
+                            "capture_busy_retry",
+                            {
+                                "set_attr": str(set_attr),
+                                "stage_text": str(stage_text),
+                                "attempt": int(state["attempt"]),
+                                "attempts_total": int(attempts_total),
+                                "busy_retry": int(state["busy_retries"]),
+                                "busy_retry_limit": int(busy_retry_limit),
+                                "retry_delay_ms": int(busy_retry_delay_ms),
+                                "reason": rejection_reason,
+                                "state": getattr(_on_result, "_capture_rejection_state", None) or {},
+                            },
+                            level="warning",
+                        )
+                        QTimer.singleShot(busy_retry_delay_ms, _arm_one_attempt)
+                        return
+                    if rejection_reason in busy_retry_reasons:
+                        self._record_event(
+                            "capture_busy_retry_exhausted",
+                            {
+                                "set_attr": str(set_attr),
+                                "stage_text": str(stage_text),
+                                "attempt": int(state["attempt"]),
+                                "attempts_total": int(attempts_total),
+                                "busy_retry_limit": int(busy_retry_limit),
+                                "reason": rejection_reason,
+                            },
+                            level="warning",
+                        )
                     self._record_event(
                         "capture_result",
                         {
@@ -6848,12 +6885,14 @@ class BaseCalibrationProcess(QObject):
                             "stage_text": str(stage_text),
                             "attempt": int(state["attempt"]),
                             "status": "failed",
+                            "rejection_reason": rejection_reason,
                         },
                         level="warning",
                     )
                     # Failed this attempt
                     if state["attempt"] < attempts_total:
                         state["attempt"] += 1
+                        state["busy_retries"] = 0
                         # Schedule the next try
                         QTimer.singleShot(retry_delay_ms, _arm_one_attempt)
                         return
@@ -17814,7 +17853,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self._capture_with_policy(
             set_attr="droplet_image",
             stage_text=f"Capturing @ {self._current_pressure:.3f} psi (rep {len(self.reps)+1}/{self.replicates_target})",
-            attempts_total=5, retry_delay_ms=75, guard_timeout_ms=10_000,
+            attempts_total=5, retry_delay_ms=75, guard_timeout_ms=15_000,
             final_error_msg=f"Capture failed @ {self._current_pressure:.3f} psi"
         )
 

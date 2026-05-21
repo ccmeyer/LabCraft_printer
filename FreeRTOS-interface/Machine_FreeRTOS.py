@@ -282,10 +282,131 @@ def _make_rising_edge_input(chip_name, offset, consumer="gpio_in"):
 
 # ---------- DropletCamera: grabber-driven flash detection with time gating ----------
 
+class StaleCaptureBackend(RuntimeError):
+    """Raised when an old capture worker touches a backend after recovery replaced it."""
+
+
+class _DropletCaptureBackend:
+    def __init__(self, backend_id, trigger_line, edge_line):
+        self.backend_id = str(backend_id)
+        self.trigger_line = trigger_line
+        self.edge_line = edge_line
+        self._released = False
+        self._lock = threading.Lock()
+
+    @property
+    def is_open(self):
+        with self._lock:
+            return not self._released
+
+    def _line_or_stale(self, attr_name, action):
+        with self._lock:
+            if self._released:
+                raise StaleCaptureBackend(
+                    f"capture backend {self.backend_id} is stale during {action}"
+                )
+            return getattr(self, attr_name)
+
+    def _raise_if_released_after(self, action):
+        with self._lock:
+            if self._released:
+                raise StaleCaptureBackend(
+                    f"capture backend {self.backend_id} was released during {action}"
+                )
+
+    def trigger_high(self):
+        line = self._line_or_stale("trigger_line", "trigger_high")
+        line.set_value(1)
+        self._raise_if_released_after("trigger_high")
+
+    def trigger_low(self):
+        line = self._line_or_stale("trigger_line", "trigger_low")
+        line.set_value(0)
+        self._raise_if_released_after("trigger_low")
+
+    def event_wait(self, timeout):
+        edge = self._line_or_stale("edge_line", "event_wait")
+        try:
+            fired = edge.event_wait(timeout)
+        except Exception as exc:
+            with self._lock:
+                released = self._released
+            if released:
+                raise StaleCaptureBackend(
+                    f"capture backend {self.backend_id} released while waiting for edge"
+                ) from exc
+            raise
+        self._raise_if_released_after("event_wait")
+        return fired
+
+    def event_consume(self):
+        edge = self._line_or_stale("edge_line", "event_consume")
+        try:
+            edge.event_consume()
+        except Exception as exc:
+            with self._lock:
+                released = self._released
+            if released:
+                raise StaleCaptureBackend(
+                    f"capture backend {self.backend_id} released while consuming edge"
+                ) from exc
+            raise
+        self._raise_if_released_after("event_consume")
+
+    def release(self):
+        with self._lock:
+            if self._released:
+                return False
+            self._released = True
+            trigger_line = self.trigger_line
+            edge_line = self.edge_line
+
+        try:
+            trigger_line.set_value(0)
+        except Exception:
+            pass
+        for line in (edge_line, trigger_line):
+            release = getattr(line, "release", None)
+            if callable(release):
+                try:
+                    release()
+                except Exception:
+                    pass
+        return True
+
+
+class _OwnerCaptureBackendAdapter:
+    """Compatibility backend for tests or legacy instances built without __init__."""
+
+    backend_id = "legacy-owner"
+
+    @property
+    def is_open(self):
+        return True
+
+    def __init__(self, owner):
+        self._owner = owner
+
+    def trigger_high(self):
+        self._owner._trigger_high()
+
+    def trigger_low(self):
+        self._owner._trigger_low()
+
+    def event_wait(self, timeout):
+        return self._owner._edge_in.event_wait(timeout)
+
+    def event_consume(self):
+        return self._owner._edge_in.event_consume()
+
+    def release(self):
+        return False
+
 class DropletCamera(QObject):
     image_captured_signal = Signal()
     capture_completed_signal = Signal(object)
     capture_failed_signal = Signal(str)  # emits error message on failure
+    capture_phase_signal = Signal(object)
 
     def __init__(self):
         super().__init__()
@@ -294,10 +415,14 @@ class DropletCamera(QObject):
         self.flash_fired_in_bcm  = 22   # MCU -> Pi flash-ack
 
         # self._chip_name = "gpiochip4"
-        self._trig_chip_name, off = _gpiofind("GPIO"+str(self.trigger_pin_out_bcm))
-        self._trig_line = _make_output_line(self._trig_chip_name, off, initial=0)
-        self._flash_chip_name, off = _gpiofind("GPIO"+str(self.flash_fired_in_bcm))
-        self._edge_in   = _make_rising_edge_input(self._flash_chip_name, off)
+        self._trig_chip_name, self._trig_offset = _gpiofind("GPIO"+str(self.trigger_pin_out_bcm))
+        self._flash_chip_name, self._flash_offset = _gpiofind("GPIO"+str(self.flash_fired_in_bcm))
+        self._backend_lock = threading.Lock()
+        self._capture_backend_seq = 0
+        self._capture_backend = None
+        self._trig_line = None
+        self._edge_in = None
+        self._replace_capture_backend(reason="init")
 
         # camera
         self.camera = None
@@ -371,12 +496,124 @@ class DropletCamera(QObject):
             return float(np.mean(arr))
 
     # --- GPIO ---
-    def _trigger_high(self): 
+    def _trigger_high(self):
         # print("[Pi] trigger HIGH")
+        backend = self._get_current_capture_backend()
+        if backend is not None:
+            backend.trigger_high()
+            return
         self._trig_line.set_value(1)
-    def _trigger_low(self): 
+    def _trigger_low(self):
         # print("[Pi] trigger LOW")
-        self._trig_line.set_value(0)
+        backend = self._get_current_capture_backend()
+        if backend is not None:
+            backend.trigger_low()
+            return
+        if self._trig_line is not None:
+            self._trig_line.set_value(0)
+
+    def _make_capture_backend(self, *, reason=""):
+        self._capture_backend_seq = int(getattr(self, "_capture_backend_seq", 0)) + 1
+        backend_id = self._capture_backend_seq
+        trigger_line = _make_output_line(
+            self._trig_chip_name,
+            self._trig_offset,
+            initial=0,
+            consumer="droplet_trigger",
+        )
+        edge_line = _make_rising_edge_input(
+            self._flash_chip_name,
+            self._flash_offset,
+            consumer="droplet_flash_edge",
+        )
+        backend = _DropletCaptureBackend(backend_id, trigger_line, edge_line)
+        self._log_capture_phase("backend_created", backend=backend, reason=str(reason or ""))
+        return backend
+
+    def _replace_capture_backend(self, *, reason=""):
+        old_backend = None
+        lock = getattr(self, "_backend_lock", None)
+        if lock is None:
+            self._backend_lock = threading.Lock()
+            lock = self._backend_lock
+        with lock:
+            old_backend = getattr(self, "_capture_backend", None)
+            self._capture_backend = None
+            self._trig_line = None
+            self._edge_in = None
+
+        if old_backend is not None:
+            released = False
+            try:
+                released = bool(old_backend.release())
+            finally:
+                self._log_capture_phase(
+                    "backend_released",
+                    backend=old_backend,
+                    reason=str(reason or ""),
+                    released=released,
+                )
+
+        backend = self._make_capture_backend(reason=reason)
+        with lock:
+            self._capture_backend = backend
+            self._trig_line = backend.trigger_line
+            self._edge_in = backend.edge_line
+        return backend
+
+    def _get_current_capture_backend(self):
+        lock = getattr(self, "_backend_lock", None)
+        if lock is None:
+            return getattr(self, "_capture_backend", None)
+        with lock:
+            return getattr(self, "_capture_backend", None)
+
+    def _resolve_capture_backend(self, backend=None):
+        if backend is not None:
+            return backend
+        current = self._get_current_capture_backend()
+        if current is not None:
+            return current
+        if getattr(self, "_edge_in", None) is not None:
+            return _OwnerCaptureBackendAdapter(self)
+        return None
+
+    def _capture_backend_id(self, backend=None):
+        backend = self._resolve_capture_backend(backend)
+        return getattr(backend, "backend_id", None)
+
+    def _is_worker_context_stale(self, *, backend=None, generation=None):
+        if generation is not None and hasattr(self, "_capture_generation"):
+            try:
+                if int(generation) != int(getattr(self, "_capture_generation", 0)):
+                    return True
+            except Exception:
+                return True
+        current = self._get_current_capture_backend()
+        if backend is not None and current is not None:
+            return getattr(backend, "backend_id", None) != getattr(current, "backend_id", None)
+        return False
+
+    def _raise_if_worker_context_stale(self, *, backend=None, generation=None, action="capture"):
+        if self._is_worker_context_stale(backend=backend, generation=generation):
+            raise StaleCaptureBackend(f"capture worker context is stale during {action}")
+
+    def _camera_ready_for_capture(self):
+        if self.camera is None:
+            return False
+        if hasattr(self, "_grab_running") and not bool(getattr(self, "_grab_running", False)):
+            return False
+        thread = getattr(self, "_grab_thread", None)
+        if thread is not None:
+            try:
+                return bool(thread.is_alive())
+            except Exception:
+                return False
+        return True
+
+    def _capture_backend_ready(self):
+        backend = self._get_current_capture_backend()
+        return backend is not None and bool(getattr(backend, "is_open", False))
 
     # --- camera lifecycle ---
     def start_camera(self):
@@ -447,22 +684,110 @@ class DropletCamera(QObject):
             return None
 
     def get_capture_state(self) -> dict:
+        worker = getattr(self, "_capture_worker_thread", None)
+        backend = self._get_current_capture_backend()
         with self._cv:
             return {
                 "cap_active": bool(self._cap_active),
                 "worker_active": bool(self._capture_worker_active.is_set()),
+                "worker_thread_alive": bool(worker is not None and worker.is_alive()),
                 "generation": int(getattr(self, "_capture_generation", 0)),
                 "cap_id": int(getattr(self, "_cap_id", 0)),
                 "request_id": getattr(self, "_cap_request_id", None),
                 "cap_done": bool(self._cap_done.is_set()),
                 "camera_started": self.camera is not None,
+                "backend_id": getattr(backend, "backend_id", None),
+                "backend_open": bool(getattr(backend, "is_open", False)) if backend is not None else False,
+                "grabber_running": bool(getattr(self, "_grab_running", False)),
             }
+
+    def _log_capture_phase(
+        self,
+        phase: str,
+        *,
+        request_id=None,
+        generation=None,
+        started_ns=None,
+        backend=None,
+        backend_id=None,
+        level="info",
+        **fields,
+    ):
+        elapsed_ms = 0.0
+        if started_ns is not None:
+            try:
+                elapsed_ms = (time.monotonic_ns() - int(started_ns)) / 1_000_000.0
+            except Exception:
+                elapsed_ms = 0.0
+        if backend_id is None and backend is not None:
+            backend_id = getattr(backend, "backend_id", None)
+        details = {
+            "request_id": request_id,
+            "gen": generation,
+            "cap_id": int(getattr(self, "_cap_id", 0)),
+            "backend_id": backend_id,
+            "elapsed_ms": f"{elapsed_ms:.1f}",
+        }
+        details.update(fields)
+        print("[CameraPhase] " + str(phase) + " " + " ".join(f"{k}={v}" for k, v in details.items()))
+        payload = {
+            "phase": str(phase),
+            "request_id": request_id,
+            "generation": generation,
+            "cap_id": int(getattr(self, "_cap_id", 0)),
+            "backend_id": backend_id,
+            "elapsed_ms": float(elapsed_ms),
+            "level": str(level or "info"),
+        }
+        payload.update(fields)
+        try:
+            self.capture_phase_signal.emit(payload)
+        except Exception as exc:
+            if str(phase) != "capture_phase_signal_error":
+                print(f"[Camera] capture phase signal failed phase={phase}: {exc}")
+
+    def _set_capture_failure_result(self, reason: str, *, request_id=None, generation=None, error=None, **extra):
+        with self._cv:
+            self._cap_active = False
+            self._cap_result = {
+                "arr": None,
+                "md": None,
+                "mean": 0.0,
+                "reason": str(reason),
+                "threshold": 0.0,
+                "cap_id": int(getattr(self, "_cap_id", 0)),
+                "request_id": request_id,
+                "generation": generation,
+            }
+            if error is not None:
+                self._cap_result["error"] = str(error)
+            self._cap_result.update(extra)
+            self._cap_done.set()
+            self._cv.notify_all()
 
     def recover_stale_capture(self, reason: str = "") -> dict:
         reason = str(reason or "stale_capture_recovery")
         restarted = False
+        backend_reopened = False
+        backend_error = None
+        ready_for_retry = False
         worker_alive_after_join = False
-        self._trigger_low()
+        old_backend = self._get_current_capture_backend()
+        self._log_capture_phase(
+            "recovery_start",
+            backend=old_backend,
+            reason=reason,
+            level="warning",
+        )
+        try:
+            if old_backend is not None:
+                old_backend.trigger_low()
+            else:
+                self._trigger_low()
+        except StaleCaptureBackend:
+            pass
+        except Exception as exc:
+            print(f"[Camera] recovery trigger-low failed: {exc}")
         with self._cv:
             self._capture_generation += 1
             generation = int(self._capture_generation)
@@ -478,6 +803,7 @@ class DropletCamera(QObject):
                 "threshold": 0.0,
                 "cap_id": int(getattr(self, "_cap_id", 0)),
                 "generation": generation,
+                "backend_id": getattr(old_backend, "backend_id", None),
             }
             self._cap_done.set()
             self._cv.notify_all()
@@ -491,6 +817,13 @@ class DropletCamera(QObject):
 
         self._capture_worker_active.clear()
 
+        try:
+            self._replace_capture_backend(reason=reason)
+            backend_reopened = True
+        except Exception as exc:
+            backend_error = str(exc)
+            print(f"[Camera] recovery backend reopen failed: {exc}")
+
         if worker_alive_after_join and self.camera is not None:
             try:
                 self.stop_camera()
@@ -498,14 +831,41 @@ class DropletCamera(QObject):
                 restarted = True
             except Exception as exc:
                 print(f"[Camera] recovery camera restart failed: {exc}")
+        backend_ready = backend_reopened and self._capture_backend_ready()
+        camera_ready = self._camera_ready_for_capture()
+        if worker_alive_after_join and self.camera is not None and not restarted:
+            camera_ready = False
+        ready_for_retry = bool(backend_ready and camera_ready)
 
-        return {
+        result = {
             "ok": True,
+            "ready_for_retry": bool(ready_for_retry),
             "reason": reason,
             "generation": generation,
             "worker_alive_after_join": worker_alive_after_join,
             "camera_restarted": restarted,
+            "backend_reopened": backend_reopened,
+            "backend_id": self._capture_backend_id(),
+            "backend_ready": bool(backend_ready),
+            "camera_ready": bool(camera_ready),
         }
+        if backend_error:
+            result["backend_error"] = backend_error
+            result["ok"] = False
+        self._log_capture_phase(
+            "recovery_end",
+            backend=self._get_current_capture_backend(),
+            generation=generation,
+            reason=reason,
+            ready_for_retry=bool(ready_for_retry),
+            worker_alive_after_join=worker_alive_after_join,
+            camera_restarted=restarted,
+            backend_reopened=backend_reopened,
+            backend_ready=bool(backend_ready),
+            camera_ready=bool(camera_ready),
+            level="warning",
+        )
+        return result
 
     def change_exposure_time(self, exposure_time_us, handler=None):
         self.exposure_time = int(exposure_time_us)
@@ -573,6 +933,7 @@ class DropletCamera(QObject):
             arr = cv2.rotate(arr, cv2.ROTATE_90_CLOCKWISE)
 
         self.latest_frame = arr
+        backend = self._get_current_capture_backend()
         self._cap_result = {
             "arr": arr,
             "md": md,
@@ -582,6 +943,7 @@ class DropletCamera(QObject):
             "cap_id": int(self._cap_id),
             "request_id": getattr(self, "_cap_request_id", None),
             "generation": int(getattr(self, "_capture_generation", 0)),
+            "backend_id": getattr(backend, "backend_id", None),
         }
         self._cap_done.set()
         # print(f"[Chosen] mean={mean:.1f} reason={reason} "
@@ -621,28 +983,34 @@ class DropletCamera(QObject):
         emit_signal=True,
         request_id=None,
         generation=None,
+        backend=None,
+        backend_id=None,
     ):
         """
         Arms a single attempt. The grabber will complete it and either emit
         image_captured_signal (if emit_signal=True) or just set _cap_result/_cap_done.
         """
+        phase_started_ns = time.monotonic_ns()
+        backend = self._resolve_capture_backend(backend)
+        backend_id = backend_id if backend_id is not None else getattr(backend, "backend_id", None)
         if not self.camera:
             print("Camera not started.")
-            with self._cv:
-                self._cap_active = False
-                self._cap_request_id = request_id
-                self._cap_result = {
-                    "arr": None,
-                    "md": None,
-                    "mean": 0.0,
-                    "reason": "camera_not_started",
-                    "threshold": 0.0,
-                    "cap_id": self._cap_id,
-                    "request_id": request_id,
-                    "generation": generation,
-                }
-                self._cap_done.set()
+            self._set_capture_failure_result(
+                "camera_not_started",
+                request_id=request_id,
+                generation=generation,
+                backend_id=backend_id,
+            )
             return
+        if backend is None:
+            self._set_capture_failure_result(
+                "backend_not_available",
+                request_id=request_id,
+                generation=generation,
+                backend_id=backend_id,
+            )
+            return
+        self._raise_if_worker_context_stale(backend=backend, generation=generation, action="capture_non_blocking")
 
         with self._cv:
             self._cap_done.clear()
@@ -650,55 +1018,153 @@ class DropletCamera(QObject):
             self._cap_request_id = request_id
 
         # Drain stale edges from previous runs
-        while self._edge_in.event_wait(0):
-            self._edge_in.event_consume()
+        drain_start_ns = time.monotonic_ns()
+        drain_count = 0
+        drain_max_edges = int(getattr(self, "prearm_drain_max_edges", 16))
+        drain_timeout_s = float(getattr(self, "prearm_drain_timeout_s", 0.050))
+        self._log_capture_phase(
+            "drain_start",
+            request_id=request_id,
+            generation=generation,
+            started_ns=phase_started_ns,
+            backend=backend,
+            drain_max_edges=drain_max_edges,
+            drain_timeout_ms=f"{drain_timeout_s * 1000.0:.1f}",
+        )
+        while backend.event_wait(0):
+            self._raise_if_worker_context_stale(backend=backend, generation=generation, action="stale_edge_drain")
+            backend.event_consume()
+            drain_count += 1
+            elapsed_s = (time.monotonic_ns() - drain_start_ns) / 1_000_000_000.0
+            if drain_count >= drain_max_edges or elapsed_s >= drain_timeout_s:
+                try:
+                    backend.trigger_low()
+                except StaleCaptureBackend:
+                    pass
+                self._log_capture_phase(
+                    "drain_stuck",
+                    request_id=request_id,
+                    generation=generation,
+                    started_ns=phase_started_ns,
+                    backend=backend,
+                    drained_edges=drain_count,
+                    elapsed_drain_ms=f"{elapsed_s * 1000.0:.1f}",
+                )
+                self._set_capture_failure_result(
+                    "edge_drain_stuck",
+                    request_id=request_id,
+                    generation=generation,
+                    backend_id=backend_id,
+                    drained_edges=drain_count,
+                    drain_elapsed_ms=float(elapsed_s * 1000.0),
+                )
+                return
+        self._log_capture_phase(
+            "drain_done",
+            request_id=request_id,
+            generation=generation,
+            started_ns=phase_started_ns,
+            backend=backend,
+            drained_edges=drain_count,
+        )
 
         trigger_asserted = False
         try:
+            self._raise_if_worker_context_stale(backend=backend, generation=generation, action="trigger_high")
             # Raise trigger to MCU
-            self._trigger_high()
+            backend.trigger_high()
             trigger_asserted = True
+            self._log_capture_phase(
+                "trigger_high",
+                request_id=request_id,
+                generation=generation,
+                started_ns=phase_started_ns,
+                backend=backend,
+                drained_edges=drain_count,
+            )
 
             # Wait for MCU "flash fired" ACK
             try:
-                fired = self._edge_in.event_wait(timeout_s)
+                self._log_capture_phase(
+                    "edge_wait_start",
+                    request_id=request_id,
+                    generation=generation,
+                    started_ns=phase_started_ns,
+                    backend=backend,
+                    timeout_s=timeout_s,
+                    drained_edges=drain_count,
+                )
+                fired = backend.event_wait(timeout_s)
+                self._raise_if_worker_context_stale(backend=backend, generation=generation, action="edge_wait")
+                self._log_capture_phase(
+                    "edge_wait_done",
+                    request_id=request_id,
+                    generation=generation,
+                    started_ns=phase_started_ns,
+                    backend=backend,
+                    fired=bool(fired),
+                    drained_edges=drain_count,
+                )
+            except StaleCaptureBackend:
+                raise
             except Exception as e:
                 print(f"Error while waiting for flash-fired edge: {e}")
-                with self._cv:
-                    self._cap_active = False
-                    self._cap_result = {
-                        "arr": None,
-                        "md": None,
-                        "mean": 0.0,
-                        "reason": "edge_wait_error",
-                        "error": str(e),
-                        "threshold": 0.0,
-                        "cap_id": self._cap_id,
-                        "request_id": request_id,
-                        "generation": generation,
-                    }
-                    self._cap_done.set()
+                self._log_capture_phase(
+                    "backend_error",
+                    request_id=request_id,
+                    generation=generation,
+                    started_ns=phase_started_ns,
+                    backend=backend,
+                    error=str(e),
+                    level="warning",
+                )
+                self._set_capture_failure_result(
+                    "edge_wait_error",
+                    request_id=request_id,
+                    generation=generation,
+                    error=str(e),
+                    backend_id=backend_id,
+                    drained_edges=drain_count,
+                )
                 return
 
             if not fired:
                 print("Timed out waiting for flash-fired edge.")
-                with self._cv:
-                    self._cap_active = False
-                    self._cap_result = {"arr": None, "md": None, "mean": 0.0,
-                                        "reason": "edge_timeout", "threshold": 0.0, "cap_id": self._cap_id,
-                                        "request_id": request_id, "generation": generation}
-                    self._cap_done.set()
+                self._set_capture_failure_result(
+                    "edge_timeout",
+                    request_id=request_id,
+                    generation=generation,
+                    backend_id=backend_id,
+                    drained_edges=drain_count,
+                )
                 return
-            self._edge_in.event_consume()
+            backend.event_consume()
+            self._log_capture_phase(
+                "edge_consume_done",
+                request_id=request_id,
+                generation=generation,
+                started_ns=phase_started_ns,
+                backend=backend,
+                drained_edges=drain_count,
+            )
         finally:
             if trigger_asserted:
                 # Always deassert the Pi trigger, even if edge consumption or
                 # GPIO waiting raises. Leaving it high can latch firmware flash
                 # safety and block later captures until restart.
-                self._trigger_low()
+                backend.trigger_low()
 
         # Arm the time gate AFTER the ack
+        self._raise_if_worker_context_stale(backend=backend, generation=generation, action="arm_start")
         arm_ns = time.monotonic_ns()
+        self._log_capture_phase(
+            "arm_start",
+            request_id=request_id,
+            generation=generation,
+            started_ns=phase_started_ns,
+            backend=backend,
+            drained_edges=drain_count,
+        )
         with self._cv:
             base_mean, base_std = self._baseline_before_ns_locked(arm_ns, N=4)
             threshold = base_mean + self.k_sigma * max(base_std, 1.0) + self.min_delta
@@ -720,6 +1186,7 @@ class DropletCamera(QObject):
 
             print(
                 f"[Arm] request_id={request_id} gen={generation} cap_id={self._cap_id} "
+                f"backend_id={backend_id} "
                 f"base_mean={base_mean:.1f} base_std={base_std:.1f} "
                 f"threshold={threshold:.1f} arm_ns={arm_ns}"
             )
@@ -734,6 +1201,8 @@ class DropletCamera(QObject):
         success_reasons=("threshold",),
         request_id=None,
         generation=None,
+        backend=None,
+        backend_id=None,
     ) -> dict:
         """
         Block until we get a 'threshold' capture or exhaust attempts.
@@ -741,14 +1210,37 @@ class DropletCamera(QObject):
         Raises RuntimeError on failure.
         """
         last_reason = None
+        backend = self._resolve_capture_backend(backend)
+        backend_id = backend_id if backend_id is not None else getattr(backend, "backend_id", None)
 
         for i in range(attempts):
+            self._raise_if_worker_context_stale(backend=backend, generation=generation, action="retry_attempt")
             # For each attempt, suppress automatic emission; we'll emit once on success.
-            self.capture_non_blocking(max_new_frames=max_new_frames,
-                                    timeout_s=attempt_timeout_s,
-                                    emit_signal=False,
-                                    request_id=request_id,
-                                    generation=generation)
+            try:
+                self.capture_non_blocking(max_new_frames=max_new_frames,
+                                        timeout_s=attempt_timeout_s,
+                                        emit_signal=False,
+                                        request_id=request_id,
+                                        generation=generation,
+                                        backend=backend,
+                                        backend_id=backend_id)
+            except StaleCaptureBackend as exc:
+                self._log_capture_phase(
+                    "stale_worker_exit",
+                    request_id=request_id,
+                    generation=generation,
+                    backend=backend,
+                    error=str(exc),
+                    level="warning",
+                )
+                self._set_capture_failure_result(
+                    "stale_backend",
+                    request_id=request_id,
+                    generation=generation,
+                    error=str(exc),
+                    backend_id=backend_id,
+                )
+                raise
 
             # Wait for the grabber to select a frame or report edge timeout.
             # Allow a tiny grace beyond attempt_timeout_s to cover scheduling jitter.
@@ -759,6 +1251,8 @@ class DropletCamera(QObject):
             else:
                 res = self._cap_result or {}
                 last_reason = res.get("reason", "unknown")
+                if last_reason == "stale_backend":
+                    raise StaleCaptureBackend(str(res.get("error") or "stale_backend"))
                 print(f"[Retry] attempt {i+1}/{attempts} result reason={last_reason} "
                     f"mean={res.get('mean')} thr={res.get('threshold')}")
 
@@ -770,6 +1264,7 @@ class DropletCamera(QObject):
                         "status": "success",
                         "request_id": request_id,
                         "generation": generation,
+                        "backend_id": backend_id,
                         "cap_id": int(res.get("cap_id") or 0),
                         "frame": self.latest_frame,
                         "capture_info": capture_info,
@@ -804,6 +1299,20 @@ class DropletCamera(QObject):
         if not self.camera:
             print(f"[Camera] capture rejected request_id={request_id} reason=camera_not_started state={self.get_capture_state()}")
             return False
+        backend = self._get_current_capture_backend()
+        if backend is None and hasattr(self, "_trig_chip_name"):
+            try:
+                backend = self._replace_capture_backend(reason="capture_queue_missing_backend")
+            except Exception as exc:
+                print(
+                    f"[Camera] capture rejected request_id={request_id} "
+                    f"reason=backend_unavailable error={exc} state={self.get_capture_state()}"
+                )
+                return False
+        if backend is not None and not bool(getattr(backend, "is_open", False)):
+            print(f"[Camera] capture rejected request_id={request_id} reason=backend_closed state={self.get_capture_state()}")
+            return False
+        backend_id = getattr(backend, "backend_id", None)
 
         self._capture_worker_active.set()
         with self._cv:
@@ -821,7 +1330,24 @@ class DropletCamera(QObject):
                     success_reasons=success_reasons,
                     request_id=request_id,
                     generation=generation,
+                    backend=backend,
+                    backend_id=backend_id,
                 )
+            except StaleCaptureBackend as e:
+                capture_info = self.get_last_capture_result() or {}
+                capture_info.pop("arr", None)
+                payload = {
+                    "status": "stale",
+                    "stale": True,
+                    "request_id": request_id,
+                    "generation": generation,
+                    "backend_id": backend_id,
+                    "cap_id": int(capture_info.get("cap_id") or 0),
+                    "frame": None,
+                    "capture_info": capture_info,
+                    "reason": str(capture_info.get("reason") or "stale_backend"),
+                    "error": str(e),
+                }
             except Exception as e:
                 capture_info = self.get_last_capture_result() or {}
                 capture_info.pop("arr", None)
@@ -829,6 +1355,7 @@ class DropletCamera(QObject):
                     "status": "failed",
                     "request_id": request_id,
                     "generation": generation,
+                    "backend_id": backend_id,
                     "cap_id": int(capture_info.get("cap_id") or 0),
                     "frame": None,
                     "capture_info": capture_info,
@@ -847,6 +1374,7 @@ class DropletCamera(QObject):
                     "status": "failed",
                     "request_id": request_id,
                     "generation": generation,
+                    "backend_id": backend_id,
                     "cap_id": 0,
                     "frame": None,
                     "capture_info": {},
@@ -855,11 +1383,19 @@ class DropletCamera(QObject):
                 }
 
             current_generation = int(getattr(self, "_capture_generation", 0))
+            current_backend = self._get_current_capture_backend()
+            current_backend_id = getattr(current_backend, "backend_id", None)
+            if backend_id is not None and current_backend_id is not None and backend_id != current_backend_id:
+                payload = dict(payload)
+                payload["status"] = "stale"
+                payload["stale"] = True
+                payload["stale_reason"] = "worker_backend_superseded"
+                payload["current_backend_id"] = current_backend_id
             if int(payload.get("generation") or -1) != current_generation:
                 payload = dict(payload)
                 payload["status"] = "stale"
                 payload["stale"] = True
-                payload["stale_reason"] = "worker_generation_superseded"
+                payload.setdefault("stale_reason", "worker_generation_superseded")
                 payload["current_generation"] = current_generation
 
             payload["worker_active"] = bool(self._capture_worker_active.is_set())
@@ -867,6 +1403,7 @@ class DropletCamera(QObject):
                 f"[Camera] capture complete request_id={request_id} "
                 f"status={payload.get('status')} cap_id={payload.get('cap_id')} "
                 f"gen={payload.get('generation')} current_gen={current_generation} "
+                f"backend_id={payload.get('backend_id')} current_backend_id={current_backend_id} "
                 f"worker_active={payload.get('worker_active')}"
             )
 
@@ -892,6 +1429,7 @@ class DropletCamera(QObject):
         self._capture_worker_thread = t
         print(
             f"[Camera] capture queued request_id={request_id} gen={generation} "
+            f"backend_id={backend_id} "
             f"attempts={attempts} max_new_frames={max_new_frames} timeout_s={attempt_timeout_s}"
         )
         t.start()
