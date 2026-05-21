@@ -11,6 +11,45 @@ from Controller import Controller
 from CalibrationClasses.View import DropletImagingDialog
 
 
+class _Signal:
+    def __init__(self):
+        self._callbacks = []
+
+    def connect(self, callback):
+        self._callbacks.append(callback)
+
+    def emit(self, *args, **kwargs):
+        for callback in list(self._callbacks):
+            callback(*args, **kwargs)
+
+
+class _CaptureGuardTimer:
+    def __init__(self):
+        self.timeout = _Signal()
+        self.interval_ms = None
+        self.active = False
+        self.single_shot = False
+
+    def setSingleShot(self, single_shot):
+        self.single_shot = bool(single_shot)
+
+    def setInterval(self, interval_ms):
+        self.interval_ms = int(interval_ms)
+
+    def start(self, interval_ms=None):
+        if interval_ms is not None:
+            self.interval_ms = int(interval_ms)
+        self.active = True
+
+    def stop(self):
+        self.active = False
+
+    def fire(self):
+        if self.single_shot:
+            self.active = False
+        self.timeout.emit()
+
+
 class _DropletCamera:
     def __init__(self):
         self.frame = np.full((8, 10, 3), 77, dtype=np.uint8)
@@ -60,6 +99,7 @@ def _make_controller():
     controller = Controller.__new__(Controller)
     machine = _Machine()
     camera_model = _CameraModel()
+    clock = {"value": 100.0}
     controller.machine = machine
     controller.model = SimpleNamespace(
         machine_model=_MachineModel(),
@@ -70,6 +110,13 @@ def _make_controller():
     controller.pending_capture_callback = None
     controller.pending_capture_context = None
     controller.pending_capture_active = False
+    controller.pending_capture_started_monotonic = None
+    controller.pending_capture_timeout_ms = 8_000
+    controller.pending_capture_throughput_timeout_ms = 1_500
+    controller.pending_capture_guard_timer = None
+    controller._timer_factory = lambda _parent: _CaptureGuardTimer()
+    controller._monotonic_fn = lambda: clock["value"]
+    controller._test_clock = clock
     return controller, machine, camera_model
 
 
@@ -120,7 +167,7 @@ def test_controller_clears_pending_callback_when_camera_rejects_capture():
     assert controller.pending_capture_callback is None
     assert controller.pending_capture_context is None
     assert controller.pending_capture_active is False
-    callback.assert_not_called()
+    callback.assert_called_once_with(None)
 
 
 def test_controller_blocks_overlapping_capture_until_frame_finishes():
@@ -131,6 +178,42 @@ def test_controller_blocks_overlapping_capture_until_frame_finishes():
     assert len(machine.capture_calls) == 1
 
     controller._on_image_captured()
+
+    assert controller.capture_droplet_image() is True
+    assert len(machine.capture_calls) == 2
+
+
+def test_controller_overlapping_capture_resolves_waiting_callback():
+    controller, machine, _camera_model = _make_controller()
+    callback = Mock()
+
+    assert controller.capture_droplet_image() is True
+    assert controller.capture_droplet_image(callback=callback) is False
+
+    assert len(machine.capture_calls) == 1
+    assert controller.pending_capture_active is True
+    callback.assert_called_once_with(None)
+
+
+def test_controller_capture_guard_releases_stale_pending_request():
+    controller, machine, _camera_model = _make_controller()
+    callback = Mock()
+
+    assert controller.capture_droplet_image(callback=callback) is True
+    timer = controller.pending_capture_guard_timer
+    assert timer is not None
+    assert timer.active is True
+    assert timer.interval_ms == 8_000
+
+    controller._test_clock["value"] = 108.25
+    timer.fire()
+
+    assert controller.pending_capture_callback is None
+    assert controller.pending_capture_context is None
+    assert controller.pending_capture_active is False
+    assert controller.pending_capture_started_monotonic is None
+    callback.assert_called_once_with(None)
+    controller.model.calibration_manager.captureFailed.emit.assert_called_once()
 
     assert controller.capture_droplet_image() is True
     assert len(machine.capture_calls) == 2

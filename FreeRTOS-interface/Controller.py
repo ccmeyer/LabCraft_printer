@@ -98,6 +98,10 @@ class Controller(QObject):
         self.pending_capture_callback = None
         self.pending_capture_context = None
         self.pending_capture_active = False
+        self.pending_capture_started_monotonic = None
+        self.pending_capture_timeout_ms = 8_000
+        self.pending_capture_throughput_timeout_ms = 1_500
+        self.pending_capture_guard_timer = None
 
         self._array_state = "idle"
         self._array_context = None
@@ -2135,34 +2139,33 @@ class Controller(QObject):
             return False
         if bool(getattr(self, "pending_capture_active", False)):
             print("Capture already pending; dropping new capture request.")
+            self._notify_capture_callback_failed(callback)
             return False
         if capture_context is not None and getattr(self, "pending_capture_context", None) is not None:
             print("Capture context already pending; dropping new capture request.")
+            self._notify_capture_callback_failed(callback)
             return False
         if callback is not None:
             if self.pending_capture_callback is not None:
                 print("Capture already pending; dropping new capture callback.")
+                self._notify_capture_callback_failed(callback)
                 return False
             self.pending_capture_callback = callback
         if capture_context is not None:
             self.pending_capture_context = str(capture_context)
         self.pending_capture_active = True
+        monotonic_fn = getattr(self, "_monotonic_fn", time.monotonic)
+        self.pending_capture_started_monotonic = monotonic_fn()
         try:
             queued = self.machine.capture_droplet_image(throughput_mode=throughput_mode)
         except Exception:
-            if callback is not None and self.pending_capture_callback is callback:
-                self.pending_capture_callback = None
-            if capture_context is not None:
-                self.pending_capture_context = None
-            self.pending_capture_active = False
+            self._clear_pending_capture(callback=callback, capture_context=capture_context)
             raise
         if queued is False:
-            if callback is not None and self.pending_capture_callback is callback:
-                self.pending_capture_callback = None
-            if capture_context is not None:
-                self.pending_capture_context = None
-            self.pending_capture_active = False
+            self._clear_pending_capture(callback=callback, capture_context=capture_context)
+            self._notify_capture_callback_failed(callback)
             return False
+        self._start_pending_capture_guard(throughput_mode=throughput_mode)
         return True
 
     def stop_droplet_camera(self):
@@ -2200,6 +2203,100 @@ class Controller(QObject):
     def handle_capture_request(self, callback):
         # protect against overlapping requests
         self.capture_droplet_image(callback=callback)
+
+    def _notify_capture_callback_failed(self, callback):
+        if callback is None:
+            return
+        try:
+            callback(None)
+        except Exception as e:
+            print(f"Callback raised after capture request failure: {e}")
+
+    def _ensure_pending_capture_guard_timer(self):
+        timer = getattr(self, "pending_capture_guard_timer", None)
+        if timer is not None:
+            return timer
+        timer_factory = getattr(self, "_timer_factory", None)
+        if not callable(timer_factory):
+            return None
+        try:
+            timer = timer_factory(self)
+            if hasattr(timer, "setSingleShot"):
+                timer.setSingleShot(True)
+            timer.timeout.connect(self._on_pending_capture_timeout)
+        except Exception as e:
+            print(f"[Camera] could not create pending capture guard timer: {e}")
+            return None
+        self.pending_capture_guard_timer = timer
+        return timer
+
+    def _start_pending_capture_guard(self, *, throughput_mode=False):
+        timer = self._ensure_pending_capture_guard_timer()
+        if timer is None:
+            return
+        timeout_ms = (
+            int(getattr(self, "pending_capture_throughput_timeout_ms", 1_500))
+            if throughput_mode else
+            int(getattr(self, "pending_capture_timeout_ms", 8_000))
+        )
+        timeout_ms = max(1, timeout_ms)
+        try:
+            timer.stop()
+        except Exception:
+            pass
+        try:
+            timer.setInterval(timeout_ms)
+            timer.start()
+        except TypeError:
+            timer.start(timeout_ms)
+
+    def _stop_pending_capture_guard(self):
+        timer = getattr(self, "pending_capture_guard_timer", None)
+        if timer is None:
+            return
+        try:
+            timer.stop()
+        except Exception:
+            pass
+
+    def _clear_pending_capture(self, *, callback=None, capture_context=None):
+        self._stop_pending_capture_guard()
+        if callback is None or self.pending_capture_callback is callback:
+            self.pending_capture_callback = None
+        if capture_context is None or self.pending_capture_context == str(capture_context):
+            self.pending_capture_context = None
+        self.pending_capture_active = False
+        self.pending_capture_started_monotonic = None
+
+    def _fail_pending_capture(self, msg: str, *, emit_capture_failed: bool = True):
+        cb = self.pending_capture_callback
+        self._clear_pending_capture()
+        if cb:
+            try:
+                cb(None)
+            except Exception as e:
+                print(f"Callback raised after capture failure: {e}")
+        if emit_capture_failed:
+            try:
+                self.model.calibration_manager.captureFailed.emit(msg)
+            except Exception:
+                pass
+
+    def _on_pending_capture_timeout(self):
+        if not bool(getattr(self, "pending_capture_active", False)):
+            return
+        started = getattr(self, "pending_capture_started_monotonic", None)
+        elapsed_s = None
+        if started is not None:
+            try:
+                monotonic_fn = getattr(self, "_monotonic_fn", time.monotonic)
+                elapsed_s = max(0.0, float(monotonic_fn()) - float(started))
+            except Exception:
+                elapsed_s = None
+        suffix = "" if elapsed_s is None else f" after {elapsed_s:.1f}s"
+        msg = f"Droplet capture timed out in controller{suffix}; releasing pending request."
+        print(f"[Camera] {msg}")
+        self._fail_pending_capture(msg)
 
     def _emit_active_calibration_error(self, message: str):
         """
@@ -2472,9 +2569,7 @@ class Controller(QObject):
         try:
             self.model.droplet_camera_model.update_image(frame, capture_info=cap_info, save_metadata=save_metadata)
         finally:
-            self.pending_capture_context = None
-            self.pending_capture_callback = None
-            self.pending_capture_active = False
+            self._clear_pending_capture()
         
         # If a callback was set for the capture, call it.
         if callback:
@@ -2483,19 +2578,7 @@ class Controller(QObject):
     @QtCore.Slot(str)
     def _on_capture_failed(self, msg: str):
         print(f"[Camera] capture failed: {msg}")
-        # 1) If a caller is waiting via callback, resolve it with sentinel None
-        cb = self.pending_capture_callback
-        self.pending_capture_callback = None
-        self.pending_capture_context = None
-        self.pending_capture_active = False
-        if cb:
-            try:
-                cb(None)                # <- sentinel for failure
-            except Exception as e:
-                # If some callback signature changed, at least fail loudly
-                print(f"Callback raised after capture failure: {e}")
-        # 2) Also notify the calibration layer (optional, but handy for QState transitions)
-        self.model.calibration_manager.captureFailed.emit(msg)
+        self._fail_pending_capture(str(msg))
 
     def set_start_pressure(self, pressure):
         self.model.calibration_manager.set_start_pressure(pressure)
