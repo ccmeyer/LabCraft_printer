@@ -105,6 +105,7 @@ def _build_experiment_model(current_stock, *, current_mode="droplet"):
         "printing_mode": str(current_mode),
         "stock_concentration": 2.5,
         "units": "mg/mL",
+        "applied_record": None,
         "metadata": {
             "fill_droplet_volume_nL": float(default_volume),
             "fill_printing_mode": str(current_mode),
@@ -159,8 +160,31 @@ def _build_experiment_model(current_stock, *, current_mode="droplet"):
             ],
         }
 
+    def _store_applied_record(new_volume_nL, kwargs, *, is_fill=False):
+        applied = dict(kwargs.get("applied_calibration") or {})
+        if not applied:
+            return
+        state["applied_record"] = {
+            "stock_id": str(current_stock),
+            "printer_head_id": "head-1",
+            "printing_mode": str(current_mode),
+            "factor_name": "Fill" if is_fill else str(current_stock).lower(),
+            "option_name": "",
+            "is_fill": bool(is_fill),
+            "measured_volume_nL": float(applied.get("measured_volume_nL", new_volume_nL)),
+            "applied_design_volume_nL": float(new_volume_nL),
+            "pw_us": applied.get("pw_us"),
+            "pressure_psi": applied.get("pressure_psi"),
+            "run_id": applied.get("run_id"),
+            "phase": applied.get("phase"),
+            "timestamp": applied.get("timestamp"),
+            "source_row_fingerprint": applied.get("source_row_fingerprint"),
+            "recorded_at": "2026-03-18T09:05:00Z",
+        }
+
     def _apply_droplet_volume_for_option(_factor_name, _option_name, new_droplet_nL, **_kwargs):
         state["droplet_nL"] = float(new_droplet_nL)
+        _store_applied_record(new_droplet_nL, _kwargs, is_fill=False)
         return {"new_droplet_nL": float(new_droplet_nL)}
 
     def _preview_fill_requantized(new_fill_droplet_nL):
@@ -183,12 +207,17 @@ def _build_experiment_model(current_stock, *, current_mode="droplet"):
     def _apply_fill_droplet_volume(new_fill_droplet_nL, **_kwargs):
         state["fill_droplet_nL"] = float(new_fill_droplet_nL)
         state["metadata"]["fill_droplet_volume_nL"] = float(new_fill_droplet_nL)
+        _store_applied_record(new_fill_droplet_nL, _kwargs, is_fill=True)
         return {
             "new_fill_nL": float(new_fill_droplet_nL),
             "total_drops_old": 1,
             "total_drops_new": 1,
             "total_drops_delta": 0,
         }
+
+    def _get_applied_imaging_calibration(**_kwargs):
+        record = state.get("applied_record")
+        return dict(record) if isinstance(record, dict) else None
 
     return SimpleNamespace(
         metadata=state["metadata"],
@@ -200,11 +229,21 @@ def _build_experiment_model(current_stock, *, current_mode="droplet"):
         apply_droplet_volume_for_option=_apply_droplet_volume_for_option,
         preview_fill_requantized=_preview_fill_requantized,
         apply_fill_droplet_volume=_apply_fill_droplet_volume,
+        get_applied_imaging_calibration=_get_applied_imaging_calibration,
     )
 
 
-def _build_model_and_manager(tmp_path, runs, *, current_stock="Water", current_mode="droplet", active_run_id=None):
-    experiment_model = _build_experiment_model(current_stock, current_mode=current_mode)
+def _build_model_and_manager(
+    tmp_path,
+    runs,
+    *,
+    current_stock="Water",
+    current_mode="droplet",
+    active_run_id=None,
+    experiment_model=None,
+):
+    if experiment_model is None:
+        experiment_model = _build_experiment_model(current_stock, current_mode=current_mode)
     experiment_model.calibration_file_path = str(tmp_path / "calibration.json")
     experiment_model.get_calibration_file_path = lambda: str(tmp_path / "calibration.json")
     printer_head = SimpleNamespace(
@@ -238,6 +277,7 @@ def _build_dialog(
     current_mode="droplet",
     active_run_id=None,
     main_window=None,
+    experiment_model=None,
 ):
     for method_name in (
         "setup_shortcuts",
@@ -259,6 +299,7 @@ def _build_dialog(
         current_stock=current_stock,
         current_mode=current_mode,
         active_run_id=active_run_id,
+        experiment_model=experiment_model,
     )
     model.droplet_camera_model = SimpleNamespace(
         flash_duration=1000,
@@ -274,7 +315,14 @@ def _build_dialog(
         get_current_print_pressure=lambda: 0.80,
     )
 
-    controller = SimpleNamespace(start_read_camera=lambda: None)
+    controller = SimpleNamespace(
+        start_read_camera=lambda: None,
+        stop_read_camera=lambda: None,
+        stop_droplet_camera=lambda: None,
+        set_droplet_capture_profile=lambda *args, **kwargs: None,
+        set_command_dispatch_interval=lambda *args, **kwargs: None,
+        disable_print_profile=lambda: None,
+    )
     if main_window is None:
         main_window = SimpleNamespace(color_dict={})
     dialog = DropletImagingDialog(main_window, model, controller)
@@ -294,6 +342,18 @@ def _visible_summary_rows(dialog):
 
 def _select_visible_row(dialog, row):
     dialog.summary_table.selectRow(row)
+
+
+class _FakeCloseEvent:
+    def __init__(self):
+        self.accepted = False
+        self.ignored = False
+
+    def accept(self):
+        self.accepted = True
+
+    def ignore(self):
+        self.ignored = True
 
 
 def test_pressure_sweep_summary_rows_enrich_metadata_and_format_timestamps(tmp_path):
@@ -883,6 +943,10 @@ def test_bridge_requires_explicit_selection_and_starts_empty(monkeypatch, qapp, 
     assert dialog.bridge_table.rowCount() == 0
     assert dialog.bridge_apply_btn.isEnabled() is False
     assert "Select a characterization result" in dialog.bridge_status_label.text()
+    assert "No calibration applied" in dialog.summary_applied_calibration_banner.text()
+    assert "#7f1d1d" in dialog.summary_applied_calibration_banner.styleSheet()
+    marker_col = dialog.summary_table_model.column_index("applied_marker")
+    assert dialog.summary_table_model.data(dialog.summary_table_model.index(0, marker_col), Qt.DisplayRole) == ""
 
     dialog.deleteLater()
 
@@ -898,6 +962,7 @@ def test_apply_marks_summary_row_and_persists_across_reopen(monkeypatch, qapp, t
         )
     ]
     main_window = SimpleNamespace(color_dict={})
+    experiment_model = _build_experiment_model("Water", current_mode="droplet")
     info_calls = []
     monkeypatch.setattr(
         DropletImagingDialog,
@@ -920,6 +985,7 @@ def test_apply_marks_summary_row_and_persists_across_reopen(monkeypatch, qapp, t
         runs,
         active_run_id="run_focus",
         main_window=main_window,
+        experiment_model=experiment_model,
     )
     dialog._apply_summary_sort(dialog.summary_table_model.column_index("mean_nL"), Qt.DescendingOrder)
     qapp.processEvents()
@@ -933,7 +999,16 @@ def test_apply_marks_summary_row_and_persists_across_reopen(monkeypatch, qapp, t
 
     bg = dialog.summary_table_model.data(dialog.summary_table_model.index(source_row, 0), Qt.BackgroundRole)
     assert bg is not None
-    assert getattr(main_window, "_droplet_imaging_applied_summary_rows")
+    marker_col = dialog.summary_table_model.column_index("applied_marker")
+    marker_index = dialog.summary_table_model.index(source_row, marker_col)
+    assert dialog.summary_table_model.data(marker_index, Qt.DisplayRole) == "✓"
+    assert dialog.summary_table_model.data(marker_index, Qt.ToolTipRole) == "Applied to design"
+    applied_record = experiment_model.get_applied_imaging_calibration()
+    assert tuple(applied_record["source_row_fingerprint"]) == tuple(dialog._summary_row_fingerprint(raw))
+    assert "Applied: Run" in dialog.bridge_applied_calibration_label.text()
+    assert "#1d4ed8" in dialog.summary_applied_calibration_banner.styleSheet()
+    assert dialog.bridge_apply_btn.isEnabled() is False
+    assert dialog.bridge_apply_btn.text() == "Selected calibration is applied"
     assert info_calls
 
     dialog.summary_valid_only_checkbox.setChecked(True)
@@ -942,6 +1017,8 @@ def test_apply_marks_summary_row_and_persists_across_reopen(monkeypatch, qapp, t
 
     dialog.deleteLater()
     qapp.processEvents()
+    if hasattr(main_window, "_droplet_imaging_applied_summary_rows"):
+        delattr(main_window, "_droplet_imaging_applied_summary_rows")
 
     reopened, _manager = _build_dialog(
         monkeypatch,
@@ -950,11 +1027,177 @@ def test_apply_marks_summary_row_and_persists_across_reopen(monkeypatch, qapp, t
         runs,
         active_run_id="run_focus",
         main_window=main_window,
+        experiment_model=experiment_model,
     )
     reopened_bg = reopened.summary_table_model.data(reopened.summary_table_model.index(source_row, 0), Qt.BackgroundRole)
     assert reopened_bg is not None
+    assert reopened.summary_table_model.data(reopened.summary_table_model.index(source_row, marker_col), Qt.DisplayRole) == "✓"
 
     reopened.deleteLater()
+
+
+def test_selecting_different_summary_row_keeps_applied_row_highlight(monkeypatch, qapp, tmp_path):
+    runs = [
+        _make_run(
+            "run_focus",
+            sweep_entries=[
+                {"timestamp": "2026-03-18T09:00:00Z", "pw_us": 1400, "pressure_psi": 1.20, "mean_nL": 10.0, "cv_pct": 4.0, "valid": True},
+                {"timestamp": "2026-03-18T09:02:00Z", "pw_us": 1450, "pressure_psi": 1.35, "mean_nL": 10.8, "cv_pct": 5.5, "valid": True},
+            ],
+        )
+    ]
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "information", lambda *args, **kwargs: None)
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "critical", lambda *args, **kwargs: None)
+    experiment_model = _build_experiment_model("Water", current_mode="droplet")
+    dialog, _manager = _build_dialog(
+        monkeypatch,
+        qapp,
+        tmp_path,
+        runs,
+        active_run_id="run_focus",
+        experiment_model=experiment_model,
+    )
+    dialog._apply_summary_sort(dialog.summary_table_model.column_index("mean_nL"), Qt.DescendingOrder)
+    qapp.processEvents()
+    _select_visible_row(dialog, 0)
+    qapp.processEvents()
+    _, applied_raw = dialog._selected_summary_row()
+    applied_source_row = applied_raw["_source_row"]
+
+    dialog._apply_previewed_droplet_volume()
+    qapp.processEvents()
+    assert dialog.summary_table_model.data(
+        dialog.summary_table_model.index(applied_source_row, 0),
+        Qt.BackgroundRole,
+    ) is not None
+
+    _select_visible_row(dialog, 1)
+    qapp.processEvents()
+    _, selected_raw = dialog._selected_summary_row()
+    assert selected_raw["_source_row"] != applied_source_row
+    assert dialog.summary_table_model.data(
+        dialog.summary_table_model.index(applied_source_row, 0),
+        Qt.BackgroundRole,
+    ) is not None
+    assert dialog.bridge_apply_btn.isEnabled() is True
+    assert dialog.bridge_apply_btn.text() == "Apply selected calibration to design"
+    assert "#2563eb" in dialog.bridge_apply_btn.styleSheet()
+
+    _select_visible_row(dialog, 0)
+    qapp.processEvents()
+    assert dialog.bridge_apply_btn.isEnabled() is False
+    assert dialog.bridge_apply_btn.text() == "Selected calibration is applied"
+    assert "#2563eb" not in dialog.bridge_apply_btn.styleSheet()
+
+    dialog.deleteLater()
+
+
+def test_load_selected_summary_row_does_not_create_applied_record(monkeypatch, qapp, tmp_path):
+    runs = [
+        _make_run(
+            "run_focus",
+            sweep_entries=[
+                {"timestamp": "2026-03-18T09:00:00Z", "pw_us": 1400, "pressure_psi": 1.20, "mean_nL": 10.0, "cv_pct": 4.0, "valid": True},
+            ],
+        )
+    ]
+    experiment_model = _build_experiment_model("Water", current_mode="droplet")
+    dialog, _manager = _build_dialog(
+        monkeypatch,
+        qapp,
+        tmp_path,
+        runs,
+        active_run_id="run_focus",
+        experiment_model=experiment_model,
+    )
+    _select_visible_row(dialog, 0)
+    qapp.processEvents()
+
+    dialog.load_selected_summary_row()
+    qapp.processEvents()
+
+    assert experiment_model.get_applied_imaging_calibration() is None
+    marker_col = dialog.summary_table_model.column_index("applied_marker")
+    assert dialog.summary_table_model.data(dialog.summary_table_model.index(0, marker_col), Qt.DisplayRole) == ""
+    assert dialog.summary_table_model.data(dialog.summary_table_model.index(0, 0), Qt.BackgroundRole) is None
+    assert "No calibration applied" in dialog.summary_applied_calibration_banner.text()
+
+    dialog.deleteLater()
+
+
+def test_close_without_applied_calibration_prompts_and_cancel_keeps_open(monkeypatch, qapp, tmp_path):
+    runs = [
+        _make_run(
+            "run_focus",
+            sweep_entries=[
+                {"timestamp": "2026-03-18T09:00:00Z", "pw_us": 1400, "pressure_psi": 1.20, "mean_nL": 10.0, "cv_pct": 4.0, "valid": True},
+            ],
+        )
+    ]
+    prompt_calls = []
+    monkeypatch.setattr(
+        calibration_view.QtWidgets.QMessageBox,
+        "question",
+        lambda *args, **kwargs: prompt_calls.append(args) or calibration_view.QtWidgets.QMessageBox.No,
+    )
+    dialog, _manager = _build_dialog(
+        monkeypatch,
+        qapp,
+        tmp_path,
+        runs,
+        active_run_id="run_focus",
+    )
+    event = _FakeCloseEvent()
+
+    dialog.closeEvent(event)
+
+    assert prompt_calls
+    assert event.ignored is True
+    assert event.accepted is False
+    assert getattr(dialog, "_stream_capture_dialog_closing", False) is False
+
+    dialog.deleteLater()
+
+
+def test_close_with_applied_calibration_does_not_prompt(monkeypatch, qapp, tmp_path):
+    runs = [
+        _make_run(
+            "run_focus",
+            sweep_entries=[
+                {"timestamp": "2026-03-18T09:00:00Z", "pw_us": 1400, "pressure_psi": 1.20, "mean_nL": 10.0, "cv_pct": 4.0, "valid": True},
+            ],
+        )
+    ]
+    prompt_calls = []
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "information", lambda *args, **kwargs: None)
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "critical", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        calibration_view.QtWidgets.QMessageBox,
+        "question",
+        lambda *args, **kwargs: prompt_calls.append(args) or calibration_view.QtWidgets.QMessageBox.No,
+    )
+    dialog, _manager = _build_dialog(
+        monkeypatch,
+        qapp,
+        tmp_path,
+        runs,
+        active_run_id="run_focus",
+    )
+    _select_visible_row(dialog, 0)
+    qapp.processEvents()
+    dialog._apply_previewed_droplet_volume()
+    qapp.processEvents()
+    event = _FakeCloseEvent()
+
+    dialog.closeEvent(event)
+
+    assert prompt_calls == []
+    assert event.accepted is True
+    assert event.ignored is False
+
+    dialog.deleteLater()
 
 
 def test_results_history_dialog_is_browse_only_and_defaults_to_all_rows(monkeypatch, qapp, tmp_path):

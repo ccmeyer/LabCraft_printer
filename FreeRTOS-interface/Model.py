@@ -347,6 +347,10 @@ class ExperimentModel(QObject):
             "start_col": 0, 
         }
         self.stock_prep_state: Dict[str, Any] = self._default_stock_prep_state()
+        self.applied_imaging_calibrations: Dict[str, Any] = {
+            "schema_version": 1,
+            "records": {},
+        }
 
         # Results of optimization
         # key for additives: (factor_name, None)
@@ -4353,6 +4357,441 @@ class ExperimentModel(QObject):
             raise ValueError(f"Reagent '{reagent_name}' matches multiple groups; pass group_name.")
         return matches[0]
 
+    @staticmethod
+    def _applied_imaging_key(
+        stock_id,
+        printer_head_id,
+        printing_mode,
+        factor_name,
+        option_name,
+    ) -> str:
+        return json.dumps(
+            [
+                "" if stock_id is None else str(stock_id),
+                "" if printer_head_id is None else str(printer_head_id),
+                normalize_printing_mode(printing_mode),
+                "" if factor_name is None else str(factor_name),
+                "" if option_name is None else str(option_name),
+            ],
+            separators=(",", ":"),
+        )
+
+    @staticmethod
+    def _normalize_applied_imaging_calibrations(payload) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {"schema_version": 1, "records": {}}
+        raw_records = payload.get("records")
+        if not isinstance(raw_records, dict):
+            raw_records = {}
+        records = {}
+        for key, value in raw_records.items():
+            if isinstance(value, dict):
+                records[str(key)] = dict(value)
+        return {
+            "schema_version": int(payload.get("schema_version", 1) or 1),
+            "records": records,
+        }
+
+    @staticmethod
+    def _stock_row_base_id(row: dict) -> str:
+        name = row.get("option_name") or row.get("factor_name") or ""
+        units = row.get("units", "")
+        conc = row.get("stock_concentration", 0.0)
+        try:
+            conc2 = f"{float(conc):.2f}"
+        except Exception:
+            conc2 = str(conc)
+        return f"{name}_{conc2}_{units}"
+
+    @staticmethod
+    def _printer_head_stock_id(printer_head) -> str | None:
+        if printer_head is None:
+            return None
+        getter = getattr(printer_head, "get_stock_id", None)
+        if callable(getter):
+            try:
+                stock_id = getter()
+                if stock_id not in (None, ""):
+                    return str(stock_id)
+            except Exception:
+                pass
+        try:
+            stock = printer_head.get_stock_solution()
+        except Exception:
+            stock = getattr(printer_head, "stock_solution", None)
+        if stock is None:
+            return None
+        getter = getattr(stock, "get_stock_id", None)
+        if callable(getter):
+            try:
+                stock_id = getter()
+                if stock_id not in (None, ""):
+                    return str(stock_id)
+            except Exception:
+                pass
+        stock_id = getattr(stock, "stock_id", None)
+        if stock_id not in (None, ""):
+            return str(stock_id)
+        return str(stock)
+
+    @staticmethod
+    def _printer_head_identity(printer_head) -> str | None:
+        if printer_head is None:
+            return None
+        for attr_name in ("printer_head_id", "serial", "id"):
+            value = getattr(printer_head, attr_name, None)
+            if value not in (None, ""):
+                return str(value)
+        return str(printer_head)
+
+    @staticmethod
+    def _printer_head_printing_mode(printer_head) -> str:
+        getter = getattr(printer_head, "get_printing_mode", None)
+        if callable(getter):
+            try:
+                return normalize_printing_mode(getter())
+            except Exception:
+                pass
+        return normalize_printing_mode(getattr(printer_head, "printing_mode", None))
+
+    def _find_stock_row_for_stock_id(self, stock_id: str | None, *, include_fill=True) -> dict | None:
+        if not stock_id:
+            return None
+        for row in self.get_stock_table_rows(include_fill=include_fill):
+            if self._stock_row_base_id(row) == str(stock_id):
+                return dict(row)
+        return None
+
+    def _resolve_applied_imaging_context(
+        self,
+        *,
+        printer_head=None,
+        stock_id: str | None = None,
+        printer_head_id: str | None = None,
+        printing_mode: str | None = None,
+        factor_name: str | None = None,
+        option_name: str | None = None,
+        is_fill: bool | None = None,
+    ) -> dict | None:
+        if printer_head is not None:
+            stock_id = stock_id or self._printer_head_stock_id(printer_head)
+            printer_head_id = printer_head_id or self._printer_head_identity(printer_head)
+            printing_mode = printing_mode or self._printer_head_printing_mode(printer_head)
+
+        row = None
+        if factor_name is None:
+            row = self._find_stock_row_for_stock_id(stock_id)
+            if row is None:
+                return None
+            factor_name = row.get("factor_name")
+            option_name = row.get("option_name") or None
+            if is_fill is None:
+                fill_name = str(self.metadata.get("fill_reagent_name", "Water"))
+                is_fill = (
+                    str(row.get("factor_name") or "") == fill_name
+                    and str(row.get("units") or "") == "--"
+                )
+            printing_mode = printing_mode or row.get("printing_mode")
+        else:
+            if is_fill:
+                row = self._fill_row_cache
+            else:
+                plan = self.plans_per_option.get((factor_name, option_name))
+                if plan and plan.get("stocks"):
+                    row = dict(plan["stocks"][0])
+                    row.setdefault("factor_name", factor_name)
+                    row.setdefault("option_name", option_name or "")
+            if stock_id is None and row is not None:
+                stock_id = self._stock_row_base_id(row)
+
+        printing_mode = normalize_printing_mode(printing_mode or (row or {}).get("printing_mode"))
+        try:
+            design_volume = float((row or {}).get("droplet_volume_nL"))
+        except Exception:
+            design_volume = None
+        if is_fill and design_volume is None:
+            try:
+                design_volume = float(self.metadata.get("fill_droplet_volume_nL"))
+            except Exception:
+                design_volume = None
+
+        if not stock_id or not printer_head_id or not factor_name:
+            return None
+
+        return {
+            "stock_id": str(stock_id),
+            "printer_head_id": str(printer_head_id),
+            "printing_mode": printing_mode,
+            "factor_name": str(factor_name),
+            "option_name": "" if option_name is None else str(option_name),
+            "is_fill": bool(is_fill),
+            "design_volume_nL": design_volume,
+        }
+
+    def record_applied_imaging_calibration(
+        self,
+        *,
+        printer_head=None,
+        stock_id: str | None = None,
+        printer_head_id: str | None = None,
+        printing_mode: str | None = None,
+        factor_name: str,
+        option_name: str | None = None,
+        is_fill: bool = False,
+        measured_volume_nL=None,
+        applied_design_volume_nL=None,
+        pw_us=None,
+        pressure_psi=None,
+        run_id=None,
+        phase=None,
+        timestamp=None,
+        source_row_fingerprint=None,
+        save: bool = True,
+    ) -> dict:
+        context = self._resolve_applied_imaging_context(
+            printer_head=printer_head,
+            stock_id=stock_id,
+            printer_head_id=printer_head_id,
+            printing_mode=printing_mode,
+            factor_name=factor_name,
+            option_name=option_name,
+            is_fill=is_fill,
+        )
+        if context is None:
+            raise ValueError("Could not resolve applied imaging calibration context.")
+
+        def _float_or_none(value):
+            if value in (None, ""):
+                return None
+            try:
+                return float(value)
+            except Exception:
+                return None
+
+        def _int_or_none(value):
+            if value in (None, ""):
+                return None
+            try:
+                return int(round(float(value)))
+            except Exception:
+                return None
+
+        design_volume = _float_or_none(applied_design_volume_nL)
+        if design_volume is None:
+            design_volume = _float_or_none(context.get("design_volume_nL"))
+
+        record = {
+            "stock_id": context["stock_id"],
+            "printer_head_id": context["printer_head_id"],
+            "printing_mode": context["printing_mode"],
+            "factor_name": context["factor_name"],
+            "option_name": context["option_name"],
+            "is_fill": bool(context["is_fill"]),
+            "measured_volume_nL": _float_or_none(measured_volume_nL),
+            "applied_design_volume_nL": design_volume,
+            "pw_us": _int_or_none(pw_us),
+            "pressure_psi": _float_or_none(pressure_psi),
+            "run_id": None if run_id in (None, "") else str(run_id),
+            "phase": None if phase in (None, "") else str(phase),
+            "timestamp": None if timestamp in (None, "") else str(timestamp),
+            "source_row_fingerprint": (
+                list(source_row_fingerprint)
+                if source_row_fingerprint is not None
+                else None
+            ),
+            "recorded_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+        key = self._applied_imaging_key(
+            record["stock_id"],
+            record["printer_head_id"],
+            record["printing_mode"],
+            record["factor_name"],
+            record["option_name"],
+        )
+        state = self._normalize_applied_imaging_calibrations(
+            getattr(self, "applied_imaging_calibrations", None)
+        )
+        state["records"][key] = record
+        self.applied_imaging_calibrations = state
+        self.unsaved_changes = True
+        if save and getattr(self, "experiment_file_path", None):
+            self.save_experiment()
+        return dict(record)
+
+    def get_applied_imaging_calibration(
+        self,
+        *,
+        printer_head=None,
+        stock_id: str | None = None,
+        printer_head_id: str | None = None,
+        printing_mode: str | None = None,
+        factor_name: str | None = None,
+        option_name: str | None = None,
+        is_fill: bool | None = None,
+    ) -> dict | None:
+        context = self._resolve_applied_imaging_context(
+            printer_head=printer_head,
+            stock_id=stock_id,
+            printer_head_id=printer_head_id,
+            printing_mode=printing_mode,
+            factor_name=factor_name,
+            option_name=option_name,
+            is_fill=is_fill,
+        )
+        if context is None:
+            return None
+        key = self._applied_imaging_key(
+            context["stock_id"],
+            context["printer_head_id"],
+            context["printing_mode"],
+            context["factor_name"],
+            context["option_name"],
+        )
+        state = self._normalize_applied_imaging_calibrations(
+            getattr(self, "applied_imaging_calibrations", None)
+        )
+        record = state.get("records", {}).get(key)
+        return dict(record) if isinstance(record, dict) else None
+
+    def validate_applied_imaging_calibration_for_print(
+        self,
+        *,
+        printer_head,
+        machine_model=None,
+        current_print_pulse_width=None,
+        current_print_pressure_psi=None,
+        target_print_pressure_psi=None,
+        pressure_tolerance_psi: float = 0.05,
+        volume_tolerance_nL: float = 1e-6,
+    ) -> dict:
+        if machine_model is not None:
+            def _machine_value(getter_name):
+                getter = getattr(machine_model, getter_name, None)
+                if callable(getter):
+                    try:
+                        return getter()
+                    except Exception:
+                        return None
+                return None
+
+            if current_print_pulse_width is None:
+                current_print_pulse_width = _machine_value("get_print_pulse_width")
+            if current_print_pressure_psi is None:
+                current_print_pressure_psi = _machine_value("get_current_print_pressure")
+            if target_print_pressure_psi is None:
+                target_print_pressure_psi = _machine_value("get_target_print_pressure")
+
+        context = self._resolve_applied_imaging_context(printer_head=printer_head)
+        if context is None:
+            return {
+                "ok": False,
+                "message": "No stock plan was found for the loaded printer head.",
+                "record": None,
+            }
+
+        record = self.get_applied_imaging_calibration(
+            stock_id=context["stock_id"],
+            printer_head_id=context["printer_head_id"],
+            printing_mode=context["printing_mode"],
+            factor_name=context["factor_name"],
+            option_name=context["option_name"],
+            is_fill=context["is_fill"],
+        )
+        if record is None:
+            return {
+                "ok": False,
+                "message": (
+                    "No applied imaging calibration was found for the loaded "
+                    f"{context['stock_id']} / {context['printer_head_id']}."
+                ),
+                "record": None,
+            }
+
+        try:
+            current_volume = float(context["design_volume_nL"])
+            applied_volume = float(record.get("applied_design_volume_nL"))
+        except Exception:
+            return {
+                "ok": False,
+                "message": "Applied imaging calibration is missing design volume information.",
+                "record": record,
+            }
+        if abs(current_volume - applied_volume) > float(volume_tolerance_nL):
+            return {
+                "ok": False,
+                "message": (
+                    "Applied imaging calibration is stale for the current design "
+                    f"({applied_volume:.3f} nL applied, {current_volume:.3f} nL current)."
+                ),
+                "record": record,
+            }
+
+        record_pw = record.get("pw_us")
+        if record_pw is None or current_print_pulse_width is None:
+            return {
+                "ok": False,
+                "message": "Cannot confirm print pulse width for the applied imaging calibration.",
+                "record": record,
+            }
+        try:
+            if int(round(float(current_print_pulse_width))) != int(record_pw):
+                return {
+                    "ok": False,
+                    "message": (
+                        "Print pulse width does not match the applied imaging calibration "
+                        f"({record_pw} us applied, {int(round(float(current_print_pulse_width)))} us current)."
+                    ),
+                    "record": record,
+                }
+        except Exception:
+            return {
+                "ok": False,
+                "message": "Cannot parse current print pulse width for calibration validation.",
+                "record": record,
+            }
+
+        record_pressure = record.get("pressure_psi")
+        if record_pressure is None:
+            return {
+                "ok": False,
+                "message": "Applied imaging calibration is missing print pressure information.",
+                "record": record,
+            }
+        pressure_values = []
+        for label, value in (
+            ("target", target_print_pressure_psi),
+            ("current", current_print_pressure_psi),
+        ):
+            if value in (None, ""):
+                continue
+            try:
+                pressure_values.append((label, float(value)))
+            except Exception:
+                return {
+                    "ok": False,
+                    "message": f"Cannot parse {label} print pressure for calibration validation.",
+                    "record": record,
+                }
+        if not pressure_values:
+            return {
+                "ok": False,
+                "message": "Cannot confirm print pressure for the applied imaging calibration.",
+                "record": record,
+            }
+        tolerance = float(pressure_tolerance_psi)
+        for label, value in pressure_values:
+            if abs(value - float(record_pressure)) > tolerance:
+                return {
+                    "ok": False,
+                    "message": (
+                        f"{label.title()} print pressure does not match the applied imaging calibration "
+                        f"({float(record_pressure):.3f} psi applied, {value:.3f} psi {label})."
+                    ),
+                    "record": record,
+                }
+
+        return {"ok": True, "message": "", "record": record}
+
 
     # ---------- apply a new droplet size while keeping stock concentration fixed ----------
     def apply_droplet_volume_for_option(
@@ -4362,6 +4801,7 @@ class ExperimentModel(QObject):
         new_droplet_nL: float,
         *,
         write_keys_if_assigned: bool = True,
+        applied_calibration: dict | None = None,
     ) -> dict:
         """
         Rebind a specific option (or additive) to a NEW droplet volume, but KEEP the
@@ -4480,6 +4920,17 @@ class ExperimentModel(QObject):
 
         # mark unsaved since design object changed
         self.unsaved_changes = True
+        applied_recorded = False
+        if applied_calibration:
+            self.record_applied_imaging_calibration(
+                factor_name=factor_name,
+                option_name=option_name,
+                is_fill=False,
+                applied_design_volume_nL=new_dv,
+                save=False,
+                **dict(applied_calibration),
+            )
+            applied_recorded = True
         saved_experiment = False
         if getattr(self, "experiment_file_path", None):
             self.save_experiment()
@@ -4496,6 +4947,7 @@ class ExperimentModel(QObject):
             "stock_row_updated": bool(updated_row),
             "worst_nonfill_after_nL": float(self._last_worst_nonfill_volume_nL or 0.0),
             "saved_experiment": saved_experiment,
+            "applied_imaging_calibration_recorded": applied_recorded,
         }
 
 
@@ -4584,6 +5036,9 @@ class ExperimentModel(QObject):
         data: Dict[str, object] = {
             "metadata": self.metadata,
             "stock_prep": self.stock_prep_state,
+            "applied_imaging_calibrations": self._normalize_applied_imaging_calibrations(
+                getattr(self, "applied_imaging_calibrations", None)
+            ),
             "factors": [
                 {
                     "name": f.name,
@@ -4672,6 +5127,9 @@ class ExperimentModel(QObject):
         # --- metadata + factors (existing behavior) ---
         self.metadata = d.get("metadata", self.metadata)
         self.stock_prep_state = self._normalize_stock_prep_state(d.get("stock_prep"))
+        self.applied_imaging_calibrations = self._normalize_applied_imaging_calibrations(
+            d.get("applied_imaging_calibrations")
+        )
         fill_droplet_nl = float(self.metadata.get("fill_droplet_volume_nL", self._default_fill_droplet_volume_nl()))
         self.metadata["fill_printing_mode"] = self._resolve_fill_printing_mode(
             self.metadata.get("fill_printing_mode"),
@@ -5533,7 +5991,13 @@ class ExperimentModel(QObject):
             "total_drops_delta": total_new - total_old,
         }
 
-    def apply_fill_droplet_volume(self, new_fill_droplet_nL: float, *, write_keys_if_assigned: bool = True) -> dict:
+    def apply_fill_droplet_volume(
+        self,
+        new_fill_droplet_nL: float,
+        *,
+        write_keys_if_assigned: bool = True,
+        applied_calibration: dict | None = None,
+    ) -> dict:
         """
         Set the fill droplet size and recompute experiment so all totals refresh.
         """
@@ -5567,6 +6031,17 @@ class ExperimentModel(QObject):
         self._refresh_runtime_after_plan_change(write_keys_if_assigned=write_keys_if_assigned)
 
         self.unsaved_changes = True
+        applied_recorded = False
+        if applied_calibration:
+            self.record_applied_imaging_calibration(
+                factor_name=str(self.metadata.get("fill_reagent_name", "Water")),
+                option_name=None,
+                is_fill=True,
+                applied_design_volume_nL=new_fill_droplet_nL,
+                save=False,
+                **dict(applied_calibration),
+            )
+            applied_recorded = True
         saved_experiment = False
         if getattr(self, "experiment_file_path", None):
             self.save_experiment()
@@ -5578,6 +6053,7 @@ class ExperimentModel(QObject):
             "total_drops_new": prev.get("total_drops_new"),
             "total_drops_delta": prev.get("total_drops_delta"),
             "saved_experiment": saved_experiment,
+            "applied_imaging_calibration_recorded": applied_recorded,
         }
 
 

@@ -223,6 +223,29 @@ def _first_saved_target(em, factor_name):
     return next(iter(stock["droplets_per_target"].values()))
 
 
+def _stock_id_for_design_row(em, factor_name, option_name=None):
+    for row in em.get_stock_table_rows(include_fill=True):
+        if row.get("factor_name") == factor_name and (row.get("option_name") or None) == option_name:
+            return em._stock_row_base_id(row)
+    raise AssertionError(f"Stock row for {factor_name!r}/{option_name!r} not found")
+
+
+def _printer_head(stock_id, *, printer_head_id="head-1", printing_mode="droplet"):
+    return SimpleNamespace(
+        get_stock_id=lambda: stock_id,
+        printer_head_id=printer_head_id,
+        get_printing_mode=lambda: printing_mode,
+    )
+
+
+def _machine_model_for_calibration(*, pw_us=1450, pressure_psi=1.35):
+    return SimpleNamespace(
+        get_print_pulse_width=lambda: pw_us,
+        get_current_print_pressure=lambda: pressure_psi,
+        get_target_print_pressure=lambda: pressure_psi,
+    )
+
+
 def test_apply_droplet_volume_for_option_persists_effective_and_intended_volume(
     experiment_model_factory,
 ):
@@ -285,3 +308,117 @@ def test_reloading_after_calibrated_volume_apply_uses_saved_effective_counts(
     assert reloaded.factors[0].options[0].intended_droplet_nL == 10.0
     assert reloaded.factors[0].options[0].forced_stock_conc == calibrated_stock_concentration
     assert _first_saved_target(reloaded, "glycerol") == calibrated_target
+
+
+def test_applied_imaging_calibration_records_serialize_through_save_and_load(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_calibrated_volume_design(em)
+    head = _printer_head(_stock_id_for_design_row(em, "glycerol"))
+
+    result = em.apply_droplet_volume_for_option(
+        "glycerol",
+        None,
+        15.0,
+        write_keys_if_assigned=False,
+        applied_calibration={
+            "printer_head": head,
+            "measured_volume_nL": 15.0,
+            "pw_us": 1450,
+            "pressure_psi": 1.35,
+            "run_id": "run-2",
+            "phase": "pressure_sweep_characterization",
+            "timestamp": "2026-03-18T09:02:00Z",
+            "source_row_fingerprint": ("run-2", "pressure_sweep", "2026-03-18T09:02:00Z", 1450, 1.35, 15.0),
+        },
+    )
+
+    payload = json.loads(Path(em.experiment_file_path).read_text(encoding="utf-8"))
+    applied = payload["applied_imaging_calibrations"]
+    assert applied["schema_version"] == 1
+    record = next(iter(applied["records"].values()))
+    assert record["stock_id"] == head.get_stock_id()
+    assert record["printer_head_id"] == "head-1"
+    assert record["applied_design_volume_nL"] == 15.0
+    assert record["measured_volume_nL"] == 15.0
+    assert record["pw_us"] == 1450
+    assert record["pressure_psi"] == 1.35
+    assert result["applied_imaging_calibration_recorded"] is True
+
+    reloaded_model = experiment_model_factory()
+    reloaded = reloaded_model.experiment_model
+    reloaded.load_experiment(em.experiment_file_path, em.experiment_dir_path)
+
+    validation = reloaded.validate_applied_imaging_calibration_for_print(
+        printer_head=head,
+        machine_model=_machine_model_for_calibration(),
+    )
+    assert validation["ok"] is True
+    assert validation["record"]["run_id"] == "run-2"
+
+
+def test_apply_fill_droplet_volume_records_applied_imaging_calibration(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_calibrated_volume_design(em)
+    head = _printer_head(_stock_id_for_design_row(em, "Water"), printer_head_id="fill-head")
+
+    result = em.apply_fill_droplet_volume(
+        12.0,
+        write_keys_if_assigned=False,
+        applied_calibration={
+            "printer_head": head,
+            "measured_volume_nL": 12.0,
+            "pw_us": 1500,
+            "pressure_psi": 1.10,
+            "run_id": "fill-run",
+            "phase": "pressure_sweep_characterization",
+            "timestamp": "2026-03-18T09:05:00Z",
+            "source_row_fingerprint": ("fill-run", "pressure_sweep", "2026-03-18T09:05:00Z", 1500, 1.10, 12.0),
+        },
+    )
+
+    record = em.get_applied_imaging_calibration(printer_head=head)
+    assert result["applied_imaging_calibration_recorded"] is True
+    assert record["is_fill"] is True
+    assert record["factor_name"] == "Water"
+    assert record["applied_design_volume_nL"] == 12.0
+    assert record["printer_head_id"] == "fill-head"
+
+
+def test_changing_design_volume_after_apply_invalidates_print_readiness(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_calibrated_volume_design(em)
+    head = _printer_head(_stock_id_for_design_row(em, "glycerol"))
+    em.apply_droplet_volume_for_option(
+        "glycerol",
+        None,
+        15.0,
+        write_keys_if_assigned=False,
+        applied_calibration={
+            "printer_head": head,
+            "measured_volume_nL": 15.0,
+            "pw_us": 1450,
+            "pressure_psi": 1.35,
+            "run_id": "run-2",
+            "phase": "pressure_sweep_characterization",
+            "timestamp": "2026-03-18T09:02:00Z",
+            "source_row_fingerprint": ("run-2", "pressure_sweep", "2026-03-18T09:02:00Z", 1450, 1.35, 15.0),
+        },
+    )
+
+    em.apply_droplet_volume_for_option("glycerol", None, 14.0, write_keys_if_assigned=False)
+
+    validation = em.validate_applied_imaging_calibration_for_print(
+        printer_head=head,
+        machine_model=_machine_model_for_calibration(),
+    )
+    assert validation["ok"] is False
+    assert "stale" in validation["message"]

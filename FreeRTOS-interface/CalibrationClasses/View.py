@@ -535,10 +535,24 @@ class CharacterizationSummaryTableModel(QtCore.QAbstractTableModel):
             return 1
         return 2
 
+    def _is_applied_row(self, row):
+        return (
+            self._applied_row_fingerprint is not None
+            and _summary_row_fingerprint(row) == self._applied_row_fingerprint
+        )
+
     def _build_columns(self):
         right = int(Qt.AlignRight | Qt.AlignVCenter)
         left = int(Qt.AlignLeft | Qt.AlignVCenter)
+        center = int(Qt.AlignCenter)
         columns = [
+            {
+                "key": "applied_marker",
+                "label": "",
+                "alignment": center,
+                "display": lambda row: "✓" if self._is_applied_row(row) else "",
+                "sort": lambda row: 0 if self._is_applied_row(row) else 1,
+            },
             {
                 "key": "run_no",
                 "label": "Run",
@@ -628,7 +642,11 @@ class CharacterizationSummaryTableModel(QtCore.QAbstractTableModel):
             return
         top_left = self.index(0, 0)
         bottom_right = self.index(self.rowCount() - 1, self.columnCount() - 1)
-        self.dataChanged.emit(top_left, bottom_right, [Qt.BackgroundRole])
+        self.dataChanged.emit(
+            top_left,
+            bottom_right,
+            [Qt.DisplayRole, Qt.ToolTipRole, Qt.BackgroundRole],
+        )
 
     def raw_row_at(self, row):
         if row < 0 or row >= len(self._rows):
@@ -668,6 +686,8 @@ class CharacterizationSummaryTableModel(QtCore.QAbstractTableModel):
         if role == SUMMARY_SORT_ROLE:
             return column["sort"](row)
         if role == Qt.ToolTipRole:
+            if key == "applied_marker" and self._is_applied_row(row):
+                return "Applied to design"
             invalid_reason = row.get("invalid_reason")
             if row.get("valid") is False and invalid_reason:
                 return f"Invalid: {invalid_reason}"
@@ -1532,6 +1552,15 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.summary_toolbar.addStretch(1)
         summary_v.addLayout(self.summary_toolbar)
 
+        self.summary_applied_calibration_banner = QtWidgets.QLabel()
+        self.summary_applied_calibration_banner.setWordWrap(True)
+        self.summary_applied_calibration_banner.setMinimumHeight(34)
+        self.summary_applied_calibration_banner.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        summary_v.addWidget(self.summary_applied_calibration_banner)
+        # Backward-compatible alias for older tests/helpers; the banner above the
+        # table is now the only visible applied-calibration status surface.
+        self.bridge_applied_calibration_label = self.summary_applied_calibration_banner
+
         self.summary_table_model = CharacterizationSummaryTableModel(
             self,
             include_recorded=False,
@@ -1552,10 +1581,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.summary_table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
         self.summary_table.setAlternatingRowColors(True)
         self.summary_table.horizontalHeader().setStretchLastSection(True)
-        self.summary_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
+        self.summary_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.Fixed)
+        self.summary_table.setColumnWidth(0, 26)
         self.summary_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
         self.summary_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
         self.summary_table.horizontalHeader().setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeToContents)
+        self.summary_table.horizontalHeader().setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeToContents)
         
         # Allow selecting entire rows (single selection)
         self.summary_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
@@ -1568,6 +1599,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.summary_table.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
 
         _configure_characterization_table_view(self.summary_table, self.summary_table_model)
+        self.summary_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.Fixed)
+        self.summary_table.setColumnWidth(0, 26)
         self.summary_table.setMinimumHeight(280)
         summary_v.addWidget(self.summary_table, 1)
         summary_v.addWidget(self.summary_count_label)
@@ -3334,6 +3367,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         return {}
 
     def _get_saved_applied_summary_row_fingerprint(self):
+        record = self._get_applied_imaging_calibration_record()
+        if isinstance(record, dict):
+            fingerprint = record.get("source_row_fingerprint")
+            if fingerprint is not None:
+                return tuple(fingerprint)
         key = self._get_current_reagent_context_key()
         raw = self._get_saved_applied_summary_row_fingerprints().get(key)
         if raw is None:
@@ -3357,6 +3395,189 @@ class DropletImagingDialog(QtWidgets.QDialog):
         fingerprint = self._get_saved_applied_summary_row_fingerprint()
         if hasattr(self, "summary_table_model"):
             self.summary_table_model.set_applied_row_fingerprint(fingerprint)
+        self._refresh_applied_calibration_banner()
+
+    def _get_loaded_printer_head(self):
+        try:
+            rack_model = getattr(self.model, "rack_model", None)
+            getter = getattr(rack_model, "get_gripper_printer_head", None)
+            if callable(getter):
+                return getter()
+            return getattr(rack_model, "gripper_printer_head", None)
+        except Exception:
+            return None
+
+    def _get_applied_imaging_calibration_record(self):
+        em = getattr(self.model, "experiment_model", None)
+        getter = getattr(em, "get_applied_imaging_calibration", None)
+        if not callable(getter):
+            return None
+        try:
+            return getter(printer_head=self._get_loaded_printer_head())
+        except Exception:
+            return None
+
+    @staticmethod
+    def _format_applied_record_value(record, key, decimals=None, suffix=""):
+        value = (record or {}).get(key)
+        if value in (None, ""):
+            return "-"
+        if decimals is None:
+            return f"{value}{suffix}"
+        try:
+            return f"{float(value):.{decimals}f}{suffix}"
+        except Exception:
+            return f"{value}{suffix}"
+
+    def _refresh_applied_calibration_status_label(self):
+        self._refresh_applied_calibration_banner()
+
+    def _refresh_applied_calibration_banner(self):
+        label = getattr(self, "summary_applied_calibration_banner", None)
+        if label is None:
+            return
+        record = self._get_applied_imaging_calibration_record()
+        if not isinstance(record, dict):
+            label.setText("No calibration applied to this design for the loaded stock/head.")
+            label.setStyleSheet(
+                "QLabel {"
+                " background-color: #7f1d1d;"
+                " color: #ffffff;"
+                " border: 1px solid #ef4444;"
+                " border-radius: 4px;"
+                " padding: 7px 9px;"
+                " font-weight: 600;"
+                "}"
+            )
+            return
+        run_id = record.get("run_id") or "-"
+        measured = self._format_applied_record_value(record, "measured_volume_nL", 3, " nL")
+        pw = self._format_applied_record_value(record, "pw_us", None, " us")
+        pressure = self._format_applied_record_value(record, "pressure_psi", 3, " psi")
+        label.setText(f"Applied: Run {run_id}, {measured}, PW {pw}, {pressure}")
+        label.setStyleSheet(
+            "QLabel {"
+            " background-color: #1d4ed8;"
+            " color: #ffffff;"
+            " border: 1px solid #60a5fa;"
+            " border-radius: 4px;"
+            " padding: 7px 9px;"
+            " font-weight: 600;"
+            "}"
+        )
+
+    def _selected_summary_row_matches_applied(self, raw=None):
+        if raw is None:
+            _, raw = self._selected_summary_row()
+        if not raw:
+            return False
+        applied = self._get_saved_applied_summary_row_fingerprint()
+        if applied is None:
+            return False
+        return tuple(self._summary_row_fingerprint(raw)) == tuple(applied)
+
+    def _set_bridge_apply_button_state(self, state, reason=None):
+        button = getattr(self, "bridge_apply_btn", None)
+        if button is None:
+            return
+        state = str(state or "unavailable").strip().lower()
+        self._bridge_apply_button_state = state
+
+        neutral_style = ""
+        primary_style = (
+            "QPushButton {"
+            " background-color: #2563eb;"
+            " color: #ffffff;"
+            " border: 1px solid #60a5fa;"
+            " border-radius: 4px;"
+            " padding: 6px 10px;"
+            " font-weight: 600;"
+            "}"
+            "QPushButton:hover { background-color: #1d4ed8; }"
+            "QPushButton:pressed { background-color: #1e40af; }"
+        )
+
+        if state == "ready":
+            button.setEnabled(True)
+            button.setText("Apply selected calibration to design")
+            button.setToolTip(str(reason or "Apply this calibration result to the experiment design."))
+            button.setStyleSheet(primary_style)
+        elif state == "applied":
+            button.setEnabled(False)
+            button.setText("Selected calibration is applied")
+            button.setToolTip(str(reason or "This calibration result is already applied to the design."))
+            button.setStyleSheet(neutral_style)
+        else:
+            button.setEnabled(False)
+            button.setText("Apply selected calibration to design")
+            button.setToolTip(str(reason or "Select a usable characterization result to preview a new ejection volume."))
+            button.setStyleSheet(neutral_style)
+
+    def _has_applied_calibration_design_context(self):
+        if bool(getattr(self, "service_mode", False)):
+            return False
+        em = getattr(self.model, "experiment_model", None)
+        printer_head = self._get_loaded_printer_head()
+        if em is None or printer_head is None:
+            return False
+        resolver = getattr(em, "_resolve_applied_imaging_context", None)
+        if callable(resolver):
+            try:
+                return resolver(printer_head=printer_head) is not None
+            except Exception:
+                return False
+        try:
+            return bool(self._bridge_get_current_reagent_name())
+        except Exception:
+            return False
+
+    def _should_confirm_close_without_applied_calibration(self):
+        if not self._has_applied_calibration_design_context():
+            return False
+        if self._get_applied_imaging_calibration_record() is None:
+            return True
+        return (
+            str(getattr(self, "_bridge_apply_button_state", "")).lower() == "ready"
+            and getattr(self, "bridge_apply_btn", None) is not None
+            and self.bridge_apply_btn.isEnabled()
+        )
+
+    def _close_without_applied_calibration_message(self):
+        if self._get_applied_imaging_calibration_record() is None:
+            return (
+                "No calibration result has been applied to this design for the loaded stock/head. "
+                "Exit the droplet imager anyway?"
+            )
+        return (
+            "A different calibration result is selected and ready to apply, but it has not been applied "
+            "to the design. Exit the droplet imager anyway?"
+        )
+
+    def _build_applied_imaging_calibration_payload(self, raw, measured_volume_nL, *, source_row_fingerprint=None):
+        raw = dict(raw or {})
+        if source_row_fingerprint is None and raw:
+            source_row_fingerprint = self._summary_row_fingerprint(raw)
+        machine_model = getattr(self.model, "machine_model", None)
+
+        def _machine_value(getter_name):
+            getter = getattr(machine_model, getter_name, None)
+            if callable(getter):
+                try:
+                    return getter()
+                except Exception:
+                    return None
+            return None
+
+        return {
+            "printer_head": self._get_loaded_printer_head(),
+            "measured_volume_nL": measured_volume_nL,
+            "pw_us": raw.get("pw_us", _machine_value("get_print_pulse_width")),
+            "pressure_psi": raw.get("pressure_psi", _machine_value("get_current_print_pressure")),
+            "run_id": raw.get("run_id") or raw.get("run_no"),
+            "phase": raw.get("phase"),
+            "timestamp": raw.get("timestamp"),
+            "source_row_fingerprint": source_row_fingerprint,
+        }
 
     @staticmethod
     def _summary_row_fingerprint(row):
@@ -5711,8 +5932,17 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         # --- Special case: fill reagent
         if payload.get("is_fill"):
+            applied_calibration = self._build_applied_imaging_calibration_payload(
+                raw,
+                float(payload["new_fill_nL"]),
+                source_row_fingerprint=payload.get("source_row_fingerprint"),
+            )
             try:
-                out = em.apply_fill_droplet_volume(float(payload["new_fill_nL"]), write_keys_if_assigned=True)
+                out = em.apply_fill_droplet_volume(
+                    float(payload["new_fill_nL"]),
+                    write_keys_if_assigned=True,
+                    applied_calibration=applied_calibration,
+                )
             except Exception as e:
                 QtWidgets.QMessageBox.critical(self, "Apply failed", f"{e}")
                 return
@@ -5755,14 +5985,20 @@ class DropletImagingDialog(QtWidgets.QDialog):
         except Exception:
             cur_dv = None
         new_dv = float(payload["new_droplet_nL"])
+        volume_unchanged = cur_dv is not None and abs(new_dv - cur_dv) < 1e-9
 
-        if cur_dv is not None and abs(new_dv - cur_dv) < 1e-9:
-            QtWidgets.QMessageBox.information(self, "Apply", "New droplet volume equals current design; nothing to change.")
-            return
-
+        applied_calibration = self._build_applied_imaging_calibration_payload(
+            raw,
+            new_dv,
+            source_row_fingerprint=payload.get("source_row_fingerprint"),
+        )
         try:
             em.apply_droplet_volume_for_option(
-                payload["factor_name"], payload["option_name"], new_dv, write_keys_if_assigned=True
+                payload["factor_name"],
+                payload["option_name"],
+                new_dv,
+                write_keys_if_assigned=True,
+                applied_calibration=applied_calibration,
             )
         except NotImplementedError as e:
             QtWidgets.QMessageBox.warning(self, "Apply failed", str(e))
@@ -5776,9 +6012,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._bridge_clear_preview()
         self._bridge_refresh_design_labels()
         self.refresh_calibration_memory_recommendation()
+        reagent_label = f"{payload['factor_name']}{('/' + payload['option_name']) if payload['option_name'] else ''}"
+        if volume_unchanged:
+            message = f"Recorded applied imaging calibration for {reagent_label} at {new_dv:.3f} nL ejection volume."
+        else:
+            message = f"Updated {reagent_label} to {new_dv:.3f} nL ejection volume."
         QtWidgets.QMessageBox.information(
             self, "Applied",
-            f"Updated {payload['factor_name']}{('/' + payload['option_name']) if payload['option_name'] else ''} to {new_dv:.3f} nL ejection volume."
+            message
         )
         
     def _selected_summary_row(self):
@@ -6292,8 +6533,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
     def _bridge_clear_preview_with_status(self, status_text=None):
         self._bridge_preview_payload = None
-        self.bridge_apply_btn.setEnabled(False)
-        self.bridge_apply_btn.setToolTip("Select a usable characterization result to preview a new ejection volume.")
+        self._set_bridge_apply_button_state(
+            "unavailable",
+            "Select a usable characterization result to preview a new ejection volume.",
+        )
         self.bridge_table.clearContents()
         self.bridge_table.setRowCount(0)
         if hasattr(self, "bridge_status_label"):
@@ -6444,8 +6687,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 "new_fill_nL": float(mean_nL),
                 "source_row_fingerprint": selected_fingerprint,
             }
-            self.bridge_apply_btn.setEnabled(True)
-            self.bridge_apply_btn.setToolTip("")
+            if self._selected_summary_row_matches_applied(raw):
+                self._set_bridge_apply_button_state("applied")
+            else:
+                self._set_bridge_apply_button_state("ready")
             self.bridge_status_label.setText(
                 f"{status_prefix}Preview uses the selected result ejection volume of {mean_nL:.3f} nL."
             )
@@ -6477,8 +6722,15 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "source_row_fingerprint": selected_fingerprint,
         }
         can_apply = self._bridge_preview_payload["n_stocks"] == 1
-        self.bridge_apply_btn.setEnabled(can_apply)
-        self.bridge_apply_btn.setToolTip("" if can_apply else "Apply supports single-stock reagents only right now.")
+        if can_apply and self._selected_summary_row_matches_applied(raw):
+            self._set_bridge_apply_button_state("applied")
+        elif can_apply:
+            self._set_bridge_apply_button_state("ready")
+        else:
+            self._set_bridge_apply_button_state(
+                "unavailable",
+                "Apply supports single-stock reagents only right now.",
+            )
         if can_apply:
             self.bridge_status_label.setText(
                 f"{status_prefix}Preview uses the selected result ejection volume of {mean_nL:.3f} nL."
@@ -6545,6 +6797,18 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
     def closeEvent(self, event):
         """Handle the closing of the dialog."""
+        if self._should_confirm_close_without_applied_calibration():
+            response = QtWidgets.QMessageBox.question(
+                self,
+                "Exit without applied calibration?",
+                self._close_without_applied_calibration_message(),
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No,
+            )
+            if response != QtWidgets.QMessageBox.Yes:
+                event.ignore()
+                return
+
         self._stream_capture_dialog_closing = True
         if getattr(self, "_optics_session_active", False):
             try:

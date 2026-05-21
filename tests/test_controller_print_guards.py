@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 from unittest.mock import ANY, Mock, call
 
+import pytest
+
 from Controller import (
     ARRAY_AXIS_ACCEL_DEFAULT,
     ARRAY_PAUSE_DEPARTURE_ACCEL,
@@ -92,6 +94,9 @@ def _make_controller(
     queue_empty=True,
     initial_state="idle",
     current_accels=None,
+    profile_name="default",
+    imaging_guard_ok=True,
+    imaging_guard_message="Applied imaging calibration is required.",
 ):
     c = Controller.__new__(Controller)
     c.array_complete = Emitter()
@@ -100,7 +105,7 @@ def _make_controller(
     c.error_occurred_signal = Emitter()
     c._array_state = initial_state
     c._array_context = None
-    c.profile = SimpleNamespace(name="default")
+    c.profile = SimpleNamespace(name=profile_name)
 
     seq_counter = {"value": 100}
     command_events = []
@@ -156,11 +161,23 @@ def _make_controller(
             regulating_print_pressure=regulation_on,
             clear_command_queue=Mock(),
             get_current_accelerations=lambda: current_accels,
+            get_print_pulse_width=lambda: 1400,
+            get_current_print_pressure=lambda: 1.20,
+            get_target_print_pressure=lambda: 1.20,
             transport_paused=False,
             pause_watermark_reached=False,
             resume_commands=Mock(),
         ),
-        experiment_model=SimpleNamespace(create_progress_file=Mock()),
+        experiment_model=SimpleNamespace(
+            create_progress_file=Mock(),
+            validate_applied_imaging_calibration_for_print=Mock(
+                return_value={
+                    "ok": bool(imaging_guard_ok),
+                    "message": "" if imaging_guard_ok else imaging_guard_message,
+                    "record": {"run_id": "run-1"} if imaging_guard_ok else None,
+                }
+            ),
+        ),
     )
     return c
 
@@ -225,6 +242,65 @@ def test_print_array_blocks_when_regulation_disabled():
     Controller.print_array(c)
     assert c.error_occurred_signal.calls[0][1] == "Pressure regulation is not enabled"
     c.close_gripper.assert_not_called()
+
+
+def test_print_array_blocks_when_applied_imaging_calibration_missing():
+    message = "No applied imaging calibration was found for the loaded stock/head."
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        imaging_guard_ok=False,
+        imaging_guard_message=message,
+    )
+
+    Controller.print_array(c)
+
+    c.model.experiment_model.validate_applied_imaging_calibration_for_print.assert_called_once_with(
+        printer_head=c.model.rack_model.gripper_printer_head,
+        machine_model=c.model.machine_model,
+    )
+    assert c.error_occurred_signal.calls[0][1] == message
+    c.close_gripper.assert_not_called()
+    c.move_to_location.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Loaded printer head does not match the applied imaging calibration.",
+        "Loaded stock does not match the applied imaging calibration.",
+        "Print pulse width does not match the applied imaging calibration.",
+        "Target print pressure does not match the applied imaging calibration.",
+        "Applied imaging calibration is stale for the current design.",
+    ],
+)
+def test_print_array_blocks_when_applied_imaging_guard_reports_mismatch(message):
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        imaging_guard_ok=False,
+        imaging_guard_message=message,
+    )
+
+    Controller.print_array(c)
+
+    assert c.error_occurred_signal.calls[0][1] == message
+    c.close_gripper.assert_not_called()
+    c.move_to_location.assert_not_called()
+
+
+def test_print_array_skips_applied_imaging_guard_for_legacy_profile():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        profile_name="legacy",
+        imaging_guard_ok=False,
+    )
+
+    Controller.print_array(c)
+
+    c.model.experiment_model.validate_applied_imaging_calibration_for_print.assert_not_called()
+    c.close_gripper.assert_called_once_with()
 
 
 def test_print_array_prefetches_one_lookahead_well():

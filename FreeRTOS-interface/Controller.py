@@ -1975,6 +1975,34 @@ class Controller(QObject):
             print('Cannot print: Pressure regulation is not enabled')
             return
 
+        profile_name = str(getattr(getattr(self, "profile", None), "name", "") or "").lower()
+        if profile_name != "legacy":
+            printer_head = self.model.rack_model.get_gripper_printer_head()
+            validator = getattr(
+                getattr(self.model, "experiment_model", None),
+                "validate_applied_imaging_calibration_for_print",
+                None,
+            )
+            if callable(validator):
+                validation = validator(
+                    printer_head=printer_head,
+                    machine_model=self.model.machine_model,
+                )
+            else:
+                validation = {
+                    "ok": False,
+                    "message": "Experiment model cannot confirm the applied imaging calibration.",
+                    "record": None,
+                }
+            if not bool((validation or {}).get("ok")):
+                message = str(
+                    (validation or {}).get("message")
+                    or "No applied imaging calibration was found for the loaded printer head."
+                )
+                self.error_occurred_signal.emit('Error', message)
+                print(f'Cannot print: {message}')
+                return
+
         if self.get_array_run_state() == "resume_ready" and self.model.machine_model.transport_paused:
             self.resume_commands()
 
