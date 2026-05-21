@@ -308,13 +308,14 @@ def test_refresh_recommendation_reentrancy_guard_returns_cached_preview(qapp):
 def test_apply_previewed_droplet_volume_refreshes_recommendation(monkeypatch, qapp):
     refresh_calls = []
     applied = []
+    source_row_fingerprint = ("run-a", "sweep", "2026-03-18T09:00:00Z", 1400.0, 1.2, 12.0)
     dialog = SimpleNamespace()
     dialog._bridge_preview_payload = {
         "factor_name": "glycerol",
         "option_name": None,
         "new_droplet_nL": 12.0,
         "n_stocks": 1,
-        "source_row_fingerprint": ("run-a", "sweep", "2026-03-18T09:00:00Z", 1400.0, 1.2, 12.0),
+        "source_row_fingerprint": source_row_fingerprint,
     }
     dialog.model = SimpleNamespace(
         experiment_model=SimpleNamespace(
@@ -322,6 +323,14 @@ def test_apply_previewed_droplet_volume_refreshes_recommendation(monkeypatch, qa
             apply_droplet_volume_for_option=lambda *args, **kwargs: applied.append((args, kwargs)),
         )
     )
+
+    def _build_applied_imaging_calibration_payload(_raw, measured_volume_nL, *, source_row_fingerprint=None):
+        return {
+            "measured_volume_nL": float(measured_volume_nL),
+            "source_row_fingerprint": source_row_fingerprint,
+        }
+
+    dialog._build_applied_imaging_calibration_payload = _build_applied_imaging_calibration_payload
     dialog._bridge_clear_preview = lambda: None
     dialog._bridge_refresh_design_labels = lambda: None
     dialog.refresh_calibration_memory_recommendation = lambda: refresh_calls.append(True)
@@ -337,6 +346,12 @@ def test_apply_previewed_droplet_volume_refreshes_recommendation(monkeypatch, qa
     dialog._apply_previewed_droplet_volume()
 
     assert applied
+    args, kwargs = applied[0]
+    assert args == ("glycerol", None, 12.0)
+    assert kwargs["write_keys_if_assigned"] is True
+    applied_calibration = kwargs["applied_calibration"]
+    assert applied_calibration["measured_volume_nL"] == pytest.approx(12.0)
+    assert applied_calibration["source_row_fingerprint"] == source_row_fingerprint
     assert refresh_calls == [True]
 
 
