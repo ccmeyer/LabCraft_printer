@@ -4685,6 +4685,7 @@ class ExperimentModel(QObject):
         if context is None:
             return {
                 "ok": False,
+                "code": "context_unavailable",
                 "message": "No stock plan was found for the loaded printer head.",
                 "record": None,
             }
@@ -4700,6 +4701,7 @@ class ExperimentModel(QObject):
         if record is None:
             return {
                 "ok": False,
+                "code": "missing_record",
                 "message": (
                     "No applied imaging calibration was found for the loaded "
                     f"{context['stock_id']} / {context['printer_head_id']}."
@@ -4713,12 +4715,14 @@ class ExperimentModel(QObject):
         except Exception:
             return {
                 "ok": False,
+                "code": "invalid_record",
                 "message": "Applied imaging calibration is missing design volume information.",
                 "record": record,
             }
         if abs(current_volume - applied_volume) > float(volume_tolerance_nL):
             return {
                 "ok": False,
+                "code": "stale_design_volume",
                 "message": (
                     "Applied imaging calibration is stale for the current design "
                     f"({applied_volume:.3f} nL applied, {current_volume:.3f} nL current)."
@@ -4730,6 +4734,7 @@ class ExperimentModel(QObject):
         if record_pw is None or current_print_pulse_width is None:
             return {
                 "ok": False,
+                "code": "settings_unavailable",
                 "message": "Cannot confirm print pulse width for the applied imaging calibration.",
                 "record": record,
             }
@@ -4737,6 +4742,7 @@ class ExperimentModel(QObject):
             if int(round(float(current_print_pulse_width))) != int(record_pw):
                 return {
                     "ok": False,
+                    "code": "pulse_width_mismatch",
                     "message": (
                         "Print pulse width does not match the applied imaging calibration "
                         f"({record_pw} us applied, {int(round(float(current_print_pulse_width)))} us current)."
@@ -4746,6 +4752,7 @@ class ExperimentModel(QObject):
         except Exception:
             return {
                 "ok": False,
+                "code": "settings_unavailable",
                 "message": "Cannot parse current print pulse width for calibration validation.",
                 "record": record,
             }
@@ -4754,6 +4761,7 @@ class ExperimentModel(QObject):
         if record_pressure is None:
             return {
                 "ok": False,
+                "code": "invalid_record",
                 "message": "Applied imaging calibration is missing print pressure information.",
                 "record": record,
             }
@@ -4769,12 +4777,14 @@ class ExperimentModel(QObject):
             except Exception:
                 return {
                     "ok": False,
+                    "code": "settings_unavailable",
                     "message": f"Cannot parse {label} print pressure for calibration validation.",
                     "record": record,
                 }
         if not pressure_values:
             return {
                 "ok": False,
+                "code": "settings_unavailable",
                 "message": "Cannot confirm print pressure for the applied imaging calibration.",
                 "record": record,
             }
@@ -4783,6 +4793,7 @@ class ExperimentModel(QObject):
             if abs(value - float(record_pressure)) > tolerance:
                 return {
                     "ok": False,
+                    "code": "pressure_mismatch",
                     "message": (
                         f"{label.title()} print pressure does not match the applied imaging calibration "
                         f"({float(record_pressure):.3f} psi applied, {value:.3f} psi {label})."
@@ -4790,7 +4801,7 @@ class ExperimentModel(QObject):
                     "record": record,
                 }
 
-        return {"ok": True, "message": "", "record": record}
+        return {"ok": True, "code": "ok", "message": "", "record": record}
 
 
     # ---------- apply a new droplet size while keeping stock concentration fixed ----------

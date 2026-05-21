@@ -3579,6 +3579,75 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "source_row_fingerprint": source_row_fingerprint,
         }
 
+    def _apply_print_settings_for_applied_calibration(self, applied_calibration, *, run_label="-"):
+        applied_calibration = dict(applied_calibration or {})
+        try:
+            pw = int(round(float(applied_calibration.get("pw_us"))))
+            pressure = float(applied_calibration.get("pressure_psi"))
+        except Exception:
+            return {
+                "ok": False,
+                "message": "Selected calibration is missing usable PW or pressure settings.",
+            }
+
+        def _after_apply(*_):
+            try:
+                DropletImagingDialog._sync_manual_spinbox_value(
+                    self,
+                    self.print_pulse_width_spinbox,
+                    pw,
+                    force=True,
+                )
+            except Exception:
+                pass
+            try:
+                self.update_stage_and_log(
+                    f"Loaded PW {pw} us and {pressure:.3f} psi from applied calibration Run {run_label or '-'}",
+                    "blue",
+                )
+            except Exception:
+                pass
+
+        mgr = getattr(self.model, "calibration_manager", None)
+        signal = getattr(mgr, "changeSettingsRequested", None)
+        if signal is not None:
+            try:
+                signal.emit({"print_pulse_width": pw, "print_pressure": pressure}, _after_apply)
+                return {
+                    "ok": True,
+                    "message": f"Loaded PW {pw} us and {pressure:.3f} psi.",
+                }
+            except Exception:
+                pass
+
+        applied_ok = False
+        try:
+            if hasattr(self.controller, "set_print_pulse_width"):
+                self.controller.set_print_pulse_width(pw, manual=True)
+                applied_ok = True
+        except Exception:
+            pass
+        try:
+            if hasattr(self.controller, "set_absolute_print_pressure"):
+                self.controller.set_absolute_print_pressure(pressure, manual=True)
+                applied_ok = True
+            elif hasattr(self.controller, "set_print_pressure"):
+                self.controller.set_print_pressure(pressure, manual=True)
+                applied_ok = True
+        except Exception:
+            pass
+
+        if applied_ok:
+            _after_apply()
+            return {
+                "ok": True,
+                "message": f"Loaded PW {pw} us and {pressure:.3f} psi.",
+            }
+        return {
+            "ok": False,
+            "message": "Could not apply settings via calibration manager or controller.",
+        }
+
     @staticmethod
     def _summary_row_fingerprint(row):
         return _summary_row_fingerprint(row)
@@ -5956,9 +6025,22 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
             self._set_saved_applied_summary_row_fingerprint(payload.get("source_row_fingerprint"))
             self._sync_applied_summary_row_highlight()
+            settings_result = self._apply_print_settings_for_applied_calibration(
+                applied_calibration,
+                run_label=applied_calibration.get("run_id") or (raw or {}).get("run_no") or "-",
+            )
             self._bridge_clear_preview()
             self._bridge_refresh_design_labels()
             self.refresh_calibration_memory_recommendation()
+            if not bool(settings_result.get("ok")):
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Settings not changed",
+                    (
+                        "Calibration was applied to the design, but the machine settings "
+                        f"could not be changed.\n\n{settings_result.get('message', '')}"
+                    ),
+                )
             QtWidgets.QMessageBox.information(
                 self, "Applied (Fill)",
                 (
@@ -6009,9 +6091,22 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         self._set_saved_applied_summary_row_fingerprint(payload.get("source_row_fingerprint"))
         self._sync_applied_summary_row_highlight()
+        settings_result = self._apply_print_settings_for_applied_calibration(
+            applied_calibration,
+            run_label=applied_calibration.get("run_id") or (raw or {}).get("run_no") or "-",
+        )
         self._bridge_clear_preview()
         self._bridge_refresh_design_labels()
         self.refresh_calibration_memory_recommendation()
+        if not bool(settings_result.get("ok")):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Settings not changed",
+                (
+                    "Calibration was applied to the design, but the machine settings "
+                    f"could not be changed.\n\n{settings_result.get('message', '')}"
+                ),
+            )
         reagent_label = f"{payload['factor_name']}{('/' + payload['option_name']) if payload['option_name'] else ''}"
         if volume_unchanged:
             message = f"Recorded applied imaging calibration for {reagent_label} at {new_dv:.3f} nL ejection volume."

@@ -22,7 +22,9 @@ class DummyButton:
         self.style = style
 
 
-def _make_widget(*, array_state="idle", has_head=True):
+def _make_widget(*, array_state="idle", has_head=True, preflight=None, choice="Cancel"):
+    if preflight is None:
+        preflight = {"ok": True, "code": "ok", "message": "", "record": None}
     widget = WellPlateWidget.__new__(WellPlateWidget)
     widget.color_dict = {
         "dark_blue": "#123456",
@@ -34,6 +36,10 @@ def _make_widget(*, array_state="idle", has_head=True):
         print_array=Mock(),
         request_array_soft_stop=Mock(),
         get_array_run_state=lambda: array_state,
+        get_print_array_imaging_calibration_preflight=Mock(return_value=preflight),
+        apply_applied_imaging_calibration_print_settings=Mock(
+            return_value={"ok": True, "message": "Set print pulse width to 1450 us and print pressure to 1.350 psi."}
+        ),
     )
     widget.model = SimpleNamespace(
         rack_model=SimpleNamespace(
@@ -42,6 +48,8 @@ def _make_widget(*, array_state="idle", has_head=True):
     )
     widget.main_window = SimpleNamespace(
         popup_yes_no=Mock(return_value=QMessageBox.StandardButton.Yes),
+        popup_choice=Mock(return_value=choice),
+        popup_message=Mock(),
         _is_yes_response=lambda response: MainWindow._is_yes_response(response),
     )
     widget.start_print_array_button = DummyButton()
@@ -98,6 +106,99 @@ def test_well_plate_widget_resume_prompt_uses_resume_copy():
         "Are you sure you want to resume the print array?",
     )
     widget.controller.print_array.assert_called_once_with()
+
+
+def test_well_plate_widget_missing_applied_calibration_cancel_does_not_print():
+    widget = _make_widget(
+        preflight={
+            "ok": False,
+            "code": "missing_record",
+            "message": "No applied imaging calibration was found.",
+            "record": None,
+        },
+        choice="Cancel",
+    )
+
+    WellPlateWidget.start_print_array(widget)
+
+    widget.main_window.popup_choice.assert_called_once()
+    widget.controller.print_array.assert_not_called()
+
+
+def test_well_plate_widget_missing_applied_calibration_can_proceed_with_override():
+    widget = _make_widget(
+        preflight={
+            "ok": False,
+            "code": "missing_record",
+            "message": "No applied imaging calibration was found.",
+            "record": None,
+        },
+        choice="Proceed without applied calibration",
+    )
+
+    WellPlateWidget.start_print_array(widget)
+
+    widget.controller.print_array.assert_called_once_with(imaging_calibration_override=True)
+
+
+def test_well_plate_widget_settings_mismatch_switches_settings_without_printing():
+    record = {"run_id": "run-2", "pw_us": 1450, "pressure_psi": 1.35}
+    widget = _make_widget(
+        preflight={
+            "ok": False,
+            "code": "pulse_width_mismatch",
+            "message": "Print pulse width does not match the applied imaging calibration.",
+            "record": record,
+        },
+        choice="Switch to applied calibration settings",
+    )
+
+    WellPlateWidget.start_print_array(widget)
+
+    widget.controller.apply_applied_imaging_calibration_print_settings.assert_called_once_with(record)
+    widget.main_window.popup_message.assert_called_once()
+    widget.controller.print_array.assert_not_called()
+
+
+def test_well_plate_widget_settings_mismatch_can_proceed_with_override():
+    widget = _make_widget(
+        preflight={
+            "ok": False,
+            "code": "pressure_mismatch",
+            "message": "Current print pressure does not match the applied imaging calibration.",
+            "record": {"run_id": "run-2", "pw_us": 1450, "pressure_psi": 1.35},
+        },
+        choice="Proceed with current settings",
+    )
+
+    WellPlateWidget.start_print_array(widget)
+
+    widget.controller.print_array.assert_called_once_with(settings_mismatch_override=True)
+
+
+def test_shift_p_shortcut_uses_well_plate_print_launch_path():
+    shortcuts = {}
+
+    class RecorderShortcutManager:
+        def add_shortcut(self, key, _name, callback):
+            shortcuts[key] = callback
+
+    main_window = MainWindow.__new__(MainWindow)
+    main_window.shortcut_manager = RecorderShortcutManager()
+    main_window.controller = SimpleNamespace()
+    main_window.model = SimpleNamespace(
+        machine_model=SimpleNamespace(
+            step_size=1,
+            increase_step_size=Mock(),
+            decrease_step_size=Mock(),
+        )
+    )
+    main_window.well_plate_widget = SimpleNamespace(start_print_array=Mock())
+
+    MainWindow.setup_shortcuts(main_window)
+    shortcuts["Shift+p"]()
+
+    main_window.well_plate_widget.start_print_array.assert_called_once_with()
 
 
 def test_well_plate_widget_running_button_requests_soft_stop():

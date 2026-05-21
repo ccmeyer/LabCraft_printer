@@ -97,6 +97,8 @@ def _make_controller(
     profile_name="default",
     imaging_guard_ok=True,
     imaging_guard_message="Applied imaging calibration is required.",
+    imaging_guard_code=None,
+    imaging_guard_record=None,
 ):
     c = Controller.__new__(Controller)
     c.array_complete = Emitter()
@@ -147,8 +149,14 @@ def _make_controller(
         resume_commands=Mock(side_effect=_fake_resume_commands),
         request_pause_after_seq32=Mock(return_value=True),
         set_axis_accel=Mock(side_effect=_fake_set_axis_accel),
+        set_print_pulse_width=Mock(return_value=SimpleNamespace(command_number=201)),
+        set_absolute_print_pressure=Mock(return_value=SimpleNamespace(command_number=202)),
         wait_ms=Mock(),
     )
+    if imaging_guard_code is None:
+        imaging_guard_code = "ok" if imaging_guard_ok else "missing_record"
+    if imaging_guard_record is None and imaging_guard_ok:
+        imaging_guard_record = {"run_id": "run-1", "pw_us": 1400, "pressure_psi": 1.20}
     c.model = SimpleNamespace(
         well_plate=well_plate,
         update_state=Mock(side_effect=lambda status: None),
@@ -173,8 +181,9 @@ def _make_controller(
             validate_applied_imaging_calibration_for_print=Mock(
                 return_value={
                     "ok": bool(imaging_guard_ok),
+                    "code": imaging_guard_code,
                     "message": "" if imaging_guard_ok else imaging_guard_message,
-                    "record": {"run_id": "run-1"} if imaging_guard_ok else None,
+                    "record": imaging_guard_record,
                 }
             ),
         ),
@@ -251,6 +260,7 @@ def test_print_array_blocks_when_applied_imaging_calibration_missing():
         printer_head=_make_printer_head(),
         imaging_guard_ok=False,
         imaging_guard_message=message,
+        imaging_guard_code="missing_record",
     )
 
     Controller.print_array(c)
@@ -260,6 +270,75 @@ def test_print_array_blocks_when_applied_imaging_calibration_missing():
         machine_model=c.model.machine_model,
     )
     assert c.error_occurred_signal.calls[0][1] == message
+    c.close_gripper.assert_not_called()
+    c.move_to_location.assert_not_called()
+
+
+def test_print_array_allows_missing_applied_calibration_with_explicit_override():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        imaging_guard_ok=False,
+        imaging_guard_message="No applied imaging calibration was found.",
+        imaging_guard_code="missing_record",
+    )
+
+    Controller.print_array(c, imaging_calibration_override=True)
+
+    c.close_gripper.assert_called_once_with()
+    assert c.error_occurred_signal.calls == []
+
+
+def test_print_array_blocks_settings_mismatch_without_override():
+    message = "Print pulse width does not match the applied imaging calibration."
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        imaging_guard_ok=False,
+        imaging_guard_message=message,
+        imaging_guard_code="pulse_width_mismatch",
+        imaging_guard_record={"run_id": "run-2", "pw_us": 1450, "pressure_psi": 1.35},
+    )
+
+    Controller.print_array(c)
+
+    assert c.error_occurred_signal.calls[0][1] == message
+    c.close_gripper.assert_not_called()
+    c.move_to_location.assert_not_called()
+
+
+def test_print_array_allows_settings_mismatch_with_explicit_override():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        imaging_guard_ok=False,
+        imaging_guard_message="Print pressure does not match the applied imaging calibration.",
+        imaging_guard_code="pressure_mismatch",
+        imaging_guard_record={"run_id": "run-2", "pw_us": 1450, "pressure_psi": 1.35},
+    )
+
+    Controller.print_array(c, settings_mismatch_override=True)
+
+    c.close_gripper.assert_called_once_with()
+    assert c.error_occurred_signal.calls == []
+
+
+def test_apply_applied_imaging_calibration_print_settings_only_sets_parameters():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+    )
+
+    result = Controller.apply_applied_imaging_calibration_print_settings(
+        c,
+        {"run_id": "run-2", "pw_us": 1450, "pressure_psi": 1.35},
+    )
+
+    assert result["ok"] is True
+    c.machine.set_print_pulse_width.assert_called_once()
+    assert c.machine.set_print_pulse_width.call_args.args[0] == 1450
+    c.machine.set_absolute_print_pressure.assert_called_once()
+    assert c.machine.set_absolute_print_pressure.call_args.args[0] == 1.35
     c.close_gripper.assert_not_called()
     c.move_to_location.assert_not_called()
 
@@ -280,6 +359,7 @@ def test_print_array_blocks_when_applied_imaging_guard_reports_mismatch(message)
         printer_head=_make_printer_head(),
         imaging_guard_ok=False,
         imaging_guard_message=message,
+        imaging_guard_code="validation_failed",
     )
 
     Controller.print_array(c)

@@ -987,6 +987,10 @@ def test_apply_marks_summary_row_and_persists_across_reopen(monkeypatch, qapp, t
         main_window=main_window,
         experiment_model=experiment_model,
     )
+    settings_calls = []
+    _manager.changeSettingsRequested.connect(
+        lambda settings, callback: settings_calls.append(dict(settings)) or (callback() if callable(callback) else None)
+    )
     dialog._apply_summary_sort(dialog.summary_table_model.column_index("mean_nL"), Qt.DescendingOrder)
     qapp.processEvents()
     _select_visible_row(dialog, 0)
@@ -1009,6 +1013,7 @@ def test_apply_marks_summary_row_and_persists_across_reopen(monkeypatch, qapp, t
     assert "#1d4ed8" in dialog.summary_applied_calibration_banner.styleSheet()
     assert dialog.bridge_apply_btn.isEnabled() is False
     assert dialog.bridge_apply_btn.text() == "Selected calibration is applied"
+    assert settings_calls[-1] == {"print_pulse_width": 1450, "print_pressure": 1.35}
     assert info_calls
 
     dialog.summary_valid_only_checkbox.setChecked(True)
@@ -1122,6 +1127,86 @@ def test_load_selected_summary_row_does_not_create_applied_record(monkeypatch, q
     assert dialog.summary_table_model.data(dialog.summary_table_model.index(0, marker_col), Qt.DisplayRole) == ""
     assert dialog.summary_table_model.data(dialog.summary_table_model.index(0, 0), Qt.BackgroundRole) is None
     assert "No calibration applied" in dialog.summary_applied_calibration_banner.text()
+
+    dialog.deleteLater()
+
+
+def test_apply_fill_calibration_sets_print_parameters(monkeypatch, qapp, tmp_path):
+    runs = [
+        _make_run(
+            "fill_run",
+            stock="Fill",
+            sweep_entries=[
+                {"timestamp": "2026-03-18T09:00:00Z", "pw_us": 1325, "pressure_psi": 0.95, "mean_nL": 9.5, "cv_pct": 4.0, "valid": True},
+            ],
+        )
+    ]
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "information", lambda *args, **kwargs: None)
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "critical", lambda *args, **kwargs: None)
+    experiment_model = _build_experiment_model("Fill", current_mode="droplet")
+    dialog, manager = _build_dialog(
+        monkeypatch,
+        qapp,
+        tmp_path,
+        runs,
+        current_stock="Fill",
+        active_run_id="fill_run",
+        experiment_model=experiment_model,
+    )
+    settings_calls = []
+    manager.changeSettingsRequested.connect(
+        lambda settings, callback: settings_calls.append(dict(settings)) or (callback() if callable(callback) else None)
+    )
+    _select_visible_row(dialog, 0)
+    qapp.processEvents()
+
+    dialog._apply_previewed_droplet_volume()
+    qapp.processEvents()
+
+    assert experiment_model.get_applied_imaging_calibration()["is_fill"] is True
+    assert settings_calls[-1] == {"print_pulse_width": 1325, "print_pressure": 0.95}
+
+    dialog.deleteLater()
+
+
+def test_apply_calibration_warns_when_settings_cannot_be_changed(monkeypatch, qapp, tmp_path):
+    runs = [
+        _make_run(
+            "run_focus",
+            sweep_entries=[
+                {"timestamp": "2026-03-18T09:00:00Z", "pw_us": 1400, "pressure_psi": 1.20, "mean_nL": 10.0, "cv_pct": 4.0, "valid": True},
+            ],
+        )
+    ]
+
+    class FailingSignal:
+        def emit(self, *_args, **_kwargs):
+            raise RuntimeError("settings unavailable")
+
+    warnings = []
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "information", lambda *args, **kwargs: None)
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "warning", lambda *args, **kwargs: warnings.append(args))
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "critical", lambda *args, **kwargs: None)
+    experiment_model = _build_experiment_model("Water", current_mode="droplet")
+    dialog, _manager = _build_dialog(
+        monkeypatch,
+        qapp,
+        tmp_path,
+        runs,
+        active_run_id="run_focus",
+        experiment_model=experiment_model,
+    )
+    dialog.model.calibration_manager = SimpleNamespace(changeSettingsRequested=FailingSignal())
+    dialog.controller = SimpleNamespace()
+    _select_visible_row(dialog, 0)
+    qapp.processEvents()
+
+    dialog._apply_previewed_droplet_volume()
+    qapp.processEvents()
+
+    assert experiment_model.get_applied_imaging_calibration() is not None
+    assert any(args[1] == "Settings not changed" for args in warnings)
 
     dialog.deleteLater()
 

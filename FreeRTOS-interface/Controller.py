@@ -1996,8 +1996,83 @@ class Controller(QObject):
     def exit_print_mode(self):
         """Exit print mode."""
         self.machine.exit_print_mode()
+
+    def get_print_array_imaging_calibration_preflight(self):
+        """Return imaging-calibration readiness for the loaded printer head."""
+        profile_name = str(getattr(getattr(self, "profile", None), "name", "") or "").lower()
+        if profile_name == "legacy":
+            return {"ok": True, "code": "ok", "message": "", "record": None}
+
+        try:
+            printer_head = self.model.rack_model.get_gripper_printer_head()
+        except Exception:
+            printer_head = None
+        if printer_head is None:
+            return {
+                "ok": False,
+                "code": "context_unavailable",
+                "message": "No printer head is loaded.",
+                "record": None,
+            }
+
+        validator = getattr(
+            getattr(self.model, "experiment_model", None),
+            "validate_applied_imaging_calibration_for_print",
+            None,
+        )
+        if not callable(validator):
+            return {
+                "ok": False,
+                "code": "validation_unavailable",
+                "message": "Experiment model cannot confirm the applied imaging calibration.",
+                "record": None,
+            }
+
+        validation = validator(
+            printer_head=printer_head,
+            machine_model=self.model.machine_model,
+        )
+        if not isinstance(validation, dict):
+            return {
+                "ok": False,
+                "code": "validation_unavailable",
+                "message": "Experiment model returned an invalid imaging calibration result.",
+                "record": None,
+            }
+        validation.setdefault("code", "ok" if validation.get("ok") else "validation_failed")
+        validation.setdefault("message", "")
+        validation.setdefault("record", None)
+        return validation
+
+    def apply_applied_imaging_calibration_print_settings(self, record):
+        """Apply PW and pressure from an applied imaging calibration record."""
+        record = dict(record or {})
+        try:
+            pw_us = int(round(float(record.get("pw_us"))))
+            pressure_psi = float(record.get("pressure_psi"))
+        except Exception:
+            return {
+                "ok": False,
+                "message": "Applied imaging calibration is missing usable PW or pressure settings.",
+            }
+
+        try:
+            self.set_print_pulse_width(pw_us, manual=True)
+            self.set_absolute_print_pressure(pressure_psi, manual=True)
+        except Exception as exc:
+            return {"ok": False, "message": f"Could not apply calibration settings: {exc}"}
+
+        return {
+            "ok": True,
+            "message": (
+                f"Set print pulse width to {pw_us} us and print pressure to "
+                f"{pressure_psi:.3f} psi."
+            ),
+            "pw_us": pw_us,
+            "pressure_psi": pressure_psi,
+        }
     
-    def print_array(self):
+    def print_array(self, *, imaging_calibration_override=False, settings_mismatch_override=False):
         '''
         Iterates through all wells with an assigned reaction and prints the 
         required number of droplets for the currently loaded printer head.
@@ -2025,33 +2100,26 @@ class Controller(QObject):
             print('Cannot print: Pressure regulation is not enabled')
             return
 
-        profile_name = str(getattr(getattr(self, "profile", None), "name", "") or "").lower()
-        if profile_name != "legacy":
-            printer_head = self.model.rack_model.get_gripper_printer_head()
-            validator = getattr(
-                getattr(self.model, "experiment_model", None),
-                "validate_applied_imaging_calibration_for_print",
-                None,
+        validation = self.get_print_array_imaging_calibration_preflight()
+        if not bool(validation.get("ok")):
+            code = str(validation.get("code") or "")
+            imaging_override_ok = (
+                bool(imaging_calibration_override)
+                and code in {"missing_record", "stale_design_volume"}
             )
-            if callable(validator):
-                validation = validator(
-                    printer_head=printer_head,
-                    machine_model=self.model.machine_model,
-                )
-            else:
-                validation = {
-                    "ok": False,
-                    "message": "Experiment model cannot confirm the applied imaging calibration.",
-                    "record": None,
-                }
-            if not bool((validation or {}).get("ok")):
+            settings_override_ok = (
+                bool(settings_mismatch_override)
+                and code in {"pulse_width_mismatch", "pressure_mismatch"}
+            )
+            if not (imaging_override_ok or settings_override_ok):
                 message = str(
-                    (validation or {}).get("message")
+                    validation.get("message")
                     or "No applied imaging calibration was found for the loaded printer head."
                 )
                 self.error_occurred_signal.emit('Error', message)
                 print(f'Cannot print: {message}')
                 return
+            print(f"Print array imaging calibration override accepted: {code}")
 
         if self.get_array_run_state() == "resume_ready" and self.model.machine_model.transport_paused:
             self.resume_commands()

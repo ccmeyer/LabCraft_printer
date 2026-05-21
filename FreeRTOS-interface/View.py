@@ -281,7 +281,7 @@ class MainWindow(QMainWindow):
         self.shortcut_manager.add_shortcut('g','Close gripper', lambda: self.controller.close_gripper())
         self.shortcut_manager.add_shortcut('Shift+g','Open gripper', lambda: self.controller.open_gripper())
 
-        self.shortcut_manager.add_shortcut('Shift+p','Print Array', lambda: self.controller.print_array())
+        self.shortcut_manager.add_shortcut('Shift+p','Print Array', lambda: self.well_plate_widget.start_print_array())
         self.shortcut_manager.add_shortcut('Shift+r','Reset Single Array', lambda: self.reset_single_array())
         self.shortcut_manager.add_shortcut('Shift+e','Reset All Arrays', lambda: self.reset_all_arrays())
 
@@ -439,6 +439,26 @@ class MainWindow(QMainWindow):
         dialog = OptionsDialog(title, message, options)
         clicked_option = dialog.exec()
         return clicked_option
+
+    def popup_choice(self, title, message, options, *, default=None):
+        msg = QtWidgets.QMessageBox()
+        msg.setWindowTitle(title)
+        msg.setText(message)
+        transparent_icon = self.make_transparent_icon()
+        msg.setWindowIcon(transparent_icon)
+        buttons = {}
+        for option in options:
+            role = QtWidgets.QMessageBox.RejectRole if option == "Cancel" else QtWidgets.QMessageBox.ActionRole
+            buttons[option] = msg.addButton(option, role)
+        default_option = default if default in buttons else (options[0] if options else None)
+        if default_option is not None:
+            msg.setDefaultButton(buttons[default_option])
+        msg.exec()
+        clicked = msg.clickedButton()
+        for option, button in buttons.items():
+            if clicked == button:
+                return option
+        return default_option
     
     def popup_yes_no(self,title, message):
         msg = QtWidgets.QMessageBox()
@@ -3125,10 +3145,88 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         title = "Resume Print Array" if is_resume else "Start Print Array"
         message = "Are you sure you want to resume the print array?" if is_resume else "Are you sure you want to start the print array?"
         response = self.main_window.popup_yes_no(title, message)
-        if self.main_window._is_yes_response(response):
-            self.controller.print_array()
-        else:
+        if not self.main_window._is_yes_response(response):
             return
+
+        print_kwargs = {}
+        preflight_getter = getattr(self.controller, "get_print_array_imaging_calibration_preflight", None)
+        preflight = preflight_getter() if callable(preflight_getter) else {"ok": True, "code": "ok"}
+        if not bool((preflight or {}).get("ok")):
+            code = str((preflight or {}).get("code") or "")
+            message = str((preflight or {}).get("message") or "Applied imaging calibration could not be confirmed.")
+            choice_getter = getattr(self.main_window, "popup_choice", None)
+            if code in {"missing_record", "stale_design_volume"}:
+                if callable(choice_getter):
+                    choice = choice_getter(
+                        "Applied Calibration Missing",
+                        (
+                            f"{message}\n\n"
+                            "Proceeding may print with droplet counts or concentrations that do not match "
+                            "a currently applied imaging calibration."
+                        ),
+                        ["Proceed without applied calibration", "Cancel"],
+                        default="Cancel",
+                    )
+                    proceed = choice == "Proceed without applied calibration"
+                else:
+                    proceed = self.main_window._is_yes_response(
+                        self.main_window.popup_yes_no(
+                            "Applied Calibration Missing",
+                            f"{message}\n\nProceed without applied imaging calibration?",
+                        )
+                    )
+                if not proceed:
+                    return
+                print_kwargs["imaging_calibration_override"] = True
+            elif code in {"pulse_width_mismatch", "pressure_mismatch"}:
+                if callable(choice_getter):
+                    choice = choice_getter(
+                        "Print Settings Differ",
+                        (
+                            f"{message}\n\n"
+                            "Choose whether to switch to the applied calibration settings, "
+                            "print with the current settings, or cancel."
+                        ),
+                        [
+                            "Switch to applied calibration settings",
+                            "Proceed with current settings",
+                            "Cancel",
+                        ],
+                        default="Cancel",
+                    )
+                else:
+                    choice = "Cancel"
+
+                if choice == "Switch to applied calibration settings":
+                    applier = getattr(self.controller, "apply_applied_imaging_calibration_print_settings", None)
+                    result = (
+                        applier((preflight or {}).get("record"))
+                        if callable(applier)
+                        else {"ok": False, "message": "Controller cannot apply calibration settings."}
+                    )
+                    if bool((result or {}).get("ok")):
+                        self.main_window.popup_message(
+                            "Print Settings Changed",
+                            (
+                                f"{result.get('message', 'Applied calibration print settings.')}\n\n"
+                                "Wait for the pressure to settle, then start the print array again."
+                            ),
+                        )
+                    else:
+                        self.main_window.popup_message(
+                            "Print Settings Not Changed",
+                            str((result or {}).get("message") or "Could not apply calibration settings."),
+                        )
+                    return
+                if choice == "Proceed with current settings":
+                    print_kwargs["settings_mismatch_override"] = True
+                else:
+                    return
+            else:
+                self.main_window.popup_message("Cannot Start Print Array", message)
+                return
+
+        self.controller.print_array(**print_kwargs)
 
     def request_array_soft_stop(self):
         request_stop = getattr(self.controller, "request_array_soft_stop", None)
