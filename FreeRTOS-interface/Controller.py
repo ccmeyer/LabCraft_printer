@@ -13,6 +13,8 @@ import os
 import serial
 import math
 import json
+import uuid
+import inspect
 
 from hardware.profile import CURRENT_PROFILE, HardwareProfile
 from hardware.null_devices import NullCamera
@@ -102,6 +104,9 @@ class Controller(QObject):
         self.pending_capture_timeout_ms = 8_000
         self.pending_capture_throughput_timeout_ms = 1_500
         self.pending_capture_guard_timer = None
+        self.pending_capture_request_id = None
+        self.pending_capture_recovery_attempted = False
+        self.pending_capture_throughput_mode = False
 
         self._array_state = "idle"
         self._array_context = None
@@ -164,8 +169,13 @@ class Controller(QObject):
         self.model.calibration_manager.moveAbsoluteRequested.connect(self.handle_absolute_move_request)
         self.model.calibration_manager.changeSettingsRequested.connect(self.handle_settings_change_request)
         try:
-            self.machine.droplet_camera.image_captured_signal.connect(self._on_image_captured)
-            self.machine.droplet_camera.capture_failed_signal.connect(self._on_capture_failed)
+            camera = self.machine.droplet_camera
+            completion_signal = getattr(camera, "capture_completed_signal", None)
+            if completion_signal is not None:
+                self._connect_qt_signal(completion_signal, self._on_capture_completed_payload, queued=True)
+            else:
+                self._connect_qt_signal(camera.image_captured_signal, self._on_image_captured, queued=True)
+                self._connect_qt_signal(camera.capture_failed_signal, self._on_capture_failed, queued=True)
         except AttributeError:
             print("Droplet camera not initialized or image_captured_signal not available.")
     
@@ -178,10 +188,38 @@ class Controller(QObject):
         except Exception:
             pass
         try:
-            self.machine.droplet_camera.image_captured_signal.disconnect(self._on_image_captured)
-            self.machine.droplet_camera.capture_failed_signal.disconnect(self._on_capture_failed)
+            camera = self.machine.droplet_camera
+            completion_signal = getattr(camera, "capture_completed_signal", None)
+            if completion_signal is not None:
+                completion_signal.disconnect(self._on_capture_completed_payload)
+            image_signal = getattr(camera, "image_captured_signal", None)
+            if image_signal is not None:
+                image_signal.disconnect(self._on_image_captured)
+            fail_signal = getattr(camera, "capture_failed_signal", None)
+            if fail_signal is not None:
+                fail_signal.disconnect(self._on_capture_failed)
         except Exception:
             pass
+
+    @staticmethod
+    def _queued_connection_type():
+        qt = getattr(QtCore, "Qt", None)
+        connection = getattr(qt, "QueuedConnection", None)
+        if connection is not None:
+            return connection
+        connection_type = getattr(qt, "ConnectionType", None)
+        return getattr(connection_type, "QueuedConnection", None)
+
+    def _connect_qt_signal(self, signal, slot, *, queued=False):
+        if queued:
+            connection = self._queued_connection_type()
+            if connection is not None:
+                try:
+                    signal.connect(slot, connection)
+                    return
+                except TypeError:
+                    pass
+        signal.connect(slot)
 
     def handle_status_update(self, status_dict):
         """Handle the status update and update the machine model."""
@@ -2135,37 +2173,135 @@ class Controller(QObject):
         it will be invoked with the captured frame once the capture completes.
         """
         if self._is_flash_fault_latched():
+            self._record_active_calibration_event(
+                "capture_queue_rejected",
+                {"reason": "flash_fault", "capture_context": capture_context},
+                level="warning",
+            )
             self._handle_blocked_capture(callback)
             return False
         if bool(getattr(self, "pending_capture_active", False)):
-            print("Capture already pending; dropping new capture request.")
+            state = self._get_droplet_capture_state()
+            print(
+                "[Camera] capture rejected: reason=controller_pending "
+                f"pending_request_id={getattr(self, 'pending_capture_request_id', None)} state={state}"
+            )
+            self._record_active_calibration_event(
+                "capture_queue_rejected",
+                {
+                    "reason": "controller_pending",
+                    "pending_request_id": getattr(self, "pending_capture_request_id", None),
+                    "state": state,
+                },
+                level="warning",
+            )
             self._notify_capture_callback_failed(callback)
             return False
         if capture_context is not None and getattr(self, "pending_capture_context", None) is not None:
-            print("Capture context already pending; dropping new capture request.")
+            state = self._get_droplet_capture_state()
+            print(f"[Camera] capture rejected: reason=context_pending state={state}")
+            self._record_active_calibration_event(
+                "capture_queue_rejected",
+                {"reason": "context_pending", "capture_context": capture_context, "state": state},
+                level="warning",
+            )
             self._notify_capture_callback_failed(callback)
             return False
         if callback is not None:
             if self.pending_capture_callback is not None:
-                print("Capture already pending; dropping new capture callback.")
+                state = self._get_droplet_capture_state()
+                print(f"[Camera] capture rejected: reason=callback_pending state={state}")
+                self._record_active_calibration_event(
+                    "capture_queue_rejected",
+                    {"reason": "callback_pending", "state": state},
+                    level="warning",
+                )
                 self._notify_capture_callback_failed(callback)
                 return False
+        return self._queue_capture_request(
+            callback=callback,
+            throughput_mode=throughput_mode,
+            capture_context=capture_context,
+            recovery_attempted=False,
+        )
+
+    def _queue_capture_request(
+        self,
+        *,
+        callback=None,
+        throughput_mode=False,
+        capture_context=None,
+        recovery_attempted=False,
+    ):
+        capture_request_id = uuid.uuid4().hex
+        if callback is not None:
             self.pending_capture_callback = callback
-        if capture_context is not None:
-            self.pending_capture_context = str(capture_context)
+        self.pending_capture_context = None if capture_context is None else str(capture_context)
         self.pending_capture_active = True
+        self.pending_capture_request_id = capture_request_id
+        self.pending_capture_recovery_attempted = bool(recovery_attempted)
+        self.pending_capture_throughput_mode = bool(throughput_mode)
         monotonic_fn = getattr(self, "_monotonic_fn", time.monotonic)
         self.pending_capture_started_monotonic = monotonic_fn()
         try:
-            queued = self.machine.capture_droplet_image(throughput_mode=throughput_mode)
+            capture_method = self.machine.capture_droplet_image
+            accepts_request_id = True
+            try:
+                signature = inspect.signature(capture_method)
+                accepts_request_id = (
+                    "capture_request_id" in signature.parameters
+                    or any(
+                        param.kind == inspect.Parameter.VAR_KEYWORD
+                        for param in signature.parameters.values()
+                    )
+                )
+            except (TypeError, ValueError):
+                accepts_request_id = True
+            if accepts_request_id:
+                queued = capture_method(
+                    throughput_mode=throughput_mode,
+                    capture_request_id=capture_request_id,
+                )
+            else:
+                queued = capture_method(throughput_mode=throughput_mode)
         except Exception:
             self._clear_pending_capture(callback=callback, capture_context=capture_context)
             raise
         if queued is False:
+            state = self._get_droplet_capture_state()
+            reason = self._classify_capture_queue_rejection(state)
+            print(
+                f"[Camera] capture rejected by machine request_id={capture_request_id} "
+                f"reason={reason} state={state}"
+            )
+            self._record_active_calibration_event(
+                "capture_queue_rejected",
+                {
+                    "request_id": capture_request_id,
+                    "reason": reason,
+                    "state": state,
+                    "capture_context": capture_context,
+                    "recovery_attempted": bool(recovery_attempted),
+                },
+                level="warning",
+            )
             self._clear_pending_capture(callback=callback, capture_context=capture_context)
             self._notify_capture_callback_failed(callback)
             return False
         self._start_pending_capture_guard(throughput_mode=throughput_mode)
+        print(
+            f"[Camera] capture request queued request_id={capture_request_id} "
+            f"throughput_mode={bool(throughput_mode)} recovery_attempted={bool(recovery_attempted)}"
+        )
+        self._record_active_calibration_event(
+            "capture_request_queued",
+            {
+                "request_id": capture_request_id,
+                "capture_context": capture_context,
+                "throughput_mode": bool(throughput_mode),
+                "recovery_attempted": bool(recovery_attempted),
+            },
+        )
         return True
 
     def stop_droplet_camera(self):
@@ -2267,9 +2403,18 @@ class Controller(QObject):
             self.pending_capture_context = None
         self.pending_capture_active = False
         self.pending_capture_started_monotonic = None
+        self.pending_capture_request_id = None
+        self.pending_capture_recovery_attempted = False
+        self.pending_capture_throughput_mode = False
 
     def _fail_pending_capture(self, msg: str, *, emit_capture_failed: bool = True):
         cb = self.pending_capture_callback
+        request_id = getattr(self, "pending_capture_request_id", None)
+        self._record_active_calibration_event(
+            "capture_failed",
+            {"request_id": request_id, "message": str(msg), "state": self._get_droplet_capture_state()},
+            level="warning",
+        )
         self._clear_pending_capture()
         if cb:
             try:
@@ -2285,6 +2430,8 @@ class Controller(QObject):
     def _on_pending_capture_timeout(self):
         if not bool(getattr(self, "pending_capture_active", False)):
             return
+        request_id = getattr(self, "pending_capture_request_id", None)
+        recovery_attempted = bool(getattr(self, "pending_capture_recovery_attempted", False))
         started = getattr(self, "pending_capture_started_monotonic", None)
         elapsed_s = None
         if started is not None:
@@ -2296,7 +2443,105 @@ class Controller(QObject):
         suffix = "" if elapsed_s is None else f" after {elapsed_s:.1f}s"
         msg = f"Droplet capture timed out in controller{suffix}; releasing pending request."
         print(f"[Camera] {msg}")
+        self._record_active_calibration_event(
+            "capture_controller_timeout",
+            {
+                "request_id": request_id,
+                "elapsed_s": elapsed_s,
+                "recovery_attempted": recovery_attempted,
+                "state": self._get_droplet_capture_state(),
+            },
+            level="warning",
+        )
+        if not recovery_attempted:
+            callback = self.pending_capture_callback
+            capture_context = self.pending_capture_context
+            throughput_mode = bool(getattr(self, "pending_capture_throughput_mode", False))
+            recovery_reason = f"controller_timeout request_id={request_id}"
+            self._record_active_calibration_event(
+                "camera_recovery_started",
+                {"request_id": request_id, "reason": recovery_reason},
+                level="warning",
+            )
+            recovery_result = {"ok": False, "reason": "recovery_not_available"}
+            try:
+                recover = getattr(self.machine, "recover_droplet_capture", None)
+                if callable(recover):
+                    recovery_result = recover(reason=recovery_reason)
+            except Exception as exc:
+                recovery_result = {"ok": False, "reason": str(exc)}
+            recovery_ok = bool(recovery_result.get("ok"))
+            self._record_active_calibration_event(
+                "camera_recovery_completed" if recovery_ok else "camera_recovery_failed",
+                {
+                    "request_id": request_id,
+                    "result": dict(recovery_result or {}),
+                    "state": self._get_droplet_capture_state(),
+                },
+                level="info" if recovery_ok else "warning",
+            )
+            self._clear_pending_capture()
+            if recovery_ok:
+                requeued = self._queue_capture_request(
+                    callback=callback,
+                    throughput_mode=throughput_mode,
+                    capture_context=capture_context,
+                    recovery_attempted=True,
+                )
+                if requeued:
+                    return
+                msg = "Droplet capture recovery completed, but retry capture could not be queued."
+            if callback:
+                try:
+                    callback(None)
+                except Exception as e:
+                    print(f"Callback raised after capture recovery failure: {e}")
+            try:
+                self.model.calibration_manager.captureFailed.emit(msg)
+            except Exception:
+                pass
+            return
         self._fail_pending_capture(msg)
+
+    def _get_droplet_capture_state(self):
+        try:
+            getter = getattr(self.machine, "get_droplet_capture_state", None)
+            if callable(getter):
+                return dict(getter() or {})
+            camera = getattr(self.machine, "droplet_camera", None)
+            getter = getattr(camera, "get_capture_state", None)
+            if callable(getter):
+                return dict(getter() or {})
+        except Exception as exc:
+            return {"state_error": str(exc)}
+        return {}
+
+    @staticmethod
+    def _classify_capture_queue_rejection(state):
+        state = dict(state or {})
+        if state.get("worker_active"):
+            return "camera_worker_active"
+        if state.get("cap_active"):
+            return "camera_capture_active"
+        if state.get("camera_started") is False:
+            return "camera_not_started"
+        if state.get("flash_fault"):
+            return "flash_fault"
+        return "machine_rejected"
+
+    def _record_active_calibration_event(self, event_type, payload=None, *, level="info"):
+        try:
+            active = getattr(self.model.calibration_manager, "activeCalibration", None)
+            recorder = getattr(active, "_record_event", None)
+            if callable(recorder):
+                recorder(str(event_type), payload or {}, level=level)
+                return
+            manager = getattr(self.model, "calibration_manager", None)
+            record_process_event = getattr(manager, "record_process_event", None)
+            if callable(record_process_event):
+                record_process_event(str(event_type), payload or {}, level=level)
+        except Exception:
+            pass
 
     def _emit_active_calibration_error(self, message: str):
         """
@@ -2560,6 +2805,54 @@ class Controller(QObject):
         except Exception:
             cap_info = None
 
+        self._complete_pending_capture_success(frame, cap_info=cap_info)
+
+    @QtCore.Slot(object)
+    def _on_capture_completed_payload(self, payload):
+        payload = dict(payload or {}) if isinstance(payload, dict) else {"status": "failed", "error": str(payload)}
+        request_id = payload.get("request_id")
+        expected_request_id = getattr(self, "pending_capture_request_id", None)
+        if not bool(getattr(self, "pending_capture_active", False)) or str(request_id) != str(expected_request_id):
+            print(
+                "[Camera] stale capture completion ignored "
+                f"request_id={request_id} expected={expected_request_id} status={payload.get('status')}"
+            )
+            self._record_active_calibration_event(
+                "capture_stale_completion_ignored",
+                {
+                    "request_id": request_id,
+                    "expected_request_id": expected_request_id,
+                    "status": payload.get("status"),
+                    "generation": payload.get("generation"),
+                    "cap_id": payload.get("cap_id"),
+                    "state": self._get_droplet_capture_state(),
+                },
+                level="warning",
+            )
+            return
+
+        status = str(payload.get("status") or "").lower()
+        if status == "success" and payload.get("frame") is not None:
+            capture_info = dict(payload.get("capture_info") or {})
+            capture_info.setdefault("request_id", request_id)
+            capture_info.setdefault("cap_id", payload.get("cap_id"))
+            self._complete_pending_capture_success(payload.get("frame"), cap_info=capture_info)
+            return
+
+        msg = str(
+            payload.get("error")
+            or payload.get("reason")
+            or payload.get("stale_reason")
+            or "Droplet capture failed."
+        )
+        print(
+            f"[Camera] capture failed request_id={request_id} status={status} "
+            f"cap_id={payload.get('cap_id')} reason={msg}"
+        )
+        self._fail_pending_capture(msg)
+
+    def _complete_pending_capture_success(self, frame, *, cap_info=None):
+        request_id = getattr(self, "pending_capture_request_id", None)
         capture_context = getattr(self, "pending_capture_context", None)
         save_metadata = self._build_droplet_capture_save_metadata(capture_context=capture_context)
 
@@ -2569,6 +2862,15 @@ class Controller(QObject):
         try:
             self.model.droplet_camera_model.update_image(frame, capture_info=cap_info, save_metadata=save_metadata)
         finally:
+            self._record_active_calibration_event(
+                "capture_completed",
+                {
+                    "request_id": request_id,
+                    "cap_id": (cap_info or {}).get("cap_id") if isinstance(cap_info, dict) else None,
+                    "capture_context": capture_context,
+                    "state": self._get_droplet_capture_state(),
+                },
+            )
             self._clear_pending_capture()
         
         # If a callback was set for the capture, call it.

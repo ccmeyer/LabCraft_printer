@@ -284,6 +284,7 @@ def _make_rising_edge_input(chip_name, offset, consumer="gpio_in"):
 
 class DropletCamera(QObject):
     image_captured_signal = Signal()
+    capture_completed_signal = Signal(object)
     capture_failed_signal = Signal(str)  # emits error message on failure
 
     def __init__(self):
@@ -329,6 +330,9 @@ class DropletCamera(QObject):
         self._cap_result = None                 # dict with mean/threshold/reason, and the image
         self._emit_on_complete = True           # gate emitting during retries
         self._capture_worker_active = threading.Event()
+        self._capture_worker_thread = None
+        self._capture_generation = 0
+        self._cap_request_id = None
         
         # threshold tuning
         self.k_sigma   = 4.0
@@ -442,6 +446,67 @@ class DropletCamera(QObject):
                 return dict(self._cap_result)
             return None
 
+    def get_capture_state(self) -> dict:
+        with self._cv:
+            return {
+                "cap_active": bool(self._cap_active),
+                "worker_active": bool(self._capture_worker_active.is_set()),
+                "generation": int(getattr(self, "_capture_generation", 0)),
+                "cap_id": int(getattr(self, "_cap_id", 0)),
+                "request_id": getattr(self, "_cap_request_id", None),
+                "cap_done": bool(self._cap_done.is_set()),
+                "camera_started": self.camera is not None,
+            }
+
+    def recover_stale_capture(self, reason: str = "") -> dict:
+        reason = str(reason or "stale_capture_recovery")
+        restarted = False
+        worker_alive_after_join = False
+        self._trigger_low()
+        with self._cv:
+            self._capture_generation += 1
+            generation = int(self._capture_generation)
+            self._cap_active = False
+            self._emit_on_complete = False
+            self._cap_request_id = None
+            self._cap_result = {
+                "arr": None,
+                "md": None,
+                "mean": 0.0,
+                "reason": "recovered_stale_capture",
+                "error": reason,
+                "threshold": 0.0,
+                "cap_id": int(getattr(self, "_cap_id", 0)),
+                "generation": generation,
+            }
+            self._cap_done.set()
+            self._cv.notify_all()
+        worker = getattr(self, "_capture_worker_thread", None)
+        if worker is not None and worker is not threading.current_thread():
+            try:
+                worker.join(timeout=0.25)
+                worker_alive_after_join = bool(worker.is_alive())
+            except Exception:
+                worker_alive_after_join = True
+
+        self._capture_worker_active.clear()
+
+        if worker_alive_after_join and self.camera is not None:
+            try:
+                self.stop_camera()
+                self.start_camera()
+                restarted = True
+            except Exception as exc:
+                print(f"[Camera] recovery camera restart failed: {exc}")
+
+        return {
+            "ok": True,
+            "reason": reason,
+            "generation": generation,
+            "worker_alive_after_join": worker_alive_after_join,
+            "camera_restarted": restarted,
+        }
+
     def change_exposure_time(self, exposure_time_us, handler=None):
         self.exposure_time = int(exposure_time_us)
         if self.camera:
@@ -483,7 +548,11 @@ class DropletCamera(QObject):
 
                         # first above-threshold wins
                         if mean >= self._cap_threshold:
-                            print(f"[Capture] cap_id={self._cap_id} mean={mean:.1f} thr={self._cap_threshold:.1f}")
+                            print(
+                                f"[Capture] request_id={getattr(self, '_cap_request_id', None)} "
+                                f"gen={getattr(self, '_capture_generation', 0)} "
+                                f"cap_id={self._cap_id} mean={mean:.1f} thr={self._cap_threshold:.1f}"
+                            )
                             self._complete_capture_locked(arr, md, mean, reason="threshold")
                         elif (self._cap_seen >= self._cap_max_new) or (time.monotonic() > self._cap_deadline):
                             # fallback to brightest seen post-arm
@@ -511,6 +580,8 @@ class DropletCamera(QObject):
             "reason": str(reason),
             "threshold": float(self._cap_threshold),
             "cap_id": int(self._cap_id),
+            "request_id": getattr(self, "_cap_request_id", None),
+            "generation": int(getattr(self, "_capture_generation", 0)),
         }
         self._cap_done.set()
         # print(f"[Chosen] mean={mean:.1f} reason={reason} "
@@ -542,18 +613,41 @@ class DropletCamera(QObject):
     def get_latest_frame(self):
         return self.latest_frame
 
-    def capture_non_blocking(self, max_new_frames=6, timeout_s=1, *, emit_signal=True):
+    def capture_non_blocking(
+        self,
+        max_new_frames=6,
+        timeout_s=1,
+        *,
+        emit_signal=True,
+        request_id=None,
+        generation=None,
+    ):
         """
         Arms a single attempt. The grabber will complete it and either emit
         image_captured_signal (if emit_signal=True) or just set _cap_result/_cap_done.
         """
         if not self.camera:
             print("Camera not started.")
+            with self._cv:
+                self._cap_active = False
+                self._cap_request_id = request_id
+                self._cap_result = {
+                    "arr": None,
+                    "md": None,
+                    "mean": 0.0,
+                    "reason": "camera_not_started",
+                    "threshold": 0.0,
+                    "cap_id": self._cap_id,
+                    "request_id": request_id,
+                    "generation": generation,
+                }
+                self._cap_done.set()
             return
 
         with self._cv:
             self._cap_done.clear()
             self._cap_result = None
+            self._cap_request_id = request_id
 
         # Drain stale edges from previous runs
         while self._edge_in.event_wait(0):
@@ -580,6 +674,8 @@ class DropletCamera(QObject):
                         "error": str(e),
                         "threshold": 0.0,
                         "cap_id": self._cap_id,
+                        "request_id": request_id,
+                        "generation": generation,
                     }
                     self._cap_done.set()
                 return
@@ -589,7 +685,8 @@ class DropletCamera(QObject):
                 with self._cv:
                     self._cap_active = False
                     self._cap_result = {"arr": None, "md": None, "mean": 0.0,
-                                        "reason": "edge_timeout", "threshold": 0.0, "cap_id": self._cap_id}
+                                        "reason": "edge_timeout", "threshold": 0.0, "cap_id": self._cap_id,
+                                        "request_id": request_id, "generation": generation}
                     self._cap_done.set()
                 return
             self._edge_in.event_consume()
@@ -616,12 +713,16 @@ class DropletCamera(QObject):
             self._cap_threshold   = threshold
             self._cap_brightest   = None
             self._emit_on_complete = bool(emit_signal)
+            self._cap_request_id = request_id
 
             self._cap_done.clear()
             self._cap_result = None
 
-            print(f"[Arm] cap_id={self._cap_id} base_mean={base_mean:.1f} "
-                f"base_std={base_std:.1f} threshold={threshold:.1f} arm_ns={arm_ns}")
+            print(
+                f"[Arm] request_id={request_id} gen={generation} cap_id={self._cap_id} "
+                f"base_mean={base_mean:.1f} base_std={base_std:.1f} "
+                f"threshold={threshold:.1f} arm_ns={arm_ns}"
+            )
             
     def capture_with_retry_sync(
         self,
@@ -631,10 +732,12 @@ class DropletCamera(QObject):
         attempt_timeout_s=1,
         small_sleep_between=0.02,
         success_reasons=("threshold",),
-    ) -> np.ndarray:
+        request_id=None,
+        generation=None,
+    ) -> dict:
         """
         Block until we get a 'threshold' capture or exhaust attempts.
-        Returns the final image (numpy array) on success.
+        Returns a completion payload on success.
         Raises RuntimeError on failure.
         """
         last_reason = None
@@ -643,7 +746,9 @@ class DropletCamera(QObject):
             # For each attempt, suppress automatic emission; we'll emit once on success.
             self.capture_non_blocking(max_new_frames=max_new_frames,
                                     timeout_s=attempt_timeout_s,
-                                    emit_signal=False)
+                                    emit_signal=False,
+                                    request_id=request_id,
+                                    generation=generation)
 
             # Wait for the grabber to select a frame or report edge timeout.
             # Allow a tiny grace beyond attempt_timeout_s to cover scheduling jitter.
@@ -659,17 +764,23 @@ class DropletCamera(QObject):
 
                 # success criterion: first frame that *crossed* threshold
                 if (last_reason in set(success_reasons)) and self.latest_frame is not None:
-                    # emit once here for compatibility with existing slots
-                    self.image_captured_signal.emit()
-                    return self.latest_frame
+                    capture_info = dict(res)
+                    capture_info.pop("arr", None)
+                    return {
+                        "status": "success",
+                        "request_id": request_id,
+                        "generation": generation,
+                        "cap_id": int(res.get("cap_id") or 0),
+                        "frame": self.latest_frame,
+                        "capture_info": capture_info,
+                        "reason": str(last_reason),
+                    }
 
             # not acceptable → try again unless we’re out of attempts
             if i < attempts - 1:
                 time.sleep(small_sleep_between)
 
-        # all attempts failed: signal and error
         msg = f"Flash capture failed after {attempts} attempts (last_reason={last_reason})"
-        self.capture_failed_signal.emit(msg)
         raise RuntimeError(msg)
     
     def capture_with_retry_async(
@@ -680,34 +791,109 @@ class DropletCamera(QObject):
         attempt_timeout_s=1.0,
         small_sleep_between=0.05,
         success_reasons=("threshold",),
+        request_id=None,
     ):
         """
-        Start a capture with internal retries. On success, emits image_captured_signal once.
+        Start a capture with internal retries. On success, emits capture_completed_signal once.
         On failure, emits capture_failed_signal(str). Returns immediately.
         """
         if self._capture_worker_active.is_set():
+            state = self.get_capture_state()
+            print(f"[Camera] capture rejected request_id={request_id} reason=worker_active state={state}")
+            return False
+        if not self.camera:
+            print(f"[Camera] capture rejected request_id={request_id} reason=camera_not_started state={self.get_capture_state()}")
             return False
 
         self._capture_worker_active.set()
+        with self._cv:
+            self._capture_generation += 1
+            generation = int(self._capture_generation)
 
         def _runner():
+            payload = None
             try:
-                self.capture_with_retry_sync(
+                payload = self.capture_with_retry_sync(
                     attempts=attempts,
                     max_new_frames=max_new_frames,
                     attempt_timeout_s=attempt_timeout_s,
                     small_sleep_between=small_sleep_between,
                     success_reasons=success_reasons,
+                    request_id=request_id,
+                    generation=generation,
                 )
-                # success path already emitted image_captured_signal inside sync wrapper
             except Exception as e:
-                # already emitted capture_failed_signal inside sync wrapper,
-                # but in case of other errors, emit here too
-                self.capture_failed_signal.emit(str(e))
+                capture_info = self.get_last_capture_result() or {}
+                capture_info.pop("arr", None)
+                payload = {
+                    "status": "failed",
+                    "request_id": request_id,
+                    "generation": generation,
+                    "cap_id": int(capture_info.get("cap_id") or 0),
+                    "frame": None,
+                    "capture_info": capture_info,
+                    "reason": str(capture_info.get("reason") or "retry_failed"),
+                    "error": str(e),
+                }
             finally:
+                # Release the worker latch before any Qt signal delivery. A stranded
+                # completion signal must not make every later capture look busy.
                 self._capture_worker_active.clear()
+                if getattr(self, "_capture_worker_thread", None) is threading.current_thread():
+                    self._capture_worker_thread = None
+
+            if not isinstance(payload, dict):
+                payload = {
+                    "status": "failed",
+                    "request_id": request_id,
+                    "generation": generation,
+                    "cap_id": 0,
+                    "frame": None,
+                    "capture_info": {},
+                    "reason": "missing_payload",
+                    "error": "Capture worker produced no payload.",
+                }
+
+            current_generation = int(getattr(self, "_capture_generation", 0))
+            if int(payload.get("generation") or -1) != current_generation:
+                payload = dict(payload)
+                payload["status"] = "stale"
+                payload["stale"] = True
+                payload["stale_reason"] = "worker_generation_superseded"
+                payload["current_generation"] = current_generation
+
+            payload["worker_active"] = bool(self._capture_worker_active.is_set())
+            print(
+                f"[Camera] capture complete request_id={request_id} "
+                f"status={payload.get('status')} cap_id={payload.get('cap_id')} "
+                f"gen={payload.get('generation')} current_gen={current_generation} "
+                f"worker_active={payload.get('worker_active')}"
+            )
+
+            try:
+                self.capture_completed_signal.emit(payload)
+            except Exception as exc:
+                print(f"[Camera] capture completion signal failed request_id={request_id}: {exc}")
+
+            status = str(payload.get("status") or "")
+            if status == "success":
+                try:
+                    self.image_captured_signal.emit()
+                except Exception as exc:
+                    print(f"[Camera] legacy image_captured_signal failed request_id={request_id}: {exc}")
+            elif status == "failed":
+                err = str(payload.get("error") or payload.get("reason") or "Capture failed.")
+                try:
+                    self.capture_failed_signal.emit(err)
+                except Exception as exc:
+                    print(f"[Camera] legacy capture_failed_signal failed request_id={request_id}: {exc}")
 
         t = threading.Thread(target=_runner, daemon=True)
+        self._capture_worker_thread = t
+        print(
+            f"[Camera] capture queued request_id={request_id} gen={generation} "
+            f"attempts={attempts} max_new_frames={max_new_frames} timeout_s={attempt_timeout_s}"
+        )
         t.start()
         return True
 
@@ -3754,7 +3940,7 @@ class Machine(QObject):
         self.droplet_camera.start_camera()
         return
     
-    def capture_droplet_image(self, *, throughput_mode=False):
+    def capture_droplet_image(self, *, throughput_mode=False, capture_request_id=None):
         # Throughput mode is intended for repeated live imaging; keep strict mode for calibration.
         success_reasons = ("threshold", "fallback") if throughput_mode else ("threshold",)
         attempts = 2 if throughput_mode else 5
@@ -3767,7 +3953,20 @@ class Machine(QObject):
             attempt_timeout_s=attempt_timeout_s,
             small_sleep_between=small_sleep_between,
             success_reasons=success_reasons,
+            request_id=capture_request_id,
         )
+
+    def recover_droplet_capture(self, reason=""):
+        recover = getattr(self.droplet_camera, "recover_stale_capture", None)
+        if callable(recover):
+            return recover(reason=reason)
+        return {"ok": False, "reason": "recovery_not_supported"}
+
+    def get_droplet_capture_state(self):
+        getter = getattr(self.droplet_camera, "get_capture_state", None)
+        if callable(getter):
+            return getter()
+        return {}
     
     def stop_droplet_camera(self):
         self.droplet_camera.stop_camera()

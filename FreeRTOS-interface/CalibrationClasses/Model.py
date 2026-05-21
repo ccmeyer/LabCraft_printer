@@ -20391,7 +20391,7 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
                        f"(rep {self._rep_count+1}/{self.replicates_per_delay})",
             attempts_total=5,
             retry_delay_ms=75,
-            guard_timeout_ms=10_000,
+            guard_timeout_ms=15_000,
             final_error_msg=f"Capture failed @ {self._current_pressure:.3f} psi"
         )
 

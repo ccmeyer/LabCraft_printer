@@ -65,12 +65,37 @@ class _Machine:
     def __init__(self):
         self.droplet_camera = _DropletCamera()
         self.capture_calls = []
+        self.recover_calls = []
         self.commands_idle = True
         self.capture_return = True
+        self.recover_return = {"ok": True}
+        self.capture_state = {
+            "cap_active": False,
+            "worker_active": False,
+            "camera_started": True,
+        }
 
-    def capture_droplet_image(self, *, throughput_mode=False):
-        self.capture_calls.append({"throughput_mode": bool(throughput_mode)})
+    def capture_droplet_image(self, *, throughput_mode=False, capture_request_id=None):
+        self.capture_calls.append(
+            {
+                "throughput_mode": bool(throughput_mode),
+                "capture_request_id": capture_request_id,
+            }
+        )
         return self.capture_return
+
+    def recover_droplet_capture(self, reason=""):
+        self.recover_calls.append(str(reason))
+        self.capture_state.update(
+            {
+                "cap_active": False,
+                "worker_active": False,
+            }
+        )
+        return dict(self.recover_return)
+
+    def get_droplet_capture_state(self):
+        return dict(self.capture_state)
 
     def check_if_all_completed(self):
         return self.commands_idle
@@ -114,6 +139,9 @@ def _make_controller():
     controller.pending_capture_timeout_ms = 8_000
     controller.pending_capture_throughput_timeout_ms = 1_500
     controller.pending_capture_guard_timer = None
+    controller.pending_capture_request_id = None
+    controller.pending_capture_recovery_attempted = False
+    controller.pending_capture_throughput_mode = False
     controller._timer_factory = lambda _parent: _CaptureGuardTimer()
     controller._monotonic_fn = lambda: clock["value"]
     controller._test_clock = clock
@@ -124,7 +152,8 @@ def test_controller_capture_context_is_written_to_next_frame_metadata():
     controller, machine, camera_model = _make_controller()
 
     assert controller.capture_droplet_image(capture_context="optics_scale_bar") is True
-    assert machine.capture_calls == [{"throughput_mode": False}]
+    assert machine.capture_calls[0]["throughput_mode"] is False
+    assert machine.capture_calls[0]["capture_request_id"]
     assert controller.pending_capture_context == "optics_scale_bar"
     assert controller.pending_capture_active is True
 
@@ -195,7 +224,7 @@ def test_controller_overlapping_capture_resolves_waiting_callback():
     callback.assert_called_once_with(None)
 
 
-def test_controller_capture_guard_releases_stale_pending_request():
+def test_controller_capture_guard_recovers_once_and_requeues_original_callback():
     controller, machine, _camera_model = _make_controller()
     callback = Mock()
 
@@ -204,19 +233,105 @@ def test_controller_capture_guard_releases_stale_pending_request():
     assert timer is not None
     assert timer.active is True
     assert timer.interval_ms == 8_000
+    first_request_id = controller.pending_capture_request_id
 
     controller._test_clock["value"] = 108.25
     timer.fire()
 
+    assert machine.recover_calls
+    assert len(machine.capture_calls) == 2
+    assert controller.pending_capture_active is True
+    assert controller.pending_capture_recovery_attempted is True
+    assert controller.pending_capture_request_id != first_request_id
+    callback.assert_not_called()
+    controller.model.calibration_manager.captureFailed.emit.assert_not_called()
+
+    frame = np.full((4, 5, 3), 99, dtype=np.uint8)
+    retry_request_id = controller.pending_capture_request_id
+    controller._on_capture_completed_payload(
+        {
+            "status": "success",
+            "request_id": retry_request_id,
+            "cap_id": 456,
+            "frame": frame,
+            "capture_info": {"cap_id": 456, "reason": "threshold"},
+        }
+    )
+
+    callback.assert_called_once()
+    assert callback.call_args.args[0] is frame
     assert controller.pending_capture_callback is None
     assert controller.pending_capture_context is None
     assert controller.pending_capture_active is False
     assert controller.pending_capture_started_monotonic is None
-    callback.assert_called_once_with(None)
-    controller.model.calibration_manager.captureFailed.emit.assert_called_once()
 
     assert controller.capture_droplet_image() is True
-    assert len(machine.capture_calls) == 2
+    assert len(machine.capture_calls) == 3
+
+
+def test_controller_second_capture_timeout_fails_cleanly_and_allows_manual_capture():
+    controller, machine, _camera_model = _make_controller()
+    callback = Mock()
+
+    assert controller.capture_droplet_image(callback=callback) is True
+    controller._test_clock["value"] = 108.25
+    controller.pending_capture_guard_timer.fire()
+
+    assert controller.pending_capture_active is True
+    assert controller.pending_capture_recovery_attempted is True
+    callback.assert_not_called()
+
+    controller._test_clock["value"] = 116.50
+    controller.pending_capture_guard_timer.fire()
+
+    callback.assert_called_once_with(None)
+    controller.model.calibration_manager.captureFailed.emit.assert_called_once()
+    assert controller.pending_capture_callback is None
+    assert controller.pending_capture_active is False
+
+    assert controller.capture_droplet_image() is True
+    assert len(machine.capture_calls) == 3
+
+
+def test_controller_late_stale_completion_cannot_satisfy_requeued_capture():
+    controller, machine, camera_model = _make_controller()
+    callback = Mock()
+
+    assert controller.capture_droplet_image(callback=callback) is True
+    old_request_id = controller.pending_capture_request_id
+    controller._test_clock["value"] = 108.25
+    controller.pending_capture_guard_timer.fire()
+    new_request_id = controller.pending_capture_request_id
+
+    old_frame = np.full((4, 5, 3), 10, dtype=np.uint8)
+    controller._on_capture_completed_payload(
+        {
+            "status": "success",
+            "request_id": old_request_id,
+            "cap_id": 111,
+            "frame": old_frame,
+            "capture_info": {"cap_id": 111},
+        }
+    )
+
+    callback.assert_not_called()
+    assert camera_model.update_calls == []
+    assert controller.pending_capture_request_id == new_request_id
+
+    new_frame = np.full((4, 5, 3), 20, dtype=np.uint8)
+    controller._on_capture_completed_payload(
+        {
+            "status": "success",
+            "request_id": new_request_id,
+            "cap_id": 222,
+            "frame": new_frame,
+            "capture_info": {"cap_id": 222},
+        }
+    )
+
+    callback.assert_called_once()
+    assert callback.call_args.args[0] is new_frame
+    assert camera_model.update_calls[-1]["capture_info"]["cap_id"] == 222
 
 
 def _make_optics_dialog(*, commands_idle=True, active=True):

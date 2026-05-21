@@ -69,6 +69,22 @@ def test_pressure_trajectory_settings_timeout_emits_error_and_finalizes():
     assert proc.finalize.calls
 
 
+def test_pressure_trajectory_capture_uses_extended_guard_for_recovery_retry():
+    proc = PressureTrajectoryCalibrationProcess.__new__(PressureTrajectoryCalibrationProcess)
+    proc._current_pressure = 0.621
+    proc.d_index = 0
+    proc.delays_us = [5950]
+    proc._rep_count = 0
+    proc.replicates_per_delay = 1
+    captured = {}
+    proc._capture_with_policy = lambda **kwargs: captured.update(kwargs)
+
+    proc.onCaptureTimepoint()
+
+    assert captured["attempts_total"] == 5
+    assert captured["guard_timeout_ms"] == 15_000
+
+
 def test_pressure_trajectory_multiple_on_single_replicate_disqualifies_and_retests_lower():
     proc = PressureTrajectoryCalibrationProcess.__new__(PressureTrajectoryCalibrationProcess)
     proc._discard_next = False
