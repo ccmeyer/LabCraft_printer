@@ -1550,16 +1550,17 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.summary_toolbar.addWidget(self.summary_source_combo)
         self.summary_toolbar.addWidget(self.summary_history_button)
         self.summary_toolbar.addStretch(1)
-        summary_v.addLayout(self.summary_toolbar)
 
         self.summary_applied_calibration_banner = QtWidgets.QLabel()
         self.summary_applied_calibration_banner.setWordWrap(True)
-        self.summary_applied_calibration_banner.setMinimumHeight(34)
+        self.summary_applied_calibration_banner.setMinimumHeight(28)
         self.summary_applied_calibration_banner.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         summary_v.addWidget(self.summary_applied_calibration_banner)
         # Backward-compatible alias for older tests/helpers; the banner above the
         # table is now the only visible applied-calibration status surface.
         self.bridge_applied_calibration_label = self.summary_applied_calibration_banner
+
+        summary_v.addLayout(self.summary_toolbar)
 
         self.summary_table_model = CharacterizationSummaryTableModel(
             self,
@@ -3439,15 +3440,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         record = self._get_applied_imaging_calibration_record()
         if not isinstance(record, dict):
             label.setText("No calibration applied to this design for the loaded stock/head.")
+            color = self.color_dict.get("dark_red", "#8a0303")
             label.setStyleSheet(
-                "QLabel {"
-                " background-color: #7f1d1d;"
-                " color: #ffffff;"
-                " border: 1px solid #ef4444;"
-                " border-radius: 4px;"
-                " padding: 7px 9px;"
-                " font-weight: 600;"
-                "}"
+                f"QLabel {{ background-color: {color}; color: white; padding: 5px; }}"
             )
             return
         run_id = record.get("run_id") or "-"
@@ -3455,15 +3450,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         pw = self._format_applied_record_value(record, "pw_us", None, " us")
         pressure = self._format_applied_record_value(record, "pressure_psi", 3, " psi")
         label.setText(f"Applied: Run {run_id}, {measured}, PW {pw}, {pressure}")
+        color = self.color_dict.get("dark_blue", "#063f99")
         label.setStyleSheet(
-            "QLabel {"
-            " background-color: #1d4ed8;"
-            " color: #ffffff;"
-            " border: 1px solid #60a5fa;"
-            " border-radius: 4px;"
-            " padding: 7px 9px;"
-            " font-weight: 600;"
-            "}"
+            f"QLabel {{ background-color: {color}; color: white; padding: 5px; }}"
         )
 
     def _selected_summary_row_matches_applied(self, raw=None):
@@ -3484,18 +3473,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._bridge_apply_button_state = state
 
         neutral_style = ""
-        primary_style = (
-            "QPushButton {"
-            " background-color: #2563eb;"
-            " color: #ffffff;"
-            " border: 1px solid #60a5fa;"
-            " border-radius: 4px;"
-            " padding: 6px 10px;"
-            " font-weight: 600;"
-            "}"
-            "QPushButton:hover { background-color: #1d4ed8; }"
-            "QPushButton:pressed { background-color: #1e40af; }"
-        )
+        primary_color = self.color_dict.get("dark_blue", "#063f99")
+        primary_style = f"background-color: {primary_color}; color: white;"
 
         if state == "ready":
             button.setEnabled(True)

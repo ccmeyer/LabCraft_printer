@@ -13,6 +13,17 @@ from CalibrationClasses.Model import CalibrationManager
 from CalibrationClasses.View import DropletImagingDialog
 
 
+DARK_BLUE = "#063f99"
+DARK_RED = "#8a0303"
+
+
+def _assert_plain_colored_surface(style, color):
+    assert f"background-color: {color}" in style
+    assert "color: white" in style
+    assert "border:" not in style
+    assert "font-weight" not in style
+
+
 def _make_run(run_id, *, stock="Water", sweep_entries=None, search_entries=None, stream_entries=None):
     steps = {
         "pressure_sweep_characterization": [],
@@ -944,7 +955,10 @@ def test_bridge_requires_explicit_selection_and_starts_empty(monkeypatch, qapp, 
     assert dialog.bridge_apply_btn.isEnabled() is False
     assert "Select a characterization result" in dialog.bridge_status_label.text()
     assert "No calibration applied" in dialog.summary_applied_calibration_banner.text()
-    assert "#7f1d1d" in dialog.summary_applied_calibration_banner.styleSheet()
+    _assert_plain_colored_surface(dialog.summary_applied_calibration_banner.styleSheet(), DARK_RED)
+    summary_layout = dialog.summary_group.layout()
+    assert summary_layout.itemAt(0).widget() is dialog.summary_applied_calibration_banner
+    assert summary_layout.itemAt(1).layout() is dialog.summary_toolbar
     marker_col = dialog.summary_table_model.column_index("applied_marker")
     assert dialog.summary_table_model.data(dialog.summary_table_model.index(0, marker_col), Qt.DisplayRole) == ""
 
@@ -1010,7 +1024,7 @@ def test_apply_marks_summary_row_and_persists_across_reopen(monkeypatch, qapp, t
     applied_record = experiment_model.get_applied_imaging_calibration()
     assert tuple(applied_record["source_row_fingerprint"]) == tuple(dialog._summary_row_fingerprint(raw))
     assert "Applied: Run" in dialog.bridge_applied_calibration_label.text()
-    assert "#1d4ed8" in dialog.summary_applied_calibration_banner.styleSheet()
+    _assert_plain_colored_surface(dialog.summary_applied_calibration_banner.styleSheet(), DARK_BLUE)
     assert dialog.bridge_apply_btn.isEnabled() is False
     assert dialog.bridge_apply_btn.text() == "Selected calibration is applied"
     assert settings_calls[-1] == {"print_pulse_width": 1450, "print_pressure": 1.35}
@@ -1087,13 +1101,13 @@ def test_selecting_different_summary_row_keeps_applied_row_highlight(monkeypatch
     ) is not None
     assert dialog.bridge_apply_btn.isEnabled() is True
     assert dialog.bridge_apply_btn.text() == "Apply selected calibration to design"
-    assert "#2563eb" in dialog.bridge_apply_btn.styleSheet()
+    _assert_plain_colored_surface(dialog.bridge_apply_btn.styleSheet(), DARK_BLUE)
 
     _select_visible_row(dialog, 0)
     qapp.processEvents()
     assert dialog.bridge_apply_btn.isEnabled() is False
     assert dialog.bridge_apply_btn.text() == "Selected calibration is applied"
-    assert "#2563eb" not in dialog.bridge_apply_btn.styleSheet()
+    assert DARK_BLUE not in dialog.bridge_apply_btn.styleSheet()
 
     dialog.deleteLater()
 
