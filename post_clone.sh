@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+printf 'WARNING: post_clone.sh is a legacy virtualenv helper. For Raspberry Pi 5 / Bookworm setup, follow README.md instead.\n'
+printf 'This script creates .venv from requirements.txt, while the current Pi flow uses venv plus requirements-pi.lock.\n'
+
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_DIR"
 

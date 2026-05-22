@@ -270,7 +270,14 @@ Inside `FreeRTOS-interface/Presets`, `Settings.json` stores predefined values su
 
 ## Pi setup status
 
-The repo still contains `setup_pi.sh` and `post_clone.sh`, but they are not the recommended path for an already-working Raspberry Pi OS Bookworm setup with cameras. If your Pi is already configured successfully using the manual procedure below, keep that flow as the source of truth for now and do not run those older scripts unless you are explicitly testing them.
+For a Raspberry Pi 5 running Raspberry Pi OS Bookworm, use the manual procedure below as the source of truth. Do not run the older root-level helper scripts during normal setup if you are following this README.
+
+| File | Current role | Normal Pi 5 setup? |
+| --- | --- | --- |
+| `README.md` | Source-of-truth setup for system packages, UART, cameras, GPIO, DFU, and the Python environment. | Yes |
+| `scripts/pi/install_desktop_launcher.sh` | Optional per-user desktop launcher installer after the app already launches manually. | Optional |
+| `setup_pi.sh` | Legacy partial system setup helper. It does not cover the full Bookworm camera flow or all current groups/packages. | No |
+| `post_clone.sh` | Legacy virtualenv helper that installs `requirements.txt` into `.venv`, not the Pi lockfile into `venv`. | No |
 
 ## Updated Startup Procedure
 ```bash
@@ -307,7 +314,8 @@ sudo apt-get install -y dfu-util
 sudo apt-get install -y python3-venv python3-pip
 
 # Numpy dependent libraries
-sudo apt-get install -y python3-numpy python3-scipy \   python3-skimage python3-sklearn python3-opencv
+sudo apt-get install -y \
+  python3-numpy python3-scipy python3-skimage python3-sklearn python3-opencv
 
 # Serial access & video groups for your user
 sudo usermod -aG dialout,video,gpio,render,plugdev $USER
@@ -364,12 +372,14 @@ pip-compile --generate-hashes --output-file requirements-pi.lock requirements.in
 
 pip-sync requirements-pi.lock
 
-# Numpy and associated libraries are reinstalled during pip-sync and must be removed from site-packages so that they rely on the dist-packages version. 
-rm -rf /home/labcraft/LabCraft_printer/venv/lib/python3.11/site-packages/numpy*
-rm -rf /home/labcraft/LabCraft_printer/venv/lib/python3.11/site-packages/pandas*
-rm -rf /home/labcraft/LabCraft_printer/venv/lib/python3.11/site-packages/matplotlib*
-rm -rf /home/labcraft/LabCraft_printer/venv/lib/python3.11/site-packages/scipy*
-rm -rf /home/labcraft/LabCraft_printer/venv/lib/python3.11/site-packages/sklearn*
+# NumPy and associated libraries are reinstalled during pip-sync and must be removed
+# from site-packages so that they rely on the apt-managed dist-packages versions.
+SITE_PACKAGES="$(python -c 'import site; print(next(p for p in site.getsitepackages() if p.endswith("site-packages")))')"
+rm -rf "$SITE_PACKAGES"/numpy*
+rm -rf "$SITE_PACKAGES"/pandas*
+rm -rf "$SITE_PACKAGES"/matplotlib*
+rm -rf "$SITE_PACKAGES"/scipy*
+rm -rf "$SITE_PACKAGES"/sklearn*
 
 # Manual launch
 python FreeRTOS-interface/App.py
@@ -386,7 +396,7 @@ bash scripts/pi/install_desktop_launcher.sh
 The launcher installer is intentionally narrow:
 
 - It installs a per-user application entry into `~/.local/share/applications/`
-- It uses the existing repo-local `.venv`, `venv`, or legacy `env`
+- It uses the existing repo-local `venv`, `.venv`, or legacy `env`
 - It does not run `apt`, change groups, touch camera/UART config, recreate the virtual environment, or reinstall dependencies
 
 Launcher diagnostics are written to:

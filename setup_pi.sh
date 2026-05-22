@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+printf 'WARNING: setup_pi.sh is a legacy partial setup helper. For Raspberry Pi 5 / Bookworm setup, follow README.md instead.\n'
+printf 'This script does not cover the full current camera, Python lockfile, or launcher flow.\n'
+
 # ---- Config ----
 USER_NAME="${SUDO_USER:-$USER}"   # the intended non-root user
 UDEV_RULE_PATH="/etc/udev/rules.d/45-st-dfu.rules"

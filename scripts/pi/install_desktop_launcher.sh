@@ -16,12 +16,12 @@ fail() {
 }
 
 choose_python() {
-  if [ -x "$REPO_ROOT/.venv/bin/python" ]; then
-    printf '%s\n' "$REPO_ROOT/.venv/bin/python"
-    return 0
-  fi
   if [ -x "$REPO_ROOT/venv/bin/python" ]; then
     printf '%s\n' "$REPO_ROOT/venv/bin/python"
+    return 0
+  fi
+  if [ -x "$REPO_ROOT/.venv/bin/python" ]; then
+    printf '%s\n' "$REPO_ROOT/.venv/bin/python"
     return 0
   fi
   if [ -x "$REPO_ROOT/env/bin/python" ]; then
