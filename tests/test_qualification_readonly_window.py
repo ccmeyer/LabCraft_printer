@@ -173,6 +173,34 @@ def test_machine_qualification_window_has_run_and_review_tabs(tmp_path, qapp):
     window.close()
 
 
+def test_run_tab_uses_two_column_header_above_test_plan(tmp_path, qapp):
+    _write_sample_report(tmp_path)
+    main_window = QtWidgets.QWidget()
+    main_window.popup_message = lambda *_args: None
+    window = MachineQualificationWindow(main_window, _ReportController(tmp_path))
+
+    assert window.run_header_layout.spacing() == 12
+    assert window.run_header_layout.itemAt(0).widget() is window.suite_group
+    assert window.run_header_layout.itemAt(0).widget().title() == "Selection Details"
+    assert window.run_header_layout.itemAt(1).widget() is window.run_config_group
+    assert window.run_header_layout.itemAt(1).widget().title() == "Run Configuration"
+
+    right_layout = window.test_plan_table.parentWidget().layout()
+    header_index = right_layout.indexOf(window.run_header_panel)
+    test_plan_index = right_layout.indexOf(window.test_plan_table)
+    assert header_index != -1
+    assert test_plan_index != -1
+    assert header_index < test_plan_index
+    assert right_layout.stretch(test_plan_index) == 1
+
+    window.suite_list.setCurrentRow(_suite_row(window, "factory_acceptance_v3"))
+    qapp.processEvents()
+
+    assert window.test_plan_table.rowCount() > 0
+
+    window.close()
+
+
 def test_run_tab_lists_campaigns_and_populates_campaign_plan(tmp_path, qapp):
     _write_sample_report(tmp_path)
     main_window = QtWidgets.QWidget()

@@ -178,6 +178,11 @@ class MachineQualificationWindow(QtWidgets.QDialog):
         right_layout = QtWidgets.QVBoxLayout(right)
         right_layout.setContentsMargins(8, 0, 0, 0)
 
+        self.run_header_panel = QtWidgets.QWidget(right)
+        self.run_header_layout = QtWidgets.QHBoxLayout(self.run_header_panel)
+        self.run_header_layout.setContentsMargins(0, 0, 0, 0)
+        self.run_header_layout.setSpacing(12)
+
         self.suite_group = QtWidgets.QGroupBox("Selection Details")
         suite_grid = QtWidgets.QGridLayout(self.suite_group)
         self.suite_labels: dict[str, QtWidgets.QLabel] = {}
@@ -197,10 +202,10 @@ class MachineQualificationWindow(QtWidgets.QDialog):
             self.suite_labels[key] = value
             suite_grid.addWidget(name, idx, 0)
             suite_grid.addWidget(value, idx, 1)
-        right_layout.addWidget(self.suite_group)
+        self.run_header_layout.addWidget(self.suite_group, stretch=1)
 
-        config_group = QtWidgets.QGroupBox("Run Configuration")
-        config_grid = QtWidgets.QGridLayout(config_group)
+        self.run_config_group = QtWidgets.QGroupBox("Run Configuration")
+        config_grid = QtWidgets.QGridLayout(self.run_config_group)
         self.machine_id_edit = QtWidgets.QLineEdit()
         self.machine_id_edit.setPlaceholderText("Use existing local identity")
         self.port_edit = QtWidgets.QLineEdit()
@@ -248,7 +253,8 @@ class MachineQualificationWindow(QtWidgets.QDialog):
         config_grid.addWidget(self.elapsed_time_label, 5, 0)
         config_grid.addWidget(self.remaining_time_label, 5, 1, 1, 2)
         config_grid.addWidget(self.typical_total_time_label, 5, 3)
-        right_layout.addWidget(config_group)
+        self.run_header_layout.addWidget(self.run_config_group, stretch=1)
+        right_layout.addWidget(self.run_header_panel, stretch=0)
 
         self.campaign_queue_table = QtWidgets.QTableWidget(0, 6, self.run_tab)
         self.campaign_queue_table.setHorizontalHeaderLabels(["Status", "Step", "Suite", "Fixture", "Timeout", "Report"])
