@@ -56,6 +56,36 @@ def _draw_split_head_image(parts, *, separator_row=None, led_start_row=None):
     return image
 
 
+def _draw_channel_wall_profile_image(
+    *,
+    head_rect=(200, 80, 220, 180),
+    wall_left_rel=48,
+    wall_spacing=20,
+    edge_peak_rel=None,
+    reservoir_peak_rel=None,
+):
+    image = np.zeros((480, 640, 3), dtype=np.uint8)
+    x, y, w, h = head_rect
+    image[y : y + h, x : x + w] = 170
+
+    if edge_peak_rel is not None:
+        image[y : y + h, x + edge_peak_rel : x + edge_peak_rel + 3] = 30
+
+    left = x + wall_left_rel
+    right = left + wall_spacing
+    image[y : y + h, left : left + 3] = 35
+    image[y : y + h, right : right + 3] = 35
+    image[y : y + h, left + 3 : right] = 215
+
+    if reservoir_peak_rel is not None:
+        reservoir_left = x + reservoir_peak_rel
+        reservoir_right = reservoir_left + wall_spacing
+        image[y : y + h, reservoir_left : reservoir_left + 3] = 5
+        image[y : y + h, reservoir_right : reservoir_right + 3] = 5
+
+    return image
+
+
 def _sample_context(*, ts="2026-03-21T10:00:00Z", mono=100.0, level=100.0):
     return {
         "timestamp_utc": ts,
@@ -161,6 +191,75 @@ def test_geometry_does_not_trim_normal_tall_head():
 
     assert geometry["head_bottom_reason"] == "merged_bbox_bottom"
     assert geometry["channel_bounds"][3] == geometry["merged_head_bbox"][3]
+
+
+def test_channel_profile_selects_wall_pair_after_initial_edge_peak():
+    image = _draw_channel_wall_profile_image(edge_peak_rel=28, wall_left_rel=49, wall_spacing=20)
+    thread = _selection_thread()
+
+    geometry = thread._detect_refuel_head_geometry(image, threshold_value=80)
+
+    assert geometry["channel_detection_reason"] == "profile_wall_pair"
+    assert abs(geometry["channel_bounds"][0] - 249) <= 1
+    assert abs(geometry["channel_bounds"][2] - 20) <= 1
+    assert geometry["selected_channel_wall_pair"] is not None
+    assert geometry["selected_channel_wall_pair_score"] <= thread.CHANNEL_WALL_PAIR_ACCEPT_SCORE_MAX
+
+
+def test_channel_profile_corrects_hard_offset_when_head_left_is_shifted():
+    image = _draw_channel_wall_profile_image(
+        head_rect=(190, 80, 230, 180),
+        wall_left_rel=49,
+        wall_spacing=20,
+        edge_peak_rel=30,
+    )
+    thread = _selection_thread()
+
+    geometry = thread._detect_refuel_head_geometry(image, threshold_value=80)
+
+    assert geometry["channel_detection_reason"] == "profile_wall_pair"
+    assert abs(geometry["channel_bounds"][0] - 239) <= 1
+    assert geometry["channel_bounds"][0] != 230
+
+
+def test_channel_profile_ignores_far_right_reservoir_peaks():
+    image = _draw_channel_wall_profile_image(
+        wall_left_rel=48,
+        wall_spacing=20,
+        reservoir_peak_rel=112,
+    )
+    thread = _selection_thread()
+
+    geometry = thread._detect_refuel_head_geometry(image, threshold_value=80)
+
+    assert geometry["channel_detection_reason"] == "profile_wall_pair"
+    assert abs(geometry["channel_bounds"][0] - 248) <= 1
+    assert abs(geometry["channel_bounds"][2] - 20) <= 1
+
+
+def test_channel_profile_falls_back_when_no_valid_wall_pair_exists():
+    image = _draw_split_head_image([(200, 80, 220, 180)])
+    thread = _selection_thread()
+
+    geometry = thread._detect_refuel_head_geometry(image, threshold_value=80)
+
+    assert geometry["channel_detection_reason"] == "fallback_offset"
+    assert geometry["channel_bounds"][0] == 240
+    assert geometry["channel_bounds"][2] == 20
+    assert geometry["selected_channel_wall_pair"] is None
+
+
+def test_channel_profile_debug_details_include_candidates_and_parameters():
+    image = _draw_channel_wall_profile_image(edge_peak_rel=28, wall_left_rel=49, wall_spacing=20)
+    thread = _selection_thread()
+
+    geometry = thread._detect_refuel_head_geometry(image, threshold_value=80)
+
+    assert geometry["channel_wall_peaks"]
+    assert geometry["channel_wall_pair_candidates"]
+    assert geometry["selected_channel_wall_pair"]["left_relative_x"] in {49, 50}
+    assert geometry["channel_wall_profile_parameters"]["peak_prominence_min"] == 6.0
+    assert thread.debug_details["channel_detection_reason"] == "profile_wall_pair"
 
 
 def test_peak_selection_prefers_comparable_top_candidate_over_stale_last_row():
@@ -596,7 +695,7 @@ def test_refuel_camera_model_build_dataset_analysis_seed_returns_geometry_and_le
     seed = model.build_dataset_analysis_seed(raw_frame)
 
     assert seed is not None
-    assert seed["detector_version"] == "phase2_dataset_seed_v4_fill_gate"
+    assert seed["detector_version"] == "phase2_dataset_seed_v5_channel_wall_profile"
     assert seed["predicted_status"] == "visible"
     assert seed["details"]["analysis_parameters"]["bottom_guard_px"] == 2
     assert abs(seed["predicted_level_px"] - (head_rect[3] - 60)) <= 3

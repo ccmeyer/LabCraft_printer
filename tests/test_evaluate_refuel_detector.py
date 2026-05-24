@@ -609,6 +609,9 @@ def test_rerun_refuel_detector_debug_matches_seed_on_synthetic_visible_frame(tmp
     assert rerun["debug_details"]["best_peak_row"] is not None
     assert rerun["debug_details"]["merged_head_bbox"] is not None
     assert rerun["debug_details"]["head_bottom_reason"] in {"merged_bbox_bottom", "led_separator"}
+    assert "channel_wall_peaks" in rerun["debug_details"]
+    assert "channel_wall_pair_candidates" in rerun["debug_details"]
+    assert "channel_wall_profile_parameters" in rerun["debug_details"]
     assert "head_closed_mask" in rerun["debug_artifacts"]
     assert "top_tie_eligible_rows" in rerun["debug_details"]
     assert "tracking_eligible_rows" in rerun["debug_details"]
