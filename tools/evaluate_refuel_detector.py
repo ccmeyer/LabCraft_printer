@@ -24,6 +24,18 @@ from tools.annotate_refuel_dataset import (
 
 
 GEOMETRY_KEYS = ("left_wall", "right_wall", "top_line", "bottom_line")
+CHANNEL_X_ERROR_KEYS = (
+    "channel_left_dx_px",
+    "channel_right_dx_px",
+    "channel_center_dx_px",
+    "channel_width_error_px",
+)
+CONTACT_SHEET_CATEGORIES = (
+    "worst_meniscus_errors",
+    "status_mismatches",
+    "per_scene_worst",
+    "worst_channel_geometry_errors",
+)
 MISSING_LABEL_STATUS = "missing_label"
 MISSING_PREDICTION_STATUS = "missing_prediction"
 
@@ -66,6 +78,20 @@ CSV_FIELDNAMES = [
     "right_wall_midpoint_error_px",
     "top_line_midpoint_error_px",
     "bottom_line_midpoint_error_px",
+    "label_channel_left_x_px",
+    "label_channel_right_x_px",
+    "label_channel_center_x_px",
+    "label_channel_width_px",
+    "predicted_channel_left_x_px",
+    "predicted_channel_right_x_px",
+    "predicted_channel_center_x_px",
+    "predicted_channel_width_px",
+    "channel_left_dx_px",
+    "channel_right_dx_px",
+    "channel_center_dx_px",
+    "channel_center_abs_error_px",
+    "channel_width_error_px",
+    "channel_width_abs_error_px",
 ]
 
 
@@ -117,6 +143,33 @@ def _line_display_midpoint(line, raw_shape):
         float((display_line[0][0] + display_line[1][0]) / 2.0),
         float((display_line[0][1] + display_line[1][1]) / 2.0),
     ]
+
+
+def _channel_x_measurement(geometry_midpoints):
+    left = (geometry_midpoints or {}).get("left_wall")
+    right = (geometry_midpoints or {}).get("right_wall")
+    if left is None or right is None:
+        return {
+            "left_x_px": None,
+            "right_x_px": None,
+            "center_x_px": None,
+            "width_px": None,
+        }
+    left_x = float(left[0])
+    right_x = float(right[0])
+    return {
+        "left_x_px": left_x,
+        "right_x_px": right_x,
+        "center_x_px": float((left_x + right_x) / 2.0),
+        "width_px": float(right_x - left_x),
+    }
+
+
+def _signed_error_summary(values):
+    values = [float(value) for value in values if value is not None]
+    summary = _numeric_summary(values)
+    summary["mean_error"] = _mean(values)
+    return summary
 
 
 def _distance(point_a, point_b):
@@ -396,6 +449,43 @@ def _frame_metric(frame, scene, label, seed, prediction_source="saved"):
             pred_midpoints.get(key),
         )
 
+    label_channel = _channel_x_measurement(label_midpoints)
+    pred_channel = _channel_x_measurement(pred_midpoints)
+    row.update(
+        {
+            "label_channel_left_x_px": label_channel["left_x_px"],
+            "label_channel_right_x_px": label_channel["right_x_px"],
+            "label_channel_center_x_px": label_channel["center_x_px"],
+            "label_channel_width_px": label_channel["width_px"],
+            "predicted_channel_left_x_px": pred_channel["left_x_px"],
+            "predicted_channel_right_x_px": pred_channel["right_x_px"],
+            "predicted_channel_center_x_px": pred_channel["center_x_px"],
+            "predicted_channel_width_px": pred_channel["width_px"],
+        }
+    )
+    channel_left_dx = None
+    channel_right_dx = None
+    channel_center_dx = None
+    channel_width_error = None
+    if label_channel["left_x_px"] is not None and pred_channel["left_x_px"] is not None:
+        channel_left_dx = float(pred_channel["left_x_px"] - label_channel["left_x_px"])
+    if label_channel["right_x_px"] is not None and pred_channel["right_x_px"] is not None:
+        channel_right_dx = float(pred_channel["right_x_px"] - label_channel["right_x_px"])
+    if label_channel["center_x_px"] is not None and pred_channel["center_x_px"] is not None:
+        channel_center_dx = float(pred_channel["center_x_px"] - label_channel["center_x_px"])
+    if label_channel["width_px"] is not None and pred_channel["width_px"] is not None:
+        channel_width_error = float(pred_channel["width_px"] - label_channel["width_px"])
+    row.update(
+        {
+            "channel_left_dx_px": channel_left_dx,
+            "channel_right_dx_px": channel_right_dx,
+            "channel_center_dx_px": channel_center_dx,
+            "channel_center_abs_error_px": None if channel_center_dx is None else abs(channel_center_dx),
+            "channel_width_error_px": channel_width_error,
+            "channel_width_abs_error_px": None if channel_width_error is None else abs(channel_width_error),
+        }
+    )
+
     return row
 
 
@@ -434,6 +524,10 @@ def _scene_summaries(frame_metrics, scenes_by_id):
             for row in rows
             if row.get("level_error_px") is not None
         ]
+        channel_x_errors = {
+            key: _signed_error_summary(row.get(key) for row in rows)
+            for key in CHANNEL_X_ERROR_KEYS
+        }
         summaries[scene_id] = {
             "scene_id": scene_id,
             "scene_tags": _scene_tags(scenes_by_id.get(scene_id)),
@@ -443,6 +537,7 @@ def _scene_summaries(frame_metrics, scenes_by_id):
             "status_accuracy": _status_accuracy(rows),
             "meniscus_y_error_px": _numeric_summary(meniscus_errors),
             "level_error_px": _numeric_summary(level_errors),
+            "channel_x_error_px": channel_x_errors,
         }
     return summaries
 
@@ -496,6 +591,10 @@ def _single_source_result(loaded, prediction_source="saved"):
             if row.get(f"{key}_midpoint_error_px") is not None
         ]
         geometry_error_summary[key] = _numeric_summary(errors)
+    channel_x_error_summary = {
+        key: _signed_error_summary(row.get(key) for row in frame_metrics)
+        for key in CHANNEL_X_ERROR_KEYS
+    }
 
     summary = {
         "prediction_source": prediction_source,
@@ -516,6 +615,7 @@ def _single_source_result(loaded, prediction_source="saved"):
         "meniscus_y_error_px": _numeric_summary(meniscus_errors),
         "level_error_px": _numeric_summary(level_errors),
         "geometry_midpoint_error_px": geometry_error_summary,
+        "channel_x_error_px": channel_x_error_summary,
     }
 
     result = {
@@ -569,6 +669,22 @@ def _worst_frames(frame_metrics, worst_count):
     candidates.sort(
         key=lambda row: (
             -float(row["meniscus_abs_error_px"]),
+            row.get("scene_id") or "",
+            int(row.get("capture_index") or 0),
+        )
+    )
+    return candidates[: max(0, int(worst_count))]
+
+
+def _worst_channel_geometry_frames(frame_metrics, worst_count):
+    candidates = [
+        row
+        for row in frame_metrics
+        if row.get("channel_center_abs_error_px") is not None
+    ]
+    candidates.sort(
+        key=lambda row: (
+            -float(row["channel_center_abs_error_px"]),
             row.get("scene_id") or "",
             int(row.get("capture_index") or 0),
         )
@@ -703,6 +819,7 @@ def _draw_overlay_text(cv2, image, metric, category):
         f"{metric.get('frame_id', '')}  scene={metric.get('scene_id', '')}",
         f"status {metric.get('label_status', '-')} -> {metric.get('predicted_status', '-')}",
         f"abs_y_err={_fmt_float(metric.get('meniscus_abs_error_px'))} px",
+        f"chan_dx={_fmt_float(metric.get('channel_center_dx_px'))} w_err={_fmt_float(metric.get('channel_width_error_px'))} px",
         f"category={category or 'overlay'}",
     ]
     font = cv2.FONT_HERSHEY_SIMPLEX
@@ -832,6 +949,7 @@ def select_overlay_frames(result, worst_overlay_count=25, overlay_all=False):
         "worst_meniscus_errors": _worst_frames(frame_metrics, count),
         "status_mismatches": status_mismatches[:count],
         "per_scene_worst": per_scene_worst,
+        "worst_channel_geometry_errors": _worst_channel_geometry_frames(frame_metrics, count),
     }
     if overlay_all:
         selected["all_evaluated_frames"] = frame_metrics
@@ -993,10 +1111,13 @@ def write_overlay_artifacts(
             "label_status": row.get("label_status"),
             "predicted_status": row.get("predicted_status"),
             "meniscus_abs_error_px": row.get("meniscus_abs_error_px"),
+            "channel_center_dx_px": row.get("channel_center_dx_px"),
+            "channel_center_abs_error_px": row.get("channel_center_abs_error_px"),
+            "channel_width_error_px": row.get("channel_width_error_px"),
         })
 
     contact_sheets = {}
-    for category in ("worst_meniscus_errors", "status_mismatches", "per_scene_worst"):
+    for category in CONTACT_SHEET_CATEGORIES:
         paths = [
             overlay_paths_by_frame.get(str(row.get("frame_id") or ""))
             for row in selected.get(category, [])
@@ -1554,6 +1675,12 @@ def write_detector_debug_artifacts(
             "label_status": source_metric.get("label_status"),
             "source_meniscus_abs_error_px": source_metric.get("meniscus_abs_error_px"),
             "rerun_meniscus_abs_error_px": rerun_metric.get("meniscus_abs_error_px"),
+            "source_channel_center_dx_px": source_metric.get("channel_center_dx_px"),
+            "source_channel_center_abs_error_px": source_metric.get("channel_center_abs_error_px"),
+            "source_channel_width_error_px": source_metric.get("channel_width_error_px"),
+            "rerun_channel_center_dx_px": rerun_metric.get("channel_center_dx_px"),
+            "rerun_channel_center_abs_error_px": rerun_metric.get("channel_center_abs_error_px"),
+            "rerun_channel_width_error_px": rerun_metric.get("channel_width_error_px"),
             "analysis_parameters": params,
             "debug_details": rerun_debug.get("debug_details") or {},
         }
@@ -1564,7 +1691,7 @@ def write_detector_debug_artifacts(
         })
 
     contact_sheets = {}
-    for category in ("worst_meniscus_errors", "status_mismatches", "per_scene_worst"):
+    for category in CONTACT_SHEET_CATEGORIES:
         paths = [
             debug_paths_by_frame.get(str(row.get("frame_id") or ""))
             for row in selected.get(category, [])
@@ -1657,6 +1784,9 @@ def format_evaluation_report(result, worst_count=10):
 
     meniscus = summary["meniscus_y_error_px"]
     level = summary["level_error_px"]
+    channel = summary.get("channel_x_error_px") or {}
+    channel_center = channel.get("channel_center_dx_px") or _signed_error_summary([])
+    channel_width = channel.get("channel_width_error_px") or _signed_error_summary([])
     lines.extend([
         "",
         "Visible Meniscus Error (display px)",
@@ -1675,14 +1805,26 @@ def format_evaluation_report(result, worst_count=10):
         f"  P90 abs: {_fmt_float(level['p90_abs_error'])}",
         f"  Max abs: {_fmt_float(level['max_abs_error'])}",
         "",
+        "Channel Geometry Error (display x px)",
+        f"  Count: {channel_center['count']}",
+        f"  Center mean signed: {_fmt_float(channel_center.get('mean_error'))}",
+        f"  Center MAE: {_fmt_float(channel_center.get('mae'))}",
+        f"  Center max abs: {_fmt_float(channel_center.get('max_abs_error'))}",
+        f"  Width mean signed: {_fmt_float(channel_width.get('mean_error'))}",
+        f"  Width MAE: {_fmt_float(channel_width.get('mae'))}",
+        "",
         "Scenes",
     ])
     for scene_id, scene in result["scenes"].items():
         men = scene["meniscus_y_error_px"]
+        scene_channel = scene.get("channel_x_error_px") or {}
+        scene_center = scene_channel.get("channel_center_dx_px") or _signed_error_summary([])
         lines.append(
             f"  {scene_id} tags={scene['scene_tags']} frames={scene['frame_count']} "
             f"status_acc={_fmt_float(scene['status_accuracy'])} "
-            f"meniscus_mae={_fmt_float(men['mae'])} meniscus_count={men['count']}"
+            f"meniscus_mae={_fmt_float(men['mae'])} meniscus_count={men['count']} "
+            f"channel_center_mean={_fmt_float(scene_center.get('mean_error'))} "
+            f"channel_center_mae={_fmt_float(scene_center.get('mae'))}"
         )
 
     worst = _worst_frames(result["frame_metrics"], worst_count)
@@ -1694,6 +1836,17 @@ def format_evaluation_report(result, worst_count=10):
             f"label_y={_fmt_float(row['label_meniscus_y_px'])} "
             f"pred_y={_fmt_float(row['predicted_meniscus_y_px'])} "
             f"abs_err={_fmt_float(row['meniscus_abs_error_px'])} "
+            f"status={row['label_status']}->{row['predicted_status']}"
+        )
+    worst_channel = _worst_channel_geometry_frames(result["frame_metrics"], worst_count)
+    lines.append("")
+    lines.append(f"Worst Channel Geometry Errors (top {len(worst_channel)})")
+    for row in worst_channel:
+        lines.append(
+            f"  {row['frame_id']} scene={row['scene_id']} "
+            f"center_dx={_fmt_float(row.get('channel_center_dx_px'))} "
+            f"center_abs={_fmt_float(row.get('channel_center_abs_error_px'))} "
+            f"width_err={_fmt_float(row.get('channel_width_error_px'))} "
             f"status={row['label_status']}->{row['predicted_status']}"
         )
     return "\n".join(lines)

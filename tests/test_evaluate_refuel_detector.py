@@ -18,6 +18,15 @@ GEOMETRY = {
 }
 
 
+def _geometry_with_display_x(left_x, right_x):
+    return {
+        "left_wall": [[25, left_x], [5, left_x]],
+        "right_wall": [[25, right_x], [5, right_x]],
+        "top_line": [[25, left_x], [25, right_x]],
+        "bottom_line": [[5, left_x], [5, right_x]],
+    }
+
+
 def _write_jsonl(path: Path, rows):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
@@ -275,6 +284,38 @@ def test_prediction_meniscus_measurement_uses_same_display_y_average():
     assert measured["level_from_bottom_px"] == 8.0
 
 
+def test_frame_metric_reports_signed_channel_x_errors():
+    frame = _make_frame("frame_000001", "scene_001", 1)
+    label_geometry = _geometry_with_display_x(2, 18)
+    pred_geometry = _geometry_with_display_x(0, 14)
+    label = _visible_label(
+        "frame_000001",
+        "scene_001",
+        [[20, 1], [10, 18]],
+        geometry=label_geometry,
+    )
+    seed = _seed(
+        "frame_000001",
+        "visible",
+        [[18, 0], [8, 19]],
+        geometry=pred_geometry,
+    )
+
+    row = evaluator._frame_metric(frame, None, label, seed)
+
+    assert row["label_channel_left_x_px"] == pytest.approx(2.0)
+    assert row["label_channel_right_x_px"] == pytest.approx(18.0)
+    assert row["label_channel_center_x_px"] == pytest.approx(10.0)
+    assert row["predicted_channel_left_x_px"] == pytest.approx(0.0)
+    assert row["predicted_channel_right_x_px"] == pytest.approx(14.0)
+    assert row["predicted_channel_center_x_px"] == pytest.approx(7.0)
+    assert row["channel_left_dx_px"] == pytest.approx(-2.0)
+    assert row["channel_right_dx_px"] == pytest.approx(-4.0)
+    assert row["channel_center_dx_px"] == pytest.approx(-3.0)
+    assert row["channel_center_abs_error_px"] == pytest.approx(3.0)
+    assert row["channel_width_error_px"] == pytest.approx(-2.0)
+
+
 def test_evaluation_confusion_matrix_includes_not_found_and_missing_prediction(tmp_path):
     run_dir = _make_run(tmp_path)
 
@@ -300,6 +341,33 @@ def test_visible_meniscus_summary_uses_predicted_visible_frames(tmp_path):
     assert summary["rmse"] == pytest.approx(math.sqrt(6.5))
     assert summary["p90_abs_error"] == pytest.approx(3.0)
     assert summary["max_abs_error"] == pytest.approx(3.0)
+
+
+def test_channel_x_error_summary_is_reported_by_dataset_and_scene(tmp_path):
+    run_dir = _make_run(tmp_path)
+    shifted = _seed(
+        "frame_000001",
+        "visible",
+        [[18, 0], [8, 19]],
+        geometry=_geometry_with_display_x(0, 14),
+    )
+    rows = []
+    for line in (run_dir / "analysis.jsonl").read_text(encoding="utf-8").splitlines():
+        row = json.loads(line)
+        if row.get("frame_id") == "frame_000001":
+            row.update(shifted)
+        rows.append(row)
+    _write_jsonl(run_dir / "analysis.jsonl", rows)
+
+    result = evaluator.evaluate_refuel_run(run_dir)
+    channel = result["summary"]["channel_x_error_px"]
+    scene_channel = result["scenes"]["scene_001"]["channel_x_error_px"]
+
+    assert channel["channel_center_dx_px"]["count"] == 4
+    assert channel["channel_center_dx_px"]["mean_error"] == pytest.approx(-0.75)
+    assert channel["channel_center_dx_px"]["max_abs_error"] == pytest.approx(3.0)
+    assert channel["channel_width_error_px"]["max_abs_error"] == pytest.approx(2.0)
+    assert scene_channel["channel_center_dx_px"]["max_abs_error"] == pytest.approx(3.0)
 
 
 def test_rejected_frames_are_skipped_by_default_and_can_be_included(tmp_path):
@@ -342,6 +410,8 @@ def test_cli_writes_json_and_csv_outputs(tmp_path, capsys):
     assert rows[0]["prediction_source"] == "saved"
     assert rows[0]["frame_id"] == "frame_000001"
     assert rows[0]["meniscus_abs_error_px"] == "2.0"
+    assert "channel_center_dx_px" in rows[0]
+    assert "channel_width_error_px" in rows[0]
 
 
 def test_prediction_source_rerun_ignores_stale_saved_seed(tmp_path, monkeypatch):
@@ -468,10 +538,13 @@ def test_select_overlay_frames_includes_failure_categories(tmp_path):
     worst_ids = [row["frame_id"] for row in selected["worst_meniscus_errors"]]
     mismatch_ids = [row["frame_id"] for row in selected["status_mismatches"]]
     per_scene_ids = [row["frame_id"] for row in selected["per_scene_worst"]]
+    channel_ids = [row["frame_id"] for row in selected["worst_channel_geometry_errors"]]
     all_ids = [row["frame_id"] for row in selected["all_evaluated_frames"]]
     assert worst_ids[:2] == ["frame_000002", "frame_000001"]
     assert {"frame_000003", "frame_000004", "frame_000005"}.issubset(set(mismatch_ids))
     assert "frame_000002" in per_scene_ids
+    assert "worst_channel_geometry_errors" in selected
+    assert channel_ids
     assert all_ids == [row["frame_id"] for row in result["frame_metrics"]]
 
 
