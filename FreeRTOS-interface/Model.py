@@ -37,6 +37,7 @@ from enum import Enum
 import CalibrationClasses
 import importlib
 from CalibrationMemoryStore import CalibrationMemoryStore
+from ExperimentAuditLog import ExperimentAuditLog
 
 from hardware.profile import CURRENT_PROFILE, HardwareProfile
 
@@ -374,6 +375,7 @@ class ExperimentModel(QObject):
         self.key_file_path: Optional[str] = None
         self.concentration_key_file_path: Optional[str] = None
         self.calibration_file_path: Optional[str] = None
+        self.experiment_audit_file_path: Optional[str] = None
         self.progress_data: Dict[str, Dict] = {}
         self._last_progress_load_warnings: list[dict[str, object]] = []
         self._last_progress_stock_override_warnings: list[dict[str, object]] = []
@@ -5405,6 +5407,7 @@ class ExperimentModel(QObject):
         self.experiment_file_path   = os.path.join(self.experiment_dir_path, "experiment_design.json")
         self.progress_file_path     = os.path.join(self.experiment_dir_path, "progress.json")
         self.calibration_file_path  = os.path.join(self.experiment_dir_path, "calibration.json")
+        self.experiment_audit_file_path = os.path.join(self.experiment_dir_path, "experiment_audit.jsonl")
         self.key_file_path          = os.path.join(self.experiment_dir_path, "key.csv")
         self.concentration_key_file_path = os.path.join(self.experiment_dir_path, "concentration_key.csv")
         if self._calibration_manager is not None and hasattr(self._calibration_manager, "update_calibration_file_path"):
@@ -6568,6 +6571,7 @@ class ExperimentModel(QObject):
         self._last_progress_load_warnings = []
         self._last_progress_stock_override_warnings = []
         self.calibration_file_path = None
+        self.experiment_audit_file_path = None
         self.key_file_path = None
         self._runtime_well_plate = None
         self._runtime_reaction_collection = None
@@ -9165,6 +9169,7 @@ class Model(QObject):
         self.calibration_manager = CalibrationClasses.CalibrationManager(self)
         # self.experiment_model = ExperimentModel(self.well_plate,self.calibration_manager)
         self.experiment_model = ExperimentModel(prof=self.profile)
+        self.experiment_audit_log = ExperimentAuditLog(model=self)
         self.calibration_memory_store = None
         self._disposable_printer_head_counter = 0
         self._initialize_calibration_memory_store()
@@ -9201,6 +9206,31 @@ class Model(QObject):
         except Exception as e:
             print(f"[CalibrationMemory] Failed to initialize store: {e}")
             self.calibration_memory_store = None
+
+    def _get_experiment_audit_log(self):
+        log = getattr(self, "experiment_audit_log", None)
+        if log is None:
+            log = ExperimentAuditLog(model=self)
+            self.experiment_audit_log = log
+        elif isinstance(log, ExperimentAuditLog):
+            log.model = self
+        return log
+
+    def record_experiment_audit_event(self, event_type, summary, details=None, level="info", context=None):
+        try:
+            log = self._get_experiment_audit_log()
+            recorder = getattr(log, "record", None)
+            if callable(recorder):
+                return recorder(
+                    event_type,
+                    summary,
+                    details=details,
+                    level=level,
+                    context=context,
+                )
+        except Exception as e:
+            print(f"[ExperimentAudit] Failed to record event '{event_type}': {e}")
+        return None
 
     @staticmethod
     def _clean_identity_text(value):
@@ -10078,8 +10108,18 @@ class Model(QObject):
         self.assign_printer_heads()
 
         # Ensure experiment folder exists and paths are known
+        initialized_experiment = False
         if not self.experiment_model.experiment_dir_path:
             self.experiment_model.initialize_experiment()
+            initialized_experiment = True
+            self.record_experiment_audit_event(
+                "experiment_initialized",
+                "Experiment initialized",
+                details={
+                    "plate_name": self.well_plate.get_current_plate_name(),
+                    "reaction_count": len(all_reactions),
+                },
+            )
         else:
             self.experiment_model.update_all_paths()
 
@@ -10097,6 +10137,23 @@ class Model(QObject):
         self.experiment_model.create_key_file()
         self.experiment_model.create_concentration_key_file()
 
+        assigned_well_count = sum(
+            1
+            for well in self.well_plate.get_all_wells()
+            if well.get_assigned_reaction() is not None
+        )
+        self.record_experiment_audit_event(
+            "experiment_loaded",
+            "Experiment loaded into runtime",
+            details={
+                "load_progress": bool(load_progress),
+                "plate_name": self.well_plate.get_current_plate_name(),
+                "reaction_count": len(self.reaction_collection.get_all_reactions()),
+                "assigned_well_count": int(assigned_well_count),
+                "progress_state": "loaded" if load_progress else "created",
+                "initialized_experiment": bool(initialized_experiment),
+            },
+        )
         self.experiment_loaded.emit()
 
     def get_well_stock_final_concentration(self, well_id: str, stock_id: str):
