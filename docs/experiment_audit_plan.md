@@ -11,6 +11,19 @@ The audit trail should describe what the operator and app did at the experiment 
 - `progress.json`, `calibration.json`, and `calibration_recordings/` remain authoritative detailed artifacts.
 - `experiment_audit.jsonl` becomes the concise timeline for review, reporting, and troubleshooting.
 
+## Implementation Status
+
+| Phase | Status | Completed | Validation |
+| --- | --- | --- | --- |
+| Phase 1: Plan and Schema | Complete | `docs/experiment_audit_plan.md` created with schema, call path, phases, risks, validation, and rollback. | Documentation-only; readback verified. |
+| Phase 2: Audit Writer Core | Complete | Added standalone `ExperimentAuditLog` writer and focused tests in `tests/test_experiment_audit_log.py`; no Controller, CalibrationManager, or UI wiring yet. | `.\env\Scripts\python.exe -m pytest -q tests/test_experiment_audit_log.py` -> 8 passed. `py -m pytest -q tests/test_experiment_audit_log.py` could not run because the Windows `py` launcher reported no installed Python. |
+| Phase 3: Experiment Lifecycle Integration | Pending | Not started. | Pending |
+| Phase 4: Print Array Events | Pending | Not started. | Pending |
+| Phase 5: Calibration Events | Pending | Not started. | Pending |
+| Phase 6: Audit Timeline Reader | Pending | Not started. | Pending |
+| Phase 7: Audit Timeline Window | Pending | Not started. | Pending |
+| Phase 8: Operator Notes and Export | Pending | Not started. | Pending |
+
 ## Call Path
 
 The feature crosses the app MVC layers at semantic action boundaries:
