@@ -29471,8 +29471,50 @@ class ImageAnalysisThread(QThread):
     # Define signals to send results back to the main thread
     # analysis_done = Signal(object,object,object,object)  # Send original, thresholded, and analyzed image and result
     analysis_done = Signal(object, object, object, object)  # Send original, annotated image, level, and meniscus row
+    TRACKING_WINDOW_PX = 30
+    TRACKING_PROMINENCE_RATIO = 0.70
+    TOP_TIE_GUARD_PX = 25
+    TOP_TIE_PROMINENCE_RATIO = 0.85
+    TOP_VISIBLE_PROMINENCE_MIN = 5.0
+    FULL_TOP_GUARD_PX = 8
+    BOTTOM_ARTIFACT_GUARD_PX = 25
+    SHORT_CHANNEL_MAX_HEIGHT_PX = 80
+    SHORT_CHANNEL_TOP_VISIBLE_PROMINENCE_MIN = 14.0
+    TOP_EDGE_VISIBLE_PROMINENCE_MIN = 8.0
+    TOP_NEAR_VISIBLE_PROMINENCE_MIN = 9.5
+    TOP_BAND_VISIBLE_PROMINENCE_MIN = 10.0
+    FILL_REFERENCE_MIN_MEAN = 40.0
+    HEAD_CLOSE_KERNEL = (65, 9)
+    COMPONENT_MIN_AREA = 800
+    COMPONENT_X_MIN = 80
+    COMPONENT_X_MAX = 540
+    COMPONENT_MIN_HEIGHT = 45
+    MERGE_VERTICAL_OVERLAP_MIN = 0.55
+    MERGE_HORIZONTAL_GAP_MAX = 70
+    CHANNEL_SEARCH_RADIUS_PX = 25
+    RIGHT_WALL_SEARCH_RADIUS_PX = 15
+    CHANNEL_SPACING_MIN_PX = 12
+    CHANNEL_SPACING_MAX_PX = 35
+    LED_TRIM_HEIGHT_MAX_PX = 108
+    LED_TRIM_ASPECT_MIN = 1.8
+    LED_SEPARATOR_PROMINENCE_MIN = 15
+    LED_SEPARATOR_BRIGHT_DELTA_MIN = 20
+    LED_SEPARATOR_ROW_MIN_FRAC = 0.45
+    LED_SEPARATOR_ROW_MAX_FRAC = 0.80
 
-    def __init__(self, image, offset, width, threshold, prominence, empty_cutoff, last_row, parent=None):
+    def __init__(
+        self,
+        image,
+        offset,
+        width,
+        threshold,
+        prominence,
+        empty_cutoff,
+        last_row,
+        parent=None,
+        capture_debug=False,
+        bottom_guard_px=2,
+    ):
         super().__init__(parent)
         self.offset = offset
         self.width = width
@@ -29480,6 +29522,10 @@ class ImageAnalysisThread(QThread):
         self.prominence = prominence
         self.empty_cutoff = empty_cutoff
         self.last_row = last_row
+        try:
+            self.bottom_guard_px = max(0, int(bottom_guard_px))
+        except Exception:
+            self.bottom_guard_px = 2
         self.input_shape = tuple(image.shape) if image is not None else None
         self.original_image = image
         self.annotated_image = None
@@ -29489,6 +29535,482 @@ class ImageAnalysisThread(QThread):
         self.channel_bounds = None
         self.detected_status = "not_found"
         self.detected_details = {}
+        self.capture_debug = bool(capture_debug)
+        self.debug_details = {}
+        self.debug_artifacts = {}
+        self.peak_selection_details = {}
+
+    def _debug_array(self, key, value):
+        if self.capture_debug and value is not None:
+            self.debug_artifacts[str(key)] = np.asarray(value).copy()
+
+    def _debug_update(self, payload):
+        if self.capture_debug:
+            self.debug_details.update(payload)
+
+    @staticmethod
+    def _debug_numeric(value):
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    def _debug_profile_stats(self, profile):
+        if profile is None or len(profile) == 0:
+            return {"length": 0, "min": None, "max": None, "mean": None}
+        arr = np.asarray(profile, dtype=float)
+        return {
+            "length": int(arr.size),
+            "min": float(np.min(arr)),
+            "max": float(np.max(arr)),
+            "mean": float(np.mean(arr)),
+        }
+
+    @classmethod
+    def peak_selection_parameters(cls):
+        return {
+            "tracking_window_px": int(cls.TRACKING_WINDOW_PX),
+            "tracking_prominence_ratio": float(cls.TRACKING_PROMINENCE_RATIO),
+            "top_tie_guard_px": int(cls.TOP_TIE_GUARD_PX),
+            "top_tie_prominence_ratio": float(cls.TOP_TIE_PROMINENCE_RATIO),
+            "top_visible_prominence_min": float(cls.TOP_VISIBLE_PROMINENCE_MIN),
+            "full_top_guard_px": int(cls.FULL_TOP_GUARD_PX),
+            "bottom_artifact_guard_px": int(cls.BOTTOM_ARTIFACT_GUARD_PX),
+            "short_channel_max_height_px": int(cls.SHORT_CHANNEL_MAX_HEIGHT_PX),
+            "short_channel_top_visible_prominence_min": float(cls.SHORT_CHANNEL_TOP_VISIBLE_PROMINENCE_MIN),
+            "top_edge_visible_prominence_min": float(cls.TOP_EDGE_VISIBLE_PROMINENCE_MIN),
+            "top_near_visible_prominence_min": float(cls.TOP_NEAR_VISIBLE_PROMINENCE_MIN),
+            "top_band_visible_prominence_min": float(cls.TOP_BAND_VISIBLE_PROMINENCE_MIN),
+        }
+
+    def _select_peak_candidate(self, peaks, prominences, last_row=None):
+        peaks = np.asarray(peaks, dtype=int)
+        prominences = np.asarray(prominences, dtype=float)
+        details = {
+            "candidate_rows": [int(row) for row in peaks.tolist()],
+            "candidate_prominences": [float(value) for value in prominences.tolist()],
+            "best_peak_row": None,
+            "best_peak_prominence": None,
+            "selected_peak_row": None,
+            "selected_peak_prominence": None,
+            "selected_peak_reason": "no_peaks",
+            "top_tie_eligible_rows": [],
+            "tracking_eligible_rows": [],
+            "tracking_window_px": int(self.TRACKING_WINDOW_PX),
+            "tracking_prominence_ratio": float(self.TRACKING_PROMINENCE_RATIO),
+            "top_tie_guard_px": int(self.TOP_TIE_GUARD_PX),
+            "top_tie_prominence_ratio": float(self.TOP_TIE_PROMINENCE_RATIO),
+        }
+        if len(peaks) == 0:
+            return details
+
+        best_idx = int(np.argmax(prominences))
+        best_prominence = float(prominences[best_idx])
+        details["best_peak_row"] = int(peaks[best_idx])
+        details["best_peak_prominence"] = best_prominence
+
+        top_threshold = best_prominence * float(self.TOP_TIE_PROMINENCE_RATIO)
+        top_indices = [
+            int(idx)
+            for idx, row in enumerate(peaks)
+            if int(row) <= int(self.TOP_TIE_GUARD_PX) and float(prominences[idx]) >= top_threshold
+        ]
+        details["top_tie_eligible_rows"] = [int(peaks[idx]) for idx in top_indices]
+
+        tracking_indices = []
+        if last_row is not None:
+            tracking_threshold = best_prominence * float(self.TRACKING_PROMINENCE_RATIO)
+            tracking_indices = [
+                int(idx)
+                for idx, row in enumerate(peaks)
+                if abs(int(row) - int(last_row)) <= int(self.TRACKING_WINDOW_PX)
+                and float(prominences[idx]) >= tracking_threshold
+            ]
+        details["tracking_eligible_rows"] = [int(peaks[idx]) for idx in tracking_indices]
+
+        if top_indices:
+            selected_idx = max(top_indices, key=lambda idx: float(prominences[idx]))
+            reason = "top_tie_candidate"
+        elif tracking_indices:
+            selected_idx = min(tracking_indices, key=lambda idx: abs(int(peaks[idx]) - int(last_row)))
+            reason = "nearest_last_row_gated"
+        else:
+            selected_idx = best_idx
+            reason = "max_prominence"
+
+        details["selected_peak_row"] = int(peaks[selected_idx])
+        details["selected_peak_prominence"] = float(prominences[selected_idx])
+        details["selected_peak_reason"] = reason
+        return details
+
+    def _has_credible_interior_peak(self, selection, channel_height):
+        rows = selection.get("candidate_rows") or []
+        prominences = selection.get("candidate_prominences") or []
+        credible_rows = []
+        lower = int(self.FULL_TOP_GUARD_PX)
+        upper = max(lower + 1, int(channel_height) - 25)
+        for row, prominence in zip(rows, prominences):
+            row = int(row)
+            prominence = float(prominence)
+            if lower < row < upper and prominence >= float(self.TOP_VISIBLE_PROMINENCE_MIN):
+                credible_rows.append(row)
+        self._debug_update({"credible_interior_peak_rows": credible_rows})
+        return bool(credible_rows)
+
+    def _selected_peak_fill_override(self, selection, channel_height):
+        row = selection.get("selected_peak_row")
+        prominence = selection.get("selected_peak_prominence")
+        if row is None or prominence is None:
+            return None, "visible_peak"
+        is_weak_top = (
+            int(row) <= int(self.FULL_TOP_GUARD_PX)
+            and float(prominence) < float(self.TOP_VISIBLE_PROMINENCE_MIN)
+        )
+        if is_weak_top and not self._has_credible_interior_peak(selection, channel_height):
+            return "full", "weak_top_boundary_full"
+        return None, "visible_peak"
+
+    def _top_visible_prominence_threshold(self, row, channel_height):
+        row = int(row)
+        if int(channel_height) <= int(self.SHORT_CHANNEL_MAX_HEIGHT_PX):
+            return float(self.SHORT_CHANNEL_TOP_VISIBLE_PROMINENCE_MIN)
+        if row <= 5:
+            return float(self.TOP_EDGE_VISIBLE_PROMINENCE_MIN)
+        if row <= 10:
+            return float(self.TOP_NEAR_VISIBLE_PROMINENCE_MIN)
+        if row <= int(self.TOP_TIE_GUARD_PX):
+            return float(self.TOP_BAND_VISIBLE_PROMINENCE_MIN)
+        return None
+
+    def _selected_peak_visible_decision(self, selection, channel_height, fill_state):
+        rows = [int(row) for row in (selection.get("candidate_rows") or [])]
+        prominences = [float(value) for value in (selection.get("candidate_prominences") or [])]
+        row = selection.get("selected_peak_row")
+        prominence = selection.get("selected_peak_prominence")
+        bottom_start = max(0, int(channel_height) - int(self.BOTTOM_ARTIFACT_GUARD_PX))
+        top_rows = [int(candidate) for candidate in rows if int(candidate) <= int(self.TOP_TIE_GUARD_PX)]
+        bottom_rows = [int(candidate) for candidate in rows if int(candidate) >= bottom_start]
+        debug_payload = {
+            "boundary_peak_rows": top_rows,
+            "bottom_artifact_rows": bottom_rows,
+            "credible_visible_peak": False,
+            "visible_peak_reason": "no_selected_peak",
+            "visible_peak_required_prominence": None,
+        }
+        if row is None or prominence is None:
+            self._debug_update(debug_payload)
+            return False, "no_selected_peak"
+
+        row = int(row)
+        prominence = float(prominence)
+        min_prominence = float(self.prominence if self.prominence is not None else 0)
+
+        if row >= bottom_start:
+            if top_rows:
+                reason = "bottom_artifact_with_top_boundary_peak"
+                if str(fill_state) == "full":
+                    reason = "bottom_artifact_with_top_boundary_full"
+                debug_payload.update({"visible_peak_reason": reason})
+                self._debug_update(debug_payload)
+                return False, reason
+            debug_payload.update({"credible_visible_peak": True, "visible_peak_reason": "bottom_visible_without_top_boundary"})
+            self._debug_update(debug_payload)
+            return True, "bottom_visible_without_top_boundary"
+
+        top_threshold = self._top_visible_prominence_threshold(row, channel_height)
+        if top_threshold is not None:
+            debug_payload["visible_peak_required_prominence"] = float(top_threshold)
+            if prominence >= top_threshold:
+                debug_payload.update({"credible_visible_peak": True, "visible_peak_reason": "top_visible_prominence"})
+                self._debug_update(debug_payload)
+                return True, "top_visible_prominence"
+            if int(channel_height) > int(self.SHORT_CHANNEL_MAX_HEIGHT_PX) and not bottom_rows and prominence >= min_prominence:
+                reason = "modest_top_visible_without_bottom_artifact"
+                debug_payload.update({"credible_visible_peak": True, "visible_peak_reason": reason})
+                self._debug_update(debug_payload)
+                return True, reason
+            reason = "top_boundary_below_visible_threshold"
+            debug_payload.update({"visible_peak_reason": reason})
+            self._debug_update(debug_payload)
+            return False, reason
+
+        if prominence >= min_prominence:
+            debug_payload.update({"credible_visible_peak": True, "visible_peak_reason": "interior_visible_prominence"})
+            self._debug_update(debug_payload)
+            return True, "interior_visible_prominence"
+
+        reason = "interior_below_visible_threshold"
+        debug_payload.update({"visible_peak_reason": reason, "visible_peak_required_prominence": float(min_prominence)})
+        self._debug_update(debug_payload)
+        return False, reason
+
+    @staticmethod
+    def _bbox_union(bboxes):
+        bboxes = [bbox for bbox in bboxes if bbox is not None]
+        if not bboxes:
+            return None
+        x0 = min(int(bbox[0]) for bbox in bboxes)
+        y0 = min(int(bbox[1]) for bbox in bboxes)
+        x1 = max(int(bbox[0]) + int(bbox[2]) for bbox in bboxes)
+        y1 = max(int(bbox[1]) + int(bbox[3]) for bbox in bboxes)
+        return [int(x0), int(y0), int(x1 - x0), int(y1 - y0)]
+
+    @staticmethod
+    def _bbox_horizontal_gap(a, b):
+        ax0, ay0, aw, ah = [int(value) for value in a]
+        bx0, by0, bw, bh = [int(value) for value in b]
+        ax1 = ax0 + aw
+        bx1 = bx0 + bw
+        if ax1 < bx0:
+            return int(bx0 - ax1)
+        if bx1 < ax0:
+            return int(ax0 - bx1)
+        return 0
+
+    @staticmethod
+    def _bbox_vertical_overlap_fraction(a, b):
+        _ax0, ay0, _aw, ah = [int(value) for value in a]
+        _bx0, by0, _bw, bh = [int(value) for value in b]
+        overlap = max(0, min(ay0 + ah, by0 + bh) - max(ay0, by0))
+        denom = max(1, min(ah, bh))
+        return float(overlap) / float(denom)
+
+    def _component_rows_from_mask(self, mask):
+        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        rows = []
+        for contour in cnts:
+            area = float(cv2.contourArea(contour))
+            x, y, w, h = cv2.boundingRect(contour)
+            rows.append({"bbox": [int(x), int(y), int(w), int(h)], "area": area})
+        return rows
+
+    def _filter_head_components(self, components):
+        kept = []
+        for row in components:
+            x, _y, _w, h = row["bbox"]
+            if row["area"] < float(self.COMPONENT_MIN_AREA):
+                continue
+            if int(h) < int(self.COMPONENT_MIN_HEIGHT):
+                continue
+            if int(x) < int(self.COMPONENT_X_MIN) or int(x) > int(self.COMPONENT_X_MAX):
+                continue
+            kept.append(row)
+        return kept
+
+    def _merge_head_component_bboxes(self, bboxes):
+        groups = [[list(map(int, bbox))] for bbox in sorted(bboxes, key=lambda rect: (rect[0], rect[1]))]
+        changed = True
+        while changed:
+            changed = False
+            merged_groups = []
+            while groups:
+                group = groups.pop(0)
+                group_bbox = self._bbox_union(group)
+                did_merge = False
+                for idx, other in enumerate(groups):
+                    other_bbox = self._bbox_union(other)
+                    overlap = self._bbox_vertical_overlap_fraction(group_bbox, other_bbox)
+                    gap = self._bbox_horizontal_gap(group_bbox, other_bbox)
+                    if overlap >= float(self.MERGE_VERTICAL_OVERLAP_MIN) and gap <= int(self.MERGE_HORIZONTAL_GAP_MAX):
+                        groups[idx] = group + other
+                        changed = True
+                        did_merge = True
+                        break
+                if not did_merge:
+                    merged_groups.append(group)
+            groups = merged_groups
+        return [self._bbox_union(group) for group in groups if self._bbox_union(group) is not None]
+
+    def _find_led_separator_row(self, gray, bbox):
+        x, y, w, h = [int(value) for value in bbox]
+        if h <= 0 or w <= 0:
+            return None, "invalid_bbox"
+        aspect = float(w) / float(max(h, 1))
+        if h > int(self.LED_TRIM_HEIGHT_MAX_PX) or aspect < float(self.LED_TRIM_ASPECT_MIN):
+            return None, "not_short_wide"
+
+        x0 = x + int(round(w * 0.15))
+        x1 = x + int(round(w * 0.85))
+        if x1 <= x0:
+            return None, "invalid_central_roi"
+        roi = gray[y : y + h, x0:x1]
+        if roi.size == 0:
+            return None, "empty_central_roi"
+
+        row_mean = roi.mean(axis=1).astype(np.float32)
+        smooth = cv2.GaussianBlur(row_mean.reshape(-1, 1), (1, 9), 0).ravel()
+        valleys, props = find_peaks(-smooth, prominence=float(self.LED_SEPARATOR_PROMINENCE_MIN))
+        row_min = int(round(float(h) * float(self.LED_SEPARATOR_ROW_MIN_FRAC)))
+        row_max = int(round(float(h) * float(self.LED_SEPARATOR_ROW_MAX_FRAC)))
+        candidates = []
+        for idx, row in enumerate(valleys):
+            row = int(row)
+            if row < row_min or row > row_max:
+                continue
+            above = smooth[max(0, row - 5) : row]
+            below = smooth[min(h, row + 5) : min(h, row + 20)]
+            if len(above) == 0 or len(below) == 0:
+                continue
+            delta = float(np.mean(below) - np.mean(above))
+            prominence = float(props.get("prominences", [])[idx])
+            if delta >= float(self.LED_SEPARATOR_BRIGHT_DELTA_MIN):
+                candidates.append((prominence, delta, row))
+        if not candidates:
+            return None, "no_led_separator"
+        candidates.sort(reverse=True)
+        return int(y + candidates[0][2]), "led_separator"
+
+    def _detect_channel_bounds_from_geometry(self, gray, merged_bbox, head_bottom_row, left_offset=40, channel_width=30):
+        x, y, w, h = [int(value) for value in merged_bbox]
+        try:
+            left_offset = int(left_offset if left_offset is not None else 40)
+        except Exception:
+            left_offset = 40
+        try:
+            channel_width = int(channel_width if channel_width is not None else 20)
+        except Exception:
+            channel_width = 20
+        image_h, image_w = gray.shape[:2]
+        fallback_x = max(0, min(image_w - 1, int(x + left_offset)))
+        fallback_width = max(1, int(channel_width))
+        channel_y = max(0, min(image_h - 1, int(y)))
+        channel_bottom = max(channel_y + 1, min(image_h, int(head_bottom_row)))
+        fallback_height = max(1, int(channel_bottom - channel_y))
+
+        roi = gray[channel_y:channel_bottom, x : x + w]
+        detected_pair = None
+        peaks_payload = []
+        reason = "fallback_offset"
+        if roi.size:
+            band = roi[8 : max(9, roi.shape[0] - 8), :]
+            if band.size == 0:
+                band = roi
+            col_mean = band.mean(axis=0).astype(np.float32)
+            smooth = cv2.GaussianBlur(col_mean.reshape(1, -1), (9, 1), 0).ravel()
+            dark_signal = float(np.max(smooth)) - smooth
+            peaks, props = find_peaks(dark_signal, prominence=3, distance=8)
+            prominences = props.get("prominences", [])
+            peaks_payload = [
+                {"x": int(x + peak), "relative_x": int(peak), "prominence": float(prominences[idx])}
+                for idx, peak in enumerate(peaks)
+            ]
+            fallback_rel = int(fallback_x - x)
+            best = None
+            for left_idx, left in enumerate(peaks):
+                if abs(int(left) - fallback_rel) > int(self.CHANNEL_SEARCH_RADIUS_PX):
+                    continue
+                expected_right = int(left) + fallback_width
+                for right_idx, right in enumerate(peaks):
+                    if int(right) <= int(left):
+                        continue
+                    spacing = int(right) - int(left)
+                    if spacing < int(self.CHANNEL_SPACING_MIN_PX) or spacing > int(self.CHANNEL_SPACING_MAX_PX):
+                        continue
+                    if abs(int(right) - expected_right) > int(self.RIGHT_WALL_SEARCH_RADIUS_PX):
+                        continue
+                    prominence_bonus = float(prominences[left_idx]) + float(prominences[right_idx])
+                    score = (
+                        abs(spacing - fallback_width) * 2.0
+                        + abs(int(left) - fallback_rel)
+                        - 0.05 * prominence_bonus
+                    )
+                    candidate = (score, int(left), int(right), spacing)
+                    if best is None or candidate < best:
+                        best = candidate
+            if best is not None:
+                _score, left, right, spacing = best
+                detected_pair = [int(x + left), int(x + right)]
+                offset_delta = abs(int(left) - fallback_rel)
+                width_delta = abs(int(spacing) - int(fallback_width))
+                if offset_delta <= 3 and width_delta <= 3:
+                    fallback_x = int(x + left)
+                    fallback_width = int(spacing)
+                    reason = "detected_wall_pair"
+                else:
+                    reason = "fallback_offset_detected_walls"
+
+        fallback_x = max(0, min(image_w - 1, fallback_x))
+        fallback_width = max(1, min(int(fallback_width), image_w - fallback_x))
+        return {
+            "channel_bounds": [int(fallback_x), int(channel_y), int(fallback_width), int(fallback_height)],
+            "channel_detection_reason": reason,
+            "detected_channel_wall_xs": detected_pair,
+            "channel_wall_peaks": peaks_payload,
+        }
+
+    def _detect_refuel_head_geometry(self, cur_img, threshold_value=50):
+        cur_gray = cv2.cvtColor(cur_img, cv2.COLOR_BGR2GRAY)
+        _, mask = cv2.threshold(cur_gray, threshold_value, 255, cv2.THRESH_BINARY)
+        self._debug_array("head_threshold_mask", mask)
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, tuple(self.HEAD_CLOSE_KERNEL))
+        closed_mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        self._debug_array("head_closed_mask", closed_mask)
+
+        raw_components = self._component_rows_from_mask(mask)
+        kept_raw_components = self._filter_head_components(raw_components)
+        closed_components = self._component_rows_from_mask(closed_mask)
+        kept_components = self._filter_head_components(closed_components)
+        kept_bboxes = [row["bbox"] for row in kept_components]
+        merged_bboxes = self._merge_head_component_bboxes(kept_bboxes)
+
+        geometry = {
+            "head_bbox": None,
+            "merged_head_bbox": None,
+            "channel_bounds": None,
+            "head_bottom_row": None,
+            "raw_component_bboxes": [row["bbox"] for row in raw_components],
+            "kept_component_bboxes": kept_bboxes,
+            "merged_component_bboxes": merged_bboxes,
+            "raw_contour_count": int(len(raw_components)),
+            "area_filtered_contour_count": int(len(kept_raw_components)),
+            "kept_contour_count": int(len(kept_components)),
+            "channel_detection_reason": None,
+            "head_bottom_reason": None,
+            "geometry_warning": None,
+        }
+
+        if not merged_bboxes:
+            geometry["geometry_warning"] = "no_head_components"
+            self._debug_update({**geometry, "failure_reason": "no_printer_head_contours"})
+            return geometry
+
+        merged_bbox = max(merged_bboxes, key=lambda rect: int(rect[2]) * int(rect[3]))
+        x, y, w, h = [int(value) for value in merged_bbox]
+        head_bottom_row, head_bottom_reason = self._find_led_separator_row(cur_gray, merged_bbox)
+        if head_bottom_row is None:
+            head_bottom_row = int(y + h)
+            head_bottom_reason = "merged_bbox_bottom"
+        head_bottom_row = max(int(y + 1), min(int(y + h), int(head_bottom_row)))
+
+        channel = self._detect_channel_bounds_from_geometry(
+            cur_gray,
+            merged_bbox,
+            head_bottom_row,
+            left_offset=self.offset,
+            channel_width=self.width,
+        )
+        geometry.update(
+            {
+                "head_bbox": [int(x), int(y), int(w), int(head_bottom_row - y)],
+                "merged_head_bbox": [int(x), int(y), int(w), int(h)],
+                "selected_head_bbox": [int(x), int(y), int(w), int(head_bottom_row - y)],
+                "head_bottom_row": int(head_bottom_row),
+                "head_bottom_reason": str(head_bottom_reason),
+                **channel,
+            }
+        )
+        self._debug_update(
+            {
+                **geometry,
+                "threshold_value": int(threshold_value),
+                "kept_contour_bboxes": kept_bboxes,
+                "kept_contour_areas": [float(row["area"]) for row in kept_components],
+            }
+        )
+        return geometry
 
     def run(self):
         # Perform image analysis
@@ -29506,24 +30028,12 @@ class ImageAnalysisThread(QThread):
         Given a current image, this function detects the printer head in the image.
         It returns the bounding box coordinates of the detected printer head.
         """
-        cur_gray = cv2.cvtColor(cur_img, cv2.COLOR_BGR2GRAY)
-        _, mask = cv2.threshold(cur_gray, threshold_value, 255, cv2.THRESH_BINARY)
-
-        # Find contours
-        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        # Filter contours based on area
-        cnts = [c for c in cnts if cv2.contourArea(c) > 1000]
-        # Filter contours based on location in the image
-        cnts = [c for c in cnts if cv2.boundingRect(c)[0] > 100 and cv2.boundingRect(c)[0] < 400]
-
-        if len(cnts) == 0:
+        geometry = self._detect_refuel_head_geometry(cur_img, threshold_value=threshold_value)
+        bbox = geometry.get("head_bbox")
+        if bbox is None:
             print("No contours found.")
             return None, None, None, None
-        big = max(cnts, key=cv2.contourArea)
-        # 3C) Get its bounding box (this is the full printer head)
-        x, y, w, h = cv2.boundingRect(big)
-        return x, y, w, h
+        return tuple(int(value) for value in bbox)
 
     def get_channel_bounds(self,cur_img, x, y, w, h, left_offset=40, channel_width=30):
         """
@@ -29543,6 +30053,11 @@ class ImageAnalysisThread(QThread):
         blur = cv2.GaussianBlur(gray, (5,5), 0)    # 2. smooth out noise  
 
         profile = blur.mean(axis=1)
+        self._debug_array("channel_crop_bgr", crop)
+        self._debug_array("channel_crop_gray", gray)
+        self._debug_array("channel_crop_blur", blur)
+        self._debug_array("profile", profile)
+        self._debug_update({"profile_stats": self._debug_profile_stats(profile)})
         return profile
 
 
@@ -29565,6 +30080,8 @@ class ImageAnalysisThread(QThread):
 
         # 2) orient so meniscus becomes a *peak* in `sig`
         sig = -grad if fluid_darker else grad
+        self._debug_array("profile_gradient", grad)
+        self._debug_array("oriented_signal", sig)
 
         # 3) find all peaks above a certain prominence
         peaks, props = find_peaks(sig, prominence=min_prominence)
@@ -29577,21 +30094,47 @@ class ImageAnalysisThread(QThread):
             for k in list(props):
                 props[k] = props[k][mask]
 
-        # 5) if any candidates remain, pick best
-        if len(peaks):
-            # a) if tracking over time, pick the one nearest last_row
-            if last_row is not None:
-                idx = np.argmin(np.abs(peaks - last_row))
-                # plt.plot(peaks[idx], sig[peaks[idx]], "o", color="red", label="Best Peak")
-                # plt.show()
-                return peaks[idx]
-            # b) otherwise pick the most prominent
-            best = np.argmax(props["prominences"])
+        prominences = props.get("prominences", [])
+        selection = self._select_peak_candidate(peaks, prominences, last_row=last_row)
+        self.peak_selection_details = dict(selection)
+        if self.capture_debug:
+            attempts = list(self.debug_details.get("peak_search_attempts") or [])
+            attempts.append(
+                {
+                    "min_prominence": int(min_prominence),
+                    "fluid_darker": bool(fluid_darker),
+                    "search_band": None if search_band is None else [int(search_band[0]), int(search_band[1])],
+                    "candidate_rows": [int(row) for row in np.asarray(peaks).tolist()],
+                    "candidate_prominences": [float(value) for value in np.asarray(prominences).tolist()],
+                    "best_peak_row": selection.get("best_peak_row"),
+                    "best_peak_prominence": selection.get("best_peak_prominence"),
+                    "selected_peak_row": selection.get("selected_peak_row"),
+                    "selected_peak_prominence": selection.get("selected_peak_prominence"),
+                    "selected_peak_reason": selection.get("selected_peak_reason"),
+                    "top_tie_eligible_rows": selection.get("top_tie_eligible_rows"),
+                    "tracking_eligible_rows": selection.get("tracking_eligible_rows"),
+                }
+            )
+            self.debug_details["peak_search_attempts"] = attempts
+            self.debug_details["peak_rows"] = selection.get("candidate_rows") or []
+            self.debug_details["peak_prominences"] = selection.get("candidate_prominences") or []
+            self.debug_details["best_peak_row"] = selection.get("best_peak_row")
+            self.debug_details["best_peak_prominence"] = selection.get("best_peak_prominence")
+            self.debug_details["selected_peak_row"] = selection.get("selected_peak_row")
+            self.debug_details["selected_peak_prominence"] = selection.get("selected_peak_prominence")
+            self.debug_details["selected_peak_reason"] = selection.get("selected_peak_reason")
+            self.debug_details["top_tie_eligible_rows"] = selection.get("top_tie_eligible_rows") or []
+            self.debug_details["tracking_eligible_rows"] = selection.get("tracking_eligible_rows") or []
+            self.debug_details["search_band"] = attempts[-1]["search_band"]
+            self.debug_details["fluid_darker"] = bool(fluid_darker)
+            self.debug_details["peak_selection_parameters"] = self.peak_selection_parameters()
 
-            return peaks[best]
+        # 5) if any candidates remain, pick best
+        selected_row = selection.get("selected_peak_row")
+        if selected_row is not None:
+            return int(selected_row)
         if last_row is not None:
             if last_row < len(profile) -20 and last_row > 20 and min_prominence > 4:
-                print(f"No peaks with {min_prominence}, trying again with {min_prominence-1}")
                 # If we have a last row, we can try to find the meniscus row again with a lower prominence
                 # This is useful if the meniscus is not very pronounced
                 return self.detect_meniscus_row(profile,
@@ -29601,31 +30144,121 @@ class ImageAnalysisThread(QThread):
                             min_prominence=min_prominence-1)
 
         # 6) If no peaks were found, return None
-        print("No peaks found")
+        self._debug_update({"selected_peak_row": None, "selected_peak_reason": "no_peaks"})
         return None
 
-    def check_fill_state(self,image,x0,y0,w0,h0,empty_cutoff=0.15, return_details=False):
+    def classify_fill_state(self, image, x0, y0, w0, h0, empty_cutoff=0.15):
         """
-        When no peaks are found, this function checks the profile to determine if the channel is empty or full.
+        Checks nearby printer-head patches to determine whether the channel is empty or full.
         """
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        square_start = y0 + h0 - w0 - 30
-        square_end = square_start + w0
-        channel_patch = gray[square_start:square_end, x0:x0+w0]
-        reference_patch = gray[square_start:square_end, x0+w0+5:x0+2*w0+5]
-        score, _ = ssim(channel_patch, reference_patch, full=True)
-        print(f"SSIM score: {score}")
+        patch_size = max(1, int(w0))
+        max_square_start = max(0, int(gray.shape[0]) - patch_size)
+        square_start = max(0, min(max_square_start, int(y0 + h0 - patch_size - 30)))
+        square_end = square_start + patch_size
+        channel_patch = gray[square_start:square_end, x0:x0+patch_size]
+        self._debug_array("fill_channel_patch", channel_patch)
+
+        reference_offsets = [
+            ("left_far", -2 * patch_size - 10),
+            ("left_near", -patch_size - 5),
+            ("right_near", patch_size + 5),
+            ("right_mid", 2 * patch_size + 10),
+            ("right_far", 3 * patch_size + 15),
+        ]
+        reference_scores = []
+        best = None
+        if channel_patch.shape == (patch_size, patch_size):
+            for name, offset in reference_offsets:
+                ref_x0 = int(x0 + offset)
+                ref_x1 = int(ref_x0 + patch_size)
+                row = {
+                    "name": str(name),
+                    "x0": int(ref_x0),
+                    "x1": int(ref_x1),
+                    "valid": False,
+                    "score": None,
+                    "reference_mean": None,
+                    "reason": "out_of_bounds",
+                }
+                if ref_x0 < 0 or ref_x1 > int(gray.shape[1]):
+                    reference_scores.append(row)
+                    continue
+                reference_patch = gray[square_start:square_end, ref_x0:ref_x1]
+                if reference_patch.shape != channel_patch.shape:
+                    row["reason"] = "shape_mismatch"
+                    reference_scores.append(row)
+                    continue
+                ref_mean = float(np.mean(reference_patch))
+                row["reference_mean"] = ref_mean
+                if ref_mean < float(self.FILL_REFERENCE_MIN_MEAN):
+                    row["reason"] = "reference_too_dark"
+                    reference_scores.append(row)
+                    continue
+                try:
+                    score = float(ssim(channel_patch, reference_patch))
+                except Exception as exc:
+                    row["reason"] = f"ssim_error:{exc}"
+                    reference_scores.append(row)
+                    continue
+                row.update({"valid": True, "score": score, "reason": "ok"})
+                reference_scores.append(row)
+                candidate = (score, name, ref_x0, reference_patch.copy())
+                if best is None or candidate[0] > best[0]:
+                    best = candidate
+
+        if best is None:
+            score = -1.0
+            chosen_name = None
+            chosen_x0 = None
+            chosen_patch = None
+            reason = "no_valid_reference_patches"
+        else:
+            score, chosen_name, chosen_x0, chosen_patch = best
+            reason = "max_reference_ssim"
+            self._debug_array("fill_reference_patch", chosen_patch)
 
         if score < empty_cutoff:
-            print("Channel is empty.")
             row = h0 - 3
             state = "empty"
+            reason = "ssim_below_empty_cutoff"
         else:
-            print("Channel is full.")
             row = 3
             state = "full"
+            reason = "ssim_at_or_above_empty_cutoff"
+        self._debug_update(
+            {
+                "fill_square_start": int(square_start),
+                "fill_square_end": int(square_end),
+                "fill_score": float(score),
+                "fill_score_method": "max_reference_ssim",
+                "fill_reference_scores": reference_scores,
+                "fill_reference_choice": None if chosen_name is None else {
+                    "name": str(chosen_name),
+                    "x0": int(chosen_x0),
+                    "x1": int(chosen_x0 + patch_size),
+                    "score": float(score),
+                },
+                "fill_reference_min_mean": float(self.FILL_REFERENCE_MIN_MEAN),
+                "fill_channel_mean": float(np.mean(channel_patch)) if channel_patch.size else None,
+                "fill_candidate_state": str(state),
+                "fill_candidate_reason": str(reason),
+                "empty_cutoff": float(empty_cutoff),
+            }
+        )
+        return row, state, float(score), reason
+
+    def check_fill_state(self,image,x0,y0,w0,h0,empty_cutoff=0.15, return_details=False):
+        row, state, score, _reason = self.classify_fill_state(
+            image,
+            x0,
+            y0,
+            w0,
+            h0,
+            empty_cutoff=empty_cutoff,
+        )
         if return_details:
-            return row, state, float(score)
+            return row, state, score
         return row
 
     def analyze_image(self):
@@ -29633,40 +30266,114 @@ class ImageAnalysisThread(QThread):
         # Rotate the image 90 degrees counter-clockwise
         self.original_image = cv2.rotate(self.original_image, cv2.ROTATE_90_COUNTERCLOCKWISE)
         cur_img = self.original_image.copy()
+        self._debug_array("analysis_image", cur_img)
+        if self.capture_debug:
+            self._debug_update(
+                {
+                    "analysis_parameters": {
+                        "offset": int(self.offset),
+                        "width": int(self.width),
+                        "threshold": int(self.threshold),
+                        "prominence": int(self.prominence),
+                        "empty_cutoff": float(self.empty_cutoff),
+                        "bottom_guard_px": int(self.bottom_guard_px),
+                    },
+                    "input_shape": list(self.input_shape) if self.input_shape is not None else None,
+                    "analysis_image_shape": list(cur_img.shape),
+                    "last_row": int(self.last_row) if self.last_row is not None else None,
+                    "peak_selection_parameters": self.peak_selection_parameters(),
+                }
+            )
 
-        x,y,w,h = self.find_printer_head(cur_img, threshold_value=self.threshold)
-        if x is None or y is None or w is None or h is None:
+        geometry = self._detect_refuel_head_geometry(cur_img, threshold_value=self.threshold)
+        head_bbox = geometry.get("head_bbox")
+        channel_bounds = geometry.get("channel_bounds")
+        if head_bbox is None or channel_bounds is None:
             print("Printer head not found, using default values")
             self.annotated_image = cur_img.copy()
             self.level_data = None
             self.meniscus_row = None
             self.detected_status = "not_found"
             self.detected_details = {"reason": "printer_head_not_found"}
+            self._debug_update(
+                {
+                    "detected_status": "not_found",
+                    "meniscus_row": None,
+                    "level_data": None,
+                    "failure_reason": "printer_head_not_found",
+                }
+            )
             return
-        else:
-            x0, y0, w0, h0 = self.get_channel_bounds(cur_img, x, y, w, h, left_offset=self.offset, channel_width=self.width)
-            self.head_bbox = (int(x), int(y), int(w), int(h))
-            self.channel_bounds = (int(x0), int(y0), int(w0), int(h0))
+
+        x, y, w, h = [int(value) for value in head_bbox]
+        x0, y0, w0, h0 = [int(value) for value in channel_bounds]
+        self.head_bbox = (int(x), int(y), int(w), int(h))
+        self.channel_bounds = (int(x0), int(y0), int(w0), int(h0))
+        self._debug_update(
+            {
+                "head_bbox": list(self.head_bbox),
+                "channel_bounds": list(self.channel_bounds),
+            }
+        )
 
         profile = self.get_channel_profile(cur_img, x0, y0, w0, h0)
 
+        fill_row, fill_candidate_state, fill_score, fill_candidate_reason = self.classify_fill_state(
+            cur_img,
+            x0,
+            y0,
+            w0,
+            h0,
+            empty_cutoff=self.empty_cutoff,
+        )
+
+        search_band = (0, max(0, int(h0) - int(self.bottom_guard_px)))
         meniscus_row = self.detect_meniscus_row(profile,
                             last_row=self.last_row,
                             fluid_darker=False,
-                            search_band=(0,h0-30),
+                            search_band=search_band,
                             min_prominence=self.prominence)
         fill_state = "visible"
-        fill_score = None
+        fill_reason = "visible_peak"
+        final_decision_reason = "visible_peak"
 
         if meniscus_row is None:
-            meniscus_row, fill_state, fill_score = self.check_fill_state(
-                cur_img,
-                x0,
-                y0,
-                w0,
+            meniscus_row = int(fill_row)
+            fill_state = str(fill_candidate_state)
+            fill_reason = str(fill_candidate_reason)
+            final_decision_reason = "no_peak_using_fill_state"
+            self._debug_update(
+                {
+                    "credible_visible_peak": False,
+                    "visible_peak_reason": "no_selected_peak",
+                }
+            )
+        else:
+            visible_peak_ok, visible_reason = self._selected_peak_visible_decision(
+                self.peak_selection_details,
                 h0,
-                empty_cutoff=self.empty_cutoff,
-                return_details=True,
+                fill_candidate_state,
+            )
+            if visible_peak_ok:
+                fill_state = "visible"
+                fill_reason = str(visible_reason)
+                final_decision_reason = "credible_visible_peak"
+            else:
+                meniscus_row = int(fill_row)
+                fill_state = str(fill_candidate_state)
+                fill_reason = str(fill_candidate_reason)
+                final_decision_reason = f"{visible_reason}_using_fill_state"
+            self._debug_update(
+                {
+                    "fill_state": str(fill_state),
+                    "fill_state_reason": str(fill_reason),
+                    "fill_candidate_state": str(fill_candidate_state),
+                    "fill_candidate_reason": str(fill_candidate_reason),
+                    "final_decision_reason": str(final_decision_reason),
+                    "full_top_guard_px": int(self.FULL_TOP_GUARD_PX),
+                    "top_visible_prominence_min": float(self.TOP_VISIBLE_PROMINENCE_MIN),
+                    "bottom_artifact_guard_px": int(self.BOTTOM_ARTIFACT_GUARD_PX),
+                }
             )
         level_y = y0 + meniscus_row
 
@@ -29682,11 +30389,31 @@ class ImageAnalysisThread(QThread):
             "head_bbox": list(self.head_bbox) if self.head_bbox is not None else None,
             "channel_bounds": list(self.channel_bounds) if self.channel_bounds is not None else None,
             "fill_score": float(fill_score) if fill_score is not None else None,
+            "fill_state_reason": str(fill_reason),
+            "fill_candidate_state": str(fill_candidate_state),
+            "fill_candidate_reason": str(fill_candidate_reason),
+            "final_decision_reason": str(final_decision_reason),
+            "selected_peak_row": self.peak_selection_details.get("selected_peak_row"),
+            "selected_peak_prominence": self.peak_selection_details.get("selected_peak_prominence"),
+            "selected_peak_reason": self.peak_selection_details.get("selected_peak_reason"),
             "last_row": int(self.last_row) if self.last_row is not None else None,
         }
 
         # Calculate level data by calculating the difference between the meniscus row and the bottom of the channel
         self.level_data = h0 - self.meniscus_row
+        self._debug_update(
+            {
+                "detected_status": self.detected_status,
+                "meniscus_row": int(self.meniscus_row),
+                "level_data": float(self.level_data),
+                "fill_score": float(fill_score) if fill_score is not None else None,
+                "fill_state": str(fill_state or "visible"),
+                "fill_state_reason": str(fill_reason),
+                "fill_candidate_state": str(fill_candidate_state),
+                "fill_candidate_reason": str(fill_candidate_reason),
+                "final_decision_reason": str(final_decision_reason),
+            }
+        )
 
 class RefuelCameraModel(QObject):
     """
@@ -29706,6 +30433,7 @@ class RefuelCameraModel(QObject):
         self.threshold = None
         self.prominence = None
         self.empty_cutoff = None
+        self.bottom_guard_px = 2
 
         self.current_level = None
         self.level_log = []
@@ -29785,6 +30513,7 @@ class RefuelCameraModel(QObject):
             "threshold": int(self.threshold if self.threshold is not None else 60),
             "prominence": int(self.prominence if self.prominence is not None else 4),
             "empty_cutoff": float(self.empty_cutoff if self.empty_cutoff is not None else 0.25),
+            "bottom_guard_px": int(self.bottom_guard_px if self.bottom_guard_px is not None else 2),
         }
 
     @staticmethod
@@ -29841,6 +30570,7 @@ class RefuelCameraModel(QObject):
                 params["prominence"],
                 params["empty_cutoff"],
                 self.last_meniscus_row,
+                bottom_guard_px=params["bottom_guard_px"],
             )
             worker.analyze_image()
         except Exception as exc:
@@ -29879,7 +30609,7 @@ class RefuelCameraModel(QObject):
 
         return {
             "detector_name": "current_refuel_detector",
-            "detector_version": "phase2_dataset_seed_v1",
+            "detector_version": "phase2_dataset_seed_v4_fill_gate",
             "predicted_status": status,
             "predicted_channel_geometry": channel_geometry,
             "predicted_meniscus_line": meniscus_line,
@@ -29888,6 +30618,7 @@ class RefuelCameraModel(QObject):
             "details": {
                 **(worker.detected_details or {}),
                 "analysis_parameters": params,
+                "peak_selection_parameters": ImageAnalysisThread.peak_selection_parameters(),
             },
         }
 
@@ -30178,6 +30909,7 @@ class RefuelCameraModel(QObject):
             self.prominence,
             self.empty_cutoff,
             self.last_meniscus_row,
+            bottom_guard_px=self.bottom_guard_px,
         )
         try:
             finished_signal = getattr(self.analysis_thread, "finished", None)

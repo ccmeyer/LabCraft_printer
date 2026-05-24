@@ -40,6 +40,22 @@ def _thread_input_from_analysis_view(image):
     return cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
 
 
+def _draw_split_head_image(parts, *, separator_row=None, led_start_row=None):
+    image = np.zeros((480, 640, 3), dtype=np.uint8)
+    for rect in parts:
+        x, y, w, h = rect
+        image[y : y + h, x : x + w] = 160
+    if separator_row is not None:
+        for rect in parts:
+            x, y, w, _h = rect
+            image[y + separator_row : y + separator_row + 3, x : x + w] = 20
+    if led_start_row is not None:
+        for rect in parts:
+            x, y, w, h = rect
+            image[y + led_start_row : y + h, x : x + w] = 220
+    return image
+
+
 def _sample_context(*, ts="2026-03-21T10:00:00Z", mono=100.0, level=100.0):
     return {
         "timestamp_utc": ts,
@@ -53,6 +69,19 @@ def _sample_context(*, ts="2026-03-21T10:00:00Z", mono=100.0, level=100.0):
     }
 
 
+def _selection_thread():
+    return ImageAnalysisThread(
+        np.zeros((4, 4, 3), dtype=np.uint8),
+        offset=40,
+        width=20,
+        threshold=80,
+        prominence=4,
+        empty_cutoff=0.25,
+        last_row=None,
+        capture_debug=True,
+    )
+
+
 def _owner_model(tmp_path, *, record_mode=True):
     calibration_manager = SimpleNamespace(
         get_record_mode_enabled=lambda: record_mode,
@@ -63,6 +92,232 @@ def _owner_model(tmp_path, *, record_mode=True):
         calibration_manager=calibration_manager,
         experiment_model=experiment_model,
     )
+
+
+def test_geometry_merges_split_head_pieces_across_channel_gap():
+    image = _draw_split_head_image([
+        (200, 80, 42, 180),
+        (264, 80, 96, 180),
+    ])
+    thread = _selection_thread()
+
+    geometry = thread._detect_refuel_head_geometry(image, threshold_value=80)
+
+    assert geometry["merged_head_bbox"][0] == 200
+    assert geometry["merged_head_bbox"][2] >= 150
+    assert geometry["channel_bounds"][0] == 240
+    assert geometry["channel_detection_reason"] == "fallback_offset"
+
+
+def test_geometry_merges_split_right_reservoir_component():
+    image = _draw_split_head_image([
+        (200, 80, 120, 180),
+        (342, 80, 78, 180),
+    ])
+    thread = _selection_thread()
+
+    geometry = thread._detect_refuel_head_geometry(image, threshold_value=80)
+
+    assert geometry["merged_head_bbox"][0] == 200
+    assert geometry["merged_head_bbox"][2] >= 220
+    assert geometry["channel_bounds"][0] == 240
+
+
+def test_geometry_keeps_channel_x_stable_when_largest_raw_contour_shifts():
+    full = _draw_split_head_image([(200, 80, 220, 180)])
+    split = _draw_split_head_image([
+        (200, 80, 42, 180),
+        (264, 80, 156, 180),
+    ])
+    thread = _selection_thread()
+
+    full_geometry = thread._detect_refuel_head_geometry(full, threshold_value=80)
+    split_geometry = thread._detect_refuel_head_geometry(split, threshold_value=80)
+
+    assert full_geometry["channel_bounds"][0] == split_geometry["channel_bounds"][0]
+    assert full_geometry["merged_head_bbox"][0] == split_geometry["merged_head_bbox"][0]
+
+
+def test_geometry_trims_visible_led_from_short_wide_head():
+    image = _draw_split_head_image(
+        [(200, 80, 230, 100)],
+        separator_row=58,
+        led_start_row=61,
+    )
+    thread = _selection_thread()
+
+    geometry = thread._detect_refuel_head_geometry(image, threshold_value=80)
+
+    assert geometry["head_bottom_reason"] == "led_separator"
+    assert abs(geometry["head_bottom_row"] - (80 + 58)) <= 2
+    assert geometry["channel_bounds"][3] < geometry["merged_head_bbox"][3]
+
+
+def test_geometry_does_not_trim_normal_tall_head():
+    image = _draw_split_head_image([(200, 80, 220, 180)])
+    thread = _selection_thread()
+
+    geometry = thread._detect_refuel_head_geometry(image, threshold_value=80)
+
+    assert geometry["head_bottom_reason"] == "merged_bbox_bottom"
+    assert geometry["channel_bounds"][3] == geometry["merged_head_bbox"][3]
+
+
+def test_peak_selection_prefers_comparable_top_candidate_over_stale_last_row():
+    thread = _selection_thread()
+
+    selection = thread._select_peak_candidate(
+        np.array([8, 105, 116]),
+        np.array([10.25, 5.15, 5.15]),
+        last_row=67,
+    )
+
+    assert selection["selected_peak_row"] == 8
+    assert selection["selected_peak_reason"] == "top_tie_candidate"
+    assert selection["top_tie_eligible_rows"] == [8]
+
+
+def test_peak_selection_uses_last_row_only_when_gated_by_distance_and_prominence():
+    thread = _selection_thread()
+
+    tracked = thread._select_peak_candidate(
+        np.array([60, 80]),
+        np.array([10.0, 8.0]),
+        last_row=82,
+    )
+    weak = thread._select_peak_candidate(
+        np.array([50, 82]),
+        np.array([10.0, 6.0]),
+        last_row=82,
+    )
+
+    assert tracked["selected_peak_row"] == 80
+    assert tracked["selected_peak_reason"] == "nearest_last_row_gated"
+    assert weak["selected_peak_row"] == 50
+    assert weak["selected_peak_reason"] == "max_prominence"
+
+
+def test_peak_selection_falls_back_to_max_prominence_without_valid_top_or_tracking():
+    thread = _selection_thread()
+
+    selection = thread._select_peak_candidate(
+        np.array([60, 100]),
+        np.array([12.0, 8.0]),
+        last_row=None,
+    )
+
+    assert selection["selected_peak_row"] == 60
+    assert selection["selected_peak_reason"] == "max_prominence"
+
+
+def test_weak_top_boundary_peak_classifies_as_full_without_credible_interior_peak():
+    thread = _selection_thread()
+    selection = {
+        "selected_peak_row": 7,
+        "selected_peak_prominence": 4.55,
+        "candidate_rows": [7, 64, 105, 116],
+        "candidate_prominences": [4.55, 4.0, 5.15, 5.2],
+    }
+
+    state, reason = thread._selected_peak_fill_override(selection, channel_height=122)
+
+    assert state == "full"
+    assert reason == "weak_top_boundary_full"
+
+
+def test_strong_top_boundary_peak_remains_visible():
+    thread = _selection_thread()
+    selection = {
+        "selected_peak_row": 7,
+        "selected_peak_prominence": 5.1,
+        "candidate_rows": [7, 105, 116],
+        "candidate_prominences": [5.1, 5.15, 4.95],
+    }
+
+    state, reason = thread._selected_peak_fill_override(selection, channel_height=122)
+
+    assert state is None
+    assert reason == "visible_peak"
+
+
+def test_visible_gate_rejects_frame_000002_style_bottom_artifact_when_fill_is_full():
+    thread = _selection_thread()
+    selection = {
+        "selected_peak_row": 106,
+        "selected_peak_prominence": 5.15,
+        "candidate_rows": [8, 106, 117],
+        "candidate_prominences": [4.15, 5.15, 4.95],
+    }
+
+    accepted, reason = thread._selected_peak_visible_decision(selection, channel_height=123, fill_state="full")
+
+    assert accepted is False
+    assert reason == "bottom_artifact_with_top_boundary_full"
+    assert thread.debug_details["credible_visible_peak"] is False
+    assert thread.debug_details["boundary_peak_rows"] == [8]
+    assert thread.debug_details["bottom_artifact_rows"] == [106, 117]
+
+
+def test_visible_gate_keeps_strong_top_visible_after_full_frame():
+    thread = _selection_thread()
+    selection = {
+        "selected_peak_row": 5,
+        "selected_peak_prominence": 8.45,
+        "candidate_rows": [5, 106, 117],
+        "candidate_prominences": [8.45, 5.0, 4.85],
+    }
+
+    accepted, reason = thread._selected_peak_visible_decision(selection, channel_height=123, fill_state="full")
+
+    assert accepted is True
+    assert reason == "top_visible_prominence"
+    assert thread.debug_details["visible_peak_required_prominence"] == 8.0
+
+
+def test_visible_gate_rejects_short_channel_top_boundary_below_visible_threshold():
+    thread = _selection_thread()
+    selection = {
+        "selected_peak_row": 8,
+        "selected_peak_prominence": 8.24,
+        "candidate_rows": [8],
+        "candidate_prominences": [8.24],
+    }
+
+    accepted, reason = thread._selected_peak_visible_decision(selection, channel_height=61, fill_state="full")
+
+    assert accepted is False
+    assert reason == "top_boundary_below_visible_threshold"
+    assert thread.debug_details["visible_peak_required_prominence"] == 14.0
+
+
+def test_visible_gate_accepts_modest_tall_top_peak_without_bottom_artifact():
+    thread = _selection_thread()
+    selection = {
+        "selected_peak_row": 12,
+        "selected_peak_prominence": 5.9,
+        "candidate_rows": [12],
+        "candidate_prominences": [5.9],
+    }
+
+    accepted, reason = thread._selected_peak_visible_decision(selection, channel_height=118, fill_state="full")
+
+    assert accepted is True
+    assert reason == "modest_top_visible_without_bottom_artifact"
+
+
+def test_visible_gate_accepts_short_channel_strong_top_meniscus():
+    thread = _selection_thread()
+    selection = {
+        "selected_peak_row": 7,
+        "selected_peak_prominence": 19.33,
+        "candidate_rows": [7],
+        "candidate_prominences": [19.33],
+    }
+
+    accepted, reason = thread._selected_peak_visible_decision(selection, channel_height=58, fill_state="full")
+
+    assert accepted is True
+    assert reason == "top_visible_prominence"
 
 
 def test_image_analysis_thread_detects_meniscus_row_and_level():
@@ -84,6 +339,145 @@ def test_image_analysis_thread_detects_meniscus_row_and_level():
     assert thread.meniscus_row is not None
     assert abs(thread.meniscus_row - expected_row) <= 3
     assert abs(thread.level_data - expected_level) <= 3
+
+
+def test_image_analysis_thread_debug_capture_records_visible_detection_steps():
+    expected_row = 60
+    analysis_view, _head_rect = _build_analysis_view(meniscus_row=expected_row)
+    thread = ImageAnalysisThread(
+        _thread_input_from_analysis_view(analysis_view),
+        offset=40,
+        width=20,
+        threshold=80,
+        prominence=4,
+        empty_cutoff=0.25,
+        last_row=None,
+        capture_debug=True,
+    )
+
+    thread.analyze_image()
+
+    details = thread.debug_details
+    artifacts = thread.debug_artifacts
+    assert details["raw_contour_count"] >= 1
+    assert details["kept_contour_count"] >= 1
+    assert details["selected_head_bbox"] == list(thread.head_bbox)
+    assert details["channel_bounds"] == list(thread.channel_bounds)
+    assert details["analysis_parameters"]["bottom_guard_px"] == 2
+    assert details["profile_stats"]["length"] == thread.channel_bounds[3]
+    assert details["peak_rows"]
+    assert abs(details["selected_peak_row"] - expected_row) <= 3
+    assert "analysis_image" in artifacts
+    assert "head_threshold_mask" in artifacts
+    assert "channel_crop_blur" in artifacts
+    assert "profile" in artifacts
+    assert "oriented_signal" in artifacts
+
+
+def test_image_analysis_thread_detects_near_bottom_visible_meniscus_with_bottom_guard():
+    head_rect = (200, 80, 120, 180)
+    expected_row = head_rect[3] - 3
+    analysis_view, _head_rect = _build_analysis_view(
+        head_rect=head_rect,
+        meniscus_row=expected_row,
+    )
+    thread = ImageAnalysisThread(
+        _thread_input_from_analysis_view(analysis_view),
+        offset=40,
+        width=20,
+        threshold=80,
+        prominence=4,
+        empty_cutoff=0.9,
+        last_row=None,
+        capture_debug=True,
+    )
+
+    thread.analyze_image()
+
+    assert thread.detected_status == "visible"
+    assert abs(thread.meniscus_row - expected_row) <= 3
+    assert thread.level_data <= 6
+    assert thread.debug_details["search_band"] == [0, head_rect[3] - 2]
+    assert thread.debug_details["analysis_parameters"]["bottom_guard_px"] == 2
+    assert thread.debug_details["visible_peak_reason"] == "bottom_visible_without_top_boundary"
+
+
+def test_image_analysis_thread_debug_capture_records_fill_fallback():
+    analysis_view, head_rect = _build_analysis_view(
+        meniscus_row=None,
+        channel_intensity=10,
+        reference_intensity=220,
+    )
+    thread = ImageAnalysisThread(
+        _thread_input_from_analysis_view(analysis_view),
+        offset=40,
+        width=20,
+        threshold=80,
+        prominence=4,
+        empty_cutoff=0.25,
+        last_row=None,
+        capture_debug=True,
+    )
+
+    thread.analyze_image()
+
+    assert thread.detected_status == "empty"
+    assert thread.meniscus_row == head_rect[3] - 3
+    assert thread.debug_details["fill_state"] == "empty"
+    assert thread.debug_details["fill_score"] < 0.25
+    assert thread.debug_details["fill_score_method"] == "max_reference_ssim"
+    assert "fill_channel_patch" in thread.debug_artifacts
+    assert "fill_reference_patch" in thread.debug_artifacts
+
+
+def test_fill_state_uses_best_valid_reference_patch():
+    analysis_view, head_rect = _build_analysis_view(
+        meniscus_row=None,
+        channel_intensity=110,
+        reference_intensity=135,
+    )
+    thread = ImageAnalysisThread(
+        _thread_input_from_analysis_view(analysis_view),
+        offset=40,
+        width=20,
+        threshold=80,
+        prominence=4,
+        empty_cutoff=0.25,
+        last_row=None,
+        capture_debug=True,
+    )
+    cur_img = cv2.rotate(thread.original_image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    x0 = head_rect[0] + 40
+    y0 = head_rect[1]
+    w0 = 20
+    h0 = head_rect[3]
+
+    _row, state, score, reason = thread.classify_fill_state(cur_img, x0, y0, w0, h0, empty_cutoff=0.25)
+
+    assert state == "full"
+    assert reason == "ssim_at_or_above_empty_cutoff"
+    assert score >= 0.25
+    assert thread.debug_details["fill_score_method"] == "max_reference_ssim"
+    assert thread.debug_details["fill_reference_choice"] is not None
+    assert len(thread.debug_details["fill_reference_scores"]) >= 3
+
+
+def test_image_analysis_thread_default_does_not_store_debug_artifacts():
+    analysis_view, _head_rect = _build_analysis_view(meniscus_row=60)
+    thread = ImageAnalysisThread(
+        _thread_input_from_analysis_view(analysis_view),
+        offset=40,
+        width=20,
+        threshold=80,
+        prominence=4,
+        empty_cutoff=0.25,
+        last_row=None,
+    )
+
+    thread.analyze_image()
+
+    assert thread.debug_details == {}
+    assert thread.debug_artifacts == {}
 
 
 def test_image_analysis_thread_empty_fallback_sets_bottom_row():
@@ -138,9 +532,22 @@ def test_refuel_camera_model_start_analysis_uses_last_meniscus_row(monkeypatch):
             captured["connected"] = fn
 
     class _ThreadStub:
-        def __init__(self, image, offset, width, threshold, prominence, empty_cutoff, last_row, parent=None):
+        def __init__(
+            self,
+            image,
+            offset,
+            width,
+            threshold,
+            prominence,
+            empty_cutoff,
+            last_row,
+            parent=None,
+            capture_debug=False,
+            bottom_guard_px=2,
+        ):
             captured["shape"] = image.shape
             captured["last_row"] = last_row
+            captured["bottom_guard_px"] = bottom_guard_px
             self.analysis_done = _SignalStub()
 
         def start(self):
@@ -156,6 +563,7 @@ def test_refuel_camera_model_start_analysis_uses_last_meniscus_row(monkeypatch):
 
     assert ok is True
     assert captured["last_row"] == 17
+    assert captured["bottom_guard_px"] == 2
     assert captured["shape"] == (640, 480, 3)
     assert captured["started"] is True
     assert model.get_raw_capture_image().shape == (16, 16, 3)
@@ -188,7 +596,9 @@ def test_refuel_camera_model_build_dataset_analysis_seed_returns_geometry_and_le
     seed = model.build_dataset_analysis_seed(raw_frame)
 
     assert seed is not None
+    assert seed["detector_version"] == "phase2_dataset_seed_v4_fill_gate"
     assert seed["predicted_status"] == "visible"
+    assert seed["details"]["analysis_parameters"]["bottom_guard_px"] == 2
     assert abs(seed["predicted_level_px"] - (head_rect[3] - 60)) <= 3
     assert seed["predicted_channel_geometry"]["left_wall"] is not None
     assert seed["predicted_meniscus_line"] is not None

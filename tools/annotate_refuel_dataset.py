@@ -87,6 +87,52 @@ def normalize_line(line) -> list[list[int]] | None:
     return points
 
 
+def _raw_dimensions(raw_shape) -> tuple[int, int]:
+    if raw_shape is None or len(raw_shape) < 2:
+        raise ValueError("raw_shape must contain image height and width.")
+    return int(raw_shape[0]), int(raw_shape[1])
+
+
+def _clamp(value: int, low: int, high: int) -> int:
+    return max(low, min(high, int(value)))
+
+
+def rotate_image_for_annotation(image):
+    if image is None:
+        return None
+    import numpy as np
+
+    return np.rot90(image, k=1)
+
+
+def raw_point_to_display(point, raw_shape) -> list[int]:
+    raw_h, raw_w = _raw_dimensions(raw_shape)
+    x_raw = _clamp(int(round(float(point[0]))), 0, raw_w - 1)
+    y_raw = _clamp(int(round(float(point[1]))), 0, raw_h - 1)
+    return [y_raw, raw_w - 1 - x_raw]
+
+
+def display_point_to_raw(point, raw_shape) -> list[int]:
+    raw_h, raw_w = _raw_dimensions(raw_shape)
+    x_disp = _clamp(int(round(float(point[0]))), 0, raw_h - 1)
+    y_disp = _clamp(int(round(float(point[1]))), 0, raw_w - 1)
+    return [raw_w - 1 - y_disp, x_disp]
+
+
+def raw_line_to_display(line, raw_shape) -> list[list[int]] | None:
+    line = normalize_line(line)
+    if line is None:
+        return None
+    return [raw_point_to_display(point, raw_shape) for point in line]
+
+
+def display_line_to_raw(line, raw_shape) -> list[list[int]] | None:
+    line = normalize_line(line)
+    if line is None:
+        return None
+    return [display_point_to_raw(point, raw_shape) for point in line]
+
+
 def _mean_y(line) -> float | None:
     line = normalize_line(line)
     if line is None:
@@ -327,6 +373,32 @@ class RefuelDatasetAnnotationSession:
             "derived": compute_derived(geometry, meniscus),
         }
 
+    def propose_interactive_label(self, frame_id: str) -> dict:
+        existing = self.get_label(frame_id)
+        if existing is not None:
+            return existing
+
+        frame = self.get_frame(frame_id)
+        scene_id = frame["scene_id"]
+        scene_geometry = self.get_scene_geometry(scene_id)
+        geometry_source = "copied_scene" if scene_geometry else "manual"
+        return {
+            "schema_version": int(SCHEMA_VERSION),
+            "frame_id": frame_id,
+            "scene_id": scene_id,
+            "annotator_id": self.annotator_id,
+            "annotated_at_utc": now_utc(),
+            "review_state": "draft",
+            "status": "visible",
+            "confidence": "medium",
+            "geometry_source": geometry_source,
+            "quality_tags": [],
+            "notes": "",
+            "channel_geometry": deepcopy(scene_geometry),
+            "meniscus_line": None,
+            "derived": compute_derived(scene_geometry, None),
+        }
+
     def save_label(self, record: dict):
         payload = deepcopy(record)
         payload["annotator_id"] = str(payload.get("annotator_id") or self.annotator_id)
@@ -368,61 +440,201 @@ class RefuelDatasetAnnotationSession:
 
 
 class InteractiveRefuelAnnotator:
+    GEOMETRY_KEYS = ("left_wall", "right_wall", "top_line", "bottom_line")
+    FIGURE_LAYOUT = {"left": 0.03, "right": 0.98, "bottom": 0.03, "top": 0.80}
+    GEOMETRY_CLICK_LABELS = (
+        "top-left corner",
+        "top-right corner",
+        "bottom-right corner",
+        "bottom-left corner",
+    )
+    STATUS_BY_KEY = {
+        "1": "visible",
+        "2": "full",
+        "3": "empty",
+        "4": "occluded",
+        "5": "bad_frame",
+        "6": "skip",
+    }
     HELP_TEXT = (
-        "[g] draw geometry  [m] draw meniscus  [1-6] set status  [c] confidence  "
-        "[r] review  [t] quality tags  [n] next  [p] prev  [s] save+next  [q] quit"
+        "g geometry | m meniscus | 1 visible | 2 full | 3 empty | 4 occluded | "
+        "5 bad | 6 skip | x clear meniscus | u undo | esc cancel | o seeds | s save | n/p nav | q quit"
     )
 
     def __init__(self, session: RefuelDatasetAnnotationSession):
         self.session = session
         self.frame_ids = session.get_frame_order()
         self.index = 0
-        self.show_seed = True
+        self.show_seed = False
+        self.mode = None
+        self.pending_points = []
+        self.proposed = None
+        self.raw_image = None
+        self.display_image = None
+        self.raw_shape = None
+        self.fig = None
+        self.ax = None
+        self.plt = None
+        self.status_message = ""
 
     def _load_image(self, frame_id):
         import matplotlib.image as mpimg
 
         return mpimg.imread(self.session.get_image_path(frame_id))
 
-    def _draw_line(self, ax, line, *, color, linestyle="-", linewidth=1.5, label=None):
+    def _draw_display_line(self, ax, line, *, color, linestyle="-", linewidth=1.5, marker=None):
         if not line:
             return
         pts = normalize_line(line)
         xs = [pts[0][0], pts[1][0]]
         ys = [pts[0][1], pts[1][1]]
-        ax.plot(xs, ys, color=color, linestyle=linestyle, linewidth=linewidth, label=label)
+        ax.plot(xs, ys, color=color, linestyle=linestyle, linewidth=linewidth, marker=marker)
 
-    def _render(self, frame_id, proposed):
+    def _draw_raw_line(self, ax, line, *, color, linestyle="-", linewidth=1.5, marker=None):
+        if line is None or self.raw_shape is None:
+            return
+        self._draw_display_line(
+            ax,
+            raw_line_to_display(line, self.raw_shape),
+            color=color,
+            linestyle=linestyle,
+            linewidth=linewidth,
+            marker=marker,
+        )
+
+    def _ensure_figure(self):
+        if self.fig is not None and self.ax is not None:
+            return
         import matplotlib.pyplot as plt
 
-        fig, ax = plt.subplots(figsize=(8, 6))
-        ax.imshow(self._load_image(frame_id))
-        ax.set_title(f"{frame_id} | {self.HELP_TEXT}")
+        self.plt = plt
+        self.fig, self.ax = plt.subplots(figsize=(9, 7))
+        try:
+            self.fig.canvas.manager.set_window_title("Refuel Dataset Annotator")
+        except Exception:
+            pass
+        self.fig.subplots_adjust(**self.FIGURE_LAYOUT)
+        self.fig.canvas.mpl_connect("key_press_event", self._on_key)
+        self.fig.canvas.mpl_connect("button_press_event", self._on_click)
+
+    def _current_frame_id(self):
+        if not (0 <= self.index < len(self.frame_ids)):
+            return None
+        return self.frame_ids[self.index]
+
+    def _load_current_frame(self, message="", start_mode=None):
+        frame_id = self._current_frame_id()
+        if frame_id is None:
+            self.status_message = "All frames annotated."
+            self._close_figure()
+            return
+        self.proposed = self.session.propose_interactive_label(frame_id)
+        self.raw_image = self._load_image(frame_id)
+        self.raw_shape = self.raw_image.shape
+        self.display_image = rotate_image_for_annotation(self.raw_image)
+        self.mode = None
+        self.pending_points = []
+        self.status_message = message
+        if start_mode == "meniscus":
+            if self._has_complete_geometry():
+                self.mode = "meniscus"
+            else:
+                extra = "Geometry is not set; press g to draw corners."
+                self.status_message = f"{message} {extra}".strip()
+        self._render()
+
+    def _render(self):
+        self._ensure_figure()
+        if self.ax is None or self.display_image is None or self.proposed is None:
+            return
+
+        frame_id = self._current_frame_id()
+        frame = self.session.get_frame(frame_id)
+        scene_id = frame.get("scene_id") or self.proposed.get("scene_id") or "-"
+        ax = self.ax
+        ax.clear()
+        ax.imshow(self.display_image)
+        ax.set_title(self._build_title(frame_id, scene_id), fontsize=9)
         ax.axis("off")
 
         seed = self.session.get_seed(frame_id) if self.show_seed else None
         if seed:
             geometry = seed.get("predicted_channel_geometry") or {}
-            for key in ("left_wall", "right_wall", "top_line", "bottom_line"):
-                self._draw_line(ax, geometry.get(key), color="#f4d35e", linestyle="--", linewidth=1.0)
-            self._draw_line(ax, seed.get("predicted_meniscus_line"), color="#f4d35e", linestyle="--", linewidth=1.0)
+            for key in self.GEOMETRY_KEYS:
+                self._draw_raw_line(ax, geometry.get(key), color="#f4d35e", linestyle="--", linewidth=1.0)
+            self._draw_raw_line(
+                ax,
+                seed.get("predicted_meniscus_line"),
+                color="#f4d35e",
+                linestyle="--",
+                linewidth=1.0,
+            )
 
-        geometry = (proposed or {}).get("channel_geometry") or {}
-        for key in ("left_wall", "right_wall", "top_line", "bottom_line"):
-            self._draw_line(ax, geometry.get(key), color="#5bc0eb", linewidth=1.4)
-        self._draw_line(ax, (proposed or {}).get("meniscus_line"), color="#e55934", linewidth=1.6)
-        fig.tight_layout()
-        return fig, ax
+        geometry = (self.proposed or {}).get("channel_geometry") or {}
+        for key in self.GEOMETRY_KEYS:
+            self._draw_raw_line(ax, geometry.get(key), color="#1f9acb", linewidth=1.8, marker="o")
+        self._draw_raw_line(
+            ax,
+            (self.proposed or {}).get("meniscus_line"),
+            color="#e55934",
+            linewidth=2.0,
+            marker="x",
+        )
+        self._draw_pending_points(ax)
 
-    @staticmethod
-    def _collect_lines(plt_module, count):
-        pts = plt_module.ginput(count, timeout=-1)
-        if len(pts) != count:
-            return None
-        lines = []
-        for idx in range(0, count, 2):
-            lines.append(normalize_line([pts[idx], pts[idx + 1]]))
-        return lines
+        height, width = int(self.display_image.shape[0]), int(self.display_image.shape[1])
+        ax.set_xlim(-0.5, width - 0.5)
+        ax.set_ylim(height - 0.5, -0.5)
+        self.fig.canvas.draw_idle()
+
+    def _draw_pending_points(self, ax):
+        if not self.pending_points or self.raw_shape is None:
+            return
+        display_points = [raw_point_to_display(point, self.raw_shape) for point in self.pending_points]
+        xs = [point[0] for point in display_points]
+        ys = [point[1] for point in display_points]
+        color = "#1f9acb" if self.mode == "geometry" else "#e55934"
+        marker = "o" if self.mode == "geometry" else "x"
+        ax.scatter(xs, ys, color=color, marker=marker, s=42, zorder=5)
+        if self.mode == "geometry":
+            line_ranges = range(0, len(display_points) - 1)
+        else:
+            line_ranges = range(0, len(display_points) - 1, 2)
+        for idx in line_ranges:
+            self._draw_display_line(
+                ax,
+                [display_points[idx], display_points[idx + 1]],
+                color=color,
+                linestyle=":",
+                linewidth=1.4,
+            )
+
+    def _build_title(self, frame_id, scene_id):
+        mode_text = self.mode or "idle"
+        status = (self.proposed or {}).get("status") or "-"
+        overlay = "on" if self.show_seed else "off"
+        title = (
+            f"{self.index + 1}/{len(self.frame_ids)} {frame_id} | scene {scene_id} | "
+            f"status {status} | mode {mode_text} | seed overlay {overlay}"
+        )
+        lines = [title, self._mode_instruction(), self.HELP_TEXT]
+        lines.append(self.status_message or " ")
+        return "\n".join(lines)
+
+    def _mode_instruction(self):
+        if self.mode == "geometry":
+            count = len(self.pending_points)
+            if count < len(self.GEOMETRY_CLICK_LABELS):
+                return f"Click {self.GEOMETRY_CLICK_LABELS[count]}."
+            return "Geometry points complete."
+        if self.mode == "meniscus":
+            count = len(self.pending_points)
+            if count == 0:
+                return "Click meniscus point 1."
+            if count == 1:
+                return "Click meniscus point 2."
+            return "Meniscus points complete."
+        return "Choose a mode or status."
 
     def run(self):
         if not self.frame_ids:
@@ -431,96 +643,237 @@ class InteractiveRefuelAnnotator:
 
         import matplotlib.pyplot as plt
 
-        while 0 <= self.index < len(self.frame_ids):
-            frame_id = self.frame_ids[self.index]
-            proposed = self.session.propose_label(frame_id)
-            while True:
-                fig, _ax = self._render(frame_id, proposed)
-                plt.show(block=False)
-                print(f"\nFrame {self.index + 1}/{len(self.frame_ids)}: {frame_id}")
-                print(self.HELP_TEXT)
-
-                command = input("Command: ").strip().lower()
-                if command == "q":
-                    plt.close(fig)
-                    return 0
-                if command == "g":
-                    print("Click left wall, right wall, top line, and bottom line (2 points each).")
-                    lines = self._collect_lines(plt, 8)
-                    if lines:
-                        proposed["channel_geometry"] = {
-                            "left_wall": lines[0],
-                            "right_wall": lines[1],
-                            "top_line": lines[2],
-                            "bottom_line": lines[3],
-                        }
-                        proposed["geometry_source"] = "adjusted"
-                    plt.close(fig)
-                    continue
-                if command == "m":
-                    print("Click the meniscus line endpoints.")
-                    lines = self._collect_lines(plt, 2)
-                    if lines:
-                        proposed["meniscus_line"] = lines[0]
-                        proposed["status"] = "visible"
-                    plt.close(fig)
-                    continue
-                if command in {"1", "2", "3", "4", "5", "6"}:
-                    proposed["status"] = {
-                        "1": "visible",
-                        "2": "full",
-                        "3": "empty",
-                        "4": "occluded",
-                        "5": "bad_frame",
-                        "6": "skip",
-                    }[command]
-                    if proposed["status"] != "visible":
-                        proposed["meniscus_line"] = None
-                    plt.close(fig)
-                    continue
-                if command == "c":
-                    next_conf = {"high": "medium", "medium": "low", "low": "high"}
-                    proposed["confidence"] = next_conf.get(str(proposed.get("confidence") or "medium"), "high")
-                    print(f"Confidence -> {proposed['confidence']}")
-                    plt.close(fig)
-                    continue
-                if command == "r":
-                    next_state = {"draft": "reviewed", "reviewed": "final", "final": "draft"}
-                    proposed["review_state"] = next_state.get(str(proposed.get("review_state") or "draft"), "draft")
-                    print(f"Review state -> {proposed['review_state']}")
-                    plt.close(fig)
-                    continue
-                if command == "t":
-                    raw = input("Quality tags (comma-separated): ").strip()
-                    proposed["quality_tags"] = dedupe_tags(raw.split(","))
-                    plt.close(fig)
-                    continue
-                if command == "p":
-                    self.index = max(0, self.index - 1)
-                    plt.close(fig)
-                    break
-                if command == "n":
-                    self.index = min(len(self.frame_ids) - 1, self.index + 1)
-                    plt.close(fig)
-                    break
-                if command == "s":
-                    try:
-                        saved = self.session.save_label(proposed)
-                        print(
-                            f"Saved {saved['frame_id']} as {saved['status']} "
-                            f"(review={saved['review_state']}, confidence={saved['confidence']})."
-                        )
-                        self.index = min(len(self.frame_ids), self.index + 1)
-                        plt.close(fig)
-                        break
-                    except Exception as exc:
-                        print(f"Save failed: {exc}")
-                        plt.close(fig)
-                        continue
-
-                print("Unknown command.")
-                plt.close(fig)
+        self.plt = plt
+        self._ensure_figure()
+        self._load_current_frame()
+        print("Refuel dataset annotator controls:")
+        print(self.HELP_TEXT)
+        plt.show()
         return 0
+
+    def _on_key(self, event):
+        key = str(getattr(event, "key", "") or "").lower()
+        if not key:
+            return
+        if key == "q":
+            self._close_figure()
+            return
+        if key == "g":
+            self._start_mode("geometry")
+            return
+        if key == "m":
+            self._start_mode("meniscus")
+            return
+        if key in {"escape", "esc"}:
+            self._cancel_mode()
+            return
+        if key == "u":
+            self._undo_pending_point()
+            return
+        if key == "x":
+            self._clear_meniscus()
+            return
+        if key == "o":
+            self.show_seed = not self.show_seed
+            self.status_message = "Seed overlay enabled." if self.show_seed else "Seed overlay hidden."
+            self._render()
+            return
+        if key in self.STATUS_BY_KEY:
+            self._set_status(self.STATUS_BY_KEY[key])
+            return
+        if key == "c":
+            self._cycle_confidence()
+            return
+        if key == "r":
+            self._cycle_review_state()
+            return
+        if key == "s":
+            self._save_and_advance()
+            return
+        if key == "n":
+            self._move(1)
+            return
+        if key == "p":
+            self._move(-1)
+            return
+        self.status_message = f"Unknown key: {key}"
+        self._render()
+
+    def _on_click(self, event):
+        if self.mode not in {"geometry", "meniscus"}:
+            return
+        if self.ax is not None and getattr(event, "inaxes", None) is not self.ax:
+            return
+        if self.raw_shape is None or getattr(event, "xdata", None) is None or getattr(event, "ydata", None) is None:
+            return
+
+        point = display_point_to_raw([event.xdata, event.ydata], self.raw_shape)
+        self.pending_points.append(point)
+        if self.mode == "geometry" and len(self.pending_points) >= 4:
+            self._complete_geometry()
+            return
+        if self.mode == "meniscus" and len(self.pending_points) >= 2:
+            self._complete_meniscus()
+            return
+        self.status_message = ""
+        self._render()
+
+    def _start_mode(self, mode):
+        self.mode = mode
+        self.pending_points = []
+        self.status_message = ""
+        self._render()
+
+    def _cancel_mode(self):
+        self.mode = None
+        self.pending_points = []
+        self.status_message = "Drawing mode cancelled."
+        self._render()
+
+    def _undo_pending_point(self):
+        if not self.pending_points:
+            self.status_message = "No pending point to undo."
+        else:
+            self.pending_points.pop()
+            self.status_message = "Undid last pending point."
+        self._render()
+
+    def _complete_geometry(self):
+        top_left, top_right, bottom_right, bottom_left = [
+            list(point) for point in self.pending_points[:4]
+        ]
+        self.proposed["channel_geometry"] = {
+            "left_wall": normalize_line([top_left, bottom_left]),
+            "right_wall": normalize_line([top_right, bottom_right]),
+            "top_line": normalize_line([top_left, top_right]),
+            "bottom_line": normalize_line([bottom_left, bottom_right]),
+        }
+        self.proposed["geometry_source"] = "adjusted"
+        self.mode = None
+        self.pending_points = []
+        self.status_message = "Geometry set."
+        if str(self.proposed.get("status") or "") == "visible":
+            self.proposed["meniscus_line"] = None
+            self.mode = "meniscus"
+            self.status_message = "Geometry set. Click two meniscus endpoints."
+            self._render()
+            return
+        self._save_if_complete_for_current_status()
+
+    def _complete_meniscus(self):
+        self.proposed["meniscus_line"] = normalize_line([self.pending_points[0], self.pending_points[1]])
+        self.proposed["status"] = "visible"
+        self.mode = None
+        self.pending_points = []
+        self.status_message = "Meniscus set."
+        self._save_if_complete_for_current_status()
+
+    def _set_status(self, status):
+        self.proposed["status"] = status
+        self.mode = None
+        self.pending_points = []
+        if status != "visible":
+            self.proposed["meniscus_line"] = None
+        if status in {"bad_frame", "skip"}:
+            self.proposed["channel_geometry"] = None
+            self.proposed["geometry_source"] = "manual"
+        self.status_message = f"Status set to {status}."
+        self._save_if_complete_for_current_status()
+
+    def _save_if_complete_for_current_status(self):
+        status = str((self.proposed or {}).get("status") or "")
+        if status in {"bad_frame", "skip"}:
+            self._save_and_advance()
+            return
+        if status in {"full", "empty", "occluded"}:
+            if self._has_complete_geometry():
+                self._save_and_advance()
+            else:
+                self.status_message = f"{status} labels require geometry. Press g to draw it."
+                self._render()
+            return
+        if status == "visible":
+            if self._has_complete_geometry() and self._has_meniscus():
+                self._save_and_advance()
+            else:
+                self._render()
+            return
+        self._render()
+
+    def _has_complete_geometry(self):
+        geometry = (self.proposed or {}).get("channel_geometry")
+        if not isinstance(geometry, dict):
+            return False
+        try:
+            return all(normalize_line(geometry.get(key)) is not None for key in self.GEOMETRY_KEYS)
+        except Exception:
+            return False
+
+    def _has_meniscus(self):
+        try:
+            return normalize_line((self.proposed or {}).get("meniscus_line")) is not None
+        except Exception:
+            return False
+
+    def _clear_meniscus(self):
+        if self.proposed is not None:
+            self.proposed["meniscus_line"] = None
+        self.mode = None
+        self.pending_points = []
+        self.status_message = "Meniscus cleared. Press m to redraw it."
+        self._render()
+
+    def _cycle_confidence(self):
+        next_conf = {"high": "medium", "medium": "low", "low": "high"}
+        current = str((self.proposed or {}).get("confidence") or "medium")
+        self.proposed["confidence"] = next_conf.get(current, "high")
+        self.status_message = f"Confidence set to {self.proposed['confidence']}."
+        self._render()
+
+    def _cycle_review_state(self):
+        next_state = {"draft": "reviewed", "reviewed": "final", "final": "draft"}
+        current = str((self.proposed or {}).get("review_state") or "draft")
+        self.proposed["review_state"] = next_state.get(current, "draft")
+        self.status_message = f"Review state set to {self.proposed['review_state']}."
+        self._render()
+
+    def _save_and_advance(self):
+        try:
+            saved = self.session.save_label(self.proposed)
+        except Exception as exc:
+            self.status_message = f"Save failed: {exc}"
+            self._render()
+            return False
+
+        self.index += 1
+        if self.index >= len(self.frame_ids):
+            print("All frames annotated.")
+            self._close_figure()
+            return True
+        start_mode = "meniscus" if saved.get("status") == "visible" else None
+        self._load_current_frame(f"Saved {saved['frame_id']} as {saved['status']}.", start_mode=start_mode)
+        return True
+
+    def _move(self, delta):
+        new_index = _clamp(self.index + int(delta), 0, len(self.frame_ids) - 1)
+        if new_index == self.index:
+            self.status_message = "Already at dataset boundary."
+            self._render()
+            return
+        self.index = new_index
+        self._load_current_frame()
+
+    def _close_figure(self):
+        fig = self.fig
+        self.fig = None
+        self.ax = None
+        if fig is None:
+            return
+        if self.plt is None:
+            import matplotlib.pyplot as plt
+
+            self.plt = plt
+        self.plt.close(fig)
 
 
 def parse_args(argv=None):
