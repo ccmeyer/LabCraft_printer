@@ -2874,6 +2874,179 @@ class CalibrationManager(QObject):
             phase_name=phase_name,
         )
 
+    # ------------- Experiment audit helpers -------------
+
+    @staticmethod
+    def _calibration_audit_level_for_outcome(outcome: str) -> str:
+        normalized = str(outcome or "completed").strip().lower()
+        if normalized in {"stopped", "stop", "cancelled", "canceled"}:
+            return "warning"
+        if normalized in {"error", "failed", "failure"}:
+            return "error"
+        return "info"
+
+    @staticmethod
+    def _calibration_audit_compact_value(value):
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        if isinstance(value, str):
+            return value if len(value) <= 240 else value[:237] + "..."
+        return None
+
+    def _build_calibration_artifact_refs(self, process_obj=None):
+        refs = {}
+        try:
+            if self.calibration_file_path:
+                refs["calibration_file_path"] = str(self.calibration_file_path)
+        except Exception:
+            pass
+
+        try:
+            run_dir = getattr(process_obj, "_recorder_run_dir", None)
+            if not run_dir:
+                recorder = getattr(self, "_process_recorder", None)
+                getter = getattr(recorder, "get_active_run_dir", None)
+                if callable(getter):
+                    run_dir = getter()
+            if run_dir:
+                refs["process_recording_run_dir"] = str(run_dir)
+        except Exception:
+            pass
+
+        try:
+            store = self._get_calibration_memory_store()
+            run_id = getattr(self, "_run_id", None)
+            if store is not None and run_id:
+                paths_getter = getattr(store, "get_run_paths", None)
+                if callable(paths_getter):
+                    paths = dict(paths_getter(run_id) or {})
+                    run_dir = paths.get("run_dir")
+                    if run_dir:
+                        refs["calibration_memory_run_dir"] = str(run_dir)
+        except Exception:
+            pass
+        return refs
+
+    def _build_calibration_result_summary(self, process_obj=None):
+        summary = {}
+        phase_name = (
+            getattr(process_obj, "phase_name", None)
+            or getattr(process_obj, "_recorder_phase_name", None)
+        )
+        try:
+            phase_key = self._resolve_phase_key(phase_name) if phase_name else None
+        except Exception:
+            phase_key = str(phase_name) if phase_name else None
+        if phase_key:
+            summary["calibration_phase"] = phase_key
+
+        try:
+            run = self.data["runs"][self._run_idx]
+        except Exception:
+            run = None
+        if not isinstance(run, dict):
+            return summary
+
+        steps = run.get("steps") or {}
+        step_payloads = []
+        if phase_key and isinstance(steps, dict):
+            step_payloads = list(steps.get(phase_key) or [])
+        summary["step_count"] = len(step_payloads)
+        flat_measurements = run.get("flat_measurements")
+        if isinstance(flat_measurements, list):
+            summary["flat_measurement_count"] = len(flat_measurements)
+
+        if not step_payloads:
+            return summary
+
+        latest = step_payloads[-1]
+        if not isinstance(latest, dict):
+            return summary
+        if latest.get("timestamp"):
+            summary["latest_timestamp"] = latest.get("timestamp")
+
+        result = latest.get("result")
+        if isinstance(result, dict):
+            summary["result_keys"] = sorted(str(key) for key in result.keys())[:24]
+            source = result
+        else:
+            source = latest
+
+        compact = {}
+        for key, value in dict(source or {}).items():
+            if key in {"image", "images", "frame", "frames", "payload", "settings", "meta"}:
+                continue
+            compact_value = self._calibration_audit_compact_value(value)
+            if compact_value is not None:
+                compact[str(key)] = compact_value
+            elif isinstance(value, (list, tuple)):
+                compact[f"{key}_count"] = len(value)
+            elif isinstance(value, dict):
+                compact[f"{key}_keys"] = sorted(str(k) for k in value.keys())[:16]
+        if compact:
+            summary["latest_compact"] = compact
+        return summary
+
+    def _build_calibration_audit_snapshot(self, process_obj=None):
+        if process_obj is None:
+            process_obj = getattr(self, "activeCalibration", None)
+
+        process_name = None
+        phase_name = None
+        if process_obj is not None:
+            process_name = (
+                getattr(process_obj, "_recorder_process_name", None)
+                or process_obj.__class__.__name__
+            )
+            phase_name = (
+                getattr(process_obj, "phase_name", None)
+                or getattr(process_obj, "_recorder_phase_name", None)
+                or process_name
+            )
+        try:
+            phase_key = self._resolve_phase_key(phase_name) if phase_name else None
+        except Exception:
+            phase_key = str(phase_name) if phase_name else None
+
+        try:
+            settings = self.get_current_settings()
+        except Exception:
+            settings = {}
+
+        try:
+            queue_depth = len(getattr(self, "calibration_queue", []) or [])
+        except Exception:
+            queue_depth = None
+
+        return {
+            "calibration_file_path": str(getattr(self, "calibration_file_path", "") or ""),
+            "calibration_run_id": getattr(self, "_run_id", None),
+            "calibration_run_index": getattr(self, "_run_idx", None),
+            "calibration_phase": phase_key,
+            "process_name": process_name,
+            "queue_depth": queue_depth,
+            "printer_head_id": self._safe_get_printer_head_id(),
+            "stock_solution": self._safe_get_stock_solution(),
+            "settings": settings,
+            "artifact_refs": self._build_calibration_artifact_refs(process_obj),
+            "result_summary": self._build_calibration_result_summary(process_obj),
+        }
+
+    def _record_calibration_audit_event(self, event_type, summary, details=None, level="info", process_obj=None):
+        try:
+            event_details = self._build_calibration_audit_snapshot(process_obj=process_obj)
+            if isinstance(details, dict):
+                event_details.update(details)
+            elif details is not None:
+                event_details["details"] = details
+
+            recorder = getattr(getattr(self, "model", None), "record_experiment_audit_event", None)
+            if not callable(recorder):
+                return None
+            return recorder(str(event_type), str(summary), details=event_details, level=level)
+        except Exception:
+            return None
+
     # ------------- Session / File management -------------
 
     def begin_session(self, calibration_file_path: str, notes: str = None):
@@ -2933,6 +3106,14 @@ class CalibrationManager(QObject):
         )
         self.characterizationSummaryUpdated.emit()
         self._emit_readiness()
+        self._record_calibration_audit_event(
+            "calibration_session_started",
+            "Calibration session started",
+            details={
+                "outcome": None,
+                "notes": notes or "",
+            },
+        )
 
     def end_session(self, *, outcome: str = "completed", error_message: str = "", emit_stage: bool = True):
         """Stamp end time for the current run."""
@@ -2944,6 +3125,16 @@ class CalibrationManager(QObject):
             self._write_calibration_memory_summary()
             if emit_stage:
                 self.calibrationStageChanged.emit("Calibration session ended", "purple")
+            normalized_outcome = str(outcome or "completed")
+            self._record_calibration_audit_event(
+                "calibration_session_ended",
+                "Calibration session ended",
+                details={
+                    "outcome": normalized_outcome,
+                    "error_message": str(error_message or ""),
+                },
+                level=self._calibration_audit_level_for_outcome(normalized_outcome),
+            )
 
         self._run_id = None
         self._run_idx = None
@@ -3134,6 +3325,12 @@ class CalibrationManager(QObject):
             if debug_signal is not None:
                 debug_signal.connect(self.onOnlineStreamDebugUpdated)
             self._begin_process_recording(self.activeCalibration)
+            process_name = self.activeCalibration.__class__.__name__
+            self._record_calibration_audit_event(
+                "calibration_process_started",
+                f"Calibration process started: {process_name}",
+                process_obj=self.activeCalibration,
+            )
             self.activeCalibration.start()
 
     def stop(self):
@@ -3162,6 +3359,16 @@ class CalibrationManager(QObject):
                     pass
             proc = self.activeCalibration
             self.activeCalibration.stop()
+            self._record_calibration_audit_event(
+                "calibration_process_stopped",
+                f"Calibration process stopped: {proc.__class__.__name__}",
+                details={
+                    "outcome": "stopped",
+                    "error_message": "Calibration terminated by user",
+                },
+                level="warning",
+                process_obj=proc,
+            )
             self._cleanup_finished_process(proc)
             self._close_process_owned_calibration_memory_session(
                 proc,
@@ -5720,6 +5927,16 @@ class CalibrationManager(QObject):
             process_obj,
             outcome="completed",
         )
+        process_name = process_obj.__class__.__name__ if process_obj is not None else "unknown"
+        self._record_calibration_audit_event(
+            "calibration_process_completed",
+            f"Calibration process completed: {process_name}",
+            details={
+                "outcome": "completed",
+                "error_message": "",
+            },
+            process_obj=process_obj,
+        )
         self._close_process_owned_calibration_memory_session(
             process_obj,
             outcome="completed",
@@ -5761,6 +5978,26 @@ class CalibrationManager(QObject):
             process_obj,
             outcome=normalized_status,
             error_message=str(error_message or ""),
+        )
+        process_name = process_obj.__class__.__name__ if process_obj is not None else "unknown"
+        event_type = (
+            "calibration_process_stopped"
+            if normalized_status == "stopped"
+            else "calibration_process_failed"
+        )
+        self._record_calibration_audit_event(
+            event_type,
+            (
+                f"Calibration process stopped: {process_name}"
+                if normalized_status == "stopped"
+                else f"Calibration process failed: {process_name}"
+            ),
+            details={
+                "outcome": normalized_status,
+                "error_message": str(error_message or ""),
+            },
+            level="warning" if normalized_status == "stopped" else "error",
+            process_obj=process_obj,
         )
         self._close_process_owned_calibration_memory_session(
             process_obj,
@@ -29495,6 +29732,17 @@ class ImageAnalysisThread(QThread):
     RIGHT_WALL_SEARCH_RADIUS_PX = 15
     CHANNEL_SPACING_MIN_PX = 12
     CHANNEL_SPACING_MAX_PX = 35
+    CHANNEL_WALL_PROFILE_VERTICAL_GUARD_PX = 8
+    CHANNEL_WALL_PEAK_PROMINENCE_MIN = 6.0
+    CHANNEL_WALL_PEAK_DISTANCE_PX = 8
+    CHANNEL_WALL_REL_X_MIN = 25
+    CHANNEL_WALL_REL_X_MAX = 95
+    CHANNEL_WALL_PAIR_LEFT_REL_MIN = 35
+    CHANNEL_WALL_PAIR_LEFT_REL_MAX = 60
+    CHANNEL_WALL_PAIR_SPACING_MIN = 14
+    CHANNEL_WALL_PAIR_SPACING_MAX = 30
+    CHANNEL_WALL_EXPECTED_LEFT_REL_X = 48
+    CHANNEL_WALL_PAIR_ACCEPT_SCORE_MAX = 12.0
     LED_TRIM_HEIGHT_MAX_PX = 108
     LED_TRIM_ASPECT_MIN = 1.8
     LED_SEPARATOR_PROMINENCE_MIN = 15
@@ -29882,54 +30130,82 @@ class ImageAnalysisThread(QThread):
         roi = gray[channel_y:channel_bottom, x : x + w]
         detected_pair = None
         peaks_payload = []
+        pair_candidates = []
+        selected_pair = None
+        selected_score = None
         reason = "fallback_offset"
         if roi.size:
-            band = roi[8 : max(9, roi.shape[0] - 8), :]
+            guard = int(self.CHANNEL_WALL_PROFILE_VERTICAL_GUARD_PX)
+            band = roi[guard : max(guard + 1, roi.shape[0] - guard), :]
             if band.size == 0:
                 band = roi
             col_mean = band.mean(axis=0).astype(np.float32)
             smooth = cv2.GaussianBlur(col_mean.reshape(1, -1), (9, 1), 0).ravel()
             dark_signal = float(np.max(smooth)) - smooth
-            peaks, props = find_peaks(dark_signal, prominence=3, distance=8)
+            peaks, props = find_peaks(
+                dark_signal,
+                prominence=float(self.CHANNEL_WALL_PEAK_PROMINENCE_MIN),
+                distance=int(self.CHANNEL_WALL_PEAK_DISTANCE_PX),
+            )
             prominences = props.get("prominences", [])
             peaks_payload = [
-                {"x": int(x + peak), "relative_x": int(peak), "prominence": float(prominences[idx])}
+                {
+                    "x": int(x + peak),
+                    "relative_x": int(peak),
+                    "prominence": float(prominences[idx]),
+                    "within_channel_search_window": bool(
+                        int(self.CHANNEL_WALL_REL_X_MIN) <= int(peak) <= int(self.CHANNEL_WALL_REL_X_MAX)
+                    ),
+                }
                 for idx, peak in enumerate(peaks)
             ]
-            fallback_rel = int(fallback_x - x)
             best = None
             for left_idx, left in enumerate(peaks):
-                if abs(int(left) - fallback_rel) > int(self.CHANNEL_SEARCH_RADIUS_PX):
+                left = int(left)
+                if left < int(self.CHANNEL_WALL_PAIR_LEFT_REL_MIN) or left > int(self.CHANNEL_WALL_PAIR_LEFT_REL_MAX):
                     continue
-                expected_right = int(left) + fallback_width
                 for right_idx, right in enumerate(peaks):
-                    if int(right) <= int(left):
+                    right = int(right)
+                    if right <= left:
                         continue
-                    spacing = int(right) - int(left)
-                    if spacing < int(self.CHANNEL_SPACING_MIN_PX) or spacing > int(self.CHANNEL_SPACING_MAX_PX):
+                    if right < int(self.CHANNEL_WALL_REL_X_MIN) or right > int(self.CHANNEL_WALL_REL_X_MAX):
                         continue
-                    if abs(int(right) - expected_right) > int(self.RIGHT_WALL_SEARCH_RADIUS_PX):
+                    spacing = right - left
+                    if spacing < int(self.CHANNEL_WALL_PAIR_SPACING_MIN) or spacing > int(self.CHANNEL_WALL_PAIR_SPACING_MAX):
                         continue
-                    prominence_bonus = float(prominences[left_idx]) + float(prominences[right_idx])
+                    left_prominence = float(prominences[left_idx])
+                    right_prominence = float(prominences[right_idx])
+                    prominence_bonus = left_prominence + right_prominence
                     score = (
-                        abs(spacing - fallback_width) * 2.0
-                        + abs(int(left) - fallback_rel)
-                        - 0.05 * prominence_bonus
+                        abs(left - int(self.CHANNEL_WALL_EXPECTED_LEFT_REL_X)) * 1.0
+                        + abs(spacing - int(fallback_width)) * 1.5
+                        - 0.04 * prominence_bonus
                     )
-                    candidate = (score, int(left), int(right), spacing)
-                    if best is None or candidate < best:
+                    pair_payload = {
+                        "left_x": int(x + left),
+                        "right_x": int(x + right),
+                        "left_relative_x": int(left),
+                        "right_relative_x": int(right),
+                        "spacing_px": int(spacing),
+                        "left_prominence": left_prominence,
+                        "right_prominence": right_prominence,
+                        "score": float(score),
+                    }
+                    pair_candidates.append(pair_payload)
+                    candidate = (float(score), int(left), int(right), int(spacing), pair_payload)
+                    if best is None or candidate[:4] < best[:4]:
                         best = candidate
             if best is not None:
-                _score, left, right, spacing = best
+                score, left, right, spacing, pair_payload = best
                 detected_pair = [int(x + left), int(x + right)]
-                offset_delta = abs(int(left) - fallback_rel)
-                width_delta = abs(int(spacing) - int(fallback_width))
-                if offset_delta <= 3 and width_delta <= 3:
+                selected_pair = dict(pair_payload)
+                selected_score = float(score)
+                if score <= float(self.CHANNEL_WALL_PAIR_ACCEPT_SCORE_MAX):
                     fallback_x = int(x + left)
                     fallback_width = int(spacing)
-                    reason = "detected_wall_pair"
+                    reason = "profile_wall_pair"
                 else:
-                    reason = "fallback_offset_detected_walls"
+                    reason = "fallback_offset_profile_pair_low_confidence"
 
         fallback_x = max(0, min(image_w - 1, fallback_x))
         fallback_width = max(1, min(int(fallback_width), image_w - fallback_x))
@@ -29938,6 +30214,23 @@ class ImageAnalysisThread(QThread):
             "channel_detection_reason": reason,
             "detected_channel_wall_xs": detected_pair,
             "channel_wall_peaks": peaks_payload,
+            "channel_wall_pair_candidates": pair_candidates,
+            "selected_channel_wall_pair": selected_pair,
+            "selected_channel_wall_pair_score": selected_score,
+            "channel_wall_profile_parameters": {
+                "vertical_guard_px": int(self.CHANNEL_WALL_PROFILE_VERTICAL_GUARD_PX),
+                "peak_prominence_min": float(self.CHANNEL_WALL_PEAK_PROMINENCE_MIN),
+                "peak_distance_px": int(self.CHANNEL_WALL_PEAK_DISTANCE_PX),
+                "relative_x_min": int(self.CHANNEL_WALL_REL_X_MIN),
+                "relative_x_max": int(self.CHANNEL_WALL_REL_X_MAX),
+                "pair_left_relative_x_min": int(self.CHANNEL_WALL_PAIR_LEFT_REL_MIN),
+                "pair_left_relative_x_max": int(self.CHANNEL_WALL_PAIR_LEFT_REL_MAX),
+                "pair_spacing_min_px": int(self.CHANNEL_WALL_PAIR_SPACING_MIN),
+                "pair_spacing_max_px": int(self.CHANNEL_WALL_PAIR_SPACING_MAX),
+                "expected_left_relative_x": int(self.CHANNEL_WALL_EXPECTED_LEFT_REL_X),
+                "expected_spacing_px": int(channel_width),
+                "accept_score_max": float(self.CHANNEL_WALL_PAIR_ACCEPT_SCORE_MAX),
+            },
         }
 
     def _detect_refuel_head_geometry(self, cur_img, threshold_value=50):
@@ -30609,7 +30902,7 @@ class RefuelCameraModel(QObject):
 
         return {
             "detector_name": "current_refuel_detector",
-            "detector_version": "phase2_dataset_seed_v4_fill_gate",
+            "detector_version": "phase2_dataset_seed_v5_channel_wall_profile",
             "predicted_status": status,
             "predicted_channel_geometry": channel_geometry,
             "predicted_meniscus_line": meniscus_line,
