@@ -8282,11 +8282,19 @@ class RefuelCameraWindow(QtWidgets.QDialog):
         super().resizeEvent(event)
         self._update_preview_pixmap()
 
-    def update_refuel_ui(self):
-        annotated_image = self.refuel_camera_model.get_annotated_image()
+    @staticmethod
+    def _prepare_refuel_preview_image(raw_image, annotated_image):
+        if raw_image is not None:
+            return cv2.rotate(raw_image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        return annotated_image
 
-        if annotated_image is not None:
-            qimage = self.numpy_to_qimage(annotated_image)
+    def update_refuel_ui(self):
+        raw_image = self.refuel_camera_model.get_raw_capture_image()
+        annotated_image = self.refuel_camera_model.get_annotated_image()
+        preview_image = self._prepare_refuel_preview_image(raw_image, annotated_image)
+
+        if preview_image is not None:
+            qimage = self.numpy_to_qimage(preview_image)
             self._preview_pixmap = QPixmap.fromImage(qimage)
             self._update_preview_pixmap()
 

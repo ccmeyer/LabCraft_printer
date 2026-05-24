@@ -116,6 +116,7 @@ def test_refuel_camera_window_preview_preserves_aspect_ratio(qapp):
         qapp,
         capture_return=np.zeros((8, 8, 3), dtype=np.uint8),
     )
+    model.refuel_camera_model.raw_capture_image = np.zeros((30, 40, 3), dtype=np.uint8)
     model.refuel_camera_model.annotated_image = np.zeros((480, 640, 3), dtype=np.uint8)
 
     dialog.show()
@@ -126,9 +127,18 @@ def test_refuel_camera_window_preview_preserves_aspect_ratio(qapp):
     pixmap = dialog.image_label.pixmap()
     assert pixmap is not None
     assert dialog.image_label.hasScaledContents() is False
-    assert abs((pixmap.width() / pixmap.height()) - (640 / 480)) < 0.05
+    assert abs((pixmap.width() / pixmap.height()) - (30 / 40)) < 0.05
     assert pixmap.width() <= dialog.image_label.width()
     assert pixmap.height() <= dialog.image_label.height()
+
+
+def test_refuel_camera_window_preview_prefers_rotated_raw_frame(qapp):
+    raw = np.zeros((30, 40, 3), dtype=np.uint8)
+    annotated = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    preview = RefuelCameraWindow._prepare_refuel_preview_image(raw, annotated)
+
+    assert preview.shape == (40, 30, 3)
 
 
 def test_refuel_camera_window_none_capture_disables_session_without_crashing(monkeypatch, qapp):
