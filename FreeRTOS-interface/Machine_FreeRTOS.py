@@ -1507,6 +1507,9 @@ class RefuelCamera(QObject):
     def __init__(self):
         super().__init__()
         self.camera = None
+        self.exposure_time = 20_000  # us
+        self.frame_duration_us = self.exposure_time
+        self.analogue_gain = 1.0
         self.led_pin = 27
         # self._chip_name = "gpiochip4"  # adjust if needed on your Pi
         self._chip_name, off = _gpiofind("GPIO"+str(self.led_pin))
@@ -1514,13 +1517,36 @@ class RefuelCamera(QObject):
         self._led = _make_output_line(self._chip_name, off,
                                              initial=0, consumer="refuel_led")
 
+    def get_camera_control_defaults(self):
+        exposure_time = int(self.exposure_time)
+        frame_duration = int(getattr(self, "frame_duration_us", exposure_time))
+        return {
+            "FrameDurationLimits": (frame_duration, frame_duration),
+            "ExposureTime": exposure_time,
+            "AeEnable": False,
+            "AwbEnable": False,
+            "AnalogueGain": float(self.analogue_gain),
+        }
+
     def start_camera(self):
+        if self.camera is not None:
+            return
+
         from picamera2 import Picamera2
-        self.camera = Picamera2(0)
-        self.camera.configure(self.camera.create_still_configuration(
-            main={"size": self.camera.sensor_resolution, "format": "RGB888"}
-        ))
-        self.camera.start()
+        camera = Picamera2(0)
+        try:
+            camera.configure(camera.create_still_configuration(
+                main={"size": camera.sensor_resolution, "format": "RGB888"}
+            ))
+            camera.set_controls(self.get_camera_control_defaults())
+            camera.start()
+        except Exception:
+            try:
+                camera.close()
+            except Exception:
+                pass
+            raise
+        self.camera = camera
 
     def capture_image(self):
         return self.camera.capture_array() if self.camera else None

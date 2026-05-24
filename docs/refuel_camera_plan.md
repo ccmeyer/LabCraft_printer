@@ -9,7 +9,7 @@ The short version is:
 - The current refuel camera path is a host-side monitoring tool, not a closed-loop controller.
 - It captures still images from a dedicated Pi camera, estimates the channel liquid level from image intensity changes, and displays the result in a separate Qt dialog.
 - Manual tuning still happens through operator actions: adjust refuel pressure/pulse width, fire print-only or refuel-only bursts, and watch whether the measured level drifts.
-- The code already contains the basic pieces for this workflow, but the feature looks only partially integrated into the main UI and has several rough edges.
+- The code is integrated as a dataset-first tool in the current main UI, but the measurement path still has geometry and workflow limits.
 
 ## Status Update: Dataset-First Capture Workflow
 
@@ -175,7 +175,7 @@ When the dialog is constructed:
 - it immediately starts the refuel camera
 - it immediately pushes the current analysis parameters into the shared `RefuelCameraModel`
 
-Unlike the droplet imager, I did not find a current main-window launcher for `RefuelCameraWindow`. The class exists and is wired internally, but no active caller in the main UI currently instantiates it.
+The current main pressure UI exposes a `Refuel Camera` button on non-legacy hardware. Before launching the dialog, it checks that the command queue is empty, a printer head is loaded, both print and refuel pressure are regulated, and the machine is at the `"camera"` location or the operator accepts a move there.
 
 ### 2. Camera start
 
@@ -195,6 +195,7 @@ The refuel camera wrapper is much simpler than the droplet imager:
 - it uses `Picamera2(0)`
 - it uses a still configuration, not a free-running video grabber
 - it does synchronous `capture_array()` image acquisition
+- it locks exposure, frame duration, auto-exposure, auto-white-balance, and analogue gain for repeatable intensity profiles
 - it controls a local LED on GPIO 27 directly from the Pi
 
 Based on the README camera overlay configuration plus the camera indices used in code, the likely intended mapping is:
@@ -241,10 +242,12 @@ The model stores only in-memory state:
 
 - `current_level`
 - `level_log` (rolling, max 100 entries)
-- `original_image`
+- `sample_trace`
+- raw capture image
+- analysis input image
 - `annotated_image`
 
-There is no built-in persistence of level history, setpoint, pressure adjustments, or refuel session metadata.
+Dataset captures are persisted through `RefuelLevelDatasetCaptureProcess` runs. The model also still contains advisory target/burst recording logic for `RefuelBalanceCalibrationProcess`, but those target/burst controls are not surfaced in the current dataset-first window.
 
 ### 5. Image analysis algorithm
 
@@ -377,9 +380,8 @@ When analysis completes, `RefuelCameraModel.update_ui_with_analysis()`:
 - converts the annotated image into a `QPixmap`
 - updates the image panel
 - updates the `Current Level` label
-- redraws the line chart from `level_log`
 
-The chart is a simple rolling plot of recent level values. It is not tied to pressure events, droplet events, timestamps, or calibration phases.
+The current dataset-first window does not show the older level chart or burst summary controls. Level history remains available in the model for recording and future workflow work.
 
 ## Manual Refuel Tuning Control Path
 
@@ -459,7 +461,6 @@ Droplet imager:
 - Pi GPIO trigger plus MCU flash-ack GPIO handshake
 - firmware `START_READ_CAMERA` / `STOP_READ_CAMERA`
 - capture retries and frame-selection logic
-- formal main-window launcher and preflight checks
 - broader calibration-manager integration
 
 In other words:
@@ -473,81 +474,15 @@ In other words:
 
 These are the most important findings for future work.
 
-### 1. The refuel dialog appears to be orphaned from the main UI
+### 1. Capture is synchronous on the UI path
 
-I found the `RefuelCameraWindow` implementation, but I did not find an active caller that opens it from the main window.
+`capture_array()` is called from the refuel dialog timer path. Slow camera readout can still block the Qt UI, unlike the droplet-imager path, which uses a free-running grabber and async capture worker.
 
-What does exist today:
+### 2. Camera controls are fixed but not yet tuned from real data
 
-- main-window shortcuts to start/stop the refuel camera hardware
-- main-window pressure controls for refuel pressure and pulse width
+The refuel camera now locks exposure time, frame duration, auto-exposure, auto-white-balance, and analogue gain before start. The current defaults mirror the droplet imager (`20,000 us`, `AnalogueGain=1.0`), but they should be checked against real refuel-camera frames for saturation, low signal, and repeatability.
 
-What I did not find:
-
-- a current button/menu/launcher that creates `RefuelCameraWindow`
-
-### 2. No preflight checks equivalent to the droplet imager
-
-The droplet imager verifies things like:
-
-- command queue empty
-- head loaded
-- print pressure regulated
-- machine positioned at `"camera"`
-
-The refuel window currently does none of that before starting the camera or capture loop.
-
-### 3. The "previous row" tracking looks inconsistent
-
-`detect_meniscus_row()` expects `last_row` to be the previously detected row index.
-
-But the refuel model passes:
-
-- `last_level = self.level_log[-1]`
-
-and `level_log` stores:
-
-- `level_data = h0 - meniscus_row`
-
-So the temporal tracking value being passed forward is a prior level-from-bottom, not a prior row-from-top.
-
-That means the "pick the peak nearest last_row" logic is likely biased or inverted relative to the actual coordinate system it expects.
-
-This is one of the most important code-level issues to fix before trusting automated tracking behavior.
-
-### 4. Capture/analysis concurrency is not guarded
-
-Each capture starts a fresh `ImageAnalysisThread`, but there is no overlap protection or "analysis in progress" guard.
-
-At the current `500 ms` timer period this may be fine most of the time, but it is much less controlled than the droplet-imager path.
-
-### 5. No `None` guard on captured frames
-
-`RefuelCameraModel.start_analysis(frame)` immediately calls `cv2.resize(frame, ...)`.
-
-If `frame` is `None`, this will fail.
-
-That matters because:
-
-- `NullCamera.capture_image()` returns `None`
-- `RefuelCamera.capture_image()` also returns `None` if the camera is not started
-
-So the current path is not robust on unsupported systems or camera-start failures.
-
-### 6. Camera settings are not explicitly locked
-
-Unlike the droplet imager, the refuel camera does not set explicit controls such as:
-
-- exposure time
-- frame duration
-- auto-exposure disable
-- auto-white-balance disable
-
-Because no camera controls are applied in `RefuelCamera.start_camera()`, the refuel path currently relies on Picamera2 defaults. That likely means measurement stability can change with scene brightness or camera auto-adjustment behavior.
-
-This is an inference from the absence of explicit control settings in the current code.
-
-### 7. Geometry assumptions are hard-coded
+### 3. Geometry assumptions are hard-coded
 
 The head/channel detector depends on:
 
@@ -558,40 +493,24 @@ The head/channel detector depends on:
 
 So the current system is tightly tied to one camera framing and one printer-head presentation.
 
-### 8. Save path looks stale
+### 4. Dataset collection and advisory calibration are split
 
-`RefuelCameraWindow.save_frame()` writes to:
+The current window is intentionally dataset-first. `RefuelCameraModel` still contains target-lock, live-status, burst-result, and recording helpers, but those controls are not exposed in the window. Future work should either revive that workflow deliberately or keep it parked while dataset collection and offline detector iteration continue.
 
-- `./MVC-interface/Images/Refuel/...`
+### 5. No closed-loop refuel control exists
 
-That path does not currently exist in the repo root. So the save feature likely needs cleanup before it can be relied on.
+The current system measures level and provides manual controls. It does not automatically tune refuel pressure, adjust pulse width, gate printing, or feed level status into the print-array workflow.
 
-### 9. There is stale/unused code around the feature
+### 6. Test coverage is focused but still synthetic
 
-Examples:
-
-- `FreeRTOS-interface/RefuelCamera.py` contains an older standalone refuel camera wrapper that does not appear to be used anywhere.
-- `RefuelCameraModel` contains fields/methods like `stable`, `update_blur`, `update_left_bound`, and `update_right_bound` that do not appear to participate in the active refuel workflow.
-
-This suggests the feature evolved in-place and was never fully cleaned up.
-
-### 10. No test coverage found for the refuel imaging path
-
-I did not find tests covering:
-
-- `RefuelCameraWindow`
-- `RefuelCameraModel`
-- `ImageAnalysisThread`
-- refuel-camera capture/analysis/controller flow
-
-The existing test suite covers many machine-model and pressure-control areas, but not the actual refuel imaging path.
+There are targeted tests for the analysis thread, model state, controller capture path, dataset capture, annotation tooling, window behavior, and refuel-camera hardware wrapper setup. The detector still needs regression tests using representative real camera frames.
 
 ## What the Current System Already Does Well
 
 Even with the gaps above, the current implementation already gives us a useful foundation:
 
 - a dedicated second camera path exists
-- a live rolling level display exists
+- a current-level display and rolling in-memory trace exist
 - the manual refuel workflow maps naturally onto existing pressure/pulse commands
 - the UI already provides tunable analysis parameters for ROI placement and peak detection
 - the system is separate from the droplet imager, which makes investigation safer while the logic is still exploratory
@@ -631,16 +550,11 @@ If the goal is to start active development on the refuel camera system again, th
 
 ### Phase 1: make the current tool reliable
 
-1. Add a proper launcher for `RefuelCameraWindow` from the main UI.
-2. Add preflight checks similar to the droplet imager:
-   - machine at `"camera"`
-   - queue empty
-   - appropriate head loaded
-   - relevant pressure channels ready
-3. Guard against `None` frames and camera-start failure.
-4. Fix the row-vs-level mismatch in temporal tracking.
-5. Clean up the stale save path and stale helper methods.
-6. Add a simple image-fixture test harness for the meniscus detector.
+1. Collect representative real frames across fluid levels, bubbles, glare, empty/full states, and focus/exposure conditions.
+2. Add image-fixture regression tests for the meniscus detector.
+3. Tune or replace the hard-coded head/channel geometry assumptions.
+4. Evaluate whether synchronous capture is acceptable during long dataset sessions.
+5. Decide whether target/burst model helpers should return to the UI or remain parked.
 
 ### Phase 2: make the measurement meaningful for calibration
 
@@ -654,7 +568,7 @@ If the goal is to start active development on the refuel camera system again, th
    - print pulse width
    - refuel pulse width
    - level trace over time
-3. Add structured "print burst then measure drift" helpers instead of relying only on manual shortcuts.
+3. Add or re-surface structured "print burst then measure drift" helpers instead of relying only on manual shortcuts.
 
 ### Phase 3: integrate with droplet imaging
 
@@ -662,8 +576,8 @@ If the goal is to start active development on the refuel camera system again, th
    - a separate refuel window
    - a tab inside the droplet imager
    - a combined droplet/refuel calibration workflow
-2. Reuse the droplet-imager preflight and camera-position checks.
-3. Share calibration metadata/logging so a droplet imaging run can also produce a refuel-balance record.
+2. Share calibration metadata/logging so a droplet imaging run can also produce a refuel-balance record.
+3. Decide whether refuel status should become a print-time guard, an advisory calibration signal, or both.
 
 ## Bottom Line
 
@@ -678,7 +592,7 @@ It is not yet an integrated calibration workflow or automatic controller.
 
 The fastest path forward is not to redesign it from zero. It is to:
 
-1. reconnect the existing dialog to the main UI,
-2. stabilize the current measurement path,
-3. fix the most obvious implementation mismatches,
+1. validate the locked camera settings on real refuel-camera frames,
+2. build a representative labeled dataset,
+3. harden the geometry and meniscus detector against that dataset,
 4. then decide how tightly it should merge with the droplet imager workflow.
