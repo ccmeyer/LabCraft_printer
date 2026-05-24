@@ -576,6 +576,114 @@ class Controller(QObject):
         self._array_state = state
         self._emit_optional("array_state_changed", state)
 
+    def _safe_audit_value(self, obj, name, default=None):
+        if obj is None:
+            return default
+        try:
+            value = getattr(obj, name, default)
+            if callable(value):
+                return value()
+            return value
+        except Exception:
+            return default
+
+    def _build_print_settings_snapshot(self):
+        machine_model = getattr(getattr(self, "model", None), "machine_model", None)
+        return {
+            "print_pressure_psi": self._safe_audit_value(machine_model, "get_current_print_pressure"),
+            "target_print_pressure_psi": self._safe_audit_value(machine_model, "get_target_print_pressure"),
+            "refuel_pressure_psi": self._safe_audit_value(machine_model, "get_current_refuel_pressure"),
+            "target_refuel_pressure_psi": self._safe_audit_value(machine_model, "get_target_refuel_pressure"),
+            "print_pulse_width_us": self._safe_audit_value(machine_model, "get_print_pulse_width"),
+            "refuel_pulse_width_us": self._safe_audit_value(machine_model, "get_refuel_pulse_width"),
+            "regulating_print_pressure": bool(
+                getattr(machine_model, "regulating_print_pressure", False)
+            ),
+            "transport_paused": bool(getattr(machine_model, "transport_paused", False)),
+        }
+
+    def _build_loaded_printer_head_snapshot(self):
+        rack_model = getattr(getattr(self, "model", None), "rack_model", None)
+        printer_head = self._safe_audit_value(rack_model, "get_gripper_printer_head")
+        if printer_head is None:
+            printer_head = getattr(rack_model, "gripper_printer_head", None)
+        if printer_head is None:
+            return {"loaded": False}
+
+        return {
+            "loaded": True,
+            "stock_id": self._safe_audit_value(printer_head, "get_stock_id"),
+            "stock_solution": self._safe_audit_value(printer_head, "get_stock_name"),
+            "reagent": self._safe_audit_value(printer_head, "get_reagent_name"),
+            "concentration": self._safe_audit_value(printer_head, "get_stock_concentration"),
+            "printing_mode": self._safe_audit_value(printer_head, "get_printing_mode"),
+            "printer_head_id": self._safe_audit_value(printer_head, "printer_head_id"),
+            "display_name": self._safe_audit_value(printer_head, "display_name"),
+            "head_type_id": self._safe_audit_value(printer_head, "head_type_id"),
+            "printer_head_slot": getattr(rack_model, "gripper_slot_number", None),
+            "calibration_complete": bool(
+                self._safe_audit_value(printer_head, "check_calibration_complete", False)
+            ),
+            "current_volume_uL": self._safe_audit_value(printer_head, "get_current_volume"),
+            "droplet_volume_nL": self._safe_audit_value(printer_head, "get_target_droplet_volume"),
+        }
+
+    def _build_print_array_snapshot(self, context=None):
+        if context is None:
+            context = getattr(self, "_array_context", None)
+        if not isinstance(context, dict):
+            context = {}
+
+        stock_id = context.get("stock_id")
+        remaining_well_count = None
+        if stock_id:
+            try:
+                remaining_well_count = len(self._get_array_remaining_wells(stock_id))
+            except Exception:
+                remaining_well_count = None
+
+        queued_wells = list(context.get("queued_wells") or [])
+        planned_well_ids = context.get("planned_well_ids") or set()
+        try:
+            planned_well_count = len(planned_well_ids)
+        except Exception:
+            planned_well_count = None
+
+        return {
+            "array_state": self.get_array_run_state(),
+            "stock_id": stock_id,
+            "remaining_well_count": remaining_well_count,
+            "queued_well_count": len(queued_wells),
+            "planned_well_count": planned_well_count,
+            "lookahead_wells": context.get("lookahead_wells"),
+            "current_barrier_seq32": context.get("current_barrier_seq32"),
+            "finalize_reason": context.get("finalize_reason"),
+            "soft_stop_pending": bool(context.get("soft_stop_pending", False)),
+            "soft_stop_phase": context.get("soft_stop_phase"),
+            "soft_stop_clear_uncertain": bool(getattr(self, "_soft_stop_clear_uncertain", False)),
+            "serpentine": bool(getattr(self, "_array_print_serpentine", ARRAY_PRINT_SERPENTINE)),
+            "expected_volume_uL": context.get("expected_volume"),
+            "droplet_volume_nL": context.get("droplet_volume"),
+            "update_volume": bool(context.get("update_volume", False)),
+            "settings": self._build_print_settings_snapshot(),
+            "loaded_printer_head": self._build_loaded_printer_head_snapshot(),
+        }
+
+    def _record_print_array_audit_event(self, event_type, summary, details=None, level="info"):
+        try:
+            event_details = self._build_print_array_snapshot()
+            if isinstance(details, dict):
+                event_details.update(details)
+            elif details is not None:
+                event_details["details"] = details
+
+            recorder = getattr(getattr(self, "model", None), "record_experiment_audit_event", None)
+            if not callable(recorder):
+                return None
+            return recorder(event_type, summary, details=event_details, level=level)
+        except Exception:
+            return None
+
     def request_array_soft_stop(self):
         """Finish the active well, then park and leave the array resumable."""
         if self.get_array_run_state() != "running":
@@ -599,6 +707,11 @@ class Controller(QObject):
             ),
         ):
             return False
+        self._record_print_array_audit_event(
+            "print_array_soft_stop_requested",
+            "Print array soft stop requested",
+            details={"barrier_seq32": current_barrier},
+        )
         return True
 
     def _abort_array_after_soft_stop_failure(self, reason, barrier_seq32=None):
@@ -1930,12 +2043,45 @@ class Controller(QObject):
 
     def _finish_array_finalize(self, reason):
         reason = str(reason or "completed")
+        try:
+            audit_details = self._build_print_array_snapshot(getattr(self, "_array_context", None))
+        except Exception:
+            audit_details = {}
+        audit_details["finalize_reason"] = reason
         self._array_context = None
 
         if reason in {"soft_stop", "refill_required"}:
             self._set_array_run_state("resume_ready")
         else:
             self._set_array_run_state("idle")
+        audit_details["array_state"] = self.get_array_run_state()
+
+        if reason == "completed":
+            self._record_print_array_audit_event(
+                "print_array_completed",
+                "Print array completed",
+                details=audit_details,
+            )
+        elif reason == "soft_stop":
+            self._record_print_array_audit_event(
+                "print_array_paused",
+                "Print array paused",
+                details=audit_details,
+            )
+        elif reason == "refill_required":
+            self._record_print_array_audit_event(
+                "print_array_refill_required",
+                "Print array paused for printer head refill",
+                details=audit_details,
+                level="warning",
+            )
+        else:
+            self._record_print_array_audit_event(
+                "print_array_aborted",
+                "Print array aborted",
+                details=audit_details,
+                level="error",
+            )
 
         if reason == "completed":
             print('---Printing complete---')
@@ -2077,7 +2223,8 @@ class Controller(QObject):
         Iterates through all wells with an assigned reaction and prints the 
         required number of droplets for the currently loaded printer head.
         '''
-        if self.get_array_run_state() in {"running", "stop_requested"}:
+        starting_state = self.get_array_run_state()
+        if starting_state in {"running", "stop_requested"}:
             print('Cannot print: Array runner is already active')
             return
 
@@ -2121,12 +2268,29 @@ class Controller(QObject):
                 return
             print(f"Print array imaging calibration override accepted: {code}")
 
-        if self.get_array_run_state() == "resume_ready" and self.model.machine_model.transport_paused:
+        transport_resumed = False
+        if starting_state == "resume_ready" and self.model.machine_model.transport_paused:
             self.resume_commands()
+            transport_resumed = True
 
         if not self._start_array_run_context():
             print('Cannot print: No remaining droplets for the loaded stock')
             return
+        self._record_print_array_audit_event(
+            "print_array_requested",
+            "Print array request accepted",
+            details={
+                "request_kind": "resume" if starting_state == "resume_ready" else "start",
+                "imaging_calibration_override": bool(imaging_calibration_override),
+                "settings_mismatch_override": bool(settings_mismatch_override),
+            },
+        )
+        if starting_state == "resume_ready":
+            self._record_print_array_audit_event(
+                "print_array_resumed",
+                "Print array resumed",
+                details={"transport_resumed": transport_resumed},
+            )
         
         self.close_gripper()
         # self.wait_command()
@@ -2141,7 +2305,13 @@ class Controller(QObject):
         self.enable_print_profile()
 
         self._set_array_run_state("running")
-        self._fill_array_lookahead()
+        lookahead_added = self._fill_array_lookahead()
+        if self.get_array_run_state() == "running":
+            self._record_print_array_audit_event(
+                "print_array_started",
+                "Print array started",
+                details={"lookahead_added": bool(lookahead_added)},
+            )
             
     def enable_print_profile(self):
         """Enable the print profile."""
