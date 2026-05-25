@@ -141,6 +141,8 @@ def test_refuel_panel_default_disabled_and_no_capture(monkeypatch, qapp):
     assert dialog.refuel_level_timing_label.parent() is None
     assert dialog.refuel_level_process_label.parent() is None
     assert dialog.refuel_level_ejection_label.parent() is None
+    assert dialog.refuel_level_process_result_label.text() == ""
+    assert dialog.refuel_level_process_result_label.isHidden() is True
     assert dialog.refuel_monitor_timer.isActive() is False
     controller.start_refuel_camera.assert_not_called()
     controller.capture_refuel_image.assert_not_called()
@@ -164,6 +166,7 @@ def test_enabling_refuel_tracking_starts_monitor_and_schedules_immediate_capture
     assert dialog.refuel_level_value_label.text() == "Level: -"
     assert dialog.export_refuel_performance_button.isEnabled() is False
     assert dialog.refuel_level_advisory_label.text() == "Waiting for first refuel sample"
+    assert dialog.refuel_level_process_result_label.isHidden() is True
     controller.start_refuel_camera.assert_called_once_with()
     controller.capture_refuel_image.assert_not_called()
     controller.capture_refuel_image_with_context.assert_called_once_with(
@@ -211,6 +214,7 @@ def test_refuel_panel_updates_from_sample_trace_when_enabled(monkeypatch, qapp):
     assert dialog.refuel_level_process_label.parent() is None
     assert dialog._refuel_level_chart_bundle["primary_series"].count() == 1
     assert dialog._refuel_level_chart_bundle["current_series"].count() == 1
+    assert dialog._refuel_level_chart_bundle["current_series"].color().name().lower() == "#ffffff"
     point = dialog._refuel_level_chart_bundle["primary_series"].at(0)
     assert point.x() == 0.0
     assert point.y() == 42.5
@@ -322,6 +326,38 @@ def test_refuel_level_chart_rolls_last_100_samples_without_truncating_trace(monk
     assert bundle["axis_x"].max() == 99.0
     assert bundle["axis_y"].min() == 0.0
     assert bundle["axis_y"].max() == 150.0
+
+
+def test_refuel_level_chart_process_markers_clip_to_visible_sample_window(monkeypatch, qapp):
+    dialog, refuel_model, _controller = _build_droplet_dialog(monkeypatch, qapp)
+
+    dialog.enable_refuel_level_tracking_checkbox.setChecked(True)
+    refuel_model.sample_trace = [
+        {
+            "sample_index": index,
+            "level_px": float(index),
+            "channel_height_px": 150.0,
+        }
+        for index in range(1, 106)
+    ]
+    refuel_model.last_refuel_process_summary = {
+        "baseline_sample_index": 1,
+        "baseline_level_px": 10.0,
+        "end_sample_index": 105,
+        "end_level_px": 105.0,
+        "drift_px": 95.0,
+    }
+
+    dialog._schedule_refuel_level_panel_refresh(force=True)
+
+    bundle = dialog._refuel_level_chart_bundle
+    assert bundle["process_start_line_series"].count() == 2
+    assert bundle["process_start_line_series"].at(0).y() == 10.0
+    assert bundle["process_end_line_series"].count() == 2
+    assert bundle["process_end_line_series"].at(0).y() == 105.0
+    assert bundle["process_start_marker_series"].count() == 0
+    assert bundle["process_end_marker_series"].count() == 1
+    assert bundle["process_end_marker_series"].at(0).x() == 99.0
 
 
 def test_refuel_monitor_tick_captures_with_context_and_updates_counters(monkeypatch, qapp):
@@ -671,6 +707,14 @@ def test_process_monitor_records_stage_and_completion_drift(monkeypatch, qapp):
     assert markers[-1]["stage_message"] == "Printing droplets"
     assert markers[-1]["phase_name"] == "droplet_search"
     assert dialog.refuel_level_process_label.parent() is None
+    dialog._schedule_refuel_level_panel_refresh(force=True)
+    bundle = dialog._refuel_level_chart_bundle
+    assert bundle["process_start_line_series"].count() == 2
+    assert bundle["process_start_marker_series"].count() == 1
+    assert bundle["process_start_marker_series"].at(0).x() == 0.0
+    assert bundle["process_start_marker_series"].at(0).y() == 40.0
+    assert bundle["process_end_line_series"].count() == 0
+    assert bundle["process_end_marker_series"].count() == 0
 
     refuel_model.update_ui_with_analysis(None, None, 34.5, 10)
     manager.calibrationCompleted.emit()
@@ -685,6 +729,58 @@ def test_process_monitor_records_stage_and_completion_drift(monkeypatch, qapp):
     dialog._schedule_refuel_level_panel_refresh(force=True)
     assert dialog.refuel_level_process_label.parent() is None
     assert "fell by 5.5 px" in dialog.refuel_level_advisory_label.text()
+    assert dialog.refuel_level_process_result_label.isHidden() is False
+    assert dialog.refuel_level_process_result_label.text() == "Last process: level fell 5.5 px"
+    assert bundle["process_start_line_series"].count() == 2
+    assert bundle["process_start_line_series"].at(0).y() == 40.0
+    assert bundle["process_end_line_series"].count() == 2
+    assert bundle["process_end_line_series"].at(0).y() == 34.5
+    assert bundle["process_start_marker_series"].count() == 1
+    assert bundle["process_start_marker_series"].at(0).x() == 0.0
+    assert bundle["process_end_marker_series"].count() == 1
+    assert bundle["process_end_marker_series"].at(0).x() == 1.0
+
+    dialog.enable_refuel_process_monitoring_checkbox.setChecked(False)
+    refuel_model.update_ui_with_analysis(None, None, 35.0, 9)
+    dialog._schedule_refuel_level_panel_refresh(force=True)
+
+    assert dialog.refuel_level_advisory_label.text() == "Level stable"
+    assert dialog.refuel_level_process_result_label.text() == "Last process: level fell 5.5 px"
+
+
+def test_process_result_replaces_on_next_completed_process_and_active_annotations_reset(monkeypatch, qapp):
+    dialog, refuel_model, _controller = _build_droplet_dialog(monkeypatch, qapp)
+    manager = dialog.model.calibration_manager
+
+    dialog.enable_refuel_level_tracking_checkbox.setChecked(True)
+    dialog.enable_refuel_process_monitoring_checkbox.setChecked(True)
+    refuel_model.update_ui_with_analysis(None, None, 50.0, 10)
+    manager.calibrationStageChanged.emit("First process", "blue")
+    refuel_model.update_ui_with_analysis(None, None, 45.0, 15)
+    manager.calibrationCompleted.emit()
+    dialog._schedule_refuel_level_panel_refresh(force=True)
+
+    assert dialog.refuel_level_process_result_label.text() == "Last process: level fell 5.0 px"
+    assert dialog._refuel_level_chart_bundle["process_end_line_series"].count() == 2
+
+    refuel_model.update_ui_with_analysis(None, None, 60.0, 5)
+    manager.calibrationStageChanged.emit("Second process", "blue")
+    dialog._schedule_refuel_level_panel_refresh(force=True)
+
+    bundle = dialog._refuel_level_chart_bundle
+    assert dialog.refuel_level_process_result_label.isHidden() is True
+    assert bundle["process_start_line_series"].count() == 2
+    assert bundle["process_start_line_series"].at(0).y() == 60.0
+    assert bundle["process_end_line_series"].count() == 0
+    assert bundle["process_end_marker_series"].count() == 0
+
+    refuel_model.update_ui_with_analysis(None, None, 62.0, 4)
+    manager.calibrationCompleted.emit()
+    dialog._schedule_refuel_level_panel_refresh(force=True)
+
+    assert dialog.refuel_level_process_result_label.text() == "Last process: level rose 2.0 px"
+    assert bundle["process_end_line_series"].count() == 2
+    assert bundle["process_end_line_series"].at(0).y() == 62.0
 
 
 def test_process_monitor_off_ignores_calibration_signals(monkeypatch, qapp):
@@ -856,5 +952,8 @@ def test_process_monitor_uses_stream_printed_count_for_drift_per_ejection(monkey
     assert summary["drift_px_per_ejection"] == -0.5
     dialog._schedule_refuel_level_panel_refresh(force=True)
     assert "-0.500 px/ejection over 10 ejections" in dialog.refuel_level_advisory_label.text()
+    assert dialog.refuel_level_process_result_label.text() == (
+        "Last process: level fell 5.0 px over 10 ejections (-0.500 px/ejection)"
+    )
     assert dialog.refuel_level_process_label.parent() is None
     assert dialog.refuel_level_ejection_label.parent() is None

@@ -2066,6 +2066,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.refuel_level_ejection_label.setWordWrap(True)
         self.refuel_level_advisory_label = QtWidgets.QLabel("Monitoring disabled")
         self.refuel_level_advisory_label.setWordWrap(True)
+        self.refuel_level_process_result_label = QtWidgets.QLabel("")
+        self.refuel_level_process_result_label.setWordWrap(True)
+        self.refuel_level_process_result_label.hide()
         group_v.addWidget(self.refuel_level_value_label)
 
         self._refuel_level_chart_bundle = self._create_refuel_level_chart_bundle()
@@ -2076,6 +2079,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         group_v.addWidget(chart_view)
 
         group_v.addWidget(self.refuel_level_advisory_label)
+        group_v.addWidget(self.refuel_level_process_result_label)
 
         self.open_refuel_camera_button = QtWidgets.QPushButton("Open Refuel Camera")
         opener = None
@@ -2214,9 +2218,28 @@ class DropletImagingDialog(QtWidgets.QDialog):
         current_series = QtCharts.QScatterSeries()
         current_series.setMarkerSize(9.0)
         current_series.setBorderColor(self._chart_color("light_gray", "#cfd8dc"))
-        current_series.setColor(self._chart_color("green", "#2ecc71"))
+        current_series.setColor(QColor("#ffffff"))
+        process_start_line_series = QtCharts.QLineSeries()
+        process_start_line_series.setPen(self._make_chart_pen("yellow", "#f1c40f", width=2, style=Qt.DashLine))
+        process_end_line_series = QtCharts.QLineSeries()
+        process_end_line_series.setPen(self._make_chart_pen("magenta", "#ff4fd8", width=2, style=Qt.DashLine))
+        process_start_marker_series = QtCharts.QScatterSeries()
+        process_start_marker_series.setMarkerSize(10.0)
+        process_start_marker_series.setBorderColor(self._chart_color("yellow", "#f1c40f"))
+        process_start_marker_series.setColor(self._chart_color("yellow", "#f1c40f"))
+        process_end_marker_series = QtCharts.QScatterSeries()
+        process_end_marker_series.setMarkerSize(10.0)
+        process_end_marker_series.setBorderColor(self._chart_color("magenta", "#ff4fd8"))
+        process_end_marker_series.setColor(self._chart_color("magenta", "#ff4fd8"))
 
-        for series in (primary_series, current_series):
+        for series in (
+            primary_series,
+            process_start_line_series,
+            process_end_line_series,
+            current_series,
+            process_start_marker_series,
+            process_end_marker_series,
+        ):
             chart.addSeries(series)
             series.attachAxis(axis_x)
             series.attachAxis(axis_y)
@@ -2233,6 +2256,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "axis_y": axis_y,
             "primary_series": primary_series,
             "current_series": current_series,
+            "process_start_line_series": process_start_line_series,
+            "process_end_line_series": process_end_line_series,
+            "process_start_marker_series": process_start_marker_series,
+            "process_end_marker_series": process_end_marker_series,
         }
 
     def _set_refuel_tracking_enabled(self, checked):
@@ -2791,6 +2818,47 @@ class DropletImagingDialog(QtWidgets.QDialog):
         return "Waiting for calibration"
 
     @staticmethod
+    def _format_refuel_process_result_label(summary):
+        last = summary.get("last") if isinstance(summary, dict) else None
+        if not isinstance(last, dict) or not last:
+            return ""
+        drift = last.get("drift_px")
+        if drift is None:
+            return "Last process: drift unavailable"
+        try:
+            drift_value = float(drift)
+            if drift_value < 0:
+                drift_text = f"level fell {abs(drift_value):.1f} px"
+            elif drift_value > 0:
+                drift_text = f"level rose {abs(drift_value):.1f} px"
+            else:
+                drift_text = "level stable"
+        except Exception:
+            drift_text = f"level changed by {drift} px"
+
+        ejection_count = last.get("ejection_count_delta")
+        drift_per_ejection = last.get("drift_px_per_ejection")
+        if ejection_count is not None:
+            try:
+                ejection_count_value = int(ejection_count)
+            except Exception:
+                ejection_count_value = None
+            if ejection_count_value is not None and ejection_count_value > 0:
+                if drift_per_ejection is not None:
+                    try:
+                        return (
+                            f"Last process: {drift_text} over {ejection_count_value} ejections "
+                            f"({float(drift_per_ejection):+.3f} px/ejection)"
+                        )
+                    except Exception:
+                        return (
+                            f"Last process: {drift_text} over {ejection_count_value} ejections "
+                            f"({drift_per_ejection} px/ejection)"
+                        )
+                return f"Last process: {drift_text} over {ejection_count_value} ejections"
+        return f"Last process: {drift_text}"
+
+    @staticmethod
     def _format_refuel_ejection_label(counter, summary):
         last = summary.get("last") if isinstance(summary, dict) else None
         if isinstance(last, dict) and last:
@@ -2976,6 +3044,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.refuel_level_process_label.setText("Process monitoring off")
             self.refuel_level_ejection_label.setText("-")
             self.refuel_level_advisory_label.setText("Monitoring disabled")
+            self.refuel_level_process_result_label.setText("")
+            self.refuel_level_process_result_label.hide()
             self._refresh_refuel_level_chart()
             return
 
@@ -2994,6 +3064,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.refuel_level_process_label.setText(
             self._format_refuel_process_label(process_enabled, process_summary)
         )
+        process_result_text = self._format_refuel_process_result_label(process_summary)
+        self.refuel_level_process_result_label.setText(process_result_text)
+        self.refuel_level_process_result_label.setVisible(bool(process_result_text))
         ejection_counter = {}
         if self.refuel_camera_model is not None:
             counter_getter = getattr(self.refuel_camera_model, "get_refuel_ejection_counter", None)
@@ -3112,26 +3185,89 @@ class DropletImagingDialog(QtWidgets.QDialog):
                                         self._refuel_level_chart_full_scale_px = channel_height
                                 except Exception:
                                     pass
-                        valid_samples.append(float(level))
+                        try:
+                            level = float(level)
+                        except Exception:
+                            continue
+                        sample_index = sample.get("sample_index") if isinstance(sample, dict) else None
+                        try:
+                            sample_index = int(sample_index)
+                        except Exception:
+                            sample_index = len(valid_samples) + 1
+                        valid_samples.append({"sample_index": sample_index, "level_px": level})
                 except Exception:
                     valid_samples = []
             if not valid_samples:
                 log_getter = getattr(model, "get_level_log", None)
                 if callable(log_getter):
                     try:
-                        valid_samples = [
-                            float(level)
-                            for level in list(log_getter() or [])
-                            if level is not None
-                        ]
+                        for index, level in enumerate(list(log_getter() or []), start=1):
+                            if level is None:
+                                continue
+                            valid_samples.append({"sample_index": int(index), "level_px": float(level)})
                     except Exception:
                         valid_samples = []
 
         window_size = int(self.REFUEL_LEVEL_CHART_WINDOW_SAMPLES)
-        visible_levels = valid_samples[-window_size:]
-        points = [(float(index), float(level)) for index, level in enumerate(visible_levels)]
+        visible_samples = valid_samples[-window_size:]
+        points = [
+            (float(index), float(sample["level_px"]))
+            for index, sample in enumerate(visible_samples)
+        ]
+        visible_x_by_sample_index = {
+            int(sample["sample_index"]): float(index)
+            for index, sample in enumerate(visible_samples)
+            if sample.get("sample_index") is not None
+        }
         self._replace_xy_series(bundle["primary_series"], points)
         self._replace_xy_series(bundle["current_series"], points[-1:] if points else [])
+
+        annotation_summary = {}
+        if model is not None and self._is_refuel_tracking_enabled():
+            annotation_summary = self._refuel_process_summary()
+        active_process = annotation_summary.get("active") if isinstance(annotation_summary, dict) else None
+        last_process = annotation_summary.get("last") if isinstance(annotation_summary, dict) else None
+        process_for_annotations = active_process if isinstance(active_process, dict) and active_process else last_process
+
+        def _float_or_none(value):
+            if value is None:
+                return None
+            try:
+                return float(value)
+            except Exception:
+                return None
+
+        def _sample_x_or_none(value):
+            if value is None:
+                return None
+            try:
+                return visible_x_by_sample_index.get(int(value))
+            except Exception:
+                return None
+
+        start_line_points = []
+        end_line_points = []
+        start_marker_points = []
+        end_marker_points = []
+        if isinstance(process_for_annotations, dict) and process_for_annotations:
+            baseline_level = _float_or_none(process_for_annotations.get("baseline_level_px"))
+            if baseline_level is not None:
+                start_line_points = [(0.0, baseline_level), (float(window_size - 1), baseline_level)]
+                start_x = _sample_x_or_none(process_for_annotations.get("baseline_sample_index"))
+                if start_x is not None:
+                    start_marker_points = [(start_x, baseline_level)]
+            if not (isinstance(active_process, dict) and active_process):
+                end_level = _float_or_none(process_for_annotations.get("end_level_px"))
+                if end_level is not None:
+                    end_line_points = [(0.0, end_level), (float(window_size - 1), end_level)]
+                    end_x = _sample_x_or_none(process_for_annotations.get("end_sample_index"))
+                    if end_x is not None:
+                        end_marker_points = [(end_x, end_level)]
+
+        self._replace_xy_series(bundle["process_start_line_series"], start_line_points)
+        self._replace_xy_series(bundle["process_end_line_series"], end_line_points)
+        self._replace_xy_series(bundle["process_start_marker_series"], start_marker_points)
+        self._replace_xy_series(bundle["process_end_marker_series"], end_marker_points)
         bundle["axis_x"].setRange(0.0, float(window_size - 1))
         y_max = self._refuel_level_chart_full_scale_px
         if y_max is None or y_max <= 0:
