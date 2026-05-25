@@ -30912,11 +30912,11 @@ class RefuelCameraModel(QObject):
     def __init__(self, owner_model=None):
         super().__init__()
         print("Loaded New")
-        self.offset = None
-        self.width = None
-        self.threshold = None
-        self.prominence = None
-        self.empty_cutoff = None
+        self.offset = 40
+        self.width = 20
+        self.threshold = 60
+        self.prominence = 4
+        self.empty_cutoff = 0.25
         self.bottom_guard_px = 2
 
         self.current_level = None

@@ -144,6 +144,25 @@ def test_refuel_camera_model_tracking_toggle_emits_update_signal():
     assert calls == [True, True]
 
 
+def test_refuel_camera_model_initializes_detector_defaults():
+    model = RefuelCameraModel()
+
+    assert model.offset == 40
+    assert model.width == 20
+    assert model.threshold == 60
+    assert model.prominence == 4
+    assert model.empty_cutoff == 0.25
+    assert model.bottom_guard_px == 2
+    assert model._seed_analysis_parameters() == {
+        "offset": 40,
+        "width": 20,
+        "threshold": 60,
+        "prominence": 4,
+        "empty_cutoff": 0.25,
+        "bottom_guard_px": 2,
+    }
+
+
 def test_refuel_camera_model_monitor_state_and_counters_emit_update_signal():
     model = RefuelCameraModel()
     calls = []

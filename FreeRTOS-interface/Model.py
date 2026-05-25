@@ -9169,6 +9169,7 @@ class Model(QObject):
         self.calibration_manager = CalibrationClasses.CalibrationManager(self)
         # self.experiment_model = ExperimentModel(self.well_plate,self.calibration_manager)
         self.experiment_model = ExperimentModel(prof=self.profile)
+        self.refuel_camera_model.attach_owner_model(self)
         self.experiment_audit_log = ExperimentAuditLog(model=self)
         self.calibration_memory_store = None
         self._disposable_printer_head_counter = 0
@@ -9183,6 +9184,7 @@ class Model(QObject):
         importlib.reload(CalibrationClasses.Model)
         importlib.reload(CalibrationClasses)
         self.refuel_camera_model = CalibrationClasses.RefuelCameraModel()
+        self.refuel_camera_model.attach_owner_model(self)
 
     def reload_droplet_model(self):
         self.droplet_camera_model.record_metadata_signal.disconnect()

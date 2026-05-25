@@ -916,7 +916,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.refuel_monitor_timer = QTimer(self)
         self.refuel_monitor_timer.setInterval(self.refuel_monitor_interval_ms)
         self.refuel_monitor_timer.timeout.connect(self._capture_refuel_monitor_sample)
+        self.refuel_panel_refresh_timer = QTimer(self)
+        self.refuel_panel_refresh_timer.setSingleShot(True)
+        self.refuel_panel_refresh_timer.timeout.connect(self._run_refuel_level_panel_refresh)
         self._refuel_monitor_camera_started = False
+        self._refuel_first_sample_pending = False
+        self._last_refuel_panel_auto_refresh_monotonic = None
+        self._refuel_panel_rendered_version = None
+        self._refuel_panel_pending_version = None
         self._refuel_level_chart_full_scale_px = None
 
         self._bridge_preview_payload = None
@@ -1917,7 +1924,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             online_stream_debug_signal.connect(self.on_online_stream_debug_updated)
         if self.refuel_camera_model is not None:
             try:
-                self.refuel_camera_model.update_level_ui_signal.connect(self._refresh_refuel_level_panel)
+                self.refuel_camera_model.update_level_ui_signal.connect(self._schedule_refuel_level_panel_refresh)
             except Exception:
                 pass
 
@@ -1995,7 +2002,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._refresh_optics_controls()
         self._apply_flash_safety_ui_state()
         self._sync_stream_capture_panel_state()
-        self._refresh_refuel_level_panel()
+        self._schedule_refuel_level_panel_refresh(force=True)
         if self._is_refuel_tracking_enabled():
             self._start_refuel_monitor()
         QTimer.singleShot(0, self._ensure_stream_capture_followup_state)
@@ -2192,7 +2199,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._start_refuel_monitor()
         else:
             self._stop_refuel_monitor("Monitoring disabled")
-        self._refresh_refuel_level_panel()
+        self._schedule_refuel_level_panel_refresh(force=True)
 
     def _set_refuel_process_monitoring_enabled(self, checked):
         checked = bool(checked and self._is_refuel_tracking_enabled())
@@ -2212,7 +2219,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
                     setter(checked)
                 except Exception:
                     pass
-        self._refresh_refuel_level_panel()
+        self._schedule_refuel_level_panel_refresh(force=True)
 
     def _start_refuel_monitor(self):
         if self.refuel_camera_model is None:
@@ -2230,12 +2237,15 @@ class DropletImagingDialog(QtWidgets.QDialog):
             return False
 
         self._refuel_monitor_camera_started = True
-        self.refuel_camera_model.set_refuel_monitor_state("monitoring", "Monitoring")
+        self.refuel_camera_model.set_refuel_monitor_state("monitoring", "Waiting for first refuel sample")
         self.refuel_monitor_timer.start(self.refuel_monitor_interval_ms)
+        self._refuel_first_sample_pending = True
+        QTimer.singleShot(0, self._capture_initial_refuel_monitor_sample)
         return True
 
     def _stop_refuel_monitor(self, message="Monitoring disabled"):
         self.refuel_monitor_timer.stop()
+        self._refuel_first_sample_pending = False
         if self._refuel_monitor_camera_started:
             try:
                 self.controller.stop_refuel_camera()
@@ -2247,6 +2257,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 self.refuel_camera_model.set_refuel_monitor_state("off", message)
             except Exception:
                 pass
+
+    def _capture_initial_refuel_monitor_sample(self):
+        if not getattr(self, "_refuel_first_sample_pending", False):
+            return
+        self._capture_refuel_monitor_sample()
 
     def _handle_refuel_monitor_failure(self, message):
         if self.refuel_camera_model is None:
@@ -2309,6 +2324,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         )
 
     def _capture_refuel_monitor_sample(self):
+        self._refuel_first_sample_pending = False
         model = self.refuel_camera_model
         if model is None or not self._is_refuel_tracking_enabled():
             return
@@ -2765,6 +2781,92 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 pass
         return None
 
+    def _refuel_panel_refresh_version(self):
+        model = self.refuel_camera_model
+        if model is None:
+            return None
+        try:
+            sample_count = len(getattr(model, "sample_trace", []) or [])
+        except Exception:
+            sample_count = 0
+
+        timing_key = None
+        try:
+            timing_log = getattr(model, "refuel_monitor_timing_log", []) or []
+            latest = getattr(model, "last_refuel_monitor_timing", None)
+            if not isinstance(latest, dict) and timing_log:
+                latest = timing_log[-1]
+            latest = latest if isinstance(latest, dict) else {}
+            timing_key = (
+                len(timing_log),
+                latest.get("tick_index"),
+                latest.get("event_kind"),
+                latest.get("detector_status"),
+                latest.get("level_px"),
+            )
+        except Exception:
+            timing_key = None
+
+        marker_count = 0
+        try:
+            marker_count = len(getattr(model, "refuel_process_marker_log", []) or [])
+        except Exception:
+            marker_count = 0
+
+        advisory_count = 0
+        try:
+            advisory_count = len(getattr(model, "refuel_advisory_log", []) or [])
+        except Exception:
+            advisory_count = 0
+
+        ejection_event_count = 0
+        try:
+            ejection_event_count = int(getattr(model, "_refuel_ejection_next_event_index", 1) or 1) - 1
+        except Exception:
+            ejection_event_count = 0
+
+        return (sample_count, timing_key, marker_count, advisory_count, ejection_event_count)
+
+    def _schedule_refuel_level_panel_refresh(self, *args, force=False):
+        timer = getattr(self, "refuel_panel_refresh_timer", None)
+        if timer is None:
+            self._refresh_refuel_level_panel()
+            return
+
+        version = self._refuel_panel_refresh_version()
+        if force:
+            if timer.isActive():
+                timer.stop()
+            self._refuel_panel_pending_version = None
+            self._refuel_panel_rendered_version = version
+            self._refresh_refuel_level_panel()
+            return
+
+        if version == self._refuel_panel_rendered_version or version == self._refuel_panel_pending_version:
+            return
+        self._refuel_panel_pending_version = version
+        if timer.isActive():
+            return
+
+        min_interval_s = max(0.0, float(getattr(self, "refuel_monitor_interval_ms", 1000)) / 1000.0)
+        last_refresh = getattr(self, "_last_refuel_panel_auto_refresh_monotonic", None)
+        now = time.monotonic()
+        if last_refresh is None or now - float(last_refresh) >= min_interval_s:
+            delay_ms = 0
+        else:
+            delay_ms = max(1, int(round((min_interval_s - (now - float(last_refresh))) * 1000.0)))
+        timer.start(delay_ms)
+
+    def _run_refuel_level_panel_refresh(self):
+        self._last_refuel_panel_auto_refresh_monotonic = time.monotonic()
+        self._refuel_panel_rendered_version = (
+            self._refuel_panel_pending_version
+            if self._refuel_panel_pending_version is not None
+            else self._refuel_panel_refresh_version()
+        )
+        self._refuel_panel_pending_version = None
+        self._refresh_refuel_level_panel()
+
     def _refresh_refuel_level_panel(self, *_args):
         enabled = self._is_refuel_tracking_enabled()
         monitor_status = {}
@@ -2836,7 +2938,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
             else:
                 self.refuel_level_status_label.setText("No sample")
             self.refuel_level_last_update_label.setText("-")
-            advisory = monitor_message if monitor_state != "monitoring" else "Waiting for refuel samples"
+            if monitor_state != "monitoring":
+                advisory = monitor_message
+            elif int(monitor_status.get("successful_captures") or 0) <= 0:
+                advisory = "Waiting for first refuel sample"
+            else:
+                advisory = "No valid refuel level detected"
             advisory = self._refuel_advisory_message(process_enabled) or advisory
             self.refuel_level_advisory_label.setText(advisory)
             self._refresh_refuel_level_chart()
