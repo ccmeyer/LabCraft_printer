@@ -97,6 +97,10 @@ Measure whether refuel monitoring has any practical effect on the droplet/stream
 
 Status: implemented as in-memory timing telemetry for the imager-scoped monitor. The monitor records capture, copy/resize, detector, total latency, skip, and failure timing without changing capture rate or moving capture off the UI thread.
 
+Performance snapshot export is available from the droplet-imager `Refuel Level` panel with `Export Perf Snapshot`. The droplet imager also records a lightweight calibration-process stopwatch from existing calibration lifecycle signals, even when refuel level tracking is off, and writes a snapshot on close when timing or stopwatch data exists. Snapshots are written to:
+
+`<experiment_dir>/calibration_recordings/refuel_monitor_performance/refuel_monitor_performance_*.json`
+
 Metrics to record:
 
 - capture duration
@@ -117,6 +121,12 @@ Validation:
 
 - Unit tests should verify timing payload shape.
 - Manual validation should compare droplet/stream calibration responsiveness with monitor off vs on.
+- To diagnose slowdown, collect three comparable runs:
+  1. refuel tracking off
+  2. refuel tracking on, process monitoring off
+  3. refuel tracking on, process monitoring on
+- Close the droplet imager or click `Export Perf Snapshot` after each run. The tracking-off baseline will export on close with calibration elapsed time but no refuel capture timings.
+- Share the exported JSON snapshots from all three runs for review.
 
 Exit criteria:
 

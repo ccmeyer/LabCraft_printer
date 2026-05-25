@@ -276,6 +276,132 @@ def test_refuel_camera_model_timing_summary_and_samples_are_independent():
     assert model.get_refuel_monitor_status()["successful_captures"] == 1
 
 
+def test_refuel_camera_model_calibration_performance_stopwatch_records_elapsed():
+    model = RefuelCameraModel()
+
+    context = model.record_refuel_calibration_performance_marker(
+        "stage_changed",
+        {
+            "source": "calibrationStageChanged",
+            "process_name": "DropletCalibrationProcess",
+            "phase_name": "droplet_search",
+            "stage_message": "Starting",
+        },
+    )
+    summary = model.get_refuel_calibration_performance_summary()
+    assert summary["active"]["process_name"] == "DropletCalibrationProcess"
+    assert summary["event_count"] == 2
+
+    completed = model.complete_refuel_calibration_performance_observation(
+        "completed",
+        {"event_kind": "calibration_completed"},
+    )
+
+    assert completed["outcome"] == "completed"
+    assert completed["elapsed_s"] >= 0.0
+    summary = model.get_refuel_calibration_performance_summary()
+    assert summary["active"] is None
+    assert summary["last"]["outcome"] == "completed"
+    events = model.get_refuel_calibration_performance_events()
+    assert [row["event_kind"] for row in events] == [
+        "calibration_performance_started",
+        "stage_changed",
+        "calibration_completed",
+    ]
+    json.dumps(events[-1])
+
+
+def test_refuel_camera_model_timing_summary_includes_max_and_p95():
+    model = RefuelCameraModel()
+    for value in (10.0, 20.0, 30.0, 40.0):
+        model.record_refuel_monitor_timing(
+            {
+                "tick_index": int(value),
+                "event_kind": "sample_result",
+                "capture_duration_ms": value,
+                "detector_runtime_ms": value / 2.0,
+                "total_latency_ms": value * 2.0,
+            }
+        )
+
+    summary = model.get_refuel_monitor_timing_summary()
+
+    assert summary["mean_capture_duration_ms"] == 25.0
+    assert summary["max_capture_duration_ms"] == 40.0
+    assert summary["p95_capture_duration_ms"] == 38.5
+    assert summary["max_detector_runtime_ms"] == 20.0
+    assert summary["p95_total_latency_ms"] == 77.0
+
+
+def test_refuel_camera_model_build_performance_snapshot_is_json_safe_and_caps_samples():
+    model = RefuelCameraModel()
+    model.set_refuel_tracking_enabled(True)
+    model.record_refuel_monitor_timing(
+        {
+            "tick_index": 1,
+            "event_kind": "sample_result",
+            "capture_duration_ms": np.float64(3.0),
+            "detector_runtime_ms": 4.0,
+            "total_latency_ms": 5.0,
+        }
+    )
+    model.record_refuel_ejection_event(2, source="capture", count_kind="observed")
+    model.sample_trace = [{"sample_index": idx, "level_px": np.float64(idx)} for idx in range(1005)]
+
+    snapshot = model.build_refuel_performance_snapshot(reason="unit_test")
+
+    assert snapshot["kind"] == "refuel_monitor_performance_snapshot"
+    assert snapshot["reason"] == "unit_test"
+    assert snapshot["tracking_enabled"] is True
+    assert snapshot["calibration_performance"]["event_count"] == 0
+    assert snapshot["timing_summary"]["max_capture_duration_ms"] == 3.0
+    assert snapshot["ejection_counter"]["observed_ejection_count"] == 2
+    assert snapshot["sample_count"] == 1005
+    assert snapshot["exported_sample_count"] == 1000
+    assert snapshot["sample_trace_tail"][0]["sample_index"] == 5
+    assert len(model.get_sample_trace()) == 1005
+    json.dumps(snapshot)
+
+
+def test_refuel_camera_model_write_performance_snapshot_uses_experiment_dir(tmp_path):
+    owner = _owner_model(tmp_path)
+    model = RefuelCameraModel(owner_model=owner)
+    model.record_refuel_monitor_timing(
+        {
+            "tick_index": 1,
+            "event_kind": "failure",
+            "failure_message": "camera busy",
+            "total_latency_ms": 9.0,
+        }
+    )
+
+    path = Path(model.write_refuel_performance_snapshot(reason="manual_export"))
+
+    assert path.parent == tmp_path / "calibration_recordings" / "refuel_monitor_performance"
+    assert path.name.startswith("refuel_monitor_performance_")
+    assert model.last_refuel_performance_snapshot_path == str(path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["reason"] == "manual_export"
+    assert payload["timing_summary"]["failure_count"] == 1
+
+
+def test_refuel_camera_model_empty_performance_snapshot_is_valid():
+    model = RefuelCameraModel()
+
+    snapshot = model.build_refuel_performance_snapshot()
+
+    assert snapshot["timing_summary"]["record_count"] == 0
+    assert snapshot["timing_log"] == []
+    assert snapshot["process_markers"] == []
+    assert snapshot["calibration_performance"]["active"] is None
+    assert snapshot["calibration_performance"]["last"] is None
+    assert snapshot["calibration_performance_events"] == []
+    assert snapshot["advisory_log"] == []
+    assert snapshot["ejection_events"] == []
+    assert snapshot["sample_count"] == 0
+    json.dumps(snapshot)
+
+
 def test_refuel_camera_model_timing_recorder_append_only_when_run_active():
     model = RefuelCameraModel()
     recorder = SimpleNamespace(append_analysis=Mock(return_value={"ok": True}))

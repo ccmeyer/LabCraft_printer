@@ -2047,6 +2047,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         group_v.addWidget(self.refuel_level_advisory_label)
 
+        self.export_refuel_performance_button = QtWidgets.QPushButton("Export Perf Snapshot")
+        self.export_refuel_performance_button.setToolTip(
+            "Write refuel monitor timing and process telemetry to a JSON file."
+        )
+        self.export_refuel_performance_button.clicked.connect(self._export_refuel_performance_snapshot)
+        self.export_refuel_performance_button.setEnabled(False)
+        group_v.addWidget(self.export_refuel_performance_button)
+
         self.open_refuel_camera_button = QtWidgets.QPushButton("Open Refuel Camera")
         opener = None
         for attr_name in (
@@ -2067,6 +2075,51 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         group.hide()
         return group
+
+    def _export_refuel_performance_snapshot(self, *, reason="manual_export", show_status=True):
+        model = self.refuel_camera_model
+        if model is None:
+            return None
+        writer = getattr(model, "write_refuel_performance_snapshot", None)
+        if not callable(writer):
+            return None
+        try:
+            path = writer(reason=reason)
+        except Exception as exc:
+            print(f"[RefuelMonitor] performance snapshot export failed: {exc}")
+            if show_status:
+                self.refuel_level_advisory_label.setText(f"Performance snapshot export failed: {exc}")
+            return None
+        if show_status:
+            message = f"Performance snapshot saved: {path}"
+            self.refuel_level_advisory_label.setText(message)
+            button = getattr(self, "export_refuel_performance_button", None)
+            if button is not None:
+                button.setToolTip(message)
+        return path
+
+    def _auto_export_refuel_performance_snapshot_on_close(self):
+        if self.refuel_camera_model is None:
+            return None
+        try:
+            getter = getattr(self.refuel_camera_model, "get_refuel_monitor_timing_log", None)
+            timing_log = list(getter() or []) if callable(getter) else []
+        except Exception:
+            timing_log = []
+        has_calibration_performance = False
+        try:
+            perf_getter = getattr(self.refuel_camera_model, "get_refuel_calibration_performance_summary", None)
+            performance = dict(perf_getter() or {}) if callable(perf_getter) else {}
+            has_calibration_performance = bool(
+                performance.get("active")
+                or performance.get("last")
+                or int(performance.get("event_count") or 0) > 0
+            )
+        except Exception:
+            has_calibration_performance = False
+        if not timing_log and not has_calibration_performance:
+            return None
+        return self._export_refuel_performance_snapshot(reason="dialog_close", show_status=False)
 
     def _create_refuel_level_chart_bundle(self):
         chart = QtCharts.QChart()
@@ -2369,6 +2422,30 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 return {}
         return {}
 
+    def _record_refuel_calibration_performance_marker(self, event_kind, source, extra=None):
+        if self.refuel_camera_model is None:
+            return None
+        recorder = getattr(self.refuel_camera_model, "record_refuel_calibration_performance_marker", None)
+        if not callable(recorder):
+            return None
+        try:
+            return recorder(str(event_kind), self._active_calibration_refuel_payload(source, extra))
+        except Exception as exc:
+            print(f"[RefuelMonitor] calibration performance marker failed: {exc}")
+            return None
+
+    def _complete_refuel_calibration_performance_observation(self, outcome, source, extra=None):
+        if self.refuel_camera_model is None:
+            return None
+        completer = getattr(self.refuel_camera_model, "complete_refuel_calibration_performance_observation", None)
+        if not callable(completer):
+            return None
+        try:
+            return completer(str(outcome), self._active_calibration_refuel_payload(source, extra))
+        except Exception as exc:
+            print(f"[RefuelMonitor] calibration performance completion failed: {exc}")
+            return None
+
     def _active_calibration_refuel_payload(self, source, extra=None):
         payload = {"source": str(source or "droplet_imager")}
         manager = getattr(getattr(self, "model", None), "calibration_manager", None)
@@ -2446,6 +2523,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
             return None
 
     def _on_refuel_calibration_stage_changed(self, message, color=None):
+        self._record_refuel_calibration_performance_marker(
+            "stage_changed",
+            "calibrationStageChanged",
+            {
+                "stage_message": str(message or ""),
+                "color_name": str(color or ""),
+            },
+        )
         self._record_refuel_process_marker(
             "stage_changed",
             "calibrationStageChanged",
@@ -2456,6 +2541,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         )
 
     def _on_refuel_calibration_completed(self):
+        self._complete_refuel_calibration_performance_observation(
+            "completed",
+            "calibrationCompleted",
+            {"event_kind": "calibration_completed"},
+        )
         self._complete_refuel_process_observation(
             "completed",
             "calibrationCompleted",
@@ -2463,6 +2553,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         )
 
     def _on_refuel_calibration_queue_completed(self):
+        self._complete_refuel_calibration_performance_observation(
+            "queue_completed",
+            "calibrationQueueCompleted",
+            {"event_kind": "queue_completed"},
+        )
         self._complete_refuel_process_observation(
             "queue_completed",
             "calibrationQueueCompleted",
@@ -2471,6 +2566,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
         )
 
     def _on_refuel_calibration_error(self, message):
+        self._complete_refuel_calibration_performance_observation(
+            "error",
+            "calibrationError",
+            {
+                "event_kind": "calibration_error",
+                "error_message": str(message or ""),
+            },
+        )
         self._complete_refuel_process_observation(
             "error",
             "calibrationError",
@@ -2502,9 +2605,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if status in terminal_statuses:
             outcome = "completed" if status in {"completed", "complete", "success", "finished", "done"} else status
             payload["event_kind"] = event_kind
+            self._complete_refuel_calibration_performance_observation(outcome, source, payload)
             self._complete_refuel_process_observation(outcome, source, payload, require_active=True)
             return
         if status and status != "idle":
+            self._record_refuel_calibration_performance_marker(event_kind, source, payload)
             self._record_refuel_process_marker(event_kind, source, payload)
 
     def _on_refuel_stream_capture_state_changed(self, state):
@@ -2690,10 +2795,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.refuel_level_process_label.setText("Process monitoring off")
             self.refuel_level_ejection_label.setText("-")
             self.refuel_level_advisory_label.setText("Monitoring disabled")
+            if hasattr(self, "export_refuel_performance_button"):
+                self.export_refuel_performance_button.setEnabled(False)
             self._refresh_refuel_level_chart()
             return
 
         self.refuel_level_group.show()
+        if hasattr(self, "export_refuel_performance_button"):
+            self.export_refuel_performance_button.setEnabled(self.refuel_camera_model is not None)
         timing = None
         if self.refuel_camera_model is not None:
             summary_getter = getattr(self.refuel_camera_model, "get_refuel_monitor_timing_summary", None)
@@ -7811,6 +7920,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._close_stream_capture_mass_dialog()
         self._reset_online_stream_debug_view(hide=True)
         self.camera_timer.stop()
+        self._auto_export_refuel_performance_snapshot_on_close()
         self._stop_refuel_monitor("Monitoring disabled")
         try:
             self.controller.set_droplet_capture_profile("default")

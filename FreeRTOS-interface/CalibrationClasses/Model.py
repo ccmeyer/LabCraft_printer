@@ -2893,6 +2893,41 @@ class CalibrationManager(QObject):
             return value if len(value) <= 240 else value[:237] + "..."
         return None
 
+    @staticmethod
+    def _calibration_audit_process_name(process_obj=None):
+        if process_obj is None:
+            return None
+        return (
+            getattr(process_obj, "_recorder_process_name", None)
+            or process_obj.__class__.__name__
+        )
+
+    def _is_volume_calibration_audit_process(self, process_obj=None):
+        process_name = self._calibration_audit_process_name(process_obj)
+        if process_name in {
+            "PressureSweepCharacterizationProcess",
+            "OnlineStreamCalibrationProcess",
+        }:
+            return True
+        if process_name == "DropletSearchCalibrationProcess":
+            return bool(getattr(process_obj, "manual_start", False))
+        return False
+
+    def _should_record_calibration_audit_event(self, event_type, process_obj=None):
+        event_type = str(event_type or "")
+        if event_type in {"calibration_session_started", "calibration_session_ended"}:
+            return False
+        if event_type.startswith("calibration_process_"):
+            return self._is_volume_calibration_audit_process(process_obj)
+        return True
+
+    @staticmethod
+    def _first_calibration_compact_value(compact: dict, *keys):
+        for key in keys:
+            if key in compact and compact.get(key) not in (None, ""):
+                return compact.get(key)
+        return None
+
     def _build_calibration_artifact_refs(self, process_obj=None):
         refs = {}
         try:
@@ -2985,6 +3020,52 @@ class CalibrationManager(QObject):
                 compact[f"{key}_keys"] = sorted(str(k) for k in value.keys())[:16]
         if compact:
             summary["latest_compact"] = compact
+            volume_nl = self._first_calibration_compact_value(
+                compact,
+                "mean_nL",
+                "measured_volume_nL",
+                "ejection_volume_nL",
+                "volume_nL",
+                "droplet_volume_nL",
+            )
+            cv_pct = self._first_calibration_compact_value(
+                compact,
+                "cv_pct",
+                "cv_percent",
+                "coefficient_variation_pct",
+            )
+            print_pressure_psi = self._first_calibration_compact_value(
+                compact,
+                "pressure_psi",
+                "print_pressure_psi",
+                "print_pressure",
+            )
+            pulse_width_us = self._first_calibration_compact_value(
+                compact,
+                "pw_us",
+                "print_pulse_width_us",
+                "print_width",
+                "pulse_width_us",
+            )
+            replicate_count = self._first_calibration_compact_value(
+                compact,
+                "sample_count",
+                "replicate_count",
+                "droplet_count",
+                "droplet_volumes_count",
+            )
+            if volume_nl is not None:
+                summary["volume_nL"] = volume_nl
+            if cv_pct is not None:
+                summary["cv_pct"] = cv_pct
+            if print_pressure_psi is not None:
+                summary["print_pressure_psi"] = print_pressure_psi
+            if pulse_width_us is not None:
+                summary["pulse_width_us"] = pulse_width_us
+            if replicate_count is not None:
+                summary["replicate_count"] = replicate_count
+            elif summary.get("flat_measurement_count") is not None:
+                summary["replicate_count"] = summary.get("flat_measurement_count")
         return summary
 
     def _build_calibration_audit_snapshot(self, process_obj=None):
@@ -2994,10 +3075,7 @@ class CalibrationManager(QObject):
         process_name = None
         phase_name = None
         if process_obj is not None:
-            process_name = (
-                getattr(process_obj, "_recorder_process_name", None)
-                or process_obj.__class__.__name__
-            )
+            process_name = self._calibration_audit_process_name(process_obj)
             phase_name = (
                 getattr(process_obj, "phase_name", None)
                 or getattr(process_obj, "_recorder_phase_name", None)
@@ -3034,6 +3112,8 @@ class CalibrationManager(QObject):
 
     def _record_calibration_audit_event(self, event_type, summary, details=None, level="info", process_obj=None):
         try:
+            if not self._should_record_calibration_audit_event(event_type, process_obj=process_obj):
+                return None
             event_details = self._build_calibration_audit_snapshot(process_obj=process_obj)
             if isinstance(details, dict):
                 event_details.update(details)
@@ -30861,6 +30941,10 @@ class RefuelCameraModel(QObject):
         self.refuel_commanded_ejection_count = 0
         self.refuel_ejection_event_log = []
         self._refuel_ejection_next_event_index = 1
+        self.refuel_calibration_performance_active = None
+        self.last_refuel_calibration_performance_summary = None
+        self.refuel_calibration_performance_log = []
+        self._refuel_calibration_performance_next_event_index = 1
         self.refuel_process_monitoring_enabled = False
         self.refuel_process_marker_log = []
         self.refuel_active_process_context = None
@@ -30872,6 +30956,7 @@ class RefuelCameraModel(QObject):
         self.refuel_advisory_near_empty_level_px = 10.0
         self.refuel_advisory_near_full_margin_px = 10.0
         self.refuel_advisory_stale_after_s = 5.0
+        self.last_refuel_performance_snapshot_path = None
         self.last_meniscus_row = None
         self.raw_capture_image = None
         self.analysis_input_image = None
@@ -31076,6 +31161,126 @@ class RefuelCameraModel(QObject):
 
     def get_refuel_ejection_events(self):
         return list(self.refuel_ejection_event_log)
+
+    def _append_refuel_calibration_performance_event(self, event_kind, payload=None):
+        payload = self._json_safe_refuel_timing_value(dict(payload or {}))
+        active = self.refuel_calibration_performance_active if isinstance(self.refuel_calibration_performance_active, dict) else {}
+        record = {
+            "event_index": int(self._refuel_calibration_performance_next_event_index),
+            "timestamp_utc": self._now_utc(),
+            "monotonic_s": time.monotonic(),
+            "event_kind": str(event_kind or "event"),
+            "source": payload.get("source", "droplet_imager"),
+            "calibration_performance_id": active.get("calibration_performance_id", payload.get("calibration_performance_id")),
+            "process_name": payload.get("process_name", active.get("process_name")),
+            "phase_name": payload.get("phase_name", active.get("phase_name")),
+            "session_id": payload.get("session_id", active.get("session_id")),
+            "tracking_enabled": bool(self.refuel_tracking_enabled),
+            "process_monitoring_enabled": bool(self.refuel_process_monitoring_enabled),
+        }
+        for key, value in payload.items():
+            if key not in record:
+                record[str(key)] = value
+        record = self._json_safe_refuel_timing_value(record)
+        self._refuel_calibration_performance_next_event_index += 1
+        self.refuel_calibration_performance_log.append(record)
+        if len(self.refuel_calibration_performance_log) > 300:
+            self.refuel_calibration_performance_log = self.refuel_calibration_performance_log[-300:]
+        return record
+
+    def begin_refuel_calibration_performance_observation(self, payload=None):
+        payload = self._json_safe_refuel_timing_value(dict(payload or {}))
+        if isinstance(self.refuel_calibration_performance_active, dict):
+            for key in ("source", "process_name", "phase_name", "session_id"):
+                if payload.get(key) is not None:
+                    self.refuel_calibration_performance_active[key] = payload.get(key)
+            return dict(self.refuel_calibration_performance_active)
+
+        now_monotonic = time.monotonic()
+        performance_id = payload.get("calibration_performance_id")
+        if not performance_id:
+            performance_id = f"calibration_perf_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+        context = {
+            "calibration_performance_id": str(performance_id),
+            "source": payload.get("source", "droplet_imager"),
+            "process_name": payload.get("process_name"),
+            "phase_name": payload.get("phase_name"),
+            "session_id": payload.get("session_id"),
+            "started_at_utc": self._now_utc(),
+            "started_monotonic_s": now_monotonic,
+            "tracking_enabled_at_start": bool(self.refuel_tracking_enabled),
+            "process_monitoring_enabled_at_start": bool(self.refuel_process_monitoring_enabled),
+        }
+        self.refuel_calibration_performance_active = self._json_safe_refuel_timing_value(context)
+        self.last_refuel_calibration_performance_summary = None
+        self._append_refuel_calibration_performance_event("calibration_performance_started", payload)
+        return dict(self.refuel_calibration_performance_active)
+
+    def record_refuel_calibration_performance_marker(self, event_kind, payload=None):
+        if not isinstance(self.refuel_calibration_performance_active, dict):
+            self.begin_refuel_calibration_performance_observation(payload)
+        return self._append_refuel_calibration_performance_event(event_kind, payload)
+
+    def complete_refuel_calibration_performance_observation(self, outcome, payload=None):
+        payload = self._json_safe_refuel_timing_value(dict(payload or {}))
+        if not isinstance(self.refuel_calibration_performance_active, dict):
+            return None
+
+        active = dict(self.refuel_calibration_performance_active)
+        completed_monotonic = time.monotonic()
+        elapsed_s = None
+        try:
+            elapsed_s = max(0.0, float(completed_monotonic) - float(active.get("started_monotonic_s")))
+        except Exception:
+            elapsed_s = None
+        summary = dict(active)
+        summary.update(
+            {
+                "outcome": str(outcome or "completed"),
+                "completed_at_utc": self._now_utc(),
+                "completed_monotonic_s": completed_monotonic,
+                "elapsed_s": elapsed_s,
+                "tracking_enabled_at_completion": bool(self.refuel_tracking_enabled),
+                "process_monitoring_enabled_at_completion": bool(self.refuel_process_monitoring_enabled),
+            }
+        )
+        for key, value in payload.items():
+            if key not in summary:
+                summary[str(key)] = value
+        self.last_refuel_calibration_performance_summary = self._json_safe_refuel_timing_value(summary)
+
+        marker_payload = dict(payload)
+        marker_payload.update(
+            {
+                "outcome": str(outcome or "completed"),
+                "elapsed_s": elapsed_s,
+            }
+        )
+        event_kind = marker_payload.pop("event_kind", None) or "calibration_performance_completed"
+        self._append_refuel_calibration_performance_event(event_kind, marker_payload)
+        self.refuel_calibration_performance_active = None
+        return dict(self.last_refuel_calibration_performance_summary)
+
+    def get_refuel_calibration_performance_summary(self):
+        active = None
+        if isinstance(self.refuel_calibration_performance_active, dict):
+            active = dict(self.refuel_calibration_performance_active)
+            try:
+                active["elapsed_s"] = max(0.0, time.monotonic() - float(active.get("started_monotonic_s")))
+            except Exception:
+                active["elapsed_s"] = None
+        return {
+            "active": active,
+            "last": (
+                dict(self.last_refuel_calibration_performance_summary)
+                if isinstance(self.last_refuel_calibration_performance_summary, dict)
+                else None
+            ),
+            "event_count": len(self.refuel_calibration_performance_log),
+        }
+
+    def get_refuel_calibration_performance_events(self):
+        return list(self.refuel_calibration_performance_log)
 
     def set_refuel_monitor_state(self, state, message=""):
         state = str(state or "off")
@@ -31743,15 +31948,40 @@ class RefuelCameraModel(QObject):
         records = list(self.refuel_monitor_timing_log)
         sample_records = [row for row in records if row.get("event_kind") == "sample_result"]
 
-        def _mean_for(key):
+        def _values_for(key, *, sample_only=False):
+            source_records = sample_records if sample_only else records
             values = [
                 float(row[key])
-                for row in sample_records
+                for row in source_records
                 if row.get(key) is not None
             ]
+            return [value for value in values if math.isfinite(value)]
+
+        def _mean_for(key):
+            values = _values_for(key, sample_only=True)
             if not values:
                 return None
             return float(sum(values) / len(values))
+
+        def _max_for(key):
+            values = _values_for(key)
+            if not values:
+                return None
+            return float(max(values))
+
+        def _p95_for(key):
+            values = sorted(_values_for(key))
+            if not values:
+                return None
+            if len(values) == 1:
+                return float(values[0])
+            rank = 0.95 * (len(values) - 1)
+            lo = int(math.floor(rank))
+            hi = int(math.ceil(rank))
+            if lo == hi:
+                return float(values[lo])
+            weight = rank - lo
+            return float(values[lo] * (1.0 - weight) + values[hi] * weight)
 
         return {
             "latest": self.last_refuel_monitor_timing,
@@ -31762,7 +31992,65 @@ class RefuelCameraModel(QObject):
             "mean_capture_duration_ms": _mean_for("capture_duration_ms"),
             "mean_detector_runtime_ms": _mean_for("detector_runtime_ms"),
             "mean_total_latency_ms": _mean_for("total_latency_ms"),
+            "max_capture_duration_ms": _max_for("capture_duration_ms"),
+            "max_detector_runtime_ms": _max_for("detector_runtime_ms"),
+            "max_total_latency_ms": _max_for("total_latency_ms"),
+            "p95_capture_duration_ms": _p95_for("capture_duration_ms"),
+            "p95_detector_runtime_ms": _p95_for("detector_runtime_ms"),
+            "p95_total_latency_ms": _p95_for("total_latency_ms"),
         }
+
+    def build_refuel_performance_snapshot(self, reason="manual_export"):
+        sample_trace_tail = list(self.sample_trace[-1000:])
+        snapshot = {
+            "kind": "refuel_monitor_performance_snapshot",
+            "schema_version": 1,
+            "reason": str(reason or "manual_export"),
+            "generated_at_utc": self._now_utc(),
+            "generated_monotonic_s": time.monotonic(),
+            "tracking_enabled": bool(self.refuel_tracking_enabled),
+            "process_monitoring_enabled": bool(self.refuel_process_monitoring_enabled),
+            "monitor_status": self.get_refuel_monitor_status(),
+            "calibration_performance": self.get_refuel_calibration_performance_summary(),
+            "calibration_performance_events": self.get_refuel_calibration_performance_events(),
+            "timing_summary": self.get_refuel_monitor_timing_summary(),
+            "timing_log": self.get_refuel_monitor_timing_log(),
+            "process_summary": self.get_refuel_process_summary(),
+            "process_markers": self.get_refuel_process_markers(),
+            "advisory": self.get_refuel_advisory(),
+            "advisory_log": self.get_refuel_advisory_log(),
+            "ejection_counter": self.get_refuel_ejection_counter(),
+            "ejection_events": self.get_refuel_ejection_events(),
+            "sample_count": len(self.sample_trace),
+            "exported_sample_count": len(sample_trace_tail),
+            "sample_trace_tail": sample_trace_tail,
+            "level_log": list(self.level_log),
+            "last_snapshot_path": self.last_refuel_performance_snapshot_path,
+        }
+        return self._json_safe_refuel_timing_value(snapshot)
+
+    def _default_refuel_performance_snapshot_dir(self):
+        owner = getattr(self, "owner_model", None)
+        experiment_model = getattr(owner, "experiment_model", None) if owner is not None else None
+        experiment_path = getattr(experiment_model, "experiment_dir_path", None)
+        if experiment_path:
+            base = Path(str(experiment_path))
+        else:
+            base = Path.cwd()
+        return base / "calibration_recordings" / "refuel_monitor_performance"
+
+    def write_refuel_performance_snapshot(self, directory=None, reason="manual_export"):
+        out_dir = Path(directory) if directory is not None else self._default_refuel_performance_snapshot_dir()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        filename = f"refuel_monitor_performance_{stamp}_{uuid.uuid4().hex[:8]}.json"
+        path = out_dir / filename
+        snapshot = self.build_refuel_performance_snapshot(reason=reason)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(snapshot, handle, indent=2, default=numpy_encoder)
+            handle.write("\n")
+        self.last_refuel_performance_snapshot_path = str(path)
+        return str(path)
 
     def _seed_analysis_parameters(self):
         return {
