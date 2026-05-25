@@ -274,6 +274,33 @@ def test_design_droplet_volume_getter_is_side_effect_free_for_design_reagent(qap
     assert target == pytest.approx(12.5)
 
 
+def test_design_droplet_volume_uses_reagent_identity_not_stock_display(qapp):
+    dialog, manager = _make_dialog_stub(_make_preview(candidate_found=False), qapp)
+    dialog.model.experiment_model = SimpleNamespace(
+        metadata={"fill_droplet_volume_nL": 10.0},
+        get_fill_reagent_name=lambda: "Water",
+        find_option_by_reagent_name=lambda reagent: (
+            (("Glycerol", None), SimpleNamespace(droplet_nL=12.5))
+            if reagent == "Glycerol"
+            else None
+        ),
+    )
+    dialog.model.rack_model = SimpleNamespace(get_gripper_printer_head=lambda: None)
+    manager._build_calibration_stock_identity_snapshot = lambda: {
+        "reagent_name": "Glycerol",
+        "stock_solution": "Glycerol - 10 mM",
+        "stock_identity": {
+            "reagent_name": "Glycerol",
+            "stock_solution": "Glycerol - 10 mM",
+        },
+    }
+    manager._safe_get_stock_solution = lambda: "Glycerol - 10 mM"
+    _bind_real_target_volume_helpers(dialog)
+
+    assert dialog._bridge_get_current_reagent_name() == "Glycerol"
+    assert dialog._bridge_get_current_design_droplet_volume_nL() == pytest.approx(12.5)
+
+
 def test_refresh_recommendation_uses_real_design_droplet_volume_without_recursing(qapp):
     dialog, manager = _make_dialog_stub(_make_preview(), qapp)
     dialog.model.experiment_model = SimpleNamespace(

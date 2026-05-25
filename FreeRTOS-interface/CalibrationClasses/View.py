@@ -6353,8 +6353,28 @@ class DropletImagingDialog(QtWidgets.QDialog):
         return self.model.calibration_manager
 
     def _bridge_get_current_reagent_name(self) -> str | None:
-        # Try via calibration manager (stable with your existing _safe_get_stock_solution)
+        # Plan lookups need the design reagent name, not the display stock name.
         cm = self._bridge_get_calibration_manager()
+        if cm is not None:
+            try:
+                identity_getter = getattr(cm, "_build_calibration_stock_identity_snapshot", None)
+                if callable(identity_getter):
+                    identity = identity_getter()
+                    if isinstance(identity, dict):
+                        r = identity.get("reagent_name") or (identity.get("stock_identity") or {}).get("reagent_name")
+                        if r:
+                            return str(r)
+            except Exception:
+                pass
+        try:
+            ph = self.model.rack_model.get_gripper_printer_head()
+            if ph:
+                r = ph.get_reagent_name()
+                if r:
+                    return str(r)
+        except Exception:
+            pass
+        # Legacy fallback for older/fake managers that only expose a reagent-like string.
         if cm is not None:
             try:
                 r = cm._safe_get_stock_solution()
@@ -6362,13 +6382,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
                     return str(r)
             except Exception:
                 pass
-        # Fallback to printer head in gripper
-        try:
-            ph = self.model.rack_model.get_gripper_printer_head()
-            if ph:
-                return ph.get_reagent_name()
-        except Exception:
-            pass
         return None
 
     @staticmethod
