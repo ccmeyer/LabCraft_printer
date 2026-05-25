@@ -40,6 +40,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import datetime
 import cv2
 from utilities import ShortcutManager
+from ExperimentAuditReader import ExperimentAuditReader
 import CalibrationClasses
 import importlib
 from typing import Mapping, Sequence, Optional, Any, List, Dict, Tuple, Set
@@ -98,6 +99,198 @@ class RefreshingComboBox(QComboBox):
         self.aboutToShowPopup.emit()
         super().showPopup()
 
+
+AUDIT_TIMELINE_ROW_ROLE = int(Qt.UserRole) + 100
+
+
+class AuditTimelineTableModel(QtCore.QAbstractTableModel):
+    COLUMNS = (
+        ("time_display", "Time", Qt.AlignLeft | Qt.AlignVCenter),
+        ("elapsed_display", "Elapsed", Qt.AlignRight | Qt.AlignVCenter),
+        ("level", "Level", Qt.AlignCenter),
+        ("event_type", "Type", Qt.AlignLeft | Qt.AlignVCenter),
+        ("summary", "Summary", Qt.AlignLeft | Qt.AlignVCenter),
+        ("line_number", "Line", Qt.AlignRight | Qt.AlignVCenter),
+    )
+
+    def __init__(self, parent=None, rows=None):
+        super().__init__(parent)
+        self._rows = list(rows or [])
+
+    def set_rows(self, rows):
+        self.beginResetModel()
+        self._rows = list(rows or [])
+        self.endResetModel()
+
+    def row_at(self, row_index):
+        if 0 <= row_index < len(self._rows):
+            return self._rows[row_index]
+        return None
+
+    def column_index(self, key):
+        for idx, (column_key, _label, _alignment) in enumerate(self.COLUMNS):
+            if column_key == key:
+                return idx
+        raise KeyError(key)
+
+    def rowCount(self, parent=QtCore.QModelIndex()):
+        if parent.isValid():
+            return 0
+        return len(self._rows)
+
+    def columnCount(self, parent=QtCore.QModelIndex()):
+        if parent.isValid():
+            return 0
+        return len(self.COLUMNS)
+
+    def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if role != Qt.DisplayRole:
+            return None
+        if orientation == Qt.Horizontal and 0 <= section < len(self.COLUMNS):
+            return self.COLUMNS[section][1]
+        return None
+
+    def data(self, index, role=Qt.DisplayRole):
+        if not index.isValid():
+            return None
+        row = self.row_at(index.row())
+        if row is None:
+            return None
+        column_key, _label, alignment = self.COLUMNS[index.column()]
+
+        if role in (Qt.DisplayRole, Qt.EditRole):
+            value = getattr(row, column_key, "")
+            return "" if value is None else str(value)
+        if role == Qt.TextAlignmentRole:
+            return int(alignment)
+        if role == AUDIT_TIMELINE_ROW_ROLE:
+            return row
+        if role == Qt.ToolTipRole:
+            if column_key == "summary":
+                return getattr(row, "detail_json", "")
+            return None
+        if role == Qt.ForegroundRole:
+            level = str(getattr(row, "level", "") or "").lower()
+            if level == "error":
+                return QBrush(QColor("#b91c1c"))
+            if level == "warning":
+                return QBrush(QColor("#b45309"))
+            if getattr(row, "is_valid", True) is False:
+                return QBrush(QColor("#6b7280"))
+        return None
+
+
+class AuditTimelineWindow(QtWidgets.QDialog):
+    def __init__(self, parent=None, model=None, reader_factory=None):
+        super().__init__(parent)
+        self.model = model if model is not None else getattr(parent, "model", None)
+        self.reader_factory = reader_factory
+
+        self.setWindowTitle("Experiment Audit Timeline")
+        self.resize(1000, 650)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        toolbar = QtWidgets.QHBoxLayout()
+        toolbar.setSpacing(8)
+        self.refresh_button = QtWidgets.QPushButton("Refresh")
+        self.refresh_button.clicked.connect(self.refresh)
+        self.status_label = QtWidgets.QLabel("")
+        self.status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        toolbar.addWidget(self.refresh_button)
+        toolbar.addStretch(1)
+        toolbar.addWidget(self.status_label)
+        layout.addLayout(toolbar)
+
+        splitter = QtWidgets.QSplitter(Qt.Vertical)
+
+        self.table = QtWidgets.QTableView()
+        self.table_model = AuditTimelineTableModel(self)
+        self.table.setModel(self.table_model)
+        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(
+            self.table_model.column_index("summary"),
+            QHeaderView.Stretch,
+        )
+
+        self.details_text = QtWidgets.QPlainTextEdit()
+        self.details_text.setReadOnly(True)
+        self.details_text.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
+        details_font = QtGui.QFont("Consolas")
+        details_font.setStyleHint(QtGui.QFont.Monospace)
+        self.details_text.setFont(details_font)
+
+        splitter.addWidget(self.table)
+        splitter.addWidget(self.details_text)
+        splitter.setSizes([430, 220])
+        layout.addWidget(splitter, 1)
+
+        selection_model = self.table.selectionModel()
+        if selection_model is not None:
+            selection_model.selectionChanged.connect(self._on_selection_changed)
+
+        self.refresh()
+
+    def _make_reader(self):
+        if self.reader_factory is not None:
+            return self.reader_factory()
+        return ExperimentAuditReader(model=self.model)
+
+    def refresh(self):
+        try:
+            rows = self._make_reader().read_rows()
+        except Exception as exc:
+            rows = []
+            self.status_label.setText(f"Could not read audit: {exc}")
+        else:
+            self.status_label.setText(self._format_status(rows))
+
+        self.table_model.set_rows(rows)
+        if rows:
+            self.table.selectRow(0)
+            self._set_details(rows[0])
+        else:
+            self.details_text.setPlainText("")
+
+    def _format_status(self, rows):
+        count = len(rows or [])
+        if count == 0:
+            return "No audit events found"
+        warnings = sum(1 for row in rows if str(getattr(row, "level", "")).lower() == "warning")
+        errors = sum(1 for row in rows if str(getattr(row, "level", "")).lower() == "error")
+        parts = [f"{count} event" if count == 1 else f"{count} events"]
+        if warnings:
+            parts.append(f"{warnings} warning" if warnings == 1 else f"{warnings} warnings")
+        if errors:
+            parts.append(f"{errors} error" if errors == 1 else f"{errors} errors")
+        return " | ".join(parts)
+
+    def _selected_row(self):
+        selection_model = self.table.selectionModel()
+        if selection_model is None:
+            return None
+        selected = selection_model.selectedRows()
+        if not selected:
+            return None
+        return self.table_model.row_at(selected[0].row())
+
+    def _set_details(self, row):
+        self.details_text.setPlainText(str(getattr(row, "detail_json", "") or ""))
+
+    def _on_selection_changed(self, *_args):
+        row = self._selected_row()
+        if row is None:
+            self.details_text.setPlainText("")
+            return
+        self._set_details(row)
+
 # class ShortcutManager:
 #     """Manage application shortcuts and their descriptions."""
 #     def __init__(self, parent):
@@ -128,6 +321,7 @@ class MainWindow(QMainWindow):
         self.color_dict_path = os.path.join(self.script_dir, 'Presets','Colors.json')
         self.color_dict = self.load_colors(self.color_dict_path)
         self._startup_focus_initialized = False
+        self.audit_timeline_window = None
 
         self.setWindowTitle("Droplet Printer Interface")
         self.init_ui()
@@ -227,6 +421,10 @@ class MainWindow(QMainWindow):
 
         right_layout.addWidget(self.board_status_box)
 
+        self.audit_timeline_button = QtWidgets.QPushButton("Audit Timeline")
+        self.audit_timeline_button.clicked.connect(self.show_experiment_audit)
+        right_layout.addWidget(self.audit_timeline_button)
+
         self.shortcut_box = ShortcutTableWidget(self,self.shortcut_manager)
         self.shortcut_box.setStyleSheet(f"background-color: {self.color_dict['darker_gray']};")
         self.shortcut_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
@@ -296,6 +494,7 @@ class MainWindow(QMainWindow):
         self.shortcut_manager.add_shortcut('t','Print 20 droplets', lambda: self.controller.print_droplets(20))
         # self.shortcut_manager.add_shortcut('Shift+s','Reset Print Syringe', lambda: self.controller.reset_print_syringe())
         self.shortcut_manager.add_shortcut('Shift+i','See calibrations', lambda: self.show_calibrations())
+        self.shortcut_manager.add_shortcut('Ctrl+Shift+A','Audit Timeline', lambda: self.show_experiment_audit())
         self.shortcut_manager.add_shortcut('Esc', 'Pause Action', lambda: self.pause_machine())
         self.shortcut_manager.add_shortcut('Shift+1','LED On', lambda: self.controller.LED_on())
         self.shortcut_manager.add_shortcut('Shift+2','LED Off', lambda: self.controller.LED_off())
@@ -646,6 +845,20 @@ class MainWindow(QMainWindow):
         for printer_head in self.model.printer_head_manager.get_all_printer_heads():
             #print(f'Printer Head {printer_head.get_stock_id()}')
             print(printer_head.get_prediction_data())
+
+    def show_experiment_audit(self):
+        """Open the read-only experiment audit timeline window."""
+        window = getattr(self, "audit_timeline_window", None)
+        if window is None:
+            window = AuditTimelineWindow(self, model=self.model)
+            self.audit_timeline_window = window
+        else:
+            window.model = self.model
+            window.refresh()
+
+        window.show()
+        window.raise_()
+        window.activateWindow()
         
     def reset_single_array(self):
         """Reset a single array."""
