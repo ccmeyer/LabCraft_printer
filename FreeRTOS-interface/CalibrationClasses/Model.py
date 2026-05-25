@@ -31057,6 +31057,7 @@ class RefuelCameraModel(QObject):
         self.refuel_monitor_timing_log = []
         self.last_refuel_monitor_timing = None
         self._refuel_monitor_next_tick_index = 1
+        self.refuel_calibration_performance_enabled = False
         self.refuel_ejection_counter_session_id = None
         self.refuel_ejection_counter_started_at_utc = None
         self.refuel_ejection_counter_started_monotonic_s = None
@@ -31177,6 +31178,19 @@ class RefuelCameraModel(QObject):
 
     def is_refuel_process_monitoring_enabled(self):
         return bool(self.refuel_process_monitoring_enabled)
+
+    def set_refuel_calibration_performance_enabled(self, enabled):
+        enabled = bool(enabled)
+        if self.refuel_calibration_performance_enabled == enabled:
+            return False
+        self.refuel_calibration_performance_enabled = enabled
+        if not enabled:
+            self.refuel_calibration_performance_active = None
+        self.update_level_ui_signal.emit()
+        return True
+
+    def is_refuel_calibration_performance_enabled(self):
+        return bool(self.refuel_calibration_performance_enabled)
 
     @staticmethod
     def _coerce_refuel_ejection_count(value):
@@ -31312,6 +31326,8 @@ class RefuelCameraModel(QObject):
         return record
 
     def begin_refuel_calibration_performance_observation(self, payload=None):
+        if not self.refuel_calibration_performance_enabled:
+            return None
         payload = self._json_safe_refuel_timing_value(dict(payload or {}))
         if isinstance(self.refuel_calibration_performance_active, dict):
             for key in ("source", "process_name", "phase_name", "session_id"):
@@ -31340,11 +31356,17 @@ class RefuelCameraModel(QObject):
         return dict(self.refuel_calibration_performance_active)
 
     def record_refuel_calibration_performance_marker(self, event_kind, payload=None):
+        if not self.refuel_calibration_performance_enabled:
+            return None
         if not isinstance(self.refuel_calibration_performance_active, dict):
             self.begin_refuel_calibration_performance_observation(payload)
+        if not isinstance(self.refuel_calibration_performance_active, dict):
+            return None
         return self._append_refuel_calibration_performance_event(event_kind, payload)
 
     def complete_refuel_calibration_performance_observation(self, outcome, payload=None):
+        if not self.refuel_calibration_performance_enabled:
+            return None
         payload = self._json_safe_refuel_timing_value(dict(payload or {}))
         if not isinstance(self.refuel_calibration_performance_active, dict):
             return None
@@ -32133,6 +32155,7 @@ class RefuelCameraModel(QObject):
             "generated_monotonic_s": time.monotonic(),
             "tracking_enabled": bool(self.refuel_tracking_enabled),
             "process_monitoring_enabled": bool(self.refuel_process_monitoring_enabled),
+            "refuel_calibration_performance_enabled": bool(self.refuel_calibration_performance_enabled),
             "monitor_status": self.get_refuel_monitor_status(),
             "calibration_performance": self.get_refuel_calibration_performance_summary(),
             "calibration_performance_events": self.get_refuel_calibration_performance_events(),

@@ -298,6 +298,26 @@ def test_refuel_camera_model_timing_summary_and_samples_are_independent():
 def test_refuel_camera_model_calibration_performance_stopwatch_records_elapsed():
     model = RefuelCameraModel()
 
+    assert model.is_refuel_calibration_performance_enabled() is False
+    assert model.record_refuel_calibration_performance_marker(
+        "stage_changed",
+        {
+            "source": "calibrationStageChanged",
+            "process_name": "IgnoredProcess",
+        },
+    ) is None
+    assert model.complete_refuel_calibration_performance_observation(
+        "completed",
+        {"event_kind": "ignored_completion"},
+    ) is None
+    assert model.get_refuel_calibration_performance_events() == []
+
+    update_calls = []
+    model.update_level_ui_signal.connect(lambda: update_calls.append(True))
+    assert model.set_refuel_calibration_performance_enabled(True) is True
+    assert model.is_refuel_calibration_performance_enabled() is True
+    assert update_calls
+
     context = model.record_refuel_calibration_performance_marker(
         "stage_changed",
         {
@@ -328,6 +348,21 @@ def test_refuel_camera_model_calibration_performance_stopwatch_records_elapsed()
         "calibration_completed",
     ]
     json.dumps(events[-1])
+
+    assert model.record_refuel_calibration_performance_marker(
+        "stage_changed",
+        {"source": "calibrationStageChanged", "process_name": "SecondProcess"},
+    )
+    assert model.get_refuel_calibration_performance_summary()["active"] is not None
+    assert model.set_refuel_calibration_performance_enabled(False) is True
+    assert model.is_refuel_calibration_performance_enabled() is False
+    assert model.get_refuel_calibration_performance_summary()["active"] is None
+    event_count = model.get_refuel_calibration_performance_summary()["event_count"]
+    assert model.record_refuel_calibration_performance_marker(
+        "stage_changed",
+        {"source": "calibrationStageChanged"},
+    ) is None
+    assert model.get_refuel_calibration_performance_summary()["event_count"] == event_count
 
 
 def test_refuel_camera_model_timing_summary_includes_max_and_p95():
@@ -372,6 +407,7 @@ def test_refuel_camera_model_build_performance_snapshot_is_json_safe_and_caps_sa
     assert snapshot["kind"] == "refuel_monitor_performance_snapshot"
     assert snapshot["reason"] == "unit_test"
     assert snapshot["tracking_enabled"] is True
+    assert snapshot["refuel_calibration_performance_enabled"] is False
     assert snapshot["calibration_performance"]["event_count"] == 0
     assert snapshot["timing_summary"]["max_capture_duration_ms"] == 3.0
     assert snapshot["ejection_counter"]["observed_ejection_count"] == 2
@@ -409,6 +445,7 @@ def test_refuel_camera_model_empty_performance_snapshot_is_valid():
 
     snapshot = model.build_refuel_performance_snapshot()
 
+    assert snapshot["refuel_calibration_performance_enabled"] is False
     assert snapshot["timing_summary"]["record_count"] == 0
     assert snapshot["timing_log"] == []
     assert snapshot["process_markers"] == []

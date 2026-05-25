@@ -925,6 +925,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._refuel_panel_rendered_version = None
         self._refuel_panel_pending_version = None
         self._refuel_level_chart_full_scale_px = None
+        self._last_refuel_named_calibration_payload = {}
 
         self._bridge_preview_payload = None
         self._memory_recommendation_preview = None
@@ -1513,6 +1514,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         debug_content_v.addWidget(self.pw_sweep_group)
         debug_content_v.addWidget(self.timecourse_group)
         debug_content_v.addWidget(self.stream_capture_group)
+        self.refuel_performance_debug_group = self._build_refuel_performance_debug_group()
+        debug_content_v.addWidget(self.refuel_performance_debug_group)
         debug_content_v.addStretch(1)
         self.debug_scroll.setWidget(self.debug_tab_content)
 
@@ -2009,17 +2012,50 @@ class DropletImagingDialog(QtWidgets.QDialog):
         QTimer.singleShot(0, self._ensure_stream_calibration_sequence_followup_state)
         QTimer.singleShot(0, self._ensure_droplet_calibration_sequence_followup_state)
 
+    def _build_refuel_performance_debug_group(self):
+        group = QtWidgets.QGroupBox("Refuel Performance Debug")
+        group_v = QtWidgets.QVBoxLayout(group)
+        group_v.setContentsMargins(8, 8, 8, 8)
+        group_v.setSpacing(6)
+
+        self.enable_refuel_performance_diagnostics_checkbox = QtWidgets.QCheckBox(
+            "Enable Refuel Performance Diagnostics"
+        )
+        self.enable_refuel_performance_diagnostics_checkbox.setToolTip(
+            "Record calibration stopwatch events and enable refuel performance snapshot export."
+        )
+        diagnostics_enabled = self._is_refuel_performance_diagnostics_enabled()
+        self.enable_refuel_performance_diagnostics_checkbox.setChecked(diagnostics_enabled)
+        self.enable_refuel_performance_diagnostics_checkbox.toggled.connect(
+            self._set_refuel_performance_diagnostics_enabled
+        )
+        group_v.addWidget(self.enable_refuel_performance_diagnostics_checkbox)
+
+        self.export_refuel_performance_button = QtWidgets.QPushButton("Export Perf Snapshot")
+        self.export_refuel_performance_button.setToolTip(
+            "Write refuel monitor timing and process telemetry to a JSON file."
+        )
+        self.export_refuel_performance_button.clicked.connect(self._export_refuel_performance_snapshot)
+        self.export_refuel_performance_button.setEnabled(bool(self.refuel_camera_model is not None and diagnostics_enabled))
+        group_v.addWidget(self.export_refuel_performance_button)
+
+        self.refuel_performance_debug_status_label = QtWidgets.QLabel(
+            "Performance diagnostics disabled"
+            if not diagnostics_enabled
+            else "Performance diagnostics enabled"
+        )
+        self.refuel_performance_debug_status_label.setWordWrap(True)
+        group_v.addWidget(self.refuel_performance_debug_status_label)
+        return group
+
     def _build_refuel_level_panel(self):
         group = QtWidgets.QGroupBox("Refuel Level")
         group_v = QtWidgets.QVBoxLayout(group)
         group_v.setContentsMargins(8, 8, 8, 8)
         group_v.setSpacing(6)
 
-        metrics_grid = QtWidgets.QGridLayout()
-        metrics_grid.setHorizontalSpacing(8)
-        metrics_grid.setVerticalSpacing(4)
-
-        self.refuel_level_value_label = QtWidgets.QLabel("-")
+        self.refuel_level_value_label = QtWidgets.QLabel("Level: -")
+        self.refuel_level_value_label.setStyleSheet("font-weight: 600;")
         self.refuel_level_status_label = QtWidgets.QLabel("Off")
         self.refuel_level_last_update_label = QtWidgets.QLabel("-")
         self.refuel_level_timing_label = QtWidgets.QLabel("-")
@@ -2030,37 +2066,16 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.refuel_level_ejection_label.setWordWrap(True)
         self.refuel_level_advisory_label = QtWidgets.QLabel("Monitoring disabled")
         self.refuel_level_advisory_label.setWordWrap(True)
-
-        metrics_grid.addWidget(QtWidgets.QLabel("Latest Level"), 0, 0)
-        metrics_grid.addWidget(self.refuel_level_value_label, 0, 1)
-        metrics_grid.addWidget(QtWidgets.QLabel("Status"), 1, 0)
-        metrics_grid.addWidget(self.refuel_level_status_label, 1, 1)
-        metrics_grid.addWidget(QtWidgets.QLabel("Last Update"), 2, 0)
-        metrics_grid.addWidget(self.refuel_level_last_update_label, 2, 1)
-        metrics_grid.addWidget(QtWidgets.QLabel("Timing"), 3, 0)
-        metrics_grid.addWidget(self.refuel_level_timing_label, 3, 1)
-        metrics_grid.addWidget(QtWidgets.QLabel("Process"), 4, 0)
-        metrics_grid.addWidget(self.refuel_level_process_label, 4, 1)
-        metrics_grid.addWidget(QtWidgets.QLabel("Ejections"), 5, 0)
-        metrics_grid.addWidget(self.refuel_level_ejection_label, 5, 1)
-        group_v.addLayout(metrics_grid)
+        group_v.addWidget(self.refuel_level_value_label)
 
         self._refuel_level_chart_bundle = self._create_refuel_level_chart_bundle()
         chart_view = self._refuel_level_chart_bundle["view"]
         chart_view.setObjectName("refuel_level_chart_view")
-        chart_view.setMinimumHeight(110)
-        chart_view.setMaximumHeight(150)
+        chart_view.setMinimumHeight(190)
+        chart_view.setMaximumHeight(240)
         group_v.addWidget(chart_view)
 
         group_v.addWidget(self.refuel_level_advisory_label)
-
-        self.export_refuel_performance_button = QtWidgets.QPushButton("Export Perf Snapshot")
-        self.export_refuel_performance_button.setToolTip(
-            "Write refuel monitor timing and process telemetry to a JSON file."
-        )
-        self.export_refuel_performance_button.clicked.connect(self._export_refuel_performance_snapshot)
-        self.export_refuel_performance_button.setEnabled(False)
-        group_v.addWidget(self.export_refuel_performance_button)
 
         self.open_refuel_camera_button = QtWidgets.QPushButton("Open Refuel Camera")
         opener = None
@@ -2083,9 +2098,55 @@ class DropletImagingDialog(QtWidgets.QDialog):
         group.hide()
         return group
 
+    def _is_refuel_performance_diagnostics_enabled(self):
+        if self.refuel_camera_model is None:
+            return False
+        checkbox = getattr(self, "enable_refuel_performance_diagnostics_checkbox", None)
+        if checkbox is not None and not checkbox.isChecked():
+            return False
+        getter = getattr(self.refuel_camera_model, "is_refuel_calibration_performance_enabled", None)
+        if callable(getter):
+            try:
+                return bool(getter())
+            except Exception:
+                return False
+        return bool(checkbox is not None and checkbox.isChecked())
+
+    def _set_refuel_performance_debug_status(self, message):
+        label = getattr(self, "refuel_performance_debug_status_label", None)
+        if label is not None:
+            label.setText(str(message or ""))
+
+    def _set_refuel_performance_diagnostics_enabled(self, checked):
+        checked = bool(checked and self.refuel_camera_model is not None)
+        checkbox = getattr(self, "enable_refuel_performance_diagnostics_checkbox", None)
+        if checkbox is not None and checkbox.isChecked() != checked:
+            was_blocked = checkbox.blockSignals(True)
+            try:
+                checkbox.setChecked(checked)
+            finally:
+                checkbox.blockSignals(was_blocked)
+        if self.refuel_camera_model is not None:
+            setter = getattr(self.refuel_camera_model, "set_refuel_calibration_performance_enabled", None)
+            if callable(setter):
+                try:
+                    setter(checked)
+                except Exception:
+                    checked = False
+        button = getattr(self, "export_refuel_performance_button", None)
+        if button is not None:
+            button.setEnabled(bool(checked and self.refuel_camera_model is not None))
+        self._set_refuel_performance_debug_status(
+            "Performance diagnostics enabled" if checked else "Performance diagnostics disabled"
+        )
+
     def _export_refuel_performance_snapshot(self, *, reason="manual_export", show_status=True):
         model = self.refuel_camera_model
         if model is None:
+            return None
+        if not self._is_refuel_performance_diagnostics_enabled():
+            if show_status:
+                self._set_refuel_performance_debug_status("Enable refuel performance diagnostics before exporting.")
             return None
         writer = getattr(model, "write_refuel_performance_snapshot", None)
         if not callable(writer):
@@ -2095,11 +2156,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         except Exception as exc:
             print(f"[RefuelMonitor] performance snapshot export failed: {exc}")
             if show_status:
-                self.refuel_level_advisory_label.setText(f"Performance snapshot export failed: {exc}")
+                self._set_refuel_performance_debug_status(f"Performance snapshot export failed: {exc}")
             return None
         if show_status:
             message = f"Performance snapshot saved: {path}"
-            self.refuel_level_advisory_label.setText(message)
+            self._set_refuel_performance_debug_status(message)
             button = getattr(self, "export_refuel_performance_button", None)
             if button is not None:
                 button.setToolTip(message)
@@ -2107,6 +2168,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
     def _auto_export_refuel_performance_snapshot_on_close(self):
         if self.refuel_camera_model is None:
+            return None
+        if not self._is_refuel_performance_diagnostics_enabled():
             return None
         try:
             getter = getattr(self.refuel_camera_model, "get_refuel_monitor_timing_log", None)
@@ -2439,7 +2502,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         return {}
 
     def _record_refuel_calibration_performance_marker(self, event_kind, source, extra=None):
-        if self.refuel_camera_model is None:
+        if self.refuel_camera_model is None or not self._is_refuel_performance_diagnostics_enabled():
             return None
         recorder = getattr(self.refuel_camera_model, "record_refuel_calibration_performance_marker", None)
         if not callable(recorder):
@@ -2451,7 +2514,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             return None
 
     def _complete_refuel_calibration_performance_observation(self, outcome, source, extra=None):
-        if self.refuel_camera_model is None:
+        if self.refuel_camera_model is None or not self._is_refuel_performance_diagnostics_enabled():
             return None
         completer = getattr(self.refuel_camera_model, "complete_refuel_calibration_performance_observation", None)
         if not callable(completer):
@@ -2461,6 +2524,17 @@ class DropletImagingDialog(QtWidgets.QDialog):
         except Exception as exc:
             print(f"[RefuelMonitor] calibration performance completion failed: {exc}")
             return None
+
+    def _remember_refuel_named_calibration_payload(self, payload):
+        if not isinstance(payload, dict):
+            return
+        if not (payload.get("process_name") or payload.get("phase_name")):
+            return
+        remembered = dict(getattr(self, "_last_refuel_named_calibration_payload", {}) or {})
+        for key in ("process_name", "phase_name", "session_id"):
+            if payload.get(key) is not None:
+                remembered[key] = payload.get(key)
+        self._last_refuel_named_calibration_payload = remembered
 
     def _active_calibration_refuel_payload(self, source, extra=None):
         payload = {"source": str(source or "droplet_imager")}
@@ -2483,6 +2557,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if isinstance(extra, dict):
             for key, value in extra.items():
                 payload[str(key)] = value
+        fallback = dict(getattr(self, "_last_refuel_named_calibration_payload", {}) or {})
+        for key in ("process_name", "phase_name", "session_id"):
+            if payload.get(key) is None and fallback.get(key) is not None:
+                payload[key] = fallback[key]
+        self._remember_refuel_named_calibration_payload(payload)
         return payload
 
     def _ensure_refuel_process_observation(self, source, extra=None):
@@ -2890,21 +2969,17 @@ class DropletImagingDialog(QtWidgets.QDialog):
         )
         if not enabled:
             self.refuel_level_group.hide()
-            self.refuel_level_value_label.setText("-")
+            self.refuel_level_value_label.setText("Level: -")
             self.refuel_level_status_label.setText("Off")
             self.refuel_level_last_update_label.setText("-")
             self.refuel_level_timing_label.setText("-")
             self.refuel_level_process_label.setText("Process monitoring off")
             self.refuel_level_ejection_label.setText("-")
             self.refuel_level_advisory_label.setText("Monitoring disabled")
-            if hasattr(self, "export_refuel_performance_button"):
-                self.export_refuel_performance_button.setEnabled(False)
             self._refresh_refuel_level_chart()
             return
 
         self.refuel_level_group.show()
-        if hasattr(self, "export_refuel_performance_button"):
-            self.export_refuel_performance_button.setEnabled(self.refuel_camera_model is not None)
         timing = None
         if self.refuel_camera_model is not None:
             summary_getter = getattr(self.refuel_camera_model, "get_refuel_monitor_timing_summary", None)
@@ -2932,7 +3007,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         )
         sample = self._latest_refuel_sample()
         if not sample:
-            self.refuel_level_value_label.setText("-")
+            self.refuel_level_value_label.setText("Level: -")
             if monitor_state in ("starting", "paused", "unavailable"):
                 self.refuel_level_status_label.setText(self._format_refuel_status(monitor_state) or "No sample")
             else:
@@ -2951,12 +3026,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         level = sample.get("level_px", sample.get("level"))
         if level is None:
-            self.refuel_level_value_label.setText("-")
+            self.refuel_level_value_label.setText("Level: -")
         else:
             try:
-                self.refuel_level_value_label.setText(f"{float(level):.1f} px")
+                self.refuel_level_value_label.setText(f"Level: {float(level):.1f} px")
             except Exception:
-                self.refuel_level_value_label.setText(str(level))
+                self.refuel_level_value_label.setText(f"Level: {level}")
 
         status = sample.get("status") or sample.get("detected_status") or sample.get("predicted_status")
         if status is None and self.refuel_camera_model is not None:
@@ -2982,7 +3057,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         else:
             self.refuel_level_last_update_label.setText("-")
 
-        advisory = monitor_message if monitor_state != "off" else "Level sample available"
+        advisory = "Level stable" if monitor_state == "monitoring" else monitor_message
         advisory_message = self._refuel_advisory_message(process_enabled)
         live_status = None
         if process_enabled and advisory_message:

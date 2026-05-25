@@ -31,13 +31,10 @@ Status: implemented as a disabled-by-default passive panel. The master toggle sh
 
 Panel contents:
 
-- monitor state: off, unavailable, monitoring, warning
-- latest detector status: visible, full, empty, not_found
-- latest level in pixels when visible
-- small rolling level plot with a fixed 100-sample display window
-- last valid sample time
+- current level in pixels from the channel bottom
+- larger rolling level plot with a fixed 100-sample display window
 - fixed empty-to-full Y scale based on detected channel height when available
-- latest advisory message
+- one useful advisory/guidance line
 - button or link to open the full refuel camera window for inspection
 
 Implementation notes:
@@ -97,7 +94,7 @@ Measure whether refuel monitoring has any practical effect on the droplet/stream
 
 Status: implemented as in-memory timing telemetry for the imager-scoped monitor. The monitor records capture, copy/resize, detector, total latency, skip, and failure timing without changing capture rate or moving capture off the UI thread.
 
-Performance snapshot export is available from the droplet-imager `Refuel Level` panel with `Export Perf Snapshot`. The droplet imager also records a lightweight calibration-process stopwatch from existing calibration lifecycle signals, even when refuel level tracking is off, and writes a snapshot on close when timing or stopwatch data exists. Snapshots are written to:
+Performance snapshot export and the calibration-process stopwatch are debug-only. They live in the droplet-imager Debug / Specialty tab under `Refuel Performance Debug` and require `Enable Refuel Performance Diagnostics` to be checked. With diagnostics disabled, normal refuel tracking does not record stopwatch rows and does not auto-export snapshots on close. Snapshots are written to:
 
 `<experiment_dir>/calibration_recordings/refuel_monitor_performance/refuel_monitor_performance_*.json`
 
@@ -113,7 +110,7 @@ Metrics to record:
 
 Implementation notes:
 
-- Store recent timing in `RefuelCameraModel` for UI display and tests.
+- Store recent timing in `RefuelCameraModel` for tests and debug snapshots.
 - Include timing fields in recorder/audit output when record mode is enabled.
 - Do not optimize prematurely; use this phase to decide whether capture needs a worker.
 
@@ -125,7 +122,8 @@ Validation:
   1. refuel tracking off
   2. refuel tracking on, process monitoring off
   3. refuel tracking on, process monitoring on
-- Close the droplet imager or click `Export Perf Snapshot` after each run. The tracking-off baseline will export on close with calibration elapsed time but no refuel capture timings.
+- For performance-debug runs, enable `Enable Refuel Performance Diagnostics`, then close the droplet imager or click `Export Perf Snapshot` after each run. Leave diagnostics off for normal operation.
+- A tracking-off baseline snapshot requires diagnostics to be enabled so the lightweight stopwatch can record calibration elapsed time.
 - Share the exported JSON snapshots from all three runs for review.
 
 Exit criteria:

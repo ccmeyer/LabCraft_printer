@@ -127,13 +127,20 @@ def test_refuel_panel_default_disabled_and_no_capture(monkeypatch, qapp):
     assert dialog.enable_refuel_process_monitoring_checkbox.text() == "Monitor Calibration Processes"
     assert dialog.enable_refuel_process_monitoring_checkbox.isChecked() is False
     assert dialog.enable_refuel_process_monitoring_checkbox.isEnabled() is False
+    assert dialog.refuel_performance_debug_group.title() == "Refuel Performance Debug"
+    assert dialog.enable_refuel_performance_diagnostics_checkbox.isChecked() is False
+    assert dialog.export_refuel_performance_button.isEnabled() is False
+    assert dialog.refuel_performance_debug_status_label.text() == "Performance diagnostics disabled"
     assert refuel_model.is_refuel_tracking_enabled() is False
     assert refuel_model.is_refuel_process_monitoring_enabled() is False
+    assert refuel_model.is_refuel_calibration_performance_enabled() is False
     assert dialog.refuel_level_group.isHidden() is True
-    assert dialog.refuel_level_status_label.text() == "Off"
-    assert dialog.refuel_level_process_label.text() == "Process monitoring off"
-    assert dialog.refuel_level_ejection_label.text() == "-"
-    assert dialog.export_refuel_performance_button.isEnabled() is False
+    assert dialog.refuel_level_value_label.text() == "Level: -"
+    assert dialog.refuel_level_status_label.parent() is None
+    assert dialog.refuel_level_last_update_label.parent() is None
+    assert dialog.refuel_level_timing_label.parent() is None
+    assert dialog.refuel_level_process_label.parent() is None
+    assert dialog.refuel_level_ejection_label.parent() is None
     assert dialog.refuel_monitor_timer.isActive() is False
     controller.start_refuel_camera.assert_not_called()
     controller.capture_refuel_image.assert_not_called()
@@ -154,10 +161,8 @@ def test_enabling_refuel_tracking_starts_monitor_and_schedules_immediate_capture
     assert dialog.refuel_monitor_timer.isActive() is True
     assert dialog.control_panel_scroll.widget() is dialog.control_panel
     assert refuel_model.get_refuel_monitor_status()["state"] == "monitoring"
-    assert dialog.refuel_level_status_label.text() == "No sample"
-    assert dialog.refuel_level_process_label.text() == "Process monitoring off"
-    assert dialog.refuel_level_ejection_label.text() == "Observed 0 | commanded 0"
-    assert dialog.export_refuel_performance_button.isEnabled() is True
+    assert dialog.refuel_level_value_label.text() == "Level: -"
+    assert dialog.export_refuel_performance_button.isEnabled() is False
     assert dialog.refuel_level_advisory_label.text() == "Waiting for first refuel sample"
     controller.start_refuel_camera.assert_called_once_with()
     controller.capture_refuel_image.assert_not_called()
@@ -200,10 +205,10 @@ def test_refuel_panel_updates_from_sample_trace_when_enabled(monkeypatch, qapp):
     refuel_model.update_ui_with_analysis(None, None, 42.5, 12)
     qapp.processEvents()
 
-    assert dialog.refuel_level_value_label.text() == "42.5 px"
-    assert dialog.refuel_level_status_label.text() == "Visible"
-    assert dialog.refuel_level_last_update_label.text().endswith(" s")
-    assert dialog.refuel_level_process_label.text() == "Process monitoring off"
+    assert dialog.refuel_level_value_label.text() == "Level: 42.5 px"
+    assert dialog.refuel_level_status_label.parent() is None
+    assert dialog.refuel_level_last_update_label.parent() is None
+    assert dialog.refuel_level_process_label.parent() is None
     assert dialog._refuel_level_chart_bundle["primary_series"].count() == 1
     assert dialog._refuel_level_chart_bundle["current_series"].count() == 1
     point = dialog._refuel_level_chart_bundle["primary_series"].at(0)
@@ -228,9 +233,9 @@ def test_refuel_update_signal_is_ignored_while_tracking_disabled(monkeypatch, qa
     qapp.processEvents()
 
     assert dialog.refuel_level_group.isHidden() is True
-    assert dialog.refuel_level_value_label.text() == "-"
-    assert dialog.refuel_level_status_label.text() == "Off"
-    assert dialog.refuel_level_timing_label.text() == "-"
+    assert dialog.refuel_level_value_label.text() == "Level: -"
+    assert dialog.refuel_level_status_label.parent() is None
+    assert dialog.refuel_level_timing_label.parent() is None
     assert dialog._refuel_level_chart_bundle["primary_series"].count() == 0
     controller.start_refuel_camera.assert_not_called()
     controller.capture_refuel_image.assert_not_called()
@@ -366,7 +371,7 @@ def test_refuel_monitor_success_timing_shows_after_analysis_result(monkeypatch, 
     assert timing["copy_resize_duration_ms"] == 2.0
     assert timing["detector_runtime_ms"] == 4.0
     assert timing["total_latency_ms"] >= 0.0
-    assert dialog.refuel_level_timing_label.text().startswith("Capture 3 ms | Detector 4 ms | Total")
+    assert dialog.refuel_level_timing_label.parent() is None
 
 
 def test_refuel_monitor_tick_skips_when_analysis_in_progress(monkeypatch, qapp):
@@ -384,7 +389,7 @@ def test_refuel_monitor_tick_skips_when_analysis_in_progress(monkeypatch, qapp):
     timing = refuel_model.get_refuel_monitor_timing_log()[-1]
     assert timing["event_kind"] == "skip"
     assert timing["skip_reason"] == "analysis_in_progress"
-    assert dialog.refuel_level_timing_label.text() == "Skipped: analysis_in_progress"
+    assert dialog.refuel_level_timing_label.parent() is None
 
 
 def test_refuel_monitor_capture_failure_marks_unavailable_without_raising(monkeypatch, qapp):
@@ -403,7 +408,7 @@ def test_refuel_monitor_capture_failure_marks_unavailable_without_raising(monkey
     timing = refuel_model.get_refuel_monitor_timing_log()[-1]
     assert timing["event_kind"] == "failure"
     assert "camera busy" in timing["failure_message"]
-    assert dialog.refuel_level_timing_label.text().startswith("Failure: Refuel capture failed")
+    assert dialog.refuel_level_timing_label.parent() is None
 
 
 def test_refuel_monitor_stops_after_three_none_frames(monkeypatch, qapp):
@@ -442,7 +447,7 @@ def test_refuel_monitor_records_analysis_not_started(monkeypatch, qapp):
     assert timing["event_kind"] == "analysis_not_started"
     assert timing["analysis_started"] is False
     assert timing["capture_duration_ms"] == 5.0
-    assert dialog.refuel_level_timing_label.text() == "Analysis not started"
+    assert dialog.refuel_level_timing_label.parent() is None
 
 
 def test_refuel_performance_export_button_writes_snapshot_without_capture(monkeypatch, qapp, tmp_path):
@@ -451,16 +456,33 @@ def test_refuel_performance_export_button_writes_snapshot_without_capture(monkey
     refuel_model.write_refuel_performance_snapshot = Mock(return_value=str(export_path))
 
     dialog.enable_refuel_level_tracking_checkbox.setChecked(True)
+    dialog.enable_refuel_performance_diagnostics_checkbox.setChecked(True)
     qapp.processEvents()
     controller.capture_refuel_image_with_context.reset_mock()
     dialog.export_refuel_performance_button.click()
     qapp.processEvents()
 
     refuel_model.write_refuel_performance_snapshot.assert_called_once_with(reason="manual_export")
-    assert str(export_path) in dialog.refuel_level_advisory_label.text()
+    assert str(export_path) in dialog.refuel_performance_debug_status_label.text()
     assert str(export_path) in dialog.export_refuel_performance_button.toolTip()
     controller.capture_refuel_image_with_context.assert_not_called()
     assert refuel_model.is_refuel_process_monitoring_enabled() is False
+
+
+def test_refuel_performance_export_button_is_debug_gated(monkeypatch, qapp, tmp_path):
+    dialog, refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
+    refuel_model.write_refuel_performance_snapshot = Mock(return_value=str(tmp_path / "snapshot.json"))
+
+    dialog.enable_refuel_level_tracking_checkbox.setChecked(True)
+    qapp.processEvents()
+    controller.capture_refuel_image_with_context.reset_mock()
+    dialog._export_refuel_performance_snapshot()
+    qapp.processEvents()
+
+    assert dialog.export_refuel_performance_button.isEnabled() is False
+    refuel_model.write_refuel_performance_snapshot.assert_not_called()
+    assert "Enable refuel performance diagnostics" in dialog.refuel_performance_debug_status_label.text()
+    controller.capture_refuel_image_with_context.assert_not_called()
 
 
 def test_refuel_performance_export_button_failure_does_not_start_capture(monkeypatch, qapp):
@@ -468,12 +490,13 @@ def test_refuel_performance_export_button_failure_does_not_start_capture(monkeyp
     refuel_model.write_refuel_performance_snapshot = Mock(side_effect=RuntimeError("disk full"))
 
     dialog.enable_refuel_level_tracking_checkbox.setChecked(True)
+    dialog.enable_refuel_performance_diagnostics_checkbox.setChecked(True)
     qapp.processEvents()
     controller.capture_refuel_image_with_context.reset_mock()
     dialog.export_refuel_performance_button.click()
     qapp.processEvents()
 
-    assert "disk full" in dialog.refuel_level_advisory_label.text()
+    assert "disk full" in dialog.refuel_performance_debug_status_label.text()
     controller.capture_refuel_image_with_context.assert_not_called()
 
 
@@ -493,13 +516,30 @@ def test_refuel_monitor_close_stops_camera_before_dialog_cleanup(monkeypatch, qa
     controller.disable_print_profile.assert_called_once_with()
 
 
-def test_refuel_monitor_close_auto_exports_when_timing_exists(monkeypatch, qapp, tmp_path):
+def test_refuel_monitor_close_does_not_auto_export_without_debug_diagnostics(monkeypatch, qapp, tmp_path):
     dialog, refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
     monkeypatch.setattr(dialog, "_should_confirm_close_without_applied_calibration", lambda: False)
     export_path = tmp_path / "close_snapshot.json"
     refuel_model.write_refuel_performance_snapshot = Mock(return_value=str(export_path))
 
     dialog.enable_refuel_level_tracking_checkbox.setChecked(True)
+    refuel_model.record_refuel_monitor_timing({"tick_index": 1, "event_kind": "skip"})
+    event = QtGui.QCloseEvent()
+    dialog.closeEvent(event)
+
+    assert event.isAccepted() is True
+    refuel_model.write_refuel_performance_snapshot.assert_not_called()
+    controller.stop_refuel_camera.assert_called_once_with()
+
+
+def test_refuel_monitor_close_auto_exports_when_diagnostics_enabled(monkeypatch, qapp, tmp_path):
+    dialog, refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
+    monkeypatch.setattr(dialog, "_should_confirm_close_without_applied_calibration", lambda: False)
+    export_path = tmp_path / "close_snapshot.json"
+    refuel_model.write_refuel_performance_snapshot = Mock(return_value=str(export_path))
+
+    dialog.enable_refuel_level_tracking_checkbox.setChecked(True)
+    dialog.enable_refuel_performance_diagnostics_checkbox.setChecked(True)
     refuel_model.record_refuel_monitor_timing({"tick_index": 1, "event_kind": "skip"})
     event = QtGui.QCloseEvent()
     dialog.closeEvent(event)
@@ -515,6 +555,7 @@ def test_refuel_monitor_close_auto_export_failure_does_not_crash(monkeypatch, qa
     refuel_model.write_refuel_performance_snapshot = Mock(side_effect=RuntimeError("no permission"))
 
     dialog.enable_refuel_level_tracking_checkbox.setChecked(True)
+    dialog.enable_refuel_performance_diagnostics_checkbox.setChecked(True)
     refuel_model.record_refuel_monitor_timing({"tick_index": 1, "event_kind": "skip"})
     event = QtGui.QCloseEvent()
     dialog.closeEvent(event)
@@ -523,7 +564,7 @@ def test_refuel_monitor_close_auto_export_failure_does_not_crash(monkeypatch, qa
     controller.stop_refuel_camera.assert_called_once_with()
 
 
-def test_refuel_monitor_close_auto_exports_baseline_stopwatch_when_tracking_off(monkeypatch, qapp, tmp_path):
+def test_refuel_monitor_close_does_not_record_or_export_baseline_stopwatch_without_diagnostics(monkeypatch, qapp, tmp_path):
     dialog, refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
     manager = dialog.model.calibration_manager
     monkeypatch.setattr(dialog, "_should_confirm_close_without_applied_calibration", lambda: False)
@@ -538,7 +579,38 @@ def test_refuel_monitor_close_auto_exports_baseline_stopwatch_when_tracking_off(
 
     assert event.isAccepted() is True
     assert refuel_model.is_refuel_tracking_enabled() is False
-    assert refuel_model.get_refuel_calibration_performance_summary()["last"]["outcome"] == "completed"
+    assert refuel_model.get_refuel_calibration_performance_summary()["last"] is None
+    assert refuel_model.get_refuel_calibration_performance_events() == []
+    refuel_model.write_refuel_performance_snapshot.assert_not_called()
+    controller.start_refuel_camera.assert_not_called()
+    controller.capture_refuel_image_with_context.assert_not_called()
+
+
+def test_refuel_monitor_close_auto_exports_baseline_stopwatch_when_diagnostics_enabled(monkeypatch, qapp, tmp_path):
+    dialog, refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
+    manager = dialog.model.calibration_manager
+    monkeypatch.setattr(dialog, "_should_confirm_close_without_applied_calibration", lambda: False)
+    export_path = tmp_path / "baseline_snapshot.json"
+    refuel_model.write_refuel_performance_snapshot = Mock(return_value=str(export_path))
+
+    dialog.enable_refuel_performance_diagnostics_checkbox.setChecked(True)
+    manager.activeCalibration = SimpleNamespace(
+        PROCESS_NAME="DropletCalibrationProcess",
+        phase_name="droplet_search",
+        session_id="session-123",
+    )
+    manager.calibrationStageChanged.emit("Baseline process", "blue")
+    manager.activeCalibration = None
+    manager.calibrationCompleted.emit()
+    qapp.processEvents()
+    event = QtGui.QCloseEvent()
+    dialog.closeEvent(event)
+
+    assert event.isAccepted() is True
+    summary = refuel_model.get_refuel_calibration_performance_summary()["last"]
+    assert summary["outcome"] == "completed"
+    assert summary["process_name"] == "DropletCalibrationProcess"
+    assert summary["phase_name"] == "droplet_search"
     refuel_model.write_refuel_performance_snapshot.assert_called_once_with(reason="dialog_close")
     controller.start_refuel_camera.assert_not_called()
     controller.capture_refuel_image_with_context.assert_not_called()
@@ -598,7 +670,7 @@ def test_process_monitor_records_stage_and_completion_drift(monkeypatch, qapp):
     assert [row["event_kind"] for row in markers[-2:]] == ["process_started", "stage_changed"]
     assert markers[-1]["stage_message"] == "Printing droplets"
     assert markers[-1]["phase_name"] == "droplet_search"
-    assert dialog.refuel_level_process_label.text() == "Monitoring droplet_search"
+    assert dialog.refuel_level_process_label.parent() is None
 
     refuel_model.update_ui_with_analysis(None, None, 34.5, 10)
     manager.calibrationCompleted.emit()
@@ -611,7 +683,7 @@ def test_process_monitor_records_stage_and_completion_drift(monkeypatch, qapp):
     assert summary["drift_px"] == -5.5
     assert refuel_model.get_refuel_process_markers()[-1]["event_kind"] == "calibration_completed"
     dialog._schedule_refuel_level_panel_refresh(force=True)
-    assert dialog.refuel_level_process_label.text() == "Drift -5.5 px"
+    assert dialog.refuel_level_process_label.parent() is None
     assert "fell by 5.5 px" in dialog.refuel_level_advisory_label.text()
 
 
@@ -626,7 +698,7 @@ def test_process_monitor_off_ignores_calibration_signals(monkeypatch, qapp):
 
     assert refuel_model.is_refuel_process_monitoring_enabled() is False
     assert refuel_model.get_refuel_process_markers() == []
-    assert dialog.refuel_level_process_label.text() == "Process monitoring off"
+    assert dialog.refuel_level_process_label.parent() is None
 
 
 def test_advisory_label_stays_passive_with_only_level_tracking(monkeypatch, qapp):
@@ -642,7 +714,7 @@ def test_advisory_label_stays_passive_with_only_level_tracking(monkeypatch, qapp
 
     assert refuel_model.get_refuel_advisory()["enabled"] is False
     assert refuel_model.get_refuel_advisory_log() == []
-    assert dialog.refuel_level_advisory_label.text() == "Monitoring"
+    assert dialog.refuel_level_advisory_label.text() == "Level stable"
 
 
 def test_advisory_label_shows_process_monitor_empty_and_full_guidance(monkeypatch, qapp):
@@ -690,7 +762,7 @@ def test_disabling_process_monitor_keeps_level_tracking_active(monkeypatch, qapp
     assert dialog.refuel_monitor_timer.isActive() is True
     assert len(refuel_model.get_refuel_process_markers()) == marker_count
     assert refuel_model.get_refuel_advisory()["enabled"] is False
-    assert dialog.refuel_level_advisory_label.text() == "Waiting for first refuel sample"
+    assert dialog.refuel_level_advisory_label.text() == "Level stable"
     controller.stop_refuel_camera.assert_not_called()
 
 
@@ -706,7 +778,7 @@ def test_level_tracking_off_disables_process_monitoring(monkeypatch, qapp):
     assert refuel_model.is_refuel_process_monitoring_enabled() is False
     assert dialog.enable_refuel_process_monitoring_checkbox.isChecked() is False
     assert dialog.enable_refuel_process_monitoring_checkbox.isEnabled() is False
-    assert dialog.refuel_level_process_label.text() == "Process monitoring off"
+    assert dialog.refuel_level_process_label.parent() is None
     assert dialog.refuel_level_advisory_label.text() == "Monitoring disabled"
 
 
@@ -729,7 +801,7 @@ def test_refuel_panel_shows_live_ejection_counts_without_process_advisory(monkey
     qapp.processEvents()
 
     assert refuel_model.is_refuel_process_monitoring_enabled() is False
-    assert dialog.refuel_level_ejection_label.text() == "Observed 2 | commanded 5"
+    assert dialog.refuel_level_ejection_label.parent() is None
     assert refuel_model.get_refuel_advisory()["enabled"] is False
 
 
@@ -782,5 +854,7 @@ def test_process_monitor_uses_stream_printed_count_for_drift_per_ejection(monkey
     assert summary["ejection_count_delta"] == 10
     assert summary["ejection_count_source"] == "printed_capture_count"
     assert summary["drift_px_per_ejection"] == -0.5
-    assert dialog.refuel_level_process_label.text() == "Drift -5.0 px | -0.500 px/ejection"
-    assert dialog.refuel_level_ejection_label.text() == "10 | -0.500 px/ejection"
+    dialog._schedule_refuel_level_panel_refresh(force=True)
+    assert "-0.500 px/ejection over 10 ejections" in dialog.refuel_level_advisory_label.text()
+    assert dialog.refuel_level_process_label.parent() is None
+    assert dialog.refuel_level_ejection_label.parent() is None
