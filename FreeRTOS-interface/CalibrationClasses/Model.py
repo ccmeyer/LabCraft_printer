@@ -29720,6 +29720,12 @@ class ImageAnalysisThread(QThread):
     TOP_EDGE_VISIBLE_PROMINENCE_MIN = 8.0
     TOP_NEAR_VISIBLE_PROMINENCE_MIN = 9.5
     TOP_BAND_VISIBLE_PROMINENCE_MIN = 10.0
+    BOTTOM_POLARITY_PRE_OUTER_PX = 14
+    BOTTOM_POLARITY_PRE_INNER_PX = 2
+    BOTTOM_POLARITY_POST_INNER_PX = 1
+    BOTTOM_POLARITY_POST_OUTER_PX = 9
+    BOTTOM_POLARITY_REJECT_DELTA_MAX = -20.0
+    BOTTOM_POLARITY_REJECT_SLOPE_MAX = -1.5
     FILL_REFERENCE_MIN_MEAN = 40.0
     HEAD_CLOSE_KERNEL = (65, 9)
     COMPONENT_MIN_AREA = 800
@@ -29831,6 +29837,12 @@ class ImageAnalysisThread(QThread):
             "top_edge_visible_prominence_min": float(cls.TOP_EDGE_VISIBLE_PROMINENCE_MIN),
             "top_near_visible_prominence_min": float(cls.TOP_NEAR_VISIBLE_PROMINENCE_MIN),
             "top_band_visible_prominence_min": float(cls.TOP_BAND_VISIBLE_PROMINENCE_MIN),
+            "bottom_polarity_pre_outer_px": int(cls.BOTTOM_POLARITY_PRE_OUTER_PX),
+            "bottom_polarity_pre_inner_px": int(cls.BOTTOM_POLARITY_PRE_INNER_PX),
+            "bottom_polarity_post_inner_px": int(cls.BOTTOM_POLARITY_POST_INNER_PX),
+            "bottom_polarity_post_outer_px": int(cls.BOTTOM_POLARITY_POST_OUTER_PX),
+            "bottom_polarity_reject_delta_max": float(cls.BOTTOM_POLARITY_REJECT_DELTA_MAX),
+            "bottom_polarity_reject_slope_max": float(cls.BOTTOM_POLARITY_REJECT_SLOPE_MAX),
         }
 
     def _select_peak_candidate(self, peaks, prominences, last_row=None):
@@ -29932,7 +29944,82 @@ class ImageAnalysisThread(QThread):
             return float(self.TOP_BAND_VISIBLE_PROMINENCE_MIN)
         return None
 
-    def _selected_peak_visible_decision(self, selection, channel_height, fill_state):
+    def _bottom_peak_polarity(self, profile, selected_row):
+        slope_half_window = 18
+        details = {
+            "bottom_peak_polarity_available": False,
+            "bottom_peak_polarity_enough_samples": False,
+            "bottom_peak_polarity_row": None,
+            "bottom_peak_polarity_pre_start": None,
+            "bottom_peak_polarity_pre_end": None,
+            "bottom_peak_polarity_post_start": None,
+            "bottom_peak_polarity_post_end": None,
+            "bottom_peak_polarity_pre_n": 0,
+            "bottom_peak_polarity_post_n": 0,
+            "bottom_peak_polarity_pre_mean": None,
+            "bottom_peak_polarity_post_mean": None,
+            "bottom_peak_polarity_post_minus_pre": None,
+            "bottom_peak_polarity_immediate_step": None,
+            "bottom_peak_polarity_slope": None,
+            "bottom_peak_polarity_slope_half_window_px": int(slope_half_window),
+            "bottom_peak_polarity_reject_delta_max": float(self.BOTTOM_POLARITY_REJECT_DELTA_MAX),
+            "bottom_peak_polarity_reject_slope_max": float(self.BOTTOM_POLARITY_REJECT_SLOPE_MAX),
+        }
+        if profile is None or selected_row is None:
+            return details
+        try:
+            values = np.asarray(profile, dtype=float).ravel()
+            row = int(selected_row)
+        except Exception:
+            return details
+        if values.size == 0 or row < 0 or row >= int(values.size):
+            return details
+
+        pre_start = max(0, row - int(self.BOTTOM_POLARITY_PRE_OUTER_PX))
+        pre_end = max(0, row - int(self.BOTTOM_POLARITY_PRE_INNER_PX))
+        post_start = min(int(values.size), row + int(self.BOTTOM_POLARITY_POST_INNER_PX))
+        post_end = min(int(values.size), row + int(self.BOTTOM_POLARITY_POST_OUTER_PX))
+        pre = values[pre_start:pre_end]
+        post = values[post_start:post_end]
+        slope_start = max(0, row - int(slope_half_window))
+        slope_end = min(int(values.size), row + int(slope_half_window) + 1)
+        slope_window = values[slope_start:slope_end]
+
+        pre_mean = float(np.mean(pre)) if len(pre) else None
+        post_mean = float(np.mean(post)) if len(post) else None
+        post_minus_pre = None if pre_mean is None or post_mean is None else float(post_mean - pre_mean)
+        immediate_step = None
+        if row + 1 < int(values.size):
+            immediate_step = float(values[row + 1] - values[row])
+        slope = None
+        if len(slope_window) >= 8:
+            xs = np.arange(slope_start, slope_end, dtype=float)
+            try:
+                slope = float(np.polyfit(xs, slope_window.astype(float), 1)[0])
+            except Exception:
+                slope = None
+        enough_samples = len(pre) >= 3 and len(post) >= 2 and slope is not None
+        details.update(
+            {
+                "bottom_peak_polarity_available": bool(enough_samples),
+                "bottom_peak_polarity_enough_samples": bool(enough_samples),
+                "bottom_peak_polarity_row": int(row),
+                "bottom_peak_polarity_pre_start": int(pre_start),
+                "bottom_peak_polarity_pre_end": int(pre_end),
+                "bottom_peak_polarity_post_start": int(post_start),
+                "bottom_peak_polarity_post_end": int(post_end),
+                "bottom_peak_polarity_pre_n": int(len(pre)),
+                "bottom_peak_polarity_post_n": int(len(post)),
+                "bottom_peak_polarity_pre_mean": pre_mean,
+                "bottom_peak_polarity_post_mean": post_mean,
+                "bottom_peak_polarity_post_minus_pre": post_minus_pre,
+                "bottom_peak_polarity_immediate_step": immediate_step,
+                "bottom_peak_polarity_slope": slope,
+            }
+        )
+        return details
+
+    def _selected_peak_visible_decision(self, selection, channel_height, fill_state, profile=None):
         rows = [int(row) for row in (selection.get("candidate_rows") or [])]
         prominences = [float(value) for value in (selection.get("candidate_prominences") or [])]
         row = selection.get("selected_peak_row")
@@ -29960,6 +30047,20 @@ class ImageAnalysisThread(QThread):
                 reason = "bottom_artifact_with_top_boundary_peak"
                 if str(fill_state) == "full":
                     reason = "bottom_artifact_with_top_boundary_full"
+                debug_payload.update({"visible_peak_reason": reason})
+                self._debug_update(debug_payload)
+                return False, reason
+            polarity = self._bottom_peak_polarity(profile, row)
+            debug_payload.update(polarity)
+            if (
+                str(fill_state) == "full"
+                and bool(polarity.get("bottom_peak_polarity_available"))
+                and polarity.get("bottom_peak_polarity_post_minus_pre") is not None
+                and polarity.get("bottom_peak_polarity_slope") is not None
+                and float(polarity["bottom_peak_polarity_post_minus_pre"]) <= float(self.BOTTOM_POLARITY_REJECT_DELTA_MAX)
+                and float(polarity["bottom_peak_polarity_slope"]) <= float(self.BOTTOM_POLARITY_REJECT_SLOPE_MAX)
+            ):
+                reason = "bottom_negative_profile_full_artifact"
                 debug_payload.update({"visible_peak_reason": reason})
                 self._debug_update(debug_payload)
                 return False, reason
@@ -30646,6 +30747,7 @@ class ImageAnalysisThread(QThread):
                 self.peak_selection_details,
                 h0,
                 fill_candidate_state,
+                profile=profile,
             )
             if visible_peak_ok:
                 fill_state = "visible"
@@ -30902,7 +31004,7 @@ class RefuelCameraModel(QObject):
 
         return {
             "detector_name": "current_refuel_detector",
-            "detector_version": "phase2_dataset_seed_v5_channel_wall_profile",
+            "detector_version": "phase2_dataset_seed_v6_bottom_polarity_gate",
             "predicted_status": status,
             "predicted_channel_geometry": channel_geometry,
             "predicted_meniscus_line": meniscus_line,

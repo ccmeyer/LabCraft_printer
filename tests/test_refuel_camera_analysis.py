@@ -357,6 +357,85 @@ def test_visible_gate_rejects_frame_000002_style_bottom_artifact_when_fill_is_fu
     assert thread.debug_details["bottom_artifact_rows"] == [106, 117]
 
 
+def test_visible_gate_rejects_bottom_peak_with_negative_full_profile_polarity():
+    thread = _selection_thread()
+    selection = {
+        "selected_peak_row": 111,
+        "selected_peak_prominence": 7.27,
+        "candidate_rows": [111],
+        "candidate_prominences": [7.27],
+    }
+    profile = np.concatenate([
+        np.full(90, 125.0),
+        np.linspace(125.0, 40.0, 27),
+    ])
+
+    accepted, reason = thread._selected_peak_visible_decision(
+        selection,
+        channel_height=117,
+        fill_state="full",
+        profile=profile,
+    )
+
+    assert accepted is False
+    assert reason == "bottom_negative_profile_full_artifact"
+    assert thread.debug_details["visible_peak_reason"] == "bottom_negative_profile_full_artifact"
+    assert thread.debug_details["bottom_peak_polarity_available"] is True
+    assert thread.debug_details["bottom_peak_polarity_post_minus_pre"] <= -20.0
+    assert thread.debug_details["bottom_peak_polarity_slope"] <= -1.5
+
+
+def test_visible_gate_keeps_bottom_peak_with_mild_negative_profile_polarity():
+    thread = _selection_thread()
+    selection = {
+        "selected_peak_row": 111,
+        "selected_peak_prominence": 16.76,
+        "candidate_rows": [111],
+        "candidate_prominences": [16.76],
+    }
+    profile = np.concatenate([
+        np.full(90, 82.0),
+        np.linspace(82.0, 64.0, 27),
+    ])
+
+    accepted, reason = thread._selected_peak_visible_decision(
+        selection,
+        channel_height=117,
+        fill_state="full",
+        profile=profile,
+    )
+
+    assert accepted is True
+    assert reason == "bottom_visible_without_top_boundary"
+    assert thread.debug_details["bottom_peak_polarity_available"] is True
+    assert thread.debug_details["bottom_peak_polarity_post_minus_pre"] > -20.0
+
+
+def test_visible_gate_keeps_negative_bottom_peak_when_fill_state_is_empty():
+    thread = _selection_thread()
+    selection = {
+        "selected_peak_row": 111,
+        "selected_peak_prominence": 13.0,
+        "candidate_rows": [111],
+        "candidate_prominences": [13.0],
+    }
+    profile = np.concatenate([
+        np.full(90, 125.0),
+        np.linspace(125.0, 40.0, 27),
+    ])
+
+    accepted, reason = thread._selected_peak_visible_decision(
+        selection,
+        channel_height=117,
+        fill_state="empty",
+        profile=profile,
+    )
+
+    assert accepted is True
+    assert reason == "bottom_visible_without_top_boundary"
+    assert thread.debug_details["bottom_peak_polarity_post_minus_pre"] <= -20.0
+
+
 def test_visible_gate_keeps_strong_top_visible_after_full_frame():
     thread = _selection_thread()
     selection = {
@@ -695,7 +774,7 @@ def test_refuel_camera_model_build_dataset_analysis_seed_returns_geometry_and_le
     seed = model.build_dataset_analysis_seed(raw_frame)
 
     assert seed is not None
-    assert seed["detector_version"] == "phase2_dataset_seed_v5_channel_wall_profile"
+    assert seed["detector_version"] == "phase2_dataset_seed_v6_bottom_polarity_gate"
     assert seed["predicted_status"] == "visible"
     assert seed["details"]["analysis_parameters"]["bottom_guard_px"] == 2
     assert abs(seed["predicted_level_px"] - (head_rect[3] - 60)) <= 3
