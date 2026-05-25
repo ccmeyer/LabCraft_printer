@@ -38,9 +38,10 @@ import shutil
 import math
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import datetime
+from pathlib import Path
 import cv2
 from utilities import ShortcutManager
-from ExperimentAuditReader import ExperimentAuditReader
+from ExperimentAuditReader import ExperimentAuditReader, build_audit_markdown
 import CalibrationClasses
 import importlib
 from typing import Mapping, Sequence, Optional, Any, List, Dict, Tuple, Set
@@ -197,9 +198,15 @@ class AuditTimelineWindow(QtWidgets.QDialog):
         toolbar.setSpacing(8)
         self.refresh_button = QtWidgets.QPushButton("Refresh")
         self.refresh_button.clicked.connect(self.refresh)
+        self.add_note_button = QtWidgets.QPushButton("Add Note")
+        self.add_note_button.clicked.connect(self.add_operator_note)
+        self.export_markdown_button = QtWidgets.QPushButton("Export Markdown")
+        self.export_markdown_button.clicked.connect(self.export_markdown)
         self.status_label = QtWidgets.QLabel("")
         self.status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         toolbar.addWidget(self.refresh_button)
+        toolbar.addWidget(self.add_note_button)
+        toolbar.addWidget(self.export_markdown_button)
         toolbar.addStretch(1)
         toolbar.addWidget(self.status_label)
         layout.addLayout(toolbar)
@@ -243,7 +250,7 @@ class AuditTimelineWindow(QtWidgets.QDialog):
             return self.reader_factory()
         return ExperimentAuditReader(model=self.model)
 
-    def refresh(self):
+    def refresh(self, select_row=0):
         try:
             rows = self._make_reader().read_rows()
         except Exception as exc:
@@ -254,8 +261,10 @@ class AuditTimelineWindow(QtWidgets.QDialog):
 
         self.table_model.set_rows(rows)
         if rows:
-            self.table.selectRow(0)
-            self._set_details(rows[0])
+            row_index = len(rows) - 1 if select_row == "last" else int(select_row or 0)
+            row_index = max(0, min(row_index, len(rows) - 1))
+            self.table.selectRow(row_index)
+            self._set_details(rows[row_index])
         else:
             self.details_text.setPlainText("")
 
@@ -290,6 +299,80 @@ class AuditTimelineWindow(QtWidgets.QDialog):
             self.details_text.setPlainText("")
             return
         self._set_details(row)
+
+    @staticmethod
+    def _operator_note_summary(note_text):
+        lines = str(note_text or "").splitlines()
+        first_line = lines[0].strip() if lines else ""
+        if len(first_line) > 80:
+            first_line = first_line[:77] + "..."
+        return f"Operator note added: {first_line}"
+
+    def add_operator_note(self):
+        note_text, ok = QtWidgets.QInputDialog.getMultiLineText(
+            self,
+            "Add Operator Note",
+            "Note:",
+        )
+        if not ok:
+            return
+
+        note_text = str(note_text or "").strip()
+        if not note_text:
+            self.status_label.setText("Operator note was empty")
+            return
+
+        try:
+            recorder = getattr(self.model, "record_experiment_audit_event", None)
+            if not callable(recorder):
+                self.status_label.setText("Could not add operator note")
+                return
+            event = recorder(
+                "operator_note_added",
+                self._operator_note_summary(note_text),
+                details={"note": note_text},
+                level="info",
+                context={"source": "audit_timeline_window"},
+            )
+        except Exception as exc:
+            self.status_label.setText(f"Could not add operator note: {exc}")
+            return
+
+        if event is None:
+            self.status_label.setText("Could not add operator note")
+            return
+
+        self.refresh(select_row="last")
+
+    def _default_markdown_export_path(self):
+        exp = getattr(self.model, "experiment_model", None)
+        exp_dir = getattr(exp, "experiment_dir_path", None)
+        if exp_dir:
+            return os.path.join(os.fspath(exp_dir), "experiment_audit_timeline.md")
+        return "experiment_audit_timeline.md"
+
+    def export_markdown(self):
+        default_path = self._default_markdown_export_path()
+        selected = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export Audit Markdown",
+            default_path,
+            "Markdown files (*.md);;Text files (*.txt);;All files (*)",
+        )
+        file_path = selected[0] if isinstance(selected, tuple) else selected
+        if not file_path:
+            return
+
+        try:
+            reader = self._make_reader()
+            rows = reader.read_rows()
+            markdown = build_audit_markdown(rows, audit_path=reader.get_audit_path())
+            Path(file_path).write_text(markdown, encoding="utf-8")
+        except Exception as exc:
+            self.status_label.setText(f"Could not export audit: {exc}")
+            return
+
+        self.status_label.setText(f"Exported audit markdown to {file_path}")
 
 # class ShortcutManager:
 #     """Manage application shortcuts and their descriptions."""

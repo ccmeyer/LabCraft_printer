@@ -41,6 +41,25 @@ def _json_pretty(payload: Any) -> str:
     return json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False, default=str)
 
 
+def _markdown_cell(value: Any) -> str:
+    text = str(value or "")
+    text = text.replace("\\", "\\\\")
+    text = text.replace("|", "\\|")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return text.replace("\n", "<br>")
+
+
+def _format_markdown_generated_at(generated_at: Any) -> str:
+    if generated_at is None:
+        generated_at = datetime.now(timezone.utc)
+    if isinstance(generated_at, datetime):
+        if generated_at.tzinfo is None:
+            generated_at = generated_at.replace(tzinfo=timezone.utc)
+        generated_at = generated_at.astimezone(timezone.utc)
+        return generated_at.isoformat().replace("+00:00", "Z")
+    return str(generated_at)
+
+
 def _coerce_float_or_none(value) -> float | None:
     try:
         if value in (None, ""):
@@ -88,6 +107,77 @@ def event_detail_json(event) -> str:
             "context": event.get("context") if isinstance(event.get("context"), dict) else {},
         }
     )
+
+
+def build_audit_markdown(
+    rows,
+    audit_path=None,
+    generated_at=None,
+    title="Experiment Audit Timeline",
+) -> str:
+    row_list = list(rows or [])
+    generated_text = _format_markdown_generated_at(generated_at)
+    lines = [
+        f"# {str(title or 'Experiment Audit Timeline')}",
+        "",
+        f"- Generated: {generated_text}",
+    ]
+    if audit_path:
+        lines.append(f"- Audit file: `{os.fspath(audit_path)}`")
+    lines.extend(
+        [
+            f"- Events: {len(row_list)}",
+            "",
+            "## Summary",
+            "",
+            "| Line | Time | Elapsed | Level | Event Type | Summary |",
+            "| ---: | --- | ---: | --- | --- | --- |",
+        ]
+    )
+
+    for row in row_list:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    _markdown_cell(getattr(row, "line_number", "")),
+                    _markdown_cell(getattr(row, "time_display", "")),
+                    _markdown_cell(getattr(row, "elapsed_display", "")),
+                    _markdown_cell(getattr(row, "level", "")),
+                    _markdown_cell(getattr(row, "event_type", "")),
+                    _markdown_cell(getattr(row, "summary", "")),
+                ]
+            )
+            + " |"
+        )
+
+    if not row_list:
+        lines.append("|  |  |  |  |  | No audit events found |")
+
+    lines.extend(["", "## Details", ""])
+    if not row_list:
+        lines.append("No audit events found.")
+    for row in row_list:
+        line_number = getattr(row, "line_number", "")
+        event_type = getattr(row, "event_type", "") or "audit_event"
+        summary = getattr(row, "summary", "")
+        lines.extend(
+            [
+                f"### Line {line_number}: {event_type}",
+                "",
+                f"- Level: {getattr(row, 'level', '')}",
+                f"- Time: {getattr(row, 'time_display', '')}",
+                f"- Elapsed: {getattr(row, 'elapsed_display', '')}",
+                f"- Summary: {summary}",
+                "",
+                "```json",
+                str(getattr(row, "detail_json", "") or "{}"),
+                "```",
+                "",
+            ]
+        )
+
+    return "\n".join(lines).rstrip() + "\n"
 
 
 class ExperimentAuditReader:
