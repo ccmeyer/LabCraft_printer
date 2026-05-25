@@ -336,6 +336,7 @@ def test_apply_previewed_droplet_volume_refreshes_recommendation(monkeypatch, qa
     dialog.refresh_calibration_memory_recommendation = lambda: refresh_calls.append(True)
     dialog._set_saved_applied_summary_row_fingerprint = lambda fingerprint: None
     dialog._sync_applied_summary_row_highlight = lambda: None
+    dialog._apply_print_settings_for_applied_calibration = lambda *args, **kwargs: {"ok": True, "message": ""}
     monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "information", lambda *args, **kwargs: None)
     monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "warning", lambda *args, **kwargs: None)
     monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "critical", lambda *args, **kwargs: None)
