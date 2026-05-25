@@ -43,6 +43,19 @@ def _event_types(c):
     return [event["event_type"] for event in c.audit_sink.events]
 
 
+class ResettableFakeWellPlate(FakeWellPlate):
+    def __init__(self, wells, calibration_ok=True):
+        super().__init__(wells, calibration_ok=calibration_ok)
+        self.reset_stock_calls = []
+        self.reset_all_calls = 0
+
+    def reset_all_wells_for_stock(self, stock_id):
+        self.reset_stock_calls.append(stock_id)
+
+    def reset_all_wells(self):
+        self.reset_all_calls += 1
+
+
 def _array_context(reason=None):
     return {
         "stock_id": "stock-a",
@@ -164,3 +177,55 @@ def test_audit_failure_does_not_block_print_array_or_finalize():
 
     assert c.get_array_run_state() == "idle"
     assert c.array_complete.calls == [()]
+
+
+def test_reset_single_array_records_warning_audit_event():
+    plate = ResettableFakeWellPlate([FakeWell("A1", 5), FakeWell("A2", 0)])
+    c = _make_audited_controller(well_plate=plate)
+    c.model.experiment_model.progress_file_path = "progress.json"
+
+    Controller.reset_single_array(c)
+
+    assert plate.reset_stock_calls == ["stock-a"]
+    c.model.experiment_model.create_progress_file.assert_called_once_with()
+    assert _event_types(c) == ["print_array_reset"]
+    event = c.audit_sink.events[0]
+    assert event["level"] == "warning"
+    assert event["details"]["reset_scope"] == "single_stock"
+    assert event["details"]["stock_id"] == "stock-a"
+    assert event["details"]["affected_well_count"] == 2
+    assert event["details"]["remaining_well_count_before_reset"] == 1
+    assert event["details"]["progress_file_path"] == "progress.json"
+    assert event["details"]["loaded_printer_head"]["stock_id"] == "stock-a"
+
+
+def test_reset_all_arrays_records_warning_audit_event():
+    plate = ResettableFakeWellPlate([FakeWell("A1", 5), FakeWell("A2", 3)])
+    c = _make_audited_controller(well_plate=plate)
+    c.model.experiment_model.progress_file_path = "progress.json"
+
+    Controller.reset_all_arrays(c)
+
+    assert plate.reset_all_calls == 1
+    c.model.experiment_model.create_progress_file.assert_called_once_with()
+    assert c.update_slots_signal.calls == [()]
+    assert _event_types(c) == ["print_arrays_reset_all"]
+    event = c.audit_sink.events[0]
+    assert event["level"] == "warning"
+    assert event["details"]["reset_scope"] == "all_stocks"
+    assert event["details"]["affected_well_count"] == 2
+    assert event["details"]["progress_file_path"] == "progress.json"
+
+
+def test_reset_audit_failure_does_not_block_reset_behavior():
+    plate = ResettableFakeWellPlate([FakeWell("A1", 5)])
+    c = _make_audited_controller(well_plate=plate)
+    c.model.record_experiment_audit_event = Mock(side_effect=RuntimeError("audit unavailable"))
+
+    Controller.reset_single_array(c)
+    Controller.reset_all_arrays(c)
+
+    assert plate.reset_stock_calls == ["stock-a"]
+    assert plate.reset_all_calls == 1
+    assert c.model.experiment_model.create_progress_file.call_count == 2
+    assert c.update_slots_signal.calls == [()]

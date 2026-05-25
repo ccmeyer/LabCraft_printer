@@ -109,6 +109,7 @@ class AuditTimelineTableModel(QtCore.QAbstractTableModel):
         ("time_display", "Time", Qt.AlignLeft | Qt.AlignVCenter),
         ("elapsed_display", "Elapsed", Qt.AlignRight | Qt.AlignVCenter),
         ("level", "Level", Qt.AlignCenter),
+        ("stock_solution", "Stock Solution", Qt.AlignLeft | Qt.AlignVCenter),
         ("event_type", "Type", Qt.AlignLeft | Qt.AlignVCenter),
         ("summary", "Summary", Qt.AlignLeft | Qt.AlignVCenter),
         ("line_number", "Line", Qt.AlignRight | Qt.AlignVCenter),
@@ -168,7 +169,7 @@ class AuditTimelineTableModel(QtCore.QAbstractTableModel):
             return row
         if role == Qt.ToolTipRole:
             if column_key == "summary":
-                return getattr(row, "detail_json", "")
+                return getattr(row, "tooltip_text", "")
             return None
         if role == Qt.ForegroundRole:
             level = str(getattr(row, "level", "") or "").lower()

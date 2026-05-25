@@ -162,7 +162,7 @@ def test_build_audit_markdown_renders_rows_malformed_lines_and_details(tmp_path)
                 "event_type": "operator_note_added",
                 "level": "info",
                 "summary": "A | B\nC",
-                "details": {"note": "hello"},
+                "details": {"note": "hello", "stock_solution": "stock-a"},
                 "context": {"source": "test"},
             }
         )
@@ -180,6 +180,8 @@ def test_build_audit_markdown_renders_rows_malformed_lines_and_details(tmp_path)
 
     assert "# Experiment Audit Timeline" in markdown
     assert f"- Audit file: `{audit_path}`" in markdown
+    assert "| Line | Time | Elapsed | Level | Stock Solution | Event Type | Summary |" in markdown
+    assert "stock-a" in markdown
     assert "A \\| B<br>C" in markdown
     assert "audit_parse_error" in markdown
     assert "```json" in markdown

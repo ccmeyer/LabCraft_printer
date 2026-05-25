@@ -628,6 +628,34 @@ class Controller(QObject):
             "droplet_volume_nL": self._safe_audit_value(printer_head, "get_target_droplet_volume"),
         }
 
+    def _count_audit_assigned_wells(self):
+        well_plate = getattr(getattr(self, "model", None), "well_plate", None)
+        getter = getattr(well_plate, "get_all_wells_with_reactions", None)
+        if callable(getter):
+            try:
+                return len(getter(fill_by="rows", serpentine=False))
+            except TypeError:
+                try:
+                    return len(getter())
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        wells = getattr(well_plate, "wells", None)
+        if isinstance(wells, dict):
+            try:
+                assigned = [
+                    well for well in wells.values()
+                    if getattr(well, "assigned_reaction", None) is not None
+                ]
+                if assigned:
+                    return len(assigned)
+                return len(wells)
+            except Exception:
+                return None
+        return None
+
     def _build_print_array_snapshot(self, context=None):
         if context is None:
             context = getattr(self, "_array_context", None)
@@ -2191,14 +2219,43 @@ class Controller(QObject):
     def reset_single_array(self):
         """Resets the droplet count for all wells in the well plate for the currently loaded stock solution."""
         active_printer_head = self.model.rack_model.get_gripper_printer_head()
-        self.model.well_plate.reset_all_wells_for_stock(active_printer_head.get_stock_id())
+        stock_id = active_printer_head.get_stock_id()
+        try:
+            remaining_before = len(self._get_array_remaining_wells(stock_id))
+        except Exception:
+            remaining_before = None
+        self.model.well_plate.reset_all_wells_for_stock(stock_id)
         self.model.experiment_model.create_progress_file()
+        progress_path = getattr(self.model.experiment_model, "progress_file_path", None)
+        self._record_print_array_audit_event(
+            "print_array_reset",
+            f"Print array reset for {stock_id}",
+            details={
+                "reset_scope": "single_stock",
+                "stock_id": stock_id,
+                "affected_well_count": self._count_audit_assigned_wells(),
+                "remaining_well_count_before_reset": remaining_before,
+                "progress_file_path": progress_path,
+            },
+            level="warning",
+        )
 
     def reset_all_arrays(self):
         """Resets the droplet count for all wells in the well plate for all stock solutions."""
         self.model.well_plate.reset_all_wells()
         self.model.experiment_model.create_progress_file()
         self.update_slots_signal.emit()
+        progress_path = getattr(self.model.experiment_model, "progress_file_path", None)
+        self._record_print_array_audit_event(
+            "print_arrays_reset_all",
+            "All print arrays reset",
+            details={
+                "reset_scope": "all_stocks",
+                "affected_well_count": self._count_audit_assigned_wells(),
+                "progress_file_path": progress_path,
+            },
+            level="warning",
+        )
 
     def enter_print_mode(self):
         """Enter print mode."""

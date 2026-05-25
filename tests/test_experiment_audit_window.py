@@ -43,7 +43,7 @@ def test_audit_timeline_table_model_exposes_stable_headers_and_data(tmp_path):
                 "experiment_loaded",
                 "Loaded experiment",
                 elapsed_s=1.25,
-                details={"reaction_count": 3},
+                details={"reaction_count": 3, "stock_solution": "stock-a"},
                 context={"experiment_dir_path": str(tmp_path)},
             )
         ],
@@ -53,14 +53,15 @@ def test_audit_timeline_table_model_exposes_stable_headers_and_data(tmp_path):
     model = AuditTimelineTableModel(rows=rows)
 
     assert model.rowCount() == 1
-    assert model.columnCount() == 6
+    assert model.columnCount() == 7
     assert [
         model.headerData(col, Qt.Horizontal, Qt.DisplayRole)
         for col in range(model.columnCount())
-    ] == ["Time", "Elapsed", "Level", "Type", "Summary", "Line"]
+    ] == ["Time", "Elapsed", "Level", "Stock Solution", "Type", "Summary", "Line"]
     assert model.data(model.index(0, model.column_index("time_display")), Qt.DisplayRole) == "2026-05-25 12:34:56 UTC"
     assert model.data(model.index(0, model.column_index("elapsed_display")), Qt.DisplayRole) == "00:00:01.250"
     assert model.data(model.index(0, model.column_index("level")), Qt.DisplayRole) == "info"
+    assert model.data(model.index(0, model.column_index("stock_solution")), Qt.DisplayRole) == "stock-a"
     assert model.data(model.index(0, model.column_index("event_type")), Qt.DisplayRole) == "experiment_loaded"
     assert model.data(model.index(0, model.column_index("summary")), Qt.DisplayRole) == "Loaded experiment"
     assert model.data(model.index(0, model.column_index("line_number")), Qt.DisplayRole) == "1"
@@ -85,6 +86,7 @@ def test_audit_timeline_window_renders_valid_rows_and_details(qapp, tmp_path):
 
     assert window.table_model.rowCount() == 1
     assert "1 event" in window.status_label.text()
+    assert window.table_model.row_at(0).stock_solution == "stock-1"
     assert "stock-1" in window.details_text.toPlainText()
     assert "tester" in window.details_text.toPlainText()
 
@@ -138,6 +140,36 @@ def test_audit_timeline_window_selection_updates_details(qapp, tmp_path):
     details = window.details_text.toPlainText()
     assert "second" in details
     assert "first" not in details
+
+
+def test_audit_timeline_table_summary_tooltip_uses_compact_preview(tmp_path):
+    audit_path = tmp_path / "experiment_audit.jsonl"
+    _write_jsonl(
+        audit_path,
+        [
+            _event(
+                "calibration_process_completed",
+                "Completed calibration",
+                details={
+                    "stock_solution": "stock-a",
+                    "process_name": "PressureSweepCharacterizationProcess",
+                    "result_summary": {
+                        "volume_nL": 12.3,
+                        "cv_pct": 2.5,
+                        "latest_compact": {"large": "x" * 1000},
+                    },
+                },
+            )
+        ],
+    )
+    rows = ExperimentAuditReader(audit_path=audit_path).read_rows()
+    model = AuditTimelineTableModel(rows=rows)
+
+    tooltip = model.data(model.index(0, model.column_index("summary")), Qt.ToolTipRole)
+
+    assert len(tooltip.splitlines()) <= 10
+    assert "Ejection volume nL: 12.3" in tooltip
+    assert "x" * 100 not in tooltip
 
 
 def test_audit_timeline_window_refresh_reloads_appended_events_without_mutating_file(qapp, tmp_path):

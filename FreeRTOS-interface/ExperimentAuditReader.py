@@ -12,6 +12,7 @@ AUDIT_FILE_NAME = "experiment_audit.jsonl"
 MALFORMED_EVENT_TYPE = "audit_parse_error"
 MALFORMED_SUMMARY = "Malformed audit line"
 RAW_LINE_PREVIEW_LIMIT = 500
+TOOLTIP_LINE_LIMIT = 10
 
 
 @dataclass
@@ -27,6 +28,8 @@ class AuditTimelineRow:
     time_display: str
     elapsed_display: str
     detail_json: str
+    stock_solution: str = ""
+    tooltip_text: str = ""
     parse_error: str | None = None
 
 
@@ -109,6 +112,183 @@ def event_detail_json(event) -> str:
     )
 
 
+def _event_sections(event) -> tuple[dict, dict]:
+    if not isinstance(event, dict):
+        return {}, {}
+    details = event.get("details")
+    context = event.get("context")
+    return (
+        details if isinstance(details, dict) else {},
+        context if isinstance(context, dict) else {},
+    )
+
+
+def _clean_display_value(value) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    return "" if text.lower() in {"none", "null"} else text
+
+
+def _nested_dict_value(payload: dict, *keys):
+    cur = payload
+    for key in keys:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(key)
+    return cur
+
+
+def _first_display_value(*values) -> str:
+    for value in values:
+        text = _clean_display_value(value)
+        if text:
+            return text
+    return ""
+
+
+def derive_audit_stock_solution(event) -> str:
+    details, context = _event_sections(event)
+    loaded_head = details.get("loaded_printer_head")
+    if not isinstance(loaded_head, dict):
+        loaded_head = {}
+    printer_head = details.get("printer_head")
+    if not isinstance(printer_head, dict):
+        printer_head = {}
+
+    return _first_display_value(
+        details.get("stock_solution"),
+        loaded_head.get("stock_solution"),
+        loaded_head.get("stock_id"),
+        details.get("stock_id"),
+        printer_head.get("stock_solution"),
+        printer_head.get("stock_id"),
+        context.get("stock_solution"),
+        context.get("stock_id"),
+    )
+
+
+def _format_tooltip_value(label: str, value) -> str | None:
+    text = _clean_display_value(value)
+    if not text:
+        return None
+    return f"{label}: {text}"
+
+
+def _compact_tooltip_lines(event, *, stock_solution="") -> list[str]:
+    details, _context = _event_sections(event)
+    lines = []
+
+    for label, value in (
+        ("Event", event.get("event_type") if isinstance(event, dict) else ""),
+        ("Level", event.get("level") if isinstance(event, dict) else ""),
+        ("Stock", stock_solution),
+    ):
+        line = _format_tooltip_value(label, value)
+        if line:
+            lines.append(line)
+
+    event_type = str(event.get("event_type") or "") if isinstance(event, dict) else ""
+    if event_type.startswith("calibration_"):
+        result_summary = details.get("result_summary")
+        if not isinstance(result_summary, dict):
+            result_summary = {}
+        compact = result_summary.get("latest_compact")
+        if not isinstance(compact, dict):
+            compact = {}
+        settings = details.get("settings")
+        if not isinstance(settings, dict):
+            settings = {}
+
+        candidates = [
+            ("Process", details.get("process_name")),
+            ("Phase", details.get("calibration_phase")),
+            ("Outcome", details.get("outcome")),
+            (
+                "Ejection volume nL",
+                _first_display_value(
+                    result_summary.get("volume_nL"),
+                    compact.get("mean_nL"),
+                    compact.get("measured_volume_nL"),
+                    compact.get("ejection_volume_nL"),
+                    compact.get("volume_nL"),
+                    compact.get("droplet_volume_nL"),
+                ),
+            ),
+            (
+                "CV %",
+                _first_display_value(
+                    result_summary.get("cv_pct"),
+                    compact.get("cv_pct"),
+                    compact.get("cv_percent"),
+                    compact.get("coefficient_variation_pct"),
+                ),
+            ),
+            (
+                "Print pressure psi",
+                _first_display_value(
+                    result_summary.get("print_pressure_psi"),
+                    compact.get("pressure_psi"),
+                    compact.get("print_pressure_psi"),
+                    settings.get("print_pressure"),
+                ),
+            ),
+            (
+                "Pulse width us",
+                _first_display_value(
+                    result_summary.get("pulse_width_us"),
+                    compact.get("pw_us"),
+                    compact.get("print_pulse_width_us"),
+                    settings.get("print_width"),
+                ),
+            ),
+            (
+                "Samples",
+                _first_display_value(
+                    result_summary.get("replicate_count"),
+                    compact.get("sample_count"),
+                    compact.get("replicate_count"),
+                    compact.get("droplet_volumes_count"),
+                    result_summary.get("flat_measurement_count"),
+                    result_summary.get("step_count"),
+                ),
+            ),
+        ]
+    else:
+        settings = details.get("settings")
+        if not isinstance(settings, dict):
+            settings = {}
+        candidates = [
+            ("Scope", details.get("reset_scope")),
+            ("Array state", details.get("array_state")),
+            ("Stock id", details.get("stock_id")),
+            ("Remaining wells", details.get("remaining_well_count")),
+            ("Queued wells", details.get("queued_well_count")),
+            ("Planned wells", details.get("planned_well_count")),
+            ("Affected wells", details.get("affected_well_count")),
+            ("Outcome", details.get("outcome")),
+            ("Print pressure psi", settings.get("print_pressure_psi")),
+            ("Pulse width us", settings.get("print_pulse_width_us")),
+        ]
+
+    for label, value in candidates:
+        line = _format_tooltip_value(label, value)
+        if line and line not in lines:
+            lines.append(line)
+        if len(lines) >= TOOLTIP_LINE_LIMIT:
+            break
+
+    summary = event.get("summary") if isinstance(event, dict) else ""
+    line = _format_tooltip_value("Summary", summary)
+    if line and line not in lines and len(lines) < TOOLTIP_LINE_LIMIT:
+        lines.append(line)
+    return lines[:TOOLTIP_LINE_LIMIT]
+
+
+def build_audit_tooltip(event, *, stock_solution="") -> str:
+    return "\n".join(_compact_tooltip_lines(event, stock_solution=stock_solution))
+
+
 def build_audit_markdown(
     rows,
     audit_path=None,
@@ -130,8 +310,8 @@ def build_audit_markdown(
             "",
             "## Summary",
             "",
-            "| Line | Time | Elapsed | Level | Event Type | Summary |",
-            "| ---: | --- | ---: | --- | --- | --- |",
+            "| Line | Time | Elapsed | Level | Stock Solution | Event Type | Summary |",
+            "| ---: | --- | ---: | --- | --- | --- | --- |",
         ]
     )
 
@@ -144,6 +324,7 @@ def build_audit_markdown(
                     _markdown_cell(getattr(row, "time_display", "")),
                     _markdown_cell(getattr(row, "elapsed_display", "")),
                     _markdown_cell(getattr(row, "level", "")),
+                    _markdown_cell(getattr(row, "stock_solution", "")),
                     _markdown_cell(getattr(row, "event_type", "")),
                     _markdown_cell(getattr(row, "summary", "")),
                 ]
@@ -152,7 +333,7 @@ def build_audit_markdown(
         )
 
     if not row_list:
-        lines.append("|  |  |  |  |  | No audit events found |")
+        lines.append("|  |  |  |  |  |  | No audit events found |")
 
     lines.extend(["", "## Details", ""])
     if not row_list:
@@ -226,6 +407,7 @@ class ExperimentAuditReader:
                 "time": row.time_display,
                 "elapsed": row.elapsed_display,
                 "level": row.level,
+                "stock_solution": row.stock_solution,
                 "event_type": row.event_type,
                 "summary": row.summary,
                 "line_number": row.line_number,
@@ -246,6 +428,7 @@ class ExperimentAuditReader:
 
         timestamp_utc = str(event.get("timestamp_utc") or "")
         elapsed_s = _coerce_float_or_none(event.get("elapsed_s"))
+        stock_solution = derive_audit_stock_solution(event)
         return AuditTimelineRow(
             line_number=line_number,
             event=event,
@@ -258,6 +441,8 @@ class ExperimentAuditReader:
             time_display=format_audit_timestamp(timestamp_utc),
             elapsed_display=format_audit_elapsed(elapsed_s),
             detail_json=event_detail_json(event),
+            stock_solution=stock_solution,
+            tooltip_text=build_audit_tooltip(event, stock_solution=stock_solution),
             parse_error=None,
         )
 
@@ -286,5 +471,7 @@ class ExperimentAuditReader:
             time_display="",
             elapsed_display="",
             detail_json=_json_pretty(detail),
+            stock_solution="",
+            tooltip_text=build_audit_tooltip(event, stock_solution=""),
             parse_error=str(parse_error or "Unknown parse error"),
         )

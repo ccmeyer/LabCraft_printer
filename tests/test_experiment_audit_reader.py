@@ -4,6 +4,8 @@ from types import SimpleNamespace
 
 from ExperimentAuditReader import (
     ExperimentAuditReader,
+    build_audit_tooltip,
+    derive_audit_stock_solution,
     event_detail_json,
     format_audit_elapsed,
     format_audit_timestamp,
@@ -53,6 +55,8 @@ def test_reads_valid_jsonl_events_and_exposes_row_fields(tmp_path):
     assert row.elapsed_s == 5.25
     assert row.time_display == "2026-05-24 12:34:56 UTC"
     assert row.elapsed_display == "00:00:05.250"
+    assert row.stock_solution == "stock-a"
+    assert len(row.tooltip_text.splitlines()) <= 10
 
 
 def test_preserves_file_order_and_line_numbers(tmp_path):
@@ -173,6 +177,7 @@ def test_read_table_returns_stable_table_dictionaries(tmp_path):
             "time": "2026-05-24 12:34:56 UTC",
             "elapsed": "00:00:02.000",
             "level": "info",
+            "stock_solution": "stock-a",
             "event_type": "experiment_loaded",
             "summary": "Experiment Loaded",
             "line_number": 1,
@@ -184,12 +189,66 @@ def test_read_table_returns_stable_table_dictionaries(tmp_path):
         "time",
         "elapsed",
         "level",
+        "stock_solution",
         "event_type",
         "summary",
         "line_number",
         "detail_json",
         "is_valid",
     }
+
+
+def test_stock_solution_is_derived_from_common_audit_payload_shapes():
+    assert derive_audit_stock_solution(
+        {"details": {"stock_solution": "cal-stock"}}
+    ) == "cal-stock"
+    assert derive_audit_stock_solution(
+        {"details": {"loaded_printer_head": {"stock_solution": "loaded-stock"}}}
+    ) == "loaded-stock"
+    assert derive_audit_stock_solution(
+        {"details": {"loaded_printer_head": {"stock_id": "stock-id"}}}
+    ) == "stock-id"
+    assert derive_audit_stock_solution(
+        {"details": {"stock_id": "reset-stock"}}
+    ) == "reset-stock"
+    assert derive_audit_stock_solution(
+        {"details": {}, "context": {"stock_solution": "context-stock"}}
+    ) == "context-stock"
+
+
+def test_tooltip_is_compact_and_prioritizes_calibration_results():
+    event = {
+        "event_type": "calibration_process_completed",
+        "level": "info",
+        "summary": "Calibration completed",
+        "details": {
+            "stock_solution": "stock-a",
+            "process_name": "PressureSweepCharacterizationProcess",
+            "calibration_phase": "pressure_sweep_characterization",
+            "outcome": "completed",
+            "settings": {"print_width": 1450, "print_pressure": 1.35},
+            "result_summary": {
+                "volume_nL": 12.4,
+                "cv_pct": 3.1,
+                "print_pressure_psi": 1.35,
+                "pulse_width_us": 1450,
+                "replicate_count": 6,
+                "latest_compact": {
+                    "huge": "x" * 1000,
+                },
+            },
+        },
+    }
+
+    tooltip = build_audit_tooltip(event, stock_solution="stock-a")
+
+    assert len(tooltip.splitlines()) <= 10
+    assert "Stock: stock-a" in tooltip
+    assert "Ejection volume nL: 12.4" in tooltip
+    assert "CV %: 3.1" in tooltip
+    assert "Print pressure psi: 1.35" in tooltip
+    assert "Pulse width us: 1450" in tooltip
+    assert "x" * 100 not in tooltip
 
 
 def test_reader_does_not_mutate_existing_audit_file(tmp_path):

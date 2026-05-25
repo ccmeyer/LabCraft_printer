@@ -55,6 +55,23 @@ class _FakeCalibrationProcess:
         self.stopped = True
 
 
+class _FakeVolumeCalibrationProcess(_FakeCalibrationProcess):
+    phase_name = "pressure_sweep_characterization"
+
+    def __init__(
+        self,
+        *,
+        process_name="PressureSweepCharacterizationProcess",
+        phase_name=None,
+        manual_start=False,
+    ):
+        super().__init__()
+        self.phase_name = phase_name or self.phase_name
+        self.manual_start = bool(manual_start)
+        self._recorder_process_name = process_name
+        self._recorder_phase_name = self.phase_name
+
+
 def _make_model(audit_sink):
     stock = SimpleNamespace(reagent_name="stock-a")
     printer_head = SimpleNamespace(
@@ -128,7 +145,45 @@ def _seed_open_session(mgr):
                                 "large_nested": {"a": 1, "b": 2},
                             },
                         }
-                    ]
+                    ],
+                    "pressure_sweep_characterization": [
+                        {
+                            "timestamp": "2026-05-24T00:00:00Z",
+                            "result": {
+                                "status": "ok",
+                                "mean_nL": 42.5,
+                                "cv_pct": 4.2,
+                                "pressure_psi": 1.2,
+                                "pw_us": 1400,
+                                "droplet_volumes": [41.0, 42.5, 44.0],
+                                "large_nested": {"a": 1, "b": 2},
+                            },
+                        }
+                    ],
+                    "online_stream_calibration": [
+                        {
+                            "timestamp": "2026-05-24T00:00:00Z",
+                            "result": {
+                                "status": "ok",
+                                "mean_nL": 40.0,
+                                "cv_pct": 5.0,
+                                "pressure_psi": 1.1,
+                                "pw_us": 1350,
+                            },
+                        }
+                    ],
+                    "droplet_characterization": [
+                        {
+                            "timestamp": "2026-05-24T00:00:00Z",
+                            "result": {
+                                "status": "ok",
+                                "mean_nL": 39.5,
+                                "cv_pct": 3.8,
+                                "pressure_psi": 1.0,
+                                "pw_us": 1300,
+                            },
+                        }
+                    ],
                 },
                 "flat_measurements": [{"id": 1}, {"id": 2}],
             }
@@ -159,21 +214,14 @@ def _event_types(mgr):
     return [event["event_type"] for event in mgr.audit_sink.events]
 
 
-def test_begin_session_records_calibration_session_started(tmp_path):
+def test_begin_session_does_not_record_high_level_audit_event(tmp_path):
     mgr = _make_manager(tmp_path)
 
     mgr.begin_session(str(tmp_path / "calibration.json"), notes="initial pass")
 
-    assert _event_types(mgr) == ["calibration_session_started"]
-    event = mgr.audit_sink.events[0]
-    assert event["level"] == "info"
-    assert event["details"]["calibration_file_path"] == str(tmp_path / "calibration.json")
-    assert event["details"]["calibration_run_id"] == mgr._run_id
-    assert event["details"]["calibration_run_index"] == 0
-    assert event["details"]["printer_head_id"] == "head-1"
-    assert event["details"]["stock_solution"] == "stock-a"
-    assert event["details"]["settings"]["print_width"] == 1400
-    assert event["details"]["artifact_refs"]["calibration_file_path"] == str(tmp_path / "calibration.json")
+    assert _event_types(mgr) == []
+    assert mgr._run_id is not None
+    assert mgr._run_idx == 0
 
 
 @pytest.mark.parametrize(
@@ -184,26 +232,34 @@ def test_begin_session_records_calibration_session_started(tmp_path):
         ("error", "error"),
     ],
 )
-def test_end_session_records_calibration_session_ended_with_level(tmp_path, outcome, level):
+def test_end_session_does_not_record_high_level_audit_event(tmp_path, outcome, level):
     mgr = _make_manager(tmp_path)
     mgr.begin_session(str(tmp_path / "calibration.json"), notes="session")
     mgr.audit_sink.events.clear()
 
     mgr.end_session(outcome=outcome, error_message="boom" if outcome == "error" else "")
 
-    assert _event_types(mgr) == ["calibration_session_ended"]
-    event = mgr.audit_sink.events[0]
-    assert event["level"] == level
-    assert event["details"]["outcome"] == outcome
-    assert event["details"]["calibration_run_id"] is not None
+    assert _event_types(mgr) == []
     assert mgr._run_id is None
     assert mgr._run_idx is None
 
 
-def test_start_active_calibration_records_process_started(tmp_path):
+@pytest.mark.parametrize(
+    ("process_name", "phase_name", "manual_start"),
+    [
+        ("PressureSweepCharacterizationProcess", "pressure_sweep_characterization", False),
+        ("DropletSearchCalibrationProcess", "droplet_characterization", True),
+        ("OnlineStreamCalibrationProcess", "online_stream_calibration", False),
+    ],
+)
+def test_start_active_calibration_records_volume_process_started(tmp_path, process_name, phase_name, manual_start):
     mgr = _make_manager(tmp_path)
     _seed_open_session(mgr)
-    proc = _FakeCalibrationProcess()
+    proc = _FakeVolumeCalibrationProcess(
+        process_name=process_name,
+        phase_name=phase_name,
+        manual_start=manual_start,
+    )
     mgr.activeCalibration = proc
     mgr.clear_pending_process_verdict = Mock()
     mgr._begin_process_recording = Mock(
@@ -217,16 +273,42 @@ def test_start_active_calibration_records_process_started(tmp_path):
     assert proc.started is True
     assert _event_types(mgr) == ["calibration_process_started"]
     event = mgr.audit_sink.events[0]
-    assert event["details"]["process_name"] == "_FakeCalibrationProcess"
-    assert event["details"]["calibration_phase"] == "nozzle_focus"
+    assert event["details"]["process_name"] == process_name
+    assert event["details"]["calibration_phase"] == phase_name
     assert event["details"]["artifact_refs"]["process_recording_run_dir"] == "calibration_recordings/start-run"
+
+
+def test_non_volume_calibration_process_is_not_audited(tmp_path):
+    mgr = _make_manager(tmp_path)
+    _seed_open_session(mgr)
+    proc = _FakeCalibrationProcess()
+    mgr.activeCalibration = proc
+    mgr.clear_pending_process_verdict = Mock()
+    mgr._begin_process_recording = Mock()
+
+    mgr.start_active_calibration()
+
+    assert proc.started is True
+    assert _event_types(mgr) == []
+
+
+def test_non_volume_calibration_terminal_event_is_not_audited(tmp_path):
+    mgr = _make_manager(tmp_path)
+    _seed_open_session(mgr)
+    _install_terminal_stubs(mgr)
+    mgr.activeCalibration = _FakeCalibrationProcess()
+
+    mgr.onCalibrationCompleted()
+
+    assert _event_types(mgr) == []
+    assert mgr.calibrationCompleted.calls
 
 
 def test_on_calibration_completed_records_compact_process_completed(tmp_path):
     mgr = _make_manager(tmp_path)
     _seed_open_session(mgr)
     _install_terminal_stubs(mgr)
-    proc = _FakeCalibrationProcess()
+    proc = _FakeVolumeCalibrationProcess()
     mgr.activeCalibration = proc
 
     mgr.onCalibrationCompleted()
@@ -239,6 +321,11 @@ def test_on_calibration_completed_records_compact_process_completed(tmp_path):
     assert event["details"]["outcome"] == "completed"
     assert summary["step_count"] == 1
     assert summary["flat_measurement_count"] == 2
+    assert summary["volume_nL"] == 42.5
+    assert summary["cv_pct"] == 4.2
+    assert summary["print_pressure_psi"] == 1.2
+    assert summary["pulse_width_us"] == 1400
+    assert summary["replicate_count"] == 3
     assert summary["latest_compact"]["droplet_volumes_count"] == 3
     assert "droplet_volumes" not in summary["latest_compact"]
     assert event["details"]["artifact_refs"]["process_recording_run_dir"] == "calibration_recordings/run-1"
@@ -256,7 +343,7 @@ def test_on_calibration_error_records_failed_or_stopped(tmp_path, message, event
     mgr = _make_manager(tmp_path)
     _seed_open_session(mgr)
     _install_terminal_stubs(mgr)
-    mgr.activeCalibration = _FakeCalibrationProcess()
+    mgr.activeCalibration = _FakeVolumeCalibrationProcess()
 
     mgr.onCalibrationError(message)
 
@@ -273,7 +360,7 @@ def test_stop_records_process_stopped_and_preserves_stop_behavior(tmp_path):
     mgr = _make_manager(tmp_path)
     _seed_open_session(mgr)
     _install_terminal_stubs(mgr)
-    proc = _FakeCalibrationProcess()
+    proc = _FakeVolumeCalibrationProcess()
     mgr.activeCalibration = proc
     mgr._pw_sweep_active = False
     mgr._pw_values = []
@@ -300,7 +387,7 @@ def test_audit_failure_does_not_block_calibration_lifecycle(tmp_path):
     mgr.end_session(outcome="completed")
 
     _seed_open_session(mgr)
-    proc = _FakeCalibrationProcess()
+    proc = _FakeVolumeCalibrationProcess()
     mgr.activeCalibration = proc
     mgr.clear_pending_process_verdict = Mock()
     mgr._begin_process_recording = Mock()
@@ -309,19 +396,19 @@ def test_audit_failure_does_not_block_calibration_lifecycle(tmp_path):
 
     _seed_open_session(mgr)
     _install_terminal_stubs(mgr)
-    mgr.activeCalibration = _FakeCalibrationProcess()
+    mgr.activeCalibration = _FakeVolumeCalibrationProcess()
     mgr.onCalibrationCompleted()
     assert mgr.calibrationCompleted.calls
 
     _seed_open_session(mgr)
     _install_terminal_stubs(mgr)
-    mgr.activeCalibration = _FakeCalibrationProcess()
+    mgr.activeCalibration = _FakeVolumeCalibrationProcess()
     mgr.onCalibrationError("boom")
     assert mgr.calibrationError.calls[-1][0] == ("boom",)
 
     _seed_open_session(mgr)
     _install_terminal_stubs(mgr)
-    proc = _FakeCalibrationProcess()
+    proc = _FakeVolumeCalibrationProcess()
     mgr.activeCalibration = proc
     mgr._pw_sweep_active = False
     mgr._pw_values = []
