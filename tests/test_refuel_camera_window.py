@@ -86,6 +86,19 @@ def test_refuel_camera_window_close_event_stops_camera_and_disables_print_profil
     assert event.isAccepted()
 
 
+def test_refuel_camera_window_live_capture_sets_diagnostic_active_flag(qapp):
+    dialog, model, _controller = _make_dialog(
+        qapp,
+        capture_return=np.zeros((8, 8, 3), dtype=np.uint8),
+    )
+
+    dialog.toggle_capture()
+    assert model.refuel_camera_model.is_refuel_diagnostic_capture_active() is True
+
+    dialog.toggle_capture()
+    assert model.refuel_camera_model.is_refuel_diagnostic_capture_active() is False
+
+
 def test_refuel_camera_window_save_frame_creates_output_directory_and_uses_raw_image(monkeypatch, qapp, tmp_path):
     dialog, model, _controller = _make_dialog(
         qapp,

@@ -29793,6 +29793,7 @@ class ImageAnalysisThread(QThread):
         self.debug_details = {}
         self.debug_artifacts = {}
         self.peak_selection_details = {}
+        self.detector_runtime_ms = None
 
     def _debug_array(self, key, value):
         if self.capture_debug and value is not None:
@@ -30408,7 +30409,12 @@ class ImageAnalysisThread(QThread):
 
     def run(self):
         # Perform image analysis
+        start_perf = time.perf_counter()
         self.analyze_image()
+        self.detector_runtime_ms = float((time.perf_counter() - start_perf) * 1000.0)
+        if isinstance(self.detected_details, dict):
+            self.detected_details["detector_runtime_ms"] = self.detector_runtime_ms
+        self._debug_update({"detector_runtime_ms": self.detector_runtime_ms})
         # Emit results
         self.analysis_done.emit(
             self.original_image,
@@ -30817,6 +30823,8 @@ class RefuelCameraModel(QObject):
 
     PROCESS_NAME = "RefuelBalanceCalibrationProcess"
     PHASE_NAME = "refuel_balance"
+    REFUEL_MONITOR_STATES = {"off", "starting", "monitoring", "paused", "unavailable"}
+    REFUEL_ADVISORY_LOG_LIMIT = 100
 
     update_level_ui_signal = Signal()
 
@@ -30833,6 +30841,29 @@ class RefuelCameraModel(QObject):
         self.current_level = None
         self.level_log = []
         self.sample_trace = []
+        self.refuel_tracking_enabled = False
+        self.refuel_monitor_state = "off"
+        self.refuel_monitor_message = "Monitoring disabled"
+        self.refuel_monitor_attempted_captures = 0
+        self.refuel_monitor_successful_captures = 0
+        self.refuel_monitor_skipped_captures = 0
+        self.refuel_monitor_failed_captures = 0
+        self.refuel_monitor_consecutive_failures = 0
+        self.refuel_diagnostic_capture_active = False
+        self.refuel_monitor_timing_log = []
+        self.last_refuel_monitor_timing = None
+        self._refuel_monitor_next_tick_index = 1
+        self.refuel_process_monitoring_enabled = False
+        self.refuel_process_marker_log = []
+        self.refuel_active_process_context = None
+        self.last_refuel_process_summary = None
+        self._refuel_process_next_marker_index = 1
+        self.last_refuel_advisory = None
+        self.refuel_advisory_log = []
+        self.refuel_advisory_drift_threshold_px = 5.0
+        self.refuel_advisory_near_empty_level_px = 10.0
+        self.refuel_advisory_near_full_margin_px = 10.0
+        self.refuel_advisory_stale_after_s = 5.0
         self.last_meniscus_row = None
         self.raw_capture_image = None
         self.analysis_input_image = None
@@ -30860,6 +30891,7 @@ class RefuelCameraModel(QObject):
         self._recorder_run_dir = None
         self._session_start_monotonic = None
         self._analysis_context = None
+        self._analysis_timing_context = None
         self._analysis_in_progress = False
         self._burst_state = None
 
@@ -30900,6 +30932,595 @@ class RefuelCameraModel(QObject):
             self.default_baseline_samples = max(1, int(baseline_samples))
         if post_samples is not None:
             self.default_post_samples = max(1, int(post_samples))
+
+    def set_refuel_tracking_enabled(self, enabled):
+        enabled = bool(enabled)
+        if self.refuel_tracking_enabled == enabled:
+            return False
+        self.refuel_tracking_enabled = enabled
+        self.update_level_ui_signal.emit()
+        return True
+
+    def is_refuel_tracking_enabled(self):
+        return bool(self.refuel_tracking_enabled)
+
+    def set_refuel_process_monitoring_enabled(self, enabled):
+        enabled = bool(enabled)
+        if self.refuel_process_monitoring_enabled == enabled:
+            return False
+        self.refuel_process_monitoring_enabled = enabled
+        if not enabled:
+            self.refuel_active_process_context = None
+            self.clear_refuel_advisory(emit=False)
+            self.update_level_ui_signal.emit()
+        else:
+            self.evaluate_refuel_advisory(reason="process_monitor_enabled")
+        return True
+
+    def is_refuel_process_monitoring_enabled(self):
+        return bool(self.refuel_process_monitoring_enabled)
+
+    def set_refuel_monitor_state(self, state, message=""):
+        state = str(state or "off")
+        if state not in self.REFUEL_MONITOR_STATES:
+            state = "off"
+        message = str(message or self._default_refuel_monitor_message(state))
+        changed = (
+            self.refuel_monitor_state != state
+            or self.refuel_monitor_message != message
+        )
+        self.refuel_monitor_state = state
+        self.refuel_monitor_message = message
+        if changed:
+            self.update_level_ui_signal.emit()
+        return changed
+
+    @staticmethod
+    def _default_refuel_monitor_message(state):
+        return {
+            "off": "Monitoring disabled",
+            "starting": "Starting refuel camera",
+            "monitoring": "Monitoring",
+            "paused": "Paused by refuel camera window",
+            "unavailable": "Refuel camera unavailable",
+        }.get(str(state), "Monitoring disabled")
+
+    def record_refuel_monitor_attempt(self, message="Monitoring"):
+        self.refuel_monitor_attempted_captures += 1
+        self.refuel_monitor_state = "monitoring"
+        self.refuel_monitor_message = str(message or "Monitoring")
+        self.update_level_ui_signal.emit()
+
+    def record_refuel_monitor_success(self, message="Monitoring"):
+        self.refuel_monitor_successful_captures += 1
+        self.refuel_monitor_consecutive_failures = 0
+        self.refuel_monitor_state = "monitoring"
+        self.refuel_monitor_message = str(message or "Monitoring")
+        self.update_level_ui_signal.emit()
+
+    def record_refuel_monitor_skip(self, reason="", *, state="monitoring", message=""):
+        self.refuel_monitor_skipped_captures += 1
+        state = str(state or "monitoring")
+        if state not in self.REFUEL_MONITOR_STATES:
+            state = "monitoring"
+        self.refuel_monitor_state = state
+        self.refuel_monitor_message = str(message or reason or self._default_refuel_monitor_message(state))
+        self.update_level_ui_signal.emit()
+
+    def record_refuel_monitor_failure(self, message="Refuel camera unavailable"):
+        self.refuel_monitor_failed_captures += 1
+        self.refuel_monitor_consecutive_failures += 1
+        self.refuel_monitor_state = "unavailable"
+        self.refuel_monitor_message = str(message or "Refuel camera unavailable")
+        self.evaluate_refuel_advisory(reason="monitor_failure")
+        self.update_level_ui_signal.emit()
+
+    def set_refuel_diagnostic_capture_active(self, active):
+        active = bool(active)
+        if self.refuel_diagnostic_capture_active == active:
+            return False
+        self.refuel_diagnostic_capture_active = active
+        self.update_level_ui_signal.emit()
+        return True
+
+    def is_refuel_diagnostic_capture_active(self):
+        return bool(self.refuel_diagnostic_capture_active)
+
+    def get_refuel_monitor_status(self):
+        return {
+            "state": self.refuel_monitor_state,
+            "message": self.refuel_monitor_message,
+            "attempted_captures": int(self.refuel_monitor_attempted_captures),
+            "successful_captures": int(self.refuel_monitor_successful_captures),
+            "skipped_captures": int(self.refuel_monitor_skipped_captures),
+            "failed_captures": int(self.refuel_monitor_failed_captures),
+            "consecutive_failures": int(self.refuel_monitor_consecutive_failures),
+            "diagnostic_capture_active": bool(self.refuel_diagnostic_capture_active),
+        }
+
+    def next_refuel_monitor_tick_index(self):
+        tick_index = int(self._refuel_monitor_next_tick_index)
+        self._refuel_monitor_next_tick_index += 1
+        return tick_index
+
+    @staticmethod
+    def _json_safe_refuel_timing_value(value):
+        if value is None:
+            return None
+        if isinstance(value, (str, bool, int)):
+            return value
+        if isinstance(value, float):
+            if math.isfinite(value):
+                return float(value)
+            return None
+        if isinstance(value, np.generic):
+            return RefuelCameraModel._json_safe_refuel_timing_value(value.item())
+        if isinstance(value, dict):
+            return {
+                str(key): RefuelCameraModel._json_safe_refuel_timing_value(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [RefuelCameraModel._json_safe_refuel_timing_value(item) for item in value]
+        try:
+            return float(value)
+        except Exception:
+            return str(value)
+
+    def _time_since_last_valid_sample_s(self, monotonic_s=None):
+        if not self.sample_trace:
+            return None
+        try:
+            last_monotonic = self.sample_trace[-1].get("monotonic_s")
+            if last_monotonic is None:
+                return None
+            if monotonic_s is None:
+                monotonic_s = time.monotonic()
+            return max(0.0, float(monotonic_s) - float(last_monotonic))
+        except Exception:
+            return None
+
+    def record_refuel_monitor_timing(self, payload):
+        payload = dict(payload or {})
+        counters = self.get_refuel_monitor_status()
+        record = {
+            "tick_index": payload.get("tick_index", payload.get("refuel_monitor_tick_index")),
+            "event_kind": str(payload.get("event_kind") or "unknown"),
+            "monitor_state": str(payload.get("monitor_state") or self.refuel_monitor_state),
+            "capture_duration_ms": payload.get("capture_duration_ms"),
+            "copy_resize_duration_ms": payload.get("copy_resize_duration_ms"),
+            "detector_runtime_ms": payload.get("detector_runtime_ms"),
+            "total_latency_ms": payload.get("total_latency_ms"),
+            "skip_reason": payload.get("skip_reason"),
+            "failure_message": payload.get("failure_message"),
+            "analysis_started": payload.get("analysis_started"),
+            "level_px": payload.get("level_px"),
+            "detector_status": payload.get("detector_status"),
+            "time_since_last_valid_sample_s": payload.get("time_since_last_valid_sample_s"),
+            "attempted_captures": counters["attempted_captures"],
+            "successful_captures": counters["successful_captures"],
+            "skipped_captures": counters["skipped_captures"],
+            "failed_captures": counters["failed_captures"],
+            "consecutive_failures": counters["consecutive_failures"],
+        }
+        for key, value in payload.items():
+            if key not in record and not str(key).endswith("_perf_s"):
+                record[str(key)] = value
+        record = self._json_safe_refuel_timing_value(record)
+        self.refuel_monitor_timing_log.append(record)
+        if len(self.refuel_monitor_timing_log) > 100:
+            self.refuel_monitor_timing_log = self.refuel_monitor_timing_log[-100:]
+        self.last_refuel_monitor_timing = record
+        if self._recorder_run_dir is not None:
+            self._record_analysis({"kind": "refuel_monitor_timing", **record})
+        if record.get("event_kind") in {"skip", "failure", "analysis_not_started"}:
+            self.evaluate_refuel_advisory(reason=f"monitor_{record.get('event_kind')}")
+        self.update_level_ui_signal.emit()
+        return record
+
+    def _latest_refuel_level_snapshot(self):
+        for sample in reversed(self.sample_trace):
+            if not isinstance(sample, dict):
+                continue
+            level = sample.get("level_px", sample.get("level"))
+            if level is None:
+                continue
+            try:
+                level = float(level)
+            except Exception:
+                continue
+            return {
+                "sample_index": sample.get("sample_index"),
+                "timestamp_utc": sample.get("timestamp_utc"),
+                "elapsed_s": sample.get("elapsed_s"),
+                "monotonic_s": sample.get("monotonic_s"),
+                "level_px": level,
+                "meniscus_row": sample.get("meniscus_row"),
+            }
+        if self.current_level is not None:
+            try:
+                level = float(self.current_level)
+            except Exception:
+                level = None
+            return {
+                "sample_index": None,
+                "timestamp_utc": None,
+                "elapsed_s": None,
+                "monotonic_s": None,
+                "level_px": level,
+                "meniscus_row": self.last_meniscus_row,
+            }
+        return {
+            "sample_index": None,
+            "timestamp_utc": None,
+            "elapsed_s": None,
+            "monotonic_s": None,
+            "level_px": None,
+            "meniscus_row": None,
+        }
+
+    def _process_payload_value(self, payload, key, default=None):
+        if isinstance(payload, dict) and payload.get(key) is not None:
+            return payload.get(key)
+        active = self.refuel_active_process_context
+        if isinstance(active, dict) and active.get(key) is not None:
+            return active.get(key)
+        return default
+
+    def record_refuel_process_marker(self, event_kind, payload=None):
+        payload = self._json_safe_refuel_timing_value(dict(payload or {}))
+        latest = self._latest_refuel_level_snapshot()
+        active = self.refuel_active_process_context if isinstance(self.refuel_active_process_context, dict) else {}
+        record = {
+            "marker_index": int(self._refuel_process_next_marker_index),
+            "timestamp_utc": self._now_utc(),
+            "monotonic_s": time.monotonic(),
+            "source": self._process_payload_value(payload, "source", "droplet_imager"),
+            "event_kind": str(event_kind or "event"),
+            "process_observation_id": self._process_payload_value(payload, "process_observation_id"),
+            "process_name": self._process_payload_value(payload, "process_name"),
+            "phase_name": self._process_payload_value(payload, "phase_name"),
+            "stage_message": payload.get("stage_message", payload.get("message")),
+            "color_name": payload.get("color_name", payload.get("color")),
+            "sequence_status": payload.get("sequence_status", payload.get("status")),
+            "session_id": self._process_payload_value(payload, "session_id"),
+            "outcome": payload.get("outcome"),
+            "latest_sample_index": latest.get("sample_index"),
+            "latest_level_px": latest.get("level_px"),
+            "latest_meniscus_row": latest.get("meniscus_row"),
+            "baseline_sample_index": active.get("baseline_sample_index"),
+            "baseline_level_px": active.get("baseline_level_px", payload.get("baseline_level_px")),
+            "end_sample_index": payload.get("end_sample_index"),
+            "end_level_px": payload.get("end_level_px"),
+            "drift_px": payload.get("drift_px"),
+            "monitor_status": self.get_refuel_monitor_status(),
+            "latest_timing": self.last_refuel_monitor_timing,
+        }
+        for key, value in payload.items():
+            if key not in record:
+                record[str(key)] = value
+        record = self._json_safe_refuel_timing_value(record)
+        self._refuel_process_next_marker_index += 1
+        self.refuel_process_marker_log.append(record)
+        if len(self.refuel_process_marker_log) > 300:
+            self.refuel_process_marker_log = self.refuel_process_marker_log[-300:]
+        if self._recorder_run_dir is not None:
+            self._record_analysis({"kind": "refuel_process_marker", **record})
+        self.update_level_ui_signal.emit()
+        return record
+
+    def begin_refuel_process_observation(self, payload=None):
+        payload = self._json_safe_refuel_timing_value(dict(payload or {}))
+        if isinstance(self.refuel_active_process_context, dict):
+            for key in ("source", "process_name", "phase_name", "session_id"):
+                if payload.get(key) is not None:
+                    self.refuel_active_process_context[key] = payload.get(key)
+            return dict(self.refuel_active_process_context)
+
+        now_utc = self._now_utc()
+        now_monotonic = time.monotonic()
+        latest = self._latest_refuel_level_snapshot()
+        observation_id = payload.get("process_observation_id")
+        if not observation_id:
+            observation_id = f"refuel_process_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+        context = {
+            "process_observation_id": str(observation_id),
+            "source": payload.get("source", "droplet_imager"),
+            "process_name": payload.get("process_name"),
+            "phase_name": payload.get("phase_name"),
+            "session_id": payload.get("session_id"),
+            "started_at_utc": now_utc,
+            "started_monotonic_s": now_monotonic,
+            "baseline_sample_index": latest.get("sample_index"),
+            "baseline_level_px": latest.get("level_px"),
+            "baseline_meniscus_row": latest.get("meniscus_row"),
+            "baseline_timestamp_utc": latest.get("timestamp_utc"),
+        }
+        self.refuel_active_process_context = self._json_safe_refuel_timing_value(context)
+        self.last_refuel_process_summary = None
+        self.record_refuel_process_marker("process_started", payload)
+        return dict(self.refuel_active_process_context)
+
+    def complete_refuel_process_observation(self, outcome, payload=None):
+        payload = self._json_safe_refuel_timing_value(dict(payload or {}))
+        if not isinstance(self.refuel_active_process_context, dict):
+            self.begin_refuel_process_observation(payload)
+
+        active = dict(self.refuel_active_process_context or {})
+        latest = self._latest_refuel_level_snapshot()
+        baseline_level = active.get("baseline_level_px")
+        end_level = latest.get("level_px")
+        drift_px = None
+        try:
+            if baseline_level is not None and end_level is not None:
+                drift_px = float(end_level) - float(baseline_level)
+        except Exception:
+            drift_px = None
+
+        summary = dict(active)
+        summary.update(
+            {
+                "outcome": str(outcome or "completed"),
+                "completed_at_utc": self._now_utc(),
+                "completed_monotonic_s": time.monotonic(),
+                "end_sample_index": latest.get("sample_index"),
+                "end_level_px": end_level,
+                "end_meniscus_row": latest.get("meniscus_row"),
+                "end_timestamp_utc": latest.get("timestamp_utc"),
+                "drift_px": drift_px,
+            }
+        )
+        self.last_refuel_process_summary = self._json_safe_refuel_timing_value(summary)
+
+        marker_payload = dict(payload)
+        marker_payload.update(
+            {
+                "outcome": str(outcome or "completed"),
+                "end_sample_index": latest.get("sample_index"),
+                "end_level_px": end_level,
+                "drift_px": drift_px,
+            }
+        )
+        event_kind = marker_payload.pop("event_kind", None)
+        if event_kind is None:
+            normalized_outcome = str(outcome or "completed").lower()
+            event_kind = "process_error" if normalized_outcome in {"error", "failed", "failure"} else "process_completed"
+        self.record_refuel_process_marker(event_kind, marker_payload)
+        self.refuel_active_process_context = None
+        self.evaluate_refuel_advisory(reason=str(event_kind))
+        self.update_level_ui_signal.emit()
+        return dict(self.last_refuel_process_summary)
+
+    def get_refuel_process_markers(self):
+        return list(self.refuel_process_marker_log)
+
+    def get_refuel_process_summary(self):
+        return {
+            "monitoring_enabled": bool(self.refuel_process_monitoring_enabled),
+            "active": dict(self.refuel_active_process_context) if isinstance(self.refuel_active_process_context, dict) else None,
+            "last": dict(self.last_refuel_process_summary) if isinstance(self.last_refuel_process_summary, dict) else None,
+            "marker_count": len(self.refuel_process_marker_log),
+        }
+
+    def _refuel_advisory_thresholds(self):
+        return {
+            "drift_threshold_px": float(self.refuel_advisory_drift_threshold_px),
+            "near_empty_level_px": float(self.refuel_advisory_near_empty_level_px),
+            "near_full_margin_px": float(self.refuel_advisory_near_full_margin_px),
+            "stale_after_s": float(self.refuel_advisory_stale_after_s),
+        }
+
+    def _latest_refuel_sample(self):
+        for sample in reversed(self.sample_trace):
+            if isinstance(sample, dict):
+                return sample
+        return None
+
+    def clear_refuel_advisory(self, *, emit=True):
+        changed = self.last_refuel_advisory is not None
+        self.last_refuel_advisory = None
+        if emit and changed:
+            self.update_level_ui_signal.emit()
+        return changed
+
+    def _disabled_refuel_advisory(self):
+        return {
+            "enabled": False,
+            "severity": "disabled",
+            "code": "disabled",
+            "message": "",
+            "reason": "process_monitoring_disabled",
+            "timestamp_utc": None,
+        }
+
+    def _store_refuel_advisory(self, record):
+        record = self._json_safe_refuel_timing_value(record)
+        self.last_refuel_advisory = record
+        self.refuel_advisory_log.append(record)
+        if len(self.refuel_advisory_log) > self.REFUEL_ADVISORY_LOG_LIMIT:
+            self.refuel_advisory_log = self.refuel_advisory_log[-self.REFUEL_ADVISORY_LOG_LIMIT:]
+        if self._recorder_run_dir is not None:
+            self._record_analysis({"kind": "refuel_advisory", **record})
+        self.update_level_ui_signal.emit()
+        return record
+
+    def evaluate_refuel_advisory(self, reason="sample_update"):
+        if not self.refuel_process_monitoring_enabled:
+            return self._disabled_refuel_advisory()
+
+        thresholds = self._refuel_advisory_thresholds()
+        sample = self._latest_refuel_sample()
+        monitor_status = self.get_refuel_monitor_status()
+        monitor_state = str(monitor_status.get("state") or "off")
+        sample_monotonic = None
+        sample_age_s = None
+        level_px = None
+        channel_height_px = None
+        detector_status = None
+        if isinstance(sample, dict):
+            sample_monotonic = sample.get("monotonic_s")
+            detector_status = sample.get("detector_status") or sample.get("status")
+            if sample.get("level_px") is not None:
+                try:
+                    level_px = float(sample.get("level_px"))
+                except Exception:
+                    level_px = None
+            if sample.get("channel_height_px") is not None:
+                try:
+                    channel_height_px = float(sample.get("channel_height_px"))
+                except Exception:
+                    channel_height_px = None
+            try:
+                if sample_monotonic is not None:
+                    sample_age_s = max(0.0, float(time.monotonic()) - float(sample_monotonic))
+            except Exception:
+                sample_age_s = None
+
+        code = "waiting_for_samples"
+        severity = "info"
+        message = "Waiting for refuel samples before making calibration guidance."
+        drift_px = None
+
+        if monitor_state == "unavailable":
+            code = "monitor_unavailable"
+            severity = "warning"
+            message = "Refuel camera unavailable; check the printer-head level before relying on guidance."
+        elif sample is not None and sample_age_s is not None and sample_age_s > thresholds["stale_after_s"]:
+            code = "monitor_stale"
+            severity = "warning"
+            message = f"Refuel level sample is stale ({sample_age_s:.1f} s old); check the monitor before continuing."
+        elif sample is None:
+            code = "waiting_for_samples"
+            severity = "info"
+            message = "Waiting for refuel samples before making calibration guidance."
+        else:
+            normalized_status = str(detector_status or "").strip().lower()
+            if normalized_status == "empty":
+                code = "near_empty"
+                severity = "warning"
+                message = "Refuel channel is empty or nearly empty; bring the level back to a safe range before continuing."
+            elif level_px is not None and level_px <= thresholds["near_empty_level_px"]:
+                code = "near_empty"
+                severity = "warning"
+                message = (
+                    f"Refuel level is near empty ({level_px:.1f} px from bottom); "
+                    "bring it back to a safe range before continuing."
+                )
+            elif normalized_status == "full":
+                code = "near_full"
+                severity = "warning"
+                message = "Refuel channel is full or nearly full; bring the level back to a safe range before continuing."
+            elif (
+                level_px is not None
+                and channel_height_px is not None
+                and level_px >= channel_height_px - thresholds["near_full_margin_px"]
+            ):
+                code = "near_full"
+                severity = "warning"
+                headroom_px = max(0.0, channel_height_px - level_px)
+                message = (
+                    f"Refuel level is near full ({headroom_px:.1f} px from top); "
+                    "bring it back to a safe range before continuing."
+                )
+            else:
+                summary = self.last_refuel_process_summary if isinstance(self.last_refuel_process_summary, dict) else None
+                if summary is not None:
+                    try:
+                        drift_px = float(summary.get("drift_px")) if summary.get("drift_px") is not None else None
+                    except Exception:
+                        drift_px = None
+                if drift_px is not None:
+                    if drift_px < -thresholds["drift_threshold_px"]:
+                        code = "increase_refuel"
+                        severity = "recommendation"
+                        message = (
+                            f"Refuel level fell by {abs(drift_px):.1f} px during calibration; "
+                            "consider increasing refuel pressure or refuel pulse width."
+                        )
+                    elif drift_px > thresholds["drift_threshold_px"]:
+                        code = "decrease_refuel"
+                        severity = "recommendation"
+                        message = (
+                            f"Refuel level rose by {abs(drift_px):.1f} px during calibration; "
+                            "consider decreasing refuel pressure or refuel pulse width."
+                        )
+                    else:
+                        code = "stable"
+                        severity = "info"
+                        message = f"Refuel level was stable during calibration (drift {drift_px:+.1f} px)."
+                elif isinstance(self.refuel_active_process_context, dict):
+                    code = "monitoring_process"
+                    severity = "info"
+                    message = "Monitoring calibration; waiting for process drift."
+                else:
+                    code = "level_in_range"
+                    severity = "info"
+                    message = "Refuel level is in the monitored range."
+
+        record = {
+            "enabled": True,
+            "timestamp_utc": self._now_utc(),
+            "monotonic_s": time.monotonic(),
+            "reason": str(reason or "sample_update"),
+            "severity": str(severity),
+            "code": str(code),
+            "message": str(message),
+            "level_px": level_px,
+            "detector_status": detector_status,
+            "channel_height_px": channel_height_px,
+            "sample_age_s": sample_age_s,
+            "drift_px": drift_px,
+            "monitor_state": monitor_state,
+            "monitor_message": monitor_status.get("message"),
+            "process_summary": self.get_refuel_process_summary(),
+            "thresholds": thresholds,
+        }
+        return self._store_refuel_advisory(record)
+
+    def get_refuel_advisory(self):
+        if not self.refuel_process_monitoring_enabled:
+            return self._disabled_refuel_advisory()
+        if isinstance(self.last_refuel_advisory, dict):
+            return dict(self.last_refuel_advisory)
+        return {
+            "enabled": True,
+            "severity": "info",
+            "code": "waiting_for_samples",
+            "message": "Waiting for refuel samples before making calibration guidance.",
+            "reason": "no_advisory_yet",
+            "timestamp_utc": None,
+        }
+
+    def get_refuel_advisory_log(self):
+        return list(self.refuel_advisory_log)
+
+    def get_refuel_monitor_timing_log(self):
+        return list(self.refuel_monitor_timing_log)
+
+    def get_refuel_monitor_timing_summary(self):
+        records = list(self.refuel_monitor_timing_log)
+        sample_records = [row for row in records if row.get("event_kind") == "sample_result"]
+
+        def _mean_for(key):
+            values = [
+                float(row[key])
+                for row in sample_records
+                if row.get(key) is not None
+            ]
+            if not values:
+                return None
+            return float(sum(values) / len(values))
+
+        return {
+            "latest": self.last_refuel_monitor_timing,
+            "record_count": len(records),
+            "sample_result_count": len(sample_records),
+            "skip_count": sum(1 for row in records if row.get("event_kind") == "skip"),
+            "failure_count": sum(1 for row in records if row.get("event_kind") == "failure"),
+            "mean_capture_duration_ms": _mean_for("capture_duration_ms"),
+            "mean_detector_runtime_ms": _mean_for("detector_runtime_ms"),
+            "mean_total_latency_ms": _mean_for("total_latency_ms"),
+        }
 
     def _seed_analysis_parameters(self):
         return {
@@ -31277,6 +31898,27 @@ class RefuelCameraModel(QObject):
             "location": context.get("location", ""),
             "phase": str(phase),
         }
+        if context.get("detector_status") is not None:
+            sample["detector_status"] = str(context.get("detector_status"))
+        if context.get("channel_height_px") is not None:
+            try:
+                sample["channel_height_px"] = float(context.get("channel_height_px"))
+            except Exception:
+                sample["channel_height_px"] = context.get("channel_height_px")
+        if self.refuel_process_monitoring_enabled and isinstance(self.refuel_active_process_context, dict):
+            active = self.refuel_active_process_context
+            sample.update(
+                {
+                    "process_monitoring_enabled": True,
+                    "process_observation_id": active.get("process_observation_id"),
+                    "process_source": active.get("source"),
+                    "process_name": active.get("process_name"),
+                    "process_phase_name": active.get("phase_name"),
+                    "process_session_id": active.get("session_id"),
+                    "process_baseline_sample_index": active.get("baseline_sample_index"),
+                    "process_baseline_level_px": active.get("baseline_level_px"),
+                }
+            )
         self.sample_trace.append(sample)
         self.update_level_log(float(level_data))
         if self.session_active:
@@ -31289,12 +31931,18 @@ class RefuelCameraModel(QObject):
         if self._analysis_in_progress:
             return False
 
+        copy_resize_start = time.perf_counter()
         raw_frame = self._copy_frame(frame)
         if raw_frame is None:
             return False
         frame = self._build_analysis_working_frame(raw_frame)
+        copy_resize_duration_ms = float((time.perf_counter() - copy_resize_start) * 1000.0)
         self.raw_capture_image = raw_frame
         self._analysis_context = self._normalize_capture_context(context)
+        self._analysis_timing_context = {
+            "copy_resize_duration_ms": copy_resize_duration_ms,
+            "analysis_enqueued_perf_s": time.perf_counter(),
+        }
         self._analysis_in_progress = True
         self.analysis_thread = ImageAnalysisThread(
             frame,
@@ -31318,6 +31966,7 @@ class RefuelCameraModel(QObject):
         except Exception:
             self._analysis_in_progress = False
             self._analysis_context = None
+            self._analysis_timing_context = None
             raise
         return True
 
@@ -31326,8 +31975,15 @@ class RefuelCameraModel(QObject):
 
     def update_ui_with_analysis(self, original_image, annotated_image, level_data, meniscus_row):
         context = self._analysis_context
+        timing_context = self._analysis_timing_context or {}
         self._analysis_context = None
+        self._analysis_timing_context = None
         self._analysis_in_progress = False
+        monitor_tick_index = None
+        time_since_last_valid_sample_s = None
+        if isinstance(context, dict):
+            monitor_tick_index = context.get("refuel_monitor_tick_index")
+            time_since_last_valid_sample_s = self._time_since_last_valid_sample_s(context.get("monotonic_s"))
 
         if original_image is not None:
             self.analysis_input_image = original_image
@@ -31337,8 +31993,43 @@ class RefuelCameraModel(QObject):
             self.last_meniscus_row = int(meniscus_row)
         if level_data is not None:
             self.update_current_level(float(level_data))
-            self._append_sample(float(level_data), meniscus_row, context)
+            sample_context = dict(context or {})
+            detector_status = getattr(self.analysis_thread, "detected_status", None)
+            detected_details = getattr(self.analysis_thread, "detected_details", None)
+            if detector_status is not None:
+                sample_context["detector_status"] = detector_status
+            if isinstance(detected_details, dict):
+                channel_bounds = detected_details.get("channel_bounds")
+                if isinstance(channel_bounds, (list, tuple)) and len(channel_bounds) >= 4:
+                    sample_context["channel_height_px"] = channel_bounds[3]
+            self._append_sample(float(level_data), meniscus_row, sample_context)
             self.finalize_burst_from_recent_samples()
+            self.evaluate_refuel_advisory(reason="sample_update")
+        if monitor_tick_index is not None:
+            tick_started_perf_s = context.get("refuel_monitor_tick_started_perf_s") if isinstance(context, dict) else None
+            total_latency_ms = None
+            try:
+                if tick_started_perf_s is not None:
+                    total_latency_ms = float((time.perf_counter() - float(tick_started_perf_s)) * 1000.0)
+            except Exception:
+                total_latency_ms = None
+            detector_runtime_ms = getattr(self.analysis_thread, "detector_runtime_ms", None)
+            detector_status = getattr(self.analysis_thread, "detected_status", None)
+            self.record_refuel_monitor_timing(
+                {
+                    "tick_index": monitor_tick_index,
+                    "event_kind": "sample_result",
+                    "monitor_state": self.refuel_monitor_state,
+                    "capture_duration_ms": context.get("refuel_monitor_capture_duration_ms"),
+                    "copy_resize_duration_ms": timing_context.get("copy_resize_duration_ms"),
+                    "detector_runtime_ms": detector_runtime_ms,
+                    "total_latency_ms": total_latency_ms,
+                    "analysis_started": context.get("analysis_started"),
+                    "level_px": float(level_data) if level_data is not None else None,
+                    "detector_status": detector_status,
+                    "time_since_last_valid_sample_s": time_since_last_valid_sample_s,
+                }
+            )
         self.update_level_ui_signal.emit()
 
     def lock_current_as_target(self, tolerance_px):

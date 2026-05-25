@@ -861,6 +861,9 @@ class CharacterizationHistoryDialog(QtWidgets.QDialog):
 
 
 class DropletImagingDialog(QtWidgets.QDialog):
+    REFUEL_LEVEL_CHART_WINDOW_SAMPLES = 100
+    REFUEL_LEVEL_CHART_FALLBACK_HEIGHT_PX = 100.0
+
     _quick_controls_expanded_default = False
     _info_panel_section_default_states = {
         "summary": True,
@@ -883,6 +886,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.color_dict = self.main_window.color_dict
         self.model = model
         self.droplet_camera_model = model.droplet_camera_model
+        self.refuel_camera_model = getattr(model, "refuel_camera_model", None)
         self.controller = controller
         self.service_mode = bool(service_mode)
         self.initial_tab = str(initial_tab or "").strip().lower()
@@ -908,6 +912,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.camera_timer = QTimer(self)
         self.camera_timer.timeout.connect(self.capture_image)
         self.capturing = False
+        self.refuel_monitor_interval_ms = 1000
+        self.refuel_monitor_timer = QTimer(self)
+        self.refuel_monitor_timer.setInterval(self.refuel_monitor_interval_ms)
+        self.refuel_monitor_timer.timeout.connect(self._capture_refuel_monitor_sample)
+        self._refuel_monitor_camera_started = False
+        self._refuel_level_chart_full_scale_px = None
 
         self._bridge_preview_payload = None
         self._memory_recommendation_preview = None
@@ -979,10 +989,16 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.info_panel_scroll.setWidget(self.info_panel)
 
         # ---------- LEFT CONTROL PANEL (fixed width): workflow tabs + run options ----------
+        self.control_panel_scroll = QtWidgets.QScrollArea()
+        self.control_panel_scroll.setWidgetResizable(True)
+        self.control_panel_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.control_panel_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.control_panel_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.control_panel = QtWidgets.QWidget()
         control_panel_v = QtWidgets.QVBoxLayout(self.control_panel)
         control_panel_v.setContentsMargins(6, 6, 6, 6)
         control_panel_v.setSpacing(8)
+        self.control_panel_scroll.setWidget(self.control_panel)
 
         self.reagent_title_widget = QtWidgets.QWidget()
         reagent_title_v = QtWidgets.QVBoxLayout(self.reagent_title_widget)
@@ -1399,6 +1415,41 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.enable_calibration_memory_checkbox.setChecked(memory_enabled)
         run_options_v.addWidget(self.enable_calibration_memory_checkbox)
 
+        self.enable_refuel_level_tracking_checkbox = QtWidgets.QCheckBox("Enable Refuel Level Tracking")
+        self.enable_refuel_level_tracking_checkbox.setToolTip(
+            "Show and sample refuel level while the droplet imager is open."
+        )
+        refuel_tracking_enabled = False
+        refuel_process_monitoring_enabled = False
+        if self.refuel_camera_model is not None:
+            try:
+                refuel_tracking_enabled = bool(self.refuel_camera_model.is_refuel_tracking_enabled())
+            except Exception:
+                refuel_tracking_enabled = False
+            process_getter = getattr(self.refuel_camera_model, "is_refuel_process_monitoring_enabled", None)
+            if callable(process_getter):
+                try:
+                    refuel_process_monitoring_enabled = bool(process_getter())
+                except Exception:
+                    refuel_process_monitoring_enabled = False
+        else:
+            self.enable_refuel_level_tracking_checkbox.setEnabled(False)
+        self.enable_refuel_level_tracking_checkbox.setChecked(refuel_tracking_enabled)
+        run_options_v.addWidget(self.enable_refuel_level_tracking_checkbox)
+
+        self.enable_refuel_process_monitoring_checkbox = QtWidgets.QCheckBox("Monitor Calibration Processes")
+        self.enable_refuel_process_monitoring_checkbox.setToolTip(
+            "Record refuel-level markers around calibration lifecycle events. "
+            "Requires refuel level tracking."
+        )
+        self.enable_refuel_process_monitoring_checkbox.setChecked(
+            bool(refuel_tracking_enabled and refuel_process_monitoring_enabled)
+        )
+        self.enable_refuel_process_monitoring_checkbox.setEnabled(
+            bool(self.refuel_camera_model is not None and refuel_tracking_enabled)
+        )
+        run_options_v.addWidget(self.enable_refuel_process_monitoring_checkbox)
+
         self.droplet_setup_widget = QtWidgets.QWidget()
         droplet_setup_grid = QtWidgets.QGridLayout(self.droplet_setup_widget)
         droplet_setup_grid.setContentsMargins(0, 0, 0, 0)
@@ -1477,10 +1528,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.debug_tab.layout().addWidget(self.debug_scroll)
         self._build_optics_tab()
 
+        self.refuel_level_group = self._build_refuel_level_panel()
         control_panel_v.addWidget(self.reagent_title_widget)
         control_panel_v.addWidget(self.acquisition_controls_section)
         control_panel_v.addWidget(self.calibration_tabs, 1)
         control_panel_v.addWidget(self.run_options_group)
+        control_panel_v.addWidget(self.refuel_level_group)
 
         self.recommendation_group = QtWidgets.QWidget()
         recommendation_v = QtWidgets.QVBoxLayout(self.recommendation_group)
@@ -1785,7 +1838,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         # Keep the side panels stable so buttons and labels remain readable.
         self.info_panel.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
         self.info_panel_scroll.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
-        self.control_panel.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
+        self.control_panel.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
+        self.control_panel_scroll.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
         self.info_panel.adjustSize()
         self.control_panel.adjustSize()
 
@@ -1845,8 +1899,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.analysis_panel.setLayout(self.analysis_layout)
         self.analysis_panel.setMinimumWidth(560)
         self.analysis_panel.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
-        self.layout.addWidget(self.control_panel, 0)
-        self.layout.setStretchFactor(self.control_panel, 0)
+        self.layout.addWidget(self.control_panel_scroll, 0)
+        self.layout.setStretchFactor(self.control_panel_scroll, 0)
         self.layout.addWidget(self.analysis_panel, 1)
         self.layout.setStretchFactor(self.analysis_panel, 1)
         self.layout.addWidget(self.info_panel_scroll, 0)
@@ -1861,11 +1915,18 @@ class DropletImagingDialog(QtWidgets.QDialog):
         online_stream_debug_signal = getattr(self.model.calibration_manager, "onlineStreamDebugUpdated", None)
         if online_stream_debug_signal is not None:
             online_stream_debug_signal.connect(self.on_online_stream_debug_updated)
+        if self.refuel_camera_model is not None:
+            try:
+                self.refuel_camera_model.update_level_ui_signal.connect(self._refresh_refuel_level_panel)
+            except Exception:
+                pass
 
         self.start_pressure_spin.valueChanged.connect(self.set_start_pressure)
         self.num_pressure_tests_spin.valueChanged.connect(self.set_num_pressure_tests)
         self.record_calibration_checkbox.toggled.connect(self.set_record_mode_enabled)
         self.enable_calibration_memory_checkbox.toggled.connect(self.set_calibration_memory_enabled)
+        self.enable_refuel_level_tracking_checkbox.toggled.connect(self._set_refuel_tracking_enabled)
+        self.enable_refuel_process_monitoring_checkbox.toggled.connect(self._set_refuel_process_monitoring_enabled)
         self.summary_current_run_checkbox.toggled.connect(self._refresh_summary_filters)
         self.summary_valid_only_checkbox.toggled.connect(self._refresh_summary_filters)
         self.summary_source_combo.currentIndexChanged.connect(self._refresh_summary_filters)
@@ -1878,6 +1939,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.model.calibration_manager.calibrationCompleted.connect(self.on_calibration_completed)
         self.model.calibration_manager.calibrationQueueCompleted.connect(self.on_calibration_queue_completed)
         self.model.calibration_manager.calibrationError.connect(self.on_calibration_error)
+        self.model.calibration_manager.calibrationStageChanged.connect(self._on_refuel_calibration_stage_changed)
+        self.model.calibration_manager.calibrationCompleted.connect(self._on_refuel_calibration_completed)
+        self.model.calibration_manager.calibrationQueueCompleted.connect(self._on_refuel_calibration_queue_completed)
+        self.model.calibration_manager.calibrationError.connect(self._on_refuel_calibration_error)
         capture_failed_signal = getattr(self.model.calibration_manager, "captureFailed", None)
         if capture_failed_signal is not None:
             capture_failed_signal.connect(self._on_droplet_capture_failed)
@@ -1892,6 +1957,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             stream_capture_signal.connect(self._sync_stream_capture_panel_state)
             stream_capture_signal.connect(self._refresh_manual_control_lock_state)
             stream_capture_signal.connect(self._ensure_stream_capture_followup_state)
+            stream_capture_signal.connect(self._on_refuel_stream_capture_state_changed)
         stream_sequence_signal = getattr(
             self.model.calibration_manager,
             "streamCalibrationSequenceStateChanged",
@@ -1900,6 +1966,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if stream_sequence_signal is not None:
             stream_sequence_signal.connect(self._refresh_manual_control_lock_state)
             stream_sequence_signal.connect(self._ensure_stream_calibration_sequence_followup_state)
+            stream_sequence_signal.connect(self._on_refuel_stream_sequence_state_changed)
         droplet_sequence_signal = getattr(
             self.model.calibration_manager,
             "dropletCalibrationSequenceStateChanged",
@@ -1908,6 +1975,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if droplet_sequence_signal is not None:
             droplet_sequence_signal.connect(self._refresh_manual_control_lock_state)
             droplet_sequence_signal.connect(self._ensure_droplet_calibration_sequence_followup_state)
+            droplet_sequence_signal.connect(self._on_refuel_droplet_sequence_state_changed)
 
         self.model.calibration_manager.readinessChanged.connect(self.on_readiness_changed)
         self.model.calibration_manager._emit_readiness()
@@ -1927,9 +1995,801 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._refresh_optics_controls()
         self._apply_flash_safety_ui_state()
         self._sync_stream_capture_panel_state()
+        self._refresh_refuel_level_panel()
+        if self._is_refuel_tracking_enabled():
+            self._start_refuel_monitor()
         QTimer.singleShot(0, self._ensure_stream_capture_followup_state)
         QTimer.singleShot(0, self._ensure_stream_calibration_sequence_followup_state)
         QTimer.singleShot(0, self._ensure_droplet_calibration_sequence_followup_state)
+
+    def _build_refuel_level_panel(self):
+        group = QtWidgets.QGroupBox("Refuel Level")
+        group_v = QtWidgets.QVBoxLayout(group)
+        group_v.setContentsMargins(8, 8, 8, 8)
+        group_v.setSpacing(6)
+
+        metrics_grid = QtWidgets.QGridLayout()
+        metrics_grid.setHorizontalSpacing(8)
+        metrics_grid.setVerticalSpacing(4)
+
+        self.refuel_level_value_label = QtWidgets.QLabel("-")
+        self.refuel_level_status_label = QtWidgets.QLabel("Off")
+        self.refuel_level_last_update_label = QtWidgets.QLabel("-")
+        self.refuel_level_timing_label = QtWidgets.QLabel("-")
+        self.refuel_level_timing_label.setWordWrap(True)
+        self.refuel_level_process_label = QtWidgets.QLabel("Process monitoring off")
+        self.refuel_level_process_label.setWordWrap(True)
+        self.refuel_level_advisory_label = QtWidgets.QLabel("Monitoring disabled")
+        self.refuel_level_advisory_label.setWordWrap(True)
+
+        metrics_grid.addWidget(QtWidgets.QLabel("Latest Level"), 0, 0)
+        metrics_grid.addWidget(self.refuel_level_value_label, 0, 1)
+        metrics_grid.addWidget(QtWidgets.QLabel("Status"), 1, 0)
+        metrics_grid.addWidget(self.refuel_level_status_label, 1, 1)
+        metrics_grid.addWidget(QtWidgets.QLabel("Last Update"), 2, 0)
+        metrics_grid.addWidget(self.refuel_level_last_update_label, 2, 1)
+        metrics_grid.addWidget(QtWidgets.QLabel("Timing"), 3, 0)
+        metrics_grid.addWidget(self.refuel_level_timing_label, 3, 1)
+        metrics_grid.addWidget(QtWidgets.QLabel("Process"), 4, 0)
+        metrics_grid.addWidget(self.refuel_level_process_label, 4, 1)
+        group_v.addLayout(metrics_grid)
+
+        self._refuel_level_chart_bundle = self._create_refuel_level_chart_bundle()
+        chart_view = self._refuel_level_chart_bundle["view"]
+        chart_view.setObjectName("refuel_level_chart_view")
+        chart_view.setMinimumHeight(110)
+        chart_view.setMaximumHeight(150)
+        group_v.addWidget(chart_view)
+
+        group_v.addWidget(self.refuel_level_advisory_label)
+
+        self.open_refuel_camera_button = QtWidgets.QPushButton("Open Refuel Camera")
+        opener = None
+        for attr_name in (
+            "open_refuel_camera_window",
+            "open_refuel_camera",
+            "_launch_refuel_camera_dialog",
+        ):
+            candidate = getattr(self.main_window, attr_name, None)
+            if callable(candidate):
+                opener = candidate
+                break
+        if opener is not None:
+            self.open_refuel_camera_button.clicked.connect(opener)
+        else:
+            self.open_refuel_camera_button.setEnabled(False)
+            self.open_refuel_camera_button.setToolTip("Open the main refuel camera window from the app launcher.")
+        group_v.addWidget(self.open_refuel_camera_button)
+
+        group.hide()
+        return group
+
+    def _create_refuel_level_chart_bundle(self):
+        chart = QtCharts.QChart()
+        chart.setTheme(QtCharts.QChart.ChartThemeDark)
+        chart.setBackgroundBrush(QBrush(self._chart_color("darker_gray", "#242424")))
+        chart.legend().hide()
+        chart.setMargins(QtCore.QMargins(2, 2, 2, 2))
+
+        axis_x = QtCharts.QValueAxis()
+        axis_x.setTitleText("Recent Sample")
+        axis_x.setLabelFormat("%.0f")
+        axis_x.setRange(0.0, float(self.REFUEL_LEVEL_CHART_WINDOW_SAMPLES - 1))
+        axis_y = QtCharts.QValueAxis()
+        axis_y.setTitleText("Level (px)")
+        axis_y.setLabelFormat("%.1f")
+        axis_y.setRange(0.0, float(self.REFUEL_LEVEL_CHART_FALLBACK_HEIGHT_PX))
+        chart.addAxis(axis_x, Qt.AlignBottom)
+        chart.addAxis(axis_y, Qt.AlignLeft)
+
+        primary_series = QtCharts.QLineSeries()
+        primary_series.setPen(self._make_chart_pen("light_blue", "#6fb6ff", width=2))
+        current_series = QtCharts.QScatterSeries()
+        current_series.setMarkerSize(9.0)
+        current_series.setBorderColor(self._chart_color("light_gray", "#cfd8dc"))
+        current_series.setColor(self._chart_color("green", "#2ecc71"))
+
+        for series in (primary_series, current_series):
+            chart.addSeries(series)
+            series.attachAxis(axis_x)
+            series.attachAxis(axis_y)
+
+        view = QtCharts.QChartView(chart)
+        view.setRenderHint(QPainter.Antialiasing)
+        view.setFocusPolicy(QtCore.Qt.NoFocus)
+        view.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+
+        return {
+            "chart": chart,
+            "view": view,
+            "axis_x": axis_x,
+            "axis_y": axis_y,
+            "primary_series": primary_series,
+            "current_series": current_series,
+        }
+
+    def _set_refuel_tracking_enabled(self, checked):
+        checked = bool(checked)
+        if self.refuel_camera_model is not None:
+            try:
+                self.refuel_camera_model.set_refuel_tracking_enabled(checked)
+            except Exception:
+                pass
+        process_checkbox = getattr(self, "enable_refuel_process_monitoring_checkbox", None)
+        if process_checkbox is not None:
+            process_checkbox.setEnabled(bool(checked and self.refuel_camera_model is not None))
+            if not checked:
+                was_blocked = process_checkbox.blockSignals(True)
+                try:
+                    process_checkbox.setChecked(False)
+                finally:
+                    process_checkbox.blockSignals(was_blocked)
+                if self.refuel_camera_model is not None:
+                    setter = getattr(self.refuel_camera_model, "set_refuel_process_monitoring_enabled", None)
+                    if callable(setter):
+                        try:
+                            setter(False)
+                        except Exception:
+                            pass
+        if checked:
+            self._start_refuel_monitor()
+        else:
+            self._stop_refuel_monitor("Monitoring disabled")
+        self._refresh_refuel_level_panel()
+
+    def _set_refuel_process_monitoring_enabled(self, checked):
+        checked = bool(checked and self._is_refuel_tracking_enabled())
+        checkbox = getattr(self, "enable_refuel_process_monitoring_checkbox", None)
+        if checkbox is not None:
+            checkbox.setEnabled(bool(self.refuel_camera_model is not None and self._is_refuel_tracking_enabled()))
+            if checkbox.isChecked() != checked:
+                was_blocked = checkbox.blockSignals(True)
+                try:
+                    checkbox.setChecked(checked)
+                finally:
+                    checkbox.blockSignals(was_blocked)
+        if self.refuel_camera_model is not None:
+            setter = getattr(self.refuel_camera_model, "set_refuel_process_monitoring_enabled", None)
+            if callable(setter):
+                try:
+                    setter(checked)
+                except Exception:
+                    pass
+        self._refresh_refuel_level_panel()
+
+    def _start_refuel_monitor(self):
+        if self.refuel_camera_model is None:
+            return False
+        if self.refuel_monitor_timer.isActive():
+            return True
+
+        self.refuel_camera_model.set_refuel_monitor_state("starting", "Starting refuel camera")
+        try:
+            self.controller.start_refuel_camera()
+        except Exception as exc:
+            self._refuel_monitor_camera_started = False
+            self.refuel_monitor_timer.stop()
+            self.refuel_camera_model.record_refuel_monitor_failure(f"Refuel camera unavailable: {exc}")
+            return False
+
+        self._refuel_monitor_camera_started = True
+        self.refuel_camera_model.set_refuel_monitor_state("monitoring", "Monitoring")
+        self.refuel_monitor_timer.start(self.refuel_monitor_interval_ms)
+        return True
+
+    def _stop_refuel_monitor(self, message="Monitoring disabled"):
+        self.refuel_monitor_timer.stop()
+        if self._refuel_monitor_camera_started:
+            try:
+                self.controller.stop_refuel_camera()
+            except Exception as exc:
+                print(f"[RefuelMonitor] stop_refuel_camera failed: {exc}")
+        self._refuel_monitor_camera_started = False
+        if self.refuel_camera_model is not None:
+            try:
+                self.refuel_camera_model.set_refuel_monitor_state("off", message)
+            except Exception:
+                pass
+
+    def _handle_refuel_monitor_failure(self, message):
+        if self.refuel_camera_model is None:
+            return
+        self.refuel_camera_model.record_refuel_monitor_failure(str(message or "Refuel camera unavailable"))
+        status = self.refuel_camera_model.get_refuel_monitor_status()
+        if int(status.get("consecutive_failures", 0)) >= 3:
+            self.refuel_monitor_timer.stop()
+            if self._refuel_monitor_camera_started:
+                try:
+                    self.controller.stop_refuel_camera()
+                except Exception as exc:
+                    print(f"[RefuelMonitor] stop_refuel_camera failed after failures: {exc}")
+            self._refuel_monitor_camera_started = False
+
+    def _new_refuel_monitor_timing_context(self):
+        model = self.refuel_camera_model
+        tick_index = model.next_refuel_monitor_tick_index() if model is not None else None
+        return {
+            "refuel_monitor_tick_index": tick_index,
+            "refuel_monitor_tick_started_perf_s": time.perf_counter(),
+            "refuel_monitor_tick_started_monotonic_s": time.monotonic(),
+            "refuel_monitor_interval_ms": int(self.refuel_monitor_interval_ms),
+        }
+
+    @staticmethod
+    def _elapsed_refuel_monitor_ms(timing_context):
+        try:
+            return float((time.perf_counter() - float(timing_context["refuel_monitor_tick_started_perf_s"])) * 1000.0)
+        except Exception:
+            return None
+
+    def _record_refuel_monitor_tick_timing(
+        self,
+        timing_context,
+        *,
+        event_kind,
+        skip_reason=None,
+        failure_message=None,
+        analysis_started=None,
+        capture_duration_ms=None,
+    ):
+        model = self.refuel_camera_model
+        if model is None:
+            return None
+        return model.record_refuel_monitor_timing(
+            {
+                "tick_index": timing_context.get("refuel_monitor_tick_index"),
+                "event_kind": event_kind,
+                "monitor_state": model.get_refuel_monitor_status().get("state"),
+                "capture_duration_ms": capture_duration_ms,
+                "total_latency_ms": self._elapsed_refuel_monitor_ms(timing_context),
+                "skip_reason": skip_reason,
+                "failure_message": failure_message,
+                "analysis_started": analysis_started,
+                "time_since_last_valid_sample_s": model._time_since_last_valid_sample_s(
+                    timing_context.get("refuel_monitor_tick_started_monotonic_s")
+                ),
+            }
+        )
+
+    def _capture_refuel_monitor_sample(self):
+        model = self.refuel_camera_model
+        if model is None or not self._is_refuel_tracking_enabled():
+            return
+        timing_context = self._new_refuel_monitor_timing_context()
+
+        try:
+            if model.is_refuel_diagnostic_capture_active():
+                model.record_refuel_monitor_skip(
+                    "diagnostic_capture_active",
+                    state="paused",
+                    message="Paused by refuel camera window",
+                )
+                self._record_refuel_monitor_tick_timing(
+                    timing_context,
+                    event_kind="skip",
+                    skip_reason="diagnostic_capture_active",
+                )
+                return
+        except Exception:
+            pass
+
+        try:
+            if model.is_analysis_in_progress():
+                model.record_refuel_monitor_skip(
+                    "analysis_in_progress",
+                    state="monitoring",
+                    message="Waiting for refuel analysis",
+                )
+                self._record_refuel_monitor_tick_timing(
+                    timing_context,
+                    event_kind="skip",
+                    skip_reason="analysis_in_progress",
+                )
+                return
+        except Exception:
+            pass
+
+        model.record_refuel_monitor_attempt("Monitoring")
+        try:
+            result = self.controller.capture_refuel_image_with_context(
+                analyze=True,
+                context_overrides=timing_context,
+            )
+        except Exception as exc:
+            self._handle_refuel_monitor_failure(f"Refuel capture failed: {exc}")
+            self._record_refuel_monitor_tick_timing(
+                timing_context,
+                event_kind="failure",
+                failure_message=f"Refuel capture failed: {exc}",
+            )
+            return
+
+        frame = result[0] if isinstance(result, tuple) else result
+        context = result[1] if isinstance(result, tuple) and len(result) > 1 else {}
+        capture_duration_ms = None
+        if isinstance(context, dict):
+            capture_duration_ms = context.get("refuel_monitor_capture_duration_ms")
+        if frame is None:
+            self._handle_refuel_monitor_failure("Camera did not return a frame.")
+            self._record_refuel_monitor_tick_timing(
+                timing_context,
+                event_kind="failure",
+                failure_message="Camera did not return a frame.",
+                analysis_started=False,
+                capture_duration_ms=capture_duration_ms,
+            )
+            return
+
+        model.record_refuel_monitor_success("Monitoring")
+        if isinstance(context, dict) and context.get("analysis_started") is False:
+            self._record_refuel_monitor_tick_timing(
+                timing_context,
+                event_kind="analysis_not_started",
+                analysis_started=False,
+                capture_duration_ms=capture_duration_ms,
+            )
+
+    def _is_refuel_tracking_enabled(self):
+        checkbox = getattr(self, "enable_refuel_level_tracking_checkbox", None)
+        if checkbox is None or not checkbox.isChecked():
+            return False
+        if self.refuel_camera_model is None:
+            return False
+        try:
+            return bool(self.refuel_camera_model.is_refuel_tracking_enabled())
+        except Exception:
+            return bool(checkbox.isChecked())
+
+    def _is_refuel_process_monitoring_enabled(self):
+        checkbox = getattr(self, "enable_refuel_process_monitoring_checkbox", None)
+        if checkbox is None or not checkbox.isChecked():
+            return False
+        if not self._is_refuel_tracking_enabled() or self.refuel_camera_model is None:
+            return False
+        getter = getattr(self.refuel_camera_model, "is_refuel_process_monitoring_enabled", None)
+        if callable(getter):
+            try:
+                return bool(getter())
+            except Exception:
+                return False
+        return True
+
+    def _refuel_process_summary(self):
+        if self.refuel_camera_model is None:
+            return {}
+        getter = getattr(self.refuel_camera_model, "get_refuel_process_summary", None)
+        if callable(getter):
+            try:
+                return dict(getter() or {})
+            except Exception:
+                return {}
+        return {}
+
+    def _active_calibration_refuel_payload(self, source, extra=None):
+        payload = {"source": str(source or "droplet_imager")}
+        manager = getattr(getattr(self, "model", None), "calibration_manager", None)
+        active = getattr(manager, "activeCalibration", None)
+        if active is not None:
+            payload["process_name"] = (
+                getattr(active, "PROCESS_NAME", None)
+                or getattr(active, "process_name", None)
+                or active.__class__.__name__
+            )
+            payload["phase_name"] = getattr(active, "phase_name", None) or getattr(active, "PHASE_NAME", None)
+            session_id = getattr(active, "session_id", None) or getattr(active, "_session_id", None)
+            if session_id is not None:
+                payload["session_id"] = session_id
+        elif manager is not None:
+            phase_name = getattr(manager, "phase_name", None)
+            if phase_name:
+                payload["phase_name"] = phase_name
+        if isinstance(extra, dict):
+            for key, value in extra.items():
+                payload[str(key)] = value
+        return payload
+
+    def _ensure_refuel_process_observation(self, source, extra=None):
+        if not self._is_refuel_process_monitoring_enabled() or self.refuel_camera_model is None:
+            return None
+        payload = self._active_calibration_refuel_payload(source, extra)
+        summary = self._refuel_process_summary()
+        if not summary.get("active"):
+            begin = getattr(self.refuel_camera_model, "begin_refuel_process_observation", None)
+            if callable(begin):
+                try:
+                    return begin(payload)
+                except Exception as exc:
+                    print(f"[RefuelMonitor] process observation start failed: {exc}")
+                    return None
+        return summary.get("active")
+
+    def _record_refuel_process_marker(self, event_kind, source, extra=None):
+        if not self._is_refuel_process_monitoring_enabled() or self.refuel_camera_model is None:
+            return None
+        self._ensure_refuel_process_observation(source, extra)
+        recorder = getattr(self.refuel_camera_model, "record_refuel_process_marker", None)
+        if not callable(recorder):
+            return None
+        try:
+            return recorder(str(event_kind), self._active_calibration_refuel_payload(source, extra))
+        except Exception as exc:
+            print(f"[RefuelMonitor] process marker failed: {exc}")
+            return None
+
+    def _complete_refuel_process_observation(self, outcome, source, extra=None, *, require_active=False):
+        if not self._is_refuel_process_monitoring_enabled() or self.refuel_camera_model is None:
+            return None
+        summary = self._refuel_process_summary()
+        if require_active and not summary.get("active"):
+            recorder = getattr(self.refuel_camera_model, "record_refuel_process_marker", None)
+            if callable(recorder):
+                try:
+                    return recorder(
+                        str(extra.get("event_kind") if isinstance(extra, dict) and extra.get("event_kind") else source),
+                        self._active_calibration_refuel_payload(source, extra),
+                    )
+                except Exception as exc:
+                    print(f"[RefuelMonitor] terminal process marker failed: {exc}")
+                    return None
+            return None
+        completer = getattr(self.refuel_camera_model, "complete_refuel_process_observation", None)
+        if not callable(completer):
+            return None
+        try:
+            return completer(str(outcome), self._active_calibration_refuel_payload(source, extra))
+        except Exception as exc:
+            print(f"[RefuelMonitor] process observation completion failed: {exc}")
+            return None
+
+    def _on_refuel_calibration_stage_changed(self, message, color=None):
+        self._record_refuel_process_marker(
+            "stage_changed",
+            "calibrationStageChanged",
+            {
+                "stage_message": str(message or ""),
+                "color_name": str(color or ""),
+            },
+        )
+
+    def _on_refuel_calibration_completed(self):
+        self._complete_refuel_process_observation(
+            "completed",
+            "calibrationCompleted",
+            {"event_kind": "calibration_completed"},
+        )
+
+    def _on_refuel_calibration_queue_completed(self):
+        self._complete_refuel_process_observation(
+            "queue_completed",
+            "calibrationQueueCompleted",
+            {"event_kind": "queue_completed"},
+            require_active=True,
+        )
+
+    def _on_refuel_calibration_error(self, message):
+        self._complete_refuel_process_observation(
+            "error",
+            "calibrationError",
+            {
+                "event_kind": "calibration_error",
+                "error_message": str(message or ""),
+            },
+        )
+
+    def _on_refuel_sequence_state_changed(self, state, source, event_kind):
+        if not isinstance(state, dict):
+            state = {}
+        status = str(state.get("status") or state.get("sequence_status") or "").strip().lower()
+        payload = dict(state)
+        payload["sequence_status"] = status
+        terminal_statuses = {
+            "completed",
+            "complete",
+            "success",
+            "finished",
+            "done",
+            "error",
+            "failed",
+            "failure",
+            "stopped",
+            "cancelled",
+            "canceled",
+        }
+        if status in terminal_statuses:
+            outcome = "completed" if status in {"completed", "complete", "success", "finished", "done"} else status
+            payload["event_kind"] = event_kind
+            self._complete_refuel_process_observation(outcome, source, payload, require_active=True)
+            return
+        if status and status != "idle":
+            self._record_refuel_process_marker(event_kind, source, payload)
+
+    def _on_refuel_stream_capture_state_changed(self, state):
+        self._on_refuel_sequence_state_changed(
+            state,
+            "streamCaptureStateChanged",
+            "stream_capture_state_changed",
+        )
+
+    def _on_refuel_stream_sequence_state_changed(self, state):
+        self._on_refuel_sequence_state_changed(
+            state,
+            "streamCalibrationSequenceStateChanged",
+            "stream_sequence_state_changed",
+        )
+
+    def _on_refuel_droplet_sequence_state_changed(self, state):
+        self._on_refuel_sequence_state_changed(
+            state,
+            "dropletCalibrationSequenceStateChanged",
+            "droplet_sequence_state_changed",
+        )
+
+    @staticmethod
+    def _format_refuel_status(status):
+        if status is None or status == "":
+            return None
+        normalized = str(status).replace("_", " ").strip()
+        if not normalized:
+            return None
+        return normalized[:1].upper() + normalized[1:]
+
+    @staticmethod
+    def _format_refuel_timing_label(timing):
+        if not isinstance(timing, dict) or not timing:
+            return "-"
+        event_kind = str(timing.get("event_kind") or "")
+        if event_kind == "skip":
+            return f"Skipped: {timing.get('skip_reason') or 'monitor busy'}"
+        if event_kind == "failure":
+            return f"Failure: {timing.get('failure_message') or 'capture failed'}"
+        if event_kind == "analysis_not_started":
+            return "Analysis not started"
+
+        def _fmt_ms(value):
+            if value is None:
+                return "-"
+            try:
+                return f"{float(value):.0f} ms"
+            except Exception:
+                return "-"
+
+        capture = _fmt_ms(timing.get("capture_duration_ms"))
+        detector = _fmt_ms(timing.get("detector_runtime_ms"))
+        total = _fmt_ms(timing.get("total_latency_ms"))
+        return f"Capture {capture} | Detector {detector} | Total {total}"
+
+    @staticmethod
+    def _format_refuel_process_label(process_enabled, summary):
+        if not process_enabled:
+            return "Process monitoring off"
+        if not isinstance(summary, dict):
+            return "Waiting for calibration"
+        active = summary.get("active")
+        if isinstance(active, dict) and active:
+            name = active.get("phase_name") or active.get("process_name") or "calibration"
+            return f"Monitoring {name}"
+        last = summary.get("last")
+        if isinstance(last, dict) and last:
+            drift = last.get("drift_px")
+            if drift is None:
+                return "Drift unavailable"
+            try:
+                return f"Drift {float(drift):+.1f} px"
+            except Exception:
+                return f"Drift {drift} px"
+        return "Waiting for calibration"
+
+    def _refuel_advisory_message(self, process_enabled):
+        if not process_enabled or self.refuel_camera_model is None:
+            return None
+        getter = getattr(self.refuel_camera_model, "get_refuel_advisory", None)
+        if not callable(getter):
+            return None
+        try:
+            advisory = getter() or {}
+        except Exception:
+            return None
+        if not isinstance(advisory, dict) or not advisory.get("enabled"):
+            return None
+        message = str(advisory.get("message") or "").strip()
+        return message or None
+
+    def _latest_refuel_sample(self):
+        model = self.refuel_camera_model
+        if model is None:
+            return None
+        getter = getattr(model, "get_sample_trace", None)
+        if callable(getter):
+            try:
+                trace = list(getter() or [])
+                if trace:
+                    return trace[-1]
+            except Exception:
+                pass
+        level_getter = getattr(model, "get_current_level", None)
+        if callable(level_getter):
+            try:
+                level = level_getter()
+                if level is not None:
+                    return {"level_px": level}
+            except Exception:
+                pass
+        return None
+
+    def _refresh_refuel_level_panel(self, *_args):
+        enabled = self._is_refuel_tracking_enabled()
+        monitor_status = {}
+        if self.refuel_camera_model is not None:
+            getter = getattr(self.refuel_camera_model, "get_refuel_monitor_status", None)
+            if callable(getter):
+                try:
+                    monitor_status = dict(getter() or {})
+                except Exception:
+                    monitor_status = {}
+        monitor_state = str(monitor_status.get("state") or "off")
+        monitor_message = str(
+            monitor_status.get("message")
+            or {
+                "off": "Monitoring disabled",
+                "starting": "Starting refuel camera",
+                "monitoring": "Monitoring",
+                "paused": "Paused by refuel camera window",
+                "unavailable": "Refuel camera unavailable",
+            }.get(monitor_state, "Monitoring disabled")
+        )
+        if not enabled:
+            self.refuel_level_group.hide()
+            self.refuel_level_value_label.setText("-")
+            self.refuel_level_status_label.setText("Off")
+            self.refuel_level_last_update_label.setText("-")
+            self.refuel_level_timing_label.setText("-")
+            self.refuel_level_process_label.setText("Process monitoring off")
+            self.refuel_level_advisory_label.setText("Monitoring disabled")
+            self._refresh_refuel_level_chart()
+            return
+
+        self.refuel_level_group.show()
+        timing = None
+        if self.refuel_camera_model is not None:
+            summary_getter = getattr(self.refuel_camera_model, "get_refuel_monitor_timing_summary", None)
+            if callable(summary_getter):
+                try:
+                    timing = (summary_getter() or {}).get("latest")
+                except Exception:
+                    timing = None
+        self.refuel_level_timing_label.setText(self._format_refuel_timing_label(timing))
+        process_enabled = self._is_refuel_process_monitoring_enabled()
+        process_summary = self._refuel_process_summary()
+        self.refuel_level_process_label.setText(
+            self._format_refuel_process_label(process_enabled, process_summary)
+        )
+        sample = self._latest_refuel_sample()
+        if not sample:
+            self.refuel_level_value_label.setText("-")
+            if monitor_state in ("starting", "paused", "unavailable"):
+                self.refuel_level_status_label.setText(self._format_refuel_status(monitor_state) or "No sample")
+            else:
+                self.refuel_level_status_label.setText("No sample")
+            self.refuel_level_last_update_label.setText("-")
+            advisory = monitor_message if monitor_state != "monitoring" else "Waiting for refuel samples"
+            advisory = self._refuel_advisory_message(process_enabled) or advisory
+            self.refuel_level_advisory_label.setText(advisory)
+            self._refresh_refuel_level_chart()
+            return
+
+        level = sample.get("level_px", sample.get("level"))
+        if level is None:
+            self.refuel_level_value_label.setText("-")
+        else:
+            try:
+                self.refuel_level_value_label.setText(f"{float(level):.1f} px")
+            except Exception:
+                self.refuel_level_value_label.setText(str(level))
+
+        status = sample.get("status") or sample.get("detected_status") or sample.get("predicted_status")
+        if status is None and self.refuel_camera_model is not None:
+            live_getter = getattr(self.refuel_camera_model, "get_live_status", None)
+            if callable(live_getter):
+                try:
+                    status = live_getter()
+                except Exception:
+                    status = None
+        if status is None and level is not None:
+            status = "Visible"
+        self.refuel_level_status_label.setText(self._format_refuel_status(status) or "No sample")
+
+        elapsed_s = sample.get("elapsed_s")
+        timestamp_utc = sample.get("timestamp_utc")
+        if elapsed_s is not None:
+            try:
+                self.refuel_level_last_update_label.setText(f"{float(elapsed_s):.1f} s")
+            except Exception:
+                self.refuel_level_last_update_label.setText(str(elapsed_s))
+        elif timestamp_utc:
+            self.refuel_level_last_update_label.setText(str(timestamp_utc))
+        else:
+            self.refuel_level_last_update_label.setText("-")
+
+        advisory = monitor_message if monitor_state != "off" else "Level sample available"
+        advisory_message = self._refuel_advisory_message(process_enabled)
+        live_status = None
+        if process_enabled and advisory_message:
+            advisory = advisory_message
+        elif process_enabled and self.refuel_camera_model is not None:
+            live_getter = getattr(self.refuel_camera_model, "get_live_status", None)
+            if callable(live_getter):
+                try:
+                    live_status = live_getter()
+                except Exception:
+                    live_status = None
+            burst_getter = getattr(self.refuel_camera_model, "get_last_burst_result", None)
+            if callable(burst_getter):
+                try:
+                    burst_result = burst_getter()
+                    if isinstance(burst_result, dict) and burst_result.get("recommendation"):
+                        advisory = str(burst_result["recommendation"])
+                except Exception:
+                    pass
+        if monitor_state in ("starting", "paused", "unavailable"):
+            advisory = advisory_message or monitor_message
+        elif process_enabled and live_status == "In Band":
+            advisory = "Level stable"
+        elif process_enabled and live_status == "Low":
+            advisory = "Level below target"
+        elif process_enabled and live_status == "High":
+            advisory = "Level above target"
+        self.refuel_level_advisory_label.setText(advisory)
+        self._refresh_refuel_level_chart()
+
+    def _refresh_refuel_level_chart(self):
+        bundle = getattr(self, "_refuel_level_chart_bundle", None)
+        if not bundle:
+            return
+        valid_samples = []
+        model = self.refuel_camera_model
+        if model is not None and self._is_refuel_tracking_enabled():
+            getter = getattr(model, "get_sample_trace", None)
+            if callable(getter):
+                try:
+                    trace = list(getter() or [])
+                    for sample in trace:
+                        level = sample.get("level_px", sample.get("level")) if isinstance(sample, dict) else None
+                        if level is None:
+                            continue
+                        if self._refuel_level_chart_full_scale_px is None and isinstance(sample, dict):
+                            channel_height = sample.get("channel_height_px")
+                            if channel_height is not None:
+                                try:
+                                    channel_height = float(channel_height)
+                                    if channel_height > 0:
+                                        self._refuel_level_chart_full_scale_px = channel_height
+                                except Exception:
+                                    pass
+                        valid_samples.append(float(level))
+                except Exception:
+                    valid_samples = []
+            if not valid_samples:
+                log_getter = getattr(model, "get_level_log", None)
+                if callable(log_getter):
+                    try:
+                        valid_samples = [
+                            float(level)
+                            for level in list(log_getter() or [])
+                            if level is not None
+                        ]
+                    except Exception:
+                        valid_samples = []
+
+        window_size = int(self.REFUEL_LEVEL_CHART_WINDOW_SAMPLES)
+        visible_levels = valid_samples[-window_size:]
+        points = [(float(index), float(level)) for index, level in enumerate(visible_levels)]
+        self._replace_xy_series(bundle["primary_series"], points)
+        self._replace_xy_series(bundle["current_series"], points[-1:] if points else [])
+        bundle["axis_x"].setRange(0.0, float(window_size - 1))
+        y_max = self._refuel_level_chart_full_scale_px
+        if y_max is None or y_max <= 0:
+            y_max = float(self.REFUEL_LEVEL_CHART_FALLBACK_HEIGHT_PX)
+        bundle["axis_y"].setRange(0.0, float(y_max))
 
     def setup_shortcuts(self):
         """Set up keyboard shortcuts using the shortcut manager."""
@@ -3158,7 +4018,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.controller.set_relative_coordinates(dX, dY, dZ, manual=False)
 
     def _set_equal_panel_widths(self):
-        if not all(hasattr(self, name) for name in ("control_panel", "analysis_panel", "info_panel", "info_panel_scroll")):
+        if not all(hasattr(self, name) for name in ("control_panel", "control_panel_scroll", "analysis_panel", "info_panel", "info_panel_scroll")):
             return
 
         margins = self.layout.contentsMargins()
@@ -3172,6 +4032,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         self.control_panel.setMinimumWidth(control_width)
         self.control_panel.setMaximumWidth(control_width)
+        self.control_panel_scroll.setMinimumWidth(control_width)
+        self.control_panel_scroll.setMaximumWidth(control_width)
         self.info_panel.setMinimumWidth(info_width)
         self.info_panel.setMaximumWidth(info_width)
         self.info_panel_scroll.setMinimumWidth(info_width)
@@ -6893,6 +7755,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._close_stream_capture_mass_dialog()
         self._reset_online_stream_debug_view(hide=True)
         self.camera_timer.stop()
+        self._stop_refuel_monitor("Monitoring disabled")
         try:
             self.controller.set_droplet_capture_profile("default")
             self.controller.set_command_dispatch_interval(90)
@@ -8168,15 +9031,27 @@ class RefuelCameraWindow(QtWidgets.QDialog):
         if self.capturing:
             self.timer.stop()
             self.capture_button.setText("Start Capturing Images")
+            try:
+                self.refuel_camera_model.set_refuel_diagnostic_capture_active(False)
+            except Exception:
+                pass
         else:
             self.timer.start(self._capture_interval_ms)
             self.capture_button.setText("Stop Capturing Images")
+            try:
+                self.refuel_camera_model.set_refuel_diagnostic_capture_active(True)
+            except Exception:
+                pass
         self.capturing = not self.capturing
 
     def _set_capture_idle(self):
         self.timer.stop()
         self.capturing = False
         self.capture_button.setText("Start Capturing Images")
+        try:
+            self.refuel_camera_model.set_refuel_diagnostic_capture_active(False)
+        except Exception:
+            pass
 
     def _handle_camera_failure(self, message, *, popup=False):
         self._camera_ready = False

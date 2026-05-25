@@ -1552,13 +1552,28 @@ class RefuelCamera(QObject):
         return self.camera.capture_array() if self.camera else None
 
     def stop_camera(self):
+        camera_error = None
+        led_error = None
         if self.camera:
-            self.camera.stop()
-            self.camera.close()
+            try:
+                self.camera.stop()
+            except Exception as exc:
+                camera_error = exc
+            try:
+                self.camera.close()
+            except Exception as exc:
+                if camera_error is None:
+                    camera_error = exc
             self.camera = None
         # ensure LED off on stop
-        try: self._led.set_value(0)
-        except Exception: pass
+        try:
+            self._led.set_value(0)
+        except Exception as exc:
+            led_error = exc
+        if led_error is not None:
+            raise led_error
+        if camera_error is not None:
+            raise camera_error
 
     def led_on(self):
         print("---LED ON")

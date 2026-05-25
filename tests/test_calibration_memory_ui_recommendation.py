@@ -424,7 +424,8 @@ def test_real_dialog_uses_three_column_layout_with_controls_left_and_results_rig
 
     assert dialog.width() == 1600
     assert dialog.layout.count() == 3
-    assert dialog.layout.itemAt(0).widget() is dialog.control_panel
+    assert dialog.layout.itemAt(0).widget() is dialog.control_panel_scroll
+    assert dialog.control_panel_scroll.widget() is dialog.control_panel
     assert dialog.layout.itemAt(1).widget() is dialog.analysis_panel
     assert dialog.layout.itemAt(2).widget() is dialog.info_panel_scroll
     assert dialog.info_panel_scroll.widget() is dialog.info_panel

@@ -1,6 +1,8 @@
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import cv2
 import numpy as np
@@ -122,6 +124,390 @@ def _owner_model(tmp_path, *, record_mode=True):
         calibration_manager=calibration_manager,
         experiment_model=experiment_model,
     )
+
+
+def test_refuel_camera_model_tracking_toggle_emits_update_signal():
+    model = RefuelCameraModel()
+    calls = []
+    model.update_level_ui_signal.connect(lambda: calls.append(True))
+
+    assert model.is_refuel_tracking_enabled() is False
+    assert model.set_refuel_tracking_enabled(True) is True
+    assert model.is_refuel_tracking_enabled() is True
+    assert calls == [True]
+
+    assert model.set_refuel_tracking_enabled(True) is False
+    assert calls == [True]
+
+    assert model.set_refuel_tracking_enabled(False) is True
+    assert model.is_refuel_tracking_enabled() is False
+    assert calls == [True, True]
+
+
+def test_refuel_camera_model_monitor_state_and_counters_emit_update_signal():
+    model = RefuelCameraModel()
+    calls = []
+    model.update_level_ui_signal.connect(lambda: calls.append(True))
+
+    assert model.set_refuel_monitor_state("starting", "Starting refuel camera") is True
+    model.record_refuel_monitor_attempt()
+    model.record_refuel_monitor_success()
+    model.record_refuel_monitor_skip("analysis_in_progress", message="Waiting for refuel analysis")
+    model.record_refuel_monitor_failure("Camera did not return a frame.")
+    assert model.set_refuel_diagnostic_capture_active(True) is True
+
+    status = model.get_refuel_monitor_status()
+    assert status["state"] == "unavailable"
+    assert status["message"] == "Camera did not return a frame."
+    assert status["attempted_captures"] == 1
+    assert status["successful_captures"] == 1
+    assert status["skipped_captures"] == 1
+    assert status["failed_captures"] == 1
+    assert status["consecutive_failures"] == 1
+    assert status["diagnostic_capture_active"] is True
+    assert len(calls) >= 6
+
+
+def test_refuel_camera_model_tracking_toggle_does_not_clear_samples_or_monitor_counters():
+    model = RefuelCameraModel()
+    model.update_ui_with_analysis(None, None, 33.0, 9)
+    model.record_refuel_monitor_success()
+
+    assert model.set_refuel_tracking_enabled(True) is True
+    assert model.set_refuel_tracking_enabled(False) is True
+
+    assert len(model.get_sample_trace()) == 1
+    assert model.get_sample_trace()[0]["level_px"] == 33.0
+    assert model.get_refuel_monitor_status()["successful_captures"] == 1
+
+
+def test_refuel_camera_model_timing_records_are_json_safe_and_rolling_capped():
+    model = RefuelCameraModel()
+    calls = []
+    model.update_level_ui_signal.connect(lambda: calls.append(True))
+
+    for idx in range(105):
+        model.record_refuel_monitor_timing(
+            {
+                "tick_index": idx + 1,
+                "event_kind": "sample_result",
+                "capture_duration_ms": np.float64(1.5),
+                "detector_runtime_ms": float("nan"),
+                "total_latency_ms": 4.0,
+                "extra": {"nested": np.int64(3)},
+            }
+        )
+
+    log = model.get_refuel_monitor_timing_log()
+    assert len(log) == 100
+    assert log[0]["tick_index"] == 6
+    assert log[-1]["tick_index"] == 105
+    assert log[-1]["capture_duration_ms"] == 1.5
+    assert log[-1]["detector_runtime_ms"] is None
+    assert log[-1]["extra"]["nested"] == 3
+    json.dumps(log[-1])
+    assert calls
+
+
+def test_refuel_camera_model_timing_summary_and_samples_are_independent():
+    model = RefuelCameraModel()
+    model.update_ui_with_analysis(None, None, 33.0, 9)
+    model.record_refuel_monitor_success()
+    model.record_refuel_monitor_timing({"tick_index": 1, "event_kind": "skip", "skip_reason": "analysis_in_progress"})
+    model.record_refuel_monitor_timing(
+        {
+            "tick_index": 2,
+            "event_kind": "sample_result",
+            "capture_duration_ms": 3.0,
+            "detector_runtime_ms": 5.0,
+            "total_latency_ms": 12.0,
+        }
+    )
+
+    summary = model.get_refuel_monitor_timing_summary()
+    assert summary["record_count"] == 2
+    assert summary["sample_result_count"] == 1
+    assert summary["skip_count"] == 1
+    assert summary["mean_capture_duration_ms"] == 3.0
+    assert summary["mean_detector_runtime_ms"] == 5.0
+    assert summary["mean_total_latency_ms"] == 12.0
+    assert len(model.get_sample_trace()) == 1
+    assert model.get_refuel_monitor_status()["successful_captures"] == 1
+
+
+def test_refuel_camera_model_timing_recorder_append_only_when_run_active():
+    model = RefuelCameraModel()
+    recorder = SimpleNamespace(append_analysis=Mock(return_value={"ok": True}))
+    model._process_recorder = recorder
+
+    model.record_refuel_monitor_timing({"tick_index": 1, "event_kind": "skip"})
+    recorder.append_analysis.assert_not_called()
+
+    model._recorder_run_dir = Path("run")
+    model.record_refuel_monitor_timing({"tick_index": 2, "event_kind": "sample_result"})
+    recorder.append_analysis.assert_called_once()
+    payload = recorder.append_analysis.call_args.args[0]
+    assert payload["kind"] == "refuel_monitor_timing"
+    assert payload["tick_index"] == 2
+
+
+def test_refuel_camera_model_process_monitor_toggle_defaults_off_and_emits():
+    model = RefuelCameraModel()
+    calls = []
+    model.update_level_ui_signal.connect(lambda: calls.append(True))
+
+    assert model.is_refuel_process_monitoring_enabled() is False
+    assert model.set_refuel_process_monitoring_enabled(True) is True
+    assert model.is_refuel_process_monitoring_enabled() is True
+    assert model.is_refuel_tracking_enabled() is False
+    assert model.set_refuel_process_monitoring_enabled(True) is False
+    assert model.set_refuel_process_monitoring_enabled(False) is True
+    assert model.is_refuel_process_monitoring_enabled() is False
+    assert calls == [True, True]
+
+
+def test_refuel_camera_model_process_markers_are_json_safe_and_capped():
+    model = RefuelCameraModel()
+    model.record_refuel_monitor_timing({"tick_index": 1, "event_kind": "skip", "extra": np.int64(2)})
+
+    for idx in range(305):
+        model.record_refuel_process_marker(
+            "stage_changed",
+            {
+                "source": "test",
+                "stage_message": f"stage {idx}",
+                "sequence_status": np.str_("running"),
+                "value": np.float64(1.25),
+            },
+        )
+
+    markers = model.get_refuel_process_markers()
+    assert len(markers) == 300
+    assert markers[0]["marker_index"] == 6
+    assert markers[-1]["marker_index"] == 305
+    assert markers[-1]["value"] == 1.25
+    assert markers[-1]["monitor_status"]["state"] == "off"
+    assert markers[-1]["latest_timing"]["extra"] == 2
+    json.dumps(markers[-1])
+
+
+def test_refuel_camera_model_process_observation_computes_signed_drift():
+    model = RefuelCameraModel()
+    model.update_ui_with_analysis(None, None, 42.0, 9)
+    model.set_refuel_process_monitoring_enabled(True)
+
+    context = model.begin_refuel_process_observation(
+        {
+            "source": "test",
+            "process_name": "PressureCalibrationProcess",
+            "phase_name": "pressure_search",
+            "session_id": "session-1",
+        }
+    )
+    model.update_ui_with_analysis(None, None, 37.5, 8)
+    summary = model.complete_refuel_process_observation("completed", {"event_kind": "calibration_completed"})
+
+    assert context["baseline_level_px"] == 42.0
+    assert summary["baseline_level_px"] == 42.0
+    assert summary["end_level_px"] == 37.5
+    assert summary["drift_px"] == -4.5
+    assert summary["process_name"] == "PressureCalibrationProcess"
+    assert model.get_refuel_process_summary()["active"] is None
+    assert model.get_refuel_process_summary()["last"]["outcome"] == "completed"
+    assert [row["event_kind"] for row in model.get_refuel_process_markers()] == [
+        "process_started",
+        "calibration_completed",
+    ]
+
+
+def test_refuel_camera_model_append_sample_stamps_active_process_context_only():
+    model = RefuelCameraModel()
+    model.update_ui_with_analysis(None, None, 50.0, 11)
+    base_sample_count = len(model.get_sample_trace())
+    model.set_refuel_process_monitoring_enabled(True)
+    model.begin_refuel_process_observation(
+        {
+            "source": "test",
+            "process_name": "StreamCalibrationProcess",
+            "phase_name": "stream_sequence",
+            "session_id": "stream-1",
+        }
+    )
+    marker_count = len(model.get_refuel_process_markers())
+    model.update_ui_with_analysis(None, None, 52.0, 12)
+
+    trace = model.get_sample_trace()
+    assert len(trace) == base_sample_count + 1
+    assert len(model.get_refuel_process_markers()) == marker_count
+    assert trace[-1]["process_monitoring_enabled"] is True
+    assert trace[-1]["process_name"] == "StreamCalibrationProcess"
+    assert trace[-1]["process_phase_name"] == "stream_sequence"
+    assert trace[-1]["process_session_id"] == "stream-1"
+    assert trace[-1]["process_baseline_level_px"] == 50.0
+
+
+def test_refuel_camera_model_process_marker_recorder_append_only_when_run_active():
+    model = RefuelCameraModel()
+    recorder = SimpleNamespace(append_analysis=Mock(return_value={"ok": True}))
+    model._process_recorder = recorder
+
+    model.record_refuel_process_marker("stage_changed", {"source": "test"})
+    recorder.append_analysis.assert_not_called()
+
+    model._recorder_run_dir = Path("run")
+    model.record_refuel_process_marker("stage_changed", {"source": "test"})
+    recorder.append_analysis.assert_called_once()
+    payload = recorder.append_analysis.call_args.args[0]
+    assert payload["kind"] == "refuel_process_marker"
+    assert payload["event_kind"] == "stage_changed"
+
+
+def test_refuel_camera_model_advisory_disabled_when_process_monitoring_off():
+    model = RefuelCameraModel()
+    model.set_refuel_tracking_enabled(True)
+    model.update_ui_with_analysis(None, None, 4.0, 20)
+
+    advisory = model.get_refuel_advisory()
+    assert advisory["enabled"] is False
+    assert advisory["code"] == "disabled"
+    assert model.evaluate_refuel_advisory()["enabled"] is False
+    assert model.get_refuel_advisory_log() == []
+
+
+def test_refuel_camera_model_advisory_near_empty_from_level_or_status():
+    model = RefuelCameraModel()
+    model.set_refuel_process_monitoring_enabled(True)
+    model.analysis_thread = SimpleNamespace(
+        detected_status="visible",
+        detected_details={"channel_bounds": [10, 20, 15, 100]},
+    )
+    model.update_ui_with_analysis(None, None, 8.0, 92)
+
+    advisory = model.get_refuel_advisory()
+    assert advisory["enabled"] is True
+    assert advisory["code"] == "near_empty"
+    assert "near empty" in advisory["message"]
+    assert model.get_sample_trace()[-1]["detector_status"] == "visible"
+    assert model.get_sample_trace()[-1]["channel_height_px"] == 100.0
+
+    model.analysis_thread = SimpleNamespace(
+        detected_status="empty",
+        detected_details={"channel_bounds": [10, 20, 15, 100]},
+    )
+    model.update_ui_with_analysis(None, None, 25.0, 75)
+    assert model.get_refuel_advisory()["code"] == "near_empty"
+
+
+def test_refuel_camera_model_advisory_near_full_from_status_or_headroom():
+    model = RefuelCameraModel()
+    model.set_refuel_process_monitoring_enabled(True)
+    model.analysis_thread = SimpleNamespace(
+        detected_status="visible",
+        detected_details={"channel_bounds": [10, 20, 15, 100]},
+    )
+    model.update_ui_with_analysis(None, None, 94.0, 6)
+    assert model.get_refuel_advisory()["code"] == "near_full"
+
+    model.analysis_thread = SimpleNamespace(
+        detected_status="full",
+        detected_details={"channel_bounds": [10, 20, 15, 100]},
+    )
+    model.update_ui_with_analysis(None, None, 60.0, 3)
+    assert model.get_refuel_advisory()["code"] == "near_full"
+
+
+def test_refuel_camera_model_advisory_completed_process_drift_recommendations():
+    model = RefuelCameraModel()
+    model.set_refuel_process_monitoring_enabled(True)
+    model.update_ui_with_analysis(None, None, 50.0, 10)
+    model.begin_refuel_process_observation({"source": "test"})
+    model.update_ui_with_analysis(None, None, 44.0, 16)
+    model.complete_refuel_process_observation("completed")
+
+    advisory = model.get_refuel_advisory()
+    assert advisory["code"] == "increase_refuel"
+    assert "increasing refuel pressure" in advisory["message"]
+    assert advisory["drift_px"] == -6.0
+
+    model.begin_refuel_process_observation({"source": "test"})
+    model.update_ui_with_analysis(None, None, 57.0, 5)
+    model.complete_refuel_process_observation("completed")
+    advisory = model.get_refuel_advisory()
+    assert advisory["code"] == "decrease_refuel"
+    assert "decreasing refuel pressure" in advisory["message"]
+    assert advisory["drift_px"] == 13.0
+
+
+def test_refuel_camera_model_advisory_completed_process_stable():
+    model = RefuelCameraModel()
+    model.set_refuel_process_monitoring_enabled(True)
+    model.update_ui_with_analysis(None, None, 50.0, 10)
+    model.begin_refuel_process_observation({"source": "test"})
+    model.update_ui_with_analysis(None, None, 53.0, 7)
+    model.complete_refuel_process_observation("completed")
+
+    advisory = model.get_refuel_advisory()
+    assert advisory["code"] == "stable"
+    assert "stable" in advisory["message"]
+    assert advisory["drift_px"] == 3.0
+
+
+def test_refuel_camera_model_advisory_stale_and_unavailable_priority():
+    model = RefuelCameraModel()
+    model.set_refuel_process_monitoring_enabled(True)
+    model.update_ui_with_analysis(None, None, 50.0, 10)
+    model.sample_trace[-1]["monotonic_s"] = time.monotonic() - 10.0
+    stale = model.evaluate_refuel_advisory(reason="manual_check")
+    assert stale["code"] == "monitor_stale"
+
+    model.last_refuel_process_summary = {"drift_px": -20.0}
+    model.record_refuel_monitor_failure("Camera did not return a frame.")
+    unavailable = model.get_refuel_advisory()
+    assert unavailable["code"] == "monitor_unavailable"
+    assert "unavailable" in unavailable["message"]
+
+
+def test_refuel_camera_model_advisory_records_json_safe_capped_and_recorder_gated():
+    model = RefuelCameraModel()
+    recorder = SimpleNamespace(append_analysis=Mock(return_value={"ok": True}))
+    model._process_recorder = recorder
+    model.set_refuel_process_monitoring_enabled(True)
+    model.update_ui_with_analysis(None, None, 50.0, 10)
+    recorder.append_analysis.assert_not_called()
+
+    for idx in range(105):
+        model.last_refuel_process_summary = {"drift_px": np.float64(float(idx))}
+        model.evaluate_refuel_advisory(reason="loop")
+
+    log = model.get_refuel_advisory_log()
+    assert len(log) == 100
+    assert log[-1]["reason"] == "loop"
+    json.dumps(log[-1])
+
+    model._recorder_run_dir = Path("run")
+    model.evaluate_refuel_advisory(reason="recorded")
+    recorder.append_analysis.assert_called_once()
+    payload = recorder.append_analysis.call_args.args[0]
+    assert payload["kind"] == "refuel_advisory"
+    assert payload["reason"] == "recorded"
+
+
+def test_image_analysis_thread_run_records_detector_runtime():
+    image = np.zeros((32, 32, 3), dtype=np.uint8)
+    thread = ImageAnalysisThread(
+        image,
+        offset=40,
+        width=20,
+        threshold=60,
+        prominence=4,
+        empty_cutoff=0.25,
+        last_row=None,
+    )
+
+    thread.run()
+
+    assert thread.detector_runtime_ms is not None
+    assert thread.detector_runtime_ms >= 0.0
 
 
 def test_geometry_merges_split_head_pieces_across_channel_gap():

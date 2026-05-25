@@ -2323,7 +2323,18 @@ class Controller(QObject):
     
     def start_refuel_camera(self):
         self.machine.start_refuel_camera()
-        self.machine.refuel_led_on()
+        try:
+            self.machine.refuel_led_on()
+        except Exception:
+            try:
+                self.machine.refuel_led_off()
+            except Exception:
+                pass
+            try:
+                self.machine.stop_refuel_camera()
+            except Exception:
+                pass
+            raise
 
     def _build_refuel_capture_context(self):
         machine_model = getattr(self.model, "machine_model", None)
@@ -2359,13 +2370,21 @@ class Controller(QObject):
         frame, _context = self.capture_refuel_image_with_context(analyze=True)
         return frame
 
-    def capture_refuel_image_with_context(self, *, analyze=True):
+    def capture_refuel_image_with_context(self, *, analyze=True, context_overrides=None):
+        capture_start = time.perf_counter()
         frame = self.machine.capture_refuel_image()
+        capture_duration_ms = float((time.perf_counter() - capture_start) * 1000.0)
         context = self._build_refuel_capture_context()
+        context["refuel_monitor_capture_duration_ms"] = capture_duration_ms
+        if context_overrides:
+            context.update(dict(context_overrides))
         if frame is None:
+            context["analysis_started"] = False
             return None, context
         if analyze:
-            self.model.refuel_camera_model.start_analysis(frame, context=context)
+            context["analysis_started"] = bool(self.model.refuel_camera_model.start_analysis(frame, context=context))
+        else:
+            context["analysis_started"] = False
         return frame, context
 
     def get_refuel_capture_context(self):
@@ -2407,8 +2426,19 @@ class Controller(QObject):
         return True
 
     def stop_refuel_camera(self):
-        self.machine.stop_refuel_camera()
-        self.machine.refuel_led_off()
+        stop_error = None
+        try:
+            self.machine.stop_refuel_camera()
+        except Exception as exc:
+            stop_error = exc
+
+        try:
+            self.machine.refuel_led_off()
+        except Exception:
+            raise
+
+        if stop_error is not None:
+            raise stop_error
 
     def start_droplet_camera(self):
         self.machine.start_droplet_camera()

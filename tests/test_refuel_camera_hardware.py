@@ -1,6 +1,8 @@
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 import Machine_FreeRTOS as machine_mod
 from Machine_FreeRTOS import RefuelCamera
 
@@ -29,6 +31,8 @@ class _FakePicamera2:
         self.start_count = 0
         self.stop_count = 0
         self.close_count = 0
+        self.stop_side_effect = None
+        self.close_side_effect = None
         _FakePicamera2.instances.append(self)
 
     def create_still_configuration(self, **kwargs):
@@ -46,9 +50,13 @@ class _FakePicamera2:
 
     def stop(self):
         self.stop_count += 1
+        if self.stop_side_effect is not None:
+            raise self.stop_side_effect
 
     def close(self):
         self.close_count += 1
+        if self.close_side_effect is not None:
+            raise self.close_side_effect
 
 
 def _install_refuel_camera_fakes(monkeypatch):
@@ -117,3 +125,49 @@ def test_refuel_camera_control_defaults_follow_instance_settings(monkeypatch):
         "AwbEnable": False,
         "AnalogueGain": 1.5,
     }
+
+
+def test_refuel_camera_stop_turns_led_off(monkeypatch):
+    fake_line = _install_refuel_camera_fakes(monkeypatch)
+    refuel_camera = RefuelCamera()
+    refuel_camera.start_camera()
+    camera = refuel_camera.camera
+
+    refuel_camera.stop_camera()
+
+    assert camera.stop_count == 1
+    assert camera.close_count == 1
+    assert refuel_camera.camera is None
+    assert fake_line.values[-1] == 0
+
+
+def test_refuel_camera_stop_turns_led_off_when_camera_stop_raises(monkeypatch):
+    fake_line = _install_refuel_camera_fakes(monkeypatch)
+    refuel_camera = RefuelCamera()
+    refuel_camera.start_camera()
+    camera = refuel_camera.camera
+    camera.stop_side_effect = RuntimeError("stop failed")
+
+    with pytest.raises(RuntimeError, match="stop failed"):
+        refuel_camera.stop_camera()
+
+    assert camera.stop_count == 1
+    assert camera.close_count == 1
+    assert refuel_camera.camera is None
+    assert fake_line.values[-1] == 0
+
+
+def test_refuel_camera_stop_clears_camera_when_close_raises(monkeypatch):
+    fake_line = _install_refuel_camera_fakes(monkeypatch)
+    refuel_camera = RefuelCamera()
+    refuel_camera.start_camera()
+    camera = refuel_camera.camera
+    camera.close_side_effect = RuntimeError("close failed")
+
+    with pytest.raises(RuntimeError, match="close failed"):
+        refuel_camera.stop_camera()
+
+    assert camera.stop_count == 1
+    assert camera.close_count == 1
+    assert refuel_camera.camera is None
+    assert fake_line.values[-1] == 0
