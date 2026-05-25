@@ -1540,6 +1540,31 @@ class Controller(QObject):
     def volume_update_handler(self,droplet_count=None):
         """Handle the volume update signal."""
         self.model.rack_model.get_gripper_printer_head().record_droplet_volume_lost(droplet_count)
+
+    def _record_refuel_ejection_event(self, count, *, source, event_kind, count_kind="observed", payload=None):
+        try:
+            refuel_model = getattr(self.model, "refuel_camera_model", None)
+            recorder = getattr(refuel_model, "record_refuel_ejection_event", None)
+            if callable(recorder):
+                return recorder(
+                    count,
+                    source=source,
+                    event_kind=event_kind,
+                    count_kind=count_kind,
+                    payload=payload or {},
+                )
+        except Exception as exc:
+            print(f"[RefuelEjections] failed to record ejection event: {exc}")
+        return None
+
+    def _current_imaging_droplet_count(self):
+        try:
+            camera_model = getattr(self.model, "droplet_camera_model", None)
+            getter = getattr(camera_model, "get_num_droplets", None)
+            value = getter() if callable(getter) else getattr(camera_model, "num_droplets", None)
+            return max(0, int(value))
+        except Exception:
+            return 0
     
     def print_droplets(self,droplets,handler=None,kwargs=None,manual=False,expected_volume=None):
         """Print a specified number of droplets."""
@@ -1549,7 +1574,16 @@ class Controller(QObject):
             return
         if self.profile.name != "legacy":
             # fall back to your current implementation
-            return self.machine.print_droplets(droplets, handler=handler, kwargs=kwargs, manual=manual)
+            result = self.machine.print_droplets(droplets, handler=handler, kwargs=kwargs, manual=manual)
+            if result is not False:
+                self._record_refuel_ejection_event(
+                    droplets,
+                    source="Controller.print_droplets",
+                    event_kind="print_droplets_queued",
+                    count_kind="commanded",
+                    payload={"manual": bool(manual)},
+                )
+            return result
         
         # --- legacy behavior ---
         printer_head = self.model.rack_model.get_gripper_printer_head()
@@ -1574,11 +1608,29 @@ class Controller(QObject):
             else:
                 print('Controller: using default pulse width')
 
-        return self.machine.print_droplets(droplets,handler=handler,kwargs=kwargs,manual=manual)
+        result = self.machine.print_droplets(droplets,handler=handler,kwargs=kwargs,manual=manual)
+        if result is not False:
+            self._record_refuel_ejection_event(
+                droplets,
+                source="Controller.print_droplets",
+                event_kind="print_droplets_queued",
+                count_kind="commanded",
+                payload={"manual": bool(manual), "profile": "legacy"},
+            )
+        return result
 
     def print_only(self,droplets,manual=False):
         """Activate the print valve a specified number of times without refueling."""
-        self.machine.print_only(droplets,manual=manual)
+        result = self.machine.print_only(droplets,manual=manual)
+        if result is not False:
+            self._record_refuel_ejection_event(
+                droplets,
+                source="Controller.print_only",
+                event_kind="print_only_queued",
+                count_kind="commanded",
+                payload={"manual": bool(manual)},
+            )
+        return result
     
     def refuel_only(self,droplets,manual=False):
         """Activate the refuel valve a specified number of times without printing."""
@@ -1587,7 +1639,20 @@ class Controller(QObject):
     def print_calibration_droplets(self,droplets,manual=False,pressure=None,pulse_width=None):
         """Print a specified number of droplets for calibration."""
         print('Controller: Printing calibration droplets')
-        self.machine.print_calibration_droplets(droplets,manual=manual,pressure=pressure,pulse_width=pulse_width)
+        result = self.machine.print_calibration_droplets(droplets,manual=manual,pressure=pressure,pulse_width=pulse_width)
+        if result is not False:
+            self._record_refuel_ejection_event(
+                droplets,
+                source="Controller.print_calibration_droplets",
+                event_kind="print_calibration_droplets_queued",
+                count_kind="commanded",
+                payload={
+                    "manual": bool(manual),
+                    "pressure": pressure,
+                    "pulse_width": pulse_width,
+                },
+            )
+        return result
 
     def start_mass_stabilization_timer(self):
         """Create a single shot timer that when triggered it will signal the model to check for the final stable mass."""
@@ -2415,6 +2480,13 @@ class Controller(QObject):
             if callable(on_error):
                 on_error(msg)
             return False
+        self._record_refuel_ejection_event(
+            droplet_count,
+            source="Controller.run_refuel_balance_burst",
+            event_kind="refuel_balance_burst_queued",
+            count_kind="commanded",
+            payload={"manual": True, "settle_ms": settle_ms},
+        )
 
         ok_wait = self.machine.wait_ms(settle_ms, handler=_burst_complete_handler, manual=True)
         if ok_wait is False:
@@ -3190,6 +3262,19 @@ class Controller(QObject):
         # Update the model and/or view (assuming your model has such a method)
         try:
             self.model.droplet_camera_model.update_image(frame, capture_info=cap_info, save_metadata=save_metadata)
+            droplet_count = self._current_imaging_droplet_count()
+            if droplet_count > 0:
+                self._record_refuel_ejection_event(
+                    droplet_count,
+                    source="Controller.droplet_capture_completed",
+                    event_kind="capture_completed",
+                    count_kind="observed",
+                    payload={
+                        "request_id": request_id,
+                        "capture_context": capture_context,
+                        "cap_id": (cap_info or {}).get("cap_id") if isinstance(cap_info, dict) else None,
+                    },
+                )
         finally:
             self._record_active_calibration_event(
                 "capture_completed",

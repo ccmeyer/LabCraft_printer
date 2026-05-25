@@ -181,6 +181,47 @@ def test_refuel_camera_model_tracking_toggle_does_not_clear_samples_or_monitor_c
     assert model.get_refuel_monitor_status()["successful_captures"] == 1
 
 
+def test_refuel_camera_model_ejection_counter_records_resets_and_caps_log():
+    model = RefuelCameraModel()
+
+    assert model.record_refuel_ejection_event(3, source="ignored") is None
+    model.set_refuel_tracking_enabled(True)
+    model.record_refuel_ejection_event(
+        3,
+        source="capture",
+        event_kind="capture_completed",
+        count_kind="observed",
+        payload={"nested": np.int64(4)},
+    )
+    model.record_refuel_ejection_event(
+        5,
+        source="print_command",
+        event_kind="print_queued",
+        count_kind="commanded",
+    )
+
+    counter = model.get_refuel_ejection_counter()
+    assert counter["observed_ejection_count"] == 3
+    assert counter["commanded_ejection_count"] == 5
+    assert counter["event_count"] == 2
+    assert counter["latest_event"]["count_kind"] == "commanded"
+    assert model.get_refuel_ejection_events()[0]["nested"] == 4
+    json.dumps(model.get_refuel_ejection_events()[0])
+
+    for _idx in range(305):
+        model.record_refuel_ejection_event(1, source="loop", count_kind="observed")
+    events = model.get_refuel_ejection_events()
+    assert len(events) == 300
+    assert events[0]["event_index"] == 8
+
+    model.set_refuel_tracking_enabled(False)
+    model.set_refuel_tracking_enabled(True)
+    counter = model.get_refuel_ejection_counter()
+    assert counter["observed_ejection_count"] == 0
+    assert counter["commanded_ejection_count"] == 0
+    assert counter["event_count"] == 0
+
+
 def test_refuel_camera_model_timing_records_are_json_safe_and_rolling_capped():
     model = RefuelCameraModel()
     calls = []
@@ -318,6 +359,81 @@ def test_refuel_camera_model_process_observation_computes_signed_drift():
         "process_started",
         "calibration_completed",
     ]
+
+
+def test_refuel_camera_model_process_summary_prefers_reported_ejection_count():
+    model = RefuelCameraModel()
+    model.set_refuel_tracking_enabled(True)
+    model.update_ui_with_analysis(None, None, 50.0, 10)
+    model.set_refuel_process_monitoring_enabled(True)
+    model.begin_refuel_process_observation({"source": "test"})
+    model.record_refuel_ejection_event(2, source="capture", count_kind="observed")
+    model.record_refuel_ejection_event(12, source="command", count_kind="commanded")
+    model.update_ui_with_analysis(None, None, 44.0, 16)
+
+    summary = model.complete_refuel_process_observation(
+        "completed",
+        {
+            "printed_capture_count": 4,
+            "printed_capture_event_count": 4,
+            "background_capture_count": 1,
+            "raw_flash_delta": 5,
+        },
+    )
+
+    assert summary["drift_px"] == -6.0
+    assert summary["observed_ejection_delta"] == 2
+    assert summary["commanded_ejection_delta"] == 12
+    assert summary["printed_capture_count"] == 4
+    assert summary["ejection_count_delta"] == 4
+    assert summary["ejection_count_source"] == "printed_capture_count"
+    assert summary["drift_px_per_ejection"] == -1.5
+    advisory = model.get_refuel_advisory()
+    assert advisory["drift_px_per_ejection"] == -1.5
+    assert "px/ejection" in advisory["message"]
+
+
+def test_refuel_camera_model_process_summary_falls_back_to_observed_then_commanded_counts():
+    model = RefuelCameraModel()
+    model.set_refuel_tracking_enabled(True)
+    model.update_ui_with_analysis(None, None, 30.0, 10)
+    model.set_refuel_process_monitoring_enabled(True)
+    model.begin_refuel_process_observation({"source": "test"})
+    model.record_refuel_ejection_event(3, source="capture", count_kind="observed")
+    model.record_refuel_ejection_event(10, source="command", count_kind="commanded")
+    model.update_ui_with_analysis(None, None, 24.0, 16)
+    summary = model.complete_refuel_process_observation("completed")
+
+    assert summary["ejection_count_delta"] == 3
+    assert summary["ejection_count_source"] == "observed_capture_ejections"
+    assert summary["drift_px_per_ejection"] == -2.0
+
+    model.begin_refuel_process_observation({"source": "test"})
+    model.record_refuel_ejection_event(8, source="command", count_kind="commanded")
+    model.update_ui_with_analysis(None, None, 20.0, 20)
+    summary = model.complete_refuel_process_observation("completed")
+
+    assert summary["observed_ejection_delta"] == 0
+    assert summary["commanded_ejection_delta"] == 8
+    assert summary["ejection_count_delta"] == 8
+    assert summary["ejection_count_source"] == "commanded_dispense_ejections"
+    assert summary["drift_px_per_ejection"] == -0.5
+
+
+def test_refuel_camera_model_reported_zero_ejections_suppresses_drift_per_ejection():
+    model = RefuelCameraModel()
+    model.set_refuel_tracking_enabled(True)
+    model.update_ui_with_analysis(None, None, 30.0, 10)
+    model.set_refuel_process_monitoring_enabled(True)
+    model.begin_refuel_process_observation({"source": "test", "printed_capture_count": 0})
+    model.record_refuel_ejection_event(5, source="capture", count_kind="observed")
+    model.update_ui_with_analysis(None, None, 25.0, 15)
+
+    summary = model.complete_refuel_process_observation("completed", {"printed_capture_count": 0})
+
+    assert summary["ejection_count_delta"] == 0
+    assert summary["ejection_count_source"] == "printed_capture_count"
+    assert summary["drift_px_per_ejection"] is None
 
 
 def test_refuel_camera_model_append_sample_stamps_active_process_context_only():

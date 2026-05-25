@@ -30825,6 +30825,7 @@ class RefuelCameraModel(QObject):
     PHASE_NAME = "refuel_balance"
     REFUEL_MONITOR_STATES = {"off", "starting", "monitoring", "paused", "unavailable"}
     REFUEL_ADVISORY_LOG_LIMIT = 100
+    REFUEL_EJECTION_EVENT_LOG_LIMIT = 300
 
     update_level_ui_signal = Signal()
 
@@ -30853,6 +30854,13 @@ class RefuelCameraModel(QObject):
         self.refuel_monitor_timing_log = []
         self.last_refuel_monitor_timing = None
         self._refuel_monitor_next_tick_index = 1
+        self.refuel_ejection_counter_session_id = None
+        self.refuel_ejection_counter_started_at_utc = None
+        self.refuel_ejection_counter_started_monotonic_s = None
+        self.refuel_observed_ejection_count = 0
+        self.refuel_commanded_ejection_count = 0
+        self.refuel_ejection_event_log = []
+        self._refuel_ejection_next_event_index = 1
         self.refuel_process_monitoring_enabled = False
         self.refuel_process_marker_log = []
         self.refuel_active_process_context = None
@@ -30938,6 +30946,8 @@ class RefuelCameraModel(QObject):
         if self.refuel_tracking_enabled == enabled:
             return False
         self.refuel_tracking_enabled = enabled
+        if enabled:
+            self.reset_refuel_ejection_counter_session(emit=False)
         self.update_level_ui_signal.emit()
         return True
 
@@ -30959,6 +30969,113 @@ class RefuelCameraModel(QObject):
 
     def is_refuel_process_monitoring_enabled(self):
         return bool(self.refuel_process_monitoring_enabled)
+
+    @staticmethod
+    def _coerce_refuel_ejection_count(value):
+        if value is None:
+            return None
+        try:
+            count = int(value)
+        except Exception:
+            return None
+        return max(0, count)
+
+    def reset_refuel_ejection_counter_session(self, *, emit=True):
+        self.refuel_ejection_counter_session_id = (
+            f"refuel_ejections_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+        )
+        self.refuel_ejection_counter_started_at_utc = self._now_utc()
+        self.refuel_ejection_counter_started_monotonic_s = time.monotonic()
+        self.refuel_observed_ejection_count = 0
+        self.refuel_commanded_ejection_count = 0
+        self.refuel_ejection_event_log = []
+        self._refuel_ejection_next_event_index = 1
+        if emit:
+            self.update_level_ui_signal.emit()
+        return self.get_refuel_ejection_counter()
+
+    def record_refuel_ejection_event(
+        self,
+        count,
+        *,
+        source="unknown",
+        event_kind=None,
+        count_kind="observed",
+        payload=None,
+    ):
+        if not self.refuel_tracking_enabled:
+            return None
+        count = self._coerce_refuel_ejection_count(count)
+        if count is None or count <= 0:
+            return None
+        count_kind = str(count_kind or "observed").strip().lower()
+        if count_kind not in {"observed", "commanded"}:
+            count_kind = "observed"
+        if count_kind == "observed":
+            self.refuel_observed_ejection_count += count
+        else:
+            self.refuel_commanded_ejection_count += count
+
+        active = self.refuel_active_process_context if isinstance(self.refuel_active_process_context, dict) else {}
+        record = {
+            "event_index": int(self._refuel_ejection_next_event_index),
+            "timestamp_utc": self._now_utc(),
+            "monotonic_s": time.monotonic(),
+            "session_id": self.refuel_ejection_counter_session_id,
+            "event_kind": str(event_kind or "ejection_event"),
+            "source": str(source or "unknown"),
+            "count_kind": count_kind,
+            "count": int(count),
+            "observed_ejection_count": int(self.refuel_observed_ejection_count),
+            "commanded_ejection_count": int(self.refuel_commanded_ejection_count),
+            "process_observation_id": active.get("process_observation_id"),
+            "process_name": active.get("process_name"),
+            "phase_name": active.get("phase_name"),
+            "process_session_id": active.get("session_id"),
+        }
+        if isinstance(payload, dict):
+            for key, value in payload.items():
+                if key not in record:
+                    record[str(key)] = value
+        record = self._json_safe_refuel_timing_value(record)
+        self._refuel_ejection_next_event_index += 1
+        self.refuel_ejection_event_log.append(record)
+        if len(self.refuel_ejection_event_log) > self.REFUEL_EJECTION_EVENT_LOG_LIMIT:
+            self.refuel_ejection_event_log = self.refuel_ejection_event_log[-self.REFUEL_EJECTION_EVENT_LOG_LIMIT:]
+        if self._recorder_run_dir is not None:
+            self._record_analysis({"kind": "refuel_ejection_event", **record})
+        self.update_level_ui_signal.emit()
+        return record
+
+    def get_refuel_ejection_counter(self):
+        latest_event = self.refuel_ejection_event_log[-1] if self.refuel_ejection_event_log else None
+        active = self.refuel_active_process_context if isinstance(self.refuel_active_process_context, dict) else {}
+        observed_delta = None
+        commanded_delta = None
+        try:
+            if active.get("baseline_observed_ejection_count") is not None:
+                observed_delta = int(self.refuel_observed_ejection_count) - int(active["baseline_observed_ejection_count"])
+        except Exception:
+            observed_delta = None
+        try:
+            if active.get("baseline_commanded_ejection_count") is not None:
+                commanded_delta = int(self.refuel_commanded_ejection_count) - int(active["baseline_commanded_ejection_count"])
+        except Exception:
+            commanded_delta = None
+        return {
+            "session_id": self.refuel_ejection_counter_session_id,
+            "started_at_utc": self.refuel_ejection_counter_started_at_utc,
+            "started_monotonic_s": self.refuel_ejection_counter_started_monotonic_s,
+            "observed_ejection_count": int(self.refuel_observed_ejection_count),
+            "commanded_ejection_count": int(self.refuel_commanded_ejection_count),
+            "active_observed_ejection_delta": observed_delta,
+            "active_commanded_ejection_delta": commanded_delta,
+            "event_count": len(self.refuel_ejection_event_log),
+            "latest_event": dict(latest_event) if isinstance(latest_event, dict) else None,
+        }
+
+    def get_refuel_ejection_events(self):
+        return list(self.refuel_ejection_event_log)
 
     def set_refuel_monitor_state(self, state, message=""):
         state = str(state or "off")
@@ -31167,10 +31284,87 @@ class RefuelCameraModel(QObject):
             return active.get(key)
         return default
 
+    def _extract_refuel_reported_ejection_counts(self, payload):
+        payload = payload if isinstance(payload, dict) else {}
+        counts = {}
+        for key in (
+            "printed_capture_count",
+            "printed_capture_event_count",
+            "background_capture_count",
+            "raw_flash_delta",
+        ):
+            value = self._coerce_refuel_ejection_count(payload.get(key))
+            if value is not None:
+                counts[key] = int(value)
+        if "printed_capture_count" in counts:
+            counts["reported_ejection_count"] = int(counts["printed_capture_count"])
+            counts["reported_ejection_count_source"] = "printed_capture_count"
+        return counts
+
+    def _update_refuel_active_process_ejection_counts(self, payload):
+        if not isinstance(self.refuel_active_process_context, dict):
+            return {}
+        counts = self._extract_refuel_reported_ejection_counts(payload)
+        if counts:
+            self.refuel_active_process_context.update(counts)
+        return counts
+
+    def _resolve_refuel_process_ejection_summary(self, active, payload=None):
+        active = dict(active or {})
+        payload = dict(payload or {})
+        payload_counts = self._extract_refuel_reported_ejection_counts(payload)
+        all_counts = dict(active)
+        all_counts.update(payload_counts)
+
+        baseline_observed = self._coerce_refuel_ejection_count(active.get("baseline_observed_ejection_count"))
+        baseline_commanded = self._coerce_refuel_ejection_count(active.get("baseline_commanded_ejection_count"))
+        end_observed = int(self.refuel_observed_ejection_count)
+        end_commanded = int(self.refuel_commanded_ejection_count)
+        observed_delta = None if baseline_observed is None else max(0, end_observed - int(baseline_observed))
+        commanded_delta = None if baseline_commanded is None else max(0, end_commanded - int(baseline_commanded))
+
+        reported = self._coerce_refuel_ejection_count(all_counts.get("reported_ejection_count"))
+        source = None
+        resolved_delta = None
+        if reported is not None:
+            resolved_delta = int(reported)
+            source = str(all_counts.get("reported_ejection_count_source") or "reported_ejection_count")
+        elif observed_delta is not None and observed_delta > 0:
+            resolved_delta = int(observed_delta)
+            source = "observed_capture_ejections"
+        elif commanded_delta is not None and commanded_delta > 0:
+            resolved_delta = int(commanded_delta)
+            source = "commanded_dispense_ejections"
+
+        result = {
+            "baseline_observed_ejection_count": baseline_observed,
+            "end_observed_ejection_count": end_observed,
+            "observed_ejection_delta": observed_delta,
+            "baseline_commanded_ejection_count": baseline_commanded,
+            "end_commanded_ejection_count": end_commanded,
+            "commanded_ejection_delta": commanded_delta,
+            "reported_ejection_count": reported,
+            "reported_ejection_count_source": all_counts.get("reported_ejection_count_source"),
+            "ejection_count_delta": resolved_delta,
+            "ejection_count_source": source,
+        }
+        for key in (
+            "printed_capture_count",
+            "printed_capture_event_count",
+            "background_capture_count",
+            "raw_flash_delta",
+        ):
+            value = self._coerce_refuel_ejection_count(all_counts.get(key))
+            if value is not None:
+                result[key] = int(value)
+        return result
+
     def record_refuel_process_marker(self, event_kind, payload=None):
         payload = self._json_safe_refuel_timing_value(dict(payload or {}))
+        self._update_refuel_active_process_ejection_counts(payload)
         latest = self._latest_refuel_level_snapshot()
         active = self.refuel_active_process_context if isinstance(self.refuel_active_process_context, dict) else {}
+        ejection_summary = self._resolve_refuel_process_ejection_summary(active, payload)
         record = {
             "marker_index": int(self._refuel_process_next_marker_index),
             "timestamp_utc": self._now_utc(),
@@ -31193,6 +31387,13 @@ class RefuelCameraModel(QObject):
             "end_sample_index": payload.get("end_sample_index"),
             "end_level_px": payload.get("end_level_px"),
             "drift_px": payload.get("drift_px"),
+            "observed_ejection_count": ejection_summary.get("end_observed_ejection_count"),
+            "commanded_ejection_count": ejection_summary.get("end_commanded_ejection_count"),
+            "observed_ejection_delta": ejection_summary.get("observed_ejection_delta"),
+            "commanded_ejection_delta": ejection_summary.get("commanded_ejection_delta"),
+            "ejection_count_delta": payload.get("ejection_count_delta", ejection_summary.get("ejection_count_delta")),
+            "ejection_count_source": payload.get("ejection_count_source", ejection_summary.get("ejection_count_source")),
+            "drift_px_per_ejection": payload.get("drift_px_per_ejection"),
             "monitor_status": self.get_refuel_monitor_status(),
             "latest_timing": self.last_refuel_monitor_timing,
         }
@@ -31215,11 +31416,13 @@ class RefuelCameraModel(QObject):
             for key in ("source", "process_name", "phase_name", "session_id"):
                 if payload.get(key) is not None:
                     self.refuel_active_process_context[key] = payload.get(key)
+            self._update_refuel_active_process_ejection_counts(payload)
             return dict(self.refuel_active_process_context)
 
         now_utc = self._now_utc()
         now_monotonic = time.monotonic()
         latest = self._latest_refuel_level_snapshot()
+        reported_counts = self._extract_refuel_reported_ejection_counts(payload)
         observation_id = payload.get("process_observation_id")
         if not observation_id:
             observation_id = f"refuel_process_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
@@ -31235,7 +31438,10 @@ class RefuelCameraModel(QObject):
             "baseline_level_px": latest.get("level_px"),
             "baseline_meniscus_row": latest.get("meniscus_row"),
             "baseline_timestamp_utc": latest.get("timestamp_utc"),
+            "baseline_observed_ejection_count": int(self.refuel_observed_ejection_count),
+            "baseline_commanded_ejection_count": int(self.refuel_commanded_ejection_count),
         }
+        context.update(reported_counts)
         self.refuel_active_process_context = self._json_safe_refuel_timing_value(context)
         self.last_refuel_process_summary = None
         self.record_refuel_process_marker("process_started", payload)
@@ -31245,6 +31451,8 @@ class RefuelCameraModel(QObject):
         payload = self._json_safe_refuel_timing_value(dict(payload or {}))
         if not isinstance(self.refuel_active_process_context, dict):
             self.begin_refuel_process_observation(payload)
+        else:
+            self._update_refuel_active_process_ejection_counts(payload)
 
         active = dict(self.refuel_active_process_context or {})
         latest = self._latest_refuel_level_snapshot()
@@ -31256,6 +31464,14 @@ class RefuelCameraModel(QObject):
                 drift_px = float(end_level) - float(baseline_level)
         except Exception:
             drift_px = None
+        ejection_summary = self._resolve_refuel_process_ejection_summary(active, payload)
+        drift_px_per_ejection = None
+        try:
+            ejection_delta = ejection_summary.get("ejection_count_delta")
+            if drift_px is not None and ejection_delta is not None and int(ejection_delta) > 0:
+                drift_px_per_ejection = float(drift_px) / float(ejection_delta)
+        except Exception:
+            drift_px_per_ejection = None
 
         summary = dict(active)
         summary.update(
@@ -31268,8 +31484,10 @@ class RefuelCameraModel(QObject):
                 "end_meniscus_row": latest.get("meniscus_row"),
                 "end_timestamp_utc": latest.get("timestamp_utc"),
                 "drift_px": drift_px,
+                "drift_px_per_ejection": drift_px_per_ejection,
             }
         )
+        summary.update(ejection_summary)
         self.last_refuel_process_summary = self._json_safe_refuel_timing_value(summary)
 
         marker_payload = dict(payload)
@@ -31279,8 +31497,10 @@ class RefuelCameraModel(QObject):
                 "end_sample_index": latest.get("sample_index"),
                 "end_level_px": end_level,
                 "drift_px": drift_px,
+                "drift_px_per_ejection": drift_px_per_ejection,
             }
         )
+        marker_payload.update(ejection_summary)
         event_kind = marker_payload.pop("event_kind", None)
         if event_kind is None:
             normalized_outcome = str(outcome or "completed").lower()
@@ -31380,6 +31600,7 @@ class RefuelCameraModel(QObject):
         severity = "info"
         message = "Waiting for refuel samples before making calibration guidance."
         drift_px = None
+        summary = None
 
         if monitor_state == "unavailable":
             code = "monitor_unavailable"
@@ -31430,24 +31651,42 @@ class RefuelCameraModel(QObject):
                     except Exception:
                         drift_px = None
                 if drift_px is not None:
+                    drift_per_ejection = None
+                    ejection_delta = None
+                    ejection_source = None
+                    if isinstance(summary, dict):
+                        drift_per_ejection = summary.get("drift_px_per_ejection")
+                        ejection_delta = summary.get("ejection_count_delta")
+
+                    def _per_ejection_suffix():
+                        try:
+                            if drift_per_ejection is None or ejection_delta is None or int(ejection_delta) <= 0:
+                                return ""
+                            return f" ({float(drift_per_ejection):+.3f} px/ejection over {int(ejection_delta)} ejections)"
+                        except Exception:
+                            return ""
+
                     if drift_px < -thresholds["drift_threshold_px"]:
                         code = "increase_refuel"
                         severity = "recommendation"
                         message = (
-                            f"Refuel level fell by {abs(drift_px):.1f} px during calibration; "
+                            f"Refuel level fell by {abs(drift_px):.1f} px{_per_ejection_suffix()} during calibration; "
                             "consider increasing refuel pressure or refuel pulse width."
                         )
                     elif drift_px > thresholds["drift_threshold_px"]:
                         code = "decrease_refuel"
                         severity = "recommendation"
                         message = (
-                            f"Refuel level rose by {abs(drift_px):.1f} px during calibration; "
+                            f"Refuel level rose by {abs(drift_px):.1f} px{_per_ejection_suffix()} during calibration; "
                             "consider decreasing refuel pressure or refuel pulse width."
                         )
                     else:
                         code = "stable"
                         severity = "info"
-                        message = f"Refuel level was stable during calibration (drift {drift_px:+.1f} px)."
+                        message = (
+                            f"Refuel level was stable during calibration "
+                            f"(drift {drift_px:+.1f} px{_per_ejection_suffix()})."
+                        )
                 elif isinstance(self.refuel_active_process_context, dict):
                     code = "monitoring_process"
                     severity = "info"
@@ -31470,6 +31709,9 @@ class RefuelCameraModel(QObject):
             "channel_height_px": channel_height_px,
             "sample_age_s": sample_age_s,
             "drift_px": drift_px,
+            "drift_px_per_ejection": summary.get("drift_px_per_ejection") if isinstance(summary, dict) else None,
+            "ejection_count_delta": summary.get("ejection_count_delta") if isinstance(summary, dict) else None,
+            "ejection_count_source": summary.get("ejection_count_source") if isinstance(summary, dict) else None,
             "monitor_state": monitor_state,
             "monitor_message": monitor_status.get("message"),
             "process_summary": self.get_refuel_process_summary(),
@@ -31907,6 +32149,7 @@ class RefuelCameraModel(QObject):
                 sample["channel_height_px"] = context.get("channel_height_px")
         if self.refuel_process_monitoring_enabled and isinstance(self.refuel_active_process_context, dict):
             active = self.refuel_active_process_context
+            ejection_summary = self._resolve_refuel_process_ejection_summary(active)
             sample.update(
                 {
                     "process_monitoring_enabled": True,
@@ -31917,6 +32160,13 @@ class RefuelCameraModel(QObject):
                     "process_session_id": active.get("session_id"),
                     "process_baseline_sample_index": active.get("baseline_sample_index"),
                     "process_baseline_level_px": active.get("baseline_level_px"),
+                    "process_baseline_observed_ejection_count": active.get("baseline_observed_ejection_count"),
+                    "process_baseline_commanded_ejection_count": active.get("baseline_commanded_ejection_count"),
+                    "process_observed_ejection_delta": ejection_summary.get("observed_ejection_delta"),
+                    "process_commanded_ejection_delta": ejection_summary.get("commanded_ejection_delta"),
+                    "process_reported_ejection_count": ejection_summary.get("reported_ejection_count"),
+                    "process_ejection_count_delta": ejection_summary.get("ejection_count_delta"),
+                    "process_ejection_count_source": ejection_summary.get("ejection_count_source"),
                 }
             )
         self.sample_trace.append(sample)

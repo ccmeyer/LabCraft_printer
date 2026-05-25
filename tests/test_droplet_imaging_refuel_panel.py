@@ -132,6 +132,7 @@ def test_refuel_panel_default_disabled_and_no_capture(monkeypatch, qapp):
     assert dialog.refuel_level_group.isHidden() is True
     assert dialog.refuel_level_status_label.text() == "Off"
     assert dialog.refuel_level_process_label.text() == "Process monitoring off"
+    assert dialog.refuel_level_ejection_label.text() == "-"
     assert dialog.refuel_monitor_timer.isActive() is False
     controller.start_refuel_camera.assert_not_called()
     controller.capture_refuel_image.assert_not_called()
@@ -154,6 +155,7 @@ def test_enabling_refuel_tracking_starts_monitor_without_immediate_capture(monke
     assert refuel_model.get_refuel_monitor_status()["state"] == "monitoring"
     assert dialog.refuel_level_status_label.text() == "No sample"
     assert dialog.refuel_level_process_label.text() == "Process monitoring off"
+    assert dialog.refuel_level_ejection_label.text() == "Observed 0 | commanded 0"
     assert dialog.refuel_level_advisory_label.text() == "Waiting for refuel samples"
     controller.start_refuel_camera.assert_called_once_with()
     controller.capture_refuel_image.assert_not_called()
@@ -581,6 +583,29 @@ def test_level_tracking_off_disables_process_monitoring(monkeypatch, qapp):
     assert dialog.refuel_level_advisory_label.text() == "Monitoring disabled"
 
 
+def test_refuel_panel_shows_live_ejection_counts_without_process_advisory(monkeypatch, qapp):
+    dialog, refuel_model, _controller = _build_droplet_dialog(monkeypatch, qapp)
+
+    dialog.enable_refuel_level_tracking_checkbox.setChecked(True)
+    refuel_model.record_refuel_ejection_event(
+        2,
+        source="capture",
+        event_kind="capture_completed",
+        count_kind="observed",
+    )
+    refuel_model.record_refuel_ejection_event(
+        5,
+        source="command",
+        event_kind="print_queued",
+        count_kind="commanded",
+    )
+    qapp.processEvents()
+
+    assert refuel_model.is_refuel_process_monitoring_enabled() is False
+    assert dialog.refuel_level_ejection_label.text() == "Observed 2 | commanded 5"
+    assert refuel_model.get_refuel_advisory()["enabled"] is False
+
+
 def test_process_monitor_records_sequence_and_capture_state_signals(monkeypatch, qapp):
     dialog, refuel_model, _controller = _build_droplet_dialog(monkeypatch, qapp)
     manager = dialog.model.calibration_manager
@@ -601,3 +626,34 @@ def test_process_monitor_records_sequence_and_capture_state_signals(monkeypatch,
     assert "droplet_sequence_state_changed" in event_kinds
     assert "calibration_error" in event_kinds
     assert "queue_completed" in event_kinds
+
+
+def test_process_monitor_uses_stream_printed_count_for_drift_per_ejection(monkeypatch, qapp):
+    dialog, refuel_model, _controller = _build_droplet_dialog(monkeypatch, qapp)
+    manager = dialog.model.calibration_manager
+
+    dialog.enable_refuel_level_tracking_checkbox.setChecked(True)
+    refuel_model.update_ui_with_analysis(None, None, 50.0, 10)
+    dialog.enable_refuel_process_monitoring_checkbox.setChecked(True)
+    manager.streamCaptureStateChanged.emit({"status": "running", "session_id": "stream-capture"})
+    refuel_model.record_refuel_ejection_event(2, source="capture", count_kind="observed")
+    refuel_model.update_ui_with_analysis(None, None, 45.0, 15)
+
+    manager.streamCaptureStateChanged.emit(
+        {
+            "status": "completed",
+            "session_id": "stream-capture",
+            "printed_capture_count": 10,
+            "printed_capture_event_count": 10,
+            "background_capture_count": 1,
+            "raw_flash_delta": 11,
+        }
+    )
+    qapp.processEvents()
+
+    summary = refuel_model.get_refuel_process_summary()["last"]
+    assert summary["ejection_count_delta"] == 10
+    assert summary["ejection_count_source"] == "printed_capture_count"
+    assert summary["drift_px_per_ejection"] == -0.5
+    assert dialog.refuel_level_process_label.text() == "Drift -5.0 px | -0.500 px/ejection"
+    assert dialog.refuel_level_ejection_label.text() == "10 | -0.500 px/ejection"

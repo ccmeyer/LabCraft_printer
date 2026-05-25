@@ -2019,6 +2019,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.refuel_level_timing_label.setWordWrap(True)
         self.refuel_level_process_label = QtWidgets.QLabel("Process monitoring off")
         self.refuel_level_process_label.setWordWrap(True)
+        self.refuel_level_ejection_label = QtWidgets.QLabel("-")
+        self.refuel_level_ejection_label.setWordWrap(True)
         self.refuel_level_advisory_label = QtWidgets.QLabel("Monitoring disabled")
         self.refuel_level_advisory_label.setWordWrap(True)
 
@@ -2032,6 +2034,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         metrics_grid.addWidget(self.refuel_level_timing_label, 3, 1)
         metrics_grid.addWidget(QtWidgets.QLabel("Process"), 4, 0)
         metrics_grid.addWidget(self.refuel_level_process_label, 4, 1)
+        metrics_grid.addWidget(QtWidgets.QLabel("Ejections"), 5, 0)
+        metrics_grid.addWidget(self.refuel_level_ejection_label, 5, 1)
         group_v.addLayout(metrics_grid)
 
         self._refuel_level_chart_bundle = self._create_refuel_level_chart_bundle()
@@ -2573,11 +2577,51 @@ class DropletImagingDialog(QtWidgets.QDialog):
             drift = last.get("drift_px")
             if drift is None:
                 return "Drift unavailable"
+            drift_per_ejection = last.get("drift_px_per_ejection")
+            ejection_count = last.get("ejection_count_delta")
             try:
+                if drift_per_ejection is not None and ejection_count is not None and int(ejection_count) > 0:
+                    return (
+                        f"Drift {float(drift):+.1f} px | "
+                        f"{float(drift_per_ejection):+.3f} px/ejection"
+                    )
                 return f"Drift {float(drift):+.1f} px"
             except Exception:
                 return f"Drift {drift} px"
         return "Waiting for calibration"
+
+    @staticmethod
+    def _format_refuel_ejection_label(counter, summary):
+        last = summary.get("last") if isinstance(summary, dict) else None
+        if isinstance(last, dict) and last:
+            ejection_count = last.get("ejection_count_delta")
+            drift_per_ejection = last.get("drift_px_per_ejection")
+            if ejection_count is not None:
+                try:
+                    count_text = f"{int(ejection_count)}"
+                except Exception:
+                    count_text = str(ejection_count)
+                if drift_per_ejection is not None:
+                    try:
+                        return f"{count_text} | {float(drift_per_ejection):+.3f} px/ejection"
+                    except Exception:
+                        return f"{count_text} | {drift_per_ejection} px/ejection"
+                source = last.get("ejection_count_source")
+                return f"{count_text} ({source})" if source else count_text
+        active = summary.get("active") if isinstance(summary, dict) else None
+        if isinstance(active, dict) and active:
+            try:
+                observed = int((counter or {}).get("active_observed_ejection_delta") or 0)
+                commanded = int((counter or {}).get("active_commanded_ejection_delta") or 0)
+                return f"Process observed {observed} | commanded {commanded}"
+            except Exception:
+                return "Process counting"
+        try:
+            observed = int((counter or {}).get("observed_ejection_count") or 0)
+            commanded = int((counter or {}).get("commanded_ejection_count") or 0)
+            return f"Observed {observed} | commanded {commanded}"
+        except Exception:
+            return "-"
 
     def _refuel_advisory_message(self, process_enabled):
         if not process_enabled or self.refuel_camera_model is None:
@@ -2644,6 +2688,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.refuel_level_last_update_label.setText("-")
             self.refuel_level_timing_label.setText("-")
             self.refuel_level_process_label.setText("Process monitoring off")
+            self.refuel_level_ejection_label.setText("-")
             self.refuel_level_advisory_label.setText("Monitoring disabled")
             self._refresh_refuel_level_chart()
             return
@@ -2662,6 +2707,17 @@ class DropletImagingDialog(QtWidgets.QDialog):
         process_summary = self._refuel_process_summary()
         self.refuel_level_process_label.setText(
             self._format_refuel_process_label(process_enabled, process_summary)
+        )
+        ejection_counter = {}
+        if self.refuel_camera_model is not None:
+            counter_getter = getattr(self.refuel_camera_model, "get_refuel_ejection_counter", None)
+            if callable(counter_getter):
+                try:
+                    ejection_counter = dict(counter_getter() or {})
+                except Exception:
+                    ejection_counter = {}
+        self.refuel_level_ejection_label.setText(
+            self._format_refuel_ejection_label(ejection_counter, process_summary)
         )
         sample = self._latest_refuel_sample()
         if not sample:

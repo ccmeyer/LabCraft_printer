@@ -11,7 +11,7 @@ The first integration should be conservative. The monitor should run only while 
 - The detector is implemented in `ImageAnalysisThread` and is validated offline against the first labeled dataset.
 - `RefuelCameraModel.start_analysis(...)` already runs detector analysis on a `QThread`.
 - The refuel camera window currently owns live capture through its own timer and is mainly useful for preview, dataset capture, and detector inspection.
-- The droplet imager window now has a default-off refuel-level panel, imager-scoped monitor lifecycle, timing telemetry, and optional calibration lifecycle markers.
+- The droplet imager window now has a default-off refuel-level panel, imager-scoped monitor lifecycle, timing telemetry, optional calibration lifecycle markers, advisory logic, and generic ejection counting.
 - The likely remaining UI-latency risk is synchronous refuel camera capture, not detector analysis itself.
 
 ## Guiding Constraints
@@ -185,6 +185,36 @@ Exit criteria:
 
 - The user gets actionable guidance without needing to watch the refuel camera window.
 - The advisory system is understandable and not disruptive.
+
+## Phase 5B: Generic Ejection Counting
+
+Track how many ejections happened during monitored calibration processes so drift can be normalized as pixels per ejection.
+
+Status: implemented as an imager-scoped counter that resets when refuel level tracking is enabled. The counter records observed successful droplet-camera captures and commanded print/dispense requests separately, then process summaries resolve a single ejection count for drift normalization.
+
+Count-source priority:
+
+- `printed_capture_count` from stream gravimetric-style capture state payloads when available
+- observed successful droplet-camera capture counts
+- commanded print/dispense counts as a fallback
+
+Implementation notes:
+
+- `RefuelCameraModel` stores a capped ejection event log and exposes session totals for the refuel panel.
+- Process summaries include `ejection_count_delta`, `ejection_count_source`, and `drift_px_per_ejection`.
+- Level samples are stamped with active process ejection context when process monitoring is enabled.
+- Advisories include drift-per-ejection text when a valid process count exists.
+- The counter is still observational; it does not adjust pressure or pulse width.
+
+Validation:
+
+- Tests cover counter reset, observed/commanded events, reported stream counts, zero-count behavior, panel text, and controller capture/dispense hooks.
+
+Exit criteria:
+
+- A monitored calibration can report both total drift and drift per ejection.
+- The panel shows general ejection totals while level tracking is enabled.
+- Count source is explicit enough to distinguish gravimetric replay, observed capture counts, and commanded fallbacks.
 
 ## Phase 6: Diagnostic Handoff To Refuel Camera Window
 
