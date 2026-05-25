@@ -1513,8 +1513,7 @@ class CalibrationManager(QObject):
 
     def _build_recorder_meta(self):
         meta = {
-            "stock_solution": self._safe_get_stock_solution(),
-            "printer_head_id": self._safe_get_printer_head_id(),
+            **self._build_calibration_stock_identity_snapshot(),
             "calibration_file_path": str(self.calibration_file_path or ""),
         }
         try:
@@ -3096,19 +3095,19 @@ class CalibrationManager(QObject):
         except Exception:
             queue_depth = None
 
-        return {
+        snapshot = {
             "calibration_file_path": str(getattr(self, "calibration_file_path", "") or ""),
             "calibration_run_id": getattr(self, "_run_id", None),
             "calibration_run_index": getattr(self, "_run_idx", None),
             "calibration_phase": phase_key,
             "process_name": process_name,
             "queue_depth": queue_depth,
-            "printer_head_id": self._safe_get_printer_head_id(),
-            "stock_solution": self._safe_get_stock_solution(),
             "settings": settings,
             "artifact_refs": self._build_calibration_artifact_refs(process_obj),
             "result_summary": self._build_calibration_result_summary(process_obj),
         }
+        snapshot.update(self._build_calibration_stock_identity_snapshot())
+        return snapshot
 
     def _record_calibration_audit_event(self, event_type, summary, details=None, level="info", process_obj=None):
         try:
@@ -3161,14 +3160,14 @@ class CalibrationManager(QObject):
 
         # Build run envelope
         self._run_id = str(uuid.uuid4())
+        stock_identity = self._build_calibration_stock_identity_snapshot()
         run_meta = {
             "run_id": self._run_id,
             "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "ended_at": None,
             "outcome": None,
             "error_message": "",
-            "printer_head_id": self._safe_get_printer_head_id(),
-            "stock_solution": self._safe_get_stock_solution(),
+            **stock_identity,
             "notes": notes or "",
             "steps": {k: [] for k in set(self.PHASE_ALIASES.values())},
             "flat_measurements": []
@@ -6128,8 +6127,7 @@ class CalibrationManager(QObject):
         # Run metadata
         meta = {
             "run_id": self._run_id,
-            "stock_solution": self._safe_get_stock_solution(),
-            "printer_head_id": self._safe_get_printer_head_id()
+            **self._build_calibration_stock_identity_snapshot(),
         }
 
         # Augment
@@ -6215,6 +6213,7 @@ class CalibrationManager(QObject):
             print_pw = payload.get("settings", {}).get("print_width")
             print_p = payload.get("settings", {}).get("print_pressure")
             nozzle_px = self.nozzle_center_image_position
+            stock_identity = self._build_calibration_stock_identity_snapshot()
 
             for i in range(N):
                 row = {
@@ -6228,8 +6227,7 @@ class CalibrationManager(QObject):
                     "focus": focus_list[i],
                     "center_px": centers[i],
                     "nozzle_center_px": nozzle_px,
-                    "stock_solution": self._safe_get_stock_solution(),
-                    "printer_head_id": self._safe_get_printer_head_id(),
+                    **stock_identity,
                 }
                 run_obj["flat_measurements"].append(row)
 
@@ -6243,11 +6241,96 @@ class CalibrationManager(QObject):
 
     # ------------- Small helpers -------------
 
+    @staticmethod
+    def _clean_calibration_stock_value(value):
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text or text.lower() in {"none", "null"}:
+            return None
+        return text
+
+    @staticmethod
+    def _safe_call_calibration_stock_value(obj, method_name, *args, **kwargs):
+        if obj is None:
+            return None
+        try:
+            method = getattr(obj, method_name, None)
+            if callable(method):
+                return method(*args, **kwargs)
+        except Exception:
+            return None
+        return None
+
+    def _build_calibration_stock_identity_snapshot(self):
+        printer_head = None
+        stock = None
+        try:
+            printer_head = self.model.rack_model.get_gripper_printer_head()
+        except Exception:
+            printer_head = None
+        if printer_head is not None:
+            try:
+                stock = printer_head.get_stock_solution()
+            except Exception:
+                stock = getattr(printer_head, "stock_solution", None)
+
+        stock_id = self._clean_calibration_stock_value(
+            self._safe_call_calibration_stock_value(printer_head, "get_stock_id")
+            or self._safe_call_calibration_stock_value(stock, "get_stock_id")
+            or getattr(stock, "stock_id", None)
+        )
+        reagent_name = self._clean_calibration_stock_value(
+            self._safe_call_calibration_stock_value(printer_head, "get_reagent_name")
+            or self._safe_call_calibration_stock_value(stock, "get_reagent_name")
+            or getattr(stock, "reagent_name", None)
+        )
+        concentration = self._clean_calibration_stock_value(
+            self._safe_call_calibration_stock_value(printer_head, "get_stock_concentration")
+            or self._safe_call_calibration_stock_value(stock, "get_stock_concentration")
+            or getattr(stock, "concentration", None)
+            or getattr(stock, "raw_concentration", None)
+        )
+        display_concentration = self._clean_calibration_stock_value(
+            self._safe_call_calibration_stock_value(printer_head, "get_display_stock_concentration")
+            or self._safe_call_calibration_stock_value(stock, "get_display_stock_concentration")
+            or concentration
+        )
+        units = self._clean_calibration_stock_value(getattr(stock, "units", None))
+        stock_solution = self._clean_calibration_stock_value(
+            self._safe_call_calibration_stock_value(printer_head, "get_stock_name")
+            or self._safe_call_calibration_stock_value(printer_head, "get_display_stock_name")
+            or self._safe_call_calibration_stock_value(stock, "get_stock_name")
+            or self._safe_call_calibration_stock_value(stock, "get_display_stock_name")
+        )
+        if stock_solution is None and reagent_name:
+            if display_concentration and units and units != "--":
+                stock_solution = f"{reagent_name} - {display_concentration} {units}"
+            elif concentration and units and units != "--":
+                stock_solution = f"{reagent_name} - {concentration} {units}"
+            else:
+                stock_solution = reagent_name
+        if stock_solution is None and stock is not None:
+            stock_solution = self._clean_calibration_stock_value(stock)
+
+        printer_head_id = self._clean_calibration_stock_value(self._safe_get_printer_head_id())
+        identity = {
+            "stock_id": stock_id,
+            "reagent_name": reagent_name,
+            "stock_solution": stock_solution,
+            "concentration": concentration,
+            "display_concentration": display_concentration,
+            "units": units,
+            "printer_head_id": printer_head_id,
+        }
+        return {
+            **identity,
+            "stock_identity": dict(identity),
+        }
+
     def _safe_get_stock_solution(self):
         try:
-            ph = self.model.rack_model.get_gripper_printer_head()
-            # Prefer a stable name if available; fallback to str()
-            return getattr(ph.get_stock_solution(), "reagent_name", None) or str(ph.get_stock_solution())
+            return self._build_calibration_stock_identity_snapshot().get("stock_solution")
         except Exception:
             return None
 
@@ -6655,6 +6738,39 @@ class CalibrationManager(QObject):
                 rows.append(row)
         return rows
 
+    def _calibration_stock_match_keys_from_fields(self, payload):
+        if not isinstance(payload, dict):
+            return []
+        identity = payload.get("stock_identity")
+        if not isinstance(identity, dict):
+            identity = {}
+
+        def _value(*keys):
+            for key in keys:
+                value = self._clean_calibration_stock_value(payload.get(key))
+                if value:
+                    return value
+                value = self._clean_calibration_stock_value(identity.get(key))
+                if value:
+                    return value
+            return None
+
+        keys = []
+        stock_id = _value("stock_id")
+        if stock_id:
+            keys.append(("stock_id", stock_id))
+
+        reagent_name = _value("reagent_name")
+        concentration = _value("concentration", "display_concentration")
+        units = _value("units")
+        if reagent_name and (concentration or units):
+            keys.append(("stock_identity", reagent_name, concentration or "", units or ""))
+
+        stock_solution = _value("stock_solution")
+        if stock_solution:
+            keys.append(("stock_solution", stock_solution))
+        return keys
+
     def _get_pressure_sweep_summary_matching_runs(self):
         self.ensure_loaded()
 
@@ -6662,18 +6778,25 @@ class CalibrationManager(QObject):
         if not runs:
             return None, []
 
-        cur_stock = self._safe_get_stock_solution()
-        if cur_stock is None:
+        current_identity = self._build_calibration_stock_identity_snapshot()
+        current_keys = self._calibration_stock_match_keys_from_fields(current_identity)
+        current_stock = current_identity.get("stock_solution")
+        if not current_keys:
             for run in reversed(runs):
-                stock_solution = run.get("stock_solution")
-                if stock_solution:
-                    cur_stock = stock_solution
+                current_keys = self._calibration_stock_match_keys_from_fields(run)
+                current_stock = run.get("stock_solution")
+                if current_keys:
                     break
-        if cur_stock is None:
+        if not current_keys:
             return None, []
 
-        matching = [(idx, run) for idx, run in enumerate(runs) if run.get("stock_solution") == cur_stock]
-        return cur_stock, matching
+        current_key_set = set(current_keys)
+        matching = [
+            (idx, run)
+            for idx, run in enumerate(runs)
+            if current_key_set.intersection(self._calibration_stock_match_keys_from_fields(run))
+        ]
+        return current_stock, matching
 
     def get_pressure_sweep_summary_focus_run_id(self):
         _cur_stock, matching = self._get_pressure_sweep_summary_matching_runs()

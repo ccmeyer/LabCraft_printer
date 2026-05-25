@@ -72,8 +72,42 @@ class _FakeVolumeCalibrationProcess(_FakeCalibrationProcess):
         self._recorder_phase_name = self.phase_name
 
 
+class _FakeStockSolution:
+    def __init__(
+        self,
+        *,
+        stock_id="stock-a-10mM",
+        reagent_name="stock-a",
+        concentration="10.00",
+        display_concentration="10",
+        units="mM",
+    ):
+        self._stock_id = stock_id
+        self.reagent_name = reagent_name
+        self._concentration = concentration
+        self._display_concentration = display_concentration
+        self.units = units
+
+    def get_stock_id(self):
+        return self._stock_id
+
+    def get_reagent_name(self):
+        return self.reagent_name
+
+    def get_stock_concentration(self):
+        return self._concentration
+
+    def get_display_stock_concentration(self):
+        return self._display_concentration
+
+    def get_stock_name(self):
+        if self.units == "--":
+            return self.reagent_name
+        return f"{self.reagent_name} - {self._display_concentration} {self.units}"
+
+
 def _make_model(audit_sink):
-    stock = SimpleNamespace(reagent_name="stock-a")
+    stock = _FakeStockSolution()
     printer_head = SimpleNamespace(
         serial="head-1",
         get_stock_solution=lambda: stock,
@@ -214,6 +248,25 @@ def _event_types(mgr):
     return [event["event_type"] for event in mgr.audit_sink.events]
 
 
+def _assert_stock_identity(details):
+    assert details["stock_id"] == "stock-a-10mM"
+    assert details["reagent_name"] == "stock-a"
+    assert details["stock_solution"] == "stock-a - 10 mM"
+    assert details["concentration"] == "10.00"
+    assert details["display_concentration"] == "10"
+    assert details["units"] == "mM"
+    assert details["printer_head_id"] == "head-1"
+    assert details["stock_identity"] == {
+        "stock_id": "stock-a-10mM",
+        "reagent_name": "stock-a",
+        "stock_solution": "stock-a - 10 mM",
+        "concentration": "10.00",
+        "display_concentration": "10",
+        "units": "mM",
+        "printer_head_id": "head-1",
+    }
+
+
 def test_begin_session_does_not_record_high_level_audit_event(tmp_path):
     mgr = _make_manager(tmp_path)
 
@@ -276,6 +329,7 @@ def test_start_active_calibration_records_volume_process_started(tmp_path, proce
     assert event["details"]["process_name"] == process_name
     assert event["details"]["calibration_phase"] == phase_name
     assert event["details"]["artifact_refs"]["process_recording_run_dir"] == "calibration_recordings/start-run"
+    _assert_stock_identity(event["details"])
 
 
 def test_non_volume_calibration_process_is_not_audited(tmp_path):
@@ -329,7 +383,29 @@ def test_on_calibration_completed_records_compact_process_completed(tmp_path):
     assert summary["latest_compact"]["droplet_volumes_count"] == 3
     assert "droplet_volumes" not in summary["latest_compact"]
     assert event["details"]["artifact_refs"]["process_recording_run_dir"] == "calibration_recordings/run-1"
+    _assert_stock_identity(event["details"])
     assert mgr.calibrationCompleted.calls
+
+
+def test_calibration_audit_stock_identity_handles_partial_stock(tmp_path):
+    mgr = _make_manager(tmp_path)
+    partial_stock = SimpleNamespace(reagent_name="partial-stock")
+    mgr.model.rack_model.get_gripper_printer_head = lambda: SimpleNamespace(
+        serial="head-partial",
+        get_stock_solution=lambda: partial_stock,
+    )
+    _seed_open_session(mgr)
+    proc = _FakeVolumeCalibrationProcess()
+    mgr.activeCalibration = proc
+    mgr.clear_pending_process_verdict = Mock()
+    mgr._begin_process_recording = Mock()
+
+    mgr.start_active_calibration()
+
+    details = mgr.audit_sink.events[0]["details"]
+    assert details["stock_solution"] == "partial-stock"
+    assert details["stock_identity"]["stock_solution"] == "partial-stock"
+    assert details["stock_identity"]["concentration"] is None
 
 
 @pytest.mark.parametrize(

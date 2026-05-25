@@ -147,8 +147,36 @@ def _first_display_value(*values) -> str:
     return ""
 
 
+def _stock_identity_display(payload) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    explicit = _first_display_value(
+        payload.get("stock_solution"),
+        payload.get("display_stock_name"),
+        payload.get("stock_display_name"),
+    )
+    if explicit:
+        return explicit
+
+    reagent_name = _first_display_value(payload.get("reagent_name"), payload.get("reagent"))
+    concentration = _first_display_value(
+        payload.get("display_concentration"),
+        payload.get("concentration"),
+        payload.get("stock_concentration"),
+    )
+    units = _first_display_value(payload.get("units"), payload.get("stock_units"))
+    if reagent_name and concentration and units and units != "--":
+        return f"{reagent_name} - {concentration} {units}"
+    if reagent_name:
+        return reagent_name
+    return _first_display_value(payload.get("stock_id"))
+
+
 def derive_audit_stock_solution(event) -> str:
     details, context = _event_sections(event)
+    stock_identity = details.get("stock_identity")
+    if not isinstance(stock_identity, dict):
+        stock_identity = {}
     loaded_head = details.get("loaded_printer_head")
     if not isinstance(loaded_head, dict):
         loaded_head = {}
@@ -157,6 +185,8 @@ def derive_audit_stock_solution(event) -> str:
         printer_head = {}
 
     return _first_display_value(
+        _stock_identity_display(stock_identity),
+        _stock_identity_display(details),
         details.get("stock_solution"),
         loaded_head.get("stock_solution"),
         loaded_head.get("stock_id"),

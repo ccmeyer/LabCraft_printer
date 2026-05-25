@@ -29,6 +29,17 @@ class _DummyStockSolution:
     def get_stock_concentration(self):
         return self._concentration
 
+    def get_display_stock_concentration(self):
+        return self._concentration.rstrip("0").rstrip(".") if "." in self._concentration else self._concentration
+
+    def get_stock_name(self):
+        if self.units == "--":
+            return self._reagent_name
+        return f"{self._reagent_name} - {self.get_display_stock_concentration()} {self.units}"
+
+    def get_display_stock_name(self):
+        return self.get_stock_name()
+
 
 class _DummyPrinterHead:
     def __init__(self, stock_solution, serial="PH-001"):
@@ -82,6 +93,35 @@ def _make_model(tmp_path):
         root_dir=str(tmp_path / "CalibrationMemory"),
     )
     return model
+
+
+def _set_loaded_stock(
+    model,
+    *,
+    stock_id="Glycerol_10.00_mM",
+    reagent_name="Glycerol",
+    concentration="10.00",
+    units="mM",
+):
+    stock = model.rack_model.get_gripper_printer_head().get_stock_solution()
+    stock._stock_id = stock_id
+    stock._reagent_name = reagent_name
+    stock._concentration = concentration
+    stock.units = units
+    return stock
+
+
+def _assert_glycerol_stock_fields(payload, *, concentration="10.00"):
+    display_concentration = concentration.rstrip("0").rstrip(".")
+    assert payload["stock_id"] == f"Glycerol_{concentration}_mM"
+    assert payload["reagent_name"] == "Glycerol"
+    assert payload["stock_solution"] == f"Glycerol - {display_concentration} mM"
+    assert payload["concentration"] == concentration
+    assert payload["display_concentration"] == display_concentration
+    assert payload["units"] == "mM"
+    assert payload["printer_head_id"] == "PH-001"
+    assert payload["stock_identity"]["stock_id"] == f"Glycerol_{concentration}_mM"
+    assert payload["stock_identity"]["stock_solution"] == f"Glycerol - {display_concentration} mM"
 
 
 def _seed_completed_prior_run(store, run_id, context, *, pressure=1.61, pulse_width_us=1500):
@@ -286,6 +326,65 @@ def test_calibration_manager_writes_sidecar_summary_and_observations(tmp_path):
     assert summary["observation_capture_level"] == "compact"
 
 
+def test_calibration_json_run_metadata_records_stock_concentration(tmp_path):
+    model = _make_model(tmp_path)
+    _set_loaded_stock(model)
+    manager = CalibrationManager(model)
+
+    manager.begin_session(model.experiment_model.calibration_file_path, notes="stock identity")
+
+    run = manager.data["runs"][-1]
+    _assert_glycerol_stock_fields(run)
+    saved = json.loads(Path(model.experiment_model.calibration_file_path).read_text(encoding="utf-8"))
+    _assert_glycerol_stock_fields(saved["runs"][-1])
+
+
+def test_process_recorder_meta_records_stock_concentration(tmp_path):
+    model = _make_model(tmp_path)
+    _set_loaded_stock(model)
+    manager = CalibrationManager(model)
+    manager.calibration_file_path = model.experiment_model.calibration_file_path
+
+    meta = manager._build_recorder_meta()
+
+    _assert_glycerol_stock_fields(meta)
+    assert meta["calibration_file_path"] == model.experiment_model.calibration_file_path
+
+
+def test_calibration_step_metadata_records_stock_concentration(tmp_path):
+    model = _make_model(tmp_path)
+    _set_loaded_stock(model)
+    manager = CalibrationManager(model)
+    manager.begin_session(model.experiment_model.calibration_file_path, notes="step identity")
+    manager.activeCalibration = SimpleNamespace(phase_name="droplet_search")
+
+    manager.onCalibrationDataUpdated({"result": {"mean_volume": 10.01}})
+
+    step = manager.data["runs"][-1]["steps"]["droplet_search"][-1]
+    _assert_glycerol_stock_fields(step["meta"])
+
+
+def test_flat_measurement_rows_record_stock_concentration(tmp_path):
+    model = _make_model(tmp_path)
+    _set_loaded_stock(model)
+    manager = CalibrationManager(model)
+    manager.nozzle_center_image_position = [20, 30]
+    run_obj = {"flat_measurements": []}
+
+    manager._try_append_flat_rows_from_payload(
+        run_obj,
+        "droplet_search",
+        {
+            "timestamp": "2026-03-17T11:00:00Z",
+            "settings": {"print_width": 1500, "print_pressure": 1.62},
+            "result": {"droplet_volumes": [9.9, 10.1]},
+        },
+    )
+
+    assert len(run_obj["flat_measurements"]) == 2
+    _assert_glycerol_stock_fields(run_obj["flat_measurements"][0])
+
+
 def test_calibration_memory_failures_do_not_break_calibration(tmp_path, capsys, monkeypatch):
     model = _make_model(tmp_path)
     manager = CalibrationManager(model)
@@ -449,6 +548,59 @@ def test_pressure_sweep_summary_rows_preserve_droplet_search_invalid_reason(tmp_
     assert len(rows) == 1
     assert rows[0]["phase"] == "search"
     assert rows[0]["invalid_reason"] == "char_invalid_ratio_exceeded"
+
+
+def test_pressure_sweep_summary_rows_separate_stock_concentrations(tmp_path):
+    model = _make_model(tmp_path)
+    _set_loaded_stock(model, concentration="10.00", stock_id="Glycerol_10.00_mM")
+    manager = CalibrationManager(model)
+    manager.ensure_loaded = lambda: None
+
+    def _run(stock_id, concentration, mean_volume):
+        display_concentration = concentration.rstrip("0").rstrip(".")
+        stock_solution = f"Glycerol - {display_concentration} mM"
+        stock_identity = {
+            "stock_id": stock_id,
+            "reagent_name": "Glycerol",
+            "stock_solution": stock_solution,
+            "concentration": concentration,
+            "display_concentration": display_concentration,
+            "units": "mM",
+            "printer_head_id": "PH-001",
+        }
+        return {
+            **stock_identity,
+            "stock_identity": dict(stock_identity),
+            "run_id": stock_id,
+            "steps": {
+                "droplet_search": [
+                    {
+                        "timestamp": "2026-03-17T11:00:00Z",
+                        "settings": {"print_width": 1500, "print_pressure": 1.62},
+                        "result": {
+                            "pressure": 1.62,
+                            "mean_volume": mean_volume,
+                            "cv_volume_percent": 4.0,
+                            "valid": True,
+                        },
+                    }
+                ]
+            },
+        }
+
+    manager.data = {
+        "runs": [
+            _run("Glycerol_10.00_mM", "10.00", 10.0),
+            _run("Glycerol_20.00_mM", "20.00", 20.0),
+        ]
+    }
+
+    rows = manager.get_pressure_sweep_summary_rows()
+    assert [row["mean_nL"] for row in rows] == [10.0]
+
+    _set_loaded_stock(model, concentration="20.00", stock_id="Glycerol_20.00_mM")
+    rows = manager.get_pressure_sweep_summary_rows()
+    assert [row["mean_nL"] for row in rows] == [20.0]
 
 
 def test_emit_readiness_treats_manual_droplet_characterization_as_ready_without_trajectory_data(tmp_path):

@@ -200,6 +200,28 @@ def test_read_table_returns_stable_table_dictionaries(tmp_path):
 
 def test_stock_solution_is_derived_from_common_audit_payload_shapes():
     assert derive_audit_stock_solution(
+        {
+            "details": {
+                "stock_identity": {
+                    "stock_solution": "Glycerol - 10 mM",
+                    "stock_id": "glycerol-10",
+                },
+                "stock_solution": "Glycerol",
+            }
+        }
+    ) == "Glycerol - 10 mM"
+    assert derive_audit_stock_solution(
+        {
+            "details": {
+                "stock_identity": {
+                    "reagent_name": "Glycerol",
+                    "display_concentration": "20",
+                    "units": "mM",
+                }
+            }
+        }
+    ) == "Glycerol - 20 mM"
+    assert derive_audit_stock_solution(
         {"details": {"stock_solution": "cal-stock"}}
     ) == "cal-stock"
     assert derive_audit_stock_solution(
