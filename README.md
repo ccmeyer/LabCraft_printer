@@ -66,6 +66,10 @@ If your repo venv is in `env` on Windows:
 .\env\Scripts\python.exe -m pytest -q
 ```
 
+The full Python suite commonly takes 3-8 minutes on Windows and in agent sandboxes.
+Automation should use a process timeout of at least 15 minutes (`900000` ms) to avoid killing a valid run and paying collection/startup cost again.
+Pytest is configured in `pytest.ini` to collect from `tests/`.
+
 ## Droplet Imager Optics Calibration
 
 The standard optics-calibration workflow uses a guided load/approach wizard, then reuses the imager `Optics` tab for manual focus, image capture, scale-bar analysis, and applying the micrometer-per-pixel and camera motion-conversion factors. The wizard does not require a printer head, print profile, or regulated pressure, and it does not change firmware or the device protocol.

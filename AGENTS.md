@@ -72,7 +72,9 @@ Prefer using the project interpreter/tools and repo scripts.
   - (If README specifies a different entrypoint, follow README)
 
 ### Run Python tests
-- Use the repo’s chosen test command (prefer `pytest` if configured):
+- Use the repo's pytest configuration; it scopes collection to `tests/` so root-level runs do not crawl large data/artifact trees.
+- The full Python suite commonly takes 3-8 minutes on Windows/agent sandboxes. When invoking it through an agent/tool timeout, set the command timeout to at least 15 minutes (`900000` ms) so a valid run is not killed and repeated.
+- Use the repo's chosen test command:
   - `python -m pytest -q` (primary)
   - `python -m pytest` (for full output)
 
