@@ -89,7 +89,16 @@ def _build_droplet_dialog(monkeypatch, qapp, *, refuel_model=None, main_window=N
             get_refuel_pulse_width=lambda: 3200,
         ),
     )
+    command_calls = []
+
+    def _command_mock(name):
+        def _side_effect(*args, **kwargs):
+            command_calls.append((name, args, kwargs))
+            return object()
+        return Mock(side_effect=_side_effect)
+
     controller = SimpleNamespace(
+        _command_calls=command_calls,
         start_read_camera=Mock(),
         stop_read_camera=Mock(),
         start_refuel_camera=Mock(),
@@ -109,12 +118,13 @@ def _build_droplet_dialog(monkeypatch, qapp, *, refuel_model=None, main_window=N
         disable_print_profile=Mock(),
         set_droplet_capture_profile=Mock(),
         set_command_dispatch_interval=Mock(),
-        enter_refuel_vacuum_mode=Mock(return_value=object()),
-        set_refuel_vacuum_pressure=Mock(return_value=object()),
-        exit_refuel_vacuum_mode=Mock(return_value=object()),
-        set_refuel_pulse_width=Mock(return_value=object()),
-        refuel_only=Mock(return_value=object()),
-        move_to_location=Mock(return_value=object()),
+        enter_refuel_vacuum_mode=_command_mock("enter_refuel_vacuum_mode"),
+        set_refuel_vacuum_pressure=_command_mock("set_refuel_vacuum_pressure"),
+        exit_refuel_vacuum_mode=_command_mock("exit_refuel_vacuum_mode"),
+        set_absolute_refuel_pressure=_command_mock("set_absolute_refuel_pressure"),
+        set_refuel_pulse_width=_command_mock("set_refuel_pulse_width"),
+        refuel_only=_command_mock("refuel_only"),
+        move_to_location=_command_mock("move_to_location"),
     )
     if main_window is None:
         main_window = SimpleNamespace(color_dict={}, pause_machine=Mock())
@@ -474,47 +484,152 @@ def test_refuel_monitor_stops_after_three_none_frames(monkeypatch, qapp):
     assert refuel_model.get_refuel_monitor_timing_log()[-1]["event_kind"] == "failure"
 
 
-def test_refuel_vacuum_dialog_manual_workflow_and_restore(monkeypatch, qapp):
+def test_printer_head_recovery_opens_in_pull_back_and_commits_on_editing_finished(monkeypatch, qapp):
     dialog, _refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
 
-    dialog.open_refuel_vacuum_dialog()
+    assert dialog.printer_head_recovery_button.text() == "Printer Head Recovery"
+
+    dialog.open_printer_head_recovery_dialog()
     qapp.processEvents()
 
-    vacuum_dialog = dialog._refuel_vacuum_dialog
-    assert vacuum_dialog is not None
+    recovery = dialog._printer_head_recovery_dialog
+    assert recovery is not None
+    assert recovery.windowTitle() == "Printer Head Recovery"
+    assert recovery.mode_label.text() == "Pull Back Mode"
     controller.enter_refuel_vacuum_mode.assert_called_once()
     enter_kwargs = controller.enter_refuel_vacuum_mode.call_args.kwargs
     assert enter_kwargs["target_psi"] == -1.0
     assert enter_kwargs["prep_position_steps"] == 20000
     assert enter_kwargs["move_hz"] == 5000
     assert enter_kwargs["manual"] is True
-    assert vacuum_dialog.pulse_button.isEnabled() is False
+    assert recovery.pulse_button.isEnabled() is False
 
     enter_kwargs["handler"]()
-    assert vacuum_dialog.pulse_button.isEnabled() is True
+    assert recovery.pulse_button.isEnabled() is True
+    assert recovery.camera_button.isEnabled() is False
+    assert recovery.switch_to_refill_button.isEnabled() is True
+    assert recovery.pressure_spin.minimum() == -1.0
+    assert recovery.pressure_spin.maximum() == 0.0
 
-    vacuum_dialog.pressure_spin.setValue(-0.5)
-    assert "Pending refuel vacuum pressure -0.50 psi." == vacuum_dialog.status_label.text()
+    recovery.pressure_spin.setValue(-0.5)
     controller.set_refuel_vacuum_pressure.assert_not_called()
-    vacuum_dialog._commit_pending_pressure_target()
+    recovery.pressure_spin.editingFinished.emit()
     controller.set_refuel_vacuum_pressure.assert_called_with(-0.5, manual=True)
 
-    vacuum_dialog.pulse_width_spin.setValue(3500)
+    recovery.pulse_width_spin.setValue(3500)
+    controller.set_refuel_pulse_width.assert_not_called()
+    recovery.pulse_width_spin.editingFinished.emit()
     controller.set_refuel_pulse_width.assert_called_with(3500, manual=True)
 
-    vacuum_dialog.pulse_count_spin.setValue(7)
-    vacuum_dialog._pulse_refuel()
+
+def test_printer_head_recovery_refill_mode_and_camera_return(monkeypatch, qapp):
+    dialog, _refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
+
+    dialog.open_printer_head_recovery_dialog()
+    qapp.processEvents()
+
+    recovery = dialog._printer_head_recovery_dialog
+    controller.enter_refuel_vacuum_mode.call_args.kwargs["handler"]()
+    controller._command_calls.clear()
+
+    recovery._switch_to_refill_mode()
+
+    assert recovery.mode_label.text() == "Refill Mode"
+    assert recovery.pressure_spin.minimum() == 0.0
+    assert recovery.pressure_spin.maximum() == 5.0
+    assert recovery.pressure_spin.value() == 2.0
+    assert recovery.pulse_width_spin.value() == 5000
+    assert recovery.pulse_button.isEnabled() is False
+    assert controller.exit_refuel_vacuum_mode.call_args.args == (2.0,)
+    assert controller.exit_refuel_vacuum_mode.call_args.kwargs["manual"] is True
+    controller.set_refuel_pulse_width.assert_called_with(5000, handler=recovery._on_refill_entered, manual=True)
+    assert [entry[0] for entry in controller._command_calls[-2:]] == [
+        "exit_refuel_vacuum_mode",
+        "set_refuel_pulse_width",
+    ]
+
+    controller.set_refuel_pulse_width.call_args.kwargs["handler"]()
+    assert recovery.pulse_button.isEnabled() is True
+    assert recovery.camera_button.isEnabled() is True
+    assert recovery.switch_to_pull_back_button.isEnabled() is True
+    assert recovery.switch_to_refill_button.isEnabled() is False
+
+    recovery.pressure_spin.setValue(1.75)
+    controller.set_absolute_refuel_pressure.assert_not_called()
+    recovery.pressure_spin.editingFinished.emit()
+    controller.set_absolute_refuel_pressure.assert_called_once_with(1.75, manual=True)
+
+    recovery._move_to_loading()
+    controller.move_to_location.assert_called_with("loading", manual=True)
+    recovery._move_to_camera()
+    controller.move_to_location.assert_called_with("camera", manual=True)
+
+
+def test_printer_head_recovery_can_switch_back_to_pull_back(monkeypatch, qapp):
+    dialog, _refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
+
+    dialog.open_printer_head_recovery_dialog()
+    qapp.processEvents()
+
+    recovery = dialog._printer_head_recovery_dialog
+    controller.enter_refuel_vacuum_mode.call_args.kwargs["handler"]()
+    recovery._switch_to_refill_mode()
+    controller.set_refuel_pulse_width.call_args.kwargs["handler"]()
+    controller.enter_refuel_vacuum_mode.reset_mock()
+
+    recovery._switch_to_pull_back_mode()
+
+    assert recovery.mode_label.text() == "Pull Back Mode"
+    assert recovery.pressure_spin.minimum() == -1.0
+    assert recovery.pressure_spin.maximum() == 0.0
+    assert recovery.pressure_spin.value() == -1.0
+    assert recovery.pulse_button.isEnabled() is False
+    controller.enter_refuel_vacuum_mode.assert_called_once()
+    enter_kwargs = controller.enter_refuel_vacuum_mode.call_args.kwargs
+    assert enter_kwargs["target_psi"] == -1.0
+    enter_kwargs["handler"]()
+    assert recovery.pulse_button.isEnabled() is True
+    assert recovery.camera_button.isEnabled() is False
+
+
+def test_printer_head_recovery_pulse_action_commits_active_edits_first(monkeypatch, qapp):
+    dialog, _refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
+
+    dialog.open_printer_head_recovery_dialog()
+    qapp.processEvents()
+
+    recovery = dialog._printer_head_recovery_dialog
+    controller.enter_refuel_vacuum_mode.call_args.kwargs["handler"]()
+
+    recovery.pressure_spin.setValue(-0.5)
+    recovery.pulse_width_spin.setValue(3500)
+    recovery.pulse_count_spin.setValue(7)
+    recovery._pulse_refuel()
+
+    controller.set_refuel_vacuum_pressure.assert_called_once_with(-0.5, manual=True)
+    controller.set_refuel_pulse_width.assert_called_once_with(3500, manual=True)
     controller.refuel_only.assert_called_with(7, manual=True)
 
-    vacuum_dialog._move_to_loading()
-    controller.move_to_location.assert_called_with("loading", manual=True)
 
-    vacuum_dialog.accept()
-    controller.set_refuel_pulse_width.assert_called_with(3200, manual=True)
-    controller.exit_refuel_vacuum_mode.assert_called_once_with(0.6, manual=True)
+def test_printer_head_recovery_shortcuts_queue_dialog_refuel_counts(monkeypatch, qapp):
+    dialog, _refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
+
+    dialog.open_printer_head_recovery_dialog()
+    qapp.processEvents()
+
+    recovery = dialog._printer_head_recovery_dialog
+    controller.enter_refuel_vacuum_mode.call_args.kwargs["handler"]()
+
+    recovery.shortcut_refuel_many.activated.emit()
+    recovery.shortcut_refuel_few.activated.emit()
+
+    assert controller.refuel_only.call_args_list[0].args == (5,)
+    assert controller.refuel_only.call_args_list[0].kwargs == {"manual": True}
+    assert controller.refuel_only.call_args_list[1].args == (1,)
+    assert controller.refuel_only.call_args_list[1].kwargs == {"manual": True}
 
 
-def test_refuel_vacuum_dialog_escape_pauses_without_closing_or_restoring(monkeypatch, qapp):
+def test_printer_head_recovery_escape_pauses_without_closing_or_restoring(monkeypatch, qapp):
     main_window = SimpleNamespace(color_dict={}, pause_machine=Mock())
     dialog, _refuel_model, controller = _build_droplet_dialog(
         monkeypatch,
@@ -522,43 +637,43 @@ def test_refuel_vacuum_dialog_escape_pauses_without_closing_or_restoring(monkeyp
         main_window=main_window,
     )
 
-    dialog.open_refuel_vacuum_dialog()
+    dialog.open_printer_head_recovery_dialog()
     qapp.processEvents()
 
-    vacuum_dialog = dialog._refuel_vacuum_dialog
+    recovery = dialog._printer_head_recovery_dialog
     controller.enter_refuel_vacuum_mode.call_args.kwargs["handler"]()
-    vacuum_dialog.pressure_spin.setValue(-0.5)
-    assert vacuum_dialog._pressure_commit_timer.isActive() is True
+    recovery.pressure_spin.setValue(-0.5)
 
     event = QtGui.QKeyEvent(
         QtCore.QEvent.KeyPress,
         QtCore.Qt.Key_Escape,
         QtCore.Qt.NoModifier,
     )
-    vacuum_dialog.keyPressEvent(event)
+    recovery.keyPressEvent(event)
 
     assert event.isAccepted() is True
     main_window.pause_machine.assert_called_once_with()
-    assert vacuum_dialog.isVisible() is True
-    assert vacuum_dialog._pressure_commit_timer.isActive() is False
+    assert recovery.isVisible() is True
     controller.set_refuel_vacuum_pressure.assert_not_called()
     controller.set_refuel_pulse_width.assert_not_called()
     controller.exit_refuel_vacuum_mode.assert_not_called()
+    assert dialog._printer_head_recovery_dialog is recovery
 
 
-def test_refuel_vacuum_dialog_window_close_restores_vacuum_mode(monkeypatch, qapp):
+def test_printer_head_recovery_window_close_restores_without_motion(monkeypatch, qapp):
     dialog, _refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
 
-    dialog.open_refuel_vacuum_dialog()
+    dialog.open_printer_head_recovery_dialog()
     qapp.processEvents()
 
-    vacuum_dialog = dialog._refuel_vacuum_dialog
+    recovery = dialog._printer_head_recovery_dialog
     controller.enter_refuel_vacuum_mode.call_args.kwargs["handler"]()
-    vacuum_dialog.close()
+    recovery.close()
     qapp.processEvents()
 
     controller.set_refuel_pulse_width.assert_called_once_with(3200, manual=True)
     controller.exit_refuel_vacuum_mode.assert_called_once_with(0.6, manual=True)
+    controller.move_to_location.assert_not_called()
 
 
 def test_refuel_monitor_records_analysis_not_started(monkeypatch, qapp):
