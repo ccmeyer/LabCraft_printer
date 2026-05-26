@@ -865,6 +865,7 @@ class RefuelVacuumDialog(QtWidgets.QDialog):
     MAX_PRESSURE_PSI = 0.0
     DEFAULT_PREP_POSITION_STEPS = 20000
     DEFAULT_PREP_MOVE_HZ = 5000
+    PRESSURE_COMMIT_DELAY_MS = 250
 
     def __init__(self, parent, model, controller):
         super().__init__(parent)
@@ -872,6 +873,7 @@ class RefuelVacuumDialog(QtWidgets.QDialog):
         self.controller = controller
         self._entered = False
         self._restore_queued = False
+        self._pending_pressure_value = None
         self._saved_refuel_pressure = self._read_float_setting(
             ("get_target_refuel_pressure", "get_current_refuel_pressure"),
             default=0.0,
@@ -886,6 +888,10 @@ class RefuelVacuumDialog(QtWidgets.QDialog):
         self.setWindowTitle("Refuel Vacuum Mode")
         self.setModal(True)
         self.setMinimumWidth(360)
+        self._pressure_commit_timer = QTimer(self)
+        self._pressure_commit_timer.setSingleShot(True)
+        self._pressure_commit_timer.setInterval(self.PRESSURE_COMMIT_DELAY_MS)
+        self._pressure_commit_timer.timeout.connect(self._commit_pending_pressure_target)
         self._build_ui()
         self._set_controls_enabled(False)
         QTimer.singleShot(0, self._enter_vacuum_mode)
@@ -1001,9 +1007,19 @@ class RefuelVacuumDialog(QtWidgets.QDialog):
     def _on_pressure_changed(self, value):
         if not self._entered:
             return
+        self._pending_pressure_value = float(value)
+        self._pressure_commit_timer.start()
+        self.status_label.setText(f"Pending refuel vacuum pressure {float(value):.2f} psi.")
+
+    def _commit_pending_pressure_target(self):
+        self._pressure_commit_timer.stop()
+        if not self._entered or self._restore_queued or self._pending_pressure_value is None:
+            return
+        value = float(self._pending_pressure_value)
+        self._pending_pressure_value = None
         setter = getattr(self.controller, "set_refuel_vacuum_pressure", None)
-        if callable(setter) and setter(float(value), manual=True) is not False:
-            self.status_label.setText(f"Queued refuel vacuum pressure {float(value):.2f} psi.")
+        if callable(setter) and setter(value, manual=True) is not False:
+            self.status_label.setText(f"Queued refuel vacuum pressure {value:.2f} psi.")
         else:
             self.status_label.setText("Failed to queue refuel vacuum pressure.")
 
@@ -1033,6 +1049,8 @@ class RefuelVacuumDialog(QtWidgets.QDialog):
         if self._restore_queued:
             return
         self._restore_queued = True
+        self._pressure_commit_timer.stop()
+        self._pending_pressure_value = None
         self._set_controls_enabled(False)
         if self._saved_refuel_pulse_width is not None:
             setter = getattr(self.controller, "set_refuel_pulse_width", None)
@@ -1043,13 +1061,40 @@ class RefuelVacuumDialog(QtWidgets.QDialog):
             exit_mode(float(self._saved_refuel_pressure), manual=True)
         self.status_label.setText("Queued refuel vacuum restore.")
 
+    def _pause_from_escape(self):
+        self._pressure_commit_timer.stop()
+        self._pending_pressure_value = None
+        parent = self.parent()
+        main_window = getattr(parent, "main_window", None)
+        pause = getattr(main_window, "pause_machine", None)
+        if callable(pause):
+            pause()
+            self.status_label.setText(
+                "Pause requested. Refuel vacuum mode remains open until Restore/Close."
+            )
+            return
+        pause_commands = getattr(self.controller, "pause_commands", None)
+        if callable(pause_commands):
+            pause_commands()
+            self.status_label.setText(
+                "Pause requested. Refuel vacuum mode remains open until Restore/Close."
+            )
+        else:
+            self.status_label.setText("Pause shortcut is unavailable in refuel vacuum mode.")
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self._pause_from_escape()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def accept(self):
         self._queue_restore()
         super().accept()
 
     def reject(self):
-        self._queue_restore()
-        super().reject()
+        self._pause_from_escape()
 
     def closeEvent(self, event):
         self._queue_restore()

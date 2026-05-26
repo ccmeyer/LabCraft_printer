@@ -117,7 +117,7 @@ def _build_droplet_dialog(monkeypatch, qapp, *, refuel_model=None, main_window=N
         move_to_location=Mock(return_value=object()),
     )
     if main_window is None:
-        main_window = SimpleNamespace(color_dict={})
+        main_window = SimpleNamespace(color_dict={}, pause_machine=Mock())
     dialog = DropletImagingDialog(main_window, model, controller)
     qapp.processEvents()
     return dialog, refuel_model, controller
@@ -494,6 +494,9 @@ def test_refuel_vacuum_dialog_manual_workflow_and_restore(monkeypatch, qapp):
     assert vacuum_dialog.pulse_button.isEnabled() is True
 
     vacuum_dialog.pressure_spin.setValue(-0.5)
+    assert "Pending refuel vacuum pressure -0.50 psi." == vacuum_dialog.status_label.text()
+    controller.set_refuel_vacuum_pressure.assert_not_called()
+    vacuum_dialog._commit_pending_pressure_target()
     controller.set_refuel_vacuum_pressure.assert_called_with(-0.5, manual=True)
 
     vacuum_dialog.pulse_width_spin.setValue(3500)
@@ -508,6 +511,53 @@ def test_refuel_vacuum_dialog_manual_workflow_and_restore(monkeypatch, qapp):
 
     vacuum_dialog.accept()
     controller.set_refuel_pulse_width.assert_called_with(3200, manual=True)
+    controller.exit_refuel_vacuum_mode.assert_called_once_with(0.6, manual=True)
+
+
+def test_refuel_vacuum_dialog_escape_pauses_without_closing_or_restoring(monkeypatch, qapp):
+    main_window = SimpleNamespace(color_dict={}, pause_machine=Mock())
+    dialog, _refuel_model, controller = _build_droplet_dialog(
+        monkeypatch,
+        qapp,
+        main_window=main_window,
+    )
+
+    dialog.open_refuel_vacuum_dialog()
+    qapp.processEvents()
+
+    vacuum_dialog = dialog._refuel_vacuum_dialog
+    controller.enter_refuel_vacuum_mode.call_args.kwargs["handler"]()
+    vacuum_dialog.pressure_spin.setValue(-0.5)
+    assert vacuum_dialog._pressure_commit_timer.isActive() is True
+
+    event = QtGui.QKeyEvent(
+        QtCore.QEvent.KeyPress,
+        QtCore.Qt.Key_Escape,
+        QtCore.Qt.NoModifier,
+    )
+    vacuum_dialog.keyPressEvent(event)
+
+    assert event.isAccepted() is True
+    main_window.pause_machine.assert_called_once_with()
+    assert vacuum_dialog.isVisible() is True
+    assert vacuum_dialog._pressure_commit_timer.isActive() is False
+    controller.set_refuel_vacuum_pressure.assert_not_called()
+    controller.set_refuel_pulse_width.assert_not_called()
+    controller.exit_refuel_vacuum_mode.assert_not_called()
+
+
+def test_refuel_vacuum_dialog_window_close_restores_vacuum_mode(monkeypatch, qapp):
+    dialog, _refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
+
+    dialog.open_refuel_vacuum_dialog()
+    qapp.processEvents()
+
+    vacuum_dialog = dialog._refuel_vacuum_dialog
+    controller.enter_refuel_vacuum_mode.call_args.kwargs["handler"]()
+    vacuum_dialog.close()
+    qapp.processEvents()
+
+    controller.set_refuel_pulse_width.assert_called_once_with(3200, manual=True)
     controller.exit_refuel_vacuum_mode.assert_called_once_with(0.6, manual=True)
 
 
