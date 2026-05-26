@@ -31,6 +31,7 @@ The intent is to increase quantitative coverage without turning the firmware, Py
 | Milestone 8E: XY Motion Qualification Suite | Complete enough to move on | Standalone operator-gated `xy_motion_v1` suite selects firmware XY long-travel/raster diagnostics `2010`-`2011` without adding them to default FULL |
 | Milestone 8F: Motion Envelope Qualification Suite | In progress | Standalone operator-gated `motion_envelope_v1` suite selects firmware motion envelope diagnostics `2012`-`2016` without adding them to default FULL |
 | Milestone 8G: Pressure Regulator Qualification Suite | In progress | Standalone operator-gated `pressure_regulator_v1` suite selects firmware pressure regulator diagnostics `2210`-`2219` without adding them to default FULL |
+| Milestone 8G.5: Refuel Vacuum Sensor Qualification Suite | In progress | Standalone operator-gated `refuel_vacuum_v1` suite selects firmware refuel vacuum diagnostics `2220`-`2221` without adding them to default FULL |
 | Milestone 8H: Valve Characterization Qualification Suite | In progress | Standalone operator-gated `valve_characterization_v1` suite selects isolated 2 psi valve repeatability/linearity diagnostics `2473`-`2475` without adding them to default FULL |
 | Milestone 8I: Gripper Seal Stress and Motion Suite | In progress | Standalone operator-gated `gripper_seal_stress_v1` suite selects firmware execution rows `2510`-`2513` and Python-derived gripper trace artifacts without adding them to default FULL |
 | Later fixture-dependent diagnostics | Not started | Planned |
@@ -936,6 +937,15 @@ Pressure regulator qualification slice:
 - `2214`/`2215` report same-direction cycle spans as `low_dn_span` and `high_up_span`; `2216`/`2217` report same-direction `below_span`/`above_span` and keep cross-direction `hyst_span` informational.
 - `2214`/`2215` and `2218`/`2219` report informational `over`/`under` raw-pressure transient metrics to support regulator speed tuning.
 - Keep `pressure_regulator_v1` out of `factory_acceptance_v3`; use it for explicit, operator-confirmed pressure regulator qualification runs before deciding whether any rows belong in the default FULL suite.
+
+Refuel vacuum sensor qualification slice:
+
+- Add `refuel_vacuum_v1` as a separate operator-gated FULL manifest requiring fixture `refuel_vacuum_dry_back_v1`.
+- Select the suite with existing `CMD_SELFTEST_START` selector field value `2298`; no protocol layout or opcode changes.
+- Firmware rows `2220` and `2221` prepare the refuel regulator through firmware-owned vacuum entry, temporarily widen only the refuel pressure sensor validation minimum for below-atmospheric readings, cycle between `-1 psi` and atmosphere 20 times, then restore validation and normal refuel regulator state.
+- Row `2220` compares pre/post atmospheric readings with the refuel valve open to catch pressure-sensor zero shift after vacuum cycling.
+- Row `2221` reports negative/zero pressure repeatability, settle error, trace presence, and motor-position guard metrics so excessive travel fails cleanly.
+- Keep `refuel_vacuum_v1` out of `factory_acceptance_v3` and `machine_full_qualification_v1`; use it only for explicit operator-confirmed dry vacuum sensor validation before enabling routine app usage on a machine.
 
 Valve characterization qualification slice:
 

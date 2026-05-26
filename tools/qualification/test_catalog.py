@@ -59,6 +59,8 @@ TEST_CATALOG: dict[int, TestCatalogEntry] = {
     2217: TestCatalogEntry(2217, "Refuel pressure hysteresis", "Refuel regulator fresh-home same-direction repeatability and informational approach-direction hysteresis at 2 psi."),
     2218: TestCatalogEntry(2218, "Print pressure step ladder", "Print regulator fresh-home settling and transient over/under through a 1, 2, 3, 2, 1 psi target ladder."),
     2219: TestCatalogEntry(2219, "Refuel pressure step ladder", "Refuel regulator fresh-home settling and transient over/under through a 1, 2, 3, 2, 1 psi target ladder."),
+    2220: TestCatalogEntry(2220, "Refuel vacuum sensor shift", "Refuel pressure sensor atmospheric baseline before and after repeated -1 psi vacuum cycles."),
+    2221: TestCatalogEntry(2221, "Refuel vacuum cycle repeatability", "Refuel regulator cycling between -1 psi and atmosphere with pressure, settle, and motor-position guards."),
     2401: TestCatalogEntry(2401, "Print valve pulse drop", "Print valve pulse pressure-drop repeatability."),
     2402: TestCatalogEntry(2402, "Refuel valve pulse drop", "Refuel valve pulse pressure-drop repeatability."),
     2403: TestCatalogEntry(2403, "Dual valve interaction", "Print/refuel pulse interaction and pressure-drop balance."),

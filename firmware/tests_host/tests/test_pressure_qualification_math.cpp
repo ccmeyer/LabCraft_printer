@@ -20,6 +20,14 @@ TEST(PressureQualificationMath, ConvertsPsiMilliToPressureRaw)
     UNSIGNED_LONGS_EQUAL(4259u, PressureQualificationMath::pressureRawFromPsiMilli(3000u));
 }
 
+TEST(PressureQualificationMath, ConvertsSignedPsiMilliToVacuumPressureRaw)
+{
+    LONGS_EQUAL(1638, PressureQualificationMath::pressureRawFromSignedPsiMilli(0));
+    LONGS_EQUAL(764, PressureQualificationMath::pressureRawFromSignedPsiMilli(-1000));
+    LONGS_EQUAL(327, PressureQualificationMath::pressureRawFromSignedPsiMilli(-1500));
+    LONGS_EQUAL(2512, PressureQualificationMath::pressureRawFromSignedPsiMilli(1000));
+}
+
 TEST(PressureQualificationMath, SplitsPressureTargetsIntoAdjacentOnePsiSteps)
 {
     const uint32_t onePsiRaw =

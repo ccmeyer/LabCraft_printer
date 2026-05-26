@@ -1019,6 +1019,44 @@ void Orchestrator::executeCommand(const Command &cmd) {
 				  MX_GRIPPER_SetRefreshPeriodMs(refreshPeriod);
 				  MX_GRIPPER_SetPulseDurationMs(pulseDuration);
 				  break;
+			} case CMD_REFUEL_VACUUM_ENTER: {
+			#if (LC_PRESSURE_PORTS > 1)
+				  const int32_t targetRaw = static_cast<int32_t>(cmd.p1u());
+				  const uint32_t prepPositionSteps = cmd.p2u();
+				  const uint32_t moveHz = cmd.p3u();
+				  if (!PressureRegulator::regR().enterVacuumMode(
+				          targetRaw,
+				          prepPositionSteps,
+				          moveHz,
+				          CRASH_TASK_ORCH)) {
+				    Logger::instance()->log("[PReg] Refuel vacuum enter failed\r\n");
+				  }
+			#else
+				  Logger::instance()->log("Legacy has no refuel channel");
+			#endif
+				  break;
+			} case CMD_REFUEL_VACUUM_SET_TARGET: {
+			#if (LC_PRESSURE_PORTS > 1)
+				  const int32_t targetRaw = static_cast<int32_t>(cmd.p1u());
+				  if (!PressureRegulator::regR().setVacuumTargetSafe(targetRaw)) {
+				    Logger::instance()->log("[PReg] Refuel vacuum target rejected\r\n");
+				  }
+			#else
+				  Logger::instance()->log("Legacy has no refuel channel");
+			#endif
+				  break;
+			} case CMD_REFUEL_VACUUM_EXIT: {
+			#if (LC_PRESSURE_PORTS > 1)
+				  const int32_t restoreRaw = static_cast<int32_t>(cmd.p1u());
+				  if (!PressureRegulator::regR().exitVacuumMode(
+				          restoreRaw,
+				          CRASH_TASK_ORCH)) {
+				    Logger::instance()->log("[PReg] Refuel vacuum exit failed\r\n");
+				  }
+			#else
+				  Logger::instance()->log("Legacy has no refuel channel");
+			#endif
+				  break;
 			} case CMD_SELFTEST_START: {
 				  Comm* comm = Comm::instance();
 				  if (!comm || !comm->handle()) {

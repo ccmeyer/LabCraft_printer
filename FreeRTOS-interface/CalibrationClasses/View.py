@@ -860,6 +860,202 @@ class CharacterizationHistoryDialog(QtWidgets.QDialog):
         self._apply_sort(section, order)
 
 
+class RefuelVacuumDialog(QtWidgets.QDialog):
+    MIN_PRESSURE_PSI = -1.0
+    MAX_PRESSURE_PSI = 0.0
+    DEFAULT_PREP_POSITION_STEPS = 20000
+    DEFAULT_PREP_MOVE_HZ = 5000
+
+    def __init__(self, parent, model, controller):
+        super().__init__(parent)
+        self.model = model
+        self.controller = controller
+        self._entered = False
+        self._restore_queued = False
+        self._saved_refuel_pressure = self._read_float_setting(
+            ("get_target_refuel_pressure", "get_current_refuel_pressure"),
+            default=0.0,
+        )
+        if self._saved_refuel_pressure is None or self._saved_refuel_pressure < 0:
+            self._saved_refuel_pressure = 0.0
+        self._saved_refuel_pulse_width = self._read_int_setting(
+            ("get_refuel_pulse_width",),
+            default=None,
+        )
+
+        self.setWindowTitle("Refuel Vacuum Mode")
+        self.setModal(True)
+        self.setMinimumWidth(360)
+        self._build_ui()
+        self._set_controls_enabled(False)
+        QTimer.singleShot(0, self._enter_vacuum_mode)
+
+    def _machine_model(self):
+        return getattr(self.model, "machine_model", None)
+
+    def _read_float_setting(self, getter_names, default=None):
+        machine_model = self._machine_model()
+        for name in getter_names:
+            getter = getattr(machine_model, name, None)
+            if callable(getter):
+                try:
+                    return float(getter())
+                except Exception:
+                    pass
+        return default
+
+    def _read_int_setting(self, getter_names, default=None):
+        value = self._read_float_setting(getter_names, default=default)
+        if value is None:
+            return default
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _build_ui(self):
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        form = QtWidgets.QFormLayout()
+        form.setFieldGrowthPolicy(QtWidgets.QFormLayout.AllNonFixedFieldsGrow)
+
+        self.pressure_spin = QtWidgets.QDoubleSpinBox()
+        self.pressure_spin.setDecimals(2)
+        self.pressure_spin.setRange(self.MIN_PRESSURE_PSI, self.MAX_PRESSURE_PSI)
+        self.pressure_spin.setSingleStep(0.05)
+        self.pressure_spin.setValue(self.MIN_PRESSURE_PSI)
+        self.pressure_spin.valueChanged.connect(self._on_pressure_changed)
+        form.addRow("Refuel pressure (psi):", self.pressure_spin)
+
+        self.pulse_width_spin = QtWidgets.QSpinBox()
+        self.pulse_width_spin.setRange(100, 10000)
+        self.pulse_width_spin.setSingleStep(50)
+        self.pulse_width_spin.setValue(
+            int(self._saved_refuel_pulse_width)
+            if self._saved_refuel_pulse_width and self._saved_refuel_pulse_width >= 100
+            else 3000
+        )
+        self.pulse_width_spin.valueChanged.connect(self._on_pulse_width_changed)
+        form.addRow("Refuel pulse width (us):", self.pulse_width_spin)
+
+        self.pulse_count_spin = QtWidgets.QSpinBox()
+        self.pulse_count_spin.setRange(1, 1000)
+        self.pulse_count_spin.setValue(5)
+        form.addRow("Pulse count:", self.pulse_count_spin)
+        layout.addLayout(form)
+
+        button_row = QtWidgets.QHBoxLayout()
+        self.pulse_button = QtWidgets.QPushButton("Pulse Refuel")
+        self.pulse_button.clicked.connect(self._pulse_refuel)
+        self.loading_button = QtWidgets.QPushButton("Move to Loading")
+        self.loading_button.clicked.connect(self._move_to_loading)
+        button_row.addWidget(self.pulse_button)
+        button_row.addWidget(self.loading_button)
+        layout.addLayout(button_row)
+
+        self.status_label = QtWidgets.QLabel("Preparing refuel vacuum mode...")
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+
+        close_row = QtWidgets.QHBoxLayout()
+        close_row.addStretch(1)
+        self.restore_close_button = QtWidgets.QPushButton("Restore/Close")
+        self.restore_close_button.clicked.connect(self.accept)
+        close_row.addWidget(self.restore_close_button)
+        layout.addLayout(close_row)
+
+    def _set_controls_enabled(self, enabled):
+        for widget in (
+            self.pressure_spin,
+            self.pulse_width_spin,
+            self.pulse_count_spin,
+            self.pulse_button,
+            self.loading_button,
+        ):
+            widget.setEnabled(bool(enabled))
+
+    def _enter_vacuum_mode(self):
+        enter = getattr(self.controller, "enter_refuel_vacuum_mode", None)
+        if not callable(enter):
+            self.status_label.setText("Refuel vacuum mode is unavailable.")
+            return
+        result = enter(
+            target_psi=float(self.pressure_spin.value()),
+            prep_position_steps=self.DEFAULT_PREP_POSITION_STEPS,
+            move_hz=self.DEFAULT_PREP_MOVE_HZ,
+            handler=self._on_enter_completed,
+            manual=True,
+        )
+        if result is False:
+            self.status_label.setText("Failed to queue refuel vacuum mode.")
+
+    def _on_enter_completed(self):
+        if self._restore_queued:
+            return
+        self._entered = True
+        self._set_controls_enabled(True)
+        self.status_label.setText("Refuel vacuum mode active.")
+
+    def _on_pressure_changed(self, value):
+        if not self._entered:
+            return
+        setter = getattr(self.controller, "set_refuel_vacuum_pressure", None)
+        if callable(setter) and setter(float(value), manual=True) is not False:
+            self.status_label.setText(f"Queued refuel vacuum pressure {float(value):.2f} psi.")
+        else:
+            self.status_label.setText("Failed to queue refuel vacuum pressure.")
+
+    def _on_pulse_width_changed(self, value):
+        if not self._entered:
+            return
+        setter = getattr(self.controller, "set_refuel_pulse_width", None)
+        if callable(setter) and setter(int(value), manual=True) is not False:
+            self.status_label.setText(f"Queued refuel pulse width {int(value)} us.")
+        else:
+            self.status_label.setText("Failed to queue refuel pulse width.")
+
+    def _pulse_refuel(self):
+        pulse = getattr(self.controller, "refuel_only", None)
+        if callable(pulse):
+            pulse(int(self.pulse_count_spin.value()), manual=True)
+            self.status_label.setText(f"Queued {int(self.pulse_count_spin.value())} refuel pulses.")
+
+    def _move_to_loading(self):
+        mover = getattr(self.controller, "move_to_location", None)
+        if callable(mover) and mover("loading", manual=True) is not False:
+            self.status_label.setText("Queued move to loading.")
+        else:
+            self.status_label.setText("Failed to queue move to loading.")
+
+    def _queue_restore(self):
+        if self._restore_queued:
+            return
+        self._restore_queued = True
+        self._set_controls_enabled(False)
+        if self._saved_refuel_pulse_width is not None:
+            setter = getattr(self.controller, "set_refuel_pulse_width", None)
+            if callable(setter):
+                setter(int(self._saved_refuel_pulse_width), manual=True)
+        exit_mode = getattr(self.controller, "exit_refuel_vacuum_mode", None)
+        if callable(exit_mode):
+            exit_mode(float(self._saved_refuel_pressure), manual=True)
+        self.status_label.setText("Queued refuel vacuum restore.")
+
+    def accept(self):
+        self._queue_restore()
+        super().accept()
+
+    def reject(self):
+        self._queue_restore()
+        super().reject()
+
+    def closeEvent(self, event):
+        self._queue_restore()
+        super().closeEvent(event)
+
+
 class DropletImagingDialog(QtWidgets.QDialog):
     REFUEL_LEVEL_CHART_WINDOW_SAMPLES = 100
     REFUEL_LEVEL_CHART_FALLBACK_HEIGHT_PX = 100.0
@@ -952,6 +1148,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._stream_calibration_sequence_gripper_restore_attempted = False
         self._droplet_calibration_sequence_gripper_preamble_attempted = False
         self._droplet_calibration_sequence_gripper_restore_attempted = False
+        self._refuel_vacuum_dialog = None
         self._optics_session_active = False
         self._optics_session_dir = None
         self._optics_rejected_filenames = []
@@ -1458,6 +1655,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         )
         run_options_v.addWidget(self.enable_refuel_process_monitoring_checkbox)
 
+        self.refuel_vacuum_button = QtWidgets.QPushButton("Refuel Vacuum Mode")
+        self.refuel_vacuum_button.setToolTip("Open manual refuel dry-back controls.")
+        run_options_v.addWidget(self.refuel_vacuum_button)
+
         self.droplet_setup_widget = QtWidgets.QWidget()
         droplet_setup_grid = QtWidgets.QGridLayout(self.droplet_setup_widget)
         droplet_setup_grid.setContentsMargins(0, 0, 0, 0)
@@ -1937,6 +2138,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.enable_calibration_memory_checkbox.toggled.connect(self.set_calibration_memory_enabled)
         self.enable_refuel_level_tracking_checkbox.toggled.connect(self._set_refuel_tracking_enabled)
         self.enable_refuel_process_monitoring_checkbox.toggled.connect(self._set_refuel_process_monitoring_enabled)
+        self.refuel_vacuum_button.clicked.connect(self.open_refuel_vacuum_dialog)
         self.summary_current_run_checkbox.toggled.connect(self._refresh_summary_filters)
         self.summary_valid_only_checkbox.toggled.connect(self._refresh_summary_filters)
         self.summary_source_combo.currentIndexChanged.connect(self._refresh_summary_filters)
@@ -2310,6 +2512,24 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 except Exception:
                     pass
         self._schedule_refuel_level_panel_refresh(force=True)
+
+    def open_refuel_vacuum_dialog(self):
+        if DropletImagingDialog._is_calibration_busy(self):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Refuel Vacuum Mode",
+                "Finish the active calibration before entering refuel vacuum mode.",
+            )
+            return
+        existing = getattr(self, "_refuel_vacuum_dialog", None)
+        if existing is not None and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            return
+        dialog = RefuelVacuumDialog(self, self.model, self.controller)
+        self._refuel_vacuum_dialog = dialog
+        dialog.finished.connect(lambda _result: setattr(self, "_refuel_vacuum_dialog", None))
+        dialog.open()
 
     def _start_refuel_monitor(self):
         if self.refuel_camera_model is None:
@@ -8242,6 +8462,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 return
 
         self._stream_capture_dialog_closing = True
+        refuel_vacuum_dialog = getattr(self, "_refuel_vacuum_dialog", None)
+        if refuel_vacuum_dialog is not None:
+            try:
+                refuel_vacuum_dialog.close()
+            except Exception:
+                pass
         if getattr(self, "_optics_session_active", False):
             try:
                 self.model.droplet_camera_model.stop_saving()

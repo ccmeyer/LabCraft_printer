@@ -329,6 +329,62 @@ def _raw_pressure_regulator_selftest():
     }
 
 
+def _raw_refuel_vacuum_selftest():
+    return {
+        "run_id": 6789,
+        "profile": "FULL",
+        "started_at": "2026-05-13T00:00:00Z",
+        "finished_at": "2026-05-13T00:03:00Z",
+        "aborted": False,
+        "summary": {"total": 2, "passed": 2, "failed": 0},
+        "results": [
+            {
+                "test_id": 2220,
+                "name": "refuel_vacuum_sensor_shift_factory",
+                "pass": True,
+                "metrics": {
+                    "pre": 1638,
+                    "post": 1642,
+                    "shift": 4,
+                    "pre_sp": 6,
+                    "post_sp": 5,
+                    "pre_n": 60,
+                    "post_n": 60,
+                    "rej": 0,
+                    "rail": 0,
+                    "spike": 0,
+                    "fault": 0,
+                    "to": 0,
+                    "trace": 1,
+                },
+            },
+            {
+                "test_id": 2221,
+                "name": "refuel_vacuum_cycle_repeatability_factory",
+                "pass": True,
+                "metrics": {
+                    "cyc": 20,
+                    "neg_n": 20,
+                    "zero_n": 20,
+                    "n_span": 30,
+                    "z_span": 25,
+                    "nps": 2000,
+                    "zps": 1800,
+                    "err": 20,
+                    "settle": 700,
+                    "guard": 0,
+                    "ma": 30000,
+                    "md": 7000,
+                    "rej": 0,
+                    "to": 0,
+                    "trace": 1,
+                },
+            },
+        ],
+        "host_checks": [{"name": "hello_ack", "pass": True, "details": {"seq8": 1}}],
+    }
+
+
 def _raw_valve_characterization_selftest():
     common = {
         "psi": 2000,
@@ -525,6 +581,10 @@ def _motion_envelope_manifest_ref():
 
 def _pressure_regulator_manifest_ref():
     return "pressure_regulator_v1"
+
+
+def _refuel_vacuum_manifest_ref():
+    return "refuel_vacuum_v1"
 
 
 def _valve_characterization_manifest_ref():
@@ -919,6 +979,45 @@ def test_pressure_regulator_manifest_rejects_missing_required_fixture(tmp_path):
     assert result.report["host_checks"][0]["details"]["allowed_fixture_ids"] == ["pressure_closed_loop_v1"]
 
 
+def test_refuel_vacuum_manifest_rejects_without_operator_prompts(tmp_path):
+    called = False
+
+    def fake_invoker(_invocation):
+        nonlocal called
+        called = True
+        return 0
+
+    result = run_qualification(
+        manifest_ref=_refuel_vacuum_manifest_ref(),
+        machine_id="LC-0001",
+        identity_path=tmp_path / "local" / "machine_identity.json",
+        output_root=tmp_path / "qualification",
+        fixture_id="refuel_vacuum_dry_back_v1",
+        operator_prompts=False,
+        invoker=fake_invoker,
+    )
+
+    assert result.returncode == 3
+    assert called is False
+    assert result.report["host_checks"][0]["name"] == "operator_prompts_required"
+
+
+def test_refuel_vacuum_manifest_rejects_missing_required_fixture(tmp_path):
+    result = run_qualification(
+        manifest_ref=_refuel_vacuum_manifest_ref(),
+        machine_id="LC-0001",
+        identity_path=tmp_path / "local" / "machine_identity.json",
+        output_root=tmp_path / "qualification",
+        operator_prompts=True,
+        invoker=lambda _invocation: 0,
+        prompter=lambda _message: None,
+    )
+
+    assert result.returncode == 3
+    assert result.report["host_checks"][0]["name"] == "fixture_required"
+    assert result.report["host_checks"][0]["details"]["allowed_fixture_ids"] == ["refuel_vacuum_dry_back_v1"]
+
+
 def test_valve_characterization_manifest_rejects_without_operator_prompts(tmp_path):
     called = False
 
@@ -1038,6 +1137,49 @@ def test_pressure_regulator_operator_prompt_runs_selected_suite_without_gripper_
     assert "hardware envelope is clear" in events[0]
     assert events == [events[0], "self-test"]
     assert result.report["run"]["fixture_id"] == "pressure_closed_loop_v1"
+    assert [item["stage"] for item in result.report["operator_interactions"]] == ["confirm_fixture_setup"]
+    assert result.report["overall_status"] == "pass"
+
+
+def test_refuel_vacuum_operator_prompt_runs_selected_suite_without_gripper_teardown(tmp_path):
+    events = []
+
+    def fake_prompter(message):
+        events.append(f"prompt:{message}")
+
+    def fake_invoker(invocation):
+        events.append("self-test")
+        assert "--refuel-vacuum-suite" in invocation.command
+        assert "--pressure-trace" in invocation.command
+        assert "--pressure-regulator-suite" not in invocation.command
+        assert "--gripper-seal-suite" not in invocation.command
+        invocation.raw_report_path.write_text(json.dumps(_raw_refuel_vacuum_selftest()), encoding="utf-8")
+        return 0
+
+    def fake_gripper_control(action, port, baud):
+        raise AssertionError(f"Refuel vacuum suite should not call gripper control: {action}:{port}:{baud}")
+
+    result = run_qualification(
+        manifest_ref=_refuel_vacuum_manifest_ref(),
+        port="/dev/ttyAMA0",
+        baud=115200,
+        machine_id="LC-0001",
+        identity_path=tmp_path / "local" / "machine_identity.json",
+        output_root=tmp_path / "qualification",
+        timeout_ms=300000,
+        fixture_id="refuel_vacuum_dry_back_v1",
+        operator_prompts=True,
+        invoker=fake_invoker,
+        prompter=fake_prompter,
+        gripper_control=fake_gripper_control,
+    )
+
+    assert result.returncode == 0
+    assert events[0].startswith("prompt:Confirm qualification setup")
+    assert "refuel_vacuum_dry_back_v1" in events[0]
+    assert "no reagent is loaded" in events[0]
+    assert events == [events[0], "self-test"]
+    assert result.report["run"]["fixture_id"] == "refuel_vacuum_dry_back_v1"
     assert [item["stage"] for item in result.report["operator_interactions"]] == ["confirm_fixture_setup"]
     assert result.report["overall_status"] == "pass"
 

@@ -88,6 +88,7 @@ void PressureRegulator::begin(
   _stepping  = false;
   _homing    = false;
   _resetting = false;
+  _vacuumMode = false;
   _readyCfg.readyTolRaw = PressureRegulatorMath::defaultReadyTolRaw(_sensorPort);
   _printTol = _readyCfg.readyTolRaw;
   _doneBit = doneBit;
@@ -295,7 +296,7 @@ void PressureRegulator::start() {
     measured = static_cast<int32_t>(PressureSensor::instance()->getLatestRaw(_sensorPort));
   }
   int32_t rampStart = measured;
-  if (rampStart < _minTarget) rampStart = _minTarget;
+  if (rampStart < activeMinTarget()) rampStart = activeMinTarget();
   if (rampStart > _maxTarget) rampStart = _maxTarget;
   seedControlTarget(rampStart, HAL_GetTick());
   _targetTransitionMonitorActive = (rampStart != _target) && (_stepper != nullptr);
@@ -458,7 +459,7 @@ static inline float clampf(float v, float lo, float hi) {
 void PressureRegulator::setTargetSafe(int32_t requested) {
 		  PressureRegulatorMath::TargetLimits limits{};
 		  limits.currentTarget = _target;
-		  limits.minTarget = _minTarget;
+		  limits.minTarget = activeMinTarget();
 		  limits.maxTarget = _maxTarget;
 		  limits.maxCmdStep = _maxCmdStep;
 		  limits.maxRelStep = _maxRelStep;
@@ -468,7 +469,7 @@ void PressureRegulator::setTargetSafe(int32_t requested) {
 void PressureRegulator::setRelativeTargetSafe(bool sign, int32_t delta) {
 		  PressureRegulatorMath::TargetLimits limits{};
 		  limits.currentTarget = _target;
-		  limits.minTarget = _minTarget;
+		  limits.minTarget = activeMinTarget();
 		  limits.maxTarget = _maxTarget;
 		  limits.maxCmdStep = _maxCmdStep;
 		  limits.maxRelStep = _maxRelStep;
@@ -620,6 +621,119 @@ void PressureRegulator::resetSyringe(CrashTaskId callerWatchdogTaskId) {
     _resetting = false;
 }
 
+bool PressureRegulator::enterVacuumMode(int32_t targetRaw,
+                                        uint32_t prepPositionSteps,
+                                        uint32_t moveHz,
+                                        CrashTaskId callerWatchdogTaskId) {
+    if (_stepper == nullptr) {
+      Logger::instance()->log("[PReg] Vacuum enter failed: no stepper\r\n");
+      return false;
+    }
+
+    if (prepPositionSteps == 0u) prepPositionSteps = 20000u;
+    if (moveHz == 0u) moveHz = 5000u;
+
+    if (targetRaw < _vacuumMinTarget) targetRaw = _vacuumMinTarget;
+    if (targetRaw > _minTarget) targetRaw = _minTarget;
+
+    Printer::instance()->pauseDispense();
+    homeWithValveFast();
+    const auto homeSnapshot = _stepper->getLastHomeDiagnosticSnapshot();
+    if (!homeSnapshot.success) {
+      _vacuumMode = false;
+      _resetting = false;
+      closeValve();
+      Printer::instance()->cancelDispense();
+      Logger::instance()->log("[PReg] Vacuum enter failed: refuel home failed\r\n");
+      return false;
+    }
+
+    pause();
+    _resetting = true;
+    openValve();
+
+    if (_stepping) {
+      _stepper->stop();
+      _stepping = false;
+      vTaskDelay(pregMsToAtLeast1Tick(10u));
+    }
+
+    auto checkInCaller = [&]() {
+      if (callerWatchdogTaskId != CRASH_TASK_NONE) {
+        Watchdog_CheckIn(callerWatchdogTaskId);
+      }
+    };
+
+    _stepper->enableMotor();
+    _stepper->moveTo(true, prepPositionSteps, moveHz, 2000u);
+    const uint32_t timeoutMs = Stepper::recommendedWaitTimeoutMs(prepPositionSteps, moveHz);
+    const uint32_t startMs = HAL_GetTick();
+    const TickType_t waitPeriod = pregMsToAtLeast1Tick(5u);
+    bool moveOk = true;
+    while (_stepper->isBusy()) {
+      checkInCaller();
+      vTaskDelay(waitPeriod);
+      if ((HAL_GetTick() - startMs) >= timeoutMs) {
+        _stepper->stop();
+        moveOk = false;
+        break;
+      }
+    }
+
+    closeValve();
+    _resetting = false;
+
+    if (!moveOk) {
+      _vacuumMode = false;
+      Printer::instance()->cancelDispense();
+      Logger::instance()->log("[PReg] Vacuum enter failed: prep move timed out\r\n");
+      return false;
+    }
+
+    _vacuumMode = true;
+    updateRequestedTarget(targetRaw);
+    start();
+    Printer::instance()->resumeDispense();
+    Logger::instance()->log("[PReg] Vacuum mode active target=%ld prep=%lu\r\n",
+                            (long)targetRaw,
+                            (unsigned long)prepPositionSteps);
+    return true;
+}
+
+bool PressureRegulator::setVacuumTargetSafe(int32_t requested) {
+    if (!_vacuumMode) {
+      Logger::instance()->log("[PReg] Vacuum target ignored: mode inactive\r\n");
+      return false;
+    }
+    if (requested < _vacuumMinTarget) requested = _vacuumMinTarget;
+    if (requested > _minTarget) requested = _minTarget;
+    updateRequestedTarget(requested);
+    return true;
+}
+
+bool PressureRegulator::exitVacuumMode(int32_t restoreTargetRaw,
+                                       CrashTaskId callerWatchdogTaskId) {
+    const bool wasVacuumMode = _vacuumMode;
+    pause();
+    _vacuumMode = false;
+
+    if (restoreTargetRaw < _minTarget) restoreTargetRaw = _minTarget;
+    if (restoreTargetRaw > _maxTarget) restoreTargetRaw = _maxTarget;
+
+    if (wasVacuumMode) {
+      resetSyringe(callerWatchdogTaskId);
+    } else {
+      closeValve();
+    }
+
+    updateRequestedTarget(restoreTargetRaw);
+    start();
+    Printer::instance()->resumeDispense();
+    Logger::instance()->log("[PReg] Vacuum mode exited restore=%ld\r\n",
+                            (long)restoreTargetRaw);
+    return true;
+}
+
 void PressureRegulator::homeWithValveFast(){
 	homeWithValve(kHomeFastHzDefault, kHomeSlowHzDefault, kHomeBackoffDefault);
 }
@@ -704,11 +818,12 @@ void PressureRegulator::controlLoop() {
     int32_t pressure = static_cast<int32_t>(controlSample.raw);
 
     // sanity bounds on target
-    if (_target < _minTarget || _target > _maxTarget) {
+    const int32_t minTarget = activeMinTarget();
+    if (_target < minTarget || _target > _maxTarget) {
       Logger::instance()->log("[PReg] target out of range: %ld\r\n", (long)_target);
       // bring target back gently toward measured within rails
       int32_t clampedTarget = _target;
-      if (clampedTarget < _minTarget) clampedTarget = _minTarget;
+      if (clampedTarget < minTarget) clampedTarget = minTarget;
       if (clampedTarget > _maxTarget) clampedTarget = _maxTarget;
       updateRequestedTarget(clampedTarget);
       vTaskDelay(period);

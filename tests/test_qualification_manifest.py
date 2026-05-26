@@ -174,6 +174,25 @@ def test_load_pressure_regulator_manifest_requires_operator_closed_loop_fixture(
     assert manifest.analysis_rules["2219"]["metrics"]["err_max"]["max"] == 8
 
 
+def test_load_refuel_vacuum_manifest_requires_operator_dry_fixture():
+    manifest = load_manifest("refuel_vacuum_v1")
+
+    assert manifest.manifest_id == "refuel_vacuum_v1"
+    assert manifest.profile == "FULL"
+    assert manifest.expected_test_ids == (2220, 2221)
+    assert manifest.enforce_expected_test_ids is True
+    assert manifest.requires_operator_prompts is True
+    assert manifest.selftest_args == ("--refuel-vacuum-suite", "--pressure-trace")
+    assert {item["fixture_id"] for item in manifest.fixtures} == {"refuel_vacuum_dry_back_v1"}
+    assert manifest.analysis_rules["2220"]["metrics"]["shift"]["max"] == 120
+    assert manifest.analysis_rules["2220"]["metrics"]["fault"]["equals"] == 0
+    assert manifest.analysis_rules["2220"]["metrics"]["trace"]["equals"] == 1
+    assert manifest.analysis_rules["2221"]["metrics"]["cyc"]["equals"] == 20
+    assert manifest.analysis_rules["2221"]["metrics"]["err"]["max"] == 120
+    assert manifest.analysis_rules["2221"]["metrics"]["ma"]["max"] == 80000
+    assert manifest.analysis_rules["2221"]["metrics"]["md"]["max"] == 50000
+
+
 def test_load_valve_characterization_manifest_requires_operator_closed_loop_fixture():
     manifest = load_manifest("valve_characterization_v1")
 

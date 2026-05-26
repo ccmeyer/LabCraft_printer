@@ -1791,6 +1791,9 @@ CMD_MAP = {
     'DISABLE_PRINT_PROFILE': 0x61,
 
     'SET_GRIPPER_PARAMS': 0x62,
+    'REFUEL_VACUUM_ENTER': 0x65,
+    'REFUEL_VACUUM_SET_TARGET': 0x66,
+    'REFUEL_VACUUM_EXIT': 0x67,
 
     'START_READ_CAMERA': 0xC0,
     'STOP_READ_CAMERA': 0xC1,
@@ -4438,7 +4441,7 @@ class Machine(QObject):
     def set_absolute_refuel_pressure(self,psi,handler=None,kwargs=None,manual=False,trace_metadata=None):
         pressure = self.convert_to_raw_pressure(psi)
         print('Setting absolute refuel pressure:',pressure)
-        if self.check_param_limits(pressure,0,10376):
+        if self.check_param_limits(pressure,self.psi_offset,10376):
             return self.add_command_to_queue(
                 'ABSOLUTE_PRESSURE_R',
                 pressure,
@@ -4449,6 +4452,84 @@ class Machine(QObject):
                 manual=manual,
                 trace_metadata=trace_metadata,
             )
+
+    def _validate_refuel_vacuum_pressure(self, psi):
+        try:
+            psi = float(psi)
+        except (TypeError, ValueError):
+            print(f'Refuel vacuum pressure is invalid: {psi}')
+            return None
+        if psi < -1.0 or psi > 0.0:
+            print(f'Refuel vacuum pressure out of range (-1.0, 0.0): {psi}')
+            return None
+        return psi
+
+    def enter_refuel_vacuum_mode(
+        self,
+        target_psi=-1.0,
+        prep_position_steps=20000,
+        move_hz=5000,
+        handler=None,
+        kwargs=None,
+        manual=False,
+    ):
+        target_psi = self._validate_refuel_vacuum_pressure(target_psi)
+        if target_psi is None:
+            return False
+        target_raw = self.convert_to_raw_pressure(target_psi)
+        if (
+            self.check_param_limits(target_raw, 764, self.psi_offset)
+            and self.check_param_limits(int(prep_position_steps), 1, 100000)
+            and self.check_param_limits(int(move_hz), 1, 40000)
+        ):
+            return self.add_command_to_queue(
+                'REFUEL_VACUUM_ENTER',
+                int(target_raw),
+                int(prep_position_steps),
+                int(move_hz),
+                handler=handler,
+                kwargs=kwargs,
+                manual=manual,
+            )
+        return False
+
+    def set_refuel_vacuum_pressure(self, pressure_psi, handler=None, kwargs=None, manual=False):
+        pressure_psi = self._validate_refuel_vacuum_pressure(pressure_psi)
+        if pressure_psi is None:
+            return False
+        target_raw = self.convert_to_raw_pressure(pressure_psi)
+        if self.check_param_limits(target_raw, 764, self.psi_offset):
+            return self.add_command_to_queue(
+                'REFUEL_VACUUM_SET_TARGET',
+                int(target_raw),
+                0,
+                0,
+                handler=handler,
+                kwargs=kwargs,
+                manual=manual,
+            )
+        return False
+
+    def exit_refuel_vacuum_mode(self, restore_pressure_psi, handler=None, kwargs=None, manual=False):
+        try:
+            restore_pressure_psi = float(restore_pressure_psi)
+        except (TypeError, ValueError):
+            print(f'Refuel vacuum restore pressure is invalid: {restore_pressure_psi}')
+            return False
+        if restore_pressure_psi < 0:
+            restore_pressure_psi = 0.0
+        restore_raw = self.convert_to_raw_pressure(restore_pressure_psi)
+        if self.check_param_limits(restore_raw, self.psi_offset, 10376):
+            return self.add_command_to_queue(
+                'REFUEL_VACUUM_EXIT',
+                int(restore_raw),
+                0,
+                0,
+                handler=handler,
+                kwargs=kwargs,
+                manual=manual,
+            )
+        return False
 
     def set_print_pulse_width(self,pulse_width,handler=None,kwargs=None,manual=False,trace_metadata=None):
         if self.check_param_limits(pulse_width,100,10000):

@@ -87,6 +87,8 @@ static constexpr DiagnosticTestDescriptor kDiagnosticTests[] = {
     {2217u, "pressure_motor_hysteresis_refuel_factory", "pressure", "FULL", "explicit_selection"},
     {2218u, "pressure_step_ladder_print_factory", "pressure", "FULL", "explicit_selection"},
     {2219u, "pressure_step_ladder_refuel_factory", "pressure", "FULL", "explicit_selection"},
+    {2220u, "refuel_vacuum_sensor_shift_factory", "pressure", "FULL", "explicit_selection"},
+    {2221u, "refuel_vacuum_cycle_repeatability_factory", "pressure", "FULL", "explicit_selection"},
     {2004u, "valve_actuation_sequence_full", "pressure", "FULL", "safe_gate_or_full"},
     {2005u, "print_refuel_pulse_integrity_full", "pulse", "FULL", "safe_gate_or_full"},
     {2401u, "print_valve_pulse_drop_repeatability_factory", "pulse", "FULL", "safe_gate_or_full"},
@@ -188,6 +190,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
     const bool runXyMotionSuite = (selectedDiagnosticId == 2009u);
     const bool runMotionEnvelopeSuite = (selectedDiagnosticId == 2019u);
     const bool runPressureRegulatorSuite = (selectedDiagnosticId == 2299u);
+    const bool runRefuelVacuumSuite = (selectedDiagnosticId == 2298u);
     const bool runValveCharacterizationSuite = (selectedDiagnosticId == 2499u);
     const bool runValveGapSweepSuite = (selectedDiagnosticId == 2498u);
     const bool runPressureSweepCore = (selectedPressureTraceTest == 2301u);
@@ -198,7 +201,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
     const bool runSinglePressureTraceSelection =
         (selectedPressureTraceTest >= 2101u) && (selectedPressureTraceTest <= 2104u);
                   auto shouldRunPressureTraceCase = [&](uint16_t testId) {
-                    if (runPressureSweepCore || runPressureSweepExtended || runPressureSweepFocused || runPressureSweepMicro || runGripperSealSuite || runGripperSealStressSuite || runXyMotionSuite || runMotionEnvelopeSuite || runPressureRegulatorSuite || runValveCharacterizationSuite || runValveGapSweepSuite) {
+                    if (runPressureSweepCore || runPressureSweepExtended || runPressureSweepFocused || runPressureSweepMicro || runGripperSealSuite || runGripperSealStressSuite || runXyMotionSuite || runMotionEnvelopeSuite || runPressureRegulatorSuite || runRefuelVacuumSuite || runValveCharacterizationSuite || runValveGapSweepSuite) {
                       return false;
                     }
                     if (runSinglePressureTraceSelection) {
@@ -3309,6 +3312,481 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                       auto psiToRaw = [](uint32_t psiMilli) -> uint16_t {
                         return PressureQualificationMath::pressureRawFromPsiMilli(psiMilli);
                       };
+
+                      if (runRefuelVacuumSuite) {
+                        static constexpr uint8_t kRefuelChannel = 1u;
+                        static constexpr int32_t kVacuumRaw =
+                            PressureQualificationMath::pressureRawFromSignedPsiMilli(-1000);
+                        static constexpr int32_t kAtmosphereRaw =
+                            PressureQualificationMath::pressureRawFromSignedPsiMilli(0);
+                        static constexpr uint16_t kVacuumValidationMinRaw =
+                            static_cast<uint16_t>(PressureQualificationMath::pressureRawFromSignedPsiMilli(-1600));
+                        static constexpr uint16_t kVacuumValidationMaxStepRaw = 1400u;
+                        static constexpr uint32_t kVacuumPrepPositionSteps = 20000u;
+                        static constexpr uint32_t kVacuumPrepMoveHz = 5000u;
+                        static constexpr uint32_t kAtmosphereSettleMs = 500u;
+                        static constexpr uint32_t kAtmosphereSampleMs = 1500u;
+                        static constexpr uint32_t kAtmosphereSamplePeriodMs = 25u;
+                        static constexpr uint32_t kVacuumCycleCount = 20u;
+                        static constexpr uint32_t kVacuumSettleTimeoutMs = 3000u;
+                        static constexpr uint32_t kVacuumAcceptTolRaw = 120u;
+                        static constexpr uint32_t kVacuumAtmosphereShiftMaxRaw = 120u;
+                        static constexpr uint32_t kVacuumMotorGuardAbsSteps = 80000u;
+                        static constexpr uint32_t kVacuumMotorGuardDeltaSteps = 50000u;
+
+#if (LC_PRESSURE_PORTS <= 1)
+                        if (!runOne(2220,
+                                    "refuel_vacuum_sensor_shift_factory",
+                                    false,
+                                    "gate=no_refuel_port;pre=0;post=0;shift=0;pre_sp=0;post_sp=0;pre_n=0;post_n=0;rej=0;rail=0;spike=0;fault=1;to=0;trace=0")) {
+                          return finishSelfTestNow();
+                        }
+                        if (!runOne(2221,
+                                    "refuel_vacuum_cycle_repeatability_factory",
+                                    false,
+                                    "gate=no_refuel_port;cyc=0;neg_n=0;zero_n=0;n_span=0;z_span=0;nps=0;zps=0;err=0;settle=0;guard=0;ma=0;md=0;rej=0;to=0;trace=0")) {
+                          return finishSelfTestNow();
+                        }
+                        return finishSelfTestNow();
+#else
+                        PressureSensor* sensor = PressureSensor::instance();
+                        Stepper* stepper = Stepper::stepperR();
+                        if ((sensor == nullptr) || (sensor->numPorts() <= kRefuelChannel) || (stepper == nullptr)) {
+                          if (!runOne(2220,
+                                      "refuel_vacuum_sensor_shift_factory",
+                                      false,
+                                      "gate=no_refuel_channel;pre=0;post=0;shift=0;pre_sp=0;post_sp=0;pre_n=0;post_n=0;rej=0;rail=0;spike=0;fault=1;to=0;trace=0")) {
+                            return finishSelfTestNow();
+                          }
+                          if (!runOne(2221,
+                                      "refuel_vacuum_cycle_repeatability_factory",
+                                      false,
+                                      "gate=no_refuel_channel;cyc=0;neg_n=0;zero_n=0;n_span=0;z_span=0;nps=0;zps=0;err=0;settle=0;guard=0;ma=0;md=0;rej=0;to=0;trace=0")) {
+                            return finishSelfTestNow();
+                          }
+                          return finishSelfTestNow();
+                        }
+
+                        struct VacuumSampleStats {
+                          uint32_t count = 0u;
+                          int64_t sum = 0;
+                          int32_t first = 0;
+                          int32_t last = 0;
+                          int32_t minValue = 0;
+                          int32_t maxValue = 0;
+                        };
+
+                        auto updateVacuumStats = [](VacuumSampleStats& stats, int32_t value) {
+                          if (stats.count == 0u) {
+                            stats.first = value;
+                            stats.minValue = value;
+                            stats.maxValue = value;
+                          }
+                          stats.last = value;
+                          if (value < stats.minValue) stats.minValue = value;
+                          if (value > stats.maxValue) stats.maxValue = value;
+                          stats.sum += static_cast<int64_t>(value);
+                          stats.count++;
+                        };
+
+                        auto meanVacuumStats = [](const VacuumSampleStats& stats) -> int32_t {
+                          return (stats.count == 0u)
+                              ? 0
+                              : static_cast<int32_t>(stats.sum / static_cast<int64_t>(stats.count));
+                        };
+
+                        auto spanVacuumStats = [](const VacuumSampleStats& stats) -> uint32_t {
+                          return (stats.count == 0u)
+                              ? 0u
+                              : PressureQualificationMath::absDiff(stats.maxValue, stats.minValue);
+                        };
+
+                        auto deltaCounter32 = [](uint32_t start, uint32_t finish) -> uint32_t {
+                          return (finish >= start) ? (finish - start) : 0u;
+                        };
+
+                        auto readRefuelPressurePositionSample = [&]() {
+                          PressurePositionSample sample{};
+                          const auto controlSample = sensor->getControlSample(kRefuelChannel);
+                          sample.pressureRaw = static_cast<int32_t>(controlSample.raw);
+                          sample.pressureAvg = static_cast<int32_t>(controlSample.avg);
+                          sample.motorPosition = stepper->getPosition();
+                          return sample;
+                        };
+
+                        PressureRegulator& reg = PressureRegulator::regR();
+                        const int32_t savedTargetRaw =
+                            (static_cast<int32_t>(reg.getTarget()) < kAtmosphereRaw)
+                                ? kAtmosphereRaw
+                                : static_cast<int32_t>(reg.getTarget());
+                        const PressureSensor::ValidationConfig savedValidation =
+                            sensor->getValidationConfig(kRefuelChannel);
+                        bool validationChanged = false;
+                        bool focusActive = false;
+                        bool vacuumEntered = false;
+                        bool traceStarted = false;
+                        bool traceExportOk = true;
+                        uint32_t traceStartTick = 0u;
+
+                        auto cleanupVacuumSuite = [&]() {
+                          if (traceStarted) {
+                            PressureTraceRecorder::instance().stop(HAL_GetTick());
+                            traceStarted = false;
+                          }
+                          if (focusActive) {
+                            sensor->endDiagnosticFocus();
+                            focusActive = false;
+                          }
+                          if (vacuumEntered) {
+                            (void)reg.exitVacuumMode(savedTargetRaw, CRASH_TASK_ORCH);
+                            vacuumEntered = false;
+                          } else {
+                            reg.pause();
+                            reg.closeValve();
+                          }
+                          if (validationChanged) {
+                            sensor->setValidationConfig(kRefuelChannel, savedValidation);
+                            validationChanged = false;
+                          }
+                        };
+
+                        auto recordVacuumMotorEvent = [&](int32_t motorPosition) {
+                          if (!traceStarted) {
+                            return;
+                          }
+                          const uint32_t dt = HAL_GetTick() - traceStartTick;
+                          const uint32_t encoded = static_cast<uint32_t>(motorPosition);
+                          PressureTraceEvent event{};
+                          event.dtMs = static_cast<uint16_t>((dt > 0xFFFFu) ? 0xFFFFu : dt);
+                          event.type = static_cast<uint8_t>(PressureTraceEventType::MotorPosition);
+                          event.value0 = static_cast<uint16_t>(encoded & 0xFFFFu);
+                          event.value1 = static_cast<uint16_t>((encoded >> 16) & 0xFFFFu);
+                          PressureTraceRecorder::instance().recordEvent(PressureTraceChannel::Refuel, event);
+                        };
+
+                        auto collectAtmosphereStats = [&](VacuumSampleStats& stats,
+                                                          const char* stage) -> bool {
+                          reg.pause();
+                          reg.openValve();
+                          if (!delayWithWatchdog(kAtmosphereSettleMs, stage)) {
+                            reg.closeValve();
+                            return false;
+                          }
+                          const uint32_t startMs = HAL_GetTick();
+                          while ((HAL_GetTick() - startMs) < kAtmosphereSampleMs) {
+                            Watchdog_CheckIn(CRASH_TASK_ORCH);
+                            maybeSendProgress(stage);
+                            if (_selfTestAbortRequested) {
+                              reg.closeValve();
+                              return false;
+                            }
+                            const auto sample = sensor->getControlSample(kRefuelChannel);
+                            updateVacuumStats(stats, static_cast<int32_t>(sample.raw));
+                            vTaskDelay(msToAtLeast1Tick(kAtmosphereSamplePeriodMs));
+                          }
+                          reg.closeValve();
+                          return stats.count > 0u;
+                        };
+
+                        const PressureQualificationMath::MotorTravelGuardLimits motorGuardLimits{
+                            kVacuumMotorGuardAbsSteps,
+                            kVacuumMotorGuardDeltaSteps,
+                        };
+                        PressureQualificationMath::MotorTravelGuardState guardState{};
+                        uint32_t guardCount = 0u;
+
+                        auto waitVacuumTarget = [&](int32_t targetRaw,
+                                                    const char* stage) -> PressureWaitResult {
+                          PressureWaitResult result{};
+                          const auto startSample = sensor->getControlSample(kRefuelChannel);
+                          const bool stepUp = static_cast<int32_t>(startSample.raw) <= targetRaw;
+                          const int32_t transitionStartPosition = stepper->getPosition();
+                          (void)PressureQualificationMath::updateMotorTravelGuard(
+                              transitionStartPosition,
+                              transitionStartPosition,
+                              motorGuardLimits,
+                              guardState);
+                          if (!reg.setVacuumTargetSafe(targetRaw)) {
+                            return result;
+                          }
+                          const uint32_t startMs = HAL_GetTick();
+                          int32_t peakPressure = sensor->getPressure(kRefuelChannel);
+                          int32_t troughPressure = peakPressure;
+                          while ((HAL_GetTick() - startMs) < kVacuumSettleTimeoutMs) {
+                            Watchdog_CheckIn(CRASH_TASK_ORCH);
+                            maybeSendProgress(stage);
+                            const int32_t pos = stepper->getPosition();
+                            if (PressureQualificationMath::updateMotorTravelGuard(
+                                    pos,
+                                    transitionStartPosition,
+                                    motorGuardLimits,
+                                    guardState)) {
+                              result.motorGuarded = true;
+                              guardCount++;
+                              reg.pause();
+                              reg.closeValve();
+                              break;
+                            }
+                            const int32_t pressure = sensor->getPressure(kRefuelChannel);
+                            if (pressure > peakPressure) peakPressure = pressure;
+                            if (pressure < troughPressure) troughPressure = pressure;
+                            const auto sample = sensor->getControlSample(kRefuelChannel);
+                            const uint32_t err =
+                                PressureQualificationMath::absDiff(static_cast<int32_t>(sample.raw), targetRaw);
+                            if (reg.isPressureOk() ||
+                                (!reg.isTargetRamping() && (err <= kVacuumAcceptTolRaw))) {
+                              result.readySeen = true;
+                              break;
+                            }
+                            if (_selfTestAbortRequested) {
+                              result.aborted = true;
+                              break;
+                            }
+                            vTaskDelay(pdMS_TO_TICKS(20));
+                          }
+                          result.settleMs = HAL_GetTick() - startMs;
+                          result.readyFinal = reg.isPressureOk();
+                          const int32_t finalAvgPressure = sensor->getPressure(kRefuelChannel);
+                          const auto finalSample = sensor->getControlSample(kRefuelChannel);
+                          result.controlError =
+                              PressureQualificationMath::absDiff(static_cast<int32_t>(finalSample.raw), targetRaw);
+                          result.avgError = PressureQualificationMath::absDiff(finalAvgPressure, targetRaw);
+                          if (stepUp) {
+                            result.overshoot = (peakPressure > targetRaw)
+                                ? static_cast<uint32_t>(peakPressure - targetRaw)
+                                : 0u;
+                          } else {
+                            result.overshoot = (troughPressure < targetRaw)
+                                ? static_cast<uint32_t>(targetRaw - troughPressure)
+                                : 0u;
+                          }
+                          result.accepted = !result.aborted &&
+                              !result.motorGuarded &&
+                              (result.readySeen || result.readyFinal ||
+                               (!reg.isTargetRamping() && (result.controlError <= kVacuumAcceptTolRaw)));
+                          return result;
+                        };
+
+                        PressureSensor::ValidationConfig vacuumValidation = savedValidation;
+                        vacuumValidation.minRaw = kVacuumValidationMinRaw;
+                        vacuumValidation.maxStepPerSample = kVacuumValidationMaxStepRaw;
+                        sensor->setValidationConfig(kRefuelChannel, vacuumValidation);
+                        validationChanged = true;
+
+                        focusActive = sensor->beginDiagnosticFocus(kRefuelChannel);
+                        const auto startCounters = sensor->getControlSample(kRefuelChannel);
+                        VacuumSampleStats preAtmosphere{};
+                        VacuumSampleStats postAtmosphere{};
+                        int32_t negPressures[kVacuumCycleCount]{};
+                        int32_t zeroPressures[kVacuumCycleCount]{};
+                        int32_t negPositions[kVacuumCycleCount]{};
+                        int32_t zeroPositions[kVacuumCycleCount]{};
+                        size_t negCount = 0u;
+                        size_t zeroCount = 0u;
+                        uint32_t cyclesCompleted = 0u;
+                        uint32_t settleMaxMs = 0u;
+                        uint32_t errMax = 0u;
+                        uint32_t timeoutCount = 0u;
+                        bool enterOk = false;
+                        bool preAtmosphereOk = false;
+                        bool postAtmosphereOk = false;
+
+                        if (exportPressureTrace) {
+                          PressureTraceRecorder::instance().reset();
+                        }
+
+                        if (focusActive) {
+                          sendProgressStage("refuel_vacuum_pre_atm");
+                          preAtmosphereOk = collectAtmosphereStats(preAtmosphere, "refuel_vacuum_pre_atm");
+                          if (!preAtmosphereOk) timeoutCount++;
+                        } else {
+                          timeoutCount++;
+                        }
+
+                        if (preAtmosphereOk && !_selfTestAbortRequested) {
+                          sendProgressStage("refuel_vacuum_enter");
+                          enterOk = reg.enterVacuumMode(
+                              kVacuumRaw,
+                              kVacuumPrepPositionSteps,
+                              kVacuumPrepMoveHz,
+                              CRASH_TASK_ORCH);
+                          vacuumEntered = enterOk;
+                        }
+
+                        if (enterOk && exportPressureTrace) {
+                          auto& recorder = PressureTraceRecorder::instance();
+                          recorder.reset();
+                          PressureTraceConfig traceCfg{};
+                          traceCfg.channel = PressureTraceChannel::Refuel;
+                          traceCfg.maxSamples = PressureTraceRecorder::kMaxSamples;
+                          traceCfg.maxEvents = PressureTraceRecorder::kMaxEvents;
+                          traceCfg.sampleStride = 10u;
+                          recorder.configure(traceCfg);
+                          recorder.arm();
+                          traceStartTick = HAL_GetTick();
+                          recorder.start(traceStartTick);
+                          traceStarted = true;
+                        }
+
+                        if (enterOk && !_selfTestAbortRequested) {
+                          for (uint32_t cycle = 0u; cycle < kVacuumCycleCount; ++cycle) {
+                            sendProgressStage("refuel_vacuum_cycle");
+                            const PressureWaitResult negWait =
+                                waitVacuumTarget(kVacuumRaw, "refuel_vacuum_neg");
+                            if (negWait.settleMs > settleMaxMs) settleMaxMs = negWait.settleMs;
+                            if (negWait.controlError > errMax) errMax = negWait.controlError;
+                            if (!negWait.accepted || _selfTestAbortRequested) {
+                              timeoutCount++;
+                              break;
+                            }
+                            const PressurePositionSample negSample = readRefuelPressurePositionSample();
+                            if (negCount < kVacuumCycleCount) {
+                              negPressures[negCount] = negSample.pressureRaw;
+                              negPositions[negCount] = negSample.motorPosition;
+                              negCount++;
+                            }
+                            recordVacuumMotorEvent(negSample.motorPosition);
+
+                            const PressureWaitResult zeroWait =
+                                waitVacuumTarget(kAtmosphereRaw, "refuel_vacuum_zero");
+                            if (zeroWait.settleMs > settleMaxMs) settleMaxMs = zeroWait.settleMs;
+                            if (zeroWait.controlError > errMax) errMax = zeroWait.controlError;
+                            if (!zeroWait.accepted || _selfTestAbortRequested) {
+                              timeoutCount++;
+                              break;
+                            }
+                            const PressurePositionSample zeroSample = readRefuelPressurePositionSample();
+                            if (zeroCount < kVacuumCycleCount) {
+                              zeroPressures[zeroCount] = zeroSample.pressureRaw;
+                              zeroPositions[zeroCount] = zeroSample.motorPosition;
+                              zeroCount++;
+                            }
+                            recordVacuumMotorEvent(zeroSample.motorPosition);
+                            cyclesCompleted++;
+                          }
+                        }
+
+                        if (enterOk && !_selfTestAbortRequested && !guardState.guardAbs && !guardState.guardDelta) {
+                          const PressureWaitResult zeroWait =
+                              waitVacuumTarget(kAtmosphereRaw, "refuel_vacuum_post_zero");
+                          if (zeroWait.settleMs > settleMaxMs) settleMaxMs = zeroWait.settleMs;
+                          if (zeroWait.controlError > errMax) errMax = zeroWait.controlError;
+                          if (!zeroWait.accepted) timeoutCount++;
+                          postAtmosphereOk = collectAtmosphereStats(postAtmosphere, "refuel_vacuum_post_atm");
+                          if (!postAtmosphereOk) timeoutCount++;
+                        }
+
+                        if (traceStarted) {
+                          PressureTraceRecorder::instance().stop(HAL_GetTick());
+                          traceStarted = false;
+                        }
+                        const bool traceCaptured =
+                            !exportPressureTrace ||
+                            ((PressureTraceRecorder::instance().sampleCount() > 0u) &&
+                             (PressureTraceRecorder::instance().eventCount() > 0u));
+                        traceExportOk = exportTrace(
+                            2221,
+                            "refuel_vacuum_cycle_repeatability_factory",
+                            traceCaptured);
+
+                        const auto endCounters = sensor->getControlSample(kRefuelChannel);
+                        const uint32_t rejectDelta =
+                            deltaCounter32(startCounters.rejectCount, endCounters.rejectCount);
+                        const uint32_t railRejectDelta =
+                            deltaCounter32(startCounters.railRejectCount, endCounters.railRejectCount);
+                        const uint32_t spikeRejectDelta =
+                            deltaCounter32(startCounters.spikeRejectCount, endCounters.spikeRejectCount);
+                        const uint32_t refuelFault =
+                            sensor->isSafetyFaultLatched(kRefuelChannel) ? 1u : 0u;
+                        const int32_t preMean = meanVacuumStats(preAtmosphere);
+                        const int32_t postMean = meanVacuumStats(postAtmosphere);
+                        const uint32_t atmosphereShift =
+                            PressureQualificationMath::absDiff(preMean, postMean);
+                        const auto negPressureStats =
+                            PressureQualificationMath::summarizeInt32Span(negPressures, negCount);
+                        const auto zeroPressureStats =
+                            PressureQualificationMath::summarizeInt32Span(zeroPressures, zeroCount);
+                        const auto negPositionStats =
+                            PressureQualificationMath::summarizeInt32Span(negPositions, negCount);
+                        const auto zeroPositionStats =
+                            PressureQualificationMath::summarizeInt32Span(zeroPositions, zeroCount);
+
+                        cleanupVacuumSuite();
+
+                        const bool traceEmitted = exportPressureTrace && traceCaptured && traceExportOk;
+                        const bool shiftPass = enterOk &&
+                            preAtmosphereOk &&
+                            postAtmosphereOk &&
+                            (cyclesCompleted == kVacuumCycleCount) &&
+                            (atmosphereShift <= kVacuumAtmosphereShiftMaxRaw) &&
+                            (rejectDelta == 0u) &&
+                            (refuelFault == 0u) &&
+                            (timeoutCount == 0u);
+                        char shiftMetrics[224];
+                        snprintf(shiftMetrics,
+                                 sizeof(shiftMetrics),
+                                 "pre=%ld;post=%ld;shift=%lu;pre_sp=%lu;post_sp=%lu;pre_n=%lu;post_n=%lu;rej=%lu;rail=%lu;spike=%lu;fault=%lu;to=%lu;trace=%u",
+                                 static_cast<long>(preMean),
+                                 static_cast<long>(postMean),
+                                 static_cast<unsigned long>(atmosphereShift),
+                                 static_cast<unsigned long>(spanVacuumStats(preAtmosphere)),
+                                 static_cast<unsigned long>(spanVacuumStats(postAtmosphere)),
+                                 static_cast<unsigned long>(preAtmosphere.count),
+                                 static_cast<unsigned long>(postAtmosphere.count),
+                                 static_cast<unsigned long>(rejectDelta),
+                                 static_cast<unsigned long>(railRejectDelta),
+                                 static_cast<unsigned long>(spikeRejectDelta),
+                                 static_cast<unsigned long>(refuelFault),
+                                 static_cast<unsigned long>(timeoutCount),
+                                 static_cast<unsigned>(traceEmitted ? 1u : 0u));
+                        if (!runOne(2220,
+                                    "refuel_vacuum_sensor_shift_factory",
+                                    shiftPass,
+                                    shiftMetrics)) {
+                          return finishSelfTestNow();
+                        }
+
+                        const bool cyclePass = enterOk &&
+                            (cyclesCompleted == kVacuumCycleCount) &&
+                            (negCount == kVacuumCycleCount) &&
+                            (zeroCount == kVacuumCycleCount) &&
+                            (errMax <= kVacuumAcceptTolRaw) &&
+                            (rejectDelta == 0u) &&
+                            (refuelFault == 0u) &&
+                            (guardCount == 0u) &&
+                            !guardState.guardAbs &&
+                            !guardState.guardDelta &&
+                            (timeoutCount == 0u) &&
+                            traceCaptured &&
+                            traceExportOk;
+                        char cycleMetrics[256];
+                        snprintf(cycleMetrics,
+                                 sizeof(cycleMetrics),
+                                 "cyc=%lu;neg_n=%lu;zero_n=%lu;n_span=%lu;z_span=%lu;nps=%lu;zps=%lu;err=%lu;settle=%lu;guard=%lu;ma=%lu;md=%lu;rej=%lu;to=%lu;trace=%u",
+                                 static_cast<unsigned long>(cyclesCompleted),
+                                 static_cast<unsigned long>(negPressureStats.sampleCount),
+                                 static_cast<unsigned long>(zeroPressureStats.sampleCount),
+                                 static_cast<unsigned long>(negPressureStats.span),
+                                 static_cast<unsigned long>(zeroPressureStats.span),
+                                 static_cast<unsigned long>(negPositionStats.span),
+                                 static_cast<unsigned long>(zeroPositionStats.span),
+                                 static_cast<unsigned long>(errMax),
+                                 static_cast<unsigned long>(settleMaxMs),
+                                 static_cast<unsigned long>(guardCount),
+                                 static_cast<unsigned long>(guardState.motorAbsMax),
+                                 static_cast<unsigned long>(guardState.motorDeltaMax),
+                                 static_cast<unsigned long>(rejectDelta),
+                                 static_cast<unsigned long>(timeoutCount),
+                                 static_cast<unsigned>(traceEmitted ? 1u : 0u));
+                        if (!runOne(2221,
+                                    "refuel_vacuum_cycle_repeatability_factory",
+                                    cyclePass,
+                                    cycleMetrics)) {
+                          return finishSelfTestNow();
+                        }
+                        return finishSelfTestNow();
+#endif
+                      }
 
                       if (runPressureRegulatorSuite) {
                         static constexpr uint32_t kPressureIdleMs = 10000u;

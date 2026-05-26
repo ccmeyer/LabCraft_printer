@@ -111,6 +111,12 @@ Run the campaign on the Pi serial port:
 python tools/run_qualification_campaign.py --campaign machine_full_qualification_v1 --operator-prompts --port /dev/ttyAMA0
 ```
 
+Run the dedicated refuel-vacuum pressure-sensor qualification suite:
+
+```bash
+python tools/run_qualification.py --manifest refuel_vacuum_v1 --operator-prompts --fixture refuel_vacuum_dry_back_v1 --port /dev/ttyAMA0
+```
+
 Outputs:
 
 - Suite reports: `hil_reports/qualification/<machine_id>/<timestamp>/`

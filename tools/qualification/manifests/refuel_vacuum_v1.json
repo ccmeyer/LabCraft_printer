@@ -1,0 +1,66 @@
+{
+  "schema_version": "qualification_manifest_v0",
+  "manifest_id": "refuel_vacuum_v1",
+  "name": "Refuel Vacuum Sensor Qualification v1",
+  "profile": "FULL",
+  "description": "Operator-gated refuel regulator vacuum suite cycling the refuel pressure sensor between -1 psi and atmosphere, then comparing pre/post atmospheric readings and motor travel repeatability.",
+  "expected_test_ids": [
+    2220,
+    2221
+  ],
+  "enforce_expected_test_ids": true,
+  "requires_operator_prompts": true,
+  "selftest_args": [
+    "--refuel-vacuum-suite",
+    "--pressure-trace"
+  ],
+  "fixtures": [
+    {
+      "fixture_id": "refuel_vacuum_dry_back_v1",
+      "required_for": [2220, 2221],
+      "operator_note": "Run only with the approved dry refuel-vacuum fixture. Confirm the refuel path is safe, vented or contained, no reagent is loaded, no printer head or open outlet is attached unless explicitly fixtured for this test, and the operator remains present while cycling below atmospheric pressure."
+    }
+  ],
+  "analysis_rules": {
+    "2220": {
+      "category": "pressure",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "pre": {"maturity": "informational"},
+        "post": {"maturity": "informational"},
+        "shift": {"maturity": "candidate", "max": 120},
+        "pre_sp": {"maturity": "candidate", "max": 120},
+        "post_sp": {"maturity": "candidate", "max": 120},
+        "pre_n": {"maturity": "candidate", "min": 20},
+        "post_n": {"maturity": "candidate", "min": 20},
+        "rej": {"maturity": "candidate", "equals": 0},
+        "rail": {"maturity": "candidate", "equals": 0},
+        "spike": {"maturity": "candidate", "equals": 0},
+        "fault": {"maturity": "candidate", "equals": 0},
+        "to": {"maturity": "candidate", "equals": 0},
+        "trace": {"maturity": "candidate", "equals": 1}
+      }
+    },
+    "2221": {
+      "category": "pressure",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "cyc": {"maturity": "candidate", "equals": 20},
+        "neg_n": {"maturity": "candidate", "equals": 20},
+        "zero_n": {"maturity": "candidate", "equals": 20},
+        "n_span": {"maturity": "candidate", "max": 240},
+        "z_span": {"maturity": "candidate", "max": 240},
+        "nps": {"maturity": "informational"},
+        "zps": {"maturity": "informational"},
+        "err": {"maturity": "candidate", "max": 120},
+        "settle": {"maturity": "candidate", "max": 3000},
+        "guard": {"maturity": "candidate", "equals": 0},
+        "ma": {"maturity": "candidate", "max": 80000},
+        "md": {"maturity": "candidate", "max": 50000},
+        "rej": {"maturity": "candidate", "equals": 0},
+        "to": {"maturity": "candidate", "equals": 0},
+        "trace": {"maturity": "candidate", "equals": 1}
+      }
+    }
+  }
+}

@@ -21,17 +21,19 @@ def test_discover_suite_entries_lists_current_manifests():
         "xy_motion_v1",
         "motion_envelope_v1",
         "pressure_regulator_v1",
+        "refuel_vacuum_v1",
         "valve_characterization_v1",
         "valve_gap_sweep_v1",
     }.issubset(manifest_ids)
     assert entries[0].manifest_id == "factory_acceptance_v3"
-    assert [entry.manifest_id for entry in entries[:7]] == [
+    assert [entry.manifest_id for entry in entries[:8]] == [
         "factory_acceptance_v3",
         "gripper_seal_v1",
         "gripper_seal_stress_v1",
         "xy_motion_v1",
         "motion_envelope_v1",
         "pressure_regulator_v1",
+        "refuel_vacuum_v1",
         "valve_characterization_v1",
     ]
 
@@ -146,6 +148,24 @@ def test_pressure_regulator_suite_exposes_operator_fixture_and_catalog_rows():
     assert "over" in rows[2218].metrics
     assert "under" in rows[2218].metrics
     assert "1, 2, 3, 2, 1 psi" in rows[2218].evaluates
+
+
+def test_refuel_vacuum_suite_exposes_operator_fixture_and_catalog_rows():
+    entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
+    vacuum = entries["refuel_vacuum_v1"].manifest
+
+    assert vacuum.requires_operator_prompts is True
+    assert required_fixture_ids(vacuum) == ("refuel_vacuum_dry_back_v1",)
+    rows = {row.test_id: row for row in build_test_plan_rows(vacuum)}
+    assert list(rows) == [2220, 2221]
+    assert rows[2220].name == "Refuel vacuum sensor shift"
+    assert rows[2221].name == "Refuel vacuum cycle repeatability"
+    assert all(row.subsystem == "Pressure" for row in rows.values())
+    assert "shift" in rows[2220].metrics
+    assert "fault" in rows[2220].metrics
+    assert "cyc" in rows[2221].metrics
+    assert "ma" in rows[2221].metrics
+    assert "-1 psi" in rows[2221].evaluates
 
 
 def test_valve_characterization_suite_exposes_operator_fixture_and_catalog_rows():

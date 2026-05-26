@@ -29,6 +29,19 @@ TEST(PressureRegulatorMath, RelativeTargetUsesMagnitudeClampAndBounds) {
     LONGS_EQUAL(1638, PressureRegulatorMath::clampRelativeTarget(limits, false, 1000));
 }
 
+TEST(PressureRegulatorMath, VacuumTargetCanClampToNegativeOnePsiRawMinimum) {
+    PressureRegulatorMath::TargetLimits limits{};
+    limits.currentTarget = 1638;
+    limits.minTarget = 764;
+    limits.maxTarget = 1638;
+    limits.maxCmdStep = 3000;
+    limits.maxRelStep = 880;
+
+    LONGS_EQUAL(764, PressureRegulatorMath::clampTarget(limits, 100));
+    LONGS_EQUAL(1638, PressureRegulatorMath::clampTarget(limits, 2000));
+    LONGS_EQUAL(764, PressureRegulatorMath::clampRelativeTarget(limits, false, 2000));
+}
+
 TEST(PressureRegulatorMath, RampedTargetAdvancesOnePsiOverAboutOneSecond) {
     const uint8_t qBits = 8;
     int32_t ramped = PressureRegulatorMath::targetRawToFixed(2512, qBits);

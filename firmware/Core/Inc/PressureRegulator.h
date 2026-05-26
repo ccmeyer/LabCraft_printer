@@ -91,6 +91,14 @@ public:
   void setRelativeTarget(bool sign, int32_t p);
   void setTargetSafe(int32_t requested);
   void setRelativeTargetSafe(bool sign, int32_t delta);
+  bool enterVacuumMode(int32_t targetRaw,
+                       uint32_t prepPositionSteps,
+                       uint32_t moveHz,
+                       CrashTaskId callerWatchdogTaskId = CRASH_TASK_NONE);
+  bool setVacuumTargetSafe(int32_t requested);
+  bool exitVacuumMode(int32_t restoreTargetRaw,
+                      CrashTaskId callerWatchdogTaskId = CRASH_TASK_NONE);
+  bool isVacuumModeActive() const { return _vacuumMode; }
   uint32_t getCurrentArr() const { return _currentArr; }
   uint32_t getTarget() const { return _target; }
   uint32_t getControlTarget() const;
@@ -166,6 +174,7 @@ private:
   TaskHandle_t       _taskHandle = nullptr;
 
   int32_t _minTarget   = 1638;        // raw sensor units
+  int32_t _vacuumMinTarget = 764;     // -1 psi with current sensor conversion
   int32_t _maxTarget   = 6007;    // raw sensor units (14-bit)
   int32_t _maxCmdStep  = 3000;      // max change allowed per setTargetSafe() call
   int32_t _maxRelStep  = 880;      // max |delta| allowed per relative change
@@ -189,8 +198,11 @@ private:
   uint16_t           _valvePin   = 0;
   bool               _homing     = false;
   bool				 _resetting	 = false;
+  bool               _vacuumMode = false;
   uint32_t			 _stepLimit	 = 100000;
   uint32_t			 _resetPos	 = 500;
+
+  int32_t activeMinTarget() const { return _vacuumMode ? _vacuumMinTarget : _minTarget; }
 
   // control state
   bool     _stepping    = false;

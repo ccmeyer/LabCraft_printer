@@ -779,9 +779,10 @@ def run(args: argparse.Namespace) -> int:
         xy_motion_suite = bool(getattr(args, "xy_motion_suite", False))
         motion_envelope_suite = bool(getattr(args, "motion_envelope_suite", False))
         pressure_regulator_suite = bool(getattr(args, "pressure_regulator_suite", False))
+        refuel_vacuum_suite = bool(getattr(args, "refuel_vacuum_suite", False))
         valve_characterization_suite = bool(getattr(args, "valve_characterization_suite", False))
         valve_gap_sweep_suite = bool(getattr(args, "valve_gap_sweep_suite", False))
-        selector = 2599 if gripper_seal_stress_suite else 2498 if valve_gap_sweep_suite else 2499 if valve_characterization_suite else 2299 if pressure_regulator_suite else 2019 if motion_envelope_suite else 2009 if xy_motion_suite else 2500 if gripper_seal_suite else (
+        selector = 2599 if gripper_seal_stress_suite else 2498 if valve_gap_sweep_suite else 2499 if valve_characterization_suite else 2298 if refuel_vacuum_suite else 2299 if pressure_regulator_suite else 2019 if motion_envelope_suite else 2009 if xy_motion_suite else 2500 if gripper_seal_suite else (
             pressure_sweep_suite if pressure_sweep_suite is not None else pressure_trace_test
         )
         if selector is not None:
@@ -1324,6 +1325,7 @@ def main() -> int:
     selector_group.add_argument("--pressure-trace-test", type=int, choices=(2101, 2102, 2103, 2104))
     selector_group.add_argument("--pressure-sweep-suite", type=int, choices=(2301, 2302, 2303, 2304))
     selector_group.add_argument("--pressure-regulator-suite", action="store_true")
+    selector_group.add_argument("--refuel-vacuum-suite", action="store_true")
     selector_group.add_argument("--xy-motion-suite", action="store_true")
     selector_group.add_argument("--motion-envelope-suite", action="store_true")
     selector_group.add_argument("--gripper-seal-suite", action="store_true")

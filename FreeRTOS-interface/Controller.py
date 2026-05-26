@@ -1129,6 +1129,69 @@ class Controller(QObject):
             trace_metadata=trace_metadata,
         )
 
+    def _validate_refuel_vacuum_pressure(self, pressure):
+        try:
+            pressure = float(pressure)
+        except (TypeError, ValueError):
+            self.error_occurred_signal.emit(
+                "Refuel Vacuum Error",
+                f"Invalid refuel vacuum pressure: {pressure}",
+            )
+            return None
+        if pressure < -1.0 or pressure > 0.0:
+            self.error_occurred_signal.emit(
+                "Refuel Vacuum Error",
+                "Refuel vacuum pressure must be between -1.0 and 0.0 psi.",
+            )
+            return None
+        return pressure
+
+    def enter_refuel_vacuum_mode(
+        self,
+        target_psi=-1.0,
+        prep_position_steps=20000,
+        move_hz=5000,
+        handler=None,
+        manual=False,
+    ):
+        target_psi = self._validate_refuel_vacuum_pressure(target_psi)
+        if target_psi is None:
+            return False
+        return self.machine.enter_refuel_vacuum_mode(
+            target_psi=target_psi,
+            prep_position_steps=int(prep_position_steps),
+            move_hz=int(move_hz),
+            handler=handler,
+            manual=manual,
+        )
+
+    def set_refuel_vacuum_pressure(self, pressure_psi, handler=None, manual=False):
+        pressure_psi = self._validate_refuel_vacuum_pressure(pressure_psi)
+        if pressure_psi is None:
+            return False
+        return self.machine.set_refuel_vacuum_pressure(
+            pressure_psi,
+            handler=handler,
+            manual=manual,
+        )
+
+    def exit_refuel_vacuum_mode(self, restore_pressure_psi, handler=None, manual=False):
+        try:
+            restore_pressure_psi = float(restore_pressure_psi)
+        except (TypeError, ValueError):
+            self.error_occurred_signal.emit(
+                "Refuel Vacuum Error",
+                f"Invalid refuel restore pressure: {restore_pressure_psi}",
+            )
+            return False
+        if restore_pressure_psi < 0.0:
+            restore_pressure_psi = 0.0
+        return self.machine.exit_refuel_vacuum_mode(
+            restore_pressure_psi,
+            handler=handler,
+            manual=manual,
+        )
+
     def set_print_pulse_width(self, pulse_width,handler=None, manual=False,update_model=False, trace_metadata=None):
         """Set the pulse width for the machine."""
         #print(f"Setting pulse width: {pulse_width}")

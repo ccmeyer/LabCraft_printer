@@ -48,6 +48,12 @@ constexpr uint16_t pressureRawFromPsiMilli(uint32_t psiMilli)
 {
   return static_cast<uint16_t>(1638u + ((psiMilli * 13107u + 7500u) / 15000u));
 }
+constexpr int32_t pressureRawFromSignedPsiMilli(int32_t psiMilli)
+{
+  return static_cast<int32_t>(
+      1638LL +
+      ((static_cast<int64_t>(psiMilli) * 13107LL + ((psiMilli >= 0) ? 7500LL : -7500LL)) / 15000LL));
+}
 int32_t slopeRawPerMin(int32_t startRaw, int32_t endRaw, uint32_t durationMs);
 size_t buildAdjacentTargetSequence(int32_t currentRaw,
                                    int32_t targetRaw,

@@ -84,6 +84,9 @@ def _build_droplet_dialog(monkeypatch, qapp, *, refuel_model=None, main_window=N
             get_print_pressure_bounds=lambda: (0.10, 5.00),
             get_print_pulse_width=lambda: 1400,
             get_current_print_pressure=lambda: 0.80,
+            get_target_refuel_pressure=lambda: 0.60,
+            get_current_refuel_pressure=lambda: 0.55,
+            get_refuel_pulse_width=lambda: 3200,
         ),
     )
     controller = SimpleNamespace(
@@ -106,6 +109,12 @@ def _build_droplet_dialog(monkeypatch, qapp, *, refuel_model=None, main_window=N
         disable_print_profile=Mock(),
         set_droplet_capture_profile=Mock(),
         set_command_dispatch_interval=Mock(),
+        enter_refuel_vacuum_mode=Mock(return_value=object()),
+        set_refuel_vacuum_pressure=Mock(return_value=object()),
+        exit_refuel_vacuum_mode=Mock(return_value=object()),
+        set_refuel_pulse_width=Mock(return_value=object()),
+        refuel_only=Mock(return_value=object()),
+        move_to_location=Mock(return_value=object()),
     )
     if main_window is None:
         main_window = SimpleNamespace(color_dict={})
@@ -463,6 +472,43 @@ def test_refuel_monitor_stops_after_three_none_frames(monkeypatch, qapp):
     assert dialog.refuel_monitor_timer.isActive() is False
     controller.stop_refuel_camera.assert_called_once_with()
     assert refuel_model.get_refuel_monitor_timing_log()[-1]["event_kind"] == "failure"
+
+
+def test_refuel_vacuum_dialog_manual_workflow_and_restore(monkeypatch, qapp):
+    dialog, _refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
+
+    dialog.open_refuel_vacuum_dialog()
+    qapp.processEvents()
+
+    vacuum_dialog = dialog._refuel_vacuum_dialog
+    assert vacuum_dialog is not None
+    controller.enter_refuel_vacuum_mode.assert_called_once()
+    enter_kwargs = controller.enter_refuel_vacuum_mode.call_args.kwargs
+    assert enter_kwargs["target_psi"] == -1.0
+    assert enter_kwargs["prep_position_steps"] == 20000
+    assert enter_kwargs["move_hz"] == 5000
+    assert enter_kwargs["manual"] is True
+    assert vacuum_dialog.pulse_button.isEnabled() is False
+
+    enter_kwargs["handler"]()
+    assert vacuum_dialog.pulse_button.isEnabled() is True
+
+    vacuum_dialog.pressure_spin.setValue(-0.5)
+    controller.set_refuel_vacuum_pressure.assert_called_with(-0.5, manual=True)
+
+    vacuum_dialog.pulse_width_spin.setValue(3500)
+    controller.set_refuel_pulse_width.assert_called_with(3500, manual=True)
+
+    vacuum_dialog.pulse_count_spin.setValue(7)
+    vacuum_dialog._pulse_refuel()
+    controller.refuel_only.assert_called_with(7, manual=True)
+
+    vacuum_dialog._move_to_loading()
+    controller.move_to_location.assert_called_with("loading", manual=True)
+
+    vacuum_dialog.accept()
+    controller.set_refuel_pulse_width.assert_called_with(3200, manual=True)
+    controller.exit_refuel_vacuum_mode.assert_called_once_with(0.6, manual=True)
 
 
 def test_refuel_monitor_records_analysis_not_started(monkeypatch, qapp):
