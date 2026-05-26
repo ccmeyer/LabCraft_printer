@@ -54,21 +54,16 @@ To get started with the LabCraft Printer project, follow these steps:
 
 ## Run Python Tests
 
-Use the project virtual environment, then run:
-
-```bash
-py -m pytest -q
-```
-
-If your repo venv is in `env` on Windows:
+On this Windows checkout, use the repo virtual environment directly:
 
 ```bash
 .\env\Scripts\python.exe -m pytest -q
 ```
 
+Avoid `py -m pytest -q` here unless the Windows Python launcher has been verified; in some agent shells it fails with `No installed Python found!`.
 The full Python suite commonly takes 3-8 minutes on Windows and in agent sandboxes.
 Automation should use a process timeout of at least 15 minutes (`900000` ms) to avoid killing a valid run and paying collection/startup cost again.
-Pytest is configured in `pytest.ini` to collect from `tests/`.
+Pytest is configured in `pytest.ini` to collect from `tests/`, and its optional cache provider is disabled to avoid `.pytest_cache` permission warnings in OneDrive/sandboxed runs. That only disables pytest cache conveniences such as `--last-failed`; it does not affect normal validation.
 
 ## Droplet Imager Optics Calibration
 

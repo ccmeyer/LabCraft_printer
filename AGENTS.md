@@ -74,9 +74,11 @@ Prefer using the project interpreter/tools and repo scripts.
 ### Run Python tests
 - Use the repo's pytest configuration; it scopes collection to `tests/` so root-level runs do not crawl large data/artifact trees.
 - The full Python suite commonly takes 3-8 minutes on Windows/agent sandboxes. When invoking it through an agent/tool timeout, set the command timeout to at least 15 minutes (`900000` ms) so a valid run is not killed and repeated.
-- Use the repo's chosen test command:
-  - `python -m pytest -q` (primary)
-  - `python -m pytest` (for full output)
+- On this Windows checkout, use the repo virtualenv directly:
+  - `.\env\Scripts\python.exe -m pytest -q` (primary)
+  - `.\env\Scripts\python.exe -m pytest` (for full output)
+- Do not use `py -m pytest` in this workspace unless you first verify that the Windows Python launcher can see an installed interpreter; in agent shells it often fails with `No installed Python found!`.
+- Pytest's optional cache provider is disabled in `pytest.ini` to avoid noisy `.pytest_cache` permission warnings in OneDrive/sandboxed agent runs. This does not affect normal full-suite validation.
 
 ---
 
@@ -122,7 +124,7 @@ Stop and ask by producing:
 
 ## Definition of done (per task/PR)
 - Automated tests pass for the affected area:
-  - Python: `python -m pytest -q`
+  - Python: `.\env\Scripts\python.exe -m pytest -q`
   - Firmware: host tests + headless build as applicable
 - Any protocol/schema changes documented (if explicitly requested)
 - Summary includes:
