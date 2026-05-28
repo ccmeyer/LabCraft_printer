@@ -24,12 +24,30 @@ def _assert_plain_colored_surface(style, color):
     assert "font-weight" not in style
 
 
-def _make_run(run_id, *, stock="Water", sweep_entries=None, search_entries=None, stream_entries=None):
+def _make_run(
+    run_id,
+    *,
+    stock="Water",
+    sweep_entries=None,
+    search_entries=None,
+    recheck_entries=None,
+    stream_entries=None,
+    trajectory_result=None,
+):
     steps = {
+        "pressure_trajectory": [],
         "pressure_sweep_characterization": [],
+        "droplet_recheck": [],
         "droplet_search": [],
         "online_stream_calibration": [],
     }
+    if trajectory_result is not None:
+        steps["pressure_trajectory"].append(
+            {
+                "timestamp": "2026-03-17T10:59:00Z",
+                "result": dict(trajectory_result),
+            }
+        )
 
     for entry in sweep_entries or []:
         steps["pressure_sweep_characterization"].append(
@@ -37,15 +55,61 @@ def _make_run(run_id, *, stock="Water", sweep_entries=None, search_entries=None,
                 "timestamp": entry.get("timestamp"),
                 "settings": {"print_width": entry.get("pw_us")},
                 "result": {
+                    "nozzle_center_px": entry.get("nozzle_center_px"),
+                    "nozzle_center_machine": entry.get("nozzle_center_machine"),
+                    "emergence_time_us": entry.get("emergence_time_us"),
                     "pressures": [
                         {
                             "pressure": entry.get("pressure_psi"),
+                            "delay_us": entry.get("delay_us"),
+                            "mean_position_machine": entry.get("mean_position_machine"),
+                            "nominal_delay_us": entry.get("nominal_delay_us"),
+                            "nominal_target_xyz": entry.get("nominal_target_xyz"),
+                            "vec_steps_per_s": entry.get("vec_steps_per_s"),
+                            "vx_px_per_us": entry.get("vx_px_per_us"),
+                            "vy_px_per_us": entry.get("vy_px_per_us"),
                             "mean_volume": entry.get("mean_nL"),
                             "cv_volume_percent": entry.get("cv_pct"),
                             "valid": entry.get("valid", True),
                             "invalid_reason": entry.get("invalid_reason"),
                         }
                     ]
+                },
+            }
+        )
+
+    for entry in recheck_entries or []:
+        steps["droplet_recheck"].append(
+            {
+                "timestamp": entry.get("timestamp"),
+                "settings": {"print_width": entry.get("pw_us")},
+                "result": {
+                    "recheck": True,
+                    "recheck_source": entry.get("recheck_source"),
+                    "nozzle_center_px": entry.get("nozzle_center_px"),
+                    "nozzle_center_machine": entry.get("nozzle_center_machine"),
+                    "emergence_time_us": entry.get("emergence_time_us"),
+                    "pressures": [
+                        {
+                            "pressure": entry.get("pressure_psi"),
+                            "print_pulse_width_us": entry.get("pw_us"),
+                            "delay_us": entry.get("delay_us"),
+                            "mean_position_machine": entry.get("mean_position_machine"),
+                            "nominal_delay_us": entry.get("nominal_delay_us"),
+                            "nominal_target_xyz": entry.get("nominal_target_xyz"),
+                            "vec_steps_per_s": entry.get("vec_steps_per_s"),
+                            "vx_px_per_us": entry.get("vx_px_per_us"),
+                            "vy_px_per_us": entry.get("vy_px_per_us"),
+                            "mean_volume": entry.get("mean_nL"),
+                            "cv_volume_percent": entry.get("cv_pct"),
+                            "valid": entry.get("valid", True),
+                            "invalid_reason": entry.get("invalid_reason"),
+                            "recheck_source": entry.get("recheck_source"),
+                            "reference_mean_volume_nL": entry.get("reference_mean_volume_nL"),
+                            "volume_delta_nL": entry.get("volume_delta_nL"),
+                            "volume_delta_percent": entry.get("volume_delta_percent"),
+                        }
+                    ],
                 },
             }
         )
@@ -424,6 +488,152 @@ def test_pressure_sweep_summary_rows_enrich_metadata_and_format_timestamps(tmp_p
     assert by_run["run_b"]["invalid_reason"] == "ratio_limit"
     assert by_run["run_b"]["is_focus_run"] is True
     assert by_run["run_c"]["timestamp_display"] == "Unknown"
+
+
+def test_pressure_sweep_summary_rows_carry_recheck_context_and_recover_trajectory(tmp_path):
+    trajectory_result = {
+        "pressures": [
+            {"pressure": 1.0, "fit": {"vx_px_per_us": 0.01, "vy_px_per_us": 0.03}},
+            {"pressure": 1.4, "fit": {"vx_px_per_us": 0.03, "vy_px_per_us": 0.07}},
+        ],
+        "valid_fit_pressures": [1.0, 1.4],
+        "nozzle_center_px": [100, 100],
+        "emergence_time_us": 4000,
+    }
+    runs = [
+        _make_run(
+            "run_a",
+            trajectory_result=trajectory_result,
+            sweep_entries=[
+                {
+                    "timestamp": "2026-03-17T11:00:00Z",
+                    "pw_us": 1400,
+                    "pressure_psi": 1.20,
+                    "delay_us": 9000,
+                    "mean_position_machine": {"X": 1234, "Y": 2000, "Z": 7654},
+                    "nominal_target_xyz": [1200, 2000, 7600],
+                    "nozzle_center_px": [100, 100],
+                    "nozzle_center_machine": {"X": 1000, "Y": 2000, "Z": 9000},
+                    "emergence_time_us": 4000,
+                    "mean_nL": 9.8,
+                    "cv_pct": 4.2,
+                    "valid": True,
+                }
+            ],
+        )
+    ]
+    _model, manager = _build_model_and_manager(tmp_path, runs, active_run_id="run_a")
+
+    row = manager.get_characterization_summary_rows()[0]
+    assert row["source_phase_key"] == "pressure_sweep_characterization"
+    assert row["delay_us"] == 9000
+    assert row["target_xyz"] == [1234, 2000, 7654]
+
+    context, missing = manager.build_droplet_recheck_context(row)
+
+    assert missing == []
+    assert context["print_pulse_width_us"] == 1400
+    assert context["pressure_psi"] == 1.2
+    assert context["target_xyz"] == [1234, 2000, 7654]
+    assert context["vx_px_per_us"] == pytest.approx(0.02)
+    assert context["vy_px_per_us"] == pytest.approx(0.05)
+
+
+def test_recheck_summary_rows_and_source_filter(monkeypatch, qapp, tmp_path):
+    runs = [
+        _make_run(
+            "run_a",
+            sweep_entries=[
+                {
+                    "timestamp": "2026-03-17T11:00:00Z",
+                    "pw_us": 1400,
+                    "pressure_psi": 1.20,
+                    "mean_nL": 9.8,
+                    "cv_pct": 4.2,
+                    "valid": True,
+                }
+            ],
+            recheck_entries=[
+                {
+                    "timestamp": "2026-03-17T12:00:00Z",
+                    "pw_us": 1400,
+                    "pressure_psi": 1.20,
+                    "delay_us": 9200,
+                    "mean_position_machine": {"X": 1240, "Y": 2000, "Z": 7600},
+                    "nominal_target_xyz": [1240, 2000, 7600],
+                    "vec_steps_per_s": [1000.0, 0.0, -5000.0],
+                    "nozzle_center_px": [100, 100],
+                    "nozzle_center_machine": {"X": 1000, "Y": 2000, "Z": 9000},
+                    "emergence_time_us": 4000,
+                    "mean_nL": 9.9,
+                    "cv_pct": 3.9,
+                    "valid": True,
+                    "recheck_source": {"run_id": "run_a"},
+                    "reference_mean_volume_nL": 9.8,
+                    "volume_delta_nL": 0.1,
+                }
+            ],
+        )
+    ]
+    dialog, _manager = _build_dialog(monkeypatch, qapp, tmp_path, runs, active_run_id="run_a")
+
+    idx = dialog.summary_source_combo.findData("recheck")
+    assert idx >= 0
+    dialog.summary_source_combo.setCurrentIndex(idx)
+    dialog._refresh_summary_filters()
+
+    visible = _visible_summary_rows(dialog)
+    assert len(visible) == 1
+    assert visible[0]["phase"] == "recheck"
+    assert visible[0]["phase_label"] == "Recheck"
+    assert visible[0]["volume_delta_nL"] == 0.1
+
+
+def test_recheck_selected_button_enables_and_dispatches_selected_row(monkeypatch, qapp, tmp_path):
+    trajectory_result = {
+        "pressures": [
+            {"pressure": 1.2, "fit": {"vx_px_per_us": 0.02, "vy_px_per_us": 0.05}},
+        ],
+        "valid_fit_pressures": [1.2],
+        "nozzle_center_px": [100, 100],
+        "emergence_time_us": 4000,
+    }
+    runs = [
+        _make_run(
+            "run_a",
+            trajectory_result=trajectory_result,
+            sweep_entries=[
+                {
+                    "timestamp": "2026-03-17T11:00:00Z",
+                    "pw_us": 1400,
+                    "pressure_psi": 1.20,
+                    "delay_us": 9000,
+                    "mean_position_machine": {"X": 1234, "Y": 2000, "Z": 7654},
+                    "nominal_target_xyz": [1200, 2000, 7600],
+                    "nozzle_center_px": [100, 100],
+                    "nozzle_center_machine": {"X": 1000, "Y": 2000, "Z": 9000},
+                    "emergence_time_us": 4000,
+                    "mean_nL": 9.8,
+                    "cv_pct": 4.2,
+                    "valid": True,
+                }
+            ],
+        )
+    ]
+    dialog, _manager = _build_dialog(monkeypatch, qapp, tmp_path, runs, active_run_id="run_a")
+    calls = []
+    dialog.controller.start_droplet_recheck_characterization = lambda row: calls.append(dict(row)) or True
+
+    _select_visible_row(dialog, 0)
+    qapp.processEvents()
+    dialog._update_load_button_state()
+
+    assert dialog.recheck_selected_button.isEnabled()
+    dialog.recheck_selected_button.click()
+
+    assert calls
+    assert calls[0]["source_phase_key"] == "pressure_sweep_characterization"
+    assert calls[0]["delay_us"] == 9000
 
 
 def test_characterization_summary_rows_include_latest_stream_result_once_and_flag_invalid_streams(tmp_path):

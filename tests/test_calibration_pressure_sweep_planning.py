@@ -189,6 +189,9 @@ class _PressureSweepInitManager(QObject):
     def get_pressure_trajectory_result(self):
         return dict(self._traj)
 
+    def emitSettingsChangeCompleted(self):
+        self.settingsChangeCompleted.emit()
+
 
 def _build_pressure_sweep_init_model():
     def _convert_pixel_position_to_motor_steps(pixel_position, current_motor_position):
@@ -432,6 +435,109 @@ def test_pressure_sweep_constructor_initializes_bounds_before_nominal_target_pla
     assert proc.plan[0]["target_plane_reachable"] is True
     assert proc.plan[0]["nominal_delay_us"] == 14000
     assert proc.plan[0]["nominal_target_xyz"] == [1200, 2000, 8000]
+
+
+def _build_recheck_context():
+    return {
+        "print_pulse_width_us": 1450,
+        "pressure_psi": 1.20,
+        "delay_us": 9000,
+        "target_xyz": [1234, 2000, 7654],
+        "nozzle_center_machine": {"X": 1000, "Y": 2000, "Z": 9000},
+        "nozzle_center_px": [100, 100],
+        "emergence_time_us": 4000,
+        "vec_steps_per_s": [20_000.0, 0.0, -100_000.0],
+        "reference_mean_volume_nL": 9.5,
+        "reference_cv_volume_percent": 3.2,
+        "source_result": {
+            "run_id": "run_a",
+            "phase_key": "pressure_sweep_characterization",
+            "step_index": 0,
+            "pressure_index": 0,
+        },
+    }
+
+
+def test_pressure_sweep_recheck_mode_builds_single_plan_and_uses_prior_target():
+    mgr = _PressureSweepInitManager()
+    model = _build_pressure_sweep_init_model()
+    context = _build_recheck_context()
+
+    proc = PressureSweepCharacterizationProcess(
+        mgr,
+        model,
+        recheck_context=context,
+        replicates_per_pressure=20,
+    )
+
+    assert proc.phase_name == "droplet_recheck"
+    assert proc.recheck_mode is True
+    assert len(proc.plan) == 1
+    assert proc.plan[0]["pressure"] == 1.2
+    assert proc.plan[0]["print_pulse_width_us"] == 1450
+
+    proc.onPickPressure()
+
+    assert proc.target_delay_us == 9000
+    assert proc.nominal_target_xyz == (1100, 2000, 8500)
+    assert proc._target_xyz_for_delay(9000, include_offsets=False) == (1100, 2000, 8500)
+    assert proc._target_xyz_for_delay(9000, include_offsets=True) == (1234, 2000, 7654)
+    offset_xyz = proc._target_xyz_for_delay(9500, include_offsets=False)
+    assert offset_xyz != (1234, 2000, 7654)
+    assert offset_xyz[0] > 1000
+
+
+def test_pressure_sweep_recheck_offset_delays_follow_prior_target_bias():
+    mgr = _PressureSweepInitManager()
+    model = _build_pressure_sweep_init_model()
+    context = _build_recheck_context()
+    proc = PressureSweepCharacterizationProcess(
+        mgr,
+        model,
+        recheck_context=context,
+        replicates_per_pressure=20,
+    )
+
+    proc.onPickPressure()
+
+    raw_nominal = proc._target_xyz_for_delay(9000, include_offsets=False)
+    raw_later = proc._target_xyz_for_delay(9500, include_offsets=False)
+    biased_nominal = proc._target_xyz_for_delay(9000, include_offsets=True)
+    biased_later = proc._target_xyz_for_delay(9500, include_offsets=True)
+
+    assert raw_nominal == (1100, 2000, 8500)
+    assert biased_nominal == (1234, 2000, 7654)
+    assert (
+        biased_later[0] - biased_nominal[0],
+        biased_later[1] - biased_nominal[1],
+        biased_later[2] - biased_nominal[2],
+    ) == (
+        raw_later[0] - raw_nominal[0],
+        raw_later[1] - raw_nominal[1],
+        raw_later[2] - raw_nominal[2],
+    )
+    assert biased_later == (1244, 2000, 7604)
+
+
+def test_pressure_sweep_recheck_mode_applies_pulse_width_and_pressure():
+    mgr = _PressureSweepInitManager()
+    model = _build_pressure_sweep_init_model()
+    proc = PressureSweepCharacterizationProcess(
+        mgr,
+        model,
+        recheck_context=_build_recheck_context(),
+        replicates_per_pressure=20,
+    )
+    proc.onPickPressure()
+    requests = []
+    proc._request_settings_with_timeout = lambda settings, **_kwargs: requests.append(dict(settings))
+
+    proc.onApplyPressure()
+
+    assert requests
+    assert requests[0]["print_pulse_width"] == 1450
+    assert requests[0]["print_pressure"] == 1.2
+    assert requests[0]["num_droplets"] == 0
 
 
 def test_pressure_sweep_solves_nominal_delay_from_fixed_z_plane():

@@ -3495,6 +3495,9 @@ class Controller(QObject):
 
     def start_pressure_sweep_characterization(self):
         self.model.calibration_manager.start_pressure_sweep_characterization()
+
+    def start_droplet_recheck_characterization(self, selected_summary_row):
+        return self.model.calibration_manager.start_droplet_recheck_characterization(selected_summary_row)
     
     def start_droplet_timecourse_process(self):
         self.model.calibration_manager.start_droplet_timecourse_process()

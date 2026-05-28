@@ -745,7 +745,7 @@ class CharacterizationSummaryProxyModel(QtCore.QSortFilterProxyModel):
 
     def setSourceFilter(self, source_key):
         normalized = str(source_key or "all").strip().lower()
-        if normalized not in ("all", "sweep", "search", "stream"):
+        if normalized not in ("all", "sweep", "search", "recheck", "stream"):
             normalized = "all"
         if self._source_filter == normalized:
             return
@@ -790,6 +790,7 @@ class CharacterizationHistoryDialog(QtWidgets.QDialog):
         self.history_source_combo.addItem("All", "all")
         self.history_source_combo.addItem("Sweep", "sweep")
         self.history_source_combo.addItem("Search", "search")
+        self.history_source_combo.addItem("Recheck", "recheck")
         self.history_source_combo.addItem("Stream", "stream")
         self.history_showing_label = QtWidgets.QLabel("")
 
@@ -1994,6 +1995,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.summary_source_combo.addItem("All", "all")
         self.summary_source_combo.addItem("Sweep", "sweep")
         self.summary_source_combo.addItem("Search", "search")
+        self.summary_source_combo.addItem("Recheck", "recheck")
         self.summary_source_combo.addItem("Stream", "stream")
         self.summary_history_button = QtWidgets.QPushButton("History...")
         self.summary_history_button.setMinimumHeight(28)
@@ -2083,7 +2085,20 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.load_selected_button.setToolTip("Select a row above, then click to apply its PW and pressure.")
         self.load_selected_button.clicked.connect(self.load_selected_summary_row)
         self.load_selected_button.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
-        summary_v.addWidget(self.load_selected_button)
+        self.recheck_selected_button = QtWidgets.QPushButton("Recheck selected")
+        self.recheck_selected_button.setMinimumHeight(32)
+        self.recheck_selected_button.setEnabled(False)
+        self.recheck_selected_button.setToolTip(
+            "Select a valid trajectory-aware droplet result, then click to image it again."
+        )
+        self.recheck_selected_button.clicked.connect(self.recheck_selected_summary_row)
+        self.recheck_selected_button.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        summary_action_row = QtWidgets.QHBoxLayout()
+        summary_action_row.setContentsMargins(0, 0, 0, 0)
+        summary_action_row.setSpacing(8)
+        summary_action_row.addWidget(self.load_selected_button)
+        summary_action_row.addWidget(self.recheck_selected_button)
+        summary_v.addLayout(summary_action_row)
 
         # --- Group 4: Design ↔ Calibration Bridge ---
         self.bridge_group = QtWidgets.QWidget()
@@ -7911,6 +7926,41 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.load_selected_button.setToolTip(
                 "Select a row above, then click to apply its PW and pressure."
             )
+        self._update_recheck_button_state(raw=raw, mismatch_message=mismatch_message)
+
+    def _summary_row_recheck_missing(self, raw):
+        if not raw:
+            return ["Selected characterization result"]
+        mgr = getattr(getattr(self, "model", None), "calibration_manager", None)
+        getter = getattr(mgr, "get_droplet_recheck_missing_requirements", None)
+        if callable(getter):
+            try:
+                return list(getter(raw) or [])
+            except Exception as exc:
+                return [f"Recheck context unavailable ({exc})"]
+        return ["Recheck support is unavailable"]
+
+    def _update_recheck_button_state(self, *, raw=None, mismatch_message=None):
+        if not hasattr(self, "recheck_selected_button"):
+            return
+        if raw is None:
+            _, raw = self._selected_summary_row()
+        if mismatch_message is None:
+            mismatch_message = self._summary_row_mode_mismatch_message(raw)
+        missing = self._summary_row_recheck_missing(raw)
+        busy = DropletImagingDialog._is_calibration_busy(self)
+        ok = bool(raw and mismatch_message is None and not missing and not busy)
+        self.recheck_selected_button.setEnabled(ok)
+        if mismatch_message:
+            self.recheck_selected_button.setToolTip(mismatch_message)
+        elif busy:
+            self.recheck_selected_button.setToolTip("Wait for the current calibration to finish before rechecking.")
+        elif missing:
+            self.recheck_selected_button.setToolTip("Recheck unavailable: " + ", ".join(str(item) for item in missing))
+        else:
+            self.recheck_selected_button.setToolTip(
+                "Image this selected condition again using its original delay, position, and trajectory."
+            )
 
     def _handle_summary_double_click(self, _item):
         """Double-click loads immediately (same as pressing the button)."""
@@ -8048,6 +8098,53 @@ class DropletImagingDialog(QtWidgets.QDialog):
                     "Could not apply settings via manager or controller."
                 )
 
+    def recheck_selected_summary_row(self):
+        """Start a one-condition recheck from the selected characterization result."""
+        if DropletImagingDialog._is_calibration_busy(self):
+            return
+        _, raw = self._selected_summary_row()
+        if not raw:
+            return
+
+        mismatch_message = self._summary_row_mode_mismatch_message(raw)
+        if mismatch_message:
+            QtWidgets.QMessageBox.information(self, "Cannot recheck", mismatch_message)
+            return
+
+        missing = self._summary_row_recheck_missing(raw)
+        if missing:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Cannot recheck",
+                "Selected result is missing: " + ", ".join(str(item) for item in missing),
+            )
+            self._update_recheck_button_state(raw=raw, mismatch_message=mismatch_message)
+            return
+
+        run_no = raw.get("run_no")
+        pw = raw.get("pw_us")
+        pres = raw.get("pressure_psi")
+        self.stageLabel.setText(
+            f"Status: Starting recheck for PW {pw or '-'} us, Pressure {pres or '-'} psi "
+            f"(Run {run_no or '-'})..."
+        )
+
+        starter = getattr(self.controller, "start_droplet_recheck_characterization", None)
+        if callable(starter):
+            started = starter(dict(raw))
+        else:
+            mgr = getattr(getattr(self, "model", None), "calibration_manager", None)
+            starter = getattr(mgr, "start_droplet_recheck_characterization", None)
+            started = starter(dict(raw)) if callable(starter) else False
+        if started is False:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Recheck not started",
+                "The selected result could not be rechecked. Check the status log for details.",
+            )
+        else:
+            self.update_stage_and_log("Started droplet recheck characterization.", "blue")
+
     def populate_summary_table(self):
         mgr = self.model.calibration_manager
         rows = mgr.get_pressure_sweep_summary_rows()
@@ -8164,6 +8261,19 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 stream_parts.append(f"Warnings: {', '.join(str(item) for item in warnings)}")
             if stream_parts:
                 status_lines.append(" | ".join(stream_parts))
+        elif str(raw.get("phase") or "").strip().lower() == "recheck":
+            recheck_parts = []
+            source = raw.get("recheck_source") or {}
+            if isinstance(source, dict) and source.get("run_id"):
+                recheck_parts.append(f"Source run {source.get('run_id')}")
+            delta = raw.get("volume_delta_nL")
+            try:
+                if delta is not None:
+                    recheck_parts.append(f"Delta {float(delta):+.3f} nL")
+            except Exception:
+                pass
+            if recheck_parts:
+                status_lines.append(" | ".join(recheck_parts))
 
         mismatch_message = self._summary_row_mode_mismatch_message(raw)
         if mismatch_message:
@@ -8253,6 +8363,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.load_selected_button.setToolTip(
                 "Select a row above, then click to apply its PW and pressure."
             )
+        self._update_recheck_button_state(raw=raw, mismatch_message=mismatch_message)
 
     def _handle_summary_double_click(self, _index):
         """Double-click loads immediately (same as pressing the button)."""

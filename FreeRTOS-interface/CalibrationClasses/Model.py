@@ -1376,8 +1376,12 @@ class CalibrationManager(QObject):
         "trajectory": "trajectory",
         "trajectory_calibration": "trajectory",
         "droplet_trajectory": "trajectory",
+        "pressure_trajectory": "pressure_trajectory",
+        "pressure_sweep_characterization": "pressure_sweep_characterization",
         "droplet_search": "droplet_search",
         "droplet_timecourse": "droplet_timecourse",
+        "droplet_recheck": "droplet_recheck",
+        "droplet_recheck_characterization": "droplet_recheck",
         "online_stream_calibration": "online_stream_calibration",
     }
     STREAM_CAPTURE_PREREQ_QUEUE = (
@@ -3796,6 +3800,374 @@ class CalibrationManager(QObject):
             order=order
         )
 
+    @staticmethod
+    def _recheck_first_value(*values):
+        for value in values:
+            if value not in (None, ""):
+                return value
+        return None
+
+    @staticmethod
+    def _recheck_float_or_none(value):
+        try:
+            if value in (None, ""):
+                return None
+            out = float(value)
+            return out if np.isfinite(out) else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _recheck_int_or_none(value):
+        try:
+            if value in (None, ""):
+                return None
+            return int(round(float(value)))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _recheck_xyz_dict_or_none(value):
+        try:
+            if isinstance(value, dict):
+                return {
+                    "X": int(round(float(value["X"]))),
+                    "Y": int(round(float(value["Y"]))),
+                    "Z": int(round(float(value["Z"]))),
+                }
+            if isinstance(value, (list, tuple)) and len(value) >= 3:
+                return {
+                    "X": int(round(float(value[0]))),
+                    "Y": int(round(float(value[1]))),
+                    "Z": int(round(float(value[2]))),
+                }
+        except Exception:
+            return None
+        return None
+
+    @staticmethod
+    def _recheck_xyz_list_or_none(value):
+        xyz = CalibrationManager._recheck_xyz_dict_or_none(value)
+        if not xyz:
+            return None
+        return [int(xyz["X"]), int(xyz["Y"]), int(xyz["Z"])]
+
+    @staticmethod
+    def _recheck_xy_list_or_none(value):
+        try:
+            if isinstance(value, dict):
+                x = value.get("x", value.get("X"))
+                y = value.get("y", value.get("Y"))
+                return [int(round(float(x))), int(round(float(y)))]
+            if isinstance(value, (list, tuple)) and len(value) >= 2:
+                return [int(round(float(value[0]))), int(round(float(value[1])))]
+        except Exception:
+            return None
+        return None
+
+    @staticmethod
+    def _recheck_vec3_or_none(value):
+        try:
+            if isinstance(value, dict):
+                values = [value.get("X"), value.get("Y"), value.get("Z")]
+            else:
+                values = list(value or [])
+            if len(values) < 3:
+                return None
+            out = [float(values[0]), float(values[1]), float(values[2])]
+            if not all(np.isfinite(v) for v in out):
+                return None
+            return out
+        except Exception:
+            return None
+
+    @staticmethod
+    def _summary_source_phase_key(row):
+        phase_key = str(row.get("source_phase_key") or "").strip()
+        if phase_key:
+            return phase_key
+        phase = str(row.get("phase") or "").strip().lower()
+        if phase == "sweep":
+            return "pressure_sweep_characterization"
+        if phase == "recheck":
+            return "droplet_recheck"
+        if phase == "search":
+            return "droplet_search"
+        if phase == "stream":
+            return "online_stream_calibration"
+        return phase
+
+    def _find_recheck_source_run(self, row):
+        run_id = row.get("source_run_id") or row.get("run_id")
+        if not run_id:
+            return None
+        try:
+            self.ensure_loaded()
+        except Exception:
+            pass
+        for run in list((getattr(self, "data", {}) or {}).get("runs") or []):
+            if str(run.get("run_id")) == str(run_id):
+                return run
+        return None
+
+    def _find_recheck_source_record(self, row):
+        run = self._find_recheck_source_run(row)
+        if not isinstance(run, dict):
+            return None, None, None
+        phase_key = self._summary_source_phase_key(row)
+        steps = list((run.get("steps") or {}).get(phase_key) or [])
+        step_index = self._recheck_int_or_none(row.get("source_step_index"))
+        pressure_index = self._recheck_int_or_none(row.get("source_pressure_index"))
+        if step_index is not None and 0 <= step_index < len(steps):
+            step = steps[step_index]
+            pressures = list(((step.get("result") or {}).get("pressures")) or [])
+            if pressure_index is not None and 0 <= pressure_index < len(pressures):
+                return run, step, pressures[pressure_index]
+            if phase_key == "droplet_search":
+                return run, step, (step.get("result") or {})
+
+        row_pressure = self._recheck_float_or_none(row.get("pressure_psi"))
+        row_ts = row.get("timestamp")
+        for step in steps:
+            if row_ts not in (None, "") and step.get("timestamp") not in (None, "", row_ts):
+                continue
+            pressures = list(((step.get("result") or {}).get("pressures")) or [])
+            for pressure_entry in pressures:
+                p = self._recheck_float_or_none(pressure_entry.get("pressure"))
+                if row_pressure is None or p is None or abs(float(p) - float(row_pressure)) < 0.0005:
+                    return run, step, pressure_entry
+            if phase_key == "droplet_search":
+                return run, step, (step.get("result") or {})
+        return run, None, None
+
+    @staticmethod
+    def _latest_pressure_trajectory_result_for_run(run):
+        if not isinstance(run, dict):
+            return None
+        steps = run.get("steps") or {}
+        for phase_key in ("pressure_trajectory", "trajectory_pressure_scan"):
+            for step in reversed(list(steps.get(phase_key) or [])):
+                result = (step.get("result") or {}) if isinstance(step, dict) else {}
+                if isinstance(result, dict) and result.get("pressures"):
+                    return result
+        return None
+
+    @staticmethod
+    def _trajectory_velocity_for_pressure(pressure, trajectory_result):
+        pressure = CalibrationManager._recheck_float_or_none(pressure)
+        if pressure is None or not isinstance(trajectory_result, dict):
+            return None, None
+        valid_fit_set = set()
+        for p in list(trajectory_result.get("valid_fit_pressures") or []):
+            try:
+                valid_fit_set.add(round(float(p), 3))
+            except Exception:
+                continue
+        fit_pts = []
+        for rec in list(trajectory_result.get("pressures") or []):
+            if not isinstance(rec, dict):
+                continue
+            fit = rec.get("fit")
+            if not isinstance(fit, dict):
+                continue
+            if bool(rec.get("disqualified", False)):
+                continue
+            try:
+                p = round(float(rec.get("pressure")), 3)
+                vx = float(fit.get("vx_px_per_us"))
+                vy = float(fit.get("vy_px_per_us"))
+            except Exception:
+                continue
+            if not (np.isfinite(vx) and np.isfinite(vy)):
+                continue
+            if valid_fit_set and p not in valid_fit_set:
+                continue
+            fit_pts.append((float(p), float(vx), float(vy)))
+        if not fit_pts:
+            return None, None
+        fit_pts.sort(key=lambda item: item[0])
+        P_fit = np.array([item[0] for item in fit_pts], dtype=float)
+        VX_fit = np.array([item[1] for item in fit_pts], dtype=float)
+        VY_fit = np.array([item[2] for item in fit_pts], dtype=float)
+        vx = float(np.interp(float(pressure), P_fit, VX_fit))
+        vy = float(np.interp(float(pressure), P_fit, VY_fit))
+        return vx, vy
+
+    def build_droplet_recheck_context(self, selected_summary_row):
+        row = dict(selected_summary_row or {})
+        missing = []
+        if not row:
+            return {}, ["Selected characterization result"]
+
+        phase = str(row.get("phase") or "").strip().lower()
+        if phase == "stream":
+            missing.append("Droplet-mode characterization result")
+        if row.get("valid") is not True:
+            missing.append("Valid characterization result")
+
+        run, step, pressure_entry = self._find_recheck_source_record(row)
+        step_result = (step.get("result") or {}) if isinstance(step, dict) else {}
+        pressure_entry = pressure_entry if isinstance(pressure_entry, dict) else {}
+
+        pw_us = self._recheck_int_or_none(
+            self._recheck_first_value(
+                row.get("pw_us"),
+                row.get("print_pulse_width_us"),
+                pressure_entry.get("print_pulse_width_us"),
+                (step.get("settings") or {}).get("print_width") if isinstance(step, dict) else None,
+            )
+        )
+        pressure_psi = self._recheck_float_or_none(
+            self._recheck_first_value(
+                row.get("pressure_psi"),
+                row.get("pressure"),
+                pressure_entry.get("pressure"),
+                (step.get("settings") or {}).get("print_pressure") if isinstance(step, dict) else None,
+            )
+        )
+        delay_us = self._recheck_int_or_none(
+            self._recheck_first_value(
+                row.get("delay_us"),
+                pressure_entry.get("delay_us"),
+                row.get("nominal_delay_us"),
+                pressure_entry.get("nominal_delay_us"),
+            )
+        )
+        target_xyz = self._recheck_xyz_list_or_none(
+            self._recheck_first_value(
+                row.get("target_xyz"),
+                row.get("mean_position_machine"),
+                pressure_entry.get("mean_position_machine"),
+                row.get("nominal_target_xyz"),
+                pressure_entry.get("nominal_target_xyz"),
+            )
+        )
+        nozzle_center_machine = self._recheck_xyz_dict_or_none(
+            self._recheck_first_value(
+                row.get("nozzle_center_machine"),
+                step_result.get("nozzle_center_machine"),
+            )
+        )
+        nozzle_center_px = self._recheck_xy_list_or_none(
+            self._recheck_first_value(
+                row.get("nozzle_center_px"),
+                step_result.get("nozzle_center_px"),
+            )
+        )
+        emergence_time_us = self._recheck_int_or_none(
+            self._recheck_first_value(
+                row.get("emergence_time_us"),
+                step_result.get("emergence_time_us"),
+            )
+        )
+        vec_steps_per_s = self._recheck_vec3_or_none(
+            self._recheck_first_value(
+                row.get("vec_steps_per_s"),
+                pressure_entry.get("vec_steps_per_s"),
+            )
+        )
+        vx_px_per_us = self._recheck_float_or_none(
+            self._recheck_first_value(
+                row.get("vx_px_per_us"),
+                row.get("vx"),
+                pressure_entry.get("vx_px_per_us"),
+                pressure_entry.get("vx"),
+            )
+        )
+        vy_px_per_us = self._recheck_float_or_none(
+            self._recheck_first_value(
+                row.get("vy_px_per_us"),
+                row.get("vy"),
+                pressure_entry.get("vy_px_per_us"),
+                pressure_entry.get("vy"),
+            )
+        )
+
+        trajectory_result = None
+        if vec_steps_per_s is None and (vx_px_per_us is None or vy_px_per_us is None):
+            trajectory_result = self._latest_pressure_trajectory_result_for_run(run)
+            vx_px_per_us, vy_px_per_us = self._trajectory_velocity_for_pressure(
+                pressure_psi,
+                trajectory_result,
+            )
+            if nozzle_center_px is None and isinstance(trajectory_result, dict):
+                nozzle_center_px = self._recheck_xy_list_or_none(trajectory_result.get("nozzle_center_px"))
+            if emergence_time_us is None and isinstance(trajectory_result, dict):
+                emergence_time_us = self._recheck_int_or_none(trajectory_result.get("emergence_time_us"))
+
+        if pw_us is None:
+            missing.append("Print pulse width")
+        if pressure_psi is None:
+            missing.append("Pressure")
+        if delay_us is None:
+            missing.append("Prior flash delay")
+        if target_xyz is None:
+            missing.append("Prior droplet machine position")
+        if nozzle_center_machine is None:
+            missing.append("Source nozzle center machine coordinates")
+        if nozzle_center_px is None:
+            missing.append("Source nozzle center image coordinates")
+        if emergence_time_us is None:
+            missing.append("Source emergence time")
+        if vec_steps_per_s is None and (vx_px_per_us is None or vy_px_per_us is None):
+            missing.append("Source droplet trajectory")
+
+        source_result = {
+            "run_id": row.get("source_run_id") or row.get("run_id"),
+            "phase_key": self._summary_source_phase_key(row),
+            "step_index": self._recheck_int_or_none(row.get("source_step_index")),
+            "pressure_index": self._recheck_int_or_none(row.get("source_pressure_index")),
+            "phase": phase,
+            "timestamp": row.get("timestamp"),
+            "pw_us": pw_us,
+            "pressure_psi": pressure_psi,
+            "delay_us": delay_us,
+            "mean_volume_nL": self._recheck_float_or_none(row.get("mean_nL")),
+            "cv_pct": self._recheck_float_or_none(row.get("cv_pct")),
+        }
+        context = {
+            "print_pulse_width_us": pw_us,
+            "pressure_psi": pressure_psi,
+            "delay_us": delay_us,
+            "target_xyz": target_xyz,
+            "mean_position_machine": target_xyz,
+            "nozzle_center_machine": nozzle_center_machine,
+            "nozzle_center_px": nozzle_center_px,
+            "emergence_time_us": emergence_time_us,
+            "vec_steps_per_s": vec_steps_per_s,
+            "vx_px_per_us": vx_px_per_us,
+            "vy_px_per_us": vy_px_per_us,
+            "reference_mean_volume_nL": source_result["mean_volume_nL"],
+            "reference_cv_volume_percent": source_result["cv_pct"],
+            "source_result": source_result,
+        }
+        if isinstance(trajectory_result, dict):
+            context["trajectory_result"] = trajectory_result
+        return context, missing
+
+    def get_droplet_recheck_missing_requirements(self, selected_summary_row):
+        _context, missing = self.build_droplet_recheck_context(selected_summary_row)
+        return list(missing or [])
+
+    def start_droplet_recheck_characterization(
+        self,
+        selected_summary_row,
+        *,
+        replicates_per_pressure=20,
+    ):
+        context, missing = self.build_droplet_recheck_context(selected_summary_row)
+        if missing:
+            msg = "Recheck prerequisites missing: " + ", ".join(str(item) for item in missing)
+            self.calibrationStageChanged.emit(msg, "red")
+            self.calibrationError.emit(msg)
+            return False
+        return self._try_start_process(
+            PressureSweepCharacterizationProcess,
+            recheck_context=context,
+            replicates_per_pressure=replicates_per_pressure,
+            order="desc",
+        )
+
     def start_droplet_timecourse_process(self, *, save_camera_archive: bool = False):
         self._try_start_process(
             DropletTimecourseProcess,
@@ -6162,6 +6534,7 @@ class CalibrationManager(QObject):
         # Notify listeners to refresh the summary table when relevant
         if phase_key in (
             "pressure_sweep_characterization",
+            "droplet_recheck",
             "droplet_search",
             "online_stream_calibration",
         ):
@@ -6614,6 +6987,8 @@ class CalibrationManager(QObject):
             return "Search"
         if phase_key == "sweep":
             return "Sweep"
+        if phase_key == "recheck":
+            return "Recheck"
         if phase_key == "stream":
             return "Stream"
         if not phase_key:
@@ -6825,14 +7200,28 @@ class CalibrationManager(QObject):
             run_no = id_to_run_no.get(rid)
 
             # ---- (A) Full sweep steps: each step contains result["pressures"] list
-            for step in run.get("steps", {}).get("pressure_sweep_characterization", []):
-                pw = (step.get("settings") or {}).get("print_width")
+            for step_index, step in enumerate(run.get("steps", {}).get("pressure_sweep_characterization", [])):
+                settings = step.get("settings") or {}
+                res = step.get("result") or {}
+                pw = settings.get("print_width")
+                if pw is None:
+                    pw = settings.get("print_pulse_width")
+                if pw is None:
+                    pw = res.get("print_pulse_width_us")
                 ts = step.get("timestamp")
-                pressures = (step.get("result") or {}).get("pressures") or []
-                for p in pressures:
+                pressures = res.get("pressures") or []
+                for pressure_index, p in enumerate(pressures):
                     phase = "sweep"
+                    delay_us = p.get("delay_us")
+                    target_xyz = self._recheck_xyz_list_or_none(
+                        p.get("mean_position_machine") or p.get("nominal_target_xyz")
+                    )
                     rows.append({
                         "run_id": rid,
+                        "source_run_id": rid,
+                        "source_phase_key": "pressure_sweep_characterization",
+                        "source_step_index": step_index,
+                        "source_pressure_index": pressure_index,
                         "run_no": run_no,
                         "phase": phase,
                         "phase_label": self._pressure_sweep_phase_label(phase),
@@ -6840,6 +7229,69 @@ class CalibrationManager(QObject):
                         "timestamp_display": self._format_pressure_sweep_summary_timestamp(ts),
                         "pw_us": pw,
                         "pressure_psi": p.get("pressure"),
+                        "delay_us": delay_us,
+                        "target_xyz": target_xyz,
+                        "mean_position_machine": p.get("mean_position_machine"),
+                        "nominal_delay_us": p.get("nominal_delay_us"),
+                        "nominal_target_xyz": p.get("nominal_target_xyz"),
+                        "vec_steps_per_s": p.get("vec_steps_per_s"),
+                        "vx_px_per_us": p.get("vx_px_per_us", p.get("vx")),
+                        "vy_px_per_us": p.get("vy_px_per_us", p.get("vy")),
+                        "nozzle_center_px": res.get("nozzle_center_px"),
+                        "nozzle_center_machine": res.get("nozzle_center_machine"),
+                        "emergence_time_us": res.get("emergence_time_us"),
+                        "mean_nL": p.get("mean_volume"),
+                        "cv_pct": p.get("cv_volume_percent"),
+                        "valid": p.get("valid"),
+                        "invalid_reason": p.get("invalid_reason"),
+                        "is_focus_run": rid == focus_run_id,
+                        "printing_mode": "droplet",
+                    })
+
+            # ---- (A2) Recheck steps: pressure-sweep result shape, single selected condition
+            for step_index, step in enumerate(run.get("steps", {}).get("droplet_recheck", [])):
+                settings = step.get("settings") or {}
+                res = step.get("result") or {}
+                pw = settings.get("print_width")
+                if pw is None:
+                    pw = res.get("print_pulse_width_us")
+                ts = step.get("timestamp")
+                pressures = res.get("pressures") or []
+                for pressure_index, p in enumerate(pressures):
+                    phase = "recheck"
+                    if pw is None:
+                        pw = p.get("print_pulse_width_us")
+                    target_xyz = self._recheck_xyz_list_or_none(
+                        p.get("mean_position_machine") or p.get("nominal_target_xyz")
+                    )
+                    rows.append({
+                        "run_id": rid,
+                        "source_run_id": rid,
+                        "source_phase_key": "droplet_recheck",
+                        "source_step_index": step_index,
+                        "source_pressure_index": pressure_index,
+                        "run_no": run_no,
+                        "phase": phase,
+                        "phase_label": self._pressure_sweep_phase_label(phase),
+                        "timestamp": ts,
+                        "timestamp_display": self._format_pressure_sweep_summary_timestamp(ts),
+                        "pw_us": pw,
+                        "pressure_psi": p.get("pressure"),
+                        "delay_us": p.get("delay_us"),
+                        "target_xyz": target_xyz,
+                        "mean_position_machine": p.get("mean_position_machine"),
+                        "nominal_delay_us": p.get("nominal_delay_us"),
+                        "nominal_target_xyz": p.get("nominal_target_xyz"),
+                        "vec_steps_per_s": p.get("vec_steps_per_s"),
+                        "vx_px_per_us": p.get("vx_px_per_us", p.get("vx")),
+                        "vy_px_per_us": p.get("vy_px_per_us", p.get("vy")),
+                        "nozzle_center_px": res.get("nozzle_center_px"),
+                        "nozzle_center_machine": res.get("nozzle_center_machine"),
+                        "emergence_time_us": res.get("emergence_time_us"),
+                        "recheck_source": p.get("recheck_source") or res.get("recheck_source"),
+                        "reference_mean_volume_nL": p.get("reference_mean_volume_nL"),
+                        "volume_delta_nL": p.get("volume_delta_nL"),
+                        "volume_delta_percent": p.get("volume_delta_percent"),
                         "mean_nL": p.get("mean_volume"),
                         "cv_pct": p.get("cv_volume_percent"),
                         "valid": p.get("valid"),
@@ -6849,7 +7301,7 @@ class CalibrationManager(QObject):
                     })
 
             # ---- (B) Droplet-search steps: single pressure at current PW/pressure
-            for step in run.get("steps", {}).get("droplet_search", []):
+            for step_index, step in enumerate(run.get("steps", {}).get("droplet_search", [])):
                 ts = step.get("timestamp")
                 res = (step.get("result") or {})
                 settings = (step.get("settings") or {})
@@ -6870,6 +7322,10 @@ class CalibrationManager(QObject):
                     phase = "search"
                     rows.append({
                         "run_id": rid,
+                        "source_run_id": rid,
+                        "source_phase_key": "droplet_search",
+                        "source_step_index": step_index,
+                        "source_pressure_index": None,
                         "run_no": run_no,
                         "phase": phase,
                         "phase_label": self._pressure_sweep_phase_label(phase),
@@ -6877,6 +7333,19 @@ class CalibrationManager(QObject):
                         "timestamp_display": self._format_pressure_sweep_summary_timestamp(ts),
                         "pw_us": pw,
                         "pressure_psi": pr,
+                        "delay_us": res.get("delay_us"),
+                        "target_xyz": self._recheck_xyz_list_or_none(
+                            res.get("mean_position_machine") or res.get("nominal_target_xyz")
+                        ),
+                        "mean_position_machine": res.get("mean_position_machine"),
+                        "nominal_delay_us": res.get("nominal_delay_us"),
+                        "nominal_target_xyz": res.get("nominal_target_xyz"),
+                        "vec_steps_per_s": res.get("vec_steps_per_s"),
+                        "vx_px_per_us": res.get("vx_px_per_us", res.get("vx")),
+                        "vy_px_per_us": res.get("vy_px_per_us", res.get("vy")),
+                        "nozzle_center_px": res.get("nozzle_center_px"),
+                        "nozzle_center_machine": res.get("nozzle_center_machine"),
+                        "emergence_time_us": res.get("emergence_time_us"),
                         "mean_nL": mean_nL,
                         "cv_pct": cv_pct,
                         "valid": bool(res.get("valid", True)),
@@ -23668,13 +24137,19 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                  char_delay_retarget_window_frames: int = 4,
                  char_delay_retarget_steps_us: tuple[int, ...] = (1000, 2000),
                  char_delay_retarget_cap: int = 2,
+                 recheck_context: dict | None = None,
                  parent=None):
         super().__init__(calibration_manager, model, parent)
-        missing_requirements = self.missing_requirements(calibration_manager)
+        self.recheck_mode = isinstance(recheck_context, dict)
+        self.recheck_context = dict(recheck_context or {})
+        missing_requirements = self.missing_requirements(
+            calibration_manager,
+            recheck_context=self.recheck_context if self.recheck_mode else None,
+        )
         if missing_requirements:
             raise ValueError("Cannot start PressureSweepCharacterizationProcess; missing prerequisites: "
                                + ", ".join(missing_requirements))
-        self.phase_name = "pressure_sweep_characterization"
+        self.phase_name = "droplet_recheck" if self.recheck_mode else "pressure_sweep_characterization"
 
         # ---------- prerequisites ----------
         self.num_samples           = self.calibration_manager.get_num_pressure_tests()
@@ -23687,6 +24162,16 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             self.nozzle_center_px = get_real_center() if callable(get_real_center) else None
         self.emergence_time_us     = self.calibration_manager.get_emergence_time()
         self.prev_background       = self.calibration_manager.get_background_image()
+        if self.recheck_mode:
+            context_nozzle_machine = self._coerce_xyz_dict(self.recheck_context.get("nozzle_center_machine"))
+            if context_nozzle_machine is not None:
+                self.nozzle_center_machine = context_nozzle_machine
+            context_nozzle_px = self._coerce_xy_tuple(self.recheck_context.get("nozzle_center_px"))
+            if context_nozzle_px is not None:
+                self.nozzle_center_px = context_nozzle_px
+            context_emergence = self._coerce_int_or_none(self.recheck_context.get("emergence_time_us"))
+            if context_emergence is not None:
+                self.emergence_time_us = int(context_emergence)
 
         get_traj_band = getattr(self.calibration_manager, "get_trajectory_pressure_band", None)
         self.trajectory_band = get_traj_band() if callable(get_traj_band) else None
@@ -23711,7 +24196,9 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
         # pull per-pressure trajectory fits
         traj = getattr(self.calibration_manager, "get_pressure_trajectory_result", None)
-        self.traj = traj() if callable(traj) else None
+        self.traj = self.recheck_context.get("trajectory_result") if self.recheck_mode else None
+        if self.traj is None:
+            self.traj = traj() if callable(traj) else None
 
         if not self.trajectory_valid_pressures and isinstance(self.traj, dict):
             for rec in list(self.traj.get("pressures") or []):
@@ -23733,7 +24220,9 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 float(max(self.trajectory_valid_pressures)),
             )
 
-        if not (self.nozzle_center_machine and self.nozzle_center_px and self.emergence_time_us and self.traj and self.traj.get("pressures")):
+        if self.recheck_mode:
+            self._ready = True
+        elif not (self.nozzle_center_machine and self.nozzle_center_px and self.emergence_time_us and self.traj and self.traj.get("pressures")):
             self.calibrationError.emit("Sweep requires nozzle center, background, emergence, and trajectory scan results.")
             self._ready = False
         else:
@@ -23741,7 +24230,14 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
         # list of (pressure, fit) we'll actually use (build grid from trajectory-derived band)
         self.plan = []
-        if self._ready:
+        if self._ready and self.recheck_mode:
+            rec = self._build_recheck_pressure_target(self.recheck_context)
+            if rec:
+                self.plan.append(rec)
+            else:
+                self.calibrationError.emit("Recheck could not build a trajectory-aware single-pressure plan.")
+                self._ready = False
+        elif self._ready:
             plan_band = self._resolve_trajectory_planning_band(
                 self.trajectory_band,
                 self.trajectory_valid_pressures,
@@ -24031,8 +24527,10 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.state_machine.setInitialState(self.state_pick)
 
     @staticmethod
-    def missing_requirements(cm) -> list[str]:
+    def missing_requirements(cm, *args, recheck_context=None, **kwargs) -> list[str]:
         """Return a list of human-readable missing prerequisites."""
+        if recheck_context is not None:
+            return PressureSweepCharacterizationProcess.recheck_missing_requirements(recheck_context)
         missing = []
         if cm.get_nozzle_center() is None:
             missing.append("Nozzle center (machine coords)")
@@ -24968,6 +25466,177 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         )
         return rec
 
+    @staticmethod
+    def _coerce_float_or_none(value):
+        try:
+            if value in (None, ""):
+                return None
+            out = float(value)
+            return out if np.isfinite(out) else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _coerce_int_or_none(value):
+        try:
+            if value in (None, ""):
+                return None
+            return int(round(float(value)))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _coerce_xyz_dict(value):
+        try:
+            if isinstance(value, dict):
+                return {
+                    "X": int(round(float(value["X"]))),
+                    "Y": int(round(float(value["Y"]))),
+                    "Z": int(round(float(value["Z"]))),
+                }
+            if isinstance(value, (list, tuple)) and len(value) >= 3:
+                return {
+                    "X": int(round(float(value[0]))),
+                    "Y": int(round(float(value[1]))),
+                    "Z": int(round(float(value[2]))),
+                }
+        except Exception:
+            return None
+        return None
+
+    @staticmethod
+    def _coerce_xyz_tuple(value):
+        xyz = PressureSweepCharacterizationProcess._coerce_xyz_dict(value)
+        if xyz is None:
+            return None
+        return (int(xyz["X"]), int(xyz["Y"]), int(xyz["Z"]))
+
+    @staticmethod
+    def _coerce_xy_tuple(value):
+        try:
+            if isinstance(value, dict):
+                x = value.get("x", value.get("X"))
+                y = value.get("y", value.get("Y"))
+                return (int(round(float(x))), int(round(float(y))))
+            if isinstance(value, (list, tuple)) and len(value) >= 2:
+                return (int(round(float(value[0]))), int(round(float(value[1]))))
+        except Exception:
+            return None
+        return None
+
+    @staticmethod
+    def _coerce_vec3(value):
+        try:
+            if isinstance(value, dict):
+                values = [value.get("X"), value.get("Y"), value.get("Z")]
+            else:
+                values = list(value or [])
+            if len(values) < 3:
+                return None
+            out = (float(values[0]), float(values[1]), float(values[2]))
+            if not all(np.isfinite(v) for v in out):
+                return None
+            return out
+        except Exception:
+            return None
+
+    @staticmethod
+    def recheck_missing_requirements(recheck_context) -> list[str]:
+        context = dict(recheck_context or {})
+        missing = []
+        if PressureSweepCharacterizationProcess._coerce_int_or_none(
+            context.get("print_pulse_width_us")
+        ) is None:
+            missing.append("Print pulse width")
+        if PressureSweepCharacterizationProcess._coerce_float_or_none(
+            context.get("pressure_psi")
+        ) is None:
+            missing.append("Pressure")
+        if PressureSweepCharacterizationProcess._coerce_int_or_none(context.get("delay_us")) is None:
+            missing.append("Prior flash delay")
+        if PressureSweepCharacterizationProcess._coerce_xyz_tuple(
+            context.get("target_xyz") or context.get("mean_position_machine")
+        ) is None:
+            missing.append("Prior droplet machine position")
+        if PressureSweepCharacterizationProcess._coerce_xyz_dict(
+            context.get("nozzle_center_machine")
+        ) is None:
+            missing.append("Source nozzle center machine coordinates")
+        if PressureSweepCharacterizationProcess._coerce_xy_tuple(context.get("nozzle_center_px")) is None:
+            missing.append("Source nozzle center image coordinates")
+        if PressureSweepCharacterizationProcess._coerce_int_or_none(
+            context.get("emergence_time_us")
+        ) is None:
+            missing.append("Source emergence time")
+        vec = PressureSweepCharacterizationProcess._coerce_vec3(context.get("vec_steps_per_s"))
+        vx = PressureSweepCharacterizationProcess._coerce_float_or_none(
+            context.get("vx_px_per_us") if context.get("vx_px_per_us") is not None else context.get("vx")
+        )
+        vy = PressureSweepCharacterizationProcess._coerce_float_or_none(
+            context.get("vy_px_per_us") if context.get("vy_px_per_us") is not None else context.get("vy")
+        )
+        if vec is None and (vx is None or vy is None):
+            missing.append("Source droplet trajectory")
+        return missing
+
+    def _build_recheck_pressure_target(self, context: dict) -> dict:
+        context = dict(context or {})
+        pressure = self._coerce_float_or_none(context.get("pressure_psi"))
+        pw_us = self._coerce_int_or_none(context.get("print_pulse_width_us"))
+        delay_us = self._coerce_int_or_none(context.get("delay_us"))
+        target_xyz = self._coerce_xyz_tuple(
+            context.get("target_xyz") or context.get("mean_position_machine")
+        )
+        if pressure is None or pw_us is None or delay_us is None or target_xyz is None:
+            return {}
+
+        vec_steps_per_s = self._coerce_vec3(context.get("vec_steps_per_s"))
+        vx = self._coerce_float_or_none(
+            context.get("vx_px_per_us") if context.get("vx_px_per_us") is not None else context.get("vx")
+        )
+        vy = self._coerce_float_or_none(
+            context.get("vy_px_per_us") if context.get("vy_px_per_us") is not None else context.get("vy")
+        )
+        if vec_steps_per_s is None:
+            if vx is None or vy is None:
+                return {}
+            vec_steps_per_s = self._image_vel_to_stage_vel(float(vx), float(vy))
+        if vx is None:
+            vx = 0.0
+        if vy is None:
+            vy = 0.0
+
+        delay_us = self._clamp_delay(int(delay_us))
+        target_xyz = self._clamp_xyz(*target_xyz)
+        raw_nominal_xyz = self._predict_target_xyz(vec_steps_per_s, int(delay_us))
+        initial_track_offset_steps = [
+            int(target_xyz[0]) - int(raw_nominal_xyz[0]),
+            int(target_xyz[1]) - int(raw_nominal_xyz[1]),
+            int(target_xyz[2]) - int(raw_nominal_xyz[2]),
+        ]
+        source = context.get("source_result")
+        source = dict(source) if isinstance(source, dict) else {}
+        return {
+            "pressure": float(round(float(pressure), 3)),
+            "vx": float(vx),
+            "vy": float(vy),
+            "vec_steps_per_s": [float(v) for v in vec_steps_per_s],
+            "targeting_mode": str(self.targeting_mode),
+            "imaging_z_offset_steps": int(self.imaging_z_offset_steps),
+            "target_z_steps": int(self.target_z_steps),
+            "target_plane_reachable": True,
+            "target_plane_reason": None,
+            "nominal_delay_us": int(delay_us),
+            "nominal_dt_us": int(max(0, int(delay_us) - int(self.emergence_time_us))),
+            "nominal_target_xyz": [int(v) for v in raw_nominal_xyz],
+            "recheck_target_xyz": [int(v) for v in target_xyz],
+            "initial_track_offset_steps": [int(v) for v in initial_track_offset_steps],
+            "print_pulse_width_us": int(pw_us),
+            "recheck_source": source,
+            "reference_mean_volume_nL": context.get("reference_mean_volume_nL"),
+            "reference_cv_volume_percent": context.get("reference_cv_volume_percent"),
+        }
+
     def _predict_target_xyz(self, vec_steps_per_s, delay_us: int):
         dt_s = max(0.0, (int(delay_us) - int(self.emergence_time_us)) * 1e-6)
         vX, vY, vZ = vec_steps_per_s
@@ -25021,6 +25690,31 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         nominal_target_xyz = rec.get("nominal_target_xyz")
         if nominal_target_xyz is not None:
             out["nominal_target_xyz"] = [int(v) for v in nominal_target_xyz]
+        recheck_target_xyz = rec.get("recheck_target_xyz")
+        if recheck_target_xyz is not None:
+            out["recheck_target_xyz"] = [int(v) for v in recheck_target_xyz]
+        initial_track_offset_steps = rec.get("initial_track_offset_steps")
+        if (
+            isinstance(initial_track_offset_steps, (list, tuple))
+            and len(initial_track_offset_steps) >= 3
+        ):
+            out["initial_track_offset_steps"] = [
+                int(round(float(initial_track_offset_steps[0]))),
+                int(round(float(initial_track_offset_steps[1]))),
+                int(round(float(initial_track_offset_steps[2]))),
+            ]
+        vec_steps_per_s = rec.get("vec_steps_per_s")
+        vec = self._coerce_vec3(vec_steps_per_s)
+        if vec is not None:
+            out["vec_steps_per_s"] = [float(v) for v in vec]
+        vx = self._coerce_float_or_none(rec.get("vx_px_per_us", rec.get("vx")))
+        vy = self._coerce_float_or_none(rec.get("vy_px_per_us", rec.get("vy")))
+        if vx is not None:
+            out["vx_px_per_us"] = float(vx)
+            out["vx"] = float(vx)
+        if vy is not None:
+            out["vy_px_per_us"] = float(vy)
+            out["vy"] = float(vy)
         target_plane_reason = rec.get("target_plane_reason")
         if target_plane_reason:
             out["target_plane_reason"] = str(target_plane_reason)
@@ -25208,6 +25902,11 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.target_delay_us = 0
         self.nominal_target_xyz = None
         self.nominal_target_delay_us = None
+        initial_offsets = rec.get("initial_track_offset_steps")
+        if isinstance(initial_offsets, (list, tuple)) and len(initial_offsets) >= 3:
+            self._x_track_offset_steps = int(round(float(initial_offsets[0])))
+            self._y_focus_offset_steps = int(round(float(initial_offsets[1])))
+            self._z_track_offset_steps = int(round(float(initial_offsets[2])))
 
         self.stageChanged.emit(f"[{self.i+1}/{len(self.plan)}] Pressure {self.cur_pressure:.3f} psi "
                                f"(vx={vx:.4f} px/us, vy={vy:.4f} px/us)")
@@ -25251,7 +25950,17 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
     @Slot()
     def onApplyPressure(self):
         settings = {"print_pressure": float(self.cur_pressure), "num_droplets": 0}
-        self.stageChanged.emit(f"Applying pressure {self.cur_pressure:.3f} psi and preparing background")
+        pw_us = None
+        rec = getattr(self, "current_plan_record", None)
+        if isinstance(rec, dict):
+            pw_us = self._coerce_int_or_none(rec.get("print_pulse_width_us"))
+        if pw_us is not None:
+            settings["print_pulse_width"] = int(pw_us)
+            self.stageChanged.emit(
+                f"Applying PW {int(pw_us)} us, pressure {self.cur_pressure:.3f} psi and preparing background"
+            )
+        else:
+            self.stageChanged.emit(f"Applying pressure {self.cur_pressure:.3f} psi and preparing background")
         self._request_settings_with_timeout(
             settings,
             on_done=self.calibration_manager.emitSettingsChangeCompleted,
@@ -26281,6 +26990,46 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         else:
             self.analyzeBatch.emit()
 
+    def _attach_recheck_metadata(self, pressure_entry: dict) -> dict:
+        if not bool(getattr(self, "recheck_mode", False)):
+            return pressure_entry
+        rec = dict(pressure_entry or {})
+        plan_record = getattr(self, "current_plan_record", None)
+        plan_record = plan_record if isinstance(plan_record, dict) else {}
+        context = getattr(self, "recheck_context", None)
+        context = context if isinstance(context, dict) else {}
+        source = plan_record.get("recheck_source") or context.get("source_result") or {}
+        source = dict(source) if isinstance(source, dict) else {}
+        pw_us = self._coerce_int_or_none(
+            plan_record.get("print_pulse_width_us") or context.get("print_pulse_width_us")
+        )
+        if pw_us is not None:
+            rec["print_pulse_width_us"] = int(pw_us)
+        rec["recheck"] = True
+        rec["recheck_source"] = source
+
+        ref_mean = self._coerce_float_or_none(
+            plan_record.get("reference_mean_volume_nL")
+            if plan_record.get("reference_mean_volume_nL") is not None
+            else context.get("reference_mean_volume_nL")
+        )
+        ref_cv = self._coerce_float_or_none(
+            plan_record.get("reference_cv_volume_percent")
+            if plan_record.get("reference_cv_volume_percent") is not None
+            else context.get("reference_cv_volume_percent")
+        )
+        if ref_mean is not None:
+            rec["reference_mean_volume_nL"] = float(ref_mean)
+        if ref_cv is not None:
+            rec["reference_cv_volume_percent"] = float(ref_cv)
+        mean_volume = self._coerce_float_or_none(rec.get("mean_volume"))
+        if ref_mean is not None and mean_volume is not None:
+            delta = float(mean_volume) - float(ref_mean)
+            rec["volume_delta_nL"] = float(delta)
+            if abs(float(ref_mean)) > 1e-9:
+                rec["volume_delta_percent"] = float(delta / float(ref_mean) * 100.0)
+        return rec
+
     @Slot()
     def onAnalyzeBatch(self):
         # Only keep “good” (circular) replicates
@@ -26402,6 +27151,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             }
             rec.update(self._circularity_threshold_context())
             rec.update(self._current_targeting_metadata())
+            rec = self._attach_recheck_metadata(rec)
             self.samples.append(rec)
             valid_payload = {
                 "status": "valid",
@@ -26495,6 +27245,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         rec.update(self._current_targeting_metadata())
         if isinstance(extra, dict):
             rec.update(extra)
+        rec = self._attach_recheck_metadata(rec)
         
         self.samples.append(rec)
         self._record_pressure_sweep_analysis(
@@ -26737,6 +27488,18 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             "nozzle_center_machine": self.nozzle_center_machine,
             "emergence_time_us": int(self.emergence_time_us),
         }
+        if bool(getattr(self, "recheck_mode", False)):
+            source = {}
+            context = getattr(self, "recheck_context", None)
+            if isinstance(context, dict):
+                source = dict(context.get("source_result") or {})
+            result.update(
+                {
+                    "recheck": True,
+                    "recheck_source": source,
+                    "print_pulse_width_us": pressure_entry.get("print_pulse_width_us"),
+                }
+            )
         self.calibrationDataUpdated.emit({"measurements": [], "result": result})
         self._incremental_emitted = True
 
@@ -26756,6 +27519,10 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 "emergence_time_us": int(self.emergence_time_us),
                 "complete": True
             }
+            if bool(getattr(self, "recheck_mode", False)):
+                context = getattr(self, "recheck_context", None)
+                source = dict(context.get("source_result") or {}) if isinstance(context, dict) else {}
+                result.update({"recheck": True, "recheck_source": source})
             self.calibrationDataUpdated.emit({"measurements": [], "result": result})
         else:
             # Back-compat: original behavior (single emit with all pressures)
@@ -26770,9 +27537,17 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 "nozzle_center_machine": self.nozzle_center_machine,
                 "emergence_time_us": int(self.emergence_time_us),
             }
+            if bool(getattr(self, "recheck_mode", False)):
+                context = getattr(self, "recheck_context", None)
+                source = dict(context.get("source_result") or {}) if isinstance(context, dict) else {}
+                result.update({"recheck": True, "recheck_source": source})
             self.calibrationDataUpdated.emit({"measurements": [], "result": result})
 
-        self.stageChanged.emit("Pressure sweep characterization complete")
+        self.stageChanged.emit(
+            "Droplet recheck characterization complete"
+            if bool(getattr(self, "recheck_mode", False))
+            else "Pressure sweep characterization complete"
+        )
         self.calibrationCompleted.emit()
         
 class DropletTimecourseProcess(BaseCalibrationProcess):

@@ -66,3 +66,18 @@ def test_data_update_stores_online_stream_under_canonical_phase_key():
     assert len(steps["online_stream_calibration"]) == 1
     assert steps["online_stream_calibration"][0]["phase"] == "online_stream_calibration"
     assert len(mgr.characterizationSummaryUpdated.calls) == 1
+
+
+def test_data_update_stores_recheck_under_canonical_phase_key_and_refreshes_summary():
+    mgr = _manager_stub()
+    mgr.activeCalibration = SimpleNamespace(phase_name="droplet_recheck_characterization")
+
+    CalibrationManager.onCalibrationDataUpdated(
+        mgr,
+        {"measurements": [], "result": {"pressures": [{"pressure": 1.2}]}},
+    )
+
+    steps = mgr.data["runs"][0]["steps"]
+    assert len(steps["droplet_recheck"]) == 1
+    assert steps["droplet_recheck"][0]["phase"] == "droplet_recheck"
+    assert len(mgr.characterizationSummaryUpdated.calls) == 1
