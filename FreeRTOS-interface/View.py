@@ -941,7 +941,8 @@ class MainWindow(QMainWindow):
         """Launch the standalone updater, then close through the normal path."""
         response = self.popup_yes_no(
             "Update App",
-            "The app will close, update the application code, and reopen. Firmware will not be updated. Continue?",
+            "The app will close, update the application code, and reopen. "
+            "A LabCraft updater window will show progress. Firmware will not be updated. Continue?",
         )
         if not self._is_yes_response(response):
             return False

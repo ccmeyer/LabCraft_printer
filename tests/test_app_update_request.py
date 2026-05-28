@@ -70,6 +70,7 @@ def test_controller_builds_update_command_with_relaunch_on_failure(tmp_path, mon
         str(tmp_path),
         "--wait-pid",
         "1234",
+        "--gui",
         "--relaunch-on-failure",
     ]
 

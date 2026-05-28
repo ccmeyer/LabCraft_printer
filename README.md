@@ -273,6 +273,25 @@ python FreeRTOS-interface/App.py
 ```
 Inside `FreeRTOS-interface/Presets`, `Settings.json` stores predefined values such as default COM ports and plate setup.
 
+## Application updates
+
+Operators can update the Python application from the Firmware tab with `Update App`.
+
+Expected flow:
+
+- The app confirms that application code will update and firmware will not be flashed.
+- If the machine is connected, the normal disconnect/close flow runs first.
+- A `LabCraft Updater` window appears after the main app closes and shows update progress.
+- On success, the updater relaunches the app automatically.
+
+If the update is blocked or fails, the updater window stays open and shows the log path. Support should ask for the path shown in the updater window, usually under:
+
+```text
+local/update_logs/
+```
+
+For dirty worktrees, network failures, credential failures, or non-fast-forward Git state, the updater does not stash, reset, clean, or overwrite local changes. Use `Reopen Current Version` to relaunch the installed app version and contact support with the updater log.
+
 ## Pi setup status
 
 For a Raspberry Pi 5 running Raspberry Pi OS Bookworm, use the manual procedure below as the source of truth. Do not run the older root-level helper scripts during normal setup if you are following this README.

@@ -314,6 +314,24 @@ def test_successful_relaunch_uses_repo_local_python_and_app_path(tmp_path):
     ]
 
 
+def test_relaunch_helper_uses_same_repo_local_python_and_app_path(tmp_path):
+    python_path = tmp_path / "venv" / "bin" / "python"
+    _write_file(python_path)
+    launches = []
+    config = _config(tmp_path, platform_name="Linux")
+
+    ok, message, command = updater.relaunch_app(
+        config,
+        tmp_path,
+        launcher=lambda launch_command, cwd: launches.append((tuple(launch_command), Path(cwd))),
+    )
+
+    assert ok is True
+    assert message == ""
+    assert command == [str(python_path), str(tmp_path / "FreeRTOS-interface" / "App.py")]
+    assert launches == [(tuple(command), tmp_path)]
+
+
 def test_log_file_created_under_local_update_logs_by_default(tmp_path):
     runner = FakeGitRunner(tmp_path, before_sha="abc", after_sha="def", pull_stdout="Fast-forward\n")
 
@@ -341,6 +359,7 @@ def test_cli_parser_defaults_match_documented_usage():
     assert config.app_path == Path("FreeRTOS-interface") / "App.py"
     assert config.no_relaunch is False
     assert config.relaunch_on_failure is False
+    assert config.gui is False
     assert config.git_timeout_s == 300.0
     assert config.log_path is None
 
@@ -349,3 +368,80 @@ def test_cli_parser_accepts_relaunch_on_failure():
     config = updater.parse_args(["--repo-root", ".", "--wait-pid", "4321", "--relaunch-on-failure"])
 
     assert config.relaunch_on_failure is True
+
+
+def test_cli_parser_accepts_gui():
+    config = updater.parse_args(["--repo-root", ".", "--gui"])
+
+    assert config.gui is True
+
+
+def test_progress_events_for_clean_noop_update(tmp_path):
+    runner = FakeGitRunner(tmp_path, before_sha="abc", after_sha="abc")
+    events = []
+
+    result = updater.run_update(
+        _config(tmp_path),
+        command_runner=runner,
+        progress_callback=events.append,
+    )
+
+    assert result.status == updater.STATUS_ALREADY_CURRENT
+    kinds = [event.kind for event in events]
+    assert "starting" in kinds
+    assert "checking_checkout" in kinds
+    assert "checking_for_updates" in kinds
+    assert "checking_local_changes" in kinds
+    assert "applying_update" in kinds
+    assert "complete" in kinds
+    assert any(event.kind == "command" and "git pull --ff-only" in event.details for event in events)
+
+
+def test_progress_events_for_dirty_worktree_failure(tmp_path):
+    runner = FakeGitRunner(tmp_path, dirty_status=" M FreeRTOS-interface/App.py\n")
+    events = []
+
+    result = updater.run_update(
+        _config(tmp_path),
+        command_runner=runner,
+        progress_callback=events.append,
+    )
+
+    assert result.status == updater.STATUS_DIRTY_WORKTREE
+    kinds = [event.kind for event in events]
+    assert "checking_local_changes" in kinds
+    assert "failed" in kinds
+    assert "applying_update" not in kinds
+
+
+def test_progress_events_for_pull_failure(tmp_path):
+    runner = FakeGitRunner(tmp_path, pull_returncode=128)
+    events = []
+
+    result = updater.run_update(
+        _config(tmp_path),
+        command_runner=runner,
+        progress_callback=events.append,
+    )
+
+    assert result.status == updater.STATUS_GIT_PULL_FAILED
+    kinds = [event.kind for event in events]
+    assert "applying_update" in kinds
+    assert "failed" in kinds
+    assert any("fatal: Not possible to fast-forward" in event.details for event in events)
+
+
+def test_progress_events_for_wait_timeout(tmp_path):
+    runner = FakeGitRunner(tmp_path)
+    events = []
+
+    result = updater.run_update(
+        _config(tmp_path, wait_pid=1234),
+        command_runner=runner,
+        waiter=lambda pid, timeout: False,
+        progress_callback=events.append,
+    )
+
+    assert result.status == updater.STATUS_WAIT_TIMEOUT
+    assert [event.kind for event in events] == ["starting", "waiting", "failed"]
+    assert runner.calls == []

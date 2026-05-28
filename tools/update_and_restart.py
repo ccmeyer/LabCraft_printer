@@ -66,6 +66,16 @@ class UpdateResult:
 
 
 @dataclass(frozen=True)
+class ProgressEvent:
+    kind: str
+    message: str
+    details: str = ""
+    command_result: CommandResult | None = None
+    result: UpdateResult | None = None
+    log_path: Path | None = None
+
+
+@dataclass(frozen=True)
 class UpdaterConfig:
     repo_root: Path = Path(".")
     wait_pid: int | None = None
@@ -74,6 +84,7 @@ class UpdaterConfig:
     app_path: Path = DEFAULT_APP_PATH
     no_relaunch: bool = False
     relaunch_on_failure: bool = False
+    gui: bool = False
     git_timeout_s: float = DEFAULT_GIT_TIMEOUT_S
     log_path: Path | None = None
     platform_name: str | None = None
@@ -82,6 +93,7 @@ class UpdaterConfig:
 CommandRunner = Callable[[Sequence[str], Path, float, Mapping[str, str] | None], CommandResult]
 Launcher = Callable[[Sequence[str], Path], object]
 Waiter = Callable[[int, float], bool]
+ProgressCallback = Callable[[ProgressEvent], None]
 
 
 class _LogBuffer:
@@ -288,6 +300,76 @@ def default_launcher(command: Sequence[str], cwd: Path) -> object:
     return subprocess.Popen([str(part) for part in command], cwd=str(cwd), shell=False)
 
 
+def format_command_result(result: CommandResult) -> str:
+    lines = [f"$ {' '.join(result.args)}", f"returncode: {result.returncode}"]
+    if result.stdout:
+        lines.append("stdout:")
+        lines.extend(result.stdout.rstrip().splitlines())
+    if result.stderr:
+        lines.append("stderr:")
+        lines.extend(result.stderr.rstrip().splitlines())
+    return "\n".join(lines)
+
+
+def _emit_progress(
+    progress_callback: ProgressCallback | None,
+    kind: str,
+    message: str,
+    *,
+    details: str = "",
+    command_result: CommandResult | None = None,
+    result: UpdateResult | None = None,
+    log_path: Path | None = None,
+) -> None:
+    if progress_callback is None:
+        return
+    progress_callback(
+        ProgressEvent(
+            kind=kind,
+            message=message,
+            details=details,
+            command_result=command_result,
+            result=result,
+            log_path=log_path,
+        )
+    )
+
+
+def _record_command(
+    log: _LogBuffer,
+    result: CommandResult,
+    progress_callback: ProgressCallback | None,
+) -> None:
+    log.add_command(result)
+    _emit_progress(
+        progress_callback,
+        "command",
+        "Command completed.",
+        details=format_command_result(result),
+        command_result=result,
+    )
+
+
+def build_relaunch_command(config: UpdaterConfig, repo_root: Path) -> list[str]:
+    python_path = resolve_python_path(repo_root, config.python_path, platform_name=config.platform_name)
+    app_path = _resolve_under_repo(repo_root, config.app_path)
+    return [str(python_path), str(app_path)]
+
+
+def relaunch_app(
+    config: UpdaterConfig,
+    repo_root: Path,
+    *,
+    launcher: Launcher = default_launcher,
+) -> tuple[bool, str, list[str]]:
+    command = build_relaunch_command(config, repo_root)
+    try:
+        launcher(command, repo_root)
+    except Exception as exc:
+        return False, str(exc), command
+    return True, "", command
+
+
 def _attempt_relaunch(
     config: UpdaterConfig,
     repo_root: Path,
@@ -295,23 +377,18 @@ def _attempt_relaunch(
     launcher: Launcher,
     *,
     context: str,
+    progress_callback: ProgressCallback | None = None,
 ) -> str | None:
     if config.no_relaunch:
         log.add(f"{context} relaunch skipped by --no-relaunch.")
         return None
 
-    python_path = resolve_python_path(repo_root, config.python_path, platform_name=config.platform_name)
-    app_path = _resolve_under_repo(repo_root, config.app_path)
-    log.add(f"python: {python_path}")
-    log.add(f"app: {app_path}")
-
-    command = [str(python_path), str(app_path)]
+    _emit_progress(progress_callback, "launching_app", "Starting LabCraft...")
+    ok, message, command = relaunch_app(config, repo_root, launcher=launcher)
+    log.add(f"python: {command[0]}")
+    log.add(f"app: {command[1]}")
     log.add(f"{context}_relaunch_command: {' '.join(command)}")
-    try:
-        launcher(command, repo_root)
-    except Exception as exc:
-        return str(exc)
-    return None
+    return None if ok else message
 
 
 def _make_result(
@@ -342,6 +419,7 @@ def run_update(
     command_runner: CommandRunner = default_command_runner,
     launcher: Launcher = default_launcher,
     waiter: Waiter | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> UpdateResult:
     requested_root = Path(config.repo_root).resolve()
     log = _LogBuffer()
@@ -351,8 +429,16 @@ def run_update(
 
     log_path = Path(config.log_path).resolve() if config.log_path is not None else default_log_path(requested_root)
 
+    _emit_progress(progress_callback, "starting", "Starting LabCraft updater...", log_path=log_path)
+
     if config.wait_pid is not None:
         log.add(f"waiting_for_pid: {config.wait_pid}")
+        _emit_progress(
+            progress_callback,
+            "waiting",
+            "Waiting for LabCraft to close...",
+            log_path=log_path,
+        )
         wait_func = waiter or (lambda pid, timeout: wait_for_process_exit(pid, timeout, platform_name=config.platform_name))
         if not wait_func(int(config.wait_pid), float(config.wait_timeout_s)):
             result = _make_result(
@@ -361,10 +447,11 @@ def run_update(
                 repo_root=None,
                 log_path=log_path,
             )
-            return _finish_failure_result(result, requested_root, config, log, launcher, log_path)
+            return _finish_failure_result(result, requested_root, config, log, launcher, log_path, progress_callback)
 
+    _emit_progress(progress_callback, "checking_checkout", "Checking local checkout...", log_path=log_path)
     top_level = _run_git(requested_root, ["rev-parse", "--show-toplevel"], config.git_timeout_s, command_runner)
-    log.add_command(top_level)
+    _record_command(log, top_level, progress_callback)
     if top_level.returncode != 0 or not top_level.stdout.strip():
         result = _make_result(
             STATUS_NOT_GIT_REPO,
@@ -372,19 +459,20 @@ def run_update(
             repo_root=None,
             log_path=log_path,
         )
-        return _finish_failure_result(result, requested_root, config, log, launcher, log_path)
+        return _finish_failure_result(result, requested_root, config, log, launcher, log_path, progress_callback)
 
     repo_root = Path(top_level.stdout.strip()).resolve()
     if config.log_path is None:
         log_path = default_log_path(repo_root)
     log.add(f"repo_root: {repo_root}")
+    _emit_progress(progress_callback, "checking_for_updates", "Checking for updates...", log_path=log_path)
 
     branch_result = _run_git(repo_root, ["branch", "--show-current"], config.git_timeout_s, command_runner)
-    log.add_command(branch_result)
+    _record_command(log, branch_result, progress_callback)
     branch = branch_result.stdout.strip() if branch_result.returncode == 0 else ""
 
     before_result = _run_git(repo_root, ["rev-parse", "HEAD"], config.git_timeout_s, command_runner)
-    log.add_command(before_result)
+    _record_command(log, before_result, progress_callback)
     if before_result.returncode != 0 or not before_result.stdout.strip():
         result = _make_result(
             STATUS_GIT_PULL_FAILED,
@@ -393,11 +481,12 @@ def run_update(
             branch=branch,
             log_path=log_path,
         )
-        return _finish_failure_result(result, repo_root, config, log, launcher, log_path)
+        return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
     before_sha = before_result.stdout.strip()
 
+    _emit_progress(progress_callback, "checking_local_changes", "Checking local changes...", log_path=log_path)
     status_result = _run_git(repo_root, ["status", "--porcelain"], config.git_timeout_s, command_runner)
-    log.add_command(status_result)
+    _record_command(log, status_result, progress_callback)
     if status_result.returncode != 0:
         result = _make_result(
             STATUS_GIT_PULL_FAILED,
@@ -407,7 +496,7 @@ def run_update(
             before_sha=before_sha,
             log_path=log_path,
         )
-        return _finish_failure_result(result, repo_root, config, log, launcher, log_path)
+        return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
     if status_result.stdout.strip():
         result = _make_result(
             STATUS_DIRTY_WORKTREE,
@@ -418,10 +507,11 @@ def run_update(
             after_sha=before_sha,
             log_path=log_path,
         )
-        return _finish_failure_result(result, repo_root, config, log, launcher, log_path)
+        return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
 
+    _emit_progress(progress_callback, "applying_update", "Downloading and applying update...", log_path=log_path)
     pull_result = _run_git(repo_root, ["pull", "--ff-only"], config.git_timeout_s, command_runner)
-    log.add_command(pull_result)
+    _record_command(log, pull_result, progress_callback)
     if pull_result.returncode != 0:
         result = _make_result(
             STATUS_GIT_PULL_FAILED,
@@ -432,10 +522,10 @@ def run_update(
             after_sha=before_sha,
             log_path=log_path,
         )
-        return _finish_failure_result(result, repo_root, config, log, launcher, log_path)
+        return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
 
     after_result = _run_git(repo_root, ["rev-parse", "HEAD"], config.git_timeout_s, command_runner)
-    log.add_command(after_result)
+    _record_command(log, after_result, progress_callback)
     if after_result.returncode != 0 or not after_result.stdout.strip():
         result = _make_result(
             STATUS_GIT_PULL_FAILED,
@@ -445,14 +535,21 @@ def run_update(
             before_sha=before_sha,
             log_path=log_path,
         )
-        return _finish_failure_result(result, repo_root, config, log, launcher, log_path)
+        return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
     after_sha = after_result.stdout.strip()
 
     status = STATUS_ALREADY_CURRENT if after_sha == before_sha else STATUS_UPDATED
     message = "LabCraft is already current." if status == STATUS_ALREADY_CURRENT else "LabCraft was updated successfully."
 
     if not config.no_relaunch:
-        relaunch_error = _attempt_relaunch(config, repo_root, log, launcher, context="success")
+        relaunch_error = _attempt_relaunch(
+            config,
+            repo_root,
+            log,
+            launcher,
+            context="success",
+            progress_callback=progress_callback,
+        )
         if relaunch_error:
             result = _make_result(
                 STATUS_RELAUNCH_FAILED,
@@ -466,6 +563,13 @@ def run_update(
             log.add(f"status: {result.status}")
             log.add(result.message)
             log.write(log_path)
+            _emit_progress(
+                progress_callback,
+                "failed",
+                result.message,
+                result=result,
+                log_path=log_path,
+            )
             return result
     else:
         log.add("relaunch skipped by --no-relaunch.")
@@ -482,6 +586,7 @@ def run_update(
     log.add(f"status: {result.status}")
     log.add(result.message)
     log.write(log_path)
+    _emit_progress(progress_callback, "complete", result.message, result=result, log_path=log_path)
     return result
 
 
@@ -492,11 +597,19 @@ def _finish_failure_result(
     log: _LogBuffer,
     launcher: Launcher,
     log_path: Path,
+    progress_callback: ProgressCallback | None = None,
 ) -> UpdateResult:
     final_result = result
     if config.relaunch_on_failure:
         log.add(f"failure_status: {result.status}")
-        relaunch_error = _attempt_relaunch(config, launch_root, log, launcher, context="failure")
+        relaunch_error = _attempt_relaunch(
+            config,
+            launch_root,
+            log,
+            launcher,
+            context="failure",
+            progress_callback=progress_callback,
+        )
         if relaunch_error:
             final_result = _make_result(
                 STATUS_RELAUNCH_FAILED,
@@ -511,6 +624,13 @@ def _finish_failure_result(
     log.add(f"status: {final_result.status}")
     log.add(final_result.message)
     log.write(log_path)
+    _emit_progress(
+        progress_callback,
+        "failed",
+        final_result.message,
+        result=final_result,
+        log_path=log_path,
+    )
     return final_result
 
 
@@ -527,6 +647,7 @@ def parse_args(argv: Sequence[str] | None = None) -> UpdaterConfig:
         action="store_true",
         help="Relaunch the current app if the update cannot complete.",
     )
+    parser.add_argument("--gui", action="store_true", help="Show the operator updater window.")
     parser.add_argument("--git-timeout-s", type=float, default=DEFAULT_GIT_TIMEOUT_S, help="Timeout for each Git command.")
     parser.add_argument("--log-path", default=None, help="Optional updater log path.")
     args = parser.parse_args(argv)
@@ -539,13 +660,26 @@ def parse_args(argv: Sequence[str] | None = None) -> UpdaterConfig:
         app_path=Path(args.app),
         no_relaunch=bool(args.no_relaunch),
         relaunch_on_failure=bool(args.relaunch_on_failure),
+        gui=bool(args.gui),
         git_timeout_s=float(args.git_timeout_s),
         log_path=Path(args.log_path) if args.log_path else None,
     )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    result = run_update(parse_args(argv))
+    config = parse_args(argv)
+    if config.gui:
+        try:
+            repo_parent = Path(__file__).resolve().parents[1]
+            if str(repo_parent) not in sys.path:
+                sys.path.insert(0, str(repo_parent))
+            from tools import update_window
+
+            return int(update_window.run_gui(config))
+        except ImportError as exc:
+            print(f"Could not start updater window, falling back to headless update: {exc}", file=sys.stderr)
+
+    result = run_update(config)
     print(result.message)
     print(f"Status: {result.status}")
     if result.branch:

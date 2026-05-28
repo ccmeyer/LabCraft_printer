@@ -233,6 +233,10 @@ Done when:
 - A blocked update can reopen the old app without support intervention.
 - README/operator notes explain what support should ask for when an update fails.
 
+Implemented status:
+
+- Slice 3 adds the PySide6 `LabCraft Updater` window, `--gui` updater mode, progress events, failure recovery actions, and README operator notes.
+
 ## Validation
 
 Documentation-only slice:
