@@ -181,6 +181,71 @@ def test_pull_failure_returns_git_pull_failed_and_does_not_relaunch(tmp_path):
     assert not launches
 
 
+def test_relaunch_on_failure_relaunches_current_app_on_dirty_worktree(tmp_path):
+    runner = FakeGitRunner(tmp_path, dirty_status=" M FreeRTOS-interface/App.py\n")
+    python_path = tmp_path / "venv" / "bin" / "python"
+    _write_file(python_path)
+    launches = []
+
+    result = updater.run_update(
+        _config(tmp_path, no_relaunch=False, relaunch_on_failure=True, platform_name="Linux"),
+        command_runner=runner,
+        launcher=lambda command, cwd: launches.append((tuple(command), Path(cwd))),
+    )
+
+    assert result.status == updater.STATUS_DIRTY_WORKTREE
+    assert result.returncode == 3
+    assert launches == [
+        (
+            (str(python_path), str(tmp_path / "FreeRTOS-interface" / "App.py")),
+            tmp_path,
+        )
+    ]
+
+
+def test_relaunch_on_failure_relaunches_current_app_on_pull_failure(tmp_path):
+    runner = FakeGitRunner(tmp_path, pull_returncode=128)
+    launches = []
+
+    result = updater.run_update(
+        _config(
+            tmp_path,
+            no_relaunch=False,
+            relaunch_on_failure=True,
+            python_path=Path("custom-python"),
+        ),
+        command_runner=runner,
+        launcher=lambda command, cwd: launches.append((tuple(command), Path(cwd))),
+    )
+
+    assert result.status == updater.STATUS_GIT_PULL_FAILED
+    assert result.returncode == 5
+    assert launches == [
+        (
+            (str(tmp_path / "custom-python"), str(tmp_path / "FreeRTOS-interface" / "App.py")),
+            tmp_path,
+        )
+    ]
+
+
+def test_relaunch_on_failure_reports_relaunch_failed_when_failure_relaunch_fails(tmp_path):
+    runner = FakeGitRunner(tmp_path, dirty_status=" M FreeRTOS-interface/App.py\n")
+
+    def failing_launcher(command, cwd):
+        raise OSError("launch failed")
+
+    result = updater.run_update(
+        _config(tmp_path, no_relaunch=False, relaunch_on_failure=True),
+        command_runner=runner,
+        launcher=failing_launcher,
+    )
+
+    assert result.status == updater.STATUS_RELAUNCH_FAILED
+    assert result.returncode == 6
+    assert "local developer changes" in result.message
+    assert "launch failed" in result.message
+
+
 def test_wait_pid_timeout_returns_before_running_git(tmp_path):
     runner = FakeGitRunner(tmp_path)
 
@@ -275,5 +340,12 @@ def test_cli_parser_defaults_match_documented_usage():
     assert config.python_path is None
     assert config.app_path == Path("FreeRTOS-interface") / "App.py"
     assert config.no_relaunch is False
+    assert config.relaunch_on_failure is False
     assert config.git_timeout_s == 300.0
     assert config.log_path is None
+
+
+def test_cli_parser_accepts_relaunch_on_failure():
+    config = updater.parse_args(["--repo-root", ".", "--wait-pid", "4321", "--relaunch-on-failure"])
+
+    assert config.relaunch_on_failure is True

@@ -10,7 +10,9 @@ from datetime import datetime, timezone
 import time
 import numpy as np
 import os
+import subprocess
 import serial
+import sys
 import math
 import json
 import uuid
@@ -78,6 +80,7 @@ class Controller(QObject):
 
         self._dfu_thread: DfuUpdateWorker | None = None
         self._qualification_worker = None
+        self._app_update_process = None
 
         # Defaults; tweak if you keep them elsewhere
         self._dfu_script = Path(__file__).resolve().parent / "dfu_update.py"
@@ -435,6 +438,190 @@ class Controller(QObject):
         self._dfu_thread.finished.connect(self.dfu_finished)
         self._dfu_thread.output.connect(self.dfu_output)
         self._dfu_thread.start()
+
+    def is_app_update_process_running(self):
+        process = getattr(self, "_app_update_process", None)
+        if process is None:
+            return False
+
+        poll = getattr(process, "poll", None)
+        if callable(poll):
+            try:
+                if poll() is None:
+                    return True
+            except Exception:
+                return True
+
+        self._app_update_process = None
+        return False
+
+    def cancel_app_update_process(self):
+        process = getattr(self, "_app_update_process", None)
+        if process is None:
+            return
+
+        if self.is_app_update_process_running():
+            terminate = getattr(process, "terminate", None)
+            if callable(terminate):
+                try:
+                    terminate()
+                except Exception:
+                    pass
+            wait = getattr(process, "wait", None)
+            if callable(wait):
+                try:
+                    wait(timeout=1.0)
+                except TypeError:
+                    try:
+                        wait()
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+        self._app_update_process = None
+
+    def build_app_update_command(self, wait_pid):
+        updater_path = (self._repo_root / "tools" / "update_and_restart.py").resolve()
+        command = [
+            sys.executable,
+            "-u",
+            str(updater_path),
+            "--repo-root",
+            str(self._repo_root),
+        ]
+        if wait_pid is not None:
+            command.extend(["--wait-pid", str(int(wait_pid))])
+        command.append("--relaunch-on-failure")
+        return command
+
+    def launch_app_updater(self, wait_pid, launcher=None):
+        if self.is_app_update_process_running():
+            return False, "An application update is already running."
+
+        command = self.build_app_update_command(wait_pid)
+
+        def _default_launcher(cmd, *, cwd):
+            return subprocess.Popen(
+                list(cmd),
+                cwd=str(cwd),
+                shell=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+        launch = launcher or _default_launcher
+        try:
+            process = launch(command, cwd=self._repo_root)
+        except Exception as exc:
+            self._app_update_process = None
+            return False, f"Could not start the application updater: {exc}"
+
+        self._app_update_process = process
+        return True, "Application updater started."
+
+    def get_app_update_blockers(self):
+        blockers = []
+
+        if self.is_app_update_process_running():
+            blockers.append("An application update is already running.")
+
+        dfu_thread = getattr(self, "_dfu_thread", None)
+        dfu_running = getattr(dfu_thread, "isRunning", None)
+        if dfu_thread is not None and callable(dfu_running) and dfu_running():
+            blockers.append("Firmware update is running.")
+
+        try:
+            if self.is_qualification_running():
+                blockers.append("Machine qualification is running.")
+        except Exception:
+            pass
+
+        array_state = str(getattr(self, "_array_state", "idle") or "idle")
+        if array_state != "idle":
+            blockers.append(f"Print array state is {array_state}.")
+
+        seq_state = str(getattr(self, "_seq_state", "idle") or "idle")
+        if seq_state != "idle":
+            blockers.append(f"Preprogrammed sequence state is {seq_state}.")
+
+        try:
+            if not self.check_if_all_completed():
+                blockers.append("Command queue is not empty.")
+        except Exception:
+            blockers.append("Command queue state could not be checked.")
+
+        if bool(getattr(self, "pending_capture_active", False)):
+            blockers.append("Image capture is active.")
+
+        blockers.extend(self._get_app_update_calibration_blockers())
+        return blockers
+
+    def _get_app_update_calibration_blockers(self):
+        manager = getattr(getattr(self, "model", None), "calibration_manager", None)
+        if manager is None:
+            return []
+
+        blockers = []
+        if getattr(manager, "activeCalibration", None) is not None:
+            blockers.append("Calibration is active.")
+
+        queue = getattr(manager, "calibration_queue", None) or []
+        try:
+            if len(queue) > 0:
+                blockers.append("Calibration queue is not empty.")
+        except Exception:
+            blockers.append("Calibration queue state could not be checked.")
+
+        sweep_active = getattr(manager, "is_pulsewidth_sweep_active", None)
+        if callable(sweep_active):
+            try:
+                if sweep_active():
+                    blockers.append("Pulse-width sweep is active.")
+            except Exception:
+                blockers.append("Pulse-width sweep state could not be checked.")
+
+        for getter_name, label in (
+            ("get_stream_gravimetric_capture_state", "Stream gravimetric capture"),
+            ("get_stream_calibration_sequence_state", "Stream calibration sequence"),
+            ("get_droplet_calibration_sequence_state", "Droplet calibration sequence"),
+        ):
+            getter = getattr(manager, getter_name, None)
+            if not callable(getter):
+                continue
+            try:
+                state = getter()
+            except Exception:
+                blockers.append(f"{label} state could not be checked.")
+                continue
+            if self._app_update_calibration_state_is_busy(state):
+                status = state.get("status") if isinstance(state, dict) else state
+                blockers.append(f"{label} state is {status}.")
+
+        return blockers
+
+    @staticmethod
+    def _app_update_calibration_state_is_busy(state):
+        if isinstance(state, dict):
+            status = state.get("status")
+        else:
+            status = state
+
+        normalized = str(status or "idle").strip().lower()
+        return normalized in {
+            "pending_gripper_refresh",
+            "refreshing_gripper",
+            "suspending_gripper_refresh",
+            "pending_loading_move",
+            "moving_to_loading",
+            "awaiting_mass_entry",
+            "running",
+            "pending_camera_return",
+            "returning_to_camera",
+            "pending_gripper_restore",
+            "restoring_gripper_refresh",
+        }
 
     def qualification_report_root(self):
         return self._repo_root / "hil_reports"

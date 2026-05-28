@@ -406,6 +406,7 @@ class MainWindow(QMainWindow):
         self.color_dict = self.load_colors(self.color_dict_path)
         self._startup_focus_initialized = False
         self.audit_timeline_window = None
+        self._app_update_close_requested = False
 
         self.setWindowTitle("Droplet Printer Interface")
         self.init_ui()
@@ -864,6 +865,12 @@ class MainWindow(QMainWindow):
 
         self._dismiss_close_disconnect_dialog()
 
+    def _cancel_app_update_request(self):
+        self._app_update_close_requested = False
+        cancel_update = getattr(self.controller, "cancel_app_update_process", None)
+        if callable(cancel_update):
+            cancel_update()
+
     def _begin_close_disconnect(self):
         self._ensure_close_disconnect_signal_hook()
         self.disconnected = False
@@ -900,6 +907,12 @@ class MainWindow(QMainWindow):
 
         if standard_button == QtWidgets.QMessageBox.Cancel:
             self._cancel_pending_close_disconnect()
+            if getattr(self, "_app_update_close_requested", False):
+                self._cancel_app_update_request()
+                self.popup_message(
+                    "Update Cancelled",
+                    "Application update was cancelled. The app will remain open.",
+                )
 
     @Slot()
     def _handle_close_disconnect_complete(self):
@@ -923,6 +936,41 @@ class MainWindow(QMainWindow):
             return text
         else:
             return None
+
+    def request_app_update(self):
+        """Launch the standalone updater, then close through the normal path."""
+        response = self.popup_yes_no(
+            "Update App",
+            "The app will close, update the application code, and reopen. Firmware will not be updated. Continue?",
+        )
+        if not self._is_yes_response(response):
+            return False
+
+        blockers_getter = getattr(self.controller, "get_app_update_blockers", None)
+        blockers = blockers_getter() if callable(blockers_getter) else []
+        if blockers:
+            message = "Application update cannot start right now:\n\n" + "\n".join(
+                f"- {blocker}" for blocker in blockers
+            )
+            self.popup_message("Cannot Update App", message)
+            return False
+
+        launcher = getattr(self.controller, "launch_app_updater", None)
+        if not callable(launcher):
+            self.popup_message(
+                "Cannot Update App",
+                "The controller does not support application updates.",
+            )
+            return False
+
+        ok, message = launcher(wait_pid=os.getpid())
+        if not ok:
+            self.popup_message("Cannot Update App", str(message or "Updater could not be started."))
+            return False
+
+        self._app_update_close_requested = True
+        self.close()
+        return True
 
     def show_calibrations(self):
         """Print all printer head calibrations to terminal."""
@@ -1030,7 +1078,13 @@ class MainWindow(QMainWindow):
             )
             return
 
+        update_close_requested = getattr(self, "_app_update_close_requested", False)
         if self.model.machine_model.is_connected():
+            if update_close_requested:
+                self._begin_close_disconnect()
+                event.ignore()
+                return
+
             response = self.popup_yes_no('Close Application','Disconnect from the machine and close the application?')
             if not self._is_yes_response(response):
                 event.ignore()
@@ -3981,6 +4035,16 @@ class SpeedProfilesTab(QtWidgets.QWidget):
 
         layout.addWidget(fw_group, row_after_table + 1, 0, 1, 3)
 
+        app_update_group = QtWidgets.QGroupBox("Application Update")
+        app_update_v = QtWidgets.QVBoxLayout(app_update_group)
+
+        self.app_update_button = QtWidgets.QPushButton("Update App")
+        self.app_update_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.app_update_button.clicked.connect(self._on_app_update_requested)
+        app_update_v.addWidget(self.app_update_button)
+
+        layout.addWidget(app_update_group, row_after_table + 2, 0, 1, 3)
+
         # Add a new button for resetting the mcu board
         self.reset_mcu_button = QtWidgets.QPushButton("Reset MCU")
         self.reset_mcu_button.setStyleSheet("""
@@ -3996,7 +4060,7 @@ class SpeedProfilesTab(QtWidgets.QWidget):
             }
         """)
         self.reset_mcu_button.clicked.connect(self._on_reset_mcu_requested)
-        layout.addWidget(self.reset_mcu_button, row_after_table + 2, 0, 1, 3)
+        layout.addWidget(self.reset_mcu_button, row_after_table + 3, 0, 1, 3)
 
         # === MCU Task Usage table (scrollable) ===
         self.tasks_group = QtWidgets.QGroupBox("MCU Task Usage")
@@ -4019,7 +4083,7 @@ class SpeedProfilesTab(QtWidgets.QWidget):
         )
 
         tasks_v.addWidget(self.tasks_table)
-        layout.addWidget(self.tasks_group, row_after_table + 3, 0, 1, 3)
+        layout.addWidget(self.tasks_group, row_after_table + 4, 0, 1, 3)
 
         # Background style to match mid-panel (optional)
         self.tasks_group.setStyleSheet(
@@ -4044,7 +4108,7 @@ class SpeedProfilesTab(QtWidgets.QWidget):
         self._log_max_rows = 2000                                                # NEW
 
         logs_v.addWidget(self.logs_table)                                        # NEW
-        layout.addWidget(self.logs_group, row_after_table + 4, 0, 1, 3)          # NEW
+        layout.addWidget(self.logs_group, row_after_table + 5, 0, 1, 3)          # NEW
 
         # Optional style
         self.logs_group.setStyleSheet(                                           # NEW
@@ -4053,15 +4117,7 @@ class SpeedProfilesTab(QtWidgets.QWidget):
         )
 
         # Stretch/spacer row so everything stays at the top
-        last_row = row_after_table + 5   # after logs_group                      # CHANGED
-        spacer = QtWidgets.QSpacerItem(
-            0, 0, QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Expanding
-        )
-        layout.addItem(spacer, last_row, 0, 1, 4)
-        layout.setRowStretch(last_row, 1)
-
-        # Stretch/spacer row so everything stays at the top
-        last_row = len(self._axis_rows) + 4  # header(0) + data rows
+        last_row = row_after_table + 6   # after logs_group                      # CHANGED
         spacer = QtWidgets.QSpacerItem(
             0, 0, QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Expanding
         )
@@ -4269,6 +4325,10 @@ class SpeedProfilesTab(QtWidgets.QWidget):
         # elif hasattr(self.controller, "update_firmware"):
         #     self.fw_status.setText("Running (UI will freeze)…")
         #     self.controller.update_firmware()
+
+    @QtCore.Slot()
+    def _on_app_update_requested(self):
+        self.main_window.request_app_update()
 
     @QtCore.Slot()
     def _on_machine_qualification_requested(self):

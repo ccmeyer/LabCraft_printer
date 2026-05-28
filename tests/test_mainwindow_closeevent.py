@@ -10,19 +10,31 @@ def _make_stub_mainwindow(fake_signal, *, popup_response=QMessageBox.StandardBut
     disconnect_calls = {"count": 0}
     close_calls = {"count": 0}
     dismiss_calls = {"count": 0}
+    cancel_update_calls = {"count": 0}
+    popup_calls = {"count": 0}
+    messages = []
     dialog_states = []
 
     mw = MainWindow.__new__(MainWindow)
     mw.model = SimpleNamespace(machine_model=SimpleNamespace(is_connected=lambda: True))
     mw.controller = SimpleNamespace(
         disconnect_machine=lambda: disconnect_calls.__setitem__("count", disconnect_calls["count"] + 1),
+        cancel_app_update_process=lambda: cancel_update_calls.__setitem__(
+            "count", cancel_update_calls["count"] + 1
+        ),
         machine=SimpleNamespace(disconnect_complete_signal=fake_signal),
     )
-    mw.popup_yes_no = lambda *args, **kwargs: popup_response
+    def _popup_yes_no(*args, **kwargs):
+        popup_calls["count"] += 1
+        return popup_response
+
+    mw.popup_yes_no = _popup_yes_no
+    mw.popup_message = lambda title, message: messages.append((title, message))
     mw.close_disconnect_timeout_ms = 20
     mw.disconnected = False
     mw._close_disconnect_pending = False
     mw._close_after_disconnect = False
+    mw._app_update_close_requested = False
     mw._close_disconnect_dialog = None
     mw._close_disconnect_timer = None
     mw._close_disconnect_timeout_prompt = False
@@ -34,6 +46,9 @@ def _make_stub_mainwindow(fake_signal, *, popup_response=QMessageBox.StandardBut
         "count", dismiss_calls["count"] + 1
     )
     mw.close = lambda: close_calls.__setitem__("count", close_calls["count"] + 1)
+    mw._cancel_update_calls = cancel_update_calls
+    mw._popup_calls = popup_calls
+    mw._popup_messages = messages
 
     return mw, disconnect_calls, close_calls, dismiss_calls, dialog_states
 
@@ -126,3 +141,45 @@ def test_mainwindow_closeevent_timeout_keep_waiting_restores_wait_dialog(qapp, f
     assert mw._close_disconnect_pending is True
     assert mw._close_disconnect_timeout_prompt is False
     assert mw._close_disconnect_timer.isActive() is True
+
+
+def test_mainwindow_closeevent_update_pending_connected_starts_disconnect_without_reprompt(qapp, fake_signal):
+    mw, disconnect_calls, close_calls, dismiss_calls, dialog_states = _make_stub_mainwindow(fake_signal)
+    mw._app_update_close_requested = True
+
+    event = QCloseEvent()
+    MainWindow.closeEvent(mw, event)
+
+    assert disconnect_calls["count"] == 1
+    assert close_calls["count"] == 0
+    assert dismiss_calls["count"] == 0
+    assert dialog_states == ["waiting"]
+    assert mw._popup_calls["count"] == 0
+    assert event.isAccepted() is False
+
+
+def test_mainwindow_closeevent_update_disconnect_cancel_terminates_updater_and_resets_state(qapp, fake_signal):
+    mw, disconnect_calls, close_calls, dismiss_calls, dialog_states = _make_stub_mainwindow(fake_signal)
+    mw._app_update_close_requested = True
+
+    event = QCloseEvent()
+    MainWindow.closeEvent(mw, event)
+    MainWindow._handle_close_disconnect_timeout(mw)
+
+    class _CancelDialog:
+        def standardButton(self, _button):
+            return QMessageBox.Cancel
+
+    mw._close_disconnect_dialog = _CancelDialog()
+    MainWindow._handle_close_disconnect_dialog_clicked(mw, object())
+
+    assert disconnect_calls["count"] == 1
+    assert close_calls["count"] == 0
+    assert dismiss_calls["count"] == 1
+    assert dialog_states == ["waiting", "timeout"]
+    assert mw._cancel_update_calls["count"] == 1
+    assert mw._app_update_close_requested is False
+    assert mw._close_disconnect_pending is False
+    assert mw._popup_messages == [
+        ("Update Cancelled", "Application update was cancelled. The app will remain open.")
+    ]

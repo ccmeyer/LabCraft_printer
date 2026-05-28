@@ -73,6 +73,7 @@ class UpdaterConfig:
     python_path: Path | None = None
     app_path: Path = DEFAULT_APP_PATH
     no_relaunch: bool = False
+    relaunch_on_failure: bool = False
     git_timeout_s: float = DEFAULT_GIT_TIMEOUT_S
     log_path: Path | None = None
     platform_name: str | None = None
@@ -287,6 +288,32 @@ def default_launcher(command: Sequence[str], cwd: Path) -> object:
     return subprocess.Popen([str(part) for part in command], cwd=str(cwd), shell=False)
 
 
+def _attempt_relaunch(
+    config: UpdaterConfig,
+    repo_root: Path,
+    log: _LogBuffer,
+    launcher: Launcher,
+    *,
+    context: str,
+) -> str | None:
+    if config.no_relaunch:
+        log.add(f"{context} relaunch skipped by --no-relaunch.")
+        return None
+
+    python_path = resolve_python_path(repo_root, config.python_path, platform_name=config.platform_name)
+    app_path = _resolve_under_repo(repo_root, config.app_path)
+    log.add(f"python: {python_path}")
+    log.add(f"app: {app_path}")
+
+    command = [str(python_path), str(app_path)]
+    log.add(f"{context}_relaunch_command: {' '.join(command)}")
+    try:
+        launcher(command, repo_root)
+    except Exception as exc:
+        return str(exc)
+    return None
+
+
 def _make_result(
     status: str,
     message: str,
@@ -334,10 +361,7 @@ def run_update(
                 repo_root=None,
                 log_path=log_path,
             )
-            log.add(f"status: {result.status}")
-            log.add(result.message)
-            log.write(log_path)
-            return result
+            return _finish_failure_result(result, requested_root, config, log, launcher, log_path)
 
     top_level = _run_git(requested_root, ["rev-parse", "--show-toplevel"], config.git_timeout_s, command_runner)
     log.add_command(top_level)
@@ -348,10 +372,7 @@ def run_update(
             repo_root=None,
             log_path=log_path,
         )
-        log.add(f"status: {result.status}")
-        log.add(result.message)
-        log.write(log_path)
-        return result
+        return _finish_failure_result(result, requested_root, config, log, launcher, log_path)
 
     repo_root = Path(top_level.stdout.strip()).resolve()
     if config.log_path is None:
@@ -372,10 +393,7 @@ def run_update(
             branch=branch,
             log_path=log_path,
         )
-        log.add(f"status: {result.status}")
-        log.add(result.message)
-        log.write(log_path)
-        return result
+        return _finish_failure_result(result, repo_root, config, log, launcher, log_path)
     before_sha = before_result.stdout.strip()
 
     status_result = _run_git(repo_root, ["status", "--porcelain"], config.git_timeout_s, command_runner)
@@ -389,10 +407,7 @@ def run_update(
             before_sha=before_sha,
             log_path=log_path,
         )
-        log.add(f"status: {result.status}")
-        log.add(result.message)
-        log.write(log_path)
-        return result
+        return _finish_failure_result(result, repo_root, config, log, launcher, log_path)
     if status_result.stdout.strip():
         result = _make_result(
             STATUS_DIRTY_WORKTREE,
@@ -403,10 +418,7 @@ def run_update(
             after_sha=before_sha,
             log_path=log_path,
         )
-        log.add(f"status: {result.status}")
-        log.add(result.message)
-        log.write(log_path)
-        return result
+        return _finish_failure_result(result, repo_root, config, log, launcher, log_path)
 
     pull_result = _run_git(repo_root, ["pull", "--ff-only"], config.git_timeout_s, command_runner)
     log.add_command(pull_result)
@@ -420,10 +432,7 @@ def run_update(
             after_sha=before_sha,
             log_path=log_path,
         )
-        log.add(f"status: {result.status}")
-        log.add(result.message)
-        log.write(log_path)
-        return result
+        return _finish_failure_result(result, repo_root, config, log, launcher, log_path)
 
     after_result = _run_git(repo_root, ["rev-parse", "HEAD"], config.git_timeout_s, command_runner)
     log.add_command(after_result)
@@ -436,29 +445,18 @@ def run_update(
             before_sha=before_sha,
             log_path=log_path,
         )
-        log.add(f"status: {result.status}")
-        log.add(result.message)
-        log.write(log_path)
-        return result
+        return _finish_failure_result(result, repo_root, config, log, launcher, log_path)
     after_sha = after_result.stdout.strip()
 
     status = STATUS_ALREADY_CURRENT if after_sha == before_sha else STATUS_UPDATED
     message = "LabCraft is already current." if status == STATUS_ALREADY_CURRENT else "LabCraft was updated successfully."
 
-    python_path = resolve_python_path(repo_root, config.python_path, platform_name=config.platform_name)
-    app_path = _resolve_under_repo(repo_root, config.app_path)
-    log.add(f"python: {python_path}")
-    log.add(f"app: {app_path}")
-
     if not config.no_relaunch:
-        command = [str(python_path), str(app_path)]
-        log.add(f"relaunch_command: {' '.join(command)}")
-        try:
-            launcher(command, repo_root)
-        except Exception as exc:
+        relaunch_error = _attempt_relaunch(config, repo_root, log, launcher, context="success")
+        if relaunch_error:
             result = _make_result(
                 STATUS_RELAUNCH_FAILED,
-                f"Update succeeded, but LabCraft could not be relaunched: {exc}",
+                f"Update succeeded, but LabCraft could not be relaunched: {relaunch_error}",
                 repo_root=repo_root,
                 branch=branch,
                 before_sha=before_sha,
@@ -487,6 +485,35 @@ def run_update(
     return result
 
 
+def _finish_failure_result(
+    result: UpdateResult,
+    launch_root: Path,
+    config: UpdaterConfig,
+    log: _LogBuffer,
+    launcher: Launcher,
+    log_path: Path,
+) -> UpdateResult:
+    final_result = result
+    if config.relaunch_on_failure:
+        log.add(f"failure_status: {result.status}")
+        relaunch_error = _attempt_relaunch(config, launch_root, log, launcher, context="failure")
+        if relaunch_error:
+            final_result = _make_result(
+                STATUS_RELAUNCH_FAILED,
+                f"{result.message} Also, LabCraft could not be relaunched: {relaunch_error}",
+                repo_root=result.repo_root,
+                branch=result.branch,
+                before_sha=result.before_sha,
+                after_sha=result.after_sha,
+                log_path=log_path,
+            )
+
+    log.add(f"status: {final_result.status}")
+    log.add(final_result.message)
+    log.write(log_path)
+    return final_result
+
+
 def parse_args(argv: Sequence[str] | None = None) -> UpdaterConfig:
     parser = argparse.ArgumentParser(description="Update the LabCraft app checkout and optionally relaunch it.")
     parser.add_argument("--repo-root", default=".", help="Repository root or any path inside the repository.")
@@ -495,6 +522,11 @@ def parse_args(argv: Sequence[str] | None = None) -> UpdaterConfig:
     parser.add_argument("--python", dest="python_path", default=None, help="Python interpreter to use when relaunching.")
     parser.add_argument("--app", default=str(DEFAULT_APP_PATH), help="App entrypoint to relaunch.")
     parser.add_argument("--no-relaunch", action="store_true", help="Run the update without relaunching the app.")
+    parser.add_argument(
+        "--relaunch-on-failure",
+        action="store_true",
+        help="Relaunch the current app if the update cannot complete.",
+    )
     parser.add_argument("--git-timeout-s", type=float, default=DEFAULT_GIT_TIMEOUT_S, help="Timeout for each Git command.")
     parser.add_argument("--log-path", default=None, help="Optional updater log path.")
     args = parser.parse_args(argv)
@@ -506,6 +538,7 @@ def parse_args(argv: Sequence[str] | None = None) -> UpdaterConfig:
         python_path=Path(args.python_path) if args.python_path else None,
         app_path=Path(args.app),
         no_relaunch=bool(args.no_relaunch),
+        relaunch_on_failure=bool(args.relaunch_on_failure),
         git_timeout_s=float(args.git_timeout_s),
         log_path=Path(args.log_path) if args.log_path else None,
     )
