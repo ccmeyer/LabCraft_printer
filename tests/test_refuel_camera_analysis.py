@@ -1246,6 +1246,34 @@ def test_visible_gate_rejects_bottom_peak_with_negative_full_profile_polarity():
     assert thread.debug_details["bottom_peak_polarity_available"] is True
     assert thread.debug_details["bottom_peak_polarity_post_minus_pre"] <= -20.0
     assert thread.debug_details["bottom_peak_polarity_slope"] <= -1.5
+    assert thread.debug_details["bottom_peak_polarity_reject_condition"] == "delta_full_bottom"
+
+
+def test_visible_gate_rejects_full_bottom_peak_with_negative_delta_and_mild_slope():
+    thread = _selection_thread()
+    selection = {
+        "selected_peak_row": 111,
+        "selected_peak_prominence": 6.3,
+        "candidate_rows": [111],
+        "candidate_prominences": [6.3],
+    }
+    profile = np.full(117, 100.0)
+    profile[97:109] = 125.0
+    profile[112:117] = 98.0
+
+    accepted, reason = thread._selected_peak_visible_decision(
+        selection,
+        channel_height=117,
+        fill_state="full",
+        profile=profile,
+    )
+
+    assert accepted is False
+    assert reason == "bottom_negative_profile_full_artifact"
+    assert thread.debug_details["visible_peak_reason"] == "bottom_negative_profile_full_artifact"
+    assert thread.debug_details["bottom_peak_polarity_post_minus_pre"] <= -20.0
+    assert thread.debug_details["bottom_peak_polarity_slope"] > ImageAnalysisThread.BOTTOM_POLARITY_REJECT_SLOPE_MAX
+    assert thread.debug_details["bottom_peak_polarity_reject_condition"] == "delta_full_bottom"
 
 
 def test_visible_gate_keeps_bottom_peak_with_mild_negative_profile_polarity():
@@ -1637,7 +1665,7 @@ def test_refuel_camera_model_build_dataset_analysis_seed_returns_geometry_and_le
     seed = model.build_dataset_analysis_seed(raw_frame)
 
     assert seed is not None
-    assert seed["detector_version"] == "phase2_dataset_seed_v7_aspect_preserving_640"
+    assert seed["detector_version"] == "phase2_dataset_seed_v8_bottom_delta_full_gate"
     assert seed["predicted_status"] == "visible"
     assert seed["details"]["analysis_parameters"]["bottom_guard_px"] == 2
     assert seed["details"]["analysis_preprocessing_mode"] == "aspect_preserving_long_side_640"

@@ -1231,7 +1231,7 @@ def _seed_from_debug_worker(worker, raw_shape, refuel_model_cls, params):
 
     return {
         "detector_name": "current_refuel_detector",
-        "detector_version": "phase2_offline_rerun_v7_aspect_preserving_640",
+        "detector_version": "phase2_offline_rerun_v8_bottom_delta_full_gate",
         "predicted_status": status,
         "predicted_channel_geometry": channel_geometry,
         "predicted_meniscus_line": meniscus_line,

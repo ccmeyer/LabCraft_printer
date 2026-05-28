@@ -31086,6 +31086,7 @@ class ImageAnalysisThread(QThread):
             "bottom_peak_polarity_slope_half_window_px": int(slope_half_window),
             "bottom_peak_polarity_reject_delta_max": float(self.BOTTOM_POLARITY_REJECT_DELTA_MAX),
             "bottom_peak_polarity_reject_slope_max": float(self.BOTTOM_POLARITY_REJECT_SLOPE_MAX),
+            "bottom_peak_polarity_reject_condition": None,
         }
         if profile is None or selected_row is None:
             return details
@@ -31179,12 +31180,13 @@ class ImageAnalysisThread(QThread):
                 str(fill_state) == "full"
                 and bool(polarity.get("bottom_peak_polarity_available"))
                 and polarity.get("bottom_peak_polarity_post_minus_pre") is not None
-                and polarity.get("bottom_peak_polarity_slope") is not None
                 and float(polarity["bottom_peak_polarity_post_minus_pre"]) <= float(self.BOTTOM_POLARITY_REJECT_DELTA_MAX)
-                and float(polarity["bottom_peak_polarity_slope"]) <= float(self.BOTTOM_POLARITY_REJECT_SLOPE_MAX)
             ):
                 reason = "bottom_negative_profile_full_artifact"
-                debug_payload.update({"visible_peak_reason": reason})
+                debug_payload.update({
+                    "visible_peak_reason": reason,
+                    "bottom_peak_polarity_reject_condition": "delta_full_bottom",
+                })
                 self._debug_update(debug_payload)
                 return False, reason
             debug_payload.update({"credible_visible_peak": True, "visible_peak_reason": "bottom_visible_without_top_boundary"})
@@ -33428,7 +33430,7 @@ class RefuelCameraModel(QObject):
 
         return {
             "detector_name": "current_refuel_detector",
-            "detector_version": "phase2_dataset_seed_v7_aspect_preserving_640",
+            "detector_version": "phase2_dataset_seed_v8_bottom_delta_full_gate",
             "predicted_status": status,
             "predicted_channel_geometry": channel_geometry,
             "predicted_meniscus_line": meniscus_line,

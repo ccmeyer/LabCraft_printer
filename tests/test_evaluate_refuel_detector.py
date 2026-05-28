@@ -604,7 +604,7 @@ def test_rerun_refuel_detector_debug_matches_seed_on_synthetic_visible_frame(tmp
     )
 
     assert rerun["seed"]["predicted_status"] == "visible"
-    assert rerun["seed"]["detector_version"] == "phase2_offline_rerun_v7_aspect_preserving_640"
+    assert rerun["seed"]["detector_version"] == "phase2_offline_rerun_v8_bottom_delta_full_gate"
     assert rerun["debug_details"]["analysis_preprocessing_mode"] == "aspect_preserving_long_side_640"
     assert rerun["debug_details"]["analysis_image_shape"] == [480, 640, 3]
     assert rerun["debug_details"]["kept_contour_count"] >= 1
