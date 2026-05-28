@@ -39,6 +39,7 @@ import importlib
 from CalibrationMemoryStore import CalibrationMemoryStore
 from ExperimentAuditLog import ExperimentAuditLog
 
+from LocalConfig import get_machine_config_path
 from hardware.profile import CURRENT_PROFILE, HardwareProfile
 
 
@@ -9135,12 +9136,12 @@ class Model(QObject):
         super().__init__()
         self.profile = profile
         self.script_dir = os.path.dirname(os.path.abspath(__file__))
-        self.locations_path = os.path.join(self.script_dir, 'Presets','Locations.json')
-        self.plates_path = os.path.join(self.script_dir, 'Presets','Plates.json')
+        self.locations_path = str(get_machine_config_path('Locations.json'))
+        self.plates_path = str(get_machine_config_path('Plates.json'))
         self.colors_path = os.path.join(self.script_dir, 'Presets','Printer_head_colors.json')
-        self.settings_path = os.path.join(self.script_dir, 'Presets','Settings.json')
+        self.settings_path = str(get_machine_config_path('Settings.json'))
         self.print_profiles_path = os.path.join(self.script_dir, 'Presets','PrintProfiles.json')
-        self.obstacles_path = os.path.join(self.script_dir, 'Presets','Obstacles.json')
+        self.obstacles_path = str(get_machine_config_path('Obstacles.json'))
         self.predictive_model_dir = os.path.join(self.script_dir, 'Presets','Predictive_models')
         self.pixel_step_conv_path = os.path.join(self.script_dir, 'Presets','step_conv_250813.json')
         # self.prediction_model_path = os.path.join(self.script_dir, 'Presets','150um_50per_large_lr_pipeline.pkl')

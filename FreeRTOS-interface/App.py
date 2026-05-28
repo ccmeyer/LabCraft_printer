@@ -11,6 +11,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from hardware.profile import get_profile
+from LocalConfig import get_machine_config_path
 
 def set_dark_theme(app):
     app.setStyle(QStyleFactory.create("Fusion"))
@@ -76,7 +77,7 @@ def main():
     from Controller import Controller
     from View import MainWindow
 
-    settings = load_settings(os.path.join(script_dir, 'Presets','Settings.json'))
+    settings = load_settings(get_machine_config_path("Settings.json"))
 
     profile = get_profile(settings.get("HARDWARE_PROFILE", "current"))
 
