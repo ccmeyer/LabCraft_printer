@@ -27,7 +27,8 @@ ARRAY_AXIS_ACCEL_DEFAULT = 140000
 ARRAY_PRINT_SERPENTINE = True
 ARRAY_GENTLE_ACCEL_ENABLED = False
 ARRAY_ROW_START_OVERSHOOT_STEPS = 0
-PLATE_ENTRY_SAFE_Z = 500
+PLATE_DOCK_SAFE_Z = 500
+PLATE_DOCK_X_OFFSET = -5000
 PLATE_SEATED_LOCATIONS = {"pause", "plate"}
 
 
@@ -1644,7 +1645,6 @@ class Controller(QObject):
         current_location = str(getattr(self, "expected_location", None) or "")
         current_location_norm = current_location.strip().lower()
         target_name_norm = str(name or "").strip().lower()
-        current_z = self.expected_position['Z']
 
         if coords is not None:
             original_target = coords
@@ -1690,14 +1690,25 @@ class Controller(QObject):
         target_is_slot = target_name_norm.startswith('slot-')
         current_is_plate_seated = current_location_norm in PLATE_SEATED_LOCATIONS
         target_is_plate_seated = target_name_norm in PLATE_SEATED_LOCATIONS
-        needs_plate_entry_safe_z = target_is_plate_seated and not current_is_plate_seated
+        needs_plate_entry_dogleg = target_is_plate_seated and not current_is_plate_seated
+        needs_plate_departure_dogleg = current_is_plate_seated and not target_is_plate_seated
+
+        current_anchor = {
+            'X': int(self.expected_position['X']),
+            'Y': int(self.expected_position['Y']),
+            'Z': int(self.expected_position['Z']),
+        }
+        final_target = target.copy()
+        if x_offset != 0:
+            final_target['X'] += x_offset
+        if z_offset != 0:
+            final_target['Z'] += z_offset
 
         needs_route_safe_z = (
             (current_is_camera or target_is_camera) or
             (current_is_slot and not target_is_slot) or
             (not current_is_slot and target_is_slot)
         )
-        route_safe_z = PLATE_ENTRY_SAFE_Z if needs_plate_entry_safe_z else safe_z
 
         def queue_safe_z(safe_z_value):
             print(f'Must move up to safe height before moving to {name} from {current_location}')
@@ -1706,21 +1717,66 @@ class Controller(QObject):
                 return False
             return True
 
-        print(f'Moving to location: {name} from {current_location}')
-        # Only insert an intermediate safe-Z move when both endpoints are at/below
-        # the selected safe plane (in inverted-Z coordinates: numerically >= safe).
-        needs_intermediate_safe_z = current_z > route_safe_z and target['Z'] > route_safe_z
+        def queue_plate_safe_z():
+            if int(self.expected_position['Z']) == PLATE_DOCK_SAFE_Z:
+                return True
+            return queue_safe_z(PLATE_DOCK_SAFE_Z)
 
-        if needs_plate_entry_safe_z and needs_intermediate_safe_z:
-            if queue_safe_z(route_safe_z) is False:
+        def queue_plate_dogleg_point(point, error_detail):
+            if self.set_absolute_coordinates(
+                point['X'], point['Y'], point['Z'],
+                manual=manual,
+                override=override,
+            ) is False:
+                self.error_occurred_signal.emit('Move Error', error_detail)
                 return False
-        elif needs_route_safe_z and not ignore_safe_height and needs_intermediate_safe_z:
-            if queue_safe_z(route_safe_z) is False:
+            return True
+
+        def queue_plate_entry_dogleg():
+            if queue_plate_safe_z() is False:
+                return False
+            approach = {
+                'X': final_target['X'] + PLATE_DOCK_X_OFFSET,
+                'Y': final_target['Y'],
+                'Z': PLATE_DOCK_SAFE_Z,
+            }
+            seated_safe = {
+                'X': final_target['X'],
+                'Y': final_target['Y'],
+                'Z': PLATE_DOCK_SAFE_Z,
+            }
+            if queue_plate_dogleg_point(approach, 'Failed to move to plate approach dogleg') is False:
+                return False
+            if queue_plate_dogleg_point(seated_safe, 'Failed to move to plate seated safe position') is False:
+                return False
+            return True
+
+        def queue_plate_departure_dogleg():
+            if queue_plate_safe_z() is False:
+                return False
+            departure = {
+                'X': current_anchor['X'] + PLATE_DOCK_X_OFFSET,
+                'Y': current_anchor['Y'],
+                'Z': PLATE_DOCK_SAFE_Z,
+            }
+            return queue_plate_dogleg_point(departure, 'Failed to move to plate departure dogleg')
+
+        print(f'Moving to location: {name} from {current_location}')
+        if needs_plate_departure_dogleg:
+            if queue_plate_departure_dogleg() is False:
                 return False
 
         if current_is_balance or target_is_balance:
-            balance_safe_z = route_safe_z if needs_plate_entry_safe_z else safe_z
-            if not ignore_safe_height and self.expected_position['Z'] > balance_safe_z:
+            balance_safe_z = PLATE_DOCK_SAFE_Z if needs_plate_entry_dogleg else safe_z
+            balance_safe_x = (
+                final_target['X'] + PLATE_DOCK_X_OFFSET
+                if needs_plate_entry_dogleg
+                else final_target['X']
+            )
+            if needs_plate_entry_dogleg:
+                if queue_plate_safe_z() is False:
+                    return False
+            elif not ignore_safe_height and self.expected_position['Z'] > balance_safe_z:
                 if queue_safe_z(balance_safe_z) is False:
                     return False
             print(f'Must move up to safe height before moving to {name} from {current_location}')
@@ -1728,14 +1784,21 @@ class Controller(QObject):
             if self.set_absolute_Y(15000, manual=manual, override=override) is False:
                 self.error_occurred_signal.emit('Move Error', 'Failed to move to safe Y height')
                 return False
-            if self.set_absolute_X(target['X'], manual=manual, override=override) is False:
+            if self.set_absolute_X(balance_safe_x, manual=manual, override=override) is False:
                 self.error_occurred_signal.emit('Move Error', 'Failed to move to target X for balance route')
                 return False
 
-        if x_offset != 0:
-            target['X'] += x_offset
-        if z_offset != 0:
-            target['Z'] += z_offset
+        if needs_plate_entry_dogleg:
+            if queue_plate_entry_dogleg() is False:
+                return False
+
+        # Only insert an intermediate safe-Z move when both endpoints are at/below
+        # the selected safe plane (in inverted-Z coordinates: numerically >= safe).
+        needs_intermediate_safe_z = self.expected_position['Z'] > safe_z and final_target['Z'] > safe_z
+
+        if needs_route_safe_z and not ignore_safe_height and needs_intermediate_safe_z:
+            if queue_safe_z(safe_z) is False:
+                return False
 
         def final_location_handler(name=name):
             self.update_location_handler(name=name)
@@ -1743,7 +1806,7 @@ class Controller(QObject):
                 on_complete()
 
         if self.set_absolute_coordinates(
-            target['X'], target['Y'], target['Z'],
+            final_target['X'], final_target['Y'], final_target['Z'],
             manual=manual,
             override=override,
             handler=final_location_handler,
