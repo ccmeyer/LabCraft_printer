@@ -1005,6 +1005,10 @@ class PrinterHeadRecoveryDialog(QtWidgets.QDialog):
         self.shortcut_refuel_few.setContext(Qt.WidgetWithChildrenShortcut)
         self.shortcut_refuel_few.activated.connect(lambda: self._pulse_refuel_count(1))
 
+        self.shortcut_pause = QShortcut(QKeySequence("Esc"), self)
+        self.shortcut_pause.setContext(Qt.WidgetWithChildrenShortcut)
+        self.shortcut_pause.activated.connect(self._pause_from_escape)
+
     def _configure_recovery_spinbox(self, spinbox, commit_handler):
         spinbox.setKeyboardTracking(False)
         spinbox.setFocusPolicy(QtCore.Qt.StrongFocus)
@@ -1242,7 +1246,8 @@ class PrinterHeadRecoveryDialog(QtWidgets.QDialog):
         super().accept()
 
     def reject(self):
-        self._pause_from_escape()
+        self._queue_restore()
+        super().reject()
 
     def closeEvent(self, event):
         self._queue_restore()

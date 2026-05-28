@@ -638,6 +638,28 @@ bool PressureRegulator::enterVacuumMode(int32_t targetRaw,
 
     Printer::instance()->pauseDispense();
     homeWithValveFast();
+    return enterVacuumModeAfterHome(
+        targetRaw,
+        prepPositionSteps,
+        moveHz,
+        callerWatchdogTaskId);
+}
+
+bool PressureRegulator::enterVacuumModeAfterHome(int32_t targetRaw,
+                                                 uint32_t prepPositionSteps,
+                                                 uint32_t moveHz,
+                                                 CrashTaskId callerWatchdogTaskId) {
+    if (_stepper == nullptr) {
+      Logger::instance()->log("[PReg] Vacuum enter failed: no stepper\r\n");
+      return false;
+    }
+
+    if (prepPositionSteps == 0u) prepPositionSteps = 20000u;
+    if (moveHz == 0u) moveHz = 5000u;
+
+    if (targetRaw < _vacuumMinTarget) targetRaw = _vacuumMinTarget;
+    if (targetRaw > _minTarget) targetRaw = _minTarget;
+
     const auto homeSnapshot = _stepper->getLastHomeDiagnosticSnapshot();
     if (!homeSnapshot.success) {
       _vacuumMode = false;
@@ -648,6 +670,7 @@ bool PressureRegulator::enterVacuumMode(int32_t targetRaw,
       return false;
     }
 
+    Printer::instance()->pauseDispense();
     pause();
     _resetting = true;
     openValve();

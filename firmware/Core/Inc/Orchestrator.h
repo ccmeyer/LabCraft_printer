@@ -328,6 +328,11 @@ public:
                          uint32_t backoffSteps,
                          EventBits_t doneBit);
 
+  bool enterRefuelVacuumModeWithAsyncHome(int32_t targetRaw,
+                                          uint32_t prepPositionSteps,
+                                          uint32_t moveHz,
+                                          bool* homeWaitInterrupted = nullptr);
+
 private:
   static Orchestrator* 	_instance;
 

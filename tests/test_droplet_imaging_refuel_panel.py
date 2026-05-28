@@ -676,6 +676,28 @@ def test_printer_head_recovery_window_close_restores_without_motion(monkeypatch,
     controller.move_to_location.assert_not_called()
 
 
+def test_printer_head_recovery_reject_restores_without_pause(monkeypatch, qapp):
+    main_window = SimpleNamespace(color_dict={}, pause_machine=Mock())
+    dialog, _refuel_model, controller = _build_droplet_dialog(
+        monkeypatch,
+        qapp,
+        main_window=main_window,
+    )
+
+    dialog.open_printer_head_recovery_dialog()
+    qapp.processEvents()
+
+    recovery = dialog._printer_head_recovery_dialog
+    controller.enter_refuel_vacuum_mode.call_args.kwargs["handler"]()
+    recovery.reject()
+    qapp.processEvents()
+
+    main_window.pause_machine.assert_not_called()
+    controller.set_refuel_pulse_width.assert_called_once_with(3200, manual=True)
+    controller.exit_refuel_vacuum_mode.assert_called_once_with(0.6, manual=True)
+    controller.move_to_location.assert_not_called()
+
+
 def test_refuel_monitor_records_analysis_not_started(monkeypatch, qapp):
     dialog, refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
     controller.capture_refuel_image_with_context.return_value = (

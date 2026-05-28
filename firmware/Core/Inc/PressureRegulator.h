@@ -22,6 +22,9 @@ public:
   static constexpr uint32_t kSetpointSlewSpeedCapHz = 16000u;
   static constexpr uint32_t kTransitionTravelWarnAbsSteps = 80000u;
   static constexpr uint32_t kTransitionTravelWarnDeltaSteps = 50000u;
+  static constexpr uint32_t kHomeFastHzDefault   = 30000;
+  static constexpr uint32_t kHomeSlowHzDefault   = 3000;
+  static constexpr uint32_t kHomeBackoffDefault  = 400;
 
   enum class PulseType : uint8_t {
     Print = 0,
@@ -95,6 +98,10 @@ public:
                        uint32_t prepPositionSteps,
                        uint32_t moveHz,
                        CrashTaskId callerWatchdogTaskId = CRASH_TASK_NONE);
+  bool enterVacuumModeAfterHome(int32_t targetRaw,
+                                uint32_t prepPositionSteps,
+                                uint32_t moveHz,
+                                CrashTaskId callerWatchdogTaskId = CRASH_TASK_NONE);
   bool setVacuumTargetSafe(int32_t requested);
   bool exitVacuumMode(int32_t restoreTargetRaw,
                       CrashTaskId callerWatchdogTaskId = CRASH_TASK_NONE);
@@ -332,10 +339,6 @@ private:
   static constexpr uint32_t NOTIF_INNER_LIMIT = (1u << 0);
   static constexpr uint32_t NOTIF_SAFETY_HOME = (1u << 1);
 
-  // Default homing parameters used when inner limit is hit
-  static constexpr uint32_t kHomeFastHzDefault   = 30000;
-  static constexpr uint32_t kHomeSlowHzDefault   = 3000;
-  static constexpr uint32_t kHomeBackoffDefault  = 400;
 };
 
 #endif /* INC_PRESSUREREGULATOR_H_ */

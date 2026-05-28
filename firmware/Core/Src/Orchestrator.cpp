@@ -1024,12 +1024,16 @@ void Orchestrator::executeCommand(const Command &cmd) {
 				  const int32_t targetRaw = static_cast<int32_t>(cmd.p1u());
 				  const uint32_t prepPositionSteps = cmd.p2u();
 				  const uint32_t moveHz = cmd.p3u();
-				  if (!PressureRegulator::regR().enterVacuumMode(
+				  bool homeWaitInterrupted = false;
+				  if (!enterRefuelVacuumModeWithAsyncHome(
 				          targetRaw,
 				          prepPositionSteps,
 				          moveHz,
-				          CRASH_TASK_ORCH)) {
+				          &homeWaitInterrupted)) {
 				    Logger::instance()->log("[PReg] Refuel vacuum enter failed\r\n");
+				    if (homeWaitInterrupted) {
+				      commandCompleted = false;
+				    }
 				  }
 			#else
 				  Logger::instance()->log("Legacy has no refuel channel");
@@ -1425,6 +1429,49 @@ void Orchestrator::startRegHomeAsync(PressureRegulator* r,
     Logger::instance()->log("[HomePR] xTaskCreateStatic failed for %s\r\n", name);
     xEventGroupSetBits(_doneEvents, doneBit);
   }
+}
+
+bool Orchestrator::enterRefuelVacuumModeWithAsyncHome(int32_t targetRaw,
+                                                      uint32_t prepPositionSteps,
+                                                      uint32_t moveHz,
+                                                      bool* homeWaitInterrupted)
+{
+  if (homeWaitInterrupted != nullptr) {
+    *homeWaitInterrupted = false;
+  }
+
+#if (LC_PRESSURE_PORTS > 1)
+  if (_taskHomeR != nullptr) {
+    Logger::instance()->log("[PReg] Refuel vacuum enter refused: async home already running\r\n");
+    return false;
+  }
+
+  xEventGroupClearBits(_doneEvents, BIT_HOME_R_DONE);
+  startRegHomeAsync(
+      &PressureRegulator::regR(),
+      PressureRegulator::kHomeFastHzDefault,
+      PressureRegulator::kHomeSlowHzDefault,
+      PressureRegulator::kHomeBackoffDefault,
+      BIT_HOME_R_DONE);
+
+  const bool homeDone = waitForBit(BIT_HOME_R_DONE);
+  if (!homeDone) {
+    if (homeWaitInterrupted != nullptr) {
+      *homeWaitInterrupted = true;
+    }
+    Logger::instance()->log("[PReg] Refuel vacuum enter interrupted during async home\r\n");
+    return false;
+  }
+
+  return PressureRegulator::regR().enterVacuumModeAfterHome(
+      targetRaw,
+      prepPositionSteps,
+      moveHz,
+      CRASH_TASK_ORCH);
+#else
+  Logger::instance()->log("Legacy has no refuel channel");
+  return false;
+#endif
 }
 
 

@@ -3605,11 +3605,10 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 
                         if (preAtmosphereOk && !_selfTestAbortRequested) {
                           sendProgressStage("refuel_vacuum_enter");
-                          enterOk = reg.enterVacuumMode(
+                          enterOk = orchestrator.enterRefuelVacuumModeWithAsyncHome(
                               kVacuumRaw,
                               kVacuumPrepPositionSteps,
-                              kVacuumPrepMoveHz,
-                              CRASH_TASK_ORCH);
+                              kVacuumPrepMoveHz);
                           vacuumEntered = enterOk;
                         }
 
