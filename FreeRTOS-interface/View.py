@@ -2946,7 +2946,6 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         """Open the refuel camera dialog after preflight checks have passed."""
         importlib.reload(CalibrationClasses.View)
         importlib.reload(CalibrationClasses)
-        self.model.reload_refuel_model()
         self.controller.enable_print_profile()
         refuel_camera_dialog = CalibrationClasses.RefuelCameraWindow(
             self.main_window,

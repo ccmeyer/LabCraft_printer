@@ -193,6 +193,36 @@ def test_refuel_panel_open_camera_button_uses_explicit_callback_without_capture(
     controller.capture_refuel_image_with_context.assert_not_called()
 
 
+def test_refuel_panel_open_camera_callback_preserves_shared_refuel_model(monkeypatch, qapp):
+    holder = {}
+
+    def _open_refuel_camera():
+        dialog = holder["dialog"]
+        assert dialog.model.refuel_camera_model is dialog.refuel_camera_model
+        dialog.refuel_camera_model.set_refuel_diagnostic_capture_active(True)
+
+    dialog, refuel_model, controller = _build_droplet_dialog(
+        monkeypatch,
+        qapp,
+        open_refuel_camera_callback=_open_refuel_camera,
+    )
+    holder["dialog"] = dialog
+
+    dialog.enable_refuel_level_tracking_checkbox.setChecked(True)
+    qapp.processEvents()
+    controller.capture_refuel_image_with_context.reset_mock()
+
+    dialog.open_refuel_camera_button.click()
+    qapp.processEvents()
+
+    assert dialog.model.refuel_camera_model is refuel_model
+    assert dialog.refuel_camera_model is refuel_model
+    assert refuel_model.is_refuel_monitor_camera_active() is True
+    assert refuel_model.is_refuel_diagnostic_capture_active() is True
+    controller.start_refuel_camera.assert_called_once_with()
+    controller.capture_refuel_image_with_context.assert_not_called()
+
+
 def test_enabling_refuel_tracking_starts_monitor_and_schedules_immediate_capture(monkeypatch, qapp):
     dialog, refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
 

@@ -632,11 +632,11 @@ def test_current_profile_refuel_camera_opens_refuel_dialog_at_camera(monkeypatch
     box.refuel_camera()
 
     assert events == [
-        "reload_refuel_model",
         "enable_print_profile",
         "refuel_dialog_init",
         "refuel_dialog_exec",
     ]
+    model.reload_refuel_model.assert_not_called()
     main_window.popup_yes_no.assert_not_called()
     controller.move_to_location.assert_not_called()
     controller.disconnect_droplet_camera_signals.assert_not_called()
@@ -788,11 +788,11 @@ def test_current_profile_refuel_camera_moves_then_launches_refuel_dialog(monkeyp
     on_complete()
 
     assert events == [
-        "reload_refuel_model",
         "enable_print_profile",
         "refuel_dialog_init",
         "refuel_dialog_exec",
     ]
+    model.reload_refuel_model.assert_not_called()
     controller.disconnect_droplet_camera_signals.assert_not_called()
     controller.connect_droplet_camera_signals.assert_not_called()
     assert popups == []
