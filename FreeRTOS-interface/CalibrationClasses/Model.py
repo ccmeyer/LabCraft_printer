@@ -5,6 +5,7 @@ from PySide6 import QtCore, QtWidgets, QtGui
 from PySide6.QtCore import QObject, Signal, Slot, QTimer, QThread
 from PySide6.QtStateMachine import QStateMachine, QState, QFinalState, QSignalTransition
 import json
+import hashlib
 import heapq
 import os
 import csv
@@ -31978,6 +31979,8 @@ class RefuelCameraModel(QObject):
     REFUEL_MONITOR_STATES = {"off", "starting", "monitoring", "paused", "unavailable"}
     REFUEL_ADVISORY_LOG_LIMIT = 100
     REFUEL_EJECTION_EVENT_LOG_LIMIT = 300
+    REFUEL_STALE_FRAME_REPEAT_THRESHOLD = 3
+    REFUEL_NO_VALID_SAMPLE_TICK_THRESHOLD = 3
 
     update_level_ui_signal = Signal()
 
@@ -31999,11 +32002,19 @@ class RefuelCameraModel(QObject):
         self.refuel_monitor_message = "Monitoring disabled"
         self.refuel_monitor_attempted_captures = 0
         self.refuel_monitor_successful_captures = 0
+        self.refuel_monitor_captured_frames = 0
+        self.refuel_monitor_valid_level_samples = 0
         self.refuel_monitor_skipped_captures = 0
         self.refuel_monitor_failed_captures = 0
         self.refuel_monitor_consecutive_failures = 0
         self.refuel_diagnostic_capture_active = False
         self.refuel_monitor_camera_active = False
+        self.last_refuel_frame_signature = None
+        self._last_refuel_frame_signature_hash = None
+        self._last_refuel_frame_downsample = None
+        self.consecutive_repeated_refuel_frame_count = 0
+        self.refuel_same_level_streak_count = 0
+        self.last_refuel_level_delta_px = None
         self.refuel_monitor_timing_log = []
         self.last_refuel_monitor_timing = None
         self._refuel_monitor_next_tick_index = 1
@@ -32460,11 +32471,27 @@ class RefuelCameraModel(QObject):
             "message": self.refuel_monitor_message,
             "attempted_captures": int(self.refuel_monitor_attempted_captures),
             "successful_captures": int(self.refuel_monitor_successful_captures),
+            "captured_frames": int(self.refuel_monitor_captured_frames),
+            "valid_level_samples": int(self.refuel_monitor_valid_level_samples),
             "skipped_captures": int(self.refuel_monitor_skipped_captures),
             "failed_captures": int(self.refuel_monitor_failed_captures),
             "consecutive_failures": int(self.refuel_monitor_consecutive_failures),
             "diagnostic_capture_active": bool(self.refuel_diagnostic_capture_active),
             "monitor_camera_active": bool(self.refuel_monitor_camera_active),
+            "latest_frame_hash": (
+                self.last_refuel_frame_signature.get("frame_hash")
+                if isinstance(self.last_refuel_frame_signature, dict)
+                else None
+            ),
+            "latest_frame_mean_abs_delta": (
+                self.last_refuel_frame_signature.get("frame_mean_abs_delta")
+                if isinstance(self.last_refuel_frame_signature, dict)
+                else None
+            ),
+            "consecutive_repeated_frame_count": int(self.consecutive_repeated_refuel_frame_count),
+            "stale_frame_repeat_threshold": int(self.REFUEL_STALE_FRAME_REPEAT_THRESHOLD),
+            "same_level_streak_count": int(self.refuel_same_level_streak_count),
+            "last_level_delta_px": self.last_refuel_level_delta_px,
         }
 
     def next_refuel_monitor_tick_index(self):
@@ -32509,6 +32536,103 @@ class RefuelCameraModel(QObject):
         except Exception:
             return None
 
+    def build_refuel_frame_signature(self, frame, update_previous=True):
+        signature = {
+            "frame_signature_available": False,
+            "frame_shape": None,
+            "frame_dtype": None,
+            "frame_hash": None,
+            "frame_mean": None,
+            "frame_std": None,
+            "frame_min": None,
+            "frame_max": None,
+            "frame_mean_abs_delta": None,
+            "frame_repeated": False,
+            "consecutive_repeated_refuel_frame_count": int(self.consecutive_repeated_refuel_frame_count),
+        }
+        if frame is None:
+            if update_previous:
+                self.last_refuel_frame_signature = dict(signature)
+            return signature
+        try:
+            arr = np.asarray(frame)
+        except Exception:
+            if update_previous:
+                self.last_refuel_frame_signature = dict(signature)
+            return signature
+        if arr.size == 0 or arr.ndim < 2:
+            if update_previous:
+                self.last_refuel_frame_signature = dict(signature)
+            return signature
+
+        try:
+            if arr.ndim >= 3:
+                gray = np.asarray(arr[..., :3], dtype=np.float32).mean(axis=2)
+            else:
+                gray = np.asarray(arr, dtype=np.float32)
+            downsample = cv2.resize(gray, (16, 16), interpolation=cv2.INTER_AREA)
+            quantized = np.clip(np.rint(downsample), 0, 255).astype(np.uint8)
+            frame_hash = hashlib.sha1(quantized.tobytes()).hexdigest()[:16]
+            previous_hash = self._last_refuel_frame_signature_hash
+            previous_downsample = self._last_refuel_frame_downsample
+            repeated = bool(previous_hash is not None and frame_hash == previous_hash)
+            mean_abs_delta = None
+            if previous_downsample is not None and np.asarray(previous_downsample).shape == downsample.shape:
+                mean_abs_delta = float(np.mean(np.abs(downsample.astype(float) - np.asarray(previous_downsample, dtype=float))))
+            repeat_count = int(self.consecutive_repeated_refuel_frame_count)
+            if update_previous:
+                repeat_count = repeat_count + 1 if repeated else 0
+                self.consecutive_repeated_refuel_frame_count = repeat_count
+                self._last_refuel_frame_signature_hash = frame_hash
+                self._last_refuel_frame_downsample = downsample.astype(np.float32).copy()
+            elif repeated:
+                repeat_count = repeat_count + 1
+
+            signature.update(
+                {
+                    "frame_signature_available": True,
+                    "frame_shape": [int(value) for value in arr.shape],
+                    "frame_dtype": str(arr.dtype),
+                    "frame_hash": str(frame_hash),
+                    "frame_mean": float(np.mean(gray)),
+                    "frame_std": float(np.std(gray)),
+                    "frame_min": float(np.min(gray)),
+                    "frame_max": float(np.max(gray)),
+                    "frame_mean_abs_delta": mean_abs_delta,
+                    "frame_repeated": bool(repeated),
+                    "consecutive_repeated_refuel_frame_count": int(repeat_count),
+                }
+            )
+        except Exception:
+            pass
+
+        signature = self._json_safe_refuel_timing_value(signature)
+        if update_previous:
+            self.last_refuel_frame_signature = dict(signature)
+        return signature
+
+    def record_refuel_monitor_frame_captured(self):
+        self.refuel_monitor_captured_frames += 1
+        return int(self.refuel_monitor_captured_frames)
+
+    def _copy_frame_signature_fields(self, source):
+        if not isinstance(source, dict):
+            return {}
+        fields = (
+            "frame_signature_available",
+            "frame_shape",
+            "frame_dtype",
+            "frame_hash",
+            "frame_mean",
+            "frame_std",
+            "frame_min",
+            "frame_max",
+            "frame_mean_abs_delta",
+            "frame_repeated",
+            "consecutive_repeated_refuel_frame_count",
+        )
+        return {key: source.get(key) for key in fields if key in source}
+
     def record_refuel_monitor_timing(self, payload):
         payload = dict(payload or {})
         counters = self.get_refuel_monitor_status()
@@ -32528,10 +32652,15 @@ class RefuelCameraModel(QObject):
             "time_since_last_valid_sample_s": payload.get("time_since_last_valid_sample_s"),
             "attempted_captures": counters["attempted_captures"],
             "successful_captures": counters["successful_captures"],
+            "captured_frames": counters["captured_frames"],
+            "valid_level_samples": counters["valid_level_samples"],
             "skipped_captures": counters["skipped_captures"],
             "failed_captures": counters["failed_captures"],
             "consecutive_failures": counters["consecutive_failures"],
+            "same_level_streak_count": counters["same_level_streak_count"],
+            "level_delta_from_previous_sample_px": payload.get("level_delta_from_previous_sample_px"),
         }
+        record.update(self._copy_frame_signature_fields(payload))
         for key, value in payload.items():
             if key not in record and not str(key).endswith("_perf_s"):
                 record[str(key)] = value
@@ -33119,6 +33248,19 @@ class RefuelCameraModel(QObject):
             "process_monitoring_enabled": bool(self.refuel_process_monitoring_enabled),
             "refuel_calibration_performance_enabled": bool(self.refuel_calibration_performance_enabled),
             "monitor_status": self.get_refuel_monitor_status(),
+            "frame_freshness": {
+                "latest_frame_signature": dict(self.last_refuel_frame_signature)
+                if isinstance(self.last_refuel_frame_signature, dict)
+                else None,
+                "consecutive_repeated_refuel_frame_count": int(self.consecutive_repeated_refuel_frame_count),
+                "stale_frame_repeat_threshold": int(self.REFUEL_STALE_FRAME_REPEAT_THRESHOLD),
+            },
+            "level_sample_health": {
+                "captured_frames": int(self.refuel_monitor_captured_frames),
+                "valid_level_samples": int(self.refuel_monitor_valid_level_samples),
+                "same_level_streak_count": int(self.refuel_same_level_streak_count),
+                "last_level_delta_px": self.last_refuel_level_delta_px,
+            },
             "calibration_performance": self.get_refuel_calibration_performance_summary(),
             "calibration_performance_events": self.get_refuel_calibration_performance_events(),
             "timing_summary": self.get_refuel_monitor_timing_summary(),
@@ -33545,12 +33687,29 @@ class RefuelCameraModel(QObject):
             if post_start is not None and float(context["monotonic_s"]) >= float(post_start):
                 phase = "post_burst"
 
+        previous_level = None
+        if self.sample_trace:
+            try:
+                previous_level = float(self.sample_trace[-1].get("level_px"))
+            except Exception:
+                previous_level = None
+        level_delta = None if previous_level is None else float(level_data) - float(previous_level)
+        if level_delta is None:
+            self.refuel_same_level_streak_count = 0
+        elif abs(float(level_delta)) <= 1e-6:
+            self.refuel_same_level_streak_count += 1
+        else:
+            self.refuel_same_level_streak_count = 0
+        self.last_refuel_level_delta_px = level_delta
+
         sample = {
             "sample_index": len(self.sample_trace) + 1,
             "timestamp_utc": str(context["timestamp_utc"]),
             "elapsed_s": float(elapsed_s),
             "monotonic_s": float(context["monotonic_s"]),
             "level_px": float(level_data),
+            "level_delta_from_previous_sample_px": level_delta,
+            "same_level_streak_count": int(self.refuel_same_level_streak_count),
             "meniscus_row": int(meniscus_row) if meniscus_row is not None else None,
             "print_pressure": context.get("print_pressure"),
             "refuel_pressure": context.get("refuel_pressure"),
@@ -33559,8 +33718,18 @@ class RefuelCameraModel(QObject):
             "location": context.get("location", ""),
             "phase": str(phase),
         }
+        sample.update(self._copy_frame_signature_fields(context))
         if context.get("detector_status") is not None:
             sample["detector_status"] = str(context.get("detector_status"))
+        for key in (
+            "final_decision_reason",
+            "selected_peak_reason",
+            "selected_peak_row",
+            "channel_bounds",
+            "last_meniscus_row_before_analysis",
+        ):
+            if context.get(key) is not None:
+                sample[key] = context.get(key)
         if context.get("channel_height_px") is not None:
             try:
                 sample["channel_height_px"] = float(context.get("channel_height_px"))
@@ -33589,6 +33758,8 @@ class RefuelCameraModel(QObject):
                 }
             )
         self.sample_trace.append(sample)
+        if context.get("refuel_monitor_tick_index") is not None:
+            self.refuel_monitor_valid_level_samples += 1
         self.update_level_log(float(level_data))
         if self.session_active:
             self._record_analysis({"kind": "refuel_level_sample", **sample})
@@ -33607,7 +33778,9 @@ class RefuelCameraModel(QObject):
         frame = self._build_analysis_working_frame(raw_frame)
         copy_resize_duration_ms = float((time.perf_counter() - copy_resize_start) * 1000.0)
         self.raw_capture_image = raw_frame
-        self._analysis_context = self._normalize_capture_context(context)
+        normalized_context = self._normalize_capture_context(context)
+        normalized_context.setdefault("last_meniscus_row_before_analysis", self.last_meniscus_row)
+        self._analysis_context = normalized_context
         self._analysis_timing_context = {
             "copy_resize_duration_ms": copy_resize_duration_ms,
             "analysis_enqueued_perf_s": time.perf_counter(),
@@ -33660,6 +33833,7 @@ class RefuelCameraModel(QObject):
             self.annotated_image = annotated_image
         if meniscus_row is not None:
             self.last_meniscus_row = int(meniscus_row)
+        sample = None
         if level_data is not None:
             self.update_current_level(float(level_data))
             sample_context = dict(context or {})
@@ -33671,7 +33845,15 @@ class RefuelCameraModel(QObject):
                 channel_bounds = detected_details.get("channel_bounds")
                 if isinstance(channel_bounds, (list, tuple)) and len(channel_bounds) >= 4:
                     sample_context["channel_height_px"] = channel_bounds[3]
-            self._append_sample(float(level_data), meniscus_row, sample_context)
+                for key in (
+                    "final_decision_reason",
+                    "selected_peak_reason",
+                    "selected_peak_row",
+                    "channel_bounds",
+                ):
+                    if detected_details.get(key) is not None:
+                        sample_context[key] = detected_details.get(key)
+            sample = self._append_sample(float(level_data), meniscus_row, sample_context)
             self.finalize_burst_from_recent_samples()
             self.evaluate_refuel_advisory(reason="sample_update")
         if monitor_tick_index is not None:
@@ -33684,8 +33866,7 @@ class RefuelCameraModel(QObject):
                 total_latency_ms = None
             detector_runtime_ms = getattr(self.analysis_thread, "detector_runtime_ms", None)
             detector_status = getattr(self.analysis_thread, "detected_status", None)
-            self.record_refuel_monitor_timing(
-                {
+            timing_payload = {
                     "tick_index": monitor_tick_index,
                     "event_kind": "sample_result",
                     "monitor_state": self.refuel_monitor_state,
@@ -33697,8 +33878,26 @@ class RefuelCameraModel(QObject):
                     "level_px": float(level_data) if level_data is not None else None,
                     "detector_status": detector_status,
                     "time_since_last_valid_sample_s": time_since_last_valid_sample_s,
-                }
-            )
+            }
+            if isinstance(context, dict):
+                timing_payload.update(self._copy_frame_signature_fields(context))
+                for key in ("last_meniscus_row_before_analysis",):
+                    if context.get(key) is not None:
+                        timing_payload[key] = context.get(key)
+            detected_details = getattr(self.analysis_thread, "detected_details", None)
+            if isinstance(detected_details, dict):
+                for key in (
+                    "final_decision_reason",
+                    "selected_peak_reason",
+                    "selected_peak_row",
+                    "channel_bounds",
+                ):
+                    if detected_details.get(key) is not None:
+                        timing_payload[key] = detected_details.get(key)
+            if isinstance(sample, dict):
+                timing_payload["level_delta_from_previous_sample_px"] = sample.get("level_delta_from_previous_sample_px")
+                timing_payload["same_level_streak_count"] = sample.get("same_level_streak_count")
+            self.record_refuel_monitor_timing(timing_payload)
         self.update_level_ui_signal.emit()
 
     def lock_current_as_target(self, tolerance_px):

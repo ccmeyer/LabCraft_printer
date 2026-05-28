@@ -748,6 +748,72 @@ def test_refuel_monitor_records_analysis_not_started(monkeypatch, qapp):
     assert dialog.refuel_level_timing_label.parent() is None
 
 
+def test_refuel_panel_warns_when_monitor_has_no_valid_level_samples(monkeypatch, qapp):
+    dialog, refuel_model, _controller = _build_droplet_dialog(monkeypatch, qapp)
+
+    dialog.enable_refuel_level_tracking_checkbox.setChecked(True)
+    refuel_model.refuel_monitor_captured_frames = 3
+    refuel_model.refuel_monitor_valid_level_samples = 0
+    refuel_model.set_refuel_monitor_state("monitoring", "Monitoring")
+    dialog._schedule_refuel_level_panel_refresh(force=True)
+
+    assert refuel_model.get_sample_trace() == []
+    assert dialog.refuel_level_advisory_label.text() == "No new valid refuel level detected"
+
+
+def test_refuel_panel_warns_when_camera_frames_repeat(monkeypatch, qapp):
+    dialog, refuel_model, _controller = _build_droplet_dialog(monkeypatch, qapp)
+
+    dialog.enable_refuel_level_tracking_checkbox.setChecked(True)
+    refuel_model.sample_trace = [
+        {
+            "sample_index": 1,
+            "elapsed_s": 0.0,
+            "monotonic_s": 1.0,
+            "level_px": 42.0,
+        }
+    ]
+    refuel_model.refuel_monitor_captured_frames = 4
+    refuel_model.refuel_monitor_valid_level_samples = 1
+    refuel_model.consecutive_repeated_refuel_frame_count = 3
+    refuel_model.last_refuel_frame_signature = {
+        "frame_signature_available": True,
+        "frame_hash": "same",
+        "frame_mean_abs_delta": 0.0,
+    }
+    refuel_model.set_refuel_monitor_state("monitoring", "Monitoring")
+    dialog._schedule_refuel_level_panel_refresh(force=True)
+
+    assert dialog.refuel_level_value_label.text() == "Level: 42.0 px"
+    assert dialog.refuel_level_advisory_label.text() == "Refuel camera image appears stale"
+
+
+def test_refuel_panel_allows_constant_level_when_frames_are_fresh(monkeypatch, qapp):
+    dialog, refuel_model, _controller = _build_droplet_dialog(monkeypatch, qapp)
+
+    dialog.enable_refuel_level_tracking_checkbox.setChecked(True)
+    refuel_model.sample_trace = [
+        {"sample_index": 1, "elapsed_s": 0.0, "monotonic_s": 1.0, "level_px": 42.0},
+        {
+            "sample_index": 2,
+            "elapsed_s": 1.0,
+            "monotonic_s": 2.0,
+            "level_px": 42.0,
+            "same_level_streak_count": 1,
+            "frame_hash": "fresh",
+        },
+    ]
+    refuel_model.refuel_monitor_captured_frames = 2
+    refuel_model.refuel_monitor_valid_level_samples = 2
+    refuel_model.consecutive_repeated_refuel_frame_count = 0
+    refuel_model.refuel_same_level_streak_count = 1
+    refuel_model.set_refuel_monitor_state("monitoring", "Monitoring")
+    dialog._schedule_refuel_level_panel_refresh(force=True)
+
+    assert dialog.refuel_level_value_label.text() == "Level: 42.0 px"
+    assert dialog.refuel_level_advisory_label.text() == "Level stable"
+
+
 def test_refuel_performance_export_button_writes_snapshot_without_capture(monkeypatch, qapp, tmp_path):
     dialog, refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
     export_path = tmp_path / "snapshot.json"

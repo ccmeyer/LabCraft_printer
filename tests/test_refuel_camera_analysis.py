@@ -1,4 +1,5 @@
 import json
+import json
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -236,6 +237,109 @@ def test_refuel_camera_model_tracking_toggle_does_not_clear_samples_or_monitor_c
     assert model.get_refuel_monitor_status()["successful_captures"] == 1
 
 
+def test_refuel_camera_model_frame_signature_tracks_repeated_frames():
+    model = RefuelCameraModel()
+    frame = np.full((24, 32, 3), 40, dtype=np.uint8)
+
+    first = model.build_refuel_frame_signature(frame)
+    second = model.build_refuel_frame_signature(frame.copy())
+    changed_frame = frame.copy()
+    changed_frame[:, :8] = 90
+    third = model.build_refuel_frame_signature(changed_frame)
+
+    assert first["frame_signature_available"] is True
+    assert first["frame_hash"] == second["frame_hash"]
+    assert first["consecutive_repeated_refuel_frame_count"] == 0
+    assert second["frame_repeated"] is True
+    assert second["consecutive_repeated_refuel_frame_count"] == 1
+    assert second["frame_mean_abs_delta"] == 0.0
+    assert third["frame_repeated"] is False
+    assert third["consecutive_repeated_refuel_frame_count"] == 0
+    assert third["frame_mean_abs_delta"] > 0.0
+    json.dumps(third)
+
+
+def test_refuel_camera_model_sample_rows_include_freshness_and_level_delta():
+    model = RefuelCameraModel()
+
+    first = model._append_sample(
+        20.0,
+        5,
+        {
+            "timestamp_utc": "2026-05-25T00:00:00Z",
+            "monotonic_s": 1.0,
+            "refuel_monitor_tick_index": 1,
+            "frame_hash": "abc",
+            "frame_signature_available": True,
+            "final_decision_reason": "credible_visible_peak",
+            "selected_peak_reason": "max_prominence",
+            "selected_peak_row": 14,
+            "channel_bounds": [1, 2, 3, 40],
+            "last_meniscus_row_before_analysis": 12,
+        },
+    )
+    second = model._append_sample(
+        20.0,
+        4,
+        {
+            "timestamp_utc": "2026-05-25T00:00:01Z",
+            "monotonic_s": 2.0,
+            "refuel_monitor_tick_index": 2,
+            "frame_hash": "def",
+            "frame_signature_available": True,
+        },
+    )
+
+    assert first["level_delta_from_previous_sample_px"] is None
+    assert first["same_level_streak_count"] == 0
+    assert first["frame_hash"] == "abc"
+    assert first["final_decision_reason"] == "credible_visible_peak"
+    assert first["selected_peak_reason"] == "max_prominence"
+    assert first["selected_peak_row"] == 14
+    assert first["channel_bounds"] == [1, 2, 3, 40]
+    assert first["last_meniscus_row_before_analysis"] == 12
+    assert second["level_delta_from_previous_sample_px"] == 0.0
+    assert second["same_level_streak_count"] == 1
+    assert model.get_refuel_monitor_status()["valid_level_samples"] == 2
+
+
+def test_refuel_camera_model_analysis_result_copies_detector_metadata_to_timing_and_sample():
+    model = RefuelCameraModel()
+    model._analysis_context = {
+        "timestamp_utc": "2026-05-25T00:00:00Z",
+        "monotonic_s": 1.0,
+        "refuel_monitor_tick_index": 9,
+        "frame_hash": "abc",
+        "frame_signature_available": True,
+        "last_meniscus_row_before_analysis": 17,
+    }
+    model._analysis_timing_context = {"copy_resize_duration_ms": 2.0}
+    model.analysis_thread = SimpleNamespace(
+        detector_runtime_ms=3.0,
+        detected_status="visible",
+        detected_details={
+            "channel_bounds": [10, 20, 15, 90],
+            "final_decision_reason": "credible_visible_peak",
+            "selected_peak_reason": "max_prominence",
+            "selected_peak_row": 31,
+        },
+    )
+
+    model.update_ui_with_analysis(None, None, 45.0, 31)
+
+    sample = model.get_sample_trace()[-1]
+    timing = model.get_refuel_monitor_timing_log()[-1]
+    assert sample["frame_hash"] == "abc"
+    assert sample["channel_bounds"] == [10, 20, 15, 90]
+    assert sample["channel_height_px"] == 90.0
+    assert sample["final_decision_reason"] == "credible_visible_peak"
+    assert sample["last_meniscus_row_before_analysis"] == 17
+    assert timing["frame_hash"] == "abc"
+    assert timing["final_decision_reason"] == "credible_visible_peak"
+    assert timing["selected_peak_reason"] == "max_prominence"
+    assert timing["selected_peak_row"] == 31
+
+
 def test_refuel_camera_model_ejection_counter_records_resets_and_caps_log():
     model = RefuelCameraModel()
 
@@ -436,6 +540,11 @@ def test_refuel_camera_model_build_performance_snapshot_is_json_safe_and_caps_sa
         }
     )
     model.record_refuel_ejection_event(2, source="capture", count_kind="observed")
+    model.build_refuel_frame_signature(np.zeros((8, 8, 3), dtype=np.uint8))
+    model.record_refuel_monitor_frame_captured()
+    model.refuel_monitor_valid_level_samples = 3
+    model.refuel_same_level_streak_count = 2
+    model.last_refuel_level_delta_px = 0.0
     model.sample_trace = [{"sample_index": idx, "level_px": np.float64(idx)} for idx in range(1005)]
 
     snapshot = model.build_refuel_performance_snapshot(reason="unit_test")
@@ -446,6 +555,10 @@ def test_refuel_camera_model_build_performance_snapshot_is_json_safe_and_caps_sa
     assert snapshot["refuel_calibration_performance_enabled"] is False
     assert snapshot["calibration_performance"]["event_count"] == 0
     assert snapshot["timing_summary"]["max_capture_duration_ms"] == 3.0
+    assert snapshot["frame_freshness"]["latest_frame_signature"]["frame_signature_available"] is True
+    assert snapshot["level_sample_health"]["captured_frames"] == 1
+    assert snapshot["level_sample_health"]["valid_level_samples"] == 3
+    assert snapshot["level_sample_health"]["same_level_streak_count"] == 2
     assert snapshot["ejection_counter"]["observed_ejection_count"] == 2
     assert snapshot["sample_count"] == 1005
     assert snapshot["exported_sample_count"] == 1000

@@ -2751,11 +2751,28 @@ class Controller(QObject):
         context["refuel_monitor_capture_duration_ms"] = capture_duration_ms
         if context_overrides:
             context.update(dict(context_overrides))
+        refuel_model = getattr(getattr(self, "model", None), "refuel_camera_model", None)
         if frame is None:
             context["analysis_started"] = False
+            context["frame_signature_available"] = False
             return None, context
+        signature_builder = getattr(refuel_model, "build_refuel_frame_signature", None)
+        if callable(signature_builder):
+            try:
+                context.update(signature_builder(frame, update_previous=True))
+            except Exception:
+                context["frame_signature_available"] = False
+        else:
+            context["frame_signature_available"] = False
+        if context.get("refuel_monitor_tick_index") is not None:
+            capture_counter = getattr(refuel_model, "record_refuel_monitor_frame_captured", None)
+            if callable(capture_counter):
+                try:
+                    context["captured_frame_count"] = capture_counter()
+                except Exception:
+                    pass
         if analyze:
-            context["analysis_started"] = bool(self.model.refuel_camera_model.start_analysis(frame, context=context))
+            context["analysis_started"] = bool(refuel_model.start_analysis(frame, context=context))
         else:
             context["analysis_started"] = False
         return frame, context

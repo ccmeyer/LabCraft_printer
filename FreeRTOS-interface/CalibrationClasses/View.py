@@ -2855,25 +2855,29 @@ class DropletImagingDialog(QtWidgets.QDialog):
         failure_message=None,
         analysis_started=None,
         capture_duration_ms=None,
+        extra_payload=None,
     ):
         model = self.refuel_camera_model
         if model is None:
             return None
-        return model.record_refuel_monitor_timing(
-            {
-                "tick_index": timing_context.get("refuel_monitor_tick_index"),
-                "event_kind": event_kind,
-                "monitor_state": model.get_refuel_monitor_status().get("state"),
-                "capture_duration_ms": capture_duration_ms,
-                "total_latency_ms": self._elapsed_refuel_monitor_ms(timing_context),
-                "skip_reason": skip_reason,
-                "failure_message": failure_message,
-                "analysis_started": analysis_started,
-                "time_since_last_valid_sample_s": model._time_since_last_valid_sample_s(
-                    timing_context.get("refuel_monitor_tick_started_monotonic_s")
-                ),
-            }
-        )
+        payload = {
+            "tick_index": timing_context.get("refuel_monitor_tick_index"),
+            "event_kind": event_kind,
+            "monitor_state": model.get_refuel_monitor_status().get("state"),
+            "capture_duration_ms": capture_duration_ms,
+            "total_latency_ms": self._elapsed_refuel_monitor_ms(timing_context),
+            "skip_reason": skip_reason,
+            "failure_message": failure_message,
+            "analysis_started": analysis_started,
+            "time_since_last_valid_sample_s": model._time_since_last_valid_sample_s(
+                timing_context.get("refuel_monitor_tick_started_monotonic_s")
+            ),
+        }
+        if isinstance(extra_payload, dict):
+            for key, value in extra_payload.items():
+                if key not in payload and not str(key).endswith("_perf_s"):
+                    payload[str(key)] = value
+        return model.record_refuel_monitor_timing(payload)
 
     def _capture_refuel_monitor_sample(self):
         self._refuel_first_sample_pending = False
@@ -2942,6 +2946,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 failure_message="Camera did not return a frame.",
                 analysis_started=False,
                 capture_duration_ms=capture_duration_ms,
+                extra_payload=context if isinstance(context, dict) else None,
             )
             return
 
@@ -2952,6 +2957,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 event_kind="analysis_not_started",
                 analysis_started=False,
                 capture_duration_ms=capture_duration_ms,
+                extra_payload=context,
             )
 
     def _is_refuel_tracking_enabled(self):
@@ -3497,6 +3503,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 "unavailable": "Refuel camera unavailable",
             }.get(monitor_state, "Monitoring disabled")
         )
+        repeated_frame_count = int(monitor_status.get("consecutive_repeated_frame_count") or 0)
+        stale_frame_threshold = int(monitor_status.get("stale_frame_repeat_threshold") or 3)
+        captured_frames = int(monitor_status.get("captured_frames") or 0)
+        valid_level_samples = int(monitor_status.get("valid_level_samples") or 0)
         if not enabled:
             self.refuel_level_group.hide()
             self.refuel_level_value_label.setText("Level: -")
@@ -3548,13 +3558,19 @@ class DropletImagingDialog(QtWidgets.QDialog):
             else:
                 self.refuel_level_status_label.setText("No sample")
             self.refuel_level_last_update_label.setText("-")
+            stale_frame_warning = monitor_state == "monitoring" and repeated_frame_count >= stale_frame_threshold
             if monitor_state != "monitoring":
                 advisory = monitor_message
+            elif stale_frame_warning:
+                advisory = "Refuel camera image appears stale"
+            elif captured_frames >= int(getattr(self.refuel_camera_model, "REFUEL_NO_VALID_SAMPLE_TICK_THRESHOLD", 3) or 3) and valid_level_samples <= 0:
+                advisory = "No new valid refuel level detected"
             elif int(monitor_status.get("successful_captures") or 0) <= 0:
                 advisory = "Waiting for first refuel sample"
             else:
                 advisory = "No valid refuel level detected"
-            advisory = self._refuel_advisory_message(process_enabled) or advisory
+            if not stale_frame_warning:
+                advisory = self._refuel_advisory_message(process_enabled) or advisory
             self.refuel_level_advisory_label.setText(advisory)
             self._refresh_refuel_level_chart()
             return
@@ -3595,7 +3611,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         advisory = "Level stable" if monitor_state == "monitoring" else monitor_message
         advisory_message = self._refuel_advisory_message(process_enabled)
         live_status = None
-        if process_enabled and advisory_message:
+        stale_frame_warning = monitor_state == "monitoring" and repeated_frame_count >= stale_frame_threshold
+        if stale_frame_warning:
+            advisory = "Refuel camera image appears stale"
+        elif process_enabled and advisory_message:
             advisory = advisory_message
         elif process_enabled and self.refuel_camera_model is not None:
             live_getter = getattr(self.refuel_camera_model, "get_live_status", None)
@@ -3614,6 +3633,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
                     pass
         if monitor_state in ("starting", "paused", "unavailable"):
             advisory = advisory_message or monitor_message
+        elif stale_frame_warning:
+            advisory = "Refuel camera image appears stale"
         elif process_enabled and live_status == "In Band":
             advisory = "Level stable"
         elif process_enabled and live_status == "Low":
