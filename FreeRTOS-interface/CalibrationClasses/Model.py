@@ -32003,6 +32003,7 @@ class RefuelCameraModel(QObject):
         self.refuel_monitor_failed_captures = 0
         self.refuel_monitor_consecutive_failures = 0
         self.refuel_diagnostic_capture_active = False
+        self.refuel_monitor_camera_active = False
         self.refuel_monitor_timing_log = []
         self.last_refuel_monitor_timing = None
         self._refuel_monitor_next_tick_index = 1
@@ -32442,6 +32443,17 @@ class RefuelCameraModel(QObject):
     def is_refuel_diagnostic_capture_active(self):
         return bool(self.refuel_diagnostic_capture_active)
 
+    def set_refuel_monitor_camera_active(self, active):
+        active = bool(active)
+        if self.refuel_monitor_camera_active == active:
+            return False
+        self.refuel_monitor_camera_active = active
+        self.update_level_ui_signal.emit()
+        return True
+
+    def is_refuel_monitor_camera_active(self):
+        return bool(self.refuel_monitor_camera_active)
+
     def get_refuel_monitor_status(self):
         return {
             "state": self.refuel_monitor_state,
@@ -32452,6 +32464,7 @@ class RefuelCameraModel(QObject):
             "failed_captures": int(self.refuel_monitor_failed_captures),
             "consecutive_failures": int(self.refuel_monitor_consecutive_failures),
             "diagnostic_capture_active": bool(self.refuel_diagnostic_capture_active),
+            "monitor_camera_active": bool(self.refuel_monitor_camera_active),
         }
 
     def next_refuel_monitor_tick_index(self):

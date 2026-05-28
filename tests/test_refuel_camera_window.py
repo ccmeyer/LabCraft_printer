@@ -18,7 +18,11 @@ def _make_dialog(
     capture_return=None,
     run_burst_return=True,
     machine=None,
+    monitor_camera_active=False,
 ):
+    refuel_camera_model = RefuelCameraModel()
+    if monitor_camera_active:
+        refuel_camera_model.set_refuel_monitor_camera_active(True)
     model = SimpleNamespace(
         machine_model=SimpleNamespace(
             step_size=1,
@@ -29,7 +33,7 @@ def _make_dialog(
             _build_recorder_meta=lambda: {},
         ),
         experiment_model=SimpleNamespace(experiment_dir_path=tempfile.mkdtemp()),
-        refuel_camera_model=RefuelCameraModel(),
+        refuel_camera_model=refuel_camera_model,
     )
     controller = SimpleNamespace(
         set_relative_coordinates=Mock(),
@@ -82,6 +86,30 @@ def test_refuel_camera_window_close_event_stops_camera_and_disables_print_profil
 
     assert not dialog.timer.isActive()
     controller.stop_refuel_camera.assert_called_once_with()
+    controller.disable_print_profile.assert_called_once_with()
+    assert event.isAccepted()
+
+
+def test_refuel_camera_window_close_keeps_monitor_owned_camera_running(qapp):
+    dialog, model, controller = _make_dialog(
+        qapp,
+        capture_return=np.zeros((8, 8, 3), dtype=np.uint8),
+        monitor_camera_active=True,
+    )
+    dialog.timer.start(500)
+    dialog.capturing = True
+    model.refuel_camera_model.set_refuel_diagnostic_capture_active(True)
+    assert dialog.timer.isActive()
+    assert model.refuel_camera_model.is_refuel_diagnostic_capture_active() is True
+
+    event = QCloseEvent()
+    dialog.closeEvent(event)
+
+    assert not dialog.timer.isActive()
+    assert model.refuel_camera_model.is_refuel_diagnostic_capture_active() is False
+    assert model.refuel_camera_model.is_refuel_monitor_camera_active() is True
+    controller.start_refuel_camera.assert_called_once_with()
+    controller.stop_refuel_camera.assert_not_called()
     controller.disable_print_profile.assert_called_once_with()
     assert event.isAccepted()
 

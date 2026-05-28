@@ -200,12 +200,15 @@ def test_refuel_camera_model_monitor_state_and_counters_emit_update_signal():
     calls = []
     model.update_level_ui_signal.connect(lambda: calls.append(True))
 
+    assert model.is_refuel_monitor_camera_active() is False
     assert model.set_refuel_monitor_state("starting", "Starting refuel camera") is True
     model.record_refuel_monitor_attempt()
     model.record_refuel_monitor_success()
     model.record_refuel_monitor_skip("analysis_in_progress", message="Waiting for refuel analysis")
     model.record_refuel_monitor_failure("Camera did not return a frame.")
     assert model.set_refuel_diagnostic_capture_active(True) is True
+    assert model.set_refuel_monitor_camera_active(True) is True
+    assert model.set_refuel_monitor_camera_active(True) is False
 
     status = model.get_refuel_monitor_status()
     assert status["state"] == "unavailable"
@@ -216,7 +219,8 @@ def test_refuel_camera_model_monitor_state_and_counters_emit_update_signal():
     assert status["failed_captures"] == 1
     assert status["consecutive_failures"] == 1
     assert status["diagnostic_capture_active"] is True
-    assert len(calls) >= 6
+    assert status["monitor_camera_active"] is True
+    assert len(calls) >= 7
 
 
 def test_refuel_camera_model_tracking_toggle_does_not_clear_samples_or_monitor_counters():

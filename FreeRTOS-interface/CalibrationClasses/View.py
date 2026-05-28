@@ -2768,11 +2768,19 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.controller.start_refuel_camera()
         except Exception as exc:
             self._refuel_monitor_camera_started = False
+            try:
+                self.refuel_camera_model.set_refuel_monitor_camera_active(False)
+            except Exception:
+                pass
             self.refuel_monitor_timer.stop()
             self.refuel_camera_model.record_refuel_monitor_failure(f"Refuel camera unavailable: {exc}")
             return False
 
         self._refuel_monitor_camera_started = True
+        try:
+            self.refuel_camera_model.set_refuel_monitor_camera_active(True)
+        except Exception:
+            pass
         self.refuel_camera_model.set_refuel_monitor_state("monitoring", "Waiting for first refuel sample")
         self.refuel_monitor_timer.start(self.refuel_monitor_interval_ms)
         self._refuel_first_sample_pending = True
@@ -2791,6 +2799,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if self.refuel_camera_model is not None:
             try:
                 self.refuel_camera_model.set_refuel_monitor_state("off", message)
+            except Exception:
+                pass
+            try:
+                self.refuel_camera_model.set_refuel_monitor_camera_active(False)
             except Exception:
                 pass
 
@@ -2812,6 +2824,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 except Exception as exc:
                     print(f"[RefuelMonitor] stop_refuel_camera failed after failures: {exc}")
             self._refuel_monitor_camera_started = False
+            try:
+                self.refuel_camera_model.set_refuel_monitor_camera_active(False)
+            except Exception:
+                pass
 
     def _new_refuel_monitor_timing_context(self):
         model = self.refuel_camera_model
@@ -9546,6 +9562,7 @@ class RefuelCameraWindow(QtWidgets.QDialog):
         self.controller = controller
         self._camera_ready = False
         self._camera_failure_shown = False
+        self._borrowed_refuel_monitor_camera = False
         self._dataset_sequence_state = None
         self._capture_interval_ms = 500
         self._save_dir = Path(__file__).resolve().parents[2] / "artifacts" / "refuel_camera_frames"
@@ -10115,6 +10132,13 @@ class RefuelCameraWindow(QtWidgets.QDialog):
         self._sync_session_controls()
 
     def start_camera(self):
+        self._borrowed_refuel_monitor_camera = False
+        try:
+            self._borrowed_refuel_monitor_camera = bool(
+                self.refuel_camera_model.is_refuel_monitor_camera_active()
+            )
+        except Exception:
+            self._borrowed_refuel_monitor_camera = False
         try:
             self.controller.start_refuel_camera()
             machine = getattr(self.controller, "machine", None)
@@ -10143,9 +10167,19 @@ class RefuelCameraWindow(QtWidgets.QDialog):
 
     def stop_camera(self):
         try:
+            if (
+                self._borrowed_refuel_monitor_camera
+                and self.refuel_camera_model.is_refuel_monitor_camera_active()
+            ):
+                self._borrowed_refuel_monitor_camera = False
+                return
+        except Exception:
+            pass
+        try:
             self.controller.stop_refuel_camera()
         except Exception as exc:
             print(f"[RefuelCamera] stop_camera failed: {exc}")
+        self._borrowed_refuel_monitor_camera = False
 
     def save_frame(self):
         """Save the latest raw frame to the snapshot directory."""

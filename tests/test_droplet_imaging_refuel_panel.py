@@ -212,6 +212,8 @@ def test_enabling_refuel_tracking_starts_monitor_and_schedules_immediate_capture
     assert dialog.refuel_level_advisory_label.text() == "Waiting for first refuel sample"
     assert dialog.refuel_level_process_result_label.isHidden() is True
     controller.start_refuel_camera.assert_called_once_with()
+    assert refuel_model.is_refuel_monitor_camera_active() is True
+    assert refuel_model.get_refuel_monitor_status()["monitor_camera_active"] is True
     controller.capture_refuel_image.assert_not_called()
     controller.capture_refuel_image_with_context.assert_called_once_with(
         analyze=True,
@@ -233,6 +235,7 @@ def test_disabling_refuel_tracking_hides_panel_and_keeps_controls_available(monk
     assert dialog.refuel_level_group.isHidden() is True
     assert dialog.refuel_monitor_timer.isActive() is False
     assert refuel_model.get_refuel_monitor_status()["state"] == "off"
+    assert refuel_model.is_refuel_monitor_camera_active() is False
     assert dialog.calibration_tabs.isEnabled() is True
     assert dialog.run_options_group.isEnabled() is True
     controller.start_refuel_camera.assert_called_once_with()
@@ -505,6 +508,7 @@ def test_refuel_monitor_stops_after_three_none_frames(monkeypatch, qapp):
     assert status["failed_captures"] == 3
     assert status["consecutive_failures"] == 3
     assert dialog.refuel_monitor_timer.isActive() is False
+    assert refuel_model.is_refuel_monitor_camera_active() is False
     controller.stop_refuel_camera.assert_called_once_with()
     assert refuel_model.get_refuel_monitor_timing_log()[-1]["event_kind"] == "failure"
 
@@ -805,6 +809,7 @@ def test_refuel_monitor_close_stops_camera_before_dialog_cleanup(monkeypatch, qa
     assert event.isAccepted() is True
     assert dialog.refuel_monitor_timer.isActive() is False
     assert refuel_model.get_refuel_monitor_status()["state"] == "off"
+    assert refuel_model.is_refuel_monitor_camera_active() is False
     controller.stop_refuel_camera.assert_called_once_with()
     controller.stop_droplet_camera.assert_called_once_with()
     controller.disable_print_profile.assert_called_once_with()
@@ -926,6 +931,29 @@ def test_refuel_monitor_skips_while_diagnostic_window_capture_active(monkeypatch
     timing = refuel_model.get_refuel_monitor_timing_log()[-1]
     assert timing["event_kind"] == "skip"
     assert timing["skip_reason"] == "diagnostic_capture_active"
+
+
+def test_refuel_monitor_resumes_after_diagnostic_window_capture_stops(monkeypatch, qapp):
+    dialog, refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
+
+    dialog.enable_refuel_level_tracking_checkbox.setChecked(True)
+    qapp.processEvents()
+    controller.capture_refuel_image_with_context.reset_mock()
+
+    refuel_model.set_refuel_diagnostic_capture_active(True)
+    dialog._capture_refuel_monitor_sample()
+    refuel_model.set_refuel_diagnostic_capture_active(False)
+    dialog._capture_refuel_monitor_sample()
+
+    controller.capture_refuel_image_with_context.assert_called_once_with(
+        analyze=True,
+        context_overrides=ANY,
+    )
+    status = refuel_model.get_refuel_monitor_status()
+    assert status["state"] == "monitoring"
+    assert status["monitor_camera_active"] is True
+    assert status["skipped_captures"] == 1
+    assert status["attempted_captures"] >= 1
 
 
 def test_process_monitor_can_be_enabled_without_changing_level_tracking(monkeypatch, qapp):
