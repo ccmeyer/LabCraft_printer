@@ -27,6 +27,8 @@ ARRAY_AXIS_ACCEL_DEFAULT = 140000
 ARRAY_PRINT_SERPENTINE = True
 ARRAY_GENTLE_ACCEL_ENABLED = False
 ARRAY_ROW_START_OVERSHOOT_STEPS = 0
+PLATE_ENTRY_SAFE_Z = 500
+PLATE_SEATED_LOCATIONS = {"pause", "plate"}
 
 
 class AppUpdateCheckWorker(QtCore.QObject):
@@ -1686,35 +1688,40 @@ class Controller(QObject):
         target_is_balance = target_name_norm == 'balance'
         current_is_slot = current_location_norm.startswith('slot-')
         target_is_slot = target_name_norm.startswith('slot-')
-
-        # Inverted-Z convention: smaller numerical Z means physically higher.
-        # If we are already above the safe height plane, don't insert a redundant safe-Z move.
-        if current_z < safe_z:
-            print("Already above safe height")
-            ignore_safe_height = True
+        current_is_plate_seated = current_location_norm in PLATE_SEATED_LOCATIONS
+        target_is_plate_seated = target_name_norm in PLATE_SEATED_LOCATIONS
+        needs_plate_entry_safe_z = target_is_plate_seated and not current_is_plate_seated
 
         needs_route_safe_z = (
             (current_is_camera or target_is_camera) or
             (current_is_slot and not target_is_slot) or
             (not current_is_slot and target_is_slot)
         )
+        route_safe_z = PLATE_ENTRY_SAFE_Z if needs_plate_entry_safe_z else safe_z
+
+        def queue_safe_z(safe_z_value):
+            print(f'Must move up to safe height before moving to {name} from {current_location}')
+            if self.set_absolute_Z(safe_z_value, manual=manual, override=override) is False:
+                self.error_occurred_signal.emit('Move Error', 'Failed to move to safe Z height')
+                return False
+            return True
 
         print(f'Moving to location: {name} from {current_location}')
         # Only insert an intermediate safe-Z move when both endpoints are at/below
-        # the safe plane (in inverted-Z coordinates: numerically >= safe_z).
-        needs_intermediate_safe_z = current_z > safe_z and target['Z'] > safe_z
+        # the selected safe plane (in inverted-Z coordinates: numerically >= safe).
+        needs_intermediate_safe_z = current_z > route_safe_z and target['Z'] > route_safe_z
 
-        if needs_route_safe_z and not ignore_safe_height and needs_intermediate_safe_z:
-            print(f'Must move up to safe height before moving to {name} from {current_location}')
-            if self.set_absolute_Z(safe_z, manual=manual, override=override) is False:
-                self.error_occurred_signal.emit('Move Error', 'Failed to move to safe Z height')
+        if needs_plate_entry_safe_z and needs_intermediate_safe_z:
+            if queue_safe_z(route_safe_z) is False:
+                return False
+        elif needs_route_safe_z and not ignore_safe_height and needs_intermediate_safe_z:
+            if queue_safe_z(route_safe_z) is False:
                 return False
 
         if current_is_balance or target_is_balance:
-            if not ignore_safe_height:
-                print(f'Must move up to safe height before moving to {name} from {current_location}')
-                if self.set_absolute_Z(safe_z, manual=manual, override=override) is False:
-                    self.error_occurred_signal.emit('Move Error', 'Failed to move to safe Z height')
+            balance_safe_z = route_safe_z if needs_plate_entry_safe_z else safe_z
+            if not ignore_safe_height and self.expected_position['Z'] > balance_safe_z:
+                if queue_safe_z(balance_safe_z) is False:
                     return False
             print(f'Must move up to safe height before moving to {name} from {current_location}')
             print("Must move to safe Y before moving to or from balance")

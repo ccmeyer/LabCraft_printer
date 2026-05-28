@@ -47,20 +47,20 @@ def _build_controller(
 
 
 @pytest.mark.parametrize(
-    "profile_name,safe_z,current_z,target_z",
+    "profile_name,current_z,target_z",
     [
-        ("current", 35000, 36000, 36000),  # both at/below safe height (numerically deeper)
-        ("legacy", 5000, 6000, 6000),      # both at/below safe height (legacy)
+        ("current", 36000, 36000),
+        ("legacy", 6000, 6000),
     ],
 )
-def test_move_to_location_enforces_safe_z_when_below_threshold(profile_name, safe_z, current_z, target_z):
+def test_move_to_location_plate_entry_uses_plate_safe_z_from_camera(profile_name, current_z, target_z):
     target = {"X": 1000, "Y": 2000, "Z": target_z}
     c, calls = _build_controller("camera", current_z, target, profile_name=profile_name)
 
     Controller.move_to_location(c, "plate")
 
-    assert ("z", safe_z) in calls
-    assert calls.index(("z", safe_z)) < calls.index(("xyz", 1000, 2000, target_z))
+    assert ("z", 500) in calls
+    assert calls.index(("z", 500)) < calls.index(("xyz", 1000, 2000, target_z))
 
 
 def test_move_to_location_camera_to_home_skips_safe_z_when_target_is_above_safe_plane():
@@ -89,8 +89,8 @@ def test_move_to_location_camera_transition_applies_safe_z_before_xyz():
 
     Controller.move_to_location(c, "plate")
 
-    assert ("z", 35000) in calls
-    assert calls.index(("z", 35000)) < calls.index(("xyz", 1000, 2000, 60000))
+    assert ("z", 500) in calls
+    assert calls.index(("z", 500)) < calls.index(("xyz", 1000, 2000, 60000))
     assert c.expected_location == "plate"
 
 
@@ -132,11 +132,22 @@ def test_move_to_location_legacy_profile_uses_legacy_safe_height_before_balance_
     assert z_idx < y_idx < x_idx < xyz_idx
 
 
-def test_move_to_location_ignore_safe_height_skips_safe_z_when_requested():
+def test_move_to_location_ignore_safe_height_does_not_skip_plate_entry_safe_z():
     target = {"X": 1000, "Y": 2000, "Z": 60000}
     c, calls = _build_controller("camera", 50000, target)
 
     Controller.move_to_location(c, "plate", ignore_safe_height=True)
+
+    assert ("z", 500) in calls
+    assert calls.index(("z", 500)) < calls.index(("xyz", 1000, 2000, 60000))
+    assert calls[-1] == ("xyz", 1000, 2000, 60000)
+
+
+def test_move_to_location_ignore_safe_height_still_skips_non_plate_route_safe_z():
+    target = {"X": 1000, "Y": 2000, "Z": 60000}
+    c, calls = _build_controller("camera", 50000, target)
+
+    Controller.move_to_location(c, "home", ignore_safe_height=True)
 
     assert ("z", 35000) not in calls
     assert calls[-1] == ("xyz", 1000, 2000, 60000)
@@ -156,7 +167,7 @@ def test_move_to_location_inverted_z_convention_skips_safe_z_when_already_high(
     target = {"X": 1000, "Y": 2000, "Z": target_z}
     c, calls = _build_controller("camera", current_z, target, profile_name=profile_name)
 
-    Controller.move_to_location(c, "plate")
+    Controller.move_to_location(c, "home")
 
     assert ("z", safe_z) not in calls
     assert calls[-1] == ("xyz", 1000, 2000, target_z)
@@ -166,10 +177,64 @@ def test_move_to_location_above_safe_height_skips_safe_z_even_if_target_below_sa
     target = {"X": 1000, "Y": 2000, "Z": 50000}
     c, calls = _build_controller("camera", 30000, target)
 
-    Controller.move_to_location(c, "plate")
+    Controller.move_to_location(c, "home")
 
     assert ("z", 35000) not in calls
     assert calls[-1] == ("xyz", 1000, 2000, 50000)
+
+
+def test_move_to_location_plate_entry_moves_to_500_from_non_plate_location():
+    target = {"X": 1000, "Y": 2000, "Z": 120050}
+    c, calls = _build_controller("loading", 50000, target)
+
+    Controller.move_to_location(c, "pause")
+
+    assert ("z", 500) in calls
+    assert calls.index(("z", 500)) < calls.index(("xyz", 1000, 2000, 120050))
+
+
+def test_move_to_location_plate_entry_skips_extra_z_when_already_at_500():
+    target = {"X": 1000, "Y": 2000, "Z": 120050}
+    c, calls = _build_controller("home", 500, target)
+
+    Controller.move_to_location(c, "plate")
+
+    assert ("z", 500) not in calls
+    assert calls[-1] == ("xyz", 1000, 2000, 120050)
+
+
+def test_move_to_location_pause_to_plate_does_not_lift_to_plate_entry_safe_z():
+    target = {"X": 1000, "Y": 2000, "Z": 120050}
+    c, calls = _build_controller("pause", 120050, target)
+
+    Controller.move_to_location(c, "plate")
+
+    assert ("z", 500) not in calls
+    assert calls[-1] == ("xyz", 1000, 2000, 120050)
+
+
+def test_move_to_location_plate_to_pause_does_not_lift_to_plate_entry_safe_z():
+    target = {"X": 1000, "Y": 2000, "Z": 120050}
+    c, calls = _build_controller("plate", 120050, target)
+
+    Controller.move_to_location(c, "pause")
+
+    assert ("z", 500) not in calls
+    assert calls[-1] == ("xyz", 1000, 2000, 120050)
+
+
+def test_move_to_location_balance_to_plate_keeps_plate_entry_z_for_balance_route():
+    target = {"X": 1111, "Y": 2222, "Z": 120050}
+    c, calls = _build_controller("balance", 74100, target)
+
+    Controller.move_to_location(c, "plate")
+
+    z_idx = calls.index(("z", 500))
+    y_idx = calls.index(("y", 15000))
+    x_idx = calls.index(("x", 1111))
+    xyz_idx = calls.index(("xyz", 1111, 2222, 120050))
+    assert ("z", 35000) not in calls
+    assert z_idx < y_idx < x_idx < xyz_idx
 
 
 def test_move_to_location_missing_location_returns_false_and_stops():
@@ -216,7 +281,7 @@ def test_move_to_location_slot_detection_is_case_insensitive():
 
     Controller.move_to_location(c, "pause")
 
-    assert ("z", 35000) in calls
+    assert ("z", 500) in calls
 
 
 def test_move_to_location_balance_respects_ignore_safe_height():
@@ -294,7 +359,7 @@ def test_move_to_location_plate_falls_back_to_legacy_location_when_plate_referen
     Controller.move_to_location(c, "plate")
 
     assert location_lookups == ["plate"]
-    assert ("z", 35000) in calls
+    assert ("z", 500) in calls
     assert calls[-1] == ("xyz", 1000, 2000, 60000)
 
 
