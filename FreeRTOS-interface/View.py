@@ -408,7 +408,7 @@ class MainWindow(QMainWindow):
         self.audit_timeline_window = None
         self._app_update_close_requested = False
 
-        self.setWindowTitle("Droplet Printer Interface")
+        self.setWindowTitle("Droplet Printer Interface v1.0.0")
         self.init_ui()
         self.disconnected = False
         self._close_disconnect_pending = False
