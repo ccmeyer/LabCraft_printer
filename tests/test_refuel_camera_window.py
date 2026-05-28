@@ -7,7 +7,7 @@ import numpy as np
 from PySide6.QtGui import QCloseEvent
 
 import CalibrationClasses.View as CalibrationView
-from CalibrationClasses.Model import RefuelCameraModel
+from CalibrationClasses.Model import ImageAnalysisThread, RefuelCameraModel
 from CalibrationClasses.View import RefuelCameraWindow
 
 
@@ -153,6 +153,27 @@ def test_refuel_camera_window_preview_prefers_annotated_frame(qapp):
 
     assert preview is annotated
     assert preview.shape == (480, 640, 3)
+
+
+def test_refuel_camera_window_detector_annotation_matches_rotated_raw_aspect(qapp):
+    raw = np.zeros((50, 80, 3), dtype=np.uint8)
+    working = RefuelCameraModel._build_analysis_working_frame(raw)
+    thread = ImageAnalysisThread(
+        working,
+        offset=40,
+        width=20,
+        threshold=80,
+        prominence=4,
+        empty_cutoff=0.25,
+        last_row=None,
+    )
+    thread.analyze_image()
+
+    preview = RefuelCameraWindow._prepare_refuel_preview_image(raw, thread.annotated_image)
+
+    rotated_raw = CalibrationView.cv2.rotate(raw, CalibrationView.cv2.ROTATE_90_COUNTERCLOCKWISE)
+    assert preview is thread.annotated_image
+    assert abs((preview.shape[1] / preview.shape[0]) - (rotated_raw.shape[1] / rotated_raw.shape[0])) < 0.01
 
 
 def test_refuel_camera_window_preview_rotates_raw_frame_without_annotation(qapp):

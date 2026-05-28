@@ -30686,24 +30686,30 @@ class ImageAnalysisThread(QThread):
     # Define signals to send results back to the main thread
     # analysis_done = Signal(object,object,object,object)  # Send original, thresholded, and analyzed image and result
     analysis_done = Signal(object, object, object, object)  # Send original, annotated image, level, and meniscus row
+    CANONICAL_ANALYSIS_HEIGHT = 480
+    CANONICAL_ANALYSIS_WIDTH = 640
+    ANALYSIS_PREPROCESSING_MODE = "aspect_preserving_long_side_640"
     TRACKING_WINDOW_PX = 30
     TRACKING_PROMINENCE_RATIO = 0.70
     TOP_TIE_GUARD_PX = 25
     TOP_TIE_PROMINENCE_RATIO = 0.85
+    BOTTOM_TIE_PROMINENCE_RATIO = 0.70
+    BOTTOM_CLUSTER_PROMINENCE_RATIO = 0.70
     TOP_VISIBLE_PROMINENCE_MIN = 5.0
     FULL_TOP_GUARD_PX = 8
     BOTTOM_ARTIFACT_GUARD_PX = 25
     SHORT_CHANNEL_MAX_HEIGHT_PX = 80
-    SHORT_CHANNEL_TOP_VISIBLE_PROMINENCE_MIN = 14.0
+    SHORT_CHANNEL_TOP_VISIBLE_PROMINENCE_MIN = 10.0
     TOP_EDGE_VISIBLE_PROMINENCE_MIN = 8.0
     TOP_NEAR_VISIBLE_PROMINENCE_MIN = 9.5
     TOP_BAND_VISIBLE_PROMINENCE_MIN = 10.0
+    MENISCUS_VISIBLE_OUTPUT_ROW_OFFSET_PX = -1
     BOTTOM_POLARITY_PRE_OUTER_PX = 14
     BOTTOM_POLARITY_PRE_INNER_PX = 2
     BOTTOM_POLARITY_POST_INNER_PX = 1
     BOTTOM_POLARITY_POST_OUTER_PX = 9
     BOTTOM_POLARITY_REJECT_DELTA_MAX = -20.0
-    BOTTOM_POLARITY_REJECT_SLOPE_MAX = -1.5
+    BOTTOM_POLARITY_REJECT_SLOPE_MAX = -1.4
     FILL_REFERENCE_MIN_MEAN = 40.0
     HEAD_CLOSE_KERNEL = (65, 9)
     COMPONENT_MIN_AREA = 800
@@ -30772,6 +30778,7 @@ class ImageAnalysisThread(QThread):
         self.debug_artifacts = {}
         self.peak_selection_details = {}
         self.detector_runtime_ms = None
+        self.analysis_image_shape = None
 
     def _debug_array(self, key, value):
         if self.capture_debug and value is not None:
@@ -30789,6 +30796,96 @@ class ImageAnalysisThread(QThread):
             return float(value)
         except Exception:
             return None
+
+    @staticmethod
+    def _shape_hw(shape):
+        if shape is None or len(shape) < 2:
+            return None
+        try:
+            return int(shape[0]), int(shape[1])
+        except Exception:
+            return None
+
+    def _current_analysis_shape(self, shape=None):
+        candidate = self._shape_hw(shape)
+        if candidate is not None:
+            return candidate
+        candidate = self._shape_hw(getattr(self, "analysis_image_shape", None))
+        if candidate is not None:
+            return candidate
+        return int(self.CANONICAL_ANALYSIS_HEIGHT), int(self.CANONICAL_ANALYSIS_WIDTH)
+
+    def _x_scale(self, shape=None):
+        _height, width = self._current_analysis_shape(shape)
+        return float(width) / float(max(1, int(self.CANONICAL_ANALYSIS_WIDTH)))
+
+    def _y_scale(self, shape=None):
+        height, _width = self._current_analysis_shape(shape)
+        return float(height) / float(max(1, int(self.CANONICAL_ANALYSIS_HEIGHT)))
+
+    def _area_scale(self, shape=None):
+        return float(self._x_scale(shape)) * float(self._y_scale(shape))
+
+    @staticmethod
+    def _scaled_positive(value, scale, *, min_value=1):
+        try:
+            raw = float(value)
+        except Exception:
+            raw = 0.0
+        if raw <= 0:
+            return 0 if min_value <= 0 else int(min_value)
+        return max(int(min_value), int(round(raw * float(scale))))
+
+    def _x_px(self, value, shape=None, *, min_value=1):
+        return self._scaled_positive(value, self._x_scale(shape), min_value=min_value)
+
+    def _y_px(self, value, shape=None, *, min_value=1):
+        return self._scaled_positive(value, self._y_scale(shape), min_value=min_value)
+
+    def _area_px(self, value, shape=None, *, min_value=1):
+        return self._scaled_positive(value, self._area_scale(shape), min_value=min_value)
+
+    def _scaled_peak_selection_parameters(self, shape=None):
+        return {
+            "tracking_window_px": int(self._y_px(self.TRACKING_WINDOW_PX, shape)),
+            "tracking_prominence_ratio": float(self.TRACKING_PROMINENCE_RATIO),
+            "top_tie_guard_px": int(self._y_px(self.TOP_TIE_GUARD_PX, shape)),
+            "top_tie_prominence_ratio": float(self.TOP_TIE_PROMINENCE_RATIO),
+            "bottom_tie_prominence_ratio": float(self.BOTTOM_TIE_PROMINENCE_RATIO),
+            "bottom_cluster_prominence_ratio": float(self.BOTTOM_CLUSTER_PROMINENCE_RATIO),
+            "top_visible_prominence_min": float(self.TOP_VISIBLE_PROMINENCE_MIN),
+            "full_top_guard_px": int(self._y_px(self.FULL_TOP_GUARD_PX, shape)),
+            "bottom_artifact_guard_px": int(self._y_px(self.BOTTOM_ARTIFACT_GUARD_PX, shape)),
+            "short_channel_max_height_px": int(self._y_px(self.SHORT_CHANNEL_MAX_HEIGHT_PX, shape)),
+            "short_channel_top_visible_prominence_min": float(self.SHORT_CHANNEL_TOP_VISIBLE_PROMINENCE_MIN),
+            "top_edge_visible_prominence_min": float(self.TOP_EDGE_VISIBLE_PROMINENCE_MIN),
+            "top_near_visible_prominence_min": float(self.TOP_NEAR_VISIBLE_PROMINENCE_MIN),
+            "top_band_visible_prominence_min": float(self.TOP_BAND_VISIBLE_PROMINENCE_MIN),
+            "meniscus_visible_output_row_offset_px": int(self.MENISCUS_VISIBLE_OUTPUT_ROW_OFFSET_PX),
+            "bottom_polarity_pre_outer_px": int(self._y_px(self.BOTTOM_POLARITY_PRE_OUTER_PX, shape)),
+            "bottom_polarity_pre_inner_px": int(self._y_px(self.BOTTOM_POLARITY_PRE_INNER_PX, shape)),
+            "bottom_polarity_post_inner_px": int(self._y_px(self.BOTTOM_POLARITY_POST_INNER_PX, shape)),
+            "bottom_polarity_post_outer_px": int(self._y_px(self.BOTTOM_POLARITY_POST_OUTER_PX, shape)),
+            "bottom_polarity_reject_delta_max": float(self.BOTTOM_POLARITY_REJECT_DELTA_MAX),
+            "bottom_polarity_reject_slope_max": float(self.BOTTOM_POLARITY_REJECT_SLOPE_MAX),
+        }
+
+    def _analysis_metadata_payload(self, shape=None):
+        analysis_hw = self._current_analysis_shape(shape)
+        analysis_shape = list(analysis_hw)
+        if self.original_image is not None:
+            try:
+                analysis_shape = list(np.asarray(self.original_image).shape)
+            except Exception:
+                pass
+        return {
+            "analysis_preprocessing_mode": self.ANALYSIS_PREPROCESSING_MODE,
+            "input_shape": list(self.input_shape) if self.input_shape is not None else None,
+            "analysis_image_shape": analysis_shape,
+            "canonical_analysis_shape": [int(self.CANONICAL_ANALYSIS_HEIGHT), int(self.CANONICAL_ANALYSIS_WIDTH)],
+            "analysis_x_scale": float(self._x_scale(shape)),
+            "analysis_y_scale": float(self._y_scale(shape)),
+        }
 
     def _debug_profile_stats(self, profile):
         if profile is None or len(profile) == 0:
@@ -30808,6 +30905,8 @@ class ImageAnalysisThread(QThread):
             "tracking_prominence_ratio": float(cls.TRACKING_PROMINENCE_RATIO),
             "top_tie_guard_px": int(cls.TOP_TIE_GUARD_PX),
             "top_tie_prominence_ratio": float(cls.TOP_TIE_PROMINENCE_RATIO),
+            "bottom_tie_prominence_ratio": float(cls.BOTTOM_TIE_PROMINENCE_RATIO),
+            "bottom_cluster_prominence_ratio": float(cls.BOTTOM_CLUSTER_PROMINENCE_RATIO),
             "top_visible_prominence_min": float(cls.TOP_VISIBLE_PROMINENCE_MIN),
             "full_top_guard_px": int(cls.FULL_TOP_GUARD_PX),
             "bottom_artifact_guard_px": int(cls.BOTTOM_ARTIFACT_GUARD_PX),
@@ -30816,6 +30915,7 @@ class ImageAnalysisThread(QThread):
             "top_edge_visible_prominence_min": float(cls.TOP_EDGE_VISIBLE_PROMINENCE_MIN),
             "top_near_visible_prominence_min": float(cls.TOP_NEAR_VISIBLE_PROMINENCE_MIN),
             "top_band_visible_prominence_min": float(cls.TOP_BAND_VISIBLE_PROMINENCE_MIN),
+            "meniscus_visible_output_row_offset_px": int(cls.MENISCUS_VISIBLE_OUTPUT_ROW_OFFSET_PX),
             "bottom_polarity_pre_outer_px": int(cls.BOTTOM_POLARITY_PRE_OUTER_PX),
             "bottom_polarity_pre_inner_px": int(cls.BOTTOM_POLARITY_PRE_INNER_PX),
             "bottom_polarity_post_inner_px": int(cls.BOTTOM_POLARITY_POST_INNER_PX),
@@ -30824,9 +30924,17 @@ class ImageAnalysisThread(QThread):
             "bottom_polarity_reject_slope_max": float(cls.BOTTOM_POLARITY_REJECT_SLOPE_MAX),
         }
 
-    def _select_peak_candidate(self, peaks, prominences, last_row=None):
+    def _select_peak_candidate(self, peaks, prominences, last_row=None, channel_height=None):
         peaks = np.asarray(peaks, dtype=int)
         prominences = np.asarray(prominences, dtype=float)
+        tracking_window_px = self._y_px(self.TRACKING_WINDOW_PX)
+        top_tie_guard_px = self._y_px(self.TOP_TIE_GUARD_PX)
+        bottom_start = None
+        if channel_height is not None:
+            try:
+                bottom_start = max(0, int(channel_height) - int(self._y_px(self.BOTTOM_ARTIFACT_GUARD_PX)))
+            except Exception:
+                bottom_start = None
         details = {
             "candidate_rows": [int(row) for row in peaks.tolist()],
             "candidate_prominences": [float(value) for value in prominences.tolist()],
@@ -30836,11 +30944,15 @@ class ImageAnalysisThread(QThread):
             "selected_peak_prominence": None,
             "selected_peak_reason": "no_peaks",
             "top_tie_eligible_rows": [],
+            "non_bottom_eligible_rows": [],
+            "upper_bottom_eligible_rows": [],
             "tracking_eligible_rows": [],
-            "tracking_window_px": int(self.TRACKING_WINDOW_PX),
+            "tracking_window_px": int(tracking_window_px),
             "tracking_prominence_ratio": float(self.TRACKING_PROMINENCE_RATIO),
-            "top_tie_guard_px": int(self.TOP_TIE_GUARD_PX),
+            "top_tie_guard_px": int(top_tie_guard_px),
             "top_tie_prominence_ratio": float(self.TOP_TIE_PROMINENCE_RATIO),
+            "bottom_tie_prominence_ratio": float(self.BOTTOM_TIE_PROMINENCE_RATIO),
+            "bottom_tie_start_row": None if bottom_start is None else int(bottom_start),
         }
         if len(peaks) == 0:
             return details
@@ -30854,9 +30966,29 @@ class ImageAnalysisThread(QThread):
         top_indices = [
             int(idx)
             for idx, row in enumerate(peaks)
-            if int(row) <= int(self.TOP_TIE_GUARD_PX) and float(prominences[idx]) >= top_threshold
+            if int(row) <= int(top_tie_guard_px) and float(prominences[idx]) >= top_threshold
         ]
         details["top_tie_eligible_rows"] = [int(peaks[idx]) for idx in top_indices]
+
+        non_bottom_indices = []
+        upper_bottom_indices = []
+        if bottom_start is not None and int(peaks[best_idx]) >= int(bottom_start):
+            non_bottom_threshold = best_prominence * float(self.BOTTOM_TIE_PROMINENCE_RATIO)
+            non_bottom_indices = [
+                int(idx)
+                for idx, row in enumerate(peaks)
+                if int(row) < int(bottom_start) and float(prominences[idx]) >= non_bottom_threshold
+            ]
+            bottom_cluster_threshold = best_prominence * float(self.BOTTOM_CLUSTER_PROMINENCE_RATIO)
+            upper_bottom_indices = [
+                int(idx)
+                for idx, row in enumerate(peaks)
+                if int(row) >= int(bottom_start)
+                and int(row) < int(peaks[best_idx])
+                and float(prominences[idx]) >= bottom_cluster_threshold
+            ]
+        details["non_bottom_eligible_rows"] = [int(peaks[idx]) for idx in non_bottom_indices]
+        details["upper_bottom_eligible_rows"] = [int(peaks[idx]) for idx in upper_bottom_indices]
 
         tracking_indices = []
         if last_row is not None:
@@ -30864,7 +30996,7 @@ class ImageAnalysisThread(QThread):
             tracking_indices = [
                 int(idx)
                 for idx, row in enumerate(peaks)
-                if abs(int(row) - int(last_row)) <= int(self.TRACKING_WINDOW_PX)
+                if abs(int(row) - int(last_row)) <= int(tracking_window_px)
                 and float(prominences[idx]) >= tracking_threshold
             ]
         details["tracking_eligible_rows"] = [int(peaks[idx]) for idx in tracking_indices]
@@ -30872,6 +31004,12 @@ class ImageAnalysisThread(QThread):
         if top_indices:
             selected_idx = max(top_indices, key=lambda idx: float(prominences[idx]))
             reason = "top_tie_candidate"
+        elif non_bottom_indices:
+            selected_idx = max(non_bottom_indices, key=lambda idx: float(prominences[idx]))
+            reason = "non_bottom_candidate_gated"
+        elif upper_bottom_indices:
+            selected_idx = min(upper_bottom_indices, key=lambda idx: int(peaks[idx]))
+            reason = "upper_bottom_candidate_gated"
         elif tracking_indices:
             selected_idx = min(tracking_indices, key=lambda idx: abs(int(peaks[idx]) - int(last_row)))
             reason = "nearest_last_row_gated"
@@ -30888,8 +31026,8 @@ class ImageAnalysisThread(QThread):
         rows = selection.get("candidate_rows") or []
         prominences = selection.get("candidate_prominences") or []
         credible_rows = []
-        lower = int(self.FULL_TOP_GUARD_PX)
-        upper = max(lower + 1, int(channel_height) - 25)
+        lower = int(self._y_px(self.FULL_TOP_GUARD_PX))
+        upper = max(lower + 1, int(channel_height) - int(self._y_px(25)))
         for row, prominence in zip(rows, prominences):
             row = int(row)
             prominence = float(prominence)
@@ -30904,7 +31042,7 @@ class ImageAnalysisThread(QThread):
         if row is None or prominence is None:
             return None, "visible_peak"
         is_weak_top = (
-            int(row) <= int(self.FULL_TOP_GUARD_PX)
+            int(row) <= int(self._y_px(self.FULL_TOP_GUARD_PX))
             and float(prominence) < float(self.TOP_VISIBLE_PROMINENCE_MIN)
         )
         if is_weak_top and not self._has_credible_interior_peak(selection, channel_height):
@@ -30913,18 +31051,22 @@ class ImageAnalysisThread(QThread):
 
     def _top_visible_prominence_threshold(self, row, channel_height):
         row = int(row)
-        if int(channel_height) <= int(self.SHORT_CHANNEL_MAX_HEIGHT_PX):
+        if int(channel_height) <= int(self._y_px(self.SHORT_CHANNEL_MAX_HEIGHT_PX)):
             return float(self.SHORT_CHANNEL_TOP_VISIBLE_PROMINENCE_MIN)
-        if row <= 5:
+        if row <= int(self._y_px(5)):
             return float(self.TOP_EDGE_VISIBLE_PROMINENCE_MIN)
-        if row <= 10:
+        if row <= int(self._y_px(10)):
             return float(self.TOP_NEAR_VISIBLE_PROMINENCE_MIN)
-        if row <= int(self.TOP_TIE_GUARD_PX):
+        if row <= int(self._y_px(self.TOP_TIE_GUARD_PX)):
             return float(self.TOP_BAND_VISIBLE_PROMINENCE_MIN)
         return None
 
     def _bottom_peak_polarity(self, profile, selected_row):
-        slope_half_window = 18
+        slope_half_window = int(self._y_px(18))
+        pre_outer = int(self._y_px(self.BOTTOM_POLARITY_PRE_OUTER_PX))
+        pre_inner = int(self._y_px(self.BOTTOM_POLARITY_PRE_INNER_PX))
+        post_inner = int(self._y_px(self.BOTTOM_POLARITY_POST_INNER_PX))
+        post_outer = int(self._y_px(self.BOTTOM_POLARITY_POST_OUTER_PX))
         details = {
             "bottom_peak_polarity_available": False,
             "bottom_peak_polarity_enough_samples": False,
@@ -30954,10 +31096,10 @@ class ImageAnalysisThread(QThread):
         if values.size == 0 or row < 0 or row >= int(values.size):
             return details
 
-        pre_start = max(0, row - int(self.BOTTOM_POLARITY_PRE_OUTER_PX))
-        pre_end = max(0, row - int(self.BOTTOM_POLARITY_PRE_INNER_PX))
-        post_start = min(int(values.size), row + int(self.BOTTOM_POLARITY_POST_INNER_PX))
-        post_end = min(int(values.size), row + int(self.BOTTOM_POLARITY_POST_OUTER_PX))
+        pre_start = max(0, row - pre_outer)
+        pre_end = max(0, row - pre_inner)
+        post_start = min(int(values.size), row + post_inner)
+        post_end = min(int(values.size), row + post_outer)
         pre = values[pre_start:pre_end]
         post = values[post_start:post_end]
         slope_start = max(0, row - int(slope_half_window))
@@ -31003,8 +31145,9 @@ class ImageAnalysisThread(QThread):
         prominences = [float(value) for value in (selection.get("candidate_prominences") or [])]
         row = selection.get("selected_peak_row")
         prominence = selection.get("selected_peak_prominence")
-        bottom_start = max(0, int(channel_height) - int(self.BOTTOM_ARTIFACT_GUARD_PX))
-        top_rows = [int(candidate) for candidate in rows if int(candidate) <= int(self.TOP_TIE_GUARD_PX)]
+        bottom_start = max(0, int(channel_height) - int(self._y_px(self.BOTTOM_ARTIFACT_GUARD_PX)))
+        top_tie_guard_px = int(self._y_px(self.TOP_TIE_GUARD_PX))
+        top_rows = [int(candidate) for candidate in rows if int(candidate) <= top_tie_guard_px]
         bottom_rows = [int(candidate) for candidate in rows if int(candidate) >= bottom_start]
         debug_payload = {
             "boundary_peak_rows": top_rows,
@@ -31054,7 +31197,7 @@ class ImageAnalysisThread(QThread):
                 debug_payload.update({"credible_visible_peak": True, "visible_peak_reason": "top_visible_prominence"})
                 self._debug_update(debug_payload)
                 return True, "top_visible_prominence"
-            if int(channel_height) > int(self.SHORT_CHANNEL_MAX_HEIGHT_PX) and not bottom_rows and prominence >= min_prominence:
+            if int(channel_height) > int(self._y_px(self.SHORT_CHANNEL_MAX_HEIGHT_PX)) and not bottom_rows and prominence >= min_prominence:
                 reason = "modest_top_visible_without_bottom_artifact"
                 debug_payload.update({"credible_visible_peak": True, "visible_peak_reason": reason})
                 self._debug_update(debug_payload)
@@ -31116,13 +31259,18 @@ class ImageAnalysisThread(QThread):
 
     def _filter_head_components(self, components):
         kept = []
+        shape = getattr(self, "analysis_image_shape", None)
+        min_area = float(self._area_px(self.COMPONENT_MIN_AREA, shape))
+        min_height = int(self._y_px(self.COMPONENT_MIN_HEIGHT, shape))
+        x_min = int(self._x_px(self.COMPONENT_X_MIN, shape, min_value=0))
+        x_max = int(self._x_px(self.COMPONENT_X_MAX, shape, min_value=0))
         for row in components:
             x, _y, _w, h = row["bbox"]
-            if row["area"] < float(self.COMPONENT_MIN_AREA):
+            if row["area"] < min_area:
                 continue
-            if int(h) < int(self.COMPONENT_MIN_HEIGHT):
+            if int(h) < min_height:
                 continue
-            if int(x) < int(self.COMPONENT_X_MIN) or int(x) > int(self.COMPONENT_X_MAX):
+            if int(x) < x_min or int(x) > x_max:
                 continue
             kept.append(row)
         return kept
@@ -31141,7 +31289,7 @@ class ImageAnalysisThread(QThread):
                     other_bbox = self._bbox_union(other)
                     overlap = self._bbox_vertical_overlap_fraction(group_bbox, other_bbox)
                     gap = self._bbox_horizontal_gap(group_bbox, other_bbox)
-                    if overlap >= float(self.MERGE_VERTICAL_OVERLAP_MIN) and gap <= int(self.MERGE_HORIZONTAL_GAP_MAX):
+                    if overlap >= float(self.MERGE_VERTICAL_OVERLAP_MIN) and gap <= int(self._x_px(self.MERGE_HORIZONTAL_GAP_MAX)):
                         groups[idx] = group + other
                         changed = True
                         did_merge = True
@@ -31156,7 +31304,8 @@ class ImageAnalysisThread(QThread):
         if h <= 0 or w <= 0:
             return None, "invalid_bbox"
         aspect = float(w) / float(max(h, 1))
-        if h > int(self.LED_TRIM_HEIGHT_MAX_PX) or aspect < float(self.LED_TRIM_ASPECT_MIN):
+        aspect_min = float(self.LED_TRIM_ASPECT_MIN) * float(self._x_scale()) / float(max(self._y_scale(), 1e-6))
+        if h > int(self._y_px(self.LED_TRIM_HEIGHT_MAX_PX)) or aspect < aspect_min:
             return None, "not_short_wide"
 
         x0 = x + int(round(w * 0.15))
@@ -31177,8 +31326,8 @@ class ImageAnalysisThread(QThread):
             row = int(row)
             if row < row_min or row > row_max:
                 continue
-            above = smooth[max(0, row - 5) : row]
-            below = smooth[min(h, row + 5) : min(h, row + 20)]
+            above = smooth[max(0, row - int(self._y_px(5))) : row]
+            below = smooth[min(h, row + int(self._y_px(5))) : min(h, row + int(self._y_px(20)))]
             if len(above) == 0 or len(below) == 0:
                 continue
             delta = float(np.mean(below) - np.mean(above))
@@ -31200,6 +31349,9 @@ class ImageAnalysisThread(QThread):
             channel_width = int(channel_width if channel_width is not None else 20)
         except Exception:
             channel_width = 20
+        shape = gray.shape[:2]
+        left_offset = int(self._x_px(left_offset, shape, min_value=0))
+        channel_width = int(self._x_px(channel_width, shape))
         image_h, image_w = gray.shape[:2]
         fallback_x = max(0, min(image_w - 1, int(x + left_offset)))
         fallback_width = max(1, int(channel_width))
@@ -31215,17 +31367,26 @@ class ImageAnalysisThread(QThread):
         selected_score = None
         reason = "fallback_offset"
         if roi.size:
-            guard = int(self.CHANNEL_WALL_PROFILE_VERTICAL_GUARD_PX)
+            guard = int(self._y_px(self.CHANNEL_WALL_PROFILE_VERTICAL_GUARD_PX, shape))
             band = roi[guard : max(guard + 1, roi.shape[0] - guard), :]
             if band.size == 0:
                 band = roi
             col_mean = band.mean(axis=0).astype(np.float32)
             smooth = cv2.GaussianBlur(col_mean.reshape(1, -1), (9, 1), 0).ravel()
             dark_signal = float(np.max(smooth)) - smooth
+            peak_distance_px = int(self._x_px(self.CHANNEL_WALL_PEAK_DISTANCE_PX, shape))
+            rel_x_min = int(self._x_px(self.CHANNEL_WALL_REL_X_MIN, shape, min_value=0))
+            rel_x_max = int(self._x_px(self.CHANNEL_WALL_REL_X_MAX, shape, min_value=0))
+            pair_left_min = int(self._x_px(self.CHANNEL_WALL_PAIR_LEFT_REL_MIN, shape, min_value=0))
+            pair_left_max = int(self._x_px(self.CHANNEL_WALL_PAIR_LEFT_REL_MAX, shape, min_value=0))
+            pair_spacing_min = int(self._x_px(self.CHANNEL_WALL_PAIR_SPACING_MIN, shape))
+            pair_spacing_max = int(self._x_px(self.CHANNEL_WALL_PAIR_SPACING_MAX, shape))
+            expected_left_rel_x = int(self._x_px(self.CHANNEL_WALL_EXPECTED_LEFT_REL_X, shape, min_value=0))
+            accept_score_max = float(self.CHANNEL_WALL_PAIR_ACCEPT_SCORE_MAX) * float(self._x_scale(shape))
             peaks, props = find_peaks(
                 dark_signal,
                 prominence=float(self.CHANNEL_WALL_PEAK_PROMINENCE_MIN),
-                distance=int(self.CHANNEL_WALL_PEAK_DISTANCE_PX),
+                distance=peak_distance_px,
             )
             prominences = props.get("prominences", [])
             peaks_payload = [
@@ -31234,7 +31395,7 @@ class ImageAnalysisThread(QThread):
                     "relative_x": int(peak),
                     "prominence": float(prominences[idx]),
                     "within_channel_search_window": bool(
-                        int(self.CHANNEL_WALL_REL_X_MIN) <= int(peak) <= int(self.CHANNEL_WALL_REL_X_MAX)
+                        rel_x_min <= int(peak) <= rel_x_max
                     ),
                 }
                 for idx, peak in enumerate(peaks)
@@ -31242,22 +31403,22 @@ class ImageAnalysisThread(QThread):
             best = None
             for left_idx, left in enumerate(peaks):
                 left = int(left)
-                if left < int(self.CHANNEL_WALL_PAIR_LEFT_REL_MIN) or left > int(self.CHANNEL_WALL_PAIR_LEFT_REL_MAX):
+                if left < pair_left_min or left > pair_left_max:
                     continue
                 for right_idx, right in enumerate(peaks):
                     right = int(right)
                     if right <= left:
                         continue
-                    if right < int(self.CHANNEL_WALL_REL_X_MIN) or right > int(self.CHANNEL_WALL_REL_X_MAX):
+                    if right < rel_x_min or right > rel_x_max:
                         continue
                     spacing = right - left
-                    if spacing < int(self.CHANNEL_WALL_PAIR_SPACING_MIN) or spacing > int(self.CHANNEL_WALL_PAIR_SPACING_MAX):
+                    if spacing < pair_spacing_min or spacing > pair_spacing_max:
                         continue
                     left_prominence = float(prominences[left_idx])
                     right_prominence = float(prominences[right_idx])
                     prominence_bonus = left_prominence + right_prominence
                     score = (
-                        abs(left - int(self.CHANNEL_WALL_EXPECTED_LEFT_REL_X)) * 1.0
+                        abs(left - expected_left_rel_x) * 1.0
                         + abs(spacing - int(fallback_width)) * 1.5
                         - 0.04 * prominence_bonus
                     )
@@ -31280,7 +31441,7 @@ class ImageAnalysisThread(QThread):
                 detected_pair = [int(x + left), int(x + right)]
                 selected_pair = dict(pair_payload)
                 selected_score = float(score)
-                if score <= float(self.CHANNEL_WALL_PAIR_ACCEPT_SCORE_MAX):
+                if score <= accept_score_max:
                     fallback_x = int(x + left)
                     fallback_width = int(spacing)
                     reason = "profile_wall_pair"
@@ -31298,27 +31459,34 @@ class ImageAnalysisThread(QThread):
             "selected_channel_wall_pair": selected_pair,
             "selected_channel_wall_pair_score": selected_score,
             "channel_wall_profile_parameters": {
-                "vertical_guard_px": int(self.CHANNEL_WALL_PROFILE_VERTICAL_GUARD_PX),
+                "vertical_guard_px": int(self._y_px(self.CHANNEL_WALL_PROFILE_VERTICAL_GUARD_PX, shape)),
                 "peak_prominence_min": float(self.CHANNEL_WALL_PEAK_PROMINENCE_MIN),
-                "peak_distance_px": int(self.CHANNEL_WALL_PEAK_DISTANCE_PX),
-                "relative_x_min": int(self.CHANNEL_WALL_REL_X_MIN),
-                "relative_x_max": int(self.CHANNEL_WALL_REL_X_MAX),
-                "pair_left_relative_x_min": int(self.CHANNEL_WALL_PAIR_LEFT_REL_MIN),
-                "pair_left_relative_x_max": int(self.CHANNEL_WALL_PAIR_LEFT_REL_MAX),
-                "pair_spacing_min_px": int(self.CHANNEL_WALL_PAIR_SPACING_MIN),
-                "pair_spacing_max_px": int(self.CHANNEL_WALL_PAIR_SPACING_MAX),
-                "expected_left_relative_x": int(self.CHANNEL_WALL_EXPECTED_LEFT_REL_X),
+                "peak_distance_px": int(self._x_px(self.CHANNEL_WALL_PEAK_DISTANCE_PX, shape)),
+                "relative_x_min": int(self._x_px(self.CHANNEL_WALL_REL_X_MIN, shape, min_value=0)),
+                "relative_x_max": int(self._x_px(self.CHANNEL_WALL_REL_X_MAX, shape, min_value=0)),
+                "pair_left_relative_x_min": int(self._x_px(self.CHANNEL_WALL_PAIR_LEFT_REL_MIN, shape, min_value=0)),
+                "pair_left_relative_x_max": int(self._x_px(self.CHANNEL_WALL_PAIR_LEFT_REL_MAX, shape, min_value=0)),
+                "pair_spacing_min_px": int(self._x_px(self.CHANNEL_WALL_PAIR_SPACING_MIN, shape)),
+                "pair_spacing_max_px": int(self._x_px(self.CHANNEL_WALL_PAIR_SPACING_MAX, shape)),
+                "expected_left_relative_x": int(self._x_px(self.CHANNEL_WALL_EXPECTED_LEFT_REL_X, shape, min_value=0)),
                 "expected_spacing_px": int(channel_width),
-                "accept_score_max": float(self.CHANNEL_WALL_PAIR_ACCEPT_SCORE_MAX),
+                "accept_score_max": float(self.CHANNEL_WALL_PAIR_ACCEPT_SCORE_MAX) * float(self._x_scale(shape)),
             },
         }
 
     def _detect_refuel_head_geometry(self, cur_img, threshold_value=50):
+        self.analysis_image_shape = tuple(cur_img.shape[:2])
         cur_gray = cv2.cvtColor(cur_img, cv2.COLOR_BGR2GRAY)
         _, mask = cv2.threshold(cur_gray, threshold_value, 255, cv2.THRESH_BINARY)
         self._debug_array("head_threshold_mask", mask)
 
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, tuple(self.HEAD_CLOSE_KERNEL))
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_RECT,
+            (
+                int(self._x_px(self.HEAD_CLOSE_KERNEL[0], cur_img.shape)),
+                int(self._y_px(self.HEAD_CLOSE_KERNEL[1], cur_img.shape)),
+            ),
+        )
         closed_mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
         self._debug_array("head_closed_mask", closed_mask)
 
@@ -31473,7 +31641,7 @@ class ImageAnalysisThread(QThread):
                 props[k] = props[k][mask]
 
         prominences = props.get("prominences", [])
-        selection = self._select_peak_candidate(peaks, prominences, last_row=last_row)
+        selection = self._select_peak_candidate(peaks, prominences, last_row=last_row, channel_height=len(profile))
         self.peak_selection_details = dict(selection)
         if self.capture_debug:
             attempts = list(self.debug_details.get("peak_search_attempts") or [])
@@ -31502,10 +31670,12 @@ class ImageAnalysisThread(QThread):
             self.debug_details["selected_peak_prominence"] = selection.get("selected_peak_prominence")
             self.debug_details["selected_peak_reason"] = selection.get("selected_peak_reason")
             self.debug_details["top_tie_eligible_rows"] = selection.get("top_tie_eligible_rows") or []
+            self.debug_details["non_bottom_eligible_rows"] = selection.get("non_bottom_eligible_rows") or []
+            self.debug_details["upper_bottom_eligible_rows"] = selection.get("upper_bottom_eligible_rows") or []
             self.debug_details["tracking_eligible_rows"] = selection.get("tracking_eligible_rows") or []
             self.debug_details["search_band"] = attempts[-1]["search_band"]
             self.debug_details["fluid_darker"] = bool(fluid_darker)
-            self.debug_details["peak_selection_parameters"] = self.peak_selection_parameters()
+            self.debug_details["peak_selection_parameters"] = self._scaled_peak_selection_parameters()
 
         # 5) if any candidates remain, pick best
         selected_row = selection.get("selected_peak_row")
@@ -31644,10 +31814,12 @@ class ImageAnalysisThread(QThread):
         # Rotate the image 90 degrees counter-clockwise
         self.original_image = cv2.rotate(self.original_image, cv2.ROTATE_90_COUNTERCLOCKWISE)
         cur_img = self.original_image.copy()
+        self.analysis_image_shape = tuple(cur_img.shape[:2])
         self._debug_array("analysis_image", cur_img)
         if self.capture_debug:
             self._debug_update(
                 {
+                    **self._analysis_metadata_payload(cur_img.shape),
                     "analysis_parameters": {
                         "offset": int(self.offset),
                         "width": int(self.width),
@@ -31656,10 +31828,8 @@ class ImageAnalysisThread(QThread):
                         "empty_cutoff": float(self.empty_cutoff),
                         "bottom_guard_px": int(self.bottom_guard_px),
                     },
-                    "input_shape": list(self.input_shape) if self.input_shape is not None else None,
-                    "analysis_image_shape": list(cur_img.shape),
                     "last_row": int(self.last_row) if self.last_row is not None else None,
-                    "peak_selection_parameters": self.peak_selection_parameters(),
+                    "peak_selection_parameters": self._scaled_peak_selection_parameters(cur_img.shape),
                 }
             )
 
@@ -31672,7 +31842,7 @@ class ImageAnalysisThread(QThread):
             self.level_data = None
             self.meniscus_row = None
             self.detected_status = "not_found"
-            self.detected_details = {"reason": "printer_head_not_found"}
+            self.detected_details = {**self._analysis_metadata_payload(cur_img.shape), "reason": "printer_head_not_found"}
             self._debug_update(
                 {
                     "detected_status": "not_found",
@@ -31705,7 +31875,8 @@ class ImageAnalysisThread(QThread):
             empty_cutoff=self.empty_cutoff,
         )
 
-        search_band = (0, max(0, int(h0) - int(self.bottom_guard_px)))
+        scaled_bottom_guard_px = int(self._y_px(self.bottom_guard_px, min_value=0))
+        search_band = (0, max(0, int(h0) - scaled_bottom_guard_px))
         meniscus_row = self.detect_meniscus_row(profile,
                             last_row=self.last_row,
                             fluid_darker=False,
@@ -31749,11 +31920,13 @@ class ImageAnalysisThread(QThread):
                     "fill_candidate_state": str(fill_candidate_state),
                     "fill_candidate_reason": str(fill_candidate_reason),
                     "final_decision_reason": str(final_decision_reason),
-                    "full_top_guard_px": int(self.FULL_TOP_GUARD_PX),
+                    "full_top_guard_px": int(self._y_px(self.FULL_TOP_GUARD_PX)),
                     "top_visible_prominence_min": float(self.TOP_VISIBLE_PROMINENCE_MIN),
-                    "bottom_artifact_guard_px": int(self.BOTTOM_ARTIFACT_GUARD_PX),
+                    "bottom_artifact_guard_px": int(self._y_px(self.BOTTOM_ARTIFACT_GUARD_PX)),
                 }
             )
+        if str(fill_state) == "visible":
+            meniscus_row = max(0, min(int(h0) - 1, int(meniscus_row) + int(self.MENISCUS_VISIBLE_OUTPUT_ROW_OFFSET_PX)))
         level_y = y0 + meniscus_row
 
         cv2.line(cur_img, (x0, level_y), (x0 + w0, level_y), (0, 0, 255), 2)  # Red line
@@ -31765,6 +31938,7 @@ class ImageAnalysisThread(QThread):
         self.meniscus_row = int(meniscus_row)
         self.detected_status = str(fill_state or "visible")
         self.detected_details = {
+            **self._analysis_metadata_payload(cur_img.shape),
             "head_bbox": list(self.head_bbox) if self.head_bbox is not None else None,
             "channel_bounds": list(self.channel_bounds) if self.channel_bounds is not None else None,
             "fill_score": float(fill_score) if fill_score is not None else None,
@@ -32995,10 +33169,33 @@ class RefuelCameraModel(QObject):
             return None
 
     @staticmethod
+    def _analysis_working_size_for_shape(raw_shape, long_side=640):
+        if raw_shape is None or len(raw_shape) < 2:
+            return None
+        try:
+            height = int(raw_shape[0])
+            width = int(raw_shape[1])
+            long_side = int(long_side)
+        except Exception:
+            return None
+        if height <= 0 or width <= 0 or long_side <= 0:
+            return None
+        if width >= height:
+            out_width = int(long_side)
+            out_height = max(1, int(round(float(height) * float(long_side) / float(width))))
+        else:
+            out_height = int(long_side)
+            out_width = max(1, int(round(float(width) * float(long_side) / float(height))))
+        return int(out_width), int(out_height)
+
+    @staticmethod
     def _build_analysis_working_frame(frame):
         if frame is None:
             return None
-        return cv2.resize(frame, (480, 640), interpolation=cv2.INTER_AREA)
+        size = RefuelCameraModel._analysis_working_size_for_shape(np.asarray(frame).shape)
+        if size is None:
+            return None
+        return cv2.resize(frame, size, interpolation=cv2.INTER_AREA)
 
     @staticmethod
     def _map_analysis_point_to_raw(point, raw_shape, input_shape):
@@ -33076,7 +33273,7 @@ class RefuelCameraModel(QObject):
 
         return {
             "detector_name": "current_refuel_detector",
-            "detector_version": "phase2_dataset_seed_v6_bottom_polarity_gate",
+            "detector_version": "phase2_dataset_seed_v7_aspect_preserving_640",
             "predicted_status": status,
             "predicted_channel_geometry": channel_geometry,
             "predicted_meniscus_line": meniscus_line,

@@ -604,6 +604,9 @@ def test_rerun_refuel_detector_debug_matches_seed_on_synthetic_visible_frame(tmp
     )
 
     assert rerun["seed"]["predicted_status"] == "visible"
+    assert rerun["seed"]["detector_version"] == "phase2_offline_rerun_v7_aspect_preserving_640"
+    assert rerun["debug_details"]["analysis_preprocessing_mode"] == "aspect_preserving_long_side_640"
+    assert rerun["debug_details"]["analysis_image_shape"] == [480, 640, 3]
     assert rerun["debug_details"]["kept_contour_count"] >= 1
     assert rerun["debug_details"]["selected_peak_row"] is not None
     assert rerun["debug_details"]["best_peak_row"] is not None

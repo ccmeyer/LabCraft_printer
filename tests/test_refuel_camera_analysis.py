@@ -114,6 +114,38 @@ def _selection_thread():
     )
 
 
+def test_refuel_analysis_working_size_preserves_aspect_ratio_long_side_640():
+    assert RefuelCameraModel._analysis_working_size_for_shape((2464, 3280, 3)) == (640, 481)
+    assert RefuelCameraModel._analysis_working_size_for_shape((100, 100, 3)) == (640, 640)
+    assert RefuelCameraModel._analysis_working_size_for_shape((3280, 2464, 3)) == (481, 640)
+    assert RefuelCameraModel._analysis_working_size_for_shape((1, 9, 3)) == (640, 71)
+
+
+def test_refuel_analysis_debug_reports_aspect_preserving_metadata():
+    raw = np.zeros((50, 80, 3), dtype=np.uint8)
+    working = RefuelCameraModel._build_analysis_working_frame(raw)
+    thread = ImageAnalysisThread(
+        working,
+        offset=40,
+        width=20,
+        threshold=80,
+        prominence=4,
+        empty_cutoff=0.25,
+        last_row=None,
+        capture_debug=True,
+    )
+
+    thread.analyze_image()
+
+    assert working.shape == (400, 640, 3)
+    assert thread.debug_details["analysis_preprocessing_mode"] == "aspect_preserving_long_side_640"
+    assert thread.debug_details["input_shape"] == [400, 640, 3]
+    assert thread.debug_details["analysis_image_shape"] == [640, 400, 3]
+    assert thread.debug_details["canonical_analysis_shape"] == [480, 640]
+    assert abs(thread.debug_details["analysis_x_scale"] - (400 / 640)) < 1e-6
+    assert abs(thread.debug_details["analysis_y_scale"] - (640 / 480)) < 1e-6
+
+
 def _owner_model(tmp_path, *, record_mode=True):
     calibration_manager = SimpleNamespace(
         get_record_mode_enabled=lambda: record_mode,
@@ -993,6 +1025,36 @@ def test_peak_selection_falls_back_to_max_prominence_without_valid_top_or_tracki
     assert selection["selected_peak_reason"] == "max_prominence"
 
 
+def test_peak_selection_prefers_comparable_non_bottom_peak_over_bottom_artifact():
+    thread = _selection_thread()
+
+    selection = thread._select_peak_candidate(
+        np.array([114, 156]),
+        np.array([14.62, 14.85]),
+        last_row=None,
+        channel_height=164,
+    )
+
+    assert selection["selected_peak_row"] == 114
+    assert selection["selected_peak_reason"] == "non_bottom_candidate_gated"
+    assert selection["non_bottom_eligible_rows"] == [114]
+
+
+def test_peak_selection_prefers_upper_comparable_peak_within_bottom_cluster():
+    thread = _selection_thread()
+
+    selection = thread._select_peak_candidate(
+        np.array([118, 128, 133]),
+        np.array([19.67, 11.0, 22.5]),
+        last_row=None,
+        channel_height=139,
+    )
+
+    assert selection["selected_peak_row"] == 118
+    assert selection["selected_peak_reason"] == "upper_bottom_candidate_gated"
+    assert selection["upper_bottom_eligible_rows"] == [118]
+
+
 def test_weak_top_boundary_peak_classifies_as_full_without_credible_interior_peak():
     thread = _selection_thread()
     selection = {
@@ -1149,7 +1211,7 @@ def test_visible_gate_rejects_short_channel_top_boundary_below_visible_threshold
 
     assert accepted is False
     assert reason == "top_boundary_below_visible_threshold"
-    assert thread.debug_details["visible_peak_required_prominence"] == 14.0
+    assert thread.debug_details["visible_peak_required_prominence"] == 10.0
 
 
 def test_visible_gate_accepts_modest_tall_top_peak_without_bottom_artifact():
@@ -1426,7 +1488,7 @@ def test_refuel_camera_model_start_analysis_uses_last_meniscus_row(monkeypatch):
     assert ok is True
     assert captured["last_row"] == 17
     assert captured["bottom_guard_px"] == 2
-    assert captured["shape"] == (640, 480, 3)
+    assert captured["shape"] == (640, 640, 3)
     assert captured["started"] is True
     assert model.get_raw_capture_image().shape == (16, 16, 3)
 
@@ -1458,9 +1520,10 @@ def test_refuel_camera_model_build_dataset_analysis_seed_returns_geometry_and_le
     seed = model.build_dataset_analysis_seed(raw_frame)
 
     assert seed is not None
-    assert seed["detector_version"] == "phase2_dataset_seed_v6_bottom_polarity_gate"
+    assert seed["detector_version"] == "phase2_dataset_seed_v7_aspect_preserving_640"
     assert seed["predicted_status"] == "visible"
     assert seed["details"]["analysis_parameters"]["bottom_guard_px"] == 2
+    assert seed["details"]["analysis_preprocessing_mode"] == "aspect_preserving_long_side_640"
     assert abs(seed["predicted_level_px"] - (head_rect[3] - 60)) <= 3
     assert seed["predicted_channel_geometry"]["left_wall"] is not None
     assert seed["predicted_meniscus_line"] is not None
