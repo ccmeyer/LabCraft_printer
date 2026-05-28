@@ -32468,6 +32468,7 @@ class RefuelCameraModel(QObject):
         return bool(self.refuel_monitor_camera_active)
 
     def get_refuel_monitor_status(self):
+        latest_signature = self.last_refuel_frame_signature if isinstance(self.last_refuel_frame_signature, dict) else {}
         return {
             "state": self.refuel_monitor_state,
             "message": self.refuel_monitor_message,
@@ -32480,16 +32481,11 @@ class RefuelCameraModel(QObject):
             "consecutive_failures": int(self.refuel_monitor_consecutive_failures),
             "diagnostic_capture_active": bool(self.refuel_diagnostic_capture_active),
             "monitor_camera_active": bool(self.refuel_monitor_camera_active),
-            "latest_frame_hash": (
-                self.last_refuel_frame_signature.get("frame_hash")
-                if isinstance(self.last_refuel_frame_signature, dict)
-                else None
-            ),
-            "latest_frame_mean_abs_delta": (
-                self.last_refuel_frame_signature.get("frame_mean_abs_delta")
-                if isinstance(self.last_refuel_frame_signature, dict)
-                else None
-            ),
+            "latest_frame_hash": latest_signature.get("frame_hash"),
+            "latest_frame_mean_abs_delta": latest_signature.get("frame_mean_abs_delta"),
+            "latest_frame_signature_duration_ms": latest_signature.get("frame_signature_duration_ms"),
+            "latest_frame_signature_source": latest_signature.get("frame_signature_source"),
+            "latest_frame_signature_sample_shape": latest_signature.get("frame_signature_sample_shape"),
             "consecutive_repeated_frame_count": int(self.consecutive_repeated_refuel_frame_count),
             "stale_frame_repeat_threshold": int(self.REFUEL_STALE_FRAME_REPEAT_THRESHOLD),
             "same_level_streak_count": int(self.refuel_same_level_streak_count),
@@ -32539,11 +32535,15 @@ class RefuelCameraModel(QObject):
             return None
 
     def build_refuel_frame_signature(self, frame, update_previous=True):
+        signature_start = time.perf_counter()
         signature = {
             "frame_signature_available": False,
             "frame_shape": None,
             "frame_dtype": None,
             "frame_hash": None,
+            "frame_signature_duration_ms": None,
+            "frame_signature_source": None,
+            "frame_signature_sample_shape": None,
             "frame_mean": None,
             "frame_std": None,
             "frame_min": None,
@@ -32552,26 +32552,34 @@ class RefuelCameraModel(QObject):
             "frame_repeated": False,
             "consecutive_repeated_refuel_frame_count": int(self.consecutive_repeated_refuel_frame_count),
         }
-        if frame is None:
+
+        def _finish(payload):
+            payload["frame_signature_duration_ms"] = float((time.perf_counter() - signature_start) * 1000.0)
+            payload = self._json_safe_refuel_timing_value(payload)
             if update_previous:
-                self.last_refuel_frame_signature = dict(signature)
-            return signature
+                self.last_refuel_frame_signature = dict(payload)
+            return payload
+
+        if frame is None:
+            return _finish(signature)
         try:
             arr = np.asarray(frame)
         except Exception:
-            if update_previous:
-                self.last_refuel_frame_signature = dict(signature)
-            return signature
+            return _finish(signature)
         if arr.size == 0 or arr.ndim < 2:
-            if update_previous:
-                self.last_refuel_frame_signature = dict(signature)
-            return signature
+            return _finish(signature)
 
         try:
-            if arr.ndim >= 3:
-                gray = np.asarray(arr[..., :3], dtype=np.float32).mean(axis=2)
+            height, width = int(arr.shape[0]), int(arr.shape[1])
+            target_size = 64
+            y_step = max(1, int(math.ceil(float(height) / float(target_size))))
+            x_step = max(1, int(math.ceil(float(width) / float(target_size))))
+            sampled = arr[::y_step, ::x_step]
+            sampled = sampled[:target_size, :target_size]
+            if sampled.ndim >= 3:
+                gray = np.asarray(sampled[..., :3], dtype=np.float32).mean(axis=2)
             else:
-                gray = np.asarray(arr, dtype=np.float32)
+                gray = np.asarray(sampled, dtype=np.float32)
             downsample = cv2.resize(gray, (16, 16), interpolation=cv2.INTER_AREA)
             quantized = np.clip(np.rint(downsample), 0, 255).astype(np.uint8)
             frame_hash = hashlib.sha1(quantized.tobytes()).hexdigest()[:16]
@@ -32596,6 +32604,8 @@ class RefuelCameraModel(QObject):
                     "frame_shape": [int(value) for value in arr.shape],
                     "frame_dtype": str(arr.dtype),
                     "frame_hash": str(frame_hash),
+                    "frame_signature_source": "sampled_thumbnail",
+                    "frame_signature_sample_shape": [int(value) for value in sampled.shape],
                     "frame_mean": float(np.mean(gray)),
                     "frame_std": float(np.std(gray)),
                     "frame_min": float(np.min(gray)),
@@ -32608,10 +32618,7 @@ class RefuelCameraModel(QObject):
         except Exception:
             pass
 
-        signature = self._json_safe_refuel_timing_value(signature)
-        if update_previous:
-            self.last_refuel_frame_signature = dict(signature)
-        return signature
+        return _finish(signature)
 
     def record_refuel_monitor_frame_captured(self):
         self.refuel_monitor_captured_frames += 1
@@ -32625,6 +32632,9 @@ class RefuelCameraModel(QObject):
             "frame_shape",
             "frame_dtype",
             "frame_hash",
+            "frame_signature_duration_ms",
+            "frame_signature_source",
+            "frame_signature_sample_shape",
             "frame_mean",
             "frame_std",
             "frame_min",
@@ -33228,12 +33238,15 @@ class RefuelCameraModel(QObject):
             "skip_count": sum(1 for row in records if row.get("event_kind") == "skip"),
             "failure_count": sum(1 for row in records if row.get("event_kind") == "failure"),
             "mean_capture_duration_ms": _mean_for("capture_duration_ms"),
+            "mean_frame_signature_duration_ms": _mean_for("frame_signature_duration_ms"),
             "mean_detector_runtime_ms": _mean_for("detector_runtime_ms"),
             "mean_total_latency_ms": _mean_for("total_latency_ms"),
             "max_capture_duration_ms": _max_for("capture_duration_ms"),
+            "max_frame_signature_duration_ms": _max_for("frame_signature_duration_ms"),
             "max_detector_runtime_ms": _max_for("detector_runtime_ms"),
             "max_total_latency_ms": _max_for("total_latency_ms"),
             "p95_capture_duration_ms": _p95_for("capture_duration_ms"),
+            "p95_frame_signature_duration_ms": _p95_for("frame_signature_duration_ms"),
             "p95_detector_runtime_ms": _p95_for("detector_runtime_ms"),
             "p95_total_latency_ms": _p95_for("total_latency_ms"),
         }

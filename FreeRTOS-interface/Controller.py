@@ -2821,10 +2821,12 @@ class Controller(QObject):
             return None, context
         signature_builder = getattr(refuel_model, "build_refuel_frame_signature", None)
         if callable(signature_builder):
+            signature_start = time.perf_counter()
             try:
                 context.update(signature_builder(frame, update_previous=True))
             except Exception:
                 context["frame_signature_available"] = False
+                context["frame_signature_duration_ms"] = float((time.perf_counter() - signature_start) * 1000.0)
         else:
             context["frame_signature_available"] = False
         if context.get("refuel_monitor_tick_index") is not None:

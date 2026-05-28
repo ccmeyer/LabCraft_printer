@@ -248,6 +248,9 @@ def test_refuel_camera_model_frame_signature_tracks_repeated_frames():
     third = model.build_refuel_frame_signature(changed_frame)
 
     assert first["frame_signature_available"] is True
+    assert first["frame_signature_source"] == "sampled_thumbnail"
+    assert first["frame_signature_duration_ms"] >= 0.0
+    assert first["frame_signature_sample_shape"] == [24, 32, 3]
     assert first["frame_hash"] == second["frame_hash"]
     assert first["consecutive_repeated_refuel_frame_count"] == 0
     assert second["frame_repeated"] is True
@@ -257,6 +260,22 @@ def test_refuel_camera_model_frame_signature_tracks_repeated_frames():
     assert third["consecutive_repeated_refuel_frame_count"] == 0
     assert third["frame_mean_abs_delta"] > 0.0
     json.dumps(third)
+
+
+def test_refuel_camera_model_frame_signature_samples_large_frames_before_stats():
+    model = RefuelCameraModel()
+    frame = np.zeros((2464, 3280, 3), dtype=np.uint8)
+    frame[::32, ::32] = 200
+
+    signature = model.build_refuel_frame_signature(frame)
+
+    assert signature["frame_signature_available"] is True
+    assert signature["frame_signature_source"] == "sampled_thumbnail"
+    assert signature["frame_signature_sample_shape"] == [64, 64, 3]
+    assert signature["frame_shape"] == [2464, 3280, 3]
+    assert signature["frame_signature_duration_ms"] >= 0.0
+    assert signature["frame_hash"]
+    json.dumps(signature)
 
 
 def test_refuel_camera_model_sample_rows_include_freshness_and_level_delta():
@@ -271,6 +290,9 @@ def test_refuel_camera_model_sample_rows_include_freshness_and_level_delta():
             "refuel_monitor_tick_index": 1,
             "frame_hash": "abc",
             "frame_signature_available": True,
+            "frame_signature_duration_ms": 1.25,
+            "frame_signature_source": "sampled_thumbnail",
+            "frame_signature_sample_shape": [64, 64, 3],
             "final_decision_reason": "credible_visible_peak",
             "selected_peak_reason": "max_prominence",
             "selected_peak_row": 14,
@@ -293,6 +315,9 @@ def test_refuel_camera_model_sample_rows_include_freshness_and_level_delta():
     assert first["level_delta_from_previous_sample_px"] is None
     assert first["same_level_streak_count"] == 0
     assert first["frame_hash"] == "abc"
+    assert first["frame_signature_duration_ms"] == 1.25
+    assert first["frame_signature_source"] == "sampled_thumbnail"
+    assert first["frame_signature_sample_shape"] == [64, 64, 3]
     assert first["final_decision_reason"] == "credible_visible_peak"
     assert first["selected_peak_reason"] == "max_prominence"
     assert first["selected_peak_row"] == 14
@@ -311,6 +336,9 @@ def test_refuel_camera_model_analysis_result_copies_detector_metadata_to_timing_
         "refuel_monitor_tick_index": 9,
         "frame_hash": "abc",
         "frame_signature_available": True,
+        "frame_signature_duration_ms": 1.5,
+        "frame_signature_source": "sampled_thumbnail",
+        "frame_signature_sample_shape": [64, 64, 3],
         "last_meniscus_row_before_analysis": 17,
     }
     model._analysis_timing_context = {"copy_resize_duration_ms": 2.0}
@@ -330,11 +358,17 @@ def test_refuel_camera_model_analysis_result_copies_detector_metadata_to_timing_
     sample = model.get_sample_trace()[-1]
     timing = model.get_refuel_monitor_timing_log()[-1]
     assert sample["frame_hash"] == "abc"
+    assert sample["frame_signature_duration_ms"] == 1.5
+    assert sample["frame_signature_source"] == "sampled_thumbnail"
+    assert sample["frame_signature_sample_shape"] == [64, 64, 3]
     assert sample["channel_bounds"] == [10, 20, 15, 90]
     assert sample["channel_height_px"] == 90.0
     assert sample["final_decision_reason"] == "credible_visible_peak"
     assert sample["last_meniscus_row_before_analysis"] == 17
     assert timing["frame_hash"] == "abc"
+    assert timing["frame_signature_duration_ms"] == 1.5
+    assert timing["frame_signature_source"] == "sampled_thumbnail"
+    assert timing["frame_signature_sample_shape"] == [64, 64, 3]
     assert timing["final_decision_reason"] == "credible_visible_peak"
     assert timing["selected_peak_reason"] == "max_prominence"
     assert timing["selected_peak_row"] == 31
@@ -513,6 +547,7 @@ def test_refuel_camera_model_timing_summary_includes_max_and_p95():
                 "tick_index": int(value),
                 "event_kind": "sample_result",
                 "capture_duration_ms": value,
+                "frame_signature_duration_ms": value / 10.0,
                 "detector_runtime_ms": value / 2.0,
                 "total_latency_ms": value * 2.0,
             }
@@ -521,8 +556,11 @@ def test_refuel_camera_model_timing_summary_includes_max_and_p95():
     summary = model.get_refuel_monitor_timing_summary()
 
     assert summary["mean_capture_duration_ms"] == 25.0
+    assert summary["mean_frame_signature_duration_ms"] == 2.5
     assert summary["max_capture_duration_ms"] == 40.0
+    assert summary["max_frame_signature_duration_ms"] == 4.0
     assert summary["p95_capture_duration_ms"] == 38.5
+    assert abs(summary["p95_frame_signature_duration_ms"] - 3.85) < 1e-9
     assert summary["max_detector_runtime_ms"] == 20.0
     assert summary["p95_total_latency_ms"] == 77.0
 
@@ -556,6 +594,8 @@ def test_refuel_camera_model_build_performance_snapshot_is_json_safe_and_caps_sa
     assert snapshot["calibration_performance"]["event_count"] == 0
     assert snapshot["timing_summary"]["max_capture_duration_ms"] == 3.0
     assert snapshot["frame_freshness"]["latest_frame_signature"]["frame_signature_available"] is True
+    assert snapshot["frame_freshness"]["latest_frame_signature"]["frame_signature_source"] == "sampled_thumbnail"
+    assert snapshot["frame_freshness"]["latest_frame_signature"]["frame_signature_duration_ms"] >= 0.0
     assert snapshot["level_sample_health"]["captured_frames"] == 1
     assert snapshot["level_sample_health"]["valid_level_samples"] == 3
     assert snapshot["level_sample_health"]["same_level_streak_count"] == 2

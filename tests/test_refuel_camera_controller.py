@@ -139,8 +139,38 @@ def test_capture_refuel_image_with_context_adds_frame_signature_for_monitor_capt
     assert captured_frame is frame
     assert context["frame_signature_available"] is True
     assert context["frame_hash"]
+    assert context["frame_signature_duration_ms"] >= 0.0
+    assert context["frame_signature_source"] == "sampled_thumbnail"
+    assert context["frame_signature_sample_shape"] == [12, 16, 3]
     assert context["captured_frame_count"] == 1
     assert refuel_camera_model.get_refuel_monitor_status()["captured_frames"] == 1
+    refuel_camera_model.start_analysis.assert_called_once_with(frame, context=context)
+
+
+def test_capture_refuel_image_with_context_continues_when_frame_signature_fails():
+    controller = Controller.__new__(Controller)
+    frame = np.full((12, 16, 3), 25, dtype=np.uint8)
+    controller.machine = SimpleNamespace(capture_refuel_image=Mock(return_value=frame))
+    refuel_camera_model = SimpleNamespace(
+        build_refuel_frame_signature=Mock(side_effect=RuntimeError("signature failed")),
+        record_refuel_monitor_frame_captured=Mock(return_value=1),
+        start_analysis=Mock(return_value=True),
+    )
+    controller.model = SimpleNamespace(refuel_camera_model=refuel_camera_model)
+    controller._build_refuel_capture_context = Mock(
+        return_value={"timestamp_utc": "2026-03-21T10:00:00Z", "monotonic_s": 12.0}
+    )
+
+    captured_frame, context = Controller.capture_refuel_image_with_context(
+        controller,
+        analyze=True,
+        context_overrides={"refuel_monitor_tick_index": 7},
+    )
+
+    assert captured_frame is frame
+    assert context["frame_signature_available"] is False
+    assert context["frame_signature_duration_ms"] >= 0.0
+    assert context["captured_frame_count"] == 1
     refuel_camera_model.start_analysis.assert_called_once_with(frame, context=context)
 
 
