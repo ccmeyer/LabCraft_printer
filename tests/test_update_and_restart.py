@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import tools.update_and_restart as updater
@@ -22,6 +23,14 @@ class FakeGitRunner:
         pull_returncode: int = 0,
         pull_stdout: str = "Already up to date.\n",
         after_rev_parse_returncode: int = 0,
+        upstream: str = "origin/main",
+        upstream_returncode: int = 0,
+        upstream_sha: str = "upstream456",
+        fetch_returncode: int = 0,
+        ahead_count: int = 0,
+        behind_count: int = 0,
+        check_commits: tuple[str, ...] = (),
+        update_commits: tuple[str, ...] = (),
     ):
         self.repo_root = repo_root
         self.branch = branch
@@ -33,6 +42,14 @@ class FakeGitRunner:
         self.pull_returncode = pull_returncode
         self.pull_stdout = pull_stdout
         self.after_rev_parse_returncode = after_rev_parse_returncode
+        self.upstream = upstream
+        self.upstream_returncode = upstream_returncode
+        self.upstream_sha = upstream_sha
+        self.fetch_returncode = fetch_returncode
+        self.ahead_count = ahead_count
+        self.behind_count = behind_count
+        self.check_commits = check_commits
+        self.update_commits = update_commits
         self.rev_parse_head_calls = 0
         self.calls: list[tuple[tuple[str, ...], Path, float, dict]] = []
 
@@ -56,6 +73,28 @@ class FakeGitRunner:
                     return updater.CommandResult(args_tuple, self.after_rev_parse_returncode, stderr="bad after")
                 return updater.CommandResult(args_tuple, 0, stdout=f"{self.after_sha}\n")
             return updater.CommandResult(args_tuple, 0, stdout=f"{self.before_sha}\n")
+
+        if git_args == ("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"):
+            if self.upstream_returncode:
+                return updater.CommandResult(args_tuple, self.upstream_returncode, stderr="no upstream")
+            return updater.CommandResult(args_tuple, 0, stdout=f"{self.upstream}\n")
+
+        if git_args == ("fetch", "--prune"):
+            if self.fetch_returncode:
+                return updater.CommandResult(args_tuple, self.fetch_returncode, stderr="network unavailable")
+            return updater.CommandResult(args_tuple, 0, stdout="")
+
+        if git_args == ("rev-parse", "@{u}"):
+            return updater.CommandResult(args_tuple, 0, stdout=f"{self.upstream_sha}\n")
+
+        if git_args == ("rev-list", "--left-right", "--count", "HEAD...@{u}"):
+            return updater.CommandResult(args_tuple, 0, stdout=f"{self.ahead_count}\t{self.behind_count}\n")
+
+        if git_args == ("log", "--oneline", "HEAD..@{u}"):
+            return updater.CommandResult(args_tuple, 0, stdout="\n".join(self.check_commits) + ("\n" if self.check_commits else ""))
+
+        if len(git_args) == 3 and git_args[:2] == ("log", "--oneline"):
+            return updater.CommandResult(args_tuple, 0, stdout="\n".join(self.update_commits) + ("\n" if self.update_commits else ""))
 
         if git_args == ("status", "--porcelain"):
             return updater.CommandResult(args_tuple, self.status_returncode, stdout=self.dirty_status)
@@ -360,6 +399,8 @@ def test_cli_parser_defaults_match_documented_usage():
     assert config.no_relaunch is False
     assert config.relaunch_on_failure is False
     assert config.gui is False
+    assert config.record_result is False
+    assert config.latest_result_path is None
     assert config.git_timeout_s == 300.0
     assert config.log_path is None
 
@@ -371,9 +412,11 @@ def test_cli_parser_accepts_relaunch_on_failure():
 
 
 def test_cli_parser_accepts_gui():
-    config = updater.parse_args(["--repo-root", ".", "--gui"])
+    config = updater.parse_args(["--repo-root", ".", "--gui", "--record-result", "--latest-result-path", "local/result.json"])
 
     assert config.gui is True
+    assert config.record_result is True
+    assert config.latest_result_path == Path("local/result.json")
 
 
 def test_progress_events_for_clean_noop_update(tmp_path):
@@ -445,3 +488,121 @@ def test_progress_events_for_wait_timeout(tmp_path):
     assert result.status == updater.STATUS_WAIT_TIMEOUT
     assert [event.kind for event in events] == ["starting", "waiting", "failed"]
     assert runner.calls == []
+
+
+def test_update_check_clean_up_to_date_returns_up_to_date(tmp_path):
+    runner = FakeGitRunner(tmp_path, ahead_count=0, behind_count=0)
+
+    result = updater.run_update_check(_config(tmp_path), command_runner=runner)
+
+    assert result.status == updater.STATUS_UP_TO_DATE
+    assert result.returncode == 0
+    assert result.message == "LabCraft is up to date."
+    assert result.upstream == "origin/main"
+    assert ("git", "fetch", "--prune") in [call[0] for call in runner.calls]
+
+
+def test_update_check_behind_upstream_returns_update_available_with_commits(tmp_path):
+    runner = FakeGitRunner(
+        tmp_path,
+        ahead_count=0,
+        behind_count=2,
+        check_commits=("def456 Add updater result dialog", "abc123 Improve update check"),
+    )
+
+    result = updater.run_update_check(_config(tmp_path), command_runner=runner)
+
+    assert result.status == updater.STATUS_UPDATE_AVAILABLE
+    assert result.behind_count == 2
+    assert result.commits == (
+        "def456 Add updater result dialog",
+        "abc123 Improve update check",
+    )
+
+
+def test_update_check_dirty_worktree_blocks_before_fetch(tmp_path):
+    runner = FakeGitRunner(tmp_path, dirty_status=" M FreeRTOS-interface/App.py\n")
+
+    result = updater.run_update_check(_config(tmp_path), command_runner=runner)
+
+    assert result.status == updater.STATUS_DIRTY_WORKTREE
+    assert ("git", "fetch", "--prune") not in [call[0] for call in runner.calls]
+
+
+def test_update_check_missing_upstream_returns_no_upstream(tmp_path):
+    runner = FakeGitRunner(tmp_path, upstream_returncode=128)
+
+    result = updater.run_update_check(_config(tmp_path), command_runner=runner)
+
+    assert result.status == updater.STATUS_NO_UPSTREAM
+    assert "upstream" in result.message
+
+
+def test_update_check_diverged_returns_diverged(tmp_path):
+    runner = FakeGitRunner(tmp_path, ahead_count=1, behind_count=2)
+
+    result = updater.run_update_check(_config(tmp_path), command_runner=runner)
+
+    assert result.status == updater.STATUS_DIVERGED
+    assert result.ahead_count == 1
+    assert result.behind_count == 2
+
+
+def test_update_check_fetch_failure_returns_fetch_failed(tmp_path):
+    runner = FakeGitRunner(tmp_path, fetch_returncode=128)
+
+    result = updater.run_update_check(_config(tmp_path), command_runner=runner)
+
+    assert result.status == updater.STATUS_FETCH_FAILED
+    assert "remote repository" in result.message
+
+
+def test_latest_result_json_written_for_updated_result(tmp_path):
+    runner = FakeGitRunner(
+        tmp_path,
+        before_sha="abc",
+        after_sha="def",
+        pull_stdout="Fast-forward\n",
+        update_commits=("def Updated app",),
+    )
+
+    result = updater.run_update(
+        updater.UpdaterConfig(repo_root=tmp_path, no_relaunch=True, record_result=True),
+        command_runner=runner,
+    )
+
+    result_path = updater.default_latest_result_path(tmp_path)
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+    assert result.status == updater.STATUS_UPDATED
+    assert payload["status"] == updater.STATUS_UPDATED
+    assert payload["before_sha"] == "abc"
+    assert payload["after_sha"] == "def"
+    assert payload["commits"] == ["def Updated app"]
+
+
+def test_latest_result_json_written_for_already_current_result(tmp_path):
+    runner = FakeGitRunner(tmp_path, before_sha="abc", after_sha="abc")
+
+    result = updater.run_update(
+        updater.UpdaterConfig(repo_root=tmp_path, no_relaunch=True, record_result=True),
+        command_runner=runner,
+    )
+
+    payload = json.loads(updater.default_latest_result_path(tmp_path).read_text(encoding="utf-8"))
+    assert result.status == updater.STATUS_ALREADY_CURRENT
+    assert payload["status"] == updater.STATUS_ALREADY_CURRENT
+    assert payload["commits"] == []
+
+
+def test_latest_result_json_written_for_failed_result(tmp_path):
+    runner = FakeGitRunner(tmp_path, dirty_status=" M FreeRTOS-interface/App.py\n")
+
+    result = updater.run_update(
+        updater.UpdaterConfig(repo_root=tmp_path, no_relaunch=True, record_result=True),
+        command_runner=runner,
+    )
+
+    payload = json.loads(updater.default_latest_result_path(tmp_path).read_text(encoding="utf-8"))
+    assert result.status == updater.STATUS_DIRTY_WORKTREE
+    assert payload["status"] == updater.STATUS_DIRTY_WORKTREE
+    assert "local developer changes" in payload["message"]

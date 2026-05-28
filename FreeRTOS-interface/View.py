@@ -423,6 +423,7 @@ class MainWindow(QMainWindow):
         self._ensure_close_disconnect_signal_hook()
         self.controller.update_volumes_in_view_signal.connect(self.rack_box.update_all_slots)
         self.controller.machine.require_gripper_confirmation.connect(self.on_require_gripper_confirmation)
+        QTimer.singleShot(250, self.show_pending_app_update_result)
 
     def load_colors(self, file_path):
         with open(file_path, 'r') as file:
@@ -939,6 +940,16 @@ class MainWindow(QMainWindow):
 
     def request_app_update(self):
         """Launch the standalone updater, then close through the normal path."""
+        check_getter = getattr(self.controller, "get_last_app_update_check_result", None)
+        if callable(check_getter):
+            check_result = check_getter()
+            if check_result is None:
+                self.popup_message("Check for Updates", "Check for updates before starting an app update.")
+                return False
+            if getattr(check_result, "status", "") != "update_available":
+                self.popup_message("No Update Available", getattr(check_result, "message", "No app update is available."))
+                return False
+
         response = self.popup_yes_no(
             "Update App",
             "The app will close, update the application code, and reopen. "
@@ -972,6 +983,83 @@ class MainWindow(QMainWindow):
         self._app_update_close_requested = True
         self.close()
         return True
+
+    def request_app_update_check(self):
+        blockers_getter = getattr(self.controller, "get_app_update_blockers", None)
+        blockers = blockers_getter() if callable(blockers_getter) else []
+        if blockers:
+            message = "Cannot check for updates right now:\n\n" + "\n".join(
+                f"- {blocker}" for blocker in blockers
+            )
+            self.popup_message("Cannot Check for Updates", message)
+            return False
+
+        starter = getattr(self.controller, "start_app_update_check", None)
+        if not callable(starter):
+            self.popup_message(
+                "Cannot Check for Updates",
+                "The controller does not support application update checks.",
+            )
+            return False
+
+        ok, message = starter()
+        if not ok:
+            self.popup_message("Cannot Check for Updates", str(message or "Update check could not be started."))
+            return False
+        return True
+
+    def _latest_app_update_result_path(self):
+        repo_root = getattr(self.controller, "_repo_root", None)
+        if repo_root is None:
+            repo_root = Path(self.script_dir).parent
+        return Path(repo_root) / "local" / "update_logs" / "latest_update_result.json"
+
+    def show_pending_app_update_result(self):
+        path = self._latest_app_update_result_path()
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return False
+        except Exception:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            return False
+
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+        message = self._format_app_update_result_message(payload)
+        self.popup_message("Application Update Result", message)
+        return True
+
+    @staticmethod
+    def _format_app_update_result_message(payload):
+        status = str(payload.get("status") or "")
+        message = str(payload.get("message") or "Application update finished.")
+        before_sha = str(payload.get("before_sha") or "")
+        after_sha = str(payload.get("after_sha") or "")
+        log_path = str(payload.get("log_path") or "")
+        commits = [str(commit) for commit in (payload.get("commits") or []) if str(commit).strip()]
+
+        lines = [message]
+        if status:
+            lines.append(f"Status: {status}")
+        if before_sha or after_sha:
+            lines.append(f"Before: {before_sha or 'unknown'}")
+            lines.append(f"After: {after_sha or 'unknown'}")
+        if log_path:
+            lines.append(f"Log: {log_path}")
+        if commits:
+            lines.append("")
+            lines.append("Updates installed:")
+            lines.extend(f"- {commit}" for commit in commits[:10])
+            if len(commits) > 10:
+                lines.append(f"- ...and {len(commits) - 10} more")
+        return "\n".join(lines)
 
     def show_calibrations(self):
         """Print all printer head calibrations to terminal."""
@@ -4039,8 +4127,18 @@ class SpeedProfilesTab(QtWidgets.QWidget):
         app_update_group = QtWidgets.QGroupBox("Application Update")
         app_update_v = QtWidgets.QVBoxLayout(app_update_group)
 
+        self.app_update_status_label = QtWidgets.QLabel("Check for updates before updating.")
+        self.app_update_status_label.setWordWrap(True)
+        app_update_v.addWidget(self.app_update_status_label)
+
+        self.app_update_check_button = QtWidgets.QPushButton("Check for Updates")
+        self.app_update_check_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.app_update_check_button.clicked.connect(self._on_app_update_check_requested)
+        app_update_v.addWidget(self.app_update_check_button)
+
         self.app_update_button = QtWidgets.QPushButton("Update App")
         self.app_update_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.app_update_button.setEnabled(False)
         self.app_update_button.clicked.connect(self._on_app_update_requested)
         app_update_v.addWidget(self.app_update_button)
 
@@ -4148,6 +4246,10 @@ class SpeedProfilesTab(QtWidgets.QWidget):
         # Optional: live log lines
         if hasattr(self.controller, "dfu_output"):
             self.controller.dfu_output.connect(self._on_dfu_output)
+        if hasattr(self.controller, "app_update_check_started"):
+            self.controller.app_update_check_started.connect(self._on_app_update_check_started)
+        if hasattr(self.controller, "app_update_check_finished"):
+            self.controller.app_update_check_finished.connect(self._on_app_update_check_finished)
 
         self.controller.machine.log_stats_updated.connect(self._on_stats_updated)
         self.controller.machine.log_message_received.connect(self._on_log_message_received)
@@ -4330,6 +4432,43 @@ class SpeedProfilesTab(QtWidgets.QWidget):
     @QtCore.Slot()
     def _on_app_update_requested(self):
         self.main_window.request_app_update()
+
+    @QtCore.Slot()
+    def _on_app_update_check_requested(self):
+        self.main_window.request_app_update_check()
+
+    @QtCore.Slot()
+    def _on_app_update_check_started(self):
+        self.app_update_status_label.setText("Checking for updates...")
+        self.app_update_check_button.setEnabled(False)
+        self.app_update_button.setEnabled(False)
+
+    @QtCore.Slot(object)
+    def _on_app_update_check_finished(self, result):
+        self.app_update_check_button.setEnabled(True)
+        status = str(getattr(result, "status", "") or "")
+        message = str(getattr(result, "message", "") or "Update check finished.")
+
+        if status == "update_available":
+            behind_count = int(getattr(result, "behind_count", 0) or 0)
+            self.app_update_status_label.setText(message)
+            blockers_getter = getattr(self.controller, "get_app_update_blockers", None)
+            blockers = blockers_getter() if callable(blockers_getter) else []
+            self.app_update_button.setEnabled(not blockers)
+            commits = [str(commit) for commit in getattr(result, "commits", ()) if str(commit).strip()]
+            details = [message]
+            if behind_count:
+                details.append(f"Pending commits: {behind_count}")
+            if commits:
+                details.append("")
+                details.extend(f"- {commit}" for commit in commits[:10])
+                if len(commits) > 10:
+                    details.append(f"- ...and {len(commits) - 10} more")
+            self.main_window.popup_message("Updates Available", "\n".join(details))
+            return
+
+        self.app_update_button.setEnabled(False)
+        self.app_update_status_label.setText(message)
 
     @QtCore.Slot()
     def _on_machine_qualification_requested(self):

@@ -237,6 +237,20 @@ Implemented status:
 
 - Slice 3 adds the PySide6 `LabCraft Updater` window, `--gui` updater mode, progress events, failure recovery actions, and README operator notes.
 
+## Slice 4: Update Check and Result Notification
+
+Purpose:
+
+Avoid closing and relaunching the app when no update is available, and tell operators what happened after an updater-driven relaunch.
+
+Implemented behavior:
+
+- The Firmware tab has `Check for Updates` above `Update App`.
+- `Update App` starts disabled and is enabled only after a successful check finds remote commits.
+- The check path uses `git fetch --prune`, upstream comparison, and `git log --oneline HEAD..@{u}` without pulling or modifying the working tree.
+- The updater writes `local/update_logs/latest_update_result.json` for app-triggered runs.
+- On relaunch, the main app shows a one-time result popup and clears the result marker.
+
 ## Validation
 
 Documentation-only slice:

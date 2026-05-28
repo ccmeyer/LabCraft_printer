@@ -271,18 +271,22 @@ To launch the user interface manually once the virtual environment is active, us
 ```bash
 python FreeRTOS-interface/App.py
 ```
-Inside `FreeRTOS-interface/Presets`, `Settings.json` stores predefined values such as default COM ports and plate setup.
+Inside `FreeRTOS-interface/Presets`, JSON files are tracked starter templates. On first launch, machine-specific templates for `Settings.json`, `Plates.json`, `Locations.json`, and `Obstacles.json` are copied into ignored `local/` files, and the app reads/writes those local copies after that. This preserves existing machine calibrations while keeping future app updates from editing tracked presets.
 
 ## Application updates
 
-Operators can update the Python application from the Firmware tab with `Update App`.
+Operators can update the Python application from the Firmware tab.
 
 Expected flow:
 
-- The app confirms that application code will update and firmware will not be flashed.
+- Click `Check for Updates`.
+- If the app is already current, it stays open and reports that no update is available.
+- If an update is available, the app shows pending commit summaries and enables `Update App`.
+- Click `Update App`; the app confirms that application code will update and firmware will not be flashed.
 - If the machine is connected, the normal disconnect/close flow runs first.
 - A `LabCraft Updater` window appears after the main app closes and shows update progress.
 - On success, the updater relaunches the app automatically.
+- After relaunch, the app shows a one-time update result popup with the status, commit range, installed commit summaries, and log path.
 
 If the update is blocked or fails, the updater window stays open and shows the log path. Support should ask for the path shown in the updater window, usually under:
 

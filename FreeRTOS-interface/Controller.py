@@ -28,6 +28,27 @@ ARRAY_PRINT_SERPENTINE = True
 ARRAY_GENTLE_ACCEL_ENABLED = False
 ARRAY_ROW_START_OVERSHOOT_STEPS = 0
 
+
+class AppUpdateCheckWorker(QtCore.QObject):
+    finished = QtCore.Signal(object)
+
+    def __init__(self, repo_root, command_runner=None):
+        super().__init__()
+        self.repo_root = Path(repo_root)
+        self.command_runner = command_runner
+
+    @QtCore.Slot()
+    def run(self):
+        from tools import update_and_restart
+
+        config = update_and_restart.UpdaterConfig(repo_root=self.repo_root)
+        kwargs = {}
+        if self.command_runner is not None:
+            kwargs["command_runner"] = self.command_runner
+        result = update_and_restart.run_update_check(config, **kwargs)
+        self.finished.emit(result)
+
+
 class Controller(QObject):
     """Controller class for the application."""
     array_complete = Signal()
@@ -49,6 +70,10 @@ class Controller(QObject):
     qualification_selftest_event = QtCore.Signal(object)
     qualification_campaign_event = QtCore.Signal(object)
     qualification_finished = QtCore.Signal(bool, str, object)
+
+    # Application update check signals
+    app_update_check_started = QtCore.Signal()
+    app_update_check_finished = QtCore.Signal(object)
 
     # Preprogrammed sequence signals
     sequence_state_changed = QtCore.Signal(str)         # "idle" | "countdown" | "running"
@@ -81,6 +106,9 @@ class Controller(QObject):
         self._dfu_thread: DfuUpdateWorker | None = None
         self._qualification_worker = None
         self._app_update_process = None
+        self._app_update_check_thread = None
+        self._app_update_check_worker = None
+        self._last_app_update_check_result = None
 
         # Defaults; tweak if you keep them elsewhere
         self._dfu_script = Path(__file__).resolve().parent / "dfu_update.py"
@@ -481,6 +509,40 @@ class Controller(QObject):
 
         self._app_update_process = None
 
+    def is_app_update_check_running(self):
+        thread = getattr(self, "_app_update_check_thread", None)
+        is_running = getattr(thread, "isRunning", None)
+        return bool(thread is not None and callable(is_running) and is_running())
+
+    def get_last_app_update_check_result(self):
+        return getattr(self, "_last_app_update_check_result", None)
+
+    def start_app_update_check(self, command_runner=None):
+        if self.is_app_update_check_running():
+            return False, "An update check is already running."
+
+        thread = QtCore.QThread(self)
+        worker = AppUpdateCheckWorker(self._repo_root, command_runner=command_runner)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._handle_app_update_check_finished)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(lambda: setattr(self, "_app_update_check_thread", None))
+        thread.finished.connect(lambda: setattr(self, "_app_update_check_worker", None))
+
+        self._app_update_check_thread = thread
+        self._app_update_check_worker = worker
+        self.app_update_check_started.emit()
+        thread.start()
+        return True, "Update check started."
+
+    @QtCore.Slot(object)
+    def _handle_app_update_check_finished(self, result):
+        self._last_app_update_check_result = result
+        self.app_update_check_finished.emit(result)
+
     def build_app_update_command(self, wait_pid):
         updater_path = (self._repo_root / "tools" / "update_and_restart.py").resolve()
         command = [
@@ -494,6 +556,7 @@ class Controller(QObject):
             command.extend(["--wait-pid", str(int(wait_pid))])
         command.append("--gui")
         command.append("--relaunch-on-failure")
+        command.append("--record-result")
         return command
 
     def launch_app_updater(self, wait_pid, launcher=None):

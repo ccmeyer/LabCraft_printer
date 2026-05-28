@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import errno
+import json
 import os
 import platform
 import subprocess
@@ -29,6 +30,11 @@ STATUS_DIRTY_WORKTREE = "dirty_worktree"
 STATUS_WAIT_TIMEOUT = "wait_timeout"
 STATUS_GIT_PULL_FAILED = "git_pull_failed"
 STATUS_RELAUNCH_FAILED = "relaunch_failed"
+STATUS_UPDATE_AVAILABLE = "update_available"
+STATUS_UP_TO_DATE = "up_to_date"
+STATUS_NO_UPSTREAM = "no_upstream"
+STATUS_DIVERGED = "diverged"
+STATUS_FETCH_FAILED = "fetch_failed"
 
 EXIT_CODES = {
     STATUS_UPDATED: 0,
@@ -38,6 +44,16 @@ EXIT_CODES = {
     STATUS_WAIT_TIMEOUT: 4,
     STATUS_GIT_PULL_FAILED: 5,
     STATUS_RELAUNCH_FAILED: 6,
+}
+
+CHECK_EXIT_CODES = {
+    STATUS_UPDATE_AVAILABLE: 0,
+    STATUS_UP_TO_DATE: 0,
+    STATUS_NOT_GIT_REPO: 2,
+    STATUS_DIRTY_WORKTREE: 3,
+    STATUS_NO_UPSTREAM: 7,
+    STATUS_DIVERGED: 8,
+    STATUS_FETCH_FAILED: 9,
 }
 
 DEFAULT_APP_PATH = Path("FreeRTOS-interface") / "App.py"
@@ -66,6 +82,22 @@ class UpdateResult:
 
 
 @dataclass(frozen=True)
+class UpdateCheckResult:
+    status: str
+    returncode: int
+    message: str
+    repo_root: Path | None
+    branch: str = ""
+    upstream: str = ""
+    head_sha: str = ""
+    upstream_sha: str = ""
+    ahead_count: int = 0
+    behind_count: int = 0
+    commits: tuple[str, ...] = ()
+    log_path: Path | None = None
+
+
+@dataclass(frozen=True)
 class ProgressEvent:
     kind: str
     message: str
@@ -85,6 +117,8 @@ class UpdaterConfig:
     no_relaunch: bool = False
     relaunch_on_failure: bool = False
     gui: bool = False
+    record_result: bool = False
+    latest_result_path: Path | None = None
     git_timeout_s: float = DEFAULT_GIT_TIMEOUT_S
     log_path: Path | None = None
     platform_name: str | None = None
@@ -130,6 +164,10 @@ def _utc_file_stamp() -> str:
 
 def default_log_path(repo_root: Path) -> Path:
     return repo_root / "local" / "update_logs" / f"update_{_utc_file_stamp()}.log"
+
+
+def default_latest_result_path(repo_root: Path) -> Path:
+    return repo_root / "local" / "update_logs" / "latest_update_result.json"
 
 
 def _resolve_under_repo(repo_root: Path, value: Path | str) -> Path:
@@ -370,6 +408,81 @@ def relaunch_app(
     return True, "", command
 
 
+def update_result_payload(result: UpdateResult, *, commits: Sequence[str] = ()) -> dict:
+    return {
+        "status": result.status,
+        "message": result.message,
+        "branch": result.branch,
+        "before_sha": result.before_sha,
+        "after_sha": result.after_sha,
+        "log_path": str(result.log_path) if result.log_path is not None else "",
+        "updated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "commits": [str(commit) for commit in commits],
+    }
+
+
+def write_latest_update_result(
+    result: UpdateResult,
+    repo_root: Path,
+    *,
+    result_path: Path | None = None,
+    commits: Sequence[str] = (),
+) -> Path:
+    path = result_path or default_latest_result_path(repo_root)
+    path = path if path.is_absolute() else repo_root / path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(update_result_payload(result, commits=commits), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _collect_update_commits(
+    result: UpdateResult,
+    config: UpdaterConfig,
+    command_runner: CommandRunner,
+) -> tuple[str, ...]:
+    if result.repo_root is None:
+        return ()
+    if result.status != STATUS_UPDATED:
+        return ()
+    if not result.before_sha or not result.after_sha or result.before_sha == result.after_sha:
+        return ()
+
+    log_result = _run_git(
+        result.repo_root,
+        ["log", "--oneline", f"{result.before_sha}..{result.after_sha}"],
+        config.git_timeout_s,
+        command_runner,
+    )
+    if log_result.returncode != 0:
+        return ()
+    return _split_commit_lines(log_result.stdout)
+
+
+def _maybe_write_latest_update_result(
+    config: UpdaterConfig,
+    result: UpdateResult,
+    fallback_root: Path,
+    command_runner: CommandRunner,
+) -> Path | None:
+    if not config.record_result:
+        return None
+
+    repo_root = result.repo_root or fallback_root
+    result_path = config.latest_result_path
+    if result_path is not None and not result_path.is_absolute():
+        result_path = repo_root / result_path
+    commits = _collect_update_commits(result, config, command_runner)
+    return write_latest_update_result(
+        result,
+        repo_root,
+        result_path=result_path,
+        commits=commits,
+    )
+
+
 def _attempt_relaunch(
     config: UpdaterConfig,
     repo_root: Path,
@@ -411,6 +524,260 @@ def _make_result(
         after_sha=after_sha,
         log_path=log_path,
     )
+
+
+def _make_check_result(
+    status: str,
+    message: str,
+    *,
+    repo_root: Path | None,
+    branch: str = "",
+    upstream: str = "",
+    head_sha: str = "",
+    upstream_sha: str = "",
+    ahead_count: int = 0,
+    behind_count: int = 0,
+    commits: Sequence[str] = (),
+    log_path: Path | None = None,
+) -> UpdateCheckResult:
+    return UpdateCheckResult(
+        status=status,
+        returncode=CHECK_EXIT_CODES[status],
+        message=message,
+        repo_root=repo_root,
+        branch=branch,
+        upstream=upstream,
+        head_sha=head_sha,
+        upstream_sha=upstream_sha,
+        ahead_count=int(ahead_count),
+        behind_count=int(behind_count),
+        commits=tuple(str(commit) for commit in commits),
+        log_path=log_path,
+    )
+
+
+def _parse_rev_list_counts(text: str) -> tuple[int, int] | None:
+    parts = str(text or "").strip().split()
+    if len(parts) < 2:
+        return None
+    try:
+        return int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+
+
+def _split_commit_lines(text: str) -> tuple[str, ...]:
+    return tuple(line.strip() for line in str(text or "").splitlines() if line.strip())
+
+
+def run_update_check(
+    config: UpdaterConfig,
+    *,
+    command_runner: CommandRunner = default_command_runner,
+) -> UpdateCheckResult:
+    requested_root = Path(config.repo_root).resolve()
+    log = _LogBuffer()
+    log.add("LabCraft update check started.")
+    log.add(f"platform: {platform.platform()}")
+    log.add(f"requested_repo_root: {requested_root}")
+
+    log_path = Path(config.log_path).resolve() if config.log_path is not None else default_log_path(requested_root)
+
+    top_level = _run_git(requested_root, ["rev-parse", "--show-toplevel"], config.git_timeout_s, command_runner)
+    log.add_command(top_level)
+    if top_level.returncode != 0 or not top_level.stdout.strip():
+        return _finish_check_result(
+            _make_check_result(
+                STATUS_NOT_GIT_REPO,
+                "Update check cannot continue because the selected path is not a Git checkout.",
+                repo_root=None,
+                log_path=log_path,
+            ),
+            log,
+            log_path,
+        )
+
+    repo_root = Path(top_level.stdout.strip()).resolve()
+    if config.log_path is None:
+        log_path = default_log_path(repo_root)
+    log.add(f"repo_root: {repo_root}")
+
+    branch_result = _run_git(repo_root, ["branch", "--show-current"], config.git_timeout_s, command_runner)
+    log.add_command(branch_result)
+    branch = branch_result.stdout.strip() if branch_result.returncode == 0 else ""
+
+    head_result = _run_git(repo_root, ["rev-parse", "HEAD"], config.git_timeout_s, command_runner)
+    log.add_command(head_result)
+    head_sha = head_result.stdout.strip() if head_result.returncode == 0 else ""
+
+    status_result = _run_git(repo_root, ["status", "--porcelain"], config.git_timeout_s, command_runner)
+    log.add_command(status_result)
+    if status_result.returncode != 0:
+        return _finish_check_result(
+            _make_check_result(
+                STATUS_FETCH_FAILED,
+                "Update check cannot continue because Git status failed.",
+                repo_root=repo_root,
+                branch=branch,
+                head_sha=head_sha,
+                log_path=log_path,
+            ),
+            log,
+            log_path,
+        )
+    if status_result.stdout.strip():
+        return _finish_check_result(
+            _make_check_result(
+                STATUS_DIRTY_WORKTREE,
+                "Update check found local developer changes. Contact support before updating.",
+                repo_root=repo_root,
+                branch=branch,
+                head_sha=head_sha,
+                log_path=log_path,
+            ),
+            log,
+            log_path,
+        )
+
+    upstream_result = _run_git(repo_root, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], config.git_timeout_s, command_runner)
+    log.add_command(upstream_result)
+    if upstream_result.returncode != 0 or not upstream_result.stdout.strip():
+        return _finish_check_result(
+            _make_check_result(
+                STATUS_NO_UPSTREAM,
+                "Update check cannot find an upstream branch for this checkout. Contact support.",
+                repo_root=repo_root,
+                branch=branch,
+                head_sha=head_sha,
+                log_path=log_path,
+            ),
+            log,
+            log_path,
+        )
+    upstream = upstream_result.stdout.strip()
+
+    fetch_result = _run_git(repo_root, ["fetch", "--prune"], config.git_timeout_s, command_runner)
+    log.add_command(fetch_result)
+    if fetch_result.returncode != 0:
+        return _finish_check_result(
+            _make_check_result(
+                STATUS_FETCH_FAILED,
+                "Update check could not contact the remote repository. Check network access or contact support.",
+                repo_root=repo_root,
+                branch=branch,
+                upstream=upstream,
+                head_sha=head_sha,
+                log_path=log_path,
+            ),
+            log,
+            log_path,
+        )
+
+    upstream_sha_result = _run_git(repo_root, ["rev-parse", "@{u}"], config.git_timeout_s, command_runner)
+    log.add_command(upstream_sha_result)
+    upstream_sha = upstream_sha_result.stdout.strip() if upstream_sha_result.returncode == 0 else ""
+
+    count_result = _run_git(repo_root, ["rev-list", "--left-right", "--count", "HEAD...@{u}"], config.git_timeout_s, command_runner)
+    log.add_command(count_result)
+    counts = _parse_rev_list_counts(count_result.stdout)
+    if count_result.returncode != 0 or counts is None:
+        return _finish_check_result(
+            _make_check_result(
+                STATUS_FETCH_FAILED,
+                "Update check could not compare this checkout with the remote branch. Contact support.",
+                repo_root=repo_root,
+                branch=branch,
+                upstream=upstream,
+                head_sha=head_sha,
+                upstream_sha=upstream_sha,
+                log_path=log_path,
+            ),
+            log,
+            log_path,
+        )
+
+    ahead_count, behind_count = counts
+    if ahead_count > 0 and behind_count > 0:
+        return _finish_check_result(
+            _make_check_result(
+                STATUS_DIVERGED,
+                "This checkout has diverged from the remote branch. Contact support before updating.",
+                repo_root=repo_root,
+                branch=branch,
+                upstream=upstream,
+                head_sha=head_sha,
+                upstream_sha=upstream_sha,
+                ahead_count=ahead_count,
+                behind_count=behind_count,
+                log_path=log_path,
+            ),
+            log,
+            log_path,
+        )
+
+    commits: tuple[str, ...] = ()
+    if behind_count > 0:
+        log_result = _run_git(repo_root, ["log", "--oneline", "HEAD..@{u}"], config.git_timeout_s, command_runner)
+        log.add_command(log_result)
+        commits = _split_commit_lines(log_result.stdout) if log_result.returncode == 0 else ()
+        return _finish_check_result(
+            _make_check_result(
+                STATUS_UPDATE_AVAILABLE,
+                f"{behind_count} update commit{'s' if behind_count != 1 else ''} available.",
+                repo_root=repo_root,
+                branch=branch,
+                upstream=upstream,
+                head_sha=head_sha,
+                upstream_sha=upstream_sha,
+                ahead_count=ahead_count,
+                behind_count=behind_count,
+                commits=commits,
+                log_path=log_path,
+            ),
+            log,
+            log_path,
+        )
+
+    message = "LabCraft is up to date."
+    if ahead_count > 0:
+        message = "No remote update is available. This checkout has local commits not present upstream."
+    return _finish_check_result(
+        _make_check_result(
+            STATUS_UP_TO_DATE,
+            message,
+            repo_root=repo_root,
+            branch=branch,
+            upstream=upstream,
+            head_sha=head_sha,
+            upstream_sha=upstream_sha,
+            ahead_count=ahead_count,
+            behind_count=behind_count,
+            log_path=log_path,
+        ),
+        log,
+        log_path,
+    )
+
+
+def _finish_check_result(result: UpdateCheckResult, log: _LogBuffer, log_path: Path) -> UpdateCheckResult:
+    result = UpdateCheckResult(
+        status=result.status,
+        returncode=result.returncode,
+        message=result.message,
+        repo_root=result.repo_root,
+        branch=result.branch,
+        upstream=result.upstream,
+        head_sha=result.head_sha,
+        upstream_sha=result.upstream_sha,
+        ahead_count=result.ahead_count,
+        behind_count=result.behind_count,
+        commits=result.commits,
+        log_path=log_path,
+    )
+    log.add(f"status: {result.status}")
+    log.add(result.message)
+    log.write(log_path)
+    return result
 
 
 def run_update(
@@ -541,6 +908,17 @@ def run_update(
     status = STATUS_ALREADY_CURRENT if after_sha == before_sha else STATUS_UPDATED
     message = "LabCraft is already current." if status == STATUS_ALREADY_CURRENT else "LabCraft was updated successfully."
 
+    result = _make_result(
+        status,
+        message,
+        repo_root=repo_root,
+        branch=branch,
+        before_sha=before_sha,
+        after_sha=after_sha,
+        log_path=log_path,
+    )
+    _maybe_write_latest_update_result(config, result, repo_root, command_runner)
+
     if not config.no_relaunch:
         relaunch_error = _attempt_relaunch(
             config,
@@ -574,15 +952,6 @@ def run_update(
     else:
         log.add("relaunch skipped by --no-relaunch.")
 
-    result = _make_result(
-        status,
-        message,
-        repo_root=repo_root,
-        branch=branch,
-        before_sha=before_sha,
-        after_sha=after_sha,
-        log_path=log_path,
-    )
     log.add(f"status: {result.status}")
     log.add(result.message)
     log.write(log_path)
@@ -623,6 +992,7 @@ def _finish_failure_result(
 
     log.add(f"status: {final_result.status}")
     log.add(final_result.message)
+    _maybe_write_latest_update_result(config, final_result, launch_root, command_runner=default_command_runner)
     log.write(log_path)
     _emit_progress(
         progress_callback,
@@ -648,6 +1018,8 @@ def parse_args(argv: Sequence[str] | None = None) -> UpdaterConfig:
         help="Relaunch the current app if the update cannot complete.",
     )
     parser.add_argument("--gui", action="store_true", help="Show the operator updater window.")
+    parser.add_argument("--record-result", action="store_true", help="Write latest update result for the relaunched app.")
+    parser.add_argument("--latest-result-path", default=None, help="Optional path for the latest update result JSON.")
     parser.add_argument("--git-timeout-s", type=float, default=DEFAULT_GIT_TIMEOUT_S, help="Timeout for each Git command.")
     parser.add_argument("--log-path", default=None, help="Optional updater log path.")
     args = parser.parse_args(argv)
@@ -661,6 +1033,8 @@ def parse_args(argv: Sequence[str] | None = None) -> UpdaterConfig:
         no_relaunch=bool(args.no_relaunch),
         relaunch_on_failure=bool(args.relaunch_on_failure),
         gui=bool(args.gui),
+        record_result=bool(args.record_result),
+        latest_result_path=Path(args.latest_result_path) if args.latest_result_path else None,
         git_timeout_s=float(args.git_timeout_s),
         log_path=Path(args.log_path) if args.log_path else None,
     )

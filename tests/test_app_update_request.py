@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -7,7 +8,7 @@ from PySide6.QtWidgets import QMessageBox
 import Controller as controller_mod
 import View as view_mod
 from Controller import Controller
-from View import MainWindow
+from View import MainWindow, SpeedProfilesTab
 
 
 class FakeProcess:
@@ -72,6 +73,7 @@ def test_controller_builds_update_command_with_relaunch_on_failure(tmp_path, mon
         "1234",
         "--gui",
         "--relaunch-on-failure",
+        "--record-result",
     ]
 
 
@@ -167,6 +169,22 @@ def _make_update_mainwindow(controller, *, popup_response=QMessageBox.StandardBu
     return window
 
 
+class _FakeLabel:
+    def __init__(self):
+        self.text_value = ""
+
+    def setText(self, value):
+        self.text_value = str(value)
+
+
+class _FakeButton:
+    def __init__(self):
+        self.enabled = True
+
+    def setEnabled(self, value):
+        self.enabled = bool(value)
+
+
 def test_mainwindow_request_app_update_cancels_when_user_says_no(qapp):
     controller = SimpleNamespace(
         get_app_update_blockers=lambda: [],
@@ -219,3 +237,146 @@ def test_mainwindow_request_app_update_blocker_stays_open(qapp):
     assert window._app_update_close_requested is False
     assert window.messages
     assert "Firmware update is running." in window.messages[0][1]
+
+
+def test_mainwindow_request_app_update_requires_update_check_when_supported(qapp):
+    controller = SimpleNamespace(
+        get_last_app_update_check_result=lambda: None,
+        get_app_update_blockers=lambda: [],
+        launch_app_updater=lambda wait_pid: pytest.fail("updater should not launch"),
+    )
+    window = _make_update_mainwindow(controller)
+
+    assert MainWindow.request_app_update(window) is False
+    assert window.messages == [("Check for Updates", "Check for updates before starting an app update.")]
+    assert window.close_calls["count"] == 0
+
+
+def test_mainwindow_request_app_update_blocks_when_check_is_up_to_date(qapp):
+    controller = SimpleNamespace(
+        get_last_app_update_check_result=lambda: SimpleNamespace(status="up_to_date", message="LabCraft is up to date."),
+        get_app_update_blockers=lambda: [],
+        launch_app_updater=lambda wait_pid: pytest.fail("updater should not launch"),
+    )
+    window = _make_update_mainwindow(controller)
+
+    assert MainWindow.request_app_update(window) is False
+    assert window.messages == [("No Update Available", "LabCraft is up to date.")]
+    assert window.close_calls["count"] == 0
+
+
+def test_mainwindow_request_app_update_check_starts_controller_check(qapp):
+    calls = {"count": 0}
+    controller = SimpleNamespace(
+        get_app_update_blockers=lambda: [],
+        start_app_update_check=lambda: calls.__setitem__("count", calls["count"] + 1) or (True, "started"),
+    )
+    window = _make_update_mainwindow(controller)
+
+    assert MainWindow.request_app_update_check(window) is True
+    assert calls["count"] == 1
+    assert window.messages == []
+
+
+def test_mainwindow_request_app_update_check_blocks_when_busy(qapp):
+    controller = SimpleNamespace(
+        get_app_update_blockers=lambda: ["Command queue is not empty."],
+        start_app_update_check=lambda: pytest.fail("check should not start"),
+    )
+    window = _make_update_mainwindow(controller)
+
+    assert MainWindow.request_app_update_check(window) is False
+    assert "Command queue is not empty." in window.messages[0][1]
+
+
+def _make_speed_tab_for_update_check():
+    tab = SpeedProfilesTab.__new__(SpeedProfilesTab)
+    tab.app_update_status_label = _FakeLabel()
+    tab.app_update_check_button = _FakeButton()
+    tab.app_update_button = _FakeButton()
+    tab.controller = SimpleNamespace(get_app_update_blockers=lambda: [])
+    tab.main_window = SimpleNamespace(messages=[], popup_message=lambda title, message: tab.main_window.messages.append((title, message)))
+    return tab
+
+
+def test_speed_tab_update_check_started_disables_update_controls(qapp):
+    tab = _make_speed_tab_for_update_check()
+
+    SpeedProfilesTab._on_app_update_check_started(tab)
+
+    assert tab.app_update_status_label.text_value == "Checking for updates..."
+    assert tab.app_update_check_button.enabled is False
+    assert tab.app_update_button.enabled is False
+
+
+def test_speed_tab_up_to_date_check_keeps_update_disabled(qapp):
+    tab = _make_speed_tab_for_update_check()
+
+    SpeedProfilesTab._on_app_update_check_finished(
+        tab,
+        SimpleNamespace(status="up_to_date", message="LabCraft is up to date.", commits=()),
+    )
+
+    assert tab.app_update_status_label.text_value == "LabCraft is up to date."
+    assert tab.app_update_check_button.enabled is True
+    assert tab.app_update_button.enabled is False
+    assert tab.main_window.messages == []
+
+
+def test_speed_tab_update_available_enables_update_and_shows_commits(qapp):
+    tab = _make_speed_tab_for_update_check()
+
+    SpeedProfilesTab._on_app_update_check_finished(
+        tab,
+        SimpleNamespace(
+            status="update_available",
+            message="2 update commits available.",
+            behind_count=2,
+            commits=("def Add result popup", "abc Add check button"),
+        ),
+    )
+
+    assert tab.app_update_status_label.text_value == "2 update commits available."
+    assert tab.app_update_button.enabled is True
+    assert tab.main_window.messages
+    assert "def Add result popup" in tab.main_window.messages[0][1]
+
+
+def test_speed_tab_update_check_failure_keeps_update_disabled(qapp):
+    tab = _make_speed_tab_for_update_check()
+
+    SpeedProfilesTab._on_app_update_check_finished(
+        tab,
+        SimpleNamespace(status="fetch_failed", message="Update check could not contact the remote.", commits=()),
+    )
+
+    assert tab.app_update_status_label.text_value == "Update check could not contact the remote."
+    assert tab.app_update_button.enabled is False
+
+
+def test_mainwindow_startup_update_result_popup_shows_once_and_clears_marker(qapp, tmp_path):
+    result_path = tmp_path / "local" / "update_logs" / "latest_update_result.json"
+    result_path.parent.mkdir(parents=True)
+    result_path.write_text(
+        json.dumps(
+            {
+                "status": "updated",
+                "message": "LabCraft was updated successfully.",
+                "before_sha": "abc",
+                "after_sha": "def",
+                "log_path": str(tmp_path / "local" / "update_logs" / "update.log"),
+                "commits": ["def Add result popup"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    window = _make_update_mainwindow(SimpleNamespace(_repo_root=tmp_path))
+
+    assert MainWindow.show_pending_app_update_result(window) is True
+
+    assert result_path.exists() is False
+    assert window.messages
+    title, message = window.messages[0]
+    assert title == "Application Update Result"
+    assert "LabCraft was updated successfully." in message
+    assert "def Add result popup" in message
