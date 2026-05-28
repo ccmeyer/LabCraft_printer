@@ -1,4 +1,5 @@
 from pathlib import Path
+import inspect
 import json
 from types import SimpleNamespace
 
@@ -354,6 +355,27 @@ def test_speed_tab_update_check_failure_keeps_update_disabled(qapp):
     assert tab.app_update_button.enabled is False
 
 
+def test_mainwindow_init_does_not_schedule_startup_update_result():
+    source = inspect.getsource(MainWindow.__init__)
+
+    assert "show_pending_app_update_result" not in source
+
+
+def test_mainwindow_startup_update_result_helper_schedules_after_startup(monkeypatch):
+    window = _make_update_mainwindow(SimpleNamespace(_repo_root=Path(".")))
+    calls = []
+
+    def fake_single_shot(delay_ms, callback):
+        calls.append((delay_ms, callback))
+
+    window.show_pending_app_update_result = lambda: "shown"
+    monkeypatch.setattr(view_mod.QTimer, "singleShot", fake_single_shot)
+
+    MainWindow.show_pending_app_update_result_after_startup(window)
+
+    assert calls == [(500, window.show_pending_app_update_result)]
+
+
 def test_mainwindow_startup_update_result_popup_shows_once_and_clears_marker(qapp, tmp_path):
     result_path = tmp_path / "local" / "update_logs" / "latest_update_result.json"
     result_path.parent.mkdir(parents=True)
@@ -371,9 +393,17 @@ def test_mainwindow_startup_update_result_popup_shows_once_and_clears_marker(qap
         encoding="utf-8",
     )
     window = _make_update_mainwindow(SimpleNamespace(_repo_root=tmp_path))
+    popup_state = {}
+
+    def popup_message(title, message):
+        popup_state["marker_exists_during_popup"] = result_path.exists()
+        window.messages.append((title, message))
+
+    window.popup_message = popup_message
 
     assert MainWindow.show_pending_app_update_result(window) is True
 
+    assert popup_state["marker_exists_during_popup"] is True
     assert result_path.exists() is False
     assert window.messages
     title, message = window.messages[0]

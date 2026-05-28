@@ -423,7 +423,6 @@ class MainWindow(QMainWindow):
         self._ensure_close_disconnect_signal_hook()
         self.controller.update_volumes_in_view_signal.connect(self.rack_box.update_all_slots)
         self.controller.machine.require_gripper_confirmation.connect(self.on_require_gripper_confirmation)
-        QTimer.singleShot(250, self.show_pending_app_update_result)
 
     def load_colors(self, file_path):
         with open(file_path, 'r') as file:
@@ -713,7 +712,7 @@ class MainWindow(QMainWindow):
     def popup_message(self, title, message):
         """Display a popup message with a title and message."""
         #print(f"Popup message: {title} - {message}")
-        msg = QtWidgets.QMessageBox()
+        msg = QtWidgets.QMessageBox(self)
         msg.setWindowTitle(title)
         msg.setText(message)
         transparent_icon = self.make_transparent_icon()
@@ -726,7 +725,7 @@ class MainWindow(QMainWindow):
         return clicked_option
 
     def popup_choice(self, title, message, options, *, default=None):
-        msg = QtWidgets.QMessageBox()
+        msg = QtWidgets.QMessageBox(self)
         msg.setWindowTitle(title)
         msg.setText(message)
         transparent_icon = self.make_transparent_icon()
@@ -746,7 +745,7 @@ class MainWindow(QMainWindow):
         return default_option
     
     def popup_yes_no(self,title, message):
-        msg = QtWidgets.QMessageBox()
+        msg = QtWidgets.QMessageBox(self)
         msg.setWindowTitle(title)
         msg.setText(message)
         msg.setStandardButtons(QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
@@ -1014,6 +1013,9 @@ class MainWindow(QMainWindow):
             repo_root = Path(self.script_dir).parent
         return Path(repo_root) / "local" / "update_logs" / "latest_update_result.json"
 
+    def show_pending_app_update_result_after_startup(self, delay_ms=500):
+        QTimer.singleShot(delay_ms, self.show_pending_app_update_result)
+
     def show_pending_app_update_result(self):
         path = self._latest_app_update_result_path()
         try:
@@ -1027,13 +1029,14 @@ class MainWindow(QMainWindow):
                 pass
             return False
 
+        message = self._format_app_update_result_message(payload)
+        self.popup_message("Application Update Result", message)
+
         try:
             path.unlink()
         except OSError:
             pass
 
-        message = self._format_app_update_result_message(payload)
-        self.popup_message("Application Update Result", message)
         return True
 
     @staticmethod

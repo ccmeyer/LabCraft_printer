@@ -127,8 +127,13 @@ def main():
     set_dark_theme(app)
     view = MainWindow(model,controller, profile=profile)
 
-    # Delay for the splash screen to simulate loading tasks
-    QTimer.singleShot(100, lambda: (splash.finish(view), view.show()))  # 2000 ms = 2 seconds
+    def show_main_window():
+        view.show()
+        splash.finish(view)
+        view.show_pending_app_update_result_after_startup()
+
+    # Delay briefly so the splash can paint before the main window appears.
+    QTimer.singleShot(100, show_main_window)
 
 
     # # Show the main window

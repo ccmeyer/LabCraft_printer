@@ -43,6 +43,9 @@ def test_popup_message_keeps_transparent_icon(monkeypatch):
     captured = {}
 
     class FakeMessageBox:
+        def __init__(self, parent=None):
+            captured["parent"] = parent
+
         def setWindowTitle(self, title):
             captured["title"] = title
 
@@ -64,6 +67,7 @@ def test_popup_message_keeps_transparent_icon(monkeypatch):
 
     MainWindow.popup_message(mw, "Title", "Body")
 
+    assert captured["parent"] is mw
     assert captured["icon"] is sentinel
     assert captured["executed"] is True
 
@@ -75,6 +79,9 @@ def test_popup_yes_no_keeps_transparent_icon(monkeypatch):
         Yes = 1
         No = 2
         StandardButton = int
+
+        def __init__(self, parent=None):
+            captured["parent"] = parent
 
         def setWindowTitle(self, title):
             captured["title"] = title
@@ -100,6 +107,7 @@ def test_popup_yes_no_keeps_transparent_icon(monkeypatch):
 
     result = MainWindow.popup_yes_no(mw, "Confirm", "Proceed?")
 
+    assert captured["parent"] is mw
     assert captured["icon"] is sentinel
     assert captured["executed"] is True
     assert result == FakeMessageBox.Yes
