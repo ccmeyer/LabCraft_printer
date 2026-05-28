@@ -130,7 +130,7 @@ def test_refuel_camera_window_preview_preserves_aspect_ratio(qapp):
         capture_return=np.zeros((8, 8, 3), dtype=np.uint8),
     )
     model.refuel_camera_model.raw_capture_image = np.zeros((30, 40, 3), dtype=np.uint8)
-    model.refuel_camera_model.annotated_image = np.zeros((480, 640, 3), dtype=np.uint8)
+    model.refuel_camera_model.annotated_image = None
 
     dialog.show()
     qapp.processEvents()
@@ -145,13 +145,40 @@ def test_refuel_camera_window_preview_preserves_aspect_ratio(qapp):
     assert pixmap.height() <= dialog.image_label.height()
 
 
-def test_refuel_camera_window_preview_prefers_rotated_raw_frame(qapp):
+def test_refuel_camera_window_preview_prefers_annotated_frame(qapp):
     raw = np.zeros((30, 40, 3), dtype=np.uint8)
     annotated = np.zeros((480, 640, 3), dtype=np.uint8)
 
     preview = RefuelCameraWindow._prepare_refuel_preview_image(raw, annotated)
 
+    assert preview is annotated
+    assert preview.shape == (480, 640, 3)
+
+
+def test_refuel_camera_window_preview_rotates_raw_frame_without_annotation(qapp):
+    raw = np.zeros((30, 40, 3), dtype=np.uint8)
+
+    preview = RefuelCameraWindow._prepare_refuel_preview_image(raw, None)
+
     assert preview.shape == (40, 30, 3)
+
+
+def test_refuel_camera_window_update_refuel_ui_displays_annotated_preview(qapp):
+    dialog, model, _controller = _make_dialog(
+        qapp,
+        capture_return=np.zeros((8, 8, 3), dtype=np.uint8),
+    )
+    model.refuel_camera_model.raw_capture_image = np.zeros((20, 30, 3), dtype=np.uint8)
+    model.refuel_camera_model.annotated_image = np.zeros((80, 120, 3), dtype=np.uint8)
+
+    dialog.show()
+    qapp.processEvents()
+    dialog.update_refuel_ui()
+    qapp.processEvents()
+
+    pixmap = dialog.image_label.pixmap()
+    assert pixmap is not None
+    assert abs((pixmap.width() / pixmap.height()) - (120 / 80)) < 0.05
 
 
 def test_refuel_camera_window_none_capture_disables_session_without_crashing(monkeypatch, qapp):

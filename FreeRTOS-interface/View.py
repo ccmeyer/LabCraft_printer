@@ -2645,7 +2645,12 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.model.reload_droplet_model()
         self.controller.connect_droplet_camera_signals()
         self.controller.enable_print_profile()
-        droplet_imaging_dialog = CalibrationClasses.DropletImagingDialog(self.main_window,self.model,self.controller)
+        droplet_imaging_dialog = CalibrationClasses.DropletImagingDialog(
+            self.main_window,
+            self.model,
+            self.controller,
+            open_refuel_camera_callback=self.refuel_camera,
+        )
         droplet_imaging_dialog.exec()
 
     def _launch_manual_optics_calibration_dialog(self):
@@ -2670,6 +2675,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             self.controller,
             service_mode=True,
             initial_tab="optics",
+            open_refuel_camera_callback=self.refuel_camera,
         )
         droplet_imaging_dialog.exec()
 

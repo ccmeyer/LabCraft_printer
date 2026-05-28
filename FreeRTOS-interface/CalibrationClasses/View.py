@@ -1273,7 +1273,15 @@ class DropletImagingDialog(QtWidgets.QDialog):
         "restoring_gripper_refresh",
     }
 
-    def __init__(self, main_window, model, controller, service_mode=False, initial_tab=None):
+    def __init__(
+        self,
+        main_window,
+        model,
+        controller,
+        service_mode=False,
+        initial_tab=None,
+        open_refuel_camera_callback=None,
+    ):
         super().__init__()
         print('\n---Created new droplet imaging dialog---\n')
         self.main_window = main_window
@@ -1284,6 +1292,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.controller = controller
         self.service_mode = bool(service_mode)
         self.initial_tab = str(initial_tab or "").strip().lower()
+        self.open_refuel_camera_callback = open_refuel_camera_callback if callable(open_refuel_camera_callback) else None
 
         # Hardware bounds for pressures (used globally)
         try:
@@ -2496,12 +2505,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
         group_v.addWidget(self.refuel_level_process_result_label)
 
         self.open_refuel_camera_button = QtWidgets.QPushButton("Open Refuel Camera")
-        opener = None
+        opener = self.open_refuel_camera_callback
         for attr_name in (
             "open_refuel_camera_window",
             "open_refuel_camera",
             "_launch_refuel_camera_dialog",
         ):
+            if opener is not None:
+                break
             candidate = getattr(self.main_window, attr_name, None)
             if callable(candidate):
                 opener = candidate
@@ -10193,9 +10204,11 @@ class RefuelCameraWindow(QtWidgets.QDialog):
 
     @staticmethod
     def _prepare_refuel_preview_image(raw_image, annotated_image):
+        if annotated_image is not None:
+            return annotated_image
         if raw_image is not None:
             return cv2.rotate(raw_image, cv2.ROTATE_90_COUNTERCLOCKWISE)
-        return annotated_image
+        return None
 
     def update_refuel_ui(self):
         raw_image = self.refuel_camera_model.get_raw_capture_image()

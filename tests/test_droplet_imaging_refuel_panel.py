@@ -41,7 +41,7 @@ def _make_calibration_manager_stub():
     )
 
 
-def _build_droplet_dialog(monkeypatch, qapp, *, refuel_model=None, main_window=None):
+def _build_droplet_dialog(monkeypatch, qapp, *, refuel_model=None, main_window=None, open_refuel_camera_callback=None):
     monkeypatch.setattr(DropletImagingDialog, "_quick_controls_expanded_default", False, raising=False)
     for method_name in (
         "setup_shortcuts",
@@ -128,7 +128,12 @@ def _build_droplet_dialog(monkeypatch, qapp, *, refuel_model=None, main_window=N
     )
     if main_window is None:
         main_window = SimpleNamespace(color_dict={}, pause_machine=Mock())
-    dialog = DropletImagingDialog(main_window, model, controller)
+    dialog = DropletImagingDialog(
+        main_window,
+        model,
+        controller,
+        open_refuel_camera_callback=open_refuel_camera_callback,
+    )
     qapp.processEvents()
     return dialog, refuel_model, controller
 
@@ -162,7 +167,27 @@ def test_refuel_panel_default_disabled_and_no_capture(monkeypatch, qapp):
     assert dialog.refuel_level_ejection_label.parent() is None
     assert dialog.refuel_level_process_result_label.text() == ""
     assert dialog.refuel_level_process_result_label.isHidden() is True
+    assert dialog.open_refuel_camera_button.isEnabled() is False
     assert dialog.refuel_monitor_timer.isActive() is False
+    controller.start_refuel_camera.assert_not_called()
+    controller.capture_refuel_image.assert_not_called()
+    controller.capture_refuel_image_with_context.assert_not_called()
+
+
+def test_refuel_panel_open_camera_button_uses_explicit_callback_without_capture(monkeypatch, qapp):
+    opener = Mock()
+    dialog, _refuel_model, controller = _build_droplet_dialog(
+        monkeypatch,
+        qapp,
+        open_refuel_camera_callback=opener,
+    )
+
+    assert dialog.open_refuel_camera_button.isEnabled() is True
+
+    dialog.open_refuel_camera_button.click()
+    qapp.processEvents()
+
+    opener.assert_called_once_with()
     controller.start_refuel_camera.assert_not_called()
     controller.capture_refuel_image.assert_not_called()
     controller.capture_refuel_image_with_context.assert_not_called()

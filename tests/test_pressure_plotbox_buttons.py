@@ -142,10 +142,11 @@ def _make_controller(events, *, queue_clear=True):
 
 def _patch_droplet_launch(monkeypatch, events, *, main_window, model, controller):
     class _DropletDialog:
-        def __init__(self, main_window_arg, model_arg, controller_arg):
+        def __init__(self, main_window_arg, model_arg, controller_arg, **kwargs):
             assert main_window_arg is main_window
             assert model_arg is model
             assert controller_arg is controller
+            assert callable(kwargs.get("open_refuel_camera_callback"))
             events.append("droplet_dialog_init")
 
         def exec(self):
