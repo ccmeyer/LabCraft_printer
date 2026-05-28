@@ -1,8 +1,10 @@
+import json
 from types import SimpleNamespace
 
 import pytest
 from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QLabel, QLineEdit, QTableWidget
 
+import LocalConfig
 from CalibrationMemoryStore import CalibrationMemoryStore
 from Model import CURRENT_PROFILE, ExperimentModel, Model, PrinterHead, StockSolution
 from View import ExperimentDesignDialog
@@ -89,6 +91,57 @@ class _WellPlateStub:
 
     def get_plate_data_by_name(self, _name):
         return {"rows": 16, "columns": 24}
+
+
+def _configure_local_calibration_memory(monkeypatch, tmp_path):
+    template_root = tmp_path / "FreeRTOS-interface" / "CalibrationMemory"
+    local_dir = tmp_path / "local"
+    entities_dir = template_root / "entities"
+    entities_dir.mkdir(parents=True)
+    local_dir.mkdir()
+    (template_root / "schema.json").write_text(
+        json.dumps({"schema_family": "labcraft.calibration_memory", "schema_version": 1}, indent=2),
+        encoding="utf-8",
+    )
+    (template_root / "config.json").write_text(
+        json.dumps(
+            {"schema_name": "labcraft.calibration_memory.runtime_config", "schema_version": 1, "memory_enabled": True},
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (entities_dir / "reagents.json").write_text(
+        json.dumps(
+            {
+                "schema_name": "labcraft.calibration_memory.reagents_registry",
+                "schema_version": 1,
+                "items": [{"reagent_id": "water", "display_name": "Water", "aliases": ["water"]}],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (entities_dir / "printer_head_types.json").write_text(
+        json.dumps(
+            {
+                "schema_name": "labcraft.calibration_memory.printer_head_types_registry",
+                "schema_version": 1,
+                "items": [{"head_type_id": "nozzle_100um", "display_name": "100 um nozzle"}],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (entities_dir / "printer_heads.json").write_text(
+        json.dumps(
+            {"schema_name": "labcraft.calibration_memory.printer_heads_registry", "schema_version": 1, "items": []},
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(LocalConfig, "CALIBRATION_MEMORY_TEMPLATE_DIR", template_root)
+    monkeypatch.setattr(LocalConfig, "LOCAL_DIR", local_dir)
+    return template_root, local_dir / "CalibrationMemory"
 
 
 def _bind_dialog_method(dialog, name):
@@ -484,6 +537,31 @@ def test_runtime_printer_head_identity_is_generated_from_intended_head_type(tmp_
     assert printer_head.head_type_id == "nozzle_100um"
     assert printer_head.nominal_nozzle_diameter_um == pytest.approx(100.0)
     assert printer_head.printer_head_id.startswith("nozzle_100um__screening_run__")
+
+
+def test_register_experiment_design_reagents_updates_local_registry_not_template(monkeypatch, tmp_path):
+    template_root, local_root = _configure_local_calibration_memory(monkeypatch, tmp_path)
+    template_reagents_path = template_root / "entities" / "reagents.json"
+    template_before = template_reagents_path.read_text(encoding="utf-8")
+    model = Model.__new__(Model)
+    model.experiment_model = SimpleNamespace(metadata={"name": "screening-run"})
+    model.calibration_memory_store = CalibrationMemoryStore(model=model)
+
+    design = ExperimentModel(prof=CURRENT_PROFILE)
+    design.add_additive(
+        name="Custom reagent stock",
+        targets=[0.0, 1.0],
+        units="mM",
+        droplet_nL=10.0,
+        reagent_display_name="Custom reagent",
+    )
+
+    registered = Model.register_experiment_design_reagents(model, design)
+
+    assert registered == ["custom_reagent"]
+    local_payload = json.loads((local_root / "entities" / "reagents.json").read_text(encoding="utf-8"))
+    assert "custom_reagent" in {item["reagent_id"] for item in local_payload["items"]}
+    assert template_reagents_path.read_text(encoding="utf-8") == template_before
 
 
 def test_preview_experiment_design_prior_returns_memory_disabled(experiment_model_factory, tmp_path):

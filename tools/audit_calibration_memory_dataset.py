@@ -15,7 +15,7 @@ from tools.calibration_memory_analysis import write_dataset_audit, _print_json
 
 def main():
     parser = argparse.ArgumentParser(description="Audit calibration-memory run coverage, sparsity, and derived snapshot availability.")
-    parser.add_argument("--root", default="", help="CalibrationMemory root. Defaults to FreeRTOS-interface/CalibrationMemory.")
+    parser.add_argument("--root", default="", help="CalibrationMemory root. Defaults to local/CalibrationMemory.")
     parser.add_argument("--json-out", default="", help="Audit JSON output path.")
     parser.add_argument("--md-out", default="", help="Audit markdown output path.")
     args = parser.parse_args()

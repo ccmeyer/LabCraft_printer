@@ -6,6 +6,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PRESETS_DIR = Path(__file__).resolve().parent / "Presets"
+CALIBRATION_MEMORY_TEMPLATE_DIR = Path(__file__).resolve().parent / "CalibrationMemory"
 LOCAL_DIR = REPO_ROOT / "local"
 
 _EXPECTED_TOP_LEVEL_TYPES = {
@@ -15,9 +16,16 @@ _EXPECTED_TOP_LEVEL_TYPES = {
     "Obstacles.json": dict,
 }
 
+_CALIBRATION_MEMORY_SEED_TYPES = {
+    "schema.json": dict,
+    "config.json": dict,
+    "entities/reagents.json": dict,
+    "entities/printer_head_types.json": dict,
+    "entities/printer_heads.json": dict,
+}
 
-def _validate_json_file(path: Path, filename: str):
-    expected_type = _EXPECTED_TOP_LEVEL_TYPES[filename]
+
+def _validate_json_top_level(path: Path, expected_type: type, label: str):
     try:
         with path.open("r", encoding="utf-8") as fh:
             payload = json.load(fh)
@@ -31,6 +39,11 @@ def _validate_json_file(path: Path, filename: str):
             f"Invalid machine config '{path}': expected top-level {expected_name}, got {actual_name}"
         )
     return payload
+
+
+def _validate_json_file(path: Path, filename: str):
+    expected_type = _EXPECTED_TOP_LEVEL_TYPES[filename]
+    return _validate_json_top_level(path, expected_type, filename)
 
 
 def _atomic_copy_bytes(source: Path, target: Path):
@@ -71,3 +84,21 @@ def get_machine_config_path(filename: str) -> Path:
     _atomic_copy_bytes(preset_path, local_path)
     _validate_json_file(local_path, filename)
     return local_path
+
+
+def get_calibration_memory_root() -> Path:
+    """Return the ignored local calibration-memory root, seeding starter JSONs once."""
+    local_root = LOCAL_DIR / "CalibrationMemory"
+
+    for relative_path, expected_type in _CALIBRATION_MEMORY_SEED_TYPES.items():
+        local_path = local_root / relative_path
+        if local_path.exists():
+            _validate_json_top_level(local_path, expected_type, relative_path)
+            continue
+
+        template_path = CALIBRATION_MEMORY_TEMPLATE_DIR / relative_path
+        _validate_json_top_level(template_path, expected_type, relative_path)
+        _atomic_copy_bytes(template_path, local_path)
+        _validate_json_top_level(local_path, expected_type, relative_path)
+
+    return local_root

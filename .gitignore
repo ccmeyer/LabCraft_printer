@@ -49,6 +49,11 @@ hil_reports/
 logs/
 local/
 
+# Calibration memory runtime outputs if an old/manual tracked root is used
+FreeRTOS-interface/CalibrationMemory/indices/
+FreeRTOS-interface/CalibrationMemory/runs/
+FreeRTOS-interface/CalibrationMemory/analysis/
+
 # Eclipse workspace metadata (should not be tracked)
 firmware/.metadata/
 

@@ -33,7 +33,7 @@ Phase 4 builds on the existing Phase 3 files:
 
 New runtime config file:
 
-- `FreeRTOS-interface/CalibrationMemory/config.json`
+- `local/CalibrationMemory/config.json`
 
 Default mode:
 
@@ -167,4 +167,4 @@ Current usefulness metrics include:
 - grouped priors do not actively steer runtime yet
 - fallback currently disables further prior use in-session but does not restart the current process from a baseline seed
 - usefulness tracking is heuristic and intended for evaluation, not automatic optimization
-- no UI control was added; the feature is configured via `CalibrationMemory/config.json`
+- no UI control was added; the feature is configured via `local/CalibrationMemory/config.json`

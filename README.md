@@ -271,7 +271,7 @@ To launch the user interface manually once the virtual environment is active, us
 ```bash
 python FreeRTOS-interface/App.py
 ```
-Inside `FreeRTOS-interface/Presets`, JSON files are tracked starter templates. On first launch, machine-specific templates for `Settings.json`, `Plates.json`, `Locations.json`, and `Obstacles.json` are copied into ignored `local/` files, and the app reads/writes those local copies after that. This preserves existing machine calibrations while keeping future app updates from editing tracked presets.
+Inside `FreeRTOS-interface/Presets`, JSON files are tracked starter templates. On first launch, machine-specific templates for `Settings.json`, `Plates.json`, `Locations.json`, and `Obstacles.json` are copied into ignored `local/` files, and the app reads/writes those local copies after that. Calibration-memory starter files under `FreeRTOS-interface/CalibrationMemory` are also seeded into ignored `local/CalibrationMemory/` files before runtime writes. This preserves existing machine calibrations and reagent memory while keeping future app updates from editing tracked templates.
 
 ## Application updates
 

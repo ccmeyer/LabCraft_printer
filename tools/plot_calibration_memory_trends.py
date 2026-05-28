@@ -15,7 +15,7 @@ from tools.calibration_memory_analysis import plot_trend_tables, _print_json
 
 def main():
     parser = argparse.ArgumentParser(description="Build offline calibration-memory trend tables and plots.")
-    parser.add_argument("--root", default="", help="CalibrationMemory root. Defaults to FreeRTOS-interface/CalibrationMemory.")
+    parser.add_argument("--root", default="", help="CalibrationMemory root. Defaults to local/CalibrationMemory.")
     parser.add_argument("--out-dir", default="", help="Output directory for plot CSVs, PNGs, and manifest.")
     parser.add_argument("--reagent", action="append", default=[], help="Reagent id filter. Repeat or use comma-separated values.")
     parser.add_argument("--head-type", action="append", default=[], help="Head type filter. Repeat or use comma-separated values.")

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 from CalibrationMemoryAggregator import CalibrationMemoryAggregator
 from CalibrationIdentity import CalibrationIdentityRegistry
+from LocalConfig import get_calibration_memory_root
 
 
 def _json_default(obj):
@@ -332,7 +333,7 @@ class CalibrationMemoryStore:
 
     def __init__(self, model=None, root_dir=None):
         self.model = model
-        base_dir = root_dir or os.path.join(os.path.dirname(os.path.abspath(__file__)), "CalibrationMemory")
+        base_dir = root_dir or get_calibration_memory_root()
         self.root_dir = os.path.abspath(base_dir)
         self.entities_dir = os.path.join(self.root_dir, "entities")
         self.indices_dir = os.path.join(self.root_dir, "indices")

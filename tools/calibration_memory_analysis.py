@@ -9,7 +9,11 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_MEMORY_ROOT = REPO_ROOT / "FreeRTOS-interface" / "CalibrationMemory"
+UI_DIR = REPO_ROOT / "FreeRTOS-interface"
+if str(UI_DIR) not in sys.path:
+    sys.path.insert(0, str(UI_DIR))
+
+from LocalConfig import get_calibration_memory_root
 
 RUN_SUMMARY_COLUMNS = [
     "run_id",
@@ -241,7 +245,9 @@ PLOT_EMERGENCE_COLUMNS = [
 
 
 def resolve_memory_root(root: str | Path | None = None) -> Path:
-    return Path(root or DEFAULT_MEMORY_ROOT).resolve()
+    if root:
+        return Path(root).expanduser().resolve()
+    return get_calibration_memory_root().resolve()
 
 
 def default_analysis_root(root: str | Path | None = None) -> Path:

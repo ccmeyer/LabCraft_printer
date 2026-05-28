@@ -4,7 +4,7 @@
 
 Configured in:
 
-- `FreeRTOS-interface/CalibrationMemory/config.json`
+- `local/CalibrationMemory/config.json`
 
 Modes:
 

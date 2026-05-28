@@ -6,17 +6,17 @@ Phase 6 adds offline-only tooling for exporting and analyzing the calibration-me
 
 Source of truth remains:
 
-- `FreeRTOS-interface/CalibrationMemory/runs/<run_id>/run_summary.json`
-- `FreeRTOS-interface/CalibrationMemory/runs/<run_id>/observations.jsonl`
-- `FreeRTOS-interface/CalibrationMemory/indices/run_catalog.jsonl`
+- `local/CalibrationMemory/runs/<run_id>/run_summary.json`
+- `local/CalibrationMemory/runs/<run_id>/observations.jsonl`
+- `local/CalibrationMemory/indices/run_catalog.jsonl`
 
 Derived indices remain secondary and rebuildable:
 
-- `FreeRTOS-interface/CalibrationMemory/indices/pair_memory.json`
-- `FreeRTOS-interface/CalibrationMemory/indices/pair_type_memory.json`
-- `FreeRTOS-interface/CalibrationMemory/indices/reagent_memory.json`
-- `FreeRTOS-interface/CalibrationMemory/indices/head_type_memory.json`
-- `FreeRTOS-interface/CalibrationMemory/indices/recommendation_index.json`
+- `local/CalibrationMemory/indices/pair_memory.json`
+- `local/CalibrationMemory/indices/pair_type_memory.json`
+- `local/CalibrationMemory/indices/reagent_memory.json`
+- `local/CalibrationMemory/indices/head_type_memory.json`
+- `local/CalibrationMemory/indices/recommendation_index.json`
 
 ## Files Added
 
@@ -31,9 +31,9 @@ Derived indices remain secondary and rebuildable:
 
 Default outputs are written under:
 
-- `FreeRTOS-interface/CalibrationMemory/analysis/exports/`
-- `FreeRTOS-interface/CalibrationMemory/analysis/plots/`
-- `FreeRTOS-interface/CalibrationMemory/analysis/reports/`
+- `local/CalibrationMemory/analysis/exports/`
+- `local/CalibrationMemory/analysis/plots/`
+- `local/CalibrationMemory/analysis/reports/`
 
 Generated files:
 
@@ -60,7 +60,7 @@ Generated files:
 Optional:
 
 ```powershell
-.\env\Scripts\python.exe tools/export_calibration_run_summaries.py --root FreeRTOS-interface/CalibrationMemory --out artifacts\calibration_run_summaries.csv
+.\env\Scripts\python.exe tools/export_calibration_run_summaries.py --root local/CalibrationMemory --out artifacts\calibration_run_summaries.csv
 ```
 
 The summary export flattens each `run_summary.json` into stable CSV columns covering:

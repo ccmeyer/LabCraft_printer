@@ -15,7 +15,7 @@ from tools.calibration_memory_analysis import export_run_summaries_csv, _print_j
 
 def main():
     parser = argparse.ArgumentParser(description="Export calibration-memory run summaries to a flat CSV.")
-    parser.add_argument("--root", default="", help="CalibrationMemory root. Defaults to FreeRTOS-interface/CalibrationMemory.")
+    parser.add_argument("--root", default="", help="CalibrationMemory root. Defaults to local/CalibrationMemory.")
     parser.add_argument("--out", default="", help="Output CSV path.")
     args = parser.parse_args()
 

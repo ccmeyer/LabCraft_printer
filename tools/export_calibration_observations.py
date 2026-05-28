@@ -15,7 +15,7 @@ from tools.calibration_memory_analysis import export_observations_csv, _print_js
 
 def main():
     parser = argparse.ArgumentParser(description="Export calibration-memory observations.jsonl files to a flat CSV.")
-    parser.add_argument("--root", default="", help="CalibrationMemory root. Defaults to FreeRTOS-interface/CalibrationMemory.")
+    parser.add_argument("--root", default="", help="CalibrationMemory root. Defaults to local/CalibrationMemory.")
     parser.add_argument("--out", default="", help="Output CSV path.")
     parser.add_argument("--run-id", action="append", default=[], help="Exact run id filter. Repeat or use comma-separated values.")
     parser.add_argument(

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import LocalConfig
 from CalibrationMemoryStore import CalibrationMemoryStore
 
 
@@ -86,6 +87,156 @@ def _make_dummy_model(tmp_path):
         droplet_camera_model=droplet_camera_model,
         profile=SimpleNamespace(name="test-profile"),
     )
+
+
+def _configure_local_calibration_memory(monkeypatch, tmp_path):
+    template_root = tmp_path / "FreeRTOS-interface" / "CalibrationMemory"
+    local_dir = tmp_path / "local"
+    entities_dir = template_root / "entities"
+    entities_dir.mkdir(parents=True)
+    local_dir.mkdir()
+    (template_root / "schema.json").write_text(
+        json.dumps({"schema_family": "labcraft.calibration_memory", "schema_version": 1}, indent=2),
+        encoding="utf-8",
+    )
+    (template_root / "config.json").write_text(
+        json.dumps(
+            {
+                "schema_name": "labcraft.calibration_memory.runtime_config",
+                "schema_version": 1,
+                "memory_enabled": True,
+                "observation_capture_level": "compact",
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (entities_dir / "reagents.json").write_text(
+        json.dumps(
+            {
+                "schema_name": "labcraft.calibration_memory.reagents_registry",
+                "schema_version": 1,
+                "items": [
+                    {
+                        "reagent_id": "water",
+                        "display_name": "Water",
+                        "aliases": ["water", "Water"],
+                        "reagent_family": "aqueous",
+                        "glycerol_percent": 0.0,
+                    }
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (entities_dir / "printer_head_types.json").write_text(
+        json.dumps(
+            {
+                "schema_name": "labcraft.calibration_memory.printer_head_types_registry",
+                "schema_version": 1,
+                "items": [
+                    {
+                        "head_type_id": "nozzle_100um",
+                        "display_name": "100 um nozzle",
+                        "nominal_nozzle_diameter_um": 100.0,
+                    }
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (entities_dir / "printer_heads.json").write_text(
+        json.dumps(
+            {
+                "schema_name": "labcraft.calibration_memory.printer_heads_registry",
+                "schema_version": 1,
+                "items": [
+                    {
+                        "printer_head_id": "PH-001",
+                        "head_type_id": "nozzle_100um",
+                        "display_name": "100 um H01",
+                        "nominal_nozzle_diameter_um": 100.0,
+                        "aliases": ["PH-001"],
+                    }
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(LocalConfig, "CALIBRATION_MEMORY_TEMPLATE_DIR", template_root)
+    monkeypatch.setattr(LocalConfig, "LOCAL_DIR", local_dir)
+    return template_root, local_dir / "CalibrationMemory"
+
+
+def test_calibration_memory_store_default_root_uses_local_config(monkeypatch, tmp_path):
+    _template_root, local_root = _configure_local_calibration_memory(monkeypatch, tmp_path)
+
+    store = CalibrationMemoryStore()
+    store.ensure_initialized()
+
+    assert Path(store.root_dir) == local_root.resolve()
+    assert (local_root / "config.json").exists()
+    assert (local_root / "entities" / "reagents.json").exists()
+    assert not (local_root / "analysis").exists()
+
+
+def test_runtime_config_updates_local_config_not_template(monkeypatch, tmp_path):
+    template_root, local_root = _configure_local_calibration_memory(monkeypatch, tmp_path)
+    template_config_path = template_root / "config.json"
+    template_before = template_config_path.read_text(encoding="utf-8")
+
+    store = CalibrationMemoryStore()
+    store.set_memory_enabled(False)
+
+    assert json.loads((local_root / "config.json").read_text(encoding="utf-8"))["memory_enabled"] is False
+    assert template_config_path.read_text(encoding="utf-8") == template_before
+
+
+def test_completed_run_and_aggregation_write_under_local_root(monkeypatch, tmp_path):
+    template_root, local_root = _configure_local_calibration_memory(monkeypatch, tmp_path)
+    model = _make_dummy_model(tmp_path)
+    store = CalibrationMemoryStore(model=model)
+    context = store.context_builder.build(
+        model=model,
+        calibration_file_path=model.experiment_model.calibration_file_path,
+    )
+    store.create_run("run_local_001", context=context, notes="local root")
+
+    store.write_run_summary(
+        "run_local_001",
+        {
+            "context": context,
+            "run_status": "completed",
+            "run_timing": {
+                "started_at_utc": "2026-03-06T18:00:00Z",
+                "ended_at_utc": "2026-03-06T18:10:00Z",
+            },
+            "phase_counts": {"droplet_search": 1},
+            "process_results": {
+                "droplet_search": {
+                    "step_count": 1,
+                    "latest_settings": {"print_width": 1500},
+                    "latest_result": {
+                        "pressure": 1.6,
+                        "mean_volume": 9.8,
+                        "cv_volume_percent": 4.1,
+                        "valid": True,
+                        "print_pulse_width_us": 1500,
+                    },
+                }
+            },
+        },
+    )
+    store.refresh_derived_memory()
+
+    assert (local_root / "runs" / "run_local_001" / "run_summary.json").exists()
+    assert (local_root / "indices" / "run_catalog.jsonl").exists()
+    assert (local_root / "indices" / "recommendation_index.json").exists()
+    assert not (template_root / "runs").exists()
+    assert not (template_root / "indices").exists()
 
 
 def test_calibration_memory_store_creates_run_summary_catalog_and_observations(tmp_path):
