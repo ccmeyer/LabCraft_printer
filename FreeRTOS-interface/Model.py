@@ -38,6 +38,11 @@ import CalibrationClasses
 import importlib
 from CalibrationMemoryStore import CalibrationMemoryStore
 from ExperimentAuditLog import ExperimentAuditLog
+from RegulatorProfiles import (
+    RegulatorProfileStore,
+    default_local_profile_path,
+    factory_default_document,
+)
 
 from LocalConfig import get_machine_config_path
 from hardware.profile import CURRENT_PROFILE, HardwareProfile
@@ -9152,6 +9157,7 @@ class Model(QObject):
         self.printer_head_colors = self.load_colors(self.colors_path)
         self.settings = self.load_settings(self.settings_path)
         self.print_profiles = self.load_print_profiles(self.print_profiles_path)
+        self._initialize_regulator_profile_store()
         self.machine_model = MachineModel()
         self.num_slots = 5
         self.location_data = self.load_all_location_data(self.locations_path)
@@ -9211,6 +9217,19 @@ class Model(QObject):
         except Exception as e:
             print(f"[CalibrationMemory] Failed to initialize store: {e}")
             self.calibration_memory_store = None
+
+    def _initialize_regulator_profile_store(self):
+        self.regulator_profiles_path = str(default_local_profile_path())
+        self.regulator_profiles_error = None
+        self.regulator_profile_store = RegulatorProfileStore()
+        try:
+            self.regulator_profiles = self.regulator_profile_store.load()
+            self.regulator_profiles_path = str(self.regulator_profile_store.path)
+        except Exception as e:
+            self.regulator_profiles_error = str(e)
+            self.regulator_profiles = factory_default_document()
+            self.regulator_profile_store.document = self.regulator_profiles
+            print(f"[RegulatorProfiles] Failed to load profile store: {e}")
 
     def _get_experiment_audit_log(self):
         log = getattr(self, "experiment_audit_log", None)

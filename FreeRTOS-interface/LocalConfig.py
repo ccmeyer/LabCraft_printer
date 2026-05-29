@@ -14,6 +14,7 @@ _EXPECTED_TOP_LEVEL_TYPES = {
     "Plates.json": list,
     "Locations.json": dict,
     "Obstacles.json": dict,
+    "RegulatorProfiles.json": dict,
 }
 
 _CALIBRATION_MEMORY_SEED_TYPES = {

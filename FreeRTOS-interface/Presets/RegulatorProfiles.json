@@ -1,0 +1,149 @@
+{
+  "schema_version": 1,
+  "active_profiles": {
+    "droplet": "droplet_default",
+    "stream": "stream_default"
+  },
+  "profiles": {
+    "droplet_default": {
+      "profile_id": "droplet_default",
+      "mode": "droplet",
+      "description": "Default droplet-mode regulator profile",
+      "source": {
+        "kind": "factory_default",
+        "run_id": null,
+        "promoted_at_utc": null,
+        "operator": null,
+        "notes": ""
+      },
+      "conditions": {
+        "printer_head_id": null,
+        "printer_head_type": null,
+        "reagent_id": null,
+        "print_pressure_psi": null,
+        "print_pulse_width_us": null,
+        "refuel_pressure_psi": null,
+        "refuel_pulse_width_us": null,
+        "frequency_hz": 20
+      },
+      "print": {
+        "recovery": {
+          "active_ticks": 2,
+          "base_boost_hz": 300,
+          "pulse_coeff_hz_per_us": 1,
+          "pressure_coeff_hz_per_raw": 0,
+          "max_boost_hz": 1500,
+          "recovery_floor_hz": 0,
+          "recovery_exit_error_raw": 3,
+          "max_extend_ticks": 0,
+          "allow_extend_while_undershoot": false,
+          "boost_only_when_undershoot": true,
+          "linear_decay": true
+        },
+        "slew": {
+          "max_hz_delta_up_per_loop": 600,
+          "max_hz_delta_down_per_loop": 1200,
+          "recovery_bypass_slew_ticks": 0
+        },
+        "ready": {
+          "ready_tol_raw": 4,
+          "consecutive_samples": 1
+        }
+      },
+      "refuel": {
+        "recovery": {
+          "active_ticks": 8,
+          "base_boost_hz": 2000,
+          "pulse_coeff_hz_per_us": 2,
+          "pressure_coeff_hz_per_raw": 1,
+          "max_boost_hz": 10000,
+          "recovery_floor_hz": 1200,
+          "recovery_exit_error_raw": 4,
+          "max_extend_ticks": 4,
+          "allow_extend_while_undershoot": true,
+          "boost_only_when_undershoot": true,
+          "linear_decay": true
+        },
+        "slew": {
+          "max_hz_delta_up_per_loop": 1200,
+          "max_hz_delta_down_per_loop": 450,
+          "recovery_bypass_slew_ticks": 3
+        },
+        "ready": {
+          "ready_tol_raw": 4,
+          "consecutive_samples": 1
+        }
+      }
+    },
+    "stream_default": {
+      "profile_id": "stream_default",
+      "mode": "stream",
+      "description": "Default stream-mode regulator profile",
+      "source": {
+        "kind": "factory_default",
+        "run_id": null,
+        "promoted_at_utc": null,
+        "operator": null,
+        "notes": ""
+      },
+      "conditions": {
+        "printer_head_id": null,
+        "printer_head_type": null,
+        "reagent_id": null,
+        "print_pressure_psi": null,
+        "print_pulse_width_us": null,
+        "refuel_pressure_psi": null,
+        "refuel_pulse_width_us": null,
+        "frequency_hz": 20
+      },
+      "print": {
+        "recovery": {
+          "active_ticks": 2,
+          "base_boost_hz": 300,
+          "pulse_coeff_hz_per_us": 1,
+          "pressure_coeff_hz_per_raw": 0,
+          "max_boost_hz": 1500,
+          "recovery_floor_hz": 0,
+          "recovery_exit_error_raw": 3,
+          "max_extend_ticks": 0,
+          "allow_extend_while_undershoot": false,
+          "boost_only_when_undershoot": true,
+          "linear_decay": true
+        },
+        "slew": {
+          "max_hz_delta_up_per_loop": 600,
+          "max_hz_delta_down_per_loop": 1200,
+          "recovery_bypass_slew_ticks": 0
+        },
+        "ready": {
+          "ready_tol_raw": 4,
+          "consecutive_samples": 1
+        }
+      },
+      "refuel": {
+        "recovery": {
+          "active_ticks": 8,
+          "base_boost_hz": 2000,
+          "pulse_coeff_hz_per_us": 2,
+          "pressure_coeff_hz_per_raw": 1,
+          "max_boost_hz": 10000,
+          "recovery_floor_hz": 1200,
+          "recovery_exit_error_raw": 4,
+          "max_extend_ticks": 4,
+          "allow_extend_while_undershoot": true,
+          "boost_only_when_undershoot": true,
+          "linear_decay": true
+        },
+        "slew": {
+          "max_hz_delta_up_per_loop": 1200,
+          "max_hz_delta_down_per_loop": 450,
+          "recovery_bypass_slew_ticks": 3
+        },
+        "ready": {
+          "ready_tol_raw": 4,
+          "consecutive_samples": 1
+        }
+      }
+    }
+  }
+}
