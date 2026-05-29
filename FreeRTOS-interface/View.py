@@ -6180,6 +6180,8 @@ class ExperimentTaskListWidget(QGroupBox):
         "waiting": "Waiting",
         "blocked": "Blocked",
         "optional": "Optional",
+        "in_progress": "In progress",
+        "stopping": "Stopping",
     }
     STATE_COLORS = {
         "done": "#2f855a",
@@ -6187,6 +6189,8 @@ class ExperimentTaskListWidget(QGroupBox):
         "waiting": "#666666",
         "blocked": "#9b2c2c",
         "optional": "#805ad5",
+        "in_progress": "#2b6cb0",
+        "stopping": "#996515",
     }
 
     def __init__(self, main_window, model, controller):
@@ -6246,6 +6250,9 @@ class ExperimentTaskListWidget(QGroupBox):
         well_plate = getattr(self.model, "well_plate", None)
         machine_model = getattr(self.model, "machine_model", None)
         calibration_manager = getattr(self.model, "calibration_manager", None)
+        experiment_model = getattr(self.model, "experiment_model", None)
+        machine = getattr(self.controller, "machine", None)
+        command_queue = getattr(machine, "command_queue", None)
 
         self._safe_connect(getattr(rack, "gripper_updated", None), self.refresh)
         self._safe_connect(getattr(rack, "slot_updated", None), self.refresh)
@@ -6259,6 +6266,9 @@ class ExperimentTaskListWidget(QGroupBox):
         self._safe_connect(getattr(self.controller, "array_complete", None), self.refresh)
         self._safe_connect(getattr(calibration_manager, "calibrationCompleted", None), self.refresh)
         self._safe_connect(getattr(calibration_manager, "calibrationStageChanged", None), self.refresh)
+        self._safe_connect(getattr(experiment_model, "applied_imaging_calibration_changed", None), self.refresh)
+        self._safe_connect(getattr(command_queue, "queue_updated", None), self.refresh)
+        self._safe_connect(getattr(command_queue, "commands_completed", None), self.refresh)
 
     def _on_experiment_loaded(self, *_args):
         self._manual_section_states.clear()
@@ -6371,13 +6381,6 @@ class ExperimentTaskListWidget(QGroupBox):
                 "done": self._call_bool(well_plate, "check_calibration_applied", False),
                 "next": "Apply plate calibration",
                 "blocking": "Calibrate the plate before starting a print array.",
-            },
-            {
-                "key": "queue_idle",
-                "label": "Command queue idle",
-                "done": self._queue_idle(),
-                "next": "Wait for queued commands",
-                "blocking": "The command queue must finish before the next workflow action.",
             },
         ]
 
@@ -6633,13 +6636,23 @@ class ExperimentTaskListWidget(QGroupBox):
         if current is not None:
             current["state"] = "current"
 
+        if current is tasks[0] and not queue_idle:
+            current["state"] = "blocked"
+            current["blocking"] = "The command queue must finish before loading this printer head."
+        elif current is tasks[5] and not queue_idle:
+            current["state"] = "blocked"
+            current["blocking"] = "The command queue must finish before dropping off this printer head."
+
         if current is tasks[3]:
-            if not queue_idle:
+            if array_state == "running":
+                current["state"] = "in_progress"
+                current["blocking"] = "Array printing is in progress."
+            elif array_state == "stop_requested":
+                current["state"] = "stopping"
+                current["blocking"] = "The array will stop after the current well."
+            elif not queue_idle:
                 current["state"] = "blocked"
                 current["blocking"] = "The command queue must finish before printing."
-            elif array_state in {"running", "stop_requested"}:
-                current["state"] = "blocked"
-                current["blocking"] = "An array print is already active."
             elif preflight_message:
                 current["state"] = "blocked"
                 current["blocking"] = preflight_message
@@ -6677,19 +6690,24 @@ class ExperimentTaskListWidget(QGroupBox):
         for context in head_contexts:
             if context["is_active"] and context["current_task"] is not None:
                 task = context["current_task"]
+                if task.get("key") == "print" and task.get("state") == "in_progress":
+                    return f"Next: Printing array for {context['name']}", task.get("blocking", "")
+                if task.get("key") == "print" and task.get("state") == "stopping":
+                    return f"Next: Stopping after current well for {context['name']}", task.get("blocking", "")
                 return f"Next: {task['label']} for {context['name']}", task.get("blocking", "")
 
         for context in head_contexts:
             if context["current_task"] is not None:
-                return f"Next: Load printer head for {context['name']}", ""
+                task = context["current_task"]
+                return f"Next: {task['label']} for {context['name']}", task.get("blocking", "")
 
         if head_contexts:
-            return "Next: Experiment task list complete", ""
+            return "Next: Experiment complete", ""
         return "Next: Add printer heads to the experiment", "Create or load an experiment with reagent assignments."
 
     def _row_style(self, state):
         color = self.STATE_COLORS.get(state, "#666666")
-        if state == "current":
+        if state in {"current", "in_progress", "stopping"}:
             return f"color: white; background-color: {color}; padding: 2px 4px; border-radius: 2px;"
         if state == "blocked":
             return f"color: white; background-color: {color}; padding: 2px 4px; border-radius: 2px;"

@@ -317,6 +317,8 @@ def test_applied_imaging_calibration_records_serialize_through_save_and_load(
     em = model.experiment_model
     _configure_calibrated_volume_design(em)
     head = _printer_head(_stock_id_for_design_row(em, "glycerol"))
+    emitted_records = []
+    em.applied_imaging_calibration_changed.connect(lambda record: emitted_records.append(dict(record)))
 
     result = em.apply_droplet_volume_for_option(
         "glycerol",
@@ -346,6 +348,9 @@ def test_applied_imaging_calibration_records_serialize_through_save_and_load(
     assert record["pw_us"] == 1450
     assert record["pressure_psi"] == 1.35
     assert result["applied_imaging_calibration_recorded"] is True
+    assert len(emitted_records) == 1
+    assert emitted_records[0]["stock_id"] == head.get_stock_id()
+    assert emitted_records[0]["run_id"] == "run-2"
 
     reloaded_model = experiment_model_factory()
     reloaded = reloaded_model.experiment_model

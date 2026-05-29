@@ -60,6 +60,7 @@ class ExperimentModelStub:
     def __init__(self, applied_stock_ids=()):
         self.experiment_dir_path = "experiment-dir"
         self._applied_stock_ids = set(applied_stock_ids)
+        self.applied_imaging_calibration_changed = SignalStub()
 
     def get_applied_imaging_calibration(self, *, printer_head=None, **_kwargs):
         stock_id = printer_head.get_stock_id() if printer_head is not None else None
@@ -104,6 +105,7 @@ def _make_widget(
     applied_stock_ids=(),
     progress_by_stock=None,
     preflight=None,
+    array_state="idle",
 ):
     if progress_by_stock is None:
         progress_by_stock = {"stock-a": [1, 1], "stock-b": [1]}
@@ -154,12 +156,17 @@ def _make_widget(
         calibrationStageChanged=SignalStub(),
     )
 
+    command_queue = SimpleNamespace(
+        queue_updated=SignalStub(),
+        commands_completed=SignalStub(),
+    )
     controller = SimpleNamespace(
         check_if_all_completed=Mock(return_value=queue_idle),
-        get_array_run_state=Mock(return_value="idle"),
+        get_array_run_state=Mock(return_value=array_state),
         get_print_array_imaging_calibration_preflight=Mock(return_value=preflight),
         array_state_changed=SignalStub(),
         array_complete=SignalStub(),
+        machine=SimpleNamespace(command_queue=command_queue),
         print_array=Mock(),
         pick_up_printer_head=Mock(),
         drop_off_printer_head=Mock(),
@@ -186,7 +193,6 @@ def _make_widget(
         ({"homed": False}, "Next: Home motors"),
         ({"pressure": False}, "Next: Start pressure regulation"),
         ({"plate_calibrated": False}, "Next: Apply plate calibration"),
-        ({"queue_idle": False}, "Next: Wait for queued commands"),
     ],
 )
 def test_global_readiness_selects_first_missing_step(qapp, kwargs, expected):
@@ -194,6 +200,15 @@ def test_global_readiness_selects_first_missing_step(qapp, kwargs, expected):
 
     assert widget.next_label.text() == expected
     assert widget._sections["global"]["button"].isChecked() is True
+
+
+def test_global_readiness_does_not_show_command_queue_idle(qapp):
+    widget, _model, _controller, _heads = _make_widget(qapp, queue_idle=False)
+
+    global_tasks = widget._global_tasks()
+
+    assert "queue_idle" not in {task["key"] for task in global_tasks}
+    assert widget.next_label.text() == "Next: Load printer head for Reagent A"
 
 
 def test_active_head_auto_expands_and_inactive_manual_expansion_persists(qapp):
@@ -268,6 +283,86 @@ def test_print_preflight_message_is_contextual_blocking_text(qapp):
     assert widget.blocking_label.text() == "Print pressure does not match the applied calibration."
 
 
+def test_queue_busy_is_contextual_print_blocker_only(qapp):
+    widget, _model, _controller, heads = _make_widget(
+        qapp,
+        active_stock="stock-a",
+        applied_stock_ids={"stock-a"},
+        progress_by_stock={"stock-a": [1]},
+        queue_idle=False,
+    )
+
+    context = widget._head_context(heads["stock-a"])
+
+    assert widget.next_label.text() == "Next: Print array for Reagent A"
+    assert context["current_task"]["key"] == "print"
+    assert context["current_task"]["state"] == "blocked"
+    assert widget.blocking_label.text() == "The command queue must finish before printing."
+
+
+def test_command_queue_signal_refreshes_contextual_blocker(qapp):
+    widget, _model, controller, heads = _make_widget(
+        qapp,
+        active_stock="stock-a",
+        applied_stock_ids={"stock-a"},
+        progress_by_stock={"stock-a": [1]},
+        queue_idle=False,
+    )
+    assert widget._head_context(heads["stock-a"])["current_task"]["state"] == "blocked"
+
+    controller.check_if_all_completed.return_value = True
+    controller.machine.command_queue.commands_completed.emit()
+
+    assert widget._head_context(heads["stock-a"])["current_task"]["state"] == "current"
+    assert widget.blocking_label.text() == ""
+
+
+def test_applied_calibration_signal_refreshes_guide(qapp):
+    widget, model, _controller, heads = _make_widget(qapp, active_stock="stock-a")
+    assert widget.next_label.text() == "Next: Calibrate printer head for Reagent A"
+
+    model.experiment_model._applied_stock_ids.add("stock-a")
+    model.experiment_model.applied_imaging_calibration_changed.emit({"stock_id": "stock-a"})
+
+    context = widget._head_context(heads["stock-a"])
+    assert context["current_task"]["key"] == "print"
+    assert widget.next_label.text() == "Next: Print array for Reagent A"
+
+
+def test_running_print_array_is_in_progress_not_blocked(qapp):
+    widget, _model, _controller, heads = _make_widget(
+        qapp,
+        active_stock="stock-a",
+        applied_stock_ids={"stock-a"},
+        progress_by_stock={"stock-a": [1]},
+        queue_idle=False,
+        array_state="running",
+    )
+
+    context = widget._head_context(heads["stock-a"])
+
+    assert widget.next_label.text() == "Next: Printing array for Reagent A"
+    assert context["current_task"]["key"] == "print"
+    assert context["current_task"]["state"] == "in_progress"
+
+
+def test_stop_requested_print_array_shows_stopping_guidance(qapp):
+    widget, _model, _controller, heads = _make_widget(
+        qapp,
+        active_stock="stock-a",
+        applied_stock_ids={"stock-a"},
+        progress_by_stock={"stock-a": [1]},
+        queue_idle=False,
+        array_state="stop_requested",
+    )
+
+    context = widget._head_context(heads["stock-a"])
+
+    assert widget.next_label.text() == "Next: Stopping after current well for Reagent A"
+    assert context["current_task"]["key"] == "print"
+    assert context["current_task"]["state"] == "stopping"
+
+
 def test_printed_active_head_highlights_dropoff_and_keeps_recheck_optional(qapp):
     widget, _model, _controller, heads = _make_widget(
         qapp,
@@ -298,6 +393,20 @@ def test_printed_dropped_off_head_is_complete(qapp):
     assert context["current_task"] is None
     assert context["done_count"] == context["total_count"]
     assert "Complete" in widget._sections["head:stock-a"]["button"].text()
+
+
+def test_all_printed_and_dropped_off_heads_show_experiment_complete_even_if_queue_busy(qapp):
+    widget, _model, _controller, _heads = _make_widget(
+        qapp,
+        active_stock=None,
+        calibrated_stock_ids={"stock-a", "stock-b"},
+        applied_stock_ids={"stock-a", "stock-b"},
+        progress_by_stock={"stock-a": [0, 0], "stock-b": [0]},
+        queue_idle=False,
+    )
+
+    assert widget.next_label.text() == "Next: Experiment complete"
+    assert widget.blocking_label.text() == ""
 
 
 def test_refresh_does_not_trigger_hardware_actions(qapp):

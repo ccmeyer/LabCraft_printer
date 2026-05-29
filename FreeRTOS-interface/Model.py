@@ -315,6 +315,7 @@ class ExperimentModel(QObject):
     stock_updated = Signal()
     experiment_generated = Signal(int, float)  # (n_reactions, worst_nonfill_volume_nL)
     targets_unreachable = Signal(object)  # list[dict]
+    applied_imaging_calibration_changed = Signal(dict)
 
     def __init__(self, prof=None):
         super().__init__()
@@ -4617,6 +4618,7 @@ class ExperimentModel(QObject):
         state["records"][key] = record
         self.applied_imaging_calibrations = state
         self.unsaved_changes = True
+        self.applied_imaging_calibration_changed.emit(dict(record))
         if save and getattr(self, "experiment_file_path", None):
             self.save_experiment()
         return dict(record)
