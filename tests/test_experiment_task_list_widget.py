@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from PySide6 import QtCore
 
 from View import ExperimentTaskListWidget
 
@@ -417,3 +418,19 @@ def test_refresh_does_not_trigger_hardware_actions(qapp):
     controller.print_array.assert_not_called()
     controller.pick_up_printer_head.assert_not_called()
     controller.drop_off_printer_head.assert_not_called()
+
+
+def test_section_headers_do_not_emit_stylesheet_parse_warning(qapp):
+    if not hasattr(QtCore, "qInstallMessageHandler"):
+        pytest.skip("Qt message handler is unavailable")
+    messages = []
+    old_handler = QtCore.qInstallMessageHandler(
+        lambda _mode, _context, message: messages.append(str(message))
+    )
+    try:
+        _make_widget(qapp, active_stock="stock-a")
+        qapp.processEvents()
+    finally:
+        QtCore.qInstallMessageHandler(old_handler)
+
+    assert not any("Could not parse stylesheet" in message for message in messages)

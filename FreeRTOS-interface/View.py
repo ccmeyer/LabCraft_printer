@@ -6713,6 +6713,10 @@ class ExperimentTaskListWidget(QGroupBox):
             return f"color: white; background-color: {color}; padding: 2px 4px; border-radius: 2px;"
         return f"color: {color};"
 
+    def _style_color(self, name, fallback):
+        value = str(self.color_dict.get(name) or fallback)
+        return value if QtGui.QColor(value).isValid() else fallback
+
     def _make_task_row(self, task):
         row = QWidget()
         layout = QVBoxLayout(row)
@@ -6764,9 +6768,10 @@ class ExperimentTaskListWidget(QGroupBox):
         button.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
         button.setCheckable(True)
         button.setChecked(bool(expanded))
+        header_bg = self._style_color("dark_gray", "#444444")
         button.setStyleSheet(
-            f"QToolButton {{ color: white; background-color: {self.color_dict.get('dark_gray', '#444444')};"
-            " border: 0; padding: 5px; text-align: left; font-weight: bold; }}"
+            f"color: #ffffff; background-color: {header_bg}; "
+            "border: none; padding: 5px; font-weight: bold;"
         )
         outer.addWidget(button)
 
