@@ -880,10 +880,11 @@ class Controller(QObject):
         )
 
         dry_run = bool(run_config.get("dry_run", False))
+        profile_document = run_config.get("_profile_document_override") or self._regulator_profile_document()
         try:
             prepared = prepare_regulator_calibration_run(
                 run_config,
-                profile_document=self._regulator_profile_document(),
+                profile_document=profile_document,
                 output_root=run_config.get("output_root") or self.regulator_calibration_output_root(),
             )
         except RegulatorCalibrationError as exc:
@@ -1352,6 +1353,55 @@ class Controller(QObject):
         if callable(emit):
             emit(*args)
 
+    def is_regulator_calibration_sweep_running(self):
+        state = getattr(self, "_regulator_calibration_batch_state", None)
+        return state is not None and state.get("prepared_sweep") is not None
+
+    def start_regulator_calibration_sweep(self, config, trace_worker_factory=None, analysis_runner=None):
+        if self.is_regulator_calibration_batch_running():
+            self._emit_regulator_calibration_batch_signal(
+                "regulator_calibration_batch_output",
+                "A regulator calibration batch is already active.",
+            )
+            return False
+        if self.is_regulator_calibration_running():
+            self._emit_regulator_calibration_batch_signal(
+                "regulator_calibration_batch_output",
+                "A regulator calibration run is already active.",
+            )
+            return False
+
+        from RegulatorSweepBuilder import RegulatorSweepError, prepare_regulator_sweep
+
+        sweep_config = dict(config or {})
+        profile_document = self._regulator_profile_document()
+        try:
+            prepared_sweep = prepare_regulator_sweep(
+                sweep_config,
+                profile_document=profile_document,
+            )
+        except RegulatorSweepError as exc:
+            self._emit_regulator_calibration_batch_signal("regulator_calibration_batch_output", str(exc))
+            return False
+
+        batch_config = dict(sweep_config)
+        batch_config["candidate_profile_ids"] = list(prepared_sweep.candidate_profile_ids)
+        batch_config["baseline_profile_id"] = prepared_sweep.baseline_profile_id
+        batch_config["_profile_document_override"] = prepared_sweep.profile_document
+        batch_config["_prepared_sweep"] = prepared_sweep
+        self._emit_regulator_calibration_batch_signal(
+            "regulator_calibration_batch_output",
+            f"Generated {len(prepared_sweep.candidate_profile_ids)} regulator sweep candidates.",
+        )
+        return self.start_regulator_calibration_batch(
+            batch_config,
+            trace_worker_factory=trace_worker_factory,
+            analysis_runner=analysis_runner,
+        )
+
+    def cancel_regulator_calibration_sweep(self):
+        return self.cancel_regulator_calibration_batch()
+
     def start_regulator_calibration_batch(self, config, trace_worker_factory=None, analysis_runner=None):
         if self.is_regulator_calibration_batch_running():
             self._emit_regulator_calibration_batch_signal(
@@ -1374,12 +1424,19 @@ class Controller(QObject):
         )
 
         batch_config = dict(config or {})
+        profile_document = batch_config.get("_profile_document_override") or self._regulator_profile_document()
         try:
             prepared = prepare_regulator_calibration_batch(
                 batch_config,
-                profile_document=self._regulator_profile_document(),
+                profile_document=profile_document,
                 output_root=batch_config.get("output_root") or self.regulator_calibration_output_root(),
             )
+            prepared_sweep = batch_config.get("_prepared_sweep")
+            if prepared_sweep is not None:
+                from RegulatorSweepBuilder import write_sweep_artifacts
+
+                prepared.manifest["sweep"] = write_sweep_artifacts(prepared_sweep, prepared.session_dir)
+                write_batch_manifest(prepared)
             write_batch_manifest(prepared, status="running")
         except (RegulatorCalibrationBatchError, Exception) as exc:
             self._emit_regulator_calibration_batch_signal("regulator_calibration_batch_output", str(exc))
@@ -1415,6 +1472,8 @@ class Controller(QObject):
             "cancel_requested": False,
             "trace_worker_factory": trace_worker_factory,
             "analysis_runner": analysis_runner,
+            "profile_document": profile_document,
+            "prepared_sweep": batch_config.get("_prepared_sweep"),
         }
         self._emit_regulator_calibration_batch_signal(
             "regulator_calibration_batch_stage",
@@ -1466,7 +1525,7 @@ class Controller(QObject):
 
         self._connect_once(self.regulator_calibration_finished, self._on_regulator_calibration_batch_run_finished)
         started = self.start_regulator_calibration_run(
-            run_configs[index],
+            dict(run_configs[index], _profile_document_override=state.get("profile_document")),
             trace_worker_factory=state.get("trace_worker_factory"),
         )
         if not started:

@@ -20,6 +20,12 @@ from RegulatorCalibrationRunner import (
     SERIAL_HANDOFF_MODE_SOFT,
     trace_case_choices,
 )
+from RegulatorSweepBuilder import (
+    MAX_SWEEP_CANDIDATES,
+    SWEEP_STRATEGY_GRID,
+    SWEEP_STRATEGY_ONE_AT_A_TIME,
+    sweepable_field_choices,
+)
 
 
 class RegulatorCalibrationWindow(QtWidgets.QDialog):
@@ -31,6 +37,7 @@ class RegulatorCalibrationWindow(QtWidgets.QDialog):
         self.controller = controller
         self._busy = False
         self._batch_active = False
+        self._sweep_active = False
         self._profiles: list[dict[str, Any]] = []
 
         self.setWindowTitle("Regulator Calibration")
@@ -40,6 +47,8 @@ class RegulatorCalibrationWindow(QtWidgets.QDialog):
         self.refresh_profiles()
         self._update_trace_summary()
         self._update_batch_custom_visible()
+        self._update_sweep_custom_visible()
+        self._update_sweep_preview()
         self._update_start_enabled()
 
     def _build_ui(self):
@@ -292,6 +301,155 @@ class RegulatorCalibrationWindow(QtWidgets.QDialog):
         batch_layout.addLayout(batch_button_row)
         layout.addWidget(batch_group)
 
+        sweep_group = QtWidgets.QGroupBox("Bounded Sweep")
+        sweep_layout = QtWidgets.QVBoxLayout(sweep_group)
+        sweep_form = QtWidgets.QFormLayout()
+        sweep_form.setLabelAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+
+        self.sweep_mode_combo = QtWidgets.QComboBox()
+        self.sweep_mode_combo.addItems(["stream", "droplet"])
+        self.sweep_mode_combo.currentIndexChanged.connect(self._refresh_sweep_baselines)
+        self.sweep_mode_combo.currentIndexChanged.connect(self._update_sweep_enabled)
+        sweep_form.addRow("Mode", self.sweep_mode_combo)
+
+        self.sweep_baseline_combo = QtWidgets.QComboBox()
+        self.sweep_baseline_combo.currentIndexChanged.connect(self._update_sweep_preview)
+        sweep_form.addRow("Baseline", self.sweep_baseline_combo)
+
+        self.sweep_trace_case_combo = QtWidgets.QComboBox()
+        for choice in trace_case_choices():
+            label = (
+                f"{choice['test_id']} - {choice['name']} "
+                f"({', '.join(choice['channels'])}, {choice['pulse_count']} pulses @ {choice['frequency_hz']} Hz)"
+            )
+            self.sweep_trace_case_combo.addItem(label, int(choice["test_id"]))
+        self.sweep_trace_case_combo.addItem("2110 - pressure_recovery_trace_custom", CUSTOM_TRACE_CASE_ID)
+        self.sweep_trace_case_combo.currentIndexChanged.connect(self._update_sweep_custom_visible)
+        self.sweep_trace_case_combo.currentIndexChanged.connect(self._update_sweep_channels)
+        sweep_form.addRow("Trace Case", self.sweep_trace_case_combo)
+
+        self.sweep_mutated_channel_combo = QtWidgets.QComboBox()
+        self.sweep_mutated_channel_combo.addItems(["print", "refuel"])
+        self.sweep_mutated_channel_combo.currentIndexChanged.connect(self._update_sweep_preview)
+        sweep_form.addRow("Channel", self.sweep_mutated_channel_combo)
+
+        self.sweep_strategy_combo = QtWidgets.QComboBox()
+        self.sweep_strategy_combo.addItem("One at a time", SWEEP_STRATEGY_ONE_AT_A_TIME)
+        self.sweep_strategy_combo.addItem("Grid", SWEEP_STRATEGY_GRID)
+        self.sweep_strategy_combo.currentIndexChanged.connect(self._update_sweep_preview)
+        sweep_form.addRow("Strategy", self.sweep_strategy_combo)
+
+        self.sweep_repeat_spin = QtWidgets.QSpinBox()
+        self.sweep_repeat_spin.setRange(1, 5)
+        self.sweep_repeat_spin.setValue(1)
+        sweep_form.addRow("Repeats", self.sweep_repeat_spin)
+
+        self.sweep_order_combo = QtWidgets.QComboBox()
+        self.sweep_order_combo.addItems(["alternating", "grouped", "randomized"])
+        sweep_form.addRow("Order", self.sweep_order_combo)
+
+        self.sweep_baseline_before_checkbox = QtWidgets.QCheckBox("Baseline before")
+        self.sweep_baseline_before_checkbox.setChecked(True)
+        self.sweep_baseline_after_checkbox = QtWidgets.QCheckBox("Baseline after")
+        self.sweep_baseline_after_checkbox.setChecked(True)
+        sweep_baselines_row = QtWidgets.QHBoxLayout()
+        sweep_baselines_row.addWidget(self.sweep_baseline_before_checkbox)
+        sweep_baselines_row.addWidget(self.sweep_baseline_after_checkbox)
+        sweep_baselines_row.addStretch(1)
+        sweep_baselines_widget = QtWidgets.QWidget()
+        sweep_baselines_widget.setLayout(sweep_baselines_row)
+        sweep_form.addRow("Baselines", sweep_baselines_widget)
+
+        self.sweep_calibrated_head_checkbox = QtWidgets.QCheckBox("Calibrated printer head installed")
+        self.sweep_calibrated_head_checkbox.stateChanged.connect(self._update_sweep_enabled)
+        sweep_form.addRow("", self.sweep_calibrated_head_checkbox)
+
+        self.sweep_handoff_combo = QtWidgets.QComboBox()
+        self.sweep_handoff_combo.addItem("Soft", SERIAL_HANDOFF_MODE_SOFT)
+        self.sweep_handoff_combo.addItem("Full shutdown", SERIAL_HANDOFF_MODE_FULL_DISCONNECT)
+        sweep_form.addRow("Handoff", self.sweep_handoff_combo)
+        sweep_layout.addLayout(sweep_form)
+
+        self.sweep_custom_group = QtWidgets.QGroupBox("Sweep Custom Trace Recipe")
+        sweep_custom_form = QtWidgets.QFormLayout(self.sweep_custom_group)
+        sweep_custom_form.setLabelAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        self.sweep_custom_channel_combo = QtWidgets.QComboBox()
+        self.sweep_custom_channel_combo.addItems(["print", "refuel"])
+        self.sweep_custom_channel_combo.currentIndexChanged.connect(self._update_sweep_channels)
+        self.sweep_custom_pressure_spin = QtWidgets.QDoubleSpinBox()
+        self.sweep_custom_pressure_spin.setRange(CUSTOM_TRACE_PRESSURE_MPSI_MIN / 1000.0, CUSTOM_TRACE_PRESSURE_MPSI_MAX / 1000.0)
+        self.sweep_custom_pressure_spin.setDecimals(3)
+        self.sweep_custom_pressure_spin.setSingleStep(0.05)
+        self.sweep_custom_pressure_spin.setValue(1.0)
+        self.sweep_custom_pulse_spin = QtWidgets.QSpinBox()
+        self.sweep_custom_pulse_spin.setRange(CUSTOM_TRACE_PULSE_US_MIN, CUSTOM_TRACE_PULSE_US_MAX)
+        self.sweep_custom_pulse_spin.setValue(1300)
+        self.sweep_custom_pulse_count_spin = QtWidgets.QSpinBox()
+        self.sweep_custom_pulse_count_spin.setRange(CUSTOM_TRACE_PULSE_COUNT_MIN, CUSTOM_TRACE_PULSE_COUNT_MAX)
+        self.sweep_custom_pulse_count_spin.setValue(10)
+        self.sweep_custom_frequency_spin = QtWidgets.QSpinBox()
+        self.sweep_custom_frequency_spin.setRange(CUSTOM_TRACE_FREQUENCY_HZ_MIN, CUSTOM_TRACE_FREQUENCY_HZ_MAX)
+        self.sweep_custom_frequency_spin.setValue(20)
+        for widget in (
+            self.sweep_custom_pressure_spin,
+            self.sweep_custom_pulse_spin,
+            self.sweep_custom_pulse_count_spin,
+            self.sweep_custom_frequency_spin,
+        ):
+            widget.valueChanged.connect(self._update_sweep_enabled)
+        sweep_custom_form.addRow("Channel", self.sweep_custom_channel_combo)
+        sweep_custom_form.addRow("Pressure (psi)", self.sweep_custom_pressure_spin)
+        sweep_custom_form.addRow("Pulse Width (us)", self.sweep_custom_pulse_spin)
+        sweep_custom_form.addRow("Pulse Count", self.sweep_custom_pulse_count_spin)
+        sweep_custom_form.addRow("Frequency (Hz)", self.sweep_custom_frequency_spin)
+        sweep_layout.addWidget(self.sweep_custom_group)
+
+        sweep_fields_group = QtWidgets.QGroupBox("Sweep Fields")
+        sweep_fields_layout = QtWidgets.QGridLayout(sweep_fields_group)
+        sweep_fields_layout.addWidget(QtWidgets.QLabel("Field"), 0, 0)
+        sweep_fields_layout.addWidget(QtWidgets.QLabel("Values"), 0, 1)
+        self.sweep_field_combos = []
+        self.sweep_value_edits = []
+        choices = sweepable_field_choices()
+        for row in range(3):
+            combo = QtWidgets.QComboBox()
+            for choice in choices:
+                combo.addItem(choice["label"], choice["field_path"])
+            edit = QtWidgets.QLineEdit()
+            edit.setPlaceholderText("e.g. 3,4,5")
+            combo.currentIndexChanged.connect(self._update_sweep_preview)
+            edit.textChanged.connect(self._update_sweep_preview)
+            self.sweep_field_combos.append(combo)
+            self.sweep_value_edits.append(edit)
+            sweep_fields_layout.addWidget(combo, row + 1, 0)
+            sweep_fields_layout.addWidget(edit, row + 1, 1)
+        sweep_layout.addWidget(sweep_fields_group)
+
+        self.sweep_preview_label = QtWidgets.QLabel("No sweep values")
+        self.sweep_preview_label.setWordWrap(True)
+        sweep_layout.addWidget(self.sweep_preview_label)
+
+        sweep_status_row = QtWidgets.QHBoxLayout()
+        self.sweep_status_label = QtWidgets.QLabel("Sweep idle")
+        self.sweep_path_label = QtWidgets.QLabel("")
+        self.sweep_path_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        sweep_status_row.addWidget(self.sweep_status_label)
+        sweep_status_row.addStretch(1)
+        sweep_status_row.addWidget(self.sweep_path_label)
+        sweep_layout.addLayout(sweep_status_row)
+
+        sweep_button_row = QtWidgets.QHBoxLayout()
+        sweep_button_row.addStretch(1)
+        self.sweep_start_button = QtWidgets.QPushButton("Start Sweep")
+        self.sweep_start_button.clicked.connect(self._on_sweep_start_clicked)
+        self.sweep_cancel_button = QtWidgets.QPushButton("Cancel Sweep")
+        self.sweep_cancel_button.clicked.connect(self._on_sweep_cancel_clicked)
+        self.sweep_cancel_button.setEnabled(False)
+        sweep_button_row.addWidget(self.sweep_start_button)
+        sweep_button_row.addWidget(self.sweep_cancel_button)
+        sweep_layout.addLayout(sweep_button_row)
+        layout.addWidget(sweep_group)
+
     def _connect_controller(self):
         if self.controller is None:
             return
@@ -337,6 +495,7 @@ class RegulatorCalibrationWindow(QtWidgets.QDialog):
                 self.profile_combo.setCurrentIndex(index)
         self._update_profile_summary()
         self._refresh_batch_candidates()
+        self._refresh_sweep_baselines()
         self._update_start_enabled()
 
     def _current_profile_id(self) -> str:
@@ -365,6 +524,62 @@ class RegulatorCalibrationWindow(QtWidgets.QDialog):
 
     def _batch_serial_handoff_mode(self) -> str:
         return str(self.batch_handoff_combo.currentData() or SERIAL_HANDOFF_MODE_SOFT)
+
+    def _sweep_serial_handoff_mode(self) -> str:
+        return str(self.sweep_handoff_combo.currentData() or SERIAL_HANDOFF_MODE_SOFT)
+
+    def _sweep_mode(self) -> str:
+        return str(self.sweep_mode_combo.currentText() or "").strip().lower()
+
+    def _sweep_baseline_profile_id(self) -> str:
+        return str(self.sweep_baseline_combo.currentData() or "").strip()
+
+    def _sweep_trace_case_id(self) -> int:
+        data = self.sweep_trace_case_combo.currentData()
+        return int(data or 0)
+
+    def _is_sweep_custom_trace_selected(self) -> bool:
+        return self._sweep_trace_case_id() == CUSTOM_TRACE_CASE_ID
+
+    def _sweep_strategy(self) -> str:
+        return str(self.sweep_strategy_combo.currentData() or SWEEP_STRATEGY_ONE_AT_A_TIME)
+
+    def _sweep_field_rows(self) -> list[dict[str, Any]]:
+        rows = []
+        for combo, edit in zip(self.sweep_field_combos, self.sweep_value_edits):
+            values = edit.text().strip()
+            if not values:
+                continue
+            rows.append({"field_path": str(combo.currentData() or ""), "values": values})
+        return rows
+
+    def _sweep_candidate_count(self) -> int:
+        counts = []
+        for row in self._sweep_field_rows():
+            values = [part.strip() for part in str(row["values"]).replace(";", ",").split(",") if part.strip()]
+            if not values:
+                continue
+            counts.append(len(values))
+        if not counts:
+            return 0
+        if self._sweep_strategy() == SWEEP_STRATEGY_GRID:
+            total = 1
+            for count in counts:
+                total *= count
+            return total
+        return sum(counts)
+
+    def _sweep_custom_trace_valid(self) -> bool:
+        pulse_count = int(self.sweep_custom_pulse_count_spin.value())
+        frequency_hz = int(self.sweep_custom_frequency_spin.value())
+        planned_window_ms = (pulse_count * 1000 + frequency_hz - 1) // frequency_hz
+        return planned_window_ms <= CUSTOM_TRACE_MAX_PULSE_WINDOW_MS
+
+    def _sweep_trace_case_supported_for_start(self) -> bool:
+        trace_id = self._sweep_trace_case_id()
+        if trace_id == CUSTOM_TRACE_CASE_ID:
+            return self._sweep_custom_trace_valid()
+        return trace_id in TRACE_CASES
 
     def _custom_trace_valid(self, *, batch: bool = False) -> bool:
         if batch:
@@ -400,6 +615,7 @@ class RegulatorCalibrationWindow(QtWidgets.QDialog):
         self.refresh_button.setEnabled(not self._busy)
         self.cancel_button.setEnabled(self._busy)
         self._update_batch_enabled()
+        self._update_sweep_enabled()
 
     def _batch_mode(self) -> str:
         return str(self.batch_mode_combo.currentText() or "").strip().lower()
@@ -439,6 +655,81 @@ class RegulatorCalibrationWindow(QtWidgets.QDialog):
             baseline_id = getter(mode)
         self.batch_baseline_label.setText(str(baseline_id or f"Active {mode} profile"))
         self._update_batch_enabled()
+
+    def _refresh_sweep_baselines(self):
+        if not hasattr(self, "sweep_baseline_combo"):
+            return
+        current = self._sweep_baseline_profile_id()
+        mode = self._sweep_mode()
+        self.sweep_baseline_combo.blockSignals(True)
+        self.sweep_baseline_combo.clear()
+        for profile in self._profiles:
+            if str(profile.get("mode") or "") != mode:
+                continue
+            profile_id = str(profile.get("profile_id") or "")
+            self.sweep_baseline_combo.addItem(profile_id, profile_id)
+        self.sweep_baseline_combo.blockSignals(False)
+        if current:
+            index = self.sweep_baseline_combo.findData(current)
+            if index >= 0:
+                self.sweep_baseline_combo.setCurrentIndex(index)
+        self._update_sweep_preview()
+
+    @QtCore.Slot()
+    def _update_sweep_enabled(self):
+        if not hasattr(self, "sweep_start_button"):
+            return
+        candidate_count = self._sweep_candidate_count()
+        can_start = (
+            not self._busy
+            and bool(self._sweep_baseline_profile_id())
+            and self._sweep_trace_case_supported_for_start()
+            and bool(self._sweep_field_rows())
+            and 1 <= candidate_count <= MAX_SWEEP_CANDIDATES
+            and self.sweep_calibrated_head_checkbox.isChecked()
+        )
+        self.sweep_start_button.setEnabled(can_start)
+        self.sweep_cancel_button.setEnabled(self._busy and self._sweep_active)
+
+    @QtCore.Slot()
+    def _update_sweep_custom_visible(self):
+        if hasattr(self, "sweep_custom_group"):
+            self.sweep_custom_group.setVisible(self._is_sweep_custom_trace_selected())
+        self._update_sweep_channels()
+
+    @QtCore.Slot()
+    def _update_sweep_channels(self):
+        if not hasattr(self, "sweep_mutated_channel_combo"):
+            return
+        current = str(self.sweep_mutated_channel_combo.currentText() or "print")
+        if self._is_sweep_custom_trace_selected():
+            channels = [str(self.sweep_custom_channel_combo.currentText() or "print")]
+        else:
+            case = TRACE_CASES.get(self._sweep_trace_case_id())
+            channels = list(case.channels) if case is not None else ["print"]
+        self.sweep_mutated_channel_combo.blockSignals(True)
+        self.sweep_mutated_channel_combo.clear()
+        self.sweep_mutated_channel_combo.addItems(channels)
+        if current in channels:
+            self.sweep_mutated_channel_combo.setCurrentText(current)
+        self.sweep_mutated_channel_combo.blockSignals(False)
+        self._update_sweep_preview()
+
+    @QtCore.Slot()
+    def _update_sweep_preview(self):
+        if not hasattr(self, "sweep_preview_label"):
+            return
+        count = self._sweep_candidate_count()
+        baseline = self._sweep_baseline_profile_id() or "baseline"
+        if count <= 0:
+            text = "No sweep values"
+        elif count > MAX_SWEEP_CANDIDATES:
+            text = f"{count} candidates exceeds the limit of {MAX_SWEEP_CANDIDATES}"
+        else:
+            ids = [f"{baseline}_sweep_{index:03d}" for index in range(1, count + 1)]
+            text = f"{count} candidates: " + ", ".join(ids)
+        self.sweep_preview_label.setText(text)
+        self._update_sweep_enabled()
 
     @QtCore.Slot()
     def _update_batch_enabled(self):
@@ -564,6 +855,37 @@ class RegulatorCalibrationWindow(QtWidgets.QDialog):
             )
         return config
 
+    def _sweep_config(self) -> dict[str, Any]:
+        config = {
+            "mode": self._sweep_mode(),
+            "baseline_profile_id": self._sweep_baseline_profile_id(),
+            "trace_case_id": self._sweep_trace_case_id(),
+            "mutated_channel": str(self.sweep_mutated_channel_combo.currentText() or "print"),
+            "sweep_strategy": self._sweep_strategy(),
+            "sweep_fields": self._sweep_field_rows(),
+            "repeat_count": self.sweep_repeat_spin.value(),
+            "order_strategy": str(self.sweep_order_combo.currentText() or "alternating"),
+            "baseline_before": self.sweep_baseline_before_checkbox.isChecked(),
+            "baseline_after": self.sweep_baseline_after_checkbox.isChecked(),
+            "operator": self.operator_edit.text().strip(),
+            "printer_head_id": self.head_id_edit.text().strip(),
+            "printer_head_type": self.head_type_edit.text().strip(),
+            "reagent_id": self.reagent_edit.text().strip(),
+            "calibrated_head_confirmed": self.sweep_calibrated_head_checkbox.isChecked(),
+            "serial_handoff_mode": self._sweep_serial_handoff_mode(),
+        }
+        if self._is_sweep_custom_trace_selected():
+            config.update(
+                {
+                    "trace_channel": str(self.sweep_custom_channel_combo.currentText() or "print"),
+                    "trace_pressure_psi": float(self.sweep_custom_pressure_spin.value()),
+                    "trace_pulse_us": int(self.sweep_custom_pulse_spin.value()),
+                    "trace_pulse_count": int(self.sweep_custom_pulse_count_spin.value()),
+                    "trace_frequency_hz": int(self.sweep_custom_frequency_spin.value()),
+                }
+            )
+        return config
+
     @QtCore.Slot()
     def _on_start_clicked(self):
         starter = getattr(self.controller, "start_regulator_calibration_run", None)
@@ -595,6 +917,22 @@ class RegulatorCalibrationWindow(QtWidgets.QDialog):
             self._on_batch_stage("Failed")
 
     @QtCore.Slot()
+    def _on_sweep_start_clicked(self):
+        starter = getattr(self.controller, "start_regulator_calibration_sweep", None)
+        if not callable(starter):
+            self._on_output("Regulator calibration sweep is not available from this controller.")
+            return
+        self.log_output.clear()
+        self.sweep_path_label.setText("")
+        self._sweep_active = True
+        self._set_busy(True)
+        self.sweep_status_label.setText("Preparing regulator calibration sweep")
+        if not starter(self._sweep_config()):
+            self._sweep_active = False
+            self._set_busy(False)
+            self.sweep_status_label.setText("Failed")
+
+    @QtCore.Slot()
     def _on_cancel_clicked(self):
         cancel = getattr(self.controller, "cancel_regulator_calibration_run", None)
         if callable(cancel):
@@ -603,6 +941,12 @@ class RegulatorCalibrationWindow(QtWidgets.QDialog):
     @QtCore.Slot()
     def _on_batch_cancel_clicked(self):
         cancel = getattr(self.controller, "cancel_regulator_calibration_batch", None)
+        if callable(cancel):
+            cancel()
+
+    @QtCore.Slot()
+    def _on_sweep_cancel_clicked(self):
+        cancel = getattr(self.controller, "cancel_regulator_calibration_sweep", None)
         if callable(cancel):
             cancel()
 
@@ -631,30 +975,41 @@ class RegulatorCalibrationWindow(QtWidgets.QDialog):
     @QtCore.Slot(str)
     def _on_batch_stage(self, message: str):
         self.batch_status_label.setText(str(message or ""))
+        if self._sweep_active:
+            self.sweep_status_label.setText(str(message or ""))
 
     @QtCore.Slot(int, int, object)
     def _on_batch_progress(self, current: int, total: int, run: object):
         if isinstance(run, dict):
-            self.batch_status_label.setText(
-                f"Batch run {current}/{total}: {run.get('role')} {run.get('profile_id')}"
-            )
+            text = f"Batch run {current}/{total}: {run.get('role')} {run.get('profile_id')}"
+            self.batch_status_label.setText(text)
+            if self._sweep_active:
+                self.sweep_status_label.setText(text)
 
     @QtCore.Slot(bool, str, object)
     def _on_batch_finished(self, ok: bool, message: str, payload: object):
+        was_sweep = self._sweep_active
         self._batch_active = False
+        self._sweep_active = False
         self._set_busy(False)
         self._on_batch_stage("Finished" if ok else "Failed")
+        if was_sweep:
+            self.sweep_status_label.setText("Finished" if ok else "Failed")
         self._on_output(str(message or ""))
         if isinstance(payload, dict):
             session_dir = payload.get("session_dir")
             if session_dir:
                 self.batch_path_label.setText(str(session_dir))
+                if was_sweep:
+                    self.sweep_path_label.setText(str(session_dir))
             manifest = payload.get("manifest")
             if isinstance(manifest, dict):
                 analysis = manifest.get("analysis") if isinstance(manifest.get("analysis"), dict) else {}
                 ranking = analysis.get("candidate_ranking_csv")
                 if ranking:
                     self.batch_path_label.setText(str(ranking))
+                    if was_sweep:
+                        self.sweep_path_label.setText(str(ranking))
 
     def _set_busy(self, busy: bool):
         self._busy = bool(busy)
@@ -676,7 +1031,26 @@ class RegulatorCalibrationWindow(QtWidgets.QDialog):
             self.batch_calibrated_head_checkbox,
             self.batch_handoff_combo,
             self.batch_candidate_list,
+            self.sweep_mode_combo,
+            self.sweep_baseline_combo,
+            self.sweep_trace_case_combo,
+            self.sweep_mutated_channel_combo,
+            self.sweep_strategy_combo,
+            self.sweep_repeat_spin,
+            self.sweep_order_combo,
+            self.sweep_baseline_before_checkbox,
+            self.sweep_baseline_after_checkbox,
+            self.sweep_calibrated_head_checkbox,
+            self.sweep_handoff_combo,
+            self.sweep_custom_channel_combo,
+            self.sweep_custom_pressure_spin,
+            self.sweep_custom_pulse_spin,
+            self.sweep_custom_pulse_count_spin,
+            self.sweep_custom_frequency_spin,
+            *self.sweep_field_combos,
+            *self.sweep_value_edits,
         ):
             widget.setEnabled(not self._busy)
         self._update_start_enabled()
         self._update_batch_enabled()
+        self._update_sweep_enabled()

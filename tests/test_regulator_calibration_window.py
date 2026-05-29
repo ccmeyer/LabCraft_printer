@@ -20,6 +20,7 @@ class _WindowController(QtCore.QObject):
         super().__init__()
         self.started_config = None
         self.started_batch_config = None
+        self.started_sweep_config = None
 
     def list_regulator_calibration_profiles(self):
         return list(rp.factory_default_document()["profiles"].values())
@@ -39,6 +40,13 @@ class _WindowController(QtCore.QObject):
         return True
 
     def cancel_regulator_calibration_batch(self):
+        return True
+
+    def start_regulator_calibration_sweep(self, config):
+        self.started_sweep_config = dict(config)
+        return True
+
+    def cancel_regulator_calibration_sweep(self):
         return True
 
 
@@ -171,6 +179,67 @@ def test_regulator_calibration_window_can_select_full_shutdown_handoff(qapp):
     window._on_batch_start_clicked()
 
     assert controller.started_batch_config["serial_handoff_mode"] == "full_disconnect"
+
+    window.close()
+
+
+def test_regulator_calibration_window_sweep_controls_validate_preview_and_start(qapp):
+    controller = _WindowController()
+    window = RegulatorCalibrationWindow(None, SimpleNamespace(), controller)
+
+    assert window.sweep_start_button.isEnabled() is False
+
+    window.sweep_calibrated_head_checkbox.setChecked(True)
+    window.sweep_value_edits[0].setText("3,4")
+    window.sweep_field_combos[1].setCurrentText("slew.max_hz_delta_up_per_loop")
+    window.sweep_value_edits[1].setText("800")
+    qapp.processEvents()
+
+    assert window.sweep_start_button.isEnabled() is True
+    assert "3 candidates" in window.sweep_preview_label.text()
+
+    window._on_sweep_start_clicked()
+
+    assert controller.started_sweep_config["mode"] == "stream"
+    assert controller.started_sweep_config["baseline_profile_id"] == "stream_default"
+    assert controller.started_sweep_config["mutated_channel"] == "print"
+    assert controller.started_sweep_config["sweep_strategy"] == "one_at_a_time"
+    assert controller.started_sweep_config["sweep_fields"] == [
+        {"field_path": "recovery.active_ticks", "values": "3,4"},
+        {"field_path": "slew.max_hz_delta_up_per_loop", "values": "800"},
+    ]
+    assert controller.started_sweep_config["serial_handoff_mode"] == "soft"
+    assert window.start_button.isEnabled() is False
+    assert window.batch_start_button.isEnabled() is False
+    assert window.sweep_start_button.isEnabled() is False
+
+    controller.regulator_calibration_batch_finished.emit(
+        True,
+        "sweep done",
+        {
+            "session_dir": "local/regulator_optimization/session",
+            "manifest": {"analysis": {"candidate_ranking_csv": "local/sweep_ranking.csv"}},
+        },
+    )
+    assert window.sweep_start_button.isEnabled() is True
+    assert window.sweep_path_label.text().endswith("sweep_ranking.csv")
+
+    window.close()
+
+
+def test_regulator_calibration_window_sweep_grid_limit_blocks_start(qapp):
+    controller = _WindowController()
+    window = RegulatorCalibrationWindow(None, SimpleNamespace(), controller)
+
+    window.sweep_calibrated_head_checkbox.setChecked(True)
+    window.sweep_strategy_combo.setCurrentIndex(window.sweep_strategy_combo.findData("grid"))
+    window.sweep_value_edits[0].setText("3,4,5,6")
+    window.sweep_field_combos[1].setCurrentText("slew.max_hz_delta_up_per_loop")
+    window.sweep_value_edits[1].setText("800,900,1000,1100")
+    qapp.processEvents()
+
+    assert window.sweep_start_button.isEnabled() is False
+    assert "exceeds" in window.sweep_preview_label.text()
 
     window.close()
 
