@@ -510,10 +510,10 @@ class MainWindow(QMainWindow):
         self.audit_timeline_button.clicked.connect(self.show_experiment_audit)
         right_layout.addWidget(self.audit_timeline_button)
 
-        self.shortcut_box = ShortcutTableWidget(self,self.shortcut_manager)
-        self.shortcut_box.setStyleSheet(f"background-color: {self.color_dict['darker_gray']};")
-        self.shortcut_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
-        right_layout.addWidget(self.shortcut_box)
+        self.experiment_task_list = ExperimentTaskListWidget(self, self.model, self.controller)
+        self.experiment_task_list.setStyleSheet(f"background-color: {self.color_dict['darker_gray']};")
+        self.experiment_task_list.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
+        right_layout.addWidget(self.experiment_task_list)
 
         # Add the command queue table to the right panel
         self.command_queue_widget = CommandQueueWidget(self,self.controller.machine)
@@ -6170,6 +6170,671 @@ class BoardStatusBox(QGroupBox):
         if self.legacy_mode:
             self.labels['Mass'].setText(str(self.model.calibration_model.get_current_mass()))
             self.labels['Stable'].setText(str(self.model.calibration_model.is_mass_stable()))
+
+class ExperimentTaskListWidget(QGroupBox):
+    """Read-only experiment workflow guide for global readiness and per-head tasks."""
+
+    STATE_LABELS = {
+        "done": "Done",
+        "current": "Current",
+        "waiting": "Waiting",
+        "blocked": "Blocked",
+        "optional": "Optional",
+    }
+    STATE_COLORS = {
+        "done": "#2f855a",
+        "current": "#2b6cb0",
+        "waiting": "#666666",
+        "blocked": "#9b2c2c",
+        "optional": "#805ad5",
+    }
+
+    def __init__(self, main_window, model, controller):
+        super().__init__("EXPERIMENT GUIDE")
+        self.main_window = main_window
+        self.model = model
+        self.controller = controller
+        self.color_dict = getattr(main_window, "color_dict", {}) or {}
+        self._sections = {}
+        self._manual_section_states = {}
+        self._connected_signals = []
+        self._last_experiment_identity = None
+        self._init_ui()
+        self._connect_refresh_signals()
+        self.refresh()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        self.next_label = QLabel("Next: Load or create an experiment")
+        self.next_label.setWordWrap(True)
+        self.next_label.setStyleSheet("color: white; font-weight: bold;")
+        layout.addWidget(self.next_label)
+
+        self.blocking_label = QLabel("")
+        self.blocking_label.setWordWrap(True)
+        self.blocking_label.setStyleSheet(f"color: {self.color_dict.get('light_gray', '#cccccc')};")
+        layout.addWidget(self.blocking_label)
+
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QFrame.NoFrame)
+        self.scroll_area.setFocusPolicy(Qt.NoFocus)
+        self.scroll_widget = QWidget()
+        self.sections_layout = QVBoxLayout(self.scroll_widget)
+        self.sections_layout.setContentsMargins(0, 0, 0, 0)
+        self.sections_layout.setSpacing(6)
+        self.sections_layout.addStretch(1)
+        self.scroll_area.setWidget(self.scroll_widget)
+        layout.addWidget(self.scroll_area, stretch=1)
+
+    def _safe_connect(self, signal, callback):
+        connector = getattr(signal, "connect", None)
+        if not callable(connector):
+            return
+        try:
+            connector(callback)
+            self._connected_signals.append(signal)
+        except Exception:
+            pass
+
+    def _connect_refresh_signals(self):
+        self._safe_connect(getattr(self.model, "experiment_loaded", None), self._on_experiment_loaded)
+        rack = getattr(self.model, "rack_model", None)
+        well_plate = getattr(self.model, "well_plate", None)
+        machine_model = getattr(self.model, "machine_model", None)
+        calibration_manager = getattr(self.model, "calibration_manager", None)
+
+        self._safe_connect(getattr(rack, "gripper_updated", None), self.refresh)
+        self._safe_connect(getattr(rack, "slot_updated", None), self.refresh)
+        self._safe_connect(getattr(well_plate, "well_state_changed_signal", None), self.refresh)
+        self._safe_connect(getattr(well_plate, "clear_all_wells_signal", None), self.refresh)
+        self._safe_connect(getattr(well_plate, "plate_format_changed_signal", None), self.refresh)
+        self._safe_connect(getattr(machine_model, "machine_state_updated", None), self.refresh)
+        self._safe_connect(getattr(machine_model, "home_status_signal", None), self.refresh)
+        self._safe_connect(getattr(machine_model, "regulation_state_changed", None), self.refresh)
+        self._safe_connect(getattr(self.controller, "array_state_changed", None), self.refresh)
+        self._safe_connect(getattr(self.controller, "array_complete", None), self.refresh)
+        self._safe_connect(getattr(calibration_manager, "calibrationCompleted", None), self.refresh)
+        self._safe_connect(getattr(calibration_manager, "calibrationStageChanged", None), self.refresh)
+
+    def _on_experiment_loaded(self, *_args):
+        self._manual_section_states.clear()
+        self.refresh()
+
+    @staticmethod
+    def _call_bool(obj, name, default=False):
+        fn = getattr(obj, name, None)
+        if callable(fn):
+            try:
+                return bool(fn())
+            except Exception:
+                return bool(default)
+        return bool(getattr(obj, name, default))
+
+    @staticmethod
+    def _call_value(obj, name, default=None, *args, **kwargs):
+        fn = getattr(obj, name, None)
+        if callable(fn):
+            try:
+                return fn(*args, **kwargs)
+            except Exception:
+                return default
+        return getattr(obj, name, default)
+
+    def _experiment_identity(self):
+        em = getattr(self.model, "experiment_model", None)
+        for attr in ("experiment_file_path", "experiment_dir_path"):
+            value = getattr(em, attr, None)
+            if value:
+                return str(value)
+        return id(em)
+
+    def _all_wells(self):
+        well_plate = getattr(self.model, "well_plate", None)
+        getter = getattr(well_plate, "get_all_wells", None)
+        if callable(getter):
+            try:
+                return list(getter() or [])
+            except Exception:
+                return []
+        return list(getattr(well_plate, "wells", []) or [])
+
+    def _well_assigned_reaction(self, well):
+        return getattr(well, "assigned_reaction", getattr(well, "assigned_reaction", None))
+
+    def _experiment_ready(self):
+        reaction_collection = getattr(self.model, "reaction_collection", None)
+        is_empty = getattr(reaction_collection, "is_empty", None)
+        if callable(is_empty):
+            try:
+                if bool(is_empty()):
+                    return False
+            except Exception:
+                pass
+
+        return any(self._well_assigned_reaction(well) is not None for well in self._all_wells())
+
+    def _queue_idle(self):
+        checker = getattr(self.controller, "check_if_all_completed", None)
+        if callable(checker):
+            try:
+                return bool(checker())
+            except Exception:
+                return False
+        return True
+
+    def _global_tasks(self):
+        machine_model = getattr(self.model, "machine_model", None)
+        well_plate = getattr(self.model, "well_plate", None)
+        return [
+            {
+                "key": "experiment",
+                "label": "Experiment loaded",
+                "done": self._experiment_ready(),
+                "next": "Load or create an experiment",
+                "blocking": "Open Experiment Editor and generate a print array.",
+            },
+            {
+                "key": "connected",
+                "label": "Machine connected",
+                "done": self._call_bool(machine_model, "is_connected", False),
+                "next": "Connect to the machine",
+                "blocking": "Use the connection controls before preparing the run.",
+            },
+            {
+                "key": "motors_enabled",
+                "label": "Motors enabled",
+                "done": self._call_bool(machine_model, "motors_are_enabled", False),
+                "next": "Enable motors",
+                "blocking": "Motors must be enabled before head handling or printing.",
+            },
+            {
+                "key": "motors_homed",
+                "label": "Motors homed",
+                "done": self._call_bool(machine_model, "motors_are_homed", False),
+                "next": "Home motors",
+                "blocking": "Home the motors before moving to rack, camera, or plate positions.",
+            },
+            {
+                "key": "pressure",
+                "label": "Pressure regulation running",
+                "done": bool(getattr(machine_model, "regulating_print_pressure", False)),
+                "next": "Start pressure regulation",
+                "blocking": "Pressure regulation is required before calibration or array printing.",
+            },
+            {
+                "key": "plate_calibration",
+                "label": "Plate calibration applied",
+                "done": self._call_bool(well_plate, "check_calibration_applied", False),
+                "next": "Apply plate calibration",
+                "blocking": "Calibrate the plate before starting a print array.",
+            },
+            {
+                "key": "queue_idle",
+                "label": "Command queue idle",
+                "done": self._queue_idle(),
+                "next": "Wait for queued commands",
+                "blocking": "The command queue must finish before the next workflow action.",
+            },
+        ]
+
+    def _first_incomplete_global_task(self):
+        for task in self._global_tasks():
+            if not task["done"]:
+                return task
+        return None
+
+    def _active_head(self):
+        rack = getattr(self.model, "rack_model", None)
+        getter = getattr(rack, "get_gripper_printer_head", None)
+        if callable(getter):
+            try:
+                return getter()
+            except Exception:
+                return None
+        return getattr(rack, "gripper_printer_head", None)
+
+    def _head_stock_id(self, head):
+        value = self._call_value(head, "get_stock_id", None)
+        if value is not None:
+            return str(value)
+        stock = getattr(head, "stock_solution", None)
+        value = self._call_value(stock, "get_stock_id", None)
+        return None if value is None else str(value)
+
+    def _head_key(self, head):
+        stock_id = self._head_stock_id(head)
+        if stock_id:
+            return stock_id
+        return str(id(head))
+
+    def _is_calibration_chip(self, head):
+        return self._call_bool(head, "is_calibration_chip", False)
+
+    def _discover_heads(self):
+        heads = []
+        manager = getattr(self.model, "printer_head_manager", None)
+        heads.extend(list(getattr(manager, "printer_heads", []) or []))
+
+        active = self._active_head()
+        if active is not None:
+            heads.append(active)
+
+        rack = getattr(self.model, "rack_model", None)
+        for slot in list(getattr(rack, "slots", []) or []):
+            head = getattr(slot, "printer_head", None)
+            if head is not None:
+                heads.append(head)
+
+        getter = getattr(manager, "get_unassigned_printer_heads", None)
+        if callable(getter):
+            try:
+                heads.extend(list(getter() or []))
+            except Exception:
+                pass
+
+        deduped = []
+        seen = set()
+        for head in heads:
+            if head is None or self._is_calibration_chip(head):
+                continue
+            key = self._head_key(head)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(head)
+        return deduped
+
+    def _display_head_name(self, head):
+        for args in ((False,), tuple()):
+            fn = getattr(head, "get_display_stock_name", None)
+            if callable(fn):
+                try:
+                    value = fn(*args)
+                    if value:
+                        return str(value).replace("\n", " ")
+                except Exception:
+                    pass
+        stock_id = self._head_stock_id(head)
+        if stock_id:
+            stock_manager = getattr(self.model, "stock_solutions", None)
+            formatter = getattr(stock_manager, "get_formatted_from_stock_id", None)
+            if callable(formatter):
+                try:
+                    return str(formatter(stock_id))
+                except Exception:
+                    pass
+            return stock_id
+        return "Printer head"
+
+    def _applied_calibration_record(self, head):
+        em = getattr(self.model, "experiment_model", None)
+        getter = getattr(em, "get_applied_imaging_calibration", None)
+        if callable(getter):
+            try:
+                record = getter(printer_head=head)
+                return record if isinstance(record, dict) else None
+            except Exception:
+                return None
+        return None
+
+    def _head_calibrated(self, head):
+        return self._call_bool(head, "check_calibration_complete", False) or self._applied_calibration_record(head) is not None
+
+    def _reaction_target_for_stock(self, reaction, stock_id):
+        getter = getattr(reaction, "get_target_droplets_for_stock", None)
+        if callable(getter):
+            try:
+                value = getter(stock_id)
+                return int(value or 0)
+            except Exception:
+                return 0
+        reagents = getattr(reaction, "reagents", None)
+        reagent = reagents.get(stock_id) if isinstance(reagents, dict) else None
+        return int(getattr(reagent, "target_droplets", 0) or 0)
+
+    def _well_remaining_for_stock(self, well, stock_id):
+        getter = getattr(well, "get_remaining_droplets", None)
+        if callable(getter):
+            try:
+                return int(getter(stock_id) or 0)
+            except Exception:
+                pass
+        reaction = self._well_assigned_reaction(well)
+        getter = getattr(reaction, "get_remaining_droplets_for_stock", None)
+        if callable(getter):
+            try:
+                return int(getter(stock_id) or 0)
+            except Exception:
+                return 0
+        target = self._reaction_target_for_stock(reaction, stock_id)
+        added = 0
+        reagents = getattr(reaction, "reagents", None)
+        reagent = reagents.get(stock_id) if isinstance(reagents, dict) else None
+        if reagent is not None:
+            added = int(getattr(reagent, "added_droplets", 0) or 0)
+        return max(0, target - added)
+
+    def _head_print_progress(self, head):
+        stock_id = self._head_stock_id(head)
+        total = 0
+        printed = 0
+        remaining_droplets = 0
+        if not stock_id:
+            return {"stock_id": stock_id, "total_wells": 0, "printed_wells": 0, "remaining_droplets": 0}
+
+        for well in self._all_wells():
+            reaction = self._well_assigned_reaction(well)
+            if reaction is None:
+                continue
+            target = self._reaction_target_for_stock(reaction, stock_id)
+            if target <= 0:
+                continue
+            total += 1
+            remaining = self._well_remaining_for_stock(well, stock_id)
+            remaining_droplets += remaining
+            if remaining <= 0:
+                printed += 1
+
+        return {
+            "stock_id": stock_id,
+            "total_wells": total,
+            "printed_wells": printed,
+            "remaining_droplets": remaining_droplets,
+        }
+
+    def _preflight_blocking_message(self):
+        getter = getattr(self.controller, "get_print_array_imaging_calibration_preflight", None)
+        if not callable(getter):
+            return ""
+        try:
+            result = getter() or {}
+        except Exception:
+            return ""
+        if bool(result.get("ok", True)):
+            return ""
+        return str(result.get("message") or "")
+
+    def _head_context(self, head):
+        active = self._active_head()
+        is_active = active is head or (
+            active is not None and self._head_key(active) == self._head_key(head)
+        )
+        applied = self._applied_calibration_record(head) is not None
+        calibrated = self._head_calibrated(head)
+        progress = self._head_print_progress(head)
+        has_work = progress["total_wells"] > 0
+        printed = has_work and progress["remaining_droplets"] <= 0
+        dropped_off = printed and not is_active
+        load_done = is_active or dropped_off
+        queue_idle = self._queue_idle()
+        array_state_getter = getattr(self.controller, "get_array_run_state", None)
+        array_state = array_state_getter() if callable(array_state_getter) else "idle"
+
+        tasks = []
+        tasks.append({"key": "load", "label": "Load printer head", "done": load_done, "blocking": ""})
+        tasks.append({
+            "key": "calibrate",
+            "label": "Calibrate printer head",
+            "done": calibrated,
+            "blocking": "" if is_active else "Load this printer head before calibrating.",
+        })
+        tasks.append({
+            "key": "apply",
+            "label": "Apply calibration to experiment",
+            "done": applied,
+            "blocking": "" if calibrated else "Complete or select a calibration result first.",
+        })
+        tasks.append({
+            "key": "print",
+            "label": "Print array",
+            "done": printed,
+            "blocking": "",
+        })
+        tasks.append({
+            "key": "recheck",
+            "label": "Bookend recheck",
+            "done": False,
+            "optional": True,
+            "blocking": "Optional until this workflow has persisted recheck tracking.",
+        })
+        tasks.append({
+            "key": "dropoff",
+            "label": "Drop off printer head",
+            "done": dropped_off,
+            "blocking": "" if printed else "Print this head's assigned wells first.",
+        })
+
+        if is_active and applied:
+            preflight_message = self._preflight_blocking_message()
+        else:
+            preflight_message = ""
+
+        for task in tasks:
+            task["state"] = "done" if task.get("done") else "waiting"
+
+        current = None
+        if dropped_off:
+            current = None
+        elif not is_active:
+            current = tasks[0]
+        elif not calibrated:
+            current = tasks[1]
+        elif not applied:
+            current = tasks[2]
+        elif has_work and not printed:
+            current = tasks[3]
+        elif printed and is_active:
+            current = tasks[5]
+
+        if current is not None:
+            current["state"] = "current"
+
+        if current is tasks[3]:
+            if not queue_idle:
+                current["state"] = "blocked"
+                current["blocking"] = "The command queue must finish before printing."
+            elif array_state in {"running", "stop_requested"}:
+                current["state"] = "blocked"
+                current["blocking"] = "An array print is already active."
+            elif preflight_message:
+                current["state"] = "blocked"
+                current["blocking"] = preflight_message
+        elif current is tasks[1] and not is_active:
+            current["state"] = "blocked"
+        elif current is tasks[2] and not calibrated:
+            current["state"] = "blocked"
+        elif current is tasks[5] and not printed:
+            current["state"] = "blocked"
+
+        tasks[4]["state"] = "optional"
+
+        done_count = sum(1 for task in tasks if task.get("done") and not task.get("optional"))
+        total_count = sum(1 for task in tasks if not task.get("optional"))
+        return {
+            "head": head,
+            "key": self._head_key(head),
+            "name": self._display_head_name(head),
+            "is_active": is_active,
+            "applied": applied,
+            "calibrated": calibrated,
+            "printed": printed,
+            "progress": progress,
+            "tasks": tasks,
+            "current_task": current,
+            "done_count": done_count,
+            "total_count": total_count,
+        }
+
+    def _choose_next(self, head_contexts):
+        global_task = self._first_incomplete_global_task()
+        if global_task is not None:
+            return f"Next: {global_task['next']}", global_task.get("blocking", "")
+
+        for context in head_contexts:
+            if context["is_active"] and context["current_task"] is not None:
+                task = context["current_task"]
+                return f"Next: {task['label']} for {context['name']}", task.get("blocking", "")
+
+        for context in head_contexts:
+            if context["current_task"] is not None:
+                return f"Next: Load printer head for {context['name']}", ""
+
+        if head_contexts:
+            return "Next: Experiment task list complete", ""
+        return "Next: Add printer heads to the experiment", "Create or load an experiment with reagent assignments."
+
+    def _row_style(self, state):
+        color = self.STATE_COLORS.get(state, "#666666")
+        if state == "current":
+            return f"color: white; background-color: {color}; padding: 2px 4px; border-radius: 2px;"
+        if state == "blocked":
+            return f"color: white; background-color: {color}; padding: 2px 4px; border-radius: 2px;"
+        return f"color: {color};"
+
+    def _make_task_row(self, task):
+        row = QWidget()
+        layout = QVBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(1)
+
+        line = QWidget()
+        line_layout = QHBoxLayout(line)
+        line_layout.setContentsMargins(0, 0, 0, 0)
+        line_layout.setSpacing(6)
+        label = QLabel(str(task.get("label", "")))
+        label.setWordWrap(True)
+        label.setStyleSheet("color: white;")
+        state = str(task.get("state") or ("done" if task.get("done") else "waiting"))
+        state_label = QLabel(self.STATE_LABELS.get(state, state.title()))
+        state_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        state_label.setStyleSheet(self._row_style(state))
+        line_layout.addWidget(label, stretch=1)
+        line_layout.addWidget(state_label)
+        layout.addWidget(line)
+
+        blocking = str(task.get("blocking") or "")
+        if blocking and state in {"blocked", "current", "optional"}:
+            detail = QLabel(blocking)
+            detail.setWordWrap(True)
+            detail.setStyleSheet(f"color: {self.color_dict.get('light_gray', '#cccccc')}; font-size: 10px;")
+            layout.addWidget(detail)
+        return row
+
+    def _clear_layout(self, layout):
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            child_layout = item.layout()
+            if widget is not None:
+                widget.deleteLater()
+            elif child_layout is not None:
+                self._clear_layout(child_layout)
+
+    def _make_section(self, key, title, expanded=False):
+        container = QWidget()
+        outer = QVBoxLayout(container)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(2)
+
+        button = QtWidgets.QToolButton()
+        button.setText(title)
+        button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        button.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+        button.setCheckable(True)
+        button.setChecked(bool(expanded))
+        button.setStyleSheet(
+            f"QToolButton {{ color: white; background-color: {self.color_dict.get('dark_gray', '#444444')};"
+            " border: 0; padding: 5px; text-align: left; font-weight: bold; }}"
+        )
+        outer.addWidget(button)
+
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(8, 4, 4, 6)
+        body_layout.setSpacing(4)
+        body.setVisible(bool(expanded))
+        outer.addWidget(body)
+
+        def _toggle(checked):
+            body.setVisible(bool(checked))
+            button.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
+            self._manual_section_states[key] = bool(checked)
+
+        button.toggled.connect(_toggle)
+        return {"container": container, "button": button, "body": body, "layout": body_layout}
+
+    def _section_expanded(self, key, default=False):
+        if key in self._manual_section_states:
+            return bool(self._manual_section_states[key])
+        return bool(default)
+
+    def _add_section(self, key, title, rows, expanded=False):
+        section = self._make_section(key, title, expanded=expanded)
+        for row in rows:
+            section["layout"].addWidget(row)
+        insert_index = max(0, self.sections_layout.count() - 1)
+        self.sections_layout.insertWidget(insert_index, section["container"])
+        self._sections[key] = section
+        return section
+
+    def _render_global_section(self):
+        rows = []
+        first_incomplete = self._first_incomplete_global_task()
+        current_key = None if first_incomplete is None else first_incomplete.get("key")
+        for task in self._global_tasks():
+            state = "done" if task["done"] else ("current" if task.get("key") == current_key else "waiting")
+            rows.append(self._make_task_row({"label": task["label"], "state": state, "blocking": task.get("blocking", "")}))
+        expanded = self._section_expanded("global", default=first_incomplete is not None)
+        self._add_section("global", "Run Readiness", rows, expanded=expanded)
+
+    def _render_head_section(self, context):
+        progress = context["progress"]
+        printed = progress["printed_wells"]
+        total = progress["total_wells"]
+        title = (
+            f"{context['name']} | {context['done_count']}/{context['total_count']} | "
+            f"{printed}/{total} wells"
+        )
+        if context["is_active"]:
+            title += " | Loaded"
+        elif context["current_task"] is None:
+            title += " | Complete"
+        section_key = f"head:{context['key']}"
+        rows = [self._make_task_row(task) for task in context["tasks"]]
+        expanded = True if context["is_active"] else self._section_expanded(section_key, default=False)
+        self._add_section(section_key, title, rows, expanded=expanded)
+
+    def refresh(self, *_args):
+        current_identity = self._experiment_identity()
+        if self._last_experiment_identity is None:
+            self._last_experiment_identity = current_identity
+        elif current_identity != self._last_experiment_identity:
+            self._last_experiment_identity = current_identity
+            self._manual_section_states.clear()
+
+        self._clear_layout(self.sections_layout)
+        self._sections.clear()
+        self.sections_layout.addStretch(1)
+
+        head_contexts = [self._head_context(head) for head in self._discover_heads()]
+        next_text, blocking_text = self._choose_next(head_contexts)
+        self.next_label.setText(next_text)
+        self.blocking_label.setText(blocking_text)
+        self.blocking_label.setVisible(bool(blocking_text))
+
+        self._render_global_section()
+        if head_contexts:
+            for context in head_contexts:
+                self._render_head_section(context)
+        else:
+            empty = QLabel("No printer heads found for the current experiment.")
+            empty.setWordWrap(True)
+            empty.setStyleSheet(f"color: {self.color_dict.get('light_gray', '#cccccc')};")
+            self.sections_layout.insertWidget(max(0, self.sections_layout.count() - 1), empty)
 
 class ShortcutTableWidget(QGroupBox):
     """
