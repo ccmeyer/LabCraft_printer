@@ -6,23 +6,26 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import math
-import statistics
+import sys
 from pathlib import Path
 from typing import Iterable
+
+TOOLS_DIR = Path(__file__).resolve().parent
+if str(TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOLS_DIR))
+
+from regulator_trace_analysis import (
+    FLAG_PRESSURE_OK,
+    FLAG_QUIET,
+    FLAG_RECOVERY,
+    FLAG_REJECTED,
+    analyze_trace as _shared_analyze_trace,
+)
 
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-
-
-FLAG_PRESSURE_OK = 0x01
-FLAG_STEPPING = 0x02
-FLAG_DIR = 0x04
-FLAG_QUIET = 0x08
-FLAG_RECOVERY = 0x10
-FLAG_REJECTED = 0x20
 
 
 EVENT_STYLE = {
@@ -46,168 +49,16 @@ def _ms(values: Iterable[int]) -> list[float]:
     return [float(v) for v in values]
 
 
-def _percentile(values: list[float], p: float) -> float:
-    if not values:
-        return 0.0
-    if len(values) == 1:
-        return values[0]
-    idx = (len(values) - 1) * p
-    lo = int(math.floor(idx))
-    hi = int(math.ceil(idx))
-    if lo == hi:
-        return values[lo]
-    frac = idx - lo
-    return values[lo] * (1.0 - frac) + values[hi] * frac
-
-
-def _series_stats(values: list[float]) -> dict[str, float]:
-    if not values:
-        return {"min": 0.0, "max": 0.0, "mean": 0.0, "median": 0.0, "p95": 0.0}
-    s = sorted(values)
-    return {
-        "min": float(s[0]),
-        "max": float(s[-1]),
-        "mean": float(sum(values) / len(values)),
-        "median": float(statistics.median(s)),
-        "p95": float(_percentile(s, 0.95)),
-    }
-
-
-def _first_index_at_or_after(times_ms: list[float], dt_ms: float) -> int:
-    for i, t in enumerate(times_ms):
-        if t >= dt_ms:
-            return i
-    return len(times_ms) - 1
-
-
 def _analyze_trace(obj: dict) -> dict:
-    samples = _safe_list(obj, "samples")
-    events = _safe_list(obj, "events")
-    if not samples:
-        return {"error": "no samples"}
-
-    t_ms = _ms(s.get("dt_ms", 0) for s in samples)
-    raw_p = [float(s.get("raw_pressure", 0)) for s in samples]
-    tgt_p = [float(s.get("target", 0)) for s in samples]
-    err = [float(s.get("error", 0)) for s in samples]
-    req_hz = [float(s.get("requested_hz", 0)) for s in samples]
-    app_hz = [float(s.get("applied_hz", 0)) for s in samples]
-    ff_hz = [float(s.get("ff_boost_hz", 0)) for s in samples]
-    flags = [int(s.get("flags", 0)) for s in samples]
-
-    # Sample period and duty ratios
-    dt_steps = [t_ms[i + 1] - t_ms[i] for i in range(len(t_ms) - 1)]
-    pressure_ok_ratio = sum(1 for f in flags if (f & FLAG_PRESSURE_OK)) / float(len(flags))
-    recovery_ratio = sum(1 for f in flags if (f & FLAG_RECOVERY)) / float(len(flags))
-    quiet_ratio = sum(1 for f in flags if (f & FLAG_QUIET)) / float(len(flags))
-    rejected_ratio = sum(1 for f in flags if (f & FLAG_REJECTED)) / float(len(flags))
-
-    # Event timelines
-    pulse_start = sorted(float(e.get("dt_ms", 0)) for e in events if e.get("event_name") == "pulse_start")
-    pulse_end = sorted(float(e.get("dt_ms", 0)) for e in events if e.get("event_name") == "pulse_end")
-    ready_enter = sorted(float(e.get("dt_ms", 0)) for e in events if e.get("event_name") == "ready_enter")
-
-    pulse_intervals = [pulse_start[i + 1] - pulse_start[i] for i in range(len(pulse_start) - 1)]
-    pulse_interval_stats = _series_stats([float(v) for v in pulse_intervals]) if pulse_intervals else _series_stats([])
-
-    per_pulse: list[dict] = []
-    for i, pe in enumerate(pulse_end):
-        start_idx = _first_index_at_or_after(t_ms, pe)
-        if i + 1 < len(pulse_end):
-            next_end = pulse_end[i + 1]
-            end_idx = _first_index_at_or_after(t_ms, next_end)
-        else:
-            end_idx = len(t_ms) - 1
-        if end_idx < start_idx:
-            end_idx = start_idx
-
-        seg_err = err[start_idx : end_idx + 1]
-        seg_raw = raw_p[start_idx : end_idx + 1]
-        seg_t = t_ms[start_idx : end_idx + 1]
-
-        trough_error = min(seg_err) if seg_err else 0.0
-        trough_idx_local = seg_err.index(trough_error) if seg_err else 0
-        trough_t = seg_t[trough_idx_local] if seg_t else pe
-        trough_pressure = min(seg_raw) if seg_raw else 0.0
-
-        rec_dt = None
-        for dt in ready_enter:
-            if dt >= pe:
-                rec_dt = dt
-                break
-        recovery_ms = None if rec_dt is None else (rec_dt - pe)
-
-        overshoot_after_recovery = 0.0
-        if rec_dt is not None:
-            rec_idx = _first_index_at_or_after(t_ms, rec_dt)
-            tail = err[rec_idx : end_idx + 1]
-            overshoot_after_recovery = max(tail) if tail else 0.0
-
-        per_pulse.append(
-            {
-                "pulse_index": i + 1,
-                "pulse_end_ms": pe,
-                "trough_error_raw": trough_error,
-                "trough_pressure_raw": trough_pressure,
-                "time_to_trough_ms": trough_t - pe,
-                "recovery_ms": recovery_ms,
-                "overshoot_after_recovery_raw": overshoot_after_recovery,
-            }
-        )
-
-    recovery_vals = [float(p["recovery_ms"]) for p in per_pulse if p["recovery_ms"] is not None]
-    trough_vals = [float(p["trough_error_raw"]) for p in per_pulse]
-    overshoot_vals = [float(p["overshoot_after_recovery_raw"]) for p in per_pulse]
-
-    diagnosis = []
-    if recovery_vals and pulse_intervals:
-        if statistics.median(recovery_vals) > 0.6 * statistics.median(pulse_intervals):
-            diagnosis.append("slow_recovery_vs_pulse_interval")
-    if trough_vals and abs(min(trough_vals)) > 2.5 * max(1.0, max(overshoot_vals) if overshoot_vals else 1.0):
-        diagnosis.append("undershoot_dominant")
-    if overshoot_vals and max(overshoot_vals) > 0.4 * max(1.0, abs(min(trough_vals)) if trough_vals else 1.0):
-        diagnosis.append("overshoot_notable")
-    if pulse_interval_stats["max"] > 0:
-        jitter = pulse_interval_stats["max"] - pulse_interval_stats["min"]
-        if jitter > 20.0:
-            diagnosis.append("pulse_timing_jitter_high")
-    if not diagnosis:
-        diagnosis.append("balanced_or_inconclusive")
-
-    return {
-        "run_id": obj.get("run_id"),
-        "test_id": obj.get("test_id"),
-        "name": obj.get("name"),
-        "summary_metrics": obj.get("summary", {}),
-        "global": {
-            "sample_count": len(samples),
-            "event_count": len(events),
-            "duration_ms": t_ms[-1] - t_ms[0] if t_ms else 0.0,
-            "sample_period_ms": _series_stats([float(v) for v in dt_steps]),
-            "pulse_count": len(pulse_end),
-            "pulse_interval_ms": pulse_interval_stats,
-            "pressure_raw": _series_stats(raw_p),
-            "target_raw": _series_stats(tgt_p),
-            "error_raw": _series_stats(err),
-            "requested_hz": _series_stats(req_hz),
-            "applied_hz": _series_stats(app_hz),
-            "ff_boost_hz": _series_stats(ff_hz),
-            "duty_ratios": {
-                "pressure_ok_ratio": pressure_ok_ratio,
-                "recovery_active_ratio": recovery_ratio,
-                "quiet_active_ratio": quiet_ratio,
-                "sample_rejected_ratio": rejected_ratio,
-            },
-            "recovery_ms": _series_stats(recovery_vals),
-            "trough_error_raw": _series_stats(trough_vals),
-            "overshoot_after_recovery_raw": _series_stats(overshoot_vals),
-        },
-        "per_pulse": per_pulse,
-        "diagnosis": diagnosis,
-    }
+    return _shared_analyze_trace(obj)
 
 
-def render_trace_file(path: Path, out_dir: Path, dpi: int = 150) -> tuple[Path, Path, Path, dict]:
+def render_trace_file(
+    path: Path,
+    out_dir: Path,
+    dpi: int = 150,
+    analysis_dir: Path | None = None,
+) -> tuple[Path, Path, Path, dict]:
     obj = json.loads(path.read_text(encoding="utf-8"))
     samples = _safe_list(obj, "samples")
     events = _safe_list(obj, "events")
@@ -290,11 +141,13 @@ def render_trace_file(path: Path, out_dir: Path, dpi: int = 150) -> tuple[Path, 
     fig.savefig(out_path, dpi=dpi)
     plt.close(fig)
 
+    analysis_base = analysis_dir or out_dir
+    analysis_base.mkdir(parents=True, exist_ok=True)
     analysis = _analyze_trace(obj)
-    analysis_json = out_dir / f"{path.stem}.analysis.json"
+    analysis_json = analysis_base / f"{path.stem}.analysis.json"
     analysis_json.write_text(json.dumps(analysis, indent=2), encoding="utf-8")
 
-    per_pulse_csv = out_dir / f"{path.stem}.per_pulse.csv"
+    per_pulse_csv = analysis_base / f"{path.stem}.per_pulse.csv"
     with per_pulse_csv.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(
             f,
