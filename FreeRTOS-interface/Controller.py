@@ -74,6 +74,11 @@ class Controller(QObject):
     qualification_campaign_event = QtCore.Signal(object)
     qualification_finished = QtCore.Signal(bool, str, object)
 
+    # Regulator calibration run signals
+    regulator_calibration_stage = QtCore.Signal(str)
+    regulator_calibration_output = QtCore.Signal(str)
+    regulator_calibration_finished = QtCore.Signal(bool, str, object)
+
     # Application update check signals
     app_update_check_started = QtCore.Signal()
     app_update_check_finished = QtCore.Signal(object)
@@ -108,6 +113,8 @@ class Controller(QObject):
 
         self._dfu_thread: DfuUpdateWorker | None = None
         self._qualification_worker = None
+        self._regulator_calibration_worker = None
+        self._regulator_calibration_state = None
         self._app_update_process = None
         self._app_update_check_thread = None
         self._app_update_check_worker = None
@@ -428,7 +435,10 @@ class Controller(QObject):
 
     def get_machine_port(self):
         """Get the currently connected machine port."""
-        return self.machine.get_machine_port()
+        getter = getattr(self.machine, "get_machine_port", None)
+        if callable(getter):
+            return getter()
+        return getattr(self.machine, "port", "")
 
     # def connect_balance(self, port):
     #     """Connect to the microbalance."""
@@ -605,6 +615,12 @@ class Controller(QObject):
         except Exception:
             pass
 
+        try:
+            if self.is_regulator_calibration_running():
+                blockers.append("Regulator calibration is running.")
+        except Exception:
+            pass
+
         array_state = str(getattr(self, "_array_state", "idle") or "idle")
         if array_state != "idle":
             blockers.append(f"Print array state is {array_state}.")
@@ -777,6 +793,493 @@ class Controller(QObject):
     def _on_qualification_finished(self, ok, message, payload):
         self.qualification_finished.emit(bool(ok), str(message), payload)
         self._qualification_worker = None
+
+    def regulator_calibration_output_root(self):
+        return self._repo_root / "local" / "regulator_optimization"
+
+    def is_regulator_calibration_running(self):
+        worker = getattr(self, "_regulator_calibration_worker", None)
+        is_running = getattr(worker, "isRunning", None)
+        worker_running = bool(worker is not None and callable(is_running) and is_running())
+        return worker_running or getattr(self, "_regulator_calibration_state", None) is not None
+
+    def _emit_regulator_calibration_signal(self, signal_name, *args):
+        signal = getattr(self, signal_name, None)
+        emit = getattr(signal, "emit", None)
+        if callable(emit):
+            emit(*args)
+
+    def _regulator_profile_document(self):
+        store = getattr(getattr(self, "model", None), "regulator_profile_store", None)
+        if store is not None:
+            document = getattr(store, "document", None)
+            if document is None:
+                return store.load()
+            return document
+        return getattr(getattr(self, "model", None), "regulator_profiles", None)
+
+    def list_regulator_calibration_profiles(self):
+        try:
+            store = getattr(getattr(self, "model", None), "regulator_profile_store", None)
+            if store is not None and hasattr(store, "list_profiles"):
+                return store.list_profiles()
+            document = self._regulator_profile_document()
+            profiles = (document or {}).get("profiles", {})
+            return [profiles[key] for key in sorted(profiles)]
+        except Exception as exc:
+            self._emit_regulator_calibration_signal(
+                "regulator_calibration_output",
+                f"Could not load regulator profiles: {exc}",
+            )
+            return []
+
+    def start_regulator_calibration_run(self, config, trace_worker_factory=None):
+        if self.is_regulator_calibration_running():
+            self._emit_regulator_calibration_signal(
+                "regulator_calibration_output",
+                "A regulator calibration run is already active.",
+            )
+            return False
+
+        from RegulatorCalibrationRunner import (
+            RegulatorCalibrationError,
+            prepare_regulator_calibration_run,
+            write_run_metadata,
+        )
+
+        run_config = dict(config or {})
+        dry_run = bool(run_config.get("dry_run", False))
+        try:
+            prepared = prepare_regulator_calibration_run(
+                run_config,
+                profile_document=self._regulator_profile_document(),
+                output_root=run_config.get("output_root") or self.regulator_calibration_output_root(),
+            )
+        except RegulatorCalibrationError as exc:
+            self._emit_regulator_calibration_signal("regulator_calibration_output", str(exc))
+            return False
+
+        if dry_run:
+            try:
+                metadata = write_run_metadata(
+                    prepared,
+                    status="completed",
+                    restored_previous_profile=True,
+                    error_message="",
+                    trace_files=[],
+                )
+            except Exception as exc:
+                self._emit_regulator_calibration_signal(
+                    "regulator_calibration_output",
+                    f"Could not write regulator calibration dry-run metadata: {exc}",
+                )
+                return False
+            payload = self._regulator_calibration_payload(prepared, metadata=metadata)
+            self._emit_regulator_calibration_signal("regulator_calibration_stage", "Dry run complete")
+            self._emit_regulator_calibration_signal(
+                "regulator_calibration_finished",
+                True,
+                f"Regulator calibration dry run wrote {prepared.run_dir}",
+                payload,
+            )
+            return True
+
+        if not self._regulator_calibration_machine_connected():
+            self._emit_regulator_calibration_signal(
+                "regulator_calibration_output",
+                "Machine must be connected before starting regulator calibration.",
+            )
+            return False
+
+        try:
+            if not self.check_if_all_completed():
+                self._emit_regulator_calibration_signal(
+                    "regulator_calibration_output",
+                    "Command queue must be idle before starting regulator calibration.",
+                )
+                return False
+        except Exception:
+            self._emit_regulator_calibration_signal(
+                "regulator_calibration_output",
+                "Command queue state could not be checked.",
+            )
+            return False
+
+        port = str(run_config.get("port") or self.get_machine_port() or "").strip()
+        if not port:
+            self._emit_regulator_calibration_signal(
+                "regulator_calibration_output",
+                "Machine serial port is not available for pressure trace capture.",
+            )
+            return False
+        baud = int(run_config.get("baud") or getattr(self.machine, "baud", 115200) or 115200)
+
+        self._regulator_calibration_state = {
+            "prepared": prepared,
+            "config": run_config,
+            "port": port,
+            "baud": baud,
+            "trace_worker_factory": trace_worker_factory,
+            "candidate_commands_queued": False,
+            "candidate_applied": False,
+            "cancel_requested": False,
+            "trace_ok": False,
+            "trace_message": "",
+            "trace_payload": {},
+            "restore_in_progress": False,
+        }
+        try:
+            write_run_metadata(
+                prepared,
+                status="failed",
+                restored_previous_profile=False,
+                error_message="Run started but did not complete.",
+                trace_files=[],
+            )
+        except Exception as exc:
+            self._regulator_calibration_state = None
+            self._emit_regulator_calibration_signal(
+                "regulator_calibration_output",
+                f"Could not initialize regulator calibration metadata: {exc}",
+            )
+            return False
+
+        self._emit_regulator_calibration_signal("regulator_calibration_stage", "Applying candidate profile")
+        try:
+            self._queue_regulator_calibration_candidate()
+        except Exception as exc:
+            self._handle_regulator_calibration_failure(
+                f"Could not queue regulator candidate profile: {exc}",
+                restore_if_needed=bool(self._regulator_calibration_state.get("candidate_commands_queued")),
+            )
+            return True
+        return True
+
+    def cancel_regulator_calibration_run(self):
+        state = getattr(self, "_regulator_calibration_state", None)
+        if state is None:
+            return False
+        state["cancel_requested"] = True
+        self._emit_regulator_calibration_signal("regulator_calibration_stage", "Cancel requested")
+        worker = getattr(self, "_regulator_calibration_worker", None)
+        cancel = getattr(worker, "cancel", None)
+        if callable(cancel):
+            cancel()
+        if not state.get("candidate_commands_queued"):
+            self._finish_regulator_calibration(
+                ok=False,
+                status="canceled",
+                message="Regulator calibration canceled before candidate application.",
+                restored_previous_profile=False,
+                error_message="Canceled before candidate application.",
+            )
+        elif state.get("candidate_applied") and worker is None and not state.get("restore_in_progress"):
+            self._restore_regulator_calibration(
+                final_status="canceled",
+                final_ok=False,
+                final_message="Regulator calibration canceled.",
+                error_message="Canceled.",
+            )
+        return True
+
+    def _regulator_calibration_machine_connected(self):
+        machine_model = getattr(getattr(self, "model", None), "machine_model", None)
+        is_connected = getattr(machine_model, "is_connected", None)
+        if callable(is_connected):
+            return bool(is_connected())
+        return bool(getattr(machine_model, "machine_connected", False))
+
+    def _queue_regulator_calibration_candidate(self):
+        state = self._regulator_calibration_state
+        prepared = state["prepared"]
+        channels = list(prepared.trace_case.channels)
+        for channel_index, channel in enumerate(channels):
+            channel_profile = prepared.candidate_profile[channel]
+            last_channel = channel_index == len(channels) - 1
+            recovery = self.set_regulator_recovery_profile(
+                channel,
+                channel_profile["recovery"],
+                manual=True,
+            )
+            self._assert_regulator_command_queued(recovery, "recovery", channel)
+            state["candidate_commands_queued"] = True
+
+            slew = self.set_regulator_slew_profile(
+                channel,
+                channel_profile["slew"],
+                manual=True,
+            )
+            self._assert_regulator_command_queued(slew, "slew", channel)
+
+            ready = self.set_regulator_ready_profile(
+                channel,
+                channel_profile["ready"],
+                handler=self._on_regulator_calibration_candidate_applied if last_channel else None,
+                manual=True,
+            )
+            self._assert_regulator_command_queued(ready, "ready", channel)
+
+    @staticmethod
+    def _assert_regulator_command_queued(command_or_commands, section, channel):
+        if command_or_commands is False or command_or_commands is None:
+            raise RuntimeError(f"{section} profile command for {channel} was rejected")
+        if isinstance(command_or_commands, (list, tuple)) and not command_or_commands:
+            raise RuntimeError(f"{section} profile command for {channel} did not queue commands")
+
+    def _on_regulator_calibration_candidate_applied(self):
+        state = getattr(self, "_regulator_calibration_state", None)
+        if state is None:
+            return
+        state["candidate_applied"] = True
+        if state.get("cancel_requested"):
+            self._restore_regulator_calibration(
+                final_status="canceled",
+                final_ok=False,
+                final_message="Regulator calibration canceled after candidate application.",
+                error_message="Canceled after candidate application.",
+            )
+            return
+        self._emit_regulator_calibration_signal("regulator_calibration_stage", "Releasing app serial port")
+        self._disconnect_for_regulator_calibration_trace()
+
+    def _connect_once(self, signal, callback):
+        if signal is None or not hasattr(signal, "connect"):
+            return False
+
+        def _wrapper(*args):
+            try:
+                signal.disconnect(_wrapper)
+            except Exception:
+                pass
+            callback(*args)
+
+        signal.connect(_wrapper)
+        return True
+
+    def _disconnect_for_regulator_calibration_trace(self):
+        signal = getattr(self.machine, "disconnect_complete_signal", None)
+        connected = self._connect_once(
+            signal,
+            lambda *_args: self._start_regulator_calibration_trace_worker(),
+        )
+        try:
+            self.disconnect_machine()
+        except Exception as exc:
+            self._handle_regulator_calibration_failure(
+                f"Could not release app serial port for pressure trace: {exc}",
+                restore_if_needed=True,
+            )
+            return
+        if not connected:
+            self._start_regulator_calibration_trace_worker()
+
+    def _start_regulator_calibration_trace_worker(self):
+        state = getattr(self, "_regulator_calibration_state", None)
+        if state is None:
+            return
+        if state.get("cancel_requested"):
+            self._restore_regulator_calibration(
+                final_status="canceled",
+                final_ok=False,
+                final_message="Regulator calibration canceled before trace capture.",
+                error_message="Canceled before trace capture.",
+            )
+            return
+
+        from RegulatorCalibrationRunner import RegulatorTraceProcessWorker
+
+        prepared = state["prepared"]
+        factory = state.get("trace_worker_factory")
+        if callable(factory):
+            worker = factory(
+                prepared,
+                state["port"],
+                state["baud"],
+                self._repo_root,
+                self._repo_root / "tools" / "run_selftest.py",
+            )
+        else:
+            worker = RegulatorTraceProcessWorker(
+                prepared,
+                port=state["port"],
+                baud=state["baud"],
+                repo_root=self._repo_root,
+                run_selftest_path=self._repo_root / "tools" / "run_selftest.py",
+                timeout_ms=state["config"].get("timeout_ms"),
+            )
+        self._regulator_calibration_worker = worker
+        self._connect_signal_if_present(worker, "stage", lambda msg: self._emit_regulator_calibration_signal("regulator_calibration_stage", msg))
+        self._connect_signal_if_present(worker, "output", lambda msg: self._emit_regulator_calibration_signal("regulator_calibration_output", msg))
+        self._connect_signal_if_present(worker, "run_finished", self._on_regulator_calibration_trace_finished)
+        worker.start()
+
+    @staticmethod
+    def _connect_signal_if_present(obj, signal_name, callback):
+        signal = getattr(obj, signal_name, None)
+        connect = getattr(signal, "connect", None)
+        if callable(connect):
+            connect(callback)
+
+    @QtCore.Slot(bool, str, object)
+    def _on_regulator_calibration_trace_finished(self, ok, message, payload):
+        state = getattr(self, "_regulator_calibration_state", None)
+        self._regulator_calibration_worker = None
+        if state is None:
+            return
+        state["trace_ok"] = bool(ok)
+        state["trace_message"] = str(message or "")
+        state["trace_payload"] = dict(payload or {})
+        self._emit_regulator_calibration_signal("regulator_calibration_stage", "Reconnecting app serial port")
+        self._reconnect_after_regulator_calibration_trace()
+
+    def _reconnect_after_regulator_calibration_trace(self):
+        state = getattr(self, "_regulator_calibration_state", None)
+        if state is None:
+            return
+        signal = getattr(self.machine, "machine_connected_signal", None)
+
+        def _on_connected(connected):
+            if connected:
+                self._restore_regulator_calibration(
+                    final_status="completed" if state.get("trace_ok") and not state.get("cancel_requested") else (
+                        "canceled" if state.get("cancel_requested") else "failed"
+                    ),
+                    final_ok=bool(state.get("trace_ok") and not state.get("cancel_requested")),
+                    final_message=state.get("trace_message") or "Pressure trace finished.",
+                    error_message="" if state.get("trace_ok") and not state.get("cancel_requested") else state.get("trace_message", ""),
+                )
+            else:
+                self._finish_regulator_calibration(
+                    ok=False,
+                    status="restore_failed",
+                    message="Could not reconnect to restore regulator profile.",
+                    restored_previous_profile=False,
+                    error_message="Reconnect failed before restore.",
+                )
+
+        connected = self._connect_once(signal, _on_connected)
+        try:
+            self.connect_machine(state["port"])
+        except Exception as exc:
+            self._finish_regulator_calibration(
+                ok=False,
+                status="restore_failed",
+                message=f"Could not reconnect to restore regulator profile: {exc}",
+                restored_previous_profile=False,
+                error_message=str(exc),
+            )
+            return
+        if not connected:
+            _on_connected(True)
+
+    def _restore_regulator_calibration(self, *, final_status, final_ok, final_message, error_message):
+        state = getattr(self, "_regulator_calibration_state", None)
+        if state is None:
+            return
+        state["restore_in_progress"] = True
+        self._emit_regulator_calibration_signal("regulator_calibration_stage", "Restoring regulator profile")
+
+        def _on_restore_complete():
+            self._finish_regulator_calibration(
+                ok=bool(final_ok),
+                status=final_status,
+                message=final_message,
+                restored_previous_profile=True,
+                error_message=error_message,
+            )
+
+        restore = self.restore_regulator_profile(
+            list(state["prepared"].trace_case.channels),
+            source="baseline",
+            handler=_on_restore_complete,
+            manual=True,
+        )
+        if restore is False or restore is None:
+            self._finish_regulator_calibration(
+                ok=False,
+                status="restore_failed",
+                message="Could not queue regulator profile restore.",
+                restored_previous_profile=False,
+                error_message="Restore command was rejected.",
+            )
+
+    def _handle_regulator_calibration_failure(self, message, *, restore_if_needed):
+        state = getattr(self, "_regulator_calibration_state", None)
+        self._emit_regulator_calibration_signal("regulator_calibration_output", str(message))
+        if state is not None and restore_if_needed:
+            self._restore_regulator_calibration(
+                final_status="failed",
+                final_ok=False,
+                final_message=str(message),
+                error_message=str(message),
+            )
+            return
+        self._finish_regulator_calibration(
+            ok=False,
+            status="failed",
+            message=str(message),
+            restored_previous_profile=False,
+            error_message=str(message),
+        )
+
+    def _finish_regulator_calibration(
+        self,
+        *,
+        ok,
+        status,
+        message,
+        restored_previous_profile,
+        error_message,
+    ):
+        from RegulatorCalibrationRunner import write_run_metadata
+
+        state = getattr(self, "_regulator_calibration_state", None)
+        if state is None:
+            return
+        prepared = state["prepared"]
+        trace_payload = dict(state.get("trace_payload") or {})
+        trace_files = trace_payload.get("trace_files")
+        try:
+            metadata = write_run_metadata(
+                prepared,
+                status=status,
+                restored_previous_profile=restored_previous_profile,
+                error_message=error_message,
+                trace_files=trace_files,
+            )
+            payload = self._regulator_calibration_payload(prepared, metadata=metadata, trace_payload=trace_payload)
+        except Exception as exc:
+            ok = False
+            message = f"{message} Metadata write failed: {exc}"
+            payload = self._regulator_calibration_payload(prepared, metadata=None, trace_payload=trace_payload)
+            payload["metadata_error"] = str(exc)
+
+        self._emit_regulator_calibration_signal("regulator_calibration_stage", "Finished" if ok else "Failed")
+        self._emit_regulator_calibration_signal(
+            "regulator_calibration_finished",
+            bool(ok),
+            str(message),
+            payload,
+        )
+        self._regulator_calibration_worker = None
+        self._regulator_calibration_state = None
+
+    @staticmethod
+    def _regulator_calibration_payload(prepared, *, metadata=None, trace_payload=None):
+        payload = {
+            "run_id": prepared.run_id,
+            "session_id": prepared.session_id,
+            "run_dir": str(prepared.run_dir),
+            "run_meta_path": str(prepared.run_dir / "run_meta.json"),
+            "raw_selftest_path": str(prepared.raw_selftest_path),
+            "trace_case_id": prepared.trace_case.test_id,
+            "trace_case_name": prepared.trace_case.name,
+        }
+        if metadata is not None:
+            payload["metadata"] = metadata
+        if trace_payload:
+            payload["trace"] = dict(trace_payload)
+        return payload
 
     def reset_mcu_board(self):
         """Reset the MCU board."""

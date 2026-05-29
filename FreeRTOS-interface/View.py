@@ -4005,6 +4005,7 @@ class SpeedProfilesTab(QtWidgets.QWidget):
         self.setObjectName("SpeedProfilesTab")
         self._dfu_manual_session = False 
         self._qualification_window = None
+        self._regulator_calibration_window = None
 
         # Prevent feedback loops when we update widgets from model signals
         self._updating = False
@@ -4123,6 +4124,12 @@ class SpeedProfilesTab(QtWidgets.QWidget):
         self.machine_qualification_button.setFocusPolicy(QtCore.Qt.NoFocus)
         self.machine_qualification_button.clicked.connect(self._on_machine_qualification_requested)
         fw_v.addWidget(self.machine_qualification_button)
+
+        self.regulator_calibration_button = QtWidgets.QPushButton("Regulator Calibration...")
+        self.regulator_calibration_button.setObjectName("regulatorCalibrationButton")
+        self.regulator_calibration_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.regulator_calibration_button.clicked.connect(self._on_regulator_calibration_requested)
+        fw_v.addWidget(self.regulator_calibration_button)
 
         layout.addWidget(fw_group, row_after_table + 1, 0, 1, 3)
 
@@ -4493,6 +4500,32 @@ class SpeedProfilesTab(QtWidgets.QWidget):
         self._qualification_window.show()
         self._qualification_window.raise_()
         self._qualification_window.activateWindow()
+
+    @QtCore.Slot()
+    def _on_regulator_calibration_requested(self):
+        window = getattr(self, "_regulator_calibration_window", None)
+        if window is not None:
+            try:
+                window.show()
+                window.raise_()
+                window.activateWindow()
+                return
+            except RuntimeError:
+                self._regulator_calibration_window = None
+
+        from RegulatorCalibrationWindow import RegulatorCalibrationWindow
+
+        self._regulator_calibration_window = RegulatorCalibrationWindow(
+            self.main_window,
+            self.model,
+            self.controller,
+        )
+        self._regulator_calibration_window.destroyed.connect(
+            lambda *_args: setattr(self, "_regulator_calibration_window", None)
+        )
+        self._regulator_calibration_window.show()
+        self._regulator_calibration_window.raise_()
+        self._regulator_calibration_window.activateWindow()
 
     @QtCore.Slot()
     def _on_reset_mcu_requested(self):

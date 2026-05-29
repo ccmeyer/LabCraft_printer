@@ -404,6 +404,14 @@ class RegulatorProfileStore:
         profile = self.document.get("profiles", {}).get(active_profile_id)
         return copy.deepcopy(profile) if profile is not None else None
 
+    def list_profiles(self):
+        self._ensure_loaded()
+        profiles = self.document.get("profiles", {})
+        return [
+            copy.deepcopy(profiles[profile_id])
+            for profile_id in sorted(profiles)
+        ]
+
     def upsert_profile(self, profile, make_active=False):
         self._ensure_loaded()
         validated_profile = validate_profile(profile)
