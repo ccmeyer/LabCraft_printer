@@ -3338,6 +3338,85 @@ class Machine(QObject):
 
         self.disconnect_complete_signal.emit()
 
+    def release_serial_for_external_owner(self, reason="external_owner"):
+        """
+        Temporarily release the COM port without sending GOODBYE.
+
+        This is intentionally narrower than disconnect_board(): it is used by
+        regulator calibration to hand the port to the pressure-trace self-test
+        runner while leaving MCU runtime state intact.
+        """
+        ser = self.ser
+        if ser is None or not getattr(ser, "is_open", False):
+            print(f"Cannot release serial port for {reason}: serial port is not open.")
+            return False
+
+        timer_was_active = False
+        if getattr(self, "execution_timer", None) is not None:
+            try:
+                timer_was_active = bool(self.execution_timer.isActive())
+                self.stop_execution_timer()
+            except Exception:
+                timer_was_active = False
+
+        previous_transport_ready = bool(getattr(self, "_transport_ready", False))
+        previous_tx_paused = bool(getattr(self, "_tx_paused", False))
+        self._cancel_pending_acks()
+
+        serial_reader = self.reader
+        log_reader = self.log_reader
+        if log_reader is not None:
+            self._disconnect_log_reader_signals(log_reader)
+
+        print(f"Releasing serial port for {reason} without GOODBYE...")
+        self._request_reader_stop(serial_reader, "Serial reader thread")
+        self._request_reader_stop(log_reader, "Log reader thread")
+        _serial_ms, serial_stopped = self._wait_for_reader_stop(
+            serial_reader,
+            "reader",
+            "Serial reader thread",
+            SERIAL_READER_STOP_WAIT_MS,
+        )
+        _log_ms, log_stopped = self._wait_for_reader_stop(
+            log_reader,
+            "log_reader",
+            "Log reader thread",
+            LOG_READER_STOP_WAIT_MS,
+        )
+        if not serial_stopped or not log_stopped:
+            print(f"Serial release for {reason} failed because a reader thread did not stop cleanly.")
+            self._transport_ready = previous_transport_ready
+            self._tx_paused = previous_tx_paused
+            if timer_was_active:
+                try:
+                    self.begin_execution_timer()
+                except Exception:
+                    pass
+            return False
+
+        try:
+            if hasattr(ser, "close"):
+                ser.close()
+        except Exception as exc:
+            print(f"Serial release for {reason} failed while closing the port: {exc}")
+            self._transport_ready = previous_transport_ready
+            self._tx_paused = previous_tx_paused
+            if timer_was_active:
+                try:
+                    self.begin_execution_timer()
+                except Exception:
+                    pass
+            return False
+
+        self.ser = None
+        self.sent_command = None
+        self._transport_ready = False
+        self._tx_paused = True
+        self._sequence_pause = False
+        self._session_recovery_in_progress = False
+        print(f"Serial port released for {reason}.")
+        return True
+
     def disconnect_board(self, error=False):
         if not self.ser:
             self.disconnect_handler()

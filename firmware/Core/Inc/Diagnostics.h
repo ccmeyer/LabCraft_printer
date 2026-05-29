@@ -6,6 +6,20 @@
 
 class Orchestrator;
 
+struct PressureTraceCustomConfig {
+    bool enabled = false;
+    bool hasChannel = false;
+    bool hasPressureMilliPsi = false;
+    bool hasPulseUs = false;
+    bool hasPulseCount = false;
+    bool hasFrequencyHz = false;
+    uint8_t channel = 0;
+    uint16_t pressureMilliPsi = 0;
+    uint16_t pulseUs = 0;
+    uint16_t pulseCount = 0;
+    uint16_t frequencyHz = 0;
+};
+
 struct DiagnosticsRequest {
     uint8_t seq8 = 0;
     uint32_t runId = 0;
@@ -15,6 +29,7 @@ struct DiagnosticsRequest {
     bool exportPressureTrace = false;
     uint16_t selectedPressureTraceTest = 0;
     uint16_t selectedDiagnosticId = 0;
+    PressureTraceCustomConfig customPressureTrace{};
 };
 
 struct DiagnosticsSummary {

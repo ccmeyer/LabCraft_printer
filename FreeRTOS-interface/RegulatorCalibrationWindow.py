@@ -4,7 +4,22 @@ from typing import Any
 
 from PySide6 import QtCore, QtWidgets
 
-from RegulatorCalibrationRunner import TRACE_CASES, trace_case_choices
+from RegulatorCalibrationRunner import (
+    CUSTOM_TRACE_CASE_ID,
+    CUSTOM_TRACE_FREQUENCY_HZ_MAX,
+    CUSTOM_TRACE_FREQUENCY_HZ_MIN,
+    CUSTOM_TRACE_MAX_PULSE_WINDOW_MS,
+    CUSTOM_TRACE_PRESSURE_MPSI_MAX,
+    CUSTOM_TRACE_PRESSURE_MPSI_MIN,
+    CUSTOM_TRACE_PULSE_COUNT_MAX,
+    CUSTOM_TRACE_PULSE_COUNT_MIN,
+    CUSTOM_TRACE_PULSE_US_MAX,
+    CUSTOM_TRACE_PULSE_US_MIN,
+    TRACE_CASES,
+    SERIAL_HANDOFF_MODE_FULL_DISCONNECT,
+    SERIAL_HANDOFF_MODE_SOFT,
+    trace_case_choices,
+)
 
 
 class RegulatorCalibrationWindow(QtWidgets.QDialog):
@@ -24,6 +39,7 @@ class RegulatorCalibrationWindow(QtWidgets.QDialog):
         self._connect_controller()
         self.refresh_profiles()
         self._update_trace_summary()
+        self._update_batch_custom_visible()
         self._update_start_enabled()
 
     def _build_ui(self):
@@ -47,6 +63,7 @@ class RegulatorCalibrationWindow(QtWidgets.QDialog):
                 f"({', '.join(choice['channels'])}, {choice['pulse_count']} pulses @ {choice['frequency_hz']} Hz)"
             )
             self.trace_case_combo.addItem(label, int(choice["test_id"]))
+        self.trace_case_combo.addItem("2110 - pressure_recovery_trace_custom", CUSTOM_TRACE_CASE_ID)
         self.trace_case_combo.currentIndexChanged.connect(self._update_trace_summary)
         form.addRow("Trace Case", self.trace_case_combo)
 
@@ -66,9 +83,52 @@ class RegulatorCalibrationWindow(QtWidgets.QDialog):
         self.calibrated_head_checkbox.stateChanged.connect(self._update_start_enabled)
         form.addRow("", self.calibrated_head_checkbox)
 
+        self.handoff_combo = QtWidgets.QComboBox()
+        self.handoff_combo.addItem("Soft", SERIAL_HANDOFF_MODE_SOFT)
+        self.handoff_combo.addItem("Full shutdown", SERIAL_HANDOFF_MODE_FULL_DISCONNECT)
+        form.addRow("Handoff", self.handoff_combo)
+
         layout.addWidget(form_group)
 
-        summary_group = QtWidgets.QGroupBox("Fixed Trace Recipe")
+        self.custom_group = QtWidgets.QGroupBox("Custom Trace Recipe")
+        custom_form = QtWidgets.QFormLayout(self.custom_group)
+        custom_form.setLabelAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        self.custom_channel_combo = QtWidgets.QComboBox()
+        self.custom_channel_combo.addItems(["print", "refuel"])
+        self.custom_pressure_spin = QtWidgets.QDoubleSpinBox()
+        self.custom_pressure_spin.setRange(CUSTOM_TRACE_PRESSURE_MPSI_MIN / 1000.0, CUSTOM_TRACE_PRESSURE_MPSI_MAX / 1000.0)
+        self.custom_pressure_spin.setDecimals(3)
+        self.custom_pressure_spin.setSingleStep(0.05)
+        self.custom_pressure_spin.setValue(1.0)
+        self.custom_pulse_spin = QtWidgets.QSpinBox()
+        self.custom_pulse_spin.setRange(CUSTOM_TRACE_PULSE_US_MIN, CUSTOM_TRACE_PULSE_US_MAX)
+        self.custom_pulse_spin.setValue(1300)
+        self.custom_pulse_count_spin = QtWidgets.QSpinBox()
+        self.custom_pulse_count_spin.setRange(CUSTOM_TRACE_PULSE_COUNT_MIN, CUSTOM_TRACE_PULSE_COUNT_MAX)
+        self.custom_pulse_count_spin.setValue(10)
+        self.custom_frequency_spin = QtWidgets.QSpinBox()
+        self.custom_frequency_spin.setRange(CUSTOM_TRACE_FREQUENCY_HZ_MIN, CUSTOM_TRACE_FREQUENCY_HZ_MAX)
+        self.custom_frequency_spin.setValue(20)
+        for widget in (
+            self.custom_channel_combo,
+            self.custom_pressure_spin,
+            self.custom_pulse_spin,
+            self.custom_pulse_count_spin,
+            self.custom_frequency_spin,
+        ):
+            signal = getattr(widget, "currentIndexChanged", None)
+            if signal is None:
+                signal = getattr(widget, "valueChanged", None)
+            if signal is not None:
+                signal.connect(self._update_trace_summary)
+        custom_form.addRow("Channel", self.custom_channel_combo)
+        custom_form.addRow("Pressure (psi)", self.custom_pressure_spin)
+        custom_form.addRow("Pulse Width (us)", self.custom_pulse_spin)
+        custom_form.addRow("Pulse Count", self.custom_pulse_count_spin)
+        custom_form.addRow("Frequency (Hz)", self.custom_frequency_spin)
+        layout.addWidget(self.custom_group)
+
+        summary_group = QtWidgets.QGroupBox("Trace Recipe")
         summary_layout = QtWidgets.QVBoxLayout(summary_group)
         self.trace_summary = QtWidgets.QLabel("")
         self.trace_summary.setWordWrap(True)
@@ -127,7 +187,9 @@ class RegulatorCalibrationWindow(QtWidgets.QDialog):
                 f"({', '.join(choice['channels'])}, {choice['pulse_count']} pulses @ {choice['frequency_hz']} Hz)"
             )
             self.batch_trace_case_combo.addItem(label, int(choice["test_id"]))
+        self.batch_trace_case_combo.addItem("2110 - pressure_recovery_trace_custom", CUSTOM_TRACE_CASE_ID)
         self.batch_trace_case_combo.currentIndexChanged.connect(self._update_batch_enabled)
+        self.batch_trace_case_combo.currentIndexChanged.connect(self._update_batch_custom_visible)
         batch_form.addRow("Trace Case", self.batch_trace_case_combo)
 
         self.batch_repeat_spin = QtWidgets.QSpinBox()
@@ -159,7 +221,50 @@ class RegulatorCalibrationWindow(QtWidgets.QDialog):
         self.batch_calibrated_head_checkbox = QtWidgets.QCheckBox("Calibrated printer head installed")
         self.batch_calibrated_head_checkbox.stateChanged.connect(self._update_batch_enabled)
         batch_form.addRow("", self.batch_calibrated_head_checkbox)
+
+        self.batch_handoff_combo = QtWidgets.QComboBox()
+        self.batch_handoff_combo.addItem("Soft", SERIAL_HANDOFF_MODE_SOFT)
+        self.batch_handoff_combo.addItem("Full shutdown", SERIAL_HANDOFF_MODE_FULL_DISCONNECT)
+        batch_form.addRow("Handoff", self.batch_handoff_combo)
         batch_layout.addLayout(batch_form)
+
+        self.batch_custom_group = QtWidgets.QGroupBox("Batch Custom Trace Recipe")
+        batch_custom_form = QtWidgets.QFormLayout(self.batch_custom_group)
+        batch_custom_form.setLabelAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        self.batch_custom_channel_combo = QtWidgets.QComboBox()
+        self.batch_custom_channel_combo.addItems(["print", "refuel"])
+        self.batch_custom_pressure_spin = QtWidgets.QDoubleSpinBox()
+        self.batch_custom_pressure_spin.setRange(CUSTOM_TRACE_PRESSURE_MPSI_MIN / 1000.0, CUSTOM_TRACE_PRESSURE_MPSI_MAX / 1000.0)
+        self.batch_custom_pressure_spin.setDecimals(3)
+        self.batch_custom_pressure_spin.setSingleStep(0.05)
+        self.batch_custom_pressure_spin.setValue(1.0)
+        self.batch_custom_pulse_spin = QtWidgets.QSpinBox()
+        self.batch_custom_pulse_spin.setRange(CUSTOM_TRACE_PULSE_US_MIN, CUSTOM_TRACE_PULSE_US_MAX)
+        self.batch_custom_pulse_spin.setValue(1300)
+        self.batch_custom_pulse_count_spin = QtWidgets.QSpinBox()
+        self.batch_custom_pulse_count_spin.setRange(CUSTOM_TRACE_PULSE_COUNT_MIN, CUSTOM_TRACE_PULSE_COUNT_MAX)
+        self.batch_custom_pulse_count_spin.setValue(10)
+        self.batch_custom_frequency_spin = QtWidgets.QSpinBox()
+        self.batch_custom_frequency_spin.setRange(CUSTOM_TRACE_FREQUENCY_HZ_MIN, CUSTOM_TRACE_FREQUENCY_HZ_MAX)
+        self.batch_custom_frequency_spin.setValue(20)
+        for widget in (
+            self.batch_custom_channel_combo,
+            self.batch_custom_pressure_spin,
+            self.batch_custom_pulse_spin,
+            self.batch_custom_pulse_count_spin,
+            self.batch_custom_frequency_spin,
+        ):
+            signal = getattr(widget, "currentIndexChanged", None)
+            if signal is None:
+                signal = getattr(widget, "valueChanged", None)
+            if signal is not None:
+                signal.connect(self._update_batch_enabled)
+        batch_custom_form.addRow("Channel", self.batch_custom_channel_combo)
+        batch_custom_form.addRow("Pressure (psi)", self.batch_custom_pressure_spin)
+        batch_custom_form.addRow("Pulse Width (us)", self.batch_custom_pulse_spin)
+        batch_custom_form.addRow("Pulse Count", self.batch_custom_pulse_count_spin)
+        batch_custom_form.addRow("Frequency (Hz)", self.batch_custom_frequency_spin)
+        batch_layout.addWidget(self.batch_custom_group)
 
         self.batch_candidate_list = QtWidgets.QListWidget()
         self.batch_candidate_list.setMinimumHeight(100)
@@ -249,12 +354,46 @@ class RegulatorCalibrationWindow(QtWidgets.QDialog):
         data = self.trace_case_combo.currentData()
         return int(data or 0)
 
+    def _is_custom_trace_selected(self) -> bool:
+        return self._current_trace_case_id() == CUSTOM_TRACE_CASE_ID
+
+    def _is_batch_custom_trace_selected(self) -> bool:
+        return self._batch_trace_case_id() == CUSTOM_TRACE_CASE_ID
+
+    def _serial_handoff_mode(self) -> str:
+        return str(self.handoff_combo.currentData() or SERIAL_HANDOFF_MODE_SOFT)
+
+    def _batch_serial_handoff_mode(self) -> str:
+        return str(self.batch_handoff_combo.currentData() or SERIAL_HANDOFF_MODE_SOFT)
+
+    def _custom_trace_valid(self, *, batch: bool = False) -> bool:
+        if batch:
+            pulse_count = int(self.batch_custom_pulse_count_spin.value())
+            frequency_hz = int(self.batch_custom_frequency_spin.value())
+        else:
+            pulse_count = int(self.custom_pulse_count_spin.value())
+            frequency_hz = int(self.custom_frequency_spin.value())
+        planned_window_ms = (pulse_count * 1000 + frequency_hz - 1) // frequency_hz
+        return planned_window_ms <= CUSTOM_TRACE_MAX_PULSE_WINDOW_MS
+
+    def _trace_case_supported_for_start(self) -> bool:
+        trace_id = self._current_trace_case_id()
+        if trace_id == CUSTOM_TRACE_CASE_ID:
+            return self._custom_trace_valid(batch=False)
+        return trace_id in TRACE_CASES
+
+    def _batch_trace_case_supported_for_start(self) -> bool:
+        trace_id = self._batch_trace_case_id()
+        if trace_id == CUSTOM_TRACE_CASE_ID:
+            return self._custom_trace_valid(batch=True)
+        return trace_id in TRACE_CASES
+
     @QtCore.Slot()
     def _update_start_enabled(self):
         can_start = (
             not self._busy
             and bool(self._current_profile_id())
-            and self._current_trace_case_id() in TRACE_CASES
+            and self._trace_case_supported_for_start()
             and self.calibrated_head_checkbox.isChecked()
         )
         self.start_button.setEnabled(can_start)
@@ -307,7 +446,7 @@ class RegulatorCalibrationWindow(QtWidgets.QDialog):
             return
         can_start = (
             not self._busy
-            and self._batch_trace_case_id() in TRACE_CASES
+            and self._batch_trace_case_supported_for_start()
             and bool(self._batch_candidate_profile_ids())
             and self.batch_calibrated_head_checkbox.isChecked()
         )
@@ -315,7 +454,34 @@ class RegulatorCalibrationWindow(QtWidgets.QDialog):
         self.batch_cancel_button.setEnabled(self._busy and self._batch_active)
 
     @QtCore.Slot()
+    def _update_batch_custom_visible(self):
+        if hasattr(self, "batch_custom_group"):
+            self.batch_custom_group.setVisible(self._is_batch_custom_trace_selected())
+        self._update_batch_enabled()
+
+    @QtCore.Slot()
     def _update_trace_summary(self):
+        if hasattr(self, "custom_group"):
+            self.custom_group.setVisible(self._is_custom_trace_selected())
+        if self._is_custom_trace_selected():
+            channel = str(self.custom_channel_combo.currentText() or "print")
+            pressure = float(self.custom_pressure_spin.value())
+            pulse_us = int(self.custom_pulse_spin.value())
+            pulse_count = int(self.custom_pulse_count_spin.value())
+            frequency_hz = int(self.custom_frequency_spin.value())
+            planned_window_ms = (pulse_count * 1000 + frequency_hz - 1) // frequency_hz
+            parts = [
+                f"Case {CUSTOM_TRACE_CASE_ID}: pressure_recovery_trace_custom",
+                f"Channel: {channel}",
+                f"Pulses: {pulse_count} @ {frequency_hz} Hz",
+                f"Pressure: {pressure:g} psi",
+                f"Pulse width: {pulse_us} us",
+            ]
+            if planned_window_ms > CUSTOM_TRACE_MAX_PULSE_WINDOW_MS:
+                parts.append(f"Pulse window exceeds {CUSTOM_TRACE_MAX_PULSE_WINDOW_MS} ms")
+            self.trace_summary.setText(" | ".join(parts))
+            self._update_start_enabled()
+            return
         case = TRACE_CASES.get(self._current_trace_case_id())
         if case is None:
             self.trace_summary.setText("")
@@ -347,7 +513,7 @@ class RegulatorCalibrationWindow(QtWidgets.QDialog):
 
     def _run_config(self) -> dict[str, Any]:
         profile = self._current_profile() or {}
-        return {
+        config = {
             "profile_id": self._current_profile_id(),
             "mode": str(profile.get("mode") or ""),
             "trace_case_id": self._current_trace_case_id(),
@@ -356,10 +522,22 @@ class RegulatorCalibrationWindow(QtWidgets.QDialog):
             "printer_head_type": self.head_type_edit.text().strip(),
             "reagent_id": self.reagent_edit.text().strip(),
             "calibrated_head_confirmed": self.calibrated_head_checkbox.isChecked(),
+            "serial_handoff_mode": self._serial_handoff_mode(),
         }
+        if self._is_custom_trace_selected():
+            config.update(
+                {
+                    "trace_channel": str(self.custom_channel_combo.currentText() or "print"),
+                    "trace_pressure_psi": float(self.custom_pressure_spin.value()),
+                    "trace_pulse_us": int(self.custom_pulse_spin.value()),
+                    "trace_pulse_count": int(self.custom_pulse_count_spin.value()),
+                    "trace_frequency_hz": int(self.custom_frequency_spin.value()),
+                }
+            )
+        return config
 
     def _batch_config(self) -> dict[str, Any]:
-        return {
+        config = {
             "mode": self._batch_mode(),
             "trace_case_id": self._batch_trace_case_id(),
             "candidate_profile_ids": self._batch_candidate_profile_ids(),
@@ -372,7 +550,19 @@ class RegulatorCalibrationWindow(QtWidgets.QDialog):
             "printer_head_type": self.head_type_edit.text().strip(),
             "reagent_id": self.reagent_edit.text().strip(),
             "calibrated_head_confirmed": self.batch_calibrated_head_checkbox.isChecked(),
+            "serial_handoff_mode": self._batch_serial_handoff_mode(),
         }
+        if self._is_batch_custom_trace_selected():
+            config.update(
+                {
+                    "trace_channel": str(self.batch_custom_channel_combo.currentText() or "print"),
+                    "trace_pressure_psi": float(self.batch_custom_pressure_spin.value()),
+                    "trace_pulse_us": int(self.batch_custom_pulse_spin.value()),
+                    "trace_pulse_count": int(self.batch_custom_pulse_count_spin.value()),
+                    "trace_frequency_hz": int(self.batch_custom_frequency_spin.value()),
+                }
+            )
+        return config
 
     @QtCore.Slot()
     def _on_start_clicked(self):
@@ -476,6 +666,7 @@ class RegulatorCalibrationWindow(QtWidgets.QDialog):
             self.head_type_edit,
             self.reagent_edit,
             self.calibrated_head_checkbox,
+            self.handoff_combo,
             self.batch_mode_combo,
             self.batch_trace_case_combo,
             self.batch_repeat_spin,
@@ -483,6 +674,7 @@ class RegulatorCalibrationWindow(QtWidgets.QDialog):
             self.batch_baseline_before_checkbox,
             self.batch_baseline_after_checkbox,
             self.batch_calibrated_head_checkbox,
+            self.batch_handoff_combo,
             self.batch_candidate_list,
         ):
             widget.setEnabled(not self._busy)

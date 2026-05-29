@@ -57,6 +57,8 @@ def test_prepare_batch_manifest_with_baselines_and_alternating_repeats(tmp_path)
 
     assert prepared.session_id == "session_20260529_200000_sess"
     assert prepared.manifest_path.exists()
+    assert prepared.serial_handoff_mode == "soft"
+    assert prepared.manifest["serial_handoff_mode"] == "soft"
     assert [run["role"] for run in prepared.runs] == [
         "baseline_before",
         "candidate",
@@ -79,7 +81,19 @@ def test_prepare_batch_manifest_with_baselines_and_alternating_repeats(tmp_path)
     assert configs[0]["profile_id"] == "stream_default"
     assert configs[0]["session_id"] == prepared.session_id
     assert configs[0]["_batch_run"] is True
+    assert configs[0]["serial_handoff_mode"] == "soft"
     assert configs[1]["batch_role"] == "candidate"
+
+    fallback = prepare_regulator_calibration_batch(
+        _config(repeat_count=1, serial_handoff_mode="full_disconnect"),
+        profile_document=_document(),
+        output_root=tmp_path / "fallback",
+        now_fn=_now,
+        id_factory=_ids(),
+    )
+    assert fallback.serial_handoff_mode == "full_disconnect"
+    assert fallback.manifest["serial_handoff_mode"] == "full_disconnect"
+    assert batch_run_configs(fallback)[0]["serial_handoff_mode"] == "full_disconnect"
 
 
 def test_grouped_and_seeded_randomized_ordering_are_deterministic(tmp_path):
@@ -117,6 +131,33 @@ def test_grouped_and_seeded_randomized_ordering_are_deterministic(tmp_path):
     assert first.random_seed == 42
 
 
+def test_prepare_batch_with_shared_custom_trace_recipe(tmp_path):
+    prepared = prepare_regulator_calibration_batch(
+        _config(
+            trace_case_id=2110,
+            trace_channel="print",
+            trace_pressure_psi=1.2,
+            trace_pulse_us=1500,
+            trace_pulse_count=12,
+            trace_frequency_hz=20,
+            repeat_count=1,
+        ),
+        profile_document=_document(),
+        output_root=tmp_path,
+        now_fn=_now,
+        id_factory=_ids(),
+    )
+
+    assert prepared.trace_case.custom is True
+    assert prepared.manifest["trace_case_id"] == 2110
+    assert prepared.manifest["conditions"]["trace_recipe"] == "custom"
+    assert prepared.manifest["conditions"]["pressure_mpsi"] == 1200
+    configs = batch_run_configs(prepared)
+    assert all(config["trace_case_id"] == 2110 for config in configs)
+    assert all(config["trace_pressure_mpsi"] == 1200 for config in configs)
+    assert all(config["trace_pulse_us"] == 1500 for config in configs)
+
+
 @pytest.mark.parametrize(
     "overrides,match",
     [
@@ -127,6 +168,7 @@ def test_grouped_and_seeded_randomized_ordering_are_deterministic(tmp_path):
         ({"repeat_count": 0}, "between 1 and 5"),
         ({"order_strategy": "unknown"}, "order_strategy"),
         ({"candidate_profile_ids": []}, "1 to 12"),
+        ({"serial_handoff_mode": "unsupported"}, "serial_handoff_mode"),
     ],
 )
 def test_prepare_batch_rejects_invalid_configs(tmp_path, overrides, match):

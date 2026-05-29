@@ -160,6 +160,16 @@ public:
 
     uint32_t p1 = 0, p2 = 0, p3 = 0;   // raw 32-bit storage
     uint8_t  p1Len = 0, p2Len = 0, p3Len = 0; // TLV value lengths (0,1,2,4)
+    uint32_t traceChannel = 0;
+    uint32_t tracePressureMilliPsi = 0;
+    uint32_t tracePulseUs = 0;
+    uint32_t tracePulseCount = 0;
+    uint32_t traceFrequencyHz = 0;
+    uint8_t traceChannelLen = 0;
+    uint8_t tracePressureMilliPsiLen = 0;
+    uint8_t tracePulseUsLen = 0;
+    uint8_t tracePulseCountLen = 0;
+    uint8_t traceFrequencyHzLen = 0;
 
     // Integer views (unsigned and signed)
     inline uint32_t p1u() const { return p1; }

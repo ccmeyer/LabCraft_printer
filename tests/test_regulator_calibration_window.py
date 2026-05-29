@@ -58,6 +58,7 @@ def test_regulator_calibration_window_requires_profile_and_head_confirmation(qap
     assert controller.started_config["profile_id"]
     assert controller.started_config["trace_case_id"] in {2101, 2102, 2103, 2104}
     assert controller.started_config["calibrated_head_confirmed"] is True
+    assert controller.started_config["serial_handoff_mode"] == "soft"
     assert "print_pressure_psi" not in controller.started_config
     assert window.start_button.isEnabled() is False
 
@@ -68,6 +69,35 @@ def test_regulator_calibration_window_requires_profile_and_head_confirmation(qap
     )
     assert window.start_button.isEnabled() is True
     assert window.output_path_label.text().endswith("session/run")
+
+    window.close()
+
+
+def test_regulator_calibration_window_custom_trace_config(qapp):
+    controller = _WindowController()
+    window = RegulatorCalibrationWindow(None, SimpleNamespace(), controller)
+
+    custom_index = window.trace_case_combo.findData(2110)
+    assert custom_index >= 0
+    window.trace_case_combo.setCurrentIndex(custom_index)
+    window.custom_channel_combo.setCurrentText("print")
+    window.custom_pressure_spin.setValue(1.25)
+    window.custom_pulse_spin.setValue(1450)
+    window.custom_pulse_count_spin.setValue(20)
+    window.custom_frequency_spin.setValue(20)
+    window.calibrated_head_checkbox.setChecked(True)
+    qapp.processEvents()
+
+    assert window.custom_group.isHidden() is False
+    assert window.start_button.isEnabled() is True
+    window._on_start_clicked()
+
+    assert controller.started_config["trace_case_id"] == 2110
+    assert controller.started_config["trace_channel"] == "print"
+    assert controller.started_config["trace_pressure_psi"] == 1.25
+    assert controller.started_config["trace_pulse_us"] == 1450
+    assert controller.started_config["trace_pulse_count"] == 20
+    assert controller.started_config["trace_frequency_hz"] == 20
 
     window.close()
 
@@ -93,6 +123,7 @@ def test_regulator_calibration_window_batch_controls_validate_and_finish(qapp):
     assert controller.started_batch_config["candidate_profile_ids"] == ["stream_default"]
     assert controller.started_batch_config["repeat_count"] == 1
     assert controller.started_batch_config["calibrated_head_confirmed"] is True
+    assert controller.started_batch_config["serial_handoff_mode"] == "soft"
     assert window.batch_start_button.isEnabled() is False
     assert window.start_button.isEnabled() is False
 
@@ -113,6 +144,33 @@ def test_regulator_calibration_window_batch_controls_validate_and_finish(qapp):
     )
     assert window.batch_start_button.isEnabled() is True
     assert window.batch_path_label.text().endswith("ranking.csv")
+
+    window.close()
+
+
+def test_regulator_calibration_window_can_select_full_shutdown_handoff(qapp):
+    controller = _WindowController()
+    window = RegulatorCalibrationWindow(None, SimpleNamespace(), controller)
+
+    window.calibrated_head_checkbox.setChecked(True)
+    window.handoff_combo.setCurrentIndex(window.handoff_combo.findData("full_disconnect"))
+    qapp.processEvents()
+    window._on_start_clicked()
+
+    assert controller.started_config["serial_handoff_mode"] == "full_disconnect"
+
+    window.batch_calibrated_head_checkbox.setChecked(True)
+    for index in range(window.batch_candidate_list.count()):
+        item = window.batch_candidate_list.item(index)
+        if item.data(QtCore.Qt.UserRole) == "stream_default":
+            item.setCheckState(QtCore.Qt.Checked)
+            break
+    window.batch_handoff_combo.setCurrentIndex(window.batch_handoff_combo.findData("full_disconnect"))
+    qapp.processEvents()
+    controller.regulator_calibration_finished.emit(True, "done", {})
+    window._on_batch_start_clicked()
+
+    assert controller.started_batch_config["serial_handoff_mode"] == "full_disconnect"
 
     window.close()
 

@@ -179,6 +179,16 @@ void Comm::handlePacket(const uint8_t* buf, uint8_t len) {
   oc.hasRunId = decoded.hasRunId;
   oc.timeoutMs = decoded.timeoutMs;
   oc.hasTimeoutMs = decoded.hasTimeoutMs;
+  oc.traceChannel = decoded.traceChannel;
+  oc.tracePressureMilliPsi = decoded.tracePressureMilliPsi;
+  oc.tracePulseUs = decoded.tracePulseUs;
+  oc.tracePulseCount = decoded.tracePulseCount;
+  oc.traceFrequencyHz = decoded.traceFrequencyHz;
+  oc.traceChannelLen = decoded.traceChannelLen;
+  oc.tracePressureMilliPsiLen = decoded.tracePressureMilliPsiLen;
+  oc.tracePulseUsLen = decoded.tracePulseUsLen;
+  oc.tracePulseCountLen = decoded.tracePulseCountLen;
+  oc.traceFrequencyHzLen = decoded.traceFrequencyHzLen;
 
   if (auto orch = Orchestrator::instance()) {
     BaseType_t woken = pdFALSE;

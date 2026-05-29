@@ -138,6 +138,7 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
   - `firmware/Core/Inc/SelfTestCommandPolicy.h`
   - Functions: `Orchestrator::begin`, `Orchestrator::_run`, `Orchestrator::executeCommand`, `enqueueFromISR`, `startHomeAsync`, `startRegHomeAsync`, `_flashTaskLoop`
   - Self-test entrypoint: `CMD_SELFTEST_START` remains dispatched from `Orchestrator::executeCommand`, but the SAFE/FULL diagnostic sequence now lives in `DiagnosticsRunner::runSelfTest`. `DiagnosticResultEmitter` owns the byte layout for `CMD_SELFTEST_RESULT` and `CMD_SELFTEST_DONE` payloads.
+  - Custom regulator pressure traces use selector `2110` plus self-test start TLVs `TAG_TRACE_CHANNEL`, `TAG_TRACE_PRESSURE_MPSI`, `TAG_TRACE_PULSE_US`, `TAG_TRACE_PULSE_COUNT`, and `TAG_TRACE_FREQUENCY_HZ`; `Orchestrator` copies them into `DiagnosticsRequest::customPressureTrace`, and `DiagnosticsRunner` validates the RAM-only recipe before calling the shared pressure trace runner.
   - Motion qualification diagnostics `2007 motion_home_repeatability_factory` and `2008 motion_pattern_return_factory` live in `DiagnosticsRunner::runSelfTest`, use existing X/Y homing and gantry motion primitives, and publish compact repeatability metrics for Python-side candidate analysis.
   - Pressure qualification diagnostics `2201 pressure_hold_leak_factory`, `2202 pressure_target_cycle_repeatability_factory`, and `2203 pressure_motor_position_hysteresis_factory` live in `DiagnosticsRunner::runSelfTest`, use existing print-channel pressure regulator/sensor primitives, restore the baseline target, pause the regulator at exit, and publish compact hold/leak/repeatability/hysteresis metrics for Python-side candidate analysis.
   - Standalone pressure regulator diagnostics `2210`-`2219` and refuel vacuum diagnostics `2220`-`2221` live behind explicit self-test selectors. The refuel vacuum command path and rows home the refuel regulator through `Orchestrator::startRegHomeAsync()` before `PressureRegulator::regR().enterVacuumModeAfterHome()`, temporarily lower only the refuel pressure sensor validation minimum for below-atmospheric samples, cycle between `-1 psi` and atmosphere, restore validation and regulator state at exit, and publish compact sensor-shift, settle, trace, and motor-travel guard metrics.
@@ -434,6 +435,7 @@ Pure host-side encode/decode vectors that do not require HAL peripherals:
 6. **Pressure self-test/trace vectors:**
    - `tools/run_selftest.py` decodes pressure trace sample/event chunks from `CMD_SELFTEST_RESULT` frames.
    - FULL diagnostic runs can enable raw pressure-trace export with `--pressure-trace`, which writes separate `*_trace_<test_id>.json` artifacts next to the main self-test report.
+   - Regulator calibration can request custom selector `2110` through `--pressure-trace-custom` with channel, pressure, pulse width, pulse count, and frequency arguments; fixed selectors `2101`-`2104` remain unchanged.
 
 Notes:
 

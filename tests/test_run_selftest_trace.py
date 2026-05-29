@@ -478,6 +478,93 @@ def test_run_sends_pressure_trace_test_selector(monkeypatch, tmp_path):
     assert sent_p3 == (2103).to_bytes(2, "little")
 
 
+def test_run_sends_custom_pressure_trace_tlvs(monkeypatch, tmp_path):
+    mod = _load_run_selftest()
+    run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF
+    clock = FakeClock()
+
+    inbound = b"".join(
+        [
+            _hello_ack(mod),
+            _selftest_done(mod, run_id),
+            _bye_ack(mod, 3),
+            _bye_done(mod, 3, run_id),
+        ]
+    )
+    serial = FakeSerial(inbound)
+    monkeypatch.setattr(mod, "time", SimpleNamespace(monotonic=clock.monotonic, time=clock.time))
+    monkeypatch.setattr(mod, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: serial))
+
+    out_path = tmp_path / "selftest.json"
+    args = SimpleNamespace(
+        port="/dev/ttyAMA0",
+        baud=115200,
+        profile="FULL",
+        timeout_ms=1000,
+        hello_timeout_ms=1000,
+        hello_retry_ms=50,
+        fast_fail_on_missing_hello=False,
+        pressure_trace=False,
+        pressure_trace_test=None,
+        pressure_trace_custom=True,
+        trace_channel="print",
+        trace_pressure_psi=1.25,
+        trace_pulse_us=1450,
+        trace_pulse_count=20,
+        trace_frequency_hz=20,
+        pressure_sweep_suite=None,
+        out=str(out_path),
+    )
+
+    rc = mod.run(args)
+
+    assert rc == 0
+    sent = None
+    for outbound in serial.writes:
+        reader = mod.FrameReader()
+        for byte in outbound:
+            frame = reader.feed(byte)
+            if not frame or frame[0] != mod.CMD_SELFTEST_START:
+                continue
+            sent = mod.parse_tlvs(frame[2:])
+            break
+        if sent is not None:
+            break
+    assert sent[mod.TAG_P2] == b"\x01"
+    assert sent[mod.TAG_P3] == (2110).to_bytes(2, "little")
+    assert sent[mod.TAG_TRACE_CHANNEL] == b"\x00"
+    assert sent[mod.TAG_TRACE_PRESSURE_MPSI] == (1250).to_bytes(2, "little")
+    assert sent[mod.TAG_TRACE_PULSE_US] == (1450).to_bytes(2, "little")
+    assert sent[mod.TAG_TRACE_PULSE_COUNT] == (20).to_bytes(2, "little")
+    assert sent[mod.TAG_TRACE_FREQUENCY_HZ] == (20).to_bytes(2, "little")
+
+
+def test_run_rejects_invalid_custom_pressure_trace_before_serial(monkeypatch, tmp_path):
+    mod = _load_run_selftest()
+
+    def fail_serial(*_args, **_kwargs):
+        raise AssertionError("serial should not be opened for invalid custom trace args")
+
+    monkeypatch.setattr(mod, "serial", SimpleNamespace(Serial=fail_serial))
+    args = SimpleNamespace(
+        port="/dev/ttyAMA0",
+        baud=115200,
+        profile="FULL",
+        timeout_ms=1000,
+        pressure_trace=False,
+        pressure_trace_test=None,
+        pressure_trace_custom=True,
+        trace_channel="print",
+        trace_pressure_psi=3.0,
+        trace_pulse_us=1450,
+        trace_pulse_count=20,
+        trace_frequency_hz=20,
+        out=str(tmp_path / "selftest.json"),
+    )
+
+    assert mod.run(args) == 3
+
+
 def test_run_sends_gripper_seal_selector_and_skips_goodbye(monkeypatch, tmp_path):
     mod = _load_run_selftest()
     run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF

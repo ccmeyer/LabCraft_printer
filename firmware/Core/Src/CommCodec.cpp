@@ -190,6 +190,26 @@ DecodedCommand decodeCommand(const uint8_t* buf, uint8_t len) {
                 dc.timeoutMs = v;
                 dc.hasTimeoutMs = (l == 4);
                 break;
+            case TAG_TRACE_CHANNEL:
+                dc.traceChannel = v;
+                dc.traceChannelLen = l;
+                break;
+            case TAG_TRACE_PRESSURE_MPSI:
+                dc.tracePressureMilliPsi = v;
+                dc.tracePressureMilliPsiLen = l;
+                break;
+            case TAG_TRACE_PULSE_US:
+                dc.tracePulseUs = v;
+                dc.tracePulseUsLen = l;
+                break;
+            case TAG_TRACE_PULSE_COUNT:
+                dc.tracePulseCount = v;
+                dc.tracePulseCountLen = l;
+                break;
+            case TAG_TRACE_FREQUENCY_HZ:
+                dc.traceFrequencyHz = v;
+                dc.traceFrequencyHzLen = l;
+                break;
             default:
                 break;
         }

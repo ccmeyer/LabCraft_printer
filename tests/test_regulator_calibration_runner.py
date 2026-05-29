@@ -124,3 +124,84 @@ def test_build_selftest_command_uses_existing_pressure_trace_selector(tmp_path):
     assert command[command.index("--port") + 1] == "COM7"
     assert command[command.index("--baud") + 1] == "230400"
     assert command[command.index("--timeout-ms") + 1] == "45000"
+    assert "--skip-goodbye" not in command
+
+    soft_command = build_selftest_command(
+        prepared,
+        port="COM7",
+        run_selftest_path=Path("tools/run_selftest.py"),
+        python_executable="python-under-test",
+        skip_goodbye=True,
+    )
+    assert soft_command[-1] == "--skip-goodbye"
+
+
+def test_prepare_and_build_custom_pressure_trace_command(tmp_path):
+    prepared = _prepared(
+        tmp_path,
+        trace_case_id=2110,
+        trace_channel="print",
+        trace_pressure_psi=1.25,
+        trace_pulse_us=1450,
+        trace_pulse_count=20,
+        trace_frequency_hz=20,
+    )
+
+    assert prepared.trace_case.custom is True
+    assert prepared.trace_case.test_id == 2110
+    assert prepared.conditions["trace_recipe"] == "custom"
+    assert prepared.conditions["pressure_mpsi"] == 1250
+    assert prepared.conditions["print_pressure_psi"] == 1.25
+    assert prepared.conditions["print_pulse_width_us"] == 1450
+    assert prepared.conditions["pulse_count"] == 20
+
+    command = build_selftest_command(
+        prepared,
+        port="COM7",
+        run_selftest_path=Path("tools/run_selftest.py"),
+        python_executable="python-under-test",
+    )
+
+    assert "--pressure-trace-test" not in command
+    assert "--pressure-trace-custom" in command
+    assert command[command.index("--trace-channel") + 1] == "print"
+    assert command[command.index("--trace-pressure-psi") + 1] == "1.25"
+    assert command[command.index("--trace-pulse-us") + 1] == "1450"
+    assert command[command.index("--trace-pulse-count") + 1] == "20"
+    assert command[command.index("--trace-frequency-hz") + 1] == "20"
+
+
+def test_prepare_defaults_to_soft_serial_handoff_and_accepts_fallback(tmp_path):
+    prepared = _prepared(tmp_path)
+    assert prepared.serial_handoff_mode == "soft"
+    assert prepared.metadata["serial_handoff_mode"] == "soft"
+
+    fallback = _prepared(tmp_path, serial_handoff_mode="full_disconnect")
+    assert fallback.serial_handoff_mode == "full_disconnect"
+    assert fallback.metadata["serial_handoff_mode"] == "full_disconnect"
+
+    with pytest.raises(RegulatorCalibrationError, match="serial_handoff_mode"):
+        _prepared(tmp_path, serial_handoff_mode="unsupported")
+
+
+@pytest.mark.parametrize(
+    "overrides,match",
+    [
+        ({"trace_pressure_psi": 3.0}, "between 0.1 and 2.5"),
+        ({"trace_pulse_us": 50000}, "trace_pulse_us"),
+        ({"trace_pulse_count": 100, "trace_frequency_hz": 1}, "pulse window"),
+        ({"trace_channel": "both"}, "trace_channel"),
+    ],
+)
+def test_prepare_rejects_invalid_custom_pressure_trace(tmp_path, overrides, match):
+    config = {
+        "trace_case_id": 2110,
+        "trace_channel": "print",
+        "trace_pressure_psi": 1.0,
+        "trace_pulse_us": 1300,
+        "trace_pulse_count": 10,
+        "trace_frequency_hz": 20,
+    }
+    config.update(overrides)
+    with pytest.raises(RegulatorCalibrationError, match=match):
+        _prepared(tmp_path, **config)

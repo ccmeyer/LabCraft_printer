@@ -380,6 +380,36 @@ TEST(CommCodec, SelftestStartWithFullProfileMirroredIntoP1ParsesProfileField) {
     UNSIGNED_LONGS_EQUAL(30000u, decoded.timeoutMs);
 }
 
+TEST(CommCodec, SelftestStartCustomPressureTraceTlvsParse) {
+    static const uint8_t payload[] = {
+        0xFA, 0x10,
+        CommCodec::TAG_P1, 0x01, 0x01,
+        CommCodec::TAG_P2, 0x01, 0x01,
+        CommCodec::TAG_P3, 0x02, 0x3E, 0x08, // 2110
+        CommCodec::TAG_TRACE_CHANNEL, 0x01, 0x00,
+        CommCodec::TAG_TRACE_PRESSURE_MPSI, 0x02, 0xE2, 0x04, // 1250
+        CommCodec::TAG_TRACE_PULSE_US, 0x02, 0xAA, 0x05, // 1450
+        CommCodec::TAG_TRACE_PULSE_COUNT, 0x02, 0x14, 0x00,
+        CommCodec::TAG_TRACE_FREQUENCY_HZ, 0x02, 0x14, 0x00
+    };
+
+    const auto decoded = CommCodec::decodeCommand(payload, sizeof(payload));
+
+    UNSIGNED_LONGS_EQUAL(0xFAu, decoded.cmd);
+    UNSIGNED_LONGS_EQUAL(2110u, decoded.p3);
+    UNSIGNED_LONGS_EQUAL(2u, decoded.p3Len);
+    UNSIGNED_LONGS_EQUAL(0u, decoded.traceChannel);
+    UNSIGNED_LONGS_EQUAL(1u, decoded.traceChannelLen);
+    UNSIGNED_LONGS_EQUAL(1250u, decoded.tracePressureMilliPsi);
+    UNSIGNED_LONGS_EQUAL(2u, decoded.tracePressureMilliPsiLen);
+    UNSIGNED_LONGS_EQUAL(1450u, decoded.tracePulseUs);
+    UNSIGNED_LONGS_EQUAL(2u, decoded.tracePulseUsLen);
+    UNSIGNED_LONGS_EQUAL(20u, decoded.tracePulseCount);
+    UNSIGNED_LONGS_EQUAL(2u, decoded.tracePulseCountLen);
+    UNSIGNED_LONGS_EQUAL(20u, decoded.traceFrequencyHz);
+    UNSIGNED_LONGS_EQUAL(2u, decoded.traceFrequencyHzLen);
+}
+
 TEST(CommCodec, SelftestDoneSummaryTlvsDoNotBreakDecoding) {
     static const uint8_t payload[] = {
         0xFC, 0x10,

@@ -1292,6 +1292,19 @@ void Orchestrator::executeCommand(const Command &cmd) {
 				  request.exportPressureTrace = request.runPressureDiagnostics;
 				  request.selectedPressureTraceTest = (cmd.p3Len >= 2u) ? static_cast<uint16_t>(cmd.p3u() & 0xFFFFu) : 0u;
 				  request.selectedDiagnosticId = request.selectedPressureTraceTest;
+				  if (request.selectedPressureTraceTest == 2110u) {
+				    request.customPressureTrace.enabled = true;
+				    request.customPressureTrace.hasChannel = (cmd.traceChannelLen == 1u);
+				    request.customPressureTrace.hasPressureMilliPsi = (cmd.tracePressureMilliPsiLen == 2u);
+				    request.customPressureTrace.hasPulseUs = (cmd.tracePulseUsLen == 2u);
+				    request.customPressureTrace.hasPulseCount = (cmd.tracePulseCountLen == 2u);
+				    request.customPressureTrace.hasFrequencyHz = (cmd.traceFrequencyHzLen == 2u);
+				    request.customPressureTrace.channel = static_cast<uint8_t>(cmd.traceChannel & 0xFFu);
+				    request.customPressureTrace.pressureMilliPsi = static_cast<uint16_t>(cmd.tracePressureMilliPsi & 0xFFFFu);
+				    request.customPressureTrace.pulseUs = static_cast<uint16_t>(cmd.tracePulseUs & 0xFFFFu);
+				    request.customPressureTrace.pulseCount = static_cast<uint16_t>(cmd.tracePulseCount & 0xFFFFu);
+				    request.customPressureTrace.frequencyHz = static_cast<uint16_t>(cmd.traceFrequencyHz & 0xFFFFu);
+				  }
 
 				  (void)DiagnosticsRunner::runSelfTest(*this, request);
 				  _selfTestAbortRequested = false;

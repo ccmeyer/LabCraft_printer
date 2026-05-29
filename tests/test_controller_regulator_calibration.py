@@ -6,8 +6,9 @@ from tests.fakes import FakeSignal
 
 
 class _FakeMachine:
-    def __init__(self, calls):
+    def __init__(self, calls, *, soft_release_ok=True):
         self.calls = calls
+        self.soft_release_ok = soft_release_ok
         self.port = "COM7"
         self.baud = 115200
         self.disconnect_complete_signal = FakeSignal()
@@ -34,12 +35,17 @@ class _FakeMachine:
             handler()
         return SimpleNamespace(command_type="RESTORE_REG_PROFILE")
 
+    def release_serial_for_external_owner(self, reason="external_owner"):
+        self.calls.append(("soft_release", reason))
+        return self.soft_release_ok
+
 
 class _FakeTraceWorker:
-    def __init__(self, prepared, calls, *, ok=True):
+    def __init__(self, prepared, calls, *, ok=True, skip_goodbye=False):
         self.prepared = prepared
         self.calls = calls
         self.ok = ok
+        self.skip_goodbye = bool(skip_goodbye)
         self.stage = FakeSignal()
         self.output = FakeSignal()
         self.run_finished = FakeSignal()
@@ -55,7 +61,7 @@ class _FakeTraceWorker:
 
     def start(self):
         self._running = True
-        self.calls.append(("trace_start", self.prepared.trace_case.test_id))
+        self.calls.append(("trace_start", self.prepared.trace_case.test_id, self.skip_goodbye))
         trace_file = self.prepared.run_dir / f"{self.prepared.raw_selftest_path.stem}_trace_{self.prepared.trace_case.test_id}.json"
         trace_file.write_text("{}", encoding="utf-8")
         payload = {
@@ -68,9 +74,9 @@ class _FakeTraceWorker:
         self.run_finished.emit(self.ok, "trace ok" if self.ok else "trace failed", payload)
 
 
-def _controller(tmp_path, *, trace_ok=True, reconnect_ok=True):
+def _controller(tmp_path, *, trace_ok=True, reconnect_ok=True, soft_release_ok=True):
     calls = []
-    machine = _FakeMachine(calls)
+    machine = _FakeMachine(calls, soft_release_ok=soft_release_ok)
     controller = Controller.__new__(Controller)
     controller.machine = machine
     controller.model = SimpleNamespace(
@@ -90,8 +96,8 @@ def _controller(tmp_path, *, trace_ok=True, reconnect_ok=True):
         machine.machine_connected_signal.emit(reconnect_ok),
     )
 
-    def factory(prepared, port, baud, repo_root, run_selftest_path):
-        return _FakeTraceWorker(prepared, calls, ok=trace_ok)
+    def factory(prepared, port, baud, repo_root, run_selftest_path, *, skip_goodbye=False):
+        return _FakeTraceWorker(prepared, calls, ok=trace_ok, skip_goodbye=skip_goodbye)
 
     return controller, machine, calls, factory
 
@@ -122,8 +128,8 @@ def test_controller_sequences_apply_trace_reconnect_and_restore(tmp_path):
     machine.ready_handlers[-1]()
 
     assert calls[3:] == [
-        ("disconnect",),
-        ("trace_start", 2102),
+        ("soft_release", "regulator_calibration"),
+        ("trace_start", 2102, True),
         ("connect", "COM7"),
         ("restore", ("print",), "baseline", True),
     ]
@@ -173,6 +179,42 @@ def test_controller_reconnect_failure_records_restore_failed(tmp_path):
     assert finished[-1][0] is False
     assert finished[-1][2]["metadata"]["outcome"]["status"] == "restore_failed"
     assert finished[-1][2]["metadata"]["outcome"]["restored_previous_profile"] is False
+
+
+def test_controller_full_disconnect_mode_preserves_shutdown_handoff(tmp_path):
+    controller, machine, calls, factory = _controller(tmp_path)
+    finished = []
+    controller.regulator_calibration_finished.connect(lambda *args: finished.append(args))
+
+    assert controller.start_regulator_calibration_run(
+        _config(serial_handoff_mode="full_disconnect"),
+        trace_worker_factory=factory,
+    ) is True
+    machine.ready_handlers[-1]()
+
+    assert calls[3:] == [
+        ("disconnect",),
+        ("trace_start", 2102, False),
+        ("connect", "COM7"),
+        ("restore", ("print",), "baseline", True),
+    ]
+    assert finished[-1][0] is True
+
+
+def test_controller_soft_release_failure_restores_without_trace(tmp_path):
+    controller, machine, calls, factory = _controller(tmp_path, soft_release_ok=False)
+    finished = []
+    controller.regulator_calibration_finished.connect(lambda *args: finished.append(args))
+
+    assert controller.start_regulator_calibration_run(_config(), trace_worker_factory=factory) is True
+    machine.ready_handlers[-1]()
+
+    assert ("soft_release", "regulator_calibration") in calls
+    assert not any(call[0] == "trace_start" for call in calls)
+    assert ("restore", ("print",), "baseline", True) in calls
+    assert finished[-1][0] is False
+    assert finished[-1][2]["metadata"]["outcome"]["status"] == "failed"
+    assert finished[-1][2]["metadata"]["outcome"]["restored_previous_profile"] is True
 
 
 def test_controller_rejects_invalid_start_without_queueing(tmp_path):

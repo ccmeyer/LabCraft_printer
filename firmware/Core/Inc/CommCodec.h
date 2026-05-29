@@ -17,6 +17,11 @@ static constexpr uint8_t TAG_CAPABILITIES = 0x13;
 static constexpr uint8_t TAG_PROFILE = 0x20;
 static constexpr uint8_t TAG_RUN_ID = 0x21;
 static constexpr uint8_t TAG_TIMEOUT_MS = 0x22;
+static constexpr uint8_t TAG_TRACE_CHANNEL = 0x40;
+static constexpr uint8_t TAG_TRACE_PRESSURE_MPSI = 0x41;
+static constexpr uint8_t TAG_TRACE_PULSE_US = 0x42;
+static constexpr uint8_t TAG_TRACE_PULSE_COUNT = 0x43;
+static constexpr uint8_t TAG_TRACE_FREQUENCY_HZ = 0x44;
 static constexpr size_t RX_BUF_SIZE = 64;
 
 struct DecodedCommand {
@@ -28,9 +33,19 @@ struct DecodedCommand {
     uint32_t seq32 = 0;
     uint32_t runId = 0;
     uint32_t timeoutMs = 0;
+    uint32_t traceChannel = 0;
+    uint32_t tracePressureMilliPsi = 0;
+    uint32_t tracePulseUs = 0;
+    uint32_t tracePulseCount = 0;
+    uint32_t traceFrequencyHz = 0;
     uint8_t p1Len = 0;
     uint8_t p2Len = 0;
     uint8_t p3Len = 0;
+    uint8_t traceChannelLen = 0;
+    uint8_t tracePressureMilliPsiLen = 0;
+    uint8_t tracePulseUsLen = 0;
+    uint8_t tracePulseCountLen = 0;
+    uint8_t traceFrequencyHzLen = 0;
     bool hasSeq32 = false;
     bool hasRunId = false;
     bool hasTimeoutMs = false;

@@ -44,6 +44,17 @@ extern "C" uint32_t RTOS_StackOverflowHookFired(void);
 
 namespace {
 
+static constexpr uint16_t kPressureTraceCustomTestId = 2110u;
+static constexpr uint16_t kTracePressureMilliPsiMin = 100u;
+static constexpr uint16_t kTracePressureMilliPsiMax = 2500u;
+static constexpr uint16_t kTracePulseUsMin = 100u;
+static constexpr uint16_t kTracePulseUsMax = 10000u;
+static constexpr uint16_t kTracePulseCountMin = 1u;
+static constexpr uint16_t kTracePulseCountMax = 100u;
+static constexpr uint16_t kTraceFrequencyHzMin = 1u;
+static constexpr uint16_t kTraceFrequencyHzMax = 50u;
+static constexpr uint32_t kTraceMaxPulseWindowMs = 10000u;
+
 static constexpr DiagnosticTestDescriptor kDiagnosticTests[] = {
     {1001u, "comm_crc_known_vector", "protocol", "SAFE", "always"},
     {1002u, "comm_frame_roundtrip", "protocol", "SAFE", "always"},
@@ -113,6 +124,7 @@ static constexpr DiagnosticTestDescriptor kDiagnosticTests[] = {
     {2102u, "pressure_recovery_trace_print_repeated", "pressure_trace", "FULL", "explicit_flag"},
     {2103u, "pressure_recovery_trace_refuel_repeated", "pressure_trace", "FULL", "explicit_flag"},
     {2104u, "pressure_recovery_trace_dual_interleaved", "pressure_trace", "FULL", "explicit_flag"},
+    {kPressureTraceCustomTestId, "pressure_recovery_trace_custom", "pressure_trace", "FULL", "explicit_flag"},
     {2301u, "pressure_sweep_core", "pressure_sweep", "FULL", "explicit_selection"},
     {2302u, "pressure_sweep_extended", "pressure_sweep", "FULL", "explicit_selection"},
     {2303u, "pressure_sweep_focused", "pressure_sweep", "FULL", "explicit_selection"},
@@ -198,6 +210,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
     const bool runPressureSweepFocused = (selectedPressureTraceTest == 2303u);
     const bool runPressureSweepMicro = (selectedPressureTraceTest == 2304u);
     const bool runPressureDiagnosticsByFlag = request.runPressureDiagnostics;
+    const bool runCustomPressureTraceSelection =
+        (selectedPressureTraceTest == kPressureTraceCustomTestId);
     const bool runSinglePressureTraceSelection =
         (selectedPressureTraceTest >= 2101u) && (selectedPressureTraceTest <= 2104u);
                   auto shouldRunPressureTraceCase = [&](uint16_t testId) {
@@ -7756,6 +7770,76 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           }
                           if (runPressureSweepMicro) {
                             if (!runPressureSweepSuite(2304u)) goto selftest_done;
+                          }
+
+                          if (runCustomPressureTraceSelection) {
+                            const PressureTraceCustomConfig& custom = request.customPressureTrace;
+                            const char* invalid = nullptr;
+                            if (!custom.enabled ||
+                                !custom.hasChannel ||
+                                !custom.hasPressureMilliPsi ||
+                                !custom.hasPulseUs ||
+                                !custom.hasPulseCount ||
+                                !custom.hasFrequencyHz) {
+                              invalid = "missing_config";
+                            } else if (custom.channel > 1u) {
+                              invalid = "channel";
+#if (LC_PRESSURE_PORTS <= 1)
+                            } else if (custom.channel == 1u) {
+                              invalid = "refuel_unavailable";
+#endif
+                            } else if ((custom.pressureMilliPsi < kTracePressureMilliPsiMin) ||
+                                       (custom.pressureMilliPsi > kTracePressureMilliPsiMax)) {
+                              invalid = "pressure";
+                            } else if ((custom.pulseUs < kTracePulseUsMin) ||
+                                       (custom.pulseUs > kTracePulseUsMax)) {
+                              invalid = "pulse_us";
+                            } else if ((custom.pulseCount < kTracePulseCountMin) ||
+                                       (custom.pulseCount > kTracePulseCountMax)) {
+                              invalid = "pulse_count";
+                            } else if ((custom.frequencyHz < kTraceFrequencyHzMin) ||
+                                       (custom.frequencyHz > kTraceFrequencyHzMax)) {
+                              invalid = "frequency";
+                            } else if (static_cast<uint32_t>(custom.pulseUs) >=
+                                       (1000000u / static_cast<uint32_t>(custom.frequencyHz))) {
+                              invalid = "pulse_period";
+                            } else if (((static_cast<uint32_t>(custom.pulseCount) * 1000u) +
+                                        static_cast<uint32_t>(custom.frequencyHz) - 1u) /
+                                       static_cast<uint32_t>(custom.frequencyHz) > kTraceMaxPulseWindowMs) {
+                              invalid = "duration";
+                            }
+
+                            if (invalid != nullptr) {
+                              char metrics[160];
+                              snprintf(metrics,
+                                       sizeof(metrics),
+                                       "custom=1;executed=0;invalid=%s;ch=%u;pressure_mpsi=%u;pulse_us=%u;pulses=%u;hz=%u",
+                                       invalid,
+                                       static_cast<unsigned>(custom.channel),
+                                       static_cast<unsigned>(custom.pressureMilliPsi),
+                                       static_cast<unsigned>(custom.pulseUs),
+                                       static_cast<unsigned>(custom.pulseCount),
+                                       static_cast<unsigned>(custom.frequencyHz));
+                              if (!runOne(kPressureTraceCustomTestId,
+                                          "pressure_recovery_trace_custom",
+                                          false,
+                                          metrics)) goto selftest_done;
+                            } else {
+                              if (!runPressureTraceCase(kPressureTraceCustomTestId,
+                                                        "pressure_recovery_trace_custom",
+                                                        custom.channel,
+                                                        psiToRaw(custom.pressureMilliPsi),
+                                                        custom.pulseUs,
+                                                        custom.pulseCount,
+                                                        custom.frequencyHz,
+                                                        (custom.channel == 0u) ? PulseMode::PRINT_ONLY : PulseMode::REFUEL_ONLY,
+                                                        false,
+                                                        0u,
+                                                        0u,
+                                                        nullptr,
+                                                        true,
+                                                        exportPressureTrace)) goto selftest_done;
+                            }
                           }
 
                           if (shouldRunPressureTraceCase(2101)) {

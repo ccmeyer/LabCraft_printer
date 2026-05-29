@@ -950,6 +950,7 @@ class Controller(QObject):
             "config": run_config,
             "port": port,
             "baud": baud,
+            "serial_handoff_mode": prepared.serial_handoff_mode,
             "trace_worker_factory": trace_worker_factory,
             "candidate_commands_queued": False,
             "candidate_applied": False,
@@ -1088,6 +1089,12 @@ class Controller(QObject):
         return True
 
     def _disconnect_for_regulator_calibration_trace(self):
+        state = getattr(self, "_regulator_calibration_state", None)
+        handoff_mode = str((state or {}).get("serial_handoff_mode") or "soft")
+        if handoff_mode == "soft":
+            self._soft_release_for_regulator_calibration_trace()
+            return
+
         signal = getattr(self.machine, "disconnect_complete_signal", None)
         connected = self._connect_once(
             signal,
@@ -1103,6 +1110,30 @@ class Controller(QObject):
             return
         if not connected:
             self._start_regulator_calibration_trace_worker()
+
+    def _soft_release_for_regulator_calibration_trace(self):
+        release = getattr(self.machine, "release_serial_for_external_owner", None)
+        if not callable(release):
+            self._handle_regulator_calibration_failure(
+                "Machine transport does not support soft serial release for regulator calibration.",
+                restore_if_needed=True,
+            )
+            return
+        try:
+            released = bool(release(reason="regulator_calibration"))
+        except Exception as exc:
+            self._handle_regulator_calibration_failure(
+                f"Could not release app serial port for pressure trace: {exc}",
+                restore_if_needed=True,
+            )
+            return
+        if not released:
+            self._handle_regulator_calibration_failure(
+                "Could not release app serial port for pressure trace.",
+                restore_if_needed=True,
+            )
+            return
+        self._start_regulator_calibration_trace_worker()
 
     def _start_regulator_calibration_trace_worker(self):
         state = getattr(self, "_regulator_calibration_state", None)
@@ -1121,6 +1152,7 @@ class Controller(QObject):
 
         prepared = state["prepared"]
         factory = state.get("trace_worker_factory")
+        skip_goodbye = str(state.get("serial_handoff_mode") or "soft") == "soft"
         if callable(factory):
             worker = factory(
                 prepared,
@@ -1128,6 +1160,7 @@ class Controller(QObject):
                 state["baud"],
                 self._repo_root,
                 self._repo_root / "tools" / "run_selftest.py",
+                skip_goodbye=skip_goodbye,
             )
         else:
             worker = RegulatorTraceProcessWorker(
@@ -1137,6 +1170,7 @@ class Controller(QObject):
                 repo_root=self._repo_root,
                 run_selftest_path=self._repo_root / "tools" / "run_selftest.py",
                 timeout_ms=state["config"].get("timeout_ms"),
+                skip_goodbye=skip_goodbye,
             )
         self._regulator_calibration_worker = worker
         self._connect_signal_if_present(worker, "stage", lambda msg: self._emit_regulator_calibration_signal("regulator_calibration_stage", msg))

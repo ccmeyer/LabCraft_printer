@@ -34,12 +34,17 @@ class _FakeMachine:
             handler()
         return SimpleNamespace(command_type="RESTORE_REG_PROFILE")
 
+    def release_serial_for_external_owner(self, reason="external_owner"):
+        self.calls.append(("soft_release", reason))
+        return True
+
 
 class _FakeTraceWorker:
-    def __init__(self, prepared, calls, ok_sequence):
+    def __init__(self, prepared, calls, ok_sequence, *, skip_goodbye=False):
         self.prepared = prepared
         self.calls = calls
         self.ok_sequence = ok_sequence
+        self.skip_goodbye = bool(skip_goodbye)
         self.stage = FakeSignal()
         self.output = FakeSignal()
         self.run_finished = FakeSignal()
@@ -56,7 +61,7 @@ class _FakeTraceWorker:
     def start(self):
         self._running = True
         ok = self.ok_sequence.pop(0) if self.ok_sequence else True
-        self.calls.append(("trace_start", self.prepared.profile_id, self.prepared.run_id))
+        self.calls.append(("trace_start", self.prepared.profile_id, self.prepared.run_id, self.skip_goodbye))
         trace_file = self.prepared.run_dir / f"{self.prepared.raw_selftest_path.stem}_trace_{self.prepared.trace_case.test_id}.json"
         trace_file.write_text("{}", encoding="utf-8")
         payload = {
@@ -107,8 +112,8 @@ def _controller(tmp_path, *, ok_sequence=None, analysis_raises=False):
     )
     sequence = list(ok_sequence if ok_sequence is not None else [True] * 10)
 
-    def factory(prepared, port, baud, repo_root, run_selftest_path):
-        return _FakeTraceWorker(prepared, calls, sequence)
+    def factory(prepared, port, baud, repo_root, run_selftest_path, *, skip_goodbye=False):
+        return _FakeTraceWorker(prepared, calls, sequence, skip_goodbye=skip_goodbye)
 
     def analysis_runner(prepared):
         calls.append(("analysis", str(prepared.session_dir)))
@@ -166,6 +171,7 @@ def test_batch_sequences_baseline_candidates_analysis_and_manifest(tmp_path):
         "stream_candidate_b",
         "stream_default",
     ]
+    assert {call[3] for call in trace_starts} == {True}
     assert len([call for call in calls if call[0] == "restore"]) == 4
     assert calls[-1][0] == "analysis"
     assert finished[-1][0] is True
@@ -242,3 +248,26 @@ def test_batch_rejects_start_while_single_run_active(tmp_path):
         trace_worker_factory=factory,
         analysis_runner=analysis_runner,
     ) is False
+
+
+def test_batch_passes_full_disconnect_handoff_to_each_run(tmp_path):
+    controller, machine, calls, factory, analysis_runner = _controller(tmp_path)
+    finished = []
+    controller.regulator_calibration_batch_finished.connect(lambda *args: finished.append(args))
+
+    assert controller.start_regulator_calibration_batch(
+        _config(
+            candidate_profile_ids=["stream_candidate_a"],
+            baseline_after=False,
+            serial_handoff_mode="full_disconnect",
+        ),
+        trace_worker_factory=factory,
+        analysis_runner=analysis_runner,
+    ) is True
+    _drain_ready_handlers(machine)
+
+    trace_starts = [call for call in calls if call[0] == "trace_start"]
+    assert [call[3] for call in trace_starts] == [False, False]
+    assert len([call for call in calls if call[0] == "disconnect"]) == 2
+    assert not any(call[0] == "soft_release" for call in calls)
+    assert finished[-1][0] is True

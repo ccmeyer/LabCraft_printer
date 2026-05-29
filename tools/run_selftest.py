@@ -57,6 +57,11 @@ TAG_P3 = 0x03
 TAG_ACK_RESULT = 0x11
 TAG_EXPECTED_SEQ32 = 0x12
 TAG_CAPABILITIES = 0x13
+TAG_TRACE_CHANNEL = 0x40
+TAG_TRACE_PRESSURE_MPSI = 0x41
+TAG_TRACE_PULSE_US = 0x42
+TAG_TRACE_PULSE_COUNT = 0x43
+TAG_TRACE_FREQUENCY_HZ = 0x44
 TAG_RESET_SEQ32 = 0x10
 TAG_RESET_CAUSE = 0x11
 TAG_RESET_FLAGS = 0x12
@@ -89,6 +94,17 @@ TRACE_KIND_SAMPLES = 1
 TRACE_KIND_EVENTS = 2
 TRACE_FORMAT_SAMPLE_V1 = 1
 TRACE_FORMAT_EVENT_V1 = 2
+CUSTOM_PRESSURE_TRACE_TEST_ID = 2110
+TRACE_PRESSURE_MPSI_MIN = 100
+TRACE_PRESSURE_MPSI_MAX = 2500
+TRACE_PULSE_US_MIN = 100
+TRACE_PULSE_US_MAX = 10000
+TRACE_PULSE_COUNT_MIN = 1
+TRACE_PULSE_COUNT_MAX = 100
+TRACE_FREQUENCY_HZ_MIN = 1
+TRACE_FREQUENCY_HZ_MAX = 50
+TRACE_MAX_PULSE_WINDOW_MS = 10000
+TRACE_CHANNEL_CODES = {"print": 0, "refuel": 1}
 
 
 def crc16(data: bytes) -> int:
@@ -123,6 +139,74 @@ def parse_tlvs(payload: bytes) -> dict[int, bytes]:
         out[tag] = payload[i : i + ln]
         i += ln
     return out
+
+
+def _validated_custom_trace_config(args: argparse.Namespace) -> dict | None:
+    if not bool(getattr(args, "pressure_trace_custom", False)):
+        return None
+
+    channel = str(getattr(args, "trace_channel", "") or "").strip().lower()
+    if channel not in TRACE_CHANNEL_CODES:
+        raise ValueError("custom pressure trace requires --trace-channel print|refuel")
+
+    def required_int(name: str, label: str) -> int:
+        value = getattr(args, name, None)
+        if value is None:
+            raise ValueError(f"custom pressure trace requires --{label}")
+        try:
+            return int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"--{label} must be an integer") from exc
+
+    pressure_psi = getattr(args, "trace_pressure_psi", None)
+    if pressure_psi is None:
+        raise ValueError("custom pressure trace requires --trace-pressure-psi")
+    try:
+        pressure_mpsi = int(round(float(pressure_psi) * 1000.0))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("--trace-pressure-psi must be numeric") from exc
+
+    pulse_us = required_int("trace_pulse_us", "trace-pulse-us")
+    pulse_count = required_int("trace_pulse_count", "trace-pulse-count")
+    frequency_hz = required_int("trace_frequency_hz", "trace-frequency-hz")
+
+    if not (TRACE_PRESSURE_MPSI_MIN <= pressure_mpsi <= TRACE_PRESSURE_MPSI_MAX):
+        raise ValueError(
+            f"--trace-pressure-psi must be between {TRACE_PRESSURE_MPSI_MIN / 1000:g} "
+            f"and {TRACE_PRESSURE_MPSI_MAX / 1000:g}"
+        )
+    if not (TRACE_PULSE_US_MIN <= pulse_us <= TRACE_PULSE_US_MAX):
+        raise ValueError(f"--trace-pulse-us must be between {TRACE_PULSE_US_MIN} and {TRACE_PULSE_US_MAX}")
+    if not (TRACE_PULSE_COUNT_MIN <= pulse_count <= TRACE_PULSE_COUNT_MAX):
+        raise ValueError(f"--trace-pulse-count must be between {TRACE_PULSE_COUNT_MIN} and {TRACE_PULSE_COUNT_MAX}")
+    if not (TRACE_FREQUENCY_HZ_MIN <= frequency_hz <= TRACE_FREQUENCY_HZ_MAX):
+        raise ValueError(f"--trace-frequency-hz must be between {TRACE_FREQUENCY_HZ_MIN} and {TRACE_FREQUENCY_HZ_MAX}")
+    period_us = 1_000_000 // frequency_hz
+    if pulse_us >= period_us:
+        raise ValueError("--trace-pulse-us must be shorter than the pulse period")
+    planned_window_ms = (pulse_count * 1000 + frequency_hz - 1) // frequency_hz
+    if planned_window_ms > TRACE_MAX_PULSE_WINDOW_MS:
+        raise ValueError(f"custom pressure trace pulse window must be <= {TRACE_MAX_PULSE_WINDOW_MS} ms")
+
+    return {
+        "channel": channel,
+        "channel_code": TRACE_CHANNEL_CODES[channel],
+        "pressure_mpsi": pressure_mpsi,
+        "pulse_us": pulse_us,
+        "pulse_count": pulse_count,
+        "frequency_hz": frequency_hz,
+    }
+
+
+def _custom_trace_tlvs(config: dict | None) -> bytes:
+    if not config:
+        return b""
+    tlvs = bytes([TAG_TRACE_CHANNEL, 1, int(config["channel_code"])])
+    tlvs += bytes([TAG_TRACE_PRESSURE_MPSI, 2]) + int(config["pressure_mpsi"]).to_bytes(2, "little")
+    tlvs += bytes([TAG_TRACE_PULSE_US, 2]) + int(config["pulse_us"]).to_bytes(2, "little")
+    tlvs += bytes([TAG_TRACE_PULSE_COUNT, 2]) + int(config["pulse_count"]).to_bytes(2, "little")
+    tlvs += bytes([TAG_TRACE_FREQUENCY_HZ, 2]) + int(config["frequency_hz"]).to_bytes(2, "little")
+    return tlvs
 
 
 def decode_ack_result(code: int | None) -> str | None:
@@ -662,6 +746,11 @@ def run(args: argparse.Namespace) -> int:
     if profile not in profile_map:
         print(f"Unsupported profile '{profile}'. Supported profiles: SAFE, FULL.")
         return 3
+    try:
+        custom_trace_config = _validated_custom_trace_config(args)
+    except ValueError as exc:
+        print(f"Invalid custom pressure trace request: {exc}")
+        return 3
 
     run_id = int(time.time() * 1000) & 0xFFFFFFFF
     effective_timeout_ms = int(args.timeout_ms)
@@ -771,7 +860,8 @@ def run(args: argparse.Namespace) -> int:
         # Mirror profile into TAG_P1 so current firmware decode can branch without
         # changing CommCodec TLV parsing rules. TAG_PROFILE remains authoritative.
         tlvs = bytes([TAG_P1, 1, profile_val])
-        tlvs += bytes([TAG_P2, 1, 1 if getattr(args, "pressure_trace", False) else 0])
+        pressure_trace_requested = bool(getattr(args, "pressure_trace", False) or custom_trace_config is not None)
+        tlvs += bytes([TAG_P2, 1, 1 if pressure_trace_requested else 0])
         pressure_trace_test = getattr(args, "pressure_trace_test", None)
         pressure_sweep_suite = getattr(args, "pressure_sweep_suite", None)
         gripper_seal_suite = bool(getattr(args, "gripper_seal_suite", False))
@@ -783,10 +873,13 @@ def run(args: argparse.Namespace) -> int:
         valve_characterization_suite = bool(getattr(args, "valve_characterization_suite", False))
         valve_gap_sweep_suite = bool(getattr(args, "valve_gap_sweep_suite", False))
         selector = 2599 if gripper_seal_stress_suite else 2498 if valve_gap_sweep_suite else 2499 if valve_characterization_suite else 2298 if refuel_vacuum_suite else 2299 if pressure_regulator_suite else 2019 if motion_envelope_suite else 2009 if xy_motion_suite else 2500 if gripper_seal_suite else (
-            pressure_sweep_suite if pressure_sweep_suite is not None else pressure_trace_test
+            pressure_sweep_suite if pressure_sweep_suite is not None else (
+                CUSTOM_PRESSURE_TRACE_TEST_ID if custom_trace_config is not None else pressure_trace_test
+            )
         )
         if selector is not None:
             tlvs += bytes([TAG_P3, 2]) + int(selector).to_bytes(2, "little")
+        tlvs += _custom_trace_tlvs(custom_trace_config)
         tlvs += bytes([TAG_PROFILE, 1, profile_val])
         tlvs += bytes([TAG_RUN_ID, 4]) + run_id.to_bytes(4, "little")
         tlvs += bytes([TAG_TIMEOUT_MS, 4]) + effective_timeout_ms.to_bytes(4, "little")
@@ -1323,6 +1416,7 @@ def main() -> int:
     p.add_argument("--pressure-trace", action="store_true")
     selector_group = p.add_mutually_exclusive_group()
     selector_group.add_argument("--pressure-trace-test", type=int, choices=(2101, 2102, 2103, 2104))
+    selector_group.add_argument("--pressure-trace-custom", action="store_true")
     selector_group.add_argument("--pressure-sweep-suite", type=int, choices=(2301, 2302, 2303, 2304))
     selector_group.add_argument("--pressure-regulator-suite", action="store_true")
     selector_group.add_argument("--refuel-vacuum-suite", action="store_true")
@@ -1332,6 +1426,11 @@ def main() -> int:
     selector_group.add_argument("--gripper-seal-stress-suite", action="store_true")
     selector_group.add_argument("--valve-characterization-suite", action="store_true")
     selector_group.add_argument("--valve-gap-sweep-suite", action="store_true")
+    p.add_argument("--trace-channel", choices=("print", "refuel"))
+    p.add_argument("--trace-pressure-psi", type=float)
+    p.add_argument("--trace-pulse-us", type=int)
+    p.add_argument("--trace-pulse-count", type=int)
+    p.add_argument("--trace-frequency-hz", type=int)
     p.add_argument("--skip-goodbye", action="store_true")
     p.add_argument("--out", required=True)
     args = p.parse_args()

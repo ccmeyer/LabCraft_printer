@@ -41,9 +41,11 @@ class RegulatorTraceCase:
     print_pulse_width_us: int | None
     refuel_pressure_psi: float | None
     refuel_pulse_width_us: int | None
+    custom: bool = False
+    pressure_mpsi: int | None = None
 
     def conditions(self) -> dict[str, Any]:
-        return {
+        conditions = {
             "print_pressure_psi": self.print_pressure_psi,
             "print_pulse_width_us": self.print_pulse_width_us,
             "refuel_pressure_psi": self.refuel_pressure_psi,
@@ -52,6 +54,27 @@ class RegulatorTraceCase:
             "pulse_count": self.pulse_count,
             "channel": self.channel_label,
         }
+        if self.custom:
+            conditions["trace_recipe"] = "custom"
+            conditions["pressure_mpsi"] = self.pressure_mpsi
+        return conditions
+
+
+CUSTOM_TRACE_CASE_ID = 2110
+CUSTOM_TRACE_NAME = "pressure_recovery_trace_custom"
+CUSTOM_TRACE_PRESSURE_MPSI_MIN = 100
+CUSTOM_TRACE_PRESSURE_MPSI_MAX = 2500
+CUSTOM_TRACE_PULSE_US_MIN = 100
+CUSTOM_TRACE_PULSE_US_MAX = 10000
+CUSTOM_TRACE_PULSE_COUNT_MIN = 1
+CUSTOM_TRACE_PULSE_COUNT_MAX = 100
+CUSTOM_TRACE_FREQUENCY_HZ_MIN = 1
+CUSTOM_TRACE_FREQUENCY_HZ_MAX = 50
+CUSTOM_TRACE_MAX_PULSE_WINDOW_MS = 10000
+CUSTOM_TRACE_CHANNELS = frozenset({"print", "refuel"})
+SERIAL_HANDOFF_MODE_SOFT = "soft"
+SERIAL_HANDOFF_MODE_FULL_DISCONNECT = "full_disconnect"
+SERIAL_HANDOFF_MODES = frozenset({SERIAL_HANDOFF_MODE_SOFT, SERIAL_HANDOFF_MODE_FULL_DISCONNECT})
 
 
 TRACE_CASES: dict[int, RegulatorTraceCase] = {
@@ -115,6 +138,12 @@ CONDITION_OVERRIDE_FIELDS = frozenset(
         "frequency_hz",
         "pulse_count",
         "channel",
+        "trace_channel",
+        "trace_pressure_psi",
+        "trace_pressure_mpsi",
+        "trace_pulse_us",
+        "trace_pulse_count",
+        "trace_frequency_hz",
     }
 )
 
@@ -128,6 +157,7 @@ class PreparedRegulatorCalibrationRun:
     trace_case: RegulatorTraceCase
     profile_id: str
     mode: str
+    serial_handoff_mode: str
     candidate_profile: dict[str, Any]
     baseline_profile: dict[str, Any]
     operator: str
@@ -141,6 +171,7 @@ class PreparedRegulatorCalibrationBatch:
     session_dir: Path
     manifest_path: Path
     mode: str
+    serial_handoff_mode: str
     trace_case: RegulatorTraceCase
     baseline_profile_id: str
     candidate_profile_ids: list[str]
@@ -197,11 +228,91 @@ def _bool_from_config(config: dict[str, Any], key: str, default: bool) -> bool:
     return bool(value)
 
 
+def serial_handoff_mode_from_config(config: dict[str, Any]) -> str:
+    mode = _string_or_empty(config.get("serial_handoff_mode") or SERIAL_HANDOFF_MODE_SOFT).lower()
+    if mode not in SERIAL_HANDOFF_MODES:
+        allowed = ", ".join(sorted(SERIAL_HANDOFF_MODES))
+        raise RegulatorCalibrationError(f"serial_handoff_mode must be one of {allowed}")
+    return mode
+
+
+def _int_field(config: dict[str, Any], key: str, label: str) -> int:
+    value = config.get(key)
+    if isinstance(value, bool) or value is None:
+        raise RegulatorCalibrationError(f"{label} is required")
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise RegulatorCalibrationError(f"{label} must be an integer") from exc
+
+
+def _custom_pressure_mpsi(config: dict[str, Any]) -> int:
+    if "trace_pressure_mpsi" in config:
+        return _int_field(config, "trace_pressure_mpsi", "trace_pressure_mpsi")
+    value = config.get("trace_pressure_psi")
+    if isinstance(value, bool) or value is None:
+        raise RegulatorCalibrationError("trace_pressure_psi is required")
+    try:
+        return int(round(float(value) * 1000.0))
+    except (TypeError, ValueError) as exc:
+        raise RegulatorCalibrationError("trace_pressure_psi must be numeric") from exc
+
+
+def custom_trace_case_from_config(config: dict[str, Any]) -> RegulatorTraceCase:
+    channel = _string_or_empty(config.get("trace_channel")).lower()
+    if channel not in CUSTOM_TRACE_CHANNELS:
+        raise RegulatorCalibrationError("trace_channel must be print or refuel")
+    pressure_mpsi = _custom_pressure_mpsi(config)
+    pulse_us = _int_field(config, "trace_pulse_us", "trace_pulse_us")
+    pulse_count = _int_field(config, "trace_pulse_count", "trace_pulse_count")
+    frequency_hz = _int_field(config, "trace_frequency_hz", "trace_frequency_hz")
+
+    if not (CUSTOM_TRACE_PRESSURE_MPSI_MIN <= pressure_mpsi <= CUSTOM_TRACE_PRESSURE_MPSI_MAX):
+        raise RegulatorCalibrationError("trace pressure must be between 0.1 and 2.5 psi")
+    if not (CUSTOM_TRACE_PULSE_US_MIN <= pulse_us <= CUSTOM_TRACE_PULSE_US_MAX):
+        raise RegulatorCalibrationError(
+            f"trace_pulse_us must be between {CUSTOM_TRACE_PULSE_US_MIN} and {CUSTOM_TRACE_PULSE_US_MAX}"
+        )
+    if not (CUSTOM_TRACE_PULSE_COUNT_MIN <= pulse_count <= CUSTOM_TRACE_PULSE_COUNT_MAX):
+        raise RegulatorCalibrationError(
+            f"trace_pulse_count must be between {CUSTOM_TRACE_PULSE_COUNT_MIN} and {CUSTOM_TRACE_PULSE_COUNT_MAX}"
+        )
+    if not (CUSTOM_TRACE_FREQUENCY_HZ_MIN <= frequency_hz <= CUSTOM_TRACE_FREQUENCY_HZ_MAX):
+        raise RegulatorCalibrationError(
+            f"trace_frequency_hz must be between {CUSTOM_TRACE_FREQUENCY_HZ_MIN} and {CUSTOM_TRACE_FREQUENCY_HZ_MAX}"
+        )
+    if pulse_us >= (1_000_000 // frequency_hz):
+        raise RegulatorCalibrationError("trace_pulse_us must be shorter than the pulse period")
+    planned_window_ms = (pulse_count * 1000 + frequency_hz - 1) // frequency_hz
+    if planned_window_ms > CUSTOM_TRACE_MAX_PULSE_WINDOW_MS:
+        raise RegulatorCalibrationError(
+            f"custom trace pulse window must be no more than {CUSTOM_TRACE_MAX_PULSE_WINDOW_MS} ms"
+        )
+
+    pressure_psi = pressure_mpsi / 1000.0
+    return RegulatorTraceCase(
+        test_id=CUSTOM_TRACE_CASE_ID,
+        name=CUSTOM_TRACE_NAME,
+        channels=(channel,),
+        channel_label=channel,
+        pulse_count=pulse_count,
+        frequency_hz=frequency_hz,
+        print_pressure_psi=pressure_psi if channel == "print" else None,
+        print_pulse_width_us=pulse_us if channel == "print" else None,
+        refuel_pressure_psi=pressure_psi if channel == "refuel" else None,
+        refuel_pulse_width_us=pulse_us if channel == "refuel" else None,
+        custom=True,
+        pressure_mpsi=pressure_mpsi,
+    )
+
+
 def _trace_case_from_config(config: dict[str, Any]) -> RegulatorTraceCase:
     try:
         trace_case_id = int(config.get("trace_case_id"))
     except (TypeError, ValueError):
         raise RegulatorCalibrationError("trace_case_id must be one of the supported pressure trace cases")
+    if trace_case_id == CUSTOM_TRACE_CASE_ID:
+        return custom_trace_case_from_config(config)
     case = TRACE_CASES.get(trace_case_id)
     if case is None:
         raise RegulatorCalibrationError("trace_case_id must be one of the supported pressure trace cases")
@@ -237,7 +348,10 @@ def prepare_regulator_calibration_run(
     config = dict(config or {})
     if not bool(config.get("calibrated_head_confirmed")):
         raise RegulatorCalibrationError("Confirm that a calibrated printer head is installed before starting.")
-    _reject_condition_overrides(config)
+    serial_handoff_mode = serial_handoff_mode_from_config(config)
+    trace_case = _trace_case_from_config(config)
+    if not trace_case.custom:
+        _reject_condition_overrides(config)
 
     document = _profile_document_from_store_or_payload(profile_document)
     profile_id = _string_or_empty(config.get("profile_id"))
@@ -257,10 +371,6 @@ def prepare_regulator_calibration_run(
             f"profile {profile_id} mode {candidate_profile.get('mode')} does not match selected mode {requested_mode}"
         )
 
-    try:
-        trace_case = _trace_case_from_config(config)
-    except RegulatorCalibrationError as exc:
-        raise RegulatorCalibrationBatchError(str(exc)) from exc
     active_profile_id = document.get("active_profiles", {}).get(requested_mode)
     active_profile = None
     if active_profile_id:
@@ -294,6 +404,7 @@ def prepare_regulator_calibration_run(
         "created_at_utc": _iso_utc(now),
         "operator": _string_or_empty(config.get("operator")),
         "mode": requested_mode,
+        "serial_handoff_mode": serial_handoff_mode,
         "candidate_profile_id": profile_id,
         "candidate_profile": copy.deepcopy(candidate_profile),
         "baseline_profile": baseline_profile,
@@ -319,6 +430,7 @@ def prepare_regulator_calibration_run(
         trace_case=trace_case,
         profile_id=profile_id,
         mode=requested_mode,
+        serial_handoff_mode=serial_handoff_mode,
         candidate_profile=copy.deepcopy(candidate_profile),
         baseline_profile=baseline_profile,
         operator=metadata["operator"],
@@ -377,7 +489,19 @@ def prepare_regulator_calibration_batch(
     config = dict(config or {})
     if not bool(config.get("calibrated_head_confirmed")):
         raise RegulatorCalibrationBatchError("Confirm that a calibrated printer head is installed before starting.")
-    _reject_condition_overrides(config)
+    try:
+        serial_handoff_mode = serial_handoff_mode_from_config(config)
+    except RegulatorCalibrationError as exc:
+        raise RegulatorCalibrationBatchError(str(exc)) from exc
+    try:
+        trace_case = _trace_case_from_config(config)
+    except RegulatorCalibrationError as exc:
+        raise RegulatorCalibrationBatchError(str(exc)) from exc
+    if not trace_case.custom:
+        try:
+            _reject_condition_overrides(config)
+        except RegulatorCalibrationError as exc:
+            raise RegulatorCalibrationBatchError(str(exc)) from exc
 
     try:
         document = _profile_document_from_store_or_payload(profile_document)
@@ -386,10 +510,6 @@ def prepare_regulator_calibration_batch(
     mode = _string_or_empty(config.get("mode")).lower()
     if mode not in {"droplet", "stream"}:
         raise RegulatorCalibrationBatchError("batch mode must be droplet or stream")
-    try:
-        trace_case = _trace_case_from_config(config)
-    except RegulatorCalibrationError as exc:
-        raise RegulatorCalibrationBatchError(str(exc)) from exc
     profiles = document.get("profiles", {})
     candidate_profile_ids = _candidate_profile_ids(config)
     if not (1 <= len(candidate_profile_ids) <= 12):
@@ -480,6 +600,7 @@ def prepare_regulator_calibration_batch(
         "created_at_utc": _iso_utc(now),
         "operator": _string_or_empty(config.get("operator")),
         "mode": mode,
+        "serial_handoff_mode": serial_handoff_mode,
         "trace_case_id": trace_case.test_id,
         "conditions": conditions,
         "baseline_profile_id": baseline_profile_id,
@@ -507,6 +628,7 @@ def prepare_regulator_calibration_batch(
         session_dir=session_dir,
         manifest_path=session_dir / "session_manifest.json",
         mode=mode,
+        serial_handoff_mode=serial_handoff_mode,
         trace_case=trace_case,
         baseline_profile_id=baseline_profile_id,
         candidate_profile_ids=list(candidate_profile_ids),
@@ -557,6 +679,7 @@ def batch_run_configs(prepared_batch: PreparedRegulatorCalibrationBatch) -> list
     configs: list[dict[str, Any]] = []
     base = {
         "mode": prepared_batch.mode,
+        "serial_handoff_mode": prepared_batch.serial_handoff_mode,
         "trace_case_id": prepared_batch.trace_case.test_id,
         "operator": prepared_batch.manifest.get("operator", ""),
         "printer_head_id": prepared_batch.conditions.get("printer_head_id", ""),
@@ -567,6 +690,22 @@ def batch_run_configs(prepared_batch: PreparedRegulatorCalibrationBatch) -> list
         "output_root": str(prepared_batch.output_root),
         "_batch_run": True,
     }
+    if prepared_batch.trace_case.custom:
+        channel = prepared_batch.trace_case.channel_label
+        pulse_us = (
+            prepared_batch.trace_case.print_pulse_width_us
+            if channel == "print"
+            else prepared_batch.trace_case.refuel_pulse_width_us
+        )
+        base.update(
+            {
+                "trace_channel": channel,
+                "trace_pressure_mpsi": prepared_batch.trace_case.pressure_mpsi,
+                "trace_pulse_us": pulse_us,
+                "trace_pulse_count": prepared_batch.trace_case.pulse_count,
+                "trace_frequency_hz": prepared_batch.trace_case.frequency_hz,
+            }
+        )
     for run in prepared_batch.runs:
         config = dict(base)
         config.update(
@@ -636,6 +775,7 @@ def build_selftest_command(
     run_selftest_path: str | Path,
     python_executable: str | None = None,
     timeout_ms: int | None = None,
+    skip_goodbye: bool = False,
 ) -> tuple[str, ...]:
     command = [
         python_executable or sys.executable,
@@ -647,14 +787,38 @@ def build_selftest_command(
         "--profile",
         "FULL",
         "--pressure-trace",
-        "--pressure-trace-test",
-        str(prepared.trace_case.test_id),
         "--progress-jsonl",
         "--out",
         str(prepared.raw_selftest_path),
     ]
+    if prepared.trace_case.custom:
+        channel = prepared.trace_case.channel_label
+        pulse_us = (
+            prepared.trace_case.print_pulse_width_us
+            if channel == "print"
+            else prepared.trace_case.refuel_pulse_width_us
+        )
+        command.extend(
+            [
+                "--pressure-trace-custom",
+                "--trace-channel",
+                channel,
+                "--trace-pressure-psi",
+                f"{(prepared.trace_case.pressure_mpsi or 0) / 1000.0:g}",
+                "--trace-pulse-us",
+                str(int(pulse_us or 0)),
+                "--trace-pulse-count",
+                str(int(prepared.trace_case.pulse_count)),
+                "--trace-frequency-hz",
+                str(int(prepared.trace_case.frequency_hz)),
+            ]
+        )
+    else:
+        command.extend(["--pressure-trace-test", str(prepared.trace_case.test_id)])
     if timeout_ms is not None:
         command.extend(["--timeout-ms", str(int(timeout_ms))])
+    if skip_goodbye:
+        command.append("--skip-goodbye")
     return tuple(command)
 
 
@@ -674,6 +838,7 @@ class RegulatorTraceProcessWorker(QtCore.QThread):
         repo_root: str | Path,
         run_selftest_path: str | Path,
         timeout_ms: int | None = None,
+        skip_goodbye: bool = False,
         invoker: Callable[[tuple[str, ...], Path], int] | None = None,
         parent=None,
     ):
@@ -684,6 +849,7 @@ class RegulatorTraceProcessWorker(QtCore.QThread):
         self.repo_root = Path(repo_root)
         self.run_selftest_path = Path(run_selftest_path)
         self.timeout_ms = timeout_ms
+        self.skip_goodbye = bool(skip_goodbye)
         self.invoker = invoker
         self._cancel_requested = False
         self._process: subprocess.Popen | None = None
@@ -708,6 +874,7 @@ class RegulatorTraceProcessWorker(QtCore.QThread):
             baud=self.baud,
             run_selftest_path=self.run_selftest_path,
             timeout_ms=self.timeout_ms,
+            skip_goodbye=self.skip_goodbye,
         )
         self.stage.emit("Running pressure trace")
         self.output.emit(" ".join(command))
