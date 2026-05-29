@@ -112,6 +112,8 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
   - Includes pressure-trace pulse-drop, recovery, deadline-slip, and outlier aggregation helpers for FULL valve pulse diagnostics and host tests.
   - `firmware/Core/Inc/GripperSealQualificationMath.h`, `firmware/Core/Src/GripperSealQualificationMath.cpp`
   - Includes closed-seal pressure-drop, slope, threshold-duration, and repeat-span helpers for the local operator-gated gripper seal suite and host tests.
+  - `firmware/Core/Inc/RegulatorProfileCommandPolicy.h`, `firmware/Core/Src/RegulatorProfileCommandPolicy.cpp`
+  - Pure command decode and bounds policy for RAM-only runtime regulator recovery/slew/ready profile commands (`0x68`-`0x6C`); host-tested and free of HAL/FreeRTOS dependencies.
 - Pressure trace capture:
   - `firmware/Core/Inc/PressureTraceRecorder.h`, `firmware/Core/Src/PressureTraceRecorder.cpp`
   - Records bounded pressure/control samples and events during pressure-focused FULL self-tests.
@@ -146,6 +148,7 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
   - Flash session safety lives here: `CMD_INIT_FLASH` / `CMD_STOP_FLASH`, PE8 arm/disarm policy, PE9 output ownership, and fault latch logging (`FLASH_ARMED`, `FLASH_DISARMED`, `FLASH_FAULT`). Active imaging sessions now only hard-fault on `line_high_on_arm`; once armed, duplicate triggers while a flash is already pending are ignored and the task simply waits for PE8 to return low without latching on slow release.
 
   - `Orchestrator::drainAckQueue()` now flushes deferred `CMD_QUEUE_ACK` traffic from both the main loop and interruptible wait loops so `CMD_PAUSE_AFTER_SEQ32` requests can be acknowledged promptly during long move/dispense commands.
+  - Runtime regulator profile calibration entrypoints `CMD_SET_REG_RECOVERY_PROFILE`, `CMD_SET_REG_SLEW_PROFILE`, `CMD_SET_REG_READY_PROFILE`, and `CMD_RESTORE_REG_PROFILE` validate existing `p1/p2/p3` TLVs through `RegulatorProfileCommandPolicy`, apply candidate settings in RAM only, capture a session baseline before the first candidate apply, and restore either that baseline or firmware defaults on request. `CMD_QUERY_REG_PROFILE` is reserved/no-op until a response format is documented.
 
 ### Logging/status/indicators
 
@@ -314,6 +317,11 @@ Common parse path for host->MCU commands:
 | `0x65` | `CMD_REFUEL_VACUUM_ENTER` | host->MCU | `p1=targetRaw`, `p2=prepPositionSteps`, `p3=moveHz` | `executeCommand` (`enterRefuelVacuumModeWithAsyncHome`) | dual-port only |
 | `0x66` | `CMD_REFUEL_VACUUM_SET_TARGET` | host->MCU | `p1=targetRaw` | `executeCommand` (`regR().setVacuumTargetSafe`) | dual-port only |
 | `0x67` | `CMD_REFUEL_VACUUM_EXIT` | host->MCU | `p1=restoreTargetRaw` | `executeCommand` (`regR().exitVacuumMode`) | dual-port only |
+| `0x68` | `CMD_SET_REG_RECOVERY_PROFILE` | host->MCU | chunked recovery config in existing `p1/p2/p3` TLVs | `RegulatorProfileCommandPolicy` -> `PressureRegulator::applyRuntimeRecoveryConfig` | RAM-only candidate |
+| `0x69` | `CMD_SET_REG_SLEW_PROFILE` | host->MCU | `p1=channel`, `p2=up/down`, `p3=bypassTicks` | `RegulatorProfileCommandPolicy` -> `PressureRegulator::applyRuntimeSlewConfig` | RAM-only candidate |
+| `0x6A` | `CMD_SET_REG_READY_PROFILE` | host->MCU | `p1=channel`, `p2=readyTolRaw`, `p3=consecutiveSamples` | `RegulatorProfileCommandPolicy` -> `PressureRegulator::applyRuntimeReadyConfig` | RAM-only candidate |
+| `0x6B` | `CMD_RESTORE_REG_PROFILE` | host->MCU | `p1=channelMask`, `p2=source`, `p3=0` | `executeCommand` restores session baseline or firmware defaults | no persistence |
+| `0x6C` | `CMD_QUERY_REG_PROFILE` | host->MCU | reserved | `executeCommand` logs reserved/no-op | response TBD |
 | `0xC0` | `CMD_INIT_FLASH` | host->MCU | none | `executeCommand` | n/a |
 | `0xC1` | `CMD_STOP_FLASH` | host->MCU | none | `executeCommand` | n/a |
 | `0xC2` | `CMD_SET_FLASH_DURATION` | host->MCU | `p1=duration` | `executeCommand` (`Flash::setDurationNs`) | n/a |

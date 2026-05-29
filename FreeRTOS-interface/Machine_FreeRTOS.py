@@ -1794,6 +1794,11 @@ CMD_MAP = {
     'REFUEL_VACUUM_ENTER': 0x65,
     'REFUEL_VACUUM_SET_TARGET': 0x66,
     'REFUEL_VACUUM_EXIT': 0x67,
+    'SET_REG_RECOVERY_PROFILE': 0x68,
+    'SET_REG_SLEW_PROFILE': 0x69,
+    'SET_REG_READY_PROFILE': 0x6A,
+    'RESTORE_REG_PROFILE': 0x6B,
+    'QUERY_REG_PROFILE': 0x6C,
 
     'START_READ_CAMERA': 0xC0,
     'STOP_READ_CAMERA': 0xC1,
@@ -1832,6 +1837,133 @@ CMD_MAP = {
 }
 
 CMD_NAME_BY_CODE = {value: key.lower() for key, value in CMD_MAP.items()}
+
+REGULATOR_PROFILE_CHANNELS = {
+    "print": 0,
+    "p": 0,
+    0: 0,
+    "refuel": 1,
+    "r": 1,
+    1: 1,
+}
+
+REGULATOR_PROFILE_RESTORE_SOURCES = {
+    "baseline": 0,
+    "defaults": 1,
+}
+
+REGULATOR_PROFILE_RECOVERY_BOUNDS = {
+    "active_ticks": (0, 20),
+    "base_boost_hz": (0, 6000),
+    "pulse_coeff_hz_per_us": (0, 4),
+    "pressure_coeff_hz_per_raw": (0, 4),
+    "max_boost_hz": (0, 12000),
+    "recovery_floor_hz": (0, 5000),
+    "recovery_exit_error_raw": (1, 30),
+    "max_extend_ticks": (0, 10),
+}
+
+REGULATOR_PROFILE_RECOVERY_BOOL_FIELDS = (
+    "allow_extend_while_undershoot",
+    "boost_only_when_undershoot",
+    "linear_decay",
+)
+
+REGULATOR_PROFILE_SLEW_BOUNDS = {
+    "max_hz_delta_up_per_loop": (1, 2500),
+    "max_hz_delta_down_per_loop": (1, 2500),
+    "recovery_bypass_slew_ticks": (0, 5),
+}
+
+REGULATOR_PROFILE_READY_BOUNDS = {
+    "ready_tol_raw": (1, 25),
+    "consecutive_samples": (1, 5),
+}
+
+
+def _pack_regulator_profile_u16_pair(low, high):
+    return (int(high) << 16) | int(low)
+
+
+def _normalize_regulator_profile_channel(channel):
+    if isinstance(channel, bool):
+        raise ValueError(f"invalid regulator channel: {channel}")
+    if isinstance(channel, str):
+        channel = channel.strip().lower()
+    if channel not in REGULATOR_PROFILE_CHANNELS:
+        raise ValueError(f"invalid regulator channel: {channel}")
+    return REGULATOR_PROFILE_CHANNELS[channel]
+
+
+def _normalize_regulator_profile_restore_source(source):
+    if isinstance(source, str):
+        source = source.strip().lower()
+    if source not in REGULATOR_PROFILE_RESTORE_SOURCES:
+        raise ValueError(f"invalid regulator restore source: {source}")
+    return REGULATOR_PROFILE_RESTORE_SOURCES[source]
+
+
+def _normalize_regulator_profile_restore_mask(channels):
+    if isinstance(channels, str):
+        normalized = channels.strip().lower()
+        if normalized == "both":
+            return 0x3
+        channels = [normalized]
+    elif isinstance(channels, int) and not isinstance(channels, bool):
+        if channels in (0x1, 0x2, 0x3):
+            return channels
+        raise ValueError(f"invalid regulator restore channel mask: {channels}")
+    else:
+        try:
+            channels = list(channels)
+        except TypeError as exc:
+            raise ValueError(f"invalid regulator restore channels: {channels}") from exc
+
+    mask = 0
+    for channel in channels:
+        code = _normalize_regulator_profile_channel(channel)
+        mask |= 0x1 if code == 0 else 0x2
+    if mask == 0:
+        raise ValueError("regulator restore channels cannot be empty")
+    return mask
+
+
+def _require_regulator_profile_int(config, field, min_value, max_value):
+    if field not in config:
+        raise ValueError(f"missing regulator profile field: {field}")
+    value = config[field]
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"regulator profile field {field} must be an integer")
+    if value < min_value or value > max_value:
+        raise ValueError(
+            f"regulator profile field {field} out of range: {value} not in ({min_value},{max_value})"
+        )
+    return value
+
+
+def _require_regulator_profile_bool(config, field):
+    if field not in config:
+        raise ValueError(f"missing regulator profile field: {field}")
+    value = config[field]
+    if not isinstance(value, bool):
+        raise ValueError(f"regulator profile field {field} must be a boolean")
+    return value
+
+
+def _validate_regulator_profile_config(config, bounds, bool_fields=()):
+    if not isinstance(config, dict):
+        raise ValueError("regulator profile config must be a dictionary")
+    validated = {}
+    for field, (min_value, max_value) in bounds.items():
+        validated[field] = _require_regulator_profile_int(
+            config,
+            field,
+            min_value,
+            max_value,
+        )
+    for field in bool_fields:
+        validated[field] = _require_regulator_profile_bool(config, field)
+    return validated
 
 CRASHLOG_FLAG_PENDING = 0x00000002
 CRASHLOG_FLAG_WDT_ARM_STICKY = 0x00000004
@@ -4281,6 +4413,12 @@ class Machine(QObject):
             self.error_occurred.emit(f'Parameter out of range: {param} not in ({min_val},{max_val})')
             return False
 
+    def _reject_regulator_profile_command(self, error):
+        message = f"Invalid regulator profile command: {error}"
+        print(message)
+        self.error_occurred.emit(message)
+        return False
+
     def enable_motors(self,handler=None,kwargs=None,manual=False):
         return self.add_command_to_queue('ENABLE_MOTORS',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
     
@@ -4321,6 +4459,126 @@ class Machine(QObject):
     
     def deregulate_refuel_pressure(self,handler=None,kwargs=None,manual=False):
         return self.add_command_to_queue('DEREGULATE_PRESSURE_R',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+
+    def set_regulator_recovery_profile(self, channel, recovery_dict, handler=None, kwargs=None, manual=False):
+        try:
+            channel_code = _normalize_regulator_profile_channel(channel)
+            recovery = _validate_regulator_profile_config(
+                recovery_dict,
+                REGULATOR_PROFILE_RECOVERY_BOUNDS,
+                REGULATOR_PROFILE_RECOVERY_BOOL_FIELDS,
+            )
+        except ValueError as exc:
+            return self._reject_regulator_profile_command(exc)
+
+        flags = (
+            (0x1 if recovery["allow_extend_while_undershoot"] else 0)
+            | (0x2 if recovery["boost_only_when_undershoot"] else 0)
+            | (0x4 if recovery["linear_decay"] else 0)
+        )
+        chunks = (
+            (
+                (0 << 8) | channel_code,
+                _pack_regulator_profile_u16_pair(
+                    recovery["active_ticks"],
+                    recovery["base_boost_hz"],
+                ),
+                _pack_regulator_profile_u16_pair(
+                    recovery["pulse_coeff_hz_per_us"],
+                    recovery["pressure_coeff_hz_per_raw"],
+                ),
+            ),
+            (
+                (1 << 8) | channel_code,
+                _pack_regulator_profile_u16_pair(
+                    recovery["max_boost_hz"],
+                    recovery["recovery_floor_hz"],
+                ),
+                _pack_regulator_profile_u16_pair(
+                    recovery["recovery_exit_error_raw"],
+                    recovery["max_extend_ticks"],
+                ),
+            ),
+            (
+                (2 << 8) | (1 << 16) | channel_code,
+                flags,
+                0,
+            ),
+        )
+        commands = []
+        for index, (p1, p2, p3) in enumerate(chunks):
+            commands.append(
+                self.add_command_to_queue(
+                    'SET_REG_RECOVERY_PROFILE',
+                    p1,
+                    p2,
+                    p3,
+                    handler=handler if index == 2 else None,
+                    kwargs=kwargs if index == 2 else None,
+                    manual=manual,
+                )
+            )
+        return commands
+
+    def set_regulator_slew_profile(self, channel, slew_dict, handler=None, kwargs=None, manual=False):
+        try:
+            channel_code = _normalize_regulator_profile_channel(channel)
+            slew = _validate_regulator_profile_config(
+                slew_dict,
+                REGULATOR_PROFILE_SLEW_BOUNDS,
+            )
+        except ValueError as exc:
+            return self._reject_regulator_profile_command(exc)
+
+        return self.add_command_to_queue(
+            'SET_REG_SLEW_PROFILE',
+            channel_code,
+            _pack_regulator_profile_u16_pair(
+                slew["max_hz_delta_up_per_loop"],
+                slew["max_hz_delta_down_per_loop"],
+            ),
+            slew["recovery_bypass_slew_ticks"],
+            handler=handler,
+            kwargs=kwargs,
+            manual=manual,
+        )
+
+    def set_regulator_ready_profile(self, channel, ready_dict, handler=None, kwargs=None, manual=False):
+        try:
+            channel_code = _normalize_regulator_profile_channel(channel)
+            ready = _validate_regulator_profile_config(
+                ready_dict,
+                REGULATOR_PROFILE_READY_BOUNDS,
+            )
+        except ValueError as exc:
+            return self._reject_regulator_profile_command(exc)
+
+        return self.add_command_to_queue(
+            'SET_REG_READY_PROFILE',
+            channel_code,
+            ready["ready_tol_raw"],
+            ready["consecutive_samples"],
+            handler=handler,
+            kwargs=kwargs,
+            manual=manual,
+        )
+
+    def restore_regulator_profile(self, channels, source="baseline", handler=None, kwargs=None, manual=False):
+        try:
+            channel_mask = _normalize_regulator_profile_restore_mask(channels)
+            source_code = _normalize_regulator_profile_restore_source(source)
+        except ValueError as exc:
+            return self._reject_regulator_profile_command(exc)
+
+        return self.add_command_to_queue(
+            'RESTORE_REG_PROFILE',
+            channel_mask,
+            source_code,
+            0,
+            handler=handler,
+            kwargs=kwargs,
+            manual=manual,
+        )
     
     def reset_print_syringe(self,handler=None,kwargs=None,manual=False):
         return self.add_command_to_queue('RESET_P',0,0,0,handler=handler,kwargs=kwargs,manual=manual)

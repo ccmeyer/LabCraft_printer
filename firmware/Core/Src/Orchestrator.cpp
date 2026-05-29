@@ -18,6 +18,7 @@
 #include "PressureRegulatorMath.h"
 #include "PressureTargetPolicy.h"
 #include "PressureSensor.h"
+#include "RegulatorProfileCommandPolicy.h"
 #include "Logger.h"
 #include "Gantry.h"
 #include "Comm.h"
@@ -54,6 +55,89 @@ const char* flashDisarmReasonToken(const char* reason)
 
 namespace {
 bool s_resetReportSent = false;
+namespace RegProfile = RegulatorProfileCommandPolicy;
+
+RegProfile::RecoveryStaging s_regProfileRecoveryStaging[2]{};
+bool s_regProfileBaselineCaptured = false;
+PressureRegulator::RuntimeConfigSnapshot s_regProfileBaselinePrint{};
+#if (LC_PRESSURE_PORTS > 1)
+PressureRegulator::RuntimeConfigSnapshot s_regProfileBaselineRefuel{};
+#endif
+
+PressureRegulator* regulatorForRegProfileChannel(uint8_t channel) {
+  if (channel == RegProfile::kChannelPrint) {
+    return &PressureRegulator::regP();
+  }
+#if (LC_PRESSURE_PORTS > 1)
+  if (channel == RegProfile::kChannelRefuel) {
+    return &PressureRegulator::regR();
+  }
+#endif
+  return nullptr;
+}
+
+PressureRegulator::RecoveryConfig toRuntimeRecovery(
+    const RegProfile::RecoveryConfig& cfg) {
+  PressureRegulator::RecoveryConfig runtime{};
+  runtime.activeTicks = cfg.activeTicks;
+  runtime.baseBoostHz = cfg.baseBoostHz;
+  runtime.pulseCoeffHzPerUs = cfg.pulseCoeffHzPerUs;
+  runtime.pressureCoeffHzPerRaw = cfg.pressureCoeffHzPerRaw;
+  runtime.maxBoostHz = cfg.maxBoostHz;
+  runtime.recoveryFloorHz = cfg.recoveryFloorHz;
+  runtime.recoveryExitErrorRaw = cfg.recoveryExitErrorRaw;
+  runtime.maxExtendTicks = cfg.maxExtendTicks;
+  runtime.allowExtendWhileUndershoot = cfg.allowExtendWhileUndershoot;
+  runtime.boostOnlyWhenUndershoot = cfg.boostOnlyWhenUndershoot;
+  runtime.linearDecay = cfg.linearDecay;
+  return runtime;
+}
+
+PressureRegulator::SlewConfig toRuntimeSlew(const RegProfile::SlewConfig& cfg) {
+  PressureRegulator::SlewConfig runtime{};
+  runtime.maxHzDeltaUpPerLoop = cfg.maxHzDeltaUpPerLoop;
+  runtime.maxHzDeltaDownPerLoop = cfg.maxHzDeltaDownPerLoop;
+  runtime.recoveryBypassSlewTicks = cfg.recoveryBypassSlewTicks;
+  return runtime;
+}
+
+PressureRegulator::ReadyConfig toRuntimeReady(const RegProfile::ReadyConfig& cfg) {
+  PressureRegulator::ReadyConfig runtime{};
+  runtime.readyTolRaw = cfg.readyTolRaw;
+  runtime.consecutiveSamples = cfg.consecutiveSamples;
+  return runtime;
+}
+
+void captureRegProfileBaselineIfNeeded() {
+  if (s_regProfileBaselineCaptured) {
+    return;
+  }
+  s_regProfileBaselinePrint = PressureRegulator::regP().getRuntimeConfigSnapshot();
+#if (LC_PRESSURE_PORTS > 1)
+  s_regProfileBaselineRefuel = PressureRegulator::regR().getRuntimeConfigSnapshot();
+#endif
+  s_regProfileBaselineCaptured = true;
+}
+
+void resetRegProfileSessionState() {
+  RegProfile::resetRecoveryStaging(s_regProfileRecoveryStaging[0]);
+  RegProfile::resetRecoveryStaging(s_regProfileRecoveryStaging[1]);
+  s_regProfileBaselineCaptured = false;
+}
+
+void logRegProfileReject(const char* commandName, RegProfile::Status status) {
+  Logger::instance()->log(
+      "[RegProfile] %s rejected: %s\r\n",
+      commandName,
+      RegProfile::statusName(status));
+}
+
+void logRegProfileNoChannel(const char* commandName, uint8_t channel) {
+  Logger::instance()->log(
+      "[RegProfile] %s rejected: unavailable channel %u\r\n",
+      commandName,
+      static_cast<unsigned>(channel));
+}
 
 #ifndef LC_CRASH_TEST_GRIPPER_OPEN_WDT
 #define LC_CRASH_TEST_GRIPPER_OPEN_WDT 0
@@ -1060,6 +1144,114 @@ void Orchestrator::executeCommand(const Command &cmd) {
 			#else
 				  Logger::instance()->log("Legacy has no refuel channel");
 			#endif
+				  break;
+			} case CMD_SET_REG_RECOVERY_PROFILE: {
+				  const uint8_t rawChannel = static_cast<uint8_t>(cmd.p1u() & 0xFFu);
+				  if ((rawChannel == RegProfile::kChannelRefuel) &&
+				      (regulatorForRegProfileChannel(rawChannel) == nullptr)) {
+				    logRegProfileNoChannel("set_recovery", rawChannel);
+				    break;
+				  }
+				  RegProfile::RecoveryStaging& staging =
+				      s_regProfileRecoveryStaging[(rawChannel == RegProfile::kChannelRefuel) ? 1u : 0u];
+				  const auto result = RegProfile::applyRecoveryChunk(
+				      staging,
+				      cmd.p1u(),
+				      cmd.p2u(),
+				      cmd.p3u());
+				  if (result.status != RegProfile::Status::Ok) {
+				    logRegProfileReject("set_recovery", result.status);
+				    break;
+				  }
+				  if (!result.committed) {
+				    break;
+				  }
+				  PressureRegulator* reg = regulatorForRegProfileChannel(result.channel);
+				  if (reg == nullptr) {
+				    logRegProfileNoChannel("set_recovery", result.channel);
+				    break;
+				  }
+				  captureRegProfileBaselineIfNeeded();
+				  reg->applyRuntimeRecoveryConfig(toRuntimeRecovery(result.config));
+				  Logger::instance()->log(
+				      "[RegProfile] recovery applied channel=%u\r\n",
+				      static_cast<unsigned>(result.channel));
+				  break;
+			} case CMD_SET_REG_SLEW_PROFILE: {
+				  const auto result = RegProfile::decodeSlew(cmd.p1u(), cmd.p2u(), cmd.p3u());
+				  if (result.status != RegProfile::Status::Ok) {
+				    logRegProfileReject("set_slew", result.status);
+				    break;
+				  }
+				  PressureRegulator* reg = regulatorForRegProfileChannel(result.channel);
+				  if (reg == nullptr) {
+				    logRegProfileNoChannel("set_slew", result.channel);
+				    break;
+				  }
+				  captureRegProfileBaselineIfNeeded();
+				  reg->applyRuntimeSlewConfig(toRuntimeSlew(result.config));
+				  Logger::instance()->log(
+				      "[RegProfile] slew applied channel=%u\r\n",
+				      static_cast<unsigned>(result.channel));
+				  break;
+			} case CMD_SET_REG_READY_PROFILE: {
+				  const auto result = RegProfile::decodeReady(cmd.p1u(), cmd.p2u(), cmd.p3u());
+				  if (result.status != RegProfile::Status::Ok) {
+				    logRegProfileReject("set_ready", result.status);
+				    break;
+				  }
+				  PressureRegulator* reg = regulatorForRegProfileChannel(result.channel);
+				  if (reg == nullptr) {
+				    logRegProfileNoChannel("set_ready", result.channel);
+				    break;
+				  }
+				  captureRegProfileBaselineIfNeeded();
+				  reg->applyRuntimeReadyConfig(toRuntimeReady(result.config));
+				  Logger::instance()->log(
+				      "[RegProfile] ready applied channel=%u\r\n",
+				      static_cast<unsigned>(result.channel));
+				  break;
+			} case CMD_RESTORE_REG_PROFILE: {
+				  const auto request = RegProfile::decodeRestore(cmd.p1u(), cmd.p2u(), cmd.p3u());
+				  if (request.status != RegProfile::Status::Ok) {
+				    logRegProfileReject("restore", request.status);
+				    break;
+				  }
+				  if (request.restoreRefuel &&
+				      (regulatorForRegProfileChannel(RegProfile::kChannelRefuel) == nullptr)) {
+				    logRegProfileNoChannel("restore", RegProfile::kChannelRefuel);
+				    break;
+				  }
+				  if (request.source == RegProfile::RestoreSource::Defaults) {
+				    if (request.restorePrint) {
+				      PressureRegulator::regP().restoreDefaultRuntimeConfig();
+				    }
+				#if (LC_PRESSURE_PORTS > 1)
+				    if (request.restoreRefuel) {
+				      PressureRegulator::regR().restoreDefaultRuntimeConfig();
+				    }
+				#endif
+				    resetRegProfileSessionState();
+				    Logger::instance()->log("[RegProfile] defaults restored\r\n");
+				    break;
+				  }
+				  if (s_regProfileBaselineCaptured) {
+				    if (request.restorePrint) {
+				      PressureRegulator::regP().restoreRuntimeConfigSnapshot(s_regProfileBaselinePrint);
+				    }
+				#if (LC_PRESSURE_PORTS > 1)
+				    if (request.restoreRefuel) {
+				      PressureRegulator::regR().restoreRuntimeConfigSnapshot(s_regProfileBaselineRefuel);
+				    }
+				#endif
+				    Logger::instance()->log("[RegProfile] baseline restored\r\n");
+				  } else {
+				    Logger::instance()->log("[RegProfile] restore baseline no-op\r\n");
+				  }
+				  resetRegProfileSessionState();
+				  break;
+			} case CMD_QUERY_REG_PROFILE: {
+				  Logger::instance()->log("[RegProfile] query reserved\r\n");
 				  break;
 			} case CMD_SELFTEST_START: {
 				  Comm* comm = Comm::instance();

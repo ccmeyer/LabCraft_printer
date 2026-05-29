@@ -153,6 +153,22 @@ public:
   void setSlewConfig(const SlewConfig& cfg) { _slewCfg = cfg; }
   SlewConfig getSlewConfig() const { return _slewCfg; }
 
+  struct RuntimeConfigSnapshot {
+    RecoveryConfig recovery{};
+    ReadyConfig ready{};
+    SlewConfig activeSlew{};
+    SlewConfig trackSlew{};
+    SlewConfig printSlew{};
+    bool printProfileEnabled = false;
+  };
+
+  RuntimeConfigSnapshot getRuntimeConfigSnapshot() const;
+  void restoreRuntimeConfigSnapshot(const RuntimeConfigSnapshot& snapshot);
+  void restoreDefaultRuntimeConfig();
+  void applyRuntimeRecoveryConfig(const RecoveryConfig& cfg);
+  void applyRuntimeSlewConfig(const SlewConfig& cfg);
+  void applyRuntimeReadyConfig(const ReadyConfig& cfg);
+
   // Call ~1–2 ms before opening the droplet valve
   void beginDispenseQuiet(uint32_t pre_ms = 2);
   // Call immediately after closing the droplet valve
@@ -289,6 +305,7 @@ private:
   SlewConfig _slewCfg{};
   SlewConfig _slewCfgTrack{MAX_HZ_DELTA_PER_LOOP, MAX_HZ_DELTA_PER_LOOP, 0};
   SlewConfig _slewCfgPrint{500, 300, 2};
+  bool _printProfileEnabled = false;
 
 	//	  static constexpr uint32_t MAX_STEPS = 10000000;
 
@@ -309,6 +326,7 @@ private:
                          bool dir);
   void recordTraceEvent(PressureTraceEventType type, uint16_t value0 = 0, uint16_t value1 = 0);
   uint32_t computeRecoveryBoostHz() const;
+  void loadDefaultRuntimeConfig();
   void seedControlTarget(int32_t targetRaw, uint32_t tickMs);
   int32_t advanceControlTarget(uint32_t tickMs);
   int32_t controlTargetRaw() const;

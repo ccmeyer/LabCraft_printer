@@ -89,43 +89,9 @@ void PressureRegulator::begin(
   _homing    = false;
   _resetting = false;
   _vacuumMode = false;
-  _readyCfg.readyTolRaw = PressureRegulatorMath::defaultReadyTolRaw(_sensorPort);
-  _printTol = _readyCfg.readyTolRaw;
   _doneBit = doneBit;
-
-  if (_sensorPort == 0u) {
-    _recoveryCfg = RecoveryConfig{};
-    _recoveryCfg.activeTicks = 2;
-    _recoveryCfg.baseBoostHz = 300;
-    _recoveryCfg.pulseCoeffHzPerUs = 1;
-    _recoveryCfg.pressureCoeffHzPerRaw = 0;
-    _recoveryCfg.maxBoostHz = 1500;
-    _recoveryCfg.recoveryFloorHz = 0;
-    _recoveryCfg.recoveryExitErrorRaw = 3;
-    _recoveryCfg.maxExtendTicks = 0;
-    _recoveryCfg.allowExtendWhileUndershoot = false;
-    _recoveryCfg.boostOnlyWhenUndershoot = true;
-    _recoveryCfg.linearDecay = true;
-  } else {
-    _recoveryCfg.activeTicks = 8;
-    _recoveryCfg.baseBoostHz = 2000;
-    _recoveryCfg.pulseCoeffHzPerUs = 2;
-    _recoveryCfg.pressureCoeffHzPerRaw = 1;
-    _recoveryCfg.maxBoostHz = 10000;
-    _recoveryCfg.recoveryFloorHz = 1200;
-    _recoveryCfg.recoveryExitErrorRaw = 4;
-    _recoveryCfg.maxExtendTicks = 4;
-    _recoveryCfg.allowExtendWhileUndershoot = true;
-    _recoveryCfg.boostOnlyWhenUndershoot = true;
-    _recoveryCfg.linearDecay = true;
-  }
-  _slewCfgTrack = SlewConfig{MAX_HZ_DELTA_PER_LOOP, MAX_HZ_DELTA_PER_LOOP, 0};
-  if (_sensorPort == 0u) {
-    _slewCfgPrint = SlewConfig{600, 1200, 0};
-  } else {
-    _slewCfgPrint = SlewConfig{1200, 450, 3};
-  }
-  _slewCfg = _slewCfgTrack;
+  _printProfileEnabled = false;
+  loadDefaultRuntimeConfig();
 
   _active = false;
   _quietActive = false;
@@ -187,6 +153,115 @@ bool PressureRegulator::isTargetRamping() const {
       _controlTargetFixed,
       _target,
       TARGET_RAMP_FRACTIONAL_BITS);
+}
+
+void PressureRegulator::loadDefaultRuntimeConfig() {
+  _readyCfg.readyTolRaw = PressureRegulatorMath::defaultReadyTolRaw(_sensorPort);
+  _readyCfg.consecutiveSamples = 1u;
+  _printTol = _readyCfg.readyTolRaw;
+
+  if (_sensorPort == 0u) {
+    _recoveryCfg = RecoveryConfig{};
+    _recoveryCfg.activeTicks = 2;
+    _recoveryCfg.baseBoostHz = 300;
+    _recoveryCfg.pulseCoeffHzPerUs = 1;
+    _recoveryCfg.pressureCoeffHzPerRaw = 0;
+    _recoveryCfg.maxBoostHz = 1500;
+    _recoveryCfg.recoveryFloorHz = 0;
+    _recoveryCfg.recoveryExitErrorRaw = 3;
+    _recoveryCfg.maxExtendTicks = 0;
+    _recoveryCfg.allowExtendWhileUndershoot = false;
+    _recoveryCfg.boostOnlyWhenUndershoot = true;
+    _recoveryCfg.linearDecay = true;
+  } else {
+    _recoveryCfg.activeTicks = 8;
+    _recoveryCfg.baseBoostHz = 2000;
+    _recoveryCfg.pulseCoeffHzPerUs = 2;
+    _recoveryCfg.pressureCoeffHzPerRaw = 1;
+    _recoveryCfg.maxBoostHz = 10000;
+    _recoveryCfg.recoveryFloorHz = 1200;
+    _recoveryCfg.recoveryExitErrorRaw = 4;
+    _recoveryCfg.maxExtendTicks = 4;
+    _recoveryCfg.allowExtendWhileUndershoot = true;
+    _recoveryCfg.boostOnlyWhenUndershoot = true;
+    _recoveryCfg.linearDecay = true;
+  }
+
+  _slewCfgTrack = SlewConfig{MAX_HZ_DELTA_PER_LOOP, MAX_HZ_DELTA_PER_LOOP, 0};
+  if (_sensorPort == 0u) {
+    _slewCfgPrint = SlewConfig{600, 1200, 0};
+  } else {
+    _slewCfgPrint = SlewConfig{1200, 450, 3};
+  }
+  _slewCfg = _printProfileEnabled ? _slewCfgPrint : _slewCfgTrack;
+}
+
+PressureRegulator::RuntimeConfigSnapshot PressureRegulator::getRuntimeConfigSnapshot() const {
+  RuntimeConfigSnapshot snapshot{};
+  snapshot.recovery = _recoveryCfg;
+  snapshot.ready = _readyCfg;
+  snapshot.activeSlew = _slewCfg;
+  snapshot.trackSlew = _slewCfgTrack;
+  snapshot.printSlew = _slewCfgPrint;
+  snapshot.printProfileEnabled = _printProfileEnabled;
+  return snapshot;
+}
+
+void PressureRegulator::restoreRuntimeConfigSnapshot(const RuntimeConfigSnapshot& snapshot) {
+  taskENTER_CRITICAL();
+  _recoveryCfg = snapshot.recovery;
+  _readyCfg = snapshot.ready;
+  _printTol = snapshot.ready.readyTolRaw;
+  _slewCfgTrack = snapshot.trackSlew;
+  _slewCfgPrint = snapshot.printSlew;
+  _printProfileEnabled = snapshot.printProfileEnabled;
+  _slewCfg = snapshot.activeSlew;
+  _recoveryActive = false;
+  _recoveryTicksRemaining = 0;
+  _recoveryCurrentBoostHz = 0;
+  _recoveryBypassRemaining = 0;
+  _readyConsecutiveCount = 0;
+  taskEXIT_CRITICAL();
+}
+
+void PressureRegulator::restoreDefaultRuntimeConfig() {
+  taskENTER_CRITICAL();
+  loadDefaultRuntimeConfig();
+  _recoveryActive = false;
+  _recoveryTicksRemaining = 0;
+  _recoveryCurrentBoostHz = 0;
+  _recoveryBypassRemaining = 0;
+  _readyConsecutiveCount = 0;
+  taskEXIT_CRITICAL();
+}
+
+void PressureRegulator::applyRuntimeRecoveryConfig(const RecoveryConfig& cfg) {
+  taskENTER_CRITICAL();
+  _recoveryCfg = cfg;
+  _recoveryActive = false;
+  _recoveryTicksRemaining = 0;
+  _recoveryCurrentBoostHz = 0;
+  _recoveryBypassRemaining = 0;
+  taskEXIT_CRITICAL();
+}
+
+void PressureRegulator::applyRuntimeSlewConfig(const SlewConfig& cfg) {
+  taskENTER_CRITICAL();
+  if (_printProfileEnabled) {
+    _slewCfgPrint = cfg;
+  } else {
+    _slewCfgTrack = cfg;
+  }
+  _slewCfg = cfg;
+  taskEXIT_CRITICAL();
+}
+
+void PressureRegulator::applyRuntimeReadyConfig(const ReadyConfig& cfg) {
+  taskENTER_CRITICAL();
+  _readyCfg = cfg;
+  _printTol = cfg.readyTolRaw;
+  _readyConsecutiveCount = 0;
+  taskEXIT_CRITICAL();
 }
 
 void PressureRegulator::seedControlTarget(int32_t targetRaw, uint32_t tickMs) {
@@ -368,6 +443,7 @@ void PressureRegulator::setPrintProfile(bool enabled) {
   _KDc = state.kdCurrent;
   _integral = state.integral;
   _I_contrib = state.iContrib;
+  _printProfileEnabled = enabled;
   _slewCfg = enabled ? _slewCfgPrint : _slewCfgTrack;
 
   taskEXIT_CRITICAL();

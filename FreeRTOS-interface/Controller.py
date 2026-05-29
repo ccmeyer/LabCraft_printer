@@ -1383,6 +1383,42 @@ class Controller(QObject):
             trace_metadata=trace_metadata,
         )
 
+    def set_regulator_recovery_profile(self, channel, recovery, handler=None, kwargs=None, manual=False):
+        return self.machine.set_regulator_recovery_profile(
+            channel,
+            recovery,
+            handler=handler,
+            kwargs=kwargs,
+            manual=manual,
+        )
+
+    def set_regulator_slew_profile(self, channel, slew, handler=None, kwargs=None, manual=False):
+        return self.machine.set_regulator_slew_profile(
+            channel,
+            slew,
+            handler=handler,
+            kwargs=kwargs,
+            manual=manual,
+        )
+
+    def set_regulator_ready_profile(self, channel, ready, handler=None, kwargs=None, manual=False):
+        return self.machine.set_regulator_ready_profile(
+            channel,
+            ready,
+            handler=handler,
+            kwargs=kwargs,
+            manual=manual,
+        )
+
+    def restore_regulator_profile(self, channels, source="baseline", handler=None, kwargs=None, manual=False):
+        return self.machine.restore_regulator_profile(
+            channels,
+            source=source,
+            handler=handler,
+            kwargs=kwargs,
+            manual=manual,
+        )
+
     def _validate_refuel_vacuum_pressure(self, pressure):
         try:
             pressure = float(pressure)
