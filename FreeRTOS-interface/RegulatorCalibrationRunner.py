@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import random
 import subprocess
 import sys
 import uuid
@@ -21,6 +22,10 @@ from RegulatorProfiles import (
 
 
 class RegulatorCalibrationError(ValueError):
+    pass
+
+
+class RegulatorCalibrationBatchError(ValueError):
     pass
 
 
@@ -130,6 +135,24 @@ class PreparedRegulatorCalibrationRun:
     metadata: dict[str, Any]
 
 
+@dataclass
+class PreparedRegulatorCalibrationBatch:
+    session_id: str
+    session_dir: Path
+    manifest_path: Path
+    mode: str
+    trace_case: RegulatorTraceCase
+    baseline_profile_id: str
+    candidate_profile_ids: list[str]
+    repeat_count: int
+    order_strategy: str
+    random_seed: int | None
+    conditions: dict[str, Any]
+    runs: list[dict[str, Any]]
+    manifest: dict[str, Any]
+    output_root: Path
+
+
 def trace_case_choices() -> list[dict[str, Any]]:
     return [
         {
@@ -165,6 +188,13 @@ def _short_id() -> str:
 
 def _string_or_empty(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _bool_from_config(config: dict[str, Any], key: str, default: bool) -> bool:
+    value = config.get(key, default)
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off", ""}
+    return bool(value)
 
 
 def _trace_case_from_config(config: dict[str, Any]) -> RegulatorTraceCase:
@@ -227,7 +257,10 @@ def prepare_regulator_calibration_run(
             f"profile {profile_id} mode {candidate_profile.get('mode')} does not match selected mode {requested_mode}"
         )
 
-    trace_case = _trace_case_from_config(config)
+    try:
+        trace_case = _trace_case_from_config(config)
+    except RegulatorCalibrationError as exc:
+        raise RegulatorCalibrationBatchError(str(exc)) from exc
     active_profile_id = document.get("active_profiles", {}).get(requested_mode)
     active_profile = None
     if active_profile_id:
@@ -242,7 +275,8 @@ def prepare_regulator_calibration_run(
     suffix = (id_factory or _short_id)()
     session_id = _string_or_empty(config.get("session_id")) or f"session_{_timestamp(now)}_{suffix}"
     run_id = _string_or_empty(config.get("run_id")) or f"regopt_{_timestamp(now)}_{suffix}"
-    run_dir = Path(output_root) / session_id / f"run_{_timestamp(now)}_{suffix}"
+    run_dir_name = _string_or_empty(config.get("run_dir_name")) or f"run_{_timestamp(now)}_{suffix}"
+    run_dir = Path(output_root) / session_id / run_dir_name
     run_dir.mkdir(parents=True, exist_ok=True)
     raw_selftest_path = run_dir / "raw_selftest.json"
 
@@ -291,6 +325,262 @@ def prepare_regulator_calibration_run(
         conditions=conditions,
         metadata=metadata,
     )
+
+
+def _candidate_profile_ids(config: dict[str, Any]) -> list[str]:
+    raw = (
+        config.get("candidate_profile_ids")
+        or config.get("profile_ids")
+        or config.get("candidate_profiles")
+        or []
+    )
+    if isinstance(raw, str):
+        raw = [part.strip() for part in raw.replace(";", ",").split(",")]
+    if not isinstance(raw, (list, tuple)):
+        raise RegulatorCalibrationBatchError("candidate_profile_ids must be a list of profile IDs")
+    ids = [_string_or_empty(item) for item in raw]
+    ids = [item for item in ids if item]
+    if len(ids) != len(set(ids)):
+        raise RegulatorCalibrationBatchError("candidate_profile_ids must not contain duplicates")
+    return ids
+
+
+def _batch_schedule_candidates(
+    candidate_profile_ids: list[str],
+    repeat_count: int,
+    order_strategy: str,
+    random_seed: int | None,
+) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    if order_strategy == "grouped":
+        for profile_id in candidate_profile_ids:
+            for repeat_index in range(1, repeat_count + 1):
+                entries.append({"role": "candidate", "profile_id": profile_id, "repeat_index": repeat_index})
+    else:
+        for repeat_index in range(1, repeat_count + 1):
+            for profile_id in candidate_profile_ids:
+                entries.append({"role": "candidate", "profile_id": profile_id, "repeat_index": repeat_index})
+    if order_strategy == "randomized":
+        rng = random.Random(random_seed)
+        rng.shuffle(entries)
+    return entries
+
+
+def prepare_regulator_calibration_batch(
+    config: dict[str, Any],
+    *,
+    profile_document: dict[str, Any] | None,
+    output_root: str | Path,
+    now_fn: Callable[[], datetime] | None = None,
+    id_factory: Callable[[], str] | None = None,
+) -> PreparedRegulatorCalibrationBatch:
+    config = dict(config or {})
+    if not bool(config.get("calibrated_head_confirmed")):
+        raise RegulatorCalibrationBatchError("Confirm that a calibrated printer head is installed before starting.")
+    _reject_condition_overrides(config)
+
+    try:
+        document = _profile_document_from_store_or_payload(profile_document)
+    except RegulatorCalibrationError as exc:
+        raise RegulatorCalibrationBatchError(str(exc)) from exc
+    mode = _string_or_empty(config.get("mode")).lower()
+    if mode not in {"droplet", "stream"}:
+        raise RegulatorCalibrationBatchError("batch mode must be droplet or stream")
+    try:
+        trace_case = _trace_case_from_config(config)
+    except RegulatorCalibrationError as exc:
+        raise RegulatorCalibrationBatchError(str(exc)) from exc
+    profiles = document.get("profiles", {})
+    candidate_profile_ids = _candidate_profile_ids(config)
+    if not (1 <= len(candidate_profile_ids) <= 12):
+        raise RegulatorCalibrationBatchError("candidate_profile_ids must contain 1 to 12 profiles")
+
+    baseline_profile_id = _string_or_empty(config.get("baseline_profile_id")) or _string_or_empty(
+        document.get("active_profiles", {}).get(mode)
+    )
+    if not baseline_profile_id:
+        raise RegulatorCalibrationBatchError(f"active baseline profile for {mode} is required")
+    all_profile_ids = [baseline_profile_id, *candidate_profile_ids]
+    for profile_id in all_profile_ids:
+        if profile_id not in profiles:
+            raise RegulatorCalibrationBatchError(f"profile {profile_id} does not exist")
+        profile = validate_profile(profiles[profile_id], profile_id=profile_id)
+        if profile.get("mode") != mode:
+            raise RegulatorCalibrationBatchError(f"profile {profile_id} mode {profile.get('mode')} does not match batch mode {mode}")
+
+    try:
+        repeat_count = int(config.get("repeat_count", 1))
+    except (TypeError, ValueError):
+        raise RegulatorCalibrationBatchError("repeat_count must be an integer")
+    if not (1 <= repeat_count <= 5):
+        raise RegulatorCalibrationBatchError("repeat_count must be between 1 and 5")
+
+    order_strategy = _string_or_empty(config.get("order_strategy") or "alternating").lower()
+    if order_strategy not in {"alternating", "grouped", "randomized"}:
+        raise RegulatorCalibrationBatchError("order_strategy must be alternating, grouped, or randomized")
+    random_seed = None
+    if order_strategy == "randomized":
+        seed_value = config.get("random_seed")
+        try:
+            random_seed = int(seed_value) if seed_value is not None and str(seed_value).strip() != "" else random.randrange(1, 2**31)
+        except (TypeError, ValueError):
+            raise RegulatorCalibrationBatchError("random_seed must be an integer")
+
+    include_baseline_before = _bool_from_config(config, "baseline_before", True)
+    include_baseline_after = _bool_from_config(config, "baseline_after", True)
+    scheduled: list[dict[str, Any]] = []
+    if include_baseline_before:
+        scheduled.append({"role": "baseline_before", "profile_id": baseline_profile_id, "repeat_index": 0})
+    scheduled.extend(_batch_schedule_candidates(candidate_profile_ids, repeat_count, order_strategy, random_seed))
+    if include_baseline_after:
+        scheduled.append({"role": "baseline_after", "profile_id": baseline_profile_id, "repeat_index": 0})
+    if len(scheduled) > 50:
+        raise RegulatorCalibrationBatchError("batch schedule must contain no more than 50 runs")
+
+    now = (now_fn or _now_utc)()
+    suffix = (id_factory or _short_id)()
+    session_id = _string_or_empty(config.get("session_id")) or f"session_{_timestamp(now)}_{suffix}"
+    output_root = Path(output_root)
+    session_dir = output_root / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    conditions = {
+        "printer_head_id": _string_or_empty(config.get("printer_head_id")),
+        "printer_head_type": _string_or_empty(config.get("printer_head_type")),
+        "reagent_id": _string_or_empty(config.get("reagent_id")),
+        **trace_case.conditions(),
+    }
+
+    runs: list[dict[str, Any]] = []
+    for order_index, item in enumerate(scheduled, start=1):
+        run_suffix = (id_factory or _short_id)()
+        run_id = f"regopt_{_timestamp(now)}_{run_suffix}"
+        run_dir_name = f"run_{_timestamp(now)}_{run_suffix}"
+        run_dir = session_dir / run_dir_name
+        runs.append(
+            {
+                "order_index": order_index,
+                "role": item["role"],
+                "profile_id": item["profile_id"],
+                "mode": mode,
+                "repeat_index": int(item["repeat_index"]),
+                "trace_case_id": trace_case.test_id,
+                "run_id": run_id,
+                "run_dir": str(run_dir),
+                "run_dir_name": run_dir_name,
+                "run_meta_path": str(run_dir / "run_meta.json"),
+                "status": "pending",
+                "message": "",
+            }
+        )
+
+    manifest = {
+        "schema_version": 1,
+        "session_id": session_id,
+        "created_at_utc": _iso_utc(now),
+        "operator": _string_or_empty(config.get("operator")),
+        "mode": mode,
+        "trace_case_id": trace_case.test_id,
+        "conditions": conditions,
+        "baseline_profile_id": baseline_profile_id,
+        "candidate_profile_ids": list(candidate_profile_ids),
+        "repeat_count": repeat_count,
+        "order_strategy": order_strategy,
+        "random_seed": random_seed,
+        "runs": copy.deepcopy(runs),
+        "analysis": {
+            "output_dir": None,
+            "candidate_ranking_json": None,
+            "candidate_ranking_csv": None,
+            "all_pulses_csv": None,
+            "error_message": "",
+        },
+        "outcome": {
+            "status": "pending",
+            "completed_run_count": 0,
+            "total_run_count": len(runs),
+            "error_message": "",
+        },
+    }
+    prepared = PreparedRegulatorCalibrationBatch(
+        session_id=session_id,
+        session_dir=session_dir,
+        manifest_path=session_dir / "session_manifest.json",
+        mode=mode,
+        trace_case=trace_case,
+        baseline_profile_id=baseline_profile_id,
+        candidate_profile_ids=list(candidate_profile_ids),
+        repeat_count=repeat_count,
+        order_strategy=order_strategy,
+        random_seed=random_seed,
+        conditions=conditions,
+        runs=runs,
+        manifest=manifest,
+        output_root=output_root,
+    )
+    write_batch_manifest(prepared)
+    return prepared
+
+
+def write_batch_manifest(
+    prepared_batch: PreparedRegulatorCalibrationBatch,
+    *,
+    runs: list[dict[str, Any]] | None = None,
+    analysis: dict[str, Any] | None = None,
+    status: str | None = None,
+    error_message: str = "",
+) -> dict[str, Any]:
+    if status is not None and status not in {"pending", "running", "completed", "failed", "canceled", "analysis_failed"}:
+        raise RegulatorCalibrationBatchError(f"invalid batch status {status}")
+    manifest = copy.deepcopy(prepared_batch.manifest)
+    if runs is not None:
+        manifest["runs"] = copy.deepcopy(runs)
+    if analysis is not None:
+        merged = dict(manifest.get("analysis", {}))
+        merged.update(copy.deepcopy(analysis))
+        manifest["analysis"] = merged
+    if status is not None:
+        completed = sum(1 for run in manifest.get("runs", []) if run.get("status") == "completed")
+        manifest["outcome"] = {
+            "status": status,
+            "completed_run_count": completed,
+            "total_run_count": len(manifest.get("runs", [])),
+            "error_message": str(error_message or ""),
+        }
+    write_json_atomic(prepared_batch.manifest_path, manifest)
+    prepared_batch.manifest = copy.deepcopy(manifest)
+    prepared_batch.runs = copy.deepcopy(manifest.get("runs", []))
+    return manifest
+
+
+def batch_run_configs(prepared_batch: PreparedRegulatorCalibrationBatch) -> list[dict[str, Any]]:
+    configs: list[dict[str, Any]] = []
+    base = {
+        "mode": prepared_batch.mode,
+        "trace_case_id": prepared_batch.trace_case.test_id,
+        "operator": prepared_batch.manifest.get("operator", ""),
+        "printer_head_id": prepared_batch.conditions.get("printer_head_id", ""),
+        "printer_head_type": prepared_batch.conditions.get("printer_head_type", ""),
+        "reagent_id": prepared_batch.conditions.get("reagent_id", ""),
+        "calibrated_head_confirmed": True,
+        "session_id": prepared_batch.session_id,
+        "output_root": str(prepared_batch.output_root),
+        "_batch_run": True,
+    }
+    for run in prepared_batch.runs:
+        config = dict(base)
+        config.update(
+            {
+                "profile_id": run["profile_id"],
+                "run_id": run["run_id"],
+                "run_dir_name": run["run_dir_name"],
+                "batch_order_index": run["order_index"],
+                "batch_role": run["role"],
+                "batch_repeat_index": run["repeat_index"],
+            }
+        )
+        configs.append(config)
+    return configs
 
 
 def relative_to_run_dir(prepared: PreparedRegulatorCalibrationRun, path: str | Path | None) -> str | None:

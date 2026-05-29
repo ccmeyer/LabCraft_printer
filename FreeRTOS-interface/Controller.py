@@ -78,6 +78,10 @@ class Controller(QObject):
     regulator_calibration_stage = QtCore.Signal(str)
     regulator_calibration_output = QtCore.Signal(str)
     regulator_calibration_finished = QtCore.Signal(bool, str, object)
+    regulator_calibration_batch_stage = QtCore.Signal(str)
+    regulator_calibration_batch_output = QtCore.Signal(str)
+    regulator_calibration_batch_progress = QtCore.Signal(int, int, object)
+    regulator_calibration_batch_finished = QtCore.Signal(bool, str, object)
 
     # Application update check signals
     app_update_check_started = QtCore.Signal()
@@ -115,6 +119,7 @@ class Controller(QObject):
         self._qualification_worker = None
         self._regulator_calibration_worker = None
         self._regulator_calibration_state = None
+        self._regulator_calibration_batch_state = None
         self._app_update_process = None
         self._app_update_check_thread = None
         self._app_update_check_worker = None
@@ -621,6 +626,12 @@ class Controller(QObject):
         except Exception:
             pass
 
+        try:
+            if self.is_regulator_calibration_batch_running():
+                blockers.append("Regulator calibration batch is running.")
+        except Exception:
+            pass
+
         array_state = str(getattr(self, "_array_state", "idle") or "idle")
         if array_state != "idle":
             blockers.append(f"Print array state is {array_state}.")
@@ -803,6 +814,9 @@ class Controller(QObject):
         worker_running = bool(worker is not None and callable(is_running) and is_running())
         return worker_running or getattr(self, "_regulator_calibration_state", None) is not None
 
+    def is_regulator_calibration_batch_running(self):
+        return getattr(self, "_regulator_calibration_batch_state", None) is not None
+
     def _emit_regulator_calibration_signal(self, signal_name, *args):
         signal = getattr(self, signal_name, None)
         emit = getattr(signal, "emit", None)
@@ -833,7 +847,25 @@ class Controller(QObject):
             )
             return []
 
+    def get_regulator_calibration_active_profile_id(self, mode):
+        try:
+            document = self._regulator_profile_document()
+            return (document or {}).get("active_profiles", {}).get(str(mode or "").strip().lower())
+        except Exception as exc:
+            self._emit_regulator_calibration_signal(
+                "regulator_calibration_output",
+                f"Could not load active regulator profile: {exc}",
+            )
+            return None
+
     def start_regulator_calibration_run(self, config, trace_worker_factory=None):
+        run_config = dict(config or {})
+        if self.is_regulator_calibration_batch_running() and not bool(run_config.get("_batch_run")):
+            self._emit_regulator_calibration_signal(
+                "regulator_calibration_output",
+                "A regulator calibration batch is already active.",
+            )
+            return False
         if self.is_regulator_calibration_running():
             self._emit_regulator_calibration_signal(
                 "regulator_calibration_output",
@@ -847,7 +879,6 @@ class Controller(QObject):
             write_run_metadata,
         )
 
-        run_config = dict(config or {})
         dry_run = bool(run_config.get("dry_run", False))
         try:
             prepared = prepare_regulator_calibration_run(
@@ -1254,6 +1285,8 @@ class Controller(QObject):
             payload = self._regulator_calibration_payload(prepared, metadata=None, trace_payload=trace_payload)
             payload["metadata_error"] = str(exc)
 
+        self._regulator_calibration_worker = None
+        self._regulator_calibration_state = None
         self._emit_regulator_calibration_signal("regulator_calibration_stage", "Finished" if ok else "Failed")
         self._emit_regulator_calibration_signal(
             "regulator_calibration_finished",
@@ -1261,8 +1294,6 @@ class Controller(QObject):
             str(message),
             payload,
         )
-        self._regulator_calibration_worker = None
-        self._regulator_calibration_state = None
 
     @staticmethod
     def _regulator_calibration_payload(prepared, *, metadata=None, trace_payload=None):
@@ -1280,6 +1311,267 @@ class Controller(QObject):
         if trace_payload:
             payload["trace"] = dict(trace_payload)
         return payload
+
+    def _emit_regulator_calibration_batch_signal(self, signal_name, *args):
+        signal = getattr(self, signal_name, None)
+        emit = getattr(signal, "emit", None)
+        if callable(emit):
+            emit(*args)
+
+    def start_regulator_calibration_batch(self, config, trace_worker_factory=None, analysis_runner=None):
+        if self.is_regulator_calibration_batch_running():
+            self._emit_regulator_calibration_batch_signal(
+                "regulator_calibration_batch_output",
+                "A regulator calibration batch is already active.",
+            )
+            return False
+        if self.is_regulator_calibration_running():
+            self._emit_regulator_calibration_batch_signal(
+                "regulator_calibration_batch_output",
+                "A regulator calibration run is already active.",
+            )
+            return False
+
+        from RegulatorCalibrationRunner import (
+            RegulatorCalibrationBatchError,
+            batch_run_configs,
+            prepare_regulator_calibration_batch,
+            write_batch_manifest,
+        )
+
+        batch_config = dict(config or {})
+        try:
+            prepared = prepare_regulator_calibration_batch(
+                batch_config,
+                profile_document=self._regulator_profile_document(),
+                output_root=batch_config.get("output_root") or self.regulator_calibration_output_root(),
+            )
+            write_batch_manifest(prepared, status="running")
+        except (RegulatorCalibrationBatchError, Exception) as exc:
+            self._emit_regulator_calibration_batch_signal("regulator_calibration_batch_output", str(exc))
+            return False
+
+        if not self._regulator_calibration_machine_connected():
+            write_batch_manifest(prepared, status="failed", error_message="Machine is not connected.")
+            self._emit_regulator_calibration_batch_signal(
+                "regulator_calibration_batch_output",
+                "Machine must be connected before starting regulator calibration batch.",
+            )
+            return False
+        try:
+            if not self.check_if_all_completed():
+                write_batch_manifest(prepared, status="failed", error_message="Command queue is not idle.")
+                self._emit_regulator_calibration_batch_signal(
+                    "regulator_calibration_batch_output",
+                    "Command queue must be idle before starting regulator calibration batch.",
+                )
+                return False
+        except Exception:
+            write_batch_manifest(prepared, status="failed", error_message="Command queue state could not be checked.")
+            self._emit_regulator_calibration_batch_signal(
+                "regulator_calibration_batch_output",
+                "Command queue state could not be checked.",
+            )
+            return False
+
+        self._regulator_calibration_batch_state = {
+            "prepared": prepared,
+            "run_configs": batch_run_configs(prepared),
+            "index": 0,
+            "cancel_requested": False,
+            "trace_worker_factory": trace_worker_factory,
+            "analysis_runner": analysis_runner,
+        }
+        self._emit_regulator_calibration_batch_signal(
+            "regulator_calibration_batch_stage",
+            f"Starting regulator calibration batch {prepared.session_id}",
+        )
+        self._emit_regulator_calibration_batch_signal(
+            "regulator_calibration_batch_output",
+            f"Session folder: {prepared.session_dir}",
+        )
+        self._start_next_regulator_calibration_batch_run()
+        return True
+
+    def cancel_regulator_calibration_batch(self):
+        state = getattr(self, "_regulator_calibration_batch_state", None)
+        if state is None:
+            return False
+        state["cancel_requested"] = True
+        self._emit_regulator_calibration_batch_signal("regulator_calibration_batch_stage", "Cancel requested")
+        if self.is_regulator_calibration_running():
+            self.cancel_regulator_calibration_run()
+        else:
+            self._finish_regulator_calibration_batch(False, "Regulator calibration batch canceled.", "canceled", "Canceled.")
+        return True
+
+    def _start_next_regulator_calibration_batch_run(self):
+        state = getattr(self, "_regulator_calibration_batch_state", None)
+        if state is None:
+            return
+        prepared = state["prepared"]
+        run_configs = state["run_configs"]
+        index = int(state.get("index", 0))
+        if index >= len(run_configs):
+            self._run_regulator_calibration_batch_analysis()
+            return
+        run = prepared.runs[index]
+        run["status"] = "running"
+        from RegulatorCalibrationRunner import write_batch_manifest
+
+        write_batch_manifest(prepared, runs=prepared.runs, status="running")
+        self._emit_regulator_calibration_batch_progress(
+            index + 1,
+            len(run_configs),
+            run,
+        )
+        self._emit_regulator_calibration_batch_signal(
+            "regulator_calibration_batch_stage",
+            f"Run {index + 1}/{len(run_configs)}: {run['role']} {run['profile_id']}",
+        )
+
+        self._connect_once(self.regulator_calibration_finished, self._on_regulator_calibration_batch_run_finished)
+        started = self.start_regulator_calibration_run(
+            run_configs[index],
+            trace_worker_factory=state.get("trace_worker_factory"),
+        )
+        if not started:
+            run["status"] = "failed"
+            run["message"] = "Could not start scheduled regulator calibration run."
+            write_batch_manifest(prepared, runs=prepared.runs, status="failed", error_message=run["message"])
+            self._finish_regulator_calibration_batch(False, run["message"], "failed", run["message"])
+
+    def _emit_regulator_calibration_batch_progress(self, current, total, run):
+        self._emit_regulator_calibration_batch_signal(
+            "regulator_calibration_batch_progress",
+            int(current),
+            int(total),
+            dict(run),
+        )
+
+    @QtCore.Slot(bool, str, object)
+    def _on_regulator_calibration_batch_run_finished(self, ok, message, payload):
+        state = getattr(self, "_regulator_calibration_batch_state", None)
+        if state is None:
+            return
+        from RegulatorCalibrationRunner import write_batch_manifest
+
+        prepared = state["prepared"]
+        index = int(state.get("index", 0))
+        if index >= len(prepared.runs):
+            return
+        run = prepared.runs[index]
+        payload = dict(payload or {})
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        outcome = metadata.get("outcome") if isinstance(metadata.get("outcome"), dict) else {}
+        status = str(outcome.get("status") or ("completed" if ok else "failed"))
+        run.update(
+            {
+                "status": status,
+                "message": str(message or ""),
+                "run_dir": str(payload.get("run_dir") or run.get("run_dir") or ""),
+                "run_meta_path": str(payload.get("run_meta_path") or run.get("run_meta_path") or ""),
+            }
+        )
+        write_batch_manifest(prepared, runs=prepared.runs, status="running")
+
+        if state.get("cancel_requested"):
+            self._mark_remaining_regulator_calibration_batch_runs_skipped(prepared, index + 1)
+            self._finish_regulator_calibration_batch(False, "Regulator calibration batch canceled.", "canceled", "Canceled.")
+            return
+        if status != "completed" or not ok:
+            final_status = "failed"
+            error_message = str(message or f"Run {index + 1} ended with status {status}.")
+            if status == "restore_failed":
+                error_message = "Restore failed during regulator calibration batch. " + error_message
+            self._mark_remaining_regulator_calibration_batch_runs_skipped(prepared, index + 1)
+            self._finish_regulator_calibration_batch(False, error_message, final_status, error_message)
+            return
+
+        state["index"] = index + 1
+        self._start_next_regulator_calibration_batch_run()
+
+    def _mark_remaining_regulator_calibration_batch_runs_skipped(self, prepared, start_index):
+        for run in prepared.runs[int(start_index):]:
+            if run.get("status") == "pending":
+                run["status"] = "skipped"
+                run["message"] = "Skipped after batch stopped."
+
+    def _run_regulator_calibration_batch_analysis(self):
+        state = getattr(self, "_regulator_calibration_batch_state", None)
+        if state is None:
+            return
+        prepared = state["prepared"]
+        self._emit_regulator_calibration_batch_signal("regulator_calibration_batch_stage", "Analyzing regulator batch")
+        analysis_runner = state.get("analysis_runner")
+        try:
+            if callable(analysis_runner):
+                result = analysis_runner(prepared)
+            else:
+                if str(self._repo_root) not in sys.path:
+                    sys.path.insert(0, str(self._repo_root))
+                from tools.plot_pressure_traces import render_trace_file
+                from tools.regulator_trace_analysis import analyze_inputs
+
+                result = analyze_inputs(
+                    [prepared.session_dir],
+                    output_dir=prepared.session_dir / "analysis",
+                    make_plots=True,
+                    update_run_meta=True,
+                    plot_renderer=render_trace_file,
+                )
+            analysis = {
+                "output_dir": str(result.get("output_dir", "")),
+                "candidate_ranking_json": str(result.get("candidate_ranking_json", "")),
+                "candidate_ranking_csv": str(result.get("candidate_ranking_csv", "")),
+                "all_pulses_csv": str(result.get("all_pulses_csv", "")),
+                "error_message": "",
+            }
+        except Exception as exc:
+            self._finish_regulator_calibration_batch(
+                False,
+                f"Regulator calibration batch analysis failed: {exc}",
+                "analysis_failed",
+                str(exc),
+                analysis={"error_message": str(exc)},
+            )
+            return
+        self._finish_regulator_calibration_batch(
+            True,
+            "Regulator calibration batch completed.",
+            "completed",
+            "",
+            analysis=analysis,
+        )
+
+    def _finish_regulator_calibration_batch(self, ok, message, status, error_message, analysis=None):
+        state = getattr(self, "_regulator_calibration_batch_state", None)
+        if state is None:
+            return
+        from RegulatorCalibrationRunner import write_batch_manifest
+
+        prepared = state["prepared"]
+        manifest = write_batch_manifest(
+            prepared,
+            runs=prepared.runs,
+            analysis=analysis,
+            status=status,
+            error_message=error_message,
+        )
+        payload = {
+            "session_id": prepared.session_id,
+            "session_dir": str(prepared.session_dir),
+            "manifest_path": str(prepared.manifest_path),
+            "manifest": manifest,
+        }
+        self._regulator_calibration_batch_state = None
+        self._emit_regulator_calibration_batch_signal("regulator_calibration_batch_stage", "Finished" if ok else "Failed")
+        self._emit_regulator_calibration_batch_signal(
+            "regulator_calibration_batch_finished",
+            bool(ok),
+            str(message or ""),
+            payload,
+        )
 
     def reset_mcu_board(self):
         """Reset the MCU board."""
