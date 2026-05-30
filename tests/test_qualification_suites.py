@@ -108,6 +108,8 @@ def test_motion_envelope_suite_exposes_operator_fixture_and_catalog_rows():
     assert motion.requires_operator_prompts is True
     assert required_fixture_ids(motion) == ("motion_full_envelope_v1",)
     assert "Firmware homes Z" in motion.fixtures[0]["operator_note"]
+    assert "raster-start XY anchor" in motion.fixtures[0]["operator_note"]
+    assert "80000 steps" in motion.fixtures[0]["operator_note"]
     rows = {row.test_id: row for row in build_test_plan_rows(motion)}
     assert list(rows) == [2012, 2013, 2014, 2015, 2016]
     assert rows[2012].name == "XY long reverse travel"
@@ -116,7 +118,11 @@ def test_motion_envelope_suite_exposes_operator_fixture_and_catalog_rows():
     assert rows[2015].name == "Z long travel"
     assert rows[2016].name == "Triggered-limit homing"
     assert all(row.subsystem == "Motion" for row in rows.values())
+    assert "xy_to" in rows[2015].metrics
+    assert "guard" in rows[2015].metrics
     assert "z_span" in rows[2015].metrics
+    assert "80000 steps" in rows[2015].evaluates
+    assert "raster-start XY anchor" in rows[2015].evaluates
     assert "limit_start" in rows[2016].metrics
 
 

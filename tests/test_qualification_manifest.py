@@ -137,7 +137,10 @@ def test_load_motion_envelope_manifest_requires_operator_full_envelope_fixture()
     assert manifest.analysis_rules["2012"]["metrics"]["move_to"]["equals"] == 0
     assert manifest.analysis_rules["2012"]["metrics"]["guard"]["equals"] == 0
     assert manifest.analysis_rules["2014"]["metrics"]["ret_err"]["maturity"] == "candidate"
+    assert manifest.analysis_rules["2015"]["metrics"]["zmax"]["equals"] == 80000
+    assert manifest.analysis_rules["2015"]["metrics"]["xy_to"]["equals"] == 0
     assert manifest.analysis_rules["2015"]["metrics"]["z_span"]["maturity"] == "candidate"
+    assert manifest.analysis_rules["2015"]["metrics"]["guard"]["equals"] == 0
     assert manifest.analysis_rules["2016"]["metrics"]["limit_start"]["equals"] == 0
 
 

@@ -2585,12 +2585,12 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                       if (runMotionEnvelopeSuite) {
                         static constexpr int32_t kSafeXMax = 45000;
                         static constexpr int32_t kSafeYMax = 35000;
-                        static constexpr int32_t kSafeZMax = 40000;
                         static constexpr int32_t kCableGuardX = 1000;
                         static constexpr int32_t kCableGuardMinY = 500;
                         static constexpr int32_t kLongXMax = 44000;
                         static constexpr int32_t kLongYMax = 34000;
-                        static constexpr int32_t kZLongMax = 39000;
+                        static constexpr int32_t kZLongMax = 80000;
+                        static constexpr int32_t kZLongSafeMax = 80000;
                         static constexpr uint32_t kLongRepetitions = 3u;
                         static constexpr uint32_t kLongPointCount = 5u;
                         static constexpr uint32_t kDiagPointCount = 5u;
@@ -2616,7 +2616,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         static constexpr uint32_t kTriggeredMoveTimeoutMs = 8000u;
                         const MotionQualificationMath::XySafetyEnvelope envelope{
                             0, kSafeXMax, 0, kSafeYMax, kCableGuardX, kCableGuardMinY};
-                        const MotionQualificationMath::ZSafetyEnvelope zEnvelope{0, kSafeZMax};
+                        const MotionQualificationMath::ZSafetyEnvelope zLongEnvelope{0, kZLongSafeMax};
                         const uint32_t zAxisMaxSpeedHz = Stepper::stepperZ()->maxSpeedHz();
                         const uint32_t zAxisAccelStepsPerSec2 =
                             static_cast<uint32_t>(Stepper::stepperZ()->accelStepsPerSec2());
@@ -2630,7 +2630,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                    static_cast<long>(kSafeYMax));
                           char zMetrics[192];
                           snprintf(zMetrics, sizeof(zMetrics),
-                                   "phase=%s;rep=0;ref=0;zhz=%lu;zcap=%lu;zacc=%lu;zmax=%ld;dz=0;z_span=0;z_drift=0;z_ret=0;ret_err=0;move_to=0;home_to=1;bound=0",
+                                   "phase=%s;rep=0;ref=0;xy_to=0;zhz=%lu;zcap=%lu;zacc=%lu;zmax=%ld;dz=0;z_span=0;z_drift=0;z_ret=0;ret_err=0;move_to=0;home_to=1;guard=0;bound=0",
                                    phase,
                                    static_cast<unsigned long>(kZFeedHz),
                                    static_cast<unsigned long>(zAxisMaxSpeedHz),
@@ -3145,6 +3145,42 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           return finishSelfTestNow();
                         }
 
+                        const MotionQualificationMath::XyPoint zLongAnchor{kPlateStartX, kPlateStartY};
+                        MotionQualificationMath::XyMotionStats zAnchorStats{};
+                        bool zAnchorBoundViolation = false;
+                        bool zAnchorGuardViolation = false;
+                        uint32_t zAnchorMoveTimeouts = 0u;
+                        sendProgressStage("z_long_xy_anchor");
+                        const bool zAnchorMoved = moveChecked(zLongAnchor,
+                                                              kPlateFeedHz,
+                                                              kPlateMoveTimeoutMs,
+                                                              zAnchorStats,
+                                                              zAnchorBoundViolation,
+                                                              zAnchorGuardViolation);
+                        if (!zAnchorMoved) {
+                          if (!zAnchorBoundViolation && !zAnchorGuardViolation) {
+                            zAnchorMoveTimeouts = 1u;
+                          }
+                          char metrics2015[224];
+                          snprintf(metrics2015, sizeof(metrics2015),
+                                   "phase=z_xy_anchor;rep=0;ref=0;anchor_x=%ld;anchor_y=%ld;xy_to=%lu;zhz=%lu;zcap=%lu;zacc=%lu;zmax=%ld;dz=0;z_span=0;z_drift=0;z_ret=0;ret_err=0;move_to=%lu;home_to=0;guard=%lu;bound=%lu",
+                                   static_cast<long>(zLongAnchor.x),
+                                   static_cast<long>(zLongAnchor.y),
+                                   static_cast<unsigned long>(zAnchorMoveTimeouts),
+                                   static_cast<unsigned long>(kZFeedHz),
+                                   static_cast<unsigned long>(zAxisMaxSpeedHz),
+                                   static_cast<unsigned long>(zAxisAccelStepsPerSec2),
+                                   static_cast<long>(kZLongMax),
+                                   static_cast<unsigned long>(zAnchorMoveTimeouts),
+                                   static_cast<unsigned long>(zAnchorGuardViolation ? 1u : 0u),
+                                   static_cast<unsigned long>(zAnchorBoundViolation ? 1u : 0u));
+                          if (!runOne(2015, "motion_z_long_travel_factory", false, metrics2015)) {
+                            return finishSelfTestNow();
+                          }
+                          (void)emitSkippedMotionEnvelope(2016u, "z_xy_anchor_failed");
+                          return finishSelfTestNow();
+                        }
+
                         MotionQualificationMath::AxisHomeSample zReference{};
                         referenceHomeFailureStage = nullptr;
                         if (!runZReferenceHomeSequence(zReference,
@@ -3164,7 +3200,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         for (uint32_t rep = 0u; rep < kLongRepetitions; ++rep) {
                           sendProgressStage("z_long_travel");
                           bool repMoveOk = true;
-                          if (!MotionQualificationMath::zPositionInBounds(kZLongMax, zEnvelope)) {
+                          if (!MotionQualificationMath::zPositionInBounds(kZLongMax, zLongEnvelope)) {
                             zBoundViolations++;
                             repMoveOk = false;
                           }
@@ -3177,7 +3213,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             zMoveTimeouts++;
                             repMoveOk = false;
                           }
-                          if (!MotionQualificationMath::zPositionInBounds(Stepper::stepperZ()->getPosition(), zEnvelope)) {
+                          if (!MotionQualificationMath::zPositionInBounds(Stepper::stepperZ()->getPosition(), zLongEnvelope)) {
                             zBoundViolations++;
                             repMoveOk = false;
                           }
@@ -3222,8 +3258,11 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             (zBoundViolations == 0u);
                         char metrics2015[224];
                         snprintf(metrics2015, sizeof(metrics2015),
-                                 "rep=%lu;ref=2;zhz=%lu;zcap=%lu;zacc=%lu;zmax=%ld;dz=%ld;z_span=%lu;z_drift=%lu;z_ret=%lu;ret_err=%lu;move_to=%lu;home_to=%lu;bound=%lu",
+                                 "rep=%lu;ref=2;anchor_x=%ld;anchor_y=%ld;xy_to=%lu;zhz=%lu;zcap=%lu;zacc=%lu;zmax=%ld;dz=%ld;z_span=%lu;z_drift=%lu;z_ret=%lu;ret_err=%lu;move_to=%lu;home_to=%lu;guard=%lu;bound=%lu",
                                  static_cast<unsigned long>(zCompleted),
+                                 static_cast<long>(zLongAnchor.x),
+                                 static_cast<long>(zLongAnchor.y),
+                                 static_cast<unsigned long>(zAnchorMoveTimeouts),
                                  static_cast<unsigned long>(kZFeedHz),
                                  static_cast<unsigned long>(zAxisMaxSpeedHz),
                                  static_cast<unsigned long>(zAxisAccelStepsPerSec2),
@@ -3233,8 +3272,9 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                  static_cast<unsigned long>(zDriftMax),
                                  static_cast<unsigned long>(zReturnErrorMax),
                                  static_cast<unsigned long>(zReturnError),
-                                 static_cast<unsigned long>(zMoveTimeouts + zHomeStats.moveTimeoutCount),
+                                 static_cast<unsigned long>(zAnchorMoveTimeouts + zMoveTimeouts + zHomeStats.moveTimeoutCount),
                                  static_cast<unsigned long>(zHomeStats.homeTimeoutCount),
+                                 static_cast<unsigned long>(zAnchorGuardViolation ? 1u : 0u),
                                  static_cast<unsigned long>(zBoundViolations));
                         if (!runOne(2015, "motion_z_long_travel_factory", zPass, metrics2015)) {
                           return finishSelfTestNow();
