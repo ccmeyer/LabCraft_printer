@@ -162,7 +162,7 @@ TEST(DiagnosticResultEmitter, GripperSealMetricsFitWithoutTruncatingAnalyzerFiel
 TEST(DiagnosticResultEmitter, GripperStressRasterMetricsFitWithoutTruncatingDecimationFields)
 {
     const char metricsText[] =
-        "psi=3000;pulses=10;moves=384;xy_home_to=0;move_to=0;guard=0;bound=0;"
+        "psi=3000;z_home_to=0;pulses=10;moves=384;xy_home_to=0;move_to=0;guard=0;bound=0;"
         "park_x=500;park_y=500;park_to=0;ready=0;timeout=0;fresh_to=0;focus=1;"
         "trace=1;sc=1031;stride=5;sample_ms=25";
     const char name[] = "gripper_motion_raster_3psi_factory";

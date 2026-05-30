@@ -20,7 +20,7 @@
     {
       "fixture_id": "dummy_blocked_head_motion_v1",
       "required_for": [2510, 2511, 2512, 2513],
-      "operator_note": "Run locally only with the dummy blocked printer head loaded and supported when prompted. Keep the operator physically present, verify the clear XY envelope, and provide a soft support/catch path before release."
+      "operator_note": "Run locally only with the dummy blocked printer head loaded and supported when prompted. Firmware homes Z before the XY raster motion row. Keep the operator physically present, verify the clear XY envelope, and provide a soft support/catch path before release."
     }
   ],
   "analysis_rules": {
@@ -70,6 +70,7 @@
       "failure_domain": "machine_performance",
       "metrics": {
         "psi": {"maturity": "candidate", "equals": 3000},
+        "z_home_to": {"maturity": "candidate", "equals": 0},
         "xy_home_to": {"maturity": "candidate", "equals": 0},
         "move_to": {"maturity": "candidate", "equals": 0},
         "guard": {"maturity": "candidate", "equals": 0},

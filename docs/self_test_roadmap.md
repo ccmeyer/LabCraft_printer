@@ -914,6 +914,7 @@ XY motion qualification slice:
 
 - Add `xy_motion_v1` as a separate operator-gated FULL manifest requiring fixture `motion_clear_envelope_v1`.
 - Select the suite with existing `CMD_SELFTEST_START` selector field value `2009`; no protocol layout or opcode changes.
+- Firmware homes Z as a clearance preflight before the first X/Y reference home or XY movement; a failed Z preflight fails rows `2010`-`2011` with `phase=z_clearance_home`.
 - Firmware rows `2010 motion_xy_long_travel_factory` and `2011 motion_xy_raster_repeatability_factory` exercise X/Y travel inside `X<=45000`, `Y<=35000`, with a cable-chain guard requiring `Y>=500` whenever `X>1000`.
 - Keep the suite out of `factory_acceptance_v3` until enough local data exists to tune thresholds and runtime.
 
@@ -921,6 +922,7 @@ Motion envelope qualification slice:
 
 - Add `motion_envelope_v1` as a separate operator-gated FULL manifest requiring fixture `motion_full_envelope_v1`.
 - Select the suite with existing `CMD_SELFTEST_START` selector field value `2019`; no protocol layout or opcode changes.
+- Firmware homes Z as a clearance preflight before the first XY envelope move; a failed Z preflight fails rows `2012`-`2016` with `phase=z_clearance_home`.
 - Firmware rows `2012`-`2016` cover reverse long XY travel, diagonal XY travel, a 16 x 24 plate raster from `(43000,13000)` toward `(33000,30000)`, Z long travel to `39000`, and homing from already-triggered X/Y/Z limit starts.
 - The `2014` plate raster returns to a near-home `Y=500` measurement anchor before the post-raster home so drift is not inflated by a long-distance homing approach artifact.
 - Keep `motion_envelope_v1` out of `factory_acceptance_v3`; use it for explicit, operator-confirmed full-envelope qualification runs.
@@ -976,7 +978,7 @@ Gripper seal stress qualification slice:
 - Select the suite with existing `CMD_SELFTEST_START` selector field value `2599`; no protocol layout or opcode changes.
 - The Python runner uses the same explicit dummy-head prompt, valve-click preflight, support-before-release prompt, gripper release/off teardown, and GOODBYE handoff path as `gripper_seal_v1`.
 - Firmware rows `2510`-`2513` keep MCU pass/fail focused on execution integrity: P/R regulator startup homing, pressure readiness, decimated trace export, gripper refresh state, and X/Y raster safety counters.
-- `2510` measures static dummy-head seal response at 1, 2, and 3 psi with gripper refresh disabled, using one unmeasured conditioning pulse per pressure before five measured decimated traces per channel. `2511` measures repeated 3 psi challenges while normal gripper refresh is enabled at `30000 ms`. `2512` homes X/Y before any motion, then runs the 384-well endpoint-interpolated plate raster while launching 3 psi regulator-quiet pulse-window traces at `10000 ms` intervals, and parks near `X=500,Y=500` before reporting. `2513` compares pre/post-raster 3 psi static seal traces.
+- `2510` measures static dummy-head seal response at 1, 2, and 3 psi with gripper refresh disabled, using one unmeasured conditioning pulse per pressure before five measured decimated traces per channel. `2511` measures repeated 3 psi challenges while normal gripper refresh is enabled at `30000 ms`. `2512` homes Z as a clearance preflight and then homes X/Y before any XY motion, runs the 384-well endpoint-interpolated plate raster while launching 3 psi regulator-quiet pulse-window traces at `10000 ms` intervals, and parks near `X=500,Y=500` before reporting. `2513` compares pre/post-raster 3 psi static seal traces; it is skipped with `gate=z_clearance_home` if the row `2512` preflight fails.
 - Gripper trace analysis is Python-derived from exported pressure traces. `raw_selftest.json` remains the MCU source of truth; `report.json` and `summary.csv` are enriched with baseline, end-of-pulse drop, post-pulse pressure, slope, noise, SNR, matrix, refresh, raster, and pre/post comparison summaries. Gripper stress traces use `sampleStride=5` (about `25 ms` spacing) and a longer cooperative export yield to keep long dummy-head pulse windows small enough for reliable MCU export.
 - Keep `gripper_seal_v1` as the quick local baseline and keep `gripper_seal_stress_v1` out of `factory_acceptance_v3` until enough dummy-head motion-stress data exists to set acceptance thresholds.
 

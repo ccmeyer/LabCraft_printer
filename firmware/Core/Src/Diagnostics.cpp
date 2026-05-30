@@ -675,6 +675,43 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             return bothDone && xSample.success && ySample.success;
                           };
 
+                          auto runAxisHomeDiagnosticAttempt = [&](Stepper* stepper,
+                                                                  EventBits_t homeBit,
+                                                                  MotionQualificationMath::AxisHomeSample& sample,
+                                                                  uint32_t fastHz,
+                                                                  uint32_t slowHz,
+                                                                  uint32_t backoffSteps,
+                                                                  uint32_t timeoutMs) -> bool {
+                            stepper->enableMotor();
+                            xEventGroupClearBits(_doneEvents, homeBit);
+                            startHomeAsync(stepper, fastHz, slowHz, backoffSteps, homeBit);
+                            const bool done = waitBitsWithTimeout(homeBit, timeoutMs);
+                            const EventBits_t doneBits = xEventGroupGetBits(_doneEvents);
+                            const bool axisDone = (doneBits & homeBit) != 0u;
+                            const Stepper::HomeDiagnosticSnapshot diag = stepper->getLastHomeDiagnosticSnapshot();
+                            sample.success = axisDone && diag.success;
+                            sample.limitTriggerSteps = diag.fineLimitPositionSteps;
+                            sample.finalBackoffSteps = diag.finalBackoffPositionSteps;
+                            sample.moveTimeoutCount = diag.moveTimeoutCount;
+                            return done && sample.success;
+                          };
+
+                          auto runZClearanceHomePreflight = [&](const char* stage,
+                                                                uint32_t fastHz,
+                                                                uint32_t slowHz,
+                                                                uint32_t backoffSteps,
+                                                                uint32_t timeoutMs) -> bool {
+                            MotionQualificationMath::AxisHomeSample zSample{};
+                            sendProgressStage(stage);
+                            return runAxisHomeDiagnosticAttempt(Stepper::stepperZ(),
+                                                                BIT_HOME_Z_DONE,
+                                                                zSample,
+                                                                fastHz,
+                                                                slowHz,
+                                                                backoffSteps,
+                                                                timeoutMs);
+                          };
+
                           auto moveGantryToWithTimeout = [&](int32_t x,
                                                             int32_t y,
                                                             uint32_t feedHz,
@@ -1420,6 +1457,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         }
 
                         GripperStressRowSummary row2512{};
+                        uint32_t zHomeTimeout = 0u;
                         uint32_t xyHomeTimeout = 0u;
                         uint32_t moveTimeout = 0u;
                         uint32_t guardViolation = 0u;
@@ -1428,17 +1466,26 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         uint32_t moveCount = 0u;
                         MotionQualificationMath::AxisHomeSample xStressHome{};
                         MotionQualificationMath::AxisHomeSample yStressHome{};
-                        sendProgressStage("gripper_motion_xy_home");
-                        const bool xyHomeOk = runXyHomeDiagnosticAttempt(xStressHome,
-                                                                         yStressHome,
-                                                                         kStressXyHomeFastHz,
-                                                                         kStressXyHomeSlowHz,
-                                                                         kStressXyHomeBackoffSteps,
-                                                                         kStressXyHomeTimeoutMs);
-                        if (!xyHomeOk) {
-                          xyHomeTimeout = 1u;
+                        const bool zHomeOk = runZClearanceHomePreflight("gripper_motion_z_clearance_home",
+                                                                        kStressXyHomeFastHz,
+                                                                        kStressXyHomeSlowHz,
+                                                                        kStressXyHomeBackoffSteps,
+                                                                        kStressXyHomeTimeoutMs);
+                        if (!zHomeOk) {
+                          zHomeTimeout = 1u;
                           row2512.pass = false;
                         } else {
+                          sendProgressStage("gripper_motion_xy_home");
+                          const bool xyHomeOk = runXyHomeDiagnosticAttempt(xStressHome,
+                                                                           yStressHome,
+                                                                           kStressXyHomeFastHz,
+                                                                           kStressXyHomeSlowHz,
+                                                                           kStressXyHomeBackoffSteps,
+                                                                           kStressXyHomeTimeoutMs);
+                          if (!xyHomeOk) {
+                            xyHomeTimeout = 1u;
+                            row2512.pass = false;
+                          } else {
                           MX_GRIPPER_SetRefreshPeriodMs(kStressRefreshMs);
                           MX_GRIPPER_StartRefresh();
 
@@ -1610,9 +1657,11 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               row2512.pass = false;
                             }
                           }
+                          }
                         }
                         row2512.pass = row2512.pass &&
                                        !_selfTestAbortRequested &&
+                                       (zHomeTimeout == 0u) &&
                                        (xyHomeTimeout == 0u) &&
                                        (moveTimeout == 0u) &&
                                        (guardViolation == 0u) &&
@@ -1627,7 +1676,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         char metrics2512[224];
                         snprintf(metrics2512,
                                  sizeof(metrics2512),
-                                 "psi=3000;pulses=%lu;moves=%lu;xy_home_to=%lu;move_to=%lu;guard=%lu;bound=%lu;park_x=%ld;park_y=%ld;park_to=%lu;ready=%lu;timeout=%lu;fresh_to=%lu;focus=1;trace=%u;sc=%lu;stride=%lu;sample_ms=%lu",
+                                 "psi=3000;z_home_to=%lu;pulses=%lu;moves=%lu;xy_home_to=%lu;move_to=%lu;guard=%lu;bound=%lu;park_x=%ld;park_y=%ld;park_to=%lu;ready=%lu;timeout=%lu;fresh_to=%lu;focus=1;trace=%u;sc=%lu;stride=%lu;sample_ms=%lu",
+                                 static_cast<unsigned long>(zHomeTimeout),
                                  static_cast<unsigned long>(row2512.pulses),
                                  static_cast<unsigned long>(moveCount),
                                  static_cast<unsigned long>(xyHomeTimeout),
@@ -1647,15 +1697,17 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         if (!runOne(2512u, "gripper_motion_raster_3psi_factory", row2512.pass, metrics2512)) {
                           return finishSelfTestNow();
                         }
-                        if (xyHomeTimeout != 0u || _selfTestAbortRequested) {
+                        if (zHomeTimeout != 0u || xyHomeTimeout != 0u || _selfTestAbortRequested) {
+                          const char* gate = (zHomeTimeout != 0u) ? "z_clearance_home" : "xy_home";
                           char skipMetrics[192];
                           snprintf(skipMetrics,
                                    sizeof(skipMetrics),
-                                   "psi=3000;pulse_ms=%lu;pre=%lu;post=0;ready=0;timeout=0;fresh_to=0;focus=0;trace=0;sc=0;ec=0;stride=%lu;sample_ms=%lu;gate=xy_home",
+                                   "psi=3000;pulse_ms=%lu;pre=%lu;post=0;ready=0;timeout=0;fresh_to=0;focus=0;trace=0;sc=0;ec=0;stride=%lu;sample_ms=%lu;gate=%s",
                                    static_cast<unsigned long>(kStressPulseMs),
                                    static_cast<unsigned long>(comparePre.pulses),
                                    static_cast<unsigned long>(kStressTraceSampleStride),
-                                   static_cast<unsigned long>(kStressTraceSampleMs));
+                                   static_cast<unsigned long>(kStressTraceSampleMs),
+                                   gate);
                           (void)runOne(2513u, "gripper_post_motion_seal_compare_factory", false, skipMetrics);
                           MX_GRIPPER_SetRefreshPeriodMs(originalRefreshMs);
                           closeStressPressurePath();
@@ -2287,6 +2339,14 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         MotionQualificationMath::AxisHomeSample xReference{};
                         MotionQualificationMath::AxisHomeSample yReference{};
                         const char* referenceHomeFailureStage = nullptr;
+                        if (!runZClearanceHomePreflight("xy_z_clearance_home",
+                                                        kHomeFastHz,
+                                                        kHomeSlowHz,
+                                                        kHomeBackoffSteps,
+                                                        kHomeTimeoutMs)) {
+                          (void)emitSkippedXyMotion(2010u, "z_clearance_home");
+                          return finishSelfTestNow();
+                        }
                         if (!runReferenceHomeSequence(xReference,
                                                       yReference,
                                                       "xy_long_settle_home",
@@ -2650,27 +2710,6 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           return reached;
                         };
 
-                        auto runAxisHomeDiagnosticAttempt = [&](Stepper* stepper,
-                                                                EventBits_t homeBit,
-                                                                MotionQualificationMath::AxisHomeSample& sample,
-                                                                uint32_t fastHz,
-                                                                uint32_t slowHz,
-                                                                uint32_t backoffSteps,
-                                                                uint32_t timeoutMs) -> bool {
-                          stepper->enableMotor();
-                          xEventGroupClearBits(_doneEvents, homeBit);
-                          startHomeAsync(stepper, fastHz, slowHz, backoffSteps, homeBit);
-                          const bool done = waitBitsWithTimeout(homeBit, timeoutMs);
-                          const EventBits_t doneBits = xEventGroupGetBits(_doneEvents);
-                          const bool axisDone = (doneBits & homeBit) != 0u;
-                          const Stepper::HomeDiagnosticSnapshot diag = stepper->getLastHomeDiagnosticSnapshot();
-                          sample.success = axisDone && diag.success;
-                          sample.limitTriggerSteps = diag.fineLimitPositionSteps;
-                          sample.finalBackoffSteps = diag.finalBackoffPositionSteps;
-                          sample.moveTimeoutCount = diag.moveTimeoutCount;
-                          return done && sample.success;
-                        };
-
                         auto runXyReferenceHomeSequence = [&](MotionQualificationMath::AxisHomeSample& xReference,
                                                               MotionQualificationMath::AxisHomeSample& yReference,
                                                               const char* settleStage,
@@ -2782,6 +2821,14 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         MotionQualificationMath::AxisHomeSample xReference{};
                         MotionQualificationMath::AxisHomeSample yReference{};
                         const char* referenceHomeFailureStage = nullptr;
+                        if (!runZClearanceHomePreflight("envelope_z_clearance_home",
+                                                        kHomeFastHz,
+                                                        kHomeSlowHz,
+                                                        kHomeBackoffSteps,
+                                                        kHomeTimeoutMs)) {
+                          (void)emitSkippedMotionEnvelope(2012u, "z_clearance_home");
+                          return finishSelfTestNow();
+                        }
                         if (!runXyReferenceHomeSequence(xReference,
                                                         yReference,
                                                         "xy_reverse_settle_home",

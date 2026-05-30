@@ -66,6 +66,7 @@ def test_gripper_stress_suite_exposes_operator_fixture_and_catalog_rows():
 
     assert gripper.requires_operator_prompts is True
     assert required_fixture_ids(gripper) == ("dummy_blocked_head_motion_v1",)
+    assert "Firmware homes Z" in gripper.fixtures[0]["operator_note"]
     rows = {row.test_id: row for row in build_test_plan_rows(gripper)}
     assert list(rows) == [2510, 2511, 2512, 2513]
     assert rows[2510].name == "Gripper static pressure matrix"
@@ -74,8 +75,10 @@ def test_gripper_stress_suite_exposes_operator_fixture_and_catalog_rows():
     assert rows[2512].name == "Gripper raster motion stress"
     assert rows[2513].name == "Gripper post-motion seal compare"
     assert all(row.subsystem == "Gripper" for row in rows.values())
+    assert "z_home_to" in rows[2512].metrics
     assert "xy_home_to" in rows[2512].metrics
     assert "park_to" in rows[2512].metrics
+    assert "Z-clearance" in rows[2512].evaluates
     assert "384-well XY raster" in rows[2512].evaluates
     assert "X=500, Y=500" in rows[2512].evaluates
     assert "pre/post raster" in rows[2513].evaluates
@@ -87,6 +90,7 @@ def test_xy_motion_suite_exposes_operator_fixture_and_catalog_rows():
 
     assert xy_motion.requires_operator_prompts is True
     assert required_fixture_ids(xy_motion) == ("motion_clear_envelope_v1",)
+    assert "Firmware homes Z" in xy_motion.fixtures[0]["operator_note"]
     rows = {row.test_id: row for row in build_test_plan_rows(xy_motion)}
     assert list(rows) == [2010, 2011]
     assert rows[2010].name == "XY long travel"
@@ -103,6 +107,7 @@ def test_motion_envelope_suite_exposes_operator_fixture_and_catalog_rows():
 
     assert motion.requires_operator_prompts is True
     assert required_fixture_ids(motion) == ("motion_full_envelope_v1",)
+    assert "Firmware homes Z" in motion.fixtures[0]["operator_note"]
     rows = {row.test_id: row for row in build_test_plan_rows(motion)}
     assert list(rows) == [2012, 2013, 2014, 2015, 2016]
     assert rows[2012].name == "XY long reverse travel"

@@ -20,7 +20,7 @@
     {
       "fixture_id": "motion_full_envelope_v1",
       "required_for": [2012, 2013, 2014, 2015, 2016],
-      "operator_note": "Confirm the full XY and Z motion envelope is clear: X<=45000, Y<=35000, Z<=40000. No plate, head, fixture, cable, hand, or tool may be inside the motion volume."
+      "operator_note": "Firmware homes Z before XY envelope motion. Confirm the full XY and Z motion envelope is clear: X<=45000, Y<=35000, Z<=40000. No plate, head, fixture, cable, hand, or tool may be inside the motion volume."
     }
   ],
   "analysis_rules": {

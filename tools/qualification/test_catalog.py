@@ -76,7 +76,7 @@ TEST_CATALOG: dict[int, TestCatalogEntry] = {
     2503: TestCatalogEntry(2503, "Gripper seal repeatability", "Repeated dummy-head seal retention and span."),
     2510: TestCatalogEntry(2510, "Gripper static pressure matrix", "Python-derived dummy-head seal pressure-drop response for 1, 2, and 3 psi long regulator-quiet pressure challenges with refresh disabled, using one unmeasured conditioning pulse per pressure before five measured decimated traces per channel."),
     2511: TestCatalogEntry(2511, "Gripper refreshed 3 psi hold", "Normal gripper refresh behavior during repeated 3 psi long pressure challenges over an extended hold, captured with decimated pressure traces."),
-    2512: TestCatalogEntry(2512, "Gripper raster motion stress", "Dummy-head gripper seal behavior during a homed 384-well XY raster with normal refresh and repeated 3 psi regulator-quiet pressure challenges using decimated traces, then parks near X=500, Y=500."),
+    2512: TestCatalogEntry(2512, "Gripper raster motion stress", "Dummy-head gripper seal behavior during a Z-clearance-preflighted, homed 384-well XY raster with normal refresh and repeated 3 psi regulator-quiet pressure challenges using decimated traces, then parks near X=500, Y=500."),
     2513: TestCatalogEntry(2513, "Gripper post-motion seal compare", "Python-derived pre/post raster 3 psi static seal comparison from decimated traces to detect motion-induced seal degradation."),
 }
 

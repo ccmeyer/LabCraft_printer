@@ -85,11 +85,13 @@ def test_load_gripper_seal_stress_manifest_requires_motion_dummy_head_fixture():
     assert manifest.requires_operator_prompts is True
     assert manifest.selftest_args == ("--gripper-seal-stress-suite", "--pressure-trace")
     assert {item["fixture_id"] for item in manifest.fixtures} == {"dummy_blocked_head_motion_v1"}
+    assert "Firmware homes Z" in manifest.fixtures[0]["operator_note"]
     assert manifest.analysis_rules["2510"]["metrics"]["pulse_ms"]["equals"] == 2000
     assert manifest.analysis_rules["2510"]["metrics"]["pulses"]["min"] == 30
     assert manifest.analysis_rules["2510"]["metrics"]["cond"]["equals"] == 3
     assert manifest.analysis_rules["2510"]["metrics"]["reps"]["equals"] == 5
     assert manifest.analysis_rules["2511"]["metrics"]["refresh_ms"]["equals"] == 30000
+    assert manifest.analysis_rules["2512"]["metrics"]["z_home_to"]["equals"] == 0
     assert manifest.analysis_rules["2512"]["metrics"]["xy_home_to"]["equals"] == 0
     assert manifest.analysis_rules["2512"]["metrics"]["guard"]["equals"] == 0
     assert manifest.analysis_rules["2512"]["metrics"]["park_x"]["equals"] == 500
@@ -114,6 +116,7 @@ def test_load_xy_motion_manifest_requires_operator_clear_envelope_fixture():
     assert manifest.requires_operator_prompts is True
     assert manifest.selftest_args == ("--xy-motion-suite",)
     assert {item["fixture_id"] for item in manifest.fixtures} == {"motion_clear_envelope_v1"}
+    assert "Firmware homes Z" in manifest.fixtures[0]["operator_note"]
     assert manifest.analysis_rules["2010"]["metrics"]["move_to"]["equals"] == 0
     assert manifest.analysis_rules["2010"]["metrics"]["guard"]["equals"] == 0
     assert manifest.analysis_rules["2010"]["metrics"]["bound"]["equals"] == 0
@@ -130,6 +133,7 @@ def test_load_motion_envelope_manifest_requires_operator_full_envelope_fixture()
     assert manifest.requires_operator_prompts is True
     assert manifest.selftest_args == ("--motion-envelope-suite",)
     assert {item["fixture_id"] for item in manifest.fixtures} == {"motion_full_envelope_v1"}
+    assert "Firmware homes Z" in manifest.fixtures[0]["operator_note"]
     assert manifest.analysis_rules["2012"]["metrics"]["move_to"]["equals"] == 0
     assert manifest.analysis_rules["2012"]["metrics"]["guard"]["equals"] == 0
     assert manifest.analysis_rules["2014"]["metrics"]["ret_err"]["maturity"] == "candidate"

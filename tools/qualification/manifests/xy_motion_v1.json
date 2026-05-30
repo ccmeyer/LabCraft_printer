@@ -17,7 +17,7 @@
     {
       "fixture_id": "motion_clear_envelope_v1",
       "required_for": [2010, 2011],
-      "operator_note": "Confirm the full XY gantry envelope is clear. No plate, fixture, tool, cable, or hand may be inside the X<=45000, Y<=35000 travel region."
+      "operator_note": "Firmware homes Z before XY motion. Confirm the full XY gantry envelope is clear. No plate, fixture, tool, cable, or hand may be inside the X<=45000, Y<=35000 travel region."
     }
   ],
   "analysis_rules": {
