@@ -86,16 +86,21 @@ def test_load_gripper_seal_stress_manifest_requires_motion_dummy_head_fixture():
     assert manifest.selftest_args == ("--gripper-seal-stress-suite", "--pressure-trace")
     assert {item["fixture_id"] for item in manifest.fixtures} == {"dummy_blocked_head_motion_v1"}
     assert "Firmware homes Z" in manifest.fixtures[0]["operator_note"]
+    assert "evaporation-plate confirmation" in manifest.fixtures[0]["operator_note"]
+    assert "Z=91500" in manifest.fixtures[0]["operator_note"]
     assert manifest.analysis_rules["2510"]["metrics"]["pulse_ms"]["equals"] == 2000
     assert manifest.analysis_rules["2510"]["metrics"]["pulses"]["min"] == 30
     assert manifest.analysis_rules["2510"]["metrics"]["cond"]["equals"] == 3
     assert manifest.analysis_rules["2510"]["metrics"]["reps"]["equals"] == 5
     assert manifest.analysis_rules["2511"]["metrics"]["refresh_ms"]["equals"] == 30000
+    assert manifest.analysis_rules["2512"]["metrics"]["pc"]["equals"] == 1
+    assert manifest.analysis_rules["2512"]["metrics"]["pz"]["equals"] == 91500
+    assert manifest.analysis_rules["2512"]["metrics"]["z_to"]["equals"] == 0
     assert manifest.analysis_rules["2512"]["metrics"]["z_home_to"]["equals"] == 0
     assert manifest.analysis_rules["2512"]["metrics"]["xy_home_to"]["equals"] == 0
     assert manifest.analysis_rules["2512"]["metrics"]["guard"]["equals"] == 0
-    assert manifest.analysis_rules["2512"]["metrics"]["park_x"]["equals"] == 500
-    assert manifest.analysis_rules["2512"]["metrics"]["park_y"]["equals"] == 500
+    assert "park_x" not in manifest.analysis_rules["2512"]["metrics"]
+    assert "park_y" not in manifest.analysis_rules["2512"]["metrics"]
     assert manifest.analysis_rules["2512"]["metrics"]["park_to"]["equals"] == 0
     assert manifest.analysis_rules["2510"]["metrics"]["stride"]["equals"] == 5
     assert manifest.analysis_rules["2510"]["metrics"]["sample_ms"]["equals"] == 25
@@ -134,8 +139,14 @@ def test_load_motion_envelope_manifest_requires_operator_full_envelope_fixture()
     assert manifest.selftest_args == ("--motion-envelope-suite",)
     assert {item["fixture_id"] for item in manifest.fixtures} == {"motion_full_envelope_v1"}
     assert "Firmware homes Z" in manifest.fixtures[0]["operator_note"]
+    assert "evaporation-plate confirmation" in manifest.fixtures[0]["operator_note"]
+    assert "Z=91500" in manifest.fixtures[0]["operator_note"]
     assert manifest.analysis_rules["2012"]["metrics"]["move_to"]["equals"] == 0
     assert manifest.analysis_rules["2012"]["metrics"]["guard"]["equals"] == 0
+    assert manifest.analysis_rules["2014"]["metrics"]["pc"]["equals"] == 1
+    assert manifest.analysis_rules["2014"]["metrics"]["pz"]["equals"] == 91500
+    assert manifest.analysis_rules["2014"]["metrics"]["z_to"]["equals"] == 0
+    assert manifest.analysis_rules["2014"]["metrics"]["z_home_to"]["equals"] == 0
     assert manifest.analysis_rules["2014"]["metrics"]["ret_err"]["maturity"] == "candidate"
     assert manifest.analysis_rules["2015"]["metrics"]["zmax"]["equals"] == 80000
     assert manifest.analysis_rules["2015"]["metrics"]["xy_to"]["equals"] == 0

@@ -201,6 +201,68 @@ def test_worker_parses_selftest_event_lines(qapp):
     assert outputs == ["ordinary output"]
 
 
+def test_worker_bridges_selftest_operator_prompt_to_subprocess_stdin(qapp):
+    class FakeStdin:
+        def __init__(self):
+            self.writes = []
+            self.flushed = False
+
+        def write(self, text):
+            self.writes.append(text)
+
+        def flush(self):
+            self.flushed = True
+
+    prompts = []
+    stdin = FakeStdin()
+    worker = QualificationRunWorker(
+        {},
+        repo_root=REPO_ROOT,
+        prompter=lambda message: prompts.append(message),
+    )
+    worker._active_process = SimpleNamespace(stdin=stdin)
+    events = []
+    worker.selftest_event.connect(events.append)
+
+    worker._handle_selftest_output_line(
+        'SELFTEST_EVENT {"schema":"selftest_event_v1","event":"selftest_operator_prompt","stage":"evap_plate_confirm","message":"Confirm plate"}'
+    )
+
+    assert prompts == ["Confirm plate"]
+    assert stdin.writes == ["continue\n"]
+    assert stdin.flushed is True
+    assert events[0]["stage"] == "evap_plate_confirm"
+
+
+def test_worker_writes_abort_when_selftest_operator_prompt_is_cancelled(qapp):
+    class FakeStdin:
+        def __init__(self):
+            self.writes = []
+
+        def write(self, text):
+            self.writes.append(text)
+
+        def flush(self):
+            pass
+
+    outputs = []
+    stdin = FakeStdin()
+
+    def reject_prompt(_message):
+        raise RuntimeError("cancelled")
+
+    worker = QualificationRunWorker({}, repo_root=REPO_ROOT, prompter=reject_prompt)
+    worker._active_process = SimpleNamespace(stdin=stdin)
+    worker.output.connect(outputs.append)
+
+    worker._handle_selftest_output_line(
+        'SELFTEST_EVENT {"schema":"selftest_event_v1","event":"selftest_operator_prompt","stage":"evap_plate_confirm","message":"Confirm plate"}'
+    )
+
+    assert stdin.writes == ["abort\n"]
+    assert any("Operator prompt cancelled" in item for item in outputs)
+
+
 def test_worker_malformed_event_line_stays_output(qapp):
     worker = QualificationRunWorker({}, repo_root=REPO_ROOT)
     events = []

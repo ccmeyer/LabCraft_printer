@@ -20,6 +20,7 @@ START_BYTE = 0xAA
 
 TAG_P1 = 0x01
 CMD_HELLO = 0xF3
+CMD_RESUME = 0xF1
 CMD_HELLO_ACK = 0xF4
 CMD_GOODBYE = 0xF5
 CMD_BYE_ACK = 0xF6
@@ -438,6 +439,29 @@ def _emit_selftest_event(args, payload: dict) -> None:
     event = {"schema": "selftest_event_v1", **dict(payload)}
     event.setdefault("timestamp", now_iso())
     print(f"{SELFTEST_EVENT_PREFIX}{json.dumps(event, sort_keys=True, separators=(',', ':'))}", flush=True)
+
+
+def _operator_prompt_message(stage: str) -> str:
+    if stage == "evap_plate_confirm":
+        return (
+            "The machine is at the 384-well plate start with Z homed/up. "
+            "Position the evaporation plate, confirm the area is clear, then continue."
+        )
+    return "Confirm the operator-gated self-test step is ready to continue."
+
+
+def _read_operator_prompt_response(args, message: str) -> bool:
+    prompt = "" if bool(getattr(args, "progress_jsonl", False)) else f"{message}\nType Enter/continue to continue, or abort to cancel: "
+    try:
+        response = input(prompt)
+    except EOFError:
+        return False
+    text = str(response or "").strip().lower()
+    if text in ("", "c", "continue", "y", "yes"):
+        return True
+    if text in ("a", "abort", "cancel", "n", "no", "stop"):
+        return False
+    return False
 
 
 def write_json_atomic(path: str, obj: dict) -> None:
@@ -979,6 +1003,8 @@ def run(args: argparse.Namespace) -> int:
         timeout_reason = "hard_timeout"
         progress_count = 0
         last_progress = {}
+        operator_prompted_stages: set[str] = set()
+        operator_control_seq8 = 4
         recent_frames = deque(maxlen=64)
         frame_counts: dict[int, int] = {}
         total_rx_bytes = 0
@@ -1064,8 +1090,9 @@ def run(args: argparse.Namespace) -> int:
                         progress_count += 1
                         metrics_raw = tlv.get(TAG_METRICS, b"").decode("utf-8", errors="replace")
                         last_progress = parse_metrics(metrics_raw)
+                        stage = str(last_progress.get("stage", ""))
                         frame_snapshot["progress"] = True
-                        frame_snapshot["stage"] = str(last_progress.get("stage", ""))
+                        frame_snapshot["stage"] = stage
                         recent_frames.append(frame_snapshot)
                         _emit_selftest_event(
                             args,
@@ -1078,6 +1105,35 @@ def run(args: argparse.Namespace) -> int:
                                 "metrics": dict(last_progress),
                             },
                         )
+                        if stage == "evap_plate_confirm" and stage not in operator_prompted_stages:
+                            operator_prompted_stages.add(stage)
+                            prompt_message = _operator_prompt_message(stage)
+                            _emit_selftest_event(
+                                args,
+                                {
+                                    "event": "selftest_operator_prompt",
+                                    "stage": stage,
+                                    "message": prompt_message,
+                                },
+                            )
+                            prompt_started = time.monotonic()
+                            accepted = _read_operator_prompt_response(args, prompt_message)
+                            prompt_finished = time.monotonic()
+                            paused_s = max(0.0, prompt_finished - prompt_started)
+                            hard_deadline += paused_s
+                            idle_deadline = prompt_finished + (progress_timeout_ms / 1000.0)
+                            activity_deadline = prompt_finished + (activity_timeout_ms / 1000.0)
+                            operator_cmd = CMD_RESUME if accepted else CMD_SELFTEST_ABORT
+                            ser.write(build_control(operator_cmd, operator_control_seq8 & 0xFF, selftest_seq32))
+                            operator_control_seq8 = (operator_control_seq8 + 1) & 0xFF
+                            _emit_selftest_event(
+                                args,
+                                {
+                                    "event": "selftest_operator_prompt_response",
+                                    "stage": stage,
+                                    "accepted": bool(accepted),
+                                },
+                            )
                         continue
                     if TAG_TRACE_KIND in tlv:
                         trace_kind = int.from_bytes(tlv.get(TAG_TRACE_KIND, b"\x00"), "little")

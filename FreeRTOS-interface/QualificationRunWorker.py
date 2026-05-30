@@ -42,6 +42,7 @@ class QualificationRunWorker(QtCore.QThread):
         self._external_campaign_runner = campaign_runner
         self._prompt_event: threading.Event | None = None
         self._prompt_accepted = False
+        self._active_process: subprocess.Popen | None = None
         self._active_campaign_step_index: int | None = None
         self._active_campaign_manifest_id: str | None = None
 
@@ -172,6 +173,7 @@ class QualificationRunWorker(QtCore.QThread):
             proc = subprocess.Popen(
                 command,
                 cwd=str(self.repo_root),
+                stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -182,10 +184,14 @@ class QualificationRunWorker(QtCore.QThread):
             self.stage.emit("Writing report")
             return 3
 
-        if proc.stdout is not None:
-            for line in proc.stdout:
-                self._handle_selftest_output_line(line.rstrip())
-        rc = int(proc.wait())
+        self._active_process = proc
+        try:
+            if proc.stdout is not None:
+                for line in proc.stdout:
+                    self._handle_selftest_output_line(line.rstrip())
+            rc = int(proc.wait())
+        finally:
+            self._active_process = None
         self.output.emit(f"Self-test runner exited with {rc}")
         self.stage.emit("Writing report")
         return rc
@@ -208,6 +214,10 @@ class QualificationRunWorker(QtCore.QThread):
             event.setdefault("campaign_step_index", self._active_campaign_step_index)
         if self._active_campaign_manifest_id:
             event.setdefault("manifest_id", self._active_campaign_manifest_id)
+        if event.get("event") == "selftest_operator_prompt":
+            self.selftest_event.emit(event)
+            self._respond_selftest_operator_prompt(event)
+            return
         self.selftest_event.emit(event)
 
     def _handle_campaign_event(self, event: dict[str, Any]) -> None:
@@ -235,3 +245,22 @@ class QualificationRunWorker(QtCore.QThread):
         self._prompt_event = None
         if not self._prompt_accepted:
             raise RuntimeError("Operator prompt cancelled.")
+
+    def _respond_selftest_operator_prompt(self, event: dict[str, Any]) -> None:
+        message = str(event.get("message") or "Confirm the operator-gated self-test step is ready to continue.")
+        accepted = False
+        try:
+            prompter = self._external_prompter or self._prompt_operator
+            prompter(message)
+            accepted = True
+        except Exception as exc:
+            self.output.emit(f"Operator prompt cancelled: {exc}")
+        proc = self._active_process
+        stdin = getattr(proc, "stdin", None)
+        if stdin is None:
+            return
+        try:
+            stdin.write("continue\n" if accepted else "abort\n")
+            stdin.flush()
+        except Exception as exc:
+            self.output.emit(f"Failed to respond to self-test operator prompt: {exc}")

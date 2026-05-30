@@ -152,6 +152,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
     (void)request.timeoutMs;
 
     auto& _selfTestAbortRequested = orchestrator._selfTestAbortRequested;
+    auto& _resumeRequested = orchestrator._resumeRequested;
     auto& _cmdQueue = orchestrator._cmdQueue;
     auto& _doneEvents = orchestrator._doneEvents;
     auto& _flashTaskHandle = orchestrator._flashTaskHandle;
@@ -310,6 +311,24 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                              static_cast<unsigned long>(nowMs - selftestStartMs),
                              hwmWords);
                     sendResult(0u, "selftest_progress", true, metrics);
+                  };
+
+                  auto waitForOperatorResume = [&](const char* stage) -> bool {
+                    _resumeRequested = false;
+                    sendProgressStage(stage);
+                    const TickType_t pollTicks = msToAtLeast1Tick(25u);
+                    while (!_selfTestAbortRequested) {
+                      Watchdog_CheckIn(CRASH_TASK_ORCH);
+                      if (_resumeRequested) {
+                        _resumeRequested = false;
+                        sendProgressStage("evap_plate_confirmed");
+                        return true;
+                      }
+                      maybeSendProgress(stage);
+                      vTaskDelay(pollTicks);
+                    }
+                    aborted = true;
+                    return false;
                   };
 
                   static constexpr uint8_t TRACE_KIND_SAMPLES = 1u;
@@ -725,6 +744,28 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             return reached;
                           };
 
+                          auto moveAxisToWithTimeout = [&](Stepper* stepper,
+                                                           EventBits_t doneBit,
+                                                           int32_t target,
+                                                           uint32_t feedHz,
+                                                           uint32_t timeoutMs) -> bool {
+                            const int32_t current = stepper->getPosition();
+                            const int64_t delta64 = static_cast<int64_t>(target) - static_cast<int64_t>(current);
+                            if (delta64 == 0) {
+                              return true;
+                            }
+                            const bool direction = delta64 >= 0;
+                            const uint32_t steps = static_cast<uint32_t>(direction ? delta64 : -delta64);
+                            xEventGroupClearBits(_doneEvents, doneBit);
+                            stepper->enableMotor();
+                            stepper->move(direction, steps, feedHz, 0u);
+                            const bool reached = waitBitsWithTimeout(doneBit, timeoutMs);
+                            if (!reached) {
+                              stepper->stop();
+                            }
+                            return reached;
+                          };
+
                           auto waitPrinterIdleWithTimeout = [&](Printer* printer, uint32_t timeoutMs) {
                             if (printer == nullptr) {
                               return false;
@@ -936,15 +977,19 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         static constexpr int32_t kStressPlateStartY = 13000;
                         static constexpr int32_t kStressPlateEndX = 33000;
                         static constexpr int32_t kStressPlateEndY = 30000;
+                        static constexpr int32_t kStressEvapPlateZ = 91500;
                         static constexpr uint32_t kStressPlateRows = 16u;
                         static constexpr uint32_t kStressPlateCols = 24u;
                         static constexpr uint32_t kStressPlateFeedHz = 6000u;
                         static constexpr uint32_t kStressPlateMoveTimeoutMs = 12000u;
+                        static constexpr uint32_t kStressZFeedHz = 30000u;
+                        static constexpr uint32_t kStressZMoveTimeoutMs = 45000u;
                         static constexpr int32_t kStressParkX = 500;
                         static constexpr int32_t kStressParkY = 500;
                         static constexpr uint32_t kStressTargetRaw1Psi = 2512u;
                         static constexpr uint32_t kStressTargetRaw2Psi = 3386u;
                         static constexpr uint32_t kStressTargetRaw3Psi = 4259u;
+                        const MotionQualificationMath::ZSafetyEnvelope stressEvapZEnvelope{0, kStressEvapPlateZ};
 
                         struct GripperStressRowSummary {
                           uint32_t pulses = 0u;
@@ -1464,6 +1509,10 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         uint32_t boundViolation = 0u;
                         uint32_t parkTimeout = 0u;
                         uint32_t moveCount = 0u;
+                        uint32_t plateConfirmed = 0u;
+                        uint32_t zPlateTimeout = 0u;
+                        bool zPlateMoveStarted = false;
+                        const char* row2512Gate = nullptr;
                         MotionQualificationMath::AxisHomeSample xStressHome{};
                         MotionQualificationMath::AxisHomeSample yStressHome{};
                         const bool zHomeOk = runZClearanceHomePreflight("gripper_motion_z_clearance_home",
@@ -1473,6 +1522,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                                                         kStressXyHomeTimeoutMs);
                         if (!zHomeOk) {
                           zHomeTimeout = 1u;
+                          row2512Gate = "z_clearance_home";
                           row2512.pass = false;
                         } else {
                           sendProgressStage("gripper_motion_xy_home");
@@ -1484,11 +1534,9 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                                                            kStressXyHomeTimeoutMs);
                           if (!xyHomeOk) {
                             xyHomeTimeout = 1u;
+                            row2512Gate = "xy_home";
                             row2512.pass = false;
                           } else {
-                          MX_GRIPPER_SetRefreshPeriodMs(kStressRefreshMs);
-                          MX_GRIPPER_StartRefresh();
-
                           uint32_t routeIndex = 0u;
                           const uint32_t totalPoints = kStressPlateRows * kStressPlateCols;
                           uint16_t pulseSeq = 0u;
@@ -1539,6 +1587,56 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             moveCount++;
                             return true;
                           };
+                          bool evapSetupOk = true;
+                          sendProgressStage("gripper_motion_plate_setup_anchor");
+                          if (!pointSafe(kStressPlateStartX, kStressPlateStartY)) {
+                            row2512Gate = "evap_plate_setup";
+                            row2512.pass = false;
+                            evapSetupOk = false;
+                          } else if (!moveGantryToWithTimeout(kStressPlateStartX,
+                                                             kStressPlateStartY,
+                                                             kStressPlateFeedHz,
+                                                             kStressPlateMoveTimeoutMs)) {
+                            moveTimeout++;
+                            row2512Gate = "evap_plate_setup";
+                            row2512.pass = false;
+                            evapSetupOk = false;
+                          }
+                          if (evapSetupOk && !waitForOperatorResume("evap_plate_confirm")) {
+                            MX_GRIPPER_SetRefreshPeriodMs(originalRefreshMs);
+                            closeStressPressurePath();
+                            return finishSelfTestNow();
+                          }
+                          if (evapSetupOk) {
+                            plateConfirmed = 1u;
+                            if (!MotionQualificationMath::zPositionInBounds(kStressEvapPlateZ, stressEvapZEnvelope)) {
+                              boundViolation++;
+                              row2512Gate = "evap_plate_setup";
+                              row2512.pass = false;
+                              evapSetupOk = false;
+                            } else {
+                              zPlateMoveStarted = true;
+                              if (!moveAxisToWithTimeout(Stepper::stepperZ(),
+                                                         BIT_STEPPER3_DONE,
+                                                         kStressEvapPlateZ,
+                                                         kStressZFeedHz,
+                                                         kStressZMoveTimeoutMs)) {
+                                zPlateTimeout = 1u;
+                                moveTimeout++;
+                                row2512Gate = "evap_plate_setup";
+                                row2512.pass = false;
+                                evapSetupOk = false;
+                              } else if (!MotionQualificationMath::zPositionInBounds(Stepper::stepperZ()->getPosition(), stressEvapZEnvelope)) {
+                                boundViolation++;
+                                row2512Gate = "evap_plate_setup";
+                                row2512.pass = false;
+                                evapSetupOk = false;
+                              }
+                            }
+                          }
+                          if (evapSetupOk) {
+                          MX_GRIPPER_SetRefreshPeriodMs(kStressRefreshMs);
+                          MX_GRIPPER_StartRefresh();
 
                           sendProgressStage("gripper_motion_raster");
                           const uint32_t rasterStartMs = HAL_GetTick();
@@ -1645,6 +1743,37 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             }
                           }
                           if (!_selfTestAbortRequested && moveTimeout == 0u && guardViolation == 0u && boundViolation == 0u) {
+                            sendProgressStage("gripper_motion_return_plate_start");
+                            if (!pointSafe(kStressPlateStartX, kStressPlateStartY)) {
+                              row2512Gate = "evap_plate_teardown";
+                              row2512.pass = false;
+                            } else if (!moveGantryToWithTimeout(kStressPlateStartX,
+                                                               kStressPlateStartY,
+                                                               kStressPlateFeedHz,
+                                                               kStressPlateMoveTimeoutMs)) {
+                              moveTimeout++;
+                              row2512Gate = "evap_plate_teardown";
+                              row2512.pass = false;
+                            }
+                          }
+                          if (!_selfTestAbortRequested && zPlateMoveStarted) {
+                            MotionQualificationMath::AxisHomeSample zPostRasterHome{};
+                            sendProgressStage("gripper_motion_z_home_after_raster");
+                            if (!runAxisHomeDiagnosticAttempt(Stepper::stepperZ(),
+                                                              BIT_HOME_Z_DONE,
+                                                              zPostRasterHome,
+                                                              kStressXyHomeFastHz,
+                                                              kStressXyHomeSlowHz,
+                                                              kStressXyHomeBackoffSteps,
+                                                              kStressXyHomeTimeoutMs)) {
+                              zHomeTimeout++;
+                              if (row2512Gate == nullptr) {
+                                row2512Gate = "evap_plate_teardown";
+                              }
+                              row2512.pass = false;
+                            }
+                          }
+                          if (!_selfTestAbortRequested && moveTimeout == 0u && guardViolation == 0u && boundViolation == 0u && zHomeTimeout == 0u) {
                             sendProgressStage("gripper_motion_park");
                             if (!pointSafe(kStressParkX, kStressParkY)) {
                               row2512.pass = false;
@@ -1657,12 +1786,22 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               row2512.pass = false;
                             }
                           }
+                          } else if (row2512Gate == nullptr) {
+                            row2512Gate = "evap_plate_setup";
                           }
+                          }
+                        }
+                        if ((moveTimeout != 0u || guardViolation != 0u || boundViolation != 0u) &&
+                            row2512Gate == nullptr &&
+                            plateConfirmed == 1u) {
+                          row2512Gate = "evap_plate_teardown";
                         }
                         row2512.pass = row2512.pass &&
                                        !_selfTestAbortRequested &&
                                        (zHomeTimeout == 0u) &&
                                        (xyHomeTimeout == 0u) &&
+                                       (plateConfirmed == 1u) &&
+                                       (zPlateTimeout == 0u) &&
                                        (moveTimeout == 0u) &&
                                        (guardViolation == 0u) &&
                                        (boundViolation == 0u) &&
@@ -1676,7 +1815,10 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         char metrics2512[224];
                         snprintf(metrics2512,
                                  sizeof(metrics2512),
-                                 "psi=3000;z_home_to=%lu;pulses=%lu;moves=%lu;xy_home_to=%lu;move_to=%lu;guard=%lu;bound=%lu;park_x=%ld;park_y=%ld;park_to=%lu;ready=%lu;timeout=%lu;fresh_to=%lu;focus=1;trace=%u;sc=%lu;stride=%lu;sample_ms=%lu",
+                                 "psi=3000;pc=%lu;pz=%ld;z_to=%lu;z_home_to=%lu;pulses=%lu;moves=%lu;xy_home_to=%lu;move_to=%lu;guard=%lu;bound=%lu;park_to=%lu;ready=%lu;timeout=%lu;fresh_to=%lu;focus=1;trace=%u;sc=%lu;stride=%lu;sample_ms=%lu",
+                                 static_cast<unsigned long>(plateConfirmed),
+                                 static_cast<long>(kStressEvapPlateZ),
+                                 static_cast<unsigned long>(zPlateTimeout),
                                  static_cast<unsigned long>(zHomeTimeout),
                                  static_cast<unsigned long>(row2512.pulses),
                                  static_cast<unsigned long>(moveCount),
@@ -1684,8 +1826,6 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                  static_cast<unsigned long>(moveTimeout),
                                  static_cast<unsigned long>(guardViolation),
                                  static_cast<unsigned long>(boundViolation),
-                                 static_cast<long>(kStressParkX),
-                                 static_cast<long>(kStressParkY),
                                  static_cast<unsigned long>(parkTimeout),
                                  static_cast<unsigned long>(row2512.ready),
                                  static_cast<unsigned long>(row2512.timeout),
@@ -1697,8 +1837,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         if (!runOne(2512u, "gripper_motion_raster_3psi_factory", row2512.pass, metrics2512)) {
                           return finishSelfTestNow();
                         }
-                        if (zHomeTimeout != 0u || xyHomeTimeout != 0u || _selfTestAbortRequested) {
-                          const char* gate = (zHomeTimeout != 0u) ? "z_clearance_home" : "xy_home";
+                        if (row2512Gate != nullptr || _selfTestAbortRequested) {
+                          const char* gate = (row2512Gate != nullptr) ? row2512Gate : "abort";
                           char skipMetrics[192];
                           snprintf(skipMetrics,
                                    sizeof(skipMetrics),
@@ -2602,6 +2742,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         static constexpr int32_t kPlateStartY = 13000;
                         static constexpr int32_t kPlateEndX = 33000;
                         static constexpr int32_t kPlateEndY = 30000;
+                        static constexpr int32_t kEvapPlateZ = 91500;
                         static constexpr uint32_t kPlateFeedHz = 6000u;
                         static constexpr uint32_t kPlateMoveTimeoutMs = 12000u;
                         static constexpr uint32_t kZFeedHz = 30000u;
@@ -2617,6 +2758,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         const MotionQualificationMath::XySafetyEnvelope envelope{
                             0, kSafeXMax, 0, kSafeYMax, kCableGuardX, kCableGuardMinY};
                         const MotionQualificationMath::ZSafetyEnvelope zLongEnvelope{0, kZLongSafeMax};
+                        const MotionQualificationMath::ZSafetyEnvelope evapZEnvelope{0, kEvapPlateZ};
                         const uint32_t zAxisMaxSpeedHz = Stepper::stepperZ()->maxSpeedHz();
                         const uint32_t zAxisAccelStepsPerSec2 =
                             static_cast<uint32_t>(Stepper::stepperZ()->accelStepsPerSec2());
@@ -3030,43 +3172,103 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         MotionQualificationMath::AxisHomeSample xPlateSample{};
                         MotionQualificationMath::AxisHomeSample yPlateSample{};
                         MotionQualificationMath::XyMotionStats plateStats{};
-                        plateStats.points = (kPlateRows * kPlateCols) + 2u;
+                        plateStats.points = (kPlateRows * kPlateCols) + 3u;
                         bool plateMovesCompleted = true;
                         bool plateBoundViolation = false;
                         bool plateGuardViolation = false;
-                        sendProgressStage("xy_plate_raster");
-                        for (uint32_t row = 0u; row < kPlateRows; ++row) {
-                          const int32_t x = MotionQualificationMath::interpolateEndpoint(
-                              kPlateStartX, kPlateEndX, row, kPlateRows);
-                          for (uint32_t colIdx = 0u; colIdx < kPlateCols; ++colIdx) {
-                            const uint32_t col = ((row & 1u) == 0u) ? colIdx : (kPlateCols - 1u - colIdx);
-                            const int32_t y = MotionQualificationMath::interpolateEndpoint(
-                                kPlateStartY, kPlateEndY, col, kPlateCols);
-                            maybeSendProgress("xy_plate_raster_move");
-                            if (!moveChecked({x, y},
-                                             kPlateFeedHz,
-                                             kPlateMoveTimeoutMs,
-                                             plateStats,
-                                             plateBoundViolation,
-                                             plateGuardViolation)) {
+                        uint32_t plateConfirmed = 0u;
+                        uint32_t plateZMoveTimeout = 0u;
+                        uint32_t plateZHomeTimeout = 0u;
+                        uint32_t plateReturnFailed = 0u;
+                        bool plateZMoveStarted = false;
+                        const MotionQualificationMath::XyPoint plateStart{kPlateStartX, kPlateStartY};
+                        sendProgressStage("xy_plate_setup_anchor");
+                        plateMovesCompleted = moveChecked(plateStart,
+                                                          kPlateFeedHz,
+                                                          kPlateMoveTimeoutMs,
+                                                          plateStats,
+                                                          plateBoundViolation,
+                                                          plateGuardViolation);
+                        if (plateMovesCompleted && !waitForOperatorResume("evap_plate_confirm")) {
+                          return finishSelfTestNow();
+                        }
+                        if (plateMovesCompleted) {
+                          plateConfirmed = 1u;
+                          if (!MotionQualificationMath::zPositionInBounds(kEvapPlateZ, evapZEnvelope)) {
+                            plateBoundViolation = true;
+                            plateStats.boundViolationCount++;
+                            plateMovesCompleted = false;
+                          } else {
+                            plateZMoveStarted = true;
+                            if (!moveAxisToWithTimeout(Stepper::stepperZ(),
+                                                       BIT_STEPPER3_DONE,
+                                                       kEvapPlateZ,
+                                                       kZFeedHz,
+                                                       kZMoveTimeoutMs)) {
+                              plateZMoveTimeout = 1u;
+                              plateStats.moveTimeoutCount++;
                               plateMovesCompleted = false;
-                              break;
+                            } else if (!MotionQualificationMath::zPositionInBounds(Stepper::stepperZ()->getPosition(), evapZEnvelope)) {
+                              plateBoundViolation = true;
+                              plateStats.boundViolationCount++;
+                              plateMovesCompleted = false;
                             }
-                            if (_selfTestAbortRequested) {
-                              break;
-                            }
-                          }
-                          if (!plateMovesCompleted || _selfTestAbortRequested) {
-                            break;
                           }
                         }
                         if (plateMovesCompleted) {
-                          plateMovesCompleted = moveChecked({kPlateEndX, kPlateEndY},
-                                                            kPlateFeedHz,
-                                                            kPlateMoveTimeoutMs,
-                                                            plateStats,
-                                                            plateBoundViolation,
-                                                            plateGuardViolation);
+                          sendProgressStage("xy_plate_raster");
+                          for (uint32_t row = 0u; row < kPlateRows; ++row) {
+                            const int32_t x = MotionQualificationMath::interpolateEndpoint(
+                                kPlateStartX, kPlateEndX, row, kPlateRows);
+                            for (uint32_t colIdx = 0u; colIdx < kPlateCols; ++colIdx) {
+                              const uint32_t col = ((row & 1u) == 0u) ? colIdx : (kPlateCols - 1u - colIdx);
+                              const int32_t y = MotionQualificationMath::interpolateEndpoint(
+                                  kPlateStartY, kPlateEndY, col, kPlateCols);
+                              maybeSendProgress("xy_plate_raster_move");
+                              if (!moveChecked({x, y},
+                                               kPlateFeedHz,
+                                               kPlateMoveTimeoutMs,
+                                               plateStats,
+                                               plateBoundViolation,
+                                               plateGuardViolation)) {
+                                plateMovesCompleted = false;
+                                break;
+                              }
+                              if (_selfTestAbortRequested) {
+                                break;
+                              }
+                            }
+                            if (!plateMovesCompleted || _selfTestAbortRequested) {
+                              break;
+                            }
+                          }
+                        }
+                        if (plateMovesCompleted) {
+                          sendProgressStage("xy_plate_return_start");
+                          const bool returnedToStart = moveChecked(plateStart,
+                                                                   kPlateFeedHz,
+                                                                   kPlateMoveTimeoutMs,
+                                                                   plateStats,
+                                                                   plateBoundViolation,
+                                                                   plateGuardViolation);
+                          if (!returnedToStart) {
+                            plateReturnFailed = 1u;
+                            plateMovesCompleted = false;
+                          }
+                        }
+                        if (!_selfTestAbortRequested && plateZMoveStarted) {
+                          MotionQualificationMath::AxisHomeSample zPlateHome{};
+                          sendProgressStage("xy_plate_z_home_after_raster");
+                          if (!runAxisHomeDiagnosticAttempt(Stepper::stepperZ(),
+                                                            BIT_HOME_Z_DONE,
+                                                            zPlateHome,
+                                                            kHomeFastHz,
+                                                            kHomeSlowHz,
+                                                            kHomeBackoffSteps,
+                                                            kHomeTimeoutMs)) {
+                            plateZHomeTimeout = 1u;
+                            plateMovesCompleted = false;
+                          }
                         }
                         const MotionQualificationMath::XyPoint plateHomeAnchor{
                             xPlateReference.finalBackoffSteps,
@@ -3113,19 +3315,21 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         plateReturnError = worstOf(plateReturnError, yPlateHomeStats.returnErrorMaxSteps);
                         const bool platePass = plateMovesCompleted &&
                             plateHomePassed &&
+                            (plateConfirmed == 1u) &&
+                            (plateZMoveTimeout == 0u) &&
+                            (plateZHomeTimeout == 0u) &&
                             MotionQualificationMath::xyMotionStatsPass(plateStats);
                         char metrics2014[224];
                         snprintf(metrics2014, sizeof(metrics2014),
-                                 "rep=%lu;ref=2;rows=%lu;cols=%lu;moves=%lu;xmax=%ld;ymax=%ld;dx=%ld;dy=%ld;home_y=%ld;x_span=%lu;y_span=%lu;x_drift=%lu;y_drift=%lu;x_ret=%lu;y_ret=%lu;ret_err=%lu;move_to=%lu;home_to=%lu;guard=%lu;bound=%lu",
+                                 "pc=%lu;pz=%ld;z_to=%lu;z_home_to=%lu;rep=%lu;ref=2;rows=%lu;cols=%lu;moves=%lu;x_span=%lu;y_span=%lu;x_drift=%lu;y_drift=%lu;x_ret=%lu;y_ret=%lu;ret_err=%lu;move_to=%lu;home_to=%lu;guard=%lu;bound=%lu",
+                                 static_cast<unsigned long>(plateConfirmed),
+                                 static_cast<long>(kEvapPlateZ),
+                                 static_cast<unsigned long>(plateZMoveTimeout),
+                                 static_cast<unsigned long>(plateZHomeTimeout),
                                  static_cast<unsigned long>(plateStats.repetitions),
                                  static_cast<unsigned long>(kPlateRows),
                                  static_cast<unsigned long>(kPlateCols),
                                  static_cast<unsigned long>(plateStats.points),
-                                 static_cast<long>(kPlateStartX),
-                                 static_cast<long>(kPlateEndY),
-                                 static_cast<long>(kPlateStartX - kPlateEndX),
-                                 static_cast<long>(kPlateEndY - kPlateStartY),
-                                 static_cast<long>(plateHomeAnchor.y),
                                  static_cast<unsigned long>(xPlateHomeStats.limitTriggerSpanSteps),
                                  static_cast<unsigned long>(yPlateHomeStats.limitTriggerSpanSteps),
                                  static_cast<unsigned long>(plateStats.xDriftMaxSteps),
@@ -3141,7 +3345,13 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           return finishSelfTestNow();
                         }
                         if (!platePass) {
-                          (void)emitSkippedMotionEnvelope(2015u, "xy_plate_failed");
+                          const char* plateFailurePhase = "xy_plate_failed";
+                          if (plateConfirmed == 0u || plateZMoveTimeout != 0u) {
+                            plateFailurePhase = "evap_plate_setup";
+                          } else if (plateReturnFailed != 0u || plateZHomeTimeout != 0u) {
+                            plateFailurePhase = "evap_plate_teardown";
+                          }
+                          (void)emitSkippedMotionEnvelope(2015u, plateFailurePhase);
                           return finishSelfTestNow();
                         }
 

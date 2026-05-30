@@ -133,6 +133,17 @@ def _captured_selftest_events(mod, captured_text: str) -> list[dict]:
     ]
 
 
+def _sent_command_ids(mod, writes: list[bytes]) -> list[int]:
+    commands: list[int] = []
+    for outbound in writes:
+        reader = mod.FrameReader()
+        for byte in outbound:
+            frame = reader.feed(byte)
+            if frame:
+                commands.append(frame[0])
+    return commands
+
+
 def test_decode_pressure_trace_payloads():
     mod = _load_run_selftest()
 
@@ -1206,6 +1217,116 @@ def test_progress_jsonl_emits_progress_result_and_done_events(monkeypatch, tmp_p
     assert events[1]["test_id"] == 2007
     assert events[1]["metrics"]["ret_err"] == 0
     assert events[2]["summary"] == {"total": 1, "passed": 1, "failed": 0}
+
+
+def test_progress_jsonl_prompts_once_and_sends_resume_for_evap_plate_confirm(monkeypatch, tmp_path, capsys):
+    mod = _load_run_selftest()
+    run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF
+    clock = FakeClock()
+    progress = _selftest_result_metrics(
+        mod,
+        0,
+        "selftest_progress",
+        True,
+        "kind=progress;stage=evap_plate_confirm;elapsed_ms=10;stk_hwm_w=100",
+    )
+    inbound = b"".join(
+        [
+            _hello_ack(mod),
+            progress,
+            progress,
+            _selftest_done(mod, run_id),
+            _bye_ack(mod, 3),
+            _bye_done(mod, 3, run_id),
+        ]
+    )
+    serial = FakeSerial(inbound)
+    responses: list[str] = []
+
+    def fake_input(prompt=""):
+        responses.append(prompt)
+        return "continue"
+
+    monkeypatch.setattr(mod, "time", SimpleNamespace(monotonic=clock.monotonic, time=clock.time))
+    monkeypatch.setattr(mod, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: serial))
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    out_path = tmp_path / "selftest.json"
+    args = SimpleNamespace(
+        port="/dev/ttyAMA0",
+        baud=115200,
+        profile="FULL",
+        timeout_ms=1000,
+        hello_timeout_ms=1000,
+        hello_retry_ms=50,
+        fast_fail_on_missing_hello=False,
+        pressure_trace=False,
+        pressure_trace_test=None,
+        pressure_sweep_suite=None,
+        progress_jsonl=True,
+        out=str(out_path),
+    )
+
+    assert mod.run(args) == 0
+
+    events = _captured_selftest_events(mod, capsys.readouterr().out)
+    prompt_events = [event for event in events if event["event"] == "selftest_operator_prompt"]
+    response_events = [event for event in events if event["event"] == "selftest_operator_prompt_response"]
+    assert len(prompt_events) == 1
+    assert prompt_events[0]["stage"] == "evap_plate_confirm"
+    assert len(response_events) == 1
+    assert response_events[0]["accepted"] is True
+    assert responses == [""]
+    assert mod.CMD_RESUME in _sent_command_ids(mod, serial.writes)
+
+
+def test_progress_jsonl_sends_abort_when_evap_plate_prompt_is_rejected(monkeypatch, tmp_path, capsys):
+    mod = _load_run_selftest()
+    run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF
+    clock = FakeClock()
+    inbound = b"".join(
+        [
+            _hello_ack(mod),
+            _selftest_result_metrics(
+                mod,
+                0,
+                "selftest_progress",
+                True,
+                "kind=progress;stage=evap_plate_confirm;elapsed_ms=10;stk_hwm_w=100",
+            ),
+            _selftest_done(mod, run_id),
+            _bye_ack(mod, 3),
+            _bye_done(mod, 3, run_id),
+        ]
+    )
+    serial = FakeSerial(inbound)
+    monkeypatch.setattr(mod, "time", SimpleNamespace(monotonic=clock.monotonic, time=clock.time))
+    monkeypatch.setattr(mod, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: serial))
+    monkeypatch.setattr("builtins.input", lambda prompt="": "abort")
+
+    out_path = tmp_path / "selftest.json"
+    args = SimpleNamespace(
+        port="/dev/ttyAMA0",
+        baud=115200,
+        profile="FULL",
+        timeout_ms=1000,
+        hello_timeout_ms=1000,
+        hello_retry_ms=50,
+        fast_fail_on_missing_hello=False,
+        pressure_trace=False,
+        pressure_trace_test=None,
+        pressure_sweep_suite=None,
+        progress_jsonl=True,
+        out=str(out_path),
+    )
+
+    assert mod.run(args) == 0
+
+    events = _captured_selftest_events(mod, capsys.readouterr().out)
+    response_events = [event for event in events if event["event"] == "selftest_operator_prompt_response"]
+    assert len(response_events) == 1
+    assert response_events[0]["accepted"] is False
+    assert mod.CMD_SELFTEST_ABORT in _sent_command_ids(mod, serial.writes)
 
 
 def test_progress_heartbeat_is_not_recorded_as_result(monkeypatch, tmp_path):

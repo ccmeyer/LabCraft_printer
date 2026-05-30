@@ -20,7 +20,7 @@
     {
       "fixture_id": "dummy_blocked_head_motion_v1",
       "required_for": [2510, 2511, 2512, 2513],
-      "operator_note": "Run locally only with the dummy blocked printer head loaded and supported when prompted. Firmware homes Z before the XY raster motion row. Keep the operator physically present, verify the clear XY envelope, and provide a soft support/catch path before release."
+      "operator_note": "Run locally only with the dummy blocked printer head loaded and supported when prompted. Firmware homes Z before the XY raster motion row, moves to the plate start with Z up, waits for evaporation-plate confirmation, lowers to Z=91500, rasters, returns to plate start, homes Z, then parks before the post-motion seal comparison. Keep the operator physically present, verify the clear XY envelope, and provide a soft support/catch path before release."
     }
   ],
   "analysis_rules": {
@@ -70,13 +70,14 @@
       "failure_domain": "machine_performance",
       "metrics": {
         "psi": {"maturity": "candidate", "equals": 3000},
+        "pc": {"maturity": "candidate", "equals": 1},
+        "pz": {"maturity": "candidate", "equals": 91500},
+        "z_to": {"maturity": "candidate", "equals": 0},
         "z_home_to": {"maturity": "candidate", "equals": 0},
         "xy_home_to": {"maturity": "candidate", "equals": 0},
         "move_to": {"maturity": "candidate", "equals": 0},
         "guard": {"maturity": "candidate", "equals": 0},
         "bound": {"maturity": "candidate", "equals": 0},
-        "park_x": {"maturity": "candidate", "equals": 500},
-        "park_y": {"maturity": "candidate", "equals": 500},
         "park_to": {"maturity": "candidate", "equals": 0},
         "ready": {"maturity": "candidate", "equals": 0},
         "timeout": {"maturity": "candidate", "equals": 0},

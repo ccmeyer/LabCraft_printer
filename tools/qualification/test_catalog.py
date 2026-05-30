@@ -43,7 +43,7 @@ TEST_CATALOG: dict[int, TestCatalogEntry] = {
     2011: TestCatalogEntry(2011, "XY raster repeatability", "Small serpentine moves that mimic well-plate printing motion."),
     2012: TestCatalogEntry(2012, "XY long reverse travel", "Reverse-order long X/Y travel repeatability across the safe gantry envelope."),
     2013: TestCatalogEntry(2013, "XY diagonal travel", "Coordinated diagonal X/Y moves between safe envelope corners."),
-    2014: TestCatalogEntry(2014, "384-well plate raster", "Serpentine 16 x 24 plate raster from the far plate corner across the print envelope."),
+    2014: TestCatalogEntry(2014, "384-well plate raster", "Operator-confirmed evaporation-plate setup at the plate start, Z lower to 91500, then serpentine 16 x 24 plate raster across the print envelope before Z home and XY return."),
     2015: TestCatalogEntry(2015, "Z long travel", "Repeated Z-axis long travel to 80000 steps from the raster-start XY anchor and back to home."),
     2016: TestCatalogEntry(2016, "Triggered-limit homing", "Homing recovery when X, Y, and Z begin with limit switches already triggered."),
     2201: TestCatalogEntry(2201, "Pressure hold leak", "Closed-loop pressure decay and correction effort."),
@@ -76,7 +76,7 @@ TEST_CATALOG: dict[int, TestCatalogEntry] = {
     2503: TestCatalogEntry(2503, "Gripper seal repeatability", "Repeated dummy-head seal retention and span."),
     2510: TestCatalogEntry(2510, "Gripper static pressure matrix", "Python-derived dummy-head seal pressure-drop response for 1, 2, and 3 psi long regulator-quiet pressure challenges with refresh disabled, using one unmeasured conditioning pulse per pressure before five measured decimated traces per channel."),
     2511: TestCatalogEntry(2511, "Gripper refreshed 3 psi hold", "Normal gripper refresh behavior during repeated 3 psi long pressure challenges over an extended hold, captured with decimated pressure traces."),
-    2512: TestCatalogEntry(2512, "Gripper raster motion stress", "Dummy-head gripper seal behavior during a Z-clearance-preflighted, homed 384-well XY raster with normal refresh and repeated 3 psi regulator-quiet pressure challenges using decimated traces, then parks near X=500, Y=500."),
+    2512: TestCatalogEntry(2512, "Gripper raster motion stress", "Dummy-head gripper seal behavior during a Z-clearance-preflighted, homed, operator-confirmed evaporation-plate setup, Z lower to 91500, 384-well XY raster with normal refresh and repeated 3 psi regulator-quiet pressure challenges using decimated traces, then Z home and park."),
     2513: TestCatalogEntry(2513, "Gripper post-motion seal compare", "Python-derived pre/post raster 3 psi static seal comparison from decimated traces to detect motion-induced seal degradation."),
 }
 

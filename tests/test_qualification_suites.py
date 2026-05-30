@@ -67,6 +67,7 @@ def test_gripper_stress_suite_exposes_operator_fixture_and_catalog_rows():
     assert gripper.requires_operator_prompts is True
     assert required_fixture_ids(gripper) == ("dummy_blocked_head_motion_v1",)
     assert "Firmware homes Z" in gripper.fixtures[0]["operator_note"]
+    assert "evaporation-plate confirmation" in gripper.fixtures[0]["operator_note"]
     rows = {row.test_id: row for row in build_test_plan_rows(gripper)}
     assert list(rows) == [2510, 2511, 2512, 2513]
     assert rows[2510].name == "Gripper static pressure matrix"
@@ -76,11 +77,15 @@ def test_gripper_stress_suite_exposes_operator_fixture_and_catalog_rows():
     assert rows[2513].name == "Gripper post-motion seal compare"
     assert all(row.subsystem == "Gripper" for row in rows.values())
     assert "z_home_to" in rows[2512].metrics
+    assert "pc" in rows[2512].metrics
+    assert "pz" in rows[2512].metrics
+    assert "z_to" in rows[2512].metrics
     assert "xy_home_to" in rows[2512].metrics
     assert "park_to" in rows[2512].metrics
     assert "Z-clearance" in rows[2512].evaluates
+    assert "operator-confirmed evaporation-plate setup" in rows[2512].evaluates
+    assert "Z lower to 91500" in rows[2512].evaluates
     assert "384-well XY raster" in rows[2512].evaluates
-    assert "X=500, Y=500" in rows[2512].evaluates
     assert "pre/post raster" in rows[2513].evaluates
 
 
@@ -108,6 +113,8 @@ def test_motion_envelope_suite_exposes_operator_fixture_and_catalog_rows():
     assert motion.requires_operator_prompts is True
     assert required_fixture_ids(motion) == ("motion_full_envelope_v1",)
     assert "Firmware homes Z" in motion.fixtures[0]["operator_note"]
+    assert "evaporation-plate confirmation" in motion.fixtures[0]["operator_note"]
+    assert "Z=91500" in motion.fixtures[0]["operator_note"]
     assert "raster-start XY anchor" in motion.fixtures[0]["operator_note"]
     assert "80000 steps" in motion.fixtures[0]["operator_note"]
     rows = {row.test_id: row for row in build_test_plan_rows(motion)}
@@ -118,6 +125,12 @@ def test_motion_envelope_suite_exposes_operator_fixture_and_catalog_rows():
     assert rows[2015].name == "Z long travel"
     assert rows[2016].name == "Triggered-limit homing"
     assert all(row.subsystem == "Motion" for row in rows.values())
+    assert "pc" in rows[2014].metrics
+    assert "pz" in rows[2014].metrics
+    assert "z_to" in rows[2014].metrics
+    assert "z_home_to" in rows[2014].metrics
+    assert "evaporation-plate setup" in rows[2014].evaluates
+    assert "Z lower to 91500" in rows[2014].evaluates
     assert "xy_to" in rows[2015].metrics
     assert "guard" in rows[2015].metrics
     assert "z_span" in rows[2015].metrics
