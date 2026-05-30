@@ -6207,6 +6207,7 @@ class BoardStatusBox(QGroupBox):
 class ExperimentTaskListWidget(QGroupBox):
     """Read-only experiment workflow guide for global readiness and per-head tasks."""
 
+    REFRESH_DEBOUNCE_MS = 150
     STATE_LABELS = {
         "done": "Done",
         "current": "Current",
@@ -6236,6 +6237,11 @@ class ExperimentTaskListWidget(QGroupBox):
         self._manual_section_states = {}
         self._connected_signals = []
         self._last_experiment_identity = None
+        self._last_render_signature = None
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.setInterval(self.REFRESH_DEBOUNCE_MS)
+        self._refresh_timer.timeout.connect(self.refresh)
         self._init_ui()
         self._connect_refresh_signals()
         self.refresh()
@@ -6287,25 +6293,29 @@ class ExperimentTaskListWidget(QGroupBox):
         machine = getattr(self.controller, "machine", None)
         command_queue = getattr(machine, "command_queue", None)
 
-        self._safe_connect(getattr(rack, "gripper_updated", None), self.refresh)
-        self._safe_connect(getattr(rack, "slot_updated", None), self.refresh)
-        self._safe_connect(getattr(well_plate, "well_state_changed_signal", None), self.refresh)
-        self._safe_connect(getattr(well_plate, "clear_all_wells_signal", None), self.refresh)
-        self._safe_connect(getattr(well_plate, "plate_format_changed_signal", None), self.refresh)
-        self._safe_connect(getattr(machine_model, "machine_state_updated", None), self.refresh)
-        self._safe_connect(getattr(machine_model, "home_status_signal", None), self.refresh)
-        self._safe_connect(getattr(machine_model, "regulation_state_changed", None), self.refresh)
-        self._safe_connect(getattr(self.controller, "array_state_changed", None), self.refresh)
-        self._safe_connect(getattr(self.controller, "array_complete", None), self.refresh)
-        self._safe_connect(getattr(calibration_manager, "calibrationCompleted", None), self.refresh)
-        self._safe_connect(getattr(calibration_manager, "calibrationStageChanged", None), self.refresh)
-        self._safe_connect(getattr(experiment_model, "applied_imaging_calibration_changed", None), self.refresh)
-        self._safe_connect(getattr(command_queue, "queue_updated", None), self.refresh)
-        self._safe_connect(getattr(command_queue, "commands_completed", None), self.refresh)
+        self._safe_connect(getattr(rack, "gripper_updated", None), self.request_refresh)
+        self._safe_connect(getattr(rack, "slot_updated", None), self.request_refresh)
+        self._safe_connect(getattr(well_plate, "well_state_changed_signal", None), self.request_refresh)
+        self._safe_connect(getattr(well_plate, "clear_all_wells_signal", None), self.request_refresh)
+        self._safe_connect(getattr(well_plate, "plate_format_changed_signal", None), self.request_refresh)
+        self._safe_connect(getattr(machine_model, "machine_state_updated", None), self.request_refresh)
+        self._safe_connect(getattr(machine_model, "home_status_signal", None), self.request_refresh)
+        self._safe_connect(getattr(machine_model, "regulation_state_changed", None), self.request_refresh)
+        self._safe_connect(getattr(self.controller, "array_state_changed", None), self.request_refresh)
+        self._safe_connect(getattr(self.controller, "array_complete", None), self.request_refresh)
+        self._safe_connect(getattr(calibration_manager, "calibrationCompleted", None), self.request_refresh)
+        self._safe_connect(getattr(experiment_model, "applied_imaging_calibration_changed", None), self.request_refresh)
+        self._safe_connect(getattr(command_queue, "queue_updated", None), self.request_refresh)
+        self._safe_connect(getattr(command_queue, "commands_completed", None), self.request_refresh)
 
     def _on_experiment_loaded(self, *_args):
         self._manual_section_states.clear()
+        self._last_render_signature = None
         self.refresh()
+
+    def request_refresh(self, *_args):
+        if not self._refresh_timer.isActive():
+            self._refresh_timer.start()
 
     @staticmethod
     def _call_bool(obj, name, default=False):
@@ -6864,20 +6874,81 @@ class ExperimentTaskListWidget(QGroupBox):
         expanded = True if context["is_active"] else self._section_expanded(section_key, default=False)
         self._add_section(section_key, title, rows, expanded=expanded)
 
+    def _render_signature(self, head_contexts, next_text, blocking_text):
+        global_signature = tuple(
+            (str(task.get("key")), bool(task.get("done")))
+            for task in self._global_tasks()
+        )
+        head_signature = []
+        for context in head_contexts:
+            progress = context["progress"]
+            task_signature = tuple(
+                (
+                    str(task.get("key")),
+                    str(task.get("state")),
+                    bool(task.get("done")),
+                    str(task.get("blocking") or ""),
+                )
+                for task in context["tasks"]
+            )
+            head_signature.append(
+                (
+                    str(context["key"]),
+                    str(context["name"]),
+                    bool(context["is_active"]),
+                    int(context["done_count"]),
+                    int(context["total_count"]),
+                    str(progress.get("stock_id")),
+                    int(progress.get("total_wells", 0)),
+                    int(progress.get("printed_wells", 0)),
+                    int(progress.get("remaining_droplets", 0)),
+                    task_signature,
+                )
+            )
+        return (
+            str(next_text),
+            str(blocking_text),
+            global_signature,
+            tuple(head_signature),
+            bool(head_contexts),
+        )
+
+    def _active_section_needs_expand(self, head_contexts):
+        for context in head_contexts:
+            if not context["is_active"]:
+                continue
+            section = self._sections.get(f"head:{context['key']}")
+            button = section.get("button") if isinstance(section, dict) else None
+            if button is not None and not button.isChecked():
+                return True
+        return False
+
     def refresh(self, *_args):
+        if self._refresh_timer.isActive():
+            self._refresh_timer.stop()
+
         current_identity = self._experiment_identity()
         if self._last_experiment_identity is None:
             self._last_experiment_identity = current_identity
         elif current_identity != self._last_experiment_identity:
             self._last_experiment_identity = current_identity
             self._manual_section_states.clear()
+            self._last_render_signature = None
+
+        head_contexts = [self._head_context(head) for head in self._discover_heads()]
+        next_text, blocking_text = self._choose_next(head_contexts)
+        render_signature = self._render_signature(head_contexts, next_text, blocking_text)
+        if (
+            render_signature == self._last_render_signature
+            and not self._active_section_needs_expand(head_contexts)
+        ):
+            return
+        self._last_render_signature = render_signature
 
         self._clear_layout(self.sections_layout)
         self._sections.clear()
         self.sections_layout.addStretch(1)
 
-        head_contexts = [self._head_context(head) for head in self._discover_heads()]
-        next_text, blocking_text = self._choose_next(head_contexts)
         self.next_label.setText(next_text)
         self.blocking_label.setText(blocking_text)
         self.blocking_label.setVisible(bool(blocking_text))

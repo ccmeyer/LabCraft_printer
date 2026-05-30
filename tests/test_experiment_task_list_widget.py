@@ -2,7 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
-from PySide6 import QtCore
+from PySide6 import QtCore, QtTest
 
 from View import ExperimentTaskListWidget
 
@@ -185,6 +185,11 @@ def _make_widget(
     return widget, model, controller, heads
 
 
+def _wait_for_debounced_refresh(qapp):
+    QtTest.QTest.qWait(ExperimentTaskListWidget.REFRESH_DEBOUNCE_MS + 50)
+    qapp.processEvents()
+
+
 @pytest.mark.parametrize(
     "kwargs, expected",
     [
@@ -313,6 +318,7 @@ def test_command_queue_signal_refreshes_contextual_blocker(qapp):
 
     controller.check_if_all_completed.return_value = True
     controller.machine.command_queue.commands_completed.emit()
+    _wait_for_debounced_refresh(qapp)
 
     assert widget._head_context(heads["stock-a"])["current_task"]["state"] == "current"
     assert widget.blocking_label.text() == ""
@@ -324,10 +330,76 @@ def test_applied_calibration_signal_refreshes_guide(qapp):
 
     model.experiment_model._applied_stock_ids.add("stock-a")
     model.experiment_model.applied_imaging_calibration_changed.emit({"stock_id": "stock-a"})
+    _wait_for_debounced_refresh(qapp)
 
     context = widget._head_context(heads["stock-a"])
     assert context["current_task"]["key"] == "print"
     assert widget.next_label.text() == "Next: Print array for Reagent A"
+
+
+def test_queue_updated_refresh_is_debounced_and_coalesced(qapp):
+    widget, _model, controller, heads = _make_widget(
+        qapp,
+        active_stock="stock-a",
+        applied_stock_ids={"stock-a"},
+        progress_by_stock={"stock-a": [1]},
+        queue_idle=False,
+    )
+    assert widget._head_context(heads["stock-a"])["current_task"]["state"] == "blocked"
+
+    clear_calls = []
+    original_clear_layout = widget._clear_layout
+
+    def counted_clear_layout(layout):
+        clear_calls.append("clear")
+        return original_clear_layout(layout)
+
+    widget._clear_layout = counted_clear_layout
+    controller.check_if_all_completed.return_value = True
+    for _ in range(10):
+        controller.machine.command_queue.queue_updated.emit()
+
+    qapp.processEvents()
+    assert clear_calls == []
+
+    _wait_for_debounced_refresh(qapp)
+
+    assert clear_calls == ["clear"]
+    assert widget._head_context(heads["stock-a"])["current_task"]["state"] == "current"
+    assert widget.blocking_label.text() == ""
+
+
+def test_unchanged_refresh_skips_full_layout_rebuild(qapp):
+    widget, _model, _controller, _heads = _make_widget(qapp)
+    clear_calls = []
+    original_clear_layout = widget._clear_layout
+
+    def counted_clear_layout(layout):
+        clear_calls.append("clear")
+        return original_clear_layout(layout)
+
+    widget._clear_layout = counted_clear_layout
+
+    widget.refresh()
+
+    assert clear_calls == []
+
+
+def test_calibration_stage_changes_do_not_refresh_guide(qapp):
+    widget, model, _controller, _heads = _make_widget(qapp, active_stock="stock-a")
+    clear_calls = []
+    original_clear_layout = widget._clear_layout
+
+    def counted_clear_layout(layout):
+        clear_calls.append("clear")
+        return original_clear_layout(layout)
+
+    widget._clear_layout = counted_clear_layout
+
+    model.calibration_manager.calibrationStageChanged.emit("stage")
+    _wait_for_debounced_refresh(qapp)
+
+    assert clear_calls == []
 
 
 def test_running_print_array_is_in_progress_not_blocked(qapp):
