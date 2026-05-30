@@ -3,7 +3,7 @@
   "manifest_id": "factory_acceptance_v3",
   "name": "Factory Acceptance v3",
   "profile": "FULL",
-  "description": "Factory acceptance suite with valve pulse pressure-drop repeatability diagnostics added in Milestone 6.",
+  "description": "Factory acceptance suite covering SAFE/core checks, motion, pressure, basic valve/pulse sanity checks, and safety abort; retired non-actionable valve pressure-drop diagnostics are excluded.",
   "expected_test_ids": [
     1001,
     1002,
@@ -32,9 +32,6 @@
     2203,
     2004,
     2005,
-    2401,
-    2402,
-    2403,
     2006
   ],
   "fixtures": [
@@ -50,8 +47,8 @@
     },
     {
       "fixture_id": "print_valve_pneumatic_drop",
-      "required_for": [2004, 2005, 2401, 2402, 2403],
-      "operator_note": "Confirm valve/pulse diagnostics are safe for the current fixture before FULL runs."
+      "required_for": [2004, 2005],
+      "operator_note": "Confirm basic valve sequence and pulse diagnostics are safe for the current fixture before FULL runs."
     }
   ],
   "enforce_expected_test_ids": true,
@@ -186,44 +183,6 @@
         "pulse_count": {"maturity": "candidate", "min": 2},
         "pulse_width_min_ns": {"maturity": "candidate", "min": 100000},
         "pulse_width_max_ns": {"maturity": "candidate", "max": 5000000}
-      }
-    },
-    "2401": {
-      "category": "pulse",
-      "failure_domain": "machine_performance",
-      "metrics": {
-        "pulses": {"maturity": "candidate", "min": 8},
-        "mean": {"maturity": "candidate", "min": 1},
-        "cv_pct": {"maturity": "candidate", "max": 100},
-        "out": {"maturity": "candidate", "max": 2},
-        "slip_w": {"maturity": "candidate", "max": 250},
-        "ready": {"maturity": "candidate", "equals": 0}
-      }
-    },
-    "2402": {
-      "category": "pulse",
-      "failure_domain": "machine_performance",
-      "metrics": {
-        "pulses": {"maturity": "candidate", "min": 8},
-        "mean": {"maturity": "candidate", "min": 1},
-        "cv_pct": {"maturity": "candidate", "max": 100},
-        "out": {"maturity": "candidate", "max": 2},
-        "slip_w": {"maturity": "candidate", "max": 250},
-        "ready": {"maturity": "candidate", "equals": 0}
-      }
-    },
-    "2403": {
-      "category": "pulse",
-      "failure_domain": "machine_performance",
-      "metrics": {
-        "pulses": {"maturity": "candidate", "min": 6},
-        "p_mean": {"maturity": "candidate", "min": 1},
-        "r_mean": {"maturity": "candidate", "min": 1},
-        "ratio": {"maturity": "candidate", "min": 25, "max": 400},
-        "p_out": {"maturity": "candidate", "max": 2},
-        "r_out": {"maturity": "candidate", "max": 2},
-        "slip_w": {"maturity": "candidate", "max": 250},
-        "ready": {"maturity": "candidate", "equals": 0}
       }
     },
     "2006": {

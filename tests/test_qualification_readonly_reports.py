@@ -42,10 +42,10 @@ def _report(*, started_at="2026-05-15T00:00:00Z"):
                 "metrics": {"x_span": 6, "y_span": 5, "ret_err": 0},
             },
             {
-                "test_id": 2401,
-                "name": "print_valve_pulse_drop_repeatability_factory",
+                "test_id": 2201,
+                "name": "pressure_hold_leak_factory",
                 "pass": True,
-                "metrics": {"mean": 0, "cv_pct": 200, "ready": 1},
+                "metrics": {"slope_raw_min": 0, "corr_steps": 2500, "ready_miss": 0, "timeout": 0},
             },
         ],
         "host_checks": [
@@ -64,9 +64,9 @@ def _report(*, started_at="2026-05-15T00:00:00Z"):
                 },
                 {
                     "item_kind": "firmware_result",
-                    "test_id": 2401,
-                    "name": "print_valve_pulse_drop_repeatability_factory",
-                    "category": "pulse",
+                    "test_id": 2201,
+                    "name": "pressure_hold_leak_factory",
+                    "category": "pressure",
                     "status": "pass",
                     "failure_domain": "none",
                     "message": "Raw firmware result passed.",
@@ -82,29 +82,29 @@ def _report(*, started_at="2026-05-15T00:00:00Z"):
             "metric_evaluations": [
                 {
                     "item_kind": "metric",
-                    "test_id": 2401,
-                    "name": "print_valve_pulse_drop_repeatability_factory",
-                    "metric_name": "mean",
+                    "test_id": 2201,
+                    "name": "pressure_hold_leak_factory",
+                    "metric_name": "corr_steps",
                     "status": "warning",
                     "failure_domain": "machine_performance",
-                    "message": "Candidate metric outside threshold: mean=0, min=1.",
+                    "message": "Candidate metric outside threshold: corr_steps=2500, max=2000.",
                 }
             ],
             "warnings": [
                 {
                     "item_kind": "metric",
-                    "test_id": 2401,
-                    "name": "print_valve_pulse_drop_repeatability_factory",
-                    "message": "Candidate metric outside threshold: mean=0, min=1.",
+                    "test_id": 2201,
+                    "name": "pressure_hold_leak_factory",
+                    "message": "Candidate metric outside threshold: corr_steps=2500, max=2000.",
                 }
             ],
         },
         "warnings": [
             {
                 "item_kind": "metric",
-                "test_id": 2401,
-                "name": "print_valve_pulse_drop_repeatability_factory",
-                "message": "Candidate metric outside threshold: mean=0, min=1.",
+                "test_id": 2201,
+                "name": "pressure_hold_leak_factory",
+                "message": "Candidate metric outside threshold: corr_steps=2500, max=2000.",
             }
         ],
     }
@@ -138,10 +138,10 @@ def test_normalize_result_rows_groups_subsystems_and_promotes_metric_warnings():
 
     assert by_id["2007"].subsystem == "Motion"
     assert by_id["2007"].analysis_status == "pass"
-    assert by_id["2401"].subsystem == "Valves/Pulses"
-    assert by_id["2401"].analysis_status == "warning"
-    assert by_id["2401"].failure_domain == "machine_performance"
-    assert "mean=0" in by_id["2401"].message
+    assert by_id["2201"].subsystem == "Pressure"
+    assert by_id["2201"].analysis_status == "warning"
+    assert by_id["2201"].failure_domain == "machine_performance"
+    assert "corr_steps=2500" in by_id["2201"].message
     assert by_id["hello_ack"].subsystem == "Host Checks"
 
 

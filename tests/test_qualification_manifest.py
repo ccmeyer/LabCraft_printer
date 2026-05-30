@@ -17,14 +17,16 @@ def test_load_builtin_factory_acceptance_manifest():
     assert 2201 in manifest.expected_test_ids
     assert 2202 in manifest.expected_test_ids
     assert 2203 in manifest.expected_test_ids
-    assert 2401 in manifest.expected_test_ids
-    assert 2402 in manifest.expected_test_ids
-    assert 2403 in manifest.expected_test_ids
+    assert 2401 not in manifest.expected_test_ids
+    assert 2402 not in manifest.expected_test_ids
+    assert 2403 not in manifest.expected_test_ids
     assert manifest.fixtures
     assert manifest.enforce_expected_test_ids is True
     assert manifest.analysis_rules["2003"]["category"] == "pressure"
     assert manifest.analysis_rules["2201"]["metrics"]["slope_raw_min"]["maturity"] == "candidate"
-    assert manifest.analysis_rules["2401"]["metrics"]["cv_pct"]["maturity"] == "candidate"
+    assert "2401" not in manifest.analysis_rules
+    assert "2402" not in manifest.analysis_rules
+    assert "2403" not in manifest.analysis_rules
     assert manifest.analysis_rules["2007"]["metrics"]["x_span"]["maturity"] == "candidate"
     assert manifest.to_report_dict()["schema_version"] == "qualification_manifest_v0"
 

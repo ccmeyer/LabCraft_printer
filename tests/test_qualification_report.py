@@ -132,59 +132,7 @@ def _raw_factory_v2_selftest():
 
 
 def _raw_factory_v3_selftest():
-    raw = _raw_factory_v2_selftest()
-    additions = [
-        {
-            "test_id": 2401,
-            "name": "print_valve_pulse_drop_repeatability_factory",
-            "pass": True,
-            "metrics": {
-                "pulses": 8,
-                "mean": 14,
-                "cv_pct": 12,
-                "slope": 0,
-                "out": 0,
-                "slip_w": 8,
-                "ready": 0,
-            },
-        },
-        {
-            "test_id": 2402,
-            "name": "refuel_valve_pulse_drop_repeatability_factory",
-            "pass": True,
-            "metrics": {
-                "pulses": 8,
-                "mean": 10,
-                "cv_pct": 15,
-                "slope": 0,
-                "out": 0,
-                "slip_w": 9,
-                "ready": 0,
-            },
-        },
-        {
-            "test_id": 2403,
-            "name": "dual_valve_interaction_factory",
-            "pass": True,
-            "metrics": {
-                "pulses": 6,
-                "p_mean": 13,
-                "r_mean": 9,
-                "ratio": 144,
-                "delta": 4,
-                "p_out": 0,
-                "r_out": 0,
-                "slip_w": 10,
-                "ready": 0,
-            },
-        },
-    ]
-    rows = list(raw["results"])
-    insert_at = next(index for index, row in enumerate(rows) if row["test_id"] == 2006)
-    rows[insert_at:insert_at] = additions
-    raw["summary"] = {"total": len(rows), "passed": len(rows), "failed": 0}
-    raw["results"] = rows
-    return raw
+    return _raw_factory_v2_selftest()
 
 
 def _raw_gripper_seal_selftest():
@@ -493,9 +441,12 @@ def test_factory_v3_synthetic_full_report_passes_expected_id_enforcement(tmp_pat
 
     assert report["overall_status"] == "pass"
     assert report["manifest_checks"]["missing_test_ids"] == []
-    assert report["raw_summary"]["total"] == 31
+    assert report["manifest_checks"]["unexpected_test_ids"] == []
+    assert report["raw_summary"]["total"] == 28
+    observed_ids = {row["test_id"] for row in report["results"]}
+    assert {2401, 2402, 2403}.isdisjoint(observed_ids)
     metric_names = {item["metric_name"] for item in report["analysis"]["metric_evaluations"]}
-    assert {"cv_pct", "p_mean", "r_mean", "ratio", "p_out", "r_out"}.issubset(metric_names)
+    assert {"slope_raw_min", "low_span", "high_span", "repeat_span", "hyst_span"}.issubset(metric_names)
 
 
 def test_gripper_seal_synthetic_report_passes_expected_id_enforcement(tmp_path):
