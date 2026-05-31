@@ -207,6 +207,18 @@ def _count_layout_clears(widget):
     return clear_calls
 
 
+def _spy_method(widget, name):
+    calls = []
+    original = getattr(widget, name)
+
+    def wrapper(*args, **kwargs):
+        calls.append(args)
+        return original(*args, **kwargs)
+
+    setattr(widget, name, wrapper)
+    return calls
+
+
 def _summary_row(**overrides):
     row = {
         "run_id": "run-1",
@@ -288,6 +300,54 @@ def test_head_header_shows_task_and_well_progress(qapp):
     assert "3/5" in header
     assert "1/2 wells" in header
     assert "Loaded" in header
+
+
+def test_printed_well_progress_updates_only_loaded_head_header(qapp):
+    widget, model, _controller, _heads = _make_widget(
+        qapp,
+        active_stock="stock-a",
+        applied_stock_ids={"stock-a"},
+        progress_by_stock={"stock-a": [1, 1], "stock-b": [1]},
+        array_state="running",
+    )
+    full_rebuild_calls = _spy_method(widget, "_full_rebuild")
+    section_update_calls = _spy_method(widget, "_update_head_section")
+    progress_update_calls = _spy_method(widget, "_update_head_progress_header")
+    clear_calls = _count_layout_clears(widget)
+
+    for well in model.well_plate.get_all_wells():
+        if "stock-a" in well._remaining_by_stock:
+            well._remaining_by_stock["stock-a"] = 0
+            break
+
+    widget.refresh()
+
+    assert full_rebuild_calls == []
+    assert section_update_calls == []
+    assert clear_calls == []
+    assert [call[0]["key"] for call in progress_update_calls] == ["stock-a"]
+    assert "1/2 wells" in widget._sections["head:stock-a"]["button"].text()
+
+
+def test_progress_for_one_head_does_not_retitle_other_head(qapp):
+    widget, model, _controller, _heads = _make_widget(
+        qapp,
+        active_stock="stock-a",
+        applied_stock_ids={"stock-a"},
+        progress_by_stock={"stock-a": [1, 1], "stock-b": [1]},
+    )
+    stock_b_header = widget._sections["head:stock-b"]["button"].text()
+    progress_update_calls = _spy_method(widget, "_update_head_progress_header")
+
+    for well in model.well_plate.get_all_wells():
+        if "stock-a" in well._remaining_by_stock:
+            well._remaining_by_stock["stock-a"] = 0
+            break
+
+    widget.refresh()
+
+    assert [call[0]["key"] for call in progress_update_calls] == ["stock-a"]
+    assert widget._sections["head:stock-b"]["button"].text() == stock_b_header
 
 
 def test_missing_calibration_highlights_calibration_as_next_head_task(qapp):
@@ -381,6 +441,31 @@ def test_applied_calibration_signal_refreshes_guide(qapp):
     assert widget.next_label.text() == "Next: Print array for Reagent A"
 
 
+def test_applied_calibration_updates_only_active_head_section(qapp):
+    widget, model, _controller, _heads = _make_widget(
+        qapp,
+        active_stock="stock-a",
+        calibrated_stock_ids={"stock-a"},
+        progress_by_stock={"stock-a": [1], "stock-b": [1]},
+    )
+    assert widget.next_label.text() == "Next: Apply calibration to experiment for Reagent A"
+
+    full_rebuild_calls = _spy_method(widget, "_full_rebuild")
+    global_update_calls = _spy_method(widget, "_update_global_section")
+    head_update_calls = _spy_method(widget, "_update_head_section")
+    progress_update_calls = _spy_method(widget, "_update_head_progress_header")
+
+    model.experiment_model._applied_stock_ids.add("stock-a")
+    model.experiment_model.applied_imaging_calibration_changed.emit({"stock_id": "stock-a"})
+    _wait_for_debounced_refresh(qapp)
+
+    assert full_rebuild_calls == []
+    assert global_update_calls == []
+    assert progress_update_calls == []
+    assert [call[0]["key"] for call in head_update_calls] == ["stock-a"]
+    assert widget.next_label.text() == "Next: Print array for Reagent A"
+
+
 def test_queue_updated_does_not_refresh_contextual_blocker(qapp):
     widget, _model, controller, heads = _make_widget(
         qapp,
@@ -447,6 +532,37 @@ def test_new_calibration_summary_row_refreshes_guide(qapp):
     assert clear_calls == ["clear"]
     assert context["current_task"]["key"] == "apply"
     assert widget.next_label.text() == "Next: Apply calibration to experiment for Reagent A"
+
+
+def test_machine_readiness_change_updates_only_run_readiness(qapp):
+    widget, model, _controller, _heads = _make_widget(qapp, connected=False)
+    assert widget.next_label.text() == "Next: Connect to the machine"
+
+    full_rebuild_calls = _spy_method(widget, "_full_rebuild")
+    global_update_calls = _spy_method(widget, "_update_global_section")
+    head_update_calls = _spy_method(widget, "_update_head_section")
+    progress_update_calls = _spy_method(widget, "_update_head_progress_header")
+
+    model.machine_model.connected = True
+    widget.refresh()
+
+    assert full_rebuild_calls == []
+    assert len(global_update_calls) == 1
+    assert head_update_calls == []
+    assert progress_update_calls == []
+    assert widget.next_label.text() == "Next: Load printer head for Reagent A"
+
+
+def test_head_list_change_full_rebuilds_and_preserves_active_auto_expansion(qapp):
+    widget, model, _controller, _heads = _make_widget(qapp, active_stock="stock-a")
+    full_rebuild_calls = _spy_method(widget, "_full_rebuild")
+
+    model.printer_head_manager.printer_heads.append(HeadStub("stock-c", "Reagent C"))
+    widget.refresh()
+
+    assert len(full_rebuild_calls) == 1
+    assert widget._sections["head:stock-a"]["button"].isChecked() is True
+    assert "head:stock-c" in widget._sections
 
 
 def test_unchanged_refresh_skips_full_layout_rebuild(qapp):
@@ -530,6 +646,34 @@ def test_printed_active_head_highlights_dropoff_and_keeps_recheck_optional(qapp)
     assert widget.next_label.text() == "Next: Drop off printer head for Reagent A"
     assert context["current_task"]["key"] == "dropoff"
     assert tasks_by_key["recheck"]["state"] == "optional"
+
+
+def test_print_completion_boundary_rebuilds_only_active_head_section(qapp):
+    widget, model, _controller, _heads = _make_widget(
+        qapp,
+        active_stock="stock-a",
+        applied_stock_ids={"stock-a"},
+        progress_by_stock={"stock-a": [1], "stock-b": [1]},
+    )
+    assert widget.next_label.text() == "Next: Print array for Reagent A"
+
+    full_rebuild_calls = _spy_method(widget, "_full_rebuild")
+    global_update_calls = _spy_method(widget, "_update_global_section")
+    head_update_calls = _spy_method(widget, "_update_head_section")
+    progress_update_calls = _spy_method(widget, "_update_head_progress_header")
+
+    for well in model.well_plate.get_all_wells():
+        if "stock-a" in well._remaining_by_stock:
+            well._remaining_by_stock["stock-a"] = 0
+            break
+
+    widget.refresh()
+
+    assert full_rebuild_calls == []
+    assert global_update_calls == []
+    assert progress_update_calls == []
+    assert [call[0]["key"] for call in head_update_calls] == ["stock-a"]
+    assert widget.next_label.text() == "Next: Drop off printer head for Reagent A"
 
 
 def test_printed_dropped_off_head_is_complete(qapp):

@@ -6238,7 +6238,9 @@ class ExperimentTaskListWidget(QGroupBox):
         self._connected_signals = []
         self._last_experiment_identity = None
         self._last_render_signature = None
+        self._last_guide_snapshot_signatures = None
         self._last_calibration_summary_signature = None
+        self._empty_label = None
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setSingleShot(True)
         self._refresh_timer.setInterval(self.REFRESH_DEBOUNCE_MS)
@@ -6312,6 +6314,7 @@ class ExperimentTaskListWidget(QGroupBox):
     def _on_experiment_loaded(self, *_args):
         self._manual_section_states.clear()
         self._last_render_signature = None
+        self._last_guide_snapshot_signatures = None
         self._last_calibration_summary_signature = None
         self.refresh()
         self._last_calibration_summary_signature = self._calibration_summary_signature()
@@ -6936,17 +6939,35 @@ class ExperimentTaskListWidget(QGroupBox):
         self._sections[key] = section
         return section
 
-    def _render_global_section(self):
-        rows = []
-        first_incomplete = self._first_incomplete_global_task()
+    def _replace_section_rows(self, section, rows):
+        layout = section.get("layout") if isinstance(section, dict) else None
+        if layout is None:
+            return False
+        self._clear_layout(layout)
+        for row in rows:
+            layout.addWidget(row)
+        return True
+
+    def _global_task_rows(self, tasks=None):
+        tasks = list(tasks if tasks is not None else self._global_tasks())
+        first_incomplete = next((task for task in tasks if not task["done"]), None)
         current_key = None if first_incomplete is None else first_incomplete.get("key")
-        for task in self._global_tasks():
+        rows = []
+        for task in tasks:
             state = "done" if task["done"] else ("current" if task.get("key") == current_key else "waiting")
-            rows.append(self._make_task_row({"label": task["label"], "state": state, "blocking": task.get("blocking", "")}))
-        expanded = self._section_expanded("global", default=first_incomplete is not None)
+            rows.append({"label": task["label"], "state": state, "blocking": task.get("blocking", "")})
+        return rows
+
+    def _render_global_section(self, snapshot=None):
+        row_payloads = list(snapshot.get("global_rows", [])) if isinstance(snapshot, dict) else self._global_task_rows()
+        rows = [self._make_task_row(row) for row in row_payloads]
+        expanded = self._section_expanded(
+            "global",
+            default=any(row.get("state") == "current" for row in row_payloads),
+        )
         self._add_section("global", "Run Readiness", rows, expanded=expanded)
 
-    def _render_head_section(self, context):
+    def _head_section_title(self, context):
         progress = context["progress"]
         printed = progress["printed_wells"]
         total = progress["total_wells"]
@@ -6958,59 +6979,216 @@ class ExperimentTaskListWidget(QGroupBox):
             title += " | Loaded"
         elif context["current_task"] is None:
             title += " | Complete"
+        return title
+
+    def _render_head_section(self, context):
+        title = self._head_section_title(context)
         section_key = f"head:{context['key']}"
         rows = [self._make_task_row(task) for task in context["tasks"]]
         expanded = True if context["is_active"] else self._section_expanded(section_key, default=False)
         self._add_section(section_key, title, rows, expanded=expanded)
 
-    def _render_signature(self, head_contexts, next_text, blocking_text):
-        global_signature = tuple(
-            (str(task.get("key")), bool(task.get("done")))
-            for task in self._global_tasks()
-        )
-        head_signature = []
-        for context in head_contexts:
-            progress = context["progress"]
-            task_signature = tuple(
-                (
-                    str(task.get("key")),
-                    str(task.get("state")),
-                    bool(task.get("done")),
-                    str(task.get("blocking") or ""),
-                )
-                for task in context["tasks"]
+    def _render_empty_message(self):
+        empty = QLabel("No printer heads found for the current experiment.")
+        empty.setWordWrap(True)
+        empty.setStyleSheet(f"color: {self.color_dict.get('light_gray', '#cccccc')};")
+        self.sections_layout.insertWidget(max(0, self.sections_layout.count() - 1), empty)
+        self._empty_label = empty
+
+    @staticmethod
+    def _global_section_signature(row_payloads):
+        return tuple(
+            (
+                str(row.get("label")),
+                str(row.get("state")),
+                str(row.get("blocking") or ""),
             )
-            head_signature.append(
-                (
-                    str(context["key"]),
-                    str(context["name"]),
-                    bool(context["is_active"]),
-                    int(context["done_count"]),
-                    int(context["total_count"]),
-                    str(progress.get("stock_id")),
-                    int(progress.get("total_wells", 0)),
-                    int(progress.get("printed_wells", 0)),
-                    int(progress.get("remaining_droplets", 0)),
-                    task_signature,
-                )
-            )
-        return (
-            str(next_text),
-            str(blocking_text),
-            global_signature,
-            tuple(head_signature),
-            bool(head_contexts),
+            for row in row_payloads
         )
 
-    def _active_section_needs_expand(self, head_contexts):
-        for context in head_contexts:
+    @staticmethod
+    def _head_section_signature(context):
+        current = context.get("current_task")
+        task_signature = tuple(
+            (
+                str(task.get("key")),
+                str(task.get("state")),
+                bool(task.get("done")),
+                str(task.get("blocking") or ""),
+            )
+            for task in context["tasks"]
+        )
+        return (
+            str(context["key"]),
+            str(context["name"]),
+            bool(context["is_active"]),
+            bool(context["applied"]),
+            bool(context["calibrated"]),
+            bool(context["printed"]),
+            None if current is None else str(current.get("key")),
+            int(context["done_count"]),
+            int(context["total_count"]),
+            task_signature,
+        )
+
+    @staticmethod
+    def _head_progress_signature(context):
+        progress = context["progress"]
+        return (
+            int(progress.get("printed_wells", 0)),
+            int(progress.get("total_wells", 0)),
+        )
+
+    def _build_guide_snapshot(self, current_identity=None):
+        current_identity = self._experiment_identity() if current_identity is None else current_identity
+        head_contexts = [self._head_context(head) for head in self._discover_heads()]
+        next_text, blocking_text = self._choose_next(head_contexts)
+        global_rows = self._global_task_rows()
+        active_key = next((str(context["key"]) for context in head_contexts if context["is_active"]), "")
+        head_keys = tuple(str(context["key"]) for context in head_contexts)
+        return {
+            "identity": current_identity,
+            "head_contexts": head_contexts,
+            "next_text": next_text,
+            "blocking_text": blocking_text,
+            "global_rows": global_rows,
+            "structure_signature": (
+                str(current_identity),
+                head_keys,
+                active_key,
+                bool(head_contexts),
+            ),
+            "next_signature": (str(next_text), str(blocking_text)),
+            "global_section_signature": self._global_section_signature(global_rows),
+            "head_section_signatures": {
+                str(context["key"]): self._head_section_signature(context)
+                for context in head_contexts
+            },
+            "head_progress_signatures": {
+                str(context["key"]): self._head_progress_signature(context)
+                for context in head_contexts
+            },
+        }
+
+    @staticmethod
+    def _snapshot_signatures(snapshot):
+        return {
+            "structure_signature": snapshot["structure_signature"],
+            "next_signature": snapshot["next_signature"],
+            "global_section_signature": snapshot["global_section_signature"],
+            "head_section_signatures": dict(snapshot["head_section_signatures"]),
+            "head_progress_signatures": dict(snapshot["head_progress_signatures"]),
+        }
+
+    def _needs_full_rebuild(self, snapshot):
+        previous = self._last_guide_snapshot_signatures
+        if previous is None:
+            return True
+        if snapshot["structure_signature"] != previous.get("structure_signature"):
+            return True
+        if "global" not in self._sections:
+            return True
+        for context in snapshot["head_contexts"]:
+            if f"head:{context['key']}" not in self._sections:
+                return True
+        if not snapshot["head_contexts"] and self._empty_label is None:
+            return True
+        return False
+
+    def _update_next_labels(self, next_text, blocking_text):
+        self.next_label.setText(next_text)
+        self.blocking_label.setText(blocking_text)
+        self.blocking_label.setVisible(bool(blocking_text))
+
+    def _update_global_section(self, snapshot):
+        section = self._sections.get("global")
+        if section is None:
+            return False
+        rows = [self._make_task_row(row) for row in snapshot["global_rows"]]
+        return self._replace_section_rows(section, rows)
+
+    def _update_head_section(self, context):
+        section = self._sections.get(f"head:{context['key']}")
+        if section is None:
+            return False
+        button = section.get("button")
+        if button is not None:
+            button.setText(self._head_section_title(context))
+            if context["is_active"] and not button.isChecked():
+                button.setChecked(True)
+        rows = [self._make_task_row(task) for task in context["tasks"]]
+        return self._replace_section_rows(section, rows)
+
+    def _update_head_progress_header(self, context):
+        section = self._sections.get(f"head:{context['key']}")
+        button = section.get("button") if isinstance(section, dict) else None
+        if button is None:
+            return False
+        button.setText(self._head_section_title(context))
+        return True
+
+    def _ensure_active_section_expanded(self, snapshot):
+        for context in snapshot["head_contexts"]:
             if not context["is_active"]:
                 continue
             section = self._sections.get(f"head:{context['key']}")
             button = section.get("button") if isinstance(section, dict) else None
             if button is not None and not button.isChecked():
-                return True
-        return False
+                button.setChecked(True)
+
+    def _full_rebuild(self, snapshot):
+        self._clear_layout(self.sections_layout)
+        self._sections.clear()
+        self._empty_label = None
+        self.sections_layout.addStretch(1)
+
+        self._update_next_labels(snapshot["next_text"], snapshot["blocking_text"])
+        self._render_global_section(snapshot)
+        if snapshot["head_contexts"]:
+            for context in snapshot["head_contexts"]:
+                self._render_head_section(context)
+        else:
+            self._render_empty_message()
+
+    def _apply_snapshot(self, snapshot):
+        if self._needs_full_rebuild(snapshot):
+            self._full_rebuild(snapshot)
+            self._last_guide_snapshot_signatures = self._snapshot_signatures(snapshot)
+            self._last_render_signature = self._last_guide_snapshot_signatures
+            return
+
+        previous = self._last_guide_snapshot_signatures or {}
+        if snapshot["next_signature"] != previous.get("next_signature"):
+            self._update_next_labels(snapshot["next_text"], snapshot["blocking_text"])
+        if snapshot["global_section_signature"] != previous.get("global_section_signature"):
+            if not self._update_global_section(snapshot):
+                self._full_rebuild(snapshot)
+                self._last_guide_snapshot_signatures = self._snapshot_signatures(snapshot)
+                self._last_render_signature = self._last_guide_snapshot_signatures
+                return
+
+        old_head_sections = previous.get("head_section_signatures", {})
+        old_head_progress = previous.get("head_progress_signatures", {})
+        for context in snapshot["head_contexts"]:
+            key = str(context["key"])
+            section_signature = snapshot["head_section_signatures"][key]
+            progress_signature = snapshot["head_progress_signatures"][key]
+            if section_signature != old_head_sections.get(key):
+                if not self._update_head_section(context):
+                    self._full_rebuild(snapshot)
+                    self._last_guide_snapshot_signatures = self._snapshot_signatures(snapshot)
+                    self._last_render_signature = self._last_guide_snapshot_signatures
+                    return
+            elif progress_signature != old_head_progress.get(key):
+                if not self._update_head_progress_header(context):
+                    self._full_rebuild(snapshot)
+                    self._last_guide_snapshot_signatures = self._snapshot_signatures(snapshot)
+                    self._last_render_signature = self._last_guide_snapshot_signatures
+                    return
+
+        self._ensure_active_section_expanded(snapshot)
+        self._last_guide_snapshot_signatures = self._snapshot_signatures(snapshot)
+        self._last_render_signature = self._last_guide_snapshot_signatures
 
     def refresh(self, *_args):
         if self._refresh_timer.isActive():
@@ -7023,34 +7201,10 @@ class ExperimentTaskListWidget(QGroupBox):
             self._last_experiment_identity = current_identity
             self._manual_section_states.clear()
             self._last_render_signature = None
+            self._last_guide_snapshot_signatures = None
 
-        head_contexts = [self._head_context(head) for head in self._discover_heads()]
-        next_text, blocking_text = self._choose_next(head_contexts)
-        render_signature = self._render_signature(head_contexts, next_text, blocking_text)
-        if (
-            render_signature == self._last_render_signature
-            and not self._active_section_needs_expand(head_contexts)
-        ):
-            return
-        self._last_render_signature = render_signature
-
-        self._clear_layout(self.sections_layout)
-        self._sections.clear()
-        self.sections_layout.addStretch(1)
-
-        self.next_label.setText(next_text)
-        self.blocking_label.setText(blocking_text)
-        self.blocking_label.setVisible(bool(blocking_text))
-
-        self._render_global_section()
-        if head_contexts:
-            for context in head_contexts:
-                self._render_head_section(context)
-        else:
-            empty = QLabel("No printer heads found for the current experiment.")
-            empty.setWordWrap(True)
-            empty.setStyleSheet(f"color: {self.color_dict.get('light_gray', '#cccccc')};")
-            self.sections_layout.insertWidget(max(0, self.sections_layout.count() - 1), empty)
+        snapshot = self._build_guide_snapshot(current_identity=current_identity)
+        self._apply_snapshot(snapshot)
         self._last_calibration_summary_signature = self._calibration_summary_signature()
 
 class ShortcutTableWidget(QGroupBox):
