@@ -735,6 +735,10 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                                             int32_t y,
                                                             uint32_t feedHz,
                                                             uint32_t timeoutMs) {
+                            const GantryPosition pos = Gantry::instance()->getPosition();
+                            if (pos.x == x && pos.y == y) {
+                              return true;
+                            }
                             xEventGroupClearBits(_doneEvents, BIT_STEPPER1_DONE | BIT_STEPPER2_DONE);
                             Gantry::instance()->moveTo(x, y, feedHz);
                             const bool reached = waitBitsWithTimeout(BIT_STEPPER1_DONE | BIT_STEPPER2_DONE, timeoutMs);
