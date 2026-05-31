@@ -506,9 +506,7 @@ class MainWindow(QMainWindow):
 
         right_layout.addWidget(self.board_status_box)
 
-        self.audit_timeline_button = QtWidgets.QPushButton("Audit Timeline")
-        self.audit_timeline_button.clicked.connect(self.show_experiment_audit)
-        right_layout.addWidget(self.audit_timeline_button)
+        self._add_right_panel_action_buttons(right_layout)
 
         self.experiment_task_list = ExperimentTaskListWidget(self, self.model, self.controller)
         self.experiment_task_list.setStyleSheet(f"background-color: {self.color_dict['darker_gray']};")
@@ -526,6 +524,23 @@ class MainWindow(QMainWindow):
         width = int(screen_geometry.width() * 0.9)
         height = int(screen_geometry.height() * 0.9)
         self.resize(width, height)
+
+    def _add_right_panel_action_buttons(self, right_layout):
+        """Add compact right-panel actions above the experiment guide."""
+        action_row = QtWidgets.QHBoxLayout()
+        action_row.setContentsMargins(0, 0, 0, 0)
+
+        self.audit_timeline_button = QtWidgets.QPushButton("Audit Timeline")
+        self.audit_timeline_button.clicked.connect(self.show_experiment_audit)
+        action_row.addWidget(self.audit_timeline_button, 1)
+
+        self.keyboard_shortcuts_button = QtWidgets.QPushButton("Shortcuts")
+        self.keyboard_shortcuts_button.setToolTip("Show keyboard shortcuts")
+        self.keyboard_shortcuts_button.clicked.connect(self.show_keyboard_shortcuts)
+        action_row.addWidget(self.keyboard_shortcuts_button)
+
+        right_layout.addLayout(action_row)
+        return action_row
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -1083,6 +1098,11 @@ class MainWindow(QMainWindow):
         window.show()
         window.raise_()
         window.activateWindow()
+
+    def show_keyboard_shortcuts(self):
+        """Open a modal dialog listing the current keyboard shortcuts."""
+        dialog = KeyboardShortcutsDialog(self, self.shortcut_manager)
+        dialog.exec()
         
     def reset_single_array(self):
         """Reset a single array."""
@@ -7253,6 +7273,31 @@ class ShortcutTableWidget(QGroupBox):
 
             self.table.setItem(row, 0, key_item)
             self.table.setItem(row, 1, description_item)
+
+
+class KeyboardShortcutsDialog(QDialog):
+    """Modal dialog that shows the application's keyboard shortcuts."""
+
+    def __init__(self, main_window, shortcut_manager):
+        super().__init__(main_window)
+        self.main_window = main_window
+        self.shortcut_manager = shortcut_manager
+
+        self.setWindowTitle("Keyboard Shortcuts")
+        self.setModal(True)
+        self.setWindowModality(Qt.ApplicationModal)
+        self.resize(520, 600)
+
+        layout = QVBoxLayout(self)
+        self.shortcut_table = ShortcutTableWidget(main_window, shortcut_manager)
+        layout.addWidget(self.shortcut_table)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        self.close_button = QPushButton("Close")
+        self.close_button.clicked.connect(self.accept)
+        button_row.addWidget(self.close_button)
+        layout.addLayout(button_row)
         
 class CommandQueueWidget(QGroupBox):
     """
