@@ -6207,7 +6207,7 @@ class BoardStatusBox(QGroupBox):
 class ExperimentTaskListWidget(QGroupBox):
     """Read-only experiment workflow guide for global readiness and per-head tasks."""
 
-    REFRESH_DEBOUNCE_MS = 150
+    REFRESH_DEBOUNCE_MS = 500
     STATE_LABELS = {
         "done": "Done",
         "current": "Current",
@@ -6238,6 +6238,7 @@ class ExperimentTaskListWidget(QGroupBox):
         self._connected_signals = []
         self._last_experiment_identity = None
         self._last_render_signature = None
+        self._last_calibration_summary_signature = None
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setSingleShot(True)
         self._refresh_timer.setInterval(self.REFRESH_DEBOUNCE_MS)
@@ -6245,6 +6246,7 @@ class ExperimentTaskListWidget(QGroupBox):
         self._init_ui()
         self._connect_refresh_signals()
         self.refresh()
+        self._last_calibration_summary_signature = self._calibration_summary_signature()
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -6290,8 +6292,6 @@ class ExperimentTaskListWidget(QGroupBox):
         machine_model = getattr(self.model, "machine_model", None)
         calibration_manager = getattr(self.model, "calibration_manager", None)
         experiment_model = getattr(self.model, "experiment_model", None)
-        machine = getattr(self.controller, "machine", None)
-        command_queue = getattr(machine, "command_queue", None)
 
         self._safe_connect(getattr(rack, "gripper_updated", None), self.request_refresh)
         self._safe_connect(getattr(rack, "slot_updated", None), self.request_refresh)
@@ -6303,19 +6303,29 @@ class ExperimentTaskListWidget(QGroupBox):
         self._safe_connect(getattr(machine_model, "regulation_state_changed", None), self.request_refresh)
         self._safe_connect(getattr(self.controller, "array_state_changed", None), self.request_refresh)
         self._safe_connect(getattr(self.controller, "array_complete", None), self.request_refresh)
-        self._safe_connect(getattr(calibration_manager, "calibrationCompleted", None), self.request_refresh)
+        self._safe_connect(
+            getattr(calibration_manager, "characterizationSummaryUpdated", None),
+            self._on_calibration_summary_updated,
+        )
         self._safe_connect(getattr(experiment_model, "applied_imaging_calibration_changed", None), self.request_refresh)
-        self._safe_connect(getattr(command_queue, "queue_updated", None), self.request_refresh)
-        self._safe_connect(getattr(command_queue, "commands_completed", None), self.request_refresh)
 
     def _on_experiment_loaded(self, *_args):
         self._manual_section_states.clear()
         self._last_render_signature = None
+        self._last_calibration_summary_signature = None
         self.refresh()
+        self._last_calibration_summary_signature = self._calibration_summary_signature()
 
     def request_refresh(self, *_args):
         if not self._refresh_timer.isActive():
             self._refresh_timer.start()
+
+    def _on_calibration_summary_updated(self, *_args):
+        signature = self._calibration_summary_signature()
+        if signature == self._last_calibration_summary_signature:
+            return
+        self._last_calibration_summary_signature = signature
+        self.request_refresh()
 
     @staticmethod
     def _call_bool(obj, name, default=False):
@@ -6528,7 +6538,86 @@ class ExperimentTaskListWidget(QGroupBox):
         return None
 
     def _head_calibrated(self, head):
-        return self._call_bool(head, "check_calibration_complete", False) or self._applied_calibration_record(head) is not None
+        return (
+            self._call_bool(head, "check_calibration_complete", False)
+            or self._applied_calibration_record(head) is not None
+            or self._head_has_calibration_summary_row(head)
+        )
+
+    def _calibration_summary_rows(self):
+        calibration_manager = getattr(self.model, "calibration_manager", None)
+        getter = getattr(calibration_manager, "get_characterization_summary_rows", None)
+        if not callable(getter):
+            return []
+        try:
+            return list(getter() or [])
+        except Exception:
+            return []
+
+    @staticmethod
+    def _summary_value(row, key):
+        if isinstance(row, dict):
+            return row.get(key)
+        return getattr(row, key, None)
+
+    def _calibration_summary_row_signature(self, row):
+        keys = (
+            "run_id",
+            "source_run_id",
+            "source_phase_key",
+            "source_step_index",
+            "source_pressure_index",
+            "phase",
+            "pw_us",
+            "pressure_psi",
+            "delay_us",
+            "printing_mode",
+            "valid",
+        )
+        return tuple(str(self._summary_value(row, key)) for key in keys)
+
+    def _calibration_summary_signature(self):
+        return tuple(
+            self._calibration_summary_row_signature(row)
+            for row in self._calibration_summary_rows()
+        )
+
+    def _head_has_calibration_summary_row(self, head):
+        rows = self._calibration_summary_rows()
+        if not rows:
+            return False
+
+        head_stock_id = self._head_stock_id(head)
+        head_name = self._display_head_name(head)
+        active = self._active_head()
+        is_active = active is head or (
+            active is not None and self._head_key(active) == self._head_key(head)
+        )
+
+        for row in rows:
+            valid = self._summary_value(row, "valid")
+            if valid is False:
+                continue
+
+            row_tokens = [
+                self._summary_value(row, key)
+                for key in (
+                    "stock_id",
+                    "stock_solution",
+                    "reagent_id",
+                    "reagent_name",
+                    "stock_name",
+                    "stock_label",
+                )
+            ]
+            normalized_tokens = {str(token) for token in row_tokens if token is not None}
+            if head_stock_id and head_stock_id in normalized_tokens:
+                return True
+            if head_name and head_name in normalized_tokens:
+                return True
+            if not normalized_tokens and is_active:
+                return True
+        return False
 
     def _reaction_target_for_stock(self, reaction, stock_id):
         getter = getattr(reaction, "get_target_droplets_for_stock", None)
@@ -6962,6 +7051,7 @@ class ExperimentTaskListWidget(QGroupBox):
             empty.setWordWrap(True)
             empty.setStyleSheet(f"color: {self.color_dict.get('light_gray', '#cccccc')};")
             self.sections_layout.insertWidget(max(0, self.sections_layout.count() - 1), empty)
+        self._last_calibration_summary_signature = self._calibration_summary_signature()
 
 class ShortcutTableWidget(QGroupBox):
     """

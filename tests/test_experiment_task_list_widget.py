@@ -107,6 +107,7 @@ def _make_widget(
     progress_by_stock=None,
     preflight=None,
     array_state="idle",
+    calibration_summary_rows=None,
 ):
     if progress_by_stock is None:
         progress_by_stock = {"stock-a": [1, 1], "stock-b": [1]}
@@ -152,10 +153,14 @@ def _make_widget(
         get_unassigned_printer_heads=lambda: [],
     )
     model.experiment_loaded = SignalStub()
-    model.calibration_manager = SimpleNamespace(
+    calibration_manager = SimpleNamespace(
         calibrationCompleted=SignalStub(),
         calibrationStageChanged=SignalStub(),
+        characterizationSummaryUpdated=SignalStub(),
     )
+    calibration_manager.summary_rows = list(calibration_summary_rows or [])
+    calibration_manager.get_characterization_summary_rows = lambda: list(calibration_manager.summary_rows)
+    model.calibration_manager = calibration_manager
 
     command_queue = SimpleNamespace(
         queue_updated=SignalStub(),
@@ -190,6 +195,36 @@ def _wait_for_debounced_refresh(qapp):
     qapp.processEvents()
 
 
+def _count_layout_clears(widget):
+    clear_calls = []
+    original_clear_layout = widget._clear_layout
+
+    def counted_clear_layout(layout):
+        clear_calls.append("clear")
+        return original_clear_layout(layout)
+
+    widget._clear_layout = counted_clear_layout
+    return clear_calls
+
+
+def _summary_row(**overrides):
+    row = {
+        "run_id": "run-1",
+        "source_run_id": "run-1",
+        "source_phase_key": "droplet_search",
+        "source_step_index": 0,
+        "source_pressure_index": None,
+        "phase": "search",
+        "pw_us": 2500,
+        "pressure_psi": 0.75,
+        "delay_us": 5000,
+        "printing_mode": "droplet",
+        "valid": True,
+    }
+    row.update(overrides)
+    return row
+
+
 @pytest.mark.parametrize(
     "kwargs, expected",
     [
@@ -215,6 +250,13 @@ def test_global_readiness_does_not_show_command_queue_idle(qapp):
 
     assert "queue_idle" not in {task["key"] for task in global_tasks}
     assert widget.next_label.text() == "Next: Load printer head for Reagent A"
+
+
+def test_refresh_debounce_interval_is_500_ms(qapp):
+    widget, _model, _controller, _heads = _make_widget(qapp)
+
+    assert widget.REFRESH_DEBOUNCE_MS == 500
+    assert widget._refresh_timer.interval() == 500
 
 
 def test_active_head_auto_expands_and_inactive_manual_expansion_persists(qapp):
@@ -306,7 +348,7 @@ def test_queue_busy_is_contextual_print_blocker_only(qapp):
     assert widget.blocking_label.text() == "The command queue must finish before printing."
 
 
-def test_command_queue_signal_refreshes_contextual_blocker(qapp):
+def test_commands_completed_does_not_refresh_contextual_blocker(qapp):
     widget, _model, controller, heads = _make_widget(
         qapp,
         active_stock="stock-a",
@@ -315,13 +357,15 @@ def test_command_queue_signal_refreshes_contextual_blocker(qapp):
         queue_idle=False,
     )
     assert widget._head_context(heads["stock-a"])["current_task"]["state"] == "blocked"
+    assert widget.blocking_label.text() == "The command queue must finish before printing."
 
+    clear_calls = _count_layout_clears(widget)
     controller.check_if_all_completed.return_value = True
     controller.machine.command_queue.commands_completed.emit()
     _wait_for_debounced_refresh(qapp)
 
-    assert widget._head_context(heads["stock-a"])["current_task"]["state"] == "current"
-    assert widget.blocking_label.text() == ""
+    assert clear_calls == []
+    assert widget.blocking_label.text() == "The command queue must finish before printing."
 
 
 def test_applied_calibration_signal_refreshes_guide(qapp):
@@ -337,7 +381,7 @@ def test_applied_calibration_signal_refreshes_guide(qapp):
     assert widget.next_label.text() == "Next: Print array for Reagent A"
 
 
-def test_queue_updated_refresh_is_debounced_and_coalesced(qapp):
+def test_queue_updated_does_not_refresh_contextual_blocker(qapp):
     widget, _model, controller, heads = _make_widget(
         qapp,
         active_stock="stock-a",
@@ -346,15 +390,9 @@ def test_queue_updated_refresh_is_debounced_and_coalesced(qapp):
         queue_idle=False,
     )
     assert widget._head_context(heads["stock-a"])["current_task"]["state"] == "blocked"
+    assert widget.blocking_label.text() == "The command queue must finish before printing."
 
-    clear_calls = []
-    original_clear_layout = widget._clear_layout
-
-    def counted_clear_layout(layout):
-        clear_calls.append("clear")
-        return original_clear_layout(layout)
-
-    widget._clear_layout = counted_clear_layout
+    clear_calls = _count_layout_clears(widget)
     controller.check_if_all_completed.return_value = True
     for _ in range(10):
         controller.machine.command_queue.queue_updated.emit()
@@ -364,9 +402,51 @@ def test_queue_updated_refresh_is_debounced_and_coalesced(qapp):
 
     _wait_for_debounced_refresh(qapp)
 
+    assert clear_calls == []
+    assert widget.blocking_label.text() == "The command queue must finish before printing."
+
+
+def test_calibration_completed_does_not_refresh_guide(qapp):
+    widget, model, _controller, _heads = _make_widget(qapp, active_stock="stock-a")
+    clear_calls = _count_layout_clears(widget)
+
+    model.calibration_manager.calibrationCompleted.emit()
+    _wait_for_debounced_refresh(qapp)
+
+    assert clear_calls == []
+
+
+def test_unchanged_calibration_summary_update_does_not_refresh_guide(qapp):
+    widget, model, _controller, _heads = _make_widget(
+        qapp,
+        active_stock="stock-a",
+        calibration_summary_rows=[_summary_row()],
+    )
+    clear_calls = _count_layout_clears(widget)
+
+    model.calibration_manager.characterizationSummaryUpdated.emit()
+    _wait_for_debounced_refresh(qapp)
+
+    assert clear_calls == []
+
+
+def test_new_calibration_summary_row_refreshes_guide(qapp):
+    widget, model, _controller, heads = _make_widget(qapp, active_stock="stock-a")
+    assert widget.next_label.text() == "Next: Calibrate printer head for Reagent A"
+
+    clear_calls = _count_layout_clears(widget)
+    model.calibration_manager.summary_rows.append(_summary_row())
+    model.calibration_manager.characterizationSummaryUpdated.emit()
+
+    qapp.processEvents()
+    assert clear_calls == []
+
+    _wait_for_debounced_refresh(qapp)
+
+    context = widget._head_context(heads["stock-a"])
     assert clear_calls == ["clear"]
-    assert widget._head_context(heads["stock-a"])["current_task"]["state"] == "current"
-    assert widget.blocking_label.text() == ""
+    assert context["current_task"]["key"] == "apply"
+    assert widget.next_label.text() == "Next: Apply calibration to experiment for Reagent A"
 
 
 def test_unchanged_refresh_skips_full_layout_rebuild(qapp):
