@@ -2246,6 +2246,8 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self._pressure_spinboxes = []
         self._active_spinbox_highlight = None
         self._print_profile_apply_pending = False
+        self._droplet_imager_dialog = None
+        self._droplet_imager_launch_pending = False
 
         prof = getattr(self.main_window, "profile", None)
         self.legacy_mode = prof.name == "legacy" if prof else True
@@ -2776,6 +2778,46 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             self.pressure_regulation_button.setText("Regulate Pressure")
             self.pressure_regulation_button.setStyleSheet(f"background-color: {self.color_dict['light_blue']}; color: white;")
 
+    def _droplet_imager_launch_is_active(self):
+        return bool(
+            getattr(self, "_droplet_imager_launch_pending", False)
+            or getattr(self, "_droplet_imager_dialog", None) is not None
+        )
+
+    def _refresh_droplet_imager_button_state(self):
+        button = getattr(self, "calibrate_pressure_button", None)
+        if button is not None and not self.legacy_mode:
+            button.setEnabled(not self._droplet_imager_launch_is_active())
+
+    def _set_droplet_imager_launch_pending(self, pending):
+        self._droplet_imager_launch_pending = bool(pending)
+        self._refresh_droplet_imager_button_state()
+
+    def _clear_droplet_imager_launch_state(self, dialog=None):
+        if dialog is None or getattr(self, "_droplet_imager_dialog", None) is dialog:
+            self._droplet_imager_dialog = None
+        self._droplet_imager_launch_pending = False
+        self._refresh_droplet_imager_button_state()
+
+    def _focus_active_droplet_imager_dialog(self):
+        dialog = getattr(self, "_droplet_imager_dialog", None)
+        if dialog is None:
+            return
+        for method_name in ("show", "raise_", "activateWindow"):
+            method = getattr(dialog, method_name, None)
+            if callable(method):
+                try:
+                    method()
+                except Exception:
+                    pass
+
+    def _reject_duplicate_droplet_imager_launch(self):
+        self._focus_active_droplet_imager_dialog()
+        self.popup_message_signal.emit(
+            "Droplet Imager Already Open",
+            "The droplet imager is already opening or open. Close it before starting another calibration window.",
+        )
+
     def calibrate_pressure(self):
         """Calibrate the pressure for a specific printer head."""
         # if not self.controller.check_if_all_completed():
@@ -2805,19 +2847,38 @@ class PressurePlotBox(QtWidgets.QGroupBox):
 
     def _launch_droplet_imager_dialog(self):
         """Open the droplet imager dialog after preflight checks have passed."""
-        self.controller.disconnect_droplet_camera_signals()
-        importlib.reload(CalibrationClasses.View)
-        importlib.reload(CalibrationClasses)
-        self.model.reload_droplet_model()
-        self.controller.connect_droplet_camera_signals()
-        self.controller.enable_print_profile()
-        droplet_imaging_dialog = CalibrationClasses.DropletImagingDialog(
-            self.main_window,
-            self.model,
-            self.controller,
-            open_refuel_camera_callback=self.refuel_camera,
-        )
-        droplet_imaging_dialog.exec()
+        if getattr(self, "_droplet_imager_dialog", None) is not None:
+            self._reject_duplicate_droplet_imager_launch()
+            return
+
+        self._set_droplet_imager_launch_pending(True)
+        droplet_imaging_dialog = None
+        try:
+            self.controller.disconnect_droplet_camera_signals()
+            importlib.reload(CalibrationClasses.View)
+            importlib.reload(CalibrationClasses)
+            self.model.reload_droplet_model()
+            self.controller.connect_droplet_camera_signals()
+            self.controller.enable_print_profile()
+            droplet_imaging_dialog = CalibrationClasses.DropletImagingDialog(
+                self.main_window,
+                self.model,
+                self.controller,
+                open_refuel_camera_callback=self.refuel_camera,
+            )
+            self._droplet_imager_dialog = droplet_imaging_dialog
+            self._refresh_droplet_imager_button_state()
+            finished_signal = getattr(droplet_imaging_dialog, "finished", None)
+            if finished_signal is not None:
+                try:
+                    finished_signal.connect(
+                        lambda _result=None, dialog=droplet_imaging_dialog: self._clear_droplet_imager_launch_state(dialog)
+                    )
+                except Exception:
+                    pass
+            droplet_imaging_dialog.exec()
+        finally:
+            self._clear_droplet_imager_launch_state(droplet_imaging_dialog)
 
     def _launch_manual_optics_calibration_dialog(self):
         """Open the droplet imager directly to the manual optics-calibration tab."""
@@ -2979,6 +3040,10 @@ class PressurePlotBox(QtWidgets.QGroupBox):
 
     def droplet_imager(self):
         """Open the droplet imager dialog after verifying prerequisites."""
+        if self._droplet_imager_launch_is_active():
+            self._reject_duplicate_droplet_imager_launch()
+            return
+
         if not self.controller.check_if_all_completed():
             self.popup_message_signal.emit(
                 "Commands Still Running",
@@ -3002,6 +3067,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
 
         current_location = str(self.model.machine_model.get_current_location() or "").strip().lower()
         if current_location == "camera":
+            self._set_droplet_imager_launch_pending(True)
             self._launch_droplet_imager_dialog()
             return
 
@@ -3016,11 +3082,23 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             )
             return
 
-        self.controller.move_to_location(
+        self._set_droplet_imager_launch_pending(True)
+
+        def _launch_after_camera_move():
+            if getattr(self, "_droplet_imager_dialog", None) is not None:
+                self._reject_duplicate_droplet_imager_launch()
+                return
+            if not getattr(self, "_droplet_imager_launch_pending", False):
+                return
+            self._launch_droplet_imager_dialog()
+
+        move_queued = self.controller.move_to_location(
             "camera",
             manual=True,
-            on_complete=self._launch_droplet_imager_dialog,
+            on_complete=_launch_after_camera_move,
         )
+        if move_queued is False:
+            self._clear_droplet_imager_launch_state()
 
     def open_manual_optics_calibration(self):
         """Start the manual optics calibration slice without motion or pressure preflight."""
@@ -7416,12 +7494,14 @@ class _BusyUiContext:
         widgets: Sequence[Any] | None = None,
         status_setter=None,
         failure_message: str | None = None,
+        show_dialog: bool = True,
     ):
         self.parent = parent
         self.message = str(message or "Working...")
         self.widgets = [widget for widget in (widgets or []) if widget is not None]
         self.status_setter = status_setter
         self.failure_message = failure_message
+        self.show_dialog = bool(show_dialog)
         self._enabled_states: list[tuple[Any, bool]] = []
         self._dialog = None
 
@@ -7443,21 +7523,22 @@ class _BusyUiContext:
             except Exception:
                 pass
 
-        try:
-            self._dialog = QtWidgets.QProgressDialog(self.message, "", 0, 0, self.parent)
-            self._dialog.setWindowTitle("Please wait")
-            self._dialog.setCancelButton(None)
-            self._dialog.setWindowModality(Qt.WindowModality.WindowModal)
-            self._dialog.setMinimumDuration(0)
-            self._dialog.setAutoClose(False)
-            self._dialog.setAutoReset(False)
-            self._dialog.setRange(0, 0)
-            self._dialog.show()
-            self._dialog.raise_()
-            self._dialog.activateWindow()
-            self._dialog.repaint()
-        except Exception:
-            self._dialog = None
+        if self.show_dialog:
+            try:
+                self._dialog = QtWidgets.QProgressDialog(self.message, "", 0, 0, self.parent)
+                self._dialog.setWindowTitle("Please wait")
+                self._dialog.setCancelButton(None)
+                self._dialog.setWindowModality(Qt.WindowModality.WindowModal)
+                self._dialog.setMinimumDuration(0)
+                self._dialog.setAutoClose(False)
+                self._dialog.setAutoReset(False)
+                self._dialog.setRange(0, 0)
+                self._dialog.show()
+                self._dialog.raise_()
+                self._dialog.activateWindow()
+                self._dialog.repaint()
+            except Exception:
+                self._dialog = None
 
         if app is not None:
             try:
@@ -9200,6 +9281,7 @@ class ExperimentDesignDialog(QDialog):
             show_failure_dialog=False,
             show_capacity_dialog=False,
             busy_message="Updating experiment design... this may take a moment on Raspberry Pi.",
+            show_busy_dialog=False,
         )
 
     def _load_factors_into_table(self):
@@ -10323,6 +10405,7 @@ class ExperimentDesignDialog(QDialog):
         show_capacity_dialog: bool = False,
         refresh_lock_states: bool = False,
         busy_message: str | None = None,
+        show_busy_dialog: bool = True,
     ) -> tuple[bool, dict | None]:
         self._rebuild_model_from_table()
         self._refresh_all_prior_availability()
@@ -10353,6 +10436,7 @@ class ExperimentDesignDialog(QDialog):
             widgets=self._design_busy_widgets(),
             status_setter=self._set_status,
             failure_message="Optimization failed.",
+            show_dialog=show_busy_dialog,
         ):
             res = self.model.optimize_stock_solutions(
                 quantum=0.1,
