@@ -430,6 +430,45 @@ def test_busy_context_forces_dialog_body_paint(monkeypatch, qapp):
     assert calls[-2:] == ["close", "deleteLater"]
 
 
+def test_busy_context_can_suppress_progress_dialog(monkeypatch, qapp):
+    calls = []
+
+    class _UnexpectedProgressDialog:
+        def __init__(self, *_args, **_kwargs):
+            calls.append("init")
+            raise AssertionError("progress dialog should not be constructed")
+
+    monkeypatch.setattr(View.QtWidgets, "QProgressDialog", _UnexpectedProgressDialog)
+
+    with View._BusyUiContext(None, "Working...", show_dialog=False):
+        calls.append("inside")
+
+    assert calls == ["inside"]
+
+
+def test_recompute_silent_suppresses_modal_busy_dialog(qapp):
+    dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    dialog._uploaded_design_active = False
+    calls = []
+
+    def fake_run_design_optimization_flow(**kwargs):
+        calls.append(kwargs)
+        return True, {"best": True}
+
+    dialog._run_design_optimization_flow = fake_run_design_optimization_flow
+
+    ExperimentDesignDialog._recompute_silent(dialog)
+
+    assert calls == [
+        {
+            "show_failure_dialog": False,
+            "show_capacity_dialog": False,
+            "busy_message": "Updating experiment design... this may take a moment on Raspberry Pi.",
+            "show_busy_dialog": False,
+        }
+    ]
+
+
 def test_import_wizard_loads_design_and_stock_tables(qapp):
     model = ExperimentModel(prof=CURRENT_PROFILE)
     wizard = View.ExperimentImportWizard(
