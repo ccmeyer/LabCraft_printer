@@ -538,6 +538,7 @@ def test_experiment_designer_transposes_reagent_fields_and_reorders_prior(qapp):
     )
     assert dialog.reagent_table.verticalHeaderItem(dialog.COL_PRIOR).text() == "Prior"
     assert dialog.reagent_table.verticalHeader().isVisible()
+    assert "padding-left: 10px" in dialog.reagent_table.verticalHeader().styleSheet()
     assert dialog.reagent_table.horizontalHeaderItem(0).text() == "Water stock 1"
 
     first_name = dialog._reagent_cell_widget(0, ExperimentDesignDialog.COL_STOCK_LABEL)

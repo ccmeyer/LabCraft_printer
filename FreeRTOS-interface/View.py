@@ -8374,6 +8374,11 @@ class ExperimentDesignDialog(QDialog):
         self.reagent_table.horizontalHeader().setMinimumSectionSize(170)
         self.reagent_table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.reagent_table.verticalHeader().setMinimumSectionSize(28)
+        self.reagent_table.verticalHeader().setMinimumWidth(155)
+        self.reagent_table.verticalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.reagent_table.verticalHeader().setStyleSheet(
+            "QHeaderView::section { padding-left: 10px; padding-right: 8px; }"
+        )
         self.reagent_table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         right.addWidget(self.reagent_table)
 
