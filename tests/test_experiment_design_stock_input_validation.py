@@ -94,7 +94,7 @@ def _build_dialog(*, fixed_text="", max_text="", responses=None, stock_rows=None
     dialog.auto_update_chk.setChecked(True)
     dialog.run_btn = QPushButton("Optimize and Generate")
     dialog._run_btn_default_stylesheet = dialog.run_btn.styleSheet()
-    dialog.reagent_table = QTableWidget(1, 12)
+    dialog.reagent_table = QTableWidget(ExperimentDesignDialog.COL_DELETE + 1, 1)
 
     name_edit = QLineEdit("AddA")
     group_combo = QComboBox()
@@ -103,11 +103,11 @@ def _build_dialog(*, fixed_text="", max_text="", responses=None, stock_rows=None
     fixed_edit = QLineEdit(fixed_text)
     max_edit = QLineEdit(max_text)
 
-    dialog.reagent_table.setCellWidget(0, ExperimentDesignDialog.COL_STOCK_LABEL, name_edit)
-    dialog.reagent_table.setCellWidget(0, ExperimentDesignDialog.COL_GROUP, group_combo)
-    dialog.reagent_table.setCellWidget(0, ExperimentDesignDialog.COL_TARGETS, target_edit)
-    dialog.reagent_table.setCellWidget(0, ExperimentDesignDialog.COL_SET_STOCK, fixed_edit)
-    dialog.reagent_table.setCellWidget(0, ExperimentDesignDialog.COL_MAX_STOCK, max_edit)
+    dialog.reagent_table.setCellWidget(ExperimentDesignDialog.COL_STOCK_LABEL, 0, name_edit)
+    dialog.reagent_table.setCellWidget(ExperimentDesignDialog.COL_GROUP, 0, group_combo)
+    dialog.reagent_table.setCellWidget(ExperimentDesignDialog.COL_TARGETS, 0, target_edit)
+    dialog.reagent_table.setCellWidget(ExperimentDesignDialog.COL_SET_STOCK, 0, fixed_edit)
+    dialog.reagent_table.setCellWidget(ExperimentDesignDialog.COL_MAX_STOCK, 0, max_edit)
 
     dialog._rebuild_model_from_table = lambda: None
     dialog._refresh_all_prior_availability = lambda: None

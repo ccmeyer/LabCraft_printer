@@ -15,7 +15,7 @@ def _build_dialog(preview_map, *, forced_stock_text="35", reagent_name="AddA", g
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
     dialog.model = _PreviewModelStub(preview_map)
     dialog.color_dict = {"dark_red": "#8a0303"}
-    dialog.reagent_table = QTableWidget(1, 12)
+    dialog.reagent_table = QTableWidget(ExperimentDesignDialog.COL_DELETE + 1, 1)
 
     name_edit = QLineEdit(reagent_name)
     group_combo = QComboBox()
@@ -27,10 +27,10 @@ def _build_dialog(preview_map, *, forced_stock_text="35", reagent_name="AddA", g
     stock_edit = QLineEdit(forced_stock_text)
     target_edit = QLineEdit("0.001, 0.149")
 
-    dialog.reagent_table.setCellWidget(0, ExperimentDesignDialog.COL_STOCK_LABEL, name_edit)
-    dialog.reagent_table.setCellWidget(0, ExperimentDesignDialog.COL_GROUP, group_combo)
-    dialog.reagent_table.setCellWidget(0, ExperimentDesignDialog.COL_SET_STOCK, stock_edit)
-    dialog.reagent_table.setCellWidget(0, ExperimentDesignDialog.COL_TARGETS, target_edit)
+    dialog.reagent_table.setCellWidget(ExperimentDesignDialog.COL_STOCK_LABEL, 0, name_edit)
+    dialog.reagent_table.setCellWidget(ExperimentDesignDialog.COL_GROUP, 0, group_combo)
+    dialog.reagent_table.setCellWidget(ExperimentDesignDialog.COL_SET_STOCK, 0, stock_edit)
+    dialog.reagent_table.setCellWidget(ExperimentDesignDialog.COL_TARGETS, 0, target_edit)
     return dialog, target_edit
 
 

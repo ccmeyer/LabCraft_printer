@@ -8192,48 +8192,31 @@ class ExperimentDesignDialog(QDialog):
         self.root.addLayout(right, stretch=3) # make right wider
 
         # ---------- Reagents table (top-right) ----------
-        reagent_table_box = QtWidgets.QWidget(self)
-        reagent_table_layout = QHBoxLayout(reagent_table_box)
-        reagent_table_layout.setContentsMargins(0, 0, 0, 0)
-        reagent_table_layout.setSpacing(0)
-
-        self.reagent_name_table = QTableWidget(0, 1, self)
-        self.reagent_name_table.setHorizontalHeaderLabels(["Stock / Label"])
-        self.reagent_name_table.setSelectionMode(QAbstractItemView.NoSelection)
-        self.reagent_name_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.reagent_name_table.setColumnWidth(0, 180)
-        self.reagent_name_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.reagent_name_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.reagent_name_table.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
-        self.reagent_name_table.verticalHeader().setVisible(False)
-        reagent_table_layout.addWidget(self.reagent_name_table, stretch=0)
-
-        self.reagent_table = QTableWidget(0, 12, self)
-        self.reagent_table.setHorizontalHeaderLabels([
-            "Reagent", "Group", "Head Type", "Mode", "Starting", "Targets", "Units",
-            "Fixed Stock Conc", "Max Stock Conc", "Ejection Vol (nL)", "Prior", "Delete"
-        ])
+        self.reagent_name_table = None
+        self._reagent_field_labels = [
+            "Stock / Label",
+            "Reagent",
+            "Group",
+            "Head Type",
+            "Mode",
+            "Starting",
+            "Targets",
+            "Units",
+            "Fixed Stock Conc",
+            "Max Stock Conc",
+            "Ejection Vol (nL)",
+            "Prior",
+            "Delete",
+        ]
+        self.reagent_table = QTableWidget(self.COL_DELETE + 1, 0, self)
+        self.reagent_table.setVerticalHeaderLabels(self._reagent_field_labels)
         self.reagent_table.setSelectionMode(QAbstractItemView.NoSelection)
         self.reagent_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.reagent_table.setColumnWidth(0, 170)   # Reagent
-        self.reagent_table.setColumnWidth(1, 70)    # Group
-        self.reagent_table.setColumnWidth(2, 75)    # Head type
-        self.reagent_table.setColumnWidth(3, 85)    # Mode
-        self.reagent_table.setColumnWidth(4, 90)    # Starting
-        self.reagent_table.setColumnWidth(5, 220)   # Targets
-        self.reagent_table.setColumnWidth(6, 90)    # Units
-        self.reagent_table.setColumnWidth(7, 120)   # Fixed stock conc
-        self.reagent_table.setColumnWidth(8, 120)   # Max stock conc
-        self.reagent_table.setColumnWidth(9, 105)   # Ejection vol
-        self.reagent_table.setColumnWidth(10, 130)  # Prior
-        self.reagent_table.setColumnWidth(11, 90)   # Delete
-        reagent_table_layout.addWidget(self.reagent_table, stretch=1)
-        right.addWidget(reagent_table_box)
-        self.reagent_table.verticalScrollBar().valueChanged.connect(self._sync_frozen_reagent_scroll)
-        self.reagent_name_table.verticalScrollBar().valueChanged.connect(self._sync_main_reagent_scroll)
-        self.reagent_table.verticalHeader().sectionResized.connect(self._sync_frozen_reagent_row_height)
-        self.reagent_name_table.verticalHeader().sectionResized.connect(self._sync_main_reagent_row_height)
-        self.reagent_name_table.horizontalHeader().sectionResized.connect(lambda *_: self._sync_reagent_tables_geometry())
+        self.reagent_table.horizontalHeader().setMinimumSectionSize(170)
+        self.reagent_table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.reagent_table.verticalHeader().setMinimumSectionSize(28)
+        self.reagent_table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        right.addWidget(self.reagent_table)
 
         # ---------- Stock table (bottom-right) ----------
         # Add "Max / Rxn (nL)" column
@@ -8479,55 +8462,58 @@ class ExperimentDesignDialog(QDialog):
 
 
     # -----------------------------
-    # Table row utilities
+    # Reagent table utilities
     # -----------------------------
 
     def _has_frozen_reagent_column(self) -> bool:
-        return getattr(self, "reagent_name_table", None) is not None
+        return False
 
     def _reagent_table_and_column(self, logical_col: int):
-        if self._has_frozen_reagent_column():
-            if logical_col == self.COL_STOCK_LABEL:
-                return self.reagent_name_table, 0
-            return self.reagent_table, logical_col - 1
-        return self.reagent_table, logical_col
+        return getattr(self, "reagent_table", None), int(logical_col)
 
     def _reagent_cell_widget(self, row: int, logical_col: int):
-        table, col = self._reagent_table_and_column(logical_col)
-        if table is None or row < 0 or row >= table.rowCount():
+        table, field_row = self._reagent_table_and_column(logical_col)
+        if (
+            table is None
+            or row < 0
+            or row >= table.columnCount()
+            or field_row < 0
+            or field_row >= table.rowCount()
+        ):
             return None
-        return table.cellWidget(row, col)
+        return table.cellWidget(field_row, row)
 
     def _set_reagent_cell_widget(self, row: int, logical_col: int, widget):
-        table, col = self._reagent_table_and_column(logical_col)
+        table, field_row = self._reagent_table_and_column(logical_col)
         if table is not None:
-            table.setCellWidget(row, col, widget)
+            table.setCellWidget(field_row, row, widget)
 
     def _reagent_column_width(self, logical_col: int) -> int:
-        table, col = self._reagent_table_and_column(logical_col)
-        return 0 if table is None else int(table.columnWidth(col))
+        table = getattr(self, "reagent_table", None)
+        return 0 if table is None or table.columnCount() == 0 else int(table.columnWidth(0))
 
     def _reagent_row_count(self) -> int:
-        table = self.reagent_name_table if self._has_frozen_reagent_column() else getattr(self, "reagent_table", None)
-        return 0 if table is None else table.rowCount()
+        table = getattr(self, "reagent_table", None)
+        return 0 if table is None else table.columnCount()
 
     def _reagent_insert_row(self, row: int):
-        if self._has_frozen_reagent_column():
-            self.reagent_name_table.insertRow(row)
         if getattr(self, "reagent_table", None) is not None:
-            self.reagent_table.insertRow(row)
+            if self.reagent_table.rowCount() < self.COL_DELETE + 1:
+                self.reagent_table.setRowCount(self.COL_DELETE + 1)
+                labels = getattr(self, "_reagent_field_labels", None)
+                if labels:
+                    self.reagent_table.setVerticalHeaderLabels(labels)
+            self.reagent_table.insertColumn(row)
+            self.reagent_table.setColumnWidth(row, 230)
+            self._update_reagent_column_header(row)
 
     def _reagent_remove_row(self, row: int):
-        if self._has_frozen_reagent_column():
-            self.reagent_name_table.removeRow(row)
         if getattr(self, "reagent_table", None) is not None:
-            self.reagent_table.removeRow(row)
+            self.reagent_table.removeColumn(row)
 
     def _clear_reagent_rows(self):
-        if self._has_frozen_reagent_column():
-            self.reagent_name_table.setRowCount(0)
         if getattr(self, "reagent_table", None) is not None:
-            self.reagent_table.setRowCount(0)
+            self.reagent_table.setColumnCount(0)
 
     def _iter_reagent_widgets(self):
         for row in range(self._reagent_row_count()):
@@ -8537,50 +8523,51 @@ class ExperimentDesignDialog(QDialog):
                     yield row, logical_col, widget
 
     def _sync_reagent_tables_geometry(self):
-        if not self._has_frozen_reagent_column():
-            return
-        header_height = self.reagent_table.horizontalHeader().height()
-        self.reagent_name_table.horizontalHeader().setFixedHeight(header_height)
-        frozen_width = self.reagent_name_table.columnWidth(0) + (self.reagent_name_table.frameWidth() * 2)
-        self.reagent_name_table.setFixedWidth(frozen_width)
-        self._sync_all_reagent_row_heights()
+        table = getattr(self, "reagent_table", None)
+        if table is not None:
+            table.resizeRowsToContents()
 
     def _sync_reagent_row_height(self, row: int):
-        if not self._has_frozen_reagent_column():
-            return
-        if row < 0 or row >= self._reagent_row_count():
-            return
-        height = max(self.reagent_table.rowHeight(row), self.reagent_name_table.rowHeight(row))
-        self.reagent_table.setRowHeight(row, height)
-        self.reagent_name_table.setRowHeight(row, height)
+        self._sync_reagent_tables_geometry()
 
     def _sync_all_reagent_row_heights(self):
         for row in range(self._reagent_row_count()):
             self._sync_reagent_row_height(row)
 
     def _sync_frozen_reagent_scroll(self, value: int):
-        if not self._has_frozen_reagent_column():
-            return
-        if self.reagent_name_table.verticalScrollBar().value() != value:
-            self.reagent_name_table.verticalScrollBar().setValue(value)
+        return
 
     def _sync_main_reagent_scroll(self, value: int):
-        if not self._has_frozen_reagent_column():
-            return
-        if self.reagent_table.verticalScrollBar().value() != value:
-            self.reagent_table.verticalScrollBar().setValue(value)
+        return
 
     def _sync_frozen_reagent_row_height(self, row: int, _old_size: int, new_size: int):
-        if not self._has_frozen_reagent_column():
-            return
-        if self.reagent_name_table.rowHeight(row) != new_size:
-            self.reagent_name_table.setRowHeight(row, new_size)
+        return
 
     def _sync_main_reagent_row_height(self, row: int, _old_size: int, new_size: int):
-        if not self._has_frozen_reagent_column():
+        return
+
+    def _reagent_header_label(self, row: int) -> str:
+        name_edit: QLineEdit = self._reagent_cell_widget(row, self.COL_STOCK_LABEL)
+        if name_edit is not None:
+            label = (name_edit.text() or "").strip()
+            if label:
+                return label
+        return f"Reagent {row + 1}"
+
+    def _update_reagent_column_header(self, row: int):
+        table = getattr(self, "reagent_table", None)
+        if table is None or row < 0 or row >= table.columnCount():
             return
-        if self.reagent_table.rowHeight(row) != new_size:
-            self.reagent_table.setRowHeight(row, new_size)
+        table.setHorizontalHeaderItem(row, QTableWidgetItem(self._reagent_header_label(row)))
+
+    def _update_reagent_column_header_for_widget(self, widget):
+        row = self._find_row_for_widget(widget)
+        if row >= 0:
+            self._update_reagent_column_header(row)
+
+    def _update_all_reagent_column_headers(self):
+        for row in range(self._reagent_row_count()):
+            self._update_reagent_column_header(row)
 
     def _bridge_get_runtime_model(self):
         return getattr(self, "runtime_model", None) or getattr(getattr(self, "main_window", None), "model", None)
@@ -8881,6 +8868,7 @@ class ExperimentDesignDialog(QDialog):
             if name_edit is not None and self._is_placeholder_stock_label(name_edit.text()) and suggested_label:
                 blocker = QSignalBlocker(name_edit)
                 name_edit.setText(str(suggested_label))
+                self._update_reagent_column_header(row)
             self._refresh_prior_availability_for_row(row)
         self._schedule_auto_update()
 
@@ -8986,7 +8974,9 @@ class ExperimentDesignDialog(QDialog):
         # 0 Stock / Label
         name_edit = QLineEdit(name or f"reagent-{row+1}")
         name_edit.textEdited.connect(self._schedule_auto_update)
+        name_edit.textChanged.connect(lambda _text, widget=name_edit: self._update_reagent_column_header_for_widget(widget))
         self._set_reagent_cell_widget(row, self.COL_STOCK_LABEL, name_edit)
+        self._update_reagent_column_header(row)
 
         # 1 Reagent identity
         reagent_combo = self._build_known_reagent_selector(
@@ -9090,6 +9080,7 @@ class ExperimentDesignDialog(QDialog):
             except Exception:
                 pass
             btn.clicked.connect(lambda _, rr=i: self._delete_row(rr))
+        self._update_all_reagent_column_headers()
         self._sync_reagent_tables_geometry()
         self._refresh_all_prior_availability()
         self._schedule_auto_update()

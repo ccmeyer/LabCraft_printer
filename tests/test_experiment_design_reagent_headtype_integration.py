@@ -155,7 +155,24 @@ def _build_dialog_stub(runtime_model):
     dialog.main_window = SimpleNamespace(model=runtime_model)
     dialog.model = ExperimentModel(prof=CURRENT_PROFILE)
     dialog.choice_groups = set()
-    dialog.reagent_table = QTableWidget(0, 13)
+    dialog.reagent_name_table = None
+    dialog._reagent_field_labels = [
+        "Stock / Label",
+        "Reagent",
+        "Group",
+        "Head Type",
+        "Mode",
+        "Starting",
+        "Targets",
+        "Units",
+        "Fixed Stock Conc",
+        "Max Stock Conc",
+        "Ejection Vol (nL)",
+        "Prior",
+        "Delete",
+    ]
+    dialog.reagent_table = QTableWidget(ExperimentDesignDialog.COL_DELETE + 1, 0)
+    dialog.reagent_table.setVerticalHeaderLabels(dialog._reagent_field_labels)
     dialog._auto_timer = SimpleNamespace(start=lambda: None)
     dialog.default_droplet_volume_nL = 10.0
     dialog.color_dict = {"dark_red": "#8a0303"}
@@ -480,7 +497,7 @@ def test_experiment_designer_fill_mode_updates_volume_range_and_metadata(qapp):
     dialog.close()
 
 
-def test_experiment_designer_freezes_name_column_and_reorders_prior(qapp):
+def test_experiment_designer_transposes_reagent_fields_and_reorders_prior(qapp):
     dialog = _build_real_dialog()
     dialog.setMinimumSize(0, 0)
     for idx in range(12):
@@ -499,20 +516,26 @@ def test_experiment_designer_freezes_name_column_and_reorders_prior(qapp):
     dialog.show()
     qapp.processEvents()
 
-    assert dialog.reagent_name_table is not None
-    assert dialog._reagent_row_count() == dialog.reagent_table.rowCount() == dialog.reagent_name_table.rowCount()
-    assert dialog._reagent_cell_widget(0, ExperimentDesignDialog.COL_STOCK_LABEL) is dialog.reagent_name_table.cellWidget(0, 0)
-    assert dialog._reagent_column_width(ExperimentDesignDialog.COL_GROUP) == 70
-    assert dialog._reagent_column_width(ExperimentDesignDialog.COL_HEAD_TYPE) == 75
-    assert dialog.reagent_table.horizontalHeaderItem(dialog.COL_PRIOR - 1).text() == "Prior"
+    assert dialog.reagent_name_table is None
+    assert dialog._has_frozen_reagent_column() is False
+    assert dialog._reagent_row_count() == dialog.reagent_table.columnCount() == 12
+    assert dialog.reagent_table.rowCount() == ExperimentDesignDialog.COL_DELETE + 1
+    assert dialog._reagent_cell_widget(0, ExperimentDesignDialog.COL_STOCK_LABEL) is dialog.reagent_table.cellWidget(
+        ExperimentDesignDialog.COL_STOCK_LABEL,
+        0,
+    )
+    assert dialog.reagent_table.verticalHeaderItem(dialog.COL_PRIOR).text() == "Prior"
+    assert dialog.reagent_table.verticalHeader().isVisible()
+    assert dialog.reagent_table.horizontalHeaderItem(0).text() == "Water stock 1"
+
+    first_name = dialog._reagent_cell_widget(0, ExperimentDesignDialog.COL_STOCK_LABEL)
+    first_name.setText("Renamed stock")
+    qapp.processEvents()
+    assert dialog.reagent_table.horizontalHeaderItem(0).text() == "Renamed stock"
 
     dialog.reagent_table.horizontalScrollBar().setValue(dialog.reagent_table.horizontalScrollBar().maximum())
     qapp.processEvents()
-    assert dialog.reagent_name_table.horizontalScrollBar().value() == 0
-
-    dialog.reagent_table.verticalScrollBar().setValue(dialog.reagent_table.verticalScrollBar().maximum())
-    qapp.processEvents()
-    assert dialog.reagent_name_table.verticalScrollBar().value() == dialog.reagent_table.verticalScrollBar().value()
+    assert dialog.reagent_table.horizontalScrollBar().value() == dialog.reagent_table.horizontalScrollBar().maximum()
 
     dialog.close()
 
