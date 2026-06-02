@@ -2248,6 +2248,8 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self._print_profile_apply_pending = False
         self._droplet_imager_dialog = None
         self._droplet_imager_launch_pending = False
+        self._refuel_camera_dialog = None
+        self._refuel_camera_launch_pending = False
 
         prof = getattr(self.main_window, "profile", None)
         self.legacy_mode = prof.name == "legacy" if prof else True
@@ -2818,6 +2820,46 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             "The droplet imager is already opening or open. Close it before starting another calibration window.",
         )
 
+    def _refuel_camera_launch_is_active(self):
+        return bool(
+            getattr(self, "_refuel_camera_launch_pending", False)
+            or getattr(self, "_refuel_camera_dialog", None) is not None
+        )
+
+    def _refresh_refuel_camera_button_state(self):
+        button = getattr(self, "refuel_camera_button", None)
+        if button is not None and not self.legacy_mode:
+            button.setEnabled(not self._refuel_camera_launch_is_active())
+
+    def _set_refuel_camera_launch_pending(self, pending):
+        self._refuel_camera_launch_pending = bool(pending)
+        self._refresh_refuel_camera_button_state()
+
+    def _clear_refuel_camera_launch_state(self, dialog=None):
+        if dialog is None or getattr(self, "_refuel_camera_dialog", None) is dialog:
+            self._refuel_camera_dialog = None
+        self._refuel_camera_launch_pending = False
+        self._refresh_refuel_camera_button_state()
+
+    def _focus_active_refuel_camera_dialog(self):
+        dialog = getattr(self, "_refuel_camera_dialog", None)
+        if dialog is None:
+            return
+        for method_name in ("show", "raise_", "activateWindow"):
+            method = getattr(dialog, method_name, None)
+            if callable(method):
+                try:
+                    method()
+                except Exception:
+                    pass
+
+    def _reject_duplicate_refuel_camera_launch(self):
+        self._focus_active_refuel_camera_dialog()
+        self.popup_message_signal.emit(
+            "Refuel Camera Already Open",
+            "The refuel camera is already opening or open. Close it before starting another refuel camera window.",
+        )
+
     def calibrate_pressure(self):
         """Calibrate the pressure for a specific printer head."""
         # if not self.controller.check_if_all_completed():
@@ -3028,15 +3070,34 @@ class PressurePlotBox(QtWidgets.QGroupBox):
 
     def _launch_refuel_camera_dialog(self):
         """Open the refuel camera dialog after preflight checks have passed."""
-        importlib.reload(CalibrationClasses.View)
-        importlib.reload(CalibrationClasses)
-        self.controller.enable_print_profile()
-        refuel_camera_dialog = CalibrationClasses.RefuelCameraWindow(
-            self.main_window,
-            self.model,
-            self.controller,
-        )
-        refuel_camera_dialog.exec()
+        if getattr(self, "_refuel_camera_dialog", None) is not None:
+            self._reject_duplicate_refuel_camera_launch()
+            return
+
+        self._set_refuel_camera_launch_pending(True)
+        refuel_camera_dialog = None
+        try:
+            importlib.reload(CalibrationClasses.View)
+            importlib.reload(CalibrationClasses)
+            self.controller.enable_print_profile()
+            refuel_camera_dialog = CalibrationClasses.RefuelCameraWindow(
+                self.main_window,
+                self.model,
+                self.controller,
+            )
+            self._refuel_camera_dialog = refuel_camera_dialog
+            self._refresh_refuel_camera_button_state()
+            finished_signal = getattr(refuel_camera_dialog, "finished", None)
+            if finished_signal is not None:
+                try:
+                    finished_signal.connect(
+                        lambda _result=None, dialog=refuel_camera_dialog: self._clear_refuel_camera_launch_state(dialog)
+                    )
+                except Exception:
+                    pass
+            refuel_camera_dialog.exec()
+        finally:
+            self._clear_refuel_camera_launch_state(refuel_camera_dialog)
 
     def droplet_imager(self):
         """Open the droplet imager dialog after verifying prerequisites."""
@@ -3120,6 +3181,10 @@ class PressurePlotBox(QtWidgets.QGroupBox):
 
     def refuel_camera(self):
         """Open the refuel camera dialog after verifying prerequisites."""
+        if self._refuel_camera_launch_is_active():
+            self._reject_duplicate_refuel_camera_launch()
+            return
+
         if not self.controller.check_if_all_completed():
             self.popup_message_signal.emit(
                 "Commands Still Running",
@@ -3146,6 +3211,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
 
         current_location = str(self.model.machine_model.get_current_location() or "").strip().lower()
         if current_location == "camera":
+            self._set_refuel_camera_launch_pending(True)
             self._launch_refuel_camera_dialog()
             return
 
@@ -3160,11 +3226,23 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             )
             return
 
-        self.controller.move_to_location(
+        self._set_refuel_camera_launch_pending(True)
+
+        def _launch_refuel_after_camera_move():
+            if getattr(self, "_refuel_camera_dialog", None) is not None:
+                self._reject_duplicate_refuel_camera_launch()
+                return
+            if not getattr(self, "_refuel_camera_launch_pending", False):
+                return
+            self._launch_refuel_camera_dialog()
+
+        move_queued = self.controller.move_to_location(
             "camera",
             manual=True,
-            on_complete=self._launch_refuel_camera_dialog,
+            on_complete=_launch_refuel_after_camera_move,
         )
+        if move_queued is False:
+            self._clear_refuel_camera_launch_state()
 
     def nozzle_position_dataset_capture(self):
         """Open the NozzlePosition checklist-driven dataset capture dialog."""

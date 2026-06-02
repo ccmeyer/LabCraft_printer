@@ -176,6 +176,7 @@ def _patch_refuel_launch(monkeypatch, events, *, main_window, model, controller)
             assert main_window_arg is main_window
             assert model_arg is model
             assert controller_arg is controller
+            self.finished = _SignalStub()
             events.append("refuel_dialog_init")
 
         def exec(self):
@@ -811,6 +812,114 @@ def test_current_profile_refuel_camera_opens_refuel_dialog_at_camera(monkeypatch
     model.reload_droplet_model.assert_not_called()
 
 
+def test_current_profile_refuel_camera_rejects_duplicate_while_dialog_open(monkeypatch, qapp):
+    events = []
+    popups = []
+    main_window = _make_main_window(CURRENT_PROFILE, popups)
+    model = _make_model(
+        _FakeMachineModel(
+            regulating_print_pressure=True,
+            regulating_refuel_pressure=True,
+            current_location="camera",
+        ),
+        events,
+        printer_head=object(),
+    )
+    controller = _make_controller(events)
+    box = PressurePlotBox(main_window, model, controller)
+
+    class _RefuelDialog:
+        def __init__(self, main_window_arg, model_arg, controller_arg):
+            assert main_window_arg is main_window
+            assert model_arg is model
+            assert controller_arg is controller
+            self.finished = _SignalStub()
+            events.append("refuel_dialog_init")
+
+        def show(self):
+            pass
+
+        def raise_(self):
+            pass
+
+        def activateWindow(self):
+            pass
+
+        def exec(self):
+            events.append("refuel_dialog_exec")
+            box.refuel_camera()
+            return 0
+
+    monkeypatch.setattr(View.importlib, "reload", lambda module: module)
+    monkeypatch.setattr(View.CalibrationClasses, "RefuelCameraWindow", _RefuelDialog)
+
+    box.refuel_camera()
+
+    assert events == [
+        "enable_print_profile",
+        "refuel_dialog_init",
+        "refuel_dialog_exec",
+    ]
+    assert popups == [
+        (
+            "Refuel Camera Already Open",
+            "The refuel camera is already opening or open. Close it before starting another refuel camera window.",
+        )
+    ]
+    main_window.popup_yes_no.assert_not_called()
+    controller.move_to_location.assert_not_called()
+    model.reload_droplet_model.assert_not_called()
+    model.reload_refuel_model.assert_not_called()
+    assert box.refuel_camera_button.isEnabled()
+
+
+def test_current_profile_refuel_camera_allows_relaunch_after_dialog_cleanup(monkeypatch, qapp):
+    events = []
+    popups = []
+    main_window = _make_main_window(CURRENT_PROFILE, popups)
+    model = _make_model(
+        _FakeMachineModel(
+            regulating_print_pressure=True,
+            regulating_refuel_pressure=True,
+            current_location="camera",
+        ),
+        events,
+        printer_head=object(),
+    )
+    controller = _make_controller(events)
+    box = PressurePlotBox(main_window, model, controller)
+
+    class _RefuelDialog:
+        def __init__(self, main_window_arg, model_arg, controller_arg):
+            assert main_window_arg is main_window
+            assert model_arg is model
+            assert controller_arg is controller
+            self.finished = _SignalStub()
+            events.append("refuel_dialog_init")
+
+        def exec(self):
+            events.append("refuel_dialog_exec")
+            self.finished.emit(0)
+            return 0
+
+    monkeypatch.setattr(View.importlib, "reload", lambda module: module)
+    monkeypatch.setattr(View.CalibrationClasses, "RefuelCameraWindow", _RefuelDialog)
+
+    box.refuel_camera()
+    box.refuel_camera()
+
+    assert events == [
+        "enable_print_profile",
+        "refuel_dialog_init",
+        "refuel_dialog_exec",
+        "enable_print_profile",
+        "refuel_dialog_init",
+        "refuel_dialog_exec",
+    ]
+    assert popups == []
+    assert box.refuel_camera_button.isEnabled()
+
+
 def test_current_profile_calibrate_pressure_requires_camera_position_on_decline(monkeypatch, qapp):
     events = []
     popups = []
@@ -963,6 +1072,53 @@ def test_current_profile_refuel_camera_moves_then_launches_refuel_dialog(monkeyp
     controller.disconnect_droplet_camera_signals.assert_not_called()
     controller.connect_droplet_camera_signals.assert_not_called()
     assert popups == []
+
+
+def test_current_profile_refuel_camera_rejects_duplicate_while_camera_move_pending(monkeypatch, qapp):
+    events = []
+    popups = []
+    main_window = _make_main_window(
+        CURRENT_PROFILE,
+        popups,
+        popup_response=QMessageBox.StandardButton.Yes,
+    )
+    model = _make_model(
+        _FakeMachineModel(
+            regulating_print_pressure=True,
+            regulating_refuel_pressure=True,
+            current_location="plate",
+        ),
+        events,
+        printer_head=object(),
+    )
+    controller = _make_controller(events)
+    box = PressurePlotBox(main_window, model, controller)
+
+    _patch_refuel_launch(monkeypatch, events, main_window=main_window, model=model, controller=controller)
+
+    box.refuel_camera()
+    box.refuel_camera()
+
+    main_window.popup_yes_no.assert_called_once()
+    controller.move_to_location.assert_called_once()
+    assert popups == [
+        (
+            "Refuel Camera Already Open",
+            "The refuel camera is already opening or open. Close it before starting another refuel camera window.",
+        )
+    ]
+    assert events == []
+    assert not box.refuel_camera_button.isEnabled()
+
+    on_complete = controller.move_to_location.call_args.kwargs["on_complete"]
+    on_complete()
+
+    assert events == [
+        "enable_print_profile",
+        "refuel_dialog_init",
+        "refuel_dialog_exec",
+    ]
+    assert box.refuel_camera_button.isEnabled()
 
 
 def test_legacy_profile_calibrate_pressure_keeps_mass_calibration(monkeypatch, qapp):
