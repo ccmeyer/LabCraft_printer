@@ -90,6 +90,12 @@ def _build_dialog(*, fixed_text="", max_text="", responses=None, stock_rows=None
     dialog.stock_table = QTableWidget(0, 9)
     dialog.summary_lbl = QLabel("")
     dialog.allow_two_chk = QCheckBox()
+    dialog.v_spin = QDoubleSpinBox()
+    dialog.v_spin.setRange(1.0, 1_000_000.0)
+    dialog.v_spin.setValue(2000.0)
+    dialog.final_v_spin = QDoubleSpinBox()
+    dialog.final_v_spin.setRange(1.0, 1_000_000.0)
+    dialog.final_v_spin.setValue(2000.0)
     dialog.auto_update_chk = QCheckBox()
     dialog.auto_update_chk.setChecked(True)
     dialog.run_btn = QPushButton("Optimize and Generate")
@@ -152,6 +158,49 @@ def test_negative_fixed_stock_is_treated_as_invalid_input(qapp):
     assert fixed_edit.styleSheet() == "border:1px solid #8a0303;"
     assert "must be greater than zero" in fixed_edit.toolTip()
     assert result["issues_by_key"][("AddA", None)][0]["code"] == "nonpositive_value"
+
+
+def test_printed_volume_above_final_volume_is_rejected_and_styled(qapp):
+    dialog, _fixed_edit, _max_edit = _build_dialog()
+    dialog.v_spin.setValue(2500.0)
+    dialog.final_v_spin.setValue(2000.0)
+
+    ok, result = ExperimentDesignDialog._run_design_optimization_flow(dialog, show_failure_dialog=False)
+
+    assert ok is False
+    assert dialog.model.optimize_calls == 0
+    assert dialog.v_spin.styleSheet() == "border:1px solid #8a0303;"
+    assert dialog.final_v_spin.styleSheet() == "border:1px solid #8a0303;"
+    assert "cannot exceed Final Reaction Volume" in dialog.v_spin.toolTip()
+    assert "cannot exceed Final Reaction Volume" in dialog.status_lbl.text()
+    assert "current volume settings are invalid" in dialog.stock_table_status_lbl.text()
+    assert dialog.stock_table.styleSheet() == "QTableWidget { border:1px solid #8a0303; }"
+    assert result["issues_by_key"][("__metadata__", "volumes")][0]["code"] == "printed_exceeds_final_volume"
+
+
+def test_printed_volume_error_clears_after_correction(qapp):
+    dialog, _fixed_edit, _max_edit = _build_dialog(
+        responses=[{"best": True, "issues_by_key": {}, "two_stock_search_limited_keys": []}]
+    )
+    dialog.v_spin.setValue(2500.0)
+    dialog.final_v_spin.setValue(2000.0)
+
+    ok, _result = ExperimentDesignDialog._run_design_optimization_flow(dialog, show_failure_dialog=False)
+    assert ok is False
+    assert dialog.v_spin.styleSheet() == "border:1px solid #8a0303;"
+
+    dialog.final_v_spin.setValue(3000.0)
+    ok, result = ExperimentDesignDialog._run_design_optimization_flow(dialog, show_failure_dialog=False)
+
+    assert ok is True
+    assert result["best"] is True
+    assert dialog.model.optimize_calls == 1
+    assert dialog.v_spin.styleSheet() == ""
+    assert dialog.final_v_spin.styleSheet() == ""
+    assert dialog.v_spin.toolTip() == ""
+    assert dialog.final_v_spin.toolTip() == ""
+    assert dialog.stock_table_status_lbl.text() == ""
+    assert dialog.stock_table.styleSheet() == ""
 
 
 def test_successful_optimization_marks_design_clean(qapp):
@@ -372,6 +421,83 @@ def test_failure_dialog_shows_detailed_issue_summary(qapp, monkeypatch):
 def _calculate_import_wizard(wizard):
     assert wizard.calculate_btn.isEnabled()
     wizard.calculate_btn.click()
+
+
+class _ImportFeasibilityModel:
+    def __init__(self):
+        self.calls = []
+
+    def build_import_feasibility_report(self, *_args, **kwargs):
+        self.calls.append(dict(kwargs))
+        return {
+            "ok": True,
+            "printed_volume_nL": kwargs.get("printed_volume_nL", 2000.0),
+            "final_volume_nL": kwargs.get("final_volume_nL", 2000.0),
+            "reagent_specs": [],
+            "composition_rows": [],
+            "stock_rows": [],
+            "issues": [],
+            "missing_stock_rows": [],
+            "unmatched_stock_rows": [],
+            "status_counts": {},
+            "max_stock_by_reagent": {},
+            "stock_settings_by_reagent": {},
+        }
+
+
+def test_import_wizard_invalid_volume_skips_feasibility_until_corrected(qapp):
+    model = _ImportFeasibilityModel()
+    wizard = View.ExperimentImportWizard(
+        model,
+        printed_volume_nL=2500.0,
+        final_volume_nL=2000.0,
+        allow_two=False,
+    )
+    wizard.load_design_dataframe(pd.DataFrame({"well_id": ["A1"], "Reagent A mM": [1.0]}))
+
+    _calculate_import_wizard(wizard)
+
+    assert model.calls == []
+    assert wizard.printed_volume_spin.styleSheet() == "border:1px solid #8a0303;"
+    assert wizard.final_volume_spin.styleSheet() == "border:1px solid #8a0303;"
+    assert "cannot exceed Final Reaction Volume" in wizard.status_lbl.text()
+    assert not wizard.apply_btn.isEnabled()
+
+    wizard.final_volume_spin.setValue(3000.0)
+    _calculate_import_wizard(wizard)
+
+    assert len(model.calls) == 1
+    assert wizard.printed_volume_spin.styleSheet() == ""
+    assert wizard.final_volume_spin.styleSheet() == ""
+    assert wizard.printed_volume_spin.toolTip() == ""
+    assert wizard.final_volume_spin.toolTip() == ""
+    assert wizard.apply_btn.isEnabled()
+
+
+def test_import_wizard_apply_rejects_invalid_volume_after_clean_report(qapp, monkeypatch):
+    model = _ImportFeasibilityModel()
+    wizard = View.ExperimentImportWizard(
+        model,
+        printed_volume_nL=2000.0,
+        final_volume_nL=3000.0,
+        allow_two=False,
+    )
+    wizard.load_design_dataframe(pd.DataFrame({"well_id": ["A1"], "Reagent A mM": [1.0]}))
+    _calculate_import_wizard(wizard)
+    assert wizard.apply_btn.isEnabled()
+
+    accepted = []
+    monkeypatch.setattr(wizard, "accept", lambda: accepted.append(True))
+    wizard.printed_volume_spin.setValue(3500.0)
+
+    wizard._on_apply_clicked()
+
+    assert accepted == []
+    assert wizard._report_dirty is True
+    assert not wizard.apply_btn.isEnabled()
+    assert wizard.printed_volume_spin.styleSheet() == "border:1px solid #8a0303;"
+    assert wizard.final_volume_spin.styleSheet() == "border:1px solid #8a0303;"
+    assert "cannot exceed Final Reaction Volume" in wizard.status_lbl.text()
 
 
 def test_busy_context_forces_dialog_body_paint(monkeypatch, qapp):

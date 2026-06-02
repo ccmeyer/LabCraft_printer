@@ -50,6 +50,57 @@ from hardware.profile import CURRENT_PROFILE, HardwareProfile
 MassCalibrationDialog = None
 
 
+_VOLUME_INPUT_ERROR_STYLE = "border:1px solid #8a0303;"
+_VOLUME_INPUT_ISSUE_KEY = ("__metadata__", "volumes")
+
+
+def _format_volume_nl(value: float) -> str:
+    return f"{float(value):.6g}"
+
+
+def _printed_final_volume_issue(
+    printed_volume_nL: float,
+    final_volume_nL: float,
+) -> dict | None:
+    try:
+        printed = float(printed_volume_nL)
+        final = float(final_volume_nL)
+    except Exception:
+        return None
+    if printed <= final + 1e-9:
+        return None
+    return {
+        "field": "printed_final_volume",
+        "severity": "error",
+        "code": "printed_exceeds_final_volume",
+        "message": (
+            f"Printed Volume ({_format_volume_nl(printed)} nL) cannot exceed "
+            f"Final Reaction Volume ({_format_volume_nl(final)} nL). "
+            "Lower Printed Volume or increase Final Reaction Volume."
+        ),
+        "printed_volume_nL": printed,
+        "final_reaction_volume_nL": final,
+    }
+
+
+def _apply_volume_issue_style(
+    printed_widget: QDoubleSpinBox | None,
+    final_widget: QDoubleSpinBox | None,
+    issues: Sequence[Mapping[str, Any]],
+):
+    issue_list = list(issues or [])
+    tooltip = "\n".join(
+        str(issue.get("message") or "").strip()
+        for issue in issue_list
+        if str(issue.get("message") or "").strip()
+    )
+    for widget in (printed_widget, final_widget):
+        if widget is None:
+            continue
+        widget.setStyleSheet(_VOLUME_INPUT_ERROR_STYLE if issue_list else "")
+        widget.setToolTip(tooltip if issue_list else "")
+
+
 def _get_mass_calibration_dialog_class():
     global MassCalibrationDialog
     if MassCalibrationDialog is None:
@@ -7984,6 +8035,34 @@ class ExperimentImportWizard(QDialog):
             self.stock_table,
         ]
 
+    def _collect_volume_input_issues(self) -> list[dict]:
+        issue = _printed_final_volume_issue(
+            float(self.printed_volume_spin.value()),
+            float(self.final_volume_spin.value()),
+        )
+        return [issue] if issue is not None else []
+
+    def _apply_volume_input_issue_state(self, issues: Sequence[Mapping[str, Any]]):
+        _apply_volume_issue_style(
+            self.printed_volume_spin,
+            self.final_volume_spin,
+            issues,
+        )
+
+    def _reject_invalid_volume_inputs(self) -> bool:
+        issues = self._collect_volume_input_issues()
+        self._apply_volume_input_issue_state(issues)
+        if not issues:
+            return False
+
+        message = str(issues[0].get("message") or "").strip()
+        self._report_dirty = True
+        self._pending_change_message = message
+        self.status_lbl.setText(message)
+        self._update_calculate_button_state()
+        self._update_apply_enabled()
+        return True
+
     def load_design_dataframe(self, df: "pd.DataFrame", *, source_path: str | None = None):
         self.design_df = df.copy()
         self.design_path = source_path
@@ -8045,6 +8124,9 @@ class ExperimentImportWizard(QDialog):
             self._has_calculated_report = False
             self._update_calculate_button_state()
             self._update_apply_enabled()
+            return
+
+        if self._reject_invalid_volume_inputs():
             return
 
         with _BusyUiContext(
@@ -8248,6 +8330,8 @@ class ExperimentImportWizard(QDialog):
 
     def _on_apply_clicked(self):
         if self.design_df is None:
+            return
+        if self._reject_invalid_volume_inputs():
             return
         if self._report_dirty or self.report is None:
             self._mark_report_dirty("Calculate feasibility before applying.")
@@ -10266,6 +10350,47 @@ class ExperimentDesignDialog(QDialog):
                 default_tooltip=self._default_max_stock_tooltip(),
             )
 
+    def _collect_volume_input_issues(self) -> Dict[tuple[str, Optional[str]], List[Dict[str, Any]]]:
+        printed = (
+            float(self.v_spin.value())
+            if hasattr(self, "v_spin") and self.v_spin is not None
+            else float(getattr(self.model, "metadata", {}).get("target_reaction_volume_nL", 2000.0))
+        )
+        final = (
+            float(self.final_v_spin.value())
+            if hasattr(self, "final_v_spin") and self.final_v_spin is not None
+            else float(getattr(self.model, "metadata", {}).get("final_reaction_volume_nL", printed))
+        )
+        issue = _printed_final_volume_issue(printed, final)
+        return {_VOLUME_INPUT_ISSUE_KEY: [issue]} if issue is not None else {}
+
+    def _apply_volume_input_issue_state(
+        self,
+        issue_map: Mapping[tuple[str, Optional[str]], Sequence[Mapping[str, Any]]],
+    ):
+        issues = list((issue_map or {}).get(_VOLUME_INPUT_ISSUE_KEY, []))
+        _apply_volume_issue_style(
+            getattr(self, "v_spin", None),
+            getattr(self, "final_v_spin", None),
+            issues,
+        )
+
+    def _reject_invalid_volume_inputs(self, *, show_dialog: bool = False, title: str = "Invalid volumes") -> bool:
+        volume_issues = self._collect_volume_input_issues()
+        self._apply_volume_input_issue_state(volume_issues)
+        if not volume_issues:
+            return False
+
+        self._mark_design_optimization_dirty()
+        self._clear_target_color_state()
+        stale_msg = "Showing last valid stock plan; current volume settings are invalid."
+        self._set_stock_table_stale(True, stale_msg)
+        summary = self._summarize_issue_map(volume_issues, stale=True, stale_message=stale_msg)
+        self._set_status(summary)
+        if show_dialog:
+            QMessageBox.warning(self, title, summary)
+        return True
+
     def _clear_target_color_state(self):
         for row in range(self._reagent_row_count()):
             tgt_edit: QLineEdit = self._reagent_cell_widget(row, self.COL_TARGETS)
@@ -10494,14 +10619,22 @@ class ExperimentDesignDialog(QDialog):
         self._refresh_all_prior_availability()
         self._update_metadata_from_controls()
 
+        volume_issues = self._collect_volume_input_issues()
         raw_issues = self._collect_raw_stock_input_issues()
-        if raw_issues:
+        input_issues = self._merge_issue_maps(volume_issues, raw_issues)
+        self._apply_volume_input_issue_state(volume_issues)
+        if input_issues:
             self._mark_design_optimization_dirty()
             self._apply_stock_input_issue_state(raw_issues)
             self._clear_target_color_state()
-            stale_msg = "Showing last valid stock plan; current stock inputs are invalid."
+            if volume_issues and raw_issues:
+                stale_msg = "Showing last valid stock plan; current design inputs are invalid."
+            elif volume_issues:
+                stale_msg = "Showing last valid stock plan; current volume settings are invalid."
+            else:
+                stale_msg = "Showing last valid stock plan; current stock inputs are invalid."
             self._set_stock_table_stale(True, stale_msg)
-            summary = self._summarize_issue_map(raw_issues, stale=True, stale_message=stale_msg)
+            summary = self._summarize_issue_map(input_issues, stale=True, stale_message=stale_msg)
             self._set_status(summary)
             if refresh_lock_states:
                 self._refresh_all_lock_states()
@@ -10510,7 +10643,7 @@ class ExperimentDesignDialog(QDialog):
             return False, {
                 "best": None,
                 "reason": summary,
-                "issues_by_key": raw_issues,
+                "issues_by_key": input_issues,
             }
 
         with _BusyUiContext(
@@ -11095,6 +11228,9 @@ class ExperimentDesignDialog(QDialog):
             if status.get("has_printed_progress"):
                 if not self.prepare_progress_policy_for_current_design():
                     return
+
+        if self._reject_invalid_volume_inputs(show_dialog=True):
+            return
 
         if self._can_reuse_current_generated_design():
             timer = getattr(self, "_auto_timer", None)
