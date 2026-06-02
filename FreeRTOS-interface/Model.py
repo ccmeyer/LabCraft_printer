@@ -343,9 +343,9 @@ class ExperimentModel(QObject):
             "use_subset_design": False,
             "allow_two_stock_solutions": False,
             "reduction_factor": 1,  # reserved; current generate is full factorial
-            "target_reaction_volume_nL": 500.0, # PRINTED volume budget
+            "target_reaction_volume_nL": 2000.0, # PRINTED volume budget
             "printed_volume_tolerance_nL": 50.0,
-            "final_reaction_volume_nL": 500.0, # includes non-printed (fill) volume
+            "final_reaction_volume_nL": 2000.0, # includes non-printed (fill) volume
             "fill_reagent_name": "Water",
             "fill_printing_mode": fill_printing_mode,
             "fill_droplet_volume_nL": fill_droplet_volume_nL,
@@ -1008,7 +1008,7 @@ class ExperimentModel(QObject):
         V_final = float(
             self.metadata.get(
                 "final_reaction_volume_nL",
-                self.metadata.get("target_reaction_volume_nL", 500.0),
+                self.metadata.get("target_reaction_volume_nL", 2000.0),
             )
         )
 
@@ -1339,7 +1339,7 @@ class ExperimentModel(QObject):
         
         # V_print = nominal printed volume. Tolerance is an acceptance band only;
         # it does not silently change the requested reaction volume metadata.
-        V_print = float(self.metadata.get("target_reaction_volume_nL", 500.0))
+        V_print = float(self.metadata.get("target_reaction_volume_nL", 2000.0))
         # V_final = the actual final well volume after prefill + printing
         V_final = float(self.metadata.get("final_reaction_volume_nL", V_print))
         try:
@@ -3372,7 +3372,7 @@ class ExperimentModel(QObject):
         printed_volume = float(
             printed_volume_nL
             if printed_volume_nL is not None
-            else self.metadata.get("target_reaction_volume_nL", 500.0)
+            else self.metadata.get("target_reaction_volume_nL", 2000.0)
         )
         final_volume = float(
             final_volume_nL
@@ -3996,7 +3996,7 @@ class ExperimentModel(QObject):
     def generate_experiment(self):
         """Enumerate the reaction space, compute droplet counts per stock, fill volumes,
         and aggregate totals. Emits experiment_generated(n, worst_nonfill_nL)."""
-        V = float(self.metadata.get("target_reaction_volume_nL", 500.0))
+        V = float(self.metadata.get("target_reaction_volume_nL", 2000.0))
         fill_dv = float(self.metadata.get("fill_droplet_volume_nL", 10.0))
         reps = int(self.metadata.get("replicates", 1))
 
@@ -4260,7 +4260,7 @@ class ExperimentModel(QObject):
 
         starting, units = start_lookup.get(key, (0.0, ""))
 
-        V_final = float(self.metadata.get("final_reaction_volume_nL", self.metadata.get("target_reaction_volume_nL", 500.0)))
+        V_final = float(self.metadata.get("final_reaction_volume_nL", self.metadata.get("target_reaction_volume_nL", 2000.0)))
         if V_final <= 0 or new_droplet_nL <= 0:
             return {"ok": False, "reason": "Invalid volumes."}
 
@@ -4865,7 +4865,7 @@ class ExperimentModel(QObject):
         c_stock = float(st["stock_concentration"])
         units = st.get("units", opt_obj.units)
         V_final = float(self.metadata.get("final_reaction_volume_nL",
-                                        self.metadata.get("target_reaction_volume_nL", 500.0)))
+                                        self.metadata.get("target_reaction_volume_nL", 2000.0)))
         option_mode = normalize_printing_mode(
             getattr(opt_obj, "printing_mode", None),
             fallback=infer_printing_mode_from_volume(getattr(opt_obj, "droplet_nL", new_droplet_nL)),
@@ -5587,7 +5587,7 @@ class ExperimentModel(QObject):
         """
         V_final_nL = float(self.metadata.get(
             "final_reaction_volume_nL",
-            self.metadata.get("target_reaction_volume_nL", 500.0)
+            self.metadata.get("target_reaction_volume_nL", 2000.0)
         ))
 
         # Stock rows (includes Fill)
@@ -5976,7 +5976,7 @@ class ExperimentModel(QObject):
         if df is None or df.empty or "nonfill_volume_nL" not in df.columns:
             return {"ok": False, "reason": "No reaction grid available to preview."}
 
-        V_print = float(self.metadata.get("target_reaction_volume_nL", 500.0))
+        V_print = float(self.metadata.get("target_reaction_volume_nL", 2000.0))
         old_fill_dv = float(self.metadata.get("fill_droplet_volume_nL", 10.0))
 
         # Per-reaction calculation of old/new fill drops
@@ -6552,9 +6552,9 @@ class ExperimentModel(QObject):
             "use_subset_design": False,   # <-- keep key consistent
             "allow_two_stock_solutions": False,
             "reduction_factor": 1,
-            "target_reaction_volume_nL": 500.0,
+            "target_reaction_volume_nL": 2000.0,
             "printed_volume_tolerance_nL": 50.0,
-            "final_reaction_volume_nL": 500.0,
+            "final_reaction_volume_nL": 2000.0,
             "fill_reagent_name": "Water",
             "fill_printing_mode": self._default_fill_printing_mode(),
             "fill_droplet_volume_nL": self._default_fill_droplet_volume_nl(),
@@ -10197,7 +10197,7 @@ class Model(QObject):
             c_stock = float(reagent.stock_solution.get_stock_concentration())
             v_final = float(self.experiment_model.metadata.get(
                 "final_reaction_volume_nL",
-                self.experiment_model.metadata.get("target_reaction_volume_nL", 500.0),
+                self.experiment_model.metadata.get("target_reaction_volume_nL", 2000.0),
             ))
             dv = float(self.experiment_model.metadata.get("fill_droplet_volume_nL", 10.0))
             # Prefer design stock table droplet volume if available

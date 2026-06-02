@@ -230,6 +230,18 @@ def _build_real_dialog():
     return ExperimentDesignDialog(ExperimentModel(prof=CURRENT_PROFILE), main_window)
 
 
+def test_experiment_designer_uses_printed_volume_label_and_2000_nl_defaults(qapp):
+    dialog = _build_real_dialog()
+    labels = {label.text() for label in dialog.findChildren(QLabel)}
+
+    assert "Printed Volume (nL)" in labels
+    assert "Target Reaction Volume (nL)" not in labels
+    assert dialog.v_spin.value() == pytest.approx(2000.0)
+    assert dialog.final_v_spin.value() == pytest.approx(2000.0)
+
+    dialog.close()
+
+
 def test_experiment_model_from_dict_keeps_legacy_rows_backward_compatible():
     model = ExperimentModel(prof=CURRENT_PROFILE)
     model.from_dict(

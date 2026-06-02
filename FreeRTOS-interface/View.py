@@ -7689,9 +7689,9 @@ class ExperimentImportWizard(QDialog):
         model: ExperimentModel,
         parent=None,
         *,
-        printed_volume_nL: float = 500.0,
+        printed_volume_nL: float = 2000.0,
         printed_volume_tolerance_nL: float = 50.0,
-        final_volume_nL: float = 500.0,
+        final_volume_nL: float = 2000.0,
         allow_two: bool = False,
     ):
         super().__init__(parent)
@@ -8414,13 +8414,13 @@ class ExperimentDesignDialog(QDialog):
         self.rep_spin.setValue(int(self.model.metadata.get("replicates", 1)))
         form.addRow(QLabel("Replicates"), self.rep_spin)
 
-        # Target reaction volume (nL)
+        # Printed volume (nL)
         self.v_spin = QDoubleSpinBox()
         self.v_spin.setDecimals(1)
         self.v_spin.setRange(1.0, 1_000_000.0)
-        self.v_spin.setValue(float(self.model.metadata.get("target_reaction_volume_nL", 500.0)))
+        self.v_spin.setValue(float(self.model.metadata.get("target_reaction_volume_nL", 2000.0)))
         self.v_spin.setSingleStep(50.0)
-        form.addRow(QLabel("Target Reaction Volume (nL)"), self.v_spin)
+        form.addRow(QLabel("Printed Volume (nL)"), self.v_spin)
         
         self.final_v_spin = QDoubleSpinBox()
         self.final_v_spin.setDecimals(1)
@@ -8428,7 +8428,7 @@ class ExperimentDesignDialog(QDialog):
         # default to metadata value or fall back to target if absent
         self.final_v_spin.setValue(float(self.model.metadata.get(
             "final_reaction_volume_nL",
-            self.model.metadata.get("target_reaction_volume_nL", 500.0)
+            self.model.metadata.get("target_reaction_volume_nL", 2000.0)
         )))
         self.final_v_spin.setSingleStep(50.0)
         form.addRow(QLabel("Final Reaction Volume (nL)"), self.final_v_spin)
@@ -9510,7 +9510,7 @@ class ExperimentDesignDialog(QDialog):
         printed_volume = (
             float(self.v_spin.value())
             if hasattr(self, "v_spin") and self.v_spin is not None
-            else float(getattr(self.model, "metadata", {}).get("target_reaction_volume_nL", 500.0))
+            else float(getattr(self.model, "metadata", {}).get("target_reaction_volume_nL", 2000.0))
         )
         final_volume = (
             float(self.final_v_spin.value())
@@ -10829,7 +10829,7 @@ class ExperimentDesignDialog(QDialog):
 
         self.exp_name_edit.setText(md.get("name", "Untitled"))
         self.rep_spin.setValue(int(md.get("replicates", 1)))
-        self.v_spin.setValue(float(md.get("target_reaction_volume_nL", 500.0)))
+        self.v_spin.setValue(float(md.get("target_reaction_volume_nL", 2000.0)))
         self.fill_name_edit.setText(md.get("fill_reagent_name", "Water"))
         fill_dv_value = float(md.get("fill_droplet_volume_nL", 10.0))
         fill_mode_value = normalize_printing_mode(
@@ -10848,7 +10848,7 @@ class ExperimentDesignDialog(QDialog):
         )
         self.final_v_spin.setValue(float(md.get(
             "final_reaction_volume_nL",
-            md.get("target_reaction_volume_nL", 500.0)
+            md.get("target_reaction_volume_nL", 2000.0)
         )))
         self.volume_tolerance_spin.setValue(float(md.get("printed_volume_tolerance_nL", 50.0)))
         self.allow_two_chk.setChecked(bool(md.get("allow_two_stock_solutions", False)))
@@ -10926,9 +10926,9 @@ class ExperimentDesignDialog(QDialog):
                 self.model.metadata = {
                     "name": temp_name,
                     "replicates": 1,
-                    "target_reaction_volume_nL": 500.0,
+                    "target_reaction_volume_nL": 2000.0,
                     "printed_volume_tolerance_nL": 50.0,
-                    "final_reaction_volume_nL": 500.0,
+                    "final_reaction_volume_nL": 2000.0,
                     "fill_reagent_name": "Water",
                     "fill_printing_mode": PRINTING_MODE_DROPLET,
                     "fill_droplet_volume_nL": 10.0,

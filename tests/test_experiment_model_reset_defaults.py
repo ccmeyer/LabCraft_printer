@@ -10,6 +10,8 @@ def test_reset_experiment_model_uses_current_profile_fill_default():
 
     assert em.metadata["fill_droplet_volume_nL"] == 10.0
     assert em.metadata["fill_printing_mode"] == "droplet"
+    assert em.metadata["target_reaction_volume_nL"] == 2000.0
+    assert em.metadata["final_reaction_volume_nL"] == 2000.0
 
 
 def test_reset_experiment_model_uses_legacy_profile_fill_default():
