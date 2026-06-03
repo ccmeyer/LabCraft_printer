@@ -22,6 +22,7 @@ PLATE_ROWS = list("ABCDEFGHIJKLMNOP")
 PLATE_COLUMNS = list(range(1, 25))
 WELL_RE = re.compile(r"^([A-P])([1-9]|1[0-9]|2[0-4])$")
 UNKEYED_CONDITION_ID = "unkeyed"
+OUTLIER_ROBUST_Z_THRESHOLD = 3.5
 BASE_MERGED_COLUMNS = {
     "time",
     "time_seconds",
@@ -48,6 +49,11 @@ ANALYSIS_COLUMNS = {
     "condition_endpoint_cv_percent",
     "condition_endpoint_n",
     "condition_percent_difference_rfu",
+    "condition_endpoint_median_rfu",
+    "condition_endpoint_mad_rfu",
+    "condition_endpoint_robust_zscore",
+    "is_endpoint_outlier",
+    "outlier_reason",
 }
 REQUIRED_MERGED_COLUMNS = {
     "time_seconds",
@@ -65,11 +71,15 @@ class AnalysisResult:
     endpoint_csv: Path
     composition_summary_csv: Path
     timecourse_summary_csv: Path
+    outlier_summary_csv: Path
     absolute_heatmap_csvs: list[Path]
     absolute_heatmap_pngs: list[Path]
     percent_difference_heatmap_csvs: list[Path]
     percent_difference_heatmap_pngs: list[Path]
+    outlier_heatmap_csvs: list[Path]
+    outlier_heatmap_pngs: list[Path]
     timecourse_plot_pngs: list[Path]
+    outlier_count: int
     condition_columns: list[str]
     endpoint_rows: int
     composition_rows: int
@@ -286,6 +296,7 @@ def compute_endpoint_by_well(
         )
         / endpoint.loc[eligible, "condition_endpoint_mean_rfu"]
     )
+    endpoint = add_endpoint_outlier_flags(endpoint)
 
     ordered_columns = (
         [
@@ -308,6 +319,11 @@ def compute_endpoint_by_well(
             "condition_endpoint_cv_percent",
             "condition_endpoint_n",
             "condition_percent_difference_rfu",
+            "condition_endpoint_median_rfu",
+            "condition_endpoint_mad_rfu",
+            "condition_endpoint_robust_zscore",
+            "is_endpoint_outlier",
+            "outlier_reason",
         ]
     )
     return endpoint[ordered_columns].sort_values(
@@ -370,6 +386,52 @@ def summarize_compositions(endpoint: pd.DataFrame, condition_columns: list[str])
     ).reset_index(drop=True)
 
 
+def add_endpoint_outlier_flags(endpoint: pd.DataFrame) -> pd.DataFrame:
+    result = endpoint.copy()
+    result["condition_endpoint_median_rfu"] = np.nan
+    result["condition_endpoint_mad_rfu"] = np.nan
+    result["condition_endpoint_robust_zscore"] = np.nan
+    result["is_endpoint_outlier"] = False
+    result["outlier_reason"] = ""
+
+    keyed = result.loc[
+        (result["condition_id"] != UNKEYED_CONDITION_ID)
+        & result["is_keyed"].astype(bool)
+    ]
+    for (_condition_id, _fluorophore), group in keyed.groupby(["condition_id", "fluorophore"]):
+        if len(group) < 3:
+            continue
+
+        values = group["endpoint_rfu"].astype(float)
+        median = float(values.median())
+        mad = float((values - median).abs().median())
+        result.loc[group.index, "condition_endpoint_median_rfu"] = median
+        result.loc[group.index, "condition_endpoint_mad_rfu"] = mad
+
+        if mad == 0:
+            differences = values - median
+            robust_z = differences.map(
+                lambda value: 0.0 if value == 0 else float(np.inf if value > 0 else -np.inf)
+            )
+            outlier_mask = differences != 0
+            outlier_indices = group.index[outlier_mask.to_numpy()]
+            result.loc[group.index, "condition_endpoint_robust_zscore"] = robust_z
+            result.loc[outlier_indices, "is_endpoint_outlier"] = True
+            result.loc[outlier_indices, "outlier_reason"] = "mad_zero_nonmedian"
+            continue
+
+        robust_z = 0.6745 * (values - median) / mad
+        outlier_mask = robust_z.abs() >= OUTLIER_ROBUST_Z_THRESHOLD
+        outlier_indices = group.index[outlier_mask.to_numpy()]
+        result.loc[group.index, "condition_endpoint_robust_zscore"] = robust_z
+        result.loc[outlier_indices, "is_endpoint_outlier"] = True
+        result.loc[outlier_indices, "outlier_reason"] = (
+            f"robust_z_abs_ge_{OUTLIER_ROBUST_Z_THRESHOLD:g}"
+        )
+
+    return result
+
+
 def summarize_condition_timecourses(dataframe: pd.DataFrame, condition_columns: list[str]) -> pd.DataFrame:
     keyed = dataframe.loc[dataframe["condition_id"] != UNKEYED_CONDITION_ID].copy()
     if keyed.empty:
@@ -429,15 +491,24 @@ def write_condition_timecourse_plot(
     condition_label: str,
 ) -> None:
     fig, ax = plt.subplots(figsize=(9, 5), constrained_layout=True)
+    outlier_label_used = False
 
     for _well, well_df in replicate_data.groupby("well"):
         well_df = well_df.sort_values("time_seconds")
+        is_outlier = bool(well_df.get("is_endpoint_outlier", pd.Series(False, index=well_df.index)).any())
+        line_kwargs = {
+            "color": "tab:red" if is_outlier else "0.35",
+            "alpha": 0.9 if is_outlier else 0.25,
+            "linewidth": 1.6 if is_outlier else 0.9,
+            "zorder": 3 if is_outlier else 1,
+        }
+        if is_outlier and not outlier_label_used:
+            line_kwargs["label"] = "endpoint outlier"
+            outlier_label_used = True
         ax.plot(
             well_df["time_minutes"],
             well_df["rfu"],
-            color="0.35",
-            alpha=0.25,
-            linewidth=0.9,
+            **line_kwargs,
         )
 
     summary_sorted = summary_data.sort_values("time_seconds")
@@ -460,6 +531,21 @@ def build_plate_heatmap(endpoint: pd.DataFrame, fluorophore: str, value_column: 
     return matrix.reindex(index=PLATE_ROWS, columns=PLATE_COLUMNS)
 
 
+def build_outlier_heatmap(endpoint: pd.DataFrame, fluorophore: str) -> pd.DataFrame:
+    channel = endpoint.loc[endpoint["fluorophore"] == fluorophore].copy()
+    evaluated = (
+        channel["is_keyed"].astype(bool)
+        & (channel["condition_id"] != UNKEYED_CONDITION_ID)
+        & channel["condition_endpoint_median_rfu"].notna()
+    )
+    channel["endpoint_outlier_count"] = np.nan
+    channel.loc[evaluated, "endpoint_outlier_count"] = channel.loc[
+        evaluated, "is_endpoint_outlier"
+    ].astype(int)
+    matrix = channel.pivot(index="plate_row", columns="plate_col", values="endpoint_outlier_count")
+    return matrix.reindex(index=PLATE_ROWS, columns=PLATE_COLUMNS)
+
+
 def write_plate_heatmap_plot(
     matrix: pd.DataFrame,
     path: str | Path,
@@ -468,6 +554,8 @@ def write_plate_heatmap_plot(
     label: str,
     cmap: str,
     center: float | None = None,
+    vmin: float | None = None,
+    vmax: float | None = None,
 ) -> None:
     fig, ax = plt.subplots(figsize=(12, 7), constrained_layout=True)
     kwargs: dict[str, object] = {
@@ -479,6 +567,10 @@ def write_plate_heatmap_plot(
     }
     if center is not None:
         kwargs["center"] = center
+    if vmin is not None:
+        kwargs["vmin"] = vmin
+    if vmax is not None:
+        kwargs["vmax"] = vmax
     sns.heatmap(matrix, **kwargs)
     ax.set_title(title)
     ax.set_xlabel("Plate column")
@@ -497,9 +589,11 @@ def analyze_merged_tidy_csv(
     output_root.mkdir(parents=True, exist_ok=True)
     absolute_dir = output_root / "heatmaps_absolute_rfu"
     percent_dir = output_root / "heatmaps_condition_percent_difference"
+    outlier_dir = output_root / "heatmaps_endpoint_outliers"
     timecourse_dir = output_root / "timecourses"
     absolute_dir.mkdir(parents=True, exist_ok=True)
     percent_dir.mkdir(parents=True, exist_ok=True)
+    outlier_dir.mkdir(parents=True, exist_ok=True)
     timecourse_dir.mkdir(parents=True, exist_ok=True)
 
     merged = load_merged_tidy(merged_csv)
@@ -515,16 +609,26 @@ def analyze_merged_tidy_csv(
     endpoint_csv = output_root / "endpoint_by_well.csv"
     composition_summary_csv = output_root / "composition_summary.csv"
     timecourse_summary_csv = output_root / "timecourse_summary.csv"
+    outlier_summary_csv = output_root / "outlier_summary.csv"
     endpoint.to_csv(endpoint_csv, index=False)
     summary.to_csv(composition_summary_csv, index=False)
     timecourse_summary.to_csv(timecourse_summary_csv, index=False)
+    endpoint.loc[endpoint["is_endpoint_outlier"].astype(bool)].to_csv(outlier_summary_csv, index=False)
 
     absolute_csvs: list[Path] = []
     absolute_pngs: list[Path] = []
     percent_csvs: list[Path] = []
     percent_pngs: list[Path] = []
+    outlier_csvs: list[Path] = []
+    outlier_pngs: list[Path] = []
     timecourse_pngs: list[Path] = []
-    keyed_prepared = prepared.loc[prepared["condition_id"] != UNKEYED_CONDITION_ID]
+    endpoint_flags = endpoint[["well", "fluorophore", "is_endpoint_outlier"]]
+    keyed_prepared = prepared.loc[prepared["condition_id"] != UNKEYED_CONDITION_ID].merge(
+        endpoint_flags,
+        on=["well", "fluorophore"],
+        how="left",
+    )
+    keyed_prepared["is_endpoint_outlier"] = keyed_prepared["is_endpoint_outlier"].fillna(False)
     for (condition_id, fluorophore), plot_summary in timecourse_summary.groupby(["condition_id", "fluorophore"]):
         plot_replicates = keyed_prepared.loc[
             (keyed_prepared["condition_id"] == condition_id)
@@ -578,16 +682,36 @@ def analyze_merged_tidy_csv(
         percent_csvs.append(percent_csv)
         percent_pngs.append(percent_png)
 
+        outlier_matrix = build_outlier_heatmap(endpoint, fluorophore)
+        outlier_csv = outlier_dir / f"{safe_name}_endpoint_outlier_count.csv"
+        outlier_png = outlier_dir / f"{safe_name}_endpoint_outlier_count.png"
+        outlier_matrix.to_csv(outlier_csv)
+        write_plate_heatmap_plot(
+            outlier_matrix,
+            outlier_png,
+            title=f"{fluorophore} endpoint outliers",
+            label="Endpoint outlier count",
+            cmap="Reds",
+            vmin=0.0,
+            vmax=1.0,
+        )
+        outlier_csvs.append(outlier_csv)
+        outlier_pngs.append(outlier_png)
+
     return AnalysisResult(
         output_dir=output_root,
         endpoint_csv=endpoint_csv,
         composition_summary_csv=composition_summary_csv,
         timecourse_summary_csv=timecourse_summary_csv,
+        outlier_summary_csv=outlier_summary_csv,
         absolute_heatmap_csvs=absolute_csvs,
         absolute_heatmap_pngs=absolute_pngs,
         percent_difference_heatmap_csvs=percent_csvs,
         percent_difference_heatmap_pngs=percent_pngs,
+        outlier_heatmap_csvs=outlier_csvs,
+        outlier_heatmap_pngs=outlier_pngs,
         timecourse_plot_pngs=timecourse_pngs,
+        outlier_count=int(endpoint["is_endpoint_outlier"].sum()),
         condition_columns=condition_columns,
         endpoint_rows=len(endpoint),
         composition_rows=len(summary),
