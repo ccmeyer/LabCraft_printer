@@ -18792,6 +18792,8 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self.single_candidate_max_span_psi = 0.30
         self.single_candidate_confirmation_reps = int(max(1, self.min_reps))
         self.single_candidate_center_std_tol_px = 8.0
+        self.single_candidate_center_retry_std_tol_px = 15.0
+        self.single_candidate_confirmation_retry_limit = 1
         self.single_candidate_residue_persistent_area_px = int(self.nozzle_area_threshold)
         self.single_candidate_residue_moderate_area_px = int(max(1000, self.nozzle_area_threshold // 4))
         self.single_candidate_bottom_edge_margin_px = 24
@@ -18807,6 +18809,9 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self._single_candidate_candidate_pressure = None
         self._single_candidate_selected_pressure = None
         self._single_candidate_confirmation_summary = {}
+        self._single_candidate_confirmation_retry_count = 0
+        self._single_candidate_confirmation_retry_history = []
+        self._single_candidate_triage_summary = {}
         self._single_candidate_residue_checks = []
         self._single_candidate_satellite_checks = []
         self._single_candidate_satellite_probe_in_progress = False
@@ -19001,6 +19006,8 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             self._discard_next = False
             self._single_candidate_satellite_probe_in_progress = False
             self._single_candidate_pending_satellite_probe = None
+            self._single_candidate_confirmation_retry_count = 0
+            self._single_candidate_triage_summary = {}
             self._single_candidate_attempt_count = int(
                 max(0, getattr(self, "_single_candidate_attempt_count", 0))
             ) + 1
@@ -19482,6 +19489,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 if verdict == "single"
                 else {}
             )
+            self._single_candidate_triage_summary = dict(triage_summary or {})
             decision["triage_verdict"] = str(verdict)
             decision["failure_kind"] = "high" if verdict == "multiple" else "low"
             decision["suggested_direction"] = "down" if verdict == "multiple" else "up"
@@ -19509,13 +19517,14 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 self.replicates_target = int(
                     max(1, getattr(self, "single_candidate_confirmation_reps", self.min_reps))
                 )
-                if total < self.replicates_target:
-                    self.stageChanged.emit(
-                        f"Candidate single pressure {self._current_pressure:.3f} psi; "
-                        f"confirming ({total}/{self.replicates_target})"
-                    )
-                    self.continueReplicate.emit()
-                    return
+                self._single_candidate_confirmation_retry_count = 0
+                self.reps = []
+                self.stageChanged.emit(
+                    f"Candidate single pressure {self._current_pressure:.3f} psi; "
+                    f"confirming (0/{self.replicates_target})"
+                )
+                self.continueReplicate.emit()
+                return
             else:
                 direction = "down" if verdict == "multiple" else "up"
                 self._store_pressure_summary(verdict, escalated=False, decision=decision)
@@ -19524,10 +19533,20 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
 
         summary = self._build_single_candidate_confirmation_summary(self.reps)
         rejection = self._single_candidate_rejection_decision(summary)
+        stability = self._single_candidate_confirmation_stability(summary)
+        summary["confirmation_stability_status"] = str(stability.get("status", ""))
+        summary["confirmation_retry_used"] = bool(
+            getattr(self, "_single_candidate_confirmation_retry_count", 0) > 0
+        )
+        summary["confirmation_retry_count"] = int(
+            max(0, getattr(self, "_single_candidate_confirmation_retry_count", 0))
+        )
         decision.update(
             {
                 "reason": "single_candidate_confirmation",
                 "confirmation_summary": dict(summary),
+                "confirmation_stability_status": str(stability.get("status", "")),
+                "confirmation_retry_used": bool(summary.get("confirmation_retry_used", False)),
                 "rejection_cause": str(rejection.get("cause", "")),
                 "failure_kind": str(rejection.get("failure_kind", "")),
                 "suggested_direction": str(rejection.get("direction", "up")),
@@ -19547,7 +19566,43 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             )
             return
 
-        if self._single_candidate_confirmation_passes(summary):
+        if bool(stability.get("can_retry", False)):
+            retry_index = int(
+                max(0, getattr(self, "_single_candidate_confirmation_retry_count", 0))
+            ) + 1
+            retry_record = {
+                "pressure_psi": float(self._current_pressure),
+                "retry_index": int(retry_index),
+                "reason": "center_std_retry_window",
+                "center_max_std_px": summary.get("center_max_std_px"),
+                "center_std_limit_px": summary.get("center_std_limit_px"),
+                "center_retry_std_limit_px": summary.get("center_retry_std_limit_px"),
+                "summary": dict(summary),
+            }
+            history = list(getattr(self, "_single_candidate_confirmation_retry_history", []) or [])
+            history.append(retry_record)
+            self._single_candidate_confirmation_retry_history = history
+            self._single_candidate_confirmation_retry_count = int(retry_index)
+            self._record_decision(
+                "single_candidate_confirmation_retry",
+                {
+                    "pressure_psi": float(self._current_pressure),
+                    "retry_index": int(retry_index),
+                    "summary": dict(summary),
+                },
+            )
+            self.reps = []
+            self.replicates_target = int(
+                max(1, getattr(self, "single_candidate_confirmation_reps", self.min_reps))
+            )
+            self.stageChanged.emit(
+                f"Candidate pressure {self._current_pressure:.3f} psi is clean but near "
+                "the stability limit; retrying confirmation"
+            )
+            self.continueReplicate.emit()
+            return
+
+        if bool(stability.get("passes", False)):
             self._single_candidate_selected_pressure = float(self._current_pressure)
             self._single_candidate_confirmation_summary = dict(summary)
             self._store_pressure_summary("single", escalated=total > self.min_reps, decision=decision)
@@ -19556,6 +19611,10 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 {
                     "pressure_psi": float(self._current_pressure),
                     "confirmation_summary": dict(summary),
+                    "confirmation_retry_used": bool(summary.get("confirmation_retry_used", False)),
+                    "confirmation_retry_history": list(
+                        getattr(self, "_single_candidate_confirmation_retry_history", []) or []
+                    ),
                 },
             )
             self.stageChanged.emit(
@@ -19934,11 +19993,15 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 pass
 
         std_x = std_y = max_std = None
+        range_x = range_y = max_range = None
         if centers:
             arr = np.array(centers, dtype=float)
             std_x = float(np.std(arr[:, 0]))
             std_y = float(np.std(arr[:, 1]))
             max_std = float(max(std_x, std_y))
+            range_x = float(np.max(arr[:, 0]) - np.min(arr[:, 0]))
+            range_y = float(np.max(arr[:, 1]) - np.min(arr[:, 1]))
+            max_range = float(max(range_x, range_y))
 
         return {
             "total_reps": int(len(reps)),
@@ -19948,7 +20011,13 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             "center_std_x_px": std_x,
             "center_std_y_px": std_y,
             "center_max_std_px": max_std,
+            "center_range_x_px": range_x,
+            "center_range_y_px": range_y,
+            "center_max_range_px": max_range,
             "center_std_limit_px": float(getattr(self, "single_candidate_center_std_tol_px", 8.0)),
+            "center_retry_std_limit_px": float(
+                getattr(self, "single_candidate_center_retry_std_tol_px", 15.0)
+            ),
             "residue_hits": int(residue_hits),
             "wet_hits": int(wet_hits),
             "nozzle_contact_hits": int(contact_hits),
@@ -19969,7 +20038,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             ),
         }
 
-    def _single_candidate_confirmation_passes(self, summary: dict) -> bool:
+    def _single_candidate_confirmation_is_clean_single(self, summary: dict) -> bool:
         total = int((summary or {}).get("total_reps", 0))
         required = int(max(1, getattr(self, "single_candidate_confirmation_reps", self.min_reps)))
         if total < required:
@@ -19988,10 +20057,69 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             return False
         if int((summary or {}).get("small_single_suspect_hits", 0)) > 0:
             return False
+        if int((summary or {}).get("high_pressure_hits", 0)) > 0:
+            return False
+        if int((summary or {}).get("low_pressure_hits", 0)) > 0:
+            return False
+        counts = dict((summary or {}).get("class_counts") or {})
+        if int(counts.get("multiple", 0) or 0) > 0:
+            return False
+        if int(counts.get("none", 0) or 0) > 0:
+            return False
+        return True
+
+    def _single_candidate_confirmation_stability(self, summary: dict) -> dict:
+        strict_limit = float((summary or {}).get(
+            "center_std_limit_px",
+            getattr(self, "single_candidate_center_std_tol_px", 8.0),
+        ))
+        retry_limit = float((summary or {}).get(
+            "center_retry_std_limit_px",
+            getattr(self, "single_candidate_center_retry_std_tol_px", 15.0),
+        ))
+        retry_count = int(max(0, getattr(self, "_single_candidate_confirmation_retry_count", 0)))
+        retry_limit_count = int(max(
+            0,
+            getattr(self, "single_candidate_confirmation_retry_limit", 1),
+        ))
+        clean = self._single_candidate_confirmation_is_clean_single(summary)
+        status = {
+            "clean_all_single": bool(clean),
+            "passes": False,
+            "can_retry": False,
+            "status": "not_clean",
+            "center_std_limit_px": float(strict_limit),
+            "center_retry_std_limit_px": float(retry_limit),
+            "confirmation_retry_count": int(retry_count),
+            "confirmation_retry_limit": int(retry_limit_count),
+        }
+        if not clean:
+            return status
         max_std = (summary or {}).get("center_max_std_px")
         if max_std is None:
-            return False
-        return bool(float(max_std) <= float((summary or {}).get("center_std_limit_px", 8.0)))
+            status["status"] = "missing_center_std"
+            return status
+        max_std = float(max_std)
+        if max_std <= strict_limit:
+            status["passes"] = True
+            status["status"] = "strict_pass"
+            return status
+        if max_std <= retry_limit:
+            if retry_count > 0:
+                status["passes"] = True
+                status["status"] = "retry_pass"
+                return status
+            if retry_count < retry_limit_count:
+                status["can_retry"] = True
+                status["status"] = "retry_window"
+                return status
+            status["status"] = "retry_limit_exhausted"
+            return status
+        status["status"] = "unstable_fail"
+        return status
+
+    def _single_candidate_confirmation_passes(self, summary: dict) -> bool:
+        return bool(self._single_candidate_confirmation_stability(summary).get("passes", False))
 
     def _single_candidate_rejection_decision(self, summary: dict) -> dict:
         counts = dict((summary or {}).get("class_counts") or {})
@@ -20249,6 +20377,13 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 "loop_escape": dict(getattr(self, "_single_candidate_last_loop_escape", {}) or {}),
                 "residue_checks": list(getattr(self, "_single_candidate_residue_checks", []) or []),
                 "satellite_checks": list(getattr(self, "_single_candidate_satellite_checks", []) or []),
+                "confirmation_retry_used": bool(
+                    getattr(self, "_single_candidate_confirmation_retry_count", 0) > 0
+                ),
+                "confirmation_retry_history": list(
+                    getattr(self, "_single_candidate_confirmation_retry_history", []) or []
+                ),
+                "triage_summary": dict(getattr(self, "_single_candidate_triage_summary", {}) or {}),
             },
         )
         self.stageChanged.emit(str(message))
@@ -20621,6 +20756,13 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                     "loop_escape": dict(getattr(self, "_single_candidate_last_loop_escape", {}) or {}),
                     "residue_checks": list(getattr(self, "_single_candidate_residue_checks", []) or []),
                     "satellite_checks": list(getattr(self, "_single_candidate_satellite_checks", []) or []),
+                    "confirmation_retry_used": bool(
+                        getattr(self, "_single_candidate_confirmation_retry_count", 0) > 0
+                    ),
+                    "confirmation_retry_history": list(
+                        getattr(self, "_single_candidate_confirmation_retry_history", []) or []
+                    ),
+                    "triage_summary": dict(getattr(self, "_single_candidate_triage_summary", {}) or {}),
                 },
             )
             self.calibrationError.emit(msg)
@@ -20648,6 +20790,13 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             "pressure_scan_mode": "single_candidate",
             "selected_pressure_psi": float(p),
             "confirmation_summary": dict(getattr(self, "_single_candidate_confirmation_summary", {}) or {}),
+            "confirmation_retry_used": bool(
+                getattr(self, "_single_candidate_confirmation_retry_count", 0) > 0
+            ),
+            "confirmation_retry_history": list(
+                getattr(self, "_single_candidate_confirmation_retry_history", []) or []
+            ),
+            "triage_summary": dict(getattr(self, "_single_candidate_triage_summary", {}) or {}),
             "tested_pressure_count": int(
                 len(set(round(float(v), 5) for v in list(getattr(self, "_single_candidate_tested_pressures", []) or [])))
             ),

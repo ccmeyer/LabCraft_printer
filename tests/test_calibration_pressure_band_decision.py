@@ -146,6 +146,8 @@ def _build_single_candidate_proc(reps):
     proc.replicates_target = 1
     proc.single_candidate_confirmation_reps = 5
     proc.single_candidate_center_std_tol_px = 8.0
+    proc.single_candidate_center_retry_std_tol_px = 15.0
+    proc.single_candidate_confirmation_retry_limit = 1
     proc.single_candidate_step_psi = 0.02
     proc.single_candidate_max_pressures = 12
     proc.single_candidate_max_span_psi = 0.30
@@ -169,6 +171,9 @@ def _build_single_candidate_proc(reps):
     proc._single_candidate_candidate_pressure = None
     proc._single_candidate_selected_pressure = None
     proc._single_candidate_confirmation_summary = {}
+    proc._single_candidate_confirmation_retry_count = 0
+    proc._single_candidate_confirmation_retry_history = []
+    proc._single_candidate_triage_summary = {}
     proc._single_candidate_residue_checks = []
     proc._single_candidate_satellite_checks = []
     proc._single_candidate_satellite_probe_in_progress = False
@@ -249,6 +254,8 @@ def test_single_candidate_triage_single_collects_confirmation_reps():
 
     assert proc._single_candidate_confirming is True
     assert proc.replicates_target == 5
+    assert proc.reps == []
+    assert proc._single_candidate_triage_summary["single_count"] == 1
     assert proc.continueReplicate.calls
     assert proc.continueScan.calls == []
 
@@ -274,7 +281,99 @@ def test_single_candidate_confirmation_finalizes_degenerate_band():
     assert payload["primary_band"] == [1.0, 1.0]
     assert payload["single_bands"] == [[1.0, 1.0]]
     assert payload["lock_pressure_for_trajectory"] is True
+    assert payload["confirmation_retry_used"] is False
+    assert payload["confirmation_summary"]["confirmation_stability_status"] == "strict_pass"
     assert persisted and persisted[0]["primary_band"] == [1.0, 1.0]
+
+
+def test_single_candidate_confirmation_retry_window_retries_same_pressure_once():
+    proc = _build_single_candidate_proc(
+        [_rep("single", center=(100, 200 + i * 10)) for i in range(5)]
+    )
+    proc._single_candidate_confirming = True
+    proc.replicates_target = 5
+
+    proc.onDecide()
+
+    assert proc._single_candidate_confirmation_retry_count == 1
+    assert proc._single_candidate_confirmation_retry_history
+    assert proc._single_candidate_confirmation_retry_history[-1]["reason"] == "center_std_retry_window"
+    assert proc.reps == []
+    assert proc.replicates_target == 5
+    assert proc.continueReplicate.calls
+    assert proc.continueScan.calls == []
+    assert proc.finalize.calls == []
+
+
+def test_single_candidate_retry_confirmation_within_relaxed_limit_finalizes():
+    proc = _build_single_candidate_proc(
+        [_rep("single", center=(100, 200 + i * 10)) for i in range(5)]
+    )
+    proc._single_candidate_confirming = True
+    proc._single_candidate_confirmation_retry_count = 1
+    proc._single_candidate_confirmation_retry_history = [
+        {"pressure_psi": 1.0, "retry_index": 1, "reason": "center_std_retry_window"}
+    ]
+    proc.replicates_target = 5
+
+    proc.onDecide()
+    proc.onCalibrationCompleted()
+
+    assert proc.finalize.calls
+    payload = proc.calibrationDataUpdated.calls[0][0][0]["result"]
+    assert payload["confirmation_retry_used"] is True
+    assert payload["confirmation_summary"]["confirmation_stability_status"] == "retry_pass"
+    assert payload["confirmation_summary"]["center_max_std_px"] <= 15.0
+
+
+def test_single_candidate_retry_confirmation_above_relaxed_limit_rejects():
+    proc = _build_single_candidate_proc(
+        [_rep("single", center=(100, 200 + i * 30)) for i in range(5)]
+    )
+    proc._single_candidate_confirming = True
+    proc._single_candidate_confirmation_retry_count = 1
+    proc._single_candidate_confirmation_retry_history = [
+        {"pressure_psi": 1.0, "retry_index": 1, "reason": "center_std_retry_window"}
+    ]
+    proc.replicates_target = 5
+
+    proc.onDecide()
+
+    assert proc._next_pressure == 1.02
+    assert proc.continueScan.calls
+    assert proc.finalize.calls == []
+
+
+def test_single_candidate_confirmation_above_retry_window_rejects_immediately():
+    proc = _build_single_candidate_proc(
+        [_rep("single", center=(100, 200 + i * 30)) for i in range(5)]
+    )
+    proc._single_candidate_confirming = True
+    proc.replicates_target = 5
+
+    proc.onDecide()
+
+    assert proc._single_candidate_confirmation_retry_count == 0
+    assert proc._single_candidate_confirmation_retry_history == []
+    assert proc._next_pressure == 1.02
+    assert proc.continueScan.calls
+    assert proc.finalize.calls == []
+
+
+def test_single_candidate_non_clean_confirmation_does_not_use_retry_path():
+    proc = _build_single_candidate_proc(
+        [_rep("single", center=(100, 200 + i * 10)) for i in range(4)] + [_rep("multiple")]
+    )
+    proc._single_candidate_confirming = True
+    proc.replicates_target = 5
+
+    proc.onDecide()
+
+    assert proc._single_candidate_confirmation_retry_count == 0
+    assert proc._single_candidate_confirmation_retry_history == []
+    assert proc._next_pressure == 0.98
+    assert proc.continueScan.calls
+    assert proc.finalize.calls == []
 
 
 def test_single_candidate_unstable_confirmation_rejects_and_steps_up():
