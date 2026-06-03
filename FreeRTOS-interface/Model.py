@@ -954,7 +954,9 @@ class ExperimentModel(QObject):
         plan: SingleStockPlan,
         *,
         final_volume_nL: float,
+        targets_final: Optional[List[float]] = None,
     ) -> _PlanAccuracyScore:
+        target_values = targets_final if targets_final is not None else getattr(opt, "targets", []) or []
         rows = [
             self._evaluate_single_forced_target(
                 t_final=float(t_final),
@@ -964,7 +966,7 @@ class ExperimentModel(QObject):
                 final_volume_nL=float(final_volume_nL),
                 units=str(plan.units or getattr(opt, "units", "")),
             )
-            for t_final in getattr(opt, "targets", []) or []
+            for t_final in target_values
         ]
         return self._summarize_plan_accuracy_rows(
             rows,
@@ -978,7 +980,9 @@ class ExperimentModel(QObject):
         plan: TwoStockPlan,
         *,
         final_volume_nL: float,
+        targets_final: Optional[List[float]] = None,
     ) -> _PlanAccuracyScore:
+        target_values = targets_final if targets_final is not None else getattr(opt, "targets", []) or []
         rows = [
             self._evaluate_two_stock_target(
                 t_final=float(t_final),
@@ -991,7 +995,7 @@ class ExperimentModel(QObject):
                 final_volume_nL=float(final_volume_nL),
                 units=str(plan.units or getattr(opt, "units", "")),
             )
-            for t_final in getattr(opt, "targets", []) or []
+            for t_final in target_values
         ]
         return self._summarize_plan_accuracy_rows(
             rows,
@@ -1042,6 +1046,53 @@ class ExperimentModel(QObject):
             if well_id not in (None, ""):
                 return f"well {well_id}"
         return f"row {int(index) + 1}"
+
+    def _additional_targets_by_key(self) -> Dict[Tuple[str, Optional[str]], List[float]]:
+        targets_by_key: Dict[Tuple[str, Optional[str]], Set[float]] = {}
+        for condition in self.additional_conditions:
+            for key, target in (condition.targets or {}).items():
+                targets_by_key.setdefault(key, set()).add(float(target))
+        return {
+            key: sorted(values)
+            for key, values in targets_by_key.items()
+        }
+
+    def _effective_targets_for_key(
+        self,
+        key: Tuple[str, Optional[str]],
+        opt: OptionSpec,
+    ) -> List[float]:
+        values = {
+            self._normalize_target_key(float(target))
+            for target in (getattr(opt, "targets", []) or [])
+        }
+        for target in self._additional_targets_by_key().get(key, []):
+            values.add(self._normalize_target_key(float(target)))
+        return sorted(values)
+
+    def _additional_condition_row_label(self, condition_index: int, replicate: int = 1) -> str:
+        label = ""
+        if 0 <= int(condition_index) < len(self.additional_conditions):
+            label = str(self.additional_conditions[int(condition_index)].label or "").strip()
+        if not label:
+            label = f"Condition {int(condition_index) + 1}"
+        if int(replicate) > 1:
+            return f"additional condition '{label}' replicate {int(replicate)}"
+        return f"additional condition '{label}'"
+
+    def _additional_condition_row_targets(self) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        for condition_index, condition in enumerate(self.additional_conditions):
+            for replicate in range(1, int(condition.replicates) + 1):
+                rows.append({
+                    "row_index": len(rows),
+                    "condition_index": int(condition_index),
+                    "condition_label": str(condition.label),
+                    "replicate": int(replicate),
+                    "row_label": self._additional_condition_row_label(condition_index, replicate),
+                    "reaction": dict(condition.targets or {}),
+                })
+        return rows
 
     @staticmethod
     def _format_volume_contributors(contributors: List[Dict[str, Any]], *, limit: int = 4) -> str:
@@ -1138,6 +1189,90 @@ class ExperimentModel(QObject):
             "unconstrained_reagents": list(worst["unconstrained_reagents"]),
         }
 
+    def _additional_max_stock_volume_diagnostic(
+        self,
+        *,
+        printed_volume_nL: float,
+        final_volume_nL: float,
+    ) -> Optional[Dict[str, Any]]:
+        rows = self._additional_condition_row_targets()
+        if not rows:
+            return None
+
+        worst: Optional[Dict[str, Any]] = None
+        for row in rows:
+            total = 0.0
+            contributors: List[Dict[str, Any]] = []
+            unconstrained: List[str] = []
+
+            for key, target in (row.get("reaction") or {}).items():
+                opt = self._get_option_for_key(key)
+                if opt is None:
+                    continue
+                starting = float(getattr(opt, "starting_conc", 0.0) or 0.0)
+                target_adjusted = max(0.0, float(target) - starting)
+                if target_adjusted <= 1e-12:
+                    continue
+
+                max_stock = getattr(opt, "max_stock_conc", None)
+                if max_stock is None or float(max_stock) <= 0.0:
+                    unconstrained.append(self._design_key_label(key))
+                    continue
+
+                volume_nL = (target_adjusted / float(max_stock)) * float(final_volume_nL)
+                total += volume_nL
+                contributors.append({
+                    "key": key,
+                    "label": self._design_key_label(key),
+                    "target": float(target),
+                    "target_adjusted": float(target_adjusted),
+                    "max_stock_conc": float(max_stock),
+                    "volume_nL": float(volume_nL),
+                    "units": getattr(opt, "units", ""),
+                })
+
+            contributors.sort(key=lambda entry: float(entry.get("volume_nL", 0.0)), reverse=True)
+            if worst is None or total > float(worst.get("required_volume_nL", 0.0)):
+                worst = {
+                    "row_index": int(row.get("row_index", 0)),
+                    "condition_index": int(row.get("condition_index", 0)),
+                    "condition_label": str(row.get("condition_label", "")),
+                    "replicate": int(row.get("replicate", 1)),
+                    "row_label": str(row.get("row_label", "additional condition")),
+                    "required_volume_nL": float(total),
+                    "contributors": contributors,
+                    "unconstrained_reagents": unconstrained,
+                }
+
+        if worst is None or float(worst["required_volume_nL"]) <= float(printed_volume_nL) + 1e-6:
+            return None
+
+        contributor_text = self._format_volume_contributors(worst["contributors"])
+        message = (
+            f"Additional conditions cannot fit within the printed-volume budget: {worst['row_label']} "
+            f"needs at least {float(worst['required_volume_nL']):.6g} nL even using max stock "
+            f"concentrations, but only {float(printed_volume_nL):.6g} nL can be printed. "
+            f"Largest contributors at max stock: {contributor_text}. Increase the printed volume, "
+            "lower the final reaction volume, raise max stock concentrations for the contributors, "
+            "or lower those targets."
+        )
+        return {
+            "field": "volume_budget",
+            "severity": "error",
+            "code": "max_stock_volume_budget_exceeded",
+            "message": message,
+            "row_index": worst["row_index"],
+            "condition_index": worst["condition_index"],
+            "condition_label": worst["condition_label"],
+            "replicate": worst["replicate"],
+            "row_label": worst["row_label"],
+            "required_volume_nL": float(worst["required_volume_nL"]),
+            "allowed_volume_nL": float(printed_volume_nL),
+            "final_volume_nL": float(final_volume_nL),
+            "contributors": [dict(row) for row in worst["contributors"]],
+            "unconstrained_reagents": list(worst["unconstrained_reagents"]),
+        }
+
     def _refresh_plan_preview_maps(self):
         self._target_preview_map = {}
         self._unreachable_preview_map = {}
@@ -1157,7 +1292,7 @@ class ExperimentModel(QObject):
             if plan.get("n_stocks", 1) == 1:
                 stock = plan["stocks"][0]
                 plan_mode = "fixed" if getattr(opt, "forced_stock_conc", None) not in (None, 0.0) else "auto"
-                for t_final in opt.targets:
+                for t_final in self._effective_targets_for_key(key, opt):
                     row = self._evaluate_single_forced_target(
                         t_final=t_final,
                         starting_conc=float(getattr(opt, "starting_conc", 0.0) or 0.0),
@@ -1170,7 +1305,7 @@ class ExperimentModel(QObject):
                     rows.append(row)
             else:
                 st1, st2 = plan["stocks"]
-                for t_final in opt.targets:
+                for t_final in self._effective_targets_for_key(key, opt):
                     row = self._evaluate_two_stock_target(
                         t_final=t_final,
                         starting_conc=float(getattr(opt, "starting_conc", 0.0) or 0.0),
@@ -1500,10 +1635,22 @@ class ExperimentModel(QObject):
         choice_option_map: Dict[Tuple[str, str], OptionSpec] = {}
         two_stock_search_limited_keys: List[Tuple[str, Optional[str]]] = []
         issues_by_key: Dict[Tuple[str, Optional[str]], List[Dict[str, Any]]] = {}
+        additional_condition_issue_key = ("__additional_conditions__", None)
+        additional_targets_by_key = self._additional_targets_by_key()
+        additional_condition_rows = self._additional_condition_row_targets()
 
-        def _adj_targets_for_opt(opt) -> List[float]:
+        def _effective_targets_for_opt(key: Tuple[str, Optional[str]], opt) -> List[float]:
+            values = {
+                self._normalize_target_key(float(target))
+                for target in (getattr(opt, "targets", []) or [])
+            }
+            for target in additional_targets_by_key.get(key, []):
+                values.add(self._normalize_target_key(float(target)))
+            return sorted(values)
+
+        def _adj_targets_for_opt(key: Tuple[str, Optional[str]], opt) -> List[float]:
             s = float(getattr(opt, "starting_conc", 0.0) or 0.0)
-            return sorted(set(max(0.0, float(t) - s) for t in opt.targets))
+            return sorted(set(max(0.0, float(t) - s) for t in _effective_targets_for_opt(key, opt)))
 
         def _bound_text(opt) -> str:
             max_stock = getattr(opt, "max_stock_conc", None)
@@ -1553,20 +1700,65 @@ class ExperimentModel(QObject):
                 "two_stock_search_limited_keys": list(two_stock_search_limited_keys),
             }
 
-        def _add_design_issue(issue: Dict[str, Any]) -> Dict[str, Any]:
+        def _add_design_issue(
+            issue: Dict[str, Any],
+            issue_key: Tuple[str, Optional[str]] = ("__uploaded_design__", None),
+        ) -> Dict[str, Any]:
             issue_copy = dict(issue)
             field = str(issue_copy.pop("field"))
             severity = str(issue_copy.pop("severity"))
             code = str(issue_copy.pop("code"))
             message = str(issue_copy.pop("message"))
             return _add_issue(
-                ("__uploaded_design__", None),
+                issue_key,
                 field=field,
                 severity=severity,
                 code=code,
                 message=message,
                 **issue_copy,
             )
+
+        unknown_additional_targets: List[Dict[str, Any]] = []
+        for row in additional_condition_rows:
+            for key, target in (row.get("reaction") or {}).items():
+                try:
+                    target_value = float(target)
+                except Exception:
+                    target_value = 0.0
+                if abs(target_value) <= 1e-12:
+                    continue
+                if self._get_option_for_key(key) is not None:
+                    continue
+                unknown_additional_targets.append({
+                    "row_index": int(row.get("row_index", 0)),
+                    "condition_index": int(row.get("condition_index", 0)),
+                    "condition_label": str(row.get("condition_label", "")),
+                    "replicate": int(row.get("replicate", 1)),
+                    "row_label": str(row.get("row_label", "additional condition")),
+                    "key": key,
+                    "label": self._design_key_label(key),
+                    "target": float(target_value),
+                })
+        if unknown_additional_targets:
+            first = unknown_additional_targets[0]
+            message = (
+                f"Additional condition target {first['label']} in {first['row_label']} "
+                "does not match any current experiment factor or option."
+            )
+            if len(unknown_additional_targets) > 1:
+                message = (
+                    f"{message} There are {len(unknown_additional_targets)} unmatched nonzero "
+                    "additional-condition targets."
+                )
+            issue = _add_issue(
+                additional_condition_issue_key,
+                field="target",
+                severity="error",
+                code="unknown_additional_condition_target",
+                message=message,
+                targets=[dict(row) for row in unknown_additional_targets],
+            )
+            return _failure(str(issue["message"]))
 
         max_stock_volume_issue = self._uploaded_max_stock_volume_diagnostic(
             printed_volume_nL=V_accept,
@@ -1586,6 +1778,25 @@ class ExperimentModel(QObject):
             issue = _add_design_issue(max_stock_volume_issue)
             return _failure(str(issue["message"]))
 
+        additional_max_stock_volume_issue = self._additional_max_stock_volume_diagnostic(
+            printed_volume_nL=V_accept,
+            final_volume_nL=V_final,
+        )
+        if additional_max_stock_volume_issue is not None:
+            required = float(additional_max_stock_volume_issue.get("required_volume_nL", 0.0))
+            additional_max_stock_volume_issue["allowed_volume_nL"] = float(V_print)
+            additional_max_stock_volume_issue["effective_allowed_volume_nL"] = float(V_accept)
+            additional_max_stock_volume_issue["printed_volume_tolerance_nL"] = float(V_tolerance)
+            additional_max_stock_volume_issue["overage_nL"] = max(0.0, required - float(V_print))
+            additional_max_stock_volume_issue["message"] = (
+                f"{additional_max_stock_volume_issue.get('message', '')} Nominal printed volume is "
+                f"{float(V_print):.6g} nL with {float(V_tolerance):.6g} nL tolerance "
+                f"(effective limit {float(V_accept):.6g} nL)."
+            ).strip()
+            issue = _add_design_issue(additional_max_stock_volume_issue, additional_condition_issue_key)
+            return _failure(str(issue["message"]))
+
+
         def _no_feasible_reason(label: str, opt, *, search_limited: bool = False) -> str:
             bound = _bound_text(opt)
             if not allow_two:
@@ -1601,7 +1812,7 @@ class ExperimentModel(QObject):
             preview_rows: List[Dict[str, Any]] = []
             dp: Dict[float, int] = {}
 
-            for t_final in opt.targets:
+            for t_final in _effective_targets_for_opt(key, opt):
                 row = self._evaluate_single_forced_target(
                     t_final=t_final,
                     starting_conc=float(getattr(opt, "starting_conc", 0.0) or 0.0),
@@ -1639,7 +1850,7 @@ class ExperimentModel(QObject):
             if f.kind == "additive":
                 o = f.options[0]
                 additive_option_map[f.name] = o
-                t_adj = _adj_targets_for_opt(o)
+                t_adj = _adj_targets_for_opt((f.name, None), o)
                 forced = getattr(o, "forced_stock_conc", None)
                 max_stock = getattr(o, "max_stock_conc", None)
                 if forced is not None and forced > 0:
@@ -1725,7 +1936,7 @@ class ExperimentModel(QObject):
                 bucket = []
                 for opt in f.options:
                     choice_option_map[(f.name, opt.name)] = opt
-                    t_adj = _adj_targets_for_opt(opt)
+                    t_adj = _adj_targets_for_opt((f.name, opt.name), opt)
                     forced = getattr(opt, "forced_stock_conc", None)
                     max_stock = getattr(opt, "max_stock_conc", None)
                     if forced is not None and forced > 0:
@@ -1816,7 +2027,7 @@ class ExperimentModel(QObject):
                 if twos is not None:
                     return twos
                 opt = additive_option_map[name]
-                t_adj = _adj_targets_for_opt(opt)
+                t_adj = _adj_targets_for_opt((name, None), opt)
                 resolved, search_limited = self._enumerate_two_stock_candidates_with_meta(
                     t_adj,
                     opt.droplet_nL,
@@ -1841,7 +2052,7 @@ class ExperimentModel(QObject):
                 if twos is not None:
                     return twos
                 opt = choice_option_map[(gname, oname)]
-                t_adj = _adj_targets_for_opt(opt)
+                t_adj = _adj_targets_for_opt((gname, oname), opt)
                 resolved, search_limited = self._enumerate_two_stock_candidates_with_meta(
                     t_adj,
                     opt.droplet_nL,
@@ -1937,36 +2148,62 @@ class ExperimentModel(QObject):
         for row_index, rxn in enumerate(uploaded_reactions):
             for key, target in (rxn or {}).items():
                 uploaded_targets_by_key.setdefault(key, []).append((int(row_index), float(target)))
+        additional_row_targets_by_key: Dict[Tuple[str, Optional[str]], List[Tuple[int, float]]] = {}
+        for row in additional_condition_rows:
+            row_index = int(row.get("row_index", 0))
+            for key, target in (row.get("reaction") or {}).items():
+                additional_row_targets_by_key.setdefault(key, []).append((row_index, float(target)))
         uploaded_row_totals_cache: Optional[List[float]] = None
         uploaded_key_volume_cache: Dict[Tuple[str, Optional[str]], List[float]] = {}
         uploaded_volume_summary_cache: Optional[Dict[str, Any]] = None
+        additional_row_totals_cache: Optional[List[float]] = None
+        additional_key_volume_cache: Dict[Tuple[str, Optional[str]], List[float]] = {}
+        additional_volume_summary_cache: Optional[Dict[str, Any]] = None
 
         def _invalidate_selected_volume_cache(*changed_keys: Tuple[str, Optional[str]]):
             nonlocal uploaded_row_totals_cache, uploaded_volume_summary_cache
+            nonlocal additional_row_totals_cache, additional_volume_summary_cache
             uploaded_volume_summary_cache = None
+            additional_volume_summary_cache = None
             if not changed_keys:
                 selected_plan_cache.clear()
                 uploaded_row_totals_cache = None
                 uploaded_key_volume_cache.clear()
+                additional_row_totals_cache = None
+                additional_key_volume_cache.clear()
                 return
 
             for key in changed_keys:
                 selected_plan_cache.pop(key, None)
                 if uploaded_row_totals_cache is None:
                     uploaded_key_volume_cache.pop(key, None)
+                else:
+                    old_volumes = uploaded_key_volume_cache.pop(key, None)
+                    if old_volumes is not None:
+                        for index, volume in enumerate(old_volumes):
+                            uploaded_row_totals_cache[index] -= float(volume)
+
+                    if key in uploaded_targets_by_key:
+                        new_volumes = _uploaded_key_row_volumes(key)
+                        uploaded_key_volume_cache[key] = new_volumes
+                        for index, volume in enumerate(new_volumes):
+                            uploaded_row_totals_cache[index] += float(volume)
+
+                if additional_row_totals_cache is None:
+                    additional_key_volume_cache.pop(key, None)
                     continue
 
-                old_volumes = uploaded_key_volume_cache.pop(key, None)
+                old_volumes = additional_key_volume_cache.pop(key, None)
                 if old_volumes is not None:
                     for index, volume in enumerate(old_volumes):
-                        uploaded_row_totals_cache[index] -= float(volume)
+                        additional_row_totals_cache[index] -= float(volume)
 
-                if key not in uploaded_targets_by_key:
+                if key not in additional_row_targets_by_key:
                     continue
-                new_volumes = _uploaded_key_row_volumes(key)
-                uploaded_key_volume_cache[key] = new_volumes
+                new_volumes = _additional_key_row_volumes(key)
+                additional_key_volume_cache[key] = new_volumes
                 for index, volume in enumerate(new_volumes):
-                    uploaded_row_totals_cache[index] += float(volume)
+                    additional_row_totals_cache[index] += float(volume)
 
         def selection_counts() -> Tuple[int, float]:
             tot_stocks = 0
@@ -2112,6 +2349,17 @@ class ExperimentModel(QObject):
                 volumes[int(row_index)] += float(volume_nL)
             return volumes
 
+        def _additional_key_row_volumes(key: Tuple[str, Optional[str]]) -> List[float]:
+            volumes = [0.0] * len(additional_condition_rows)
+            for row_index, target in additional_row_targets_by_key.get(key, []):
+                volume_nL, _contributor = _selected_plan_volume_for_target(
+                    key,
+                    float(target),
+                    include_contributor=False,
+                )
+                volumes[int(row_index)] += float(volume_nL)
+            return volumes
+
         def _uploaded_row_totals() -> Optional[List[float]]:
             nonlocal uploaded_row_totals_cache
             if not uploaded_reactions:
@@ -2128,6 +2376,23 @@ class ExperimentModel(QObject):
                     totals[index] += float(volume)
             uploaded_row_totals_cache = totals
             return uploaded_row_totals_cache
+
+        def _additional_row_totals() -> Optional[List[float]]:
+            nonlocal additional_row_totals_cache
+            if not additional_condition_rows:
+                return None
+            if additional_row_totals_cache is not None:
+                return additional_row_totals_cache
+
+            additional_key_volume_cache.clear()
+            totals = [0.0] * len(additional_condition_rows)
+            for key in additional_row_targets_by_key.keys():
+                volumes = _additional_key_row_volumes(key)
+                additional_key_volume_cache[key] = volumes
+                for index, volume in enumerate(volumes):
+                    totals[index] += float(volume)
+            additional_row_totals_cache = totals
+            return additional_row_totals_cache
 
         def _uploaded_selected_volume_summary() -> Optional[Dict[str, Any]]:
             nonlocal uploaded_volume_summary_cache
@@ -2146,6 +2411,27 @@ class ExperimentModel(QObject):
             }
             return uploaded_volume_summary_cache
 
+        def _additional_selected_volume_summary() -> Optional[Dict[str, Any]]:
+            nonlocal additional_volume_summary_cache
+            if additional_volume_summary_cache is not None:
+                return additional_volume_summary_cache
+
+            totals = _additional_row_totals()
+            if not totals:
+                return None
+
+            row_index, total = max(enumerate(totals), key=lambda item: float(item[1]))
+            row = additional_condition_rows[int(row_index)]
+            additional_volume_summary_cache = {
+                "row_index": int(row_index),
+                "condition_index": int(row.get("condition_index", 0)),
+                "condition_label": str(row.get("condition_label", "")),
+                "replicate": int(row.get("replicate", 1)),
+                "row_label": str(row.get("row_label", "additional condition")),
+                "required_volume_nL": float(total),
+            }
+            return additional_volume_summary_cache
+
         def _uploaded_selected_volume_details() -> Optional[Dict[str, Any]]:
             summary = _uploaded_selected_volume_summary()
             if not summary:
@@ -2163,6 +2449,27 @@ class ExperimentModel(QObject):
                 if contributor:
                     contributors.append(contributor)
             contributors.sort(key=lambda row: float(row.get("volume_nL", 0.0)), reverse=True)
+            details = dict(summary)
+            details["contributors"] = contributors
+            return details
+
+        def _additional_selected_volume_details() -> Optional[Dict[str, Any]]:
+            summary = _additional_selected_volume_summary()
+            if not summary:
+                return None
+
+            row_index = int(summary.get("row_index", -1))
+            row = additional_condition_rows[row_index] if 0 <= row_index < len(additional_condition_rows) else {}
+            contributors: List[Dict[str, Any]] = []
+            for key, target in (row.get("reaction") or {}).items():
+                _volume_nL, contributor = _selected_plan_volume_for_target(
+                    key,
+                    float(target),
+                    include_contributor=True,
+                )
+                if contributor:
+                    contributors.append(contributor)
+            contributors.sort(key=lambda item: float(item.get("volume_nL", 0.0)), reverse=True)
             details = dict(summary)
             details["contributors"] = contributors
             return details
@@ -2215,10 +2522,71 @@ class ExperimentModel(QObject):
                 contributors=[dict(row) for row in details.get("contributors", [])],
             )
 
+        def _record_additional_selected_volume_budget_issue(
+            code: str,
+            *,
+            severity: str = "error",
+        ) -> Optional[Dict[str, Any]]:
+            details = _additional_selected_volume_details()
+            if not details:
+                return None
+            required = float(details.get("required_volume_nL", 0.0))
+            if severity == "warning":
+                if required <= V_print + 1e-6 or required > V_accept + 1e-6:
+                    return None
+            elif required <= V_accept + 1e-6:
+                return None
+            contributor_text = self._format_volume_contributors(details.get("contributors", []))
+            overage = max(0.0, required - float(V_print))
+            if severity == "warning":
+                message = (
+                    "Selected stock plan is within the printed-volume tolerance for the additional "
+                    f"conditions: {details['row_label']} needs {required:.6g} nL, which is "
+                    f"{overage:.6g} nL over the nominal {float(V_print):.6g} nL printed volume "
+                    f"and within the {float(V_tolerance):.6g} nL tolerance. Largest contributors: "
+                    f"{contributor_text}."
+                )
+            else:
+                message = (
+                    "Selected stock plan exceeds the printed-volume budget for the additional "
+                    f"conditions: {details['row_label']} needs {required:.6g} nL, but the nominal "
+                    f"budget is {float(V_print):.6g} nL with {float(V_tolerance):.6g} nL tolerance "
+                    f"(effective limit {float(V_accept):.6g} nL). Largest contributors: "
+                    f"{contributor_text}. Increase the printed volume, raise stock concentrations for "
+                    "the contributors, enable two-stock mode when available, or lower those targets."
+                )
+            return _add_issue(
+                additional_condition_issue_key,
+                field="volume_budget",
+                severity=severity,
+                code=code,
+                message=message,
+                row_index=int(details["row_index"]),
+                condition_index=int(details.get("condition_index", 0)),
+                condition_label=str(details.get("condition_label", "")),
+                replicate=int(details.get("replicate", 1)),
+                row_label=details["row_label"],
+                required_volume_nL=required,
+                allowed_volume_nL=float(V_print),
+                effective_allowed_volume_nL=float(V_accept),
+                printed_volume_tolerance_nL=float(V_tolerance),
+                overage_nL=overage,
+                contributors=[dict(row) for row in details.get("contributors", [])],
+            )
+
         def worst_case_nonfill_volume() -> float:
             uploaded_summary = _uploaded_selected_volume_summary()
+            additional_summary = _additional_selected_volume_summary()
+            row_worst = max(
+                [
+                    float(summary.get("required_volume_nL", 0.0))
+                    for summary in (uploaded_summary, additional_summary)
+                    if summary is not None
+                ],
+                default=0.0,
+            )
             if uploaded_summary is not None:
-                return float(uploaded_summary.get("required_volume_nL", 0.0))
+                return row_worst
 
             total = 0.0
             for name, singles, twos in additives:
@@ -2238,7 +2606,7 @@ class ExperimentModel(QObject):
                     if v > m:
                         m = v
                 total += m
-            return total
+            return max(total, row_worst)
 
         # ---- NEW: tie-aware, look-ahead bump for choice options ----
         def bump_gain_opt(gname: str, oname: str) -> Tuple[float, float]:
@@ -2349,6 +2717,7 @@ class ExperimentModel(QObject):
             return singles_this is not None and (ch_idx[(gname, oname)] + 1 < len(singles_this))
 
         def _refine_single_selection(
+            key: Tuple[str, Optional[str]],
             opt: OptionSpec,
             singles: List[SingleStockPlan],
             current_index: int,
@@ -2356,10 +2725,12 @@ class ExperimentModel(QObject):
             current_plan = singles[current_index]
             volume_limit = float(current_plan.max_volume_nL)
             best_index = int(current_index)
+            targets_final = _effective_targets_for_opt(key, opt)
             best_score = self._score_single_stock_plan(
                 opt,
                 current_plan,
                 final_volume_nL=V_final,
+                targets_final=targets_final,
             )
             for idx, candidate in enumerate(singles):
                 if float(candidate.max_volume_nL) > volume_limit + 1e-12:
@@ -2368,6 +2739,7 @@ class ExperimentModel(QObject):
                     opt,
                     candidate,
                     final_volume_nL=V_final,
+                    targets_final=targets_final,
                 )
                 if self._plan_accuracy_score_is_better(candidate_score, best_score):
                     best_index = idx
@@ -2375,6 +2747,7 @@ class ExperimentModel(QObject):
             return best_index
 
         def _refine_two_selection(
+            key: Tuple[str, Optional[str]],
             opt: OptionSpec,
             twos: List[TwoStockPlan],
             current_index: int,
@@ -2382,10 +2755,12 @@ class ExperimentModel(QObject):
             current_plan = twos[current_index]
             volume_limit = float(current_plan.max_volume_nL)
             best_index = int(current_index)
+            targets_final = _effective_targets_for_opt(key, opt)
             best_score = self._score_two_stock_plan(
                 opt,
                 current_plan,
                 final_volume_nL=V_final,
+                targets_final=targets_final,
             )
             for idx, candidate in enumerate(twos):
                 if float(candidate.max_volume_nL) > volume_limit + 1e-12:
@@ -2394,6 +2769,7 @@ class ExperimentModel(QObject):
                     opt,
                     candidate,
                     final_volume_nL=V_final,
+                    targets_final=targets_final,
                 )
                 if self._plan_accuracy_score_is_better(candidate_score, best_score):
                     best_index = idx
@@ -2530,6 +2906,11 @@ class ExperimentModel(QObject):
                     aggregate_issue = _record_uploaded_selected_volume_budget_issue(
                         "selected_plan_volume_budget_exceeded"
                     )
+                    additional_issue = _record_additional_selected_volume_budget_issue(
+                        "selected_plan_volume_budget_exceeded"
+                    )
+                    if aggregate_issue is None:
+                        aggregate_issue = additional_issue
                     for name, singles, twos in additives:
                         if add_two_idx[name] is not None:
                             continue
@@ -2726,9 +3107,9 @@ class ExperimentModel(QObject):
                 continue
             if add_two_idx[name] is not None:
                 if twos:
-                    add_two_idx[name] = _refine_two_selection(opt, twos, add_two_idx[name])
+                    add_two_idx[name] = _refine_two_selection((name, None), opt, twos, add_two_idx[name])
             else:
-                add_idx[name] = _refine_single_selection(opt, singles, add_idx[name])
+                add_idx[name] = _refine_single_selection((name, None), opt, singles, add_idx[name])
         _invalidate_selected_volume_cache()
 
         for gname, bucket in choice_groups.items():
@@ -2739,9 +3120,9 @@ class ExperimentModel(QObject):
                     continue
                 if ch_two_idx[key] is not None:
                     if twos:
-                        ch_two_idx[key] = _refine_two_selection(opt, twos, ch_two_idx[key])
+                        ch_two_idx[key] = _refine_two_selection(key, opt, twos, ch_two_idx[key])
                 else:
-                    ch_idx[key] = _refine_single_selection(opt, singles, ch_idx[key])
+                    ch_idx[key] = _refine_single_selection(key, opt, singles, ch_idx[key])
         _invalidate_selected_volume_cache()
 
         final_worst = worst_case_nonfill_volume()
@@ -2749,6 +3130,11 @@ class ExperimentModel(QObject):
             aggregate_issue = _record_uploaded_selected_volume_budget_issue(
                 "selected_plan_volume_budget_exceeded"
             )
+            additional_issue = _record_additional_selected_volume_budget_issue(
+                "selected_plan_volume_budget_exceeded"
+            )
+            if aggregate_issue is None:
+                aggregate_issue = additional_issue
             for name, singles, twos in additives:
                 if add_two_idx[name] is not None:
                     continue
@@ -2930,6 +3316,10 @@ class ExperimentModel(QObject):
         self._refresh_plan_preview_maps()
         self._last_worst_nonfill_volume_nL = worst_case_nonfill_volume()
         _record_uploaded_selected_volume_budget_issue(
+            "selected_plan_volume_budget_within_tolerance",
+            severity="warning",
+        )
+        _record_additional_selected_volume_budget_issue(
             "selected_plan_volume_budget_within_tolerance",
             severity="warning",
         )

@@ -33,6 +33,21 @@ def _configure_generation_design(em, *, replicates=2):
     )
 
 
+def _configure_auto_signal_design(em, *, targets=(0.0, 1.0), target_volume=500.0, final_volume=500.0):
+    em.factors = []
+    em.add_additive("Signal", list(targets), "mM", 10.0)
+    em.set_metadata(
+        randomize_assignments=False,
+        start_row=0,
+        start_col=0,
+        replicates=1,
+        target_reaction_volume_nL=float(target_volume),
+        final_reaction_volume_nL=float(final_volume),
+        fill_reagent_name="Water",
+        fill_droplet_volume_nL=10.0,
+    )
+
+
 def test_new_experiment_model_starts_without_additional_conditions():
     em = _make_model()
 
@@ -368,3 +383,179 @@ def test_runtime_handoff_includes_additional_condition_runs(experiment_model_fac
     ]
     assert len(assigned) == expected_n
     assert len(model.reaction_collection.get_all_reactions()) == expected_n
+
+
+def test_optimizer_includes_additional_only_targets_in_stock_lookup_and_generation():
+    em = _make_model()
+    _configure_auto_signal_design(em, targets=(0.0, 1.0))
+    em.set_additional_conditions(
+        [
+            AdditionalConditionSpec(
+                label="Midpoint response",
+                replicates=1,
+                targets={("Signal", None): 0.5},
+            )
+        ]
+    )
+
+    result = em.optimize_stock_solutions(quantum=0.1, max_refine=20, two_max_refine=20, allow_two=False)
+
+    assert result["best"]
+    stock = em.plans_per_option[("Signal", None)]["stocks"][0]
+    assert 0.5 in stock["droplets_per_target"]
+
+    em.generate_experiment()
+
+    df = em.get_reactions_dataframe()
+    assert df.iloc[-1]["design_source"] == "additional_condition"
+    assert df.iloc[-1]["additional_condition_label"] == "Midpoint response"
+    assert df.iloc[-1]["nonfill_volume_nL"] > 0.0
+    assert list(em.iter_reaction_stock_droplets())[-1]
+
+
+def test_forced_stock_preview_includes_additional_only_targets():
+    em = _make_model()
+    em.factors = []
+    em.add_additive("Signal", [0.0, 1.0], "mM", 10.0, forced_stock_conc=25.0)
+    em.set_metadata(
+        randomize_assignments=False,
+        replicates=1,
+        target_reaction_volume_nL=500.0,
+        final_reaction_volume_nL=500.0,
+        fill_reagent_name="Water",
+        fill_droplet_volume_nL=10.0,
+    )
+    em.set_additional_conditions(
+        [
+            AdditionalConditionSpec(
+                label="Half signal",
+                replicates=1,
+                targets={("Signal", None): 0.5},
+            )
+        ]
+    )
+
+    result = em.optimize_stock_solutions(quantum=0.1, max_refine=20, two_max_refine=20, allow_two=False)
+
+    assert result["best"]
+    preview = em.get_target_preview_map()[("Signal", None)]
+    by_target = {row["requested_final"]: row for row in preview}
+    assert sorted(by_target.keys()) == [0.0, 0.5, 1.0]
+    assert by_target[0.5]["reachable"] is True
+    assert by_target[0.5]["droplets"] == 1
+    assert by_target[0.5]["achieved_final"] == pytest.approx(0.5)
+    assert 0.5 in em.plans_per_option[("Signal", None)]["stocks"][0]["droplets_per_target"]
+
+
+def test_additional_only_targets_do_not_mutate_serialized_factor_targets():
+    em = _make_model()
+    _configure_auto_signal_design(em, targets=(0.0, 1.0))
+    em.set_additional_conditions(
+        [
+            AdditionalConditionSpec(
+                label="Midpoint response",
+                replicates=1,
+                targets={("Signal", None): 0.5},
+            )
+        ]
+    )
+
+    assert em.optimize_stock_solutions(quantum=0.1, max_refine=20, two_max_refine=20, allow_two=False)["best"]
+
+    assert em.factors[0].options[0].targets == [0.0, 1.0]
+    assert em.to_dict()["factors"][0]["options"][0]["targets"] == [0.0, 1.0]
+
+
+def test_unknown_nonzero_additional_target_fails_but_unknown_zero_target_is_allowed():
+    em = _make_model()
+    _configure_auto_signal_design(em, targets=(0.0, 1.0))
+    em.set_additional_conditions(
+        [
+            AdditionalConditionSpec(
+                label="Bad target",
+                replicates=1,
+                targets={("Missing", None): 1.0},
+            )
+        ]
+    )
+
+    result = em.optimize_stock_solutions(quantum=0.1, max_refine=20, two_max_refine=20, allow_two=False)
+
+    assert not result.get("best")
+    issue = result["issues_by_key"][("__additional_conditions__", None)][0]
+    assert issue["code"] == "unknown_additional_condition_target"
+    assert issue["targets"][0]["label"] == "Missing"
+
+    zero_target = _make_model()
+    _configure_auto_signal_design(zero_target, targets=(0.0, 1.0))
+    zero_target.set_additional_conditions(
+        [
+            AdditionalConditionSpec(
+                label="Zero missing target",
+                replicates=1,
+                targets={("Missing", None): 0.0},
+            )
+        ]
+    )
+
+    assert zero_target.optimize_stock_solutions(
+        quantum=0.1,
+        max_refine=20,
+        two_max_refine=20,
+        allow_two=False,
+    )["best"]
+
+
+def test_additional_condition_row_volume_can_drive_budget_diagnostic():
+    em = _make_model()
+    em.factors = []
+    em.add_choice_group("Reporter")
+    em.add_choice_option(
+        "Reporter",
+        "A",
+        [0.0, 5.0],
+        "mM",
+        10.0,
+        forced_stock_conc=10.0,
+        max_stock_conc=20.0,
+    )
+    em.add_choice_option(
+        "Reporter",
+        "B",
+        [0.0, 5.0],
+        "mM",
+        10.0,
+        forced_stock_conc=10.0,
+        max_stock_conc=20.0,
+    )
+    em.set_metadata(
+        randomize_assignments=False,
+        replicates=1,
+        target_reaction_volume_nL=550.0,
+        final_reaction_volume_nL=1000.0,
+        fill_reagent_name="Water",
+        fill_droplet_volume_nL=10.0,
+    )
+    em.set_additional_conditions(
+        [
+            AdditionalConditionSpec(
+                label="Both reporters",
+                replicates=1,
+                targets={
+                    ("Reporter", "A"): 5.0,
+                    ("Reporter", "B"): 5.0,
+                },
+            )
+        ]
+    )
+
+    result = em.optimize_stock_solutions(quantum=0.1, max_refine=20, two_max_refine=20, allow_two=False)
+
+    assert not result.get("best")
+    issue = result["issues_by_key"][("__additional_conditions__", None)][0]
+    assert issue["code"] == "selected_plan_volume_budget_exceeded"
+    assert issue["field"] == "volume_budget"
+    assert issue["row_label"] == "additional condition 'Both reporters'"
+    assert issue["required_volume_nL"] == pytest.approx(1000.0)
+    assert issue["allowed_volume_nL"] == pytest.approx(550.0)
+    assert {row["label"] for row in issue["contributors"]} == {"Reporter/A", "Reporter/B"}
