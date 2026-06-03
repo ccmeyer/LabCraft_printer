@@ -96,6 +96,10 @@ def test_pressure_scan_constructor_configures_single_candidate_mode(monkeypatch)
     assert proc._single_candidate_attempt_count == 0
     assert proc._single_candidate_attempt_history == []
     assert proc.single_candidate_residue_moderate_area_px < proc.single_candidate_residue_persistent_area_px
+    assert proc.single_candidate_satellite_min_area_px == 12000
+    assert proc.single_candidate_satellite_min_bbox_area_px == 16000
+    assert proc.single_candidate_satellite_probe_reps == 1
+    assert proc._single_candidate_satellite_checks == []
 
 
 def test_pressure_scan_prefers_emergence_refined_nozzle_center(monkeypatch):

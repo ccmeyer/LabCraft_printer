@@ -603,7 +603,7 @@ def test_pressure_sweep_summary_rows_separate_stock_concentrations(tmp_path):
     assert [row["mean_nL"] for row in rows] == [20.0]
 
 
-def test_emit_readiness_reports_pressure_sweep_prereqs_for_manual_characterization(tmp_path):
+def test_emit_readiness_allows_manual_characterization_without_prior_calibrations(tmp_path):
     model = _make_model(tmp_path)
     manager = CalibrationManager(model)
     captured = []
@@ -613,11 +613,36 @@ def test_emit_readiness_reports_pressure_sweep_prereqs_for_manual_characterizati
 
     assert captured
     droplet_characterization = captured[-1]["droplet_characterization"]
+    assert droplet_characterization["ready"] is True
+    assert droplet_characterization["missing"] == []
+
+
+@pytest.mark.parametrize(
+    ("mutate_model", "missing_label"),
+    [
+        (lambda model: setattr(model.machine_model, "get_current_position_dict", lambda: None), "Current machine position"),
+        (lambda model: setattr(model.machine_model, "get_current_print_pressure", lambda: None), "Pressure"),
+        (lambda model: setattr(model.machine_model, "get_print_pulse_width", lambda: None), "Print pulse width"),
+        (lambda model: setattr(model.droplet_camera_model, "get_image_metadata", lambda: (1, 1000, None, 1, 30000)), "Current flash delay"),
+    ],
+)
+def test_emit_readiness_reports_missing_live_values_for_manual_characterization(
+    tmp_path,
+    mutate_model,
+    missing_label,
+):
+    model = _make_model(tmp_path)
+    mutate_model(model)
+    manager = CalibrationManager(model)
+    captured = []
+    manager.readinessChanged.connect(lambda readiness: captured.append(readiness))
+
+    manager._emit_readiness()
+
+    assert captured
+    droplet_characterization = captured[-1]["droplet_characterization"]
     assert droplet_characterization["ready"] is False
-    assert "Source nozzle center machine coordinates" in droplet_characterization["missing"]
-    assert "Source nozzle center image coordinates" in droplet_characterization["missing"]
-    assert "Source emergence time" in droplet_characterization["missing"]
-    assert "Source droplet trajectory" in droplet_characterization["missing"]
+    assert missing_label in droplet_characterization["missing"]
 
 
 def test_verbose_capture_level_restores_process_event_mirroring(tmp_path):

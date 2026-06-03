@@ -3900,7 +3900,6 @@ class CalibrationManager(QObject):
             pressure_psi,
             trajectory_result,
         )
-
         source_result = {
             "phase": "search",
             "phase_key": "droplet_search",
@@ -3921,8 +3920,11 @@ class CalibrationManager(QObject):
                 "nozzle_center_machine": nozzle_center_machine,
                 "nozzle_center_px": nozzle_center_px,
                 "emergence_time_us": emergence_time_us,
+                "vec_steps_per_s": None,
                 "vx_px_per_us": vx_px_per_us,
                 "vy_px_per_us": vy_px_per_us,
+                "static_target_context": True,
+                "targeting_mode": "manual_current_position",
                 "source_result": source_result,
             }
         )
@@ -4174,21 +4176,30 @@ class CalibrationManager(QObject):
                 pressure_entry.get("nominal_target_xyz"),
             )
         )
+        static_target_context = bool(
+            row.get("manual_current")
+            or pressure_entry.get("manual_current")
+            or str(row.get("targeting_mode") or pressure_entry.get("targeting_mode") or "").strip().lower()
+            == "manual_current_position"
+        )
         nozzle_center_machine = self._recheck_xyz_dict_or_none(
             self._recheck_first_value(
                 row.get("nozzle_center_machine"),
+                pressure_entry.get("nozzle_center_machine"),
                 step_result.get("nozzle_center_machine"),
             )
         )
         nozzle_center_px = self._recheck_xy_list_or_none(
             self._recheck_first_value(
                 row.get("nozzle_center_px"),
+                pressure_entry.get("nozzle_center_px"),
                 step_result.get("nozzle_center_px"),
             )
         )
         emergence_time_us = self._recheck_int_or_none(
             self._recheck_first_value(
                 row.get("emergence_time_us"),
+                pressure_entry.get("emergence_time_us"),
                 step_result.get("emergence_time_us"),
             )
         )
@@ -4235,13 +4246,17 @@ class CalibrationManager(QObject):
             missing.append("Prior flash delay")
         if target_xyz is None:
             missing.append("Prior droplet machine position")
-        if nozzle_center_machine is None:
+        if nozzle_center_machine is None and not static_target_context:
             missing.append("Source nozzle center machine coordinates")
-        if nozzle_center_px is None:
+        if nozzle_center_px is None and not static_target_context:
             missing.append("Source nozzle center image coordinates")
-        if emergence_time_us is None:
+        if emergence_time_us is None and not static_target_context:
             missing.append("Source emergence time")
-        if vec_steps_per_s is None and (vx_px_per_us is None or vy_px_per_us is None):
+        if (
+            vec_steps_per_s is None
+            and (vx_px_per_us is None or vy_px_per_us is None)
+            and not static_target_context
+        ):
             missing.append("Source droplet trajectory")
 
         source_result = {
@@ -4269,6 +4284,12 @@ class CalibrationManager(QObject):
             "vec_steps_per_s": vec_steps_per_s,
             "vx_px_per_us": vx_px_per_us,
             "vy_px_per_us": vy_px_per_us,
+            "static_target_context": bool(static_target_context),
+            "targeting_mode": (
+                "manual_current_position"
+                if static_target_context
+                else self._recheck_first_value(row.get("targeting_mode"), pressure_entry.get("targeting_mode"))
+            ),
             "reference_mean_volume_nL": source_result["mean_volume_nL"],
             "reference_cv_volume_percent": source_result["cv_pct"],
             "source_result": source_result,
@@ -7489,6 +7510,7 @@ class CalibrationManager(QObject):
                             "mean_position_machine": p.get("mean_position_machine"),
                             "nominal_delay_us": p.get("nominal_delay_us"),
                             "nominal_target_xyz": p.get("nominal_target_xyz"),
+                            "targeting_mode": p.get("targeting_mode", res.get("targeting_mode")),
                             "vec_steps_per_s": p.get("vec_steps_per_s"),
                             "vx_px_per_us": p.get("vx_px_per_us", p.get("vx")),
                             "vy_px_per_us": p.get("vy_px_per_us", p.get("vy")),
@@ -18773,11 +18795,22 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self.single_candidate_residue_persistent_area_px = int(self.nozzle_area_threshold)
         self.single_candidate_residue_moderate_area_px = int(max(1000, self.nozzle_area_threshold // 4))
         self.single_candidate_bottom_edge_margin_px = 24
+        self.single_candidate_satellite_min_area_px = 12000
+        self.single_candidate_satellite_min_bbox_area_px = 16000
+        self.single_candidate_satellite_probe_reps = 1
+        self.single_candidate_satellite_larger_area_ratio = 1.4
+        self.single_candidate_residue_artifact_free_count = 4
+        self.single_candidate_residue_artifact_component_count = 12
+        self.single_candidate_residue_artifact_large_bbox_area_px = 100000
+        self.single_candidate_residue_artifact_span_fraction = 0.65
         self._single_candidate_confirming = False
         self._single_candidate_candidate_pressure = None
         self._single_candidate_selected_pressure = None
         self._single_candidate_confirmation_summary = {}
         self._single_candidate_residue_checks = []
+        self._single_candidate_satellite_checks = []
+        self._single_candidate_satellite_probe_in_progress = False
+        self._single_candidate_pending_satellite_probe = None
         self._single_candidate_pending_residue_check = None
         self._single_candidate_failure_message = None
         self._single_candidate_residue_check_in_progress = False
@@ -18966,6 +18999,8 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         if self._is_single_candidate_mode():
             self.replicates_target = 1
             self._discard_next = False
+            self._single_candidate_satellite_probe_in_progress = False
+            self._single_candidate_pending_satellite_probe = None
             self._single_candidate_attempt_count = int(
                 max(0, getattr(self, "_single_candidate_attempt_count", 0))
             ) + 1
@@ -19064,6 +19099,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         free_blob_count = len(free_blob_details)
         largest_free_blob_area_px = 0
         largest_free_blob_bbox = None
+        largest_free_blob_bbox_area_px = 0
         largest_free_blob_bottom_px = None
         bottom_edge_or_clipped = False
         stream_min_area = int(max(1, getattr(self, "stream_min_area_px", 1200)))
@@ -19085,15 +19121,19 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 area_px = 0
             bbox = info.get("bbox") if isinstance(info, dict) else None
             blob_bottom = None
+            bbox_area_px = 0
             if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
                 try:
                     bx, by, bw, bh = [int(v) for v in bbox[:4]]
                     blob_bottom = int(by + bh)
+                    bbox_area_px = int(max(0, bw) * max(0, bh))
                 except Exception:
                     blob_bottom = None
+                    bbox_area_px = 0
             if area_px >= int(largest_free_blob_area_px):
                 largest_free_blob_area_px = int(area_px)
                 largest_free_blob_bbox = list(bbox[:4]) if isinstance(bbox, (list, tuple)) and len(bbox) >= 4 else None
+                largest_free_blob_bbox_area_px = int(bbox_area_px)
                 largest_free_blob_bottom_px = blob_bottom
             is_stream_like = bool(info.get("is_stream_like", False))
             if (not is_stream_like) and area_px >= stream_min_area:
@@ -19259,6 +19299,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             "largest_free_blob_bbox": (
                 None if largest_free_blob_bbox is None else [int(v) for v in largest_free_blob_bbox]
             ),
+            "largest_free_blob_bbox_area_px": int(largest_free_blob_bbox_area_px),
             "largest_free_blob_bottom_px": (
                 None if largest_free_blob_bottom_px is None else int(largest_free_blob_bottom_px)
             ),
@@ -19274,6 +19315,10 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 getattr(self, "_active_classify_delay_us", getattr(self, "classify_delay_us", 0))
             ),
         }
+        rep["small_single_suspect"] = bool(
+            self._is_single_candidate_mode()
+            and self._single_candidate_rep_has_small_single_suspect(rep)
+        )
         self.reps.append(rep)
         self.replicateReady.emit()
     @Slot()
@@ -19415,6 +19460,9 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         if total < required_reps:
             self.continueReplicate.emit()
             return
+        if bool(getattr(self, "_single_candidate_satellite_probe_in_progress", False)):
+            self._finish_single_candidate_satellite_probe()
+            return
 
         self._single_candidate_record_current_pressure()
         decision = {
@@ -19429,13 +19477,30 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             if verdict == "single" and self._single_candidate_reps_have_high_pressure_evidence(self.reps):
                 verdict = "multiple"
                 decision["triage_override"] = "high_pressure_visible_single"
+            triage_summary = (
+                self._build_single_candidate_confirmation_summary(self.reps)
+                if verdict == "single"
+                else {}
+            )
             decision["triage_verdict"] = str(verdict)
             decision["failure_kind"] = "high" if verdict == "multiple" else "low"
             decision["suggested_direction"] = "down" if verdict == "multiple" else "up"
+            if triage_summary:
+                decision["triage_summary"] = dict(triage_summary)
+                decision["small_single_suspect_hits"] = int(
+                    triage_summary.get("small_single_suspect_hits", 0) or 0
+                )
             if self._single_candidate_has_residue_evidence(self.reps):
                 self._start_single_candidate_residue_verification(
                     trigger="triage",
                     decision=decision,
+                )
+                return
+            if verdict == "single" and int(triage_summary.get("small_single_suspect_hits", 0) or 0) > 0:
+                self._start_single_candidate_satellite_probe(
+                    trigger="triage",
+                    decision=decision,
+                    summary=triage_summary,
                 )
                 return
             if verdict == "single":
@@ -19472,6 +19537,13 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             self._start_single_candidate_residue_verification(
                 trigger="confirmation",
                 decision=decision,
+            )
+            return
+        if int(summary.get("small_single_suspect_hits", 0) or 0) > 0:
+            self._start_single_candidate_satellite_probe(
+                trigger="confirmation",
+                decision=decision,
+                summary=summary,
             )
             return
 
@@ -19517,6 +19589,258 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 return True
         return False
 
+    def _single_candidate_rep_has_small_single_suspect(self, rep: dict | None) -> bool:
+        rep = dict(rep or {})
+        if str(rep.get("cls", "")) != "single":
+            return False
+        try:
+            area_px = int(rep.get("largest_free_blob_area_px", 0) or 0)
+        except Exception:
+            area_px = 0
+        try:
+            bbox_area_px = int(rep.get("largest_free_blob_bbox_area_px", 0) or 0)
+        except Exception:
+            bbox_area_px = 0
+        area_limit = int(max(1, getattr(self, "single_candidate_satellite_min_area_px", 12000)))
+        bbox_limit = int(max(1, getattr(self, "single_candidate_satellite_min_bbox_area_px", 16000)))
+        area_small = bool(area_px > 0 and area_px < area_limit)
+        bbox_small = bool(bbox_area_px > 0 and bbox_area_px < bbox_limit)
+        return bool(area_small or bbox_small)
+
+    def _single_candidate_reps_have_small_single_suspect(self, reps) -> bool:
+        return any(
+            self._single_candidate_rep_has_small_single_suspect(r)
+            for r in list(reps or [])
+        )
+
+    def _start_single_candidate_satellite_probe(
+        self,
+        *,
+        trigger: str,
+        decision: dict | None = None,
+        summary: dict | None = None,
+    ) -> bool:
+        if bool(getattr(self, "_single_candidate_satellite_probe_in_progress", False)):
+            return True
+        decision = dict(decision or {})
+        summary = dict(summary or self._build_single_candidate_confirmation_summary(self.reps))
+        original_delay = int(
+            getattr(self, "_active_classify_delay_us", getattr(self, "classify_delay_us", 0))
+        )
+        probe_delay = self._earlier_delay_candidate_us()
+        if probe_delay is None:
+            fallback = {
+                **decision,
+                "reason": "single_candidate_satellite_probe_unavailable",
+                "rejection_cause": "small_single_probe_unavailable",
+                "failure_kind": "high",
+                "suggested_direction": "down",
+                "satellite_probe_result": "unavailable",
+                "confirmation_summary": dict(summary),
+            }
+            self._store_pressure_summary("multiple", escalated=len(self.reps) > 1, decision=fallback)
+            self._advance_single_candidate_pressure("down", "small_single_probe_unavailable", fallback)
+            return True
+
+        self._single_candidate_satellite_probe_in_progress = True
+        self._single_candidate_pending_satellite_probe = {
+            "pressure_psi": (
+                None if self._current_pressure is None else float(self._current_pressure)
+            ),
+            "trigger": str(trigger),
+            "decision": dict(decision),
+            "original_summary": dict(summary),
+            "original_reps": [dict(r) for r in list(self.reps or [])],
+            "original_replicates_target": int(max(1, getattr(self, "replicates_target", 1))),
+            "original_delay_us": int(original_delay),
+            "probe_delay_us": int(probe_delay),
+        }
+        self._active_classify_delay_us = int(probe_delay)
+        self.reps = []
+        self.replicates_target = int(
+            max(1, getattr(self, "single_candidate_satellite_probe_reps", 1))
+        )
+        self._invalid_skip_count = 0
+        self._discard_next = False
+        self.stageChanged.emit(
+            f"Small single droplet candidate; probing earlier flash delay {int(probe_delay)} us"
+        )
+        self._record_decision(
+            "single_candidate_satellite_probe_started",
+            {
+                "pressure_psi": (
+                    None if self._current_pressure is None else float(self._current_pressure)
+                ),
+                "trigger": str(trigger),
+                "from_delay_us": int(original_delay),
+                "to_delay_us": int(probe_delay),
+                "summary": dict(summary),
+                "decision": dict(decision),
+            },
+        )
+        self._request_settings_with_recording(
+            {"flash_delay": int(probe_delay), "num_droplets": 1},
+            lambda *args, **kwargs: self.continueReplicate.emit(),
+            context=f"single_candidate_satellite_probe:{trigger}",
+            guard_timeout_ms=15_000,
+            on_timeout=lambda: self._single_candidate_fail(
+                "Satellite probe settings timed out; conservative pressure search stopped."
+            ),
+        )
+        return True
+
+    def _finish_single_candidate_satellite_probe(self):
+        ctx = dict(getattr(self, "_single_candidate_pending_satellite_probe", {}) or {})
+        probe_reps = [dict(r) for r in list(self.reps or [])]
+        probe_summary = self._build_single_candidate_confirmation_summary(probe_reps)
+        original_summary = dict(ctx.get("original_summary") or {})
+        check = self._single_candidate_satellite_probe_result(
+            original_summary=original_summary,
+            probe_summary=probe_summary,
+        )
+        check.update(
+            {
+                "pressure_psi": ctx.get("pressure_psi"),
+                "trigger": str(ctx.get("trigger", "")),
+                "original_delay_us": int(ctx.get("original_delay_us", 0) or 0),
+                "probe_delay_us": int(ctx.get("probe_delay_us", 0) or 0),
+                "original_summary": dict(original_summary),
+                "probe_summary": dict(probe_summary),
+            }
+        )
+        checks = list(getattr(self, "_single_candidate_satellite_checks", []) or [])
+        checks.append(dict(check))
+        self._single_candidate_satellite_checks = checks
+        self._record_decision("single_candidate_satellite_probe_result", dict(check))
+
+        self._single_candidate_satellite_probe_in_progress = False
+        self._single_candidate_pending_satellite_probe = None
+        original_reps = [dict(r) for r in list(ctx.get("original_reps") or [])]
+        original_target = int(max(1, ctx.get("original_replicates_target", 1) or 1))
+        original_delay = int(
+            ctx.get(
+                "original_delay_us",
+                getattr(self, "_base_classify_delay_us", getattr(self, "classify_delay_us", 0)),
+            )
+            or 0
+        )
+        self._active_classify_delay_us = int(original_delay)
+        self.reps = original_reps
+        self.replicates_target = original_target
+
+        direction = str(check.get("direction", "down"))
+        if direction not in ("up", "down"):
+            direction = "down"
+        failure_kind = str(check.get("failure_kind", "high"))
+        if failure_kind not in ("high", "low"):
+            failure_kind = "high" if direction == "down" else "low"
+        decision = {
+            **dict(ctx.get("decision") or {}),
+            "reason": "single_candidate_satellite_probe",
+            "rejection_cause": str(check.get("result", "small_single_unresolved")),
+            "failure_kind": str(failure_kind),
+            "suggested_direction": str(direction),
+            "satellite_probe_result": str(check.get("result", "")),
+            "satellite_check": dict(check),
+        }
+        verdict = "multiple" if direction == "down" else "none"
+
+        def _after_restore(*_args, **_kwargs):
+            self._store_pressure_summary(
+                verdict,
+                escalated=len(original_reps) > 1,
+                decision=decision,
+            )
+            self._advance_single_candidate_pressure(direction, "satellite_probe", decision)
+
+        self._request_settings_with_recording(
+            {"flash_delay": int(original_delay), "num_droplets": 1},
+            _after_restore,
+            context="single_candidate_satellite_probe_restore_delay",
+            guard_timeout_ms=15_000,
+            on_timeout=lambda: self._single_candidate_fail(
+                "Failed to restore flash delay after satellite probe."
+            ),
+        )
+
+    def _single_candidate_satellite_probe_result(
+        self,
+        *,
+        original_summary: dict,
+        probe_summary: dict,
+    ) -> dict:
+        original_summary = dict(original_summary or {})
+        probe_summary = dict(probe_summary or {})
+        probe_counts = dict(probe_summary.get("class_counts") or {})
+        probe_single_count = int(probe_counts.get("single", 0) or 0)
+        high_hits = int(probe_summary.get("high_pressure_hits", 0) or 0)
+        low_hits = int(probe_summary.get("low_pressure_hits", 0) or 0)
+        multiple_count = int(probe_counts.get("multiple", 0) or 0)
+        max_free_count = int(probe_summary.get("max_free_blob_count", 0) or 0)
+        original_area = int(original_summary.get("largest_free_blob_area_px", 0) or 0)
+        probe_area = int(probe_summary.get("largest_free_blob_area_px", 0) or 0)
+        probe_bbox_area = int(probe_summary.get("largest_free_blob_bbox_area_px", 0) or 0)
+        area_limit = int(max(1, getattr(self, "single_candidate_satellite_min_area_px", 12000)))
+        bbox_limit = int(max(1, getattr(self, "single_candidate_satellite_min_bbox_area_px", 16000)))
+        larger_ratio = float(
+            max(1.0, getattr(self, "single_candidate_satellite_larger_area_ratio", 1.4))
+        )
+        larger_than_original = bool(
+            original_area > 0
+            and probe_area >= int(round(float(original_area) * larger_ratio))
+        )
+        larger_main_seen = bool(
+            probe_single_count > 0
+            and (
+                probe_area >= area_limit
+                or probe_bbox_area >= bbox_limit
+                or larger_than_original
+            )
+        )
+        if high_hits > 0 or multiple_count > 0 or max_free_count > 1:
+            return {
+                "result": "small_single_satellite_confirmed",
+                "evidence": "high_pressure_probe",
+                "direction": "down",
+                "failure_kind": "high",
+            }
+        if larger_main_seen:
+            return {
+                "result": "small_single_satellite_confirmed",
+                "evidence": "larger_main_probe",
+                "direction": "down",
+                "failure_kind": "high",
+            }
+        if low_hits > 0 and probe_single_count == 0 and high_hits == 0:
+            return {
+                "result": "small_single_probe_low_pressure",
+                "evidence": "low_pressure_probe",
+                "direction": "up",
+                "failure_kind": "low",
+            }
+        direction = self._single_candidate_small_single_history_direction()
+        return {
+            "result": "small_single_unresolved",
+            "evidence": "probe_still_small_or_ambiguous",
+            "direction": str(direction),
+            "failure_kind": "high" if str(direction) == "down" else "low",
+        }
+
+    def _single_candidate_small_single_history_direction(self) -> str:
+        cur = None
+        try:
+            cur = float(self._current_pressure)
+        except Exception:
+            cur = None
+        if cur is not None and self._single_candidate_has_recent_failure(cur, "high", relation="above"):
+            return "down"
+        if cur is not None and self._single_candidate_has_recent_failure(cur, "low", relation="below"):
+            return "up"
+        last_kind = self._single_candidate_last_failure_kind()
+        if last_kind == "low":
+            return "up"
+        return "down"
+
     def _single_candidate_rep_has_high_pressure_evidence(self, rep: dict | None) -> bool:
         rep = dict(rep or {})
         if str(rep.get("cls", "")) == "multiple":
@@ -19556,8 +19880,12 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         low_pressure_hits = 0
         stream_like_hits = 0
         bottom_edge_hits = 0
+        small_single_suspect_hits = 0
         max_free_blob_count = 0
         largest_blob_area_px = 0
+        largest_blob_bbox_area_px = 0
+        blob_area_values = []
+        blob_bbox_area_values = []
         for rep in reps:
             cls = str(rep.get("cls", ""))
             if cls in counts:
@@ -19584,15 +19912,24 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 stream_like_hits += 1
             if bool(rep.get("bottom_edge_or_clipped", False)):
                 bottom_edge_hits += 1
+            if self._single_candidate_rep_has_small_single_suspect(rep):
+                small_single_suspect_hits += 1
             try:
                 max_free_blob_count = max(max_free_blob_count, int(rep.get("free_blob_count", 0) or 0))
             except Exception:
                 pass
             try:
-                largest_blob_area_px = max(
-                    largest_blob_area_px,
-                    int(rep.get("largest_free_blob_area_px", 0) or 0),
-                )
+                area_px = int(rep.get("largest_free_blob_area_px", 0) or 0)
+                largest_blob_area_px = max(largest_blob_area_px, area_px)
+                if area_px > 0:
+                    blob_area_values.append(area_px)
+            except Exception:
+                pass
+            try:
+                bbox_area_px = int(rep.get("largest_free_blob_bbox_area_px", 0) or 0)
+                largest_blob_bbox_area_px = max(largest_blob_bbox_area_px, bbox_area_px)
+                if bbox_area_px > 0:
+                    blob_bbox_area_values.append(bbox_area_px)
             except Exception:
                 pass
 
@@ -19620,8 +19957,16 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             "low_pressure_hits": int(low_pressure_hits),
             "stream_like_hits": int(stream_like_hits),
             "bottom_edge_hits": int(bottom_edge_hits),
+            "small_single_suspect_hits": int(small_single_suspect_hits),
             "max_free_blob_count": int(max_free_blob_count),
             "largest_free_blob_area_px": int(largest_blob_area_px),
+            "largest_free_blob_bbox_area_px": int(largest_blob_bbox_area_px),
+            "min_largest_free_blob_area_px": (
+                int(min(blob_area_values)) if blob_area_values else 0
+            ),
+            "min_largest_free_blob_bbox_area_px": (
+                int(min(blob_bbox_area_values)) if blob_bbox_area_values else 0
+            ),
         }
 
     def _single_candidate_confirmation_passes(self, summary: dict) -> bool:
@@ -19641,6 +19986,8 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             return False
         if int((summary or {}).get("too_close_hits", 0)) > 0:
             return False
+        if int((summary or {}).get("small_single_suspect_hits", 0)) > 0:
+            return False
         max_std = (summary or {}).get("center_max_std_px")
         if max_std is None:
             return False
@@ -19659,6 +20006,13 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 "direction": "up",
                 "cause": "low_pressure_evidence",
                 "failure_kind": "low",
+            }
+        if int((summary or {}).get("small_single_suspect_hits", 0)) > 0:
+            direction = self._single_candidate_small_single_history_direction()
+            return {
+                "direction": str(direction),
+                "cause": "small_single_unresolved",
+                "failure_kind": "high" if str(direction) == "down" else "low",
             }
 
         cur = None
@@ -19894,6 +20248,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 "loop_detected": bool(getattr(self, "_single_candidate_loop_detected", False)),
                 "loop_escape": dict(getattr(self, "_single_candidate_last_loop_escape", {}) or {}),
                 "residue_checks": list(getattr(self, "_single_candidate_residue_checks", []) or []),
+                "satellite_checks": list(getattr(self, "_single_candidate_satellite_checks", []) or []),
             },
         )
         self.stageChanged.emit(str(message))
@@ -19982,10 +20337,10 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
 
         severity = str(check.get("residue_severity", "clear"))
         pending = getattr(self, "_single_candidate_pending_residue_check", None)
-        if severity == "moderate" and not pending:
+        if severity in ("moderate", "artifact") and not pending:
             self._single_candidate_pending_residue_check = dict(check)
             self.stageChanged.emit(
-                "Moderate residue signal detected; confirming with a second no-droplet image"
+                "Residue signal detected; confirming with a second no-droplet image"
             )
             self._capture_single_candidate_residue_verification_frame(
                 trigger=str(trigger),
@@ -20072,11 +20427,79 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             max(1, getattr(self, "single_candidate_residue_moderate_area_px", max(1000, area_limit // 4)))
         )
         free_count = int(len(droplets or []))
-        strong = bool(attached_area >= area_limit or residue_area >= area_limit)
+        free_details = []
+        if isinstance(details, dict):
+            free_details = list(details.get("free_droplets", []) or [])
+        component_count = 0
+        try:
+            component_count = int((details or {}).get("component_count", 0) or 0)
+        except Exception:
+            component_count = 0
+        frame_h = frame_w = 0
+        try:
+            frame_h, frame_w = int(frame.shape[0]), int(frame.shape[1])
+        except Exception:
+            frame_h = frame_w = 0
+        max_free_bbox_area = 0
+        broad_free_bbox_count = 0
+        large_free_bbox_count = 0
+        span_fraction = float(
+            max(0.05, getattr(self, "single_candidate_residue_artifact_span_fraction", 0.65))
+        )
+        large_bbox_limit = int(
+            max(1, getattr(self, "single_candidate_residue_artifact_large_bbox_area_px", 100000))
+        )
+        for info in free_details:
+            bbox = info.get("bbox") if isinstance(info, dict) else None
+            if not (isinstance(bbox, (list, tuple)) and len(bbox) >= 4):
+                continue
+            try:
+                _x, _y, bw, bh = [int(v) for v in bbox[:4]]
+            except Exception:
+                continue
+            bbox_area = int(max(0, bw) * max(0, bh))
+            max_free_bbox_area = max(max_free_bbox_area, bbox_area)
+            if bbox_area >= large_bbox_limit:
+                large_free_bbox_count += 1
+            if (
+                frame_w > 0
+                and frame_h > 0
+                and (
+                    bw >= int(round(float(frame_w) * span_fraction))
+                    or bh >= int(round(float(frame_h) * span_fraction))
+                )
+            ):
+                broad_free_bbox_count += 1
+        artifact_reasons = []
+        free_artifact_limit = int(
+            max(1, getattr(self, "single_candidate_residue_artifact_free_count", 4))
+        )
+        component_artifact_limit = int(
+            max(1, getattr(self, "single_candidate_residue_artifact_component_count", 12))
+        )
+        if free_count >= free_artifact_limit:
+            artifact_reasons.append("many_free_droplets")
+        if component_count >= component_artifact_limit:
+            artifact_reasons.append("many_components")
+        if large_free_bbox_count > 0:
+            artifact_reasons.append("large_free_bbox")
+        if broad_free_bbox_count > 0:
+            artifact_reasons.append("broad_free_bbox")
+        artifact_like = bool(artifact_reasons)
+        contact_only_artifact_strong = bool(
+            attached_area >= area_limit
+            and residue_area < moderate_limit
+            and artifact_like
+        )
+        strong = bool(
+            residue_area >= area_limit
+            or (attached_area >= area_limit and not contact_only_artifact_strong)
+        )
         transient_free = bool(free_count > 0 and not strong)
         moderate = bool(
             not transient_free
             and not strong
+            and not contact_only_artifact_strong
             and (residue_detected or contact_detected)
             and (
                 attached_area >= moderate_limit
@@ -20084,7 +20507,9 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 or contact_detected
             )
         )
-        if strong:
+        if contact_only_artifact_strong:
+            severity = "artifact"
+        elif strong:
             severity = "strong"
         elif moderate:
             severity = "moderate"
@@ -20103,6 +20528,12 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             "attached_area_limit_px": int(area_limit),
             "moderate_area_limit_px": int(moderate_limit),
             "free_droplet_count": int(free_count),
+            "component_count": int(component_count),
+            "artifact_like": bool(artifact_like),
+            "artifact_reasons": list(artifact_reasons),
+            "max_free_bbox_area_px": int(max_free_bbox_area),
+            "large_free_bbox_count": int(large_free_bbox_count),
+            "broad_free_bbox_count": int(broad_free_bbox_count),
             "details": dict(details or {}),
         }
 
@@ -20189,6 +20620,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                     "loop_detected": bool(getattr(self, "_single_candidate_loop_detected", False)),
                     "loop_escape": dict(getattr(self, "_single_candidate_last_loop_escape", {}) or {}),
                     "residue_checks": list(getattr(self, "_single_candidate_residue_checks", []) or []),
+                    "satellite_checks": list(getattr(self, "_single_candidate_satellite_checks", []) or []),
                 },
             )
             self.calibrationError.emit(msg)
@@ -20224,6 +20656,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             "loop_detected": bool(getattr(self, "_single_candidate_loop_detected", False)),
             "loop_escape": dict(getattr(self, "_single_candidate_last_loop_escape", {}) or {}),
             "residue_checks": list(getattr(self, "_single_candidate_residue_checks", []) or []),
+            "satellite_checks": list(getattr(self, "_single_candidate_satellite_checks", []) or []),
             "lock_pressure_for_trajectory": True,
         }
         self.calibrationDataUpdated.emit({"measurements": [], "result": result})
@@ -26183,6 +26616,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         if bool(getattr(self, "_search_candidate_seen_ever", False)):
             return False
         no_droplet_reasons = {
+            "manual_current_no_droplet",
             "search_fail_cycles",
             "search_low_signal_streak_limit",
             "search_no_contour_streak_limit",
@@ -26725,6 +27159,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
     def recheck_missing_requirements(recheck_context) -> list[str]:
         context = dict(recheck_context or {})
         missing = []
+        static_target_context = bool(context.get("static_target_context"))
         if PressureSweepCharacterizationProcess._coerce_int_or_none(
             context.get("print_pulse_width_us")
         ) is None:
@@ -26739,13 +27174,13 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             context.get("target_xyz") or context.get("mean_position_machine")
         ) is None:
             missing.append("Prior droplet machine position")
-        if PressureSweepCharacterizationProcess._coerce_xyz_dict(
+        if (not static_target_context) and PressureSweepCharacterizationProcess._coerce_xyz_dict(
             context.get("nozzle_center_machine")
         ) is None:
             missing.append("Source nozzle center machine coordinates")
-        if PressureSweepCharacterizationProcess._coerce_xy_tuple(context.get("nozzle_center_px")) is None:
+        if (not static_target_context) and PressureSweepCharacterizationProcess._coerce_xy_tuple(context.get("nozzle_center_px")) is None:
             missing.append("Source nozzle center image coordinates")
-        if PressureSweepCharacterizationProcess._coerce_int_or_none(
+        if (not static_target_context) and PressureSweepCharacterizationProcess._coerce_int_or_none(
             context.get("emergence_time_us")
         ) is None:
             missing.append("Source emergence time")
@@ -26756,7 +27191,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         vy = PressureSweepCharacterizationProcess._coerce_float_or_none(
             context.get("vy_px_per_us") if context.get("vy_px_per_us") is not None else context.get("vy")
         )
-        if vec is None and (vx is None or vy is None):
+        if vec is None and (vx is None or vy is None) and not static_target_context:
             missing.append("Source droplet trajectory")
         return missing
 
@@ -26778,29 +27213,12 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             context.get("target_xyz") or context.get("mean_position_machine")
         ) is None:
             missing.append("Current machine position")
-        if PressureSweepCharacterizationProcess._coerce_xyz_dict(
-            context.get("nozzle_center_machine")
-        ) is None:
-            missing.append("Source nozzle center machine coordinates")
-        if PressureSweepCharacterizationProcess._coerce_xy_tuple(context.get("nozzle_center_px")) is None:
-            missing.append("Source nozzle center image coordinates")
-        if PressureSweepCharacterizationProcess._coerce_int_or_none(
-            context.get("emergence_time_us")
-        ) is None:
-            missing.append("Source emergence time")
-        vec = PressureSweepCharacterizationProcess._coerce_vec3(context.get("vec_steps_per_s"))
-        vx = PressureSweepCharacterizationProcess._coerce_float_or_none(
-            context.get("vx_px_per_us") if context.get("vx_px_per_us") is not None else context.get("vx")
-        )
-        vy = PressureSweepCharacterizationProcess._coerce_float_or_none(
-            context.get("vy_px_per_us") if context.get("vy_px_per_us") is not None else context.get("vy")
-        )
-        if vec is None and (vx is None or vy is None):
-            missing.append("Source droplet trajectory")
         return missing
 
     def _build_recheck_pressure_target(self, context: dict) -> dict:
         context = dict(context or {})
+        if bool(context.get("static_target_context")):
+            return self._build_static_pressure_target(context)
         pressure = self._coerce_float_or_none(context.get("pressure_psi"))
         pw_us = self._coerce_int_or_none(context.get("print_pulse_width_us"))
         delay_us = self._coerce_int_or_none(context.get("delay_us"))
@@ -26857,8 +27275,48 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             "reference_cv_volume_percent": context.get("reference_cv_volume_percent"),
         }
 
+    def _build_static_pressure_target(self, context: dict) -> dict:
+        context = dict(context or {})
+        pressure = self._coerce_float_or_none(context.get("pressure_psi"))
+        pw_us = self._coerce_int_or_none(context.get("print_pulse_width_us"))
+        delay_us = self._coerce_int_or_none(context.get("delay_us"))
+        target_xyz = self._coerce_xyz_tuple(
+            context.get("target_xyz") or context.get("mean_position_machine")
+        )
+        if pressure is None or pw_us is None or delay_us is None or target_xyz is None:
+            return {}
+
+        delay_us = self._clamp_delay(int(delay_us))
+        target_xyz = self._clamp_xyz(*target_xyz)
+        source = context.get("source_result")
+        source = dict(source) if isinstance(source, dict) else {}
+        return {
+            "pressure": float(round(float(pressure), 3)),
+            "vx": 0.0,
+            "vy": 0.0,
+            "vec_steps_per_s": [0.0, 0.0, 0.0],
+            "targeting_mode": "manual_current_position",
+            "imaging_z_offset_steps": 0,
+            "target_z_steps": int(target_xyz[2]),
+            "target_plane_reachable": True,
+            "target_plane_reason": None,
+            "nominal_delay_us": int(delay_us),
+            "nominal_dt_us": 0,
+            "nominal_target_xyz": [int(v) for v in target_xyz],
+            "recheck_target_xyz": [int(v) for v in target_xyz],
+            "initial_track_offset_steps": [0, 0, 0],
+            "print_pulse_width_us": int(pw_us),
+            "recheck_source": source,
+            "manual_current_source": source,
+            "static_target_context": True,
+            "reference_mean_volume_nL": context.get("reference_mean_volume_nL"),
+            "reference_cv_volume_percent": context.get("reference_cv_volume_percent"),
+        }
+
     def _build_manual_current_pressure_target(self, context: dict) -> dict:
-        rec = self._build_recheck_pressure_target(context)
+        manual_context = dict(context or {})
+        manual_context["static_target_context"] = True
+        rec = self._build_static_pressure_target(manual_context)
         if rec:
             source = context.get("source_result")
             source = dict(source) if isinstance(source, dict) else {}
@@ -27121,6 +27579,8 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         rec = self.plan[self.i]
         self.current_plan_record = rec
         self.cur_pressure = float(rec["pressure"])
+        if rec.get("targeting_mode"):
+            self.targeting_mode = str(rec.get("targeting_mode"))
         vx, vy = float(rec["vx"]), float(rec["vy"])
         vec_steps_per_s = rec.get("vec_steps_per_s")
         if isinstance(vec_steps_per_s, (list, tuple)) and len(vec_steps_per_s) == 3:
@@ -27140,6 +27600,8 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.stageChanged.emit(f"[{self.i+1}/{len(self.plan)}] Pressure {self.cur_pressure:.3f} psi "
                                f"(vx={vx:.4f} px/us, vy={vy:.4f} px/us)")
         self._reset_char_buffers()
+        if str(rec.get("targeting_mode") or "").strip().lower() == "manual_current_position":
+            self._delay_offsets_us = [0]
         self._centered = False
         self._char_need_capture = False
         self._background_stale = False
@@ -27202,9 +27664,15 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self._search_anchor_xyz = self._clamp_xyz(*tgt)
         self._imaging_guard_hit_count = 0
         self._mark_background_stale("pressure_target_move")
-        self.stageChanged.emit(
-            f"Moving to predicted target @ {self.target_delay_us} us -> {self._search_anchor_xyz}"
-        )
+        rec = getattr(self, "current_plan_record", None)
+        if isinstance(rec, dict) and str(rec.get("targeting_mode") or "").strip().lower() == "manual_current_position":
+            self.stageChanged.emit(
+                f"Moving to manual target @ {self.target_delay_us} us -> {self._search_anchor_xyz}"
+            )
+        else:
+            self.stageChanged.emit(
+                f"Moving to predicted target @ {self.target_delay_us} us -> {self._search_anchor_xyz}"
+            )
         self._safe_move_abs(self._search_anchor_xyz)
 
     @Slot()
@@ -27318,6 +27786,18 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         if self._delay_try_index >= len(self._delay_offsets_us):
             # exhausted a sweep
             self._delay_try_index = 0
+            rec = getattr(self, "current_plan_record", None)
+            if (
+                bool(getattr(self, "manual_current_mode", False))
+                and isinstance(rec, dict)
+                and str(rec.get("targeting_mode") or "").strip().lower() == "manual_current_position"
+                and not bool(getattr(self, "_search_candidate_seen_ever", False))
+            ):
+                self._invalidate_current_pressure(
+                    "manual_current_no_droplet",
+                    stage_message="No droplet found at the current manual position.",
+                )
+                return
 
             if bool(getattr(self, "_search_candidate_seen_since_sweep", False)):
                 self._search_candidate_seen_since_sweep = False
@@ -27508,6 +27988,19 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                     "streaks": self._search_streak_snapshot(),
                 },
             )
+
+            rec = getattr(self, "current_plan_record", None)
+            if (
+                bool(getattr(self, "manual_current_mode", False))
+                and isinstance(rec, dict)
+                and str(rec.get("targeting_mode") or "").strip().lower() == "manual_current_position"
+                and not bool(getattr(self, "_search_candidate_seen_ever", False))
+            ):
+                self._invalidate_current_pressure(
+                    "manual_current_no_droplet",
+                    stage_message="No droplet found at the current manual position.",
+                )
+                return
 
             if (
                 is_background_artifact
@@ -28740,6 +29233,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         Emit a single-pressure result so the UI can update immediately.
         Includes run metadata but only one pressure record in 'pressures'.
         """
+        emergence_time_us = self._coerce_int_or_none(getattr(self, "emergence_time_us", None))
         result = {
             "pressures": [pressure_entry],                     # <- exactly one pressure
             "order": "desc",                                   # keep same metadata as final
@@ -28749,7 +29243,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             "target_z_steps": int(getattr(self, "target_z_steps", 0)),
             "nozzle_center_px": self.nozzle_center_px,
             "nozzle_center_machine": self.nozzle_center_machine,
-            "emergence_time_us": int(self.emergence_time_us),
+            "emergence_time_us": None if emergence_time_us is None else int(emergence_time_us),
         }
         if bool(getattr(self, "recheck_mode", False)):
             source = {}
@@ -28782,6 +29276,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
     def onCompleted(self):
         if self._incremental_emitted:
             # We've already emitted each pressure; just stamp metadata + completion.
+            emergence_time_us = self._coerce_int_or_none(getattr(self, "emergence_time_us", None))
             result = {
                 "pressures": [],  # nothing new here; avoids duplicates in summary rows
                 "order": "desc",
@@ -28791,7 +29286,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 "target_z_steps": int(getattr(self, "target_z_steps", 0)),
                 "nozzle_center_px": self.nozzle_center_px,
                 "nozzle_center_machine": self.nozzle_center_machine,
-                "emergence_time_us": int(self.emergence_time_us),
+                "emergence_time_us": None if emergence_time_us is None else int(emergence_time_us),
                 "complete": True
             }
             if bool(getattr(self, "recheck_mode", False)):
@@ -28805,6 +29300,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             self.calibrationDataUpdated.emit({"measurements": [], "result": result})
         else:
             # Back-compat: original behavior (single emit with all pressures)
+            emergence_time_us = self._coerce_int_or_none(getattr(self, "emergence_time_us", None))
             result = {
                 "pressures": self.samples,
                 "order": "desc",
@@ -28814,7 +29310,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 "target_z_steps": int(getattr(self, "target_z_steps", 0)),
                 "nozzle_center_px": self.nozzle_center_px,
                 "nozzle_center_machine": self.nozzle_center_machine,
-                "emergence_time_us": int(self.emergence_time_us),
+                "emergence_time_us": None if emergence_time_us is None else int(emergence_time_us),
             }
             if bool(getattr(self, "recheck_mode", False)):
                 context = getattr(self, "recheck_context", None)

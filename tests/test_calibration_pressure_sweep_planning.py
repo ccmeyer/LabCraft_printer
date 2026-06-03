@@ -193,6 +193,41 @@ class _PressureSweepInitManager(QObject):
         self.settingsChangeCompleted.emit()
 
 
+class _ManualStaticInitManager(QObject):
+    settingsChangeCompleted = Signal()
+    captureCompleted = Signal()
+
+    def get_num_pressure_tests(self):
+        return 1
+
+    def get_nozzle_center(self):
+        return None
+
+    def get_pressure_scan_nozzle_center_image_position(self):
+        return None
+
+    def get_real_nozzle_center_image_position(self):
+        return None
+
+    def get_emergence_time(self):
+        return None
+
+    def get_background_image(self):
+        return None
+
+    def get_trajectory_pressure_band(self):
+        return None
+
+    def get_trajectory_valid_fit_pressures(self):
+        return []
+
+    def get_pressure_trajectory_result(self):
+        return None
+
+    def emitSettingsChangeCompleted(self):
+        self.settingsChangeCompleted.emit()
+
+
 def _build_pressure_sweep_init_model():
     def _convert_pixel_position_to_motor_steps(pixel_position, current_motor_position):
         px, py = pixel_position
@@ -545,28 +580,29 @@ def test_pressure_sweep_recheck_mode_applies_pulse_width_and_pressure():
 
 
 def _build_manual_current_context():
-    context = _build_recheck_context()
-    context.update(
-        {
-            "manual_current": True,
+    return {
+        "manual_current": True,
+        "static_target_context": True,
+        "targeting_mode": "manual_current_position",
+        "print_pulse_width_us": 1450,
+        "pressure_psi": 1.20,
+        "delay_us": 9000,
+        "target_xyz": [1234, 2000, 7654],
+        "mean_position_machine": [1234, 2000, 7654],
+        "source_result": {
+            "phase": "search",
+            "phase_key": "droplet_search",
+            "phase_source": "manual_current",
+            "pressure_psi": 1.20,
+            "pw_us": 1450,
+            "delay_us": 9000,
             "target_xyz": [1234, 2000, 7654],
-            "mean_position_machine": [1234, 2000, 7654],
-            "source_result": {
-                "phase": "search",
-                "phase_key": "droplet_search",
-                "phase_source": "manual_current",
-                "pressure_psi": 1.20,
-                "pw_us": 1450,
-                "delay_us": 9000,
-                "target_xyz": [1234, 2000, 7654],
-            },
-        }
-    )
-    return context
+        },
+    }
 
 
-def test_pressure_sweep_manual_current_mode_builds_single_plan_from_current_target():
-    mgr = _PressureSweepInitManager()
+def test_pressure_sweep_manual_current_mode_builds_static_plan_without_prior_calibrations():
+    mgr = _ManualStaticInitManager()
     model = _build_pressure_sweep_init_model()
     context = _build_manual_current_context()
 
@@ -584,22 +620,57 @@ def test_pressure_sweep_manual_current_mode_builds_single_plan_from_current_targ
     assert proc.plan[0]["pressure"] == 1.2
     assert proc.plan[0]["print_pulse_width_us"] == 1450
     assert proc.plan[0]["manual_current"] is True
+    assert proc.plan[0]["targeting_mode"] == "manual_current_position"
+    assert proc.plan[0]["vec_steps_per_s"] == [0.0, 0.0, 0.0]
+    assert proc.plan[0]["nominal_target_xyz"] == [1234, 2000, 7654]
 
     proc.onPickPressure()
 
     assert proc.target_delay_us == 9000
-    assert proc.nominal_target_xyz == (1100, 2000, 8500)
-    assert proc._target_xyz_for_delay(9000, include_offsets=False) == (1100, 2000, 8500)
+    assert proc.nominal_target_xyz == (1234, 2000, 7654)
+    assert proc._delay_offsets_us == [0]
+    assert proc._target_xyz_for_delay(9000, include_offsets=False) == (1234, 2000, 7654)
     assert proc._target_xyz_for_delay(9000, include_offsets=True) == (1234, 2000, 7654)
 
     pressure_entry = proc._attach_manual_current_metadata(
         {"pressure": 1.2, "delay_us": 9000, "mean_volume": 9.8, "cv_volume_percent": 4.2, "valid": True}
     )
     assert pressure_entry["print_pulse_width_us"] == 1450
-    assert pressure_entry["nozzle_center_px"] == [100, 100]
-    assert pressure_entry["nozzle_center_machine"] == {"X": 1000, "Y": 2000, "Z": 9000}
-    assert pressure_entry["emergence_time_us"] == 4000
+    assert "nozzle_center_px" not in pressure_entry
+    assert "nozzle_center_machine" not in pressure_entry
+    assert "emergence_time_us" not in pressure_entry
     assert pressure_entry["manual_current"] is True
+
+
+def test_pressure_sweep_static_recheck_mode_builds_saved_location_plan_without_trajectory():
+    mgr = _ManualStaticInitManager()
+    model = _build_pressure_sweep_init_model()
+    context = {
+        "static_target_context": True,
+        "targeting_mode": "manual_current_position",
+        "print_pulse_width_us": 1450,
+        "pressure_psi": 1.20,
+        "delay_us": 9000,
+        "target_xyz": [1234, 2000, 7654],
+        "source_result": {"phase_key": "droplet_search", "pressure_index": 0},
+    }
+
+    proc = PressureSweepCharacterizationProcess(
+        mgr,
+        model,
+        recheck_context=context,
+        replicates_per_pressure=20,
+    )
+
+    assert proc.phase_name == "droplet_recheck"
+    assert proc.recheck_mode is True
+    assert len(proc.plan) == 1
+    assert proc.plan[0]["targeting_mode"] == "manual_current_position"
+    assert proc.plan[0]["nominal_target_xyz"] == [1234, 2000, 7654]
+
+    proc.onPickPressure()
+
+    assert proc._target_xyz_for_delay(9000, include_offsets=True) == (1234, 2000, 7654)
 
 
 def test_manual_droplet_characterization_starts_pressure_sweep_with_current_position(tmp_path):
@@ -620,15 +691,10 @@ def test_manual_droplet_characterization_starts_pressure_sweep_with_current_posi
         calibration_memory_store=None,
     )
     manager = CalibrationManager(model)
-    manager.nozzle_center = {"X": 1000, "Y": 2000, "Z": 9000}
-    manager.real_nozzle_center_image_position = [100, 100]
-    manager.get_emergence_time = lambda: 4000
-    manager._pressure_traj_result = {
-        "pressures": [
-            {"pressure": 1.2, "fit": {"vx_px_per_us": 0.02, "vy_px_per_us": 0.10}},
-        ],
-        "valid_fit_pressures": [1.2],
-    }
+    manager.nozzle_center = None
+    manager.real_nozzle_center_image_position = None
+    manager.get_emergence_time = lambda: None
+    manager._pressure_traj_result = None
     started = {}
     manager._try_start_process = lambda proc_cls, **kwargs: started.update(
         {"proc_cls": proc_cls, "kwargs": dict(kwargs)}
@@ -642,21 +708,37 @@ def test_manual_droplet_characterization_starts_pressure_sweep_with_current_posi
     assert context["pressure_psi"] == 1.2
     assert context["print_pulse_width_us"] == 1450
     assert context["delay_us"] == 4300
-    assert context["vx_px_per_us"] == 0.02
-    assert context["vy_px_per_us"] == 0.10
+    assert context["static_target_context"] is True
+    assert context["targeting_mode"] == "manual_current_position"
+    assert context["vx_px_per_us"] is None
+    assert context["vy_px_per_us"] is None
 
 
-def test_manual_current_no_droplet_finishes_without_pressure_row():
+def test_manual_current_initial_no_contour_finishes_without_pressure_row():
     proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
     proc.manual_current_mode = True
     proc._search_candidate_seen_ever = False
+    proc.current_plan_record = {"targeting_mode": "manual_current_position"}
     proc.plan = [{"pressure": 1.2}]
     proc.i = 0
     proc.cur_pressure = 1.2
     proc.current_delay_us = None
     proc.target_delay_us = 4300
+    proc.droplet_image = np.zeros((16, 16), dtype=np.uint8)
+    proc.background_image = np.zeros((16, 16), dtype=np.uint8)
     proc.stageChanged = Recorder()
     proc.nextPressure = Recorder()
+    proc.presentImageSignal = Recorder()
+    proc._centered = False
+    proc._background_stale = False
+    proc._search_confirm_same_delay_pending = False
+    proc._search_background_artifact_streak = 0
+    proc._search_no_contour_streak = 0
+    proc._search_low_signal_streak = 0
+    proc._search_stable_hits = 0
+    proc._search_center_jump_streak = 0
+    proc._search_last_center = None
+    proc._search_last_delay_us = None
     proc._search_streak_snapshot = lambda: {}
     proc._char_ratio_snapshot = lambda: {}
     proc._morphology_snapshot = lambda: {}
@@ -667,8 +749,17 @@ def test_manual_current_no_droplet_finishes_without_pressure_row():
     proc._record_decision = lambda kind, payload: decisions.append((kind, dict(payload)))
     proc._record_pressure_sweep_analysis = lambda kind, payload=None: analyses.append((kind, dict(payload or {})))
     proc._record_pressure_result = lambda *args, **kwargs: recorded_rows.append((args, kwargs))
+    proc.model = SimpleNamespace(
+        droplet_camera_model=SimpleNamespace(
+            identify_droplet_contour=lambda *_args, **_kwargs: (
+                None,
+                np.zeros((16, 16), dtype=np.uint8),
+                {"reason": "no_contour"},
+            )
+        )
+    )
 
-    proc._invalidate_current_pressure("search_no_contour_streak_limit")
+    proc.onAnalyzeDroplet()
 
     assert recorded_rows == []
     assert proc.i == len(proc.plan)

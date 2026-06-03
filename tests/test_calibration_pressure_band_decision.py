@@ -25,7 +25,8 @@ def _rep(
     nozzle_attached_area: int = 0,
     stream_like_count: int = 0,
     free_blob_count: int = 1,
-    largest_free_blob_area_px: int = 2000,
+    largest_free_blob_area_px: int = 20000,
+    largest_free_blob_bbox=None,
     bottom_edge_or_clipped: bool = False,
 ):
     if center is not None:
@@ -36,6 +37,11 @@ def _rep(
         int(near_nozzle_residue_area)
         if near_nozzle_residue_area is not None
         else (12000 if near_nozzle_residue else 0)
+    )
+    bbox = (
+        list(largest_free_blob_bbox)
+        if largest_free_blob_bbox is not None
+        else [500, 500, 140, 150]
     )
     return {
         "cls": str(cls_name),
@@ -51,7 +57,8 @@ def _rep(
         "frame_height_px": int(h),
         "free_blob_count": int(free_blob_count),
         "largest_free_blob_area_px": int(largest_free_blob_area_px),
-        "largest_free_blob_bbox": [500, 500, 40, 50],
+        "largest_free_blob_bbox": [int(v) for v in bbox[:4]],
+        "largest_free_blob_bbox_area_px": int(max(0, int(bbox[2])) * max(0, int(bbox[3]))),
         "largest_free_blob_bottom_px": int(h - 1 if bottom_edge_or_clipped else 550),
         "bottom_edge_or_clipped": bool(bottom_edge_or_clipped),
         "stream_like_count": int(stream_like_count),
@@ -150,6 +157,10 @@ def _build_single_candidate_proc(reps):
     proc.P_MIN = 0.30
     proc.P_MAX = 2.00
     proc.classify_delay_us = 5850
+    proc._base_classify_delay_us = 5850
+    proc._active_classify_delay_us = 5850
+    proc.delay_retest_step_us = 500
+    proc.delay_retest_min_us = 2000
     proc._pulse_width_us = 1600
     proc._early_stop = False
     proc._stop_reason = None
@@ -159,6 +170,9 @@ def _build_single_candidate_proc(reps):
     proc._single_candidate_selected_pressure = None
     proc._single_candidate_confirmation_summary = {}
     proc._single_candidate_residue_checks = []
+    proc._single_candidate_satellite_checks = []
+    proc._single_candidate_satellite_probe_in_progress = False
+    proc._single_candidate_pending_satellite_probe = None
     proc._single_candidate_pending_residue_check = None
     proc._single_candidate_failure_message = None
     proc._single_candidate_residue_check_in_progress = False
@@ -169,6 +183,14 @@ def _build_single_candidate_proc(reps):
     proc._single_candidate_last_loop_escape = {}
     proc.single_candidate_residue_moderate_area_px = 2000
     proc.single_candidate_bottom_edge_margin_px = 24
+    proc.single_candidate_satellite_min_area_px = 12000
+    proc.single_candidate_satellite_min_bbox_area_px = 16000
+    proc.single_candidate_satellite_probe_reps = 1
+    proc.single_candidate_satellite_larger_area_ratio = 1.4
+    proc.single_candidate_residue_artifact_free_count = 4
+    proc.single_candidate_residue_artifact_component_count = 12
+    proc.single_candidate_residue_artifact_large_bbox_area_px = 100000
+    proc.single_candidate_residue_artifact_span_fraction = 0.65
     proc.continueReplicate = Recorder()
     proc.continueScan = Recorder()
     proc.finalize = Recorder()
@@ -178,6 +200,9 @@ def _build_single_candidate_proc(reps):
     proc.calibrationCompleted = Recorder()
     proc._record_decision = lambda *args, **kwargs: None
     proc._record_error = lambda *args, **kwargs: None
+    proc._request_settings_with_recording = (
+        lambda _settings, callback, **_kwargs: callback()
+    )
     proc.calibration_manager = SimpleNamespace(
         set_primary_pressure_band=lambda _payload: None,
     )
@@ -300,6 +325,168 @@ def test_single_candidate_bottom_edge_single_steps_down_after_one_capture():
     assert proc.continueReplicate.calls == []
 
 
+def test_single_candidate_small_single_triage_starts_satellite_probe():
+    proc = _build_single_candidate_proc(
+        [
+            _rep(
+                "single",
+                center=(100, 200),
+                largest_free_blob_area_px=8200,
+                largest_free_blob_bbox=[500, 500, 90, 90],
+            )
+        ]
+    )
+    calls = []
+    proc._start_single_candidate_satellite_probe = (
+        lambda *, trigger, decision=None, summary=None: calls.append(
+            {
+                "trigger": trigger,
+                "decision": dict(decision or {}),
+                "summary": dict(summary or {}),
+            }
+        )
+        or True
+    )
+
+    proc.onDecide()
+
+    assert calls and calls[0]["trigger"] == "triage"
+    assert calls[0]["summary"]["small_single_suspect_hits"] == 1
+    assert proc._single_candidate_confirming is False
+    assert proc.continueScan.calls == []
+
+
+def test_single_candidate_small_confirmation_starts_satellite_probe_not_finalize():
+    proc = _build_single_candidate_proc(
+        [
+            _rep(
+                "single",
+                center=(100 + i % 2, 200 + i % 2),
+                largest_free_blob_area_px=8100,
+                largest_free_blob_bbox=[500, 500, 90, 90],
+            )
+            for i in range(5)
+        ]
+    )
+    proc._single_candidate_confirming = True
+    proc.replicates_target = 5
+    calls = []
+    proc._start_single_candidate_satellite_probe = (
+        lambda *, trigger, decision=None, summary=None: calls.append(
+            {
+                "trigger": trigger,
+                "decision": dict(decision or {}),
+                "summary": dict(summary or {}),
+            }
+        )
+        or True
+    )
+
+    proc.onDecide()
+
+    assert calls and calls[0]["trigger"] == "confirmation"
+    assert calls[0]["summary"]["small_single_suspect_hits"] == 5
+    assert proc.finalize.calls == []
+    assert proc.continueScan.calls == []
+
+
+def test_single_candidate_satellite_probe_larger_main_steps_down():
+    original = _rep(
+        "single",
+        center=(100, 200),
+        largest_free_blob_area_px=8200,
+        largest_free_blob_bbox=[500, 500, 90, 90],
+    )
+    proc = _build_single_candidate_proc([original])
+    summary = proc._build_single_candidate_confirmation_summary(proc.reps)
+
+    proc._start_single_candidate_satellite_probe(
+        trigger="triage",
+        decision={"failure_kind": "low", "suggested_direction": "up"},
+        summary=summary,
+    )
+    proc.reps = [
+        _rep(
+            "single",
+            center=(100, 200),
+            largest_free_blob_area_px=22000,
+            largest_free_blob_bbox=[500, 500, 150, 150],
+        )
+    ]
+
+    proc.onDecide()
+
+    assert proc._next_pressure == 0.98
+    assert proc.continueScan.calls
+    assert proc._active_classify_delay_us == 5850
+    assert proc._single_candidate_satellite_checks[-1]["result"] == "small_single_satellite_confirmed"
+    assert proc._single_candidate_attempt_history[-1]["failure_kind"] == "high"
+
+
+def test_single_candidate_satellite_probe_multiple_steps_down():
+    original = _rep(
+        "single",
+        center=(100, 200),
+        largest_free_blob_area_px=8200,
+        largest_free_blob_bbox=[500, 500, 90, 90],
+    )
+    proc = _build_single_candidate_proc([original])
+    summary = proc._build_single_candidate_confirmation_summary(proc.reps)
+
+    proc._start_single_candidate_satellite_probe(
+        trigger="triage",
+        decision={"failure_kind": "low", "suggested_direction": "up"},
+        summary=summary,
+    )
+    proc.reps = [_rep("multiple", free_blob_count=2, largest_free_blob_area_px=22000)]
+
+    proc.onDecide()
+
+    assert proc._next_pressure == 0.98
+    assert proc._single_candidate_satellite_checks[-1]["evidence"] == "high_pressure_probe"
+    assert proc._single_candidate_attempt_history[-1]["rejection_cause"] == "small_single_satellite_confirmed"
+
+
+def test_single_candidate_unresolved_small_probe_uses_recent_low_history():
+    original = _rep(
+        "single",
+        center=(100, 200),
+        largest_free_blob_area_px=8200,
+        largest_free_blob_bbox=[500, 500, 90, 90],
+    )
+    proc = _build_single_candidate_proc([original])
+    proc._single_candidate_attempt_history = [
+        {
+            "pressure": 0.98,
+            "next_pressure": 1.00,
+            "direction": "up",
+            "reason": "none",
+            "failure_kind": "low",
+        }
+    ]
+    summary = proc._build_single_candidate_confirmation_summary(proc.reps)
+
+    proc._start_single_candidate_satellite_probe(
+        trigger="triage",
+        decision={"failure_kind": "low", "suggested_direction": "up"},
+        summary=summary,
+    )
+    proc.reps = [
+        _rep(
+            "single",
+            center=(100, 200),
+            largest_free_blob_area_px=8300,
+            largest_free_blob_bbox=[500, 500, 90, 90],
+        )
+    ]
+
+    proc.onDecide()
+
+    assert proc._next_pressure == 1.02
+    assert proc._single_candidate_satellite_checks[-1]["result"] == "small_single_unresolved"
+    assert proc._single_candidate_attempt_history[-1]["failure_kind"] == "low"
+
+
 def test_single_candidate_loop_escape_moves_below_low_side():
     proc = _build_single_candidate_proc([_rep("none") for _ in range(5)])
     proc._current_pressure = 0.78
@@ -375,6 +562,104 @@ def test_single_candidate_persistent_residue_stops_with_cleanup_message():
 
     assert proc.finalize.calls
     assert "clean the printer head bottom" in proc._single_candidate_failure_message
+
+
+def test_single_candidate_artifact_like_strong_residue_requests_second_verification():
+    proc = _build_single_candidate_proc([_rep("single", center=(100, 200), near_nozzle_residue=True)])
+    broad_components = [
+        {
+            "center": [544, 899],
+            "bbox": [0, 342, 1088, 1114],
+            "area_px": 426676,
+        },
+        {"center": [650, 500], "bbox": [610, 450, 90, 90], "area_px": 1600},
+        {"center": [720, 600], "bbox": [690, 560, 80, 90], "area_px": 1400},
+        {"center": [820, 700], "bbox": [790, 660, 80, 90], "area_px": 1400},
+    ]
+    proc.model = SimpleNamespace(
+        droplet_camera_model=SimpleNamespace(
+            identify_droplets=lambda *args, **kwargs: (
+                [(544, 899), (650, 500), (720, 600), (820, 700)],
+                193664,
+                np.zeros((1536, 1088), dtype=np.uint8),
+                {
+                    "near_nozzle_residue_detected": False,
+                    "near_nozzle_residue_area": 0,
+                    "nozzle_contact_detected": True,
+                    "nozzle_attached_area": 193664,
+                    "component_count": 30,
+                    "free_droplets": broad_components,
+                },
+            )
+        )
+    )
+    proc.background_image = np.zeros((1536, 1088), dtype=np.uint8)
+    proc.nozzle_center_px = (544, 320)
+    recaptures = []
+    proc._capture_single_candidate_residue_verification_frame = (
+        lambda **kwargs: recaptures.append(dict(kwargs))
+    )
+
+    proc._finish_single_candidate_residue_verification(
+        np.zeros((1536, 1088), dtype=np.uint8),
+        trigger="triage",
+        decision={"failure_kind": "low", "suggested_direction": "up"},
+    )
+
+    assert recaptures and recaptures[0]["repeated"] is True
+    assert proc.finalize.calls == []
+    assert proc.continueScan.calls == []
+    assert proc._single_candidate_pending_residue_check["residue_severity"] == "artifact"
+    assert proc._single_candidate_pending_residue_check["artifact_like"] is True
+
+
+def test_single_candidate_repeated_artifact_like_residue_continues_up():
+    proc = _build_single_candidate_proc([_rep("single", center=(100, 200), near_nozzle_residue=True)])
+    response = (
+        [(544, 899), (650, 500), (720, 600), (820, 700)],
+        193664,
+        np.zeros((1536, 1088), dtype=np.uint8),
+        {
+            "near_nozzle_residue_detected": False,
+            "near_nozzle_residue_area": 0,
+            "nozzle_contact_detected": True,
+            "nozzle_attached_area": 193664,
+            "component_count": 30,
+            "free_droplets": [
+                {"center": [544, 899], "bbox": [0, 342, 1088, 1114], "area_px": 426676},
+                {"center": [650, 500], "bbox": [610, 450, 90, 90], "area_px": 1600},
+                {"center": [720, 600], "bbox": [690, 560, 80, 90], "area_px": 1400},
+                {"center": [820, 700], "bbox": [790, 660, 80, 90], "area_px": 1400},
+            ],
+        },
+    )
+    proc.model = SimpleNamespace(
+        droplet_camera_model=SimpleNamespace(
+            identify_droplets=lambda *args, **kwargs: response
+        )
+    )
+    proc.background_image = np.zeros((1536, 1088), dtype=np.uint8)
+    proc.nozzle_center_px = (544, 320)
+    proc._capture_single_candidate_residue_verification_frame = lambda **_kwargs: None
+
+    proc._finish_single_candidate_residue_verification(
+        np.zeros((1536, 1088), dtype=np.uint8),
+        trigger="triage",
+        decision={"failure_kind": "low", "suggested_direction": "up"},
+    )
+    proc._finish_single_candidate_residue_verification(
+        np.zeros((1536, 1088), dtype=np.uint8),
+        trigger="triage",
+        decision={"failure_kind": "low", "suggested_direction": "up"},
+    )
+
+    assert proc._next_pressure == 1.02
+    assert proc.continueScan.calls
+    assert proc.finalize.calls == []
+    assert [c["residue_severity"] for c in proc._single_candidate_residue_checks] == [
+        "artifact",
+        "artifact",
+    ]
 
 
 def test_single_candidate_weak_residue_boolean_does_not_hard_stop():

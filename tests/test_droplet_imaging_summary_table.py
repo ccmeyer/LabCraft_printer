@@ -551,9 +551,7 @@ def test_manual_current_pressure_sweep_search_row_can_be_rechecked(tmp_path):
                         "settings": {"print_width": 1450, "print_pressure": 1.2},
                         "result": {
                             "manual_current": True,
-                            "nozzle_center_px": [100, 100],
-                            "nozzle_center_machine": {"X": 1000, "Y": 2000, "Z": 9000},
-                            "emergence_time_us": 4000,
+                            "targeting_mode": "manual_current_position",
                             "pressures": [
                                 {
                                     "pressure": 1.2,
@@ -561,10 +559,8 @@ def test_manual_current_pressure_sweep_search_row_can_be_rechecked(tmp_path):
                                     "delay_us": 9000,
                                     "mean_position_machine": {"X": 1234, "Y": 2000, "Z": 7654},
                                     "nominal_delay_us": 9000,
-                                    "nominal_target_xyz": [1100, 2000, 8500],
-                                    "vec_steps_per_s": [20_000.0, 0.0, -100_000.0],
-                                    "vx_px_per_us": 0.02,
-                                    "vy_px_per_us": 0.10,
+                                    "nominal_target_xyz": [1234, 2000, 7654],
+                                    "targeting_mode": "manual_current_position",
                                     "mean_volume": 9.8,
                                     "cv_volume_percent": 4.2,
                                     "valid": True,
@@ -578,9 +574,7 @@ def test_manual_current_pressure_sweep_search_row_can_be_rechecked(tmp_path):
                         "settings": {"print_width": 1450, "print_pressure": 1.2},
                         "result": {
                             "manual_current": True,
-                            "nozzle_center_px": [100, 100],
-                            "nozzle_center_machine": {"X": 1000, "Y": 2000, "Z": 9000},
-                            "emergence_time_us": 4000,
+                            "targeting_mode": "manual_current_position",
                             "pressures": [],
                         },
                     },
@@ -599,6 +593,7 @@ def test_manual_current_pressure_sweep_search_row_can_be_rechecked(tmp_path):
     assert row["source_pressure_index"] == 0
     assert row["target_xyz"] == [1234, 2000, 7654]
     assert row["manual_current"] is True
+    assert row["targeting_mode"] == "manual_current_position"
 
     context, missing = manager.build_droplet_recheck_context(row)
 
@@ -607,7 +602,9 @@ def test_manual_current_pressure_sweep_search_row_can_be_rechecked(tmp_path):
     assert context["print_pulse_width_us"] == 1450
     assert context["pressure_psi"] == 1.2
     assert context["delay_us"] == 9000
-    assert context["vec_steps_per_s"] == [20_000.0, 0.0, -100_000.0]
+    assert context["static_target_context"] is True
+    assert context["targeting_mode"] == "manual_current_position"
+    assert context["vec_steps_per_s"] is None
 
 
 def test_recheck_summary_rows_and_source_filter(monkeypatch, qapp, tmp_path):
