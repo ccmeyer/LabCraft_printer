@@ -233,6 +233,13 @@ class FactorSpec:
     options: List[OptionSpec] = field(default_factory=list)
 
 
+@dataclass
+class AdditionalConditionSpec:
+    label: str
+    targets: Dict[Tuple[str, Optional[str]], float]
+    replicates: int = 1
+
+
 # --------------------------
 # Numeric helpers (grid-based)
 # --------------------------
@@ -326,6 +333,7 @@ class ExperimentModel(QObject):
         super().__init__()
         # Factors (additive & choice groups)
         self.factors: List[FactorSpec] = []
+        self.additional_conditions: List[AdditionalConditionSpec] = []
 
         self.legacy_mode = prof.name == "legacy" if prof else True
 
@@ -487,6 +495,134 @@ class ExperimentModel(QObject):
         )
     def set_metadata(self, **kwargs):
         self.metadata.update(kwargs)
+
+    def _clear_design_derived_state(self):
+        self.plans_per_option.clear()
+        self._unreachable_preview_map = {}
+        self._target_preview_map = {}
+        self._stock_rows_cache.clear()
+        self._fill_row_cache = None
+        self._reactions_df = pd.DataFrame()
+        self._last_worst_nonfill_volume_nL = None
+
+    @staticmethod
+    def _copy_additional_condition(condition: AdditionalConditionSpec) -> AdditionalConditionSpec:
+        return AdditionalConditionSpec(
+            label=str(condition.label),
+            targets=dict(condition.targets),
+            replicates=int(condition.replicates),
+        )
+
+    @staticmethod
+    def _normalize_additional_condition_target_key(raw_key) -> tuple[str, Optional[str]] | None:
+        if isinstance(raw_key, (tuple, list)) and len(raw_key) >= 1:
+            factor = raw_key[0]
+            option = raw_key[1] if len(raw_key) > 1 else None
+        else:
+            factor = raw_key
+            option = None
+
+        factor_name = str(factor or "").strip()
+        if not factor_name:
+            return None
+
+        if option is None:
+            option_name = None
+        else:
+            option_name = str(option).strip() or None
+
+        return (factor_name, option_name)
+
+    @classmethod
+    def _normalize_additional_condition_targets(cls, raw_targets) -> Dict[Tuple[str, Optional[str]], float]:
+        targets: Dict[Tuple[str, Optional[str]], float] = {}
+
+        def _store(raw_key, raw_value):
+            key = cls._normalize_additional_condition_target_key(raw_key)
+            if key is None:
+                return
+            try:
+                value = float(raw_value)
+            except Exception:
+                value = 0.0
+            if not math.isfinite(value):
+                value = 0.0
+            targets[key] = float(value)
+
+        if isinstance(raw_targets, dict):
+            for raw_key, raw_value in raw_targets.items():
+                _store(raw_key, raw_value)
+        elif isinstance(raw_targets, list):
+            for item in raw_targets:
+                if isinstance(item, dict):
+                    _store(
+                        (item.get("factor"), item.get("option", None)),
+                        item.get("target", 0.0),
+                    )
+                elif isinstance(item, (tuple, list)) and len(item) >= 3:
+                    _store((item[0], item[1]), item[2])
+
+        return targets
+
+    @classmethod
+    def _normalize_additional_conditions(cls, raw_conditions) -> List[AdditionalConditionSpec]:
+        if raw_conditions is None:
+            return []
+
+        if isinstance(raw_conditions, dict):
+            raw_conditions = raw_conditions.get("conditions", [])
+
+        if not isinstance(raw_conditions, list):
+            return []
+
+        normalized: List[AdditionalConditionSpec] = []
+        for index, raw_condition in enumerate(raw_conditions, start=1):
+            if isinstance(raw_condition, AdditionalConditionSpec):
+                raw_label = raw_condition.label
+                raw_targets = raw_condition.targets
+                raw_replicates = raw_condition.replicates
+            elif isinstance(raw_condition, dict):
+                raw_label = raw_condition.get("label", "")
+                raw_targets = raw_condition.get("targets", {})
+                raw_replicates = raw_condition.get("replicates", 1)
+            else:
+                continue
+
+            label = str(raw_label or "").strip() or f"Condition {index}"
+            try:
+                replicates = int(raw_replicates)
+            except Exception:
+                replicates = 1
+            if replicates < 1:
+                replicates = 1
+
+            normalized.append(
+                AdditionalConditionSpec(
+                    label=label,
+                    targets=cls._normalize_additional_condition_targets(raw_targets),
+                    replicates=int(replicates),
+                )
+            )
+
+        return normalized
+
+    def set_additional_conditions(self, conditions):
+        self.additional_conditions = self._normalize_additional_conditions(conditions)
+        self._clear_design_derived_state()
+        self.unsaved_changes = True
+        self.stock_updated.emit()
+
+    def get_additional_conditions(self) -> List[AdditionalConditionSpec]:
+        return [self._copy_additional_condition(condition) for condition in self.additional_conditions]
+
+    def clear_additional_conditions(self):
+        self.additional_conditions = []
+        self._clear_design_derived_state()
+        self.unsaved_changes = True
+        self.stock_updated.emit()
+
+    def has_additional_conditions(self) -> bool:
+        return bool(self.additional_conditions)
 
     def _default_stock_prep_state(self) -> Dict[str, Any]:
         return {
@@ -5097,6 +5233,24 @@ class ExperimentModel(QObject):
                 }
                 for f in self.factors
             ],
+            "additional_conditions": {
+                "schema_version": 1,
+                "conditions": [
+                    {
+                        "label": condition.label,
+                        "replicates": int(condition.replicates),
+                        "targets": [
+                            {
+                                "factor": factor,
+                                "option": option,
+                                "target": float(target),
+                            }
+                            for (factor, option), target in condition.targets.items()
+                        ],
+                    }
+                    for condition in self.additional_conditions
+                ],
+            },
         }
 
         # If this design is driven by an explicit uploaded reaction list,
@@ -5148,6 +5302,9 @@ class ExperimentModel(QObject):
         # --- metadata + factors (existing behavior) ---
         self.metadata = d.get("metadata", self.metadata)
         self.stock_prep_state = self._normalize_stock_prep_state(d.get("stock_prep"))
+        self.additional_conditions = self._normalize_additional_conditions(
+            d.get("additional_conditions")
+        )
         self.applied_imaging_calibrations = self._normalize_applied_imaging_calibrations(
             d.get("applied_imaging_calibrations")
         )
@@ -6545,6 +6702,7 @@ class ExperimentModel(QObject):
         """Reset v2 design to a fresh state (keeps class methods)."""
         import time
         self.factors = []
+        self.additional_conditions = []
         temp_name = "Untitled-" + time.strftime("%Y%m%d_%H%M%S")
         self.metadata = {
             "name": temp_name,
