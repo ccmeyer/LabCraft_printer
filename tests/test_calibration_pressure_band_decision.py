@@ -19,26 +19,42 @@ def _rep(
     center=None,
     nozzle_contact: bool = False,
     near_nozzle_residue: bool = False,
+    near_nozzle_residue_area: int | None = None,
     nozzle_wet: bool = False,
     too_close: bool = False,
+    nozzle_attached_area: int = 0,
+    stream_like_count: int = 0,
+    free_blob_count: int = 1,
+    largest_free_blob_area_px: int = 2000,
+    bottom_edge_or_clipped: bool = False,
 ):
     if center is not None:
         center_value = tuple(center)
     else:
         center_value = None if cy is None else (550, int(cy))
+    residue_area = (
+        int(near_nozzle_residue_area)
+        if near_nozzle_residue_area is not None
+        else (12000 if near_nozzle_residue else 0)
+    )
     return {
         "cls": str(cls_name),
         "center_px": center_value,
         "dy_min_px": dy,
-        "nozzle_attached_area": 0,
+        "nozzle_attached_area": int(nozzle_attached_area),
         "nozzle_contact": bool(nozzle_contact or nozzle_wet),
         "near_nozzle_residue": bool(near_nozzle_residue),
-        "near_nozzle_residue_area": 12000 if near_nozzle_residue else 0,
+        "near_nozzle_residue_area": int(residue_area),
         "near_nozzle_residue_components": 1 if near_nozzle_residue else 0,
         "nozzle_wet": bool(nozzle_wet),
         "too_close": bool(too_close),
         "frame_height_px": int(h),
-        "stream_like_count": 0,
+        "free_blob_count": int(free_blob_count),
+        "largest_free_blob_area_px": int(largest_free_blob_area_px),
+        "largest_free_blob_bbox": [500, 500, 40, 50],
+        "largest_free_blob_bottom_px": int(h - 1 if bottom_edge_or_clipped else 550),
+        "bottom_edge_or_clipped": bool(bottom_edge_or_clipped),
+        "stream_like_count": int(stream_like_count),
         "max_aspect_h_over_w": None,
         "min_circularity": None,
     }
@@ -143,9 +159,16 @@ def _build_single_candidate_proc(reps):
     proc._single_candidate_selected_pressure = None
     proc._single_candidate_confirmation_summary = {}
     proc._single_candidate_residue_checks = []
+    proc._single_candidate_pending_residue_check = None
     proc._single_candidate_failure_message = None
     proc._single_candidate_residue_check_in_progress = False
     proc._single_candidate_tested_pressures = []
+    proc._single_candidate_attempt_count = 1
+    proc._single_candidate_attempt_history = []
+    proc._single_candidate_loop_detected = False
+    proc._single_candidate_last_loop_escape = {}
+    proc.single_candidate_residue_moderate_area_px = 2000
+    proc.single_candidate_bottom_edge_margin_px = 24
     proc.continueReplicate = Recorder()
     proc.continueScan = Recorder()
     proc.finalize = Recorder()
@@ -243,6 +266,75 @@ def test_single_candidate_unstable_confirmation_rejects_and_steps_up():
     assert proc.finalize.calls == []
 
 
+def test_single_candidate_rejected_confirmation_after_higher_multiple_steps_down():
+    proc = _build_single_candidate_proc(
+        [_rep("single", center=(100 + i * 30, 200)) for i in range(5)]
+    )
+    proc._single_candidate_confirming = True
+    proc.replicates_target = 5
+    proc._single_candidate_attempt_history = [
+        {
+            "pressure": 1.02,
+            "next_pressure": 1.00,
+            "direction": "down",
+            "reason": "multiple",
+            "failure_kind": "high",
+        }
+    ]
+
+    proc.onDecide()
+
+    assert proc._next_pressure == 0.98
+    assert proc.continueScan.calls
+
+
+def test_single_candidate_bottom_edge_single_steps_down_after_one_capture():
+    proc = _build_single_candidate_proc(
+        [_rep("single", center=(100, 1500), bottom_edge_or_clipped=True)]
+    )
+
+    proc.onDecide()
+
+    assert proc._next_pressure == 0.98
+    assert proc.continueScan.calls
+    assert proc.continueReplicate.calls == []
+
+
+def test_single_candidate_loop_escape_moves_below_low_side():
+    proc = _build_single_candidate_proc([_rep("none") for _ in range(5)])
+    proc._current_pressure = 0.78
+    proc.start_pressure = 0.80
+    proc._single_candidate_confirming = True
+    proc.replicates_target = 5
+    proc._single_candidate_attempt_history = [
+        {
+            "pressure": 0.80,
+            "next_pressure": 0.78,
+            "direction": "down",
+            "reason": "multiple",
+            "failure_kind": "high",
+        }
+    ]
+
+    proc.onDecide()
+
+    assert proc._next_pressure == 0.76
+    assert proc._single_candidate_loop_detected is True
+    assert proc._single_candidate_attempt_history[-1]["loop_detected"] is True
+    assert proc._single_candidate_attempt_history[-1]["loop_escape_direction"] == "down"
+
+
+def test_single_candidate_repeated_attempts_consume_budget():
+    proc = _build_single_candidate_proc([_rep("multiple")])
+    proc._single_candidate_attempt_count = proc.single_candidate_max_pressures
+
+    proc.onDecide()
+
+    assert proc.finalize.calls
+    assert "pressure attempts" in proc._single_candidate_failure_message
+    assert proc.continueScan.calls == []
+
+
 def test_single_candidate_residue_starts_background_verification():
     proc = _build_single_candidate_proc([_rep("single", center=(100, 200), near_nozzle_residue=True)])
     calls = []
@@ -283,6 +375,162 @@ def test_single_candidate_persistent_residue_stops_with_cleanup_message():
 
     assert proc.finalize.calls
     assert "clean the printer head bottom" in proc._single_candidate_failure_message
+
+
+def test_single_candidate_weak_residue_boolean_does_not_hard_stop():
+    proc = _build_single_candidate_proc([_rep("single", center=(100, 200), near_nozzle_residue=True)])
+    proc.model = SimpleNamespace(
+        droplet_camera_model=SimpleNamespace(
+            identify_droplets=lambda *args, **kwargs: (
+                None,
+                None,
+                np.zeros((20, 20), dtype=np.uint8),
+                {
+                    "near_nozzle_residue_detected": True,
+                    "near_nozzle_residue_area": 300,
+                    "nozzle_contact_detected": False,
+                    "nozzle_attached_area": 0,
+                },
+            )
+        )
+    )
+    proc.background_image = np.zeros((20, 20), dtype=np.uint8)
+    proc.nozzle_center_px = (10, 10)
+
+    proc._finish_single_candidate_residue_verification(
+        np.zeros((20, 20), dtype=np.uint8),
+        trigger="triage",
+        decision={"failure_kind": "low", "suggested_direction": "up"},
+    )
+
+    assert proc._next_pressure == 1.02
+    assert proc.continueScan.calls
+    assert proc.finalize.calls == []
+    assert proc._single_candidate_residue_checks[-1]["residue_severity"] == "weak"
+
+
+def test_single_candidate_moderate_residue_requests_second_verification():
+    proc = _build_single_candidate_proc([_rep("single", center=(100, 200), near_nozzle_residue=True)])
+    proc.model = SimpleNamespace(
+        droplet_camera_model=SimpleNamespace(
+            identify_droplets=lambda *args, **kwargs: (
+                None,
+                None,
+                np.zeros((20, 20), dtype=np.uint8),
+                {
+                    "near_nozzle_residue_detected": True,
+                    "near_nozzle_residue_area": 3000,
+                    "nozzle_contact_detected": False,
+                    "nozzle_attached_area": 0,
+                },
+            )
+        )
+    )
+    proc.background_image = np.zeros((20, 20), dtype=np.uint8)
+    proc.nozzle_center_px = (10, 10)
+    recaptures = []
+    proc._capture_single_candidate_residue_verification_frame = (
+        lambda **kwargs: recaptures.append(dict(kwargs))
+    )
+
+    proc._finish_single_candidate_residue_verification(
+        np.zeros((20, 20), dtype=np.uint8),
+        trigger="triage",
+        decision={},
+    )
+
+    assert recaptures and recaptures[0]["repeated"] is True
+    assert proc.continueScan.calls == []
+    assert proc.finalize.calls == []
+    assert proc._single_candidate_pending_residue_check["residue_severity"] == "moderate"
+
+
+def test_single_candidate_moderate_residue_that_clears_continues():
+    proc = _build_single_candidate_proc([_rep("single", center=(100, 200), near_nozzle_residue=True)])
+    responses = [
+        (
+            None,
+            None,
+            np.zeros((20, 20), dtype=np.uint8),
+            {
+                "near_nozzle_residue_detected": True,
+                "near_nozzle_residue_area": 3000,
+                "nozzle_contact_detected": False,
+                "nozzle_attached_area": 0,
+            },
+        ),
+        (
+            None,
+            None,
+            np.zeros((20, 20), dtype=np.uint8),
+            {
+                "near_nozzle_residue_detected": False,
+                "near_nozzle_residue_area": 0,
+                "nozzle_contact_detected": False,
+                "nozzle_attached_area": 0,
+            },
+        ),
+    ]
+    proc.model = SimpleNamespace(
+        droplet_camera_model=SimpleNamespace(
+            identify_droplets=lambda *args, **kwargs: responses.pop(0)
+        )
+    )
+    proc.background_image = np.zeros((20, 20), dtype=np.uint8)
+    proc.nozzle_center_px = (10, 10)
+    proc._capture_single_candidate_residue_verification_frame = lambda **_kwargs: None
+
+    proc._finish_single_candidate_residue_verification(
+        np.zeros((20, 20), dtype=np.uint8),
+        trigger="triage",
+        decision={"failure_kind": "low", "suggested_direction": "up"},
+    )
+    proc._finish_single_candidate_residue_verification(
+        np.zeros((20, 20), dtype=np.uint8),
+        trigger="triage",
+        decision={"failure_kind": "low", "suggested_direction": "up"},
+    )
+
+    assert proc._next_pressure == 1.02
+    assert proc.continueScan.calls
+    assert proc.finalize.calls == []
+    assert [c["residue_severity"] for c in proc._single_candidate_residue_checks] == [
+        "moderate",
+        "clear",
+    ]
+
+
+def test_single_candidate_free_droplet_in_residue_check_is_transient_high_pressure():
+    proc = _build_single_candidate_proc([_rep("single", center=(100, 200), near_nozzle_residue=True)])
+    proc.model = SimpleNamespace(
+        droplet_camera_model=SimpleNamespace(
+            identify_droplets=lambda *args, **kwargs: (
+                [(466, 896)],
+                440,
+                np.zeros((20, 20), dtype=np.uint8),
+                {
+                    "near_nozzle_residue_detected": True,
+                    "near_nozzle_residue_area": 7373,
+                    "nozzle_contact_detected": True,
+                    "nozzle_attached_area": 440,
+                },
+            )
+        )
+    )
+    proc.background_image = np.zeros((20, 20), dtype=np.uint8)
+    proc.nozzle_center_px = (10, 10)
+
+    proc._finish_single_candidate_residue_verification(
+        np.zeros((20, 20), dtype=np.uint8),
+        trigger="triage",
+        decision={"failure_kind": "high", "suggested_direction": "down"},
+    )
+
+    assert proc._next_pressure == 0.98
+    assert proc.continueScan.calls
+    assert proc.finalize.calls == []
+    assert proc._single_candidate_residue_checks[-1]["residue_severity"] == "weak"
+    assert proc._single_candidate_residue_checks[-1]["free_droplet_count"] == 1
 
 
 def test_single_candidate_disappearing_residue_steps_up_as_under_ejection():

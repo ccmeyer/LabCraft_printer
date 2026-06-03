@@ -18595,14 +18595,21 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self.single_candidate_confirmation_reps = int(max(1, self.min_reps))
         self.single_candidate_center_std_tol_px = 8.0
         self.single_candidate_residue_persistent_area_px = int(self.nozzle_area_threshold)
+        self.single_candidate_residue_moderate_area_px = int(max(1000, self.nozzle_area_threshold // 4))
+        self.single_candidate_bottom_edge_margin_px = 24
         self._single_candidate_confirming = False
         self._single_candidate_candidate_pressure = None
         self._single_candidate_selected_pressure = None
         self._single_candidate_confirmation_summary = {}
         self._single_candidate_residue_checks = []
+        self._single_candidate_pending_residue_check = None
         self._single_candidate_failure_message = None
         self._single_candidate_residue_check_in_progress = False
         self._single_candidate_tested_pressures = []
+        self._single_candidate_attempt_count = 0
+        self._single_candidate_attempt_history = []
+        self._single_candidate_loop_detected = False
+        self._single_candidate_last_loop_escape = {}
         if self.pressure_scan_mode == "single_candidate":
             self.initial_reps_target = 1
             self.replicates_target = 1
@@ -18783,6 +18790,9 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         if self._is_single_candidate_mode():
             self.replicates_target = 1
             self._discard_next = False
+            self._single_candidate_attempt_count = int(
+                max(0, getattr(self, "_single_candidate_attempt_count", 0))
+            ) + 1
         else:
             self._discard_next = bool(self._should_discard_settling_shot(prev_pressure, target))
         active_delay_us = int(self._base_classify_delay_us)
@@ -18875,6 +18885,11 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         stream_like_count = 0
         max_aspect_h_over_w = None
         min_circularity = None
+        free_blob_count = len(free_blob_details)
+        largest_free_blob_area_px = 0
+        largest_free_blob_bbox = None
+        largest_free_blob_bottom_px = None
+        bottom_edge_or_clipped = False
         stream_min_area = int(max(1, getattr(self, "stream_min_area_px", 1200)))
         aspect_hard = float(max(1.0, getattr(self, "stream_aspect_hard", 2.0)))
         aspect_soft = float(max(1.0, getattr(self, "stream_aspect_soft", 1.6)))
@@ -18892,6 +18907,18 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 area_px = int(info.get("area_px", 0))
             except Exception:
                 area_px = 0
+            bbox = info.get("bbox") if isinstance(info, dict) else None
+            blob_bottom = None
+            if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+                try:
+                    bx, by, bw, bh = [int(v) for v in bbox[:4]]
+                    blob_bottom = int(by + bh)
+                except Exception:
+                    blob_bottom = None
+            if area_px >= int(largest_free_blob_area_px):
+                largest_free_blob_area_px = int(area_px)
+                largest_free_blob_bbox = list(bbox[:4]) if isinstance(bbox, (list, tuple)) and len(bbox) >= 4 else None
+                largest_free_blob_bottom_px = blob_bottom
             is_stream_like = bool(info.get("is_stream_like", False))
             if (not is_stream_like) and area_px >= stream_min_area:
                 is_stream_like = bool(
@@ -18904,6 +18931,22 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 max_aspect_h_over_w = float(aspect)
             if min_circularity is None or circularity < min_circularity:
                 min_circularity = float(circularity)
+        frame_height_px = (
+            int(self.droplet_image.shape[0])
+            if getattr(self, "droplet_image", None) is not None
+            else None
+        )
+        if frame_height_px is not None and largest_free_blob_bottom_px is not None:
+            bottom_margin = int(max(1, getattr(self, "single_candidate_bottom_edge_margin_px", 24)))
+            bottom_edge_or_clipped = bool(
+                int(largest_free_blob_bottom_px) >= int(frame_height_px) - bottom_margin
+            )
+        if isinstance(droplet_details, dict):
+            bottom_edge_or_clipped = bool(
+                bottom_edge_or_clipped
+                or droplet_details.get("bottom_clipped", False)
+                or droplet_details.get("fov_bottom_clipped", False)
+            )
         if cls == "single" and stream_like_count > 0:
             cls = "multiple"
             self.stageChanged.emit(
@@ -19034,7 +19077,16 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             "nozzle_wet": bool(
                 nozzle_contact and nozzle_area and nozzle_area > self.nozzle_area_threshold
             ),
-            "frame_height_px": int(self.droplet_image.shape[0]) if getattr(self, "droplet_image", None) is not None else None,
+            "frame_height_px": frame_height_px,
+            "free_blob_count": int(free_blob_count),
+            "largest_free_blob_area_px": int(largest_free_blob_area_px),
+            "largest_free_blob_bbox": (
+                None if largest_free_blob_bbox is None else [int(v) for v in largest_free_blob_bbox]
+            ),
+            "largest_free_blob_bottom_px": (
+                None if largest_free_blob_bottom_px is None else int(largest_free_blob_bottom_px)
+            ),
+            "bottom_edge_or_clipped": bool(bottom_edge_or_clipped),
             "stream_like_count": int(stream_like_count),
             "max_aspect_h_over_w": (
                 None if max_aspect_h_over_w is None else float(max_aspect_h_over_w)
@@ -19196,16 +19248,20 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             "mode": "single_candidate",
         }
 
-        if self._single_candidate_has_residue_evidence(self.reps):
-            self._start_single_candidate_residue_verification(
-                trigger="confirmation" if self._single_candidate_confirming else "triage",
-                decision=decision,
-            )
-            return
-
         if not self._single_candidate_confirming:
             verdict = self._single_candidate_triage_verdict(counts)
+            if verdict == "single" and self._single_candidate_reps_have_high_pressure_evidence(self.reps):
+                verdict = "multiple"
+                decision["triage_override"] = "high_pressure_visible_single"
             decision["triage_verdict"] = str(verdict)
+            decision["failure_kind"] = "high" if verdict == "multiple" else "low"
+            decision["suggested_direction"] = "down" if verdict == "multiple" else "up"
+            if self._single_candidate_has_residue_evidence(self.reps):
+                self._start_single_candidate_residue_verification(
+                    trigger="triage",
+                    decision=decision,
+                )
+                return
             if verdict == "single":
                 self._single_candidate_confirming = True
                 self._single_candidate_candidate_pressure = float(self._current_pressure)
@@ -19226,12 +19282,23 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 return
 
         summary = self._build_single_candidate_confirmation_summary(self.reps)
+        rejection = self._single_candidate_rejection_decision(summary)
         decision.update(
             {
                 "reason": "single_candidate_confirmation",
                 "confirmation_summary": dict(summary),
+                "rejection_cause": str(rejection.get("cause", "")),
+                "failure_kind": str(rejection.get("failure_kind", "")),
+                "suggested_direction": str(rejection.get("direction", "up")),
             }
         )
+        if self._single_candidate_has_residue_evidence(self.reps):
+            self._start_single_candidate_residue_verification(
+                trigger="confirmation",
+                decision=decision,
+            )
+            return
+
         if self._single_candidate_confirmation_passes(summary):
             self._single_candidate_selected_pressure = float(self._current_pressure)
             self._single_candidate_confirmation_summary = dict(summary)
@@ -19249,10 +19316,12 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             self.finalize.emit()
             return
 
-        direction = self._single_candidate_rejection_direction(summary)
+        direction = str(rejection.get("direction", "up"))
         rejected_verdict = "multiple" if direction == "down" else "none"
         decision["reason"] = "single_candidate_rejected"
         decision["rejected_direction"] = str(direction)
+        decision["rejection_cause"] = str(rejection.get("cause", ""))
+        decision["failure_kind"] = str(rejection.get("failure_kind", ""))
         self._store_pressure_summary(rejected_verdict, escalated=total > 1, decision=decision)
         self._advance_single_candidate_pressure(direction, "confirmation_rejected", decision)
 
@@ -19272,6 +19341,33 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 return True
         return False
 
+    def _single_candidate_rep_has_high_pressure_evidence(self, rep: dict | None) -> bool:
+        rep = dict(rep or {})
+        if str(rep.get("cls", "")) == "multiple":
+            return True
+        if int(rep.get("stream_like_count", 0) or 0) > 0:
+            return True
+        if bool(rep.get("bottom_edge_or_clipped", False)):
+            return True
+        if int(rep.get("free_blob_count", 0) or 0) > 1:
+            return True
+        return False
+
+    def _single_candidate_rep_has_low_pressure_evidence(self, rep: dict | None) -> bool:
+        rep = dict(rep or {})
+        if self._single_candidate_rep_has_high_pressure_evidence(rep):
+            return False
+        if str(rep.get("cls", "")) == "none":
+            return True
+        if bool(rep.get("too_close", False)):
+            return True
+        if bool(rep.get("nozzle_contact", False)):
+            return True
+        return False
+
+    def _single_candidate_reps_have_high_pressure_evidence(self, reps) -> bool:
+        return any(self._single_candidate_rep_has_high_pressure_evidence(r) for r in list(reps or []))
+
     def _build_single_candidate_confirmation_summary(self, reps):
         reps = list(reps or [])
         counts = {"none": 0, "single": 0, "multiple": 0}
@@ -19280,6 +19376,12 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         wet_hits = 0
         contact_hits = 0
         too_close_hits = 0
+        high_pressure_hits = 0
+        low_pressure_hits = 0
+        stream_like_hits = 0
+        bottom_edge_hits = 0
+        max_free_blob_count = 0
+        largest_blob_area_px = 0
         for rep in reps:
             cls = str(rep.get("cls", ""))
             if cls in counts:
@@ -19298,6 +19400,25 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 contact_hits += 1
             if bool(rep.get("too_close")):
                 too_close_hits += 1
+            if self._single_candidate_rep_has_high_pressure_evidence(rep):
+                high_pressure_hits += 1
+            if self._single_candidate_rep_has_low_pressure_evidence(rep):
+                low_pressure_hits += 1
+            if int(rep.get("stream_like_count", 0) or 0) > 0:
+                stream_like_hits += 1
+            if bool(rep.get("bottom_edge_or_clipped", False)):
+                bottom_edge_hits += 1
+            try:
+                max_free_blob_count = max(max_free_blob_count, int(rep.get("free_blob_count", 0) or 0))
+            except Exception:
+                pass
+            try:
+                largest_blob_area_px = max(
+                    largest_blob_area_px,
+                    int(rep.get("largest_free_blob_area_px", 0) or 0),
+                )
+            except Exception:
+                pass
 
         std_x = std_y = max_std = None
         if centers:
@@ -19319,6 +19440,12 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             "wet_hits": int(wet_hits),
             "nozzle_contact_hits": int(contact_hits),
             "too_close_hits": int(too_close_hits),
+            "high_pressure_hits": int(high_pressure_hits),
+            "low_pressure_hits": int(low_pressure_hits),
+            "stream_like_hits": int(stream_like_hits),
+            "bottom_edge_hits": int(bottom_edge_hits),
+            "max_free_blob_count": int(max_free_blob_count),
+            "largest_free_blob_area_px": int(largest_blob_area_px),
         }
 
     def _single_candidate_confirmation_passes(self, summary: dict) -> bool:
@@ -19343,12 +19470,79 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             return False
         return bool(float(max_std) <= float((summary or {}).get("center_std_limit_px", 8.0)))
 
-    @staticmethod
-    def _single_candidate_rejection_direction(summary: dict) -> str:
+    def _single_candidate_rejection_decision(self, summary: dict) -> dict:
         counts = dict((summary or {}).get("class_counts") or {})
-        if int(counts.get("multiple", 0)) > 0:
-            return "down"
-        return "up"
+        if int((summary or {}).get("high_pressure_hits", 0)) > 0 or int(counts.get("multiple", 0)) > 0:
+            return {
+                "direction": "down",
+                "cause": "high_pressure_evidence",
+                "failure_kind": "high",
+            }
+        if int((summary or {}).get("low_pressure_hits", 0)) > 0:
+            return {
+                "direction": "up",
+                "cause": "low_pressure_evidence",
+                "failure_kind": "low",
+            }
+
+        cur = None
+        try:
+            cur = float(self._current_pressure)
+        except Exception:
+            cur = None
+        if cur is not None and self._single_candidate_has_recent_failure(cur, "high", relation="above"):
+            return {
+                "direction": "down",
+                "cause": "recent_higher_high_pressure_failure",
+                "failure_kind": "high",
+            }
+        if cur is not None and self._single_candidate_has_recent_failure(cur, "low", relation="below"):
+            return {
+                "direction": "up",
+                "cause": "recent_lower_low_pressure_failure",
+                "failure_kind": "low",
+            }
+
+        last_kind = self._single_candidate_last_failure_kind()
+        if last_kind == "high":
+            return {
+                "direction": "down",
+                "cause": "last_high_pressure_failure",
+                "failure_kind": "high",
+            }
+        if last_kind == "low":
+            return {
+                "direction": "up",
+                "cause": "last_low_pressure_failure",
+                "failure_kind": "low",
+            }
+        return {
+            "direction": "up",
+            "cause": "ambiguous_unstable_single",
+            "failure_kind": "low",
+        }
+
+    def _single_candidate_has_recent_failure(self, pressure: float, failure_kind: str, *, relation: str) -> bool:
+        eps = 1e-6
+        for rec in reversed(list(getattr(self, "_single_candidate_attempt_history", []) or [])):
+            if str(rec.get("failure_kind", "")) != str(failure_kind):
+                continue
+            try:
+                p = float(rec.get("pressure"))
+            except Exception:
+                continue
+            if relation == "above" and p > float(pressure) + eps:
+                return True
+            if relation == "below" and p < float(pressure) - eps:
+                return True
+        return False
+
+    def _single_candidate_last_failure_kind(self) -> str:
+        for rec in reversed(list(getattr(self, "_single_candidate_attempt_history", []) or [])):
+            kind = str(rec.get("failure_kind", ""))
+            if kind in ("high", "low"):
+                return kind
+        return ""
 
     def _single_candidate_record_current_pressure(self):
         if self._current_pressure is None:
@@ -19366,14 +19560,25 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         cur = float(self._current_pressure)
         step = float(max(0.001, getattr(self, "single_candidate_step_psi", 0.02)))
         direction = str(direction or "up").strip().lower()
+        decision = dict(decision or {})
+        failure_kind = self._single_candidate_failure_kind(direction, reason, decision)
         if direction == "down":
             next_p = cur - step
         else:
             direction = "up"
             next_p = cur + step
         next_p = float(max(self.P_MIN, min(self.P_MAX, next_p)))
+        loop_info = self._single_candidate_loop_escape(cur, next_p, direction, failure_kind, step)
+        if bool(getattr(self, "_early_stop", False)):
+            return
+        if loop_info:
+            next_p = float(loop_info["next_pressure_psi"])
+            direction = str(loop_info["direction"])
+            self._single_candidate_loop_detected = True
+            self._single_candidate_last_loop_escape = dict(loop_info)
 
         tested_count = len(set(round(float(p), 5) for p in list(getattr(self, "_single_candidate_tested_pressures", []) or [])))
+        attempt_count = int(max(1, getattr(self, "_single_candidate_attempt_count", 0)))
         max_pressures = int(max(1, getattr(self, "single_candidate_max_pressures", 12)))
         max_span = float(max(0.0, getattr(self, "single_candidate_max_span_psi", 0.30)))
         if abs(next_p - float(self.start_pressure)) > (max_span + 1e-9):
@@ -19381,9 +19586,9 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 f"Conservative pressure search exceeded {max_span:.2f} psi from the start pressure."
             )
             return
-        if tested_count >= max_pressures:
+        if attempt_count >= max_pressures:
             self._single_candidate_fail(
-                f"Conservative pressure search reached {max_pressures} tested pressures without a stable single droplet."
+                f"Conservative pressure search reached {max_pressures} pressure attempts without a stable single droplet."
             )
             return
         if abs(next_p - cur) < 1e-9:
@@ -19397,11 +19602,30 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 "next_pressure_psi": float(next_p),
                 "direction": str(direction),
                 "reason": str(reason),
-                "decision": dict(decision or {}),
+                "failure_kind": str(failure_kind),
+                "decision": dict(decision),
                 "tested_pressure_count": int(tested_count),
+                "attempt_count": int(attempt_count),
                 "max_pressures": int(max_pressures),
+                "loop_detected": bool(loop_info),
+                "loop_escape_direction": str((loop_info or {}).get("direction", "")),
             },
         )
+        history = list(getattr(self, "_single_candidate_attempt_history", []) or [])
+        history.append(
+            {
+                "pressure": float(cur),
+                "next_pressure": float(next_p),
+                "direction": str(direction),
+                "reason": str(reason),
+                "failure_kind": str(failure_kind),
+                "rejection_cause": str(decision.get("rejection_cause", decision.get("reason", ""))),
+                "attempt_count": int(attempt_count),
+                "loop_detected": bool(loop_info),
+                "loop_escape_direction": str((loop_info or {}).get("direction", "")),
+            }
+        )
+        self._single_candidate_attempt_history = history
         self.stageChanged.emit(
             f"Conservative pressure search: {str(reason).replace('_', ' ')}; "
             f"next {next_p:.3f} psi"
@@ -19410,6 +19634,72 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self._single_candidate_candidate_pressure = None
         self._next_pressure = float(next_p)
         self.continueScan.emit()
+
+    def _single_candidate_failure_kind(self, direction: str, reason: str, decision: dict | None = None) -> str:
+        decision = dict(decision or {})
+        kind = str(decision.get("failure_kind", "")).strip().lower()
+        if kind in ("high", "low"):
+            return kind
+        triage = str(decision.get("triage_verdict", "")).strip().lower()
+        if triage == "multiple" or str(reason) == "multiple":
+            return "high"
+        if triage in ("none", "too_close", "nozzle_contact") or str(reason) in ("none", "too_close", "nozzle_contact"):
+            return "low"
+        return "high" if str(direction).strip().lower() == "down" else "low"
+
+    def _single_candidate_loop_escape(
+        self,
+        cur: float,
+        next_p: float,
+        direction: str,
+        failure_kind: str,
+        step: float,
+    ) -> dict | None:
+        history = list(getattr(self, "_single_candidate_attempt_history", []) or [])
+        if not history:
+            return None
+        last = dict(history[-1] or {})
+        eps = 1e-5
+        try:
+            last_pressure = float(last.get("pressure"))
+            last_next = float(last.get("next_pressure"))
+        except Exception:
+            return None
+        if abs(last_next - float(cur)) > eps or abs(last_pressure - float(next_p)) > eps:
+            return None
+
+        low = min(float(cur), float(next_p))
+        high = max(float(cur), float(next_p))
+        high_has_high_failure = bool(
+            (abs(float(cur) - high) <= eps and str(failure_kind) == "high")
+            or (abs(last_pressure - high) <= eps and str(last.get("failure_kind", "")) == "high")
+        )
+        low_has_low_failure = bool(
+            (abs(float(cur) - low) <= eps and str(failure_kind) == "low")
+            or (abs(last_pressure - low) <= eps and str(last.get("failure_kind", "")) == "low")
+        )
+        if high_has_high_failure:
+            escaped = float(max(self.P_MIN, low - float(step)))
+            return {
+                "direction": "down",
+                "next_pressure_psi": float(escaped),
+                "cycle_low_pressure_psi": float(low),
+                "cycle_high_pressure_psi": float(high),
+                "cycle_escape_reason": "higher_side_high_pressure_failure",
+            }
+        if low_has_low_failure:
+            escaped = float(min(self.P_MAX, high + float(step)))
+            return {
+                "direction": "up",
+                "next_pressure_psi": float(escaped),
+                "cycle_low_pressure_psi": float(low),
+                "cycle_high_pressure_psi": float(high),
+                "cycle_escape_reason": "lower_side_low_pressure_failure",
+            }
+        self._single_candidate_fail(
+            "Conservative pressure search is cycling between pressures without a clear escape direction."
+        )
+        return None
 
     def _single_candidate_fail(self, message: str):
         self._single_candidate_failure_message = str(message)
@@ -19423,6 +19713,11 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             {
                 "mode": "single_candidate",
                 "tested_pressures": list(getattr(self, "_single_candidate_tested_pressures", []) or []),
+                "attempt_count": int(getattr(self, "_single_candidate_attempt_count", 0)),
+                "attempt_history": list(getattr(self, "_single_candidate_attempt_history", []) or []),
+                "loop_detected": bool(getattr(self, "_single_candidate_loop_detected", False)),
+                "loop_escape": dict(getattr(self, "_single_candidate_last_loop_escape", {}) or {}),
+                "residue_checks": list(getattr(self, "_single_candidate_residue_checks", []) or []),
             },
         )
         self.stageChanged.emit(str(message))
@@ -19432,6 +19727,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         if bool(getattr(self, "_single_candidate_residue_check_in_progress", False)):
             return
         self._single_candidate_residue_check_in_progress = True
+        self._single_candidate_pending_residue_check = None
         pressure = float(self._current_pressure) if self._current_pressure is not None else None
         self._record_decision(
             "single_candidate_residue_verification_started",
@@ -19447,27 +19743,13 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             self._single_candidate_residue_check_in_progress = False
             self._single_candidate_fail(str(message))
 
-        def _capture_background():
-            self._capture_with_policy(
-                set_attr="residue_check_image",
-                stage_text="Capturing no-droplet residue verification image",
-                attempts_total=3,
-                retry_delay_ms=75,
-                guard_timeout_ms=15_000,
-                on_success=lambda frame: self._finish_single_candidate_residue_verification(
-                    frame,
-                    trigger=str(trigger),
-                    decision=dict(decision or {}),
-                ),
-                on_final_failure=lambda: _fail_verification(
-                    "Residue verification capture failed; inspect and clean the printer head bottom."
-                ),
-                final_error_msg="Residue verification capture failed.",
-            )
-
         self._request_settings_with_recording(
             {"num_droplets": 0},
-            _capture_background,
+            lambda: self._capture_single_candidate_residue_verification_frame(
+                trigger=str(trigger),
+                decision=dict(decision or {}),
+                repeated=False,
+            ),
             context="single_candidate_residue_verification",
             guard_timeout_ms=15_000,
             on_timeout=lambda: _fail_verification(
@@ -19475,8 +19757,39 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             ),
         )
 
+    def _capture_single_candidate_residue_verification_frame(
+        self,
+        *,
+        trigger: str,
+        decision: dict | None = None,
+        repeated: bool = False,
+    ):
+        self._single_candidate_residue_check_in_progress = True
+        label = (
+            "Capturing second no-droplet residue verification image"
+            if repeated
+            else "Capturing no-droplet residue verification image"
+        )
+        self._capture_with_policy(
+            set_attr="residue_check_image",
+            stage_text=label,
+            attempts_total=3,
+            retry_delay_ms=75,
+            guard_timeout_ms=15_000,
+            on_success=lambda frame: self._finish_single_candidate_residue_verification(
+                frame,
+                trigger=str(trigger),
+                decision=dict(decision or {}),
+            ),
+            on_final_failure=lambda: self._single_candidate_fail(
+                "Residue verification capture failed; inspect and clean the printer head bottom."
+            ),
+            final_error_msg="Residue verification capture failed.",
+        )
+
     def _finish_single_candidate_residue_verification(self, frame, *, trigger: str, decision: dict | None = None):
         self._single_candidate_residue_check_in_progress = False
+        decision = dict(decision or {})
         check = self._analyze_single_candidate_residue_verification(frame)
         check.update(
             {
@@ -19491,7 +19804,26 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self._single_candidate_residue_checks = checks
         self._record_decision("single_candidate_residue_verification_result", dict(check))
 
-        if bool(check.get("persistent_residue")):
+        severity = str(check.get("residue_severity", "clear"))
+        pending = getattr(self, "_single_candidate_pending_residue_check", None)
+        if severity == "moderate" and not pending:
+            self._single_candidate_pending_residue_check = dict(check)
+            self.stageChanged.emit(
+                "Moderate residue signal detected; confirming with a second no-droplet image"
+            )
+            self._capture_single_candidate_residue_verification_frame(
+                trigger=str(trigger),
+                decision=decision,
+                repeated=True,
+            )
+            return
+
+        repeated_moderate = bool(
+            severity in ("strong", "moderate")
+            and isinstance(pending, dict)
+            and str(pending.get("residue_severity", "")) in ("strong", "moderate")
+        )
+        if bool(check.get("persistent_residue")) or repeated_moderate:
             msg = (
                 "Persistent fluid residue detected near the printer head bottom. "
                 "Stop calibration and clean the printer head bottom before continuing."
@@ -19508,18 +19840,22 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             self._single_candidate_fail(msg)
             return
 
+        self._single_candidate_pending_residue_check = None
+        direction = self._single_candidate_direction_from_decision(decision)
+        verdict = "multiple" if direction == "down" else "none"
         self._store_pressure_summary(
-            "none",
+            verdict,
             escalated=len(self.reps) > 1,
             decision={
-                "reason": "single_candidate_residue_cleared_under_ejection",
+                "reason": "single_candidate_residue_transient",
                 "residue_check": dict(check),
+                "residue_resolution_direction": str(direction),
                 **dict(decision or {}),
             },
         )
         self._advance_single_candidate_pressure(
-            "up",
-            "residue_cleared_under_ejection",
+            direction,
+            "residue_transient",
             {"residue_check": dict(check), **dict(decision or {})},
         )
 
@@ -19550,18 +19886,64 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             attached_area = 0
         residue_detected = bool((details or {}).get("near_nozzle_residue_detected", False))
         contact_detected = bool((details or {}).get("nozzle_contact_detected", False))
+        try:
+            residue_area = int((details or {}).get("near_nozzle_residue_area", 0) or 0)
+        except Exception:
+            residue_area = 0
         default_area_limit = int(getattr(self, "nozzle_area_threshold", 8000))
         area_limit = int(max(1, getattr(self, "single_candidate_residue_persistent_area_px", default_area_limit)))
-        persistent = bool(residue_detected or contact_detected or attached_area >= area_limit)
+        moderate_limit = int(
+            max(1, getattr(self, "single_candidate_residue_moderate_area_px", max(1000, area_limit // 4)))
+        )
+        free_count = int(len(droplets or []))
+        strong = bool(attached_area >= area_limit or residue_area >= area_limit)
+        transient_free = bool(free_count > 0 and not strong)
+        moderate = bool(
+            not transient_free
+            and not strong
+            and (residue_detected or contact_detected)
+            and (
+                attached_area >= moderate_limit
+                or residue_area >= moderate_limit
+                or contact_detected
+            )
+        )
+        if strong:
+            severity = "strong"
+        elif moderate:
+            severity = "moderate"
+        elif residue_detected or contact_detected or free_count > 0:
+            severity = "weak"
+        else:
+            severity = "clear"
+        persistent = bool(strong)
         return {
             "persistent_residue": bool(persistent),
+            "residue_severity": str(severity),
             "near_nozzle_residue_detected": bool(residue_detected),
             "nozzle_contact_detected": bool(contact_detected),
             "attached_area_px": int(attached_area),
+            "near_nozzle_residue_area_px": int(residue_area),
             "attached_area_limit_px": int(area_limit),
-            "free_droplet_count": int(len(droplets or [])),
+            "moderate_area_limit_px": int(moderate_limit),
+            "free_droplet_count": int(free_count),
             "details": dict(details or {}),
         }
+
+    def _single_candidate_direction_from_decision(self, decision: dict | None = None) -> str:
+        decision = dict(decision or {})
+        direction = str(decision.get("suggested_direction", "")).strip().lower()
+        if direction in ("up", "down"):
+            return direction
+        failure_kind = str(decision.get("failure_kind", "")).strip().lower()
+        if failure_kind == "high":
+            return "down"
+        if failure_kind == "low":
+            return "up"
+        triage = str(decision.get("triage_verdict", "")).strip().lower()
+        if triage == "multiple":
+            return "down"
+        return "up"
 
     @Slot()
     def onCalibrationCompleted(self):
@@ -19626,6 +20008,10 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                     "mode": "single_candidate",
                     "pressure_count": int(len(getattr(self, "samples", []) or [])),
                     "tested_pressures": list(getattr(self, "_single_candidate_tested_pressures", []) or []),
+                    "attempt_count": int(getattr(self, "_single_candidate_attempt_count", 0)),
+                    "attempt_history": list(getattr(self, "_single_candidate_attempt_history", []) or []),
+                    "loop_detected": bool(getattr(self, "_single_candidate_loop_detected", False)),
+                    "loop_escape": dict(getattr(self, "_single_candidate_last_loop_escape", {}) or {}),
                     "residue_checks": list(getattr(self, "_single_candidate_residue_checks", []) or []),
                 },
             )
@@ -19657,6 +20043,10 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             "tested_pressure_count": int(
                 len(set(round(float(v), 5) for v in list(getattr(self, "_single_candidate_tested_pressures", []) or [])))
             ),
+            "attempt_count": int(getattr(self, "_single_candidate_attempt_count", 0)),
+            "attempt_history": list(getattr(self, "_single_candidate_attempt_history", []) or []),
+            "loop_detected": bool(getattr(self, "_single_candidate_loop_detected", False)),
+            "loop_escape": dict(getattr(self, "_single_candidate_last_loop_escape", {}) or {}),
             "residue_checks": list(getattr(self, "_single_candidate_residue_checks", []) or []),
             "lock_pressure_for_trajectory": True,
         }

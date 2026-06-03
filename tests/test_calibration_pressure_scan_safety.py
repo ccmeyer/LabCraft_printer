@@ -93,6 +93,9 @@ def test_pressure_scan_constructor_configures_single_candidate_mode(monkeypatch)
     assert proc.replicates_target == 1
     assert proc.discard_first_after_major_pressure_change is False
     assert proc.backtrack_after_first_single is False
+    assert proc._single_candidate_attempt_count == 0
+    assert proc._single_candidate_attempt_history == []
+    assert proc.single_candidate_residue_moderate_area_px < proc.single_candidate_residue_persistent_area_px
 
 
 def test_pressure_scan_prefers_emergence_refined_nozzle_center(monkeypatch):
