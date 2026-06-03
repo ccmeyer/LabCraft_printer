@@ -12,8 +12,10 @@ from CalibrationClasses.Model import PressureBandCalibrationProcess
 class _DummyState:
     def __init__(self, *args, **kwargs):
         self.entered = SignalStub()
+        self.transitions = []
 
     def addTransition(self, *args, **kwargs):
+        self.transitions.append((args, kwargs))
         return None
 
 
@@ -42,6 +44,12 @@ def _build_inputs():
         get_nozzle_center_image_position=lambda: (100, 100),
         get_background_image=lambda: object(),
         get_emergence_time=lambda: 1500,
+        get_current_settings=lambda: {
+            "num_droplets": 7,
+            "flash_delay": 4321,
+            "print_pressure": 0.88,
+            "print_width": 1600,
+        },
         settingsChangeCompleted=SignalStub(),
         captureCompleted=SignalStub(),
         changeSettingsRequested=SignalStub(),
@@ -110,6 +118,63 @@ def test_pressure_scan_constructor_configures_single_candidate_mode(monkeypatch)
     assert proc.single_candidate_satellite_min_bbox_area_px == 16000
     assert proc.single_candidate_satellite_probe_reps == 1
     assert proc._single_candidate_satellite_checks == []
+    assert proc._build_pressure_scan_restore_settings() == {
+        "num_droplets": 7,
+        "flash_delay": 4321,
+    }
+    assert proc._restored_settings is False
+    assert proc._restore_settings_confirmed is None
+    assert proc.state_restore in proc.state_machine.states
+    active_states = [
+        proc.state_prepare_bg,
+        proc.state_apply,
+        proc.state_capture,
+        proc.state_analyze,
+        proc.state_decide,
+    ]
+    assert all(
+        any(args and args[-1] is proc.state_restore for args, _kwargs in st.transitions)
+        for st in active_states
+    )
+    assert any(
+        args and args[-1] is proc.state_final
+        for args, _kwargs in proc.state_restore.transitions
+    )
+
+
+def test_pressure_scan_restore_settings_restores_only_imaging_settings(monkeypatch):
+    monkeypatch.setattr(calibration_model, "QState", _DummyState)
+    monkeypatch.setattr(calibration_model, "QFinalState", _DummyState)
+    monkeypatch.setattr(calibration_model, "QStateMachine", _DummyStateMachine)
+    monkeypatch.setattr(
+        PressureBandCalibrationProcess,
+        "missing_requirements",
+        staticmethod(lambda _cm: []),
+    )
+
+    cm, model = _build_inputs()
+    completion_calls = []
+    cm.emitSettingsChangeCompleted = lambda: completion_calls.append("done")
+    proc = PressureBandCalibrationProcess(cm, model, mode="single_candidate")
+    captured = {}
+
+    def fake_request(settings, callback, **kwargs):
+        captured["settings"] = dict(settings)
+        captured["context"] = kwargs.get("context")
+        captured["guard_timeout_ms"] = kwargs.get("guard_timeout_ms")
+        callback()
+
+    proc._request_settings_with_recording = fake_request
+
+    proc.onRestoreSettings()
+
+    assert captured["settings"] == {"num_droplets": 7, "flash_delay": 4321}
+    assert "print_pressure" not in captured["settings"]
+    assert captured["context"] == "pressure_scan_restore_settings"
+    assert captured["guard_timeout_ms"] == 15_000
+    assert proc._restored_settings is True
+    assert proc._restore_settings_confirmed is True
+    assert completion_calls == ["done"]
 
 
 def test_pressure_scan_prefers_emergence_refined_nozzle_center(monkeypatch):

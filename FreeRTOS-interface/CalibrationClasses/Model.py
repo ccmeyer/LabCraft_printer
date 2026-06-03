@@ -18686,6 +18686,12 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self._ready = not (self.nozzle_center_px is None or
                            self.background_image is None or
                            self.emergence_time_us is None)
+        try:
+            self._orig_settings = dict(self.calibration_manager.get_current_settings() or {})
+        except Exception:
+            self._orig_settings = {}
+        self._restored_settings = False
+        self._restore_settings_confirmed = None
 
         # --- imaging delay ---
         if classification_delay_us is None:
@@ -18912,6 +18918,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self.state_capture    = QState()
         self.state_analyze    = QState()
         self.state_decide     = QState()
+        self.state_restore    = QState()
         self.state_final      = QFinalState()
 
         self.state_prepare_bg.entered.connect(self.onPrepareBackground)
@@ -18919,6 +18926,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self.state_capture.entered.connect(self.onCaptureReplicate)
         self.state_analyze.entered.connect(self.onAnalyzeReplicate)
         self.state_decide.entered.connect(self.onDecide)
+        self.state_restore.entered.connect(self.onRestoreSettings)
         self.state_final.entered.connect(self.onCalibrationCompleted)
 
         # ---------- transitions ----------
@@ -18927,7 +18935,11 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         )
         for st in (self.state_prepare_bg, self.state_apply, self.state_capture,
                    self.state_analyze, self.state_decide):
-            st.addTransition(self.finalize, self.state_final)
+            st.addTransition(self.finalize, self.state_restore)
+        self.state_restore.addTransition(
+            self.calibration_manager.settingsChangeCompleted, self.state_final
+        )
+        self.state_restore.addTransition(self.finalize, self.state_final)
 
         # apply -> capture (after pressure actually set)
         self.state_apply.addTransition(self.pressureApplied, self.state_capture)
@@ -18943,7 +18955,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
 
         # register
         for s in (self.state_prepare_bg, self.state_apply, self.state_capture,
-                  self.state_analyze, self.state_decide, self.state_final):
+                  self.state_analyze, self.state_decide, self.state_restore, self.state_final):
             self.state_machine.addState(s)
         self.state_machine.setInitialState(self.state_prepare_bg)
 
@@ -18975,6 +18987,37 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
     def _is_single_candidate_mode(self) -> bool:
         return str(getattr(self, "pressure_scan_mode", "band")) == "single_candidate"
 
+    def _build_pressure_scan_restore_settings(self) -> dict:
+        orig = dict(getattr(self, "_orig_settings", {}) or {})
+        restore = {}
+        if orig.get("num_droplets") is not None:
+            try:
+                restore["num_droplets"] = int(orig.get("num_droplets"))
+            except Exception:
+                pass
+        if orig.get("flash_delay") is not None:
+            try:
+                restore["flash_delay"] = int(orig.get("flash_delay"))
+            except Exception:
+                pass
+        return restore
+
+    def _on_pressure_scan_restore_settings_completed(self, *args, **kwargs):
+        self._restore_settings_confirmed = True
+        self.calibration_manager.emitSettingsChangeCompleted()
+
+    def _on_pressure_scan_restore_settings_timeout(self):
+        self._restore_settings_confirmed = False
+        self._record_event(
+            "restore_settings_unconfirmed",
+            {
+                "context": "pressure_scan_restore_settings",
+                "settings": self._build_pressure_scan_restore_settings(),
+            },
+            level="warning",
+        )
+        self.finalize.emit()
+
     # ---------- state handlers ----------
     @Slot()
     def onPrepareBackground(self):
@@ -18989,6 +19032,39 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             {"num_droplets": 0},
             self.calibration_manager.emitSettingsChangeCompleted
         )
+
+    @Slot()
+    def onRestoreSettings(self):
+        if bool(getattr(self, "_restored_settings", False)):
+            self.finalize.emit()
+            return
+        self._restored_settings = True
+        restore = self._build_pressure_scan_restore_settings()
+        if not restore:
+            self._restore_settings_confirmed = True
+            self.finalize.emit()
+            return
+        self.stageChanged.emit("Pressure scan: restoring imaging settings")
+        try:
+            self._request_settings_with_recording(
+                restore,
+                self._on_pressure_scan_restore_settings_completed,
+                context="pressure_scan_restore_settings",
+                guard_timeout_ms=15_000,
+                on_timeout=self._on_pressure_scan_restore_settings_timeout,
+            )
+        except Exception as exc:
+            self._restore_settings_confirmed = False
+            self._record_event(
+                "restore_settings_request_failed",
+                {
+                    "context": "pressure_scan_restore_settings",
+                    "settings": dict(restore),
+                    "error": str(exc),
+                },
+                level="warning",
+            )
+            self.finalize.emit()
 
     @Slot()
     def onApplyPressure(self):
