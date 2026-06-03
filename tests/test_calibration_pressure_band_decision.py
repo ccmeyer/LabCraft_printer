@@ -148,6 +148,8 @@ def _build_single_candidate_proc(reps):
     proc.single_candidate_center_std_tol_px = 8.0
     proc.single_candidate_center_retry_std_tol_px = 15.0
     proc.single_candidate_confirmation_retry_limit = 1
+    proc.single_candidate_max_stability_rejections = 2
+    proc.single_candidate_stability_fallback_max_std_px = 25.0
     proc.single_candidate_step_psi = 0.02
     proc.single_candidate_max_pressures = 12
     proc.single_candidate_max_span_psi = 0.30
@@ -173,6 +175,9 @@ def _build_single_candidate_proc(reps):
     proc._single_candidate_confirmation_summary = {}
     proc._single_candidate_confirmation_retry_count = 0
     proc._single_candidate_confirmation_retry_history = []
+    proc._single_candidate_stability_fallback_candidates = []
+    proc._single_candidate_stability_rejection_count = 0
+    proc._single_candidate_selected_by_fallback = False
     proc._single_candidate_triage_summary = {}
     proc._single_candidate_residue_checks = []
     proc._single_candidate_satellite_checks = []
@@ -303,6 +308,8 @@ def test_single_candidate_confirmation_retry_window_retries_same_pressure_once()
     assert proc.continueReplicate.calls
     assert proc.continueScan.calls == []
     assert proc.finalize.calls == []
+    assert proc._single_candidate_stability_rejection_count == 0
+    assert proc._single_candidate_stability_fallback_candidates == []
 
 
 def test_single_candidate_retry_confirmation_within_relaxed_limit_finalizes():
@@ -342,6 +349,31 @@ def test_single_candidate_retry_confirmation_above_relaxed_limit_rejects():
     assert proc._next_pressure == 1.02
     assert proc.continueScan.calls
     assert proc.finalize.calls == []
+    assert proc._single_candidate_stability_rejection_count == 0
+    assert proc._single_candidate_stability_fallback_candidates == []
+
+
+def test_single_candidate_retry_confirmation_above_relaxed_limit_records_fallback_candidate():
+    proc = _build_single_candidate_proc(
+        [_rep("single", center=(100, 200 + i * 17)) for i in range(5)]
+    )
+    proc._single_candidate_confirming = True
+    proc._single_candidate_confirmation_retry_count = 1
+    proc._single_candidate_confirmation_retry_history = [
+        {"pressure_psi": 1.0, "retry_index": 1, "reason": "center_std_retry_window"}
+    ]
+    proc.replicates_target = 5
+
+    proc.onDecide()
+
+    assert proc._next_pressure == 1.02
+    assert proc.continueScan.calls
+    assert proc.finalize.calls == []
+    assert proc._single_candidate_stability_rejection_count == 1
+    candidate = proc._single_candidate_stability_fallback_candidates[-1]
+    assert candidate["pressure_psi"] == 1.0
+    assert candidate["confirmation_retry_used"] is True
+    assert 15.0 < candidate["center_max_std_px"] <= 25.0
 
 
 def test_single_candidate_confirmation_above_retry_window_rejects_immediately():
@@ -358,6 +390,66 @@ def test_single_candidate_confirmation_above_retry_window_rejects_immediately():
     assert proc._next_pressure == 1.02
     assert proc.continueScan.calls
     assert proc.finalize.calls == []
+    assert proc._single_candidate_stability_rejection_count == 0
+    assert proc._single_candidate_stability_fallback_candidates == []
+
+
+def test_single_candidate_eligible_unstable_confirmation_records_fallback_candidate():
+    events = []
+    proc = _build_single_candidate_proc(
+        [_rep("single", center=(100, 200 + i * 17)) for i in range(5)]
+    )
+    proc._single_candidate_confirming = True
+    proc.replicates_target = 5
+    proc._record_decision = lambda name, payload=None: events.append((name, dict(payload or {})))
+
+    proc.onDecide()
+
+    assert proc._next_pressure == 1.02
+    assert proc.continueScan.calls
+    assert proc.finalize.calls == []
+    assert proc._single_candidate_stability_rejection_count == 1
+    assert len(proc._single_candidate_stability_fallback_candidates) == 1
+    candidate = proc._single_candidate_stability_fallback_candidates[0]
+    assert candidate["pressure_psi"] == 1.0
+    assert 15.0 < candidate["center_max_std_px"] <= 25.0
+    pressure_steps = [payload for name, payload in events if name == "single_candidate_pressure_step"]
+    assert pressure_steps
+    assert "decision_context" in pressure_steps[-1]
+    assert "confirmation_summary" in pressure_steps[-1]["decision_context"]
+    assert "decision" not in pressure_steps[-1]
+
+
+def test_single_candidate_two_stability_rejections_select_best_candidate():
+    proc = _build_single_candidate_proc(
+        [_rep("single", center=(100, 200 + i * 16)) for i in range(5)]
+    )
+    proc._single_candidate_confirming = True
+    proc.replicates_target = 5
+
+    proc.onDecide()
+
+    assert proc._single_candidate_stability_rejection_count == 1
+    assert proc.finalize.calls == []
+
+    proc._current_pressure = 1.02
+    proc.reps = [_rep("single", center=(100, 200 + i * 17)) for i in range(5)]
+    proc._single_candidate_confirming = True
+    proc.replicates_target = 5
+
+    proc.onDecide()
+    proc.onCalibrationCompleted()
+
+    assert proc.finalize.calls
+    assert proc._single_candidate_selected_pressure == 1.0
+    payload = proc.calibrationDataUpdated.calls[0][0][0]["result"]
+    assert payload["primary_band"] == [1.0, 1.0]
+    assert payload["single_bands"] == [[1.0, 1.0]]
+    assert payload["stability_fallback_used"] is True
+    assert payload["stability_rejection_count"] == 2
+    assert payload["stability_fallback_selected_pressure_psi"] == 1.0
+    assert len(payload["stability_fallback_candidates"]) == 2
+    assert payload["confirmation_summary"]["selected_by_stability_fallback"] is True
 
 
 def test_single_candidate_non_clean_confirmation_does_not_use_retry_path():
@@ -374,6 +466,24 @@ def test_single_candidate_non_clean_confirmation_does_not_use_retry_path():
     assert proc._next_pressure == 0.98
     assert proc.continueScan.calls
     assert proc.finalize.calls == []
+    assert proc._single_candidate_stability_rejection_count == 0
+    assert proc._single_candidate_stability_fallback_candidates == []
+
+
+def test_single_candidate_safety_evidence_is_not_stability_fallback_candidate():
+    proc = _build_single_candidate_proc(
+        [_rep("single", center=(100, 200 + i * 17), too_close=True) for i in range(5)]
+    )
+    proc._single_candidate_confirming = True
+    proc.replicates_target = 5
+
+    proc.onDecide()
+
+    assert proc._next_pressure == 1.02
+    assert proc.continueScan.calls
+    assert proc.finalize.calls == []
+    assert proc._single_candidate_stability_rejection_count == 0
+    assert proc._single_candidate_stability_fallback_candidates == []
 
 
 def test_single_candidate_unstable_confirmation_rejects_and_steps_up():
@@ -619,6 +729,33 @@ def test_single_candidate_repeated_attempts_consume_budget():
     assert proc.finalize.calls
     assert "pressure attempts" in proc._single_candidate_failure_message
     assert proc.continueScan.calls == []
+    assert proc._single_candidate_stability_fallback_candidates == []
+
+
+def test_single_candidate_attempt_budget_selects_existing_stability_fallback_candidate():
+    proc = _build_single_candidate_proc(
+        [_rep("single", center=(100, 200 + i * 17)) for i in range(5)]
+    )
+    proc._single_candidate_confirming = True
+    proc.replicates_target = 5
+    summary = proc._build_single_candidate_confirmation_summary(proc.reps)
+    stability = proc._single_candidate_confirmation_stability(summary)
+    proc._single_candidate_record_stability_fallback_candidate(
+        summary,
+        stability,
+        {"cause": "ambiguous_unstable_single", "failure_kind": "low"},
+    )
+    proc._single_candidate_attempt_count = proc.single_candidate_max_pressures
+
+    proc._advance_single_candidate_pressure("up", "confirmation_rejected", {})
+    proc.onCalibrationCompleted()
+
+    assert proc.finalize.calls
+    assert proc._single_candidate_failure_message is None
+    payload = proc.calibrationDataUpdated.calls[0][0][0]["result"]
+    assert payload["primary_band"] == [1.0, 1.0]
+    assert payload["stability_fallback_used"] is True
+    assert payload["stability_fallback_selected_pressure_psi"] == 1.0
 
 
 def test_single_candidate_residue_starts_background_verification():

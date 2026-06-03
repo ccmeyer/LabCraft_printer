@@ -18813,6 +18813,8 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self.single_candidate_center_std_tol_px = 8.0
         self.single_candidate_center_retry_std_tol_px = 15.0
         self.single_candidate_confirmation_retry_limit = 1
+        self.single_candidate_max_stability_rejections = 2
+        self.single_candidate_stability_fallback_max_std_px = 25.0
         self.single_candidate_residue_persistent_area_px = int(self.nozzle_area_threshold)
         self.single_candidate_residue_moderate_area_px = int(max(1000, self.nozzle_area_threshold // 4))
         self.single_candidate_bottom_edge_margin_px = 24
@@ -18830,6 +18832,9 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self._single_candidate_confirmation_summary = {}
         self._single_candidate_confirmation_retry_count = 0
         self._single_candidate_confirmation_retry_history = []
+        self._single_candidate_stability_fallback_candidates = []
+        self._single_candidate_stability_rejection_count = 0
+        self._single_candidate_selected_by_fallback = False
         self._single_candidate_triage_summary = {}
         self._single_candidate_residue_checks = []
         self._single_candidate_satellite_checks = []
@@ -19623,6 +19628,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
 
         if bool(stability.get("passes", False)):
             self._single_candidate_selected_pressure = float(self._current_pressure)
+            self._single_candidate_selected_by_fallback = False
             self._single_candidate_confirmation_summary = dict(summary)
             self._store_pressure_summary("single", escalated=total > self.min_reps, decision=decision)
             self._record_decision(
@@ -19641,6 +19647,19 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             )
             self.finalize.emit()
             return
+
+        fallback_candidate = self._single_candidate_record_stability_fallback_candidate(
+            summary,
+            stability,
+            rejection,
+        )
+        if fallback_candidate is not None:
+            limits = self._single_candidate_stability_fallback_limits()
+            if int(getattr(self, "_single_candidate_stability_rejection_count", 0)) >= int(
+                limits.get("max_stability_rejections", 2)
+            ):
+                if self._single_candidate_select_stability_fallback("stability_rejection_cap"):
+                    return
 
         direction = str(rejection.get("direction", "up"))
         rejected_verdict = "multiple" if direction == "down" else "none"
@@ -20140,6 +20159,162 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
     def _single_candidate_confirmation_passes(self, summary: dict) -> bool:
         return bool(self._single_candidate_confirmation_stability(summary).get("passes", False))
 
+    def _single_candidate_stability_fallback_limits(self) -> dict:
+        return {
+            "max_stability_rejections": int(
+                max(0, getattr(self, "single_candidate_max_stability_rejections", 2))
+            ),
+            "max_std_px": float(
+                max(0.0, getattr(self, "single_candidate_stability_fallback_max_std_px", 25.0))
+            ),
+        }
+
+    def _single_candidate_stability_fallback_metadata(self) -> dict:
+        candidates = list(getattr(self, "_single_candidate_stability_fallback_candidates", []) or [])
+        selected = getattr(self, "_single_candidate_selected_pressure", None)
+        return {
+            "stability_fallback_used": bool(
+                getattr(self, "_single_candidate_selected_by_fallback", False)
+            ),
+            "stability_rejection_count": int(
+                max(0, getattr(self, "_single_candidate_stability_rejection_count", 0))
+            ),
+            "stability_fallback_candidates": [dict(c) for c in candidates],
+            "stability_fallback_selected_pressure_psi": (
+                float(selected)
+                if bool(getattr(self, "_single_candidate_selected_by_fallback", False))
+                and selected is not None
+                else None
+            ),
+            "stability_fallback_limits": self._single_candidate_stability_fallback_limits(),
+        }
+
+    def _single_candidate_stability_fallback_eligible(self, summary: dict, stability: dict) -> bool:
+        summary = dict(summary or {})
+        stability = dict(stability or {})
+        if bool(stability.get("passes", False)) or bool(stability.get("can_retry", False)):
+            return False
+        if not bool(stability.get("clean_all_single", False)):
+            return False
+        status = str(stability.get("status", "")).strip().lower()
+        if status not in ("unstable_fail", "retry_limit_exhausted"):
+            return False
+        max_std = summary.get("center_max_std_px")
+        if max_std is None:
+            return False
+        try:
+            max_std = float(max_std)
+        except Exception:
+            return False
+        limits = self._single_candidate_stability_fallback_limits()
+        if max_std > float(limits.get("max_std_px", 25.0)):
+            return False
+        return True
+
+    def _single_candidate_record_stability_fallback_candidate(
+        self,
+        summary: dict,
+        stability: dict,
+        rejection: dict | None = None,
+    ) -> dict | None:
+        summary = dict(summary or {})
+        stability = dict(stability or {})
+        rejection = dict(rejection or {})
+        if not self._single_candidate_stability_fallback_eligible(summary, stability):
+            return None
+
+        count = int(max(0, getattr(self, "_single_candidate_stability_rejection_count", 0))) + 1
+        self._single_candidate_stability_rejection_count = int(count)
+        pressure = (
+            None if self._current_pressure is None else float(round(float(self._current_pressure), 5))
+        )
+        candidate = {
+            "pressure_psi": pressure,
+            "rejection_index": int(count),
+            "rejection_cause": str(rejection.get("cause", "center_stability")),
+            "failure_kind": str(rejection.get("failure_kind", "")),
+            "confirmation_stability_status": str(stability.get("status", "")),
+            "center_max_std_px": summary.get("center_max_std_px"),
+            "center_max_range_px": summary.get("center_max_range_px"),
+            "min_largest_free_blob_area_px": int(
+                summary.get("min_largest_free_blob_area_px", 0) or 0
+            ),
+            "confirmation_retry_used": bool(summary.get("confirmation_retry_used", False)),
+            "confirmation_retry_count": int(summary.get("confirmation_retry_count", 0) or 0),
+            "confirmation_retry_history": list(
+                getattr(self, "_single_candidate_confirmation_retry_history", []) or []
+            ),
+            "summary": dict(summary),
+        }
+        candidates = list(getattr(self, "_single_candidate_stability_fallback_candidates", []) or [])
+        candidates.append(dict(candidate))
+        self._single_candidate_stability_fallback_candidates = candidates
+        self._record_decision("single_candidate_stability_fallback_candidate", dict(candidate))
+        return candidate
+
+    def _single_candidate_best_stability_fallback_candidate(self) -> dict | None:
+        candidates = list(getattr(self, "_single_candidate_stability_fallback_candidates", []) or [])
+        if not candidates:
+            return None
+
+        def _rank(candidate: dict):
+            summary = dict(candidate.get("summary") or {})
+            try:
+                max_std = float(candidate.get("center_max_std_px"))
+            except Exception:
+                max_std = float("inf")
+            try:
+                max_range = float(candidate.get("center_max_range_px"))
+            except Exception:
+                max_range = float("inf")
+            try:
+                area = int(candidate.get("min_largest_free_blob_area_px", 0) or 0)
+            except Exception:
+                area = 0
+            try:
+                pressure = float(candidate.get("pressure_psi"))
+            except Exception:
+                pressure = float("inf")
+            return (max_std, max_range, -area, pressure, int(candidate.get("rejection_index", 0) or 0))
+
+        return dict(sorted(candidates, key=_rank)[0])
+
+    def _single_candidate_select_stability_fallback(self, reason: str) -> bool:
+        candidate = self._single_candidate_best_stability_fallback_candidate()
+        if not candidate:
+            return False
+        pressure = candidate.get("pressure_psi")
+        if pressure is None:
+            return False
+        try:
+            pressure = float(pressure)
+        except Exception:
+            return False
+        summary = dict(candidate.get("summary") or {})
+        summary["selected_by_stability_fallback"] = True
+        summary["stability_fallback_selection_reason"] = str(reason)
+        self._single_candidate_selected_pressure = float(pressure)
+        self._single_candidate_selected_by_fallback = True
+        self._single_candidate_confirmation_summary = dict(summary)
+        self._single_candidate_confirmation_retry_count = int(
+            summary.get("confirmation_retry_count", 0) or 0
+        )
+        self._single_candidate_confirmation_retry_history = list(
+            candidate.get("confirmation_retry_history", []) or []
+        )
+        payload = {
+            "pressure_psi": float(pressure),
+            "reason": str(reason),
+            "selected_candidate": dict(candidate),
+            **self._single_candidate_stability_fallback_metadata(),
+        }
+        self._record_decision("single_candidate_stability_fallback_selected", payload)
+        self.stageChanged.emit(
+            f"Selecting most consistent clean single pressure: {pressure:.3f} psi"
+        )
+        self.finalize.emit()
+        return True
+
     def _single_candidate_rejection_decision(self, summary: dict) -> dict:
         counts = dict((summary or {}).get("class_counts") or {})
         if int((summary or {}).get("high_pressure_hits", 0)) > 0 or int(counts.get("multiple", 0)) > 0:
@@ -20264,6 +20439,8 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             )
             return
         if attempt_count >= max_pressures:
+            if self._single_candidate_select_stability_fallback("attempt_budget_exhausted"):
+                return
             self._single_candidate_fail(
                 f"Conservative pressure search reached {max_pressures} pressure attempts without a stable single droplet."
             )
@@ -20280,7 +20457,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 "direction": str(direction),
                 "reason": str(reason),
                 "failure_kind": str(failure_kind),
-                "decision": dict(decision),
+                "decision_context": dict(decision),
                 "tested_pressure_count": int(tested_count),
                 "attempt_count": int(attempt_count),
                 "max_pressures": int(max_pressures),
@@ -20403,6 +20580,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                     getattr(self, "_single_candidate_confirmation_retry_history", []) or []
                 ),
                 "triage_summary": dict(getattr(self, "_single_candidate_triage_summary", {}) or {}),
+                **self._single_candidate_stability_fallback_metadata(),
             },
         )
         self.stageChanged.emit(str(message))
@@ -20794,6 +20972,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                         getattr(self, "_single_candidate_confirmation_retry_history", []) or []
                     ),
                     "triage_summary": dict(getattr(self, "_single_candidate_triage_summary", {}) or {}),
+                    **self._single_candidate_stability_fallback_metadata(),
                 },
             )
             self.calibrationError.emit(msg)
@@ -20801,6 +20980,15 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
 
         p = float(round(float(selected), 5))
         band = [float(p), float(p)]
+        confirmation_summary = dict(
+            getattr(self, "_single_candidate_confirmation_summary", {}) or {}
+        )
+        confirmation_retry_used = bool(
+            confirmation_summary.get(
+                "confirmation_retry_used",
+                getattr(self, "_single_candidate_confirmation_retry_count", 0) > 0,
+            )
+        )
         result = {
             "pulse_width_us": self._pulse_width_us,
             "delay_us": int(self.classify_delay_us),
@@ -20820,10 +21008,8 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             ),
             "pressure_scan_mode": "single_candidate",
             "selected_pressure_psi": float(p),
-            "confirmation_summary": dict(getattr(self, "_single_candidate_confirmation_summary", {}) or {}),
-            "confirmation_retry_used": bool(
-                getattr(self, "_single_candidate_confirmation_retry_count", 0) > 0
-            ),
+            "confirmation_summary": confirmation_summary,
+            "confirmation_retry_used": bool(confirmation_retry_used),
             "confirmation_retry_history": list(
                 getattr(self, "_single_candidate_confirmation_retry_history", []) or []
             ),
@@ -20838,6 +21024,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             "residue_checks": list(getattr(self, "_single_candidate_residue_checks", []) or []),
             "satellite_checks": list(getattr(self, "_single_candidate_satellite_checks", []) or []),
             "lock_pressure_for_trajectory": True,
+            **self._single_candidate_stability_fallback_metadata(),
         }
         self.calibrationDataUpdated.emit({"measurements": [], "result": result})
         self.calibration_manager.set_primary_pressure_band(result)
