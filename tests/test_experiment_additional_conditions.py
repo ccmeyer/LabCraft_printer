@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from Model import AdditionalConditionSpec, CURRENT_PROFILE, ExperimentModel
+from Model import AdditionalConditionSpec, CURRENT_PROFILE, ExperimentModel, Model
 
 
 def _make_model():
@@ -10,6 +10,27 @@ def _make_model():
 
 def _target_map(condition):
     return dict(condition.targets)
+
+
+def _configure_generation_design(em, *, replicates=2):
+    em.factors = []
+    em.add_additive(
+        "Signal",
+        [0.0, 1.0],
+        "mM",
+        10.0,
+        forced_stock_conc=50.0,
+    )
+    em.set_metadata(
+        randomize_assignments=False,
+        start_row=0,
+        start_col=0,
+        replicates=replicates,
+        target_reaction_volume_nL=500.0,
+        final_reaction_volume_nL=500.0,
+        fill_reagent_name="Water",
+        fill_droplet_volume_nL=10.0,
+    )
 
 
 def test_new_experiment_model_starts_without_additional_conditions():
@@ -240,3 +261,110 @@ def test_clear_and_reset_additional_conditions():
     assert em.has_additional_conditions() is False
     assert em.get_additional_conditions() == []
     assert em.unsaved_changes is False
+
+
+def test_base_design_generation_count_is_unchanged_without_additional_conditions():
+    em = _make_model()
+    _configure_generation_design(em, replicates=2)
+
+    assert em.get_number_of_reactions() == 4
+    assert em.optimize_stock_solutions(allow_two=False)["best"]
+
+    em.generate_experiment()
+
+    df = em.get_reactions_dataframe()
+    assert em.get_number_of_reactions() == 4
+    assert len(df) == 4
+    assert df["design_source"].tolist() == ["base", "base", "base", "base"]
+    assert df["additional_condition_label"].tolist() == ["", "", "", ""]
+
+
+def test_additional_conditions_append_to_generated_run_order():
+    em = _make_model()
+    _configure_generation_design(em, replicates=2)
+    em.set_additional_conditions(
+        [
+            AdditionalConditionSpec(
+                label="No signal control",
+                replicates=3,
+                targets={("Signal", None): 0.0},
+            ),
+            AdditionalConditionSpec(
+                label="Known response",
+                replicates=1,
+                targets={("Signal", None): 1.0},
+            ),
+        ]
+    )
+
+    assert em.get_number_of_reactions() == 8
+    assert em.optimize_stock_solutions(allow_two=False)["best"]
+
+    em.generate_experiment()
+
+    df = em.get_reactions_dataframe()
+    assert len(df) == 8
+    assert em.get_number_of_reactions() == 8
+    assert df["global_index"].tolist() == list(range(8))
+    assert df["design_source"].tolist() == [
+        "base",
+        "base",
+        "base",
+        "base",
+        "additional_condition",
+        "additional_condition",
+        "additional_condition",
+        "additional_condition",
+    ]
+    assert df["additional_condition_label"].tolist() == [
+        "",
+        "",
+        "",
+        "",
+        "No signal control",
+        "No signal control",
+        "No signal control",
+        "Known response",
+    ]
+    assert df["replicate"].tolist() == [1, 1, 2, 2, 1, 2, 3, 1]
+    assert df["reaction_index"].tolist() == [0, 1, 0, 1, 0, 0, 0, 1]
+    assert df["nonfill_volume_nL"].tolist() == pytest.approx(
+        [0.0, 10.0, 0.0, 10.0, 0.0, 0.0, 0.0, 10.0]
+    )
+    assert df["fill_drops"].tolist() == [50, 49, 50, 49, 50, 50, 50, 49]
+
+    parts = list(em.iter_reaction_stock_droplets())
+    assert len(parts) == len(df)
+    assert parts[0] == []
+    assert parts[1] == [("Signal", 50.0, "mM", 1)]
+    assert parts[4] == []
+    assert parts[7] == [("Signal", 50.0, "mM", 1)]
+
+
+def test_runtime_handoff_includes_additional_condition_runs(experiment_model_factory):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_generation_design(em, replicates=1)
+    em.set_additional_conditions(
+        [
+            AdditionalConditionSpec(
+                label="Known response",
+                replicates=2,
+                targets={("Signal", None): 1.0},
+            )
+        ]
+    )
+    assert em.optimize_stock_solutions(allow_two=False)["best"]
+    em.generate_experiment()
+
+    expected_n = em.get_number_of_reactions()
+
+    Model.load_experiment_from_model(model, load_progress=False)
+
+    assigned = [
+        well.get_assigned_reaction()
+        for well in model.well_plate.get_all_wells()
+        if well.get_assigned_reaction() is not None
+    ]
+    assert len(assigned) == expected_n
+    assert len(model.reaction_collection.get_all_reactions()) == expected_n

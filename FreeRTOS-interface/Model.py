@@ -4129,15 +4129,50 @@ class ExperimentModel(QObject):
             return None
         return list(self._uploaded_well_ids)
 
+    def _metadata_replicate_count(self) -> int:
+        try:
+            reps = int(self.metadata.get("replicates", 1))
+        except Exception:
+            reps = 1
+        return max(0, reps)
+
+    def _iter_reaction_run_specs(self):
+        base_reactions = self._enumerate_reactions()
+        base_reps = self._metadata_replicate_count()
+
+        for replicate_index in range(base_reps):
+            for reaction_index, reaction in enumerate(base_reactions):
+                yield {
+                    "reaction": dict(reaction),
+                    "design_source": "base",
+                    "replicate": replicate_index + 1,
+                    "reaction_index": reaction_index,
+                    "additional_condition_label": "",
+                }
+
+        for condition_index, condition in enumerate(self.additional_conditions):
+            try:
+                condition_reps = int(condition.replicates)
+            except Exception:
+                condition_reps = 1
+            condition_reps = max(1, condition_reps)
+            for replicate_index in range(condition_reps):
+                yield {
+                    "reaction": dict(condition.targets),
+                    "design_source": "additional_condition",
+                    "replicate": replicate_index + 1,
+                    "reaction_index": condition_index,
+                    "additional_condition_label": str(condition.label or ""),
+                }
+
     def generate_experiment(self):
         """Enumerate the reaction space, compute droplet counts per stock, fill volumes,
         and aggregate totals. Emits experiment_generated(n, worst_nonfill_nL)."""
         V = float(self.metadata.get("target_reaction_volume_nL", 2000.0))
         fill_dv = float(self.metadata.get("fill_droplet_volume_nL", 10.0))
-        reps = int(self.metadata.get("replicates", 1))
 
-        reactions = self._enumerate_reactions()
-        if not reactions:
+        run_specs = list(self._iter_reaction_run_specs())
+        if not run_specs:
             self._reactions_df = pd.DataFrame()
             self._last_worst_nonfill_volume_nL = 0.0
             self.experiment_generated.emit(0, 0.0)
@@ -4164,7 +4199,8 @@ class ExperimentModel(QObject):
         stock_drop_vol_nL: Dict[Tuple[str, str, float], float] = {}  # remember droplet nL per stock
         fill_total_drops = 0
 
-        for rxn in reactions:
+        for global_index, run_spec in enumerate(run_specs):
+            rxn = run_spec["reaction"]
             used_nL = 0.0
 
             # per reaction, per stock droplet usage (to compute per-reaction maxima)
@@ -4234,13 +4270,13 @@ class ExperimentModel(QObject):
 
             rows.append({
                 "nonfill_volume_nL": used_nL,
-                "fill_drops": fill_drops
+                "fill_drops": fill_drops,
+                "replicate": int(run_spec["replicate"]),
+                "reaction_index": int(run_spec["reaction_index"]),
+                "global_index": int(global_index),
+                "design_source": str(run_spec["design_source"]),
+                "additional_condition_label": str(run_spec["additional_condition_label"]),
             })
-
-        # apply replicates to totals (per-reaction maxima do NOT scale with reps)
-        for k in list(stock_totals.keys()):
-            stock_totals[k] *= reps
-        fill_total_drops *= reps
 
         # Build stock rows cache (with totals AND per-reaction max volume)
         stock_table = []
@@ -4279,24 +4315,12 @@ class ExperimentModel(QObject):
             "intended_head_type_id": None,
             "intended_head_type_display_name": None,
         }
-        # --- replicate-expand the row list so _reactions_df matches actual run order ---
-        base_rows = rows
-        rows = []
-        n_base = len(base_rows)
-        for r in range(reps):
-            for i, row in enumerate(base_rows):
-                rows.append({
-                    **row,
-                    "replicate": r + 1,            # 1-based replicate index (optional)
-                    "reaction_index": i,           # index within base design (optional)
-                    "global_index": r * n_base + i # absolute run index (optional)
-                })
         self._reactions_df = pd.DataFrame(rows)
         self._last_worst_nonfill_volume_nL = worst_nonfill
         if issues:
             # Fire a signal so the UI can pop a warning dialog/banner.
             self.targets_unreachable.emit(issues)
-        self.experiment_generated.emit(len(reactions) * reps, float(worst_nonfill))
+        self.experiment_generated.emit(len(run_specs), float(worst_nonfill))
 
     def find_option_by_reagent_name(self, reagent_name: str) -> tuple[tuple[str, Optional[str]], OptionSpec] | None:
         """
@@ -5134,9 +5158,6 @@ class ExperimentModel(QObject):
 
     # ---------- enumerate reactions as stock-droplet lists ----------
     def iter_reaction_stock_droplets(self):
-        reactions = self._enumerate_reactions()
-        reps = int(self.metadata.get("replicates", 1))
-
         def _reagent_name_from_key(key: tuple[str, object]) -> str:
             return key[0] if key[1] is None else key[1]
 
@@ -5150,38 +5171,37 @@ class ExperimentModel(QObject):
                 for o in f.options:
                     start_lookup[(f.name, o.name)] = float(getattr(o, "starting_conc", 0.0) or 0.0)
 
-        for r in range(reps):
-            for rxn in reactions:
-                items = []
-                for key, target in rxn.items():
-                    plan = self.plans_per_option.get(key)
-                    if not plan:
-                        continue
-                    s = start_lookup.get(key, 0.0)
-                    t_add = max(0.0, float(target) - float(s))
-                    if plan["n_stocks"] == 1:
-                        st = plan["stocks"][0]
-                        drops, _, _, _ = self._resolve_drops_for_target(st, t_add)
-                        if drops > 0:
-                            items.append((_reagent_name_from_key(key),
-                                        float(st["stock_concentration"]),
-                                        st["units"],
-                                        drops))
-                    else:
-                        st1, st2 = plan["stocks"]
-                        k1, _, _, _ = self._resolve_drops_for_target(st1, t_add)
-                        k2, _, _, _ = self._resolve_drops_for_target(st2, t_add)
-                        if k1 > 0:
-                            items.append((_reagent_name_from_key(key),
-                                        float(st1["stock_concentration"]),
-                                        st1["units"],
-                                        k1))
-                        if k2 > 0:
-                            items.append((_reagent_name_from_key(key),
-                                        float(st2["stock_concentration"]),
-                                        st2["units"],
-                                        k2))
-                yield items
+        for run_spec in self._iter_reaction_run_specs():
+            items = []
+            for key, target in run_spec["reaction"].items():
+                plan = self.plans_per_option.get(key)
+                if not plan:
+                    continue
+                s = start_lookup.get(key, 0.0)
+                t_add = max(0.0, float(target) - float(s))
+                if plan["n_stocks"] == 1:
+                    st = plan["stocks"][0]
+                    drops, _, _, _ = self._resolve_drops_for_target(st, t_add)
+                    if drops > 0:
+                        items.append((_reagent_name_from_key(key),
+                                    float(st["stock_concentration"]),
+                                    st["units"],
+                                    drops))
+                else:
+                    st1, st2 = plan["stocks"]
+                    k1, _, _, _ = self._resolve_drops_for_target(st1, t_add)
+                    k2, _, _, _ = self._resolve_drops_for_target(st2, t_add)
+                    if k1 > 0:
+                        items.append((_reagent_name_from_key(key),
+                                    float(st1["stock_concentration"]),
+                                    st1["units"],
+                                    k1))
+                    if k2 > 0:
+                        items.append((_reagent_name_from_key(key),
+                                    float(st2["stock_concentration"]),
+                                    st2["units"],
+                                    k2))
+            yield items
                 
     # ------------- Save/Load (optional; keep simple) -------------
 
@@ -5444,8 +5464,7 @@ class ExperimentModel(QObject):
         if hasattr(self, "_reactions_df") and not self._reactions_df.empty:
             return len(self._reactions_df)
         # Fallback if generate_experiment() hasn't been called yet
-        reps = int(self.metadata.get("replicates", 1))
-        return reps * len(self._enumerate_reactions())
+        return sum(1 for _ in self._iter_reaction_run_specs())
 
     def get_random_seed(self) -> Optional[int]:
         return self.metadata.get("random_seed")
@@ -10135,10 +10154,11 @@ class Model(QObject):
 
         # Build fill sequence to match reaction count
         df = self.experiment_model.get_reactions_dataframe()
-        base_fill = [int(x) for x in df["fill_drops"].tolist()] if not df.empty else []
-        reps = int(self.experiment_model.metadata.get("replicates", 1))
-        # Repeat the base_fill for replicates
-        fill_seq = base_fill * max(1, reps)
+        fill_seq = (
+            [int(x) for x in df["fill_drops"].tolist()]
+            if not df.empty and "fill_drops" in df.columns
+            else []
+        )
 
         # If counts don't perfectly match, extend/cycle safely
         if len(fill_seq) and len(parts_list) > len(fill_seq):
