@@ -59,6 +59,18 @@ def _write_outlier_merged_csv(path: Path) -> Path:
     rows.extend(_merged_rows_for_well("B1", [10, 10, 10], is_keyed=True, dna_mM=2.0, mg_mM=5.0))
     rows.extend(_merged_rows_for_well("B2", [1000, 1000, 1000], is_keyed=True, dna_mM=2.0, mg_mM=5.0))
     rows.extend(_merged_rows_for_well("C1", [500, 500, 500], is_keyed=False, dna_mM=np.nan, mg_mM=np.nan))
+    rows.extend(_merged_rows_for_well("D1", [100, 100, 100], is_keyed=True, dna_mM=1.5, mg_mM=5.0))
+    rows.extend(_merged_rows_for_well("D2", [101, 101, 101], is_keyed=True, dna_mM=1.5, mg_mM=5.0))
+    rows.extend(_merged_rows_for_well("D3", [102, 102, 102], is_keyed=True, dna_mM=1.5, mg_mM=5.0))
+    rows.extend(_merged_rows_for_well("D4", [113, 113, 113], is_keyed=True, dna_mM=1.5, mg_mM=5.0))
+    rows.extend(_merged_rows_for_well("E1", [100, 100, 100], is_keyed=True, dna_mM=3.0, mg_mM=5.0))
+    rows.extend(_merged_rows_for_well("E2", [100, 100, 100], is_keyed=True, dna_mM=3.0, mg_mM=5.0))
+    rows.extend(_merged_rows_for_well("E3", [100, 100, 100], is_keyed=True, dna_mM=3.0, mg_mM=5.0))
+    rows.extend(_merged_rows_for_well("E4", [110, 110, 110], is_keyed=True, dna_mM=3.0, mg_mM=5.0))
+    rows.extend(_merged_rows_for_well("F1", [200, 200, 200], is_keyed=True, dna_mM=4.0, mg_mM=5.0))
+    rows.extend(_merged_rows_for_well("F2", [200, 200, 200], is_keyed=True, dna_mM=4.0, mg_mM=5.0))
+    rows.extend(_merged_rows_for_well("F3", [200, 200, 200], is_keyed=True, dna_mM=4.0, mg_mM=5.0))
+    rows.extend(_merged_rows_for_well("F4", [240, 240, 240], is_keyed=True, dna_mM=4.0, mg_mM=5.0))
     path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows).to_csv(path, index=False)
     return path
@@ -192,6 +204,9 @@ def test_endpoint_outlier_detection_flags_only_evaluated_keyed_replicates(tmp_pa
         "condition_endpoint_median_rfu",
         "condition_endpoint_mad_rfu",
         "condition_endpoint_robust_zscore",
+        "condition_endpoint_relative_delta_percent",
+        "is_endpoint_outlier_candidate",
+        "outlier_candidate_reason",
         "is_endpoint_outlier",
         "outlier_reason",
     }
@@ -201,23 +216,50 @@ def test_endpoint_outlier_detection_flags_only_evaluated_keyed_replicates(tmp_pa
     a4 = endpoint.loc[endpoint["well"] == "A4"].iloc[0]
     b2 = endpoint.loc[endpoint["well"] == "B2"].iloc[0]
     c1 = endpoint.loc[endpoint["well"] == "C1"].iloc[0]
+    d4 = endpoint.loc[endpoint["well"] == "D4"].iloc[0]
+    e4 = endpoint.loc[endpoint["well"] == "E4"].iloc[0]
+    f4 = endpoint.loc[endpoint["well"] == "F4"].iloc[0]
 
     assert a1["condition_endpoint_median_rfu"] == pytest.approx(101.5)
     assert a1["condition_endpoint_mad_rfu"] == pytest.approx(1.0)
     assert a1["condition_endpoint_robust_zscore"] == pytest.approx(0.6745 * (100.0 - 101.5))
+    assert a1["condition_endpoint_relative_delta_percent"] == pytest.approx(100.0 * (100.0 - 101.5) / 101.5)
+    assert not bool(a1["is_endpoint_outlier_candidate"])
     assert not bool(a1["is_endpoint_outlier"])
+    assert bool(a4["is_endpoint_outlier_candidate"])
+    assert a4["outlier_candidate_reason"] == "robust_z_abs_ge_3.5"
     assert bool(a4["is_endpoint_outlier"])
     assert a4["outlier_reason"] == "robust_z_abs_ge_3.5"
     assert a4["condition_endpoint_robust_zscore"] == pytest.approx(0.6745 * (130.0 - 101.5))
+    assert a4["condition_endpoint_relative_delta_percent"] == pytest.approx(100.0 * (130.0 - 101.5) / 101.5)
+
+    assert bool(d4["is_endpoint_outlier_candidate"])
+    assert d4["outlier_candidate_reason"] == "robust_z_abs_ge_3.5"
+    assert not bool(d4["is_endpoint_outlier"])
+    assert pd.isna(d4["outlier_reason"]) or d4["outlier_reason"] == ""
+    assert d4["condition_endpoint_relative_delta_percent"] == pytest.approx(100.0 * (113.0 - 101.5) / 101.5)
+
+    assert bool(e4["is_endpoint_outlier_candidate"])
+    assert e4["outlier_candidate_reason"] == "mad_zero_nonmedian"
+    assert not bool(e4["is_endpoint_outlier"])
+    assert pd.isna(e4["outlier_reason"]) or e4["outlier_reason"] == ""
+    assert e4["condition_endpoint_relative_delta_percent"] == pytest.approx(10.0)
+
+    assert bool(f4["is_endpoint_outlier_candidate"])
+    assert f4["outlier_candidate_reason"] == "mad_zero_nonmedian"
+    assert bool(f4["is_endpoint_outlier"])
+    assert f4["outlier_reason"] == "mad_zero_nonmedian"
+    assert f4["condition_endpoint_relative_delta_percent"] == pytest.approx(20.0)
 
     assert pd.isna(b2["condition_endpoint_median_rfu"])
+    assert not bool(b2["is_endpoint_outlier_candidate"])
     assert not bool(b2["is_endpoint_outlier"])
     assert pd.isna(c1["condition_endpoint_median_rfu"])
+    assert not bool(c1["is_endpoint_outlier_candidate"])
     assert not bool(c1["is_endpoint_outlier"])
 
-    assert result.outlier_count == 1
-    assert len(outlier_summary) == 1
-    assert outlier_summary.iloc[0]["well"] == "A4"
+    assert result.outlier_count == 2
+    assert set(outlier_summary["well"]) == {"A4", "F4"}
 
     outlier_heatmap = pd.read_csv(
         result.output_dir / "heatmaps_endpoint_outliers" / "488_509_endpoint_outlier_count.csv",
@@ -227,6 +269,9 @@ def test_endpoint_outlier_detection_flags_only_evaluated_keyed_replicates(tmp_pa
     assert outlier_heatmap.loc["A", "4"] == pytest.approx(1.0)
     assert pd.isna(outlier_heatmap.loc["B", "1"])
     assert pd.isna(outlier_heatmap.loc["C", "1"])
+    assert outlier_heatmap.loc["D", "4"] == pytest.approx(0.0)
+    assert outlier_heatmap.loc["E", "4"] == pytest.approx(0.0)
+    assert outlier_heatmap.loc["F", "4"] == pytest.approx(1.0)
 
     outlier_png = result.output_dir / "heatmaps_endpoint_outliers" / "488_509_endpoint_outlier_count.png"
     timecourse_png = result.output_dir / "timecourses" / "condition_001_488_509_timecourse.png"

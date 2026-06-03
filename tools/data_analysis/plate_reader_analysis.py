@@ -23,6 +23,7 @@ PLATE_COLUMNS = list(range(1, 25))
 WELL_RE = re.compile(r"^([A-P])([1-9]|1[0-9]|2[0-4])$")
 UNKEYED_CONDITION_ID = "unkeyed"
 OUTLIER_ROBUST_Z_THRESHOLD = 3.5
+OUTLIER_MIN_RELATIVE_DELTA_PERCENT = 15.0
 BASE_MERGED_COLUMNS = {
     "time",
     "time_seconds",
@@ -52,6 +53,9 @@ ANALYSIS_COLUMNS = {
     "condition_endpoint_median_rfu",
     "condition_endpoint_mad_rfu",
     "condition_endpoint_robust_zscore",
+    "condition_endpoint_relative_delta_percent",
+    "is_endpoint_outlier_candidate",
+    "outlier_candidate_reason",
     "is_endpoint_outlier",
     "outlier_reason",
 }
@@ -322,6 +326,9 @@ def compute_endpoint_by_well(
             "condition_endpoint_median_rfu",
             "condition_endpoint_mad_rfu",
             "condition_endpoint_robust_zscore",
+            "condition_endpoint_relative_delta_percent",
+            "is_endpoint_outlier_candidate",
+            "outlier_candidate_reason",
             "is_endpoint_outlier",
             "outlier_reason",
         ]
@@ -391,6 +398,9 @@ def add_endpoint_outlier_flags(endpoint: pd.DataFrame) -> pd.DataFrame:
     result["condition_endpoint_median_rfu"] = np.nan
     result["condition_endpoint_mad_rfu"] = np.nan
     result["condition_endpoint_robust_zscore"] = np.nan
+    result["condition_endpoint_relative_delta_percent"] = np.nan
+    result["is_endpoint_outlier_candidate"] = False
+    result["outlier_candidate_reason"] = ""
     result["is_endpoint_outlier"] = False
     result["outlier_reason"] = ""
 
@@ -407,27 +417,43 @@ def add_endpoint_outlier_flags(endpoint: pd.DataFrame) -> pd.DataFrame:
         mad = float((values - median).abs().median())
         result.loc[group.index, "condition_endpoint_median_rfu"] = median
         result.loc[group.index, "condition_endpoint_mad_rfu"] = mad
+        if median != 0:
+            relative_delta_percent = 100.0 * (values - median) / median
+        else:
+            relative_delta_percent = values.map(lambda value: 0.0 if value == 0 else np.nan)
+        result.loc[group.index, "condition_endpoint_relative_delta_percent"] = relative_delta_percent
 
         if mad == 0:
             differences = values - median
             robust_z = differences.map(
                 lambda value: 0.0 if value == 0 else float(np.inf if value > 0 else -np.inf)
             )
-            outlier_mask = differences != 0
-            outlier_indices = group.index[outlier_mask.to_numpy()]
+            candidate_mask = differences != 0
+            final_mask = candidate_mask & (
+                relative_delta_percent.abs() >= OUTLIER_MIN_RELATIVE_DELTA_PERCENT
+            )
+            candidate_indices = group.index[candidate_mask.to_numpy()]
+            final_indices = group.index[final_mask.to_numpy()]
             result.loc[group.index, "condition_endpoint_robust_zscore"] = robust_z
-            result.loc[outlier_indices, "is_endpoint_outlier"] = True
-            result.loc[outlier_indices, "outlier_reason"] = "mad_zero_nonmedian"
+            result.loc[candidate_indices, "is_endpoint_outlier_candidate"] = True
+            result.loc[candidate_indices, "outlier_candidate_reason"] = "mad_zero_nonmedian"
+            result.loc[final_indices, "is_endpoint_outlier"] = True
+            result.loc[final_indices, "outlier_reason"] = "mad_zero_nonmedian"
             continue
 
         robust_z = 0.6745 * (values - median) / mad
-        outlier_mask = robust_z.abs() >= OUTLIER_ROBUST_Z_THRESHOLD
-        outlier_indices = group.index[outlier_mask.to_numpy()]
-        result.loc[group.index, "condition_endpoint_robust_zscore"] = robust_z
-        result.loc[outlier_indices, "is_endpoint_outlier"] = True
-        result.loc[outlier_indices, "outlier_reason"] = (
-            f"robust_z_abs_ge_{OUTLIER_ROBUST_Z_THRESHOLD:g}"
+        candidate_mask = robust_z.abs() >= OUTLIER_ROBUST_Z_THRESHOLD
+        final_mask = candidate_mask & (
+            relative_delta_percent.abs() >= OUTLIER_MIN_RELATIVE_DELTA_PERCENT
         )
+        candidate_indices = group.index[candidate_mask.to_numpy()]
+        final_indices = group.index[final_mask.to_numpy()]
+        candidate_reason = f"robust_z_abs_ge_{OUTLIER_ROBUST_Z_THRESHOLD:g}"
+        result.loc[group.index, "condition_endpoint_robust_zscore"] = robust_z
+        result.loc[candidate_indices, "is_endpoint_outlier_candidate"] = True
+        result.loc[candidate_indices, "outlier_candidate_reason"] = candidate_reason
+        result.loc[final_indices, "is_endpoint_outlier"] = True
+        result.loc[final_indices, "outlier_reason"] = candidate_reason
 
     return result
 

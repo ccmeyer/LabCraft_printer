@@ -21,4 +21,6 @@ report includes endpoint tables, plate heatmaps, flagged outlier summaries, and
 per-composition timecourse plots under `plate_reader_analysis/timecourses/`.
 Flagged endpoint outliers are shown as red replicate traces in the timecourse
 plots and mapped by plate location under `heatmaps_endpoint_outliers/`; they are
-not excluded from means, standard deviations, CVs, or heatmaps.
+not excluded from means, standard deviations, CVs, or heatmaps. Outlier calls use
+a robust endpoint z-score candidate rule plus a minimum 15% endpoint difference
+from the condition median.
