@@ -3789,7 +3789,20 @@ class CalibrationManager(QObject):
         self._try_start_process(DropletSearchCalibrationProcess)
 
     def start_manual_droplet_characterization(self, *, start_delay_us: int | None = None):
-        self._try_start_process(DropletSearchCalibrationProcess, manual_start=True)
+        context, missing = self.build_manual_current_characterization_context(
+            start_delay_us=start_delay_us,
+        )
+        if missing:
+            msg = "Manual characterization prerequisites missing: " + ", ".join(str(item) for item in missing)
+            self.calibrationStageChanged.emit(msg, "red")
+            self.calibrationError.emit(msg)
+            return False
+        return self._try_start_process(
+            PressureSweepCharacterizationProcess,
+            manual_current_context=context,
+            replicates_per_pressure=20,
+            order="desc",
+        )
 
     def start_pressure_sweep_characterization(
         self,
@@ -3809,6 +3822,115 @@ class CalibrationManager(QObject):
             replicates_per_pressure=replicates_per_pressure,
             order=order
         )
+
+    def build_manual_current_characterization_context(self, *, start_delay_us: int | None = None):
+        context = {}
+
+        machine_model = getattr(self.model, "machine_model", None)
+        camera_model = getattr(self.model, "droplet_camera_model", None)
+
+        current_xyz = None
+        get_current_position = getattr(machine_model, "get_current_position_dict", None)
+        if callable(get_current_position):
+            try:
+                current_xyz = self._recheck_xyz_list_or_none(get_current_position())
+            except Exception:
+                current_xyz = None
+
+        current_settings = {}
+        try:
+            current_settings = dict(self.get_current_settings() or {})
+        except Exception:
+            current_settings = {}
+
+        pressure_psi = self._recheck_float_or_none(current_settings.get("print_pressure"))
+        if pressure_psi is None:
+            get_pressure = getattr(machine_model, "get_current_print_pressure", None)
+            if callable(get_pressure):
+                try:
+                    pressure_psi = self._recheck_float_or_none(get_pressure())
+                except Exception:
+                    pressure_psi = None
+
+        pw_us = self._recheck_int_or_none(
+            self._recheck_first_value(
+                current_settings.get("print_width"),
+                current_settings.get("print_pulse_width"),
+            )
+        )
+        if pw_us is None:
+            get_pw = getattr(machine_model, "get_print_pulse_width", None)
+            if callable(get_pw):
+                try:
+                    pw_us = self._recheck_int_or_none(get_pw())
+                except Exception:
+                    pw_us = None
+
+        delay_us = self._recheck_int_or_none(current_settings.get("flash_delay"))
+        if delay_us is None:
+            get_metadata = getattr(camera_model, "get_image_metadata", None)
+            if callable(get_metadata):
+                try:
+                    _num_flashes, _flash_duration, flash_delay, _num_droplets, _exposure = get_metadata()
+                    delay_us = self._recheck_int_or_none(flash_delay)
+                except Exception:
+                    delay_us = None
+        if start_delay_us is not None:
+            delay_us = self._recheck_int_or_none(start_delay_us)
+
+        nozzle_center_machine = self._recheck_xyz_dict_or_none(self.get_nozzle_center())
+        get_ps_center = getattr(self, "get_pressure_scan_nozzle_center_image_position", None)
+        nozzle_center_px = None
+        if callable(get_ps_center):
+            try:
+                nozzle_center_px = self._recheck_xy_list_or_none(get_ps_center())
+            except Exception:
+                nozzle_center_px = None
+        if nozzle_center_px is None:
+            get_real_center = getattr(self, "get_real_nozzle_center_image_position", None)
+            if callable(get_real_center):
+                try:
+                    nozzle_center_px = self._recheck_xy_list_or_none(get_real_center())
+                except Exception:
+                    nozzle_center_px = None
+
+        emergence_time_us = self._recheck_int_or_none(self.get_emergence_time())
+        trajectory_result = self.get_pressure_trajectory_result()
+        vx_px_per_us, vy_px_per_us = self._trajectory_velocity_for_pressure(
+            pressure_psi,
+            trajectory_result,
+        )
+
+        source_result = {
+            "phase": "search",
+            "phase_key": "droplet_search",
+            "phase_source": "manual_current",
+            "pressure_psi": pressure_psi,
+            "pw_us": pw_us,
+            "delay_us": delay_us,
+            "target_xyz": current_xyz,
+        }
+        context.update(
+            {
+                "manual_current": True,
+                "print_pulse_width_us": pw_us,
+                "pressure_psi": pressure_psi,
+                "delay_us": delay_us,
+                "target_xyz": current_xyz,
+                "mean_position_machine": current_xyz,
+                "nozzle_center_machine": nozzle_center_machine,
+                "nozzle_center_px": nozzle_center_px,
+                "emergence_time_us": emergence_time_us,
+                "vx_px_per_us": vx_px_per_us,
+                "vy_px_per_us": vy_px_per_us,
+                "source_result": source_result,
+            }
+        )
+        if isinstance(trajectory_result, dict):
+            context["trajectory_result"] = trajectory_result
+
+        missing = PressureSweepCharacterizationProcess.manual_current_missing_requirements(context)
+        return context, missing
 
     @staticmethod
     def _recheck_first_value(*values):
@@ -6960,7 +7082,7 @@ class CalibrationManager(QObject):
             # "trajectory":                     pack(TrajectoryCalibrationProcess),
             "trajectory_pressure_scan":       pack(PressureTrajectoryCalibrationProcess),
             # "droplet_search":                 pack(DropletSearchCalibrationProcess),
-            "droplet_characterization":       pack(DropletSearchCalibrationProcess, manual_start=True),
+            "droplet_characterization":       pack(PressureSweepCharacterizationProcess, manual_current_context=True),
             "pressure_sweep_characterization":pack(PressureSweepCharacterizationProcess),
             "online_stream_calibration":      pack(OnlineStreamCalibrationProcess),
         }
@@ -7333,6 +7455,60 @@ class CalibrationManager(QObject):
                     pw = res.get("print_pulse_width_us")
                 if pr is None:
                     pr = res.get("pressure")
+
+                pressures = list(res.get("pressures") or [])
+                if pressures:
+                    for pressure_index, p in enumerate(pressures):
+                        p_pw = pw
+                        p_pr = pr
+                        if p_pw is None:
+                            p_pw = p.get("print_pulse_width_us")
+                        if p_pr is None:
+                            p_pr = p.get("pressure")
+                        mean_nL = p.get("mean_volume")
+                        if (p_pw is None) or (p_pr is None) or (mean_nL is None):
+                            continue
+                        phase = "search"
+                        rows.append({
+                            "run_id": rid,
+                            "source_run_id": rid,
+                            "source_phase_key": "droplet_search",
+                            "source_step_index": step_index,
+                            "source_pressure_index": pressure_index,
+                            "run_no": run_no,
+                            "phase": phase,
+                            "phase_label": self._pressure_sweep_phase_label(phase),
+                            "timestamp": ts,
+                            "timestamp_display": self._format_pressure_sweep_summary_timestamp(ts),
+                            "pw_us": p_pw,
+                            "pressure_psi": p_pr,
+                            "delay_us": p.get("delay_us"),
+                            "target_xyz": self._recheck_xyz_list_or_none(
+                                p.get("mean_position_machine") or p.get("nominal_target_xyz")
+                            ),
+                            "mean_position_machine": p.get("mean_position_machine"),
+                            "nominal_delay_us": p.get("nominal_delay_us"),
+                            "nominal_target_xyz": p.get("nominal_target_xyz"),
+                            "vec_steps_per_s": p.get("vec_steps_per_s"),
+                            "vx_px_per_us": p.get("vx_px_per_us", p.get("vx")),
+                            "vy_px_per_us": p.get("vy_px_per_us", p.get("vy")),
+                            "nozzle_center_px": res.get("nozzle_center_px", p.get("nozzle_center_px")),
+                            "nozzle_center_machine": res.get(
+                                "nozzle_center_machine",
+                                p.get("nozzle_center_machine"),
+                            ),
+                            "emergence_time_us": res.get("emergence_time_us", p.get("emergence_time_us")),
+                            "manual_current": bool(p.get("manual_current", res.get("manual_current", False))),
+                            "mean_nL": mean_nL,
+                            "cv_pct": p.get("cv_volume_percent"),
+                            "valid": bool(p.get("valid", True)),
+                            "invalid_reason": (
+                                None if p.get("valid", True) else (p.get("invalid_reason") or "invalid")
+                            ),
+                            "is_focus_run": rid == focus_run_id,
+                            "printing_mode": "droplet",
+                        })
+                    continue
 
                 mean_nL = res.get("mean_volume")
                 cv_pct  = res.get("cv_volume_percent")
@@ -25081,19 +25257,30 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                  char_delay_retarget_window_frames: int = 4,
                  char_delay_retarget_steps_us: tuple[int, ...] = (1000, 2000),
                  char_delay_retarget_cap: int = 2,
+                 manual_current_context: dict | None = None,
                  recheck_context: dict | None = None,
                  parent=None):
         super().__init__(calibration_manager, model, parent)
+        self.manual_current_mode = isinstance(manual_current_context, dict)
         self.recheck_mode = isinstance(recheck_context, dict)
+        if self.manual_current_mode and self.recheck_mode:
+            raise ValueError("PressureSweepCharacterizationProcess cannot use both manual_current_context and recheck_context.")
+        self.manual_current_context = dict(manual_current_context or {})
         self.recheck_context = dict(recheck_context or {})
         missing_requirements = self.missing_requirements(
             calibration_manager,
+            manual_current_context=self.manual_current_context if self.manual_current_mode else None,
             recheck_context=self.recheck_context if self.recheck_mode else None,
         )
         if missing_requirements:
             raise ValueError("Cannot start PressureSweepCharacterizationProcess; missing prerequisites: "
                                + ", ".join(missing_requirements))
-        self.phase_name = "droplet_recheck" if self.recheck_mode else "pressure_sweep_characterization"
+        if self.recheck_mode:
+            self.phase_name = "droplet_recheck"
+        elif self.manual_current_mode:
+            self.phase_name = "droplet_search"
+        else:
+            self.phase_name = "pressure_sweep_characterization"
 
         # ---------- prerequisites ----------
         self.num_samples           = self.calibration_manager.get_num_pressure_tests()
@@ -25106,14 +25293,19 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             self.nozzle_center_px = get_real_center() if callable(get_real_center) else None
         self.emergence_time_us     = self.calibration_manager.get_emergence_time()
         self.prev_background       = self.calibration_manager.get_background_image()
-        if self.recheck_mode:
-            context_nozzle_machine = self._coerce_xyz_dict(self.recheck_context.get("nozzle_center_machine"))
+        single_context = (
+            self.recheck_context
+            if self.recheck_mode
+            else (self.manual_current_context if self.manual_current_mode else {})
+        )
+        if self.recheck_mode or self.manual_current_mode:
+            context_nozzle_machine = self._coerce_xyz_dict(single_context.get("nozzle_center_machine"))
             if context_nozzle_machine is not None:
                 self.nozzle_center_machine = context_nozzle_machine
-            context_nozzle_px = self._coerce_xy_tuple(self.recheck_context.get("nozzle_center_px"))
+            context_nozzle_px = self._coerce_xy_tuple(single_context.get("nozzle_center_px"))
             if context_nozzle_px is not None:
                 self.nozzle_center_px = context_nozzle_px
-            context_emergence = self._coerce_int_or_none(self.recheck_context.get("emergence_time_us"))
+            context_emergence = self._coerce_int_or_none(single_context.get("emergence_time_us"))
             if context_emergence is not None:
                 self.emergence_time_us = int(context_emergence)
 
@@ -25140,7 +25332,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
         # pull per-pressure trajectory fits
         traj = getattr(self.calibration_manager, "get_pressure_trajectory_result", None)
-        self.traj = self.recheck_context.get("trajectory_result") if self.recheck_mode else None
+        self.traj = single_context.get("trajectory_result") if (self.recheck_mode or self.manual_current_mode) else None
         if self.traj is None:
             self.traj = traj() if callable(traj) else None
 
@@ -25164,7 +25356,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 float(max(self.trajectory_valid_pressures)),
             )
 
-        if self.recheck_mode:
+        if self.recheck_mode or self.manual_current_mode:
             self._ready = True
         elif not (self.nozzle_center_machine and self.nozzle_center_px and self.emergence_time_us and self.traj and self.traj.get("pressures")):
             self.calibrationError.emit("Sweep requires nozzle center, background, emergence, and trajectory scan results.")
@@ -25180,6 +25372,13 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 self.plan.append(rec)
             else:
                 self.calibrationError.emit("Recheck could not build a trajectory-aware single-pressure plan.")
+                self._ready = False
+        elif self._ready and self.manual_current_mode:
+            rec = self._build_manual_current_pressure_target(self.manual_current_context)
+            if rec:
+                self.plan.append(rec)
+            else:
+                self.calibrationError.emit("Manual characterization could not build a trajectory-aware single-pressure plan.")
                 self._ready = False
         elif self._ready:
             plan_band = self._resolve_trajectory_planning_band(
@@ -25471,8 +25670,16 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.state_machine.setInitialState(self.state_pick)
 
     @staticmethod
-    def missing_requirements(cm, *args, recheck_context=None, **kwargs) -> list[str]:
+    def missing_requirements(cm, *args, manual_current_context=None, recheck_context=None, **kwargs) -> list[str]:
         """Return a list of human-readable missing prerequisites."""
+        if manual_current_context is not None:
+            if manual_current_context is True:
+                builder = getattr(cm, "build_manual_current_characterization_context", None)
+                if callable(builder):
+                    _context, missing = builder()
+                    return list(missing or [])
+                return ["Manual characterization context"]
+            return PressureSweepCharacterizationProcess.manual_current_missing_requirements(manual_current_context)
         if recheck_context is not None:
             return PressureSweepCharacterizationProcess.recheck_missing_requirements(recheck_context)
         missing = []
@@ -25970,6 +26177,33 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             out.update(payload)
         self._record_analysis(out)
 
+    def _manual_current_should_finish_without_row(self, reason: str) -> bool:
+        if not bool(getattr(self, "manual_current_mode", False)):
+            return False
+        if bool(getattr(self, "_search_candidate_seen_ever", False)):
+            return False
+        no_droplet_reasons = {
+            "search_fail_cycles",
+            "search_low_signal_streak_limit",
+            "search_no_contour_streak_limit",
+            "search_center_jump_streak_limit",
+            "search_background_artifact_streak_limit",
+            "search_elapsed_timeout",
+        }
+        return str(reason or "") in no_droplet_reasons
+
+    def _finish_manual_current_without_result_row(self, reason: str, payload: dict):
+        out = dict(payload or {})
+        out["status"] = "no_droplet"
+        out["no_result_row"] = True
+        self._record_decision("manual_current_no_droplet", out)
+        self._record_pressure_sweep_analysis("manual_current_no_droplet", out)
+        self.stageChanged.emit(
+            f"No droplet found at the current position ({reason}); manual characterization complete."
+        )
+        self.i = len(getattr(self, "plan", []) or [])
+        self.nextPressure.emit()
+
     def _invalidate_current_pressure(self, reason: str, *, stage_message: str | None = None):
         if stage_message:
             self.stageChanged.emit(str(stage_message))
@@ -25987,6 +26221,9 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             "pressure_invalidated",
             payload,
         )
+        if self._manual_current_should_finish_without_row(self._bad_reason):
+            self._finish_manual_current_without_result_row(self._bad_reason, payload)
+            return
         self._record_pressure_result(valid=False, reason=self._bad_reason)
         self.i += 1
         self.nextPressure.emit()
@@ -26523,6 +26760,45 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             missing.append("Source droplet trajectory")
         return missing
 
+    @staticmethod
+    def manual_current_missing_requirements(manual_current_context) -> list[str]:
+        context = dict(manual_current_context or {})
+        missing = []
+        if PressureSweepCharacterizationProcess._coerce_int_or_none(
+            context.get("print_pulse_width_us")
+        ) is None:
+            missing.append("Print pulse width")
+        if PressureSweepCharacterizationProcess._coerce_float_or_none(
+            context.get("pressure_psi")
+        ) is None:
+            missing.append("Pressure")
+        if PressureSweepCharacterizationProcess._coerce_int_or_none(context.get("delay_us")) is None:
+            missing.append("Current flash delay")
+        if PressureSweepCharacterizationProcess._coerce_xyz_tuple(
+            context.get("target_xyz") or context.get("mean_position_machine")
+        ) is None:
+            missing.append("Current machine position")
+        if PressureSweepCharacterizationProcess._coerce_xyz_dict(
+            context.get("nozzle_center_machine")
+        ) is None:
+            missing.append("Source nozzle center machine coordinates")
+        if PressureSweepCharacterizationProcess._coerce_xy_tuple(context.get("nozzle_center_px")) is None:
+            missing.append("Source nozzle center image coordinates")
+        if PressureSweepCharacterizationProcess._coerce_int_or_none(
+            context.get("emergence_time_us")
+        ) is None:
+            missing.append("Source emergence time")
+        vec = PressureSweepCharacterizationProcess._coerce_vec3(context.get("vec_steps_per_s"))
+        vx = PressureSweepCharacterizationProcess._coerce_float_or_none(
+            context.get("vx_px_per_us") if context.get("vx_px_per_us") is not None else context.get("vx")
+        )
+        vy = PressureSweepCharacterizationProcess._coerce_float_or_none(
+            context.get("vy_px_per_us") if context.get("vy_px_per_us") is not None else context.get("vy")
+        )
+        if vec is None and (vx is None or vy is None):
+            missing.append("Source droplet trajectory")
+        return missing
+
     def _build_recheck_pressure_target(self, context: dict) -> dict:
         context = dict(context or {})
         pressure = self._coerce_float_or_none(context.get("pressure_psi"))
@@ -26580,6 +26856,15 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             "reference_mean_volume_nL": context.get("reference_mean_volume_nL"),
             "reference_cv_volume_percent": context.get("reference_cv_volume_percent"),
         }
+
+    def _build_manual_current_pressure_target(self, context: dict) -> dict:
+        rec = self._build_recheck_pressure_target(context)
+        if rec:
+            source = context.get("source_result")
+            source = dict(source) if isinstance(source, dict) else {}
+            rec["manual_current"] = True
+            rec["manual_current_source"] = source
+        return rec
 
     def _predict_target_xyz(self, vec_steps_per_s, delay_us: int):
         dt_s = max(0.0, (int(delay_us) - int(self.emergence_time_us)) * 1e-6)
@@ -27974,6 +28259,38 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 rec["volume_delta_percent"] = float(delta / float(ref_mean) * 100.0)
         return rec
 
+    def _attach_manual_current_metadata(self, pressure_entry: dict) -> dict:
+        if not bool(getattr(self, "manual_current_mode", False)):
+            return pressure_entry
+        rec = dict(pressure_entry or {})
+        plan_record = getattr(self, "current_plan_record", None)
+        plan_record = plan_record if isinstance(plan_record, dict) else {}
+        context = getattr(self, "manual_current_context", None)
+        context = context if isinstance(context, dict) else {}
+        source = plan_record.get("manual_current_source") or context.get("source_result") or {}
+        source = dict(source) if isinstance(source, dict) else {}
+        pw_us = self._coerce_int_or_none(
+            plan_record.get("print_pulse_width_us") or context.get("print_pulse_width_us")
+        )
+        if pw_us is not None:
+            rec["print_pulse_width_us"] = int(pw_us)
+        nozzle_center_px = getattr(self, "nozzle_center_px", None)
+        if nozzle_center_px is not None:
+            rec["nozzle_center_px"] = (
+                [int(v) for v in nozzle_center_px]
+                if isinstance(nozzle_center_px, (list, tuple))
+                else nozzle_center_px
+            )
+        nozzle_center_machine = getattr(self, "nozzle_center_machine", None)
+        if nozzle_center_machine is not None:
+            rec["nozzle_center_machine"] = dict(nozzle_center_machine)
+        emergence_time_us = self._coerce_int_or_none(getattr(self, "emergence_time_us", None))
+        if emergence_time_us is not None:
+            rec["emergence_time_us"] = int(emergence_time_us)
+        rec["manual_current"] = True
+        rec["manual_current_source"] = source
+        return rec
+
     @Slot()
     def onAnalyzeBatch(self):
         # Only keep “good” (circular) replicates
@@ -28096,6 +28413,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             rec.update(self._circularity_threshold_context())
             rec.update(self._current_targeting_metadata())
             rec = self._attach_recheck_metadata(rec)
+            rec = self._attach_manual_current_metadata(rec)
             self.samples.append(rec)
             valid_payload = {
                 "status": "valid",
@@ -28190,6 +28508,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         if isinstance(extra, dict):
             rec.update(extra)
         rec = self._attach_recheck_metadata(rec)
+        rec = self._attach_manual_current_metadata(rec)
         
         self.samples.append(rec)
         self._record_pressure_sweep_analysis(
@@ -28444,6 +28763,18 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                     "print_pulse_width_us": pressure_entry.get("print_pulse_width_us"),
                 }
             )
+        if bool(getattr(self, "manual_current_mode", False)):
+            source = {}
+            context = getattr(self, "manual_current_context", None)
+            if isinstance(context, dict):
+                source = dict(context.get("source_result") or {})
+            result.update(
+                {
+                    "manual_current": True,
+                    "manual_current_source": source,
+                    "print_pulse_width_us": pressure_entry.get("print_pulse_width_us"),
+                }
+            )
         self.calibrationDataUpdated.emit({"measurements": [], "result": result})
         self._incremental_emitted = True
 
@@ -28467,6 +28798,10 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 context = getattr(self, "recheck_context", None)
                 source = dict(context.get("source_result") or {}) if isinstance(context, dict) else {}
                 result.update({"recheck": True, "recheck_source": source})
+            if bool(getattr(self, "manual_current_mode", False)):
+                context = getattr(self, "manual_current_context", None)
+                source = dict(context.get("source_result") or {}) if isinstance(context, dict) else {}
+                result.update({"manual_current": True, "manual_current_source": source})
             self.calibrationDataUpdated.emit({"measurements": [], "result": result})
         else:
             # Back-compat: original behavior (single emit with all pressures)
@@ -28485,12 +28820,20 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 context = getattr(self, "recheck_context", None)
                 source = dict(context.get("source_result") or {}) if isinstance(context, dict) else {}
                 result.update({"recheck": True, "recheck_source": source})
+            if bool(getattr(self, "manual_current_mode", False)):
+                context = getattr(self, "manual_current_context", None)
+                source = dict(context.get("source_result") or {}) if isinstance(context, dict) else {}
+                result.update({"manual_current": True, "manual_current_source": source})
             self.calibrationDataUpdated.emit({"measurements": [], "result": result})
 
         self.stageChanged.emit(
             "Droplet recheck characterization complete"
             if bool(getattr(self, "recheck_mode", False))
-            else "Pressure sweep characterization complete"
+            else (
+                "Manual droplet characterization complete"
+                if bool(getattr(self, "manual_current_mode", False))
+                else "Pressure sweep characterization complete"
+            )
         )
         self.calibrationCompleted.emit()
         

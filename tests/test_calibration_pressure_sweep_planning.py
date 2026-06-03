@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from tests.calibration_test_utils import Recorder, contour_from_rect, ensure_calibration_import_stubs
+from tests.calibration_test_utils import Recorder, SignalStub, contour_from_rect, ensure_calibration_import_stubs
 
 
 ensure_calibration_import_stubs()
@@ -415,6 +415,7 @@ def test_pressure_sweep_defaults_disable_early_stop_and_keep_20_replicates():
     assert sig.parameters["char_delay_retarget_window_frames"].default == 4
     assert sig.parameters["char_delay_retarget_steps_us"].default == (1000, 2000)
     assert sig.parameters["char_delay_retarget_cap"].default == 2
+    assert sig.parameters["manual_current_context"].default is None
 
 
 def test_pressure_sweep_constructor_initializes_bounds_before_nominal_target_planning():
@@ -484,6 +485,7 @@ def test_pressure_sweep_recheck_mode_builds_single_plan_and_uses_prior_target():
     assert proc.nominal_target_xyz == (1100, 2000, 8500)
     assert proc._target_xyz_for_delay(9000, include_offsets=False) == (1100, 2000, 8500)
     assert proc._target_xyz_for_delay(9000, include_offsets=True) == (1234, 2000, 7654)
+
     offset_xyz = proc._target_xyz_for_delay(9500, include_offsets=False)
     assert offset_xyz != (1234, 2000, 7654)
     assert offset_xyz[0] > 1000
@@ -540,6 +542,139 @@ def test_pressure_sweep_recheck_mode_applies_pulse_width_and_pressure():
     assert requests[0]["print_pulse_width"] == 1450
     assert requests[0]["print_pressure"] == 1.2
     assert requests[0]["num_droplets"] == 0
+
+
+def _build_manual_current_context():
+    context = _build_recheck_context()
+    context.update(
+        {
+            "manual_current": True,
+            "target_xyz": [1234, 2000, 7654],
+            "mean_position_machine": [1234, 2000, 7654],
+            "source_result": {
+                "phase": "search",
+                "phase_key": "droplet_search",
+                "phase_source": "manual_current",
+                "pressure_psi": 1.20,
+                "pw_us": 1450,
+                "delay_us": 9000,
+                "target_xyz": [1234, 2000, 7654],
+            },
+        }
+    )
+    return context
+
+
+def test_pressure_sweep_manual_current_mode_builds_single_plan_from_current_target():
+    mgr = _PressureSweepInitManager()
+    model = _build_pressure_sweep_init_model()
+    context = _build_manual_current_context()
+
+    proc = PressureSweepCharacterizationProcess(
+        mgr,
+        model,
+        manual_current_context=context,
+        replicates_per_pressure=20,
+    )
+
+    assert proc.phase_name == "droplet_search"
+    assert proc.manual_current_mode is True
+    assert proc.recheck_mode is False
+    assert len(proc.plan) == 1
+    assert proc.plan[0]["pressure"] == 1.2
+    assert proc.plan[0]["print_pulse_width_us"] == 1450
+    assert proc.plan[0]["manual_current"] is True
+
+    proc.onPickPressure()
+
+    assert proc.target_delay_us == 9000
+    assert proc.nominal_target_xyz == (1100, 2000, 8500)
+    assert proc._target_xyz_for_delay(9000, include_offsets=False) == (1100, 2000, 8500)
+    assert proc._target_xyz_for_delay(9000, include_offsets=True) == (1234, 2000, 7654)
+
+    pressure_entry = proc._attach_manual_current_metadata(
+        {"pressure": 1.2, "delay_us": 9000, "mean_volume": 9.8, "cv_volume_percent": 4.2, "valid": True}
+    )
+    assert pressure_entry["print_pulse_width_us"] == 1450
+    assert pressure_entry["nozzle_center_px"] == [100, 100]
+    assert pressure_entry["nozzle_center_machine"] == {"X": 1000, "Y": 2000, "Z": 9000}
+    assert pressure_entry["emergence_time_us"] == 4000
+    assert pressure_entry["manual_current"] is True
+
+
+def test_manual_droplet_characterization_starts_pressure_sweep_with_current_position(tmp_path):
+    model = SimpleNamespace(
+        machine_state_updated=SignalStub(),
+        experiment_model=SimpleNamespace(get_calibration_file_path=lambda: str(tmp_path / "calibration.json")),
+        rack_model=SimpleNamespace(get_gripper_printer_head=lambda: None),
+        droplet_camera_model=SimpleNamespace(
+            get_image_metadata=lambda: (1, 1000, 4300, 1, 30000),
+        ),
+        machine_model=SimpleNamespace(
+            get_current_position_dict=lambda: {"X": 2222, "Y": 3333, "Z": 4444},
+            get_print_pulse_width=lambda: 1450,
+            get_refuel_pulse_width=lambda: 0,
+            get_current_print_pressure=lambda: 1.2,
+            get_current_refuel_pressure=lambda: 0.0,
+        ),
+        calibration_memory_store=None,
+    )
+    manager = CalibrationManager(model)
+    manager.nozzle_center = {"X": 1000, "Y": 2000, "Z": 9000}
+    manager.real_nozzle_center_image_position = [100, 100]
+    manager.get_emergence_time = lambda: 4000
+    manager._pressure_traj_result = {
+        "pressures": [
+            {"pressure": 1.2, "fit": {"vx_px_per_us": 0.02, "vy_px_per_us": 0.10}},
+        ],
+        "valid_fit_pressures": [1.2],
+    }
+    started = {}
+    manager._try_start_process = lambda proc_cls, **kwargs: started.update(
+        {"proc_cls": proc_cls, "kwargs": dict(kwargs)}
+    ) or True
+
+    assert manager.start_manual_droplet_characterization() is True
+
+    assert started["proc_cls"] is PressureSweepCharacterizationProcess
+    context = started["kwargs"]["manual_current_context"]
+    assert context["target_xyz"] == [2222, 3333, 4444]
+    assert context["pressure_psi"] == 1.2
+    assert context["print_pulse_width_us"] == 1450
+    assert context["delay_us"] == 4300
+    assert context["vx_px_per_us"] == 0.02
+    assert context["vy_px_per_us"] == 0.10
+
+
+def test_manual_current_no_droplet_finishes_without_pressure_row():
+    proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
+    proc.manual_current_mode = True
+    proc._search_candidate_seen_ever = False
+    proc.plan = [{"pressure": 1.2}]
+    proc.i = 0
+    proc.cur_pressure = 1.2
+    proc.current_delay_us = None
+    proc.target_delay_us = 4300
+    proc.stageChanged = Recorder()
+    proc.nextPressure = Recorder()
+    proc._search_streak_snapshot = lambda: {}
+    proc._char_ratio_snapshot = lambda: {}
+    proc._morphology_snapshot = lambda: {}
+    proc._circularity_threshold_context = lambda: {}
+    decisions = []
+    analyses = []
+    recorded_rows = []
+    proc._record_decision = lambda kind, payload: decisions.append((kind, dict(payload)))
+    proc._record_pressure_sweep_analysis = lambda kind, payload=None: analyses.append((kind, dict(payload or {})))
+    proc._record_pressure_result = lambda *args, **kwargs: recorded_rows.append((args, kwargs))
+
+    proc._invalidate_current_pressure("search_no_contour_streak_limit")
+
+    assert recorded_rows == []
+    assert proc.i == len(proc.plan)
+    assert proc.nextPressure.calls
+    assert any(kind == "manual_current_no_droplet" for kind, _payload in decisions)
+    assert any(kind == "manual_current_no_droplet" for kind, _payload in analyses)
 
 
 def test_pressure_sweep_solves_nominal_delay_from_fixed_z_plane():

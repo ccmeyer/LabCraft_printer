@@ -539,6 +539,77 @@ def test_pressure_sweep_summary_rows_carry_recheck_context_and_recover_trajector
     assert context["vy_px_per_us"] == pytest.approx(0.05)
 
 
+def test_manual_current_pressure_sweep_search_row_can_be_rechecked(tmp_path):
+    runs = [
+        {
+            "run_id": "run_manual",
+            "stock_solution": "Water",
+            "steps": {
+                "droplet_search": [
+                    {
+                        "timestamp": "2026-03-17T11:00:00Z",
+                        "settings": {"print_width": 1450, "print_pressure": 1.2},
+                        "result": {
+                            "manual_current": True,
+                            "nozzle_center_px": [100, 100],
+                            "nozzle_center_machine": {"X": 1000, "Y": 2000, "Z": 9000},
+                            "emergence_time_us": 4000,
+                            "pressures": [
+                                {
+                                    "pressure": 1.2,
+                                    "print_pulse_width_us": 1450,
+                                    "delay_us": 9000,
+                                    "mean_position_machine": {"X": 1234, "Y": 2000, "Z": 7654},
+                                    "nominal_delay_us": 9000,
+                                    "nominal_target_xyz": [1100, 2000, 8500],
+                                    "vec_steps_per_s": [20_000.0, 0.0, -100_000.0],
+                                    "vx_px_per_us": 0.02,
+                                    "vy_px_per_us": 0.10,
+                                    "mean_volume": 9.8,
+                                    "cv_volume_percent": 4.2,
+                                    "valid": True,
+                                    "manual_current": True,
+                                }
+                            ],
+                        },
+                    },
+                    {
+                        "timestamp": "2026-03-17T11:01:00Z",
+                        "settings": {"print_width": 1450, "print_pressure": 1.2},
+                        "result": {
+                            "manual_current": True,
+                            "nozzle_center_px": [100, 100],
+                            "nozzle_center_machine": {"X": 1000, "Y": 2000, "Z": 9000},
+                            "emergence_time_us": 4000,
+                            "pressures": [],
+                        },
+                    },
+                ],
+            },
+        }
+    ]
+    _model, manager = _build_model_and_manager(tmp_path, runs, active_run_id="run_manual")
+
+    rows = manager.get_characterization_summary_rows()
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["phase"] == "search"
+    assert row["source_phase_key"] == "droplet_search"
+    assert row["source_pressure_index"] == 0
+    assert row["target_xyz"] == [1234, 2000, 7654]
+    assert row["manual_current"] is True
+
+    context, missing = manager.build_droplet_recheck_context(row)
+
+    assert missing == []
+    assert context["target_xyz"] == [1234, 2000, 7654]
+    assert context["print_pulse_width_us"] == 1450
+    assert context["pressure_psi"] == 1.2
+    assert context["delay_us"] == 9000
+    assert context["vec_steps_per_s"] == [20_000.0, 0.0, -100_000.0]
+
+
 def test_recheck_summary_rows_and_source_filter(monkeypatch, qapp, tmp_path):
     runs = [
         _make_run(

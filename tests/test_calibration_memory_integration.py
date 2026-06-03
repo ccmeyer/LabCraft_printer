@@ -603,7 +603,7 @@ def test_pressure_sweep_summary_rows_separate_stock_concentrations(tmp_path):
     assert [row["mean_nL"] for row in rows] == [20.0]
 
 
-def test_emit_readiness_treats_manual_droplet_characterization_as_ready_without_trajectory_data(tmp_path):
+def test_emit_readiness_reports_pressure_sweep_prereqs_for_manual_characterization(tmp_path):
     model = _make_model(tmp_path)
     manager = CalibrationManager(model)
     captured = []
@@ -613,8 +613,11 @@ def test_emit_readiness_treats_manual_droplet_characterization_as_ready_without_
 
     assert captured
     droplet_characterization = captured[-1]["droplet_characterization"]
-    assert droplet_characterization["ready"] is True
-    assert droplet_characterization["missing"] == []
+    assert droplet_characterization["ready"] is False
+    assert "Source nozzle center machine coordinates" in droplet_characterization["missing"]
+    assert "Source nozzle center image coordinates" in droplet_characterization["missing"]
+    assert "Source emergence time" in droplet_characterization["missing"]
+    assert "Source droplet trajectory" in droplet_characterization["missing"]
 
 
 def test_verbose_capture_level_restores_process_event_mirroring(tmp_path):
