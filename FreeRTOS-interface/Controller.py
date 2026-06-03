@@ -4772,8 +4772,10 @@ class Controller(QObject):
     def start_online_stream_calibration(self):
         self.model.calibration_manager.start_online_stream_calibration()
 
-    def start_droplet_calibration_sequence(self):
-        return self.model.calibration_manager.start_droplet_calibration_sequence()
+    def start_droplet_calibration_sequence(self, *, pressure_scan_mode: str = "band"):
+        return self.model.calibration_manager.start_droplet_calibration_sequence(
+            pressure_scan_mode=pressure_scan_mode,
+        )
 
     def start_stream_calibration_sequence(self):
         return self.model.calibration_manager.start_stream_calibration_sequence()

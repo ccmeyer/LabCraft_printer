@@ -119,7 +119,7 @@ def _build_droplet_dialog(monkeypatch, qapp):
     controller = SimpleNamespace(
         start_read_camera=lambda: None,
         capture_droplet_image=lambda: None,
-        start_droplet_calibration_sequence=lambda: None,
+        start_droplet_calibration_sequence=lambda **_kwargs: None,
         begin_droplet_calibration_sequence_gripper_preamble=lambda: (True, ""),
         begin_droplet_calibration_sequence_gripper_restore=lambda: (True, ""),
     )

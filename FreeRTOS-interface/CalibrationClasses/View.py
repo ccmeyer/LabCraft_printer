@@ -1643,6 +1643,29 @@ class DropletImagingDialog(QtWidgets.QDialog):
         )
         calib_grid.addWidget(self.calibrate_pressure_sweep_button, crow, 0, 1, 2); crow += 1
 
+        self.calibrate_all_pressure_mode_label = QtWidgets.QLabel("Calibrate All pressure step")
+        self.calibrate_all_pressure_mode_widget = QtWidgets.QWidget()
+        calibrate_all_pressure_mode_layout = QtWidgets.QHBoxLayout(
+            self.calibrate_all_pressure_mode_widget
+        )
+        calibrate_all_pressure_mode_layout.setContentsMargins(0, 0, 0, 0)
+        calibrate_all_pressure_mode_layout.setSpacing(8)
+        self.calibrate_all_pressure_full_band_radio = QtWidgets.QRadioButton("Full Band Scan")
+        self.calibrate_all_pressure_single_radio = QtWidgets.QRadioButton("Find Single Pressure")
+        self.calibrate_all_pressure_full_band_radio.setChecked(True)
+        self.calibrate_all_pressure_mode_group = QtWidgets.QButtonGroup(self)
+        self.calibrate_all_pressure_mode_group.addButton(
+            self.calibrate_all_pressure_full_band_radio
+        )
+        self.calibrate_all_pressure_mode_group.addButton(
+            self.calibrate_all_pressure_single_radio
+        )
+        calibrate_all_pressure_mode_layout.addWidget(self.calibrate_all_pressure_full_band_radio)
+        calibrate_all_pressure_mode_layout.addWidget(self.calibrate_all_pressure_single_radio)
+        calibrate_all_pressure_mode_layout.addStretch(1)
+        calib_grid.addWidget(self.calibrate_all_pressure_mode_label, crow, 0)
+        calib_grid.addWidget(self.calibrate_all_pressure_mode_widget, crow, 1); crow += 1
+
         self.calibrate_all_button = QtWidgets.QPushButton("Calibrate All")
         self.calibrate_all_button.clicked.connect(self.toggle_start_all_calibration)
         self._register_calibration_action_button("calibrate_all", self.calibrate_all_button)
@@ -1895,8 +1918,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         droplet_workflow_grid.addWidget(self.find_single_pressure_button, 3, 0, 1, 2)
         droplet_workflow_grid.addWidget(self.scan_trajectory_button, 4, 0, 1, 2)
         droplet_workflow_grid.addWidget(self.calibrate_pressure_sweep_button, 5, 0, 1, 2)
-        droplet_workflow_grid.addWidget(self.calibrate_all_button, 6, 0, 1, 2)
-        droplet_workflow_grid.addWidget(self.calibrate_characterization_button, 7, 0, 1, 2)
+        droplet_workflow_grid.addWidget(self.calibrate_all_pressure_mode_label, 6, 0)
+        droplet_workflow_grid.addWidget(self.calibrate_all_pressure_mode_widget, 6, 1)
+        droplet_workflow_grid.addWidget(self.calibrate_all_button, 7, 0, 1, 2)
+        droplet_workflow_grid.addWidget(self.calibrate_characterization_button, 8, 0, 1, 2)
 
         self.stream_setup_widget = QtWidgets.QWidget()
         stream_setup_grid = QtWidgets.QGridLayout(self.stream_setup_widget)
@@ -4815,6 +4840,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         state = self._get_droplet_calibration_sequence_state()
         status = str(state.get("status") or "idle")
         if status != "idle":
+            self._set_calibrate_all_pressure_mode_controls_enabled(False)
             self._set_calibration_action_text(
                 "calibrate_all",
                 "Stop Calibration",
@@ -4831,6 +4857,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         stream_capture_blocked = self._stream_capture_blocks_new_starts(self._get_stream_capture_state())
 
         if flash_fault_latched:
+            self._set_calibrate_all_pressure_mode_controls_enabled(False)
             self._set_calibration_action_state(
                 "calibrate_all",
                 False,
@@ -4838,6 +4865,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             )
             return
         if stream_capture_blocked:
+            self._set_calibrate_all_pressure_mode_controls_enabled(False)
             self._set_calibration_action_state(
                 "calibrate_all",
                 False,
@@ -4845,7 +4873,23 @@ class DropletImagingDialog(QtWidgets.QDialog):
             )
             return
 
+        self._set_calibrate_all_pressure_mode_controls_enabled(True)
         self._set_calibration_action_state("calibrate_all", True)
+
+    def _set_calibrate_all_pressure_mode_controls_enabled(self, enabled: bool):
+        for widget in (
+            getattr(self, "calibrate_all_pressure_mode_label", None),
+            getattr(self, "calibrate_all_pressure_full_band_radio", None),
+            getattr(self, "calibrate_all_pressure_single_radio", None),
+        ):
+            if widget is not None:
+                widget.setEnabled(bool(enabled))
+
+    def _get_calibrate_all_pressure_scan_mode(self) -> str:
+        single_radio = getattr(self, "calibrate_all_pressure_single_radio", None)
+        if single_radio is not None and bool(single_radio.isChecked()):
+            return "single_candidate"
+        return "band"
 
     def _apply_flash_safety_ui_state(self):
         fault_latched = self._is_flash_fault_latched()
@@ -6909,7 +6953,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         else:
             print('Starting calibration')
             self._set_calibration_action_text("calibrate_all", "Stop Calibration")
-            self.controller.start_droplet_calibration_sequence()
+            self.controller.start_droplet_calibration_sequence(
+                pressure_scan_mode=self._get_calibrate_all_pressure_scan_mode(),
+            )
         self._refresh_manual_control_lock_state()
 
     def toggle_start_pw_sweep(self):

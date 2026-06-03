@@ -135,6 +135,7 @@ class _ControllerStub:
         self.start_online_stream_calls = 0
         self.start_stream_calibration_sequence_calls = 0
         self.start_droplet_calibration_sequence_calls = 0
+        self.start_droplet_calibration_sequence_modes = []
         self.start_nozzle_calls = 0
         self.stop_calibration_calls = 0
 
@@ -174,10 +175,12 @@ class _ControllerStub:
             )
         return True, ""
 
-    def start_droplet_calibration_sequence(self):
+    def start_droplet_calibration_sequence(self, *, pressure_scan_mode="band"):
         self.start_droplet_calibration_sequence_calls += 1
+        self.start_droplet_calibration_sequence_modes.append(str(pressure_scan_mode))
         if self.manager is not None:
             self.manager.droplet_sequence_state["status"] = "pending_gripper_refresh"
+            self.manager.droplet_sequence_state["pressure_scan_mode"] = str(pressure_scan_mode)
             self.manager.dropletCalibrationSequenceStateChanged.emit(
                 dict(self.manager.droplet_sequence_state)
             )
@@ -346,6 +349,7 @@ def test_droplet_calibrate_all_toggle_starts_and_stops_via_controller(monkeypatc
     qapp.processEvents()
 
     assert controller.start_droplet_calibration_sequence_calls == 1
+    assert controller.start_droplet_calibration_sequence_modes == ["band"]
     assert dialog.calibrate_all_button.text() == "Stop Calibration"
 
     manager.droplet_sequence_state["status"] = "running"
@@ -353,6 +357,7 @@ def test_droplet_calibrate_all_toggle_starts_and_stops_via_controller(monkeypatc
     qapp.processEvents()
 
     assert controller.stop_calibration_calls == 1
+    assert controller.start_droplet_calibration_sequence_calls == 1
     assert dialog.calibrate_all_button.text() == "Stop Calibration"
 
     manager.droplet_sequence_state["status"] = "idle"
@@ -360,6 +365,19 @@ def test_droplet_calibrate_all_toggle_starts_and_stops_via_controller(monkeypatc
     qapp.processEvents()
 
     assert dialog.calibrate_all_button.text() == "Calibrate All"
+
+    dialog.deleteLater()
+
+
+def test_droplet_calibrate_all_single_pressure_mode_passes_to_controller(monkeypatch, qapp):
+    dialog, _manager, controller = _build_dialog(monkeypatch, qapp)
+
+    dialog.calibrate_all_pressure_single_radio.setChecked(True)
+    dialog.calibrate_all_button.click()
+    qapp.processEvents()
+
+    assert controller.start_droplet_calibration_sequence_calls == 1
+    assert controller.start_droplet_calibration_sequence_modes == ["single_candidate"]
 
     dialog.deleteLater()
 

@@ -462,6 +462,24 @@ def test_controller_start_online_stream_calibration_forwards_to_manager():
     assert called["count"] == 1
 
 
+def test_controller_start_droplet_calibration_sequence_forwards_pressure_mode():
+    controller = Controller.__new__(Controller)
+    called = []
+    controller.model = SimpleNamespace(
+        calibration_manager=SimpleNamespace(
+            start_droplet_calibration_sequence=lambda **kwargs: called.append(dict(kwargs)) or True
+        )
+    )
+
+    started = Controller.start_droplet_calibration_sequence(
+        controller,
+        pressure_scan_mode="single_candidate",
+    )
+
+    assert started is True
+    assert called == [{"pressure_scan_mode": "single_candidate"}]
+
+
 def test_calibration_manager_rebroadcasts_online_stream_debug_payload():
     mgr = CalibrationManager.__new__(CalibrationManager)
     mgr.onlineStreamDebugUpdated = Recorder()

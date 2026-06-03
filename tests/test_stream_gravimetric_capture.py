@@ -17,6 +17,7 @@ from CalibrationClasses.Model import (
     CalibrationManager,
     DropletTimecourseProcess,
     OnlineStreamCalibrationProcess,
+    PressureBandCalibrationProcess,
 )
 from CalibrationClasses.View import DropletImagingDialog
 
@@ -903,6 +904,84 @@ def test_stream_calibration_sequence_queue_can_start_online_stream_calibration(t
             {
                 "_allow_stream_calibration_sequence": True,
                 "_stream_calibration_sequence_phase": "online_stream_calibration",
+            },
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("requested_mode", "expected_mode"),
+    [
+        ("band", "band"),
+        ("single_candidate", "single_candidate"),
+        ("invalid_mode", "band"),
+    ],
+)
+def test_droplet_calibration_sequence_stores_pressure_scan_mode(
+    tmp_path,
+    requested_mode,
+    expected_mode,
+):
+    _model, manager = _make_manager(tmp_path)
+
+    ok = manager.start_droplet_calibration_sequence(pressure_scan_mode=requested_mode)
+
+    assert ok is True
+    assert manager.get_droplet_calibration_sequence_state()["pressure_scan_mode"] == expected_mode
+
+
+def test_droplet_sequence_pressure_scan_queue_uses_full_band_by_default(tmp_path, monkeypatch):
+    _model, manager = _make_manager(tmp_path)
+    started = []
+
+    def _capture_start(proc_cls, *args, **kwargs):
+        started.append((proc_cls, dict(kwargs)))
+        return True
+
+    monkeypatch.setattr(manager, "_try_start_process", _capture_start)
+    manager.calibration_queue = ["pressure_scan"]
+    manager._droplet_calibration_sequence_state = {
+        "status": "running",
+        "pressure_scan_mode": "band",
+    }
+
+    manager.start_calibration_queue()
+
+    assert started == [
+        (
+            PressureBandCalibrationProcess,
+            {
+                "_allow_droplet_calibration_sequence": True,
+                "_droplet_calibration_sequence_phase": "pressure_scan",
+            },
+        ),
+    ]
+
+
+def test_droplet_sequence_pressure_scan_queue_can_use_single_candidate_mode(tmp_path, monkeypatch):
+    _model, manager = _make_manager(tmp_path)
+    started = []
+
+    def _capture_start(proc_cls, *args, **kwargs):
+        started.append((proc_cls, dict(kwargs)))
+        return True
+
+    monkeypatch.setattr(manager, "_try_start_process", _capture_start)
+    manager.calibration_queue = ["pressure_scan"]
+    manager._droplet_calibration_sequence_state = {
+        "status": "running",
+        "pressure_scan_mode": "single_candidate",
+    }
+
+    manager.start_calibration_queue()
+
+    assert started == [
+        (
+            PressureBandCalibrationProcess,
+            {
+                "_allow_droplet_calibration_sequence": True,
+                "_droplet_calibration_sequence_phase": "pressure_scan",
+                "mode": "single_candidate",
             },
         ),
     ]

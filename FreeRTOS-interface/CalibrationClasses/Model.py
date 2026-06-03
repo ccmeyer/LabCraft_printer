@@ -3323,6 +3323,13 @@ class CalibrationManager(QObject):
     def clear_calibration_queue(self):
         self.calibration_queue = []
 
+    @staticmethod
+    def _normalize_droplet_sequence_pressure_scan_mode(value) -> str:
+        mode = str(value or "band").strip().lower()
+        if mode in {"single_candidate", "single", "find_single_pressure"}:
+            return "single_candidate"
+        return "band"
+
     def start_calibration_queue(self):
         if not self.calibration_queue:
             self.calibrationStageChanged.emit("No calibrations in queue.", "red")
@@ -3376,6 +3383,15 @@ class CalibrationManager(QObject):
         ):
             start_kwargs["_allow_droplet_calibration_sequence"] = True
             start_kwargs["_droplet_calibration_sequence_phase"] = str(next_cal)
+            if next_cal == "pressure_scan":
+                pressure_scan_mode = self._normalize_droplet_sequence_pressure_scan_mode(
+                    (getattr(self, "_droplet_calibration_sequence_state", None) or {}).get(
+                        "pressure_scan_mode",
+                        "band",
+                    )
+                )
+                if pressure_scan_mode == "single_candidate":
+                    start_kwargs["mode"] = "single_candidate"
 
         if not self._try_start_process(proc_cls, **start_kwargs):
             # Stop the queue on error to avoid cascading failures.
@@ -4346,7 +4362,7 @@ class CalibrationManager(QObject):
         raw_missing = self._process_missing(OnlineStreamCalibrationProcess)
         return self._filter_stream_calibration_sequence_missing_requirements(raw_missing)
 
-    def start_droplet_calibration_sequence(self):
+    def start_droplet_calibration_sequence(self, *, pressure_scan_mode: str = "band"):
         if self.activeCalibration is not None or len(self.calibration_queue) > 0 or self.is_pulsewidth_sweep_active():
             message = "Stop the current calibration before starting the droplet calibration sequence."
             self.calibrationStageChanged.emit(message, "red")
@@ -4375,6 +4391,7 @@ class CalibrationManager(QObject):
             self.calibrationError.emit(message)
             return False
 
+        pressure_scan_mode = self._normalize_droplet_sequence_pressure_scan_mode(pressure_scan_mode)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         self._droplet_calibration_sequence_state = self._build_default_droplet_calibration_sequence_state()
         self._droplet_calibration_sequence_state.update(
@@ -4388,6 +4405,7 @@ class CalibrationManager(QObject):
                 "gripper_pulse_duration_snapshot_ms": int(gripper_snapshot["pulse_duration_ms"]),
                 "gripper_was_open": bool(gripper_snapshot["gripper_open"]),
                 "gripper_refresh_suspended": False,
+                "pressure_scan_mode": str(pressure_scan_mode),
             }
         )
         self._emit_droplet_calibration_sequence_state_changed()
@@ -4710,6 +4728,7 @@ class CalibrationManager(QObject):
             "gripper_pulse_duration_snapshot_ms": None,
             "gripper_was_open": None,
             "gripper_refresh_suspended": False,
+            "pressure_scan_mode": "band",
             "session_outcome": None,
         }
 
