@@ -8581,6 +8581,80 @@ class AdditionalConditionsDialog(QDialog):
         super().accept()
 
 
+class ReactionPreviewDialog(QDialog):
+    def __init__(self, preview_df: pd.DataFrame, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Reaction Preview")
+        self.setMinimumSize(980, 560)
+        self.preview_df = preview_df.copy() if preview_df is not None else pd.DataFrame()
+
+        root = QVBoxLayout(self)
+        self.status_lbl = QLabel(self._status_text())
+        self.status_lbl.setWordWrap(True)
+        root.addWidget(self.status_lbl)
+
+        self.table = QTableWidget(len(self.preview_df.index), len(self.preview_df.columns), self)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setHorizontalHeaderLabels([str(col) for col in self.preview_df.columns])
+        self._populate_table()
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.table.horizontalHeader().setStretchLastSection(False)
+        self.table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        root.addWidget(self.table, stretch=1)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        buttons.addWidget(close_btn)
+        root.addLayout(buttons)
+
+    @staticmethod
+    def _format_cell_value(value: Any) -> str:
+        if value is None:
+            return ""
+        try:
+            if pd.isna(value):
+                return ""
+        except Exception:
+            pass
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                return ""
+            if abs(value - round(value)) < 1e-12:
+                return str(int(round(value)))
+            return f"{value:.6g}"
+        return str(value)
+
+    def _status_text(self) -> str:
+        if self.preview_df is None or self.preview_df.empty:
+            return (
+                "Total rows: 0 | Base rows: 0 | Unique-condition rows: 0 | "
+                "Expanded unique-condition replicates: 0"
+            )
+        source = self.preview_df.get("design_source", pd.Series([], dtype=object))
+        base_rows = int((source == "base").sum())
+        unique_rows = int((source == "additional_condition").sum())
+        return (
+            f"Total rows: {len(self.preview_df.index)} | "
+            f"Base rows: {base_rows} | "
+            f"Unique-condition rows: {unique_rows} | "
+            f"Expanded unique-condition replicates: {unique_rows}"
+        )
+
+    def _populate_table(self):
+        for row_idx, (_index, row) in enumerate(self.preview_df.iterrows()):
+            for col_idx, column_name in enumerate(self.preview_df.columns):
+                item = QTableWidgetItem(self._format_cell_value(row.get(column_name, "")))
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self.table.setItem(row_idx, col_idx, item)
+        try:
+            self.table.resizeColumnsToContents()
+        except Exception:
+            pass
+
+
 class ExperimentDesignDialog(QDialog):
     """
     UI for composing reagents (additives and choice groups), optimizing stock solutions,
@@ -8858,6 +8932,14 @@ class ExperimentDesignDialog(QDialog):
         self.unique_conditions_btn = QPushButton("Unique Conditions...")
         self.unique_conditions_btn.clicked.connect(self._on_unique_conditions)
         controls_col.addWidget(self.unique_conditions_btn)
+
+        self.preview_reactions_btn = QPushButton("Preview Reactions...")
+        self.preview_reactions_btn.clicked.connect(self._on_preview_reactions)
+        controls_col.addWidget(self.preview_reactions_btn)
+
+        self.export_reaction_preview_btn = QPushButton("Export Reaction Preview CSV...")
+        self.export_reaction_preview_btn.clicked.connect(self._on_export_reaction_preview_csv)
+        controls_col.addWidget(self.export_reaction_preview_btn)
 
         self.auto_update_chk = QCheckBox("Auto update design")
         self.auto_update_chk.setChecked(True)
@@ -9742,6 +9824,8 @@ class ExperimentDesignDialog(QDialog):
             getattr(self, "upload_design_btn", None),
             getattr(self, "reset_upload_btn", None),
             getattr(self, "unique_conditions_btn", None),
+            getattr(self, "preview_reactions_btn", None),
+            getattr(self, "export_reaction_preview_btn", None),
             getattr(self, "add_reagent_btn", None),
             getattr(self, "auto_update_chk", None),
             getattr(self, "new_btn", None),
@@ -9852,6 +9936,74 @@ class ExperimentDesignDialog(QDialog):
         self._update_unique_conditions_button_label()
         self._schedule_auto_update()
         self._refresh_all_lock_states()
+
+    def _ensure_reaction_preview_current(self) -> bool:
+        if self._manual_assignments_active() and not self._can_reuse_current_generated_design():
+            message = (
+                "Reaction preview/export requires a current generated design when explicit "
+                "well assignments are active."
+            )
+            self._set_status(message)
+            return False
+
+        if self._can_reuse_current_generated_design():
+            return True
+
+        ok, _res = self._run_design_optimization_flow(
+            show_failure_dialog=True,
+            failure_title="Optimization failed",
+            show_capacity_dialog=False,
+            busy_message="Optimizing before reaction preview/export... this may take a moment on Raspberry Pi.",
+        )
+        if ok:
+            return True
+        return bool(_res and _res.get("best") and self._has_current_generated_design())
+
+    def _reaction_preview_dataframe(self) -> pd.DataFrame:
+        getter = getattr(self.model, "get_reaction_preview_dataframe", None)
+        if not callable(getter):
+            return pd.DataFrame()
+        return getter()
+
+    def _on_preview_reactions(self):
+        if not self._ensure_reaction_preview_current():
+            return
+        preview_df = self._reaction_preview_dataframe()
+        dialog = ReactionPreviewDialog(preview_df, self)
+        dialog.exec()
+
+    def _default_reaction_preview_export_path(self) -> str:
+        export_dir = getattr(self.model, "experiment_dir_path", None)
+        if not export_dir or not os.path.isdir(str(export_dir)):
+            export_dir = os.getcwd()
+        return os.path.join(str(export_dir), "reaction_preview.csv")
+
+    def _on_export_reaction_preview_csv(self):
+        if not self._ensure_reaction_preview_current():
+            return
+        preview_df = self._reaction_preview_dataframe()
+        if preview_df.empty:
+            QMessageBox.warning(self, "No Reactions", "There are no generated reactions to export.")
+            return
+
+        default_path = self._default_reaction_preview_export_path()
+        path, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export Reaction Preview CSV",
+            default_path,
+            "CSV files (*.csv);;All files (*)",
+        )
+        if not path:
+            return
+        if not os.path.splitext(path)[1]:
+            path = f"{path}.csv"
+
+        try:
+            preview_df.to_csv(path, index=False)
+        except Exception as e:
+            QMessageBox.warning(self, "Export Failed", f"Could not export reaction preview CSV:\n{e}")
+            return
+        self._set_status(f"Reaction preview exported to: {path}")
 
     # -----------------------------
     # Uploaded design mode toggling
@@ -10180,6 +10332,11 @@ class ExperimentDesignDialog(QDialog):
             self.plate_format_combo.setEnabled(not active)
         if hasattr(self, "unique_conditions_btn") and self.unique_conditions_btn is not None:
             self.unique_conditions_btn.setEnabled(not active)
+        preview_enabled = (not active) or self._can_reuse_current_generated_design()
+        for attr_name in ("preview_reactions_btn", "export_reaction_preview_btn"):
+            widget = getattr(self, attr_name, None)
+            if widget is not None:
+                widget.setEnabled(preview_enabled)
 
     def _is_gripper_loaded(self) -> bool:
         try:
@@ -10196,6 +10353,8 @@ class ExperimentDesignDialog(QDialog):
             "upload_design_btn",
             "reset_upload_btn",
             "unique_conditions_btn",
+            "preview_reactions_btn",
+            "export_reaction_preview_btn",
             "run_btn",
             "new_btn",
             "save_btn",
@@ -10246,6 +10405,8 @@ class ExperimentDesignDialog(QDialog):
             "upload_design_btn",
             "reset_upload_btn",
             "unique_conditions_btn",
+            "preview_reactions_btn",
+            "export_reaction_preview_btn",
             "run_btn",
             "new_btn",
             "save_btn",
@@ -10334,6 +10495,8 @@ class ExperimentDesignDialog(QDialog):
             "upload_design_btn",
             "reset_upload_btn",
             "unique_conditions_btn",
+            "preview_reactions_btn",
+            "export_reaction_preview_btn",
             "run_btn",
             "new_btn",
             "save_btn",
@@ -10380,6 +10543,8 @@ class ExperimentDesignDialog(QDialog):
             "upload_design_btn",
             "reset_upload_btn",
             "unique_conditions_btn",
+            "preview_reactions_btn",
+            "export_reaction_preview_btn",
             "run_btn",
             "new_btn",
             "save_btn",
@@ -10499,6 +10664,8 @@ class ExperimentDesignDialog(QDialog):
             "upload_design_btn",
             "reset_upload_btn",
             "unique_conditions_btn",
+            "preview_reactions_btn",
+            "export_reaction_preview_btn",
             "run_btn",
             "save_btn",
             "rep_spin",

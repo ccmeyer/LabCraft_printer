@@ -5535,6 +5535,129 @@ class ExperimentModel(QObject):
 
     def get_reactions_dataframe(self) -> pd.DataFrame:
         return self._reactions_df.copy()
+
+    def _reaction_preview_target_columns(self, run_specs: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+        specs: List[Dict[str, Any]] = []
+        seen: Set[Tuple[str, Optional[str]]] = set()
+        used_headers: Set[str] = set()
+
+        def _unique_header(base_header: str) -> str:
+            header = base_header
+            suffix = 2
+            while header in used_headers:
+                header = f"{base_header} #{suffix}"
+                suffix += 1
+            used_headers.add(header)
+            return header
+
+        def _add_spec(key: Tuple[str, Optional[str]], label: str, units: str = ""):
+            factor = str(key[0]).strip()
+            option = None if key[1] in (None, "") else str(key[1]).strip()
+            norm_key = (factor, option)
+            if not factor or norm_key in seen:
+                return
+            seen.add(norm_key)
+            header = str(label or self._design_key_label(norm_key)).strip()
+            units_text = str(units or "").strip()
+            if units_text:
+                header = f"{header} ({units_text})"
+            specs.append({
+                "key": norm_key,
+                "header": _unique_header(header),
+            })
+
+        for factor in self.factors:
+            factor_name = str(getattr(factor, "name", "") or "").strip()
+            if not factor_name:
+                continue
+            options = list(getattr(factor, "options", []) or [])
+            if getattr(factor, "kind", "") == "additive":
+                if not options:
+                    continue
+                option = options[0]
+                _add_spec(
+                    (factor_name, None),
+                    factor_name,
+                    getattr(option, "units", "") or "",
+                )
+            elif getattr(factor, "kind", "") == "choice":
+                for option in options:
+                    option_name = str(getattr(option, "name", "") or "").strip()
+                    if not option_name:
+                        continue
+                    _add_spec(
+                        (factor_name, option_name),
+                        f"{factor_name}/{option_name}",
+                        getattr(option, "units", "") or "",
+                    )
+
+        for run_spec in run_specs or []:
+            for key in (run_spec.get("reaction") or {}).keys():
+                if not isinstance(key, (list, tuple)) or len(key) < 2:
+                    continue
+                norm_key = (str(key[0]).strip(), None if key[1] in (None, "") else str(key[1]).strip())
+                if not norm_key[0] or norm_key in seen:
+                    continue
+                _add_spec(norm_key, self._design_key_label(norm_key), "")
+        return specs
+
+    def get_reaction_preview_dataframe(self) -> pd.DataFrame:
+        run_specs = list(self._iter_reaction_run_specs())
+        target_specs = self._reaction_preview_target_columns(run_specs)
+        metadata_columns = [
+            "global_index",
+            "design_source",
+            "additional_condition_label",
+            "replicate",
+            "reaction_index",
+            "nonfill_volume_nL",
+            "fill_drops",
+        ]
+        columns = metadata_columns + [spec["header"] for spec in target_specs]
+        generated_df = self._reactions_df.copy()
+        has_generated_rows = not generated_df.empty
+
+        rows: List[Dict[str, Any]] = []
+        for global_index, run_spec in enumerate(run_specs):
+            generated_row = None
+            if has_generated_rows and global_index < len(generated_df.index):
+                generated_row = generated_df.iloc[global_index]
+
+            row: Dict[str, Any] = {
+                "global_index": int(
+                    generated_row.get("global_index", global_index)
+                    if generated_row is not None
+                    else global_index
+                ),
+                "design_source": str(run_spec.get("design_source", "")),
+                "additional_condition_label": str(run_spec.get("additional_condition_label", "")),
+                "replicate": int(run_spec.get("replicate", 1)),
+                "reaction_index": int(run_spec.get("reaction_index", 0)),
+                "nonfill_volume_nL": "",
+                "fill_drops": "",
+            }
+            if generated_row is not None:
+                if "design_source" in generated_df.columns:
+                    row["design_source"] = str(generated_row.get("design_source", row["design_source"]))
+                if "additional_condition_label" in generated_df.columns:
+                    row["additional_condition_label"] = str(
+                        generated_row.get("additional_condition_label", row["additional_condition_label"])
+                    )
+                if "replicate" in generated_df.columns:
+                    row["replicate"] = int(generated_row.get("replicate", row["replicate"]))
+                if "reaction_index" in generated_df.columns:
+                    row["reaction_index"] = int(generated_row.get("reaction_index", row["reaction_index"]))
+                if "nonfill_volume_nL" in generated_df.columns:
+                    row["nonfill_volume_nL"] = generated_row.get("nonfill_volume_nL", "")
+                if "fill_drops" in generated_df.columns:
+                    row["fill_drops"] = generated_row.get("fill_drops", "")
+
+            reaction = dict(run_spec.get("reaction") or {})
+            for spec in target_specs:
+                row[spec["header"]] = float(reaction.get(spec["key"], 0.0))
+            rows.append(row)
+
+        return pd.DataFrame(rows, columns=columns)
     
     def get_random_seed(self):
         return self.metadata.get("random_seed", None)
