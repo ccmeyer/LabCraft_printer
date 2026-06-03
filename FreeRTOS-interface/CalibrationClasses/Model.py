@@ -20491,7 +20491,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
 
         severity = str(check.get("residue_severity", "clear"))
         pending = getattr(self, "_single_candidate_pending_residue_check", None)
-        if severity in ("moderate", "artifact") and not pending:
+        if severity == "moderate" and not pending:
             self._single_candidate_pending_residue_check = dict(check)
             self.stageChanged.emit(
                 "Residue signal detected; confirming with a second no-droplet image"
@@ -20507,6 +20507,8 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             severity in ("strong", "moderate")
             and isinstance(pending, dict)
             and str(pending.get("residue_severity", "")) in ("strong", "moderate")
+            and str(check.get("residue_signal_quality", "")) == "localized"
+            and str(pending.get("residue_signal_quality", "")) == "localized"
         )
         if bool(check.get("persistent_residue")) or repeated_moderate:
             msg = (
@@ -20640,20 +20642,16 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         if broad_free_bbox_count > 0:
             artifact_reasons.append("broad_free_bbox")
         artifact_like = bool(artifact_reasons)
-        contact_only_artifact_strong = bool(
-            attached_area >= area_limit
-            and residue_area < moderate_limit
-            and artifact_like
-        )
-        strong = bool(
+        persistent_candidate = bool(
             residue_area >= area_limit
-            or (attached_area >= area_limit and not contact_only_artifact_strong)
+            or attached_area >= area_limit
         )
+        strong = bool(persistent_candidate and not artifact_like)
         transient_free = bool(free_count > 0 and not strong)
         moderate = bool(
             not transient_free
             and not strong
-            and not contact_only_artifact_strong
+            and not artifact_like
             and (residue_detected or contact_detected)
             and (
                 attached_area >= moderate_limit
@@ -20661,7 +20659,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 or contact_detected
             )
         )
-        if contact_only_artifact_strong:
+        if artifact_like:
             severity = "artifact"
         elif strong:
             severity = "strong"
@@ -20672,9 +20670,23 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         else:
             severity = "clear"
         persistent = bool(strong)
+        if artifact_like:
+            signal_quality = "artifact"
+        elif (
+            residue_detected
+            or contact_detected
+            or attached_area > 0
+            or residue_area > 0
+            or free_count > 0
+        ):
+            signal_quality = "localized"
+        else:
+            signal_quality = "clear"
         return {
             "persistent_residue": bool(persistent),
+            "persistent_residue_candidate": bool(persistent_candidate),
             "residue_severity": str(severity),
+            "residue_signal_quality": str(signal_quality),
             "near_nozzle_residue_detected": bool(residue_detected),
             "nozzle_contact_detected": bool(contact_detected),
             "attached_area_px": int(attached_area),

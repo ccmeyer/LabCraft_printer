@@ -661,9 +661,14 @@ def test_single_candidate_persistent_residue_stops_with_cleanup_message():
 
     assert proc.finalize.calls
     assert "clean the printer head bottom" in proc._single_candidate_failure_message
+    check = proc._single_candidate_residue_checks[-1]
+    assert check["residue_severity"] == "strong"
+    assert check["persistent_residue"] is True
+    assert check["persistent_residue_candidate"] is True
+    assert check["residue_signal_quality"] == "localized"
 
 
-def test_single_candidate_artifact_like_strong_residue_requests_second_verification():
+def test_single_candidate_artifact_like_strong_residue_continues_up():
     proc = _build_single_candidate_proc([_rep("single", center=(100, 200), near_nozzle_residue=True)])
     broad_components = [
         {
@@ -705,11 +710,62 @@ def test_single_candidate_artifact_like_strong_residue_requests_second_verificat
         decision={"failure_kind": "low", "suggested_direction": "up"},
     )
 
-    assert recaptures and recaptures[0]["repeated"] is True
+    assert recaptures == []
+    assert proc._next_pressure == 1.02
+    assert proc.continueScan.calls
     assert proc.finalize.calls == []
-    assert proc.continueScan.calls == []
-    assert proc._single_candidate_pending_residue_check["residue_severity"] == "artifact"
-    assert proc._single_candidate_pending_residue_check["artifact_like"] is True
+    assert proc._single_candidate_pending_residue_check is None
+    check = proc._single_candidate_residue_checks[-1]
+    assert check["residue_severity"] == "artifact"
+    assert check["artifact_like"] is True
+    assert check["persistent_residue"] is False
+    assert check["persistent_residue_candidate"] is True
+    assert check["residue_signal_quality"] == "artifact"
+
+
+def test_single_candidate_artifact_like_strong_near_nozzle_area_does_not_hard_stop():
+    proc = _build_single_candidate_proc([_rep("none", near_nozzle_residue=True)])
+    proc.model = SimpleNamespace(
+        droplet_camera_model=SimpleNamespace(
+            identify_droplets=lambda *args, **kwargs: (
+                [(444, 646)],
+                216,
+                np.zeros((1456, 1088), dtype=np.uint8),
+                {
+                    "near_nozzle_residue_detected": True,
+                    "near_nozzle_residue_area": 9085,
+                    "nozzle_contact_detected": True,
+                    "nozzle_attached_area": 216,
+                    "component_count": 3336,
+                    "free_droplets": [
+                        {
+                            "center": [444, 646],
+                            "bbox": [409, 607, 71, 78],
+                            "area_px": 1831,
+                        }
+                    ],
+                },
+            )
+        )
+    )
+    proc.background_image = np.zeros((1456, 1088), dtype=np.uint8)
+    proc.nozzle_center_px = (514, 296)
+
+    proc._finish_single_candidate_residue_verification(
+        np.zeros((1456, 1088), dtype=np.uint8),
+        trigger="triage",
+        decision={"failure_kind": "low", "suggested_direction": "up"},
+    )
+
+    assert proc._next_pressure == 1.02
+    assert proc.continueScan.calls
+    assert proc.finalize.calls == []
+    check = proc._single_candidate_residue_checks[-1]
+    assert check["residue_severity"] == "artifact"
+    assert check["artifact_like"] is True
+    assert check["persistent_residue"] is False
+    assert check["persistent_residue_candidate"] is True
+    assert check["residue_signal_quality"] == "artifact"
 
 
 def test_single_candidate_repeated_artifact_like_residue_continues_up():
@@ -759,6 +815,8 @@ def test_single_candidate_repeated_artifact_like_residue_continues_up():
         "artifact",
         "artifact",
     ]
+    assert all(c["persistent_residue"] is False for c in proc._single_candidate_residue_checks)
+    assert all(c["residue_signal_quality"] == "artifact" for c in proc._single_candidate_residue_checks)
 
 
 def test_single_candidate_weak_residue_boolean_does_not_hard_stop():
@@ -882,6 +940,61 @@ def test_single_candidate_moderate_residue_that_clears_continues():
         "moderate",
         "clear",
     ]
+
+
+def test_single_candidate_repeated_localized_moderate_residue_stops():
+    proc = _build_single_candidate_proc([_rep("single", center=(100, 200), near_nozzle_residue=True)])
+    responses = [
+        (
+            None,
+            None,
+            np.zeros((20, 20), dtype=np.uint8),
+            {
+                "near_nozzle_residue_detected": True,
+                "near_nozzle_residue_area": 3000,
+                "nozzle_contact_detected": False,
+                "nozzle_attached_area": 0,
+            },
+        ),
+        (
+            None,
+            None,
+            np.zeros((20, 20), dtype=np.uint8),
+            {
+                "near_nozzle_residue_detected": True,
+                "near_nozzle_residue_area": 3500,
+                "nozzle_contact_detected": False,
+                "nozzle_attached_area": 0,
+            },
+        ),
+    ]
+    proc.model = SimpleNamespace(
+        droplet_camera_model=SimpleNamespace(
+            identify_droplets=lambda *args, **kwargs: responses.pop(0)
+        )
+    )
+    proc.background_image = np.zeros((20, 20), dtype=np.uint8)
+    proc.nozzle_center_px = (10, 10)
+    proc._capture_single_candidate_residue_verification_frame = lambda **_kwargs: None
+
+    proc._finish_single_candidate_residue_verification(
+        np.zeros((20, 20), dtype=np.uint8),
+        trigger="triage",
+        decision={"failure_kind": "low", "suggested_direction": "up"},
+    )
+    proc._finish_single_candidate_residue_verification(
+        np.zeros((20, 20), dtype=np.uint8),
+        trigger="triage",
+        decision={"failure_kind": "low", "suggested_direction": "up"},
+    )
+
+    assert proc.finalize.calls
+    assert "clean the printer head bottom" in proc._single_candidate_failure_message
+    assert [c["residue_severity"] for c in proc._single_candidate_residue_checks] == [
+        "moderate",
+        "moderate",
+    ]
+    assert all(c["residue_signal_quality"] == "localized" for c in proc._single_candidate_residue_checks)
 
 
 def test_single_candidate_free_droplet_in_residue_check_is_transient_high_pressure():
