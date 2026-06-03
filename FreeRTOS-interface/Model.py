@@ -3394,6 +3394,16 @@ class ExperimentModel(QObject):
 
     # ------------- Generation & summaries -------------
 
+    def _choice_option_contributes_to_base_design(self, option: OptionSpec) -> bool:
+        for target in getattr(option, "targets", []) or []:
+            try:
+                value = self._normalize_target_key(float(target))
+            except Exception:
+                continue
+            if math.isfinite(value) and abs(value) > 1e-12:
+                return True
+        return False
+
     def _enumerate_reactions(self) -> List[Dict]:
         """
         Build the list of reactions.
@@ -3444,17 +3454,25 @@ class ExperimentModel(QObject):
                 for f in choices:
                     lvls = []
                     for opt in f.options:
+                        if not self._choice_option_contributes_to_base_design(opt):
+                            continue
                         for t in opt.targets:
-                            lvls.append((opt.name, float(t)))
-                    facs.append({
-                        "kind": "choice",
-                        "group": f.name,
-                        "levels": lvls,    # e.g., [("A",0.0),("A",1.0),("B",0.0),...]
-                    })
+                            try:
+                                value = float(t)
+                            except Exception:
+                                continue
+                            if math.isfinite(value):
+                                lvls.append((opt.name, value))
+                    if lvls:
+                        facs.append({
+                            "kind": "choice",
+                            "group": f.name,
+                            "levels": lvls,    # e.g., [("A",0.0),("A",1.0),("B",0.0),...]
+                        })
 
                 level_counts = [len(fd["levels"]) for fd in facs]
                 if not level_counts:   # No factors configured
-                    return []
+                    return [{}]
 
                 # Use pyDOE3 to get a balanced subset of factor-level combinations
                 # Returns an array of 0-based level indices per factor
@@ -3500,8 +3518,11 @@ class ExperimentModel(QObject):
         for f in choices_list:
             tuples = []  # ( (group, option), targets list )
             for opt in f.options:
+                if not self._choice_option_contributes_to_base_design(opt):
+                    continue
                 tuples.append(((f.name, opt.name), opt.targets))
-            choice_lists.append(tuples)
+            if tuples:
+                choice_lists.append(tuples)
 
         # Build per-group choice sets
         per_group_choices: List[List[Tuple[Tuple[str, str], float]]] = []

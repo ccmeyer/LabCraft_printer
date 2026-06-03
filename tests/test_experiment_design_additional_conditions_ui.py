@@ -94,6 +94,7 @@ def test_experiment_dialog_column_specs_include_additives_choices_and_missing_sa
     model.add_additive("Buffer", [0.0, 1.0], "mM", 10.0)
     model.add_choice_group("Reporter")
     model.add_choice_option("Reporter", "GFP", [0.0, 2.0], "uM", 10.0)
+    model.add_choice_option("Reporter", "No signal", [0.0], "uM", 10.0)
     model.set_additional_conditions(
         [
             AdditionalConditionSpec(
@@ -111,6 +112,7 @@ def test_experiment_dialog_column_specs_include_additives_choices_and_missing_sa
     assert [spec["key"] for spec in specs] == [
         ("Buffer", None),
         ("Reporter", "GFP"),
+        ("Reporter", "No signal"),
         ("Other", None),
     ]
     assert specs[-1]["label"] == "Missing: Other"

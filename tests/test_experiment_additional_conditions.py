@@ -1,3 +1,6 @@
+import sys
+from types import SimpleNamespace
+
 import pandas as pd
 import pytest
 
@@ -354,6 +357,139 @@ def test_additional_conditions_append_to_generated_run_order():
     assert parts[1] == [("Signal", 50.0, "mM", 1)]
     assert parts[4] == []
     assert parts[7] == [("Signal", 50.0, "mM", 1)]
+
+
+def test_zero_only_choice_option_is_unique_condition_only_in_base_generation():
+    em = _make_model()
+    em.factors = []
+    em.add_additive("Activator", [0.0, 1.0], "mM", 10.0, forced_stock_conc=50.0)
+    em.add_choice_group("DNA")
+    em.add_choice_option("DNA", "Main DNA", [0.0, 5.0], "nM", 10.0, forced_stock_conc=50.0)
+    em.add_choice_option("DNA", "Negative DNA", [0.0], "nM", 10.0, forced_stock_conc=50.0)
+    em.set_metadata(
+        randomize_assignments=False,
+        replicates=2,
+        target_reaction_volume_nL=500.0,
+        final_reaction_volume_nL=500.0,
+        fill_reagent_name="Water",
+        fill_droplet_volume_nL=10.0,
+    )
+    em.set_additional_conditions(
+        [
+            AdditionalConditionSpec(
+                label="Negative DNA control",
+                replicates=2,
+                targets={
+                    ("Activator", None): 0.0,
+                    ("DNA", "Main DNA"): 0.0,
+                    ("DNA", "Negative DNA"): 5.0,
+                },
+            )
+        ]
+    )
+
+    assert em.get_number_of_reactions() == 10
+    assert em.optimize_stock_solutions(allow_two=False)["best"]
+    assert 5.0 in em.plans_per_option[("DNA", "Negative DNA")]["stocks"][0]["droplets_per_target"]
+
+    em.generate_experiment()
+
+    df = em.get_reactions_dataframe()
+    assert len(df) == 10
+    assert df["design_source"].tolist() == ["base"] * 8 + ["additional_condition"] * 2
+    assert df["replicate"].tolist() == [1, 1, 1, 1, 2, 2, 2, 2, 1, 2]
+    assert df["reaction_index"].tolist() == [0, 1, 2, 3, 0, 1, 2, 3, 0, 0]
+
+    preview = em.get_reaction_preview_dataframe()
+    base_rows = preview[preview["design_source"] == "base"]
+    control_rows = preview[preview["design_source"] == "additional_condition"]
+    assert "DNA/Negative DNA (nM)" in preview.columns
+    assert base_rows["DNA/Main DNA (nM)"].tolist() == pytest.approx([0.0, 5.0, 0.0, 5.0] * 2)
+    assert base_rows["DNA/Negative DNA (nM)"].tolist() == pytest.approx([0.0] * 8)
+    assert control_rows["additional_condition_label"].tolist() == ["Negative DNA control", "Negative DNA control"]
+    assert control_rows["DNA/Main DNA (nM)"].tolist() == pytest.approx([0.0, 0.0])
+    assert control_rows["DNA/Negative DNA (nM)"].tolist() == pytest.approx([5.0, 5.0])
+
+
+def test_all_zero_choice_group_contributes_one_empty_base_reaction_per_replicate():
+    em = _make_model()
+    em.factors = []
+    em.add_choice_group("DNA")
+    em.add_choice_option("DNA", "Blank A", [0.0], "nM", 10.0, forced_stock_conc=50.0)
+    em.add_choice_option("DNA", "Blank B", [0.0], "nM", 10.0, forced_stock_conc=50.0)
+    em.set_metadata(
+        randomize_assignments=False,
+        replicates=3,
+        target_reaction_volume_nL=500.0,
+        final_reaction_volume_nL=500.0,
+        fill_reagent_name="Water",
+        fill_droplet_volume_nL=10.0,
+    )
+
+    assert em.get_number_of_reactions() == 3
+
+    em.generate_experiment()
+
+    df = em.get_reactions_dataframe()
+    preview = em.get_reaction_preview_dataframe()
+    assert len(df) == 3
+    assert df["design_source"].tolist() == ["base", "base", "base"]
+    assert df["reaction_index"].tolist() == [0, 0, 0]
+    assert preview["DNA/Blank A (nM)"].tolist() == pytest.approx([0.0, 0.0, 0.0])
+    assert preview["DNA/Blank B (nM)"].tolist() == pytest.approx([0.0, 0.0, 0.0])
+
+
+def test_zero_only_choice_option_is_filtered_in_subset_design_path(monkeypatch):
+    em = _make_model()
+    em.factors = []
+    em.add_choice_group("DNA")
+    em.add_choice_option("DNA", "Main DNA", [0.0, 5.0], "nM", 10.0)
+    em.add_choice_option("DNA", "Negative DNA", [0.0], "nM", 10.0)
+    em.set_metadata(use_subset_design=True, reduction_factor=2, replicates=1)
+    captured_level_counts = []
+
+    def fake_gsd(level_counts, reduction):
+        captured_level_counts.append(list(level_counts))
+        assert reduction == 2
+        return [[0], [1]]
+
+    monkeypatch.setitem(sys.modules, "pyDOE3", SimpleNamespace(gsd=fake_gsd))
+
+    reactions = em._enumerate_reactions()
+
+    assert captured_level_counts == [[2]]
+    assert reactions == [
+        {("DNA", "Main DNA"): 0.0},
+        {("DNA", "Main DNA"): 5.0},
+    ]
+
+
+def test_uploaded_design_reactions_do_not_apply_zero_only_choice_filter():
+    em = _make_model()
+    em.set_metadata(
+        randomize_assignments=False,
+        replicates=1,
+        target_reaction_volume_nL=500.0,
+        final_reaction_volume_nL=500.0,
+        fill_reagent_name="Water",
+        fill_droplet_volume_nL=10.0,
+    )
+    em.set_uploaded_design_from_dataframe(
+        pd.DataFrame(
+            {
+                "Main DNA (nM)": [0.0, 5.0],
+                "Negative DNA (nM)": [0.0, 0.0],
+            }
+        ),
+        droplet_nL_default=10.0,
+        starting_conc_default=0.0,
+    )
+
+    preview = em.get_reaction_preview_dataframe()
+
+    assert em.get_number_of_reactions() == 2
+    assert preview["Main DNA (nM)"].tolist() == pytest.approx([0.0, 5.0])
+    assert preview["Negative DNA (nM)"].tolist() == pytest.approx([0.0, 0.0])
 
 
 def test_runtime_handoff_includes_additional_condition_runs(experiment_model_factory):
