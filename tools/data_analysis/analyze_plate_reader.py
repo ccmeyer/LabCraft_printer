@@ -139,6 +139,10 @@ def print_summary(result: analysis.AnalysisResult, merged_csv: Path) -> None:
     print(f"Endpoint outlier heatmaps: {len(result.outlier_heatmap_pngs)}")
     print(f"Timecourse plots: {len(result.timecourse_plot_pngs)}")
     print(f"Combined timecourse plots: {len(result.combined_timecourse_plot_pngs)}")
+    print(f"Faceted timecourse grid plots: {len(result.faceted_timecourse_pngs)}")
+    print(f"Endpoint main-effect plots: {len(result.main_effect_pngs)}")
+    print(f"Endpoint pairwise interaction plots: {len(result.pairwise_interaction_pngs)}")
+    print(f"Endpoint faceted dose-response plots: {len(result.faceted_dose_response_pngs)}")
 
 
 def main(argv: list[str] | None = None) -> int:

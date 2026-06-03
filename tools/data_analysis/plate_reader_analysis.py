@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from itertools import combinations, permutations
 from pathlib import Path
 from typing import Iterable
 
@@ -24,6 +25,10 @@ WELL_RE = re.compile(r"^([A-P])([1-9]|1[0-9]|2[0-4])$")
 UNKEYED_CONDITION_ID = "unkeyed"
 OUTLIER_ROBUST_Z_THRESHOLD = 3.5
 OUTLIER_MIN_RELATIVE_DELTA_PERCENT = 15.0
+ENDPOINT_EFFECT_VARIANTS = (
+    ("including_outliers", "including outliers"),
+    ("excluding_outliers", "excluding endpoint outliers"),
+)
 BASE_MERGED_COLUMNS = {
     "time",
     "time_seconds",
@@ -85,6 +90,14 @@ class AnalysisResult:
     outlier_heatmap_pngs: list[Path]
     timecourse_plot_pngs: list[Path]
     combined_timecourse_plot_pngs: list[Path]
+    main_effect_csvs: list[Path]
+    main_effect_pngs: list[Path]
+    pairwise_interaction_csvs: list[Path]
+    pairwise_interaction_pngs: list[Path]
+    faceted_dose_response_csvs: list[Path]
+    faceted_dose_response_pngs: list[Path]
+    faceted_timecourse_csvs: list[Path]
+    faceted_timecourse_pngs: list[Path]
     outlier_count: int
     condition_columns: list[str]
     endpoint_rows: int
@@ -609,6 +622,247 @@ def write_combined_condition_timecourse_plot(
     plt.close(fig)
 
 
+def faceted_timecourse_grid_assignments(varying_columns: list[str]) -> list[tuple[str | None, str, str]]:
+    if len(varying_columns) == 2:
+        first, second = varying_columns
+        return [(None, first, second), (None, second, first)]
+    if len(varying_columns) == 3:
+        return [(row_reagent, col_reagent, hue_reagent) for row_reagent, col_reagent, hue_reagent in permutations(varying_columns, 3)]
+    return []
+
+
+def build_faceted_timecourse_grid_summary(
+    dataframe: pd.DataFrame,
+    *,
+    fluorophore: str,
+    row_reagent: str | None,
+    col_reagent: str,
+    hue_reagent: str,
+) -> pd.DataFrame:
+    columns = [
+        "fluorophore",
+        "row_reagent",
+        "col_reagent",
+        "hue_reagent",
+        "row_value",
+        "col_value",
+        "hue_value",
+        "time_seconds",
+        "time_minutes",
+        "mean_rfu",
+        "sd_rfu",
+        "replicate_count",
+        "composition_count",
+    ]
+    channel = dataframe.loc[dataframe["fluorophore"] == fluorophore]
+    if channel.empty:
+        return pd.DataFrame(columns=columns)
+
+    row_values = unique_sorted_values(channel[row_reagent]) if row_reagent is not None else [""]
+    col_values = unique_sorted_values(channel[col_reagent])
+    hue_values = unique_sorted_values(channel[hue_reagent])
+    rows: list[dict[str, object]] = []
+    for row_value in row_values:
+        row_group = channel
+        if row_reagent is not None:
+            row_group = row_group.loc[condition_value_mask(row_group[row_reagent], row_value)]
+        for col_value in col_values:
+            col_group = row_group.loc[condition_value_mask(row_group[col_reagent], col_value)]
+            for hue_value in hue_values:
+                group = col_group.loc[condition_value_mask(col_group[hue_reagent], hue_value)]
+                if group.empty:
+                    continue
+                time_summary = (
+                    group.groupby(["time_seconds", "time_minutes"], as_index=False)
+                    .agg(
+                        mean_rfu=("rfu", "mean"),
+                        sd_rfu=("rfu", "std"),
+                        replicate_count=("rfu", "count"),
+                        composition_count=("condition_id", "nunique"),
+                    )
+                    .sort_values("time_seconds", kind="stable")
+                )
+                for _, time_row in time_summary.iterrows():
+                    rows.append(
+                        {
+                            "fluorophore": fluorophore,
+                            "row_reagent": row_reagent or "",
+                            "col_reagent": col_reagent,
+                            "hue_reagent": hue_reagent,
+                            "row_value": row_value,
+                            "col_value": col_value,
+                            "hue_value": hue_value,
+                            "time_seconds": time_row["time_seconds"],
+                            "time_minutes": time_row["time_minutes"],
+                            "mean_rfu": time_row["mean_rfu"],
+                            "sd_rfu": time_row["sd_rfu"],
+                            "replicate_count": int(time_row["replicate_count"]),
+                            "composition_count": int(time_row["composition_count"]),
+                        }
+                    )
+
+    return pd.DataFrame(rows, columns=columns)
+
+
+def write_faceted_timecourse_grid_plot(
+    summary: pd.DataFrame,
+    replicate_data: pd.DataFrame,
+    path: str | Path,
+    *,
+    fluorophore: str,
+    row_reagent: str | None,
+    col_reagent: str,
+    hue_reagent: str,
+    variant_label: str,
+) -> None:
+    row_values = unique_sorted_values(summary["row_value"]) if row_reagent is not None else [""]
+    col_values = unique_sorted_values(summary["col_value"])
+    hue_values = unique_sorted_values(summary["hue_value"])
+    hue_labels = [format_condition_value(value) for value in hue_values]
+    palette = sns.color_palette("husl", n_colors=max(len(hue_labels), 1))
+    color_by_hue = dict(zip(hue_labels, palette))
+    row_count = len(row_values)
+    col_count = len(col_values)
+    fig_width = max(7.0, 4.8 * col_count)
+    fig_height = max(5.0, 3.8 * row_count)
+    fig, axes = plt.subplots(
+        row_count,
+        col_count,
+        figsize=(fig_width, fig_height),
+        sharex=True,
+        sharey=True,
+        constrained_layout=True,
+    )
+    axes = np.asarray(axes).reshape(row_count, col_count)
+
+    for row_index, row_value in enumerate(row_values):
+        row_summary = summary
+        if row_reagent is not None:
+            row_summary = row_summary.loc[condition_value_mask(row_summary["row_value"], row_value)]
+            row_replicates = replicate_data.loc[condition_value_mask(replicate_data[row_reagent], row_value)]
+        else:
+            row_replicates = replicate_data
+        for col_index, col_value in enumerate(col_values):
+            ax = axes[row_index, col_index]
+            panel = row_summary.loc[condition_value_mask(row_summary["col_value"], col_value)]
+            panel_replicates = row_replicates.loc[condition_value_mask(row_replicates[col_reagent], col_value)]
+            for hue_value, hue_label in zip(hue_values, hue_labels):
+                hue_summary = panel.loc[condition_value_mask(panel["hue_value"], hue_value)].sort_values("time_seconds")
+                if hue_summary.empty:
+                    continue
+                color = color_by_hue[hue_label]
+                hue_replicates = panel_replicates.loc[condition_value_mask(panel_replicates[hue_reagent], hue_value)]
+                for (_well, _condition_id), replicate in hue_replicates.groupby(["well", "condition_id"]):
+                    replicate = replicate.sort_values("time_seconds")
+                    ax.plot(
+                        replicate["time_minutes"],
+                        replicate["rfu"],
+                        color=color,
+                        alpha=0.22,
+                        linewidth=0.8,
+                        zorder=1,
+                    )
+                x = hue_summary["time_minutes"].to_numpy(dtype=float)
+                mean = hue_summary["mean_rfu"].to_numpy(dtype=float)
+                sd = hue_summary["sd_rfu"].fillna(0).to_numpy(dtype=float)
+                ax.fill_between(x, mean - sd, mean + sd, color=color, alpha=0.16, linewidth=0, zorder=2)
+                ax.plot(
+                    x,
+                    mean,
+                    color=color,
+                    linewidth=2.0,
+                    label=f"{hue_reagent}={hue_label}",
+                    zorder=3,
+                )
+
+            title_parts = [f"{col_reagent}={format_condition_value(col_value)}"]
+            if row_reagent is not None:
+                title_parts.insert(0, f"{row_reagent}={format_condition_value(row_value)}")
+            ax.set_title(", ".join(title_parts))
+            ax.grid(axis="y", color="0.9", linewidth=0.7)
+            if row_index == row_count - 1:
+                ax.set_xlabel("Time (min)")
+            if col_index == 0:
+                ax.set_ylabel("RFU")
+
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    if handles:
+        fig.legend(handles, labels, frameon=False, title=hue_reagent, loc="upper right")
+    row_part = f"row={row_reagent}, " if row_reagent is not None else ""
+    fig.suptitle(
+        f"{fluorophore} faceted timecourse grid ({variant_label})\n"
+        f"{row_part}column={col_reagent}, hue={hue_reagent}"
+    )
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
+def write_faceted_timecourse_grid_outputs(
+    keyed_prepared: pd.DataFrame,
+    condition_columns: list[str],
+    output_root: Path,
+) -> tuple[list[Path], list[Path]]:
+    timecourse_root = output_root / "timecourses_faceted"
+    timecourse_csvs: list[Path] = []
+    timecourse_pngs: list[Path] = []
+
+    for variant_name, variant_label in ENDPOINT_EFFECT_VARIANTS:
+        variant_data = keyed_prepared
+        if variant_name == "excluding_outliers":
+            variant_data = variant_data.loc[~variant_data["is_endpoint_outlier"].astype(bool)]
+        variant_dir = timecourse_root / variant_name
+        variant_dir.mkdir(parents=True, exist_ok=True)
+        if variant_data.empty or not condition_columns:
+            continue
+
+        for fluorophore in sorted(variant_data["fluorophore"].dropna().astype(str).unique()):
+            channel = variant_data.loc[variant_data["fluorophore"] == fluorophore]
+            varying_columns = varying_condition_columns(channel, condition_columns)
+            assignments = faceted_timecourse_grid_assignments(varying_columns)
+            if not assignments:
+                continue
+
+            safe_fluorophore = safe_filename(fluorophore)
+            for row_reagent, col_reagent, hue_reagent in assignments:
+                summary = build_faceted_timecourse_grid_summary(
+                    variant_data,
+                    fluorophore=fluorophore,
+                    row_reagent=row_reagent,
+                    col_reagent=col_reagent,
+                    hue_reagent=hue_reagent,
+                )
+                if summary.empty:
+                    continue
+                if row_reagent is None:
+                    stem = (
+                        f"{safe_fluorophore}_col_{safe_filename(col_reagent)}"
+                        f"_hue_{safe_filename(hue_reagent)}_timecourse_grid"
+                    )
+                else:
+                    stem = (
+                        f"{safe_fluorophore}_row_{safe_filename(row_reagent)}"
+                        f"_col_{safe_filename(col_reagent)}"
+                        f"_hue_{safe_filename(hue_reagent)}_timecourse_grid"
+                    )
+                csv_path = variant_dir / f"{stem}.csv"
+                png_path = variant_dir / f"{stem}.png"
+                summary.to_csv(csv_path, index=False)
+                write_faceted_timecourse_grid_plot(
+                    summary,
+                    variant_data.loc[variant_data["fluorophore"] == fluorophore],
+                    png_path,
+                    fluorophore=fluorophore,
+                    row_reagent=row_reagent,
+                    col_reagent=col_reagent,
+                    hue_reagent=hue_reagent,
+                    variant_label=variant_label,
+                )
+                timecourse_csvs.append(csv_path)
+                timecourse_pngs.append(png_path)
+
+    return timecourse_csvs, timecourse_pngs
+
+
 def build_plate_heatmap(endpoint: pd.DataFrame, fluorophore: str, value_column: str) -> pd.DataFrame:
     channel = endpoint.loc[endpoint["fluorophore"] == fluorophore]
     matrix = channel.pivot(index="plate_row", columns="plate_col", values=value_column)
@@ -642,6 +896,22 @@ def write_plate_heatmap_plot(
     vmax: float | None = None,
 ) -> None:
     fig, ax = plt.subplots(figsize=(12, 7), constrained_layout=True)
+    if matrix.isna().all().all():
+        ax.text(
+            0.5,
+            0.5,
+            "No data",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+        )
+        ax.set_title(title)
+        ax.set_xlabel("Plate column")
+        ax.set_ylabel("Plate row")
+        fig.savefig(path, dpi=150)
+        plt.close(fig)
+        return
+
     kwargs: dict[str, object] = {
         "cmap": cmap,
         "ax": ax,
@@ -661,6 +931,604 @@ def write_plate_heatmap_plot(
     ax.set_ylabel("Plate row")
     fig.savefig(path, dpi=150)
     plt.close(fig)
+
+
+def keyed_endpoint_for_effects(endpoint: pd.DataFrame, *, exclude_outliers: bool) -> pd.DataFrame:
+    keyed = endpoint.loc[
+        (endpoint["condition_id"] != UNKEYED_CONDITION_ID)
+        & endpoint["is_keyed"].astype(bool)
+    ].copy()
+    if exclude_outliers:
+        keyed = keyed.loc[~keyed["is_endpoint_outlier"].astype(bool)].copy()
+    return keyed
+
+
+def unique_sorted_values(series: pd.Series) -> list[object]:
+    values = series.drop_duplicates().tolist()
+    return sorted(values, key=sort_token)
+
+
+def condition_value_mask(series: pd.Series, value: object) -> pd.Series:
+    if pd.isna(value):
+        return series.isna()
+    return series == value
+
+
+def varying_condition_columns(endpoint: pd.DataFrame, condition_columns: list[str]) -> list[str]:
+    return [
+        column
+        for column in condition_columns
+        if len(unique_sorted_values(endpoint[column])) >= 2
+    ]
+
+
+def build_main_effect_summary(
+    endpoint: pd.DataFrame,
+    *,
+    fluorophore: str,
+    reagent: str,
+) -> pd.DataFrame:
+    columns = [
+        "fluorophore",
+        "reagent",
+        "reagent_value",
+        "endpoint_mean_rfu",
+        "endpoint_sd_rfu",
+        "endpoint_n",
+        "composition_count",
+    ]
+    channel = endpoint.loc[endpoint["fluorophore"] == fluorophore]
+    values = unique_sorted_values(channel[reagent])
+    if len(values) < 2:
+        return pd.DataFrame(columns=columns)
+
+    rows: list[dict[str, object]] = []
+    for value in values:
+        group = channel.loc[condition_value_mask(channel[reagent], value)]
+        rows.append(
+            {
+                "fluorophore": fluorophore,
+                "reagent": reagent,
+                "reagent_value": value,
+                "endpoint_mean_rfu": group["endpoint_rfu"].mean(),
+                "endpoint_sd_rfu": group["endpoint_rfu"].std(),
+                "endpoint_n": int(group["endpoint_rfu"].count()),
+                "composition_count": int(group["condition_id"].nunique()),
+            }
+        )
+
+    return pd.DataFrame(rows, columns=columns)
+
+
+def build_main_effect_composition_points(
+    endpoint: pd.DataFrame,
+    *,
+    fluorophore: str,
+    reagent: str,
+) -> pd.DataFrame:
+    channel = endpoint.loc[endpoint["fluorophore"] == fluorophore]
+    if channel.empty:
+        return pd.DataFrame(columns=["reagent_value", "condition_id", "endpoint_mean_rfu"])
+    points = (
+        channel.groupby([reagent, "condition_id"], dropna=False, as_index=False)
+        .agg(endpoint_mean_rfu=("endpoint_rfu", "mean"))
+        .rename(columns={reagent: "reagent_value"})
+    )
+    points["value_label"] = points["reagent_value"].map(format_condition_value)
+    return points
+
+
+def write_main_effect_plot(
+    summary: pd.DataFrame,
+    composition_points: pd.DataFrame,
+    path: str | Path,
+    *,
+    fluorophore: str,
+    reagent: str,
+    variant_label: str,
+) -> None:
+    summary_sorted = summary.copy()
+    summary_sorted["value_label"] = summary_sorted["reagent_value"].map(format_condition_value)
+    positions = np.arange(len(summary_sorted))
+    position_by_label = dict(zip(summary_sorted["value_label"], positions))
+
+    fig, ax = plt.subplots(figsize=(9, 5), constrained_layout=True)
+    for label, points in composition_points.groupby("value_label", sort=False):
+        if label not in position_by_label:
+            continue
+        base_position = position_by_label[label]
+        offsets = np.linspace(-0.12, 0.12, num=len(points)) if len(points) > 1 else np.array([0.0])
+        ax.scatter(
+            np.full(len(points), base_position) + offsets,
+            points["endpoint_mean_rfu"],
+            color="0.35",
+            alpha=0.35,
+            s=28,
+            linewidths=0,
+            label=None,
+        )
+
+    y = summary_sorted["endpoint_mean_rfu"].to_numpy(dtype=float)
+    yerr = summary_sorted["endpoint_sd_rfu"].fillna(0).to_numpy(dtype=float)
+    ax.errorbar(
+        positions,
+        y,
+        yerr=yerr,
+        color="tab:blue",
+        marker="o",
+        linewidth=2.2,
+        capsize=4,
+        label="marginal mean +/- SD",
+    )
+    ax.set_xticks(positions)
+    ax.set_xticklabels(summary_sorted["value_label"], rotation=45, ha="right")
+    ax.set_title(f"{fluorophore} endpoint RFU by {reagent}\n{variant_label}")
+    ax.set_xlabel(reagent)
+    ax.set_ylabel("Endpoint RFU")
+    ax.legend(frameon=False)
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
+def build_pairwise_interaction_matrices(
+    endpoint: pd.DataFrame,
+    *,
+    fluorophore: str,
+    reagent_a: str,
+    reagent_b: str,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    channel = endpoint.loc[endpoint["fluorophore"] == fluorophore]
+    a_values = unique_sorted_values(channel[reagent_a])
+    b_values = unique_sorted_values(channel[reagent_b])
+    if len(a_values) < 2 or len(b_values) < 2:
+        return pd.DataFrame(), pd.DataFrame()
+
+    a_labels = [format_condition_value(value) for value in a_values]
+    b_labels = [format_condition_value(value) for value in b_values]
+    mean_matrix = pd.DataFrame(np.nan, index=b_labels, columns=a_labels)
+    count_matrix = pd.DataFrame(np.nan, index=b_labels, columns=a_labels)
+
+    for b_value, b_label in zip(b_values, b_labels):
+        b_mask = condition_value_mask(channel[reagent_b], b_value)
+        for a_value, a_label in zip(a_values, a_labels):
+            group = channel.loc[b_mask & condition_value_mask(channel[reagent_a], a_value)]
+            if group.empty:
+                continue
+            mean_matrix.loc[b_label, a_label] = group["endpoint_rfu"].mean()
+            count_matrix.loc[b_label, a_label] = int(group["endpoint_rfu"].count())
+
+    mean_matrix.index.name = reagent_b
+    mean_matrix.columns.name = reagent_a
+    count_matrix.index.name = reagent_b
+    count_matrix.columns.name = reagent_a
+    return mean_matrix, count_matrix
+
+
+def write_pairwise_interaction_heatmap_plot(
+    matrix: pd.DataFrame,
+    path: str | Path,
+    *,
+    fluorophore: str,
+    reagent_a: str,
+    reagent_b: str,
+    variant_label: str,
+) -> None:
+    fig, ax = plt.subplots(figsize=(9, 6), constrained_layout=True)
+    sns.heatmap(
+        matrix,
+        cmap="viridis",
+        ax=ax,
+        cbar_kws={"label": "Mean endpoint RFU"},
+        linewidths=0.2,
+        linecolor="0.85",
+    )
+    ax.invert_yaxis()
+    ax.set_title(f"{fluorophore} endpoint RFU: {reagent_a} x {reagent_b}\n{variant_label}")
+    ax.set_xlabel(reagent_a)
+    ax.set_ylabel(reagent_b)
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
+def faceted_dose_response_assignments(varying_columns: list[str]) -> list[tuple[str, str, str | None]]:
+    if len(varying_columns) == 2:
+        first, second = varying_columns
+        return [(first, second, None), (second, first, None)]
+    if len(varying_columns) == 3:
+        return [(x_reagent, hue_reagent, col_reagent) for x_reagent, hue_reagent, col_reagent in permutations(varying_columns, 3)]
+    return []
+
+
+def build_faceted_dose_response_summary(
+    endpoint: pd.DataFrame,
+    *,
+    fluorophore: str,
+    x_reagent: str,
+    hue_reagent: str,
+    col_reagent: str | None,
+) -> pd.DataFrame:
+    columns = [
+        "fluorophore",
+        "x_reagent",
+        "hue_reagent",
+        "col_reagent",
+        "x_value",
+        "hue_value",
+        "col_value",
+        "endpoint_mean_rfu",
+        "endpoint_sd_rfu",
+        "endpoint_n",
+        "composition_count",
+    ]
+    channel = endpoint.loc[endpoint["fluorophore"] == fluorophore]
+    if channel.empty:
+        return pd.DataFrame(columns=columns)
+
+    x_values = unique_sorted_values(channel[x_reagent])
+    hue_values = unique_sorted_values(channel[hue_reagent])
+    col_values = unique_sorted_values(channel[col_reagent]) if col_reagent is not None else [""]
+    rows: list[dict[str, object]] = []
+    for col_value in col_values:
+        col_group = channel
+        if col_reagent is not None:
+            col_group = col_group.loc[condition_value_mask(col_group[col_reagent], col_value)]
+        for x_value in x_values:
+            x_group = col_group.loc[condition_value_mask(col_group[x_reagent], x_value)]
+            for hue_value in hue_values:
+                group = x_group.loc[condition_value_mask(x_group[hue_reagent], hue_value)]
+                if group.empty:
+                    continue
+                rows.append(
+                    {
+                        "fluorophore": fluorophore,
+                        "x_reagent": x_reagent,
+                        "hue_reagent": hue_reagent,
+                        "col_reagent": col_reagent or "",
+                        "x_value": x_value,
+                        "hue_value": hue_value,
+                        "col_value": col_value,
+                        "endpoint_mean_rfu": group["endpoint_rfu"].mean(),
+                        "endpoint_sd_rfu": group["endpoint_rfu"].std(),
+                        "endpoint_n": int(group["endpoint_rfu"].count()),
+                        "composition_count": int(group["condition_id"].nunique()),
+                    }
+                )
+
+    return pd.DataFrame(rows, columns=columns)
+
+
+def build_faceted_dose_response_csv_data(
+    endpoint: pd.DataFrame,
+    summary: pd.DataFrame,
+    *,
+    fluorophore: str,
+    x_reagent: str,
+    hue_reagent: str,
+    col_reagent: str | None,
+) -> pd.DataFrame:
+    columns = [
+        "row_type",
+        "fluorophore",
+        "x_reagent",
+        "hue_reagent",
+        "col_reagent",
+        "x_value",
+        "hue_value",
+        "col_value",
+        "condition_id",
+        "well",
+        "endpoint_rfu",
+        "endpoint_mean_rfu",
+        "endpoint_sd_rfu",
+        "endpoint_n",
+        "composition_count",
+    ]
+    rows: list[dict[str, object]] = []
+    for _, row in summary.iterrows():
+        rows.append(
+            {
+                "row_type": "summary",
+                "fluorophore": row["fluorophore"],
+                "x_reagent": row["x_reagent"],
+                "hue_reagent": row["hue_reagent"],
+                "col_reagent": row["col_reagent"],
+                "x_value": row["x_value"],
+                "hue_value": row["hue_value"],
+                "col_value": row["col_value"],
+                "condition_id": "",
+                "well": "",
+                "endpoint_rfu": np.nan,
+                "endpoint_mean_rfu": row["endpoint_mean_rfu"],
+                "endpoint_sd_rfu": row["endpoint_sd_rfu"],
+                "endpoint_n": row["endpoint_n"],
+                "composition_count": row["composition_count"],
+            }
+        )
+
+    channel = endpoint.loc[endpoint["fluorophore"] == fluorophore]
+    col_values = unique_sorted_values(channel[col_reagent]) if col_reagent is not None else [""]
+    x_values = unique_sorted_values(channel[x_reagent])
+    hue_values = unique_sorted_values(channel[hue_reagent])
+    for col_value in col_values:
+        col_group = channel
+        if col_reagent is not None:
+            col_group = col_group.loc[condition_value_mask(col_group[col_reagent], col_value)]
+        for x_value in x_values:
+            x_group = col_group.loc[condition_value_mask(col_group[x_reagent], x_value)]
+            for hue_value in hue_values:
+                group = x_group.loc[condition_value_mask(x_group[hue_reagent], hue_value)]
+                for _, endpoint_row in group.sort_values(["condition_id", "well"], kind="stable").iterrows():
+                    rows.append(
+                        {
+                            "row_type": "replicate",
+                            "fluorophore": fluorophore,
+                            "x_reagent": x_reagent,
+                            "hue_reagent": hue_reagent,
+                            "col_reagent": col_reagent or "",
+                            "x_value": x_value,
+                            "hue_value": hue_value,
+                            "col_value": col_value,
+                            "condition_id": endpoint_row["condition_id"],
+                            "well": endpoint_row["well"],
+                            "endpoint_rfu": endpoint_row["endpoint_rfu"],
+                            "endpoint_mean_rfu": np.nan,
+                            "endpoint_sd_rfu": np.nan,
+                            "endpoint_n": np.nan,
+                            "composition_count": np.nan,
+                        }
+                    )
+
+    return pd.DataFrame(rows, columns=columns)
+
+
+def write_faceted_dose_response_plot(
+    summary: pd.DataFrame,
+    csv_data: pd.DataFrame,
+    path: str | Path,
+    *,
+    fluorophore: str,
+    x_reagent: str,
+    hue_reagent: str,
+    col_reagent: str | None,
+    variant_label: str,
+) -> None:
+    replicate_points = csv_data.loc[csv_data["row_type"] == "replicate"].copy()
+    x_values = unique_sorted_values(summary["x_value"])
+    hue_values = unique_sorted_values(summary["hue_value"])
+    col_values = unique_sorted_values(summary["col_value"]) if col_reagent is not None else [""]
+    x_labels = [format_condition_value(value) for value in x_values]
+    hue_labels = [format_condition_value(value) for value in hue_values]
+    x_position_by_label = dict(zip(x_labels, np.arange(len(x_labels))))
+    hue_offsets = np.linspace(-0.16, 0.16, len(hue_labels)) if len(hue_labels) > 1 else np.array([0.0])
+    hue_offset_by_label = dict(zip(hue_labels, hue_offsets))
+    palette = sns.color_palette("husl", n_colors=max(len(hue_labels), 1))
+    color_by_hue = dict(zip(hue_labels, palette))
+
+    fig_width = max(8.0, 4.8 * len(col_values))
+    fig, axes = plt.subplots(
+        1,
+        len(col_values),
+        figsize=(fig_width, 5.5),
+        sharey=True,
+        constrained_layout=True,
+    )
+    if len(col_values) == 1:
+        axes = np.array([axes])
+
+    for ax, col_value in zip(axes, col_values):
+        facet_summary = summary
+        facet_points = replicate_points
+        if col_reagent is not None:
+            facet_summary = facet_summary.loc[condition_value_mask(facet_summary["col_value"], col_value)]
+            facet_points = facet_points.loc[condition_value_mask(facet_points["col_value"], col_value)]
+
+        for hue_value, hue_label in zip(hue_values, hue_labels):
+            color = color_by_hue[hue_label]
+            hue_summary = facet_summary.loc[condition_value_mask(facet_summary["hue_value"], hue_value)]
+            x_positions: list[float] = []
+            means: list[float] = []
+            errors: list[float] = []
+            for x_value in x_values:
+                group = hue_summary.loc[condition_value_mask(hue_summary["x_value"], x_value)]
+                if group.empty:
+                    continue
+                x_label = format_condition_value(x_value)
+                x_positions.append(float(x_position_by_label[x_label]) + float(hue_offset_by_label[hue_label]))
+                means.append(float(group["endpoint_mean_rfu"].iloc[0]))
+                sd_value = group["endpoint_sd_rfu"].iloc[0]
+                errors.append(0.0 if pd.isna(sd_value) else float(sd_value))
+
+                point_group = facet_points.loc[
+                    condition_value_mask(facet_points["x_value"], x_value)
+                    & condition_value_mask(facet_points["hue_value"], hue_value)
+                ]
+                if not point_group.empty:
+                    jitter = (
+                        np.linspace(-0.035, 0.035, len(point_group))
+                        if len(point_group) > 1
+                        else np.array([0.0])
+                    )
+                    ax.scatter(
+                        np.full(len(point_group), x_position_by_label[x_label] + hue_offset_by_label[hue_label]) + jitter,
+                        point_group["endpoint_rfu"].to_numpy(dtype=float),
+                        color=color,
+                        alpha=0.25,
+                        s=20,
+                        linewidths=0,
+                        zorder=1,
+                    )
+
+            if x_positions:
+                ax.errorbar(
+                    x_positions,
+                    means,
+                    yerr=errors,
+                    color=color,
+                    marker="o",
+                    linewidth=2.1,
+                    capsize=3,
+                    label=f"{hue_reagent}={hue_label}",
+                    zorder=3,
+                )
+
+        ax.set_xticks(np.arange(len(x_labels)))
+        ax.set_xticklabels(x_labels, rotation=45, ha="right")
+        ax.set_xlabel(x_reagent)
+        ax.grid(axis="y", color="0.9", linewidth=0.7)
+        if col_reagent is not None:
+            ax.set_title(f"{col_reagent}={format_condition_value(col_value)}")
+
+    axes[0].set_ylabel("Endpoint RFU")
+    handles, labels = axes[0].get_legend_handles_labels()
+    if handles:
+        axes[0].legend(handles, labels, frameon=False, title=hue_reagent)
+    col_part = f", column={col_reagent}" if col_reagent is not None else ""
+    fig.suptitle(
+        f"{fluorophore} endpoint dose-response ({variant_label})\n"
+        f"x={x_reagent}, hue={hue_reagent}{col_part}"
+    )
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
+def write_endpoint_effect_outputs(
+    endpoint: pd.DataFrame,
+    condition_columns: list[str],
+    output_root: Path,
+) -> tuple[list[Path], list[Path], list[Path], list[Path], list[Path], list[Path]]:
+    effects_root = output_root / "endpoint_effects"
+    main_root = effects_root / "main_effects"
+    pairwise_root = effects_root / "pairwise_interactions"
+    dose_root = effects_root / "faceted_dose_response"
+    main_csvs: list[Path] = []
+    main_pngs: list[Path] = []
+    pairwise_csvs: list[Path] = []
+    pairwise_pngs: list[Path] = []
+    dose_csvs: list[Path] = []
+    dose_pngs: list[Path] = []
+
+    for variant_name, variant_label in ENDPOINT_EFFECT_VARIANTS:
+        variant_endpoint = keyed_endpoint_for_effects(
+            endpoint,
+            exclude_outliers=variant_name == "excluding_outliers",
+        )
+        main_dir = main_root / variant_name
+        pairwise_dir = pairwise_root / variant_name
+        dose_dir = dose_root / variant_name
+        main_dir.mkdir(parents=True, exist_ok=True)
+        pairwise_dir.mkdir(parents=True, exist_ok=True)
+        dose_dir.mkdir(parents=True, exist_ok=True)
+        if variant_endpoint.empty or not condition_columns:
+            continue
+
+        fluorophores = sorted(variant_endpoint["fluorophore"].dropna().astype(str).unique())
+        for fluorophore in fluorophores:
+            channel = variant_endpoint.loc[variant_endpoint["fluorophore"] == fluorophore]
+            safe_fluorophore = safe_filename(fluorophore)
+
+            for reagent in condition_columns:
+                if len(unique_sorted_values(channel[reagent])) < 2:
+                    continue
+                safe_reagent = safe_filename(reagent)
+                main_summary = build_main_effect_summary(
+                    variant_endpoint,
+                    fluorophore=fluorophore,
+                    reagent=reagent,
+                )
+                composition_points = build_main_effect_composition_points(
+                    variant_endpoint,
+                    fluorophore=fluorophore,
+                    reagent=reagent,
+                )
+                main_csv = main_dir / f"{safe_fluorophore}_{safe_reagent}_main_effect.csv"
+                main_png = main_dir / f"{safe_fluorophore}_{safe_reagent}_main_effect.png"
+                main_summary.to_csv(main_csv, index=False)
+                write_main_effect_plot(
+                    main_summary,
+                    composition_points,
+                    main_png,
+                    fluorophore=fluorophore,
+                    reagent=reagent,
+                    variant_label=variant_label,
+                )
+                main_csvs.append(main_csv)
+                main_pngs.append(main_png)
+
+            for reagent_a, reagent_b in combinations(condition_columns, 2):
+                if (
+                    len(unique_sorted_values(channel[reagent_a])) < 2
+                    or len(unique_sorted_values(channel[reagent_b])) < 2
+                ):
+                    continue
+                mean_matrix, count_matrix = build_pairwise_interaction_matrices(
+                    variant_endpoint,
+                    fluorophore=fluorophore,
+                    reagent_a=reagent_a,
+                    reagent_b=reagent_b,
+                )
+                if mean_matrix.empty or mean_matrix.isna().all().all():
+                    continue
+                safe_reagent_a = safe_filename(reagent_a)
+                safe_reagent_b = safe_filename(reagent_b)
+                prefix = f"{safe_fluorophore}_{safe_reagent_a}_x_{safe_reagent_b}"
+                mean_csv = pairwise_dir / f"{prefix}_mean_endpoint_rfu.csv"
+                count_csv = pairwise_dir / f"{prefix}_endpoint_n.csv"
+                heatmap_png = pairwise_dir / f"{prefix}_mean_endpoint_rfu.png"
+                mean_matrix.to_csv(mean_csv)
+                count_matrix.to_csv(count_csv)
+                write_pairwise_interaction_heatmap_plot(
+                    mean_matrix,
+                    heatmap_png,
+                    fluorophore=fluorophore,
+                    reagent_a=reagent_a,
+                    reagent_b=reagent_b,
+                    variant_label=variant_label,
+                )
+                pairwise_csvs.extend([mean_csv, count_csv])
+                pairwise_pngs.append(heatmap_png)
+
+            varying_columns = varying_condition_columns(channel, condition_columns)
+            for x_reagent, hue_reagent, col_reagent in faceted_dose_response_assignments(varying_columns):
+                dose_summary = build_faceted_dose_response_summary(
+                    variant_endpoint,
+                    fluorophore=fluorophore,
+                    x_reagent=x_reagent,
+                    hue_reagent=hue_reagent,
+                    col_reagent=col_reagent,
+                )
+                if dose_summary.empty:
+                    continue
+                dose_csv_data = build_faceted_dose_response_csv_data(
+                    variant_endpoint,
+                    dose_summary,
+                    fluorophore=fluorophore,
+                    x_reagent=x_reagent,
+                    hue_reagent=hue_reagent,
+                    col_reagent=col_reagent,
+                )
+                safe_x = safe_filename(x_reagent)
+                safe_hue = safe_filename(hue_reagent)
+                stem = f"{safe_fluorophore}_x_{safe_x}_hue_{safe_hue}"
+                if col_reagent is not None:
+                    stem = f"{stem}_col_{safe_filename(col_reagent)}"
+                stem = f"{stem}_endpoint_dose_response"
+                dose_csv = dose_dir / f"{stem}.csv"
+                dose_png = dose_dir / f"{stem}.png"
+                dose_csv_data.to_csv(dose_csv, index=False)
+                write_faceted_dose_response_plot(
+                    dose_summary,
+                    dose_csv_data,
+                    dose_png,
+                    fluorophore=fluorophore,
+                    x_reagent=x_reagent,
+                    hue_reagent=hue_reagent,
+                    col_reagent=col_reagent,
+                    variant_label=variant_label,
+                )
+                dose_csvs.append(dose_csv)
+                dose_pngs.append(dose_png)
+
+    return main_csvs, main_pngs, pairwise_csvs, pairwise_pngs, dose_csvs, dose_pngs
 
 
 def analyze_merged_tidy_csv(
@@ -702,6 +1570,11 @@ def analyze_merged_tidy_csv(
         keyed_prepared.loc[~keyed_prepared["is_endpoint_outlier"].astype(bool)],
         condition_columns,
     )
+    faceted_timecourse_csvs, faceted_timecourse_pngs = write_faceted_timecourse_grid_outputs(
+        keyed_prepared,
+        condition_columns,
+        output_root,
+    )
 
     endpoint_csv = output_root / "endpoint_by_well.csv"
     composition_summary_csv = output_root / "composition_summary.csv"
@@ -713,6 +1586,18 @@ def analyze_merged_tidy_csv(
     timecourse_summary.to_csv(timecourse_summary_csv, index=False)
     timecourse_summary_excluding_outliers.to_csv(timecourse_excluding_outliers_summary_csv, index=False)
     endpoint.loc[endpoint["is_endpoint_outlier"].astype(bool)].to_csv(outlier_summary_csv, index=False)
+    (
+        main_effect_csvs,
+        main_effect_pngs,
+        pairwise_csvs,
+        pairwise_pngs,
+        dose_csvs,
+        dose_pngs,
+    ) = write_endpoint_effect_outputs(
+        endpoint,
+        condition_columns,
+        output_root,
+    )
 
     absolute_csvs: list[Path] = []
     absolute_pngs: list[Path] = []
@@ -835,6 +1720,14 @@ def analyze_merged_tidy_csv(
         outlier_heatmap_pngs=outlier_pngs,
         timecourse_plot_pngs=timecourse_pngs,
         combined_timecourse_plot_pngs=combined_timecourse_pngs,
+        main_effect_csvs=main_effect_csvs,
+        main_effect_pngs=main_effect_pngs,
+        pairwise_interaction_csvs=pairwise_csvs,
+        pairwise_interaction_pngs=pairwise_pngs,
+        faceted_dose_response_csvs=dose_csvs,
+        faceted_dose_response_pngs=dose_pngs,
+        faceted_timecourse_csvs=faceted_timecourse_csvs,
+        faceted_timecourse_pngs=faceted_timecourse_pngs,
         outlier_count=int(endpoint["is_endpoint_outlier"].sum()),
         condition_columns=condition_columns,
         endpoint_rows=len(endpoint),

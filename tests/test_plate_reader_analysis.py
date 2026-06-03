@@ -39,6 +39,39 @@ def _merged_rows_for_well(
     return rows
 
 
+def _effect_rows_for_well(
+    well: str,
+    values: list[float],
+    *,
+    is_keyed: bool,
+    dna_mM: float | None,
+    mg_mM: float | None,
+    salt_mM: float | None,
+    buffer_x: float | None,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for index, rfu in enumerate(values):
+        rows.append(
+            {
+                "time": f"00:0{index}:00",
+                "time_seconds": float(index * 60),
+                "time_minutes": float(index),
+                "temperature_c": 37.0,
+                "well": well,
+                "is_keyed": is_keyed,
+                "fluorophore": "488_509",
+                "excitation_nm": 488,
+                "emission_nm": 509,
+                "rfu": rfu,
+                "DNA_mM": dna_mM,
+                "Mg_mM": mg_mM,
+                "Salt_mM": salt_mM,
+                "Buffer_x": buffer_x,
+            }
+        )
+    return rows
+
+
 def _write_synthetic_merged_csv(path: Path) -> Path:
     rows: list[dict[str, object]] = []
     rows.extend(_merged_rows_for_well("A1", [10, 12, 14, 16], is_keyed=True, dna_mM=np.nan, mg_mM=5.0))
@@ -71,6 +104,52 @@ def _write_outlier_merged_csv(path: Path) -> Path:
     rows.extend(_merged_rows_for_well("F2", [200, 200, 200], is_keyed=True, dna_mM=4.0, mg_mM=5.0))
     rows.extend(_merged_rows_for_well("F3", [200, 200, 200], is_keyed=True, dna_mM=4.0, mg_mM=5.0))
     rows.extend(_merged_rows_for_well("F4", [240, 240, 240], is_keyed=True, dna_mM=4.0, mg_mM=5.0))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows).to_csv(path, index=False)
+    return path
+
+
+def _write_endpoint_effects_merged_csv(path: Path) -> Path:
+    rows: list[dict[str, object]] = []
+    rows.extend(_effect_rows_for_well("A1", [10, 10, 10], is_keyed=True, dna_mM=0.0, mg_mM=1.0, salt_mM=0.0, buffer_x=1.0))
+    rows.extend(_effect_rows_for_well("A2", [12, 12, 12], is_keyed=True, dna_mM=0.0, mg_mM=1.0, salt_mM=0.0, buffer_x=1.0))
+    rows.extend(_effect_rows_for_well("A3", [20, 20, 20], is_keyed=True, dna_mM=0.0, mg_mM=2.0, salt_mM=0.0, buffer_x=1.0))
+    rows.extend(_effect_rows_for_well("A4", [22, 22, 22], is_keyed=True, dna_mM=0.0, mg_mM=2.0, salt_mM=0.0, buffer_x=1.0))
+    rows.extend(_effect_rows_for_well("A5", [100, 100, 100], is_keyed=True, dna_mM=1.0, mg_mM=1.0, salt_mM=1.0, buffer_x=1.0))
+    rows.extend(_effect_rows_for_well("A6", [101, 101, 101], is_keyed=True, dna_mM=1.0, mg_mM=1.0, salt_mM=1.0, buffer_x=1.0))
+    rows.extend(_effect_rows_for_well("A7", [102, 102, 102], is_keyed=True, dna_mM=1.0, mg_mM=1.0, salt_mM=1.0, buffer_x=1.0))
+    rows.extend(_effect_rows_for_well("A8", [130, 130, 130], is_keyed=True, dna_mM=1.0, mg_mM=1.0, salt_mM=1.0, buffer_x=1.0))
+    rows.extend(_effect_rows_for_well("B1", [100, 100, 100], is_keyed=True, dna_mM=1.0, mg_mM=2.0, salt_mM=0.0, buffer_x=1.0))
+    rows.extend(_effect_rows_for_well("B2", [101, 101, 101], is_keyed=True, dna_mM=1.0, mg_mM=2.0, salt_mM=0.0, buffer_x=1.0))
+    rows.extend(_effect_rows_for_well("B3", [102, 102, 102], is_keyed=True, dna_mM=1.0, mg_mM=2.0, salt_mM=0.0, buffer_x=1.0))
+    rows.extend(_effect_rows_for_well("B4", [113, 113, 113], is_keyed=True, dna_mM=1.0, mg_mM=2.0, salt_mM=0.0, buffer_x=1.0))
+    rows.extend(_effect_rows_for_well("C1", [999, 999, 999], is_keyed=False, dna_mM=np.nan, mg_mM=np.nan, salt_mM=np.nan, buffer_x=np.nan))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows).to_csv(path, index=False)
+    return path
+
+
+def _write_two_reagent_effects_merged_csv(path: Path) -> Path:
+    rows: list[dict[str, object]] = []
+    rows.extend(_effect_rows_for_well("A1", [10, 10, 10], is_keyed=True, dna_mM=0.0, mg_mM=1.0, salt_mM=0.0, buffer_x=1.0))
+    rows.extend(_effect_rows_for_well("A2", [11, 11, 11], is_keyed=True, dna_mM=0.0, mg_mM=1.0, salt_mM=0.0, buffer_x=1.0))
+    rows.extend(_effect_rows_for_well("A3", [20, 20, 20], is_keyed=True, dna_mM=0.0, mg_mM=2.0, salt_mM=0.0, buffer_x=1.0))
+    rows.extend(_effect_rows_for_well("A4", [21, 21, 21], is_keyed=True, dna_mM=0.0, mg_mM=2.0, salt_mM=0.0, buffer_x=1.0))
+    rows.extend(_effect_rows_for_well("A5", [30, 30, 30], is_keyed=True, dna_mM=1.0, mg_mM=1.0, salt_mM=0.0, buffer_x=1.0))
+    rows.extend(_effect_rows_for_well("A6", [31, 31, 31], is_keyed=True, dna_mM=1.0, mg_mM=1.0, salt_mM=0.0, buffer_x=1.0))
+    rows.extend(_effect_rows_for_well("A7", [40, 40, 40], is_keyed=True, dna_mM=1.0, mg_mM=2.0, salt_mM=0.0, buffer_x=1.0))
+    rows.extend(_effect_rows_for_well("A8", [41, 41, 41], is_keyed=True, dna_mM=1.0, mg_mM=2.0, salt_mM=0.0, buffer_x=1.0))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows).to_csv(path, index=False)
+    return path
+
+
+def _write_four_reagent_effects_merged_csv(path: Path) -> Path:
+    rows: list[dict[str, object]] = []
+    rows.extend(_effect_rows_for_well("A1", [10, 10, 10], is_keyed=True, dna_mM=0.0, mg_mM=1.0, salt_mM=0.0, buffer_x=0.0))
+    rows.extend(_effect_rows_for_well("A2", [20, 20, 20], is_keyed=True, dna_mM=1.0, mg_mM=1.0, salt_mM=0.0, buffer_x=1.0))
+    rows.extend(_effect_rows_for_well("A3", [30, 30, 30], is_keyed=True, dna_mM=0.0, mg_mM=2.0, salt_mM=1.0, buffer_x=0.0))
+    rows.extend(_effect_rows_for_well("A4", [40, 40, 40], is_keyed=True, dna_mM=1.0, mg_mM=2.0, salt_mM=1.0, buffer_x=1.0))
     path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows).to_csv(path, index=False)
     return path
@@ -356,6 +435,406 @@ def test_combined_timecourse_summaries_and_plots_exclude_final_outliers_only(tmp
     assert set(result.combined_timecourse_plot_pngs) == {including_png, excluding_png}
 
 
+def test_endpoint_main_effects_and_pairwise_interactions(tmp_path):
+    merged_csv = _write_endpoint_effects_merged_csv(tmp_path / "effects_merged_tidy.csv")
+    result = analysis.analyze_merged_tidy_csv(merged_csv, tmp_path / "analysis")
+
+    assert len(result.main_effect_pngs) == 6
+    assert len(result.main_effect_csvs) == 6
+    assert len(result.pairwise_interaction_pngs) == 6
+    assert len(result.pairwise_interaction_csvs) == 12
+
+    including_dna = pd.read_csv(
+        result.output_dir
+        / "endpoint_effects"
+        / "main_effects"
+        / "including_outliers"
+        / "488_509_DNA_mM_main_effect.csv"
+    )
+    excluding_dna = pd.read_csv(
+        result.output_dir
+        / "endpoint_effects"
+        / "main_effects"
+        / "excluding_outliers"
+        / "488_509_DNA_mM_main_effect.csv"
+    )
+    dna0 = including_dna.loc[including_dna["reagent_value"] == 0.0].iloc[0]
+    dna1_including = including_dna.loc[including_dna["reagent_value"] == 1.0].iloc[0]
+    dna1_excluding = excluding_dna.loc[excluding_dna["reagent_value"] == 1.0].iloc[0]
+
+    assert dna0["endpoint_mean_rfu"] == pytest.approx(np.mean([10.0, 12.0, 20.0, 22.0]))
+    assert dna0["endpoint_sd_rfu"] == pytest.approx(np.std([10.0, 12.0, 20.0, 22.0], ddof=1))
+    assert dna0["endpoint_n"] == 4
+    assert dna0["composition_count"] == 2
+    assert dna1_including["endpoint_mean_rfu"] == pytest.approx(
+        np.mean([100.0, 101.0, 102.0, 130.0, 100.0, 101.0, 102.0, 113.0])
+    )
+    assert dna1_including["endpoint_n"] == 8
+    assert dna1_including["composition_count"] == 2
+    assert dna1_excluding["endpoint_mean_rfu"] == pytest.approx(
+        np.mean([100.0, 101.0, 102.0, 100.0, 101.0, 102.0, 113.0])
+    )
+    assert dna1_excluding["endpoint_n"] == 7
+    assert dna1_excluding["composition_count"] == 2
+
+    buffer_main_effect = (
+        result.output_dir
+        / "endpoint_effects"
+        / "main_effects"
+        / "including_outliers"
+        / "488_509_Buffer_x_main_effect.csv"
+    )
+    assert not buffer_main_effect.exists()
+
+    main_effect_png = (
+        result.output_dir
+        / "endpoint_effects"
+        / "main_effects"
+        / "excluding_outliers"
+        / "488_509_DNA_mM_main_effect.png"
+    )
+    assert main_effect_png.stat().st_size > 0
+
+    mean_matrix = pd.read_csv(
+        result.output_dir
+        / "endpoint_effects"
+        / "pairwise_interactions"
+        / "excluding_outliers"
+        / "488_509_DNA_mM_x_Mg_mM_mean_endpoint_rfu.csv",
+        index_col=0,
+    )
+    count_matrix = pd.read_csv(
+        result.output_dir
+        / "endpoint_effects"
+        / "pairwise_interactions"
+        / "excluding_outliers"
+        / "488_509_DNA_mM_x_Mg_mM_endpoint_n.csv",
+        index_col=0,
+    )
+    mean_matrix.index = mean_matrix.index.astype(str)
+    count_matrix.index = count_matrix.index.astype(str)
+    assert mean_matrix.loc["1", "0"] == pytest.approx(11.0)
+    assert mean_matrix.loc["2", "0"] == pytest.approx(21.0)
+    assert mean_matrix.loc["1", "1"] == pytest.approx(101.0)
+    assert mean_matrix.loc["2", "1"] == pytest.approx(np.mean([100.0, 101.0, 102.0, 113.0]))
+    assert count_matrix.loc["1", "1"] == pytest.approx(3.0)
+    assert count_matrix.loc["2", "1"] == pytest.approx(4.0)
+
+    missing_matrix = pd.read_csv(
+        result.output_dir
+        / "endpoint_effects"
+        / "pairwise_interactions"
+        / "including_outliers"
+        / "488_509_DNA_mM_x_Salt_mM_mean_endpoint_rfu.csv",
+        index_col=0,
+    )
+    missing_matrix.index = missing_matrix.index.astype(str)
+    assert pd.isna(missing_matrix.loc["1", "0"])
+    assert missing_matrix.loc["1", "1"] == pytest.approx(np.mean([100.0, 101.0, 102.0, 130.0]))
+
+    pairwise_png = (
+        result.output_dir
+        / "endpoint_effects"
+        / "pairwise_interactions"
+        / "excluding_outliers"
+        / "488_509_DNA_mM_x_Mg_mM_mean_endpoint_rfu.png"
+    )
+    assert pairwise_png.stat().st_size > 0
+
+
+def test_pairwise_interaction_heatmap_puts_lowest_y_value_at_bottom(tmp_path, monkeypatch):
+    matrix = pd.DataFrame(
+        [[1.0, 2.0], [3.0, 4.0]],
+        index=["1", "2"],
+        columns=["0", "1"],
+    )
+    original_close = analysis.plt.close
+    monkeypatch.setattr(analysis.plt, "close", lambda fig=None: None)
+
+    analysis.write_pairwise_interaction_heatmap_plot(
+        matrix,
+        tmp_path / "pairwise.png",
+        fluorophore="488_509",
+        reagent_a="DNA_mM",
+        reagent_b="Mg_mM",
+        variant_label="including outliers",
+    )
+
+    fig = analysis.plt.gcf()
+    ax = fig.axes[0]
+    assert not ax.yaxis_inverted()
+    assert (tmp_path / "pairwise.png").stat().st_size > 0
+    original_close(fig)
+
+
+def test_faceted_endpoint_dose_response_plots_three_reagent_assignments(tmp_path):
+    merged_csv = _write_endpoint_effects_merged_csv(tmp_path / "effects_merged_tidy.csv")
+    result = analysis.analyze_merged_tidy_csv(merged_csv, tmp_path / "analysis")
+
+    assert len(result.faceted_dose_response_pngs) == 12
+    assert len(result.faceted_dose_response_csvs) == 12
+
+    including_csv = (
+        result.output_dir
+        / "endpoint_effects"
+        / "faceted_dose_response"
+        / "including_outliers"
+        / "488_509_x_DNA_mM_hue_Mg_mM_col_Salt_mM_endpoint_dose_response.csv"
+    )
+    excluding_csv = (
+        result.output_dir
+        / "endpoint_effects"
+        / "faceted_dose_response"
+        / "excluding_outliers"
+        / "488_509_x_DNA_mM_hue_Mg_mM_col_Salt_mM_endpoint_dose_response.csv"
+    )
+    including = pd.read_csv(including_csv)
+    excluding = pd.read_csv(excluding_csv)
+    including_summary = including.loc[including["row_type"] == "summary"]
+    excluding_summary = excluding.loc[excluding["row_type"] == "summary"]
+
+    assert list(including_summary[["col_value", "x_value", "hue_value"]].itertuples(index=False, name=None)) == [
+        (0.0, 0.0, 1.0),
+        (0.0, 0.0, 2.0),
+        (0.0, 1.0, 2.0),
+        (1.0, 1.0, 1.0),
+    ]
+
+    outlier_group = including_summary.loc[
+        (including_summary["col_value"] == 1.0)
+        & (including_summary["x_value"] == 1.0)
+        & (including_summary["hue_value"] == 1.0)
+    ].iloc[0]
+    outlier_group_excluded = excluding_summary.loc[
+        (excluding_summary["col_value"] == 1.0)
+        & (excluding_summary["x_value"] == 1.0)
+        & (excluding_summary["hue_value"] == 1.0)
+    ].iloc[0]
+    candidate_group_excluded = excluding_summary.loc[
+        (excluding_summary["col_value"] == 0.0)
+        & (excluding_summary["x_value"] == 1.0)
+        & (excluding_summary["hue_value"] == 2.0)
+    ].iloc[0]
+
+    assert outlier_group["endpoint_mean_rfu"] == pytest.approx(np.mean([100.0, 101.0, 102.0, 130.0]))
+    assert outlier_group["endpoint_sd_rfu"] == pytest.approx(np.std([100.0, 101.0, 102.0, 130.0], ddof=1))
+    assert outlier_group["endpoint_n"] == 4
+    assert outlier_group["composition_count"] == 1
+    assert outlier_group_excluded["endpoint_mean_rfu"] == pytest.approx(101.0)
+    assert outlier_group_excluded["endpoint_n"] == 3
+    assert candidate_group_excluded["endpoint_mean_rfu"] == pytest.approx(np.mean([100.0, 101.0, 102.0, 113.0]))
+    assert candidate_group_excluded["endpoint_n"] == 4
+
+    including_replicates = including.loc[
+        (including["row_type"] == "replicate")
+        & (including["col_value"] == 1.0)
+        & (including["x_value"] == 1.0)
+        & (including["hue_value"] == 1.0)
+    ]
+    excluding_replicates = excluding.loc[
+        (excluding["row_type"] == "replicate")
+        & (excluding["col_value"] == 1.0)
+        & (excluding["x_value"] == 1.0)
+        & (excluding["hue_value"] == 1.0)
+    ]
+    candidate_replicates = excluding.loc[
+        (excluding["row_type"] == "replicate")
+        & (excluding["col_value"] == 0.0)
+        & (excluding["x_value"] == 1.0)
+        & (excluding["hue_value"] == 2.0)
+    ]
+    assert set(including_replicates["well"]) == {"A5", "A6", "A7", "A8"}
+    assert set(excluding_replicates["well"]) == {"A5", "A6", "A7"}
+    assert set(candidate_replicates["well"]) == {"B1", "B2", "B3", "B4"}
+
+    including_png = including_csv.with_suffix(".png")
+    excluding_png = excluding_csv.with_suffix(".png")
+    assert including_png.stat().st_size > 0
+    assert excluding_png.stat().st_size > 0
+
+
+def test_faceted_endpoint_dose_response_two_and_four_reagent_generation_rules(tmp_path):
+    two_reagent_csv = _write_two_reagent_effects_merged_csv(tmp_path / "two_reagent_merged_tidy.csv")
+    two_reagent_result = analysis.analyze_merged_tidy_csv(two_reagent_csv, tmp_path / "two_reagent_analysis")
+
+    assert len(two_reagent_result.faceted_dose_response_pngs) == 4
+    assert len(two_reagent_result.faceted_dose_response_csvs) == 4
+    assert (
+        two_reagent_result.output_dir
+        / "endpoint_effects"
+        / "faceted_dose_response"
+        / "including_outliers"
+        / "488_509_x_DNA_mM_hue_Mg_mM_endpoint_dose_response.png"
+    ).stat().st_size > 0
+
+    four_reagent_csv = _write_four_reagent_effects_merged_csv(tmp_path / "four_reagent_merged_tidy.csv")
+    four_reagent_result = analysis.analyze_merged_tidy_csv(four_reagent_csv, tmp_path / "four_reagent_analysis")
+
+    assert four_reagent_result.faceted_dose_response_pngs == []
+    assert four_reagent_result.faceted_dose_response_csvs == []
+
+
+def test_faceted_timecourse_grids_three_reagent_assignments(tmp_path):
+    merged_csv = _write_endpoint_effects_merged_csv(tmp_path / "effects_merged_tidy.csv")
+    result = analysis.analyze_merged_tidy_csv(merged_csv, tmp_path / "analysis")
+
+    assert len(result.faceted_timecourse_pngs) == 12
+    assert len(result.faceted_timecourse_csvs) == 12
+
+    including_csv = (
+        result.output_dir
+        / "timecourses_faceted"
+        / "including_outliers"
+        / "488_509_row_DNA_mM_col_Mg_mM_hue_Salt_mM_timecourse_grid.csv"
+    )
+    excluding_csv = (
+        result.output_dir
+        / "timecourses_faceted"
+        / "excluding_outliers"
+        / "488_509_row_DNA_mM_col_Mg_mM_hue_Salt_mM_timecourse_grid.csv"
+    )
+    including = pd.read_csv(including_csv)
+    excluding = pd.read_csv(excluding_csv)
+
+    assert list(
+        including.loc[including["time_seconds"] == 120.0, ["row_value", "col_value", "hue_value"]]
+        .drop_duplicates()
+        .itertuples(index=False, name=None)
+    ) == [
+        (0.0, 1.0, 0.0),
+        (0.0, 2.0, 0.0),
+        (1.0, 1.0, 1.0),
+        (1.0, 2.0, 0.0),
+    ]
+
+    outlier_group = including.loc[
+        (including["row_value"] == 1.0)
+        & (including["col_value"] == 1.0)
+        & (including["hue_value"] == 1.0)
+        & (including["time_seconds"] == 120.0)
+    ].iloc[0]
+    outlier_group_excluded = excluding.loc[
+        (excluding["row_value"] == 1.0)
+        & (excluding["col_value"] == 1.0)
+        & (excluding["hue_value"] == 1.0)
+        & (excluding["time_seconds"] == 120.0)
+    ].iloc[0]
+    candidate_group_excluded = excluding.loc[
+        (excluding["row_value"] == 1.0)
+        & (excluding["col_value"] == 2.0)
+        & (excluding["hue_value"] == 0.0)
+        & (excluding["time_seconds"] == 120.0)
+    ].iloc[0]
+
+    assert outlier_group["mean_rfu"] == pytest.approx(np.mean([100.0, 101.0, 102.0, 130.0]))
+    assert outlier_group["sd_rfu"] == pytest.approx(np.std([100.0, 101.0, 102.0, 130.0], ddof=1))
+    assert outlier_group["replicate_count"] == 4
+    assert outlier_group["composition_count"] == 1
+    assert outlier_group_excluded["mean_rfu"] == pytest.approx(101.0)
+    assert outlier_group_excluded["sd_rfu"] == pytest.approx(np.std([100.0, 101.0, 102.0], ddof=1))
+    assert outlier_group_excluded["replicate_count"] == 3
+    assert outlier_group_excluded["composition_count"] == 1
+    assert candidate_group_excluded["mean_rfu"] == pytest.approx(np.mean([100.0, 101.0, 102.0, 113.0]))
+    assert candidate_group_excluded["replicate_count"] == 4
+
+    including_png = including_csv.with_suffix(".png")
+    excluding_png = excluding_csv.with_suffix(".png")
+    assert including_png.stat().st_size > 0
+    assert excluding_png.stat().st_size > 0
+
+
+def test_faceted_timecourse_grids_two_and_four_reagent_generation_rules(tmp_path):
+    two_reagent_csv = _write_two_reagent_effects_merged_csv(tmp_path / "two_reagent_merged_tidy.csv")
+    two_reagent_result = analysis.analyze_merged_tidy_csv(two_reagent_csv, tmp_path / "two_reagent_analysis")
+
+    assert len(two_reagent_result.faceted_timecourse_pngs) == 4
+    assert len(two_reagent_result.faceted_timecourse_csvs) == 4
+    assert (
+        two_reagent_result.output_dir
+        / "timecourses_faceted"
+        / "including_outliers"
+        / "488_509_col_DNA_mM_hue_Mg_mM_timecourse_grid.png"
+    ).stat().st_size > 0
+
+    four_reagent_csv = _write_four_reagent_effects_merged_csv(tmp_path / "four_reagent_merged_tidy.csv")
+    four_reagent_result = analysis.analyze_merged_tidy_csv(four_reagent_csv, tmp_path / "four_reagent_analysis")
+
+    assert four_reagent_result.faceted_timecourse_pngs == []
+    assert four_reagent_result.faceted_timecourse_csvs == []
+
+
+def test_faceted_timecourse_grid_plot_uses_faint_replicate_lines_without_mean_markers(tmp_path, monkeypatch):
+    summary = pd.DataFrame(
+        [
+            {
+                "fluorophore": "488_509",
+                "row_reagent": "",
+                "col_reagent": "DNA_mM",
+                "hue_reagent": "Mg_mM",
+                "row_value": "",
+                "col_value": 0.0,
+                "hue_value": 1.0,
+                "time_seconds": 0.0,
+                "time_minutes": 0.0,
+                "mean_rfu": 11.0,
+                "sd_rfu": np.std([10.0, 12.0], ddof=1),
+                "replicate_count": 2,
+                "composition_count": 1,
+            },
+            {
+                "fluorophore": "488_509",
+                "row_reagent": "",
+                "col_reagent": "DNA_mM",
+                "hue_reagent": "Mg_mM",
+                "row_value": "",
+                "col_value": 0.0,
+                "hue_value": 1.0,
+                "time_seconds": 60.0,
+                "time_minutes": 1.0,
+                "mean_rfu": 16.0,
+                "sd_rfu": np.std([14.0, 18.0], ddof=1),
+                "replicate_count": 2,
+                "composition_count": 1,
+            },
+        ]
+    )
+    replicate_data = pd.DataFrame(
+        [
+            {"well": "A1", "condition_id": "condition_001", "fluorophore": "488_509", "time_seconds": 0.0, "time_minutes": 0.0, "rfu": 10.0, "DNA_mM": 0.0, "Mg_mM": 1.0},
+            {"well": "A1", "condition_id": "condition_001", "fluorophore": "488_509", "time_seconds": 60.0, "time_minutes": 1.0, "rfu": 14.0, "DNA_mM": 0.0, "Mg_mM": 1.0},
+            {"well": "A2", "condition_id": "condition_001", "fluorophore": "488_509", "time_seconds": 0.0, "time_minutes": 0.0, "rfu": 12.0, "DNA_mM": 0.0, "Mg_mM": 1.0},
+            {"well": "A2", "condition_id": "condition_001", "fluorophore": "488_509", "time_seconds": 60.0, "time_minutes": 1.0, "rfu": 18.0, "DNA_mM": 0.0, "Mg_mM": 1.0},
+        ]
+    )
+    original_close = analysis.plt.close
+    monkeypatch.setattr(analysis.plt, "close", lambda fig=None: None)
+
+    analysis.write_faceted_timecourse_grid_plot(
+        summary,
+        replicate_data,
+        tmp_path / "grid.png",
+        fluorophore="488_509",
+        row_reagent=None,
+        col_reagent="DNA_mM",
+        hue_reagent="Mg_mM",
+        variant_label="including outliers",
+    )
+
+    fig = analysis.plt.gcf()
+    ax = fig.axes[0]
+    replicate_lines = [line for line in ax.get_lines() if line.get_linewidth() == pytest.approx(0.8)]
+    mean_lines = [line for line in ax.get_lines() if line.get_label() == "Mg_mM=1"]
+    assert len(replicate_lines) == 2
+    assert len(mean_lines) == 1
+    mean_line = mean_lines[0]
+    assert mean_line.get_marker() in {"None", "", None}
+    for replicate_line in replicate_lines:
+        assert replicate_line.get_color() == mean_line.get_color()
+        assert replicate_line.get_alpha() == pytest.approx(0.22)
+    assert (tmp_path / "grid.png").stat().st_size > 0
+    original_close(fig)
+
+
 def test_cli_with_merged_csv_creates_expected_outputs(tmp_path, capsys):
     merged_csv = _write_synthetic_merged_csv(tmp_path / "experiment_merged_tidy.csv")
     output_dir = tmp_path / "custom_analysis"
@@ -376,6 +855,9 @@ def test_cli_with_merged_csv_creates_expected_outputs(tmp_path, capsys):
     assert (
         output_dir / "timecourses_combined" / "488_509_all_conditions_excluding_outliers.png"
     ).exists()
+    assert (
+        output_dir / "endpoint_effects" / "main_effects" / "including_outliers" / "488_509_DNA_mM_main_effect.png"
+    ).exists()
 
     captured = capsys.readouterr()
     assert "Endpoint rows: 4" in captured.out
@@ -384,6 +866,10 @@ def test_cli_with_merged_csv_creates_expected_outputs(tmp_path, capsys):
     assert "Endpoint outliers: 0" in captured.out
     assert "Timecourse plots: 2" in captured.out
     assert "Combined timecourse plots: 2" in captured.out
+    assert "Faceted timecourse grid plots: 0" in captured.out
+    assert "Endpoint main-effect plots: 2" in captured.out
+    assert "Endpoint pairwise interaction plots: 0" in captured.out
+    assert "Endpoint faceted dose-response plots: 0" in captured.out
 
 
 def test_cli_with_experiment_directory_uses_single_existing_merged_csv(tmp_path):

@@ -22,6 +22,15 @@ per-composition timecourse plots under `plate_reader_analysis/timecourses/`.
 Combined per-fluorophore composition plots are written under
 `plate_reader_analysis/timecourses_combined/` with inclusive and
 outlier-excluded versions.
+Faceted timecourse grids are written under
+`plate_reader_analysis/timecourses_faceted/` when exactly two or three reagent
+columns vary.
+Endpoint main-effect and pairwise interaction plots are written under
+`plate_reader_analysis/endpoint_effects/` with inclusive and final-outlier-
+excluded variants. These are marginal descriptive endpoint summaries, not fitted
+statistical models. Faceted endpoint dose-response plots are written under
+`endpoint_effects/faceted_dose_response/` when exactly two or three reagent
+columns vary.
 Flagged endpoint outliers are shown as red replicate traces in the timecourse
 plots and mapped by plate location under `heatmaps_endpoint_outliers/`; they are
 not excluded from means, standard deviations, CVs, or heatmaps. Outlier calls use
