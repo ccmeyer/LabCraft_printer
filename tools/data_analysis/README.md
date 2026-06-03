@@ -16,4 +16,6 @@ You can also pass an existing merged tidy CSV directly:
 ```
 
 Outputs are written to `plate_reader_analysis/` in the experiment directory by
-default, or to `<merged_csv_stem>_analysis/` when using `--merged-csv`.
+default, or to `<merged_csv_stem>_analysis/` when using `--merged-csv`. The
+report includes endpoint tables, plate heatmaps, and per-composition timecourse
+plots under `plate_reader_analysis/timecourses/`.

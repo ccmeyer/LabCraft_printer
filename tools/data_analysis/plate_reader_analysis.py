@@ -64,10 +64,12 @@ class AnalysisResult:
     output_dir: Path
     endpoint_csv: Path
     composition_summary_csv: Path
+    timecourse_summary_csv: Path
     absolute_heatmap_csvs: list[Path]
     absolute_heatmap_pngs: list[Path]
     percent_difference_heatmap_csvs: list[Path]
     percent_difference_heatmap_pngs: list[Path]
+    timecourse_plot_pngs: list[Path]
     condition_columns: list[str]
     endpoint_rows: int
     composition_rows: int
@@ -368,6 +370,90 @@ def summarize_compositions(endpoint: pd.DataFrame, condition_columns: list[str])
     ).reset_index(drop=True)
 
 
+def summarize_condition_timecourses(dataframe: pd.DataFrame, condition_columns: list[str]) -> pd.DataFrame:
+    keyed = dataframe.loc[dataframe["condition_id"] != UNKEYED_CONDITION_ID].copy()
+    if keyed.empty:
+        columns = [
+            "condition_id",
+            "condition_label",
+            "fluorophore",
+            "time_seconds",
+            "time_minutes",
+            "mean_rfu",
+            "sd_rfu",
+            "replicate_count",
+        ] + condition_columns
+        return pd.DataFrame(columns=columns)
+
+    group_columns = ["condition_id", "fluorophore", "time_seconds", "time_minutes"]
+    summary = (
+        keyed.groupby(group_columns, as_index=False)
+        .agg(
+            condition_label=("condition_label", "first"),
+            mean_rfu=("rfu", "mean"),
+            sd_rfu=("rfu", "std"),
+            replicate_count=("rfu", "count"),
+        )
+        .sort_values(["fluorophore", "condition_id", "time_seconds"], kind="stable")
+        .reset_index(drop=True)
+    )
+    condition_values = (
+        keyed[["condition_id"] + condition_columns]
+        .drop_duplicates("condition_id")
+        .reset_index(drop=True)
+    )
+    summary = summary.merge(condition_values, on="condition_id", how="left")
+    ordered_columns = [
+        "condition_id",
+        "condition_label",
+        "fluorophore",
+        "time_seconds",
+        "time_minutes",
+        "mean_rfu",
+        "sd_rfu",
+        "replicate_count",
+    ] + condition_columns
+    return summary[ordered_columns].sort_values(
+        ["fluorophore", "condition_id", "time_seconds"],
+        kind="stable",
+    ).reset_index(drop=True)
+
+
+def write_condition_timecourse_plot(
+    replicate_data: pd.DataFrame,
+    summary_data: pd.DataFrame,
+    path: str | Path,
+    *,
+    condition_id: str,
+    fluorophore: str,
+    condition_label: str,
+) -> None:
+    fig, ax = plt.subplots(figsize=(9, 5), constrained_layout=True)
+
+    for _well, well_df in replicate_data.groupby("well"):
+        well_df = well_df.sort_values("time_seconds")
+        ax.plot(
+            well_df["time_minutes"],
+            well_df["rfu"],
+            color="0.35",
+            alpha=0.25,
+            linewidth=0.9,
+        )
+
+    summary_sorted = summary_data.sort_values("time_seconds")
+    x = summary_sorted["time_minutes"].to_numpy(dtype=float)
+    mean = summary_sorted["mean_rfu"].to_numpy(dtype=float)
+    sd = summary_sorted["sd_rfu"].fillna(0).to_numpy(dtype=float)
+    ax.fill_between(x, mean - sd, mean + sd, color="tab:blue", alpha=0.18)
+    ax.plot(x, mean, color="tab:blue", linewidth=2.5, label="mean +/- SD")
+    ax.set_title(f"{condition_id} {fluorophore}\n{condition_label}")
+    ax.set_xlabel("Time (min)")
+    ax.set_ylabel("RFU")
+    ax.legend(frameon=False)
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
 def build_plate_heatmap(endpoint: pd.DataFrame, fluorophore: str, value_column: str) -> pd.DataFrame:
     channel = endpoint.loc[endpoint["fluorophore"] == fluorophore]
     matrix = channel.pivot(index="plate_row", columns="plate_col", values=value_column)
@@ -411,8 +497,10 @@ def analyze_merged_tidy_csv(
     output_root.mkdir(parents=True, exist_ok=True)
     absolute_dir = output_root / "heatmaps_absolute_rfu"
     percent_dir = output_root / "heatmaps_condition_percent_difference"
+    timecourse_dir = output_root / "timecourses"
     absolute_dir.mkdir(parents=True, exist_ok=True)
     percent_dir.mkdir(parents=True, exist_ok=True)
+    timecourse_dir.mkdir(parents=True, exist_ok=True)
 
     merged = load_merged_tidy(merged_csv)
     prepared, condition_columns = prepare_analysis_dataframe(merged)
@@ -422,16 +510,42 @@ def analyze_merged_tidy_csv(
         endpoint_last_n=endpoint_last_n,
     )
     summary = summarize_compositions(endpoint, condition_columns)
+    timecourse_summary = summarize_condition_timecourses(prepared, condition_columns)
 
     endpoint_csv = output_root / "endpoint_by_well.csv"
     composition_summary_csv = output_root / "composition_summary.csv"
+    timecourse_summary_csv = output_root / "timecourse_summary.csv"
     endpoint.to_csv(endpoint_csv, index=False)
     summary.to_csv(composition_summary_csv, index=False)
+    timecourse_summary.to_csv(timecourse_summary_csv, index=False)
 
     absolute_csvs: list[Path] = []
     absolute_pngs: list[Path] = []
     percent_csvs: list[Path] = []
     percent_pngs: list[Path] = []
+    timecourse_pngs: list[Path] = []
+    keyed_prepared = prepared.loc[prepared["condition_id"] != UNKEYED_CONDITION_ID]
+    for (condition_id, fluorophore), plot_summary in timecourse_summary.groupby(["condition_id", "fluorophore"]):
+        plot_replicates = keyed_prepared.loc[
+            (keyed_prepared["condition_id"] == condition_id)
+            & (keyed_prepared["fluorophore"] == fluorophore)
+        ]
+        if plot_replicates.empty:
+            continue
+
+        safe_fluorophore = safe_filename(fluorophore)
+        timecourse_png = timecourse_dir / f"{condition_id}_{safe_fluorophore}_timecourse.png"
+        condition_label = str(plot_summary["condition_label"].iloc[0])
+        write_condition_timecourse_plot(
+            plot_replicates,
+            plot_summary,
+            timecourse_png,
+            condition_id=str(condition_id),
+            fluorophore=str(fluorophore),
+            condition_label=condition_label,
+        )
+        timecourse_pngs.append(timecourse_png)
+
     for fluorophore in sorted(endpoint["fluorophore"].dropna().astype(str).unique()):
         safe_name = safe_filename(fluorophore)
 
@@ -468,10 +582,12 @@ def analyze_merged_tidy_csv(
         output_dir=output_root,
         endpoint_csv=endpoint_csv,
         composition_summary_csv=composition_summary_csv,
+        timecourse_summary_csv=timecourse_summary_csv,
         absolute_heatmap_csvs=absolute_csvs,
         absolute_heatmap_pngs=absolute_pngs,
         percent_difference_heatmap_csvs=percent_csvs,
         percent_difference_heatmap_pngs=percent_pngs,
+        timecourse_plot_pngs=timecourse_pngs,
         condition_columns=condition_columns,
         endpoint_rows=len(endpoint),
         composition_rows=len(summary),

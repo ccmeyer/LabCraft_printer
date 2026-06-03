@@ -131,6 +131,42 @@ def test_heatmap_matrices_place_wells_by_plate_row_and_column(tmp_path):
     assert percent_png.stat().st_size > 0
 
 
+def test_timecourse_summary_and_plots_are_generated_for_keyed_conditions(tmp_path):
+    merged_csv = _write_synthetic_merged_csv(tmp_path / "experiment_merged_tidy.csv")
+    result = analysis.analyze_merged_tidy_csv(merged_csv, tmp_path / "analysis")
+
+    timecourse = pd.read_csv(result.timecourse_summary_csv)
+
+    assert set(timecourse["condition_id"]) == {"condition_001", "condition_002"}
+    assert "unkeyed" not in set(timecourse["condition_id"])
+    assert len(timecourse) == 6
+
+    selected = timecourse.loc[
+        (timecourse["condition_id"] == "condition_001")
+        & (timecourse["fluorophore"] == "488_509")
+        & (timecourse["time_seconds"] == 120.0)
+    ].iloc[0]
+    assert selected["mean_rfu"] == pytest.approx(17.0)
+    assert selected["sd_rfu"] == pytest.approx(np.std([14.0, 20.0], ddof=1))
+    assert selected["replicate_count"] == 2
+
+    one_replicate = timecourse.loc[
+        (timecourse["condition_id"] == "condition_002")
+        & (timecourse["time_seconds"] == 60.0)
+    ].iloc[0]
+    assert one_replicate["mean_rfu"] == pytest.approx(110.0)
+    assert pd.isna(one_replicate["sd_rfu"])
+    assert one_replicate["replicate_count"] == 1
+
+    multi_plot = result.output_dir / "timecourses" / "condition_001_488_509_timecourse.png"
+    single_plot = result.output_dir / "timecourses" / "condition_002_488_509_timecourse.png"
+    unkeyed_plot = result.output_dir / "timecourses" / "unkeyed_488_509_timecourse.png"
+    assert multi_plot.stat().st_size > 0
+    assert single_plot.stat().st_size > 0
+    assert not unkeyed_plot.exists()
+    assert set(result.timecourse_plot_pngs) == {multi_plot, single_plot}
+
+
 def test_cli_with_merged_csv_creates_expected_outputs(tmp_path, capsys):
     merged_csv = _write_synthetic_merged_csv(tmp_path / "experiment_merged_tidy.csv")
     output_dir = tmp_path / "custom_analysis"
@@ -139,11 +175,14 @@ def test_cli_with_merged_csv_creates_expected_outputs(tmp_path, capsys):
 
     assert (output_dir / "endpoint_by_well.csv").exists()
     assert (output_dir / "composition_summary.csv").exists()
+    assert (output_dir / "timecourse_summary.csv").exists()
     assert (output_dir / "heatmaps_absolute_rfu" / "488_509_endpoint_rfu.png").exists()
+    assert (output_dir / "timecourses" / "condition_001_488_509_timecourse.png").exists()
 
     captured = capsys.readouterr()
     assert "Endpoint rows: 4" in captured.out
     assert "Composition rows: 2" in captured.out
+    assert "Timecourse plots: 2" in captured.out
 
 
 def test_cli_with_experiment_directory_uses_single_existing_merged_csv(tmp_path):

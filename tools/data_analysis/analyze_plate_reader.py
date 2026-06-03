@@ -130,8 +130,10 @@ def print_summary(result: analysis.AnalysisResult, merged_csv: Path) -> None:
     print(f"Condition columns: {', '.join(result.condition_columns) if result.condition_columns else '(none)'}")
     print(f"Endpoint table: {result.endpoint_csv}")
     print(f"Composition summary: {result.composition_summary_csv}")
+    print(f"Timecourse summary: {result.timecourse_summary_csv}")
     print(f"Absolute RFU heatmaps: {len(result.absolute_heatmap_pngs)}")
     print(f"Condition percent-difference heatmaps: {len(result.percent_difference_heatmap_pngs)}")
+    print(f"Timecourse plots: {len(result.timecourse_plot_pngs)}")
 
 
 def main(argv: list[str] | None = None) -> int:
