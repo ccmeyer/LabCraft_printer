@@ -2,6 +2,7 @@ from __future__ import annotations
 
 # Import your model & dataclasses
 from Model import (
+    AdditionalConditionSpec,
     FactorSpec,
     OptionSpec,
     ExperimentModel,
@@ -8353,6 +8354,233 @@ class ExperimentImportWizard(QDialog):
         }
 
 
+class AdditionalConditionsDialog(QDialog):
+    COL_LABEL = 0
+
+    def __init__(
+        self,
+        column_specs: Sequence[Mapping[str, Any]],
+        conditions: Sequence[AdditionalConditionSpec] | None = None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Unique Conditions")
+        self.setMinimumSize(900, 480)
+        self.column_specs = [self._normalize_column_spec(spec) for spec in (column_specs or [])]
+        self._accepted_conditions: List[AdditionalConditionSpec] | None = None
+
+        root = QHBoxLayout(self)
+
+        controls = QVBoxLayout()
+        root.addLayout(controls, stretch=0)
+
+        self.add_btn = QPushButton("Add Composition")
+        self.add_btn.clicked.connect(self._add_empty_row)
+        controls.addWidget(self.add_btn)
+
+        self.delete_btn = QPushButton("Delete Selected")
+        self.delete_btn.clicked.connect(self._delete_selected_rows)
+        controls.addWidget(self.delete_btn)
+
+        self.clear_btn = QPushButton("Clear All")
+        self.clear_btn.clicked.connect(self.table_clear)
+        controls.addWidget(self.clear_btn)
+        controls.addStretch(1)
+
+        table_col_count = 2 + len(self.column_specs)
+        self.table = QTableWidget(0, table_col_count, self)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setHorizontalHeaderLabels(self._header_labels())
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.table.horizontalHeader().setStretchLastSection(False)
+        self.table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        root.addWidget(self.table, stretch=1)
+
+        right = QVBoxLayout()
+        root.addLayout(right, stretch=0)
+        right.addStretch(1)
+        self.ok_btn = QPushButton("OK")
+        self.ok_btn.clicked.connect(self.accept)
+        right.addWidget(self.ok_btn)
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self.reject)
+        right.addWidget(self.cancel_btn)
+
+        for condition in conditions or []:
+            self._add_condition_row(condition)
+        self._resize_table()
+
+    @staticmethod
+    def _normalize_column_spec(spec: Mapping[str, Any]) -> Dict[str, Any]:
+        key = spec.get("key")
+        if isinstance(key, (list, tuple)) and len(key) >= 2:
+            factor = str(key[0]).strip()
+            option = key[1]
+            option = None if option in (None, "") else str(option).strip()
+            key = (factor, option)
+        else:
+            factor = str(spec.get("factor", "")).strip()
+            option = spec.get("option")
+            option = None if option in (None, "") else str(option).strip()
+            key = (factor, option)
+        label = str(spec.get("label") or AdditionalConditionsDialog._key_label(key)).strip()
+        units = str(spec.get("units") or "").strip()
+        return {
+            "key": key,
+            "label": label,
+            "units": units,
+            "missing": bool(spec.get("missing", False)),
+        }
+
+    @staticmethod
+    def _key_label(key: Tuple[str, Optional[str]]) -> str:
+        factor, option = key
+        return str(factor) if option in (None, "") else f"{factor}/{option}"
+
+    @staticmethod
+    def _fmt_value(value: Any) -> str:
+        try:
+            number = float(value)
+        except Exception:
+            return str(value)
+        if not math.isfinite(number):
+            return ""
+        if abs(number - round(number)) < 1e-12:
+            return str(int(round(number)))
+        return f"{number:.6g}"
+
+    def _header_labels(self) -> List[str]:
+        labels = ["Label"]
+        for spec in self.column_specs:
+            text = str(spec.get("label") or self._key_label(spec["key"]))
+            units = str(spec.get("units") or "").strip()
+            if units:
+                text = f"{text} ({units})"
+            labels.append(text)
+        labels.append("Replicates")
+        return labels
+
+    def _target_col_for_spec_index(self, spec_index: int) -> int:
+        return self.COL_LABEL + 1 + int(spec_index)
+
+    def _replicates_col(self) -> int:
+        return self.COL_LABEL + 1 + len(self.column_specs)
+
+    def _resize_table(self):
+        try:
+            self.table.resizeColumnsToContents()
+            self.table.resizeRowsToContents()
+        except Exception:
+            pass
+
+    def _add_empty_row(self):
+        self._add_condition_row(None)
+
+    def _add_condition_row(self, condition: AdditionalConditionSpec | None):
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+
+        label = getattr(condition, "label", "") if condition is not None else ""
+        self.table.setItem(row, self.COL_LABEL, QTableWidgetItem(str(label or "")))
+
+        targets = dict(getattr(condition, "targets", {}) or {})
+        for spec_index, spec in enumerate(self.column_specs):
+            key = spec["key"]
+            text = self._fmt_value(targets[key]) if key in targets else ""
+            self.table.setItem(row, self._target_col_for_spec_index(spec_index), QTableWidgetItem(text))
+
+        reps = QSpinBox()
+        reps.setMinimum(1)
+        reps.setMaximum(9999)
+        try:
+            reps.setValue(max(1, int(getattr(condition, "replicates", 1) or 1)))
+        except Exception:
+            reps.setValue(1)
+        self.table.setCellWidget(row, self._replicates_col(), reps)
+        self._resize_table()
+
+    def table_clear(self):
+        self.table.setRowCount(0)
+
+    def _delete_selected_rows(self):
+        rows = {
+            index.row()
+            for index in self.table.selectionModel().selectedRows()
+        }
+        if not rows and self.table.currentRow() >= 0:
+            rows = {self.table.currentRow()}
+        for row in sorted(rows, reverse=True):
+            self.table.removeRow(row)
+
+    def _parse_target_cell(self, row: int, spec_index: int) -> Tuple[bool, float, str]:
+        col = self._target_col_for_spec_index(spec_index)
+        item = self.table.item(row, col)
+        text = (item.text() if item is not None else "").strip()
+        if not text:
+            return True, 0.0, ""
+        try:
+            value = float(text)
+        except Exception:
+            return False, 0.0, "must be a number"
+        if not math.isfinite(value):
+            return False, 0.0, "must be finite"
+        if value < 0.0:
+            return False, 0.0, "must be nonnegative"
+        return True, float(value), ""
+
+    def _collect_conditions(self, *, show_errors: bool) -> Tuple[bool, List[AdditionalConditionSpec]]:
+        conditions: List[AdditionalConditionSpec] = []
+        for row in range(self.table.rowCount()):
+            label_item = self.table.item(row, self.COL_LABEL)
+            label = (label_item.text() if label_item is not None else "").strip()
+            targets: Dict[Tuple[str, Optional[str]], float] = {}
+            for spec_index, spec in enumerate(self.column_specs):
+                ok, value, reason = self._parse_target_cell(row, spec_index)
+                if not ok:
+                    header = self.table.horizontalHeaderItem(self._target_col_for_spec_index(spec_index))
+                    column_label = header.text() if header is not None else str(spec.get("label", "target"))
+                    if show_errors:
+                        QMessageBox.warning(
+                            self,
+                            "Invalid Unique Condition",
+                            f"Row {row + 1}, {column_label}: target {reason}.",
+                        )
+                    return False, []
+                targets[spec["key"]] = float(value)
+
+            reps_widget = self.table.cellWidget(row, self._replicates_col())
+            replicates = int(reps_widget.value()) if isinstance(reps_widget, QSpinBox) else 1
+            conditions.append(
+                AdditionalConditionSpec(
+                    label=label,
+                    targets=targets,
+                    replicates=replicates,
+                )
+            )
+        return True, conditions
+
+    def get_conditions(self) -> List[AdditionalConditionSpec]:
+        if self._accepted_conditions is not None:
+            return [
+                AdditionalConditionSpec(
+                    label=condition.label,
+                    targets=dict(condition.targets),
+                    replicates=int(condition.replicates),
+                )
+                for condition in self._accepted_conditions
+            ]
+        ok, conditions = self._collect_conditions(show_errors=False)
+        return conditions if ok else []
+
+    def accept(self):
+        ok, conditions = self._collect_conditions(show_errors=True)
+        if not ok:
+            return
+        self._accepted_conditions = conditions
+        super().accept()
+
+
 class ExperimentDesignDialog(QDialog):
     """
     UI for composing reagents (additives and choice groups), optimizing stock solutions,
@@ -8627,6 +8855,10 @@ class ExperimentDesignDialog(QDialog):
         self.reset_upload_btn.clicked.connect(self._on_reset_uploaded_design)
         controls_col.addWidget(self.reset_upload_btn)
 
+        self.unique_conditions_btn = QPushButton("Unique Conditions...")
+        self.unique_conditions_btn.clicked.connect(self._on_unique_conditions)
+        controls_col.addWidget(self.unique_conditions_btn)
+
         self.auto_update_chk = QCheckBox("Auto update design")
         self.auto_update_chk.setChecked(True)
         self.auto_update_chk.setToolTip(
@@ -8702,6 +8934,7 @@ class ExperimentDesignDialog(QDialog):
         self._load_factors_into_table()
         self._refresh_stock_table()
         self._update_summary_labels(initial=True)
+        self._update_unique_conditions_button_label()
         self._refresh_all_lock_states()
         self._sync_reagent_tables_geometry()
         self._gripper_lock_connection = self.main_window.model.rack_model.gripper_updated.connect(
@@ -9508,11 +9741,118 @@ class ExperimentDesignDialog(QDialog):
             getattr(self, "save_btn", None),
             getattr(self, "upload_design_btn", None),
             getattr(self, "reset_upload_btn", None),
+            getattr(self, "unique_conditions_btn", None),
             getattr(self, "add_reagent_btn", None),
             getattr(self, "auto_update_chk", None),
             getattr(self, "new_btn", None),
             getattr(self, "load_btn", None),
         ]
+
+    def _current_additional_condition_column_specs(self) -> List[Dict[str, Any]]:
+        specs: List[Dict[str, Any]] = []
+        seen: Set[Tuple[str, Optional[str]]] = set()
+
+        def add_spec(key: Tuple[str, Optional[str]], label: str, units: str = "", *, missing: bool = False):
+            norm_key = (str(key[0]).strip(), None if key[1] in (None, "") else str(key[1]).strip())
+            if not norm_key[0] or norm_key in seen:
+                return
+            seen.add(norm_key)
+            specs.append({
+                "key": norm_key,
+                "label": str(label or self._key_label(norm_key)),
+                "units": str(units or ""),
+                "missing": bool(missing),
+            })
+
+        for factor in getattr(self.model, "factors", []) or []:
+            factor_name = str(getattr(factor, "name", "") or "").strip()
+            if not factor_name:
+                continue
+            options = list(getattr(factor, "options", []) or [])
+            if getattr(factor, "kind", "") == "additive":
+                if not options:
+                    continue
+                option = options[0]
+                add_spec(
+                    (factor_name, None),
+                    factor_name,
+                    getattr(option, "units", "") or "",
+                )
+                continue
+            if getattr(factor, "kind", "") == "choice":
+                for option in options:
+                    option_name = str(getattr(option, "name", "") or "").strip()
+                    if not option_name:
+                        continue
+                    add_spec(
+                        (factor_name, option_name),
+                        f"{factor_name}/{option_name}",
+                        getattr(option, "units", "") or "",
+                    )
+
+        getter = getattr(self.model, "get_additional_conditions", None)
+        conditions = getter() if callable(getter) else []
+        for condition in conditions or []:
+            for key in (getattr(condition, "targets", {}) or {}).keys():
+                if not isinstance(key, (list, tuple)) or len(key) < 2:
+                    continue
+                norm_key = (str(key[0]).strip(), None if key[1] in (None, "") else str(key[1]).strip())
+                if norm_key in seen or not norm_key[0]:
+                    continue
+                add_spec(norm_key, f"Missing: {self._key_label(norm_key)}", "", missing=True)
+        return specs
+
+    def _additional_conditions_counts(self) -> Tuple[int, int]:
+        getter = getattr(self.model, "get_additional_conditions", None)
+        conditions = list(getter() if callable(getter) else [])
+        expanded = 0
+        for condition in conditions:
+            try:
+                expanded += max(1, int(getattr(condition, "replicates", 1) or 1))
+            except Exception:
+                expanded += 1
+        return len(conditions), int(expanded)
+
+    def _update_unique_conditions_button_label(self):
+        button = getattr(self, "unique_conditions_btn", None)
+        if button is None:
+            return
+        count, expanded = self._additional_conditions_counts()
+        if count:
+            button.setText(f"Unique Conditions ({count})...")
+            button.setToolTip(
+                f"{count} unique condition row(s), {expanded} extra reaction(s) including condition replicates."
+            )
+        else:
+            button.setText("Unique Conditions...")
+            button.setToolTip("Add supplemental unique compositions to append after the base design.")
+
+    def _on_unique_conditions(self):
+        if getattr(self, "_editing_locked_by_gripper", False):
+            self._set_status("Design is view-only while a printer head is loaded in the gripper.")
+            return
+        if getattr(self, "_progress_protected", False):
+            self._set_status(getattr(self, "_progress_lock_status_message", "Design is view-only."))
+            return
+        if self._manual_assignments_active():
+            self._set_status("Unique conditions are disabled when explicit well assignments are active.")
+            return
+
+        self._rebuild_model_from_table()
+        column_specs = self._current_additional_condition_column_specs()
+        getter = getattr(self.model, "get_additional_conditions", None)
+        conditions = getter() if callable(getter) else []
+        dialog = AdditionalConditionsDialog(column_specs, conditions, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        setter = getattr(self.model, "set_additional_conditions", None)
+        if callable(setter):
+            setter(dialog.get_conditions())
+        self._update_unique_conditions_button_label()
+        self._schedule_auto_update()
+        self._refresh_all_lock_states()
+
     # -----------------------------
     # Uploaded design mode toggling
     # -----------------------------
@@ -9706,6 +10046,7 @@ class ExperimentDesignDialog(QDialog):
             f.name for f in getattr(self.model, "factors", []) if getattr(f, "kind", "") == "choice"
         )
         self._load_factors_into_table()
+        self._update_unique_conditions_button_label()
         self._update_metadata_from_controls()
 
         # Immediately optimize & generate using the uploaded design
@@ -9775,6 +10116,7 @@ class ExperimentDesignDialog(QDialog):
             f.name for f in getattr(self.model, "factors", []) if getattr(f, "kind", "") == "choice"
         )
         self._load_factors_into_table()
+        self._update_unique_conditions_button_label()
         self._run_design_optimization_flow(
             show_failure_dialog=False,
             show_capacity_dialog=False,
@@ -9836,6 +10178,8 @@ class ExperimentDesignDialog(QDialog):
             self.start_row_spin.setEnabled(not active)
         if hasattr(self, "plate_format_combo") and self.plate_format_combo is not None:
             self.plate_format_combo.setEnabled(not active)
+        if hasattr(self, "unique_conditions_btn") and self.unique_conditions_btn is not None:
+            self.unique_conditions_btn.setEnabled(not active)
 
     def _is_gripper_loaded(self) -> bool:
         try:
@@ -9851,6 +10195,7 @@ class ExperimentDesignDialog(QDialog):
             "add_reagent_btn",
             "upload_design_btn",
             "reset_upload_btn",
+            "unique_conditions_btn",
             "run_btn",
             "new_btn",
             "save_btn",
@@ -9900,6 +10245,7 @@ class ExperimentDesignDialog(QDialog):
             "add_reagent_btn",
             "upload_design_btn",
             "reset_upload_btn",
+            "unique_conditions_btn",
             "run_btn",
             "new_btn",
             "save_btn",
@@ -9987,6 +10333,7 @@ class ExperimentDesignDialog(QDialog):
             "add_reagent_btn",
             "upload_design_btn",
             "reset_upload_btn",
+            "unique_conditions_btn",
             "run_btn",
             "new_btn",
             "save_btn",
@@ -10032,6 +10379,7 @@ class ExperimentDesignDialog(QDialog):
             "add_reagent_btn",
             "upload_design_btn",
             "reset_upload_btn",
+            "unique_conditions_btn",
             "run_btn",
             "new_btn",
             "save_btn",
@@ -10150,6 +10498,7 @@ class ExperimentDesignDialog(QDialog):
             "add_reagent_btn",
             "upload_design_btn",
             "reset_upload_btn",
+            "unique_conditions_btn",
             "run_btn",
             "save_btn",
             "rep_spin",
@@ -11113,6 +11462,7 @@ class ExperimentDesignDialog(QDialog):
         self._sync_controls_from_model()
         self._refresh_stock_table()
         self._update_summary_labels()
+        self._update_unique_conditions_button_label()
         self._refresh_all_prior_availability()
 
         self._set_status(f"New experiment created: {getattr(self.model, 'experiment_dir_path', '(unsaved yet)')}")
@@ -11200,6 +11550,7 @@ class ExperimentDesignDialog(QDialog):
         self._sync_controls_from_model()
         self._refresh_stock_table()
         self._update_summary_labels()
+        self._update_unique_conditions_button_label()
         self._refresh_all_prior_availability()
         self._refresh_all_lock_states()
 
