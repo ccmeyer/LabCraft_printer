@@ -17,6 +17,7 @@ MODEL_THREE_BREAK_TWO_BREAK_MIDPOINT = "three_break_two_break_midpoint"
 TAIL_START_SOURCE_REFERENCE_MODEL = "reference_model"
 TAIL_START_SOURCE_THREE_BREAK_TAU1 = "three_break_tau1"
 TAIL_START_SOURCE_THREE_TWO_MIDPOINT = "three_two_midpoint"
+TAIL_START_SOURCE_TWO_BREAK_MAJOR_COLLAPSE = "two_break_major_collapse"
 
 MIN_NOISE_FLOOR_PX = 0.75
 MIN_SEGMENT_POINTS = 2
@@ -28,6 +29,9 @@ THREE_BREAK_MIN_EARLY_SHOULDER_SLOPE_PX_PER_MS = 10.0
 THREE_BREAK_LOCAL_CONFIRMATION_MIN_DROP_PX = 1.5
 THREE_BREAK_LOCAL_CONFIRMATION_MAX_REBOUND_PX = 0.5
 THREE_BREAK_LOCAL_CONFIRMATION_FUTURE_POINTS = 2
+TWO_BREAK_WEAK_SHOULDER_MAX_SLOPE_PX_PER_MS = 10.0
+TWO_BREAK_MAJOR_COLLAPSE_MIN_SLOPE_PX_PER_MS = 40.0
+TWO_BREAK_MAJOR_COLLAPSE_MIN_DELTA_TO_SHOULDER_RATIO = 4.0
 
 
 def _float_or_none(value):
@@ -742,10 +746,12 @@ def _empty_three_break_selection_metadata() -> dict:
         "tail_start_source": TAIL_START_SOURCE_REFERENCE_MODEL,
         "three_break_tail_start_delay_from_emergence_us": None,
         "two_break_tail_start_delay_from_emergence_us": None,
+        "two_break_major_collapse_tail_start_delay_from_emergence_us": None,
         "midpoint_tail_start_delay_from_emergence_us": None,
         "breakpoint_refinement_step_us": BREAKPOINT_REFINEMENT_STEP_US,
         "tail_start_observed_delay": None,
         "breakpoint_observed_delays": [],
+        "two_break_major_collapse_gate": _two_break_major_collapse_gate(None),
         "three_break_selection_gate": _three_break_selection_gate(
             None,
             two_break=None,
@@ -759,6 +765,90 @@ def _empty_three_break_selection_metadata() -> dict:
             noise_floor=MIN_NOISE_FLOOR_PX,
         ),
     }
+
+
+def _two_break_major_collapse_gate(two_break: dict | None) -> dict:
+    details = {
+        "passed": False,
+        "reason": "no_two_break_model",
+        "tail_start_delay_from_emergence_us": None,
+        "major_collapse_delay_from_emergence_us": None,
+        "shoulder_slope_px_per_ms": None,
+        "shoulder_slope_magnitude_px_per_ms": None,
+        "max_weak_shoulder_slope_magnitude_px_per_ms": float(
+            TWO_BREAK_WEAK_SHOULDER_MAX_SLOPE_PX_PER_MS
+        ),
+        "collapse_delta_slope_px_per_ms": None,
+        "collapse_delta_slope_magnitude_px_per_ms": None,
+        "collapse_slope_px_per_ms": None,
+        "collapse_slope_magnitude_px_per_ms": None,
+        "min_major_collapse_slope_magnitude_px_per_ms": float(
+            TWO_BREAK_MAJOR_COLLAPSE_MIN_SLOPE_PX_PER_MS
+        ),
+        "delta_to_shoulder_slope_ratio": None,
+        "min_delta_to_shoulder_slope_ratio": float(
+            TWO_BREAK_MAJOR_COLLAPSE_MIN_DELTA_TO_SHOULDER_RATIO
+        ),
+    }
+    if two_break is None:
+        return details
+    if str(two_break.get("model_name") or "") != MODEL_PLATEAU_SHOULDER_COLLAPSE:
+        details["reason"] = "not_two_break_model"
+        return details
+
+    tail_start = _int_or_none(two_break.get("tail_start_delay_from_emergence_us"))
+    major_collapse = _int_or_none(two_break.get("knee_delay_from_emergence_us"))
+    details["tail_start_delay_from_emergence_us"] = tail_start
+    details["major_collapse_delay_from_emergence_us"] = major_collapse
+    if tail_start is None or major_collapse is None:
+        details["reason"] = "missing_breakpoints"
+        return details
+    if int(major_collapse) <= int(tail_start):
+        details["reason"] = "invalid_breakpoint_order"
+        return details
+
+    params = dict(two_break.get("params") or {})
+    shoulder_slope = _float_or_none(params.get("shoulder_slope_px_per_ms"))
+    collapse_delta = _float_or_none(params.get("collapse_delta_slope_px_per_ms"))
+    collapse_slope = _float_or_none(params.get("collapse_slope_px_per_ms"))
+    if shoulder_slope is None or collapse_delta is None or collapse_slope is None:
+        details["reason"] = "missing_slope_params"
+        return details
+
+    shoulder_magnitude = abs(float(shoulder_slope))
+    collapse_delta_magnitude = abs(float(collapse_delta))
+    collapse_magnitude = abs(float(collapse_slope))
+    details["shoulder_slope_px_per_ms"] = float(shoulder_slope)
+    details["shoulder_slope_magnitude_px_per_ms"] = float(shoulder_magnitude)
+    details["collapse_delta_slope_px_per_ms"] = float(collapse_delta)
+    details["collapse_delta_slope_magnitude_px_per_ms"] = float(collapse_delta_magnitude)
+    details["collapse_slope_px_per_ms"] = float(collapse_slope)
+    details["collapse_slope_magnitude_px_per_ms"] = float(collapse_magnitude)
+    if float(shoulder_magnitude) > 0.0:
+        details["delta_to_shoulder_slope_ratio"] = float(
+            collapse_delta_magnitude / shoulder_magnitude
+        )
+
+    if float(shoulder_magnitude) >= float(TWO_BREAK_WEAK_SHOULDER_MAX_SLOPE_PX_PER_MS):
+        details["reason"] = "shoulder_slope_not_weak"
+        return details
+    if float(collapse_magnitude) < float(TWO_BREAK_MAJOR_COLLAPSE_MIN_SLOPE_PX_PER_MS):
+        details["reason"] = "collapse_slope_not_major"
+        return details
+    if float(shoulder_magnitude) <= 0.0:
+        ratio_passed = bool(float(collapse_delta_magnitude) > 0.0)
+    else:
+        ratio_passed = bool(
+            float(collapse_delta_magnitude / shoulder_magnitude)
+            >= float(TWO_BREAK_MAJOR_COLLAPSE_MIN_DELTA_TO_SHOULDER_RATIO)
+        )
+    if not ratio_passed:
+        details["reason"] = "collapse_delta_not_dominant"
+        return details
+
+    details["passed"] = True
+    details["reason"] = "passed"
+    return details
 
 
 def _three_break_selection_gate(
@@ -978,6 +1068,18 @@ def _midpoint_selection(three_break: dict, two_break: dict) -> dict | None:
     return selected
 
 
+def _two_break_major_collapse_selection(two_break: dict) -> dict | None:
+    major_collapse = _int_or_none(two_break.get("knee_delay_from_emergence_us"))
+    if major_collapse is None:
+        return None
+    selected = dict(two_break)
+    selected["tail_start_delay_from_emergence_us"] = int(major_collapse)
+    selected["breakpoint_delays_from_emergence_us"] = [int(major_collapse)]
+    selected["tail_start_observed_delay"] = None
+    selected["breakpoint_observed_delays"] = []
+    return selected
+
+
 def _select_segmented_tail_model(
     trace: list[dict],
     *,
@@ -1000,6 +1102,7 @@ def _select_segmented_tail_model(
         reference_model=reference,
         bic_improvement_threshold=bic_improvement_threshold,
     )
+    two_break_major_collapse_gate = _two_break_major_collapse_gate(two_break)
     local_confirmation = _three_break_local_confirmation(
         trace,
         three_break,
@@ -1023,6 +1126,16 @@ def _select_segmented_tail_model(
                 )
                 tail_start_source = TAIL_START_SOURCE_THREE_TWO_MIDPOINT
 
+    if (
+        tail_start_source == TAIL_START_SOURCE_REFERENCE_MODEL
+        and str(selected.get("model_name") or "") == MODEL_PLATEAU_SHOULDER_COLLAPSE
+        and bool(two_break_major_collapse_gate.get("passed"))
+    ):
+        major_selection = _two_break_major_collapse_selection(selected)
+        if major_selection is not None:
+            selected = major_selection
+            tail_start_source = TAIL_START_SOURCE_TWO_BREAK_MAJOR_COLLAPSE
+
     return {
         "selected": selected,
         "tail_start_source": tail_start_source,
@@ -1036,7 +1149,13 @@ def _select_segmented_tail_model(
             if two_break is None
             else _int_or_none(two_break.get("tail_start_delay_from_emergence_us"))
         ),
+        "two_break_major_collapse_tail_start_delay_from_emergence_us": _int_or_none(
+            two_break_major_collapse_gate.get("major_collapse_delay_from_emergence_us")
+        )
+        if bool(two_break_major_collapse_gate.get("passed"))
+        else None,
         "midpoint_tail_start_delay_from_emergence_us": midpoint_tail_start,
+        "two_break_major_collapse_gate": two_break_major_collapse_gate,
         "three_break_selection_gate": hard_gate,
         "local_confirmation": local_confirmation,
     }
@@ -1181,6 +1300,9 @@ def evaluate_segmented_tail_trace(
         "two_break_tail_start_delay_from_emergence_us": _int_or_none(
             selection.get("two_break_tail_start_delay_from_emergence_us")
         ),
+        "two_break_major_collapse_tail_start_delay_from_emergence_us": _int_or_none(
+            selection.get("two_break_major_collapse_tail_start_delay_from_emergence_us")
+        ),
         "midpoint_tail_start_delay_from_emergence_us": _int_or_none(
             selection.get("midpoint_tail_start_delay_from_emergence_us")
         ),
@@ -1190,6 +1312,9 @@ def evaluate_segmented_tail_trace(
             selected.get("tail_start_delay_from_emergence_us"),
         ),
         "breakpoint_observed_delays": selected_observed_flags,
+        "two_break_major_collapse_gate": dict(
+            selection.get("two_break_major_collapse_gate") or {}
+        ),
         "three_break_selection_gate": dict(selection.get("three_break_selection_gate") or {}),
         "local_confirmation": dict(selection.get("local_confirmation") or {}),
         "models": {

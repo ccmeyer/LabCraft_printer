@@ -428,6 +428,38 @@ def test_segmented_tail_three_break_gate_blocks_early_weak_shoulder_overfit():
     assert result["three_break_selection_gate"]["reason"] == "tail_start_advance_too_large"
 
 
+def test_segmented_tail_two_break_weak_shoulder_selects_major_collapse():
+    result = segmented_tail_mod.evaluate_segmented_tail_trace(
+        _segmented_tail_pairs(
+            [
+                (1850, 73.0),
+                (2350, 72.0),
+                (2450, 72.0),
+                (2550, 71.0),
+                (2650, 71.0),
+                (2750, 71.0),
+                (2850, 70.0),
+                (2950, 70.0),
+                (3050, 69.0),
+                (3150, 66.0),
+                (3250, 56.0),
+                (3350, 38.0),
+                (3450, 22.0),
+            ]
+        ),
+        baseline_width_px=74.5,
+    )
+
+    assert result["model_name"] == segmented_tail_mod.MODEL_PLATEAU_SHOULDER_COLLAPSE
+    assert result["tail_start_source"] == segmented_tail_mod.TAIL_START_SOURCE_TWO_BREAK_MAJOR_COLLAPSE
+    assert result["two_break_tail_start_delay_from_emergence_us"] == 2375
+    assert result["tail_start_delay_from_emergence_us"] == 3175
+    assert result["two_break_major_collapse_tail_start_delay_from_emergence_us"] == 3175
+    assert result["breakpoint_delays_from_emergence_us"] == [3175]
+    assert result["two_break_major_collapse_gate"]["passed"] is True
+    assert result["two_break_major_collapse_gate"]["reason"] == "passed"
+
+
 def test_segmented_tail_local_rebound_uses_midpoint_between_three_and_two_breaks():
     result = segmented_tail_mod.evaluate_segmented_tail_trace(
         _segmented_tail_pairs(
