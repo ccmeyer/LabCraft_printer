@@ -19,8 +19,12 @@ Outputs are written to `plate_reader_analysis/` in the experiment directory by
 default, or to `<merged_csv_stem>_analysis/` when using `--merged-csv`. The
 report includes endpoint tables, plate heatmaps, flagged outlier summaries, and
 per-composition timecourse plots under `plate_reader_analysis/timecourses/`.
+Combined per-fluorophore composition plots are written under
+`plate_reader_analysis/timecourses_combined/` with inclusive and
+outlier-excluded versions.
 Flagged endpoint outliers are shown as red replicate traces in the timecourse
 plots and mapped by plate location under `heatmaps_endpoint_outliers/`; they are
 not excluded from means, standard deviations, CVs, or heatmaps. Outlier calls use
 a robust endpoint z-score candidate rule plus a minimum 15% endpoint difference
-from the condition median.
+from the condition median. The outlier-excluded combined timecourse plot removes
+only final endpoint outlier wells from that summary and plot.

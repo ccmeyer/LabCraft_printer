@@ -279,6 +279,83 @@ def test_endpoint_outlier_detection_flags_only_evaluated_keyed_replicates(tmp_pa
     assert timecourse_png.stat().st_size > 0
 
 
+def test_combined_timecourse_summaries_and_plots_exclude_final_outliers_only(tmp_path):
+    merged_csv = _write_outlier_merged_csv(tmp_path / "outlier_merged_tidy.csv")
+    result = analysis.analyze_merged_tidy_csv(merged_csv, tmp_path / "analysis")
+
+    inclusive = pd.read_csv(result.timecourse_summary_csv)
+    excluded = pd.read_csv(result.timecourse_excluding_outliers_summary_csv)
+
+    assert result.timecourse_excluding_outliers_summary_csv.exists()
+    assert set(inclusive["condition_id"]) == {
+        "condition_001",
+        "condition_002",
+        "condition_003",
+        "condition_004",
+        "condition_005",
+    }
+    assert set(excluded["condition_id"]) == set(inclusive["condition_id"])
+    assert "unkeyed" not in set(inclusive["condition_id"])
+    assert "unkeyed" not in set(excluded["condition_id"])
+
+    a_inclusive = inclusive.loc[
+        (inclusive["condition_id"] == "condition_001")
+        & (inclusive["fluorophore"] == "488_509")
+        & (inclusive["time_seconds"] == 120.0)
+    ].iloc[0]
+    a_excluded = excluded.loc[
+        (excluded["condition_id"] == "condition_001")
+        & (excluded["fluorophore"] == "488_509")
+        & (excluded["time_seconds"] == 120.0)
+    ].iloc[0]
+    assert a_inclusive["replicate_count"] == 4
+    assert a_inclusive["mean_rfu"] == pytest.approx(np.mean([100.0, 101.0, 102.0, 130.0]))
+    assert a_inclusive["sd_rfu"] == pytest.approx(np.std([100.0, 101.0, 102.0, 130.0], ddof=1))
+    assert a_excluded["replicate_count"] == 3
+    assert a_excluded["mean_rfu"] == pytest.approx(101.0)
+    assert a_excluded["sd_rfu"] == pytest.approx(np.std([100.0, 101.0, 102.0], ddof=1))
+
+    d_candidate_only = excluded.loc[
+        (excluded["condition_id"] == "condition_002")
+        & (excluded["fluorophore"] == "488_509")
+        & (excluded["time_seconds"] == 120.0)
+    ].iloc[0]
+    assert d_candidate_only["replicate_count"] == 4
+    assert d_candidate_only["mean_rfu"] == pytest.approx(np.mean([100.0, 101.0, 102.0, 113.0]))
+    assert d_candidate_only["sd_rfu"] == pytest.approx(np.std([100.0, 101.0, 102.0, 113.0], ddof=1))
+
+    e_candidate_only = excluded.loc[
+        (excluded["condition_id"] == "condition_004")
+        & (excluded["fluorophore"] == "488_509")
+        & (excluded["time_seconds"] == 120.0)
+    ].iloc[0]
+    assert e_candidate_only["replicate_count"] == 4
+    assert e_candidate_only["mean_rfu"] == pytest.approx(102.5)
+
+    f_excluded = excluded.loc[
+        (excluded["condition_id"] == "condition_005")
+        & (excluded["fluorophore"] == "488_509")
+        & (excluded["time_seconds"] == 120.0)
+    ].iloc[0]
+    assert f_excluded["replicate_count"] == 3
+    assert f_excluded["mean_rfu"] == pytest.approx(200.0)
+    assert f_excluded["sd_rfu"] == pytest.approx(0.0)
+
+    including_png = (
+        result.output_dir
+        / "timecourses_combined"
+        / "488_509_all_conditions_including_outliers.png"
+    )
+    excluding_png = (
+        result.output_dir
+        / "timecourses_combined"
+        / "488_509_all_conditions_excluding_outliers.png"
+    )
+    assert including_png.stat().st_size > 0
+    assert excluding_png.stat().st_size > 0
+    assert set(result.combined_timecourse_plot_pngs) == {including_png, excluding_png}
+
+
 def test_cli_with_merged_csv_creates_expected_outputs(tmp_path, capsys):
     merged_csv = _write_synthetic_merged_csv(tmp_path / "experiment_merged_tidy.csv")
     output_dir = tmp_path / "custom_analysis"
@@ -288,16 +365,25 @@ def test_cli_with_merged_csv_creates_expected_outputs(tmp_path, capsys):
     assert (output_dir / "endpoint_by_well.csv").exists()
     assert (output_dir / "composition_summary.csv").exists()
     assert (output_dir / "timecourse_summary.csv").exists()
+    assert (output_dir / "timecourse_summary_excluding_outliers.csv").exists()
     assert (output_dir / "outlier_summary.csv").exists()
     assert (output_dir / "heatmaps_absolute_rfu" / "488_509_endpoint_rfu.png").exists()
     assert (output_dir / "heatmaps_endpoint_outliers" / "488_509_endpoint_outlier_count.png").exists()
     assert (output_dir / "timecourses" / "condition_001_488_509_timecourse.png").exists()
+    assert (
+        output_dir / "timecourses_combined" / "488_509_all_conditions_including_outliers.png"
+    ).exists()
+    assert (
+        output_dir / "timecourses_combined" / "488_509_all_conditions_excluding_outliers.png"
+    ).exists()
 
     captured = capsys.readouterr()
     assert "Endpoint rows: 4" in captured.out
     assert "Composition rows: 2" in captured.out
+    assert "Timecourse summary excluding outliers:" in captured.out
     assert "Endpoint outliers: 0" in captured.out
     assert "Timecourse plots: 2" in captured.out
+    assert "Combined timecourse plots: 2" in captured.out
 
 
 def test_cli_with_experiment_directory_uses_single_existing_merged_csv(tmp_path):

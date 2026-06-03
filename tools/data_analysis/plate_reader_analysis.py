@@ -75,6 +75,7 @@ class AnalysisResult:
     endpoint_csv: Path
     composition_summary_csv: Path
     timecourse_summary_csv: Path
+    timecourse_excluding_outliers_summary_csv: Path
     outlier_summary_csv: Path
     absolute_heatmap_csvs: list[Path]
     absolute_heatmap_pngs: list[Path]
@@ -83,6 +84,7 @@ class AnalysisResult:
     outlier_heatmap_csvs: list[Path]
     outlier_heatmap_pngs: list[Path]
     timecourse_plot_pngs: list[Path]
+    combined_timecourse_plot_pngs: list[Path]
     outlier_count: int
     condition_columns: list[str]
     endpoint_rows: int
@@ -551,6 +553,62 @@ def write_condition_timecourse_plot(
     plt.close(fig)
 
 
+def build_condition_color_map(condition_ids: list[str]) -> dict[str, tuple[float, float, float]]:
+    if not condition_ids:
+        return {}
+    palette = sns.color_palette("husl", n_colors=len(condition_ids))
+    return dict(zip(condition_ids, palette))
+
+
+def write_combined_condition_timecourse_plot(
+    summary_data: pd.DataFrame,
+    path: str | Path,
+    *,
+    fluorophore: str,
+    title_suffix: str,
+    color_by_condition: dict[str, tuple[float, float, float]],
+) -> None:
+    fig, ax = plt.subplots(figsize=(13, 7), constrained_layout=True)
+    plotted_conditions = 0
+
+    condition_ids = sorted(summary_data["condition_id"].dropna().astype(str).unique())
+    for condition_id in condition_ids:
+        condition_summary = summary_data.loc[summary_data["condition_id"] == condition_id].sort_values("time_seconds")
+        if condition_summary.empty:
+            continue
+
+        color = color_by_condition.get(condition_id, "tab:blue")
+        x = condition_summary["time_minutes"].to_numpy(dtype=float)
+        mean = condition_summary["mean_rfu"].to_numpy(dtype=float)
+        sd = condition_summary["sd_rfu"].fillna(0).to_numpy(dtype=float)
+        ax.fill_between(x, mean - sd, mean + sd, color=color, alpha=0.14, linewidth=0)
+        ax.plot(x, mean, color=color, linewidth=2.0, label=condition_id)
+        plotted_conditions += 1
+
+    if plotted_conditions:
+        ax.legend(
+            title="Composition",
+            frameon=False,
+            bbox_to_anchor=(1.01, 1.0),
+            loc="upper left",
+        )
+    else:
+        ax.text(
+            0.5,
+            0.5,
+            "No keyed composition data",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+        )
+
+    ax.set_title(f"{fluorophore}\n{title_suffix}")
+    ax.set_xlabel("Time (min)")
+    ax.set_ylabel("RFU")
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
 def build_plate_heatmap(endpoint: pd.DataFrame, fluorophore: str, value_column: str) -> pd.DataFrame:
     channel = endpoint.loc[endpoint["fluorophore"] == fluorophore]
     matrix = channel.pivot(index="plate_row", columns="plate_col", values=value_column)
@@ -617,10 +675,12 @@ def analyze_merged_tidy_csv(
     percent_dir = output_root / "heatmaps_condition_percent_difference"
     outlier_dir = output_root / "heatmaps_endpoint_outliers"
     timecourse_dir = output_root / "timecourses"
+    combined_timecourse_dir = output_root / "timecourses_combined"
     absolute_dir.mkdir(parents=True, exist_ok=True)
     percent_dir.mkdir(parents=True, exist_ok=True)
     outlier_dir.mkdir(parents=True, exist_ok=True)
     timecourse_dir.mkdir(parents=True, exist_ok=True)
+    combined_timecourse_dir.mkdir(parents=True, exist_ok=True)
 
     merged = load_merged_tidy(merged_csv)
     prepared, condition_columns = prepare_analysis_dataframe(merged)
@@ -631,14 +691,27 @@ def analyze_merged_tidy_csv(
     )
     summary = summarize_compositions(endpoint, condition_columns)
     timecourse_summary = summarize_condition_timecourses(prepared, condition_columns)
+    endpoint_flags = endpoint[["well", "fluorophore", "is_endpoint_outlier"]]
+    keyed_prepared = prepared.loc[prepared["condition_id"] != UNKEYED_CONDITION_ID].merge(
+        endpoint_flags,
+        on=["well", "fluorophore"],
+        how="left",
+    )
+    keyed_prepared["is_endpoint_outlier"] = keyed_prepared["is_endpoint_outlier"].fillna(False)
+    timecourse_summary_excluding_outliers = summarize_condition_timecourses(
+        keyed_prepared.loc[~keyed_prepared["is_endpoint_outlier"].astype(bool)],
+        condition_columns,
+    )
 
     endpoint_csv = output_root / "endpoint_by_well.csv"
     composition_summary_csv = output_root / "composition_summary.csv"
     timecourse_summary_csv = output_root / "timecourse_summary.csv"
+    timecourse_excluding_outliers_summary_csv = output_root / "timecourse_summary_excluding_outliers.csv"
     outlier_summary_csv = output_root / "outlier_summary.csv"
     endpoint.to_csv(endpoint_csv, index=False)
     summary.to_csv(composition_summary_csv, index=False)
     timecourse_summary.to_csv(timecourse_summary_csv, index=False)
+    timecourse_summary_excluding_outliers.to_csv(timecourse_excluding_outliers_summary_csv, index=False)
     endpoint.loc[endpoint["is_endpoint_outlier"].astype(bool)].to_csv(outlier_summary_csv, index=False)
 
     absolute_csvs: list[Path] = []
@@ -648,13 +721,7 @@ def analyze_merged_tidy_csv(
     outlier_csvs: list[Path] = []
     outlier_pngs: list[Path] = []
     timecourse_pngs: list[Path] = []
-    endpoint_flags = endpoint[["well", "fluorophore", "is_endpoint_outlier"]]
-    keyed_prepared = prepared.loc[prepared["condition_id"] != UNKEYED_CONDITION_ID].merge(
-        endpoint_flags,
-        on=["well", "fluorophore"],
-        how="left",
-    )
-    keyed_prepared["is_endpoint_outlier"] = keyed_prepared["is_endpoint_outlier"].fillna(False)
+    combined_timecourse_pngs: list[Path] = []
     for (condition_id, fluorophore), plot_summary in timecourse_summary.groupby(["condition_id", "fluorophore"]):
         plot_replicates = keyed_prepared.loc[
             (keyed_prepared["condition_id"] == condition_id)
@@ -675,6 +742,35 @@ def analyze_merged_tidy_csv(
             condition_label=condition_label,
         )
         timecourse_pngs.append(timecourse_png)
+
+    for fluorophore in sorted(timecourse_summary["fluorophore"].dropna().astype(str).unique()):
+        inclusive_summary = timecourse_summary.loc[timecourse_summary["fluorophore"] == fluorophore]
+        excluded_summary = timecourse_summary_excluding_outliers.loc[
+            timecourse_summary_excluding_outliers["fluorophore"] == fluorophore
+        ]
+        condition_ids = sorted(inclusive_summary["condition_id"].dropna().astype(str).unique())
+        color_by_condition = build_condition_color_map(condition_ids)
+        safe_name = safe_filename(fluorophore)
+
+        including_png = combined_timecourse_dir / f"{safe_name}_all_conditions_including_outliers.png"
+        write_combined_condition_timecourse_plot(
+            inclusive_summary,
+            including_png,
+            fluorophore=fluorophore,
+            title_suffix="All keyed compositions including endpoint outliers",
+            color_by_condition=color_by_condition,
+        )
+        combined_timecourse_pngs.append(including_png)
+
+        excluding_png = combined_timecourse_dir / f"{safe_name}_all_conditions_excluding_outliers.png"
+        write_combined_condition_timecourse_plot(
+            excluded_summary,
+            excluding_png,
+            fluorophore=fluorophore,
+            title_suffix="All keyed compositions excluding endpoint outliers",
+            color_by_condition=color_by_condition,
+        )
+        combined_timecourse_pngs.append(excluding_png)
 
     for fluorophore in sorted(endpoint["fluorophore"].dropna().astype(str).unique()):
         safe_name = safe_filename(fluorophore)
@@ -729,6 +825,7 @@ def analyze_merged_tidy_csv(
         endpoint_csv=endpoint_csv,
         composition_summary_csv=composition_summary_csv,
         timecourse_summary_csv=timecourse_summary_csv,
+        timecourse_excluding_outliers_summary_csv=timecourse_excluding_outliers_summary_csv,
         outlier_summary_csv=outlier_summary_csv,
         absolute_heatmap_csvs=absolute_csvs,
         absolute_heatmap_pngs=absolute_pngs,
@@ -737,6 +834,7 @@ def analyze_merged_tidy_csv(
         outlier_heatmap_csvs=outlier_csvs,
         outlier_heatmap_pngs=outlier_pngs,
         timecourse_plot_pngs=timecourse_pngs,
+        combined_timecourse_plot_pngs=combined_timecourse_pngs,
         outlier_count=int(endpoint["is_endpoint_outlier"].sum()),
         condition_columns=condition_columns,
         endpoint_rows=len(endpoint),

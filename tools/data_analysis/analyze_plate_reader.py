@@ -131,12 +131,14 @@ def print_summary(result: analysis.AnalysisResult, merged_csv: Path) -> None:
     print(f"Endpoint table: {result.endpoint_csv}")
     print(f"Composition summary: {result.composition_summary_csv}")
     print(f"Timecourse summary: {result.timecourse_summary_csv}")
+    print(f"Timecourse summary excluding outliers: {result.timecourse_excluding_outliers_summary_csv}")
     print(f"Outlier summary: {result.outlier_summary_csv}")
     print(f"Endpoint outliers: {result.outlier_count}")
     print(f"Absolute RFU heatmaps: {len(result.absolute_heatmap_pngs)}")
     print(f"Condition percent-difference heatmaps: {len(result.percent_difference_heatmap_pngs)}")
     print(f"Endpoint outlier heatmaps: {len(result.outlier_heatmap_pngs)}")
     print(f"Timecourse plots: {len(result.timecourse_plot_pngs)}")
+    print(f"Combined timecourse plots: {len(result.combined_timecourse_plot_pngs)}")
 
 
 def main(argv: list[str] | None = None) -> int:
