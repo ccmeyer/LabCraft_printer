@@ -432,6 +432,8 @@ def test_pressure_sweep_constructor_initializes_bounds_before_nominal_target_pla
     assert (proc.y_lo, proc.y_hi) == (0, 30000)
     assert (proc.z_lo, proc.z_hi) == (0, 30000)
     assert proc.plan
+    assert len(proc.plan) == 1
+    assert proc.plan[0]["pressure"] == 1.2
     assert proc.plan[0]["target_plane_reachable"] is True
     assert proc.plan[0]["nominal_delay_us"] == 14000
     assert proc.plan[0]["nominal_target_xyz"] == [1200, 2000, 8000]

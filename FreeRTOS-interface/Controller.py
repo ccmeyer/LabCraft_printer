@@ -4713,6 +4713,9 @@ class Controller(QObject):
     def start_pressure_scan_calibration(self):
         self.model.calibration_manager.start_pressure_scan_calibration()
 
+    def start_conservative_pressure_scan_calibration(self):
+        self.model.calibration_manager.start_conservative_pressure_scan_calibration()
+
     def start_prebreakup_morphology_calibration(
         self,
         *,

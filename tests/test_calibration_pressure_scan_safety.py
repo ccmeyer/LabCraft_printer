@@ -75,6 +75,26 @@ def test_pressure_scan_constructor_honors_auto_stop_on_nozzle_wet_flag(monkeypat
     assert p_false.auto_stop_on_nozzle_wet is False
 
 
+def test_pressure_scan_constructor_configures_single_candidate_mode(monkeypatch):
+    monkeypatch.setattr(calibration_model, "QState", _DummyState)
+    monkeypatch.setattr(calibration_model, "QFinalState", _DummyState)
+    monkeypatch.setattr(calibration_model, "QStateMachine", _DummyStateMachine)
+    monkeypatch.setattr(
+        PressureBandCalibrationProcess,
+        "missing_requirements",
+        staticmethod(lambda _cm: []),
+    )
+
+    cm, model = _build_inputs()
+    proc = PressureBandCalibrationProcess(cm, model, mode="single_candidate")
+
+    assert proc.pressure_scan_mode == "single_candidate"
+    assert proc.initial_reps_target == 1
+    assert proc.replicates_target == 1
+    assert proc.discard_first_after_major_pressure_change is False
+    assert proc.backtrack_after_first_single is False
+
+
 def test_pressure_scan_prefers_emergence_refined_nozzle_center(monkeypatch):
     monkeypatch.setattr(calibration_model, "QState", _DummyState)
     monkeypatch.setattr(calibration_model, "QFinalState", _DummyState)

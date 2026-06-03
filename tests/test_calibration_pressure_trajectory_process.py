@@ -2,12 +2,39 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from tests.calibration_test_utils import Recorder, ensure_calibration_import_stubs
+from tests.calibration_test_utils import Recorder, SignalStub, ensure_calibration_import_stubs
 
 
 ensure_calibration_import_stubs()
 
+import CalibrationClasses.Model as calibration_model  # noqa: E402
 from CalibrationClasses.Model import PressureTrajectoryCalibrationProcess  # noqa: E402
+
+
+class _DummyState:
+    def __init__(self, *args, **kwargs):
+        self.entered = SignalStub()
+
+    def addTransition(self, *args, **kwargs):
+        return None
+
+
+class _DummyStateMachine:
+    def __init__(self, *args, **kwargs):
+        self.states = []
+        self.initial = None
+
+    def addState(self, st):
+        self.states.append(st)
+
+    def setInitialState(self, st):
+        self.initial = st
+
+    def start(self):
+        return None
+
+    def stop(self):
+        return None
 
 
 def test_pressure_trajectory_missing_requirements_primary_band_optional_with_explicit_pressures():
@@ -43,6 +70,39 @@ def test_pressure_trajectory_missing_requirements_accepts_prebreakup_published_b
     assert req_default == []
 
 
+def test_pressure_trajectory_single_candidate_band_scans_one_locked_pressure(monkeypatch):
+    monkeypatch.setattr(calibration_model, "QState", _DummyState)
+    monkeypatch.setattr(calibration_model, "QFinalState", _DummyState)
+    monkeypatch.setattr(calibration_model, "QStateMachine", _DummyStateMachine)
+
+    cm = SimpleNamespace(
+        get_nozzle_center=lambda: {"X": 0, "Y": 0, "Z": 0},
+        get_pressure_scan_nozzle_center_image_position=lambda: (100, 100),
+        get_real_nozzle_center_image_position=lambda: (100, 100),
+        get_background_image=lambda: np.zeros((64, 64), dtype=np.uint8),
+        get_emergence_time=lambda: 4500,
+        get_primary_pressure_band=lambda: (1.0, 1.0),
+        get_pressure_scan_result=lambda: {
+            "pressure_scan_mode": "single_candidate",
+            "lock_pressure_for_trajectory": True,
+            "primary_band": [1.0, 1.0],
+        },
+        settingsChangeCompleted=SignalStub(),
+        captureCompleted=SignalStub(),
+    )
+    model = SimpleNamespace(
+        machine_model=SimpleNamespace(
+            get_print_pulse_width=lambda: 1600,
+            get_print_pressure_bounds=lambda: (0.3, 2.0),
+        )
+    )
+
+    proc = PressureTrajectoryCalibrationProcess(cm, model)
+
+    assert proc.pressures == [1.0]
+    assert proc.lock_pressure_adjustments is True
+
+
 def test_pressure_trajectory_settings_timeout_emits_error_and_finalizes():
     proc = PressureTrajectoryCalibrationProcess.__new__(PressureTrajectoryCalibrationProcess)
     proc.settings_timeout_ms = 12000
@@ -66,6 +126,76 @@ def test_pressure_trajectory_settings_timeout_emits_error_and_finalizes():
     )
 
     assert proc.calibrationError.calls
+    assert proc.finalize.calls
+
+
+def test_pressure_trajectory_locked_pressure_fails_on_multiple_instead_of_adjusting():
+    proc = PressureTrajectoryCalibrationProcess.__new__(PressureTrajectoryCalibrationProcess)
+    proc.lock_pressure_adjustments = True
+    proc._discard_next = False
+    proc._current_pressure = 1.0
+    proc.d_index = 0
+    proc.delays_us = [5000]
+    proc.droplet_image = np.zeros((64, 64), dtype=np.uint8)
+    proc.background_image = np.zeros((64, 64), dtype=np.uint8)
+    proc.nozzle_center_px = (10, 10)
+    proc.model = SimpleNamespace(
+        droplet_camera_model=SimpleNamespace(
+            identify_droplets=lambda *args, **kwargs: (
+                [(10, 30), (20, 34)],
+                None,
+                np.zeros((64, 64), dtype=np.uint8),
+                {},
+            )
+        )
+    )
+    proc.calibrationError = Recorder()
+    proc.finalize = Recorder()
+    proc._record_error = lambda *args, **kwargs: None
+
+    proc.onAnalyzeTimepoint()
+
+    assert proc.calibrationError.calls
+    assert "multiple droplets" in proc.calibrationError.calls[0][0][0]
+    assert proc.finalize.calls
+
+
+def test_pressure_trajectory_locked_pressure_fails_on_low_pressure_retraction():
+    proc = PressureTrajectoryCalibrationProcess.__new__(PressureTrajectoryCalibrationProcess)
+    proc.lock_pressure_adjustments = True
+    proc._current_pressure = 1.0
+    proc._pending_pressure_adjustment = None
+    proc._pending_adjust_reason = None
+    proc._pending_adjust_payload = {}
+    proc._failed_caps_this_delay = 0
+    proc.max_failed_captures_per_delay = 4
+    proc._rep_count = 3
+    proc.replicates_per_delay = 3
+    proc._analyze_good = True
+    proc._rep_buffer = [(2.0, 10.0), (2.0, 10.0), (2.0, 10.0)]
+    proc.points = [{"t_us": 5000, "center_px": (2.0, 20.0)}]
+    proc.d_index = 1
+    proc.delays_us = [5000, 5700]
+    proc._completed = [True, False]
+    proc._stop_delays_after_this = False
+    proc.min_points = 2
+    proc._min_points_for_retraction_check = 2
+    proc._min_delay_span_us_for_retraction = 100
+    proc._reverse_step_px = 1.0
+    proc._min_radial_growth_px = 4.0
+    proc._min_downward_growth_px = 6.0
+    proc._min_downward_slope_px_per_us = 0.001
+    proc._low_pressure_adjusted_this_pressure = False
+    proc.calibrationError = Recorder()
+    proc.finalize = Recorder()
+    proc.stageChanged = Recorder()
+    proc._record_error = lambda *args, **kwargs: None
+    proc._record_decision = lambda *args, **kwargs: None
+
+    proc.onDecide()
+
+    assert proc.calibrationError.calls
+    assert "valid droplet motion" in proc.calibrationError.calls[0][0][0]
     assert proc.finalize.calls
 
 

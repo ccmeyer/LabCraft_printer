@@ -1617,6 +1617,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._register_calibration_action_button("pressure_scan", self.calibrate_pressure_scan_button)
         calib_grid.addWidget(self.calibrate_pressure_scan_button, crow, 0, 1, 2); crow += 1
 
+        self.find_single_pressure_button = QtWidgets.QPushButton("Find Single Pressure")
+        self.find_single_pressure_button.clicked.connect(self.toggle_start_single_pressure_scan_calibration)
+        self._register_calibration_action_button("single_pressure_scan", self.find_single_pressure_button)
+        calib_grid.addWidget(self.find_single_pressure_button, crow, 0, 1, 2); crow += 1
+
         # self.calibrate_trajectory_button = QtWidgets.QPushButton("Calibrate Droplet Trajectory")
         # self.calibrate_trajectory_button.clicked.connect(self.toggle_start_trajectory_calibration)
         # calib_grid.addWidget(self.calibrate_trajectory_button, crow, 0, 1, 2); crow += 1
@@ -1742,6 +1747,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         self._calibration_readiness_button_specs = (
             ("pressure_scan", "pressure_scan"),
+            ("single_pressure_scan", "single_pressure_scan"),
             ("trajectory_pressure_scan", "pressure_trajectory"),
             ("droplet_characterization", "droplet_characterization"),
             ("pressure_sweep_characterization", "pressure_sweep_characterization"),
@@ -1886,10 +1892,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         droplet_workflow_grid.addWidget(self.num_pressure_tests_label, 1, 0)
         droplet_workflow_grid.addWidget(self.num_pressure_tests_spin, 1, 1)
         droplet_workflow_grid.addWidget(self.calibrate_pressure_scan_button, 2, 0, 1, 2)
-        droplet_workflow_grid.addWidget(self.scan_trajectory_button, 3, 0, 1, 2)
-        droplet_workflow_grid.addWidget(self.calibrate_pressure_sweep_button, 4, 0, 1, 2)
-        droplet_workflow_grid.addWidget(self.calibrate_all_button, 5, 0, 1, 2)
-        droplet_workflow_grid.addWidget(self.calibrate_characterization_button, 6, 0, 1, 2)
+        droplet_workflow_grid.addWidget(self.find_single_pressure_button, 3, 0, 1, 2)
+        droplet_workflow_grid.addWidget(self.scan_trajectory_button, 4, 0, 1, 2)
+        droplet_workflow_grid.addWidget(self.calibrate_pressure_sweep_button, 5, 0, 1, 2)
+        droplet_workflow_grid.addWidget(self.calibrate_all_button, 6, 0, 1, 2)
+        droplet_workflow_grid.addWidget(self.calibrate_characterization_button, 7, 0, 1, 2)
 
         self.stream_setup_widget = QtWidgets.QWidget()
         stream_setup_grid = QtWidgets.QGridLayout(self.stream_setup_widget)
@@ -4877,6 +4884,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 "nozzle_focus",
                 "droplet_emergence",
                 "pressure_scan",
+                "single_pressure_scan",
                 "pressure_trajectory",
                 "pressure_sweep_characterization",
                 "droplet_characterization",
@@ -6463,6 +6471,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "nozzle_focus",
             "droplet_emergence",
             "pressure_scan",
+            "single_pressure_scan",
             "pressure_trajectory",
             "pressure_sweep_characterization",
             "droplet_characterization",
@@ -6669,6 +6678,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "nozzle_focus",
             "droplet_emergence",
             "pressure_scan",
+            "single_pressure_scan",
             "pressure_trajectory",
             "pressure_sweep_characterization",
             "droplet_characterization",
@@ -6761,6 +6771,18 @@ class DropletImagingDialog(QtWidgets.QDialog):
             # Launch
             self._set_calibration_action_text("pressure_scan", "Stop Calibration")
             self.controller.start_pressure_scan_calibration()
+        self._refresh_manual_control_lock_state()
+
+    def toggle_start_single_pressure_scan_calibration(self):
+        """
+        Start/stop the conservative single-pressure discovery scan.
+        """
+        if self.model.calibration_manager.activeCalibration is not None:
+            self._set_calibration_action_text("single_pressure_scan", use_default=True)
+            self.controller.stop_calibration()
+        else:
+            self._set_calibration_action_text("single_pressure_scan", "Stop Calibration")
+            self.controller.start_conservative_pressure_scan_calibration()
         self._refresh_manual_control_lock_state()
 
     def toggle_start_pressure_trajectory_calibration(self):

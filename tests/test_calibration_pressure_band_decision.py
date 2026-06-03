@@ -1,3 +1,7 @@
+from types import SimpleNamespace
+
+import numpy as np
+
 from tests.calibration_test_utils import Recorder, ensure_calibration_import_stubs
 
 
@@ -6,14 +10,33 @@ ensure_calibration_import_stubs()
 from CalibrationClasses.Model import PressureBandCalibrationProcess  # noqa: E402
 
 
-def _rep(cls_name: str, *, dy: int | None = None, cy: int | None = None, h: int = 1536):
-    center = None if cy is None else (550, int(cy))
+def _rep(
+    cls_name: str,
+    *,
+    dy: int | None = None,
+    cy: int | None = None,
+    h: int = 1536,
+    center=None,
+    nozzle_contact: bool = False,
+    near_nozzle_residue: bool = False,
+    nozzle_wet: bool = False,
+    too_close: bool = False,
+):
+    if center is not None:
+        center_value = tuple(center)
+    else:
+        center_value = None if cy is None else (550, int(cy))
     return {
         "cls": str(cls_name),
-        "center_px": center,
+        "center_px": center_value,
         "dy_min_px": dy,
         "nozzle_attached_area": 0,
-        "nozzle_wet": False,
+        "nozzle_contact": bool(nozzle_contact or nozzle_wet),
+        "near_nozzle_residue": bool(near_nozzle_residue),
+        "near_nozzle_residue_area": 12000 if near_nozzle_residue else 0,
+        "near_nozzle_residue_components": 1 if near_nozzle_residue else 0,
+        "nozzle_wet": bool(nozzle_wet),
+        "too_close": bool(too_close),
         "frame_height_px": int(h),
         "stream_like_count": 0,
         "max_aspect_h_over_w": None,
@@ -91,6 +114,205 @@ def _build_decide_proc(reps):
     proc._choose_next_pressure = lambda verdict: proc._choose_calls.append(str(verdict))
     proc._advance_or_finish = lambda: proc._advance_calls.append(True)
     return proc
+
+
+def _build_single_candidate_proc(reps):
+    proc = PressureBandCalibrationProcess.__new__(PressureBandCalibrationProcess)
+    proc.pressure_scan_mode = "single_candidate"
+    proc.min_reps = 5
+    proc.replicates_target = 1
+    proc.single_candidate_confirmation_reps = 5
+    proc.single_candidate_center_std_tol_px = 8.0
+    proc.single_candidate_step_psi = 0.02
+    proc.single_candidate_max_pressures = 12
+    proc.single_candidate_max_span_psi = 0.30
+    proc.single_candidate_residue_persistent_area_px = 8000
+    proc.reps = list(reps)
+    proc.samples = []
+    proc._current_pressure = 1.00
+    proc.start_pressure = 1.00
+    proc.P_MIN = 0.30
+    proc.P_MAX = 2.00
+    proc.classify_delay_us = 5850
+    proc._pulse_width_us = 1600
+    proc._early_stop = False
+    proc._stop_reason = None
+    proc._terminate_at_pressure = None
+    proc._single_candidate_confirming = False
+    proc._single_candidate_candidate_pressure = None
+    proc._single_candidate_selected_pressure = None
+    proc._single_candidate_confirmation_summary = {}
+    proc._single_candidate_residue_checks = []
+    proc._single_candidate_failure_message = None
+    proc._single_candidate_residue_check_in_progress = False
+    proc._single_candidate_tested_pressures = []
+    proc.continueReplicate = Recorder()
+    proc.continueScan = Recorder()
+    proc.finalize = Recorder()
+    proc.stageChanged = Recorder()
+    proc.calibrationError = Recorder()
+    proc.calibrationDataUpdated = Recorder()
+    proc.calibrationCompleted = Recorder()
+    proc._record_decision = lambda *args, **kwargs: None
+    proc._record_error = lambda *args, **kwargs: None
+    proc.calibration_manager = SimpleNamespace(
+        set_primary_pressure_band=lambda _payload: None,
+    )
+    return proc
+
+
+def test_single_candidate_triage_none_steps_up_after_one_capture():
+    proc = _build_single_candidate_proc([_rep("none")])
+
+    proc.onDecide()
+
+    assert proc._next_pressure == 1.02
+    assert proc.continueScan.calls
+    assert proc.continueReplicate.calls == []
+
+
+def test_single_candidate_triage_contact_and_too_close_step_up():
+    for rep in (
+        _rep("none", nozzle_contact=True),
+        _rep("none", too_close=True),
+    ):
+        proc = _build_single_candidate_proc([rep])
+
+        proc.onDecide()
+
+        assert proc._next_pressure == 1.02
+        assert proc.continueScan.calls
+        assert proc.finalize.calls == []
+
+
+def test_single_candidate_triage_multiple_steps_down_after_one_capture():
+    proc = _build_single_candidate_proc([_rep("multiple")])
+
+    proc.onDecide()
+
+    assert proc._next_pressure == 0.98
+    assert proc.continueScan.calls
+
+
+def test_single_candidate_triage_single_collects_confirmation_reps():
+    proc = _build_single_candidate_proc([_rep("single", center=(100, 200))])
+
+    proc.onDecide()
+
+    assert proc._single_candidate_confirming is True
+    assert proc.replicates_target == 5
+    assert proc.continueReplicate.calls
+    assert proc.continueScan.calls == []
+
+
+def test_single_candidate_confirmation_finalizes_degenerate_band():
+    proc = _build_single_candidate_proc(
+        [_rep("single", center=(100 + i % 2, 200 + i % 2)) for i in range(5)]
+    )
+    proc._single_candidate_confirming = True
+    proc.replicates_target = 5
+    persisted = []
+    proc.calibration_manager = SimpleNamespace(
+        set_primary_pressure_band=lambda payload: persisted.append(dict(payload)),
+    )
+
+    proc.onDecide()
+    proc.onCalibrationCompleted()
+
+    assert proc.finalize.calls
+    assert proc.calibrationCompleted.calls
+    payload = proc.calibrationDataUpdated.calls[0][0][0]["result"]
+    assert payload["pressure_scan_mode"] == "single_candidate"
+    assert payload["primary_band"] == [1.0, 1.0]
+    assert payload["single_bands"] == [[1.0, 1.0]]
+    assert payload["lock_pressure_for_trajectory"] is True
+    assert persisted and persisted[0]["primary_band"] == [1.0, 1.0]
+
+
+def test_single_candidate_unstable_confirmation_rejects_and_steps_up():
+    proc = _build_single_candidate_proc(
+        [_rep("single", center=(100 + i * 30, 200)) for i in range(5)]
+    )
+    proc._single_candidate_confirming = True
+    proc.replicates_target = 5
+
+    proc.onDecide()
+
+    assert proc._next_pressure == 1.02
+    assert proc.continueScan.calls
+    assert proc.finalize.calls == []
+
+
+def test_single_candidate_residue_starts_background_verification():
+    proc = _build_single_candidate_proc([_rep("single", center=(100, 200), near_nozzle_residue=True)])
+    calls = []
+    proc._start_single_candidate_residue_verification = (
+        lambda *, trigger, decision=None: calls.append((trigger, dict(decision or {})))
+    )
+
+    proc.onDecide()
+
+    assert calls and calls[0][0] == "triage"
+    assert proc.continueScan.calls == []
+
+
+def test_single_candidate_persistent_residue_stops_with_cleanup_message():
+    proc = _build_single_candidate_proc([_rep("single", center=(100, 200), near_nozzle_residue=True)])
+    proc.model = SimpleNamespace(
+        droplet_camera_model=SimpleNamespace(
+            identify_droplets=lambda *args, **kwargs: (
+                None,
+                12000,
+                np.zeros((20, 20), dtype=np.uint8),
+                {
+                    "near_nozzle_residue_detected": True,
+                    "nozzle_contact_detected": False,
+                    "nozzle_attached_area": 12000,
+                },
+            )
+        )
+    )
+    proc.background_image = np.zeros((20, 20), dtype=np.uint8)
+    proc.nozzle_center_px = (10, 10)
+
+    proc._finish_single_candidate_residue_verification(
+        np.zeros((20, 20), dtype=np.uint8),
+        trigger="triage",
+        decision={},
+    )
+
+    assert proc.finalize.calls
+    assert "clean the printer head bottom" in proc._single_candidate_failure_message
+
+
+def test_single_candidate_disappearing_residue_steps_up_as_under_ejection():
+    proc = _build_single_candidate_proc([_rep("single", center=(100, 200), near_nozzle_residue=True)])
+    proc.model = SimpleNamespace(
+        droplet_camera_model=SimpleNamespace(
+            identify_droplets=lambda *args, **kwargs: (
+                None,
+                None,
+                np.zeros((20, 20), dtype=np.uint8),
+                {
+                    "near_nozzle_residue_detected": False,
+                    "nozzle_contact_detected": False,
+                    "nozzle_attached_area": 0,
+                },
+            )
+        )
+    )
+    proc.background_image = np.zeros((20, 20), dtype=np.uint8)
+    proc.nozzle_center_px = (10, 10)
+
+    proc._finish_single_candidate_residue_verification(
+        np.zeros((20, 20), dtype=np.uint8),
+        trigger="triage",
+        decision={},
+    )
+
+    assert proc._next_pressure == 1.02
+    assert proc.continueScan.calls
+    assert proc.finalize.calls == []
 
 
 def test_pressure_band_on_decide_escalates_ambiguous_after_min_reps():
