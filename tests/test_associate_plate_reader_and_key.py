@@ -81,6 +81,63 @@ def _write_single_channel_plate_export(path: Path) -> None:
         writer.writerows(rows)
 
 
+def _matrix_timepoint_rows(time: str, temperature: str, values: tuple[int, int, int, int]) -> list[list[str]]:
+    a1, a2, b1, b2 = values
+    rows = [
+        [time, temperature, str(a1), str(a2), ""],
+        ["", "", str(b1), str(b2), ""],
+    ]
+    rows.extend([["", "", "", "", ""] for _ in range(14)])
+    return rows
+
+
+def _write_matrix_plate_export(path: Path) -> None:
+    metadata_row = [""] * 33
+    metadata_values = {
+        0: "Plate:",
+        1: "Plate1",
+        2: "1.3",
+        3: "PlateFormat",
+        4: "Kinetic",
+        5: "Fluorescence",
+        6: "TRUE",
+        7: "Raw",
+        8: "FALSE",
+        9: "37",
+        10: "600",
+        11: "300",
+        15: "1",
+        16: "509 ",
+        17: "1",
+        18: "5",
+        19: "384",
+        20: "488 ",
+        21: "Automatic",
+        22: "495 ",
+        25: "6",
+        26: "Medium",
+        29: "1",
+        30: "16",
+    }
+    for index, value in metadata_values.items():
+        metadata_row[index] = value
+
+    rows = [
+        ["##BLOCKS= 1"],
+        metadata_row,
+        ["", "Temperature(C)", "1", "2", "3"],
+    ]
+    rows.extend(_matrix_timepoint_rows("00:00:00", "36.5", (10, 20, 30, 40)))
+    rows.append([])
+    rows.extend(_matrix_timepoint_rows("00:05:00", "37.0", (11, 21, 31, 41)))
+    rows.extend([[], ["~End"]])
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-16", newline="") as handle:
+        writer = csv.writer(handle, delimiter="\t")
+        writer.writerows(rows)
+
+
 def _write_key(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -90,6 +147,22 @@ def _write_key(path: Path) -> None:
                 "A1,1.0,5.0,10,20",
                 "A2,2.0,6.0,11,21",
                 "A4,4.0,8.0,12,22",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _write_matrix_key(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(
+            [
+                "Well ID,DNA_mM,Water_--",
+                "A1,1.0,10",
+                "A2,2.0,11",
+                "B1,3.0,12",
             ]
         )
         + "\n",
@@ -212,6 +285,30 @@ def test_single_channel_export_with_split_ex_em_metadata_is_parsed(tmp_path):
     assert merged.groupby("fluorophore")["time"].nunique().to_dict() == {"485_510": 2}
     assert summary.keyed_wells == ["A1", "A2"]
     assert summary.missing_key_wells == ["A4"]
+
+
+def test_matrix_txt_export_discovers_inputs_and_maps_plate_rows(tmp_path):
+    exp_dir = tmp_path / "MatrixReader-20260602_135844"
+    plate = exp_dir / "MatrixReader_LabCraft.txt"
+    key = exp_dir / "concentration_key.csv"
+    _write_matrix_plate_export(plate)
+    _write_matrix_key(key)
+
+    assert mod.main([str(exp_dir)]) == 0
+
+    out = exp_dir / "MatrixReader_LabCraft_merged_tidy.csv"
+    df = _read_output(out)
+    assert len(df) == 8
+    assert set(df["well"]) == {"A1", "A2", "B1", "B2"}
+    assert set(df["fluorophore"]) == {"488_509"}
+    assert set(df["excitation_nm"]) == {488}
+    assert set(df["emission_nm"]) == {509}
+    assert "Water_--" not in df.columns
+
+    b2_final = df.loc[(df["well"] == "B2") & (df["time"] == "00:05:00")].iloc[0]
+    assert b2_final["rfu"] == 41
+    assert b2_final["temperature_c"] == 37.0
+    assert not bool(b2_final["is_keyed"])
 
 
 def test_keyed_and_unkeyed_wells_are_retained_with_is_keyed(tmp_path):

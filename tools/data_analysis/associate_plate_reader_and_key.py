@@ -7,7 +7,7 @@ Primary workflow:
 
 The experiment directory must contain:
 - concentration_key.csv
-- one plate-reader export matching *_data.xls
+- one plate-reader export matching *_data.xls, or one plate-reader .txt export
 
 The plate-reader export may have an .xls extension, but is expected to be a
 UTF-16, tab-delimited text export.
@@ -30,8 +30,9 @@ WELL_RE = re.compile(r"^[A-P](?:[1-9]|1[0-9]|2[0-4])$")
 EX_EM_RE = re.compile(r"^(\d+)\s+(\d+)$")
 WAVELENGTH_RE = re.compile(r"^\d{3}(?:\.0)?$")
 TIME_RE = re.compile(r"^\d{2}:\d{2}:\d{2}$")
+PLATE_ROW_LABELS = "ABCDEFGHIJKLMNOP"
 DEFAULT_KEY_FILENAME = "concentration_key.csv"
-DEFAULT_PLATE_PATTERN = "*_data.xls"
+DEFAULT_PLATE_PATTERN = "*_data.xls or plate-reader .txt"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_EXPERIMENTS_DIR = REPO_ROOT / "FreeRTOS-interface" / "Experiments"
 
@@ -169,6 +170,32 @@ def split_into_blocks(data_rows: list[list[str]]) -> list[list[list[str]]]:
     return blocks
 
 
+def is_matrix_plate_header(header_row: list[str]) -> bool:
+    if len(header_row) < 3:
+        return False
+    if str(header_row[0]).strip() != "":
+        return False
+    if not str(header_row[1]).strip().lower().startswith("temperature"):
+        return False
+
+    numeric_headers = [str(cell).strip() for cell in header_row[2:] if str(cell).strip()]
+    if not numeric_headers:
+        return False
+    return all(header.isdigit() for header in numeric_headers)
+
+
+def matrix_column_indices(header_row: list[str]) -> list[tuple[int, int]]:
+    columns: list[tuple[int, int]] = []
+    for index, raw in enumerate(header_row):
+        text = str(raw).strip()
+        if not text.isdigit():
+            continue
+        plate_column = int(text)
+        if 1 <= plate_column <= 24:
+            columns.append((index, plate_column))
+    return columns
+
+
 def parse_fluorophore_label(label: str) -> tuple[int | None, int | None]:
     match = re.match(r"^(\d+)_(\d+)$", str(label).strip())
     if not match:
@@ -176,14 +203,84 @@ def parse_fluorophore_label(label: str) -> tuple[int | None, int | None]:
     return int(match.group(1)), int(match.group(2))
 
 
-def parse_plate_reader(path: str | Path) -> pd.DataFrame:
-    rows = read_plate_rows(path)
-    if len(rows) < 4:
-        raise ValueError("Plate-reader file is too short to parse.")
+def parse_matrix_plate_reader_rows(rows: list[list[str]], metadata_row: list[str], header_row: list[str]) -> pd.DataFrame:
+    channel_labels = extract_channel_labels(metadata_row, expected_count=1)
+    if len(channel_labels) != 1:
+        raise ValueError(
+            f"Matrix plate-reader export must contain exactly one channel label; found {len(channel_labels)}."
+        )
 
-    metadata_row = rows[1]
-    header_row = rows[2]
+    fluorophore = channel_labels[0]
+    excitation_nm, emission_nm = parse_fluorophore_label(fluorophore)
+    column_indices = matrix_column_indices(header_row)
+    if not column_indices:
+        raise ValueError("No numbered plate columns were detected in the matrix plate-reader header.")
 
+    tidy_records: list[dict[str, object]] = []
+    current_time = ""
+    current_temperature = ""
+    current_plate_row = -1
+
+    for row in rows[3:]:
+        if not row or all(str(cell).strip() == "" for cell in row):
+            if current_time and 0 <= current_plate_row < len(PLATE_ROW_LABELS) - 1:
+                current_plate_row += 1
+                continue
+            current_time = ""
+            current_temperature = ""
+            current_plate_row = -1
+            continue
+        if str(row[0]).strip().startswith("~End"):
+            break
+
+        first_cell = str(row[0]).strip()
+        if TIME_RE.match(first_cell):
+            current_time = first_cell
+            current_temperature = str(row[1]).strip() if len(row) > 1 else ""
+            current_plate_row = 0
+        elif current_time and first_cell == "":
+            current_plate_row += 1
+        else:
+            continue
+
+        if current_plate_row < 0 or current_plate_row >= len(PLATE_ROW_LABELS):
+            raise ValueError("Matrix plate-reader export has more plate rows than expected for a 384-well plate.")
+
+        plate_row_label = PLATE_ROW_LABELS[current_plate_row]
+        for col_idx, plate_column in column_indices:
+            value = row[col_idx].strip() if col_idx < len(row) else ""
+            if value == "":
+                continue
+            tidy_records.append(
+                {
+                    "time": current_time,
+                    "temperature_c": current_temperature,
+                    "well": f"{plate_row_label}{plate_column}",
+                    "fluorophore": fluorophore,
+                    "excitation_nm": excitation_nm,
+                    "emission_nm": emission_nm,
+                    "rfu": value,
+                }
+            )
+
+    plate_df = pd.DataFrame(tidy_records)
+    if plate_df.empty:
+        raise ValueError("No fluorescence values were parsed from the matrix plate-reader file.")
+
+    return finalize_plate_dataframe(plate_df)
+
+
+def finalize_plate_dataframe(plate_df: pd.DataFrame) -> pd.DataFrame:
+    plate_df = plate_df.copy()
+    plate_df["temperature_c"] = pd.to_numeric(plate_df["temperature_c"], errors="coerce")
+    plate_df["rfu"] = pd.to_numeric(plate_df["rfu"], errors="coerce")
+    plate_df["time_seconds"] = pd.to_timedelta(plate_df["time"], errors="coerce").dt.total_seconds()
+    plate_df["time_minutes"] = plate_df["time_seconds"] / 60.0
+
+    return sort_tidy_rows(plate_df)
+
+
+def parse_wide_plate_reader_rows(rows: list[list[str]], metadata_row: list[str], header_row: list[str]) -> pd.DataFrame:
     if len(header_row) < 3 or str(header_row[0]).strip() != "Time":
         raise ValueError("Unexpected plate-reader header row; expected 'Time' in the first column.")
 
@@ -231,12 +328,21 @@ def parse_plate_reader(path: str | Path) -> pd.DataFrame:
     if plate_df.empty:
         raise ValueError("No fluorescence values were parsed from the plate-reader file.")
 
-    plate_df["temperature_c"] = pd.to_numeric(plate_df["temperature_c"], errors="coerce")
-    plate_df["rfu"] = pd.to_numeric(plate_df["rfu"], errors="coerce")
-    plate_df["time_seconds"] = pd.to_timedelta(plate_df["time"], errors="coerce").dt.total_seconds()
-    plate_df["time_minutes"] = plate_df["time_seconds"] / 60.0
+    return finalize_plate_dataframe(plate_df)
 
-    return sort_tidy_rows(plate_df)
+
+def parse_plate_reader(path: str | Path) -> pd.DataFrame:
+    rows = read_plate_rows(path)
+    if len(rows) < 4:
+        raise ValueError("Plate-reader file is too short to parse.")
+
+    metadata_row = rows[1]
+    header_row = rows[2]
+
+    if is_matrix_plate_header(header_row):
+        return parse_matrix_plate_reader_rows(rows, metadata_row, header_row)
+
+    return parse_wide_plate_reader_rows(rows, metadata_row, header_row)
 
 
 def sort_tidy_rows(df: pd.DataFrame) -> pd.DataFrame:
@@ -340,7 +446,7 @@ def discover_plate_file(experiment_dir: Path) -> Path:
     candidates = sorted(
         path
         for path in experiment_dir.iterdir()
-        if path.is_file() and path.name.lower().endswith("_data.xls")
+        if path.is_file() and is_plate_reader_export_candidate(path)
     )
     if not candidates:
         raise ValueError(
@@ -353,6 +459,24 @@ def discover_plate_file(experiment_dir: Path) -> Path:
             f"Pass --plate-file to choose one. Candidates: {names}"
         )
     return candidates[0]
+
+
+def is_plate_reader_export_candidate(path: Path) -> bool:
+    if path.name.lower().endswith("_data.xls"):
+        return True
+    if path.suffix.lower() != ".txt":
+        return False
+
+    try:
+        with open(path, "r", encoding="utf-16", newline="") as handle:
+            first_line = handle.readline().strip()
+            second_line = handle.readline().strip()
+    except OSError:
+        raise
+    except UnicodeError:
+        return False
+
+    return first_line.startswith("##BLOCKS") and second_line.startswith("Plate:")
 
 
 def has_wildcard(path_text: str | Path) -> bool:
