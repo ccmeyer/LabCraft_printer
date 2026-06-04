@@ -8960,6 +8960,10 @@ class ExperimentDesignDialog(QDialog):
         self.new_btn.clicked.connect(self._on_new_experiment)
         controls_col.addWidget(self.new_btn)
 
+        self.duplicate_btn = QPushButton("Duplicate Design...")
+        self.duplicate_btn.clicked.connect(self._on_duplicate_design)
+        controls_col.addWidget(self.duplicate_btn)
+
         self.save_btn = QPushButton("Save Design…")
         self.save_btn.clicked.connect(self._on_save_design)
         controls_col.addWidget(self.save_btn)
@@ -10357,6 +10361,7 @@ class ExperimentDesignDialog(QDialog):
             "export_reaction_preview_btn",
             "run_btn",
             "new_btn",
+            "duplicate_btn",
             "save_btn",
             "load_btn",
             "finish_btn",
@@ -11653,6 +11658,90 @@ class ExperimentDesignDialog(QDialog):
         self._ensure_experiment_dir()
         self.model.save_experiment()
         self._set_status(f"Design saved to: {self.model.experiment_file_path}")
+
+    def _on_duplicate_design(self):
+        default_dir = None
+        try:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            maybe = os.path.join(script_dir, "Experiments")
+            default_dir = maybe if os.path.isdir(maybe) else None
+        except Exception:
+            pass
+
+        exp_dir = QFileDialog.getExistingDirectory(
+            self, "Select Experiment to Duplicate", default_dir or os.getcwd()
+        )
+        if not exp_dir:
+            return
+
+        path = os.path.join(exp_dir, "experiment_design.json")
+        if not os.path.exists(path):
+            self._set_status(f"No 'experiment_design.json' found in: {exp_dir}")
+            return
+
+        source_name = os.path.basename(os.path.normpath(exp_dir)) or "Experiment"
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            if isinstance(payload, dict):
+                metadata = payload.get("metadata") or {}
+                if isinstance(metadata, dict) and metadata.get("name"):
+                    source_name = str(metadata.get("name"))
+        except Exception:
+            pass
+
+        default_name = self.model.default_duplicate_experiment_name(source_name)
+        new_name, ok = QInputDialog.getText(
+            self,
+            "Duplicate Experiment Design",
+            "New experiment name:",
+            text=default_name,
+        )
+        if not ok:
+            self._set_status("Duplicate canceled; current design was left unchanged.")
+            return
+
+        new_name = self.model.sanitize_experiment_name(new_name, fallback="")
+        if not new_name:
+            self._set_status("Duplicate canceled; no experiment name was provided.")
+            return
+
+        base_dir = default_dir or os.path.dirname(os.path.normpath(exp_dir)) or os.getcwd()
+        new_experiment_path = os.path.join(base_dir, new_name)
+        if os.path.exists(new_experiment_path):
+            QMessageBox.warning(
+                self,
+                "Duplicate failed",
+                f"A folder named '{new_name}' already exists.",
+            )
+            self._set_status(f"Duplicate failed; folder already exists: {new_experiment_path}")
+            return
+
+        try:
+            self.model.duplicate_design_from(path, new_name, new_experiment_path)
+        except Exception as e:
+            message = str(e) or "Unknown duplicate error."
+            QMessageBox.warning(self, "Duplicate failed", message)
+            self._set_status(f"Duplicate failed: {message}")
+            return
+
+        self._progress_reset_confirmed = False
+        self._set_progress_protection(False)
+        self._uploaded_design_active = self.model.has_uploaded_design()
+        self._uploaded_design_path = getattr(self.model, "_uploaded_design_source", None)
+
+        self.choice_groups = set(
+            f.name for f in getattr(self.model, "factors", []) if getattr(f, "kind", "") == "choice"
+        )
+        self._load_factors_into_table()
+        self._sync_controls_from_model()
+        self._refresh_stock_table()
+        self._update_summary_labels()
+        self._update_unique_conditions_button_label()
+        self._refresh_all_prior_availability()
+        self._refresh_all_lock_states()
+
+        self._set_status(f"Duplicated design from: {exp_dir}. New experiment: {new_experiment_path}")
 
     def _on_load_design(self):
         # Default directory = Experiments

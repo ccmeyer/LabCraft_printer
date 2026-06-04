@@ -7205,6 +7205,95 @@ class ExperimentModel(QObject):
     # -----------------------------
     # Rename / duplicate
     # -----------------------------
+    @staticmethod
+    def sanitize_experiment_name(name: str, fallback: str = "Untitled") -> str:
+        """Return a filesystem-safe experiment folder/name for Windows paths."""
+        text = str(name or "").strip()
+        text = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "-", text)
+        text = re.sub(r"\s+", "_", text)
+        text = re.sub(r"-{2,}", "-", text)
+        text = text.strip(" .-_")
+        if text.upper() in {"CON", "PRN", "AUX", "NUL"}:
+            text = f"{text}_experiment"
+        return text or fallback
+
+    @classmethod
+    def default_duplicate_experiment_name(cls, source_name: str) -> str:
+        base = cls.sanitize_experiment_name(source_name, fallback="Experiment")
+        return f"{base}-replicate-{time.strftime('%Y%m%d_%H%M%S')}"
+
+    def _duplicate_design_payload(
+        self,
+        data: Dict,
+        new_name: str,
+        *,
+        copy_applied_imaging_calibrations: bool = False,
+    ) -> Dict:
+        if not isinstance(data, dict):
+            raise ValueError("Experiment design must be a JSON object.")
+
+        payload = json.loads(json.dumps(data, default=self.convert_to_serializable))
+        payload["metadata"] = dict(payload.get("metadata") or {})
+        payload["metadata"]["name"] = self.sanitize_experiment_name(new_name)
+        if copy_applied_imaging_calibrations:
+            payload["applied_imaging_calibrations"] = self._normalize_applied_imaging_calibrations(
+                payload.get("applied_imaging_calibrations")
+            )
+        else:
+            payload["applied_imaging_calibrations"] = self._normalize_applied_imaging_calibrations(None)
+        return payload
+
+    def _write_duplicate_design(
+        self,
+        data: Dict,
+        new_name: str,
+        new_experiment_path: str,
+        *,
+        copy_applied_imaging_calibrations: bool = False,
+    ) -> bool:
+        import os
+
+        if not new_experiment_path:
+            raise ValueError("A destination experiment path is required.")
+        if os.path.exists(new_experiment_path):
+            raise FileExistsError(f"Experiment folder already exists: {new_experiment_path}")
+
+        payload = self._duplicate_design_payload(
+            data,
+            new_name,
+            copy_applied_imaging_calibrations=copy_applied_imaging_calibrations,
+        )
+
+        self.experiment_dir_path = os.path.abspath(new_experiment_path)
+        os.makedirs(self.experiment_dir_path)
+        self.update_all_paths()
+        self.progress_data = {}
+        self._last_progress_load_warnings = []
+        self._last_progress_stock_override_warnings = []
+        self._runtime_well_plate = None
+        self._runtime_reaction_collection = None
+
+        self.from_dict(payload)
+
+        if self._uploaded_reactions is not None:
+            self._materialize_uploaded_design_csv()
+
+        res = self.optimize_stock_solutions(
+            quantum=0.1,
+            max_refine=60,
+            two_max_refine=40,
+            allow_two=self._allow_two_from_metadata(),
+        )
+        if not res.get("best"):
+            raise RuntimeError(f"Optimization failed: {res.get('reason', 'Unknown')}")
+        self.generate_experiment()
+
+        self.save_experiment()
+        self.create_progress_file()
+        self._atomic_json_dump(self.calibration_file_path, {})
+        self.unsaved_changes = False
+        return True
+
     def rename_experiment(self, new_name: str) -> bool:
         """Rename experiment dir (if it does not already exist)."""
         import os
@@ -7220,33 +7309,36 @@ class ExperimentModel(QObject):
         self.save_experiment()
         return True
 
+    def duplicate_design_from(self, source_design_path: str, new_name: str, new_experiment_path: str) -> bool:
+        """Create a fresh experiment from another experiment_design.json."""
+        import os
+
+        if not source_design_path:
+            raise ValueError("A source experiment design path is required.")
+        if not os.path.exists(source_design_path):
+            raise FileNotFoundError(source_design_path)
+        with open(source_design_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return self._write_duplicate_design(
+            data,
+            new_name,
+            new_experiment_path,
+            copy_applied_imaging_calibrations=False,
+        )
+
     def duplicate_experiment(self, new_name: str, new_experiment_path: str, copy_calibrations: bool = False) -> bool:
-        """Copy just the design; progress is new; calibration optionally copied."""
-        import os, json
-        self.metadata["name"] = new_name
-        self.experiment_dir_path = new_experiment_path
-        if not os.path.exists(self.experiment_dir_path):
-            os.makedirs(self.experiment_dir_path)
-        self.update_all_paths()
-
-        # also materialize the uploaded design CSV into the new folder, if any
-        if self._uploaded_reactions is not None:
-            self._materialize_uploaded_design_csv()
-
-        self.save_experiment()
-        self.create_progress_file()
-        self.create_key_file()
-        self.create_concentration_key_file()
-        # calibration handling
-        if not copy_calibrations:
-            with open(self.calibration_file_path, "w") as f:
-                f.write("{}")
-        else:
-            # if you have a manager, ask it to save here
+        """Copy the current design into a new experiment with fresh progress."""
+        ok = self._write_duplicate_design(
+            self.to_dict(),
+            new_name,
+            new_experiment_path,
+            copy_applied_imaging_calibrations=bool(copy_calibrations),
+        )
+        if copy_calibrations:
             if self._calibration_manager is not None and hasattr(self._calibration_manager, "save_calibration_data"):
                 self._calibration_manager.update_calibration_file_path(self.calibration_file_path)
                 self._calibration_manager.save_calibration_data(self.calibration_file_path)
-        return True
+        return ok
 
     # -----------------------------
     # Reset (fresh design session)
