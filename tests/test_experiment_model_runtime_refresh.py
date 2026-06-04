@@ -269,6 +269,64 @@ def test_apply_droplet_volume_for_option_persists_effective_and_intended_volume(
     assert em.unsaved_changes is False
 
 
+def test_apply_droplet_volume_for_option_can_switch_printing_mode(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_calibrated_volume_design(em)
+    stock_id = _stock_id_for_design_row(em, "glycerol")
+    head = _printer_head(stock_id, printing_mode="stream")
+
+    result = em.apply_droplet_volume_for_option(
+        "glycerol",
+        None,
+        60.0,
+        write_keys_if_assigned=False,
+        printing_mode="stream",
+        applied_calibration={
+            "printer_head": head,
+            "measured_volume_nL": 60.0,
+            "pw_us": 1800,
+            "pressure_psi": 1.80,
+            "run_id": "stream-run",
+            "phase": "stream",
+            "timestamp": "2026-03-18T10:00:00Z",
+            "source_row_fingerprint": ("stream-run", "stream", "2026-03-18T10:00:00Z", 1800, 1.80, 60.0),
+        },
+    )
+
+    payload = json.loads(Path(em.experiment_file_path).read_text(encoding="utf-8"))
+    option = _first_option_payload(payload, "glycerol")
+    assert option["droplet_nL"] == 60.0
+    assert option["printing_mode"] == "stream"
+    assert option["intended_droplet_nL"] == 10.0
+    assert option["intended_printing_mode"] == "droplet"
+    assert result["original_printing_mode"] == "droplet"
+    assert result["applied_printing_mode"] == "stream"
+
+    record = em.get_applied_imaging_calibration(printer_head=head)
+    assert record["printing_mode"] == "stream"
+    assert record["original_printing_mode"] == "droplet"
+    assert record["applied_printing_mode"] == "stream"
+    assert record["run_id"] == "stream-run"
+
+    reloaded_model = experiment_model_factory()
+    reloaded = reloaded_model.experiment_model
+    reloaded.load_experiment(em.experiment_file_path, em.experiment_dir_path)
+    reloaded_option = reloaded.factors[0].options[0]
+    assert reloaded_option.droplet_nL == 60.0
+    assert reloaded_option.printing_mode == "stream"
+    assert reloaded_option.intended_droplet_nL == 10.0
+    assert reloaded_option.intended_printing_mode == "droplet"
+
+    validation = reloaded.validate_applied_imaging_calibration_for_print(
+        printer_head=head,
+        machine_model=_machine_model_for_calibration(pw_us=1800, pressure_psi=1.80),
+    )
+    assert validation["ok"] is True
+
+
 def test_apply_fill_droplet_volume_persists_effective_and_intended_volume(
     experiment_model_factory,
 ):
@@ -283,6 +341,36 @@ def test_apply_fill_droplet_volume_persists_effective_and_intended_volume(
     assert payload["metadata"]["intended_fill_droplet_volume_nL"] == 10.0
     assert result["saved_experiment"] is True
     assert em.unsaved_changes is False
+
+
+def test_apply_fill_droplet_volume_can_switch_printing_mode(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_calibrated_volume_design(em)
+
+    result = em.apply_fill_droplet_volume(
+        60.0,
+        write_keys_if_assigned=False,
+        printing_mode="stream",
+    )
+
+    payload = json.loads(Path(em.experiment_file_path).read_text(encoding="utf-8"))
+    assert payload["metadata"]["fill_droplet_volume_nL"] == 60.0
+    assert payload["metadata"]["fill_printing_mode"] == "stream"
+    assert payload["metadata"]["intended_fill_droplet_volume_nL"] == 10.0
+    assert payload["metadata"]["intended_fill_printing_mode"] == "droplet"
+    assert result["original_printing_mode"] == "droplet"
+    assert result["applied_printing_mode"] == "stream"
+
+    reloaded_model = experiment_model_factory()
+    reloaded = reloaded_model.experiment_model
+    reloaded.load_experiment(em.experiment_file_path, em.experiment_dir_path)
+    assert reloaded.metadata["fill_droplet_volume_nL"] == 60.0
+    assert reloaded.metadata["fill_printing_mode"] == "stream"
+    assert reloaded.metadata["intended_fill_droplet_volume_nL"] == 10.0
+    assert reloaded.metadata["intended_fill_printing_mode"] == "droplet"
 
 
 def test_reloading_after_calibrated_volume_apply_uses_saved_effective_counts(

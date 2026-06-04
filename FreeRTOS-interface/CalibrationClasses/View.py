@@ -5288,6 +5288,48 @@ class DropletImagingDialog(QtWidgets.QDialog):
         except Exception:
             return None
 
+    def _sync_loaded_printer_head_printing_mode(self, printing_mode) -> bool:
+        mode = self._normalize_printing_mode_value(printing_mode, fallback=None)
+        if mode is None:
+            return False
+        printer_head = self._get_loaded_printer_head()
+        if printer_head is None:
+            return False
+
+        candidates = [printer_head]
+        getter = getattr(printer_head, "get_stock_solution", None)
+        if callable(getter):
+            try:
+                candidates.append(getter())
+            except Exception:
+                pass
+        candidates.append(getattr(printer_head, "stock_solution", None))
+
+        updated = False
+        seen = set()
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            identity = id(candidate)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            setter = getattr(candidate, "set_printing_mode", None)
+            if callable(setter):
+                try:
+                    setter(mode)
+                    updated = True
+                    continue
+                except Exception:
+                    pass
+            if hasattr(candidate, "printing_mode"):
+                try:
+                    setattr(candidate, "printing_mode", mode)
+                    updated = True
+                except Exception:
+                    pass
+        return updated
+
     def _get_applied_imaging_calibration_record(self):
         em = getattr(self.model, "experiment_model", None)
         getter = getattr(em, "get_applied_imaging_calibration", None)
@@ -5417,6 +5459,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if source_row_fingerprint is None and raw:
             source_row_fingerprint = self._summary_row_fingerprint(raw)
         machine_model = getattr(self.model, "machine_model", None)
+        original_mode, applied_mode = self._bridge_result_mode_pair(raw)
 
         def _machine_value(getter_name):
             getter = getattr(machine_model, getter_name, None)
@@ -5436,6 +5479,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "phase": raw.get("phase"),
             "timestamp": raw.get("timestamp"),
             "source_row_fingerprint": source_row_fingerprint,
+            "printing_mode": applied_mode,
+            "original_printing_mode": original_mode,
+            "applied_printing_mode": applied_mode,
         }
 
     def _apply_print_settings_for_applied_calibration(self, applied_calibration, *, run_label="-"):
@@ -7236,6 +7282,53 @@ class DropletImagingDialog(QtWidgets.QDialog):
             f"but the current reagent uses {self._printing_mode_label(current_mode).lower()} mode."
         )
 
+    def _bridge_result_mode_pair(self, raw: dict | None):
+        current_mode = self._bridge_resolve_current_printing_mode()
+        result_mode = self._summary_row_printing_mode(raw)
+        applied_mode = result_mode or current_mode
+        return current_mode, applied_mode
+
+    def _bridge_mode_switch_text(self, original_mode: str | None, applied_mode: str | None) -> str:
+        if original_mode in (None, "") or applied_mode in (None, "") or original_mode == applied_mode:
+            return ""
+        return (
+            f"Mode switch: {self._printing_mode_label(original_mode)} -> "
+            f"{self._printing_mode_label(applied_mode)}"
+        )
+
+    def _confirm_bridge_mode_switch_if_needed(
+        self,
+        *,
+        original_mode: str | None,
+        applied_mode: str | None,
+        old_volume_nL=None,
+        new_volume_nL=None,
+    ) -> bool:
+        mode_text = self._bridge_mode_switch_text(original_mode, applied_mode)
+        if not mode_text:
+            return True
+
+        def _fmt_volume(value):
+            try:
+                return f"{float(value):.3f} nL"
+            except Exception:
+                return "-"
+
+        response = QtWidgets.QMessageBox.question(
+            self,
+            "Apply calibration as mode switch?",
+            (
+                "Apply this selected calibration by switching the design mode?\n\n"
+                f"{mode_text}\n"
+                f"Ejection volume: {_fmt_volume(old_volume_nL)} -> {_fmt_volume(new_volume_nL)}\n\n"
+                "Review the preview table before continuing. The target errors, ejection counts, "
+                "and printed volumes may change."
+            ),
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        )
+        return response == QtWidgets.QMessageBox.Yes
+
     def _bridge_get_current_design_droplet_volume_nL(self) -> float | None:
         em = getattr(self.model, "experiment_model", None)
         reagent = self._bridge_get_current_reagent_name()
@@ -7879,30 +7972,65 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 _, raw = selected_row_getter()
             except Exception:
                 raw = None
-        mismatch_message = None
-        mismatch_getter = getattr(self, "_summary_row_mode_mismatch_message", None)
-        if callable(mismatch_getter):
-            mismatch_message = mismatch_getter(raw)
-        if mismatch_message:
-            QtWidgets.QMessageBox.information(self, "Apply", mismatch_message)
-            return
+        mode_pair_getter = getattr(self, "_bridge_result_mode_pair", None)
+        if callable(mode_pair_getter):
+            current_mode, result_mode = mode_pair_getter(raw)
+        else:
+            current_mode, result_mode = None, None
+        original_mode = (
+            DropletImagingDialog._normalize_printing_mode_value(
+                payload.get("original_printing_mode"),
+                fallback=None,
+            )
+            or current_mode
+        )
+        applied_mode = (
+            DropletImagingDialog._normalize_printing_mode_value(
+                payload.get("applied_printing_mode"),
+                fallback=None,
+            )
+            or result_mode
+            or original_mode
+        )
 
         # --- Special case: fill reagent
         if payload.get("is_fill"):
+            try:
+                old_fill_nL = self._bridge_get_current_design_droplet_volume_nL()
+            except Exception:
+                old_fill_nL = None
+            new_fill_nL = float(payload["new_fill_nL"])
+            confirmer = getattr(self, "_confirm_bridge_mode_switch_if_needed", None)
+            if callable(confirmer):
+                if not confirmer(
+                    original_mode=original_mode,
+                    applied_mode=applied_mode,
+                    old_volume_nL=old_fill_nL,
+                    new_volume_nL=new_fill_nL,
+                ):
+                    return
+
             applied_calibration = self._build_applied_imaging_calibration_payload(
                 raw,
-                float(payload["new_fill_nL"]),
+                new_fill_nL,
                 source_row_fingerprint=payload.get("source_row_fingerprint"),
             )
+            applied_calibration["original_printing_mode"] = original_mode
+            applied_calibration["applied_printing_mode"] = applied_mode
+            applied_calibration["printing_mode"] = applied_mode
             try:
                 out = em.apply_fill_droplet_volume(
-                    float(payload["new_fill_nL"]),
+                    new_fill_nL,
                     write_keys_if_assigned=True,
                     applied_calibration=applied_calibration,
+                    printing_mode=applied_mode,
                 )
             except Exception as e:
                 QtWidgets.QMessageBox.critical(self, "Apply failed", f"{e}")
                 return
+            sync_mode = getattr(self, "_sync_loaded_printer_head_printing_mode", None)
+            if callable(sync_mode):
+                sync_mode(applied_mode)
 
             # Refresh UI tables that show the per-stock + fill totals
             if hasattr(self.main_window, "refresh_stock_table"):
@@ -7956,12 +8084,24 @@ class DropletImagingDialog(QtWidgets.QDialog):
             cur_dv = None
         new_dv = float(payload["new_droplet_nL"])
         volume_unchanged = cur_dv is not None and abs(new_dv - cur_dv) < 1e-9
+        confirmer = getattr(self, "_confirm_bridge_mode_switch_if_needed", None)
+        if callable(confirmer):
+            if not confirmer(
+                original_mode=original_mode,
+                applied_mode=applied_mode,
+                old_volume_nL=cur_dv,
+                new_volume_nL=new_dv,
+            ):
+                return
 
         applied_calibration = self._build_applied_imaging_calibration_payload(
             raw,
             new_dv,
             source_row_fingerprint=payload.get("source_row_fingerprint"),
         )
+        applied_calibration["original_printing_mode"] = original_mode
+        applied_calibration["applied_printing_mode"] = applied_mode
+        applied_calibration["printing_mode"] = applied_mode
         try:
             em.apply_droplet_volume_for_option(
                 payload["factor_name"],
@@ -7969,6 +8109,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 new_dv,
                 write_keys_if_assigned=True,
                 applied_calibration=applied_calibration,
+                printing_mode=applied_mode,
             )
         except NotImplementedError as e:
             QtWidgets.QMessageBox.warning(self, "Apply failed", str(e))
@@ -7976,6 +8117,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Apply failed", f"{e}")
             return
+        sync_mode = getattr(self, "_sync_loaded_printer_head_printing_mode", None)
+        if callable(sync_mode):
+            sync_mode(applied_mode)
 
         self._set_saved_applied_summary_row_fingerprint(payload.get("source_row_fingerprint"))
         self._sync_applied_summary_row_highlight()
@@ -8000,6 +8144,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
             message = f"Recorded applied imaging calibration for {reagent_label} at {new_dv:.3f} nL ejection volume."
         else:
             message = f"Updated {reagent_label} to {new_dv:.3f} nL ejection volume."
+        mode_switch_formatter = getattr(self, "_bridge_mode_switch_text", None)
+        mode_switch_text = (
+            mode_switch_formatter(original_mode, applied_mode)
+            if callable(mode_switch_formatter)
+            else ""
+        )
+        if mode_switch_text:
+            message = f"{message}\n{mode_switch_text}."
         QtWidgets.QMessageBox.information(
             self, "Applied",
             message
@@ -8007,13 +8159,44 @@ class DropletImagingDialog(QtWidgets.QDialog):
         
     def _selected_summary_row(self):
         """Return (row_index, dict_of_raw_values) from the selected table row or (None, None)."""
-        sel = self.summary_table.selectionModel().selectedRows()
+        selection_model = self.summary_table.selectionModel()
+        if selection_model is None:
+            return None, None
+        sel = selection_model.selectedRows()
         if not sel:
             return None, None
-        row = sel[0].row()
+        index = sel[0]
+        row = index.row()
+
+        try:
+            raw = index.data(SUMMARY_RAW_ROW_ROLE)
+            if isinstance(raw, dict):
+                raw = dict(raw)
+                raw["_row"] = row
+                return row, raw
+        except Exception:
+            pass
+
+        try:
+            proxy_model = getattr(self, "summary_table_proxy_model", None)
+            source_model = getattr(self, "summary_table_model", None)
+            if proxy_model is not None and source_model is not None:
+                source_index = proxy_model.mapToSource(index)
+                getter = getattr(source_model, "raw_row_at", None)
+                if callable(getter):
+                    raw = getter(source_index.row())
+                    if isinstance(raw, dict):
+                        raw = dict(raw)
+                        raw["_row"] = row
+                        return row, raw
+        except Exception:
+            pass
 
         def _raw(col):
-            it = self.summary_table.item(row, col)
+            item_getter = getattr(self.summary_table, "item", None)
+            if not callable(item_getter):
+                return None
+            it = item_getter(row, col)
             return None if it is None else it.data(Qt.UserRole)
 
         # Columns: 0=Run #, 1=PW, 2=Pressure, 3=Mean, 4=CV, 5=Valid
@@ -8715,10 +8898,13 @@ class DropletImagingDialog(QtWidgets.QDialog):
             )
             return
 
-        mismatch_message = self._summary_row_mode_mismatch_message(raw)
-        if mismatch_message:
-            self._bridge_clear_preview_with_status(mismatch_message)
-            return
+        original_mode, applied_mode = self._bridge_result_mode_pair(raw)
+        mode_switch_text = self._bridge_mode_switch_text(original_mode, applied_mode)
+        mode_switch_suffix = (
+            f" {mode_switch_text}. Review target errors before applying."
+            if mode_switch_text
+            else ""
+        )
 
         selected_fingerprint = self._summary_row_fingerprint(raw)
         invalid_reason = raw.get("invalid_reason")
@@ -8765,6 +8951,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 "is_fill": True,
                 "new_fill_nL": float(mean_nL),
                 "source_row_fingerprint": selected_fingerprint,
+                "original_printing_mode": original_mode,
+                "applied_printing_mode": applied_mode,
             }
             if self._selected_summary_row_matches_applied(raw):
                 self._set_bridge_apply_button_state("applied")
@@ -8772,6 +8960,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 self._set_bridge_apply_button_state("ready")
             self.bridge_status_label.setText(
                 f"{status_prefix}Preview uses the selected result ejection volume of {mean_nL:.3f} nL."
+                f"{mode_switch_suffix}"
             )
             return
 
@@ -8799,6 +8988,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "new_droplet_nL": float(preview.get("new_droplet_nL", mean_nL)),
             "n_stocks": int(preview.get("n_stocks", 1)),
             "source_row_fingerprint": selected_fingerprint,
+            "original_printing_mode": original_mode,
+            "applied_printing_mode": applied_mode,
         }
         can_apply = self._bridge_preview_payload["n_stocks"] == 1
         if can_apply and self._selected_summary_row_matches_applied(raw):
@@ -8813,6 +9004,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if can_apply:
             self.bridge_status_label.setText(
                 f"{status_prefix}Preview uses the selected result ejection volume of {mean_nL:.3f} nL."
+                f"{mode_switch_suffix}"
             )
         else:
             self.bridge_status_label.setText(

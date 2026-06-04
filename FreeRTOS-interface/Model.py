@@ -224,6 +224,7 @@ class OptionSpec:
     intended_head_type_id: str | None = None
     intended_head_type_display_name: str | None = None
     intended_droplet_nL: float | None = None
+    intended_printing_mode: str | None = None
 
 
 @dataclass
@@ -5126,13 +5127,21 @@ class ExperimentModel(QObject):
         phase=None,
         timestamp=None,
         source_row_fingerprint=None,
+        original_printing_mode=None,
+        applied_printing_mode=None,
         save: bool = True,
     ) -> dict:
+        requested_printing_mode = applied_printing_mode or printing_mode
+        context_printing_mode = (
+            normalize_printing_mode(requested_printing_mode)
+            if requested_printing_mode is not None
+            else None
+        )
         context = self._resolve_applied_imaging_context(
             printer_head=printer_head,
             stock_id=stock_id,
             printer_head_id=printer_head_id,
-            printing_mode=printing_mode,
+            printing_mode=context_printing_mode,
             factor_name=factor_name,
             option_name=option_name,
             is_fill=is_fill,
@@ -5159,11 +5168,21 @@ class ExperimentModel(QObject):
         design_volume = _float_or_none(applied_design_volume_nL)
         if design_volume is None:
             design_volume = _float_or_none(context.get("design_volume_nL"))
+        original_printing_mode = normalize_printing_mode(
+            original_printing_mode,
+            fallback=context["printing_mode"],
+        )
+        applied_printing_mode = normalize_printing_mode(
+            applied_printing_mode,
+            fallback=context["printing_mode"],
+        )
 
         record = {
             "stock_id": context["stock_id"],
             "printer_head_id": context["printer_head_id"],
             "printing_mode": context["printing_mode"],
+            "original_printing_mode": original_printing_mode,
+            "applied_printing_mode": applied_printing_mode,
             "factor_name": context["factor_name"],
             "option_name": context["option_name"],
             "is_fill": bool(context["is_fill"]),
@@ -5394,6 +5413,7 @@ class ExperimentModel(QObject):
         *,
         write_keys_if_assigned: bool = True,
         applied_calibration: dict | None = None,
+        printing_mode: str | None = None,
     ) -> dict:
         """
         Rebind a specific option (or additive) to a NEW droplet volume, but KEEP the
@@ -5437,13 +5457,18 @@ class ExperimentModel(QObject):
         units = st.get("units", opt_obj.units)
         V_final = float(self.metadata.get("final_reaction_volume_nL",
                                         self.metadata.get("target_reaction_volume_nL", 2000.0)))
-        option_mode = normalize_printing_mode(
+        original_printing_mode = normalize_printing_mode(
             getattr(opt_obj, "printing_mode", None),
             fallback=infer_printing_mode_from_volume(getattr(opt_obj, "droplet_nL", new_droplet_nL)),
         )
+        applied_printing_mode = (
+            normalize_printing_mode(printing_mode, fallback=original_printing_mode)
+            if printing_mode is not None
+            else original_printing_mode
+        )
         new_dv = validate_ejection_volume_for_mode(
             new_droplet_nL,
-            option_mode,
+            applied_printing_mode,
             label="Ejection volume",
         )
         if V_final <= 0.0:
@@ -5487,12 +5512,19 @@ class ExperimentModel(QObject):
             and abs(current_design_dv - new_dv) > 1e-9
         ):
             opt_obj.intended_droplet_nL = current_design_dv
+        if (
+            getattr(opt_obj, "intended_printing_mode", None) is None
+            and original_printing_mode != applied_printing_mode
+        ):
+            opt_obj.intended_printing_mode = original_printing_mode
 
         # Update the persistent design object so saves/loads reflect the new dv
         opt_obj.droplet_nL = new_dv
+        opt_obj.printing_mode = applied_printing_mode
         opt_obj.forced_stock_conc = c_stock
 
         # Update the cached stock rows so UI tables reflect new dv
+        st["printing_mode"] = applied_printing_mode
         updated_row = None
         for r in self._stock_rows_cache:
             if (
@@ -5502,6 +5534,7 @@ class ExperimentModel(QObject):
             ):
                 r["droplet_volume_nL"] = new_dv
                 r["delta_per_drop"] = delta
+                r["printing_mode"] = applied_printing_mode
                 updated_row = r
                 break
 
@@ -5514,13 +5547,17 @@ class ExperimentModel(QObject):
         self.unsaved_changes = True
         applied_recorded = False
         if applied_calibration:
+            record_kwargs = dict(applied_calibration)
+            record_kwargs.setdefault("printing_mode", applied_printing_mode)
+            record_kwargs.setdefault("original_printing_mode", original_printing_mode)
+            record_kwargs.setdefault("applied_printing_mode", applied_printing_mode)
             self.record_applied_imaging_calibration(
                 factor_name=factor_name,
                 option_name=option_name,
                 is_fill=False,
                 applied_design_volume_nL=new_dv,
                 save=False,
-                **dict(applied_calibration),
+                **record_kwargs,
             )
             applied_recorded = True
         saved_experiment = False
@@ -5534,6 +5571,8 @@ class ExperimentModel(QObject):
             "stock_concentration": c_stock,
             "units": units,
             "new_droplet_nL": new_dv,
+            "original_printing_mode": original_printing_mode,
+            "applied_printing_mode": applied_printing_mode,
             "delta_per_drop": delta,
             "example_map": dict(list(dp.items())[: min(5, len(dp))]),
             "stock_row_updated": bool(updated_row),
@@ -5771,6 +5810,11 @@ class ExperimentModel(QObject):
                                 if getattr(o, "intended_droplet_nL", None) is not None
                                 else {}
                             ),
+                            **(
+                                {"intended_printing_mode": normalize_printing_mode(o.intended_printing_mode)}
+                                if getattr(o, "intended_printing_mode", None) is not None
+                                else {}
+                            ),
                             "forced_stock_conc": (
                                 float(o.forced_stock_conc)
                                 if o.forced_stock_conc is not None
@@ -5900,6 +5944,11 @@ class ExperimentModel(QObject):
                     intended_droplet_nL=(
                         float(o["intended_droplet_nL"])
                         if o.get("intended_droplet_nL") is not None
+                        else None
+                    ),
+                    intended_printing_mode=(
+                        normalize_printing_mode(o.get("intended_printing_mode"))
+                        if o.get("intended_printing_mode") is not None
                         else None
                     ),
                 )
@@ -6729,21 +6778,27 @@ class ExperimentModel(QObject):
         *,
         write_keys_if_assigned: bool = True,
         applied_calibration: dict | None = None,
+        printing_mode: str | None = None,
     ) -> dict:
         """
         Set the fill droplet size and recompute experiment so all totals refresh.
         """
         metadata = getattr(self, "metadata", {}) or {}
-        fill_mode = normalize_printing_mode(
+        original_fill_mode = normalize_printing_mode(
             metadata.get("fill_printing_mode"),
             fallback=infer_printing_mode_from_volume(
                 metadata.get("fill_droplet_volume_nL", 10.0),
                 fallback=PRINTING_MODE_DROPLET,
             ),
         )
+        applied_fill_mode = (
+            normalize_printing_mode(printing_mode, fallback=original_fill_mode)
+            if printing_mode is not None
+            else original_fill_mode
+        )
         new_fill_droplet_nL = validate_ejection_volume_for_mode(
             new_fill_droplet_nL,
-            fill_mode,
+            applied_fill_mode,
             label="Fill ejection volume",
         )
 
@@ -6757,7 +6812,13 @@ class ExperimentModel(QObject):
             and abs(old - new_fill_droplet_nL) > 1e-9
         ):
             self.metadata["intended_fill_droplet_volume_nL"] = old
+        if (
+            "intended_fill_printing_mode" not in self.metadata
+            and original_fill_mode != applied_fill_mode
+        ):
+            self.metadata["intended_fill_printing_mode"] = original_fill_mode
         self.metadata["fill_droplet_volume_nL"] = new_fill_droplet_nL
+        self.metadata["fill_printing_mode"] = applied_fill_mode
         self.generate_experiment()
 
         self._refresh_runtime_after_plan_change(write_keys_if_assigned=write_keys_if_assigned)
@@ -6765,13 +6826,17 @@ class ExperimentModel(QObject):
         self.unsaved_changes = True
         applied_recorded = False
         if applied_calibration:
+            record_kwargs = dict(applied_calibration)
+            record_kwargs.setdefault("printing_mode", applied_fill_mode)
+            record_kwargs.setdefault("original_printing_mode", original_fill_mode)
+            record_kwargs.setdefault("applied_printing_mode", applied_fill_mode)
             self.record_applied_imaging_calibration(
                 factor_name=str(self.metadata.get("fill_reagent_name", "Water")),
                 option_name=None,
                 is_fill=True,
                 applied_design_volume_nL=new_fill_droplet_nL,
                 save=False,
-                **dict(applied_calibration),
+                **record_kwargs,
             )
             applied_recorded = True
         saved_experiment = False
@@ -6781,6 +6846,8 @@ class ExperimentModel(QObject):
         return {
             "old_fill_nL": old,
             "new_fill_nL": new_fill_droplet_nL,
+            "original_printing_mode": original_fill_mode,
+            "applied_printing_mode": applied_fill_mode,
             "total_drops_old": prev.get("total_drops_old"),
             "total_drops_new": prev.get("total_drops_new"),
             "total_drops_delta": prev.get("total_drops_delta"),

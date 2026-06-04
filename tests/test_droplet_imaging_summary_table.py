@@ -211,6 +211,7 @@ def _build_experiment_model(current_stock, *, current_mode="droplet"):
                     "stock_concentration": float(state["stock_concentration"]),
                     "units": str(state["units"]),
                     "droplet_volume_nL": float(state["droplet_nL"]),
+                    "printing_mode": str(state["printing_mode"]),
                 }
             ],
         }
@@ -239,10 +240,17 @@ def _build_experiment_model(current_stock, *, current_mode="droplet"):
         applied = dict(kwargs.get("applied_calibration") or {})
         if not applied:
             return
+        mode = str(
+            kwargs.get("printing_mode")
+            or applied.get("printing_mode")
+            or state["printing_mode"]
+        )
         state["applied_record"] = {
             "stock_id": str(current_stock),
             "printer_head_id": "head-1",
-            "printing_mode": str(current_mode),
+            "printing_mode": mode,
+            "original_printing_mode": str(applied.get("original_printing_mode") or current_mode),
+            "applied_printing_mode": str(applied.get("applied_printing_mode") or mode),
             "factor_name": "Fill" if is_fill else str(current_stock).lower(),
             "option_name": "",
             "is_fill": bool(is_fill),
@@ -259,6 +267,7 @@ def _build_experiment_model(current_stock, *, current_mode="droplet"):
 
     def _apply_droplet_volume_for_option(_factor_name, _option_name, new_droplet_nL, **_kwargs):
         state["droplet_nL"] = float(new_droplet_nL)
+        state["printing_mode"] = str(_kwargs.get("printing_mode") or state["printing_mode"])
         _store_applied_record(new_droplet_nL, _kwargs, is_fill=False)
         return {"new_droplet_nL": float(new_droplet_nL)}
 
@@ -282,6 +291,8 @@ def _build_experiment_model(current_stock, *, current_mode="droplet"):
     def _apply_fill_droplet_volume(new_fill_droplet_nL, **_kwargs):
         state["fill_droplet_nL"] = float(new_fill_droplet_nL)
         state["metadata"]["fill_droplet_volume_nL"] = float(new_fill_droplet_nL)
+        state["printing_mode"] = str(_kwargs.get("printing_mode") or state["printing_mode"])
+        state["metadata"]["fill_printing_mode"] = state["printing_mode"]
         _store_applied_record(new_fill_droplet_nL, _kwargs, is_fill=True)
         return {
             "new_fill_nL": float(new_fill_droplet_nL),
@@ -321,10 +332,17 @@ def _build_model_and_manager(
         experiment_model = _build_experiment_model(current_stock, current_mode=current_mode)
     experiment_model.calibration_file_path = str(tmp_path / "calibration.json")
     experiment_model.get_calibration_file_path = lambda: str(tmp_path / "calibration.json")
+    printer_head_mode = {"value": str(current_mode)}
+
+    def _set_printer_head_mode(mode):
+        printer_head_mode["value"] = str(mode)
+
     printer_head = SimpleNamespace(
         get_stock_solution=lambda: current_stock,
         get_reagent_name=lambda: current_stock,
-        get_printing_mode=lambda: current_mode,
+        get_printing_mode=lambda: printer_head_mode["value"],
+        set_printing_mode=_set_printer_head_mode,
+        printing_mode=str(current_mode),
         serial="head-1",
     )
     rack_model = SimpleNamespace(get_gripper_printer_head=lambda: printer_head)
@@ -1115,7 +1133,7 @@ def test_stream_selection_enables_bridge_for_stream_mode(monkeypatch, qapp, tmp_
     dialog.deleteLater()
 
 
-def test_stream_selection_blocks_bridge_and_load_for_droplet_mode(monkeypatch, qapp, tmp_path):
+def test_stream_selection_previews_mode_switch_but_blocks_load_for_droplet_mode(monkeypatch, qapp, tmp_path):
     runs = [
         _make_run(
             "run_focus",
@@ -1138,15 +1156,14 @@ def test_stream_selection_blocks_bridge_and_load_for_droplet_mode(monkeypatch, q
     qapp.processEvents()
 
     assert dialog.load_selected_button.isEnabled() is False
-    assert dialog.bridge_table.rowCount() == 0
-    assert dialog.bridge_apply_btn.isEnabled() is False
-    assert "stream mode" in dialog.bridge_status_label.text().lower()
-    assert "droplet mode" in dialog.bridge_status_label.text().lower()
+    assert dialog.bridge_table.rowCount() == 1
+    assert dialog.bridge_apply_btn.isEnabled() is True
+    assert "Mode switch: Droplet -> Stream" in dialog.bridge_status_label.text()
 
     dialog.deleteLater()
 
 
-def test_droplet_selection_blocks_bridge_and_load_for_stream_mode(monkeypatch, qapp, tmp_path):
+def test_droplet_selection_previews_mode_switch_but_blocks_load_for_stream_mode(monkeypatch, qapp, tmp_path):
     runs = [
         _make_run(
             "run_focus",
@@ -1168,10 +1185,9 @@ def test_droplet_selection_blocks_bridge_and_load_for_stream_mode(monkeypatch, q
     qapp.processEvents()
 
     assert dialog.load_selected_button.isEnabled() is False
-    assert dialog.bridge_table.rowCount() == 0
-    assert dialog.bridge_apply_btn.isEnabled() is False
-    assert "droplet mode" in dialog.bridge_status_label.text().lower()
-    assert "stream mode" in dialog.bridge_status_label.text().lower()
+    assert dialog.bridge_table.rowCount() == 1
+    assert dialog.bridge_apply_btn.isEnabled() is True
+    assert "Mode switch: Stream -> Droplet" in dialog.bridge_status_label.text()
 
     dialog.deleteLater()
 
@@ -1331,6 +1347,83 @@ def test_apply_marks_summary_row_and_persists_across_reopen(monkeypatch, qapp, t
     assert reopened.summary_table_model.data(reopened.summary_table_model.index(source_row, marker_col), Qt.DisplayRole) == "✓"
 
     reopened.deleteLater()
+
+
+def test_cross_mode_apply_confirms_and_switches_design_mode(monkeypatch, qapp, tmp_path):
+    runs = [
+        _make_run(
+            "run_stream",
+            stream_entries=[
+                {
+                    "timestamp": "2026-03-18T10:01:00Z",
+                    "pw_us": 1800,
+                    "pressure_psi": 1.80,
+                    "predicted_volume_nl": 72.6,
+                    "predicted_stream_duration_us": 3950,
+                    "flow_fit_status": "ok",
+                    "tail_phase_status": "captured",
+                }
+            ],
+        )
+    ]
+    experiment_model = _build_experiment_model("Water", current_mode="droplet")
+    info_calls = []
+    question_calls = []
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "information", lambda *args, **kwargs: info_calls.append(args))
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "critical", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        calibration_view.QtWidgets.QMessageBox,
+        "question",
+        lambda *args, **kwargs: question_calls.append(args) or calibration_view.QtWidgets.QMessageBox.Yes,
+    )
+
+    dialog, _manager = _build_dialog(
+        monkeypatch,
+        qapp,
+        tmp_path,
+        runs,
+        current_stock="Water",
+        current_mode="droplet",
+        active_run_id="run_stream",
+        experiment_model=experiment_model,
+    )
+    settings_calls = []
+    _manager.changeSettingsRequested.connect(
+        lambda settings, callback: settings_calls.append(dict(settings)) or (callback() if callable(callback) else None)
+    )
+    stream_row = next(
+        idx for idx, row in enumerate(_visible_summary_rows(dialog))
+        if row.get("phase") == "stream"
+    )
+    _select_visible_row(dialog, stream_row)
+    qapp.processEvents()
+
+    _, raw = dialog._selected_summary_row()
+    assert raw["phase"] == "stream"
+    assert raw["printing_mode"] == "stream"
+    assert dialog.bridge_apply_btn.isEnabled() is True
+    assert "Mode switch: Droplet -> Stream" in dialog.bridge_status_label.text()
+    assert dialog.load_selected_button.isEnabled() is False
+    assert dialog.recheck_selected_button.isEnabled() is False
+
+    dialog._apply_previewed_droplet_volume()
+    qapp.processEvents()
+
+    assert question_calls
+    key_opt = experiment_model.find_option_by_reagent_name("Water")
+    assert key_opt[1].droplet_nL == pytest.approx(72.6)
+    assert key_opt[1].printing_mode == "stream"
+    assert dialog._get_loaded_printer_head().get_printing_mode() == "stream"
+    applied_record = experiment_model.get_applied_imaging_calibration()
+    assert applied_record["printing_mode"] == "stream"
+    assert applied_record["original_printing_mode"] == "droplet"
+    assert applied_record["applied_printing_mode"] == "stream"
+    assert applied_record["run_id"] == "run_stream"
+    assert settings_calls[-1] == {"print_pulse_width": 1800, "print_pressure": 1.80}
+    assert info_calls
+
+    dialog.deleteLater()
 
 
 def test_selecting_different_summary_row_keeps_applied_row_highlight(monkeypatch, qapp, tmp_path):
