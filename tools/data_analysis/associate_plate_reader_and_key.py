@@ -35,6 +35,7 @@ DEFAULT_KEY_FILENAME = "concentration_key.csv"
 DEFAULT_PLATE_PATTERN = "*_data.xls or plate-reader .txt"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_EXPERIMENTS_DIR = REPO_ROOT / "FreeRTOS-interface" / "Experiments"
+PLATE_READER_TEXT_ENCODINGS = ("utf-16", "utf-8-sig", "cp1252")
 
 
 @dataclass(frozen=True)
@@ -129,8 +130,18 @@ def extract_channel_labels(metadata_row: list[str], *, expected_count: int | Non
 
 
 def read_plate_rows(path: str | Path) -> list[list[str]]:
-    with open(path, "r", encoding="utf-16", newline="") as handle:
-        return list(csv.reader(handle, delimiter="\t"))
+    errors: list[str] = []
+    for encoding in PLATE_READER_TEXT_ENCODINGS:
+        try:
+            with open(path, "r", encoding=encoding, newline="") as handle:
+                return list(csv.reader(handle, delimiter="\t"))
+        except UnicodeError as exc:
+            errors.append(f"{encoding}: {exc}")
+
+    raise UnicodeError(
+        "Could not decode plate-reader export with supported encodings "
+        f"{', '.join(PLATE_READER_TEXT_ENCODINGS)}. " + " | ".join(errors)
+    )
 
 
 def split_into_blocks(data_rows: list[list[str]]) -> list[list[list[str]]]:
@@ -196,6 +207,10 @@ def matrix_column_indices(header_row: list[str]) -> list[tuple[int, int]]:
     return columns
 
 
+def is_endpoint_plate_mode(metadata_row: list[str]) -> bool:
+    return any(str(cell).strip().lower() == "endpoint" for cell in metadata_row)
+
+
 def parse_fluorophore_label(label: str) -> tuple[int | None, int | None]:
     match = re.match(r"^(\d+)_(\d+)$", str(label).strip())
     if not match:
@@ -220,6 +235,8 @@ def parse_matrix_plate_reader_rows(rows: list[list[str]], metadata_row: list[str
     current_time = ""
     current_temperature = ""
     current_plate_row = -1
+    endpoint_mode = is_endpoint_plate_mode(metadata_row)
+    endpoint_started = False
 
     for row in rows[3:]:
         if not row or all(str(cell).strip() == "" for cell in row):
@@ -238,6 +255,11 @@ def parse_matrix_plate_reader_rows(rows: list[list[str]], metadata_row: list[str
             current_time = first_cell
             current_temperature = str(row[1]).strip() if len(row) > 1 else ""
             current_plate_row = 0
+        elif endpoint_mode and not endpoint_started and first_cell == "":
+            current_time = "00:00:00"
+            current_temperature = str(row[1]).strip() if len(row) > 1 else ""
+            current_plate_row = 0
+            endpoint_started = True
         elif current_time and first_cell == "":
             current_plate_row += 1
         else:
@@ -468,15 +490,15 @@ def is_plate_reader_export_candidate(path: Path) -> bool:
         return False
 
     try:
-        with open(path, "r", encoding="utf-16", newline="") as handle:
-            first_line = handle.readline().strip()
-            second_line = handle.readline().strip()
+        rows = read_plate_rows(path)
     except OSError:
         raise
     except UnicodeError:
         return False
 
-    return first_line.startswith("##BLOCKS") and second_line.startswith("Plate:")
+    if len(rows) < 2 or not rows[0] or not rows[1]:
+        return False
+    return str(rows[0][0]).strip().startswith("##BLOCKS") and str(rows[1][0]).strip().startswith("Plate:")
 
 
 def has_wildcard(path_text: str | Path) -> bool:

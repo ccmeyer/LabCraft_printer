@@ -522,6 +522,10 @@ def summarize_condition_timecourses(dataframe: pd.DataFrame, condition_columns: 
     ).reset_index(drop=True)
 
 
+def has_timecourse_data(dataframe: pd.DataFrame) -> bool:
+    return dataframe["time_seconds"].dropna().nunique() >= 2
+
+
 def write_condition_timecourse_plot(
     replicate_data: pd.DataFrame,
     summary_data: pd.DataFrame,
@@ -1570,11 +1574,16 @@ def analyze_merged_tidy_csv(
         keyed_prepared.loc[~keyed_prepared["is_endpoint_outlier"].astype(bool)],
         condition_columns,
     )
-    faceted_timecourse_csvs, faceted_timecourse_pngs = write_faceted_timecourse_grid_outputs(
-        keyed_prepared,
-        condition_columns,
-        output_root,
-    )
+    should_write_timecourse_plots = has_timecourse_data(prepared)
+    if should_write_timecourse_plots:
+        faceted_timecourse_csvs, faceted_timecourse_pngs = write_faceted_timecourse_grid_outputs(
+            keyed_prepared,
+            condition_columns,
+            output_root,
+        )
+    else:
+        faceted_timecourse_csvs = []
+        faceted_timecourse_pngs = []
 
     endpoint_csv = output_root / "endpoint_by_well.csv"
     composition_summary_csv = output_root / "composition_summary.csv"
@@ -1607,55 +1616,56 @@ def analyze_merged_tidy_csv(
     outlier_pngs: list[Path] = []
     timecourse_pngs: list[Path] = []
     combined_timecourse_pngs: list[Path] = []
-    for (condition_id, fluorophore), plot_summary in timecourse_summary.groupby(["condition_id", "fluorophore"]):
-        plot_replicates = keyed_prepared.loc[
-            (keyed_prepared["condition_id"] == condition_id)
-            & (keyed_prepared["fluorophore"] == fluorophore)
-        ]
-        if plot_replicates.empty:
-            continue
+    if should_write_timecourse_plots:
+        for (condition_id, fluorophore), plot_summary in timecourse_summary.groupby(["condition_id", "fluorophore"]):
+            plot_replicates = keyed_prepared.loc[
+                (keyed_prepared["condition_id"] == condition_id)
+                & (keyed_prepared["fluorophore"] == fluorophore)
+            ]
+            if plot_replicates.empty:
+                continue
 
-        safe_fluorophore = safe_filename(fluorophore)
-        timecourse_png = timecourse_dir / f"{condition_id}_{safe_fluorophore}_timecourse.png"
-        condition_label = str(plot_summary["condition_label"].iloc[0])
-        write_condition_timecourse_plot(
-            plot_replicates,
-            plot_summary,
-            timecourse_png,
-            condition_id=str(condition_id),
-            fluorophore=str(fluorophore),
-            condition_label=condition_label,
-        )
-        timecourse_pngs.append(timecourse_png)
+            safe_fluorophore = safe_filename(fluorophore)
+            timecourse_png = timecourse_dir / f"{condition_id}_{safe_fluorophore}_timecourse.png"
+            condition_label = str(plot_summary["condition_label"].iloc[0])
+            write_condition_timecourse_plot(
+                plot_replicates,
+                plot_summary,
+                timecourse_png,
+                condition_id=str(condition_id),
+                fluorophore=str(fluorophore),
+                condition_label=condition_label,
+            )
+            timecourse_pngs.append(timecourse_png)
 
-    for fluorophore in sorted(timecourse_summary["fluorophore"].dropna().astype(str).unique()):
-        inclusive_summary = timecourse_summary.loc[timecourse_summary["fluorophore"] == fluorophore]
-        excluded_summary = timecourse_summary_excluding_outliers.loc[
-            timecourse_summary_excluding_outliers["fluorophore"] == fluorophore
-        ]
-        condition_ids = sorted(inclusive_summary["condition_id"].dropna().astype(str).unique())
-        color_by_condition = build_condition_color_map(condition_ids)
-        safe_name = safe_filename(fluorophore)
+        for fluorophore in sorted(timecourse_summary["fluorophore"].dropna().astype(str).unique()):
+            inclusive_summary = timecourse_summary.loc[timecourse_summary["fluorophore"] == fluorophore]
+            excluded_summary = timecourse_summary_excluding_outliers.loc[
+                timecourse_summary_excluding_outliers["fluorophore"] == fluorophore
+            ]
+            condition_ids = sorted(inclusive_summary["condition_id"].dropna().astype(str).unique())
+            color_by_condition = build_condition_color_map(condition_ids)
+            safe_name = safe_filename(fluorophore)
 
-        including_png = combined_timecourse_dir / f"{safe_name}_all_conditions_including_outliers.png"
-        write_combined_condition_timecourse_plot(
-            inclusive_summary,
-            including_png,
-            fluorophore=fluorophore,
-            title_suffix="All keyed compositions including endpoint outliers",
-            color_by_condition=color_by_condition,
-        )
-        combined_timecourse_pngs.append(including_png)
+            including_png = combined_timecourse_dir / f"{safe_name}_all_conditions_including_outliers.png"
+            write_combined_condition_timecourse_plot(
+                inclusive_summary,
+                including_png,
+                fluorophore=fluorophore,
+                title_suffix="All keyed compositions including endpoint outliers",
+                color_by_condition=color_by_condition,
+            )
+            combined_timecourse_pngs.append(including_png)
 
-        excluding_png = combined_timecourse_dir / f"{safe_name}_all_conditions_excluding_outliers.png"
-        write_combined_condition_timecourse_plot(
-            excluded_summary,
-            excluding_png,
-            fluorophore=fluorophore,
-            title_suffix="All keyed compositions excluding endpoint outliers",
-            color_by_condition=color_by_condition,
-        )
-        combined_timecourse_pngs.append(excluding_png)
+            excluding_png = combined_timecourse_dir / f"{safe_name}_all_conditions_excluding_outliers.png"
+            write_combined_condition_timecourse_plot(
+                excluded_summary,
+                excluding_png,
+                fluorophore=fluorophore,
+                title_suffix="All keyed compositions excluding endpoint outliers",
+                color_by_condition=color_by_condition,
+            )
+            combined_timecourse_pngs.append(excluding_png)
 
     for fluorophore in sorted(endpoint["fluorophore"].dropna().astype(str).unique()):
         safe_name = safe_filename(fluorophore)

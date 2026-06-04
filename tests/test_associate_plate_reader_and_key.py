@@ -138,6 +138,52 @@ def _write_matrix_plate_export(path: Path) -> None:
         writer.writerows(rows)
 
 
+def _write_endpoint_matrix_plate_export(path: Path) -> None:
+    metadata_row = [""] * 33
+    metadata_values = {
+        0: "Plate:",
+        1: "Plate#1",
+        2: "1.3",
+        3: "PlateFormat",
+        4: "Endpoint",
+        5: "Fluorescence",
+        6: "TRUE",
+        7: "Raw",
+        8: "FALSE",
+        9: "1",
+        15: "1",
+        16: "585",
+        17: "1",
+        18: "24",
+        19: "384",
+        20: "560",
+        21: "Manual",
+        22: "570",
+        25: "6",
+        26: "Medium",
+        29: "1",
+        30: "16",
+        32: "None",
+    }
+    for index, value in metadata_values.items():
+        metadata_row[index] = value
+
+    rows = [
+        ["##BLOCKS= 1"],
+        metadata_row,
+        ["", "Temperature(¡C)", "1", "2", "3"],
+        ["", "23.50", "100.5", "200.5", ""],
+        ["", "", "300.5", "400.5", ""],
+        ["", "", "", "500.5", ""],
+        [],
+        ["~End"],
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="cp1252", newline="") as handle:
+        writer = csv.writer(handle, delimiter="\t")
+        writer.writerows(rows)
+
+
 def _write_key(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -309,6 +355,32 @@ def test_matrix_txt_export_discovers_inputs_and_maps_plate_rows(tmp_path):
     assert b2_final["rfu"] == 41
     assert b2_final["temperature_c"] == 37.0
     assert not bool(b2_final["is_keyed"])
+
+
+def test_endpoint_matrix_txt_export_discovers_inputs_and_maps_single_endpoint(tmp_path):
+    exp_dir = tmp_path / "EndpointReader-20260603_162039"
+    plate = exp_dir / "Data 06-03-26-162039_medium pmt 560ex 585em.txt"
+    key = exp_dir / "concentration_key.csv"
+    _write_endpoint_matrix_plate_export(plate)
+    _write_matrix_key(key)
+
+    assert mod.main([str(exp_dir)]) == 0
+
+    out = exp_dir / "Data 06-03-26-162039_medium pmt 560ex 585em_merged_tidy.csv"
+    df = _read_output(out)
+    assert len(df) == 5
+    assert set(df["well"]) == {"A1", "A2", "B1", "B2", "C2"}
+    assert set(df["time"]) == {"00:00:00"}
+    assert set(df["time_seconds"]) == {0.0}
+    assert set(df["time_minutes"]) == {0.0}
+    assert set(df["fluorophore"]) == {"560_585"}
+    assert set(df["excitation_nm"]) == {560}
+    assert set(df["emission_nm"]) == {585}
+
+    c2 = df.loc[df["well"] == "C2"].iloc[0]
+    assert c2["rfu"] == 500.5
+    assert c2["temperature_c"] == 23.5
+    assert not bool(c2["is_keyed"])
 
 
 def test_keyed_and_unkeyed_wells_are_retained_with_is_keyed(tmp_path):

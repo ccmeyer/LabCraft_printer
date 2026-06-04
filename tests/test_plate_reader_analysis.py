@@ -83,6 +83,17 @@ def _write_synthetic_merged_csv(path: Path) -> Path:
     return path
 
 
+def _write_endpoint_only_merged_csv(path: Path) -> Path:
+    rows: list[dict[str, object]] = []
+    rows.extend(_merged_rows_for_well("A1", [10], is_keyed=True, dna_mM=0.0, mg_mM=5.0))
+    rows.extend(_merged_rows_for_well("A2", [12], is_keyed=True, dna_mM=0.0, mg_mM=5.0))
+    rows.extend(_merged_rows_for_well("A3", [50], is_keyed=True, dna_mM=1.0, mg_mM=5.0))
+    rows.extend(_merged_rows_for_well("B1", [40], is_keyed=False, dna_mM=np.nan, mg_mM=np.nan))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows).to_csv(path, index=False)
+    return path
+
+
 def _write_outlier_merged_csv(path: Path) -> Path:
     rows: list[dict[str, object]] = []
     rows.extend(_merged_rows_for_well("A1", [100, 100, 100], is_keyed=True, dna_mM=1.0, mg_mM=5.0))
@@ -870,6 +881,36 @@ def test_cli_with_merged_csv_creates_expected_outputs(tmp_path, capsys):
     assert "Endpoint main-effect plots: 2" in captured.out
     assert "Endpoint pairwise interaction plots: 0" in captured.out
     assert "Endpoint faceted dose-response plots: 0" in captured.out
+
+
+def test_cli_with_endpoint_only_data_skips_timecourse_plots(tmp_path, capsys):
+    merged_csv = _write_endpoint_only_merged_csv(tmp_path / "endpoint_merged_tidy.csv")
+    output_dir = tmp_path / "endpoint_analysis"
+
+    assert cli.main(["--merged-csv", str(merged_csv), "--output-dir", str(output_dir)]) == 0
+
+    assert (output_dir / "endpoint_by_well.csv").exists()
+    assert (output_dir / "composition_summary.csv").exists()
+    assert (output_dir / "timecourse_summary.csv").exists()
+    assert (output_dir / "timecourse_summary_excluding_outliers.csv").exists()
+    assert (output_dir / "heatmaps_absolute_rfu" / "488_509_endpoint_rfu.png").exists()
+    assert (
+        output_dir / "endpoint_effects" / "main_effects" / "including_outliers" / "488_509_DNA_mM_main_effect.png"
+    ).exists()
+
+    timecourse = pd.read_csv(output_dir / "timecourse_summary.csv")
+    assert len(timecourse) == 2
+    assert set(timecourse["time_seconds"]) == {0.0}
+    assert not list((output_dir / "timecourses").glob("*.png"))
+    assert not list((output_dir / "timecourses_combined").glob("*.png"))
+    assert not (output_dir / "timecourses_faceted").exists()
+
+    captured = capsys.readouterr()
+    assert "Endpoint rows: 4" in captured.out
+    assert "Timecourse plots: 0" in captured.out
+    assert "Combined timecourse plots: 0" in captured.out
+    assert "Faceted timecourse grid plots: 0" in captured.out
+    assert "Endpoint main-effect plots: 2" in captured.out
 
 
 def test_cli_with_experiment_directory_uses_single_existing_merged_csv(tmp_path):
