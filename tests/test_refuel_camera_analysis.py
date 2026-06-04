@@ -1316,7 +1316,34 @@ def test_visible_gate_rejects_full_bottom_peak_with_negative_delta_and_mild_slop
     assert thread.debug_details["bottom_peak_polarity_reject_condition"] == "delta_full_bottom"
 
 
-def test_visible_gate_keeps_bottom_peak_with_mild_negative_profile_polarity():
+def test_visible_gate_rejects_full_bottom_peak_with_subtle_high_brightness_drop():
+    thread = _selection_thread()
+    selection = {
+        "selected_peak_row": 111,
+        "selected_peak_prominence": 4.8,
+        "candidate_rows": [111],
+        "candidate_prominences": [4.8],
+    }
+    profile = np.full(117, 68.0)
+    profile[76:109] = 81.0
+    profile[113:117] = 78.0
+
+    accepted, reason = thread._selected_peak_visible_decision(
+        selection,
+        channel_height=117,
+        fill_state="full",
+        profile=profile,
+    )
+
+    assert accepted is False
+    assert reason == "bottom_high_brightness_drop_full_artifact"
+    assert thread.debug_details["visible_peak_reason"] == "bottom_high_brightness_drop_full_artifact"
+    assert thread.debug_details["bottom_peak_polarity_post_minus_pre"] > -20.0
+    assert thread.debug_details["bottom_peak_brightness_post_minus_pre_p90"] <= -2.0
+    assert thread.debug_details["bottom_peak_brightness_reject_condition"] == "p90_drop_full_bottom"
+
+
+def test_visible_gate_keeps_bottom_peak_when_high_brightness_does_not_drop():
     thread = _selection_thread()
     selection = {
         "selected_peak_row": 111,
@@ -1324,10 +1351,9 @@ def test_visible_gate_keeps_bottom_peak_with_mild_negative_profile_polarity():
         "candidate_rows": [111],
         "candidate_prominences": [16.76],
     }
-    profile = np.concatenate([
-        np.full(90, 82.0),
-        np.linspace(82.0, 64.0, 27),
-    ])
+    profile = np.full(117, 68.0)
+    profile[76:109] = 55.0
+    profile[113:117] = 82.0
 
     accepted, reason = thread._selected_peak_visible_decision(
         selection,
@@ -1340,6 +1366,8 @@ def test_visible_gate_keeps_bottom_peak_with_mild_negative_profile_polarity():
     assert reason == "bottom_visible_without_top_boundary"
     assert thread.debug_details["bottom_peak_polarity_available"] is True
     assert thread.debug_details["bottom_peak_polarity_post_minus_pre"] > -20.0
+    assert thread.debug_details["bottom_peak_brightness_post_minus_pre_p90"] >= 0.0
+    assert thread.debug_details["bottom_peak_brightness_reject_condition"] is None
 
 
 def test_visible_gate_keeps_negative_bottom_peak_when_fill_state_is_empty():
@@ -1365,6 +1393,8 @@ def test_visible_gate_keeps_negative_bottom_peak_when_fill_state_is_empty():
     assert accepted is True
     assert reason == "bottom_visible_without_top_boundary"
     assert thread.debug_details["bottom_peak_polarity_post_minus_pre"] <= -20.0
+    assert thread.debug_details["bottom_peak_brightness_post_minus_pre_p90"] is not None
+    assert thread.debug_details["bottom_peak_brightness_reject_condition"] is None
 
 
 def test_visible_gate_keeps_strong_top_visible_after_full_frame():

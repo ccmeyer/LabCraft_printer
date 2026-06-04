@@ -32936,6 +32936,12 @@ class ImageAnalysisThread(QThread):
     BOTTOM_POLARITY_POST_OUTER_PX = 9
     BOTTOM_POLARITY_REJECT_DELTA_MAX = -20.0
     BOTTOM_POLARITY_REJECT_SLOPE_MAX = -1.4
+    BOTTOM_BRIGHTNESS_PRE_OUTER_PX = 35
+    BOTTOM_BRIGHTNESS_PRE_INNER_PX = 3
+    BOTTOM_BRIGHTNESS_POST_INNER_PX = 2
+    BOTTOM_BRIGHTNESS_POST_OUTER_PX = 35
+    BOTTOM_BRIGHTNESS_PERCENTILE = 90.0
+    BOTTOM_BRIGHTNESS_REJECT_DELTA_MAX = -2.0
     FILL_REFERENCE_MIN_MEAN = 40.0
     HEAD_CLOSE_KERNEL = (65, 9)
     COMPONENT_MIN_AREA = 800
@@ -33367,6 +33373,55 @@ class ImageAnalysisThread(QThread):
         )
         return details
 
+    def _bottom_peak_brightness_drop(self, profile, selected_row):
+        pre_outer = int(self._y_px(self.BOTTOM_BRIGHTNESS_PRE_OUTER_PX))
+        pre_inner = int(self._y_px(self.BOTTOM_BRIGHTNESS_PRE_INNER_PX))
+        post_inner = int(self._y_px(self.BOTTOM_BRIGHTNESS_POST_INNER_PX))
+        post_outer = int(self._y_px(self.BOTTOM_BRIGHTNESS_POST_OUTER_PX))
+        details = {
+            "bottom_peak_brightness_pre_start": None,
+            "bottom_peak_brightness_pre_end": None,
+            "bottom_peak_brightness_post_start": None,
+            "bottom_peak_brightness_post_end": None,
+            "bottom_peak_brightness_pre_p90": None,
+            "bottom_peak_brightness_post_p90": None,
+            "bottom_peak_brightness_post_minus_pre_p90": None,
+            "bottom_peak_brightness_reject_delta_max": float(self.BOTTOM_BRIGHTNESS_REJECT_DELTA_MAX),
+            "bottom_peak_brightness_reject_condition": None,
+        }
+        if profile is None or selected_row is None:
+            return details
+        try:
+            values = np.asarray(profile, dtype=float).ravel()
+            row = int(selected_row)
+        except Exception:
+            return details
+        if values.size == 0 or row < 0 or row >= int(values.size):
+            return details
+
+        pre_start = max(0, row - pre_outer)
+        pre_end = max(0, row - pre_inner + 1)
+        post_start = min(int(values.size), row + post_inner)
+        post_end = min(int(values.size), row + post_outer + 1)
+        pre = values[pre_start:pre_end]
+        post = values[post_start:post_end]
+
+        pre_p90 = float(np.percentile(pre, self.BOTTOM_BRIGHTNESS_PERCENTILE)) if len(pre) else None
+        post_p90 = float(np.percentile(post, self.BOTTOM_BRIGHTNESS_PERCENTILE)) if len(post) else None
+        post_minus_pre = None if pre_p90 is None or post_p90 is None else float(post_p90 - pre_p90)
+        details.update(
+            {
+                "bottom_peak_brightness_pre_start": int(pre_start),
+                "bottom_peak_brightness_pre_end": int(pre_end),
+                "bottom_peak_brightness_post_start": int(post_start),
+                "bottom_peak_brightness_post_end": int(post_end),
+                "bottom_peak_brightness_pre_p90": pre_p90,
+                "bottom_peak_brightness_post_p90": post_p90,
+                "bottom_peak_brightness_post_minus_pre_p90": post_minus_pre,
+            }
+        )
+        return details
+
     def _selected_peak_visible_decision(self, selection, channel_height, fill_state, profile=None):
         rows = [int(row) for row in (selection.get("candidate_rows") or [])]
         prominences = [float(value) for value in (selection.get("candidate_prominences") or [])]
@@ -33411,6 +33466,20 @@ class ImageAnalysisThread(QThread):
                 debug_payload.update({
                     "visible_peak_reason": reason,
                     "bottom_peak_polarity_reject_condition": "delta_full_bottom",
+                })
+                self._debug_update(debug_payload)
+                return False, reason
+            brightness = self._bottom_peak_brightness_drop(profile, row)
+            debug_payload.update(brightness)
+            if (
+                str(fill_state) == "full"
+                and brightness.get("bottom_peak_brightness_post_minus_pre_p90") is not None
+                and float(brightness["bottom_peak_brightness_post_minus_pre_p90"]) <= float(self.BOTTOM_BRIGHTNESS_REJECT_DELTA_MAX)
+            ):
+                reason = "bottom_high_brightness_drop_full_artifact"
+                debug_payload.update({
+                    "visible_peak_reason": reason,
+                    "bottom_peak_brightness_reject_condition": "p90_drop_full_bottom",
                 })
                 self._debug_update(debug_payload)
                 return False, reason
