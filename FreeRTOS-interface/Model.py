@@ -6795,12 +6795,18 @@ class ExperimentModel(QObject):
         Set the fill droplet size and recompute experiment so all totals refresh.
         """
         metadata = getattr(self, "metadata", {}) or {}
+        default_fill_droplet_nL = printing_mode_default_ejection_volume_nl(PRINTING_MODE_DROPLET)
+        default_fill_getter = getattr(self, "_default_fill_droplet_volume_nl", None)
+        if callable(default_fill_getter):
+            default_fill_droplet_nL = float(default_fill_getter())
+        current_fill_droplet_nL = float(
+            metadata["fill_droplet_volume_nL"]
+            if "fill_droplet_volume_nL" in metadata
+            else default_fill_droplet_nL
+        )
         original_fill_mode = normalize_printing_mode(
             metadata.get("fill_printing_mode"),
-            fallback=infer_printing_mode_from_volume(
-                metadata.get("fill_droplet_volume_nL", self._default_fill_droplet_volume_nl()),
-                fallback=PRINTING_MODE_DROPLET,
-            ),
+            fallback=infer_printing_mode_from_volume(current_fill_droplet_nL, fallback=PRINTING_MODE_DROPLET),
         )
         applied_fill_mode = (
             normalize_printing_mode(printing_mode, fallback=original_fill_mode)
@@ -6813,7 +6819,7 @@ class ExperimentModel(QObject):
             label="Fill ejection volume",
         )
 
-        old = float(self.metadata.get("fill_droplet_volume_nL", self._default_fill_droplet_volume_nl()))
+        old = current_fill_droplet_nL
 
         # Preview before we apply, so we can report useful deltas after recompute
         prev = self.preview_fill_requantized(new_fill_droplet_nL)

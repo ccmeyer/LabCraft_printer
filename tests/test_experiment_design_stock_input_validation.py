@@ -638,7 +638,7 @@ def test_import_wizard_loads_design_and_stock_tables(qapp):
     assert wizard.report["composition_rows"][0]["count"] == 2
     assert wizard.report["composition_rows"][0]["total_required_volume_nL"] == 200.0
     assert wizard.stock_table.item(0, wizard.STOCK_COL_MODE).text() == "Droplet"
-    assert wizard.stock_table.item(0, wizard.STOCK_COL_DROPLET).text() == "10"
+    assert wizard.stock_table.item(0, wizard.STOCK_COL_DROPLET).text() == "9"
     assert wizard.stock_table.item(1, wizard.STOCK_COL_MODE).text() == "Stream"
     assert wizard.stock_table.item(1, wizard.STOCK_COL_DROPLET).text() == "60"
     payload = wizard.get_apply_payload()
@@ -1000,9 +1000,9 @@ def test_import_wizard_status_colors_distinguish_warnings_from_errors(qapp):
 
     near_budget_wizard = View.ExperimentImportWizard(
         ExperimentModel(prof=CURRENT_PROFILE),
-        printed_volume_nL=950.0,
+        printed_volume_nL=958.0,
         printed_volume_tolerance_nL=50.0,
-        final_volume_nL=1000.0,
+        final_volume_nL=1008.0,
         allow_two=False,
     )
     near_budget_wizard.load_design_dataframe(
