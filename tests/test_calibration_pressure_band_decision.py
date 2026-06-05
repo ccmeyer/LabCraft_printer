@@ -331,6 +331,50 @@ def test_single_candidate_triage_single_transient_head_evidence_confirms_same_pr
     assert proc._single_candidate_triage_summary["verified_transient_head_evidence"] is True
 
 
+def test_single_candidate_triage_single_nozzle_wet_transient_confirms_same_pressure():
+    proc = _build_single_candidate_proc(
+        [_rep("single", center=(100, 200), nozzle_wet=True, nozzle_attached_area=12000)]
+    )
+    _install_residue_detection(
+        proc,
+        details={
+            "near_nozzle_residue_detected": False,
+            "nozzle_contact_detected": False,
+            "nozzle_attached_area": 0,
+        },
+    )
+    settings_requests = []
+
+    def _request(settings, callback, **kwargs):
+        settings_requests.append((dict(settings), dict(kwargs)))
+        callback()
+
+    proc._request_settings_with_recording = _request
+    triage_summary = proc._build_single_candidate_confirmation_summary(proc.reps)
+
+    proc._finish_single_candidate_residue_verification(
+        np.zeros((20, 20), dtype=np.uint8),
+        trigger="triage",
+        decision={
+            "reason": "single_candidate_triage",
+            "triage_verdict": "single",
+            "failure_kind": "low",
+            "suggested_direction": "up",
+            "triage_summary": dict(triage_summary),
+        },
+    )
+
+    assert proc._single_candidate_confirming is True
+    assert proc._single_candidate_candidate_pressure == 1.0
+    assert proc.replicates_target == 5
+    assert proc.reps == []
+    assert proc.continueReplicate.calls
+    assert proc.continueScan.calls == []
+    assert settings_requests[-1][0] == {"num_droplets": 1, "flash_delay": 5850}
+    assert proc._single_candidate_triage_summary["wet_hits"] == 1
+    assert proc._single_candidate_triage_summary["verified_transient_head_evidence"] is True
+
+
 def test_single_candidate_triage_none_transient_residue_still_steps_up():
     proc = _build_single_candidate_proc([_rep("none", near_nozzle_residue=True)])
     _install_residue_detection(
@@ -435,6 +479,62 @@ def test_single_candidate_confirmation_contact_only_verifies_and_strict_passes()
     assert any(name == "single_candidate_verified_transient_head_evidence_used" for name, _ in events)
 
 
+def test_single_candidate_confirmation_nozzle_wet_verifies_and_strict_passes():
+    events = []
+    proc = _build_single_candidate_proc(
+        [
+            _rep(
+                "single",
+                center=(100 + i % 2, 200 + i % 2),
+                nozzle_wet=True,
+                nozzle_attached_area=12000,
+            )
+            for i in range(5)
+        ]
+    )
+    proc._single_candidate_confirming = True
+    proc.replicates_target = 5
+    proc._record_decision = lambda name, payload=None: events.append((name, dict(payload or {})))
+    _install_residue_detection(
+        proc,
+        details={
+            "near_nozzle_residue_detected": False,
+            "nozzle_contact_detected": False,
+            "nozzle_attached_area": 0,
+        },
+    )
+    verification_calls = []
+    real_finish = proc._finish_single_candidate_residue_verification
+    proc._start_single_candidate_residue_verification = (
+        lambda *, trigger, decision=None: verification_calls.append(
+            (trigger, dict(decision or {}))
+        )
+    )
+
+    proc.onDecide()
+
+    assert verification_calls and verification_calls[0][0] == "confirmation"
+    real_finish(
+        np.zeros((20, 20), dtype=np.uint8),
+        trigger="confirmation",
+        decision=verification_calls[0][1],
+    )
+    proc.onCalibrationCompleted()
+
+    assert proc.finalize.calls
+    payload = proc.calibrationDataUpdated.calls[0][0][0]["result"]
+    summary = payload["confirmation_summary"]
+    assert summary["verified_transient_head_evidence"] is True
+    assert summary["softened_hit_counts"]["wet_hits"] == 5
+    assert summary["softened_hit_counts"]["nozzle_contact_hits"] == 5
+    assert summary["wet_hits"] == 0
+    assert summary["nozzle_contact_hits"] == 0
+    assert summary["low_pressure_hits"] == 0
+    assert summary["confirmation_stability_status"] == "strict_pass"
+    assert payload["primary_band"] == [1.0, 1.0]
+    assert any(name == "single_candidate_verified_transient_head_evidence_used" for name, _ in events)
+
+
 def test_single_candidate_transient_head_evidence_can_select_fallback_candidate():
     events = []
     proc = _build_single_candidate_proc(
@@ -496,6 +596,75 @@ def test_single_candidate_transient_head_evidence_can_select_fallback_candidate(
     assert any(name == "single_candidate_verified_transient_head_evidence_used" for name, _ in events)
 
 
+def test_single_candidate_nozzle_wet_transient_can_select_fallback_candidate():
+    proc = _build_single_candidate_proc(
+        [
+            _rep(
+                "single",
+                center=(100, 200 + i * 17),
+                nozzle_wet=True,
+                nozzle_attached_area=12000,
+            )
+            for i in range(5)
+        ]
+    )
+    proc._single_candidate_confirming = True
+    proc.replicates_target = 5
+    _install_residue_detection(
+        proc,
+        details={
+            "near_nozzle_residue_detected": False,
+            "nozzle_contact_detected": False,
+            "nozzle_attached_area": 0,
+        },
+    )
+    captured = []
+    real_finish = proc._finish_single_candidate_residue_verification
+    proc._start_single_candidate_residue_verification = (
+        lambda *, trigger, decision=None: captured.append((trigger, dict(decision or {})))
+    )
+
+    proc.onDecide()
+    real_finish(
+        np.zeros((20, 20), dtype=np.uint8),
+        trigger="confirmation",
+        decision=captured.pop(0)[1],
+    )
+
+    assert proc._single_candidate_stability_rejection_count == 1
+    assert proc._single_candidate_stability_fallback_candidates
+    assert proc.finalize.calls == []
+
+    proc._current_pressure = 1.02
+    proc.reps = [
+        _rep(
+            "single",
+            center=(100, 200 + i * 20),
+            nozzle_wet=True,
+            nozzle_attached_area=12000,
+        )
+        for i in range(5)
+    ]
+    proc._single_candidate_confirming = True
+    proc.replicates_target = 5
+
+    proc.onDecide()
+    real_finish(
+        np.zeros((20, 20), dtype=np.uint8),
+        trigger="confirmation",
+        decision=captured.pop(0)[1],
+    )
+    proc.onCalibrationCompleted()
+
+    assert proc.finalize.calls
+    assert proc._single_candidate_selected_pressure == 1.0
+    payload = proc.calibrationDataUpdated.calls[0][0][0]["result"]
+    assert payload["stability_fallback_used"] is True
+    assert payload["primary_band"] == [1.0, 1.0]
+    assert payload["confirmation_summary"]["softened_hit_counts"]["wet_hits"] == 5
+    assert payload["confirmation_summary"]["selected_by_stability_fallback"] is True
+
+
 def test_single_candidate_transient_head_evidence_does_not_soften_too_close():
     proc = _build_single_candidate_proc(
         [
@@ -503,6 +672,7 @@ def test_single_candidate_transient_head_evidence_does_not_soften_too_close():
                 "single",
                 center=(100, 200 + i * 17),
                 near_nozzle_residue=True,
+                nozzle_wet=True,
                 too_close=True,
             )
             for i in range(5)
@@ -532,6 +702,82 @@ def test_single_candidate_transient_head_evidence_does_not_soften_too_close():
     )
 
     assert proc._next_pressure == 1.02
+    assert proc.continueScan.calls
+    assert proc.finalize.calls == []
+    assert proc._single_candidate_stability_fallback_candidates == []
+
+
+def test_single_candidate_nozzle_wet_persistent_residue_stops_with_cleanup_message():
+    proc = _build_single_candidate_proc(
+        [_rep("single", center=(100, 200), nozzle_wet=True, nozzle_attached_area=12000)]
+    )
+    _install_residue_detection(
+        proc,
+        nozzle_area=12000,
+        details={
+            "near_nozzle_residue_detected": False,
+            "nozzle_contact_detected": True,
+            "nozzle_attached_area": 12000,
+        },
+    )
+    triage_summary = proc._build_single_candidate_confirmation_summary(proc.reps)
+
+    proc._finish_single_candidate_residue_verification(
+        np.zeros((20, 20), dtype=np.uint8),
+        trigger="triage",
+        decision={
+            "reason": "single_candidate_triage",
+            "triage_verdict": "single",
+            "failure_kind": "low",
+            "suggested_direction": "up",
+            "triage_summary": dict(triage_summary),
+        },
+    )
+
+    assert proc.finalize.calls
+    assert "clean the printer head bottom" in proc._single_candidate_failure_message
+    check = proc._single_candidate_residue_checks[-1]
+    assert check["residue_severity"] == "strong"
+    assert check["persistent_residue"] is True
+
+
+def test_single_candidate_nozzle_wet_does_not_soften_high_pressure_evidence():
+    proc = _build_single_candidate_proc(
+        [
+            _rep(
+                "single",
+                center=(100, 200 + i * 4),
+                nozzle_wet=True,
+                nozzle_attached_area=12000,
+                bottom_edge_or_clipped=True,
+            )
+            for i in range(5)
+        ]
+    )
+    proc._single_candidate_confirming = True
+    proc.replicates_target = 5
+    _install_residue_detection(
+        proc,
+        details={
+            "near_nozzle_residue_detected": False,
+            "nozzle_contact_detected": False,
+            "nozzle_attached_area": 0,
+        },
+    )
+    captured = []
+    real_finish = proc._finish_single_candidate_residue_verification
+    proc._start_single_candidate_residue_verification = (
+        lambda *, trigger, decision=None: captured.append((trigger, dict(decision or {})))
+    )
+
+    proc.onDecide()
+    real_finish(
+        np.zeros((20, 20), dtype=np.uint8),
+        trigger="confirmation",
+        decision=captured[0][1],
+    )
+
+    assert proc._next_pressure == 0.98
     assert proc.continueScan.calls
     assert proc.finalize.calls == []
     assert proc._single_candidate_stability_fallback_candidates == []

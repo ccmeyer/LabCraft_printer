@@ -20927,8 +20927,6 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         summary = dict(summary or {})
         if not self._single_candidate_summary_is_all_single(summary):
             return None
-        if int(summary.get("wet_hits", 0) or 0) > 0:
-            return None
         if int(summary.get("too_close_hits", 0) or 0) > 0:
             return None
         if int(summary.get("high_pressure_hits", 0) or 0) > 0:
@@ -20962,6 +20960,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         effective = dict(summary)
         softened = {
             "residue_hits": int(effective.get("residue_hits", 0) or 0),
+            "wet_hits": int(effective.get("wet_hits", 0) or 0),
             "nozzle_contact_hits": int(effective.get("nozzle_contact_hits", 0) or 0),
             "low_pressure_hits": int(effective.get("low_pressure_hits", 0) or 0),
         }
@@ -20970,6 +20969,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         effective["verified_transient_residue_check"] = dict(check)
         effective["softened_hit_counts"] = dict(softened)
         effective["residue_hits"] = 0
+        effective["wet_hits"] = 0
         effective["nozzle_contact_hits"] = 0
         effective["low_pressure_hits"] = 0
         return effective
