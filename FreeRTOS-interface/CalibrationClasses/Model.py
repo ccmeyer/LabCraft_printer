@@ -4334,6 +4334,7 @@ class CalibrationManager(QObject):
             PressureSweepCharacterizationProcess,
             recheck_context=context,
             replicates_per_pressure=replicates_per_pressure,
+            char_delay_retarget_cap=1,
             order="desc",
         )
 
@@ -7474,6 +7475,16 @@ class CalibrationManager(QObject):
                         "reference_mean_volume_nL": p.get("reference_mean_volume_nL"),
                         "volume_delta_nL": p.get("volume_delta_nL"),
                         "volume_delta_percent": p.get("volume_delta_percent"),
+                        "quality_warning": p.get("quality_warning") or res.get("quality_warning"),
+                        "quality_warnings": (
+                            p.get("quality_warnings")
+                            or res.get("quality_warnings")
+                            or []
+                        ),
+                        "circularity_warning": p.get("circularity_warning") or res.get("circularity_warning"),
+                        "circularity_min": p.get("circularity_min"),
+                        "circularity_mean": p.get("circularity_mean"),
+                        "circularity_warning_threshold": p.get("circularity_warning_threshold"),
                         "mean_nL": p.get("mean_volume"),
                         "cv_pct": p.get("cv_volume_percent"),
                         "valid": p.get("valid"),
@@ -26819,6 +26830,8 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
     def _count_good_replicates(self) -> int:
         circularity_values = list(getattr(self, "circularity_values", []) or [])
+        if self._count_all_single_droplet_replicates_for_circularity():
+            return int(len(circularity_values))
         threshold = float(self._active_circularity_threshold())
         return int(
             sum(1 for c in circularity_values if float(c) >= threshold)
@@ -26862,8 +26875,45 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         mode = str(rec.get("targeting_mode") or getattr(self, "targeting_mode", "") or "")
         return bool(getattr(self, "manual_current_mode", False)) and mode.strip().lower() == "manual_current_position"
 
-    def _manual_static_circularity_warning_metadata(self, recommended_threshold: float) -> dict:
-        if not self._is_manual_static_target():
+    def _is_recheck_static_target(self) -> bool:
+        if not bool(getattr(self, "recheck_mode", False)):
+            return False
+        rec = getattr(self, "current_plan_record", None)
+        rec = rec if isinstance(rec, dict) else {}
+        context = getattr(self, "recheck_context", None)
+        context = context if isinstance(context, dict) else {}
+        mode = str(
+            rec.get("targeting_mode")
+            or context.get("targeting_mode")
+            or getattr(self, "targeting_mode", "")
+            or ""
+        ).strip().lower()
+        return bool(context.get("static_target_context")) or mode == "manual_current_position"
+
+    def _recheck_circularity_fallback_available(self) -> bool:
+        if not bool(getattr(self, "recheck_mode", False)):
+            return False
+        if self._is_recheck_static_target():
+            return True
+        retarget_cap = int(max(0, getattr(self, "char_delay_retarget_cap", 1)))
+        retarget_count = int(max(0, getattr(self, "_morphology_retarget_count", 0)))
+        return bool(retarget_cap <= 0 or retarget_count >= retarget_cap)
+
+    def _count_all_single_droplet_replicates_for_circularity(self) -> bool:
+        return bool(self._is_manual_static_target() or self._recheck_circularity_fallback_available())
+
+    def _low_circularity_warning_metadata(self, recommended_threshold: float) -> dict:
+        if self._is_manual_static_target():
+            warning = (
+                "Manual characterization droplet circularity was below the recommended threshold; "
+                "volume was quantified from the current image."
+            )
+        elif self._recheck_circularity_fallback_available():
+            warning = (
+                "Recheck droplet circularity was below the recommended threshold; "
+                "volume was quantified with a low-circularity warning."
+            )
+        else:
             return {}
         values = []
         for value in list(getattr(self, "circularity_values", []) or []):
@@ -26878,10 +26928,6 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         below = [value for value in values if float(value) < float(recommended_threshold)]
         if not below:
             return {}
-        warning = (
-            "Manual characterization droplet circularity was below the recommended threshold; "
-            "volume was quantified from the current image."
-        )
         return {
             "quality_warning": warning,
             "quality_warnings": [warning],
@@ -26890,6 +26936,9 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             "circularity_mean": float(np.mean(np.array(values, dtype=float))),
             "circularity_warning_threshold": float(recommended_threshold),
         }
+
+    def _manual_static_circularity_warning_metadata(self, recommended_threshold: float) -> dict:
+        return self._low_circularity_warning_metadata(recommended_threshold)
 
     def _pair_capture_context(self) -> dict:
         refs = getattr(self, "_last_capture_refs", {}) or {}
@@ -27243,6 +27292,24 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         retarget_count = int(getattr(self, "_morphology_retarget_count", 0))
         retarget_cap = int(max(0, getattr(self, "char_delay_retarget_cap", 2)))
         if retarget_count >= retarget_cap:
+            if self._recheck_circularity_fallback_available():
+                payload = {
+                    "status": "warning",
+                    "reason": "morphology_retarget_exhausted",
+                    "center_px": [int(center_px[0]), int(center_px[1])],
+                    "ellipse_roundness": float(ellipse_roundness),
+                    "focus": float(focus_val),
+                    "stream_like": bool(stream_like),
+                    "current_delay_us": int(current_anchor),
+                    "morphology": self._morphology_snapshot(),
+                }
+                payload.update(self._circularity_threshold_context())
+                self.stageChanged.emit(
+                    "Repeated non-round droplets after recheck delay retarget; quantifying with warning."
+                )
+                self._record_pressure_sweep_analysis("pressure_sweep_morphology", payload)
+                self._record_decision("recheck_morphology_retarget_exhausted_warning", payload)
+                return False
             return self._invalidate_current_pressure_for_morphology(
                 "morphology_retarget_exhausted",
                 center_px=center_px,
@@ -27359,9 +27426,14 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         bad_hits_required = int(max(1, getattr(self, "char_delay_retarget_bad_hits_required", 3)))
         if int(getattr(self, "_morphology_window_nonround_hits", 0)) < int(bad_hits_required):
             return False
-        if self._is_manual_static_target():
+        if self._is_manual_static_target() or self._is_recheck_static_target():
+            decision_kind = (
+                "manual_current_nonround_warning"
+                if self._is_manual_static_target()
+                else "recheck_static_nonround_warning"
+            )
             self._record_decision(
-                "manual_current_nonround_warning",
+                decision_kind,
                 {
                     "center_px": [int(center_px[0]), int(center_px[1])],
                     "ellipse_roundness": float(ellipse_roundness),
@@ -29279,12 +29351,12 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
     def onAnalyzeBatch(self):
         # Only keep “good” (circular) replicates
         active_threshold = float(self._active_circularity_threshold())
-        manual_static = self._is_manual_static_target()
-        if manual_static:
+        circularity_fallback = self._count_all_single_droplet_replicates_for_circularity()
+        if circularity_fallback:
             good = [float(v) for v in list(self.droplet_volumes or [])]
         else:
             good = [v for v, c in zip(self.droplet_volumes, self.circularity_values) if float(c) >= active_threshold]
-        circularity_warning_metadata = self._manual_static_circularity_warning_metadata(
+        circularity_warning_metadata = self._low_circularity_warning_metadata(
             float(getattr(self, "circularity_threshold", 0.95))
         )
         ratios = self._char_ratio_snapshot()

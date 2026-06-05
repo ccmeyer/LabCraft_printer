@@ -579,6 +579,89 @@ def test_pressure_sweep_recheck_mode_applies_pulse_width_and_pressure():
     assert requests[0]["num_droplets"] == 0
 
 
+def test_manager_recheck_start_limits_morphology_retarget_to_one():
+    mgr = CalibrationManager.__new__(CalibrationManager)
+    calls = []
+    mgr.build_droplet_recheck_context = lambda _row: (_build_recheck_context(), [])
+    mgr._try_start_process = lambda *args, **kwargs: calls.append((args, kwargs)) or True
+
+    started = CalibrationManager.start_droplet_recheck_characterization(
+        mgr,
+        {"source_run_id": "run_a"},
+        replicates_per_pressure=20,
+    )
+
+    assert started is True
+    assert calls
+    assert calls[0][0][0] is PressureSweepCharacterizationProcess
+    assert calls[0][1]["recheck_context"]["target_xyz"] == [1234, 2000, 7654]
+    assert calls[0][1]["char_delay_retarget_cap"] == 1
+
+
+def test_recheck_nonround_retargets_once_then_quantifies_with_warning():
+    proc, _state, moves = _build_pressure_sweep_focus_proc(
+        [6_000_000, 6_000_000, 6_000_000],
+        roundness_values=[0.85, 0.84, 0.83],
+    )
+    proc.recheck_mode = True
+    proc.manual_current_mode = False
+    proc.recheck_context = _build_recheck_context()
+    proc.current_plan_record = {
+        "targeting_mode": "fixed_z_plane",
+        "print_pulse_width_us": 1450,
+        "recheck_source": {"run_id": "run_a"},
+        "reference_mean_volume_nL": 9.5,
+        "reference_cv_volume_percent": 3.2,
+    }
+    proc.char_delay_retarget_cap = 1
+    proc._target_xyz_for_delay = lambda delay_us, include_offsets=True: (int(delay_us), 1200, 2200)
+    invalidated = []
+    proc._invalidate_current_pressure = lambda reason, stage_message=None: invalidated.append(
+        (str(reason), str(stage_message))
+    )
+
+    proc.onCharacterizeLoop()
+    proc.onCharacterizeLoop()
+    proc.onCharacterizeLoop()
+
+    assert invalidated == []
+    assert proc._morphology_retarget_count == 1
+    assert proc._morphology_retarget_history_us == [8000]
+    assert proc.target_delay_us == 8000
+    assert moves[-1] == (8000, 1200, 2200)
+
+    proc.num_images = 20
+    proc.droplet_volumes = [9.0 + (i * 0.01) for i in range(20)]
+    proc.circularity_values = [0.84] * 20
+    proc.droplet_positions = [(120, 230)] * 20
+    proc.current_delay_us = 8000
+    proc.samples = []
+    emitted = []
+    proc._emit_incremental_pressure_step = lambda rec: emitted.append(dict(rec))
+    proc.i = 0
+    proc._reset_char_buffers = lambda: None
+    proc.nextPressure = Recorder()
+
+    proc.onAnalyzeBatch()
+
+    assert proc.samples
+    rec = proc.samples[-1]
+    assert rec["valid"] is True
+    assert rec["accepted_replicates"] == 20
+    assert rec["mean_volume"] == np.mean(proc.droplet_volumes)
+    assert rec["recheck"] is True
+    assert rec["circularity_warning"] is True
+    assert rec["quality_warning"].startswith("Recheck droplet circularity")
+    assert rec["quality_warnings"] == [rec["quality_warning"]]
+    assert rec["circularity_min"] == 0.84
+    assert rec["circularity_mean"] == np.mean(proc.circularity_values)
+    assert rec["circularity_warning_threshold"] == 0.95
+    assert rec["morphology_retarget_count"] == 1
+    assert rec["morphology_retarget_history_us"] == [8000]
+    assert emitted and emitted[-1]["circularity_warning"] is True
+    assert proc.nextPressure.calls
+
+
 def _build_manual_current_context():
     return {
         "manual_current": True,
@@ -859,6 +942,67 @@ def test_manual_static_analyze_batch_quantifies_nonround_replicates_with_warning
     assert rec["manual_current"] is True
     assert emitted
     assert emitted[-1]["circularity_warning"] is True
+    assert proc.nextPressure.calls
+
+
+def test_static_recheck_quantifies_nonround_replicates_with_warning_without_retarget():
+    proc, _state, moves = _build_pressure_sweep_focus_proc(
+        [6_000_000, 6_000_000, 6_000_000],
+        roundness_values=[0.88, 0.87, 0.86],
+    )
+    proc.manual_current_mode = False
+    proc.recheck_mode = True
+    proc.recheck_context = {
+        "static_target_context": True,
+        "targeting_mode": "manual_current_position",
+        "print_pulse_width_us": 1450,
+        "source_result": {"run_id": "run_manual"},
+    }
+    proc.current_plan_record = {
+        "targeting_mode": "manual_current_position",
+        "print_pulse_width_us": 1450,
+        "recheck_source": {"run_id": "run_manual"},
+    }
+    decisions = []
+    proc._record_decision = lambda kind, payload: decisions.append((kind, dict(payload)))
+    invalidated = []
+    proc._invalidate_current_pressure = lambda reason, stage_message=None: invalidated.append(
+        (str(reason), str(stage_message))
+    )
+
+    proc.onCharacterizeLoop()
+    proc.onCharacterizeLoop()
+    proc.onCharacterizeLoop()
+
+    assert moves == []
+    assert invalidated == []
+    assert proc._morphology_retarget_count == 0
+    assert decisions and decisions[-1][0] == "recheck_static_nonround_warning"
+
+    proc.num_images = 20
+    proc.droplet_volumes = [8.5 + (i * 0.01) for i in range(20)]
+    proc.circularity_values = [0.86] * 20
+    proc.droplet_positions = [(120, 230)] * 20
+    proc.current_delay_us = 9000
+    proc.samples = []
+    emitted = []
+    proc._emit_incremental_pressure_step = lambda rec: emitted.append(dict(rec))
+    proc.i = 0
+    proc._reset_char_buffers = lambda: None
+    proc.nextPressure = Recorder()
+
+    proc.onAnalyzeBatch()
+
+    assert proc.samples
+    rec = proc.samples[-1]
+    assert rec["valid"] is True
+    assert rec["accepted_replicates"] == 20
+    assert rec["recheck"] is True
+    assert rec["circularity_warning"] is True
+    assert rec["quality_warning"].startswith("Recheck droplet circularity")
+    assert rec["morphology_retarget_count"] == 0
+    assert rec["morphology_retarget_history_us"] == []
+    assert emitted and emitted[-1]["circularity_warning"] is True
     assert proc.nextPressure.calls
 
 

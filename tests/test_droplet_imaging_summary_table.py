@@ -108,6 +108,12 @@ def _make_run(
                             "reference_mean_volume_nL": entry.get("reference_mean_volume_nL"),
                             "volume_delta_nL": entry.get("volume_delta_nL"),
                             "volume_delta_percent": entry.get("volume_delta_percent"),
+                            "quality_warning": entry.get("quality_warning"),
+                            "quality_warnings": list(entry.get("quality_warnings") or []),
+                            "circularity_warning": entry.get("circularity_warning"),
+                            "circularity_min": entry.get("circularity_min"),
+                            "circularity_mean": entry.get("circularity_mean"),
+                            "circularity_warning_threshold": entry.get("circularity_warning_threshold"),
                         }
                     ],
                 },
@@ -657,6 +663,14 @@ def test_recheck_summary_rows_and_source_filter(monkeypatch, qapp, tmp_path):
                     "recheck_source": {"run_id": "run_a"},
                     "reference_mean_volume_nL": 9.8,
                     "volume_delta_nL": 0.1,
+                    "quality_warning": "Recheck droplet circularity was below the recommended threshold; volume was quantified with a low-circularity warning.",
+                    "quality_warnings": [
+                        "Recheck droplet circularity was below the recommended threshold; volume was quantified with a low-circularity warning."
+                    ],
+                    "circularity_warning": True,
+                    "circularity_min": 0.84,
+                    "circularity_mean": 0.86,
+                    "circularity_warning_threshold": 0.95,
                 }
             ],
         )
@@ -673,6 +687,16 @@ def test_recheck_summary_rows_and_source_filter(monkeypatch, qapp, tmp_path):
     assert visible[0]["phase"] == "recheck"
     assert visible[0]["phase_label"] == "Recheck"
     assert visible[0]["volume_delta_nL"] == 0.1
+    assert visible[0]["circularity_warning"] is True
+    assert visible[0]["quality_warning"].startswith("Recheck droplet circularity")
+
+    _select_visible_row(dialog, 0)
+    qapp.processEvents()
+    dialog._refresh_summary_detail_strip()
+
+    assert "Source run run_a" in dialog.summary_detail_status_label.text()
+    assert "Delta +0.100 nL" in dialog.summary_detail_status_label.text()
+    assert "Warnings: Recheck droplet circularity" in dialog.summary_detail_status_label.text()
 
 
 def test_recheck_selected_button_enables_and_dispatches_selected_row(monkeypatch, qapp, tmp_path):
