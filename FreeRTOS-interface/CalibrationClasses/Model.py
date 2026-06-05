@@ -18832,6 +18832,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self.single_candidate_confirmation_retry_limit = 1
         self.single_candidate_max_stability_rejections = 2
         self.single_candidate_stability_fallback_max_std_px = 100.0
+        self.single_candidate_allow_verified_transient_head_evidence = True
         self.single_candidate_residue_persistent_area_px = int(self.nozzle_area_threshold)
         self.single_candidate_residue_moderate_area_px = int(max(1000, self.nozzle_area_threshold // 4))
         self.single_candidate_bottom_edge_margin_px = 24
@@ -19609,7 +19610,12 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 decision["small_single_suspect_hits"] = int(
                     triage_summary.get("small_single_suspect_hits", 0) or 0
                 )
-            if self._single_candidate_has_residue_evidence(self.reps):
+            if self._single_candidate_should_verify_head_evidence(
+                self.reps,
+                trigger="triage",
+                summary=triage_summary,
+                verdict=verdict,
+            ):
                 self._start_single_candidate_residue_verification(
                     trigger="triage",
                     decision=decision,
@@ -19643,6 +19649,103 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 return
 
         summary = self._build_single_candidate_confirmation_summary(self.reps)
+        summary, decision, stability, rejection = self._single_candidate_prepare_confirmation_decision(
+            summary,
+            decision,
+        )
+        if self._single_candidate_should_verify_head_evidence(
+            self.reps,
+            trigger="confirmation",
+            summary=summary,
+            verdict="single",
+        ):
+            self._start_single_candidate_residue_verification(
+                trigger="confirmation",
+                decision=decision,
+            )
+            return
+        if int(summary.get("small_single_suspect_hits", 0) or 0) > 0:
+            self._start_single_candidate_satellite_probe(
+                trigger="confirmation",
+                decision=decision,
+                summary=summary,
+            )
+            return
+
+        self._single_candidate_resolve_prepared_confirmation(
+            summary,
+            stability,
+            rejection,
+            decision,
+            total=total,
+        )
+        return
+
+    @staticmethod
+    def _single_candidate_triage_verdict(counts: dict) -> str:
+        if int((counts or {}).get("multiple", 0)) > 0:
+            return "multiple"
+        if int((counts or {}).get("single", 0)) > 0:
+            return "single"
+        return "none"
+
+    def _single_candidate_has_residue_evidence(self, reps) -> bool:
+        for rep in list(reps or []):
+            if bool(rep.get("near_nozzle_residue")):
+                return True
+            if bool(rep.get("nozzle_wet")):
+                return True
+        return False
+
+    def _single_candidate_should_verify_head_evidence(
+        self,
+        reps,
+        *,
+        trigger: str,
+        summary: dict | None = None,
+        verdict: str | None = None,
+    ) -> bool:
+        if self._single_candidate_has_residue_evidence(reps):
+            return True
+        if not bool(
+            getattr(self, "single_candidate_allow_verified_transient_head_evidence", True)
+        ):
+            return False
+        summary = dict(summary or {})
+        contact_hits = int(summary.get("nozzle_contact_hits", 0) or 0)
+        if contact_hits <= 0:
+            return False
+        trigger = str(trigger or "").strip().lower()
+        if trigger == "triage":
+            return str(verdict or "").strip().lower() == "single"
+        if trigger == "confirmation":
+            return self._single_candidate_summary_is_all_single(summary)
+        return False
+
+    @staticmethod
+    def _single_candidate_summary_is_all_single(summary: dict | None) -> bool:
+        summary = dict(summary or {})
+        total = int(summary.get("total_reps", 0) or 0)
+        if total <= 0:
+            return False
+        if int(summary.get("single_count", 0) or 0) != total:
+            return False
+        if int(summary.get("center_count", 0) or 0) != total:
+            return False
+        counts = dict(summary.get("class_counts") or {})
+        if int(counts.get("multiple", 0) or 0) > 0:
+            return False
+        if int(counts.get("none", 0) or 0) > 0:
+            return False
+        return True
+
+    def _single_candidate_prepare_confirmation_decision(
+        self,
+        summary: dict,
+        decision: dict | None = None,
+    ):
+        summary = dict(summary or {})
+        decision = dict(decision or {})
         rejection = self._single_candidate_rejection_decision(summary)
         stability = self._single_candidate_confirmation_stability(summary)
         summary["confirmation_stability_status"] = str(stability.get("status", ""))
@@ -19663,20 +19766,22 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 "suggested_direction": str(rejection.get("direction", "up")),
             }
         )
-        if self._single_candidate_has_residue_evidence(self.reps):
-            self._start_single_candidate_residue_verification(
-                trigger="confirmation",
-                decision=decision,
-            )
-            return
-        if int(summary.get("small_single_suspect_hits", 0) or 0) > 0:
-            self._start_single_candidate_satellite_probe(
-                trigger="confirmation",
-                decision=decision,
-                summary=summary,
-            )
-            return
+        return summary, decision, stability, rejection
 
+    def _single_candidate_resolve_prepared_confirmation(
+        self,
+        summary: dict,
+        stability: dict,
+        rejection: dict,
+        decision: dict,
+        *,
+        total: int,
+        resume_after_residue_verification: bool = False,
+    ):
+        summary = dict(summary or {})
+        stability = dict(stability or {})
+        rejection = dict(rejection or {})
+        decision = dict(decision or {})
         if bool(stability.get("can_retry", False)):
             retry_index = int(
                 max(0, getattr(self, "_single_candidate_confirmation_retry_count", 0))
@@ -19706,18 +19811,26 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             self.replicates_target = int(
                 max(1, getattr(self, "single_candidate_confirmation_reps", self.min_reps))
             )
-            self.stageChanged.emit(
+            stage_message = (
                 f"Candidate pressure {self._current_pressure:.3f} psi is clean but near "
                 "the stability limit; retrying confirmation"
             )
-            self.continueReplicate.emit()
+            if resume_after_residue_verification:
+                self._single_candidate_restore_capture_settings_then_continue(
+                    self.continueReplicate.emit,
+                    context="single_candidate_confirmation_retry_after_residue_verification",
+                    stage_message=stage_message,
+                )
+            else:
+                self.stageChanged.emit(stage_message)
+                self.continueReplicate.emit()
             return
 
         if bool(stability.get("passes", False)):
             self._single_candidate_selected_pressure = float(self._current_pressure)
             self._single_candidate_selected_by_fallback = False
             self._single_candidate_confirmation_summary = dict(summary)
-            self._store_pressure_summary("single", escalated=total > self.min_reps, decision=decision)
+            self._store_pressure_summary("single", escalated=int(total) > self.min_reps, decision=decision)
             self._record_decision(
                 "single_candidate_pressure_selected",
                 {
@@ -19754,24 +19867,8 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         decision["rejected_direction"] = str(direction)
         decision["rejection_cause"] = str(rejection.get("cause", ""))
         decision["failure_kind"] = str(rejection.get("failure_kind", ""))
-        self._store_pressure_summary(rejected_verdict, escalated=total > 1, decision=decision)
+        self._store_pressure_summary(rejected_verdict, escalated=int(total) > 1, decision=decision)
         self._advance_single_candidate_pressure(direction, "confirmation_rejected", decision)
-
-    @staticmethod
-    def _single_candidate_triage_verdict(counts: dict) -> str:
-        if int((counts or {}).get("multiple", 0)) > 0:
-            return "multiple"
-        if int((counts or {}).get("single", 0)) > 0:
-            return "single"
-        return "none"
-
-    def _single_candidate_has_residue_evidence(self, reps) -> bool:
-        for rep in list(reps or []):
-            if bool(rep.get("near_nozzle_residue")):
-                return True
-            if bool(rep.get("nozzle_wet")):
-                return True
-        return False
 
     def _single_candidate_rep_has_small_single_suspect(self, rep: dict | None) -> bool:
         rep = dict(rep or {})
@@ -20737,6 +20834,146 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             final_error_msg="Residue verification capture failed.",
         )
 
+    def _single_candidate_restore_capture_settings_then_continue(
+        self,
+        callback,
+        *,
+        context: str,
+        stage_message: str | None = None,
+    ):
+        settings = {
+            "num_droplets": 1,
+            "flash_delay": int(getattr(self, "_active_classify_delay_us", self.classify_delay_us)),
+        }
+
+        def _continue():
+            if stage_message:
+                self.stageChanged.emit(str(stage_message))
+            callback()
+
+        self._request_settings_with_recording(
+            settings,
+            _continue,
+            context=str(context),
+            guard_timeout_ms=15_000,
+            on_timeout=lambda: self._single_candidate_fail(
+                "Pressure scan capture settings restore timed out after residue verification."
+            ),
+        )
+
+    @staticmethod
+    def _single_candidate_residue_check_is_verified_transient(
+        check: dict | None,
+        *,
+        repeated_moderate: bool = False,
+    ) -> bool:
+        check = dict(check or {})
+        if bool(repeated_moderate):
+            return False
+        if bool(check.get("persistent_residue", False)):
+            return False
+        severity = str(check.get("residue_severity", "clear")).strip().lower()
+        return severity in ("clear", "weak", "artifact")
+
+    def _single_candidate_start_confirmation_after_verified_transient_head_evidence(
+        self,
+        *,
+        decision: dict,
+        check: dict,
+    ):
+        pressure = float(self._current_pressure)
+        self._single_candidate_confirming = True
+        self._single_candidate_candidate_pressure = pressure
+        self.replicates_target = int(
+            max(1, getattr(self, "single_candidate_confirmation_reps", self.min_reps))
+        )
+        self._single_candidate_confirmation_retry_count = 0
+        summary = dict(
+            decision.get("triage_summary")
+            or getattr(self, "_single_candidate_triage_summary", {})
+            or {}
+        )
+        summary["verified_transient_head_evidence"] = True
+        summary["verified_transient_residue_check"] = dict(check)
+        self._single_candidate_triage_summary = dict(summary)
+        self._record_decision(
+            "single_candidate_verified_transient_head_evidence_used",
+            {
+                "pressure_psi": pressure,
+                "trigger": "triage",
+                "triage_summary": dict(summary),
+                "residue_check": dict(check),
+            },
+        )
+        self.reps = []
+        self._single_candidate_restore_capture_settings_then_continue(
+            self.continueReplicate.emit,
+            context="single_candidate_triage_resume_after_residue_verification",
+            stage_message=(
+                f"Candidate single pressure {pressure:.3f} psi; "
+                f"confirming (0/{self.replicates_target})"
+            ),
+        )
+
+    def _single_candidate_effective_summary_for_verified_transient_head_evidence(
+        self,
+        summary: dict,
+        check: dict,
+    ) -> dict | None:
+        if not bool(
+            getattr(self, "single_candidate_allow_verified_transient_head_evidence", True)
+        ):
+            return None
+        summary = dict(summary or {})
+        if not self._single_candidate_summary_is_all_single(summary):
+            return None
+        if int(summary.get("wet_hits", 0) or 0) > 0:
+            return None
+        if int(summary.get("too_close_hits", 0) or 0) > 0:
+            return None
+        if int(summary.get("high_pressure_hits", 0) or 0) > 0:
+            return None
+        if int(summary.get("stream_like_hits", 0) or 0) > 0:
+            return None
+        if int(summary.get("bottom_edge_hits", 0) or 0) > 0:
+            return None
+        if int(summary.get("small_single_suspect_hits", 0) or 0) > 0:
+            return None
+        min_area = int(summary.get("min_largest_free_blob_area_px", 0) or 0)
+        min_bbox_area = int(summary.get("min_largest_free_blob_bbox_area_px", 0) or 0)
+        if min_area < int(getattr(self, "single_candidate_satellite_min_area_px", 12000)):
+            return None
+        if min_bbox_area < int(
+            getattr(self, "single_candidate_satellite_min_bbox_area_px", 16000)
+        ):
+            return None
+        max_std = summary.get("center_max_std_px")
+        if max_std is None:
+            return None
+        try:
+            max_std = float(max_std)
+        except Exception:
+            return None
+        if max_std > float(
+            getattr(self, "single_candidate_stability_fallback_max_std_px", 100.0)
+        ):
+            return None
+
+        effective = dict(summary)
+        softened = {
+            "residue_hits": int(effective.get("residue_hits", 0) or 0),
+            "nozzle_contact_hits": int(effective.get("nozzle_contact_hits", 0) or 0),
+            "low_pressure_hits": int(effective.get("low_pressure_hits", 0) or 0),
+        }
+        effective["raw_confirmation_summary"] = dict(summary)
+        effective["verified_transient_head_evidence"] = True
+        effective["verified_transient_residue_check"] = dict(check)
+        effective["softened_hit_counts"] = dict(softened)
+        effective["residue_hits"] = 0
+        effective["nozzle_contact_hits"] = 0
+        effective["low_pressure_hits"] = 0
+        return effective
+
     def _finish_single_candidate_residue_verification(self, frame, *, trigger: str, decision: dict | None = None):
         self._single_candidate_residue_check_in_progress = False
         decision = dict(decision or {})
@@ -20793,6 +21030,71 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             return
 
         self._single_candidate_pending_residue_check = None
+        verified_transient = bool(
+            getattr(self, "single_candidate_allow_verified_transient_head_evidence", True)
+            and self._single_candidate_residue_check_is_verified_transient(
+                check,
+                repeated_moderate=bool(repeated_moderate),
+            )
+        )
+        if verified_transient:
+            if (
+                str(trigger) == "triage"
+                and str(decision.get("triage_verdict", "")).strip().lower() == "single"
+            ):
+                self._single_candidate_start_confirmation_after_verified_transient_head_evidence(
+                    decision=decision,
+                    check=check,
+                )
+                return
+
+            if str(trigger) == "confirmation":
+                raw_summary = dict(decision.get("confirmation_summary") or {})
+                effective = self._single_candidate_effective_summary_for_verified_transient_head_evidence(
+                    raw_summary,
+                    check,
+                )
+                if effective is not None:
+                    effective, effective_decision, stability, rejection = (
+                        self._single_candidate_prepare_confirmation_decision(
+                            effective,
+                            {
+                                **dict(decision),
+                                "raw_confirmation_summary": dict(raw_summary),
+                                "verified_transient_head_evidence": True,
+                                "verified_transient_residue_check": dict(check),
+                                "effective_confirmation_summary": dict(effective),
+                            },
+                        )
+                    )
+                    effective_decision["raw_confirmation_summary"] = dict(raw_summary)
+                    effective_decision["effective_confirmation_summary"] = dict(effective)
+                    effective_decision["verified_transient_head_evidence"] = True
+                    effective_decision["verified_transient_residue_check"] = dict(check)
+                    self._record_decision(
+                        "single_candidate_verified_transient_head_evidence_used",
+                        {
+                            "pressure_psi": (
+                                None
+                                if self._current_pressure is None
+                                else float(self._current_pressure)
+                            ),
+                            "trigger": "confirmation",
+                            "raw_confirmation_summary": dict(raw_summary),
+                            "effective_confirmation_summary": dict(effective),
+                            "residue_check": dict(check),
+                        },
+                    )
+                    self._single_candidate_resolve_prepared_confirmation(
+                        effective,
+                        stability,
+                        rejection,
+                        effective_decision,
+                        total=int(effective.get("total_reps", len(self.reps)) or len(self.reps)),
+                        resume_after_residue_verification=True,
+                    )
+                    return
+
         direction = self._single_candidate_direction_from_decision(decision)
         verdict = "multiple" if direction == "down" else "none"
         self._store_pressure_summary(
