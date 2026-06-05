@@ -21,6 +21,7 @@ from datetime import datetime
 from pathlib import Path
 import cv2
 from utilities import ShortcutManager
+from CalibrationRecordExport import CalibrationRecordExportError, export_calibration_records
 from .Model import NozzlePositionChecklistStore
 from hardware.null_devices import NullCamera
 
@@ -1845,6 +1846,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.record_calibration_checkbox.setChecked(rec_enabled)
         run_options_v.addWidget(self.record_calibration_checkbox)
 
+        self.export_calibration_records_button = QtWidgets.QPushButton("Export Calibration Records")
+        self.export_calibration_records_button.setToolTip(
+            "Create a zip of the current experiment's calibration recordings in Downloads."
+        )
+        run_options_v.addWidget(self.export_calibration_records_button)
+
         self.enable_calibration_memory_checkbox = QtWidgets.QCheckBox("Enable Calibration Memory")
         self.enable_calibration_memory_checkbox.setToolTip(
             "When disabled, prior lookup and calibration-memory sidecar writes are skipped."
@@ -2388,6 +2395,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.start_pressure_spin.valueChanged.connect(self.set_start_pressure)
         self.num_pressure_tests_spin.valueChanged.connect(self.set_num_pressure_tests)
         self.record_calibration_checkbox.toggled.connect(self.set_record_mode_enabled)
+        self.export_calibration_records_button.clicked.connect(self.export_calibration_records_to_downloads)
         self.enable_calibration_memory_checkbox.toggled.connect(self.set_calibration_memory_enabled)
         self.enable_refuel_level_tracking_checkbox.toggled.connect(self._set_refuel_tracking_enabled)
         self.enable_refuel_process_monitoring_checkbox.toggled.connect(self._set_refuel_process_monitoring_enabled)
@@ -5004,6 +5012,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             if sequence_busy or droplet_sequence_busy:
                 self.record_calibration_checkbox.setEnabled(False)
 
+        self._refresh_calibration_record_export_button_state()
         self._recompute_online_stream_button_state()
         self._recompute_stream_calibration_sequence_button_state()
         self._recompute_droplet_calibration_sequence_button_state()
@@ -6078,6 +6087,110 @@ class DropletImagingDialog(QtWidgets.QDialog):
         except Exception:
             mgr.record_mode_enabled = bool(enabled)
         self._sync_stream_capture_panel_state()
+
+    @staticmethod
+    def _format_export_file_size(byte_count):
+        try:
+            size = float(byte_count)
+        except Exception:
+            return "unknown size"
+        units = ("B", "KB", "MB", "GB")
+        unit = units[0]
+        for unit in units:
+            if size < 1024.0 or unit == units[-1]:
+                break
+            size /= 1024.0
+        if unit == "B":
+            return f"{int(size)} {unit}"
+        return f"{size:.1f} {unit}"
+
+    def _resolve_current_calibration_export_experiment_dir(self):
+        experiment_model = getattr(getattr(self, "model", None), "experiment_model", None)
+        experiment_dir = getattr(experiment_model, "experiment_dir_path", None)
+        if experiment_dir:
+            return Path(experiment_dir).expanduser()
+
+        manager = getattr(getattr(self, "model", None), "calibration_manager", None)
+        calibration_file_path = getattr(manager, "calibration_file_path", None)
+        if calibration_file_path:
+            return Path(calibration_file_path).expanduser().parent
+        return None
+
+    def _resolve_downloads_dir(self):
+        downloads = ""
+        try:
+            standard_paths = getattr(QtCore, "QStandardPaths", None)
+            writable_location = getattr(standard_paths, "writableLocation", None) if standard_paths else None
+            download_location = getattr(standard_paths, "DownloadLocation", None) if standard_paths else None
+            if callable(writable_location) and download_location is not None:
+                downloads = str(writable_location(download_location) or "")
+        except Exception:
+            downloads = ""
+        if not downloads:
+            downloads = str(Path.home() / "Downloads")
+        path = Path(downloads).expanduser()
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _calibration_record_export_block_reason(self):
+        if DropletImagingDialog._is_calibration_busy(self):
+            return "Calibration is still running. Stop or finish calibration before exporting records."
+        if bool(getattr(self, "_capture_request_pending", False)):
+            return "A droplet image capture is still pending. Wait for the capture to finish before exporting records."
+        return ""
+
+    def _refresh_calibration_record_export_button_state(self):
+        button = getattr(self, "export_calibration_records_button", None)
+        if button is None:
+            return
+        reason = self._calibration_record_export_block_reason()
+        button.setEnabled(not bool(reason))
+        if reason:
+            button.setToolTip(reason)
+        else:
+            button.setToolTip("Create a zip of the current experiment's calibration recordings in Downloads.")
+
+    def export_calibration_records_to_downloads(self):
+        reason = self._calibration_record_export_block_reason()
+        if reason:
+            QtWidgets.QMessageBox.warning(self, "Export Calibration Records", reason)
+            self._refresh_calibration_record_export_button_state()
+            return
+
+        experiment_dir = self._resolve_current_calibration_export_experiment_dir()
+        if experiment_dir is None:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Export Calibration Records",
+                "No current experiment is loaded. Start or load an experiment before exporting calibration records.",
+            )
+            return
+
+        try:
+            downloads_dir = self._resolve_downloads_dir()
+            result = export_calibration_records(experiment_dir, downloads_dir)
+        except CalibrationRecordExportError as exc:
+            QtWidgets.QMessageBox.warning(self, "Export Calibration Records", str(exc))
+            return
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Export Calibration Records",
+                f"Could not export calibration records:\n{exc}",
+            )
+            return
+
+        archive_path = result.get("archive_path", "")
+        size_text = self._format_export_file_size(result.get("archive_size_bytes"))
+        QtWidgets.QMessageBox.information(
+            self,
+            "Export Calibration Records",
+            f"Calibration records exported to:\n{archive_path}\n\nSize: {size_text}",
+        )
+        try:
+            self.update_stage_and_log(f"Exported calibration records to {archive_path}", "green")
+        except Exception:
+            pass
 
     def _get_stream_capture_state(self):
         mgr = getattr(self.model, "calibration_manager", None)
@@ -8592,6 +8705,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
                     recheck_parts.append(f"Delta {float(delta):+.3f} nL")
             except Exception:
                 pass
+            warnings = list(raw.get("quality_warnings") or [])
+            quality_warning = raw.get("quality_warning")
+            if quality_warning and quality_warning not in warnings:
+                warnings.insert(0, quality_warning)
+            if warnings:
+                recheck_parts.append(f"Warnings: {', '.join(str(item) for item in warnings)}")
             if recheck_parts:
                 status_lines.append(" | ".join(recheck_parts))
 

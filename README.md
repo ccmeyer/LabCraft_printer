@@ -147,6 +147,15 @@ Outputs in `hil_reports/`:
 
 ## Pull Calibration Records From The Pi
 
+From the Pi touchscreen, users can create an email-ready archive without remote access:
+
+1. Open the droplet imager calibration window.
+2. Wait for any active calibration or image capture to finish.
+3. Click `Export Calibration Records` in `Run Options`.
+4. Email the generated `LabCraft_calibration_records_*.zip` from `~/Downloads`.
+
+The archive contains the current experiment's `calibration_recordings/`, calibration/progress context files when present, a generated `calibration_recordings_summary.csv`, and a `manifest.json`. The export is read-only and does not send commands to the printer.
+
 Use the Windows PowerShell helper to copy calibration artifacts from a Pi experiment into local `tmp/` for replay and analysis:
 
 ```powershell
