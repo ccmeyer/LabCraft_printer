@@ -7,7 +7,31 @@ from tests.calibration_test_utils import SignalStub, ensure_calibration_import_s
 
 ensure_calibration_import_stubs()
 
-from CalibrationClasses.View import DropletImagingDialog
+from CalibrationClasses.View import CalibrationModePreflightDialog, DropletImagingDialog
+
+
+_PRINT_PROFILES = [
+    {
+        "id": "water_droplet",
+        "name": "Water - droplet",
+        "mode": "droplet",
+        "material": "water",
+        "print_pressure": 0.6,
+        "refuel_pressure": 0.3,
+        "print_pulse_width": 1300,
+        "refuel_pulse_width": 3000,
+    },
+    {
+        "id": "water_stream",
+        "name": "Water - stream",
+        "mode": "stream",
+        "material": "water",
+        "print_pressure": 0.8,
+        "refuel_pressure": 0.8,
+        "print_pulse_width": 2500,
+        "refuel_pulse_width": 6000,
+    },
+]
 
 
 class _DropletCameraModelStub:
@@ -129,15 +153,33 @@ class _CalibrationManagerStub:
         return dict(self.droplet_sequence_state)
 
 
+class _MachineModelStub:
+    def __init__(self, *, print_pulse_width=1400):
+        self.print_pulse_width = int(print_pulse_width)
+
+    def get_print_pressure_bounds(self):
+        return (0.10, 5.00)
+
+    def get_print_pulse_width(self):
+        return int(self.print_pulse_width)
+
+    def get_current_print_pressure(self):
+        return 0.80
+
+
 class _ControllerStub:
-    def __init__(self, manager=None):
+    def __init__(self, manager=None, *, preflight_enabled=False):
         self.manager = manager
+        self.model = None
+        self.preflight_enabled = bool(preflight_enabled)
         self.start_online_stream_calls = 0
         self.start_stream_calibration_sequence_calls = 0
         self.start_droplet_calibration_sequence_calls = 0
         self.start_droplet_calibration_sequence_modes = []
         self.start_nozzle_calls = 0
         self.stop_calibration_calls = 0
+        self.apply_print_profile_calls = []
+        self.set_print_pulse_width_calls = []
 
     def start_read_camera(self):
         return None
@@ -204,8 +246,101 @@ class _ControllerStub:
     def stop_calibration(self):
         self.stop_calibration_calls += 1
 
+    def get_calibration_mode_preflight(self, requested_mode):
+        if not self.preflight_enabled:
+            return {
+                "ok": True,
+                "code": "ok",
+                "requested_mode": str(requested_mode or "droplet"),
+                "head_mode": str(requested_mode or "droplet"),
+                "current_print_pulse_width_us": None,
+                "expected_print_pulse_width_us": None,
+                "matching_profiles": [],
+                "message": "",
+            }
+        requested_mode = str(requested_mode or "droplet").strip().lower()
+        expected = 2500 if requested_mode == "stream" else 1300
+        current = self.model.machine_model.get_print_pulse_width()
+        printer_head = self.model.rack_model.get_gripper_printer_head()
+        matching_profiles = [
+            dict(profile)
+            for profile in list(getattr(self.model, "print_profiles", []) or [])
+            if str(profile.get("mode") or "").strip().lower() == requested_mode
+            and int(profile.get("print_pulse_width") or 0) == expected
+        ]
+        if printer_head is None:
+            return {
+                "ok": False,
+                "code": "no_printer_head",
+                "requested_mode": requested_mode,
+                "head_mode": None,
+                "current_print_pulse_width_us": current,
+                "expected_print_pulse_width_us": expected,
+                "matching_profiles": matching_profiles,
+                "message": "No printer head is loaded.",
+            }
+        head_mode = str(printer_head.get_printing_mode()).strip().lower()
+        if head_mode != requested_mode:
+            return {
+                "ok": False,
+                "code": "head_mode_mismatch",
+                "requested_mode": requested_mode,
+                "head_mode": head_mode,
+                "current_print_pulse_width_us": current,
+                "expected_print_pulse_width_us": expected,
+                "matching_profiles": matching_profiles,
+                "message": "Head mode does not match.",
+            }
+        if current != expected:
+            return {
+                "ok": False,
+                "code": "pulse_width_mismatch",
+                "requested_mode": requested_mode,
+                "head_mode": head_mode,
+                "current_print_pulse_width_us": current,
+                "expected_print_pulse_width_us": expected,
+                "matching_profiles": matching_profiles,
+                "message": "Pulse width does not match.",
+            }
+        return {
+            "ok": True,
+            "code": "ok",
+            "requested_mode": requested_mode,
+            "head_mode": head_mode,
+            "current_print_pulse_width_us": current,
+            "expected_print_pulse_width_us": expected,
+            "matching_profiles": matching_profiles,
+            "message": "",
+        }
 
-def _build_dialog(monkeypatch, qapp, *, printing_mode=None, **dialog_kwargs):
+    def apply_print_profile(self, profile, callback=None):
+        profile = dict(profile)
+        self.apply_print_profile_calls.append(profile)
+        self.model.machine_model.print_pulse_width = int(profile["print_pulse_width"])
+        if callback is not None:
+            callback()
+        return True
+
+    def set_print_pulse_width(self, pulse_width, *, manual=False, handler=None):
+        self.set_print_pulse_width_calls.append(
+            {"pulse_width": int(pulse_width), "manual": bool(manual)}
+        )
+        self.model.machine_model.print_pulse_width = int(pulse_width)
+        if handler is not None:
+            handler()
+        return True
+
+
+def _build_dialog(
+    monkeypatch,
+    qapp,
+    *,
+    printing_mode=None,
+    print_pulse_width=1400,
+    preflight_enabled=False,
+    print_profiles=None,
+    **dialog_kwargs,
+):
     monkeypatch.setattr(DropletImagingDialog, "_quick_controls_expanded_default", False, raising=False)
     for method_name in (
         "setup_shortcuts",
@@ -222,22 +357,21 @@ def _build_dialog(monkeypatch, qapp, *, printing_mode=None, **dialog_kwargs):
         monkeypatch.setattr(DropletImagingDialog, method_name, lambda self, *args, **kwargs: None)
 
     manager = _CalibrationManagerStub()
-    controller = _ControllerStub(manager)
+    controller = _ControllerStub(manager, preflight_enabled=preflight_enabled)
     printer_head = (
         SimpleNamespace(get_printing_mode=lambda mode=printing_mode: mode)
         if printing_mode is not None
         else None
     )
+    machine_model = _MachineModelStub(print_pulse_width=print_pulse_width)
     model = SimpleNamespace(
         droplet_camera_model=_DropletCameraModelStub(),
         calibration_manager=manager,
-        machine_model=SimpleNamespace(
-            get_print_pressure_bounds=lambda: (0.10, 5.00),
-            get_print_pulse_width=lambda: 1400,
-            get_current_print_pressure=lambda: 0.80,
-        ),
+        machine_model=machine_model,
         rack_model=SimpleNamespace(get_gripper_printer_head=lambda: printer_head),
+        print_profiles=list(print_profiles if print_profiles is not None else _PRINT_PROFILES),
     )
+    controller.model = model
     dialog = DropletImagingDialog(SimpleNamespace(color_dict={}, model=model), model, controller, **dialog_kwargs)
     qapp.processEvents()
     return dialog, manager, controller
@@ -313,6 +447,140 @@ def test_online_stream_toggle_starts_and_stops_via_controller(monkeypatch, qapp)
 
     assert controller.stop_calibration_calls == 1
     assert dialog.calibrate_online_stream_button.text() == "Calibrate Stream Volume"
+
+    dialog.deleteLater()
+
+
+def test_stream_preflight_ok_starts_without_dialog(monkeypatch, qapp):
+    dialog, _manager, controller = _build_dialog(
+        monkeypatch,
+        qapp,
+        printing_mode="stream",
+        print_pulse_width=2500,
+        preflight_enabled=True,
+    )
+    dialog_calls = []
+    monkeypatch.setattr(
+        DropletImagingDialog,
+        "_run_calibration_mode_preflight_dialog",
+        lambda self, preflight: dialog_calls.append(dict(preflight))
+        or (CalibrationModePreflightDialog.ACTION_CANCEL, None),
+    )
+
+    dialog.calibrate_online_stream_button.click()
+    qapp.processEvents()
+
+    assert dialog_calls == []
+    assert controller.start_online_stream_calls == 1
+    assert dialog.calibrate_online_stream_button.text() == "Stop Calibration"
+
+    dialog.deleteLater()
+
+
+def test_stream_preflight_applies_matching_profile_then_starts(monkeypatch, qapp):
+    dialog, _manager, controller = _build_dialog(
+        monkeypatch,
+        qapp,
+        printing_mode="stream",
+        print_pulse_width=1300,
+        preflight_enabled=True,
+    )
+
+    def choose_profile(self, preflight):
+        return (
+            CalibrationModePreflightDialog.ACTION_APPLY_PROFILE,
+            preflight["matching_profiles"][0],
+        )
+
+    monkeypatch.setattr(
+        DropletImagingDialog,
+        "_run_calibration_mode_preflight_dialog",
+        choose_profile,
+    )
+
+    dialog.calibrate_online_stream_button.click()
+    qapp.processEvents()
+    qapp.processEvents()
+
+    assert controller.apply_print_profile_calls == [_PRINT_PROFILES[1]]
+    assert dialog.model.machine_model.get_print_pulse_width() == 2500
+    assert controller.start_online_stream_calls == 1
+    assert dialog.calibrate_online_stream_button.text() == "Stop Calibration"
+
+    dialog.deleteLater()
+
+
+def test_stream_preflight_review_settings_does_not_start(monkeypatch, qapp):
+    dialog, _manager, controller = _build_dialog(
+        monkeypatch,
+        qapp,
+        printing_mode="stream",
+        print_pulse_width=1300,
+        preflight_enabled=True,
+    )
+    monkeypatch.setattr(
+        DropletImagingDialog,
+        "_run_calibration_mode_preflight_dialog",
+        lambda self, preflight: (CalibrationModePreflightDialog.ACTION_REVIEW_SETTINGS, None),
+    )
+
+    dialog.calibrate_online_stream_button.click()
+    qapp.processEvents()
+
+    assert controller.start_online_stream_calls == 0
+    assert controller.apply_print_profile_calls == []
+    assert dialog.acquisition_controls_toggle.isChecked() is True
+    assert dialog.calibrate_online_stream_button.text() == "Calibrate Stream Volume"
+
+    dialog.deleteLater()
+
+
+def test_stream_preflight_continue_anyway_starts_without_profile(monkeypatch, qapp):
+    dialog, manager, controller = _build_dialog(
+        monkeypatch,
+        qapp,
+        printing_mode="stream",
+        print_pulse_width=1300,
+        preflight_enabled=True,
+    )
+    monkeypatch.setattr(
+        DropletImagingDialog,
+        "_run_calibration_mode_preflight_dialog",
+        lambda self, preflight: (CalibrationModePreflightDialog.ACTION_CONTINUE_ANYWAY, None),
+    )
+
+    dialog.calibrate_online_stream_button.click()
+    qapp.processEvents()
+
+    assert controller.apply_print_profile_calls == []
+    assert controller.start_online_stream_calls == 1
+    assert manager.calibrationStageChanged.calls
+    assert "Continuing calibration despite" in manager.calibrationStageChanged.calls[0][0][0]
+
+    dialog.deleteLater()
+
+
+def test_droplet_preflight_head_mismatch_switches_to_stream_tab(monkeypatch, qapp):
+    dialog, _manager, controller = _build_dialog(
+        monkeypatch,
+        qapp,
+        printing_mode="stream",
+        print_pulse_width=1300,
+        preflight_enabled=True,
+    )
+    dialog.calibration_tabs.setCurrentWidget(dialog.droplet_tab)
+    monkeypatch.setattr(
+        DropletImagingDialog,
+        "_run_calibration_mode_preflight_dialog",
+        lambda self, preflight: (CalibrationModePreflightDialog.ACTION_SWITCH_TAB, None),
+    )
+
+    dialog.calibrate_all_button.click()
+    qapp.processEvents()
+
+    assert controller.start_droplet_calibration_sequence_calls == 0
+    assert dialog.calibration_tabs.currentWidget() is dialog.stream_tab
+    assert dialog.calibrate_all_button.text() == "Calibrate All"
 
     dialog.deleteLater()
 

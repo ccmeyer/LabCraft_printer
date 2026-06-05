@@ -25,6 +25,28 @@ from CalibrationRecordExport import CalibrationRecordExportError, export_calibra
 from .Model import NozzlePositionChecklistStore
 from hardware.null_devices import NullCamera
 
+
+class _CalibrationRecordExportWorker(QtCore.QObject):
+    succeeded = Signal(dict)
+    failed = Signal(str, str)
+
+    def __init__(self, experiment_dir, output_dir):
+        super().__init__()
+        self.experiment_dir = experiment_dir
+        self.output_dir = output_dir
+
+    @Slot()
+    def run(self):
+        try:
+            result = export_calibration_records(self.experiment_dir, self.output_dir)
+        except CalibrationRecordExportError as exc:
+            self.failed.emit(str(exc), "warning")
+        except Exception as exc:
+            self.failed.emit(str(exc), "critical")
+        else:
+            self.succeeded.emit(result)
+
+
 class RackCalibrationFixDialog(QtWidgets.QDialog):
     def __init__(self, main_window, model, controller):
         self.main_window = main_window
@@ -167,6 +189,154 @@ class CalibrationVerdictDialog(QtWidgets.QDialog):
             "suspected_cause": self.suspected_cause_edit.text().strip(),
             "notes": self.notes_edit.toPlainText().strip(),
         }
+
+
+class CalibrationModePreflightDialog(QtWidgets.QDialog):
+    ACTION_CANCEL = "cancel"
+    ACTION_APPLY_PROFILE = "apply_profile"
+    ACTION_REVIEW_SETTINGS = "review_settings"
+    ACTION_SET_PULSE_WIDTH = "set_pulse_width"
+    ACTION_CONTINUE_ANYWAY = "continue_anyway"
+    ACTION_SWITCH_TAB = "switch_tab"
+
+    def __init__(self, parent=None, *, preflight=None):
+        super().__init__(parent)
+        self.preflight = dict(preflight or {})
+        self.action = self.ACTION_CANCEL
+        self._selected_profile = None
+        self._profile_summary_label = None
+        self._profile_combo = None
+
+        self.setWindowTitle("Calibration Settings Check")
+        self.setModal(True)
+        self.resize(560, 260)
+        self._init_ui()
+
+    @staticmethod
+    def _normalize_mode(mode):
+        value = str(mode or "").strip().lower()
+        return value if value in ("droplet", "stream") else "droplet"
+
+    @classmethod
+    def _mode_label(cls, mode):
+        return "Stream" if cls._normalize_mode(mode) == "stream" else "Droplet"
+
+    @staticmethod
+    def _format_pulse_width(value):
+        try:
+            return f"{int(value)} us"
+        except Exception:
+            return "-"
+
+    @classmethod
+    def _profile_summary(cls, profile):
+        profile = dict(profile or {})
+        try:
+            print_pressure = float(profile["print_pressure"])
+            refuel_pressure = float(profile["refuel_pressure"])
+            print_pw = int(profile["print_pulse_width"])
+            refuel_pw = int(profile["refuel_pulse_width"])
+        except Exception:
+            return "Selected profile settings could not be read."
+        return (
+            f"Print: {print_pressure:.2f} psi, {print_pw} us | "
+            f"Refuel: {refuel_pressure:.2f} psi, {refuel_pw} us"
+        )
+
+    def _init_ui(self):
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        requested_mode = self.preflight.get("requested_mode")
+        head_mode = self.preflight.get("head_mode")
+        current_pw = self.preflight.get("current_print_pulse_width_us")
+        expected_pw = self.preflight.get("expected_print_pulse_width_us")
+        code = str(self.preflight.get("code") or "")
+        profiles = list(self.preflight.get("matching_profiles") or [])
+
+        message = str(self.preflight.get("message") or "Calibration settings should be reviewed before continuing.")
+        message_label = QtWidgets.QLabel(message)
+        message_label.setWordWrap(True)
+        message_label.setStyleSheet("font-weight: 600;")
+        layout.addWidget(message_label)
+
+        details = QtWidgets.QLabel(
+            f"Requested: {self._mode_label(requested_mode)} calibration\n"
+            f"Loaded head: {self._mode_label(head_mode) if head_mode else '-'}\n"
+            f"Current print pulse width: {self._format_pulse_width(current_pw)}\n"
+            f"Expected print pulse width: {self._format_pulse_width(expected_pw)}"
+        )
+        details.setWordWrap(True)
+        layout.addWidget(details)
+
+        if code == "pulse_width_mismatch" and profiles:
+            self._profile_combo = QtWidgets.QComboBox()
+            for profile in profiles:
+                profile_data = dict(profile)
+                self._profile_combo.addItem(
+                    str(profile_data.get("name") or profile_data.get("id") or "Print Profile"),
+                    profile_data,
+                )
+            self._profile_combo.currentIndexChanged.connect(self._refresh_profile_summary)
+            layout.addWidget(QtWidgets.QLabel("Compatible print profile:"))
+            layout.addWidget(self._profile_combo)
+            self._profile_summary_label = QtWidgets.QLabel("")
+            self._profile_summary_label.setWordWrap(True)
+            layout.addWidget(self._profile_summary_label)
+            self._refresh_profile_summary()
+
+        button_row = QtWidgets.QHBoxLayout()
+        button_row.addStretch(1)
+
+        def add_button(text, action, *, default=False):
+            button = QtWidgets.QPushButton(text)
+            if default:
+                button.setDefault(True)
+            button.clicked.connect(lambda _checked=False, selected_action=action: self._finish(selected_action))
+            button_row.addWidget(button)
+            return button
+
+        if code == "head_mode_mismatch":
+            add_button(f"Switch to {self._mode_label(head_mode)} Tab", self.ACTION_SWITCH_TAB, default=True)
+            add_button("Continue Anyway", self.ACTION_CONTINUE_ANYWAY)
+            add_button("Cancel", self.ACTION_CANCEL)
+        elif code == "pulse_width_mismatch" and profiles:
+            add_button("Apply Selected Profile and Continue", self.ACTION_APPLY_PROFILE, default=True)
+            add_button("Review Settings", self.ACTION_REVIEW_SETTINGS)
+            add_button("Continue Anyway", self.ACTION_CONTINUE_ANYWAY)
+            add_button("Cancel", self.ACTION_CANCEL)
+        elif code == "pulse_width_mismatch":
+            add_button("Review Settings", self.ACTION_REVIEW_SETTINGS, default=True)
+            add_button("Set Pulse Width Only and Continue", self.ACTION_SET_PULSE_WIDTH)
+            add_button("Continue Anyway", self.ACTION_CONTINUE_ANYWAY)
+            add_button("Cancel", self.ACTION_CANCEL)
+        else:
+            add_button("Cancel", self.ACTION_CANCEL, default=True)
+
+        layout.addLayout(button_row)
+
+    def _refresh_profile_summary(self):
+        if self._profile_combo is None or self._profile_summary_label is None:
+            return
+        profile = self._profile_combo.currentData()
+        self._selected_profile = dict(profile) if isinstance(profile, dict) else None
+        self._profile_summary_label.setText(self._profile_summary(self._selected_profile))
+
+    def _finish(self, action):
+        self.action = str(action or self.ACTION_CANCEL)
+        if self.action == self.ACTION_CANCEL:
+            self.reject()
+        else:
+            self.accept()
+
+    def selected_action(self):
+        return str(self.action or self.ACTION_CANCEL)
+
+    def selected_profile(self):
+        if self._profile_combo is not None:
+            profile = self._profile_combo.currentData()
+            return dict(profile) if isinstance(profile, dict) else None
+        return dict(self._selected_profile) if isinstance(self._selected_profile, dict) else None
 
 
 class StreamCaptureMassEntryDialog(QtWidgets.QDialog):
@@ -1258,6 +1428,12 @@ class PrinterHeadRecoveryDialog(QtWidgets.QDialog):
 class DropletImagingDialog(QtWidgets.QDialog):
     REFUEL_LEVEL_CHART_WINDOW_SAMPLES = 100
     REFUEL_LEVEL_CHART_FALLBACK_HEIGHT_PX = 100.0
+    EXPORT_CALIBRATION_RECORDS_TEXT = "Export Calibration Records"
+    EXPORT_CALIBRATION_RECORDS_ACTIVE_TEXT = "Exporting..."
+    EXPORT_CALIBRATION_RECORDS_DEFAULT_TOOLTIP = (
+        "Create a zip of the current experiment's calibration recordings in Downloads."
+    )
+    EXPORT_CALIBRATION_RECORDS_ACTIVE_TOOLTIP = "Calibration records export is in progress."
 
     _quick_controls_expanded_default = False
     _info_panel_section_default_states = {
@@ -1362,6 +1538,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._optics_rejected_filenames = []
         self._optics_last_analysis = None
         self._capture_request_pending = False
+        self._calibration_record_export_thread = None
+        self._calibration_record_export_worker = None
+        self._calibration_record_export_in_progress = False
         try:
             self.model.calibration_manager.clear_calibration_memory_ui_recommendation_state()
         except Exception:
@@ -1846,9 +2025,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.record_calibration_checkbox.setChecked(rec_enabled)
         run_options_v.addWidget(self.record_calibration_checkbox)
 
-        self.export_calibration_records_button = QtWidgets.QPushButton("Export Calibration Records")
+        self.export_calibration_records_button = QtWidgets.QPushButton(
+            self.EXPORT_CALIBRATION_RECORDS_TEXT
+        )
         self.export_calibration_records_button.setToolTip(
-            "Create a zip of the current experiment's calibration recordings in Downloads."
+            self.EXPORT_CALIBRATION_RECORDS_DEFAULT_TOOLTIP
         )
         run_options_v.addWidget(self.export_calibration_records_button)
 
@@ -6133,6 +6314,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         return path
 
     def _calibration_record_export_block_reason(self):
+        if bool(getattr(self, "_calibration_record_export_in_progress", False)):
+            return self.EXPORT_CALIBRATION_RECORDS_ACTIVE_TOOLTIP
         if DropletImagingDialog._is_calibration_busy(self):
             return "Calibration is still running. Stop or finish calibration before exporting records."
         if bool(getattr(self, "_capture_request_pending", False)):
@@ -6143,12 +6326,49 @@ class DropletImagingDialog(QtWidgets.QDialog):
         button = getattr(self, "export_calibration_records_button", None)
         if button is None:
             return
+        if bool(getattr(self, "_calibration_record_export_in_progress", False)):
+            button.setEnabled(False)
+            button.setText(self.EXPORT_CALIBRATION_RECORDS_ACTIVE_TEXT)
+            button.setToolTip(self.EXPORT_CALIBRATION_RECORDS_ACTIVE_TOOLTIP)
+            return
+
         reason = self._calibration_record_export_block_reason()
         button.setEnabled(not bool(reason))
+        button.setText(self.EXPORT_CALIBRATION_RECORDS_TEXT)
         if reason:
             button.setToolTip(reason)
         else:
-            button.setToolTip("Create a zip of the current experiment's calibration recordings in Downloads.")
+            button.setToolTip(self.EXPORT_CALIBRATION_RECORDS_DEFAULT_TOOLTIP)
+
+    def _set_calibration_record_export_in_progress(self, in_progress):
+        self._calibration_record_export_in_progress = bool(in_progress)
+        self._refresh_calibration_record_export_button_state()
+
+    def _clear_calibration_record_export_worker_refs(self):
+        self._calibration_record_export_thread = None
+        self._calibration_record_export_worker = None
+        if bool(getattr(self, "_calibration_record_export_in_progress", False)):
+            self._set_calibration_record_export_in_progress(False)
+
+    def _start_calibration_record_export_worker(self, experiment_dir, downloads_dir):
+        thread = QtCore.QThread(self)
+        worker = _CalibrationRecordExportWorker(experiment_dir, downloads_dir)
+        worker.moveToThread(thread)
+
+        thread.started.connect(worker.run)
+        worker.succeeded.connect(self._on_calibration_record_export_succeeded)
+        worker.failed.connect(self._on_calibration_record_export_failed)
+        worker.succeeded.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.succeeded.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._clear_calibration_record_export_worker_refs)
+
+        self._calibration_record_export_thread = thread
+        self._calibration_record_export_worker = worker
+        self._set_calibration_record_export_in_progress(True)
+        thread.start()
 
     def export_calibration_records_to_downloads(self):
         reason = self._calibration_record_export_block_reason()
@@ -6168,18 +6388,19 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         try:
             downloads_dir = self._resolve_downloads_dir()
-            result = export_calibration_records(experiment_dir, downloads_dir)
-        except CalibrationRecordExportError as exc:
-            QtWidgets.QMessageBox.warning(self, "Export Calibration Records", str(exc))
-            return
         except Exception as exc:
             QtWidgets.QMessageBox.critical(
                 self,
                 "Export Calibration Records",
-                f"Could not export calibration records:\n{exc}",
+                f"Could not prepare calibration record export:\n{exc}",
             )
             return
 
+        self._start_calibration_record_export_worker(experiment_dir, downloads_dir)
+
+    def _on_calibration_record_export_succeeded(self, result):
+        self._set_calibration_record_export_in_progress(False)
+        result = dict(result or {})
         archive_path = result.get("archive_path", "")
         size_text = self._format_export_file_size(result.get("archive_size_bytes"))
         QtWidgets.QMessageBox.information(
@@ -6191,6 +6412,18 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.update_stage_and_log(f"Exported calibration records to {archive_path}", "green")
         except Exception:
             pass
+
+    def _on_calibration_record_export_failed(self, message, severity):
+        self._set_calibration_record_export_in_progress(False)
+        text = str(message or "Could not export calibration records.")
+        if str(severity or "").lower() == "warning":
+            QtWidgets.QMessageBox.warning(self, "Export Calibration Records", text)
+        else:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Export Calibration Records",
+                f"Could not export calibration records:\n{text}",
+            )
 
     def _get_stream_capture_state(self):
         mgr = getattr(self.model, "calibration_manager", None)
@@ -6871,6 +7104,257 @@ class DropletImagingDialog(QtWidgets.QDialog):
             except Exception:
                 pass
 
+    def _get_calibration_mode_preflight(self, requested_mode):
+        getter = getattr(self.controller, "get_calibration_mode_preflight", None)
+        if callable(getter):
+            try:
+                result = getter(requested_mode)
+                if isinstance(result, dict):
+                    return dict(result)
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "code": "preflight_error",
+                    "requested_mode": self._normalize_printing_mode(requested_mode),
+                    "head_mode": None,
+                    "current_print_pulse_width_us": None,
+                    "expected_print_pulse_width_us": None,
+                    "matching_profiles": [],
+                    "message": f"Could not check calibration settings: {exc}",
+                }
+        return {
+            "ok": True,
+            "code": "ok",
+            "requested_mode": self._normalize_printing_mode(requested_mode),
+            "head_mode": self._normalize_printing_mode(requested_mode),
+            "current_print_pulse_width_us": None,
+            "expected_print_pulse_width_us": None,
+            "matching_profiles": [],
+            "message": "",
+        }
+
+    def _run_calibration_mode_preflight_dialog(self, preflight):
+        dialog = CalibrationModePreflightDialog(self, preflight=preflight)
+        result = dialog.exec()
+        try:
+            accepted = int(result) == int(QtWidgets.QDialog.Accepted)
+        except Exception:
+            accepted = bool(result)
+        if not accepted:
+            return CalibrationModePreflightDialog.ACTION_CANCEL, None
+        return dialog.selected_action(), dialog.selected_profile()
+
+    def _refresh_print_pulse_width_control(self):
+        spinbox = getattr(self, "print_pulse_width_spinbox", None)
+        machine_model = getattr(getattr(self, "model", None), "machine_model", None)
+        getter = getattr(machine_model, "get_print_pulse_width", None)
+        if spinbox is None or not callable(getter):
+            return
+        try:
+            spinbox.blockSignals(True)
+            spinbox.setValue(int(getter()))
+        except Exception:
+            pass
+        finally:
+            try:
+                spinbox.blockSignals(False)
+            except Exception:
+                pass
+
+    def _review_calibration_mode_settings(self):
+        toggle = getattr(self, "acquisition_controls_toggle", None)
+        if toggle is not None:
+            try:
+                toggle.setChecked(True)
+            except Exception:
+                self._set_acquisition_controls_expanded(True)
+        else:
+            self._set_acquisition_controls_expanded(True)
+        spinbox = getattr(self, "print_pulse_width_spinbox", None)
+        if spinbox is not None:
+            try:
+                spinbox.setFocus(Qt.OtherFocusReason)
+                spinbox.selectAll()
+            except Exception:
+                pass
+
+    def _switch_to_calibration_mode_tab(self, mode):
+        tabs = getattr(self, "calibration_tabs", None)
+        if tabs is None:
+            return
+        mode = self._normalize_printing_mode(mode)
+        target = self.stream_tab if mode == "stream" else self.droplet_tab
+        tabs.setCurrentWidget(target)
+
+    def _emit_calibration_mode_override_warning(self, preflight):
+        message = str(
+            (preflight or {}).get("message")
+            or "Calibration settings do not match the loaded printer head mode."
+        )
+        warning = f"Continuing calibration despite settings preflight warning: {message}"
+        manager = getattr(getattr(self, "model", None), "calibration_manager", None)
+        signal = getattr(manager, "calibrationStageChanged", None)
+        if signal is not None:
+            try:
+                signal.emit(warning, "orange")
+            except Exception:
+                pass
+        print(warning)
+
+    def _show_calibration_mode_preflight_error(self, preflight):
+        message = str(
+            (preflight or {}).get("message")
+            or "Calibration settings could not be confirmed."
+        )
+        popup = getattr(self, "popup_message_signal", None)
+        if popup is not None:
+            try:
+                popup.emit("Calibration Settings Check", message)
+                return
+            except Exception:
+                pass
+        try:
+            QtWidgets.QMessageBox.warning(self, "Calibration Settings Check", message)
+        except Exception:
+            print(message)
+
+    def _start_calibration_after_mode_preflight(self, action_key, start_callback):
+        print("Starting calibration")
+        result = start_callback()
+        if result is False:
+            self._set_calibration_action_text(action_key, use_default=True)
+            self._refresh_manual_control_lock_state()
+            return False
+        self._set_calibration_action_text(action_key, "Stop Calibration")
+        self._refresh_manual_control_lock_state()
+        return True
+
+    def _finish_calibration_mode_setting_correction(self, requested_mode, action_key, start_callback):
+        self._refresh_print_pulse_width_control()
+        preflight = self._get_calibration_mode_preflight(requested_mode)
+        if bool(preflight.get("ok")):
+            return self._start_calibration_after_mode_preflight(action_key, start_callback)
+        self._set_calibration_action_text(action_key, use_default=True)
+        self._refresh_manual_control_lock_state()
+        self._show_calibration_mode_preflight_error(preflight)
+        return False
+
+    def _apply_calibration_mode_profile_then_start(self, profile, requested_mode, action_key, start_callback):
+        if not isinstance(profile, dict):
+            self._show_calibration_mode_preflight_error(
+                {"message": "No compatible print profile was selected."}
+            )
+            return False
+
+        applier = getattr(self.controller, "apply_print_profile", None)
+        if not callable(applier):
+            self._show_calibration_mode_preflight_error(
+                {"message": "Print profiles cannot be applied by this controller."}
+            )
+            return False
+
+        self._set_calibration_action_text(action_key, "Applying...")
+
+        def _after_apply(*_args, **_kwargs):
+            QTimer.singleShot(
+                0,
+                lambda: self._finish_calibration_mode_setting_correction(
+                    requested_mode,
+                    action_key,
+                    start_callback,
+                ),
+            )
+
+        result = applier(profile, callback=_after_apply)
+        if result is False:
+            self._set_calibration_action_text(action_key, use_default=True)
+            self._refresh_manual_control_lock_state()
+            return False
+        self._refresh_manual_control_lock_state()
+        return True
+
+    def _set_calibration_mode_pulse_width_then_start(self, preflight, requested_mode, action_key, start_callback):
+        setter = getattr(self.controller, "set_print_pulse_width", None)
+        if not callable(setter):
+            self._show_calibration_mode_preflight_error(
+                {"message": "Print pulse width cannot be changed by this controller."}
+            )
+            return False
+        try:
+            expected_pw = int((preflight or {}).get("expected_print_pulse_width_us"))
+        except Exception:
+            self._show_calibration_mode_preflight_error(
+                {"message": "Expected print pulse width could not be determined."}
+            )
+            return False
+
+        self._set_calibration_action_text(action_key, "Applying...")
+
+        def _after_set(*_args, **_kwargs):
+            QTimer.singleShot(
+                0,
+                lambda: self._finish_calibration_mode_setting_correction(
+                    requested_mode,
+                    action_key,
+                    start_callback,
+                ),
+            )
+
+        result = setter(expected_pw, manual=True, handler=_after_set)
+        if result is False:
+            self._set_calibration_action_text(action_key, use_default=True)
+            self._refresh_manual_control_lock_state()
+            return False
+        self._refresh_manual_control_lock_state()
+        return True
+
+    def _start_mode_guarded_calibration(self, requested_mode, action_key, start_callback):
+        requested_mode = self._normalize_printing_mode(requested_mode)
+        preflight = self._get_calibration_mode_preflight(requested_mode)
+        if bool(preflight.get("ok")):
+            return self._start_calibration_after_mode_preflight(action_key, start_callback)
+
+        code = str(preflight.get("code") or "")
+        if code in {
+            "no_printer_head",
+            "invalid_requested_mode",
+            "head_mode_unavailable",
+            "pulse_width_unavailable",
+            "preflight_error",
+        }:
+            self._show_calibration_mode_preflight_error(preflight)
+            return False
+
+        action, selected_profile = self._run_calibration_mode_preflight_dialog(preflight)
+        if action == CalibrationModePreflightDialog.ACTION_APPLY_PROFILE:
+            return self._apply_calibration_mode_profile_then_start(
+                selected_profile,
+                requested_mode,
+                action_key,
+                start_callback,
+            )
+        if action == CalibrationModePreflightDialog.ACTION_SET_PULSE_WIDTH:
+            return self._set_calibration_mode_pulse_width_then_start(
+                preflight,
+                requested_mode,
+                action_key,
+                start_callback,
+            )
+        if action == CalibrationModePreflightDialog.ACTION_CONTINUE_ANYWAY:
+            self._emit_calibration_mode_override_warning(preflight)
+            return self._start_calibration_after_mode_preflight(action_key, start_callback)
+        if action == CalibrationModePreflightDialog.ACTION_REVIEW_SETTINGS:
+            self._review_calibration_mode_settings()
+            self._refresh_manual_control_lock_state()
+            return False
+        if action == CalibrationModePreflightDialog.ACTION_SWITCH_TAB:
+            self._switch_to_calibration_mode_tab(preflight.get("head_mode") or requested_mode)
+            self._refresh_manual_control_lock_state()
+            return False
+
+        self._refresh_manual_control_lock_state()
+        return False
+
     def reset_calibration_buttons(self):
         """
         Resets the calibration buttons to their default state.
@@ -6971,9 +7455,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._set_calibration_action_text("pressure_scan", use_default=True)
             self.controller.stop_calibration()
         else:
-            # Launch
-            self._set_calibration_action_text("pressure_scan", "Stop Calibration")
-            self.controller.start_pressure_scan_calibration()
+            self._start_mode_guarded_calibration(
+                "droplet",
+                "pressure_scan",
+                self.controller.start_pressure_scan_calibration,
+            )
         self._refresh_manual_control_lock_state()
 
     def toggle_start_single_pressure_scan_calibration(self):
@@ -6984,8 +7470,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._set_calibration_action_text("single_pressure_scan", use_default=True)
             self.controller.stop_calibration()
         else:
-            self._set_calibration_action_text("single_pressure_scan", "Stop Calibration")
-            self.controller.start_conservative_pressure_scan_calibration()
+            self._start_mode_guarded_calibration(
+                "droplet",
+                "single_pressure_scan",
+                self.controller.start_conservative_pressure_scan_calibration,
+            )
         self._refresh_manual_control_lock_state()
 
     def toggle_start_pressure_trajectory_calibration(self):
@@ -6997,9 +7486,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._set_calibration_action_text("pressure_trajectory", use_default=True)
             self.controller.stop_calibration()
         else:
-            print('Starting calibration')
-            self._set_calibration_action_text("pressure_trajectory", "Stop Calibration")
-            self.controller.start_pressure_trajectory_calibration()
+            self._start_mode_guarded_calibration(
+                "droplet",
+                "pressure_trajectory",
+                self.controller.start_pressure_trajectory_calibration,
+            )
         self._refresh_manual_control_lock_state()
 
     # def toggle_start_droplet_search_calibration(self):
@@ -7024,9 +7515,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._set_calibration_action_text("droplet_characterization", use_default=True)
             self.controller.stop_calibration()
         else:
-            print('Starting calibration')
-            self._set_calibration_action_text("droplet_characterization", "Stop Calibration")
-            self.controller.start_droplet_characterization_calibration()
+            self._start_mode_guarded_calibration(
+                "droplet",
+                "droplet_characterization",
+                self.controller.start_droplet_characterization_calibration,
+            )
         self._refresh_manual_control_lock_state()
 
     def toggle_start_pressure_sweep_calibration(self):
@@ -7038,9 +7531,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._set_calibration_action_text("pressure_sweep_characterization", use_default=True)
             self.controller.stop_calibration()
         else:
-            print('Starting calibration')
-            self._set_calibration_action_text("pressure_sweep_characterization", "Stop Calibration")
-            self.controller.start_pressure_sweep_characterization()
+            self._start_mode_guarded_calibration(
+                "droplet",
+                "pressure_sweep_characterization",
+                self.controller.start_pressure_sweep_characterization,
+            )
         self._refresh_manual_control_lock_state()
 
     def toggle_start_timecourse_calibration(self):
@@ -7066,9 +7561,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._set_calibration_action_text("online_stream_calibration", use_default=True)
             self.controller.stop_calibration()
         else:
-            print('Starting calibration')
-            self._set_calibration_action_text("online_stream_calibration", "Stop Calibration")
-            self.controller.start_online_stream_calibration()
+            self._start_mode_guarded_calibration(
+                "stream",
+                "online_stream_calibration",
+                self.controller.start_online_stream_calibration,
+            )
         self._refresh_manual_control_lock_state()
 
     def toggle_start_all_stream_calibration(self):
@@ -7088,9 +7585,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._set_calibration_action_text("stream_calibrate_all", use_default=True)
             self.controller.stop_calibration()
         else:
-            print('Starting calibration')
-            self._set_calibration_action_text("stream_calibrate_all", "Stop Calibration")
-            self.controller.start_stream_calibration_sequence()
+            self._start_mode_guarded_calibration(
+                "stream",
+                "stream_calibrate_all",
+                self.controller.start_stream_calibration_sequence,
+            )
         self._refresh_manual_control_lock_state()
 
     def toggle_start_all_calibration(self):
@@ -7110,10 +7609,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._set_calibration_action_text("calibrate_all", use_default=True)
             self.controller.stop_calibration()
         else:
-            print('Starting calibration')
-            self._set_calibration_action_text("calibrate_all", "Stop Calibration")
-            self.controller.start_droplet_calibration_sequence(
-                pressure_scan_mode=self._get_calibrate_all_pressure_scan_mode(),
+            self._start_mode_guarded_calibration(
+                "droplet",
+                "calibrate_all",
+                lambda: self.controller.start_droplet_calibration_sequence(
+                    pressure_scan_mode=self._get_calibrate_all_pressure_scan_mode(),
+                ),
             )
         self._refresh_manual_control_lock_state()
 

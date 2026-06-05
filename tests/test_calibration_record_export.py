@@ -11,6 +11,7 @@ from CalibrationRecordExport import (
     CalibrationRecordExportError,
     export_calibration_records,
 )
+from tests.fakes import FakeSignal
 
 
 def _write_json(path: Path, payload: dict):
@@ -189,11 +190,126 @@ def test_export_calibration_records_skips_missing_optional_files(tmp_path):
         assert "experiment_audit.jsonl" not in names
 
 
-def test_droplet_dialog_export_handler_uses_current_experiment_and_downloads(monkeypatch, tmp_path):
+def _raise(exc):
+    raise exc
+
+
+def test_calibration_record_export_worker_emits_succeeded(monkeypatch):
     import CalibrationClasses.View as calibration_view
 
-    experiment_dir = _make_experiment(tmp_path)
-    downloads_dir = tmp_path / "Downloads"
+    expected = {"archive_path": "records.zip", "archive_size_bytes": 123}
+    monkeypatch.setattr(
+        calibration_view,
+        "export_calibration_records",
+        lambda experiment_dir, output_dir: expected,
+    )
+    worker = calibration_view._CalibrationRecordExportWorker("experiment", "downloads")
+    seen = []
+    worker.succeeded.connect(lambda payload: seen.append(payload))
+
+    worker.run()
+
+    assert seen == [expected]
+
+
+def test_calibration_record_export_worker_emits_warning_for_export_error(monkeypatch):
+    import CalibrationClasses.View as calibration_view
+
+    monkeypatch.setattr(
+        calibration_view,
+        "export_calibration_records",
+        lambda experiment_dir, output_dir: _raise(CalibrationRecordExportError("no records")),
+    )
+    worker = calibration_view._CalibrationRecordExportWorker("experiment", "downloads")
+    seen = []
+    worker.failed.connect(lambda message, severity: seen.append((message, severity)))
+
+    worker.run()
+
+    assert seen == [("no records", "warning")]
+
+
+def test_calibration_record_export_worker_emits_critical_for_unexpected_error(monkeypatch):
+    import CalibrationClasses.View as calibration_view
+
+    monkeypatch.setattr(
+        calibration_view,
+        "export_calibration_records",
+        lambda experiment_dir, output_dir: _raise(RuntimeError("disk error")),
+    )
+    worker = calibration_view._CalibrationRecordExportWorker("experiment", "downloads")
+    seen = []
+    worker.failed.connect(lambda message, severity: seen.append((message, severity)))
+
+    worker.run()
+
+    assert seen == [("disk error", "critical")]
+
+
+class _FakeButton:
+    def __init__(self):
+        self.enabled = True
+        self.text = ""
+        self.tooltip = ""
+
+    def setEnabled(self, enabled):
+        self.enabled = bool(enabled)
+
+    def setText(self, text):
+        self.text = str(text)
+
+    def setToolTip(self, tooltip):
+        self.tooltip = str(tooltip)
+
+
+class _FakeExportThread:
+    instances = []
+
+    def __init__(self, parent=None):
+        self.parent = parent
+        self.started = FakeSignal()
+        self.finished = FakeSignal()
+        self.started_called = False
+        self.quit_called = False
+        self.deleted = False
+        self.__class__.instances.append(self)
+
+    def start(self):
+        self.started_called = True
+        self.started.emit()
+
+    def quit(self, *args, **kwargs):
+        self.quit_called = True
+        self.finished.emit()
+
+    def deleteLater(self, *args, **kwargs):
+        self.deleted = True
+
+
+class _FakeExportWorker:
+    instances = []
+
+    def __init__(self, experiment_dir, output_dir):
+        self.experiment_dir = experiment_dir
+        self.output_dir = output_dir
+        self.succeeded = FakeSignal()
+        self.failed = FakeSignal()
+        self.run_called = False
+        self.deleted = False
+        self.thread = None
+        self.__class__.instances.append(self)
+
+    def moveToThread(self, thread):
+        self.thread = thread
+
+    def run(self):
+        self.run_called = True
+
+    def deleteLater(self, *args, **kwargs):
+        self.deleted = True
+
+
+def _make_export_dialog(calibration_view, experiment_dir, downloads_dir):
     dialog = calibration_view.DropletImagingDialog.__new__(calibration_view.DropletImagingDialog)
     dialog.model = SimpleNamespace(
         experiment_model=SimpleNamespace(experiment_dir_path=str(experiment_dir)),
@@ -201,21 +317,31 @@ def test_droplet_dialog_export_handler_uses_current_experiment_and_downloads(mon
     )
     dialog.controller = object()
     dialog._capture_request_pending = False
+    dialog._calibration_record_export_thread = None
+    dialog._calibration_record_export_worker = None
+    dialog._calibration_record_export_in_progress = False
+    dialog.export_calibration_records_button = _FakeButton()
     dialog._resolve_downloads_dir = lambda: downloads_dir
     dialog.update_stage_and_log = lambda *args, **kwargs: None
+    return dialog
 
-    calls = []
 
-    def fake_export(exp_arg, out_arg):
-        calls.append((Path(exp_arg), Path(out_arg)))
-        return {
-            "archive_path": str(downloads_dir / "records.zip"),
-            "archive_size_bytes": 2048,
-        }
+def _install_fake_export_threading(monkeypatch, calibration_view):
+    _FakeExportThread.instances = []
+    _FakeExportWorker.instances = []
+    monkeypatch.setattr(calibration_view.QtCore, "QThread", _FakeExportThread)
+    monkeypatch.setattr(calibration_view, "_CalibrationRecordExportWorker", _FakeExportWorker)
 
+
+def test_droplet_dialog_export_handler_starts_worker_and_restores_on_success(monkeypatch, tmp_path):
+    import CalibrationClasses.View as calibration_view
+
+    experiment_dir = _make_experiment(tmp_path)
+    downloads_dir = tmp_path / "Downloads"
+    dialog = _make_export_dialog(calibration_view, experiment_dir, downloads_dir)
+    _install_fake_export_threading(monkeypatch, calibration_view)
     info_messages = []
     warning_messages = []
-    monkeypatch.setattr(calibration_view, "export_calibration_records", fake_export)
     monkeypatch.setattr(
         calibration_view.DropletImagingDialog,
         "_is_calibration_busy",
@@ -234,31 +360,122 @@ def test_droplet_dialog_export_handler_uses_current_experiment_and_downloads(mon
 
     calibration_view.DropletImagingDialog.export_calibration_records_to_downloads(dialog)
 
-    assert calls == [(experiment_dir, downloads_dir)]
+    assert len(_FakeExportWorker.instances) == 1
+    assert len(_FakeExportThread.instances) == 1
+    worker = _FakeExportWorker.instances[0]
+    thread = _FakeExportThread.instances[0]
+    assert Path(worker.experiment_dir) == experiment_dir
+    assert Path(worker.output_dir) == downloads_dir
+    assert worker.thread is thread
+    assert worker.run_called is True
+    assert dialog.export_calibration_records_button.enabled is False
+    assert dialog.export_calibration_records_button.text == "Exporting..."
+
+    worker.succeeded.emit(
+        {
+            "archive_path": str(downloads_dir / "records.zip"),
+            "archive_size_bytes": 2048,
+        }
+    )
+
+    assert thread.quit_called is True
+    assert thread.deleted is True
+    assert worker.deleted is True
+    assert dialog._calibration_record_export_thread is None
+    assert dialog._calibration_record_export_worker is None
+    assert dialog._calibration_record_export_in_progress is False
+    assert dialog.export_calibration_records_button.enabled is True
+    assert dialog.export_calibration_records_button.text == "Export Calibration Records"
     assert info_messages
     assert not warning_messages
+
+
+@pytest.mark.parametrize(
+    ("severity", "expected_message_kind"),
+    [
+        ("warning", "warning"),
+        ("critical", "critical"),
+    ],
+)
+def test_droplet_dialog_export_handler_restores_on_failure(
+    monkeypatch,
+    tmp_path,
+    severity,
+    expected_message_kind,
+):
+    import CalibrationClasses.View as calibration_view
+
+    experiment_dir = _make_experiment(tmp_path)
+    downloads_dir = tmp_path / "Downloads"
+    dialog = _make_export_dialog(calibration_view, experiment_dir, downloads_dir)
+    _install_fake_export_threading(monkeypatch, calibration_view)
+    messages = {"warning": [], "critical": []}
+    monkeypatch.setattr(
+        calibration_view.DropletImagingDialog,
+        "_is_calibration_busy",
+        lambda self: False,
+    )
+    monkeypatch.setattr(
+        calibration_view.QtWidgets.QMessageBox,
+        "warning",
+        lambda *args, **kwargs: messages["warning"].append(args),
+    )
+    monkeypatch.setattr(
+        calibration_view.QtWidgets.QMessageBox,
+        "critical",
+        lambda *args, **kwargs: messages["critical"].append(args),
+    )
+
+    calibration_view.DropletImagingDialog.export_calibration_records_to_downloads(dialog)
+    worker = _FakeExportWorker.instances[0]
+    worker.failed.emit("export failed", severity)
+
+    assert dialog._calibration_record_export_in_progress is False
+    assert dialog.export_calibration_records_button.enabled is True
+    assert dialog.export_calibration_records_button.text == "Export Calibration Records"
+    assert messages[expected_message_kind]
+
+
+def test_droplet_dialog_export_handler_blocks_second_click_while_exporting(monkeypatch, tmp_path):
+    import CalibrationClasses.View as calibration_view
+
+    experiment_dir = _make_experiment(tmp_path)
+    downloads_dir = tmp_path / "Downloads"
+    dialog = _make_export_dialog(calibration_view, experiment_dir, downloads_dir)
+    _install_fake_export_threading(monkeypatch, calibration_view)
+    warning_messages = []
+    monkeypatch.setattr(
+        calibration_view.DropletImagingDialog,
+        "_is_calibration_busy",
+        lambda self: False,
+    )
+    monkeypatch.setattr(
+        calibration_view.QtWidgets.QMessageBox,
+        "warning",
+        lambda *args, **kwargs: warning_messages.append(args),
+    )
+
+    calibration_view.DropletImagingDialog.export_calibration_records_to_downloads(dialog)
+    calibration_view.DropletImagingDialog.export_calibration_records_to_downloads(dialog)
+
+    assert len(_FakeExportWorker.instances) == 1
+    assert warning_messages
+    assert dialog.export_calibration_records_button.enabled is False
+    assert dialog.export_calibration_records_button.text == "Exporting..."
 
 
 def test_droplet_dialog_export_handler_blocks_while_busy(monkeypatch, tmp_path):
     import CalibrationClasses.View as calibration_view
 
     experiment_dir = _make_experiment(tmp_path)
-    dialog = calibration_view.DropletImagingDialog.__new__(calibration_view.DropletImagingDialog)
-    dialog.model = SimpleNamespace(
-        experiment_model=SimpleNamespace(experiment_dir_path=str(experiment_dir)),
-        calibration_manager=SimpleNamespace(calibration_file_path=""),
-    )
-    dialog._capture_request_pending = False
+    downloads_dir = tmp_path / "Downloads"
+    dialog = _make_export_dialog(calibration_view, experiment_dir, downloads_dir)
+    _install_fake_export_threading(monkeypatch, calibration_view)
 
     monkeypatch.setattr(
         calibration_view.DropletImagingDialog,
         "_is_calibration_busy",
         lambda self: True,
-    )
-    monkeypatch.setattr(
-        calibration_view,
-        "export_calibration_records",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("export should not run")),
     )
     warning_messages = []
     monkeypatch.setattr(
@@ -270,3 +487,4 @@ def test_droplet_dialog_export_handler_blocks_while_busy(monkeypatch, tmp_path):
     calibration_view.DropletImagingDialog.export_calibration_records_to_downloads(dialog)
 
     assert warning_messages
+    assert not _FakeExportWorker.instances

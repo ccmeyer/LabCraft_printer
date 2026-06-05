@@ -30,6 +30,10 @@ ARRAY_ROW_START_OVERSHOOT_STEPS = 0
 PLATE_DOCK_SAFE_Z = 500
 PLATE_DOCK_X_OFFSET = -5000
 PLATE_SEATED_LOCATIONS = {"pause", "plate"}
+CALIBRATION_MODE_PRINT_PULSE_WIDTH_US = {
+    "droplet": 1300,
+    "stream": 2500,
+}
 
 
 class AppUpdateCheckWorker(QtCore.QObject):
@@ -2393,6 +2397,176 @@ class Controller(QObject):
             handler=handler,
             trace_metadata=trace_metadata,
         )
+
+    @staticmethod
+    def _normalize_calibration_mode(value, *, fallback="droplet"):
+        mode = str(value or "").strip().lower()
+        if mode in CALIBRATION_MODE_PRINT_PULSE_WIDTH_US:
+            return mode
+        if fallback is None:
+            return None
+        fallback_mode = str(fallback or "droplet").strip().lower()
+        return fallback_mode if fallback_mode in CALIBRATION_MODE_PRINT_PULSE_WIDTH_US else "droplet"
+
+    @staticmethod
+    def _calibration_mode_label(mode):
+        normalized = Controller._normalize_calibration_mode(mode)
+        return "Stream" if normalized == "stream" else "Droplet"
+
+    @classmethod
+    def expected_calibration_print_pulse_width_us(cls, mode):
+        normalized = cls._normalize_calibration_mode(mode, fallback=None)
+        if normalized is None:
+            return None
+        return int(CALIBRATION_MODE_PRINT_PULSE_WIDTH_US[normalized])
+
+    @staticmethod
+    def _read_printer_head_printing_mode(printer_head):
+        if printer_head is None:
+            return None
+        getter = getattr(printer_head, "get_printing_mode", None)
+        try:
+            if callable(getter):
+                return Controller._normalize_calibration_mode(getter(), fallback=None)
+        except Exception:
+            pass
+        return Controller._normalize_calibration_mode(
+            getattr(printer_head, "printing_mode", None),
+            fallback=None,
+        )
+
+    def _current_print_pulse_width_us_for_preflight(self):
+        machine_model = getattr(getattr(self, "model", None), "machine_model", None)
+        getter = getattr(machine_model, "get_print_pulse_width", None)
+        try:
+            value = getter() if callable(getter) else getattr(machine_model, "print_pulse_width", None)
+            return int(value)
+        except Exception:
+            return None
+
+    def _matching_print_profiles_for_calibration_mode(self, requested_mode, expected_pulse_width_us):
+        profiles = list(getattr(getattr(self, "model", None), "print_profiles", []) or [])
+        matches = []
+        for profile in profiles:
+            if not isinstance(profile, dict):
+                continue
+            mode = self._normalize_calibration_mode(profile.get("mode"), fallback=None)
+            if mode != requested_mode:
+                continue
+            try:
+                profile_pulse_width = int(profile.get("print_pulse_width"))
+            except Exception:
+                continue
+            if profile_pulse_width != int(expected_pulse_width_us):
+                continue
+            matches.append(dict(profile))
+        return matches
+
+    def get_calibration_mode_preflight(self, requested_mode):
+        requested_mode = self._normalize_calibration_mode(requested_mode, fallback=None)
+        if requested_mode is None:
+            return {
+                "ok": False,
+                "code": "invalid_requested_mode",
+                "requested_mode": None,
+                "head_mode": None,
+                "current_print_pulse_width_us": self._current_print_pulse_width_us_for_preflight(),
+                "expected_print_pulse_width_us": None,
+                "matching_profiles": [],
+                "message": "Calibration mode must be droplet or stream.",
+            }
+
+        expected_pulse_width_us = self.expected_calibration_print_pulse_width_us(requested_mode)
+        current_pulse_width_us = self._current_print_pulse_width_us_for_preflight()
+        matching_profiles = self._matching_print_profiles_for_calibration_mode(
+            requested_mode,
+            expected_pulse_width_us,
+        )
+
+        try:
+            rack_model = getattr(getattr(self, "model", None), "rack_model", None)
+            printer_head = rack_model.get_gripper_printer_head() if rack_model is not None else None
+        except Exception:
+            printer_head = None
+
+        if printer_head is None:
+            return {
+                "ok": False,
+                "code": "no_printer_head",
+                "requested_mode": requested_mode,
+                "head_mode": None,
+                "current_print_pulse_width_us": current_pulse_width_us,
+                "expected_print_pulse_width_us": expected_pulse_width_us,
+                "matching_profiles": matching_profiles,
+                "message": "No printer head is loaded.",
+            }
+
+        head_mode = self._read_printer_head_printing_mode(printer_head)
+        if head_mode is None:
+            return {
+                "ok": False,
+                "code": "head_mode_unavailable",
+                "requested_mode": requested_mode,
+                "head_mode": None,
+                "current_print_pulse_width_us": current_pulse_width_us,
+                "expected_print_pulse_width_us": expected_pulse_width_us,
+                "matching_profiles": matching_profiles,
+                "message": "Loaded printer head printing mode could not be read.",
+            }
+
+        if head_mode != requested_mode:
+            return {
+                "ok": False,
+                "code": "head_mode_mismatch",
+                "requested_mode": requested_mode,
+                "head_mode": head_mode,
+                "current_print_pulse_width_us": current_pulse_width_us,
+                "expected_print_pulse_width_us": expected_pulse_width_us,
+                "matching_profiles": matching_profiles,
+                "message": (
+                    f"The loaded printer head is set to {self._calibration_mode_label(head_mode)} mode, "
+                    f"but {self._calibration_mode_label(requested_mode)} calibration was requested."
+                ),
+            }
+
+        if current_pulse_width_us is None:
+            return {
+                "ok": False,
+                "code": "pulse_width_unavailable",
+                "requested_mode": requested_mode,
+                "head_mode": head_mode,
+                "current_print_pulse_width_us": current_pulse_width_us,
+                "expected_print_pulse_width_us": expected_pulse_width_us,
+                "matching_profiles": matching_profiles,
+                "message": "Current print pulse width could not be read.",
+            }
+
+        if int(current_pulse_width_us) != int(expected_pulse_width_us):
+            return {
+                "ok": False,
+                "code": "pulse_width_mismatch",
+                "requested_mode": requested_mode,
+                "head_mode": head_mode,
+                "current_print_pulse_width_us": current_pulse_width_us,
+                "expected_print_pulse_width_us": expected_pulse_width_us,
+                "matching_profiles": matching_profiles,
+                "message": (
+                    f"{self._calibration_mode_label(requested_mode)} calibration expects "
+                    f"{int(expected_pulse_width_us)} us print pulse width, but the machine is set to "
+                    f"{int(current_pulse_width_us)} us."
+                ),
+            }
+
+        return {
+            "ok": True,
+            "code": "ok",
+            "requested_mode": requested_mode,
+            "head_mode": head_mode,
+            "current_print_pulse_width_us": current_pulse_width_us,
+            "expected_print_pulse_width_us": expected_pulse_width_us,
+            "matching_profiles": matching_profiles,
+            "message": "",
+        }
 
     def apply_print_profile(self, profile, callback=None):
         """Apply a print profile through the existing print/refuel setting commands."""
