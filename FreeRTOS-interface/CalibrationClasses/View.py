@@ -7229,8 +7229,57 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._refresh_manual_control_lock_state()
         return True
 
-    def _finish_calibration_mode_setting_correction(self, requested_mode, action_key, start_callback):
+    def _sync_pressure_scan_start_pressure_from_profile(self, profile):
+        if not isinstance(profile, dict) or "print_pressure" not in profile:
+            return False
+        try:
+            pressure = float(profile.get("print_pressure"))
+        except Exception:
+            return False
+
+        applied_pressure = pressure
+        spinbox = getattr(self, "start_pressure_spin", None)
+        if spinbox is not None:
+            try:
+                pressure = max(float(spinbox.minimum()), min(float(spinbox.maximum()), pressure))
+            except Exception:
+                pass
+            try:
+                spinbox.blockSignals(True)
+                spinbox.setValue(round(pressure, 2))
+                applied_pressure = float(spinbox.value())
+            except Exception:
+                applied_pressure = pressure
+            finally:
+                try:
+                    spinbox.blockSignals(False)
+                except Exception:
+                    pass
+
+        setter = getattr(self.controller, "set_start_pressure", None)
+        if callable(setter):
+            try:
+                setter(applied_pressure)
+                return True
+            except Exception:
+                pass
+        try:
+            self.set_start_pressure(applied_pressure)
+            return True
+        except Exception:
+            return False
+
+    def _finish_calibration_mode_setting_correction(
+        self,
+        requested_mode,
+        action_key,
+        start_callback,
+        *,
+        applied_profile=None,
+    ):
         self._refresh_print_pulse_width_control()
+        if isinstance(applied_profile, dict):
+            self._sync_pressure_scan_start_pressure_from_profile(applied_profile)
         preflight = self._get_calibration_mode_preflight(requested_mode)
         if bool(preflight.get("ok")):
             return self._start_calibration_after_mode_preflight(action_key, start_callback)
@@ -7262,6 +7311,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
                     requested_mode,
                     action_key,
                     start_callback,
+                    applied_profile=profile,
                 ),
             )
 

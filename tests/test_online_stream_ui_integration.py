@@ -98,6 +98,7 @@ class _CalibrationManagerStub:
         self.state = {"status": "idle"}
         self.sequence_state = {"status": "idle"}
         self.droplet_sequence_state = {"status": "idle"}
+        self.start_pressure = 0.80
 
     def clear_calibration_memory_ui_recommendation_state(self):
         return None
@@ -152,10 +153,17 @@ class _CalibrationManagerStub:
     def get_droplet_calibration_sequence_state(self):
         return dict(self.droplet_sequence_state)
 
+    def set_start_pressure(self, pressure):
+        self.start_pressure = float(pressure)
+
+    def get_start_pressure(self):
+        return float(self.start_pressure)
+
 
 class _MachineModelStub:
-    def __init__(self, *, print_pulse_width=1400):
+    def __init__(self, *, print_pulse_width=1400, print_pressure=0.80):
         self.print_pulse_width = int(print_pulse_width)
+        self.print_pressure = float(print_pressure)
 
     def get_print_pressure_bounds(self):
         return (0.10, 5.00)
@@ -164,7 +172,7 @@ class _MachineModelStub:
         return int(self.print_pulse_width)
 
     def get_current_print_pressure(self):
-        return 0.80
+        return float(self.print_pressure)
 
 
 class _ControllerStub:
@@ -180,6 +188,7 @@ class _ControllerStub:
         self.stop_calibration_calls = 0
         self.apply_print_profile_calls = []
         self.set_print_pulse_width_calls = []
+        self.start_pressure_values = []
 
     def start_read_camera(self):
         return None
@@ -317,9 +326,16 @@ class _ControllerStub:
         profile = dict(profile)
         self.apply_print_profile_calls.append(profile)
         self.model.machine_model.print_pulse_width = int(profile["print_pulse_width"])
+        self.model.machine_model.print_pressure = float(profile["print_pressure"])
         if callback is not None:
             callback()
         return True
+
+    def set_start_pressure(self, pressure):
+        pressure = float(pressure)
+        self.start_pressure_values.append(pressure)
+        if self.manager is not None:
+            self.manager.set_start_pressure(pressure)
 
     def set_print_pulse_width(self, pulse_width, *, manual=False, handler=None):
         self.set_print_pulse_width_calls.append(
@@ -337,6 +353,7 @@ def _build_dialog(
     *,
     printing_mode=None,
     print_pulse_width=1400,
+    print_pressure=0.80,
     preflight_enabled=False,
     print_profiles=None,
     **dialog_kwargs,
@@ -363,7 +380,10 @@ def _build_dialog(
         if printing_mode is not None
         else None
     )
-    machine_model = _MachineModelStub(print_pulse_width=print_pulse_width)
+    machine_model = _MachineModelStub(
+        print_pulse_width=print_pulse_width,
+        print_pressure=print_pressure,
+    )
     model = SimpleNamespace(
         droplet_camera_model=_DropletCameraModelStub(),
         calibration_manager=manager,
@@ -506,6 +526,43 @@ def test_stream_preflight_applies_matching_profile_then_starts(monkeypatch, qapp
     assert dialog.model.machine_model.get_print_pulse_width() == 2500
     assert controller.start_online_stream_calls == 1
     assert dialog.calibrate_online_stream_button.text() == "Stop Calibration"
+
+    dialog.deleteLater()
+
+
+def test_droplet_preflight_profile_apply_updates_pressure_scan_start(monkeypatch, qapp):
+    dialog, manager, controller = _build_dialog(
+        monkeypatch,
+        qapp,
+        printing_mode="droplet",
+        print_pulse_width=2500,
+        print_pressure=0.80,
+        preflight_enabled=True,
+    )
+
+    def choose_profile(self, preflight):
+        return (
+            CalibrationModePreflightDialog.ACTION_APPLY_PROFILE,
+            preflight["matching_profiles"][0],
+        )
+
+    monkeypatch.setattr(
+        DropletImagingDialog,
+        "_run_calibration_mode_preflight_dialog",
+        choose_profile,
+    )
+
+    dialog.calibrate_all_button.click()
+    qapp.processEvents()
+    qapp.processEvents()
+
+    assert controller.apply_print_profile_calls == [_PRINT_PROFILES[0]]
+    assert dialog.model.machine_model.get_print_pulse_width() == 1300
+    assert abs(dialog.start_pressure_spin.value() - 0.60) < 1e-9
+    assert controller.start_pressure_values == [0.60]
+    assert abs(manager.get_start_pressure() - 0.60) < 1e-9
+    assert controller.start_droplet_calibration_sequence_calls == 1
+    assert controller.start_droplet_calibration_sequence_modes == ["band"]
 
     dialog.deleteLater()
 
