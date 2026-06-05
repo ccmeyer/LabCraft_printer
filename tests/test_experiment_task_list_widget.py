@@ -72,10 +72,15 @@ class ExperimentModelStub:
 
 class MachineModelStub:
     machine_state_updated = SignalStub()
+    motor_state_changed = SignalStub()
     home_status_signal = SignalStub()
     regulation_state_changed = SignalStub()
 
     def __init__(self, *, connected=True, enabled=True, homed=True, pressure=True):
+        self.machine_state_updated = SignalStub()
+        self.motor_state_changed = SignalStub()
+        self.home_status_signal = SignalStub()
+        self.regulation_state_changed = SignalStub()
         self.connected = bool(connected)
         self.enabled = bool(enabled)
         self.homed = bool(homed)
@@ -551,6 +556,20 @@ def test_machine_readiness_change_updates_only_run_readiness(qapp):
     assert head_update_calls == []
     assert progress_update_calls == []
     assert widget.next_label.text() == "Next: Load printer head for Reagent A"
+
+
+def test_motor_enable_signal_refreshes_run_readiness(qapp):
+    widget, model, _controller, _heads = _make_widget(qapp, enabled=False, homed=False)
+    assert widget.next_label.text() == "Next: Enable motors"
+
+    model.machine_model.enabled = True
+    model.machine_model.motor_state_changed.emit(True)
+    _wait_for_debounced_refresh(qapp)
+
+    rows = {row["label"]: row["state"] for row in widget._global_task_rows()}
+    assert rows["Motors enabled"] == "done"
+    assert rows["Motors homed"] == "current"
+    assert widget.next_label.text() == "Next: Home motors"
 
 
 def test_head_list_change_full_rebuilds_and_preserves_active_auto_expansion(qapp):

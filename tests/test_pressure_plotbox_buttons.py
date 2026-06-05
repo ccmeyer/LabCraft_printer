@@ -49,8 +49,10 @@ class _FakeMachineModel(QObject):
         target_refuel_pressure=1.0,
         print_pulse_width=3000,
         refuel_pulse_width=3000,
+        connected=True,
     ):
         super().__init__()
+        self.machine_connected = bool(connected)
         self.regulating_print_pressure = regulating_print_pressure
         self.regulating_refuel_pressure = (
             regulating_print_pressure
@@ -65,7 +67,7 @@ class _FakeMachineModel(QObject):
         self.dispense_frequency_hz = 10
 
     def is_connected(self):
-        return True
+        return self.machine_connected
 
     def motors_are_enabled(self):
         return True
@@ -385,6 +387,38 @@ def test_selecting_different_print_profile_enables_apply(qapp):
     assert "#60a5fa" in box.print_profile_apply_button.styleSheet()
 
 
+def test_disconnected_print_profile_disables_apply(qapp):
+    events = []
+    popups = []
+    box = PressurePlotBox(
+        _make_main_window(CURRENT_PROFILE, popups),
+        _make_model(_FakeMachineModel(connected=False), events),
+        _make_controller(events),
+    )
+
+    assert box.print_profile_apply_button.text() == "Apply"
+    assert not box.print_profile_apply_button.isEnabled()
+    assert "#777777" in box.print_profile_apply_button.styleSheet()
+
+
+def test_machine_connection_update_enables_print_profile_apply(qapp):
+    events = []
+    popups = []
+    machine_model = _FakeMachineModel(connected=False)
+    box = PressurePlotBox(
+        _make_main_window(CURRENT_PROFILE, popups),
+        _make_model(machine_model, events),
+        _make_controller(events),
+    )
+
+    machine_model.machine_connected = True
+    machine_model.machine_state_updated.emit(True)
+
+    assert box.print_profile_apply_button.text() == "Apply"
+    assert box.print_profile_apply_button.isEnabled()
+    assert "#60a5fa" in box.print_profile_apply_button.styleSheet()
+
+
 def test_manual_print_profile_setting_change_returns_button_to_apply(qapp):
     events = []
     popups = []
@@ -409,6 +443,23 @@ def test_manual_print_profile_setting_change_returns_button_to_apply(qapp):
     controller.set_absolute_print_pressure.assert_called_with(0.7, manual=True)
     assert box.print_profile_apply_button.text() == "Apply"
     assert box.print_profile_apply_button.isEnabled()
+
+
+def test_apply_print_profile_ignores_disconnected_machine(qapp):
+    events = []
+    popups = []
+    controller = _make_controller(events)
+    box = PressurePlotBox(
+        _make_main_window(CURRENT_PROFILE, popups),
+        _make_model(_FakeMachineModel(connected=False), events),
+        controller,
+    )
+
+    box.handle_print_profile_apply()
+
+    controller.apply_print_profile.assert_not_called()
+    assert box.print_profile_apply_button.text() == "Apply"
+    assert not box.print_profile_apply_button.isEnabled()
 
 
 def test_apply_print_profile_calls_controller_and_enters_applying_state(qapp):

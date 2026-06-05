@@ -2485,6 +2485,16 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         except (KeyError, TypeError, ValueError):
             return False
 
+    def _machine_is_connected(self):
+        machine_model = getattr(self.model, "machine_model", None)
+        is_connected = getattr(machine_model, "is_connected", None)
+        if callable(is_connected):
+            try:
+                return bool(is_connected())
+            except Exception:
+                return False
+        return bool(getattr(machine_model, "machine_connected", False))
+
     def _set_print_profile_button(self, text, *, enabled, color):
         button = getattr(self, "print_profile_apply_button", None)
         if button is None:
@@ -2505,6 +2515,9 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         if self._selected_print_profile_is_loaded(profile):
             self._print_profile_apply_pending = False
             self._set_print_profile_button("Loaded", enabled=False, color="#777777")
+        elif not self._machine_is_connected():
+            self._print_profile_apply_pending = False
+            self._set_print_profile_button("Apply", enabled=False, color="#777777")
         elif self._print_profile_apply_pending:
             self._set_print_profile_button("Applying...", enabled=False, color=self.color_dict["light_blue"])
         else:
@@ -2518,6 +2531,10 @@ class PressurePlotBox(QtWidgets.QGroupBox):
     def handle_print_profile_apply(self):
         profile = self._get_selected_print_profile()
         if profile is None:
+            return
+        if not self._machine_is_connected():
+            self._print_profile_apply_pending = False
+            self.update_print_profile_button_state()
             return
         self._print_profile_apply_pending = True
         self.update_print_profile_button_state()
@@ -2822,6 +2839,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
 
     def update_regulation_button_state(self,machine_connected):
         self.pressure_regulation_button.setEnabled(machine_connected)
+        self.update_print_profile_button_state()
 
     def update_regulation_button(self, regulating_pressure):
         """Update the motor button text and color based on the motor state."""
@@ -6529,6 +6547,7 @@ class ExperimentTaskListWidget(QGroupBox):
         self._safe_connect(getattr(well_plate, "clear_all_wells_signal", None), self.request_refresh)
         self._safe_connect(getattr(well_plate, "plate_format_changed_signal", None), self.request_refresh)
         self._safe_connect(getattr(machine_model, "machine_state_updated", None), self.request_refresh)
+        self._safe_connect(getattr(machine_model, "motor_state_changed", None), self.request_refresh)
         self._safe_connect(getattr(machine_model, "home_status_signal", None), self.request_refresh)
         self._safe_connect(getattr(machine_model, "regulation_state_changed", None), self.request_refresh)
         self._safe_connect(getattr(self.controller, "array_state_changed", None), self.request_refresh)
