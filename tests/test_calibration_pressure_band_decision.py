@@ -149,7 +149,7 @@ def _build_single_candidate_proc(reps):
     proc.single_candidate_center_retry_std_tol_px = 15.0
     proc.single_candidate_confirmation_retry_limit = 1
     proc.single_candidate_max_stability_rejections = 2
-    proc.single_candidate_stability_fallback_max_std_px = 25.0
+    proc.single_candidate_stability_fallback_max_std_px = 100.0
     proc.single_candidate_step_psi = 0.02
     proc.single_candidate_max_pressures = 12
     proc.single_candidate_max_span_psi = 0.30
@@ -333,7 +333,7 @@ def test_single_candidate_retry_confirmation_within_relaxed_limit_finalizes():
     assert payload["confirmation_summary"]["center_max_std_px"] <= 15.0
 
 
-def test_single_candidate_retry_confirmation_above_relaxed_limit_rejects():
+def test_single_candidate_retry_confirmation_above_relaxed_limit_records_fallback():
     proc = _build_single_candidate_proc(
         [_rep("single", center=(100, 200 + i * 30)) for i in range(5)]
     )
@@ -349,8 +349,8 @@ def test_single_candidate_retry_confirmation_above_relaxed_limit_rejects():
     assert proc._next_pressure == 1.02
     assert proc.continueScan.calls
     assert proc.finalize.calls == []
-    assert proc._single_candidate_stability_rejection_count == 0
-    assert proc._single_candidate_stability_fallback_candidates == []
+    assert proc._single_candidate_stability_rejection_count == 1
+    assert len(proc._single_candidate_stability_fallback_candidates) == 1
 
 
 def test_single_candidate_retry_confirmation_above_relaxed_limit_records_fallback_candidate():
@@ -373,12 +373,33 @@ def test_single_candidate_retry_confirmation_above_relaxed_limit_records_fallbac
     candidate = proc._single_candidate_stability_fallback_candidates[-1]
     assert candidate["pressure_psi"] == 1.0
     assert candidate["confirmation_retry_used"] is True
-    assert 15.0 < candidate["center_max_std_px"] <= 25.0
+    assert 15.0 < candidate["center_max_std_px"] <= 100.0
 
 
-def test_single_candidate_confirmation_above_retry_window_rejects_immediately():
+def test_single_candidate_confirmation_above_retry_window_records_fallback_candidate():
     proc = _build_single_candidate_proc(
         [_rep("single", center=(100, 200 + i * 30)) for i in range(5)]
+    )
+    proc._single_candidate_confirming = True
+    proc.replicates_target = 5
+
+    proc.onDecide()
+
+    assert proc._single_candidate_confirmation_retry_count == 0
+    assert proc._single_candidate_confirmation_retry_history == []
+    assert proc._next_pressure == 1.02
+    assert proc.continueScan.calls
+    assert proc.finalize.calls == []
+    assert proc._single_candidate_stability_rejection_count == 1
+    assert len(proc._single_candidate_stability_fallback_candidates) == 1
+    candidate = proc._single_candidate_stability_fallback_candidates[0]
+    assert candidate["pressure_psi"] == 1.0
+    assert 15.0 < candidate["center_max_std_px"] <= 100.0
+
+
+def test_single_candidate_grossly_unstable_confirmation_is_not_fallback_candidate():
+    proc = _build_single_candidate_proc(
+        [_rep("single", center=(100, 200 + i * 80)) for i in range(5)]
     )
     proc._single_candidate_confirming = True
     proc.replicates_target = 5
@@ -412,7 +433,7 @@ def test_single_candidate_eligible_unstable_confirmation_records_fallback_candid
     assert len(proc._single_candidate_stability_fallback_candidates) == 1
     candidate = proc._single_candidate_stability_fallback_candidates[0]
     assert candidate["pressure_psi"] == 1.0
-    assert 15.0 < candidate["center_max_std_px"] <= 25.0
+    assert 15.0 < candidate["center_max_std_px"] <= 100.0
     pressure_steps = [payload for name, payload in events if name == "single_candidate_pressure_step"]
     assert pressure_steps
     assert "decision_context" in pressure_steps[-1]

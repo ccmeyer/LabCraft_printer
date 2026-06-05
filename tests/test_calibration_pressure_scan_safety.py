@@ -108,7 +108,7 @@ def test_pressure_scan_constructor_configures_single_candidate_mode(monkeypatch)
     assert proc._single_candidate_confirmation_retry_count == 0
     assert proc._single_candidate_confirmation_retry_history == []
     assert proc.single_candidate_max_stability_rejections == 2
-    assert proc.single_candidate_stability_fallback_max_std_px == 25.0
+    assert proc.single_candidate_stability_fallback_max_std_px == 100.0
     assert proc._single_candidate_stability_fallback_candidates == []
     assert proc._single_candidate_stability_rejection_count == 0
     assert proc._single_candidate_selected_by_fallback is False

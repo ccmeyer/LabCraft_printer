@@ -18820,7 +18820,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self.single_candidate_center_retry_std_tol_px = 15.0
         self.single_candidate_confirmation_retry_limit = 1
         self.single_candidate_max_stability_rejections = 2
-        self.single_candidate_stability_fallback_max_std_px = 25.0
+        self.single_candidate_stability_fallback_max_std_px = 100.0
         self.single_candidate_residue_persistent_area_px = int(self.nozzle_area_threshold)
         self.single_candidate_residue_moderate_area_px = int(max(1000, self.nozzle_area_threshold // 4))
         self.single_candidate_bottom_edge_margin_px = 24
@@ -20241,7 +20241,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 max(0, getattr(self, "single_candidate_max_stability_rejections", 2))
             ),
             "max_std_px": float(
-                max(0.0, getattr(self, "single_candidate_stability_fallback_max_std_px", 25.0))
+                max(0.0, getattr(self, "single_candidate_stability_fallback_max_std_px", 100.0))
             ),
         }
 
@@ -20283,7 +20283,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         except Exception:
             return False
         limits = self._single_candidate_stability_fallback_limits()
-        if max_std > float(limits.get("max_std_px", 25.0)):
+        if max_std > float(limits.get("max_std_px", 100.0)):
             return False
         return True
 
