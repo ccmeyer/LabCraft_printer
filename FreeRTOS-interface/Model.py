@@ -71,6 +71,8 @@ def _format_stock_display_sig_figs(value, sig_figs: int = 3) -> str:
 PRINTING_MODE_DROPLET = "droplet"
 PRINTING_MODE_STREAM = "stream"
 PRINTING_MODE_CHOICES = (PRINTING_MODE_DROPLET, PRINTING_MODE_STREAM)
+DROPLET_DEFAULT_EJECTION_VOLUME_NL = 9.0
+STREAM_DEFAULT_EJECTION_VOLUME_NL = 60.0
 
 
 def normalize_printing_mode(value, *, fallback=PRINTING_MODE_DROPLET) -> str:
@@ -92,7 +94,11 @@ def infer_printing_mode_from_volume(volume_nl, *, fallback=PRINTING_MODE_DROPLET
 
 def printing_mode_default_ejection_volume_nl(mode: str) -> float:
     mode = normalize_printing_mode(mode)
-    return 60.0 if mode == PRINTING_MODE_STREAM else 10.0
+    return (
+        STREAM_DEFAULT_EJECTION_VOLUME_NL
+        if mode == PRINTING_MODE_STREAM
+        else DROPLET_DEFAULT_EJECTION_VOLUME_NL
+    )
 
 
 def printing_mode_allowed_range_nl(mode: str) -> tuple[float, float]:
@@ -3681,7 +3687,7 @@ class ExperimentModel(QObject):
         df: "pd.DataFrame",
         *,
         units_default: str = "",
-        droplet_nL_default: float = 10.0,
+        droplet_nL_default: float = DROPLET_DEFAULT_EJECTION_VOLUME_NL,
         starting_conc_default: float = 0.0,
     ) -> Dict[str, Any]:
         df_in = df.copy()
@@ -3910,7 +3916,7 @@ class ExperimentModel(QObject):
         max_stock_df: Optional["pd.DataFrame"] = None,
         max_stock_map: Dict[str, float] | None = None,
         units_default: str = "",
-        droplet_nL_default: float = 10.0,
+        droplet_nL_default: float = DROPLET_DEFAULT_EJECTION_VOLUME_NL,
         starting_conc_default: float = 0.0,
         printed_volume_nL: float | None = None,
         printed_volume_tolerance_nL: float | None = None,
@@ -4391,7 +4397,7 @@ class ExperimentModel(QObject):
         df: "pd.DataFrame",
         *,
         units_default: str = "",
-        droplet_nL_default: float = 10.0,
+        droplet_nL_default: float = DROPLET_DEFAULT_EJECTION_VOLUME_NL,
         starting_conc_default: float = 0.0,
         source_path: str | None = None,
     ):
@@ -4581,7 +4587,7 @@ class ExperimentModel(QObject):
         """Enumerate the reaction space, compute droplet counts per stock, fill volumes,
         and aggregate totals. Emits experiment_generated(n, worst_nonfill_nL)."""
         V = float(self.metadata.get("target_reaction_volume_nL", 2000.0))
-        fill_dv = float(self.metadata.get("fill_droplet_volume_nL", 10.0))
+        fill_dv = float(self.metadata.get("fill_droplet_volume_nL", self._default_fill_droplet_volume_nl()))
 
         run_specs = list(self._iter_reaction_run_specs())
         if not run_specs:
@@ -5916,7 +5922,12 @@ class ExperimentModel(QObject):
         for f in d.get("factors", []):
             fs = FactorSpec(name=f["name"], kind=f["kind"], options=[])
             for o in f.get("options", []):
-                option_droplet_nl = float(o.get("droplet_nL", 10.0))
+                option_droplet_nl = float(
+                    o.get(
+                        "droplet_nL",
+                        printing_mode_default_ejection_volume_nl(PRINTING_MODE_DROPLET),
+                    )
+                )
                 opt = OptionSpec(
                     name=o["name"],
                     targets=list(o.get("targets", [])),
@@ -6087,7 +6098,7 @@ class ExperimentModel(QObject):
     def _default_fill_droplet_volume_nl(self) -> float:
         if self._default_fill_printing_mode() == PRINTING_MODE_STREAM:
             return 40.0
-        return 10.0
+        return printing_mode_default_ejection_volume_nl(PRINTING_MODE_DROPLET)
 
     def _resolve_option_printing_mode(self, value, droplet_nL: float) -> str:
         return normalize_printing_mode(
@@ -6293,7 +6304,7 @@ class ExperimentModel(QObject):
             _base_sid(r): float(r.get("droplet_volume_nL", 0.0))
             for r in stock_rows
         }
-        dv_fallback = float(self.metadata.get("fill_droplet_volume_nL", 10.0))
+        dv_fallback = float(self.metadata.get("fill_droplet_volume_nL", self._default_fill_droplet_volume_nl()))
 
         # 2) Build the table: one value (drops) per (well, stock-with-dv)
         data = {}
@@ -6736,7 +6747,7 @@ class ExperimentModel(QObject):
             return {"ok": False, "reason": "No reaction grid available to preview."}
 
         V_print = float(self.metadata.get("target_reaction_volume_nL", 2000.0))
-        old_fill_dv = float(self.metadata.get("fill_droplet_volume_nL", 10.0))
+        old_fill_dv = float(self.metadata.get("fill_droplet_volume_nL", self._default_fill_droplet_volume_nl()))
 
         # Per-reaction calculation of old/new fill drops
         remaining = (V_print - df["nonfill_volume_nL"]).clip(lower=0.0)
@@ -6787,7 +6798,7 @@ class ExperimentModel(QObject):
         original_fill_mode = normalize_printing_mode(
             metadata.get("fill_printing_mode"),
             fallback=infer_printing_mode_from_volume(
-                metadata.get("fill_droplet_volume_nL", 10.0),
+                metadata.get("fill_droplet_volume_nL", self._default_fill_droplet_volume_nl()),
                 fallback=PRINTING_MODE_DROPLET,
             ),
         )
@@ -6802,7 +6813,7 @@ class ExperimentModel(QObject):
             label="Fill ejection volume",
         )
 
-        old = float(self.metadata.get("fill_droplet_volume_nL", 10.0))
+        old = float(self.metadata.get("fill_droplet_volume_nL", self._default_fill_droplet_volume_nl()))
 
         # Preview before we apply, so we can report useful deltas after recompute
         prev = self.preview_fill_requantized(new_fill_droplet_nL)
@@ -11070,7 +11081,11 @@ class Model(QObject):
                 "final_reaction_volume_nL",
                 self.experiment_model.metadata.get("target_reaction_volume_nL", 2000.0),
             ))
-            dv = float(self.experiment_model.metadata.get("fill_droplet_volume_nL", 10.0))
+            default_fill_dv = printing_mode_default_ejection_volume_nl(PRINTING_MODE_DROPLET)
+            default_fill_getter = getattr(self.experiment_model, "_default_fill_droplet_volume_nl", None)
+            if callable(default_fill_getter):
+                default_fill_dv = float(default_fill_getter())
+            dv = float(self.experiment_model.metadata.get("fill_droplet_volume_nL", default_fill_dv))
             # Prefer design stock table droplet volume if available
             for row in self.experiment_model.get_stock_table_rows(include_fill=True):
                 name = row.get("option_name") or row.get("factor_name") or ""

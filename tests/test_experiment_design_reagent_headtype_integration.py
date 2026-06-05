@@ -6,7 +6,15 @@ from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QLabel, QLineEdit, QTab
 
 import LocalConfig
 from CalibrationMemoryStore import CalibrationMemoryStore
-from Model import CURRENT_PROFILE, ExperimentModel, Model, PrinterHead, StockSolution
+from Model import (
+    CURRENT_PROFILE,
+    PRINTING_MODE_DROPLET,
+    ExperimentModel,
+    Model,
+    PrinterHead,
+    StockSolution,
+    printing_mode_default_ejection_volume_nl,
+)
 from View import ExperimentDesignDialog
 
 
@@ -174,7 +182,7 @@ def _build_dialog_stub(runtime_model):
     dialog.reagent_table = QTableWidget(ExperimentDesignDialog.COL_DELETE + 1, 0)
     dialog.reagent_table.setVerticalHeaderLabels(dialog._reagent_field_labels)
     dialog._auto_timer = SimpleNamespace(start=lambda: None)
-    dialog.default_droplet_volume_nL = 10.0
+    dialog.default_droplet_volume_nL = printing_mode_default_ejection_volume_nl(PRINTING_MODE_DROPLET)
     dialog.color_dict = {"dark_red": "#8a0303"}
     dialog._test_sender = None
     dialog.sender = lambda: dialog._test_sender
@@ -238,6 +246,9 @@ def test_experiment_designer_uses_printed_volume_label_and_2000_nl_defaults(qapp
     assert "Target Reaction Volume (nL)" not in labels
     assert dialog.v_spin.value() == pytest.approx(2000.0)
     assert dialog.final_v_spin.value() == pytest.approx(2000.0)
+    assert dialog.fill_dv_spin.value() == pytest.approx(
+        printing_mode_default_ejection_volume_nl(PRINTING_MODE_DROPLET)
+    )
 
     dialog.close()
 
@@ -380,7 +391,7 @@ def test_experiment_designer_mode_switch_updates_ejection_volume_range(qapp):
     qapp.processEvents()
     assert dv_spin.minimum() == pytest.approx(5.0)
     assert dv_spin.maximum() == pytest.approx(25.0)
-    assert dv_spin.value() == pytest.approx(10.0)
+    assert dv_spin.value() == pytest.approx(printing_mode_default_ejection_volume_nl(PRINTING_MODE_DROPLET))
 
 
 def test_experiment_designer_prior_indicator_uses_preview_status(qapp):

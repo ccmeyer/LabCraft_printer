@@ -173,7 +173,7 @@ def _make_run(
 
 
 def _build_experiment_model(current_stock, *, current_mode="droplet"):
-    default_volume = 60.0 if str(current_mode or "").lower() == "stream" else 10.0
+    default_volume = 60.0 if str(current_mode or "").lower() == "stream" else 9.0
     state = {
         "droplet_nL": float(default_volume),
         "fill_droplet_nL": float(default_volume),
@@ -962,7 +962,7 @@ def test_results_table_sorts_numeric_columns_and_selection_payload_survives_prox
     assert dialog.bridge_table.item(0, 2).text() == "+0.00%"
     assert dialog.bridge_table.item(0, 4).text() == "0.1"
     assert dialog.bridge_table.item(0, 5).text() == "12.00"
-    assert dialog.bridge_table.item(0, 6).text() == "+2.00"
+    assert dialog.bridge_table.item(0, 6).text() == "+3.00"
 
     dialog.deleteLater()
 

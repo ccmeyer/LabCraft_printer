@@ -146,6 +146,12 @@ def _bind_real_target_volume_helpers(dialog):
     dialog._bridge_get_current_reagent_name = (
         DropletImagingDialog._bridge_get_current_reagent_name.__get__(dialog, DropletImagingDialog)
     )
+    dialog._bridge_default_fill_droplet_volume_nL = (
+        DropletImagingDialog._bridge_default_fill_droplet_volume_nL.__get__(dialog, DropletImagingDialog)
+    )
+    dialog._bridge_fill_droplet_volume_nL = (
+        DropletImagingDialog._bridge_fill_droplet_volume_nL.__get__(dialog, DropletImagingDialog)
+    )
     dialog._bridge_get_current_design_droplet_volume_nL = (
         DropletImagingDialog._bridge_get_current_design_droplet_volume_nL.__get__(dialog, DropletImagingDialog)
     )
@@ -272,6 +278,20 @@ def test_design_droplet_volume_getter_is_side_effect_free_for_design_reagent(qap
     target = dialog._bridge_get_current_design_droplet_volume_nL()
 
     assert target == pytest.approx(12.5)
+
+
+def test_design_droplet_volume_uses_nine_nl_fill_default_when_metadata_missing(qapp):
+    dialog, manager = _make_dialog_stub(_make_preview(candidate_found=False), qapp)
+    dialog.model.experiment_model = SimpleNamespace(
+        metadata={},
+        get_fill_reagent_name=lambda: "Water",
+        find_option_by_reagent_name=lambda _reagent: None,
+    )
+    dialog.model.rack_model = SimpleNamespace(get_gripper_printer_head=lambda: None)
+    manager._safe_get_stock_solution = lambda: "Water"
+    _bind_real_target_volume_helpers(dialog)
+
+    assert dialog._bridge_get_current_design_droplet_volume_nL() == pytest.approx(9.0)
 
 
 def test_design_droplet_volume_uses_reagent_identity_not_stock_display(qapp):

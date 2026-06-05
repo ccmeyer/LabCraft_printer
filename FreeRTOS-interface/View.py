@@ -8142,7 +8142,7 @@ class ExperimentImportWizard(QDialog):
                 max_stock_df=self.max_stock_df,
                 max_stock_map=self._manual_max_stock_by_reagent,
                 units_default="",
-                droplet_nL_default=10.0,
+                droplet_nL_default=printing_mode_default_ejection_volume_nl(PRINTING_MODE_DROPLET),
                 starting_conc_default=0.0,
                 printed_volume_nL=float(self.printed_volume_spin.value()),
                 printed_volume_tolerance_nL=float(self.printed_volume_tolerance_spin.value()),
@@ -9527,7 +9527,8 @@ class ExperimentDesignDialog(QDialog):
 
     def _add_reagent_row(self, name: str = "", group: str = GROUP_ADDITIVE,
                         targets: str = "0, 1, 2", units: str = "mM",
-                        droplet_nL: float = 10.0, starting_conc: float = 0.0,
+                        droplet_nL: float = printing_mode_default_ejection_volume_nl(PRINTING_MODE_DROPLET),
+                        starting_conc: float = 0.0,
                         forced_stock_conc: float | None = None,
                         max_stock_conc: float | None = None,
                         reagent_id: str | None = None,
@@ -10163,7 +10164,7 @@ class ExperimentDesignDialog(QDialog):
         self.model.set_uploaded_design_from_dataframe(
             df,
             units_default="",                    # user units come from header; blank defaults to "arb"
-            droplet_nL_default=10.0,
+            droplet_nL_default=printing_mode_default_ejection_volume_nl(PRINTING_MODE_DROPLET),
             starting_conc_default=0.0,
             source_path=payload.get("source_path"),
         )
@@ -11490,7 +11491,10 @@ class ExperimentDesignDialog(QDialog):
         self.rep_spin.setValue(int(md.get("replicates", 1)))
         self.v_spin.setValue(float(md.get("target_reaction_volume_nL", 2000.0)))
         self.fill_name_edit.setText(md.get("fill_reagent_name", "Water"))
-        fill_dv_value = float(md.get("fill_droplet_volume_nL", 10.0))
+        fill_dv_value = float(md.get(
+            "fill_droplet_volume_nL",
+            printing_mode_default_ejection_volume_nl(PRINTING_MODE_DROPLET),
+        ))
         fill_mode_value = normalize_printing_mode(
             md.get("fill_printing_mode"),
             fallback=infer_printing_mode_from_volume(fill_dv_value, fallback=PRINTING_MODE_DROPLET),
@@ -11590,7 +11594,7 @@ class ExperimentDesignDialog(QDialog):
                     "final_reaction_volume_nL": 2000.0,
                     "fill_reagent_name": "Water",
                     "fill_printing_mode": PRINTING_MODE_DROPLET,
-                    "fill_droplet_volume_nL": 10.0,
+                    "fill_droplet_volume_nL": printing_mode_default_ejection_volume_nl(PRINTING_MODE_DROPLET),
                     "allow_two_stock_solutions": False,
                     "randomize_assignments": False,
                     "random_seed": None,

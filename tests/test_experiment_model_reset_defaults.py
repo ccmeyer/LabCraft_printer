@@ -1,4 +1,4 @@
-from Model import ExperimentModel
+from Model import ExperimentModel, printing_mode_default_ejection_volume_nl
 from hardware.profile import CURRENT_PROFILE, LEGACY_PROFILE
 
 
@@ -8,7 +8,8 @@ def test_reset_experiment_model_uses_current_profile_fill_default():
 
     em.reset_experiment_model()
 
-    assert em.metadata["fill_droplet_volume_nL"] == 10.0
+    assert printing_mode_default_ejection_volume_nl("droplet") == 9.0
+    assert em.metadata["fill_droplet_volume_nL"] == 9.0
     assert em.metadata["fill_printing_mode"] == "droplet"
     assert em.metadata["target_reaction_volume_nL"] == 2000.0
     assert em.metadata["final_reaction_volume_nL"] == 2000.0

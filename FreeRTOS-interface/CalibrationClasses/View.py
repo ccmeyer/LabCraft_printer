@@ -7329,6 +7329,22 @@ class DropletImagingDialog(QtWidgets.QDialog):
         )
         return response == QtWidgets.QMessageBox.Yes
 
+    def _bridge_default_fill_droplet_volume_nL(self) -> float:
+        em = getattr(self.model, "experiment_model", None)
+        default_getter = getattr(em, "_default_fill_droplet_volume_nl", None)
+        if callable(default_getter):
+            try:
+                return float(default_getter())
+            except Exception:
+                pass
+        return 9.0
+
+    def _bridge_fill_droplet_volume_nL(self, em) -> float:
+        metadata = getattr(em, "metadata", {}) or {}
+        if "fill_droplet_volume_nL" in metadata:
+            return float(metadata.get("fill_droplet_volume_nL"))
+        return self._bridge_default_fill_droplet_volume_nL()
+
     def _bridge_get_current_design_droplet_volume_nL(self) -> float | None:
         em = getattr(self.model, "experiment_model", None)
         reagent = self._bridge_get_current_reagent_name()
@@ -7336,7 +7352,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             return None
         try:
             if reagent == em.get_fill_reagent_name():
-                return float(em.metadata.get("fill_droplet_volume_nL", 10.0))
+                return self._bridge_fill_droplet_volume_nL(em)
         except Exception:
             pass
         try:
@@ -7415,7 +7431,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         # Special case: fill reagent
         if reagent and reagent == em.get_fill_reagent_name():
-            dv = float(em.metadata.get("fill_droplet_volume_nL", 10.0))
+            dv = self._bridge_fill_droplet_volume_nL(em)
             self.bridge_design_dv_label.setText(f"Design droplet volume (nL): {dv:.3f}  (fill)")
             self.bridge_design_targets_label.setText("Design targets: — (fill top-up)")
             self.bridge_design_stock_label.setText("Stock concentration(s): —")
@@ -8828,7 +8844,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         if reagent == fill_reagent:
             try:
-                dv = float(em.metadata.get("fill_droplet_volume_nL", 10.0))
+                dv = self._bridge_fill_droplet_volume_nL(em)
                 self.bridge_design_dv_label.setText(f"Design ejection volume (nL): {dv:.3f}  (fill)")
             except Exception:
                 self.bridge_design_dv_label.setText("Design ejection volume (nL): —")

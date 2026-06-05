@@ -825,7 +825,7 @@ def test_import_feasibility_report_flags_missing_max_stock():
 
 
 def test_import_feasibility_report_marks_selected_overage_as_near_budget():
-    em = _make_model(target_volume_nl=950.0, final_volume_nl=1000.0)
+    em = _make_model(target_volume_nl=958.0, final_volume_nl=1008.0)
     df = pd.DataFrame({"well_id": ["B3"], "Reagent A mM": [5.0], "Reagent B mM": [5.0]})
     max_df = pd.DataFrame(
         {
@@ -838,16 +838,16 @@ def test_import_feasibility_report_marks_selected_overage_as_near_budget():
     report = em.build_import_feasibility_report(
         df,
         max_stock_df=max_df,
-        printed_volume_nL=950.0,
+        printed_volume_nL=958.0,
         printed_volume_tolerance_nL=50.0,
-        final_volume_nL=1000.0,
+        final_volume_nL=1008.0,
     )
 
     assert report["ok"] is True
-    assert report["effective_printed_volume_limit_nL"] == pytest.approx(1000.0)
+    assert report["effective_printed_volume_limit_nL"] == pytest.approx(1008.0)
     row = report["composition_rows"][0]
     assert row["status"] == "Near budget"
-    assert row["selected_plan_required_volume_nL"] == pytest.approx(1000.0)
+    assert row["selected_plan_required_volume_nL"] == pytest.approx(1008.0)
     assert row["selected_plan_overage_nL"] == pytest.approx(50.0)
     assert row["selected_plan_contributors"]
     assert any(issue["code"] == "selected_plan_volume_budget_within_tolerance" for issue in report["issues"])
@@ -902,7 +902,7 @@ def test_import_max_stock_parser_reads_print_modes_from_reagents_csv():
     assert stocks_by_name["polyp"]["printing_mode"] == "stream"
     assert stocks_by_name["polyp"]["droplet_nL"] == pytest.approx(60.0)
     assert stocks_by_name["hepes"]["printing_mode"] == "droplet"
-    assert stocks_by_name["hepes"]["droplet_nL"] == pytest.approx(10.0)
+    assert stocks_by_name["hepes"]["droplet_nL"] == pytest.approx(9.0)
     assert stocks_by_name["tcep"]["printing_mode"] == "droplet"
 
 
@@ -921,7 +921,7 @@ def test_import_max_stock_parser_warns_for_invalid_print_mode():
 
     stocks_by_name = {row["name"]: row for row in payload["stocks"]}
     assert stocks_by_name["Reagent A"]["printing_mode"] == "droplet"
-    assert stocks_by_name["Reagent A"]["droplet_nL"] == pytest.approx(10.0)
+    assert stocks_by_name["Reagent A"]["droplet_nL"] == pytest.approx(9.0)
     assert stocks_by_name["Reagent B"]["printing_mode"] == "droplet"
     assert any(
         issue["code"] == "invalid_print_mode" and issue["reagent"] == "Reagent A"
@@ -990,7 +990,7 @@ def test_bnext_260513_tolerance_does_not_increase_selected_plan_volume():
 
     assert issue_50["row_label"] == "well I17"
     assert issue_100["row_label"] == "well I17"
-    assert issue_50["required_volume_nL"] == pytest.approx(5830.0)
+    assert issue_50["required_volume_nL"] == pytest.approx(5832.0)
     assert issue_100["required_volume_nL"] == pytest.approx(issue_50["required_volume_nL"])
     assert not any(issue.get("row_label") == "well H4" for issue in report_100["issues"])
     h4_rows = [row for row in report_100["composition_rows"] if "H4" in row.get("wells", [])]
