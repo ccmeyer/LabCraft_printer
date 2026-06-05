@@ -768,6 +768,115 @@ def test_manual_current_initial_no_contour_finishes_without_pressure_row():
     assert any(kind == "manual_current_no_droplet" for kind, _payload in analyses)
 
 
+def test_manual_static_nonround_morphology_records_warning_evidence_without_retarget():
+    proc, _state, moves = _build_pressure_sweep_focus_proc([6_000_000, 6_000_000, 6_000_000])
+    proc.manual_current_mode = True
+    proc.current_plan_record = {"targeting_mode": "manual_current_position"}
+    decisions = []
+    proc._record_decision = lambda kind, payload: decisions.append((kind, dict(payload)))
+    invalidated = []
+    proc._invalidate_current_pressure = lambda *args, **kwargs: invalidated.append((args, kwargs))
+
+    handled = [
+        proc._maybe_retarget_for_morphology(
+            (200, 200),
+            roundness,
+            focus_val=6_000_000,
+            stream_like=False,
+        )
+        for roundness in (0.89, 0.90, 0.91)
+    ]
+
+    assert handled == [False, False, False]
+    assert moves == []
+    assert invalidated == []
+    assert proc._morphology_window_evaluable_count == 3
+    assert proc._morphology_window_nonround_hits == 3
+    assert proc._morphology_nonround_hits_total == 3
+    assert proc._morphology_retarget_count == 0
+    assert decisions
+    assert decisions[-1][0] == "manual_current_nonround_warning"
+
+
+def test_manual_static_analyze_batch_quantifies_nonround_replicates_with_warning():
+    proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
+    proc.manual_current_mode = True
+    proc.manual_current_context = {"print_pulse_width_us": 1450}
+    proc.current_plan_record = {
+        "targeting_mode": "manual_current_position",
+        "print_pulse_width_us": 1450,
+    }
+    proc.targeting_mode = "manual_current_position"
+    proc.num_images = 20
+    proc.circularity_threshold = 0.95
+    proc.droplet_volumes = [9.5 + (i * 0.01) for i in range(20)]
+    proc.circularity_values = [0.88 + (i * 0.002) for i in range(20)]
+    proc.droplet_positions = [(120, 230)] * 20
+    proc.cur_pressure = 1.20
+    proc.current_delay_us = 7000
+    proc.multiple_droplet_hits = 0
+    proc._char_stream_hits = 0
+    proc._char_invalid_hits = 0
+    proc._char_frames_evaluated = 20
+    proc._morphology_nonround_hits_total = 20
+    proc._morphology_retarget_count = 0
+    proc._morphology_retarget_history_us = []
+    proc._morphology_window_evaluable_count = 4
+    proc._morphology_window_nonround_hits = 4
+    proc._y_focus_offset_steps = 0
+    proc.samples = []
+    proc.stageChanged = Recorder()
+    proc.presentImageSignal = Recorder()
+    proc.model = SimpleNamespace(
+        machine_model=SimpleNamespace(get_current_position_dict=lambda: {"X": 1, "Y": 2, "Z": 3}),
+        droplet_camera_model=SimpleNamespace(
+            convert_pixel_position_to_motor_steps=lambda _center, pos: dict(pos)
+        ),
+    )
+    proc._annotate_char_summary_image = lambda *_args, **_kwargs: np.zeros((32, 32, 3), dtype=np.uint8)
+    emitted = []
+    proc._emit_incremental_pressure_step = lambda rec: emitted.append(dict(rec))
+    proc._record_analysis = lambda *_args, **_kwargs: None
+    proc._record_decision = lambda *_args, **_kwargs: None
+    proc.i = 0
+    proc._reset_char_buffers = lambda: None
+    proc.nextPressure = Recorder()
+
+    proc.onAnalyzeBatch()
+
+    assert proc.samples
+    rec = proc.samples[-1]
+    assert rec["valid"] is True
+    assert rec["accepted_replicates"] == 20
+    assert rec["mean_volume"] == np.mean(proc.droplet_volumes)
+    assert rec["circularity_warning"] is True
+    assert rec["quality_warning"].startswith("Manual characterization droplet circularity")
+    assert rec["quality_warnings"] == [rec["quality_warning"]]
+    assert rec["circularity_min"] == min(proc.circularity_values)
+    assert rec["circularity_mean"] == np.mean(proc.circularity_values)
+    assert rec["circularity_warning_threshold"] == 0.95
+    assert rec["morphology_nonround_hits"] == 20
+    assert rec["manual_current"] is True
+    assert emitted
+    assert emitted[-1]["circularity_warning"] is True
+    assert proc.nextPressure.calls
+
+
+def test_manual_static_stream_like_characterization_frame_still_rejected():
+    proc, _state, moves = _build_pressure_sweep_focus_proc([6_000_000], roundness_values=[0.55])
+    proc.manual_current_mode = True
+    proc.current_plan_record = {"targeting_mode": "manual_current_position"}
+
+    proc.onCharacterizeLoop()
+
+    assert moves == []
+    assert proc.droplet_volumes == []
+    assert proc.circularity_values == []
+    assert proc._char_stream_hits == 1
+    assert proc._char_invalid_hits == 1
+    assert proc.continueCap.calls
+
+
 def test_pressure_sweep_solves_nominal_delay_from_fixed_z_plane():
     proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
     proc.nozzle_center_machine = {"X": 100, "Y": 200, "Z": 9000}

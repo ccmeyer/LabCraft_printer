@@ -26856,6 +26856,41 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             "circularity_threshold_final_phase_active": bool(final_phase_active),
         }
 
+    def _is_manual_static_target(self) -> bool:
+        rec = getattr(self, "current_plan_record", None)
+        rec = rec if isinstance(rec, dict) else {}
+        mode = str(rec.get("targeting_mode") or getattr(self, "targeting_mode", "") or "")
+        return bool(getattr(self, "manual_current_mode", False)) and mode.strip().lower() == "manual_current_position"
+
+    def _manual_static_circularity_warning_metadata(self, recommended_threshold: float) -> dict:
+        if not self._is_manual_static_target():
+            return {}
+        values = []
+        for value in list(getattr(self, "circularity_values", []) or []):
+            try:
+                f_value = float(value)
+            except Exception:
+                continue
+            if np.isfinite(f_value):
+                values.append(float(f_value))
+        if not values:
+            return {}
+        below = [value for value in values if float(value) < float(recommended_threshold)]
+        if not below:
+            return {}
+        warning = (
+            "Manual characterization droplet circularity was below the recommended threshold; "
+            "volume was quantified from the current image."
+        )
+        return {
+            "quality_warning": warning,
+            "quality_warnings": [warning],
+            "circularity_warning": True,
+            "circularity_min": float(min(values)),
+            "circularity_mean": float(np.mean(np.array(values, dtype=float))),
+            "circularity_warning_threshold": float(recommended_threshold),
+        }
+
     def _pair_capture_context(self) -> dict:
         refs = getattr(self, "_last_capture_refs", {}) or {}
         bg_ref = refs.get("background_image") or {}
@@ -27323,6 +27358,19 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             ) + 1
         bad_hits_required = int(max(1, getattr(self, "char_delay_retarget_bad_hits_required", 3)))
         if int(getattr(self, "_morphology_window_nonround_hits", 0)) < int(bad_hits_required):
+            return False
+        if self._is_manual_static_target():
+            self._record_decision(
+                "manual_current_nonround_warning",
+                {
+                    "center_px": [int(center_px[0]), int(center_px[1])],
+                    "ellipse_roundness": float(ellipse_roundness),
+                    "focus": float(focus_val),
+                    "stream_like": bool(stream_like),
+                    "morphology": self._morphology_snapshot(),
+                    "recommended_roundness_min": float(roundness_min),
+                },
+            )
             return False
         return self._retarget_current_pressure_for_morphology(
             center_px=center_px,
@@ -29231,7 +29279,14 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
     def onAnalyzeBatch(self):
         # Only keep “good” (circular) replicates
         active_threshold = float(self._active_circularity_threshold())
-        good = [v for v, c in zip(self.droplet_volumes, self.circularity_values) if float(c) >= active_threshold]
+        manual_static = self._is_manual_static_target()
+        if manual_static:
+            good = [float(v) for v in list(self.droplet_volumes or [])]
+        else:
+            good = [v for v, c in zip(self.droplet_volumes, self.circularity_values) if float(c) >= active_threshold]
+        circularity_warning_metadata = self._manual_static_circularity_warning_metadata(
+            float(getattr(self, "circularity_threshold", 0.95))
+        )
         ratios = self._char_ratio_snapshot()
         morphology = self._morphology_snapshot()
         max_invalid_ratio = float(getattr(self, "char_max_invalid_ratio", 0.45))
@@ -29346,6 +29401,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 "circularity_threshold_active": float(active_threshold),
                 "valid": True
             }
+            rec.update(circularity_warning_metadata)
             rec.update(self._circularity_threshold_context())
             rec.update(self._current_targeting_metadata())
             rec = self._attach_recheck_metadata(rec)
@@ -29360,6 +29416,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 "ratios": ratios,
                 "morphology": morphology,
             }
+            valid_payload.update(circularity_warning_metadata)
             valid_payload.update(self._circularity_threshold_context())
             self._record_pressure_sweep_analysis(
                 "pressure_sweep_batch",
@@ -29372,6 +29429,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 "cv_volume_percent": float(cv_vol),
                 "morphology": morphology,
             }
+            decision_payload.update(circularity_warning_metadata)
             decision_payload.update(self._circularity_threshold_context())
             self._record_decision(
                 "batch_valid",
