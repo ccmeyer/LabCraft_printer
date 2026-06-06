@@ -11069,6 +11069,7 @@ class Model(QObject):
         all_reactions = reaction_collection.get_all_reactions()
         manual_well_ids = self._get_manual_well_assignments()
         using_manual_assignments = manual_well_ids is not None
+        included_wells = None if using_manual_assignments else self.experiment_model.get_auto_assignment_included_wells()
         target_plate_name = plate_name or self.well_plate.get_current_plate_name()
         preserved_exclusions = set(getattr(self.well_plate, "excluded_wells", set()))
 
@@ -11082,6 +11083,11 @@ class Model(QObject):
                 manual_well_ids,
                 plate_name=target_plate_name,
                 excluded_wells=preserved_exclusions,
+            )
+        elif included_wells is not None:
+            self.well_plate.normalize_included_wells(
+                included_wells,
+                plate_name=target_plate_name,
             )
 
         self.clear_experiment()
@@ -11139,7 +11145,8 @@ class Model(QObject):
             self.well_plate.assign_reactions_to_wells(
                 all_reactions,
                 start_row=start_row,
-                start_col=start_col
+                start_col=start_col,
+                included_wells=included_wells,
             )
 
         # Apply calibration & printer head assignment as before
@@ -11286,6 +11293,7 @@ class Model(QObject):
         all_reactions = self.reaction_collection.get_all_reactions()
         manual_well_ids = self._get_manual_well_assignments()
         using_manual_assignments = manual_well_ids is not None
+        included_wells = None if using_manual_assignments else self.experiment_model.get_auto_assignment_included_wells()
 
         # Clear only reaction assignments (keep calibrations & excluded_wells)
         self.well_plate.clear_all_reaction_assignments()
@@ -11307,7 +11315,8 @@ class Model(QObject):
             self.well_plate.assign_reactions_to_wells(
                 all_reactions,
                 start_row=start_row,
-                start_col=start_col
+                start_col=start_col,
+                included_wells=included_wells,
             )
 
         self.experiment_loaded.emit()

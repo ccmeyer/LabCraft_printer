@@ -41,6 +41,25 @@ def test_manual_assignment_uses_explicit_well_ids_exactly(experiment_model_facto
     assert [wid for _, wid in by_reaction_idx] == explicit
 
 
+def test_manual_assignment_overrides_printable_well_selection(experiment_model_factory):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_design_for_manual(em)
+    assert em.optimize_stock_solutions()["best"]
+    em.generate_experiment()
+
+    num = em.get_number_of_reactions()
+    explicit = [f"B{i+1}" for i in range(num)]
+    em._uploaded_well_ids = explicit
+    em.set_well_selection(["A1"])
+
+    Model.load_experiment_from_model(model, load_progress=False)
+
+    pairs = _assigned_ordered_pairs(model.well_plate)
+    by_reaction_idx = sorted(pairs, key=lambda p: int(p[0][1:]))
+    assert [wid for _, wid in by_reaction_idx] == explicit
+
+
 def test_manual_assignment_accepts_high_density_wells_on_384_plate(experiment_model_factory):
     model = experiment_model_factory()
     em = model.experiment_model

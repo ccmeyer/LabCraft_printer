@@ -27,6 +27,21 @@ def _assigned_well_ids(well_plate):
     return [w.well_id for w in well_plate.get_all_wells() if w.get_assigned_reaction() is not None]
 
 
+def _assigned_wells_by_reaction_order(well_plate):
+    pairs = []
+    for well in well_plate.get_all_wells():
+        rxn = well.get_assigned_reaction()
+        if rxn is not None:
+            pairs.append((rxn.unique_id, well.well_id))
+    return [
+        well_id
+        for _reaction_id, well_id in sorted(
+            pairs,
+            key=lambda item: int(item[0][1:]),
+        )
+    ]
+
+
 def _first_assigned_reagent(well_plate):
     for well in well_plate.get_all_wells():
         rxn = well.get_assigned_reaction()
@@ -147,6 +162,52 @@ def test_update_well_plate_reassigns_without_wiping_exclusions(experiment_model_
     assert before_ids != after_ids
     assert model.well_plate.excluded_wells == before_excluded
     assert dict(model.well_plate.calibrations) == before_cal
+
+
+def test_update_well_plate_uses_custom_well_selection_for_auto_assignment(experiment_model_factory):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_design(em)
+    assert em.optimize_stock_solutions()["best"]
+    em.generate_experiment()
+    Model.load_experiment_from_model(model, load_progress=False)
+
+    selected = [
+        "C1", "A1", "B2", "D1",
+        "A2", "B1", "C2", "D2",
+        "A3", "B3", "C3", "D3",
+    ]
+    em.set_metadata(start_row=999, start_col=999)
+    em.set_well_selection(selected)
+    expected_ids = [
+        well.well_id
+        for well in model.well_plate.zigzag_order(
+            [model.well_plate.get_well(wid) for wid in model.well_plate.normalize_included_wells(selected)],
+            fill_by="columns",
+        )
+    ][:em.get_number_of_reactions()]
+
+    Model.update_well_plate(model)
+
+    assert _assigned_wells_by_reaction_order(model.well_plate) == expected_ids
+
+
+def test_update_well_plate_manual_assignments_override_printable_wells(experiment_model_factory):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_design(em)
+    assert em.optimize_stock_solutions()["best"]
+    em.generate_experiment()
+
+    explicit = [f"B{i + 1}" for i in range(em.get_number_of_reactions())]
+    em._uploaded_well_ids = explicit
+    em.set_well_selection(["A1"])
+    Model.load_experiment_from_model(model, load_progress=False)
+
+    em.set_well_selection(["A2"])
+    Model.update_well_plate(model)
+
+    assert _assigned_wells_by_reaction_order(model.well_plate) == explicit
 
 
 def test_load_progress_applies_added_droplets(experiment_model_factory):
