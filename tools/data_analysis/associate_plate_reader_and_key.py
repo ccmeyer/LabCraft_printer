@@ -29,7 +29,7 @@ import pandas as pd
 WELL_RE = re.compile(r"^[A-P](?:[1-9]|1[0-9]|2[0-4])$")
 EX_EM_RE = re.compile(r"^(\d+)\s+(\d+)$")
 WAVELENGTH_RE = re.compile(r"^\d{3}(?:\.0)?$")
-TIME_RE = re.compile(r"^\d{2}:\d{2}:\d{2}$")
+TIME_RE = re.compile(r"^\d{1,2}:\d{2}(?::\d{2})?$")
 PLATE_ROW_LABELS = "ABCDEFGHIJKLMNOP"
 DEFAULT_KEY_FILENAME = "concentration_key.csv"
 DEFAULT_PLATE_PATTERN = "*_data.xls or plate-reader .txt"
@@ -129,6 +129,33 @@ def extract_channel_labels(metadata_row: list[str], *, expected_count: int | Non
     return labels
 
 
+def parse_plate_time_seconds(raw: object) -> int | None:
+    text = str(raw).strip()
+    if not TIME_RE.match(text):
+        return None
+
+    parts = [int(part) for part in text.split(":")]
+    if len(parts) == 2:
+        minutes, seconds = parts
+        if seconds >= 60:
+            return None
+        return minutes * 60 + seconds
+
+    hours, minutes, seconds = parts
+    if minutes >= 60 or seconds >= 60:
+        return None
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def normalize_plate_time(raw: object) -> str | None:
+    total_seconds = parse_plate_time_seconds(raw)
+    if total_seconds is None:
+        return None
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
 def read_plate_rows(path: str | Path) -> list[list[str]]:
     errors: list[str] = []
     for encoding in PLATE_READER_TEXT_ENCODINGS:
@@ -163,8 +190,8 @@ def split_into_blocks(data_rows: list[list[str]]) -> list[list[list[str]]]:
                 seen_any_time = False
             continue
 
-        time_value = str(row[0]).strip()
-        if not TIME_RE.match(time_value):
+        time_value = normalize_plate_time(row[0])
+        if time_value is None:
             continue
         if seen_any_time and time_value == "00:00:00" and current:
             blocks.append(current)
@@ -184,7 +211,8 @@ def split_into_blocks(data_rows: list[list[str]]) -> list[list[list[str]]]:
 def is_matrix_plate_header(header_row: list[str]) -> bool:
     if len(header_row) < 3:
         return False
-    if str(header_row[0]).strip() != "":
+    first_cell = str(header_row[0]).strip().lower()
+    if first_cell != "" and not first_cell.startswith("time"):
         return False
     if not str(header_row[1]).strip().lower().startswith("temperature"):
         return False
@@ -251,8 +279,9 @@ def parse_matrix_plate_reader_rows(rows: list[list[str]], metadata_row: list[str
             break
 
         first_cell = str(row[0]).strip()
-        if TIME_RE.match(first_cell):
-            current_time = first_cell
+        normalized_time = normalize_plate_time(first_cell)
+        if normalized_time is not None:
+            current_time = normalized_time
             current_temperature = str(row[1]).strip() if len(row) > 1 else ""
             current_plate_row = 0
         elif endpoint_mode and not endpoint_started and first_cell == "":
@@ -328,7 +357,9 @@ def parse_wide_plate_reader_rows(rows: list[list[str]], metadata_row: list[str],
         excitation_nm, emission_nm = parse_fluorophore_label(fluorophore)
 
         for row in block:
-            time_str = str(row[0]).strip()
+            time_str = normalize_plate_time(row[0])
+            if time_str is None:
+                continue
             temp_str = str(row[1]).strip() if len(row) > 1 else ""
             for well, col_idx in zip(well_columns, well_column_indices):
                 value = row[col_idx].strip() if col_idx < len(row) else ""

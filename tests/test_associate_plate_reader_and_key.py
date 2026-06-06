@@ -138,6 +138,54 @@ def _write_matrix_plate_export(path: Path) -> None:
         writer.writerows(rows)
 
 
+def _write_compact_time_matrix_plate_export(path: Path) -> None:
+    metadata_row = [""] * 33
+    metadata_values = {
+        0: "Plate:",
+        1: "Plate#1",
+        2: "1.3",
+        3: "PlateFormat",
+        4: "Kinetic",
+        5: "Fluorescence",
+        6: "TRUE",
+        7: "Raw",
+        8: "FALSE",
+        9: "3",
+        10: "3600",
+        11: "120",
+        15: "1",
+        16: "590",
+        17: "1",
+        18: "24",
+        19: "384",
+        20: "560",
+        21: "Manual",
+        22: "570",
+        25: "6",
+        26: "Medium",
+        29: "1",
+        30: "16",
+        32: "None",
+    }
+    for index, value in metadata_values.items():
+        metadata_row[index] = value
+
+    rows = [
+        ["##BLOCKS= 1"],
+        metadata_row,
+        ["Time(hh:mm:ss)", "Temperature(¡C)", "1", "2", "3"],
+    ]
+    rows.extend(_matrix_timepoint_rows("0:00", "37.0", (10, 20, 30, 40)))
+    rows.extend(_matrix_timepoint_rows("2:00", "37.1", (11, 21, 31, 41)))
+    rows.extend(_matrix_timepoint_rows("1:00:00", "37.2", (12, 22, 32, 42)))
+    rows.extend([["~End"]])
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="cp1252", newline="") as handle:
+        writer = csv.writer(handle, delimiter="\t")
+        writer.writerows(rows)
+
+
 def _write_endpoint_matrix_plate_export(path: Path) -> None:
     metadata_row = [""] * 33
     metadata_values = {
@@ -355,6 +403,32 @@ def test_matrix_txt_export_discovers_inputs_and_maps_plate_rows(tmp_path):
     assert b2_final["rfu"] == 41
     assert b2_final["temperature_c"] == 37.0
     assert not bool(b2_final["is_keyed"])
+
+
+def test_compact_time_matrix_txt_export_normalizes_time_values(tmp_path):
+    exp_dir = tmp_path / "CompactTimeReader-20260605_215910"
+    plate = exp_dir / "LabCraft-260605-HEM_data.txt"
+    key = exp_dir / "concentration_key.csv"
+    _write_compact_time_matrix_plate_export(plate)
+    _write_matrix_key(key)
+
+    assert mod.main([str(exp_dir)]) == 0
+
+    out = exp_dir / "LabCraft-260605-HEM_data_merged_tidy.csv"
+    df = _read_output(out)
+    assert len(df) == 12
+    assert set(df["well"]) == {"A1", "A2", "B1", "B2"}
+    assert set(df["fluorophore"]) == {"560_590"}
+    assert set(df["excitation_nm"]) == {560}
+    assert set(df["emission_nm"]) == {590}
+    assert sorted(df["time"].unique()) == ["00:00:00", "00:02:00", "01:00:00"]
+    assert set(df["time_seconds"]) == {0.0, 120.0, 3600.0}
+    assert set(df["time_minutes"]) == {0.0, 2.0, 60.0}
+
+    b2_hour = df.loc[(df["well"] == "B2") & (df["time"] == "01:00:00")].iloc[0]
+    assert b2_hour["rfu"] == 42
+    assert b2_hour["temperature_c"] == 37.2
+    assert not bool(b2_hour["is_keyed"])
 
 
 def test_endpoint_matrix_txt_export_discovers_inputs_and_maps_single_endpoint(tmp_path):
