@@ -573,6 +573,8 @@ class Controller(QObject):
             str(updater_path),
             "--repo-root",
             str(self._repo_root),
+            "--python",
+            sys.executable,
         ]
         if wait_pid is not None:
             command.extend(["--wait-pid", str(int(wait_pid))])

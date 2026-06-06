@@ -371,6 +371,72 @@ def test_relaunch_helper_uses_same_repo_local_python_and_app_path(tmp_path):
     assert launches == [(tuple(command), tmp_path)]
 
 
+def test_deferred_relaunch_helper_waits_for_updater_before_app_launch(tmp_path, monkeypatch):
+    monkeypatch.setattr(updater.sys, "executable", "helper-python")
+    launches = []
+    config = _config(tmp_path, python_path=Path("custom-python"))
+
+    ok, message, helper_command, app_command = updater.relaunch_app_after_process_exit(
+        config,
+        tmp_path,
+        wait_pid=1234,
+        launcher=lambda launch_command, cwd: launches.append((tuple(launch_command), Path(cwd))),
+    )
+
+    assert ok is True
+    assert message == ""
+    assert app_command == [
+        str(tmp_path / "custom-python"),
+        str(tmp_path / "FreeRTOS-interface" / "App.py"),
+    ]
+    assert helper_command == [
+        "helper-python",
+        "-u",
+        str(Path(updater.__file__).resolve()),
+        updater.DEFERRED_LAUNCH_ARG,
+        "--wait-pid",
+        "1234",
+        "--wait-timeout-s",
+        "30",
+        "--cwd",
+        str(tmp_path),
+        "--",
+        *app_command,
+    ]
+    assert launches == [(tuple(helper_command), tmp_path)]
+
+
+def test_run_deferred_launch_waits_then_launches_detached(tmp_path, monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(updater, "wait_for_process_exit", lambda pid, timeout: calls.append(("wait", pid, timeout)) or True)
+    monkeypatch.setattr(
+        updater,
+        "detached_process_launcher",
+        lambda command, cwd: calls.append(("launch", tuple(command), Path(cwd))),
+    )
+
+    returncode = updater.run_deferred_launch(
+        [
+            "--wait-pid",
+            "4321",
+            "--wait-timeout-s",
+            "2.5",
+            "--cwd",
+            str(tmp_path),
+            "--",
+            "python",
+            "FreeRTOS-interface/App.py",
+        ]
+    )
+
+    assert returncode == 0
+    assert calls == [
+        ("wait", 4321, 2.5),
+        ("launch", ("python", "FreeRTOS-interface/App.py"), tmp_path),
+    ]
+
+
 def test_log_file_created_under_local_update_logs_by_default(tmp_path):
     runner = FakeGitRunner(tmp_path, before_sha="abc", after_sha="def", pull_stdout="Fast-forward\n")
 

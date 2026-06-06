@@ -70,6 +70,8 @@ def test_controller_builds_update_command_with_relaunch_on_failure(tmp_path, mon
         str((tmp_path / "tools" / "update_and_restart.py").resolve()),
         "--repo-root",
         str(tmp_path),
+        "--python",
+        "python-under-test",
         "--wait-pid",
         "1234",
         "--gui",

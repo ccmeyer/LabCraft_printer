@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -228,19 +229,30 @@ class UpdaterWindow(QtWidgets.QDialog):
         result = self._result
         repo_root = result.repo_root if result and result.repo_root is not None else Path(self.config.repo_root).resolve()
         self._set_running_state("Starting LabCraft...")
-        ok, message, command = updater.relaunch_app(self.config, repo_root, launcher=self.launcher)
-        self._append_details("Launch command:\n$ " + " ".join(command))
+        deferred = bool(close_on_success and self.auto_close_on_launch)
+        if deferred:
+            ok, message, helper_command, command = updater.relaunch_app_after_process_exit(
+                self.config,
+                repo_root,
+                wait_pid=os.getpid(),
+                launcher=self.launcher,
+            )
+            self._append_details("Deferred launch command:\n$ " + " ".join(helper_command))
+            self._append_details("App launch command:\n$ " + " ".join(command))
+        else:
+            ok, message, command = updater.relaunch_app(self.config, repo_root, launcher=self.launcher)
+            self._append_details("Launch command:\n$ " + " ".join(command))
         if not ok:
             self._show_relaunch_failure(message, command)
             return False
 
-        self.status_label.setText("LabCraft started.")
+        self.status_label.setText("LabCraft will reopen." if deferred else "LabCraft started.")
         self.progress_bar.setRange(0, 1)
         self.progress_bar.setValue(1)
         if result is not None and result.status in SUCCESS_STATUSES:
             self.exit_code = 0
         if close_on_success and self.auto_close_on_launch:
-            QtCore.QTimer.singleShot(500, self.accept)
+            QtCore.QTimer.singleShot(0, self.accept)
         return True
 
     def _show_log_path(self, log_path) -> None:

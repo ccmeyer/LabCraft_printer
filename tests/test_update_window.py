@@ -126,6 +126,43 @@ def test_update_window_reopen_current_version_launches_and_preserves_failure_cod
     window.close()
 
 
+def test_update_window_success_auto_close_defers_launch_until_updater_exits(qapp, tmp_path, monkeypatch):
+    launches = []
+    monkeypatch.setattr(update_window.os, "getpid", lambda: 555)
+    window = update_window.UpdaterWindow(
+        _config(tmp_path, python_path=Path("custom-python")),
+        auto_start=False,
+        auto_close_on_launch=True,
+        launcher=lambda command, cwd: launches.append((tuple(command), Path(cwd))),
+    )
+    result = updater.UpdateResult(
+        updater.STATUS_UPDATED,
+        0,
+        "LabCraft was updated successfully.",
+        repo_root=tmp_path,
+        before_sha="abc",
+        after_sha="def",
+        log_path=tmp_path / "update.log",
+    )
+
+    window.handle_finished(result)
+
+    assert len(launches) == 1
+    helper_command, cwd = launches[0]
+    assert cwd == tmp_path
+    assert updater.DEFERRED_LAUNCH_ARG in helper_command
+    assert "--wait-pid" in helper_command
+    assert "555" in helper_command
+    assert str(tmp_path / "custom-python") in helper_command
+    assert str(tmp_path / "FreeRTOS-interface" / "App.py") in helper_command
+    assert window.status_label.text() == "LabCraft will reopen."
+    assert "Deferred launch command" in window.details_text.toPlainText()
+    assert "App launch command" in window.details_text.toPlainText()
+    assert window.exit_code == 0
+
+    window.close()
+
+
 def test_update_window_relaunch_failure_after_success_shows_retry(qapp, tmp_path):
     def failing_launcher(command, cwd):
         raise OSError("launch failed")

@@ -59,6 +59,8 @@ CHECK_EXIT_CODES = {
 DEFAULT_APP_PATH = Path("FreeRTOS-interface") / "App.py"
 DEFAULT_WAIT_TIMEOUT_S = 120.0
 DEFAULT_GIT_TIMEOUT_S = 300.0
+DEFAULT_DEFERRED_LAUNCH_WAIT_TIMEOUT_S = 30.0
+DEFERRED_LAUNCH_ARG = "--deferred-launch"
 
 
 @dataclass(frozen=True)
@@ -282,6 +284,18 @@ def _wait_for_process_exit_windows(pid: int, timeout_s: float) -> bool:
     except AttributeError:
         return _wait_for_process_exit_by_polling(pid, timeout_s)
 
+    try:
+        from ctypes import wintypes
+
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+    except Exception:
+        pass
+
     synchronize = 0x00100000
     process_query_limited_information = 0x1000
     wait_object_0 = 0x00000000
@@ -334,8 +348,36 @@ def wait_for_process_exit(pid: int, timeout_s: float, *, platform_name: str | No
     return _wait_for_process_exit_by_polling(pid, timeout_s)
 
 
+def detached_process_launcher(command: Sequence[str], cwd: Path) -> object:
+    str_command = [str(part) for part in command]
+    base_kwargs = {
+        "cwd": str(cwd),
+        "shell": False,
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+
+    if _is_windows():
+        detached = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+        new_group = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+        breakaway = getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000)
+        flag_options = (detached | new_group | breakaway, detached | new_group)
+        last_error: OSError | None = None
+        for flags in flag_options:
+            try:
+                return subprocess.Popen(str_command, creationflags=flags, **base_kwargs)
+            except OSError as exc:
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+
+    return subprocess.Popen(str_command, start_new_session=True, **base_kwargs)
+
+
 def default_launcher(command: Sequence[str], cwd: Path) -> object:
-    return subprocess.Popen([str(part) for part in command], cwd=str(cwd), shell=False)
+    return detached_process_launcher(command, cwd)
 
 
 def format_command_result(result: CommandResult) -> str:
@@ -394,6 +436,31 @@ def build_relaunch_command(config: UpdaterConfig, repo_root: Path) -> list[str]:
     return [str(python_path), str(app_path)]
 
 
+def build_deferred_relaunch_command(
+    config: UpdaterConfig,
+    repo_root: Path,
+    *,
+    wait_pid: int,
+    wait_timeout_s: float = DEFAULT_DEFERRED_LAUNCH_WAIT_TIMEOUT_S,
+) -> tuple[list[str], list[str]]:
+    app_command = build_relaunch_command(config, repo_root)
+    helper_command = [
+        str(Path(sys.executable)),
+        "-u",
+        str(Path(__file__).resolve()),
+        DEFERRED_LAUNCH_ARG,
+        "--wait-pid",
+        str(int(wait_pid)),
+        "--wait-timeout-s",
+        f"{float(wait_timeout_s):g}",
+        "--cwd",
+        str(repo_root),
+        "--",
+        *app_command,
+    ]
+    return helper_command, app_command
+
+
 def relaunch_app(
     config: UpdaterConfig,
     repo_root: Path,
@@ -406,6 +473,27 @@ def relaunch_app(
     except Exception as exc:
         return False, str(exc), command
     return True, "", command
+
+
+def relaunch_app_after_process_exit(
+    config: UpdaterConfig,
+    repo_root: Path,
+    *,
+    wait_pid: int,
+    wait_timeout_s: float = DEFAULT_DEFERRED_LAUNCH_WAIT_TIMEOUT_S,
+    launcher: Launcher = default_launcher,
+) -> tuple[bool, str, list[str], list[str]]:
+    helper_command, app_command = build_deferred_relaunch_command(
+        config,
+        repo_root,
+        wait_pid=wait_pid,
+        wait_timeout_s=wait_timeout_s,
+    )
+    try:
+        launcher(helper_command, repo_root)
+    except Exception as exc:
+        return False, str(exc), helper_command, app_command
+    return True, "", helper_command, app_command
 
 
 def update_result_payload(result: UpdateResult, *, commits: Sequence[str] = ()) -> dict:
@@ -1040,7 +1128,34 @@ def parse_args(argv: Sequence[str] | None = None) -> UpdaterConfig:
     )
 
 
+def run_deferred_launch(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Wait for a process to exit, then launch LabCraft detached.")
+    parser.add_argument("--wait-pid", type=int, required=True)
+    parser.add_argument("--wait-timeout-s", type=float, default=DEFAULT_DEFERRED_LAUNCH_WAIT_TIMEOUT_S)
+    parser.add_argument("--cwd", required=True)
+    parser.add_argument("command", nargs=argparse.REMAINDER)
+    args = parser.parse_args(argv)
+
+    command = [str(part) for part in args.command]
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        parser.error("a launch command is required after --")
+
+    wait_for_process_exit(int(args.wait_pid), float(args.wait_timeout_s))
+    try:
+        detached_process_launcher(command, Path(args.cwd))
+    except Exception as exc:
+        print(f"Could not launch LabCraft: {exc}", file=sys.stderr)
+        return EXIT_CODES[STATUS_RELAUNCH_FAILED]
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == DEFERRED_LAUNCH_ARG:
+        return run_deferred_launch(argv[1:])
+
     config = parse_args(argv)
     if config.gui:
         try:
