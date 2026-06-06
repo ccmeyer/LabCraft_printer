@@ -10256,6 +10256,7 @@ class ExperimentDesignDialog(QDialog):
             well_plate.validate_explicit_well_ids(
                 uploaded_well_ids,
                 plate_name=selected_plate_name or None,
+                excluded_wells=getattr(well_plate, "excluded_wells", set()),
             )
         except ValueError as e:
             message = str(e)
@@ -11269,7 +11270,7 @@ class ExperimentDesignDialog(QDialog):
     def _available_wells_for_selected_plate(self) -> tuple[int, str]:
         """
         Compute assignable wells for the selected plate using the same gating inputs
-        as runtime assignment (plate dims, start row/col, exclusions).
+        as runtime assignment (manual wells, printable wells, start offset, exclusions).
         """
         selected_plate = self.plate_format_combo.currentText().strip()
         wp = getattr(getattr(self.main_window, "model", None), "well_plate", None)
@@ -11280,6 +11281,46 @@ class ExperimentDesignDialog(QDialog):
         plate = wp.get_plate_data_by_name(plate_name)
         rows = int(plate.get("rows", 0))
         cols = int(plate.get("columns", 0))
+
+        def _excluded_ids_for_plate():
+            out = set()
+            normalizer = getattr(wp, "_normalize_excluded_wells_for_plate", None)
+            if callable(normalizer):
+                return set(normalizer(rows, cols, excluded_wells=getattr(wp, "excluded_wells", set())))
+            for item in set(getattr(wp, "excluded_wells", set()) or set()):
+                if isinstance(item, Well):
+                    well_id = item.well_id
+                else:
+                    well_id = str(item).strip().upper()
+                try:
+                    row_label, col_1 = Well.parse_well_id(well_id)
+                    row_idx = Well.row_label_to_index(row_label)
+                    col_idx = int(col_1) - 1
+                except Exception:
+                    continue
+                if 0 <= row_idx < rows and 0 <= col_idx < cols:
+                    out.add(f"{row_label}{int(col_1)}")
+            return out
+
+        if self._manual_assignments_active():
+            get_manual = getattr(self.model, "get_explicit_well_assignments", None)
+            manual_well_ids = get_manual() if callable(get_manual) else getattr(self.model, "_uploaded_well_ids", None)
+            if not manual_well_ids:
+                return 0, plate_name
+            normalized = wp.validate_explicit_well_ids(
+                manual_well_ids,
+                plate_name=plate_name,
+                excluded_wells=getattr(wp, "excluded_wells", set()),
+            )
+            return len(normalized), plate_name
+
+        included_getter = getattr(self.model, "get_auto_assignment_included_wells", None)
+        included_wells = included_getter() if callable(included_getter) else None
+        if included_wells is not None:
+            normalized = wp.normalize_included_wells(included_wells, plate_name=plate_name)
+            excluded_ids = _excluded_ids_for_plate()
+            return sum(1 for well_id in normalized if well_id not in excluded_ids), plate_name
+
         start_row = int(self.start_row_spin.value())
         start_col = int(self.start_col_spin.value())
 
@@ -11290,11 +11331,7 @@ class ExperimentDesignDialog(QDialog):
 
         region_capacity = (rows - start_row) * (cols - start_col)
         excluded_count = 0
-        for item in set(getattr(wp, "excluded_wells", set()) or set()):
-            if isinstance(item, Well):
-                well_id = item.well_id
-            else:
-                well_id = str(item).strip().upper()
+        for well_id in _excluded_ids_for_plate():
             try:
                 row_label, col_1 = Well.parse_well_id(well_id)
                 row_idx = Well.row_label_to_index(row_label)
@@ -11315,7 +11352,7 @@ class ExperimentDesignDialog(QDialog):
             "Not enough available wells for this experiment design.\n\n"
             f"Required reactions: {required}\n"
             f"Available wells on '{plate_name}': {available}\n\n"
-            "Choose a larger plate, reduce the design size, adjust start row/column, "
+            "Choose a larger plate, reduce the design size, adjust printable wells, "
             "or include more wells."
         )
         if show_dialog:

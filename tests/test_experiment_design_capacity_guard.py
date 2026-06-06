@@ -5,12 +5,46 @@ import pandas as pd
 from PySide6.QtWidgets import QLabel, QMessageBox, QSpinBox
 
 import View
+from Model import WellPlate
 from View import ExperimentDesignDialog
 
 
-def _build_capacity_dialog(required_reactions, *, rows=1, cols=2, start_row=0, start_col=0, excluded=None):
+class _CapacityModelStub:
+    def __init__(self, required_reactions, *, included_wells=None, explicit_wells=None):
+        self._required_reactions = required_reactions
+        self._included_wells = included_wells
+        self._explicit_wells = explicit_wells
+
+    def get_number_of_reactions(self):
+        return self._required_reactions
+
+    def get_auto_assignment_included_wells(self):
+        return self._included_wells
+
+    def has_explicit_well_assignments(self):
+        return bool(self._explicit_wells and any(w is not None for w in self._explicit_wells))
+
+    def get_explicit_well_assignments(self):
+        return list(self._explicit_wells) if self.has_explicit_well_assignments() else None
+
+
+def _build_capacity_dialog(
+    required_reactions,
+    *,
+    rows=1,
+    cols=2,
+    start_row=0,
+    start_col=0,
+    excluded=None,
+    included_wells=None,
+    explicit_wells=None,
+):
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
-    dialog.model = SimpleNamespace(get_number_of_reactions=lambda: required_reactions)
+    dialog.model = _CapacityModelStub(
+        required_reactions,
+        included_wells=included_wells,
+        explicit_wells=explicit_wells,
+    )
     dialog.status_lbl = QLabel("")
     dialog.summary_lbl = QLabel("")
     dialog._set_status = ExperimentDesignDialog._set_status.__get__(dialog, ExperimentDesignDialog)
@@ -21,14 +55,19 @@ def _build_capacity_dialog(required_reactions, *, rows=1, cols=2, start_row=0, s
     dialog.start_col_spin.setValue(start_col)
     dialog.plate_format_combo = SimpleNamespace(currentText=lambda: "test-plate")
 
-    plate_data = {"name": "test-plate", "rows": rows, "columns": cols}
+    plate_data = {
+        "name": "test-plate",
+        "rows": rows,
+        "columns": cols,
+        "spacing": 10,
+        "default": True,
+        "calibrations": {},
+    }
+    well_plate = WellPlate([plate_data], "unused")
+    well_plate.excluded_wells = set(excluded or set())
     dialog.main_window = SimpleNamespace(
         model=SimpleNamespace(
-            well_plate=SimpleNamespace(
-                get_current_plate_name=lambda: "test-plate",
-                get_plate_data_by_name=lambda _: plate_data,
-                excluded_wells=set(excluded or set()),
-            )
+            well_plate=well_plate
         )
     )
     return dialog
@@ -70,6 +109,68 @@ def test_validate_plate_capacity_counts_exclusions_and_start_offset(monkeypatch,
     assert "Available wells on 'test-plate': 1" in msg
 
 
+def test_validate_plate_capacity_counts_custom_well_selection_and_ignores_start_offset(monkeypatch, qapp):
+    dialog = _build_capacity_dialog(
+        required_reactions=4,
+        rows=3,
+        cols=3,
+        start_row=999,
+        start_col=999,
+        included_wells=["A1", "B2", "C3"],
+    )
+    warn = Mock()
+    monkeypatch.setattr(QMessageBox, "warning", warn)
+
+    ok = ExperimentDesignDialog._validate_plate_capacity(dialog, show_dialog=True)
+
+    assert ok is False
+    warn.assert_called_once()
+    _, _title, msg = warn.call_args[0]
+    assert "Required reactions: 4" in msg
+    assert "Available wells on 'test-plate': 3" in msg
+    assert "adjust printable wells" in msg
+
+
+def test_validate_plate_capacity_counts_exclusions_inside_custom_well_selection(monkeypatch, qapp):
+    dialog = _build_capacity_dialog(
+        required_reactions=3,
+        rows=2,
+        cols=2,
+        included_wells=["A1", "A2", "B1"],
+        excluded={"A2"},
+    )
+    warn = Mock()
+    monkeypatch.setattr(QMessageBox, "warning", warn)
+
+    ok = ExperimentDesignDialog._validate_plate_capacity(dialog, show_dialog=True)
+
+    assert ok is False
+    warn.assert_called_once()
+    _, _title, msg = warn.call_args[0]
+    assert "Available wells on 'test-plate': 2" in msg
+
+
+def test_validate_plate_capacity_manual_wells_override_custom_well_selection(monkeypatch, qapp):
+    dialog = _build_capacity_dialog(
+        required_reactions=2,
+        rows=2,
+        cols=2,
+        start_row=999,
+        start_col=999,
+        included_wells=["A1"],
+        explicit_wells=["B1", "B2"],
+    )
+    warn = Mock()
+    monkeypatch.setattr(QMessageBox, "warning", warn)
+
+    ok = ExperimentDesignDialog._validate_plate_capacity(dialog, show_dialog=True)
+
+    assert ok is True
+    warn.assert_not_called()
+    available, plate_name = ExperimentDesignDialog._available_wells_for_selected_plate(dialog)
+    assert (available, plate_name) == (2, "test-plate")
+
+
 def test_validate_plate_capacity_no_popup_when_sufficient(monkeypatch, qapp):
     dialog = _build_capacity_dialog(required_reactions=2, rows=2, cols=2)
     warn = Mock()
@@ -102,6 +203,21 @@ def test_summary_shows_plain_required_when_within_capacity(qapp):
     assert "Total reactions = 3" in text
     assert "Available wells = 4" in text
     assert "color:#8a0303" not in text
+
+
+def test_summary_uses_custom_well_selection_capacity(qapp):
+    dialog = _build_capacity_dialog(
+        required_reactions=4,
+        rows=3,
+        cols=3,
+        included_wells=["A1", "B2", "C3"],
+    )
+
+    ExperimentDesignDialog._update_summary_labels(dialog, total_reactions=4, worst_nonfill_nL=5.0)
+
+    text = dialog.summary_lbl.text()
+    assert "Available wells = 3" in text
+    assert "color:#8a0303" in text
 
 
 def test_upload_design_warns_immediately_for_invalid_selected_plate(monkeypatch, qapp, experiment_model_factory):
@@ -157,3 +273,31 @@ def test_upload_design_warns_immediately_for_invalid_selected_plate(monkeypatch,
     assert dialog._uploaded_design_active is False
     assert "G16" in dialog.status_lbl.text()
     assert "96well-8x12" in dialog.status_lbl.text()
+
+
+def test_upload_design_well_validation_rejects_excluded_wells(monkeypatch, qapp, experiment_model_factory):
+    runtime_model = experiment_model_factory()
+    runtime_model.well_plate.excluded_wells.add("A1")
+    dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    dialog.model = SimpleNamespace(
+        extract_uploaded_design_well_ids_from_dataframe=(
+            runtime_model.experiment_model.extract_uploaded_design_well_ids_from_dataframe
+        ),
+    )
+    dialog.main_window = SimpleNamespace(model=runtime_model)
+    dialog.status_lbl = QLabel("")
+    dialog._set_status = ExperimentDesignDialog._set_status.__get__(dialog, ExperimentDesignDialog)
+    dialog.plate_format_combo = SimpleNamespace(currentText=lambda: runtime_model.well_plate.get_current_plate_name())
+
+    warn = Mock()
+    monkeypatch.setattr(QMessageBox, "warning", warn)
+
+    ok = ExperimentDesignDialog._validate_uploaded_design_well_assignments(
+        dialog,
+        pd.DataFrame({"Well ID": ["A1"], "NaCl (mM)": [1.0]}),
+    )
+
+    assert ok is False
+    warn.assert_called_once()
+    assert "Excluded wells" in dialog.status_lbl.text()
+    assert "A1" in dialog.status_lbl.text()
