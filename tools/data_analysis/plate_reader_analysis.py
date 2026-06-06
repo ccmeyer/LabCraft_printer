@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 from itertools import combinations, permutations
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 import matplotlib
 
@@ -76,6 +76,7 @@ REQUIRED_MERGED_COLUMNS = {
     "fluorophore",
     "rfu",
 }
+ProgressCallback = Callable[[str], None]
 
 
 @dataclass(frozen=True)
@@ -102,6 +103,8 @@ class AnalysisResult:
     faceted_dose_response_pngs: list[Path]
     faceted_timecourse_csvs: list[Path]
     faceted_timecourse_pngs: list[Path]
+    endpoint_variability_csvs: list[Path]
+    endpoint_variability_pngs: list[Path]
     outlier_count: int
     condition_columns: list[str]
     endpoint_rows: int
@@ -134,6 +137,15 @@ def coerce_bool_series(series: pd.Series) -> pd.Series:
 
     truthy = {"true", "1", "yes", "y"}
     return series.fillna(False).map(lambda value: str(value).strip().lower() in truthy)
+
+
+def report_progress(progress_callback: ProgressCallback | None, message: str) -> None:
+    if progress_callback is not None:
+        progress_callback(message)
+
+
+def should_report_progress_item(index: int, total: int, *, every: int = 10) -> bool:
+    return index == 1 or index == total or index % every == 0
 
 
 def infer_condition_columns(dataframe: pd.DataFrame) -> list[str]:
@@ -654,7 +666,7 @@ def write_combined_condition_timecourse_plot(
     title_suffix: str,
     color_by_condition: dict[str, tuple[float, float, float]],
 ) -> None:
-    fig, ax = plt.subplots(figsize=(13, 7), constrained_layout=True)
+    fig, ax = plt.subplots(figsize=(14, 8))
     plotted_conditions = 0
 
     condition_ids = sorted(summary_data["condition_id"].dropna().astype(str).unique())
@@ -691,7 +703,8 @@ def write_combined_condition_timecourse_plot(
     ax.set_title(f"{fluorophore}\n{title_suffix}")
     ax.set_xlabel("Time (min)")
     ax.set_ylabel("RFU")
-    fig.savefig(path, dpi=150)
+    fig.subplots_adjust(right=0.78)
+    fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -874,6 +887,8 @@ def write_faceted_timecourse_grid_outputs(
     keyed_prepared: pd.DataFrame,
     condition_columns: list[str],
     output_root: Path,
+    *,
+    progress_callback: ProgressCallback | None = None,
 ) -> tuple[list[Path], list[Path]]:
     timecourse_root = output_root / "timecourses_faceted"
     timecourse_csvs: list[Path] = []
@@ -896,7 +911,16 @@ def write_faceted_timecourse_grid_outputs(
                 continue
 
             safe_fluorophore = safe_filename(fluorophore)
-            for row_reagent, col_reagent, hue_reagent in assignments:
+            report_progress(
+                progress_callback,
+                f"Faceted timecourse grids: {variant_label}, {fluorophore}, {len(assignments)} assignment(s)",
+            )
+            for assignment_index, (row_reagent, col_reagent, hue_reagent) in enumerate(assignments, start=1):
+                if should_report_progress_item(assignment_index, len(assignments), every=3):
+                    report_progress(
+                        progress_callback,
+                        f"Writing faceted timecourse grid {assignment_index}/{len(assignments)} for {fluorophore}",
+                    )
                 summary = build_faceted_timecourse_grid_summary(
                     variant_data,
                     fluorophore=fluorophore,
@@ -1027,6 +1051,82 @@ def condition_value_mask(series: pd.Series, value: object) -> pd.Series:
     return series == value
 
 
+@dataclass(frozen=True)
+class ConditionAxis:
+    axis_type: str
+    values: list[object]
+    labels: list[str]
+    plot_values: list[float]
+    plot_value_by_label: dict[str, float]
+
+
+def finite_float_or_none(value: object) -> float | None:
+    if pd.isna(value):
+        return None
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(numeric_value):
+        return None
+    return numeric_value
+
+
+def build_condition_axis(values: Iterable[object]) -> ConditionAxis:
+    raw_values = list(values)
+    numeric_pairs: list[tuple[object, float]] = []
+    is_numeric = bool(raw_values)
+    for value in raw_values:
+        numeric_value = finite_float_or_none(value)
+        if numeric_value is None:
+            is_numeric = False
+            break
+        numeric_pairs.append((value, numeric_value))
+
+    if is_numeric:
+        sorted_pairs = sorted(numeric_pairs, key=lambda pair: pair[1])
+        axis_values = [value for value, _numeric_value in sorted_pairs]
+        plot_values = [numeric_value for _value, numeric_value in sorted_pairs]
+        axis_type = "numeric"
+    else:
+        axis_values = sorted(raw_values, key=sort_token)
+        plot_values = [float(index) for index, _value in enumerate(axis_values)]
+        axis_type = "categorical"
+
+    labels = [format_condition_value(value) for value in axis_values]
+    return ConditionAxis(
+        axis_type=axis_type,
+        values=axis_values,
+        labels=labels,
+        plot_values=plot_values,
+        plot_value_by_label=dict(zip(labels, plot_values)),
+    )
+
+
+def axis_plot_value(axis: ConditionAxis, value: object) -> float:
+    return float(axis.plot_value_by_label[format_condition_value(value)])
+
+
+def jitter_offsets(count: int, *, width: float) -> np.ndarray:
+    if count > 1:
+        return np.linspace(-width, width, num=count)
+    return np.array([0.0])
+
+
+def axis_jitter_width(axis: ConditionAxis, *, categorical_width: float, numeric_fraction: float = 0.035) -> float:
+    if axis.axis_type != "numeric":
+        return categorical_width
+    unique_positions = sorted(set(axis.plot_values))
+    positive_spacings = [
+        right - left
+        for left, right in zip(unique_positions, unique_positions[1:])
+        if right > left
+    ]
+    if not positive_spacings:
+        return 0.02
+    return min(positive_spacings) * numeric_fraction
+
+
 def varying_condition_columns(endpoint: pd.DataFrame, condition_columns: list[str]) -> list[str]:
     return [
         column
@@ -1045,24 +1145,28 @@ def build_main_effect_summary(
         "fluorophore",
         "reagent",
         "reagent_value",
+        "reagent_axis_type",
+        "reagent_plot_value",
         "endpoint_mean_rfu",
         "endpoint_sd_rfu",
         "endpoint_n",
         "composition_count",
     ]
     channel = endpoint.loc[endpoint["fluorophore"] == fluorophore]
-    values = unique_sorted_values(channel[reagent])
-    if len(values) < 2:
+    axis = build_condition_axis(channel[reagent].drop_duplicates().tolist())
+    if len(axis.values) < 2:
         return pd.DataFrame(columns=columns)
 
     rows: list[dict[str, object]] = []
-    for value in values:
+    for value in axis.values:
         group = channel.loc[condition_value_mask(channel[reagent], value)]
         rows.append(
             {
                 "fluorophore": fluorophore,
                 "reagent": reagent,
                 "reagent_value": value,
+                "reagent_axis_type": axis.axis_type,
+                "reagent_plot_value": axis_plot_value(axis, value),
                 "endpoint_mean_rfu": group["endpoint_rfu"].mean(),
                 "endpoint_sd_rfu": group["endpoint_rfu"].std(),
                 "endpoint_n": int(group["endpoint_rfu"].count()),
@@ -1081,13 +1185,25 @@ def build_main_effect_composition_points(
 ) -> pd.DataFrame:
     channel = endpoint.loc[endpoint["fluorophore"] == fluorophore]
     if channel.empty:
-        return pd.DataFrame(columns=["reagent_value", "condition_id", "endpoint_mean_rfu"])
+        return pd.DataFrame(
+            columns=[
+                "reagent_value",
+                "condition_id",
+                "endpoint_mean_rfu",
+                "value_label",
+                "reagent_axis_type",
+                "reagent_plot_value",
+            ]
+        )
+    axis = build_condition_axis(channel[reagent].drop_duplicates().tolist())
     points = (
         channel.groupby([reagent, "condition_id"], dropna=False, as_index=False)
         .agg(endpoint_mean_rfu=("endpoint_rfu", "mean"))
         .rename(columns={reagent: "reagent_value"})
     )
     points["value_label"] = points["reagent_value"].map(format_condition_value)
+    points["reagent_axis_type"] = axis.axis_type
+    points["reagent_plot_value"] = points["reagent_value"].map(lambda value: axis_plot_value(axis, value))
     return points
 
 
@@ -1102,15 +1218,19 @@ def write_main_effect_plot(
 ) -> None:
     summary_sorted = summary.copy()
     summary_sorted["value_label"] = summary_sorted["reagent_value"].map(format_condition_value)
-    positions = np.arange(len(summary_sorted))
-    position_by_label = dict(zip(summary_sorted["value_label"], positions))
+    axis = build_condition_axis(summary_sorted["reagent_value"].tolist())
+    summary_sorted["reagent_axis_type"] = axis.axis_type
+    summary_sorted["reagent_plot_value"] = summary_sorted["reagent_value"].map(lambda value: axis_plot_value(axis, value))
+    summary_sorted = summary_sorted.sort_values("reagent_plot_value", kind="stable")
+    position_by_label = axis.plot_value_by_label
 
     fig, ax = plt.subplots(figsize=(9, 5), constrained_layout=True)
+    jitter_width = axis_jitter_width(axis, categorical_width=0.12)
     for label, points in composition_points.groupby("value_label", sort=False):
         if label not in position_by_label:
             continue
         base_position = position_by_label[label]
-        offsets = np.linspace(-0.12, 0.12, num=len(points)) if len(points) > 1 else np.array([0.0])
+        offsets = jitter_offsets(len(points), width=jitter_width)
         ax.scatter(
             np.full(len(points), base_position) + offsets,
             points["endpoint_mean_rfu"],
@@ -1121,6 +1241,7 @@ def write_main_effect_plot(
             label=None,
         )
 
+    positions = summary_sorted["reagent_plot_value"].to_numpy(dtype=float)
     y = summary_sorted["endpoint_mean_rfu"].to_numpy(dtype=float)
     yerr = summary_sorted["endpoint_sd_rfu"].fillna(0).to_numpy(dtype=float)
     ax.errorbar(
@@ -1133,14 +1254,112 @@ def write_main_effect_plot(
         capsize=4,
         label="marginal mean +/- SD",
     )
-    ax.set_xticks(positions)
-    ax.set_xticklabels(summary_sorted["value_label"], rotation=45, ha="right")
+    ax.set_xticks(axis.plot_values)
+    ax.set_xticklabels(axis.labels, rotation=45, ha="right")
+    ax.margins(x=0.08)
     ax.set_title(f"{fluorophore} endpoint RFU by {reagent}\n{variant_label}")
     ax.set_xlabel(reagent)
     ax.set_ylabel("Endpoint RFU")
     ax.legend(frameon=False)
     fig.savefig(path, dpi=150)
     plt.close(fig)
+
+
+def write_endpoint_variability_plot(
+    summary: pd.DataFrame,
+    path: str | Path,
+    *,
+    fluorophore: str,
+    variant_label: str,
+    y_column: str,
+    y_label: str,
+    title_metric: str,
+) -> None:
+    plot_data = summary.dropna(subset=["endpoint_mean_rfu", y_column]).copy()
+    fig, ax = plt.subplots(figsize=(8, 5), constrained_layout=True)
+    if plot_data.empty:
+        ax.text(
+            0.5,
+            0.5,
+            "No variability data",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+        )
+    else:
+        ax.scatter(
+            plot_data["endpoint_mean_rfu"],
+            plot_data[y_column],
+            color="tab:blue",
+            alpha=0.65,
+            s=36,
+            linewidths=0,
+        )
+        if (plot_data["endpoint_mean_rfu"] > 0).all():
+            ax.set_xscale("log")
+
+    ax.set_title(f"{fluorophore} {title_metric} vs endpoint mean ({variant_label})")
+    ax.set_xlabel("Endpoint mean RFU")
+    ax.set_ylabel(y_label)
+    ax.grid(True, color="0.9", linewidth=0.7)
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
+def write_endpoint_variability_outputs(
+    endpoint: pd.DataFrame,
+    condition_columns: list[str],
+    output_root: Path,
+    *,
+    progress_callback: ProgressCallback | None = None,
+) -> tuple[list[Path], list[Path]]:
+    variability_root = output_root / "endpoint_variability"
+    variability_csvs: list[Path] = []
+    variability_pngs: list[Path] = []
+
+    report_progress(progress_callback, "Writing endpoint variability plots")
+    for variant_name, variant_label in ENDPOINT_EFFECT_VARIANTS:
+        variant_endpoint = keyed_endpoint_for_effects(
+            endpoint,
+            exclude_outliers=variant_name == "excluding_outliers",
+        )
+        variant_dir = variability_root / variant_name
+        variant_dir.mkdir(parents=True, exist_ok=True)
+        if variant_endpoint.empty:
+            continue
+
+        for fluorophore in sorted(variant_endpoint["fluorophore"].dropna().astype(str).unique()):
+            report_progress(progress_callback, f"Writing endpoint variability plots: {variant_label}, {fluorophore}")
+            channel = variant_endpoint.loc[variant_endpoint["fluorophore"] == fluorophore]
+            summary = summarize_compositions(channel, condition_columns)
+            safe_fluorophore = safe_filename(fluorophore)
+            csv_path = variant_dir / f"{safe_fluorophore}_endpoint_variability.csv"
+            cv_png = variant_dir / f"{safe_fluorophore}_cv_vs_mean_endpoint_rfu.png"
+            sd_png = variant_dir / f"{safe_fluorophore}_sd_vs_mean_endpoint_rfu.png"
+
+            summary.to_csv(csv_path, index=False)
+            write_endpoint_variability_plot(
+                summary,
+                cv_png,
+                fluorophore=fluorophore,
+                variant_label=variant_label,
+                y_column="endpoint_cv_percent",
+                y_label="Endpoint CV (%)",
+                title_metric="CV",
+            )
+            write_endpoint_variability_plot(
+                summary,
+                sd_png,
+                fluorophore=fluorophore,
+                variant_label=variant_label,
+                y_column="endpoint_sd_rfu",
+                y_label="Endpoint sample SD RFU",
+                title_metric="SD",
+            )
+            variability_csvs.append(csv_path)
+            variability_pngs.extend([cv_png, sd_png])
+
+    return variability_csvs, variability_pngs
 
 
 def build_pairwise_interaction_matrices(
@@ -1226,6 +1445,8 @@ def build_faceted_dose_response_summary(
         "hue_reagent",
         "col_reagent",
         "x_value",
+        "x_axis_type",
+        "x_plot_value",
         "hue_value",
         "col_value",
         "endpoint_mean_rfu",
@@ -1237,7 +1458,8 @@ def build_faceted_dose_response_summary(
     if channel.empty:
         return pd.DataFrame(columns=columns)
 
-    x_values = unique_sorted_values(channel[x_reagent])
+    x_axis = build_condition_axis(channel[x_reagent].drop_duplicates().tolist())
+    x_values = x_axis.values
     hue_values = unique_sorted_values(channel[hue_reagent])
     col_values = unique_sorted_values(channel[col_reagent]) if col_reagent is not None else [""]
     rows: list[dict[str, object]] = []
@@ -1258,6 +1480,8 @@ def build_faceted_dose_response_summary(
                         "hue_reagent": hue_reagent,
                         "col_reagent": col_reagent or "",
                         "x_value": x_value,
+                        "x_axis_type": x_axis.axis_type,
+                        "x_plot_value": axis_plot_value(x_axis, x_value),
                         "hue_value": hue_value,
                         "col_value": col_value,
                         "endpoint_mean_rfu": group["endpoint_rfu"].mean(),
@@ -1286,6 +1510,8 @@ def build_faceted_dose_response_csv_data(
         "hue_reagent",
         "col_reagent",
         "x_value",
+        "x_axis_type",
+        "x_plot_value",
         "hue_value",
         "col_value",
         "condition_id",
@@ -1306,6 +1532,8 @@ def build_faceted_dose_response_csv_data(
                 "hue_reagent": row["hue_reagent"],
                 "col_reagent": row["col_reagent"],
                 "x_value": row["x_value"],
+                "x_axis_type": row["x_axis_type"],
+                "x_plot_value": row["x_plot_value"],
                 "hue_value": row["hue_value"],
                 "col_value": row["col_value"],
                 "condition_id": "",
@@ -1319,8 +1547,9 @@ def build_faceted_dose_response_csv_data(
         )
 
     channel = endpoint.loc[endpoint["fluorophore"] == fluorophore]
+    x_axis = build_condition_axis(summary["x_value"].drop_duplicates().tolist())
     col_values = unique_sorted_values(channel[col_reagent]) if col_reagent is not None else [""]
-    x_values = unique_sorted_values(channel[x_reagent])
+    x_values = x_axis.values
     hue_values = unique_sorted_values(channel[hue_reagent])
     for col_value in col_values:
         col_group = channel
@@ -1339,6 +1568,8 @@ def build_faceted_dose_response_csv_data(
                             "hue_reagent": hue_reagent,
                             "col_reagent": col_reagent or "",
                             "x_value": x_value,
+                            "x_axis_type": x_axis.axis_type,
+                            "x_plot_value": axis_plot_value(x_axis, x_value),
                             "hue_value": hue_value,
                             "col_value": col_value,
                             "condition_id": endpoint_row["condition_id"],
@@ -1366,14 +1597,18 @@ def write_faceted_dose_response_plot(
     variant_label: str,
 ) -> None:
     replicate_points = csv_data.loc[csv_data["row_type"] == "replicate"].copy()
-    x_values = unique_sorted_values(summary["x_value"])
+    x_axis = build_condition_axis(summary["x_value"].drop_duplicates().tolist())
+    x_values = x_axis.values
     hue_values = unique_sorted_values(summary["hue_value"])
     col_values = unique_sorted_values(summary["col_value"]) if col_reagent is not None else [""]
-    x_labels = [format_condition_value(value) for value in x_values]
     hue_labels = [format_condition_value(value) for value in hue_values]
-    x_position_by_label = dict(zip(x_labels, np.arange(len(x_labels))))
-    hue_offsets = np.linspace(-0.16, 0.16, len(hue_labels)) if len(hue_labels) > 1 else np.array([0.0])
+    hue_offsets = (
+        np.zeros(len(hue_labels))
+        if x_axis.axis_type == "numeric"
+        else np.linspace(-0.16, 0.16, len(hue_labels)) if len(hue_labels) > 1 else np.array([0.0])
+    )
     hue_offset_by_label = dict(zip(hue_labels, hue_offsets))
+    point_jitter_width = axis_jitter_width(x_axis, categorical_width=0.035)
     palette = sns.color_palette("husl", n_colors=max(len(hue_labels), 1))
     color_by_hue = dict(zip(hue_labels, palette))
 
@@ -1405,8 +1640,7 @@ def write_faceted_dose_response_plot(
                 group = hue_summary.loc[condition_value_mask(hue_summary["x_value"], x_value)]
                 if group.empty:
                     continue
-                x_label = format_condition_value(x_value)
-                x_positions.append(float(x_position_by_label[x_label]) + float(hue_offset_by_label[hue_label]))
+                x_positions.append(axis_plot_value(x_axis, x_value) + float(hue_offset_by_label[hue_label]))
                 means.append(float(group["endpoint_mean_rfu"].iloc[0]))
                 sd_value = group["endpoint_sd_rfu"].iloc[0]
                 errors.append(0.0 if pd.isna(sd_value) else float(sd_value))
@@ -1416,13 +1650,15 @@ def write_faceted_dose_response_plot(
                     & condition_value_mask(facet_points["hue_value"], hue_value)
                 ]
                 if not point_group.empty:
-                    jitter = (
-                        np.linspace(-0.035, 0.035, len(point_group))
-                        if len(point_group) > 1
-                        else np.array([0.0])
-                    )
+                    jitter = jitter_offsets(len(point_group), width=point_jitter_width)
                     ax.scatter(
-                        np.full(len(point_group), x_position_by_label[x_label] + hue_offset_by_label[hue_label]) + jitter,
+                        (
+                            np.full(
+                                len(point_group),
+                                axis_plot_value(x_axis, x_value) + hue_offset_by_label[hue_label],
+                            )
+                            + jitter
+                        ),
                         point_group["endpoint_rfu"].to_numpy(dtype=float),
                         color=color,
                         alpha=0.25,
@@ -1444,8 +1680,9 @@ def write_faceted_dose_response_plot(
                     zorder=3,
                 )
 
-        ax.set_xticks(np.arange(len(x_labels)))
-        ax.set_xticklabels(x_labels, rotation=45, ha="right")
+        ax.set_xticks(x_axis.plot_values)
+        ax.set_xticklabels(x_axis.labels, rotation=45, ha="right")
+        ax.margins(x=0.08)
         ax.set_xlabel(x_reagent)
         ax.grid(axis="y", color="0.9", linewidth=0.7)
         if col_reagent is not None:
@@ -1468,6 +1705,8 @@ def write_endpoint_effect_outputs(
     endpoint: pd.DataFrame,
     condition_columns: list[str],
     output_root: Path,
+    *,
+    progress_callback: ProgressCallback | None = None,
 ) -> tuple[list[Path], list[Path], list[Path], list[Path], list[Path], list[Path]]:
     effects_root = output_root / "endpoint_effects"
     main_root = effects_root / "main_effects"
@@ -1498,6 +1737,7 @@ def write_endpoint_effect_outputs(
         for fluorophore in fluorophores:
             channel = variant_endpoint.loc[variant_endpoint["fluorophore"] == fluorophore]
             safe_fluorophore = safe_filename(fluorophore)
+            report_progress(progress_callback, f"Endpoint effects: {variant_label}, {fluorophore}")
 
             for reagent in condition_columns:
                 if len(unique_sorted_values(channel[reagent])) < 2:
@@ -1516,6 +1756,7 @@ def write_endpoint_effect_outputs(
                 main_csv = main_dir / f"{safe_fluorophore}_{safe_reagent}_main_effect.csv"
                 main_png = main_dir / f"{safe_fluorophore}_{safe_reagent}_main_effect.png"
                 main_summary.to_csv(main_csv, index=False)
+                report_progress(progress_callback, f"Writing main-effect plot: {fluorophore} by {reagent}")
                 write_main_effect_plot(
                     main_summary,
                     composition_points,
@@ -1549,6 +1790,10 @@ def write_endpoint_effect_outputs(
                 heatmap_png = pairwise_dir / f"{prefix}_mean_endpoint_rfu.png"
                 mean_matrix.to_csv(mean_csv)
                 count_matrix.to_csv(count_csv)
+                report_progress(
+                    progress_callback,
+                    f"Writing pairwise endpoint heatmap: {fluorophore} {reagent_a} x {reagent_b}",
+                )
                 write_pairwise_interaction_heatmap_plot(
                     mean_matrix,
                     heatmap_png,
@@ -1588,6 +1833,10 @@ def write_endpoint_effect_outputs(
                 dose_csv = dose_dir / f"{stem}.csv"
                 dose_png = dose_dir / f"{stem}.png"
                 dose_csv_data.to_csv(dose_csv, index=False)
+                report_progress(
+                    progress_callback,
+                    f"Writing faceted dose-response plot: {fluorophore} x={x_reagent}, hue={hue_reagent}",
+                )
                 write_faceted_dose_response_plot(
                     dose_summary,
                     dose_csv_data,
@@ -1609,8 +1858,10 @@ def analyze_merged_tidy_csv(
     output_dir: str | Path,
     *,
     endpoint_last_n: int = 3,
+    progress_callback: ProgressCallback | None = None,
 ) -> AnalysisResult:
     output_root = Path(output_dir)
+    report_progress(progress_callback, f"Preparing output directory: {output_root}")
     output_root.mkdir(parents=True, exist_ok=True)
     absolute_dir = output_root / "heatmaps_absolute_rfu"
     percent_dir = output_root / "heatmaps_condition_percent_difference"
@@ -1623,13 +1874,34 @@ def analyze_merged_tidy_csv(
     timecourse_dir.mkdir(parents=True, exist_ok=True)
     combined_timecourse_dir.mkdir(parents=True, exist_ok=True)
 
+    report_progress(progress_callback, f"Loading merged tidy CSV: {merged_csv}")
     merged = load_merged_tidy(merged_csv)
+    report_progress(
+        progress_callback,
+        (
+            f"Loaded {len(merged):,} rows, "
+            f"{merged['well'].nunique():,} wells, "
+            f"{merged['fluorophore'].nunique():,} fluorophore(s), "
+            f"{merged['time_seconds'].nunique():,} timepoint(s)"
+        ),
+    )
+    report_progress(progress_callback, "Preparing condition groups and plate coordinates")
     prepared, condition_columns = prepare_analysis_dataframe(merged)
+    report_progress(
+        progress_callback,
+        f"Condition columns: {', '.join(condition_columns) if condition_columns else '(none)'}",
+    )
+    report_progress(progress_callback, f"Computing endpoint statistics from the last {endpoint_last_n} timepoint(s)")
     endpoint = compute_endpoint_by_well(
         prepared,
         condition_columns,
         endpoint_last_n=endpoint_last_n,
     )
+    report_progress(
+        progress_callback,
+        f"Endpoint table ready: {len(endpoint):,} rows, {int(endpoint['is_endpoint_outlier'].sum()):,} outlier(s)",
+    )
+    report_progress(progress_callback, "Summarizing compositions and timecourses")
     summary = summarize_compositions(endpoint, condition_columns)
     timecourse_summary = summarize_condition_timecourses(prepared, condition_columns)
     endpoint_flags = endpoint[["well", "fluorophore", "is_endpoint_outlier"]]
@@ -1645,12 +1917,16 @@ def analyze_merged_tidy_csv(
     )
     should_write_timecourse_plots = has_timecourse_data(prepared)
     if should_write_timecourse_plots:
+        report_progress(progress_callback, "Generating faceted timecourse grids")
         faceted_timecourse_csvs, faceted_timecourse_pngs = write_faceted_timecourse_grid_outputs(
             keyed_prepared,
             condition_columns,
             output_root,
+            progress_callback=progress_callback,
         )
+        report_progress(progress_callback, f"Faceted timecourse grids complete: {len(faceted_timecourse_pngs)} plot(s)")
     else:
+        report_progress(progress_callback, "Skipping timecourse plots because fewer than two timepoints were found")
         faceted_timecourse_csvs = []
         faceted_timecourse_pngs = []
 
@@ -1659,11 +1935,18 @@ def analyze_merged_tidy_csv(
     timecourse_summary_csv = output_root / "timecourse_summary.csv"
     timecourse_excluding_outliers_summary_csv = output_root / "timecourse_summary_excluding_outliers.csv"
     outlier_summary_csv = output_root / "outlier_summary.csv"
+    report_progress(progress_callback, "Writing endpoint, composition, timecourse, and outlier CSV summaries")
     endpoint.to_csv(endpoint_csv, index=False)
     summary.to_csv(composition_summary_csv, index=False)
     timecourse_summary.to_csv(timecourse_summary_csv, index=False)
     timecourse_summary_excluding_outliers.to_csv(timecourse_excluding_outliers_summary_csv, index=False)
     endpoint.loc[endpoint["is_endpoint_outlier"].astype(bool)].to_csv(outlier_summary_csv, index=False)
+    endpoint_variability_csvs, endpoint_variability_pngs = write_endpoint_variability_outputs(
+        endpoint,
+        condition_columns,
+        output_root,
+        progress_callback=progress_callback,
+    )
     (
         main_effect_csvs,
         main_effect_pngs,
@@ -1675,6 +1958,16 @@ def analyze_merged_tidy_csv(
         endpoint,
         condition_columns,
         output_root,
+        progress_callback=progress_callback,
+    )
+    report_progress(
+        progress_callback,
+        (
+            "Endpoint effects complete: "
+            f"{len(main_effect_pngs)} main-effect plot(s), "
+            f"{len(pairwise_pngs)} pairwise plot(s), "
+            f"{len(dose_pngs)} dose-response plot(s)"
+        ),
     )
 
     absolute_csvs: list[Path] = []
@@ -1686,7 +1979,14 @@ def analyze_merged_tidy_csv(
     timecourse_pngs: list[Path] = []
     combined_timecourse_pngs: list[Path] = []
     if should_write_timecourse_plots:
-        for (condition_id, fluorophore), plot_summary in timecourse_summary.groupby(["condition_id", "fluorophore"]):
+        timecourse_groups = list(timecourse_summary.groupby(["condition_id", "fluorophore"]))
+        report_progress(progress_callback, f"Writing per-composition timecourse plots: {len(timecourse_groups)} plot(s)")
+        for plot_index, ((condition_id, fluorophore), plot_summary) in enumerate(timecourse_groups, start=1):
+            if should_report_progress_item(plot_index, len(timecourse_groups), every=10):
+                report_progress(
+                    progress_callback,
+                    f"Writing per-composition timecourse plot {plot_index}/{len(timecourse_groups)}",
+                )
             plot_replicates = keyed_prepared.loc[
                 (keyed_prepared["condition_id"] == condition_id)
                 & (keyed_prepared["fluorophore"] == fluorophore)
@@ -1707,7 +2007,12 @@ def analyze_merged_tidy_csv(
             )
             timecourse_pngs.append(timecourse_png)
 
-        for fluorophore in sorted(timecourse_summary["fluorophore"].dropna().astype(str).unique()):
+        fluorophores_with_timecourses = sorted(timecourse_summary["fluorophore"].dropna().astype(str).unique())
+        report_progress(
+            progress_callback,
+            f"Writing combined timecourse plots for {len(fluorophores_with_timecourses)} fluorophore(s)",
+        )
+        for fluorophore in fluorophores_with_timecourses:
             inclusive_summary = timecourse_summary.loc[timecourse_summary["fluorophore"] == fluorophore]
             excluded_summary = timecourse_summary_excluding_outliers.loc[
                 timecourse_summary_excluding_outliers["fluorophore"] == fluorophore
@@ -1739,6 +2044,7 @@ def analyze_merged_tidy_csv(
     for fluorophore in sorted(endpoint["fluorophore"].dropna().astype(str).unique()):
         safe_name = safe_filename(fluorophore)
 
+        report_progress(progress_callback, f"Writing plate heatmaps for {fluorophore}")
         absolute_matrix = build_plate_heatmap(endpoint, fluorophore, "endpoint_rfu")
         absolute_csv = absolute_dir / f"{safe_name}_endpoint_rfu.csv"
         absolute_png = absolute_dir / f"{safe_name}_endpoint_rfu.png"
@@ -1784,6 +2090,7 @@ def analyze_merged_tidy_csv(
         outlier_csvs.append(outlier_csv)
         outlier_pngs.append(outlier_png)
 
+    report_progress(progress_callback, "Analysis output generation complete")
     return AnalysisResult(
         output_dir=output_root,
         endpoint_csv=endpoint_csv,
@@ -1807,6 +2114,8 @@ def analyze_merged_tidy_csv(
         faceted_dose_response_pngs=dose_pngs,
         faceted_timecourse_csvs=faceted_timecourse_csvs,
         faceted_timecourse_pngs=faceted_timecourse_pngs,
+        endpoint_variability_csvs=endpoint_variability_csvs,
+        endpoint_variability_pngs=endpoint_variability_pngs,
         outlier_count=int(endpoint["is_endpoint_outlier"].sum()),
         condition_columns=condition_columns,
         endpoint_rows=len(endpoint),

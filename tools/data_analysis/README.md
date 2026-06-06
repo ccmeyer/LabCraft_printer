@@ -30,7 +30,14 @@ Endpoint main-effect and pairwise interaction plots are written under
 excluded variants. These are marginal descriptive endpoint summaries, not fitted
 statistical models. Faceted endpoint dose-response plots are written under
 `endpoint_effects/faceted_dose_response/` when exactly two or three reagent
-columns vary.
+columns vary. Endpoint main-effect and faceted dose-response plots use actual
+numeric concentration values on the X axis when the plotted reagent values are
+numeric; nonnumeric reagent values remain evenly spaced categories.
+Endpoint replicate variability QC plots are written under
+`plate_reader_analysis/endpoint_variability/` with inclusive and final-outlier-
+excluded variants. These CV-vs-mean and SD-vs-mean scatter plots are descriptive
+replicate QC views to help separate low-signal noise-floor behavior from
+condition-level inconsistency.
 Flagged endpoint outliers are shown as red replicate traces in the timecourse
 plots and mapped by plate location under `heatmaps_endpoint_outliers/`; they are
 not excluded from means, standard deviations, CVs, or heatmaps. Outlier calls use

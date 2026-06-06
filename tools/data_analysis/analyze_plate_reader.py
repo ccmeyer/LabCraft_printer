@@ -140,9 +140,14 @@ def print_summary(result: analysis.AnalysisResult, merged_csv: Path) -> None:
     print(f"Timecourse plots: {len(result.timecourse_plot_pngs)}")
     print(f"Combined timecourse plots: {len(result.combined_timecourse_plot_pngs)}")
     print(f"Faceted timecourse grid plots: {len(result.faceted_timecourse_pngs)}")
+    print(f"Endpoint variability plots: {len(result.endpoint_variability_pngs)}")
     print(f"Endpoint main-effect plots: {len(result.main_effect_pngs)}")
     print(f"Endpoint pairwise interaction plots: {len(result.pairwise_interaction_pngs)}")
     print(f"Endpoint faceted dose-response plots: {len(result.faceted_dose_response_pngs)}")
+
+
+def print_progress(message: str) -> None:
+    print(f"[analysis] {message}", flush=True)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -150,12 +155,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        print_progress("Resolving merged tidy data input")
         merged_csv, experiment_dir = resolve_merged_tidy_csv(args)
         output_dir = args.output_dir or default_output_dir(merged_csv, experiment_dir)
         result = analysis.analyze_merged_tidy_csv(
             merged_csv,
             output_dir,
             endpoint_last_n=args.endpoint_last_n,
+            progress_callback=print_progress,
         )
     except Exception as exc:  # pragma: no cover - CLI reporting
         print(f"ERROR: {exc}", file=sys.stderr)
