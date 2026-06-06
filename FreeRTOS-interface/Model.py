@@ -4,7 +4,7 @@ import numpy as np
 from dataclasses import dataclass, field
 from math import gcd
 from functools import reduce
-from typing import List, Dict, Tuple, Optional, Any, Set
+from typing import List, Dict, Tuple, Optional, Any, Set, Iterable
 
 from PySide6 import QtCore, QtWidgets, QtGui
 from PySide6.QtCore import QObject, Signal, Slot, QTimer, QThread
@@ -367,7 +367,8 @@ class ExperimentModel(QObject):
             "randomize_assignments": False,
             "random_seed": None,
             "start_row": 0,
-            "start_col": 0, 
+            "start_col": 0,
+            "well_selection": self._default_well_selection(),
         }
         self.stock_prep_state: Dict[str, Any] = self._default_stock_prep_state()
         self.applied_imaging_calibrations: Dict[str, Any] = {
@@ -502,6 +503,69 @@ class ExperimentModel(QObject):
         )
     def set_metadata(self, **kwargs):
         self.metadata.update(kwargs)
+
+    @staticmethod
+    def _default_well_selection() -> Dict[str, object]:
+        return {
+            "mode": "start_offset",
+            "included_wells": None,
+        }
+
+    @staticmethod
+    def _normalize_well_id_list(well_ids: Iterable[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw in well_ids:
+            if raw is None:
+                raise ValueError("Included well selection contains a blank well ID.")
+            row, col = Well.parse_well_id(str(raw).strip().upper())
+            wid = f"{row}{col}"
+            if wid not in seen:
+                seen.add(wid)
+                normalized.append(wid)
+        return normalized
+
+    def get_well_selection(self) -> Dict[str, object]:
+        raw = self.metadata.get("well_selection")
+        if not isinstance(raw, dict):
+            return self._default_well_selection()
+
+        mode = str(raw.get("mode", "start_offset") or "start_offset").strip().lower()
+        if mode != "custom":
+            return self._default_well_selection()
+
+        included_wells = raw.get("included_wells")
+        if included_wells is None:
+            return self._default_well_selection()
+        if isinstance(included_wells, str):
+            included_wells = [included_wells]
+
+        return {
+            "mode": "custom",
+            "included_wells": self._normalize_well_id_list(included_wells),
+        }
+
+    def _ensure_well_selection_metadata(self) -> Dict[str, object]:
+        selection = self.get_well_selection()
+        self.metadata["well_selection"] = selection
+        return selection
+
+    def set_well_selection(self, included_wells: Iterable[str] | None) -> None:
+        if included_wells is None:
+            self.metadata["well_selection"] = self._default_well_selection()
+            return
+        if isinstance(included_wells, str):
+            included_wells = [included_wells]
+        self.metadata["well_selection"] = {
+            "mode": "custom",
+            "included_wells": self._normalize_well_id_list(included_wells),
+        }
+
+    def get_auto_assignment_included_wells(self) -> list[str] | None:
+        selection = self.get_well_selection()
+        if selection.get("mode") != "custom":
+            return None
+        return list(selection.get("included_wells") or [])
 
     def _clear_design_derived_state(self):
         self.plans_per_option.clear()
@@ -5789,6 +5853,7 @@ class ExperimentModel(QObject):
         Serialize the design input (metadata + factors) plus, if present,
         any explicit uploaded/manual reaction set.
         """
+        self._ensure_well_selection_metadata()
         data: Dict[str, object] = {
             "metadata": self.metadata,
             "stock_prep": self.stock_prep_state,
@@ -5917,6 +5982,7 @@ class ExperimentModel(QObject):
             self.metadata.get("fill_printing_mode"),
             fill_droplet_nl,
         )
+        self._ensure_well_selection_metadata()
         self.factors = []
 
         for f in d.get("factors", []):
@@ -7449,6 +7515,7 @@ class ExperimentModel(QObject):
             "random_seed": None,
             "start_row": 0,
             "start_col": 0,
+            "well_selection": self._default_well_selection(),
         }
         self.stock_prep_state = self._default_stock_prep_state()
         self.plans_per_option.clear()
@@ -8017,6 +8084,62 @@ class WellPlate(QObject):
                 normalized.add(wid)
         return normalized
 
+    def normalize_included_wells(self, included_wells, *, plate_name: Optional[str] = None) -> list[str]:
+        """Canonicalize an automatic-assignment well pool for a plate."""
+        plate_data = self.get_plate_data_by_name(plate_name) if plate_name else self.current_plate_data
+        target_name = str(plate_data["name"])
+        rows = int(plate_data["rows"])
+        cols = int(plate_data["columns"])
+
+        if included_wells is None:
+            return []
+        if isinstance(included_wells, str):
+            included_wells = [included_wells]
+
+        malformed: list[str] = []
+        out_of_bounds: list[str] = []
+        normalized: list[str] = []
+        seen: set[str] = set()
+
+        for well_id in list(included_wells):
+            raw = "" if well_id is None else str(well_id).strip()
+            if not raw:
+                malformed.append("<blank>")
+                continue
+            try:
+                wid = self._normalize_well_id(raw)
+                row_label, col_1 = Well.parse_well_id(wid)
+                row_idx = Well.row_label_to_index(row_label)
+                col_idx = int(col_1) - 1
+            except ValueError:
+                malformed.append(raw)
+                continue
+
+            if row_idx >= rows or col_idx >= cols:
+                out_of_bounds.append(wid)
+                continue
+            if wid in seen:
+                continue
+
+            seen.add(wid)
+            normalized.append(wid)
+
+        issues = []
+        if malformed:
+            issues.append(f"Invalid well IDs: {self._format_well_id_examples(malformed)}.")
+        if out_of_bounds:
+            issues.append(
+                f"Out of bounds for plate '{target_name}' ({rows}x{cols}): "
+                f"{self._format_well_id_examples(out_of_bounds)}."
+            )
+        if issues:
+            raise ValueError(
+                f"Included well selection is invalid for plate '{target_name}' ({rows}x{cols}). "
+                + " ".join(issues)
+            )
+
+        return normalized
+
     def validate_explicit_well_ids(
         self,
         well_ids,
@@ -8430,7 +8553,7 @@ class WellPlate(QObject):
 
         return wells
 
-    def get_available_wells(self, fill_by="columns",start_row=0,start_col=0):
+    def get_available_wells(self, fill_by="columns",start_row=0,start_col=0,included_wells=None):
         """
         Get a list of available wells, sorted by rows or columns in a zigzag pattern.
 
@@ -8442,11 +8565,15 @@ class WellPlate(QObject):
         """
         if fill_by not in ["rows", "columns"]:
             raise ValueError("fill_by must be 'rows' or 'columns'.")
-        self.validate_start_position(start_row=start_row, start_col=start_col)
         self.normalize_excluded_wells()
 
         available_wells = [well for well in self.wells.values() if well.well_id not in self.excluded_wells and well.assigned_reaction is None]
-        available_wells = [well for well in available_wells if well.row_num >= start_row and well.col >= start_col+1]
+        if included_wells is not None:
+            included_ids = set(self.normalize_included_wells(included_wells))
+            available_wells = [well for well in available_wells if well.well_id in included_ids]
+        else:
+            self.validate_start_position(start_row=start_row, start_col=start_col)
+            available_wells = [well for well in available_wells if well.row_num >= start_row and well.col >= start_col+1]
         return self.zigzag_order(available_wells, fill_by=fill_by)
     
     def get_all_wells(self):
@@ -8529,7 +8656,7 @@ class WellPlate(QObject):
             status[well_id] = well.get_status()
         return status
 
-    def assign_reactions_to_wells(self, reactions, fill_by="columns",start_row=0,start_col=0):
+    def assign_reactions_to_wells(self, reactions, fill_by="columns",start_row=0,start_col=0,included_wells=None):
         """
         Systematically assign reactions to available wells.
 
@@ -8540,7 +8667,7 @@ class WellPlate(QObject):
         Returns:
             dict: A dictionary mapping reaction names to well IDs.
         """
-        available_wells = self.get_available_wells(fill_by=fill_by,start_row=start_row,start_col=start_col)
+        available_wells = self.get_available_wells(fill_by=fill_by,start_row=start_row,start_col=start_col,included_wells=included_wells)
         reaction_assignment = {}
 
         if len(reactions) > len(available_wells):
