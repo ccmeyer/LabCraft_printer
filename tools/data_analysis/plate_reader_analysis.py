@@ -25,6 +25,10 @@ WELL_RE = re.compile(r"^([A-P])([1-9]|1[0-9]|2[0-4])$")
 UNKEYED_CONDITION_ID = "unkeyed"
 OUTLIER_ROBUST_Z_THRESHOLD = 3.5
 OUTLIER_MIN_RELATIVE_DELTA_PERCENT = 15.0
+OUTLIER_TRIPLICATE_MIN_GROUP_CV_PERCENT = 35.0
+OUTLIER_TRIPLICATE_LOW_SIGNAL_DROP_PERCENT = 60.0
+OUTLIER_TRIPLICATE_MAX_HIGH_PAIR_CV_PERCENT = 30.0
+OUTLIER_TRIPLICATE_HIGH_SIGNAL_ABOVE_MID_PERCENT = 100.0
 ENDPOINT_EFFECT_VARIANTS = (
     ("including_outliers", "including outliers"),
     ("excluding_outliers", "excluding endpoint outliers"),
@@ -408,6 +412,54 @@ def summarize_compositions(endpoint: pd.DataFrame, condition_columns: list[str])
     ).reset_index(drop=True)
 
 
+def coefficient_of_variation_percent(values: pd.Series | np.ndarray) -> float:
+    array = np.asarray(values, dtype=float)
+    mean = float(np.mean(array))
+    if len(array) < 2 or mean == 0:
+        return float("nan")
+    return float(100.0 * np.std(array, ddof=1) / mean)
+
+
+def triplicate_split_outlier(endpoint_group: pd.DataFrame) -> tuple[int, str] | None:
+    if len(endpoint_group) != 3:
+        return None
+
+    sorted_group = endpoint_group.sort_values("endpoint_rfu", kind="stable")
+    values = sorted_group["endpoint_rfu"].to_numpy(dtype=float)
+    low, mid, high = values
+    group_cv = coefficient_of_variation_percent(values)
+    if not np.isfinite(group_cv) or group_cv < OUTLIER_TRIPLICATE_MIN_GROUP_CV_PERCENT:
+        return None
+
+    high_pair = values[1:]
+    high_pair_mean = float(np.mean(high_pair))
+    high_pair_cv = coefficient_of_variation_percent(high_pair)
+    low_drop_percent = (
+        100.0 * (high_pair_mean - low) / high_pair_mean
+        if high_pair_mean != 0
+        else float("nan")
+    )
+    if (
+        np.isfinite(low_drop_percent)
+        and np.isfinite(high_pair_cv)
+        and low_drop_percent >= OUTLIER_TRIPLICATE_LOW_SIGNAL_DROP_PERCENT
+        and high_pair_cv <= OUTLIER_TRIPLICATE_MAX_HIGH_PAIR_CV_PERCENT
+    ):
+        return int(sorted_group.index[0]), "triplicate_low_signal_split"
+
+    if mid != 0:
+        high_above_mid_percent = 100.0 * (high - mid) / mid
+    else:
+        high_above_mid_percent = float("inf") if high > mid else float("nan")
+    if (
+        np.isfinite(high_above_mid_percent)
+        and high_above_mid_percent >= OUTLIER_TRIPLICATE_HIGH_SIGNAL_ABOVE_MID_PERCENT
+    ):
+        return int(sorted_group.index[2]), "triplicate_high_signal_split"
+
+    return None
+
+
 def add_endpoint_outlier_flags(endpoint: pd.DataFrame) -> pd.DataFrame:
     result = endpoint.copy()
     result["condition_endpoint_median_rfu"] = np.nan
@@ -454,6 +506,14 @@ def add_endpoint_outlier_flags(endpoint: pd.DataFrame) -> pd.DataFrame:
             result.loc[candidate_indices, "outlier_candidate_reason"] = "mad_zero_nonmedian"
             result.loc[final_indices, "is_endpoint_outlier"] = True
             result.loc[final_indices, "outlier_reason"] = "mad_zero_nonmedian"
+            if len(group) == 3 and not bool(result.loc[group.index, "is_endpoint_outlier"].any()):
+                split_outlier = triplicate_split_outlier(group)
+                if split_outlier is not None:
+                    outlier_index, split_reason = split_outlier
+                    result.loc[outlier_index, "is_endpoint_outlier_candidate"] = True
+                    result.loc[outlier_index, "outlier_candidate_reason"] = split_reason
+                    result.loc[outlier_index, "is_endpoint_outlier"] = True
+                    result.loc[outlier_index, "outlier_reason"] = split_reason
             continue
 
         robust_z = 0.6745 * (values - median) / mad
@@ -469,6 +529,15 @@ def add_endpoint_outlier_flags(endpoint: pd.DataFrame) -> pd.DataFrame:
         result.loc[candidate_indices, "outlier_candidate_reason"] = candidate_reason
         result.loc[final_indices, "is_endpoint_outlier"] = True
         result.loc[final_indices, "outlier_reason"] = candidate_reason
+
+        if len(group) == 3 and not bool(result.loc[group.index, "is_endpoint_outlier"].any()):
+            split_outlier = triplicate_split_outlier(group)
+            if split_outlier is not None:
+                outlier_index, split_reason = split_outlier
+                result.loc[outlier_index, "is_endpoint_outlier_candidate"] = True
+                result.loc[outlier_index, "outlier_candidate_reason"] = split_reason
+                result.loc[outlier_index, "is_endpoint_outlier"] = True
+                result.loc[outlier_index, "outlier_reason"] = split_reason
 
     return result
 

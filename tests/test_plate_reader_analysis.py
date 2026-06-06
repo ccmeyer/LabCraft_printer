@@ -120,6 +120,22 @@ def _write_outlier_merged_csv(path: Path) -> Path:
     return path
 
 
+def _write_triplicate_split_outlier_merged_csv(path: Path) -> Path:
+    rows: list[dict[str, object]] = []
+    rows.extend(_merged_rows_for_well("A1", [1798, 1798, 1798], is_keyed=True, dna_mM=1.0, mg_mM=5.0))
+    rows.extend(_merged_rows_for_well("A2", [9546, 9546, 9546], is_keyed=True, dna_mM=1.0, mg_mM=5.0))
+    rows.extend(_merged_rows_for_well("A3", [13092, 13092, 13092], is_keyed=True, dna_mM=1.0, mg_mM=5.0))
+    rows.extend(_merged_rows_for_well("B1", [665, 665, 665], is_keyed=True, dna_mM=2.0, mg_mM=5.0))
+    rows.extend(_merged_rows_for_well("B2", [1978, 1978, 1978], is_keyed=True, dna_mM=2.0, mg_mM=5.0))
+    rows.extend(_merged_rows_for_well("B3", [7490, 7490, 7490], is_keyed=True, dna_mM=2.0, mg_mM=5.0))
+    rows.extend(_merged_rows_for_well("C1", [1214, 1214, 1214], is_keyed=True, dna_mM=3.0, mg_mM=5.0))
+    rows.extend(_merged_rows_for_well("C2", [1422, 1422, 1422], is_keyed=True, dna_mM=3.0, mg_mM=5.0))
+    rows.extend(_merged_rows_for_well("C3", [2007, 2007, 2007], is_keyed=True, dna_mM=3.0, mg_mM=5.0))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows).to_csv(path, index=False)
+    return path
+
+
 def _write_endpoint_effects_merged_csv(path: Path) -> Path:
     rows: list[dict[str, object]] = []
     rows.extend(_effect_rows_for_well("A1", [10, 10, 10], is_keyed=True, dna_mM=0.0, mg_mM=1.0, salt_mM=0.0, buffer_x=1.0))
@@ -367,6 +383,70 @@ def test_endpoint_outlier_detection_flags_only_evaluated_keyed_replicates(tmp_pa
     timecourse_png = result.output_dir / "timecourses" / "condition_001_488_509_timecourse.png"
     assert outlier_png.stat().st_size > 0
     assert timecourse_png.stat().st_size > 0
+
+
+def test_triplicate_split_outlier_detection_adds_low_and_high_signal_fallbacks(tmp_path):
+    merged_csv = _write_triplicate_split_outlier_merged_csv(tmp_path / "triplicate_split_merged_tidy.csv")
+    result = analysis.analyze_merged_tidy_csv(merged_csv, tmp_path / "analysis")
+
+    endpoint = pd.read_csv(result.endpoint_csv)
+    outlier_summary = pd.read_csv(result.outlier_summary_csv)
+    excluded_timecourse = pd.read_csv(result.timecourse_excluding_outliers_summary_csv)
+
+    low_split = endpoint.loc[endpoint["well"] == "A1"].iloc[0]
+    low_split_neighbor = endpoint.loc[endpoint["well"] == "A2"].iloc[0]
+    high_split = endpoint.loc[endpoint["well"] == "B3"].iloc[0]
+    high_split_neighbor = endpoint.loc[endpoint["well"] == "B2"].iloc[0]
+    moderate_high = endpoint.loc[endpoint["well"] == "C3"].iloc[0]
+
+    assert bool(low_split["is_endpoint_outlier_candidate"])
+    assert bool(low_split["is_endpoint_outlier"])
+    assert low_split["outlier_candidate_reason"] == "triplicate_low_signal_split"
+    assert low_split["outlier_reason"] == "triplicate_low_signal_split"
+    assert not bool(low_split_neighbor["is_endpoint_outlier"])
+
+    assert bool(high_split["is_endpoint_outlier_candidate"])
+    assert bool(high_split["is_endpoint_outlier"])
+    assert high_split["outlier_candidate_reason"] == "triplicate_high_signal_split"
+    assert high_split["outlier_reason"] == "triplicate_high_signal_split"
+    assert not bool(high_split_neighbor["is_endpoint_outlier"])
+
+    assert not bool(moderate_high["is_endpoint_outlier_candidate"])
+    assert not bool(moderate_high["is_endpoint_outlier"])
+    assert result.outlier_count == 2
+    assert set(outlier_summary["well"]) == {"A1", "B3"}
+    assert set(outlier_summary["outlier_reason"]) == {
+        "triplicate_low_signal_split",
+        "triplicate_high_signal_split",
+    }
+
+    outlier_heatmap = pd.read_csv(
+        result.output_dir / "heatmaps_endpoint_outliers" / "488_509_endpoint_outlier_count.csv",
+        index_col=0,
+    )
+    assert outlier_heatmap.loc["A", "1"] == pytest.approx(1.0)
+    assert outlier_heatmap.loc["A", "2"] == pytest.approx(0.0)
+    assert outlier_heatmap.loc["B", "3"] == pytest.approx(1.0)
+    assert outlier_heatmap.loc["C", "3"] == pytest.approx(0.0)
+
+    low_split_excluded = excluded_timecourse.loc[
+        (excluded_timecourse["condition_id"] == "condition_001")
+        & (excluded_timecourse["time_seconds"] == 120.0)
+    ].iloc[0]
+    high_split_excluded = excluded_timecourse.loc[
+        (excluded_timecourse["condition_id"] == "condition_002")
+        & (excluded_timecourse["time_seconds"] == 120.0)
+    ].iloc[0]
+    moderate_excluded = excluded_timecourse.loc[
+        (excluded_timecourse["condition_id"] == "condition_003")
+        & (excluded_timecourse["time_seconds"] == 120.0)
+    ].iloc[0]
+    assert low_split_excluded["replicate_count"] == 2
+    assert low_split_excluded["mean_rfu"] == pytest.approx(np.mean([9546.0, 13092.0]))
+    assert high_split_excluded["replicate_count"] == 2
+    assert high_split_excluded["mean_rfu"] == pytest.approx(np.mean([665.0, 1978.0]))
+    assert moderate_excluded["replicate_count"] == 3
+    assert moderate_excluded["mean_rfu"] == pytest.approx(np.mean([1214.0, 1422.0, 2007.0]))
 
 
 def test_combined_timecourse_summaries_and_plots_exclude_final_outliers_only(tmp_path):
