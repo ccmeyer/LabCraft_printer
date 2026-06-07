@@ -8674,6 +8674,308 @@ class ReactionPreviewDialog(QDialog):
             pass
 
 
+class WellSelectionGridWidget(QWidget):
+    """Painted plate grid for selecting automatic-assignment wells."""
+
+    selection_changed = Signal()
+
+    def __init__(
+        self,
+        rows: int,
+        columns: int,
+        selected_wells: Sequence[str] | None = None,
+        disabled_wells: Sequence[str] | None = None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.rows = max(0, int(rows or 0))
+        self.columns = max(0, int(columns or 0))
+        self._cell_size = 26
+        self._header_w = 42
+        self._header_h = 28
+        self._selected: set[str] = set()
+        self._disabled: set[str] = set()
+        self._drag_anchor: str | None = None
+        self._drag_current: str | None = None
+        self._drag_button = None
+        self._drag_selecting: bool | None = None
+        self.setMouseTracking(True)
+        self.set_selected_wells(selected_wells or [], emit=False)
+        self.set_disabled_wells(disabled_wells or [])
+
+    def sizeHint(self):
+        return QtCore.QSize(
+            self._header_w + self.columns * self._cell_size + 8,
+            self._header_h + self.rows * self._cell_size + 8,
+        )
+
+    def minimumSizeHint(self):
+        return self.sizeHint()
+
+    def _all_well_ids(self) -> list[str]:
+        return [
+            f"{Well.index_to_row_label(row)}{col + 1}"
+            for row in range(self.rows)
+            for col in range(self.columns)
+        ]
+
+    def _normalize_ids(self, well_ids: Sequence[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw in well_ids or []:
+            try:
+                row_label, col_1 = Well.parse_well_id(str(raw).strip().upper())
+                row_idx = Well.row_label_to_index(row_label)
+                col_idx = int(col_1) - 1
+            except Exception:
+                continue
+            if not (0 <= row_idx < self.rows and 0 <= col_idx < self.columns):
+                continue
+            well_id = f"{row_label}{int(col_1)}"
+            if well_id not in seen:
+                seen.add(well_id)
+                normalized.append(well_id)
+        return normalized
+
+    def set_disabled_wells(self, well_ids: Sequence[str]):
+        self._disabled = set(self._normalize_ids(well_ids or []))
+        before = set(self._selected)
+        self._selected.difference_update(self._disabled)
+        self.updateGeometry()
+        self.update()
+        if self._selected != before:
+            self.selection_changed.emit()
+
+    def set_selected_wells(self, well_ids: Sequence[str], *, emit: bool = True):
+        normalized = self._normalize_ids(well_ids or [])
+        before = set(self._selected)
+        self._selected = {well_id for well_id in normalized if well_id not in self._disabled}
+        self.update()
+        if emit and self._selected != before:
+            self.selection_changed.emit()
+
+    def selected_well_ids(self) -> list[str]:
+        selected = set(self._selected)
+        return [well_id for well_id in self._all_well_ids() if well_id in selected]
+
+    def select_all(self):
+        self.set_selected_wells(
+            [well_id for well_id in self._all_well_ids() if well_id not in self._disabled]
+        )
+
+    def clear_selection(self):
+        self.set_selected_wells([])
+
+    def _rect_well_ids(self, start_well: str, end_well: str, *, include_disabled: bool = False) -> list[str]:
+        try:
+            start_row_label, start_col_1 = Well.parse_well_id(str(start_well).strip().upper())
+            end_row_label, end_col_1 = Well.parse_well_id(str(end_well).strip().upper())
+            start_row = Well.row_label_to_index(start_row_label)
+            end_row = Well.row_label_to_index(end_row_label)
+            start_col = int(start_col_1) - 1
+            end_col = int(end_col_1) - 1
+        except Exception:
+            return []
+
+        row_a, row_b = sorted((start_row, end_row))
+        col_a, col_b = sorted((start_col, end_col))
+        wells: list[str] = []
+        for row in range(max(0, row_a), min(self.rows - 1, row_b) + 1):
+            for col in range(max(0, col_a), min(self.columns - 1, col_b) + 1):
+                well_id = f"{Well.index_to_row_label(row)}{col + 1}"
+                if not include_disabled and well_id in self._disabled:
+                    continue
+                wells.append(well_id)
+        return wells
+
+    def drag_preview_well_ids(self) -> list[str]:
+        if self._drag_anchor is None or self._drag_current is None:
+            return []
+        return self._rect_well_ids(self._drag_anchor, self._drag_current)
+
+    def apply_rect_selection(self, start_well: str, end_well: str, selected: bool = True):
+        before = set(self._selected)
+        for well_id in self._rect_well_ids(start_well, end_well):
+            if selected:
+                self._selected.add(well_id)
+            else:
+                self._selected.discard(well_id)
+        self.update()
+        if self._selected != before:
+            self.selection_changed.emit()
+
+    def _cell_rect(self, row: int, col: int):
+        return QtCore.QRect(
+            self._header_w + col * self._cell_size,
+            self._header_h + row * self._cell_size,
+            self._cell_size - 3,
+            self._cell_size - 3,
+        )
+
+    def _well_id_at(self, pos) -> str | None:
+        point = pos.toPoint() if hasattr(pos, "toPoint") else pos
+        x = int(point.x()) - self._header_w
+        y = int(point.y()) - self._header_h
+        if x < 0 or y < 0:
+            return None
+        col = x // self._cell_size
+        row = y // self._cell_size
+        if not (0 <= row < self.rows and 0 <= col < self.columns):
+            return None
+        return f"{Well.index_to_row_label(row)}{col + 1}"
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.fillRect(self.rect(), QColor("#ffffff"))
+        painter.setFont(self.font())
+
+        header_pen = QPen(QColor("#555555"))
+        painter.setPen(header_pen)
+        for col in range(self.columns):
+            rect = QtCore.QRect(
+                self._header_w + col * self._cell_size,
+                0,
+                self._cell_size - 3,
+                self._header_h - 2,
+            )
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, str(col + 1))
+        for row in range(self.rows):
+            rect = QtCore.QRect(0, self._header_h + row * self._cell_size, self._header_w - 4, self._cell_size - 3)
+            painter.drawText(rect, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, Well.index_to_row_label(row))
+
+        border = QPen(QColor("#8a8f98"))
+        selected_border = QPen(QColor("#245f9f"))
+        disabled_pen = QPen(QColor("#b8bcc2"))
+        preview_ids = set(self.drag_preview_well_ids())
+        selecting_preview = self._drag_selecting is True
+        clearing_preview = self._drag_selecting is False
+        select_preview_pen = QPen(QColor("#1f6fb2"), 2)
+        clear_preview_pen = QPen(QColor("#b23a3a"), 2)
+        for row in range(self.rows):
+            for col in range(self.columns):
+                well_id = f"{Well.index_to_row_label(row)}{col + 1}"
+                rect = self._cell_rect(row, col)
+                if well_id in self._disabled:
+                    painter.setPen(disabled_pen)
+                    painter.setBrush(QBrush(QColor("#eceff3")))
+                elif well_id in preview_ids and selecting_preview:
+                    painter.setPen(select_preview_pen)
+                    painter.setBrush(QBrush(QColor("#b9dcf7")))
+                elif well_id in preview_ids and clearing_preview:
+                    painter.setPen(clear_preview_pen)
+                    painter.setBrush(QBrush(QColor("#f6c7c7")))
+                elif well_id in self._selected:
+                    painter.setPen(selected_border)
+                    painter.setBrush(QBrush(QColor("#6fa8dc")))
+                else:
+                    painter.setPen(border)
+                    painter.setBrush(QBrush(QColor("#ffffff")))
+                painter.drawEllipse(rect)
+
+    def mousePressEvent(self, event):
+        well_id = self._well_id_at(event.position())
+        if (
+            event.button() not in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton)
+            or well_id is None
+            or well_id in self._disabled
+        ):
+            return super().mousePressEvent(event)
+        self._drag_button = event.button()
+        self._drag_anchor = well_id
+        self._drag_current = well_id
+        self._drag_selecting = event.button() == Qt.MouseButton.LeftButton and well_id not in self._selected
+        self.update()
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._drag_anchor is None:
+            return super().mouseMoveEvent(event)
+        well_id = self._well_id_at(event.position())
+        if well_id is not None and well_id != self._drag_current:
+            self._drag_current = well_id
+            self.update()
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if self._drag_anchor is None:
+            return super().mouseReleaseEvent(event)
+        well_id = self._well_id_at(event.position()) or self._drag_current or self._drag_anchor
+        anchor = self._drag_anchor
+        selected = self._drag_selecting
+        self._drag_anchor = None
+        self._drag_current = None
+        self._drag_button = None
+        self._drag_selecting = None
+        self.update()
+
+        if selected is not None:
+            self.apply_rect_selection(anchor, well_id, selected=selected)
+        event.accept()
+
+
+class WellSelectionDialog(QDialog):
+    def __init__(
+        self,
+        plate_name: str,
+        rows: int,
+        columns: int,
+        selected_wells: Sequence[str] | None = None,
+        disabled_wells: Sequence[str] | None = None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Printable Wells")
+        self.grid = WellSelectionGridWidget(
+            rows,
+            columns,
+            selected_wells=selected_wells or [],
+            disabled_wells=disabled_wells or [],
+            parent=self,
+        )
+
+        root = QVBoxLayout(self)
+        title = QLabel(f"Plate: {plate_name}")
+        title.setStyleSheet("font-weight:600;")
+        root.addWidget(title)
+
+        self.summary_lbl = QLabel("")
+        root.addWidget(self.summary_lbl)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(False)
+        scroll.setWidget(self.grid)
+        scroll.setMinimumSize(min(760, self.grid.sizeHint().width() + 24), min(520, self.grid.sizeHint().height() + 24))
+        root.addWidget(scroll, stretch=1)
+
+        buttons = QHBoxLayout()
+        self.all_btn = QPushButton("All")
+        self.clear_btn = QPushButton("Clear")
+        buttons.addWidget(self.all_btn)
+        buttons.addWidget(self.clear_btn)
+        buttons.addStretch(1)
+        self.ok_btn = QPushButton("OK")
+        self.cancel_btn = QPushButton("Cancel")
+        buttons.addWidget(self.ok_btn)
+        buttons.addWidget(self.cancel_btn)
+        root.addLayout(buttons)
+
+        self.all_btn.clicked.connect(self.grid.select_all)
+        self.clear_btn.clicked.connect(self.grid.clear_selection)
+        self.ok_btn.clicked.connect(self.accept)
+        self.cancel_btn.clicked.connect(self.reject)
+        self.grid.selection_changed.connect(self._update_summary)
+        self._update_summary()
+
+    def _update_summary(self):
+        count = len(self.grid.selected_well_ids())
+        self.summary_lbl.setText(f"Selected wells: {count}")
+        self.ok_btn.setEnabled(count > 0)
+
+    def selected_well_ids(self) -> list[str]:
+        return self.grid.selected_well_ids()
+
+
 class ExperimentDesignDialog(QDialog):
     """
     UI for composing reagents (additives and choice groups), optimizing stock solutions,
@@ -8904,16 +9206,16 @@ class ExperimentDesignDialog(QDialog):
         self.reduction_spin.setEnabled(self.subset_chk.isChecked())
         form.addRow(QLabel("Reduction factor"), self.reduction_spin)
 
-        # Start column/row
-        self.start_col_spin = QSpinBox()
+        # Hidden legacy start-offset controls kept for old designs/tests.
+        self.start_col_spin = QSpinBox(self)
         self.start_col_spin.setMinimum(0); self.start_col_spin.setMaximum(999)
         self.start_col_spin.setValue(int(self.model.metadata.get("start_col", 0)))
-        form.addRow(QLabel("Start column (0-based)"), self.start_col_spin)
+        self.start_col_spin.setVisible(False)
 
-        self.start_row_spin = QSpinBox()
+        self.start_row_spin = QSpinBox(self)
         self.start_row_spin.setMinimum(0); self.start_row_spin.setMaximum(999)
         self.start_row_spin.setValue(int(self.model.metadata.get("start_row", 0)))
-        form.addRow(QLabel("Start row (0-based)"), self.start_row_spin)
+        self.start_row_spin.setVisible(False)
 
         # Plate format (designer-owned source of truth)
         self.plate_format_combo = QComboBox()
@@ -8930,6 +9232,17 @@ class ExperimentDesignDialog(QDialog):
             if idx >= 0:
                 self.plate_format_combo.setCurrentIndex(idx)
         form.addRow(QLabel("Plate format"), self.plate_format_combo)
+
+        self.well_selection_btn = QPushButton("Printable Wells...")
+        self.well_selection_btn.clicked.connect(self._on_choose_printable_wells)
+        self.well_selection_summary_lbl = QLabel("")
+        self.well_selection_summary_lbl.setWordWrap(True)
+        well_selection_row = QWidget()
+        well_selection_layout = QHBoxLayout(well_selection_row)
+        well_selection_layout.setContentsMargins(0, 0, 0, 0)
+        well_selection_layout.addWidget(self.well_selection_btn)
+        well_selection_layout.addWidget(self.well_selection_summary_lbl, stretch=1)
+        form.addRow(QLabel("Printable Wells"), well_selection_row)
 
         # Add the form to the left-hand column
         controls_col.addLayout(form)
@@ -9030,7 +9343,7 @@ class ExperimentDesignDialog(QDialog):
         self.fill_name_edit.textChanged.connect(self._schedule_auto_update)
         self.fill_dv_spin.valueChanged.connect(self._schedule_auto_update)
         self.fill_mode_combo.currentIndexChanged.connect(self._on_fill_printing_mode_changed)
-        self.plate_format_combo.currentIndexChanged.connect(self._schedule_auto_update)
+        self.plate_format_combo.currentIndexChanged.connect(self._on_plate_format_changed)
 
         # ---- Model hooks & initial render ----
         self.model.stock_updated.connect(self._refresh_stock_table)
@@ -9038,6 +9351,7 @@ class ExperimentDesignDialog(QDialog):
 
         self._load_factors_into_table()
         self._refresh_stock_table()
+        self._update_well_selection_summary()
         self._update_summary_labels(initial=True)
         self._update_unique_conditions_button_label()
         self._refresh_all_lock_states()
@@ -9851,6 +10165,7 @@ class ExperimentDesignDialog(QDialog):
             getattr(self, "preview_reactions_btn", None),
             getattr(self, "export_reaction_preview_btn", None),
             getattr(self, "add_reagent_btn", None),
+            getattr(self, "well_selection_btn", None),
             getattr(self, "auto_update_chk", None),
             getattr(self, "new_btn", None),
             getattr(self, "load_btn", None),
@@ -10355,6 +10670,9 @@ class ExperimentDesignDialog(QDialog):
             self.start_row_spin.setEnabled(not active)
         if hasattr(self, "plate_format_combo") and self.plate_format_combo is not None:
             self.plate_format_combo.setEnabled(not active)
+        if hasattr(self, "well_selection_btn") and self.well_selection_btn is not None:
+            self.well_selection_btn.setEnabled(not active)
+        self._update_well_selection_summary()
         if hasattr(self, "unique_conditions_btn") and self.unique_conditions_btn is not None:
             self.unique_conditions_btn.setEnabled(not active)
         preview_enabled = (not active) or self._can_reuse_current_generated_design()
@@ -10401,6 +10719,7 @@ class ExperimentDesignDialog(QDialog):
             "start_col_spin",
             "start_row_spin",
             "plate_format_combo",
+            "well_selection_btn",
         ]
         for attr_name in mutating_controls:
             widget = getattr(self, attr_name, None)
@@ -10452,6 +10771,7 @@ class ExperimentDesignDialog(QDialog):
             "reduction_spin",
             "start_col_spin",
             "start_row_spin",
+            "well_selection_btn",
         ]
         for attr_name in baseline_controls:
             widget = getattr(self, attr_name, None)
@@ -10543,6 +10863,7 @@ class ExperimentDesignDialog(QDialog):
             "start_col_spin",
             "start_row_spin",
             "plate_format_combo",
+            "well_selection_btn",
         ]
         for attr_name in mutating_controls:
             widget = getattr(self, attr_name, None)
@@ -10590,6 +10911,7 @@ class ExperimentDesignDialog(QDialog):
             "reduction_spin",
             "start_col_spin",
             "start_row_spin",
+            "well_selection_btn",
         ]
         for attr_name in baseline_controls:
             widget = getattr(self, attr_name, None)
@@ -10709,6 +11031,7 @@ class ExperimentDesignDialog(QDialog):
             "start_col_spin",
             "start_row_spin",
             "plate_format_combo",
+            "well_selection_btn",
         ]
         for attr_name in mutating_controls:
             widget = getattr(self, attr_name, None)
@@ -11267,6 +11590,191 @@ class ExperimentDesignDialog(QDialog):
         )
         return ok
 
+    def _well_plate_for_design(self):
+        return getattr(getattr(self.main_window, "model", None), "well_plate", None)
+
+    def _selected_plate_name_for_design(self) -> str:
+        combo = getattr(self, "plate_format_combo", None)
+        if combo is not None:
+            text = combo.currentText().strip()
+            if text:
+                return text
+        wp = self._well_plate_for_design()
+        if wp is not None and hasattr(wp, "get_current_plate_name"):
+            try:
+                return str(wp.get_current_plate_name())
+            except Exception:
+                pass
+        return "unknown"
+
+    def _plate_dimensions_for_design(self, plate_name: str | None = None) -> tuple[int, int, str]:
+        wp = self._well_plate_for_design()
+        if wp is None:
+            return 0, 0, plate_name or "unknown"
+        target_name = plate_name or self._selected_plate_name_for_design()
+        plate = wp.get_plate_data_by_name(target_name)
+        return int(plate.get("rows", 0)), int(plate.get("columns", 0)), str(plate.get("name", target_name))
+
+    def _well_ids_for_plate(self, plate_name: str | None = None) -> list[str]:
+        rows, cols, _plate_name = self._plate_dimensions_for_design(plate_name)
+        return [
+            f"{Well.index_to_row_label(row)}{col + 1}"
+            for row in range(rows)
+            for col in range(cols)
+        ]
+
+    def _excluded_ids_for_plate(self, plate_name: str | None = None) -> set[str]:
+        wp = self._well_plate_for_design()
+        if wp is None:
+            return set()
+        rows, cols, _plate_name = self._plate_dimensions_for_design(plate_name)
+        normalizer = getattr(wp, "_normalize_excluded_wells_for_plate", None)
+        if callable(normalizer):
+            return set(normalizer(rows, cols, excluded_wells=getattr(wp, "excluded_wells", set())))
+
+        out: set[str] = set()
+        for item in set(getattr(wp, "excluded_wells", set()) or set()):
+            raw = item.well_id if isinstance(item, Well) else item
+            try:
+                row_label, col_1 = Well.parse_well_id(str(raw).strip().upper())
+                row_idx = Well.row_label_to_index(row_label)
+                col_idx = int(col_1) - 1
+            except Exception:
+                continue
+            if 0 <= row_idx < rows and 0 <= col_idx < cols:
+                out.add(f"{row_label}{int(col_1)}")
+        return out
+
+    def _legacy_start_offset_wells_for_plate(self, plate_name: str | None = None) -> list[str]:
+        rows, cols, _plate_name = self._plate_dimensions_for_design(plate_name)
+        row_spin = getattr(self, "start_row_spin", None)
+        col_spin = getattr(self, "start_col_spin", None)
+        start_row = int(row_spin.value()) if row_spin is not None else 0
+        start_col = int(col_spin.value()) if col_spin is not None else 0
+        excluded = self._excluded_ids_for_plate(plate_name)
+        if start_row < 0 or start_col < 0 or start_row >= rows or start_col >= cols:
+            return []
+        return [
+            f"{Well.index_to_row_label(row)}{col + 1}"
+            for row in range(start_row, rows)
+            for col in range(start_col, cols)
+            if f"{Well.index_to_row_label(row)}{col + 1}" not in excluded
+        ]
+
+    def _current_selection_for_picker(self, plate_name: str | None = None) -> list[str]:
+        wp = self._well_plate_for_design()
+        if wp is None:
+            return []
+        target_name = plate_name or self._selected_plate_name_for_design()
+        all_ids = set(self._well_ids_for_plate(target_name))
+        excluded = self._excluded_ids_for_plate(target_name)
+        included_getter = getattr(self.model, "get_auto_assignment_included_wells", None)
+        included_wells = included_getter() if callable(included_getter) else None
+        if included_wells is None:
+            return self._legacy_start_offset_wells_for_plate(target_name)
+
+        normalizer = getattr(wp, "normalize_included_wells", None)
+        if callable(normalizer):
+            try:
+                normalized = normalizer(included_wells, plate_name=target_name)
+            except ValueError:
+                normalized = []
+                seen: set[str] = set()
+                for raw in included_wells or []:
+                    try:
+                        row_label, col_1 = Well.parse_well_id(str(raw).strip().upper())
+                        well_id = f"{row_label}{int(col_1)}"
+                    except Exception:
+                        continue
+                    if well_id in all_ids and well_id not in seen:
+                        seen.add(well_id)
+                        normalized.append(well_id)
+        else:
+            normalized = list(included_wells or [])
+        return [
+            well_id
+            for well_id in normalized
+            if well_id in all_ids and well_id not in excluded
+        ]
+
+    def _well_selection_summary_text(self) -> str:
+        if self._manual_assignments_active():
+            return "Explicit uploaded wells control layout."
+
+        try:
+            available, _plate_name = self._available_wells_for_selected_plate()
+        except Exception:
+            return "Printable wells unavailable."
+
+        included_getter = getattr(self.model, "get_auto_assignment_included_wells", None)
+        included_wells = included_getter() if callable(included_getter) else None
+        if included_wells is not None:
+            return f"{available} printable well(s) selected."
+
+        try:
+            non_excluded_total = len(self._well_ids_for_plate()) - len(self._excluded_ids_for_plate())
+        except Exception:
+            non_excluded_total = None
+        if non_excluded_total is not None and available == non_excluded_total:
+            return f"All non-excluded wells ({available})."
+        return f"Legacy start offset ({available} printable well(s))."
+
+    def _update_well_selection_summary(self):
+        label = getattr(self, "well_selection_summary_lbl", None)
+        if label is not None:
+            label.setText(self._well_selection_summary_text())
+
+    def _on_plate_format_changed(self):
+        self._update_well_selection_summary()
+        self._schedule_auto_update()
+
+    def _on_choose_printable_wells(self):
+        if self._manual_assignments_active():
+            self._set_status("Printable wells are disabled because explicit uploaded wells control layout.")
+            return
+        if getattr(self, "_progress_protected", False):
+            self._set_status(getattr(self, "_progress_lock_status_message", "Design is view-only."))
+            return
+        if getattr(self, "_editing_locked_by_gripper", False):
+            self._set_status("Design is view-only while a printer head is loaded in the gripper.")
+            return
+
+        wp = self._well_plate_for_design()
+        if wp is None:
+            self._set_status("No plate format is available for printable well selection.")
+            return
+
+        try:
+            rows, cols, plate_name = self._plate_dimensions_for_design()
+        except Exception as e:
+            self._set_status(f"Could not open printable wells: {e}")
+            return
+
+        dialog = WellSelectionDialog(
+            plate_name,
+            rows,
+            cols,
+            selected_wells=self._current_selection_for_picker(plate_name),
+            disabled_wells=sorted(self._excluded_ids_for_plate(plate_name)),
+            parent=self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        selected_ids = dialog.selected_well_ids()
+        setter = getattr(self.model, "set_well_selection", None)
+        if callable(setter):
+            setter(selected_ids)
+        else:
+            self.model.metadata["well_selection"] = {
+                "mode": "custom",
+                "included_wells": selected_ids,
+            }
+        self._update_well_selection_summary()
+        self._update_summary_labels()
+        self._schedule_auto_update()
+        self._refresh_all_lock_states()
+
     def _available_wells_for_selected_plate(self) -> tuple[int, str]:
         """
         Compute assignable wells for the selected plate using the same gating inputs
@@ -11499,6 +12007,7 @@ class ExperimentDesignDialog(QDialog):
         # Update summary when model emits
         self._update_summary_labels(total_reactions=total_reactions, worst_nonfill_nL=worst_nonfill_nL)
         self._validate_plate_capacity(show_dialog=False)
+        self._update_well_selection_summary()
 
     def _update_summary_labels(self, initial: bool = False, total_reactions: int | None = None, worst_nonfill_nL: float | None = None):
         if total_reactions is None:
@@ -11523,6 +12032,7 @@ class ExperimentDesignDialog(QDialog):
             f"Available wells = {available_text}  |  "
             f"Worst non-fill volume = {self._fmt_num(worst_nonfill_nL)} nL"
         )
+        self._update_well_selection_summary()
     
     def _sync_controls_from_model(self):
         md = self.model.metadata
@@ -11600,6 +12110,7 @@ class ExperimentDesignDialog(QDialog):
                     self.plate_format_combo.setCurrentIndex(idx)
 
         self._recompute_silent()
+        self._update_well_selection_summary()
         self._apply_manual_assignment_lock_state()
 
     def _ensure_experiment_dir(self):
@@ -11658,6 +12169,10 @@ class ExperimentDesignDialog(QDialog):
                     "reduction_factor": 1,
                     "start_row": 0,
                     "start_col": 0,
+                    "well_selection": {
+                        "mode": "start_offset",
+                        "included_wells": None,
+                    },
                 }
                 # factors + caches
                 self.model.factors = []
@@ -11694,6 +12209,7 @@ class ExperimentDesignDialog(QDialog):
         self._sync_controls_from_model()
         self._refresh_stock_table()
         self._update_summary_labels()
+        self._update_well_selection_summary()
         self._update_unique_conditions_button_label()
         self._refresh_all_prior_availability()
 

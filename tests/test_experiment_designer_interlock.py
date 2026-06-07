@@ -45,6 +45,7 @@ def _build_dialog_stub(gripper_loaded: bool, *, manual_assignments: bool = False
     dialog.reduction_spin = QSpinBox()
     dialog.start_col_spin = QSpinBox()
     dialog.start_row_spin = QSpinBox()
+    dialog.well_selection_btn = QPushButton()
     dialog.plate_format_combo = QComboBox()
     dialog.plate_format_combo.addItem("shallow-384_well_plate")
 
@@ -87,6 +88,7 @@ def _assert_mutating_controls_disabled(dialog):
         dialog.random_seed_spin,
         dialog.start_col_spin,
         dialog.start_row_spin,
+        dialog.well_selection_btn,
         dialog.subset_chk,
         dialog.reduction_spin,
         dialog.plate_format_combo,
@@ -254,6 +256,7 @@ def test_experiment_designer_lock_precedence_matrix(
     assert dialog.randomize_chk.isEnabled() is (not manual_assignments)
     assert dialog.start_col_spin.isEnabled() is (not manual_assignments)
     assert dialog.start_row_spin.isEnabled() is (not manual_assignments)
+    assert dialog.well_selection_btn.isEnabled() is (not manual_assignments)
     assert dialog.random_seed_spin.isEnabled() is (not manual_assignments)
 
     # Unaffected mutating controls remain enabled without gripper lock

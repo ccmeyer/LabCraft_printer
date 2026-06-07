@@ -285,6 +285,7 @@ def _install_lock_widgets(dialog):
     dialog.reduction_spin = QSpinBox()
     dialog.start_col_spin = QSpinBox()
     dialog.start_row_spin = QSpinBox()
+    dialog.well_selection_btn = QPushButton()
     dialog.plate_format_combo = QComboBox()
     dialog._iter_reagent_widgets = lambda: []
     dialog.status_lbl = QLabel("")
@@ -299,10 +300,12 @@ def test_preview_export_buttons_participate_in_busy_and_lock_states(qapp):
     busy_widgets = ExperimentDesignDialog._design_busy_widgets(dialog)
     assert dialog.preview_reactions_btn in busy_widgets
     assert dialog.export_reaction_preview_btn in busy_widgets
+    assert dialog.well_selection_btn in busy_widgets
 
     dialog._can_reuse_current_generated_design = lambda: False
     ExperimentDesignDialog._apply_manual_assignment_lock_state(dialog)
     assert dialog.unique_conditions_btn.isEnabled() is False
+    assert dialog.well_selection_btn.isEnabled() is False
     assert dialog.preview_reactions_btn.isEnabled() is False
     assert dialog.export_reaction_preview_btn.isEnabled() is False
 
@@ -311,6 +314,7 @@ def test_preview_export_buttons_participate_in_busy_and_lock_states(qapp):
     dialog._can_reuse_current_generated_design = lambda: True
     ExperimentDesignDialog._apply_manual_assignment_lock_state(dialog)
     assert dialog.unique_conditions_btn.isEnabled() is False
+    assert dialog.well_selection_btn.isEnabled() is False
     assert dialog.preview_reactions_btn.isEnabled() is True
     assert dialog.export_reaction_preview_btn.isEnabled() is True
 
@@ -318,6 +322,7 @@ def test_preview_export_buttons_participate_in_busy_and_lock_states(qapp):
     dialog._progress_lock_status_message = "locked"
     ExperimentDesignDialog._apply_progress_edit_lock_state(dialog)
     assert dialog.preview_reactions_btn.isEnabled() is False
+    assert dialog.well_selection_btn.isEnabled() is False
     assert dialog.export_reaction_preview_btn.isEnabled() is False
 
     dialog.preview_reactions_btn.setEnabled(True)
@@ -329,6 +334,7 @@ def test_preview_export_buttons_participate_in_busy_and_lock_states(qapp):
     )
     ExperimentDesignDialog._apply_gripper_edit_lock_state(dialog)
     assert dialog.preview_reactions_btn.isEnabled() is False
+    assert dialog.well_selection_btn.isEnabled() is False
     assert dialog.export_reaction_preview_btn.isEnabled() is False
 
 
