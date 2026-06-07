@@ -77,6 +77,8 @@ Prefer using the project interpreter/tools and repo scripts.
 - On this Windows checkout, use the repo virtualenv directly:
   - `.\env\Scripts\python.exe -m pytest -q` (primary)
   - `.\env\Scripts\python.exe -m pytest` (for full output)
+- Slow, insulated offline analysis-pipeline tests are skipped by default. Run them only when analysis-pipeline code changes or when explicitly requested:
+  - `.\env\Scripts\python.exe -m pytest -q --run-analysis-pipeline tests\test_plate_reader_analysis.py`
 - Do not use `py -m pytest` in this workspace unless you first verify that the Windows Python launcher can see an installed interpreter; in agent shells it often fails with `No installed Python found!`.
 - Pytest's optional cache provider is disabled in `pytest.ini` to avoid noisy `.pytest_cache` permission warnings in OneDrive/sandboxed agent runs. This does not affect normal full-suite validation.
 

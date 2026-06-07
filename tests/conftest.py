@@ -124,6 +124,28 @@ def _ensure_serial_stub() -> None:
 
 _ensure_serial_stub()
 
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--run-analysis-pipeline",
+        action="store_true",
+        default=False,
+        help="Run slow, insulated offline analysis-pipeline tests.",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    if config.getoption("--run-analysis-pipeline"):
+        return
+
+    skip_analysis = pytest.mark.skip(
+        reason="analysis pipeline tests are skipped by default; pass --run-analysis-pipeline to run them"
+    )
+    for item in items:
+        if item.get_closest_marker("analysis_pipeline"):
+            item.add_marker(skip_analysis)
+
+
 if "numpy" in sys.modules:
     _np = sys.modules["numpy"]
     if not hasattr(_np, "array"):

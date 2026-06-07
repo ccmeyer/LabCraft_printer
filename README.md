@@ -64,6 +64,11 @@ Avoid `py -m pytest -q` here unless the Windows Python launcher has been verifie
 The full Python suite commonly takes 3-8 minutes on Windows and in agent sandboxes.
 Automation should use a process timeout of at least 15 minutes (`900000` ms) to avoid killing a valid run and paying collection/startup cost again.
 Pytest is configured in `pytest.ini` to collect from `tests/`, and its optional cache provider is disabled to avoid `.pytest_cache` permission warnings in OneDrive/sandboxed runs. That only disables pytest cache conveniences such as `--last-failed`; it does not affect normal validation.
+Slow, insulated offline analysis-pipeline tests are skipped by default. Run them when changing the plate-reader analysis pipeline:
+
+```bash
+.\env\Scripts\python.exe -m pytest -q --run-analysis-pipeline tests\test_plate_reader_analysis.py
+```
 
 ## Droplet Imager Optics Calibration
 

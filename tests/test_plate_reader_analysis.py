@@ -9,6 +9,8 @@ import pytest
 from tools.data_analysis import analyze_plate_reader as cli
 from tools.data_analysis import plate_reader_analysis as analysis
 
+pytestmark = pytest.mark.analysis_pipeline
+
 
 def _merged_rows_for_well(
     well: str,
