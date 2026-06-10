@@ -73,6 +73,8 @@ PRINTING_MODE_STREAM = "stream"
 PRINTING_MODE_CHOICES = (PRINTING_MODE_DROPLET, PRINTING_MODE_STREAM)
 DROPLET_DEFAULT_EJECTION_VOLUME_NL = 9.0
 STREAM_DEFAULT_EJECTION_VOLUME_NL = 60.0
+EJECTION_VOLUME_HARD_MIN_NL = 1.0
+EJECTION_VOLUME_HARD_MAX_NL = 250.0
 
 
 def normalize_printing_mode(value, *, fallback=PRINTING_MODE_DROPLET) -> str:
@@ -102,10 +104,7 @@ def printing_mode_default_ejection_volume_nl(mode: str) -> float:
 
 
 def printing_mode_allowed_range_nl(mode: str) -> tuple[float, float]:
-    mode = normalize_printing_mode(mode)
-    if mode == PRINTING_MODE_STREAM:
-        return (40.0, 120.0)
-    return (5.0, 25.0)
+    return (EJECTION_VOLUME_HARD_MIN_NL, EJECTION_VOLUME_HARD_MAX_NL)
 
 
 def validate_ejection_volume_for_mode(volume_nl, mode: str, *, label: str = "Ejection volume") -> float:
@@ -116,7 +115,7 @@ def validate_ejection_volume_for_mode(volume_nl, mode: str, *, label: str = "Eje
 
     mode = normalize_printing_mode(mode)
     lo, hi = printing_mode_allowed_range_nl(mode)
-    if volume < lo or volume > hi:
+    if not math.isfinite(volume) or volume < lo or volume > hi:
         raise ValueError(
             f"{label} {volume:.3f} nL is outside the allowed range for {mode} mode "
             f"({lo:.1f}-{hi:.1f} nL)."

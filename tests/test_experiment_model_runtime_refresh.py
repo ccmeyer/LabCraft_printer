@@ -4,7 +4,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from Model import ExperimentModel
+from Model import (
+    EJECTION_VOLUME_HARD_MAX_NL,
+    EJECTION_VOLUME_HARD_MIN_NL,
+    ExperimentModel,
+    printing_mode_allowed_range_nl,
+)
 
 
 class _SignalRecorder:
@@ -126,19 +131,32 @@ def test_apply_fill_droplet_volume_refreshes_runtime_after_apply():
     assert result["saved_experiment"] is False
 
 
-def test_apply_droplet_volume_for_option_rejects_volume_outside_printing_mode_range():
+def test_printing_mode_volume_range_uses_shared_hard_envelope():
+    assert EJECTION_VOLUME_HARD_MIN_NL == pytest.approx(1.0)
+    assert EJECTION_VOLUME_HARD_MAX_NL == pytest.approx(250.0)
+    assert printing_mode_allowed_range_nl("droplet") == (
+        EJECTION_VOLUME_HARD_MIN_NL,
+        EJECTION_VOLUME_HARD_MAX_NL,
+    )
+    assert printing_mode_allowed_range_nl("stream") == (
+        EJECTION_VOLUME_HARD_MIN_NL,
+        EJECTION_VOLUME_HARD_MAX_NL,
+    )
+
+
+def _build_apply_droplet_volume_model(*, printing_mode="droplet", current_volume=10.0):
     option = SimpleNamespace(
         name="glycerol",
-        droplet_nL=10.0,
+        droplet_nL=float(current_volume),
         units="mM",
         targets=[0.5],
         starting_conc=0.0,
-        printing_mode="droplet",
+        printing_mode=printing_mode,
     )
     factor = SimpleNamespace(name="glycerol", kind="additive", options=[option])
     stock = {
         "stock_concentration": 10.0,
-        "droplet_volume_nL": 10.0,
+        "droplet_volume_nL": float(current_volume),
         "units": "mM",
         "droplets_per_target": {},
     }
@@ -161,14 +179,79 @@ def test_apply_droplet_volume_for_option_rejects_volume_outside_printing_mode_ra
     em.apply_droplet_volume_for_option = (
         ExperimentModel.apply_droplet_volume_for_option.__get__(em, ExperimentModel)
     )
-
-    with pytest.raises(ValueError, match="outside the allowed range for droplet mode"):
-        em.apply_droplet_volume_for_option("glycerol", None, 60.0, write_keys_if_assigned=False)
+    return em, option
 
 
-def test_apply_fill_droplet_volume_rejects_volume_outside_fill_printing_mode_range():
+@pytest.mark.parametrize(
+    ("new_volume", "printing_mode"),
+    [
+        (60.0, "droplet"),
+        (10.0, "stream"),
+        (30.0, "stream"),
+        (30.0, "droplet"),
+    ],
+)
+def test_apply_droplet_volume_for_option_accepts_explicit_mode_inside_hard_envelope(
+    new_volume,
+    printing_mode,
+):
+    em, option = _build_apply_droplet_volume_model(printing_mode=printing_mode)
+
+    result = em.apply_droplet_volume_for_option(
+        "glycerol",
+        None,
+        new_volume,
+        write_keys_if_assigned=False,
+        printing_mode=printing_mode,
+    )
+
+    assert option.droplet_nL == pytest.approx(new_volume)
+    assert option.printing_mode == printing_mode
+    assert result["new_droplet_nL"] == pytest.approx(new_volume)
+    assert result["applied_printing_mode"] == printing_mode
+
+
+@pytest.mark.parametrize(
+    ("new_volume", "printing_mode", "match"),
+    [
+        ("not-a-number", "droplet", "must be numeric"),
+        (0.0, "droplet", "outside the allowed range for droplet mode"),
+        (-1.0, "stream", "outside the allowed range for stream mode"),
+        (float("inf"), "stream", "outside the allowed range for stream mode"),
+        (250.1, "stream", "outside the allowed range for stream mode"),
+    ],
+)
+def test_apply_droplet_volume_for_option_rejects_values_outside_hard_envelope(
+    new_volume,
+    printing_mode,
+    match,
+):
+    em, _option = _build_apply_droplet_volume_model(printing_mode=printing_mode)
+
+    with pytest.raises(ValueError, match=match):
+        em.apply_droplet_volume_for_option(
+            "glycerol",
+            None,
+            new_volume,
+            write_keys_if_assigned=False,
+            printing_mode=printing_mode,
+        )
+
+
+@pytest.mark.parametrize(
+    ("new_volume", "printing_mode"),
+    [
+        (10.0, "stream"),
+        (30.0, "stream"),
+        (30.0, "droplet"),
+    ],
+)
+def test_apply_fill_droplet_volume_accepts_explicit_mode_inside_hard_envelope(
+    new_volume,
+    printing_mode,
+):
     em = SimpleNamespace(
-        metadata={"fill_droplet_volume_nL": 60.0, "fill_printing_mode": "stream"},
+        metadata={"fill_droplet_volume_nL": 12.0, "fill_printing_mode": printing_mode},
         preview_fill_requantized=lambda new_fill: {
             "total_drops_old": 50,
             "total_drops_new": 42,
@@ -182,8 +265,54 @@ def test_apply_fill_droplet_volume_rejects_volume_outside_fill_printing_mode_ran
         ExperimentModel.apply_fill_droplet_volume.__get__(em, ExperimentModel)
     )
 
-    with pytest.raises(ValueError, match="outside the allowed range for stream mode"):
-        em.apply_fill_droplet_volume(10.0, write_keys_if_assigned=True)
+    result = em.apply_fill_droplet_volume(
+        new_volume,
+        write_keys_if_assigned=True,
+        printing_mode=printing_mode,
+    )
+
+    assert em.metadata["fill_droplet_volume_nL"] == pytest.approx(new_volume)
+    assert em.metadata["fill_printing_mode"] == printing_mode
+    assert result["new_fill_nL"] == pytest.approx(new_volume)
+    assert result["applied_printing_mode"] == printing_mode
+
+
+@pytest.mark.parametrize(
+    ("new_volume", "printing_mode", "match"),
+    [
+        ("not-a-number", "droplet", "must be numeric"),
+        (0.0, "droplet", "outside the allowed range for droplet mode"),
+        (-1.0, "stream", "outside the allowed range for stream mode"),
+        (float("inf"), "stream", "outside the allowed range for stream mode"),
+        (250.1, "stream", "outside the allowed range for stream mode"),
+    ],
+)
+def test_apply_fill_droplet_volume_rejects_values_outside_hard_envelope(
+    new_volume,
+    printing_mode,
+    match,
+):
+    em = SimpleNamespace(
+        metadata={"fill_droplet_volume_nL": 60.0, "fill_printing_mode": printing_mode},
+        preview_fill_requantized=lambda new_fill: {
+            "total_drops_old": 50,
+            "total_drops_new": 42,
+            "total_drops_delta": -8,
+        },
+        generate_experiment=lambda: None,
+        _refresh_runtime_after_plan_change=lambda **kwargs: True,
+        unsaved_changes=False,
+    )
+    em.apply_fill_droplet_volume = (
+        ExperimentModel.apply_fill_droplet_volume.__get__(em, ExperimentModel)
+    )
+
+    with pytest.raises(ValueError, match=match):
+        em.apply_fill_droplet_volume(
+            new_volume,
+            write_keys_if_assigned=True,
+            printing_mode=printing_mode,
+        )
 
 
 def _configure_calibrated_volume_design(em):
@@ -256,13 +385,14 @@ def test_apply_droplet_volume_for_option_persists_effective_and_intended_volume(
     result = em.apply_droplet_volume_for_option(
         "glycerol",
         None,
-        15.0,
+        30.0,
         write_keys_if_assigned=False,
     )
 
     payload = json.loads(Path(em.experiment_file_path).read_text(encoding="utf-8"))
     option = _first_option_payload(payload, "glycerol")
-    assert option["droplet_nL"] == 15.0
+    assert option["droplet_nL"] == 30.0
+    assert option["printing_mode"] == "droplet"
     assert option["intended_droplet_nL"] == 10.0
     assert option["forced_stock_conc"] == result["stock_concentration"]
     assert result["saved_experiment"] is True
@@ -281,24 +411,24 @@ def test_apply_droplet_volume_for_option_can_switch_printing_mode(
     result = em.apply_droplet_volume_for_option(
         "glycerol",
         None,
-        60.0,
+        30.0,
         write_keys_if_assigned=False,
         printing_mode="stream",
         applied_calibration={
             "printer_head": head,
-            "measured_volume_nL": 60.0,
+            "measured_volume_nL": 30.0,
             "pw_us": 1800,
             "pressure_psi": 1.80,
             "run_id": "stream-run",
             "phase": "stream",
             "timestamp": "2026-03-18T10:00:00Z",
-            "source_row_fingerprint": ("stream-run", "stream", "2026-03-18T10:00:00Z", 1800, 1.80, 60.0),
+            "source_row_fingerprint": ("stream-run", "stream", "2026-03-18T10:00:00Z", 1800, 1.80, 30.0),
         },
     )
 
     payload = json.loads(Path(em.experiment_file_path).read_text(encoding="utf-8"))
     option = _first_option_payload(payload, "glycerol")
-    assert option["droplet_nL"] == 60.0
+    assert option["droplet_nL"] == 30.0
     assert option["printing_mode"] == "stream"
     assert option["intended_droplet_nL"] == 10.0
     assert option["intended_printing_mode"] == "droplet"
@@ -315,7 +445,7 @@ def test_apply_droplet_volume_for_option_can_switch_printing_mode(
     reloaded = reloaded_model.experiment_model
     reloaded.load_experiment(em.experiment_file_path, em.experiment_dir_path)
     reloaded_option = reloaded.factors[0].options[0]
-    assert reloaded_option.droplet_nL == 60.0
+    assert reloaded_option.droplet_nL == 30.0
     assert reloaded_option.printing_mode == "stream"
     assert reloaded_option.intended_droplet_nL == 10.0
     assert reloaded_option.intended_printing_mode == "droplet"
@@ -334,10 +464,11 @@ def test_apply_fill_droplet_volume_persists_effective_and_intended_volume(
     em = model.experiment_model
     _configure_calibrated_volume_design(em)
 
-    result = em.apply_fill_droplet_volume(12.0, write_keys_if_assigned=False)
+    result = em.apply_fill_droplet_volume(30.0, write_keys_if_assigned=False)
 
     payload = json.loads(Path(em.experiment_file_path).read_text(encoding="utf-8"))
-    assert payload["metadata"]["fill_droplet_volume_nL"] == 12.0
+    assert payload["metadata"]["fill_droplet_volume_nL"] == 30.0
+    assert payload["metadata"]["fill_printing_mode"] == "droplet"
     assert payload["metadata"]["intended_fill_droplet_volume_nL"] == 10.0
     assert result["saved_experiment"] is True
     assert em.unsaved_changes is False
@@ -351,13 +482,13 @@ def test_apply_fill_droplet_volume_can_switch_printing_mode(
     _configure_calibrated_volume_design(em)
 
     result = em.apply_fill_droplet_volume(
-        60.0,
+        30.0,
         write_keys_if_assigned=False,
         printing_mode="stream",
     )
 
     payload = json.loads(Path(em.experiment_file_path).read_text(encoding="utf-8"))
-    assert payload["metadata"]["fill_droplet_volume_nL"] == 60.0
+    assert payload["metadata"]["fill_droplet_volume_nL"] == 30.0
     assert payload["metadata"]["fill_printing_mode"] == "stream"
     assert payload["metadata"]["intended_fill_droplet_volume_nL"] == 10.0
     assert payload["metadata"]["intended_fill_printing_mode"] == "droplet"
@@ -367,7 +498,7 @@ def test_apply_fill_droplet_volume_can_switch_printing_mode(
     reloaded_model = experiment_model_factory()
     reloaded = reloaded_model.experiment_model
     reloaded.load_experiment(em.experiment_file_path, em.experiment_dir_path)
-    assert reloaded.metadata["fill_droplet_volume_nL"] == 60.0
+    assert reloaded.metadata["fill_droplet_volume_nL"] == 30.0
     assert reloaded.metadata["fill_printing_mode"] == "stream"
     assert reloaded.metadata["intended_fill_droplet_volume_nL"] == 10.0
     assert reloaded.metadata["intended_fill_printing_mode"] == "droplet"

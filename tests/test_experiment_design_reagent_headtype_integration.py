@@ -8,6 +8,8 @@ import LocalConfig
 from CalibrationMemoryStore import CalibrationMemoryStore
 from Model import (
     CURRENT_PROFILE,
+    EJECTION_VOLUME_HARD_MAX_NL,
+    EJECTION_VOLUME_HARD_MIN_NL,
     PRINTING_MODE_DROPLET,
     ExperimentModel,
     Model,
@@ -346,7 +348,7 @@ def test_experiment_designer_rebuild_model_persists_reagent_and_head_type(qapp):
     assert option.printing_mode == "stream"
 
 
-def test_experiment_designer_stream_mode_snaps_invalid_volume_to_stream_default(qapp):
+def test_experiment_designer_stream_mode_preserves_low_volume_inside_shared_range(qapp):
     dialog = _build_dialog_stub(_RuntimeModelStub())
 
     dialog._add_reagent_row(
@@ -361,12 +363,12 @@ def test_experiment_designer_stream_mode_snaps_invalid_volume_to_stream_default(
     dv_spin: QDoubleSpinBox = dialog._reagent_cell_widget(0, ExperimentDesignDialog.COL_DROPLET)
 
     assert mode_combo.currentData() == "stream"
-    assert dv_spin.minimum() == pytest.approx(40.0)
-    assert dv_spin.maximum() == pytest.approx(120.0)
-    assert dv_spin.value() == pytest.approx(60.0)
+    assert dv_spin.minimum() == pytest.approx(EJECTION_VOLUME_HARD_MIN_NL)
+    assert dv_spin.maximum() == pytest.approx(EJECTION_VOLUME_HARD_MAX_NL)
+    assert dv_spin.value() == pytest.approx(10.0)
 
 
-def test_experiment_designer_mode_switch_updates_ejection_volume_range(qapp):
+def test_experiment_designer_mode_switch_preserves_volume_with_shared_range(qapp):
     dialog = _build_dialog_stub(_RuntimeModelStub())
     dialog._add_reagent_row(
         name="Water stock",
@@ -382,16 +384,16 @@ def test_experiment_designer_mode_switch_updates_ejection_volume_range(qapp):
     dialog._test_sender = mode_combo
     mode_combo.setCurrentIndex(mode_combo.findData("stream"))
     qapp.processEvents()
-    assert dv_spin.minimum() == pytest.approx(40.0)
-    assert dv_spin.maximum() == pytest.approx(120.0)
-    assert dv_spin.value() == pytest.approx(60.0)
+    assert dv_spin.minimum() == pytest.approx(EJECTION_VOLUME_HARD_MIN_NL)
+    assert dv_spin.maximum() == pytest.approx(EJECTION_VOLUME_HARD_MAX_NL)
+    assert dv_spin.value() == pytest.approx(20.0)
 
     dv_spin.setValue(80.0)
     mode_combo.setCurrentIndex(mode_combo.findData("droplet"))
     qapp.processEvents()
-    assert dv_spin.minimum() == pytest.approx(5.0)
-    assert dv_spin.maximum() == pytest.approx(25.0)
-    assert dv_spin.value() == pytest.approx(printing_mode_default_ejection_volume_nl(PRINTING_MODE_DROPLET))
+    assert dv_spin.minimum() == pytest.approx(EJECTION_VOLUME_HARD_MIN_NL)
+    assert dv_spin.maximum() == pytest.approx(EJECTION_VOLUME_HARD_MAX_NL)
+    assert dv_spin.value() == pytest.approx(80.0)
 
 
 def test_experiment_designer_prior_indicator_uses_preview_status(qapp):
@@ -507,9 +509,11 @@ def test_experiment_designer_fill_mode_updates_volume_range_and_metadata(qapp):
     dialog.fill_mode_combo.setCurrentIndex(dialog.fill_mode_combo.findData("stream"))
     qapp.processEvents()
 
-    assert dialog.fill_dv_spin.minimum() == pytest.approx(40.0)
-    assert dialog.fill_dv_spin.maximum() == pytest.approx(120.0)
-    assert dialog.fill_dv_spin.value() == pytest.approx(60.0)
+    assert dialog.fill_dv_spin.minimum() == pytest.approx(EJECTION_VOLUME_HARD_MIN_NL)
+    assert dialog.fill_dv_spin.maximum() == pytest.approx(EJECTION_VOLUME_HARD_MAX_NL)
+    assert dialog.fill_dv_spin.value() == pytest.approx(
+        printing_mode_default_ejection_volume_nl(PRINTING_MODE_DROPLET)
+    )
 
     dialog.fill_dv_spin.setValue(85.0)
     dialog._update_metadata_from_controls()
