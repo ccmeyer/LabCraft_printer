@@ -126,6 +126,37 @@ def test_update_window_reopen_current_version_launches_and_preserves_failure_cod
     window.close()
 
 
+def test_update_window_no_relaunch_success_tells_operator_to_open_manually(qapp, tmp_path):
+    launches = []
+    window = _make_window(
+        qapp,
+        tmp_path,
+        config_kwargs={"no_relaunch": True},
+        launcher=lambda command, cwd: launches.append((tuple(command), Path(cwd))),
+    )
+    result = updater.UpdateResult(
+        updater.STATUS_UPDATED,
+        0,
+        "LabCraft was updated successfully.",
+        repo_root=tmp_path,
+        before_sha="abc",
+        after_sha="def",
+        log_path=tmp_path / "update.log",
+    )
+
+    window.handle_finished(result)
+
+    assert launches == []
+    assert "LabCraft was updated successfully." in window.status_label.text()
+    assert "start LabCraft again using your normal shortcut or launch command" in window.status_label.text()
+    assert window.close_button.isHidden() is False
+    assert window.reopen_button.isHidden() is True
+    assert window.retry_launch_button.isHidden() is True
+    assert window.exit_code == 0
+
+    window.close()
+
+
 def test_update_window_success_auto_close_defers_launch_until_updater_exits(qapp, tmp_path, monkeypatch):
     launches = []
     monkeypatch.setattr(update_window.os, "getpid", lambda: 555)

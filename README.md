@@ -299,8 +299,8 @@ Expected flow:
 - Click `Update App`; the app confirms that application code will update and firmware will not be flashed.
 - If the machine is connected, the normal disconnect/close flow runs first.
 - A `LabCraft Updater` window appears after the main app closes and shows update progress.
-- On success, the updater relaunches the app automatically.
-- After relaunch, the app shows a one-time update result popup with the status, commit range, installed commit summaries, and log path.
+- On success, the updater shows the status, commit range, installed commit summaries, and log path.
+- Close the updater window, then launch LabCraft again using the normal shortcut or launch command.
 
 If the update is blocked or fails, the updater window stays open and shows the log path. Support should ask for the path shown in the updater window, usually under:
 

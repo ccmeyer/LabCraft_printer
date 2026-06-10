@@ -14,6 +14,10 @@ from tools import update_and_restart as updater
 
 
 SUCCESS_STATUSES = {updater.STATUS_UPDATED, updater.STATUS_ALREADY_CURRENT}
+MANUAL_REOPEN_MESSAGE = (
+    "{message}\n\n"
+    "Close this updater window, then start LabCraft again using your normal shortcut or launch command."
+)
 
 
 class UpdaterWorker(QtCore.QObject):
@@ -175,7 +179,7 @@ class UpdaterWindow(QtWidgets.QDialog):
 
         if result.status in SUCCESS_STATUSES:
             if self.config.no_relaunch:
-                self._set_done_state(result.message)
+                self._set_done_state(MANUAL_REOPEN_MESSAGE.format(message=result.message))
                 return
             self.status_label.setText("Starting LabCraft...")
             if not self._try_launch_app(close_on_success=True):

@@ -58,7 +58,7 @@ def _make_controller(tmp_path):
     return controller
 
 
-def test_controller_builds_update_command_with_relaunch_on_failure(tmp_path, monkeypatch):
+def test_controller_builds_update_command_without_auto_relaunch(tmp_path, monkeypatch):
     controller = _make_controller(tmp_path)
     monkeypatch.setattr(controller_mod.sys, "executable", "python-under-test")
 
@@ -75,7 +75,7 @@ def test_controller_builds_update_command_with_relaunch_on_failure(tmp_path, mon
         "--wait-pid",
         "1234",
         "--gui",
-        "--relaunch-on-failure",
+        "--no-relaunch",
         "--record-result",
     ]
 

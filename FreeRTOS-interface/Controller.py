@@ -579,7 +579,7 @@ class Controller(QObject):
         if wait_pid is not None:
             command.extend(["--wait-pid", str(int(wait_pid))])
         command.append("--gui")
-        command.append("--relaunch-on-failure")
+        command.append("--no-relaunch")
         command.append("--record-result")
         return command
 
