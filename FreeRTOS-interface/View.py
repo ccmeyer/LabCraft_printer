@@ -3981,6 +3981,29 @@ class WellPlateWidget(QtWidgets.QGroupBox):
                 idx = self.reagent_selection.findText(stock_name)
             self.reagent_selection.setCurrentIndex(idx)
             self.update_well_colors()            
+
+    def _suspend_well_plate_repaints(self):
+        setter = getattr(self, "setUpdatesEnabled", None)
+        if not callable(setter):
+            return False
+        updates_enabled = getattr(self, "updatesEnabled", None)
+        try:
+            was_enabled = bool(updates_enabled()) if callable(updates_enabled) else True
+            if not was_enabled:
+                return False
+            setter(False)
+        except Exception:
+            return False
+        return True
+
+    def _resume_well_plate_repaints(self, should_resume):
+        if not should_resume:
+            return
+        try:
+            self.setUpdatesEnabled(True)
+            self.update()
+        except Exception:
+            pass
     
     def update_well_colors(self, *_args):
         """Update the colors of the wells based on the selected reagent's concentration."""
@@ -4015,46 +4038,51 @@ class WellPlateWidget(QtWidgets.QGroupBox):
             max_concentration = 0
             color = 'grey'
         
-        for well in self.model.well_plate.get_all_wells():
-            if well.assigned_reaction:
-                concentration = well.assigned_reaction.get_target_droplets_for_stock(stock_id)
-                final_conc = self.model.get_well_stock_final_concentration(well.well_id, stock_id)
-                state = well.assigned_reaction.check_stock_complete(stock_id)
-                if state:
-                    outline = 'white'
-                else:
-                    outline = 'black'
-                if concentration is not None:
-                    if max_concentration == 0:
-                        opacity = 0
+        resume_repaints = self._suspend_well_plate_repaints()
+        try:
+            for well in self.model.well_plate.get_all_wells():
+                label = self.well_labels[well.row_num][well.col-1]
+                if well.assigned_reaction:
+                    concentration = well.assigned_reaction.get_target_droplets_for_stock(stock_id)
+                    final_conc = self.model.get_well_stock_final_concentration(well.well_id, stock_id)
+                    state = well.assigned_reaction.check_stock_complete(stock_id)
+                    if state:
+                        outline = 'white'
                     else:
-                        opacity = concentration / max_concentration
-                    color = QtGui.QColor(color)
-                    color.setAlphaF(opacity)
-                    rgba_color = f"rgba({color.red()},{color.green()},{color.blue()},{color.alpha()})"
-                    self.well_labels[well.row_num][well.col-1].setStyleSheet(f"background-color: {rgba_color}; border: 1px solid {outline};")
+                        outline = 'black'
+                    if concentration is not None:
+                        if max_concentration == 0:
+                            opacity = 0
+                        else:
+                            opacity = concentration / max_concentration
+                        well_color = QtGui.QColor(color)
+                        well_color.setAlphaF(opacity)
+                        rgba_color = f"rgba({well_color.red()},{well_color.green()},{well_color.blue()},{well_color.alpha()})"
+                        label.setStyleSheet(f"background-color: {rgba_color}; border: 1px solid {outline};")
+                    else:
+                        label.setStyleSheet(f"background-color: grey; border: 1px solid {outline};")
+                    if final_conc is None:
+                        conc_text = "n/a"
+                    else:
+                        try:
+                            units = self.model.stock_solutions.get_stock_by_id(stock_id).units
+                        except Exception:
+                            units = ""
+                        conc_text = f"{final_conc:.4f} {units}".strip()
+                    if enable_tooltips:
+                        label.setToolTip(
+                            f"Well {well.well_id}\nTarget droplets: {int(concentration or 0)}\nFinal concentration: {conc_text}"
+                        )
+                    else:
+                        label.setToolTip("")
                 else:
-                    self.well_labels[well.row_num][well.col-1].setStyleSheet(f"background-color: grey; border: 1px solid {outline};")
-                if final_conc is None:
-                    conc_text = "n/a"
-                else:
-                    try:
-                        units = self.model.stock_solutions.get_stock_by_id(stock_id).units
-                    except Exception:
-                        units = ""
-                    conc_text = f"{final_conc:.4f} {units}".strip()
-                if enable_tooltips:
-                    self.well_labels[well.row_num][well.col-1].setToolTip(
-                        f"Well {well.well_id}\nTarget droplets: {int(concentration or 0)}\nFinal concentration: {conc_text}"
-                    )
-                else:
-                    self.well_labels[well.row_num][well.col-1].setToolTip("")
-            else:
-                self.well_labels[well.row_num][well.col-1].setStyleSheet(f"background-color: none; border: 1px solid black;")
-                if enable_tooltips:
-                    self.well_labels[well.row_num][well.col-1].setToolTip(f"Well {well.well_id}\nNo reaction assigned")
-                else:
-                    self.well_labels[well.row_num][well.col-1].setToolTip("")
+                    label.setStyleSheet(f"background-color: none; border: 1px solid black;")
+                    if enable_tooltips:
+                        label.setToolTip(f"Well {well.well_id}\nNo reaction assigned")
+                    else:
+                        label.setToolTip("")
+        finally:
+            self._resume_well_plate_repaints(resume_repaints)
 
 
     def clear_grid(self):
