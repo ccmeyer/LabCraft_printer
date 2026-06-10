@@ -368,7 +368,7 @@ def test_experiment_designer_stream_mode_preserves_low_volume_inside_shared_rang
     assert dv_spin.value() == pytest.approx(10.0)
 
 
-def test_experiment_designer_mode_switch_preserves_volume_with_shared_range(qapp):
+def test_experiment_designer_mode_switch_applies_mode_default_with_shared_range(qapp):
     dialog = _build_dialog_stub(_RuntimeModelStub())
     dialog._add_reagent_row(
         name="Water stock",
@@ -386,14 +386,14 @@ def test_experiment_designer_mode_switch_preserves_volume_with_shared_range(qapp
     qapp.processEvents()
     assert dv_spin.minimum() == pytest.approx(EJECTION_VOLUME_HARD_MIN_NL)
     assert dv_spin.maximum() == pytest.approx(EJECTION_VOLUME_HARD_MAX_NL)
-    assert dv_spin.value() == pytest.approx(20.0)
+    assert dv_spin.value() == pytest.approx(60.0)
 
     dv_spin.setValue(80.0)
     mode_combo.setCurrentIndex(mode_combo.findData("droplet"))
     qapp.processEvents()
     assert dv_spin.minimum() == pytest.approx(EJECTION_VOLUME_HARD_MIN_NL)
     assert dv_spin.maximum() == pytest.approx(EJECTION_VOLUME_HARD_MAX_NL)
-    assert dv_spin.value() == pytest.approx(80.0)
+    assert dv_spin.value() == pytest.approx(printing_mode_default_ejection_volume_nl(PRINTING_MODE_DROPLET))
 
 
 def test_experiment_designer_prior_indicator_uses_preview_status(qapp):
@@ -511,9 +511,7 @@ def test_experiment_designer_fill_mode_updates_volume_range_and_metadata(qapp):
 
     assert dialog.fill_dv_spin.minimum() == pytest.approx(EJECTION_VOLUME_HARD_MIN_NL)
     assert dialog.fill_dv_spin.maximum() == pytest.approx(EJECTION_VOLUME_HARD_MAX_NL)
-    assert dialog.fill_dv_spin.value() == pytest.approx(
-        printing_mode_default_ejection_volume_nl(PRINTING_MODE_DROPLET)
-    )
+    assert dialog.fill_dv_spin.value() == pytest.approx(60.0)
 
     dialog.fill_dv_spin.setValue(85.0)
     dialog._update_metadata_from_controls()

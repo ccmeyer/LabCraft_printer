@@ -9779,17 +9779,21 @@ class ExperimentDesignDialog(QDialog):
             return
         mode_combo: QComboBox = self._reagent_cell_widget(row, self.COL_MODE)
         dv_spin: QDoubleSpinBox = self._reagent_cell_widget(row, self.COL_DROPLET)
+        mode = self._current_printing_mode_from_combo(mode_combo)
         self._configure_ejection_volume_spinbox(
             dv_spin,
-            self._current_printing_mode_from_combo(mode_combo),
+            mode,
+            preferred_value=printing_mode_default_ejection_volume_nl(mode),
         )
         self._refresh_prior_availability_for_row(row)
         self._schedule_auto_update()
 
     def _on_fill_printing_mode_changed(self, *_args):
+        mode = self._current_printing_mode_from_combo(getattr(self, "fill_mode_combo", None))
         self._configure_ejection_volume_spinbox(
             self.fill_dv_spin,
-            self._current_printing_mode_from_combo(getattr(self, "fill_mode_combo", None)),
+            mode,
+            preferred_value=printing_mode_default_ejection_volume_nl(mode),
         )
         self._schedule_auto_update()
 
