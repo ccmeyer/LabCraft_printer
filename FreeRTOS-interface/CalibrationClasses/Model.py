@@ -1487,6 +1487,8 @@ class CalibrationManager(QObject):
         self.nozzle_center = None
         self.nozzle_center_image_position = None
         self.nozzle_center_image_position_source = None
+        self.nozzle_detection_flash_delay_us = None
+        self.nozzle_detection_flash_delay_source = None
         self.emergence_nozzle_center_image_position = None
         self.real_nozzle_center_image_position = None
         self.droplet_trajectory_vector = None
@@ -3146,6 +3148,8 @@ class CalibrationManager(QObject):
         # Per-run derived center used by pressure band; avoid stale cross-session carryover.
         self.emergence_nozzle_center_image_position = None
         self.real_nozzle_center_image_position = None
+        self.nozzle_detection_flash_delay_us = None
+        self.nozzle_detection_flash_delay_source = None
         self._reset_calibration_memory_prior_runtime()
         self._reset_online_stream_prior_runtime()
         print(f"Calibration file path: {self.calibration_file_path}")
@@ -6328,6 +6332,14 @@ class CalibrationManager(QObject):
         self.nozzle_center_image_position = center
         self.nozzle_center_image_position_source = str(source or "unknown") if center is not None else None
         self._emit_readiness()
+    def set_nozzle_detection_flash_delay_us(self, delay_us, source="nozzle_position"):
+        try:
+            delay_us = int(delay_us)
+        except Exception:
+            delay_us = None
+        self.nozzle_detection_flash_delay_us = delay_us
+        self.nozzle_detection_flash_delay_source = str(source or "unknown") if delay_us is not None else None
+        self._emit_readiness()
     def set_real_nozzle_center_image_position(self, center):
         self.real_nozzle_center_image_position = center
         # Keep legacy alias synchronized.
@@ -6387,6 +6399,12 @@ class CalibrationManager(QObject):
     def get_nozzle_center_image_position_source(self):
         return getattr(self, "nozzle_center_image_position_source", None) or (
             "nozzle_position" if self.nozzle_center_image_position is not None else "none"
+        )
+    def get_nozzle_detection_flash_delay_us(self):
+        return getattr(self, "nozzle_detection_flash_delay_us", None)
+    def get_nozzle_detection_flash_delay_source(self):
+        return getattr(self, "nozzle_detection_flash_delay_source", None) or (
+            "none" if self.get_nozzle_detection_flash_delay_us() is None else "unknown"
         )
     def get_real_nozzle_center_image_position(self):
         real_center = getattr(self, "real_nozzle_center_image_position", None)
@@ -11887,6 +11905,8 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         self.multi_contour_static_area_change_frac = 0.08
         self.multi_contour_static_height_change_frac = 0.10
         self.multi_contour_static_center_shift_px = 25.0
+        self.multi_contour_aligned_stack_max_x_span_px = 80.0
+        self.multi_contour_aligned_single_max_dx_px = 80.0
         self._current_flash_delay_us = int(self.initial_flash_delay_us)
         self._reset_multi_contour_tracking()
 
@@ -12482,6 +12502,12 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
     def _handle_single_contour_after_multi_probe(self, nozzle_px):
         cur_delay = int(self._clamp_delay(getattr(self, "_current_flash_delay_us", self.initial_flash_delay_us)))
         candidates = self._current_nozzle_candidates()
+        aligned_selection = self._select_aligned_single_contour_after_multi_probe(candidates)
+        if aligned_selection is not None:
+            self._append_multi_contour_snapshot(cur_delay, candidates, str("OK"), 1)
+            self._select_attached_single_multi_contour_candidate(aligned_selection)
+            return
+
         selection = self._select_delay_responsive_candidate(candidates)
         if selection is not None:
             self._append_multi_contour_snapshot(cur_delay, candidates, str("OK"), 1)
@@ -12801,6 +12827,91 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
             out.append(item)
         return out
 
+    def _candidate_alignment_x(self, cand):
+        cand = dict(cand or {})
+        value = cand.get("support_mid_x")
+        if value is None:
+            value = cand.get("bbox_mid_x")
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _median_float(values):
+        vals = sorted(float(v) for v in values)
+        if not vals:
+            return None
+        mid = len(vals) // 2
+        if len(vals) % 2:
+            return float(vals[mid])
+        return float((vals[mid - 1] + vals[mid]) / 2.0)
+
+    def _latest_aligned_multi_contour_stack(self):
+        max_span = float(getattr(self, "multi_contour_aligned_stack_max_x_span_px", 80.0))
+        for snap in reversed(list(getattr(self, "_multi_contour_probe_history", []) or [])):
+            if int(snap.get("n_contours", 0)) <= 1:
+                continue
+            candidates = [self._normalize_nozzle_candidate(c) for c in list(snap.get("candidates") or [])]
+            valid = []
+            for cand in candidates:
+                x = self._candidate_alignment_x(cand)
+                if x is None or cand.get("nozzle_xy") is None:
+                    continue
+                valid.append((cand, x))
+            if len(valid) < 2:
+                return None
+            xs = [x for _cand, x in valid]
+            span = float(max(xs) - min(xs))
+            if span > max_span:
+                return None
+            return {
+                "flash_delay_us": int(snap.get("flash_delay_us", 0)),
+                "n_contours": int(snap.get("n_contours", 0)),
+                "candidates": [cand for cand, _x in valid],
+                "xs": [float(x) for _cand, x in valid],
+                "x_median": self._median_float(xs),
+                "x_span_px": float(span),
+                "max_x_span_px": float(max_span),
+            }
+        return None
+
+    def _select_aligned_single_contour_after_multi_probe(self, candidates):
+        current = [self._normalize_nozzle_candidate(c) for c in list(candidates or [])]
+        if len(current) != 1:
+            return None
+        cand = current[0]
+        nozzle_xy = cand.get("nozzle_xy")
+        if nozzle_xy is None:
+            return None
+        cur_x = self._candidate_alignment_x(cand)
+        if cur_x is None:
+            return None
+        stack = self._latest_aligned_multi_contour_stack()
+        if stack is None or stack.get("x_median") is None:
+            return None
+        max_dx = float(getattr(self, "multi_contour_aligned_single_max_dx_px", 80.0))
+        dx = abs(float(cur_x) - float(stack["x_median"]))
+        if dx > max_dx:
+            return None
+        alignment = {
+            "previous_flash_delay_us": int(stack.get("flash_delay_us", 0)),
+            "current_flash_delay_us": int(
+                self._clamp_delay(getattr(self, "_current_flash_delay_us", self.initial_flash_delay_us))
+            ),
+            "previous_xs": [float(x) for x in list(stack.get("xs") or [])],
+            "previous_x_median_px": float(stack["x_median"]),
+            "previous_x_span_px": float(stack.get("x_span_px", 0.0)),
+            "current_x_px": float(cur_x),
+            "current_dx_px": float(dx),
+            "max_stack_x_span_px": float(stack.get("max_x_span_px", 0.0)),
+            "max_single_dx_px": float(max_dx),
+        }
+        return {
+            "candidate": cand,
+            "alignment": alignment,
+        }
+
     def _select_delay_responsive_candidate(self, candidates):
         selected = None
         selected_metrics = None
@@ -12823,6 +12934,45 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
             "metrics": selected_metrics or {},
             "response_summary": self._multi_contour_response_summary(candidates),
         }
+
+    def _select_attached_single_multi_contour_candidate(self, selection):
+        candidate = dict((selection or {}).get("candidate") or {})
+        nozzle_xy = candidate.get("nozzle_xy")
+        if nozzle_xy is None:
+            self._abort_multi_contour_ambiguous(
+                "aligned_single_candidate_missing_nozzle_xy",
+                {
+                    "selection": selection or {},
+                    "history": self._multi_contour_history_payload(),
+                },
+            )
+            return
+        nozzle_px = (int(nozzle_xy[0]), int(nozzle_xy[1]))
+        self.stageChanged.emit(
+            "Nozzle Pos - Selected earlier-delay attached stream candidate; preserving flash delay."
+        )
+        self._record_decision(
+            "multi_contour_selected_attached_single_candidate",
+            {
+                "n_contours": 1,
+                "flash_delay_us": int(getattr(self, "_current_flash_delay_us", self.initial_flash_delay_us)),
+                "nozzle_px": [int(nozzle_px[0]), int(nozzle_px[1])],
+                "candidate": candidate,
+                "alignment": dict((selection or {}).get("alignment") or {}),
+                "history": self._multi_contour_history_payload(),
+            },
+        )
+        decision = self._recenter_or_finish(nozzle_px)
+        if decision:
+            self._record_decision(
+                decision,
+                {
+                    "status": "OK",
+                    "nozzle_px": [int(nozzle_px[0]), int(nozzle_px[1])],
+                    "n_contours": 1,
+                    "source": "attached_single_after_multi_contour_probe",
+                },
+            )
 
     def _select_responsive_multi_contour_candidate(self, selection, n_contours: int):
         candidate = dict((selection or {}).get("candidate") or {})
@@ -13121,6 +13271,12 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
             self.measurements.append((machine_pos, nozzle_px))
             self.calibration_manager.set_background_image(self.background_image)
             self.calibration_manager.set_nozzle_center_image_position(nozzle_px, "nozzle_position")
+            set_delay = getattr(self.calibration_manager, "set_nozzle_detection_flash_delay_us", None)
+            if callable(set_delay):
+                set_delay(
+                    int(self._clamp_delay(getattr(self, "_current_flash_delay_us", self.initial_flash_delay_us))),
+                    "nozzle_position",
+                )
             self.calibration_manager.set_nozzle_center(machine_pos)
             self.nozzleCentered.emit()
             return "finish"
@@ -13369,9 +13525,7 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
             pulse_width_us = int(self.model.machine_model.get_print_pulse_width())
         except Exception:
             pulse_width_us = 0
-        self.post_focus_nozzle_refresh_flash_delay_us = self._clamp_post_focus_refresh_delay(
-            max(pulse_width_us + 2600, 0)
-        )
+        self.post_focus_nozzle_refresh_flash_delay_us = self._resolve_post_focus_refresh_delay_us(pulse_width_us)
         self.fixed_thresh_value = 30
         self.no_signal_min_fg_px = 120
         self.min_stream_bbox_h_px = 10
@@ -13879,11 +14033,20 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
         if debug_img is not None:
             self.presentImageSignal.emit(debug_img)
 
-        if str(status) == "OK" and nozzle_px is not None:
-            refresh_status = "ok" if int(n_contours) <= 1 else "ok_multi_contour"
+        if str(status) == "OK" and nozzle_px is not None and int(n_contours) <= 1:
             self._finish_post_focus_nozzle_refresh(
-                refresh_status,
+                "ok",
                 nozzle_px=nozzle_px,
+                n_contours=int(n_contours),
+                detection=details,
+                pair=pair_ctx,
+            )
+            return
+
+        if str(status) == "OK" and nozzle_px is not None and int(n_contours) > 1:
+            self._finish_post_focus_nozzle_refresh(
+                "failed",
+                reason="multi_contour_refresh_preserved_prior",
                 n_contours=int(n_contours),
                 detection=details,
                 pair=pair_ctx,
@@ -13941,6 +14104,22 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
         except Exception:
             delay_us = 2600
         return int(max(int(self.min_flash_delay_us), min(int(self.max_flash_delay_us), delay_us)))
+
+    def _resolve_post_focus_refresh_delay_us(self, pulse_width_us):
+        accepted_nozzle_delay_us = None
+        try:
+            get_delay = getattr(self.calibration_manager, "get_nozzle_detection_flash_delay_us", None)
+            if callable(get_delay):
+                accepted_nozzle_delay_us = get_delay()
+        except Exception:
+            accepted_nozzle_delay_us = None
+        if accepted_nozzle_delay_us is None:
+            try:
+                pulse_width_us = int(pulse_width_us)
+            except Exception:
+                pulse_width_us = 0
+            accepted_nozzle_delay_us = max(int(pulse_width_us) + 2600, 0)
+        return self._clamp_post_focus_refresh_delay(accepted_nozzle_delay_us)
 
     def _post_focus_refresh_delay_us(self):
         return self._clamp_post_focus_refresh_delay(

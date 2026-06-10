@@ -219,6 +219,45 @@ def test_focus_post_refresh_success_updates_image_center_and_diagnostics():
     assert proc.postFocusNozzleRefreshFinished.calls
 
 
+def test_focus_post_refresh_delay_prefers_accepted_nozzle_detection_delay():
+    proc = NozzleFocusCalibrationProcess.__new__(NozzleFocusCalibrationProcess)
+    proc.min_flash_delay_us = 2000
+    proc.max_flash_delay_us = 12_000
+    proc.calibration_manager = SimpleNamespace(
+        get_nozzle_detection_flash_delay_us=lambda: 4600,
+    )
+
+    assert proc._resolve_post_focus_refresh_delay_us(2500) == 4600
+
+    proc.calibration_manager = SimpleNamespace(
+        get_nozzle_detection_flash_delay_us=lambda: None,
+    )
+    assert proc._resolve_post_focus_refresh_delay_us(2500) == 5100
+
+
+def test_focus_post_refresh_multi_contour_preserves_prior_center():
+    proc, calls = _build_post_focus_refresh_proc(prior_center=(546, 196))
+    proc.post_focus_nozzle_refresh_flash_delay_us = 4600
+    proc.background_image = np.zeros((800, 800, 3), dtype=np.uint8)
+    proc.droplet_image = proc.background_image.copy()
+    proc.droplet_image[100:360, 500:560, :] = 255
+    proc.droplet_image[430:550, 490:610, :] = 255
+
+    proc.onPostFocusAnalyzeNozzle()
+
+    assert calls["image_center"] == []
+    assert calls["background"] == []
+    result = proc._post_focus_nozzle_refresh_result
+    assert result["status"] == "failed"
+    assert result["reason"] == "multi_contour_refresh_preserved_prior"
+    assert result["pre_focus_nozzle_center_px"] == (546, 196)
+    assert result["post_focus_nozzle_center_px"] is None
+    assert result["post_focus_nozzle_center_source"] == "none"
+    assert result["n_contours"] == 2
+    assert calls["decisions"][0][0] == "post_focus_nozzle_refresh_preserved_prior"
+    assert proc.postFocusNozzleRefreshFinished.calls
+
+
 def test_focus_post_refresh_failure_preserves_prior_center():
     proc, calls = _build_post_focus_refresh_proc(prior_center=(546, 196))
 

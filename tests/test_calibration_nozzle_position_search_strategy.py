@@ -88,6 +88,7 @@ def _build_process_for_analyze():
         emitSettingsChangeCompleted=lambda *args, **kwargs: None,
         set_background_image=lambda *_: None,
         set_nozzle_center_image_position=lambda *_: None,
+        set_nozzle_detection_flash_delay_us=lambda *_: None,
         set_nozzle_center=lambda *_: None,
     )
 
@@ -451,6 +452,31 @@ def test_delay_responsive_candidate_is_selected_after_probe():
     assert proc.calibrationError.calls == []
     assert settings_calls == [{"num_droplets": 1, "flash_delay": 4900}]
     assert any(d[0] == "multi_contour_selected_responsive_candidate" for d in proc._test_decisions)
+
+
+def test_aligned_single_contour_after_probe_is_accepted_as_attached_stream():
+    proc, _pos, settings_calls, move_calls, recenter_calls = _build_process_for_analyze()
+    proc._current_flash_delay_us = 5100
+    late_separated = [
+        _candidate(18_111.0, [827, 538, 149, 164], [901, 538]),
+        _candidate(27_802.5, [859, 102, 102, 390], [915, 102]),
+    ]
+    earlier_attached = [
+        _candidate(37_122.5, [857, 103, 113, 463], [918, 103]),
+    ]
+
+    _install_detection(proc, "OK", late_separated)
+    proc.onAnalyze()
+    assert settings_calls[-1]["flash_delay"] == 4900
+    assert recenter_calls == []
+
+    _install_detection(proc, "OK", earlier_attached)
+    proc.onAnalyze()
+
+    assert recenter_calls == [(918, 103)]
+    assert move_calls == []
+    assert proc.calibrationError.calls == []
+    assert any(d[0] == "multi_contour_selected_attached_single_candidate" for d in proc._test_decisions)
 
 
 def test_highlighted_shape_does_not_jump_to_static_artifact():
