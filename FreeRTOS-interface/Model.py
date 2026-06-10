@@ -10358,6 +10358,8 @@ class Model(QObject):
                 "head_type_id": item.head_type_id,
                 "display_name": item.display_name,
                 "nominal_nozzle_diameter_um": item.nominal_nozzle_diameter_um,
+                "default_droplet_ejection_volume_nL": item.default_droplet_ejection_volume_nL,
+                "default_stream_ejection_volume_nL": item.default_stream_ejection_volume_nL,
                 "tags": list(item.tags or []),
                 "notes": item.notes,
             })

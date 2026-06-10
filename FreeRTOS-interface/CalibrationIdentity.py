@@ -164,6 +164,8 @@ class PrinterHeadTypeIdentity:
     head_type_id: str
     display_name: str
     nominal_nozzle_diameter_um: float | None = None
+    default_droplet_ejection_volume_nL: float | None = None
+    default_stream_ejection_volume_nL: float | None = None
     tags: list[str] = field(default_factory=list)
     notes: str = ""
 
@@ -177,6 +179,8 @@ class PrinterHeadTypeIdentity:
             head_type_id=head_type_id,
             display_name=display_name,
             nominal_nozzle_diameter_um=_float_or_none(payload.get("nominal_nozzle_diameter_um")),
+            default_droplet_ejection_volume_nL=_float_or_none(payload.get("default_droplet_ejection_volume_nL")),
+            default_stream_ejection_volume_nL=_float_or_none(payload.get("default_stream_ejection_volume_nL")),
             tags=_list_of_str(payload.get("tags")),
             notes=_clean_str(payload.get("notes")) or "",
         )
@@ -186,6 +190,8 @@ class PrinterHeadTypeIdentity:
             "head_type_id": self.head_type_id,
             "display_name": self.display_name,
             "nominal_nozzle_diameter_um": self.nominal_nozzle_diameter_um,
+            "default_droplet_ejection_volume_nL": self.default_droplet_ejection_volume_nL,
+            "default_stream_ejection_volume_nL": self.default_stream_ejection_volume_nL,
             "tags": list(self.tags),
             "notes": self.notes,
         }
@@ -269,18 +275,24 @@ def _default_head_type_items():
             head_type_id="nozzle_80um",
             display_name="80 um nozzle",
             nominal_nozzle_diameter_um=80.0,
+            default_droplet_ejection_volume_nL=7.0,
+            default_stream_ejection_volume_nL=35.0,
             tags=["baseline_study"],
         ),
         PrinterHeadTypeIdentity(
             head_type_id="nozzle_100um",
             display_name="100 um nozzle",
             nominal_nozzle_diameter_um=100.0,
+            default_droplet_ejection_volume_nL=9.0,
+            default_stream_ejection_volume_nL=60.0,
             tags=["baseline_study"],
         ),
         PrinterHeadTypeIdentity(
             head_type_id="nozzle_120um",
             display_name="120 um nozzle",
             nominal_nozzle_diameter_um=120.0,
+            default_droplet_ejection_volume_nL=12.0,
+            default_stream_ejection_volume_nL=80.0,
             tags=["baseline_study"],
         ),
     ]

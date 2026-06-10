@@ -38,9 +38,25 @@ class _RuntimeModelStub:
     def list_known_printer_head_types(self):
         return [
             {
+                "head_type_id": "nozzle_80um",
+                "display_name": "80 um nozzle",
+                "nominal_nozzle_diameter_um": 80.0,
+                "default_droplet_ejection_volume_nL": 7.0,
+                "default_stream_ejection_volume_nL": 35.0,
+            },
+            {
                 "head_type_id": "nozzle_100um",
                 "display_name": "100 um nozzle",
                 "nominal_nozzle_diameter_um": 100.0,
+                "default_droplet_ejection_volume_nL": 9.0,
+                "default_stream_ejection_volume_nL": 60.0,
+            },
+            {
+                "head_type_id": "nozzle_120um",
+                "display_name": "120 um nozzle",
+                "nominal_nozzle_diameter_um": 120.0,
+                "default_droplet_ejection_volume_nL": 12.0,
+                "default_stream_ejection_volume_nL": 80.0,
             }
         ]
 
@@ -200,6 +216,10 @@ def _build_dialog_stub(runtime_model):
         "_configure_ejection_volume_spinbox",
         "_build_known_reagent_selector",
         "_build_head_type_selector",
+        "_default_ejection_volume_for_head_type",
+        "_volumes_close",
+        "_is_default_like_ejection_volume",
+        "_maybe_update_ejection_volume_for_head_type_change",
         "_format_prior_availability",
         "_resolve_reagent_selection_from_row",
         "_refresh_prior_availability_for_row",
@@ -238,6 +258,14 @@ def _build_real_dialog():
         profile=SimpleNamespace(name="modern"),
     )
     return ExperimentDesignDialog(ExperimentModel(prof=CURRENT_PROFILE), main_window)
+
+
+def _head_type_index(combo: QComboBox, head_type_id: str) -> int:
+    for idx in range(combo.count()):
+        data = combo.itemData(idx)
+        if isinstance(data, dict) and data.get("head_type_id") == head_type_id:
+            return idx
+    raise AssertionError(f"Head type {head_type_id!r} not found")
 
 
 def test_experiment_designer_uses_printed_volume_label_and_2000_nl_defaults(qapp):
@@ -394,6 +422,123 @@ def test_experiment_designer_mode_switch_applies_mode_default_with_shared_range(
     assert dv_spin.minimum() == pytest.approx(EJECTION_VOLUME_HARD_MIN_NL)
     assert dv_spin.maximum() == pytest.approx(EJECTION_VOLUME_HARD_MAX_NL)
     assert dv_spin.value() == pytest.approx(printing_mode_default_ejection_volume_nl(PRINTING_MODE_DROPLET))
+
+
+@pytest.mark.parametrize(
+    ("head_type_id", "expected_stream_nl"),
+    [
+        ("nozzle_80um", 35.0),
+        ("nozzle_100um", 60.0),
+        ("nozzle_120um", 80.0),
+    ],
+)
+def test_experiment_designer_mode_switch_uses_head_type_stream_default(
+    qapp,
+    head_type_id,
+    expected_stream_nl,
+):
+    dialog = _build_dialog_stub(_RuntimeModelStub())
+    dialog._add_reagent_row(
+        name="Water stock",
+        targets="0, 1",
+        units="mM",
+        droplet_nL=7.0,
+        intended_head_type_id=head_type_id,
+        printing_mode="droplet",
+    )
+
+    mode_combo: QComboBox = dialog._reagent_cell_widget(0, ExperimentDesignDialog.COL_MODE)
+    dv_spin: QDoubleSpinBox = dialog._reagent_cell_widget(0, ExperimentDesignDialog.COL_DROPLET)
+
+    dialog._test_sender = mode_combo
+    mode_combo.setCurrentIndex(mode_combo.findData("stream"))
+    qapp.processEvents()
+
+    assert dv_spin.value() == pytest.approx(expected_stream_nl)
+
+
+def test_experiment_designer_mode_switch_uses_head_type_droplet_default(qapp):
+    dialog = _build_dialog_stub(_RuntimeModelStub())
+    dialog._add_reagent_row(
+        name="Water stock",
+        targets="0, 1",
+        units="mM",
+        droplet_nL=80.0,
+        intended_head_type_id="nozzle_120um",
+        printing_mode="stream",
+    )
+
+    mode_combo: QComboBox = dialog._reagent_cell_widget(0, ExperimentDesignDialog.COL_MODE)
+    dv_spin: QDoubleSpinBox = dialog._reagent_cell_widget(0, ExperimentDesignDialog.COL_DROPLET)
+
+    dialog._test_sender = mode_combo
+    mode_combo.setCurrentIndex(mode_combo.findData("droplet"))
+    qapp.processEvents()
+
+    assert dv_spin.value() == pytest.approx(12.0)
+
+
+def test_experiment_designer_head_type_switch_updates_default_like_volume(qapp):
+    dialog = _build_dialog_stub(_RuntimeModelStub())
+    dialog._add_reagent_row(
+        name="Water stock",
+        targets="0, 1",
+        units="mM",
+        droplet_nL=60.0,
+        intended_head_type_id="nozzle_100um",
+        printing_mode="stream",
+    )
+
+    head_type_combo: QComboBox = dialog._reagent_cell_widget(0, ExperimentDesignDialog.COL_HEAD_TYPE)
+    dv_spin: QDoubleSpinBox = dialog._reagent_cell_widget(0, ExperimentDesignDialog.COL_DROPLET)
+
+    dialog._test_sender = head_type_combo
+    head_type_combo.setCurrentIndex(_head_type_index(head_type_combo, "nozzle_80um"))
+    qapp.processEvents()
+
+    assert dv_spin.value() == pytest.approx(35.0)
+
+    head_type_combo.setCurrentIndex(_head_type_index(head_type_combo, "nozzle_120um"))
+    qapp.processEvents()
+
+    assert dv_spin.value() == pytest.approx(80.0)
+
+
+def test_experiment_designer_head_type_switch_preserves_custom_volume(qapp):
+    dialog = _build_dialog_stub(_RuntimeModelStub())
+    dialog._add_reagent_row(
+        name="Water stock",
+        targets="0, 1",
+        units="mM",
+        droplet_nL=42.0,
+        intended_head_type_id="nozzle_100um",
+        printing_mode="stream",
+    )
+
+    head_type_combo: QComboBox = dialog._reagent_cell_widget(0, ExperimentDesignDialog.COL_HEAD_TYPE)
+    dv_spin: QDoubleSpinBox = dialog._reagent_cell_widget(0, ExperimentDesignDialog.COL_DROPLET)
+
+    dialog._test_sender = head_type_combo
+    head_type_combo.setCurrentIndex(_head_type_index(head_type_combo, "nozzle_80um"))
+    qapp.processEvents()
+
+    assert dv_spin.value() == pytest.approx(42.0)
+
+
+def test_experiment_designer_loaded_row_preserves_saved_volume_with_head_type_default(qapp):
+    dialog = _build_dialog_stub(_RuntimeModelStub())
+    dialog._add_reagent_row(
+        name="Water stock",
+        targets="0, 1",
+        units="mM",
+        droplet_nL=9.0,
+        intended_head_type_id="nozzle_80um",
+        printing_mode="stream",
+    )
+
+    dv_spin: QDoubleSpinBox = dialog._reagent_cell_widget(0, ExperimentDesignDialog.COL_DROPLET)
+
+    assert dv_spin.value() == pytest.approx(9.0)
 
 
 def test_experiment_designer_prior_indicator_uses_preview_status(qapp):
@@ -586,6 +731,22 @@ def test_runtime_printer_head_identity_is_generated_from_intended_head_type(tmp_
     assert printer_head.head_type_id == "nozzle_100um"
     assert printer_head.nominal_nozzle_diameter_um == pytest.approx(100.0)
     assert printer_head.printer_head_id.startswith("nozzle_100um__screening_run__")
+
+
+def test_list_known_printer_head_types_includes_default_ejection_volumes(tmp_path):
+    model = Model.__new__(Model)
+    model.calibration_memory_store = CalibrationMemoryStore(model=model, root_dir=tmp_path / "CalibrationMemory")
+    model.calibration_memory_store.ensure_initialized()
+
+    rows = Model.list_known_printer_head_types(model)
+    by_id = {row["head_type_id"]: row for row in rows}
+
+    assert by_id["nozzle_80um"]["default_droplet_ejection_volume_nL"] == pytest.approx(7.0)
+    assert by_id["nozzle_80um"]["default_stream_ejection_volume_nL"] == pytest.approx(35.0)
+    assert by_id["nozzle_100um"]["default_droplet_ejection_volume_nL"] == pytest.approx(9.0)
+    assert by_id["nozzle_100um"]["default_stream_ejection_volume_nL"] == pytest.approx(60.0)
+    assert by_id["nozzle_120um"]["default_droplet_ejection_volume_nL"] == pytest.approx(12.0)
+    assert by_id["nozzle_120um"]["default_stream_ejection_volume_nL"] == pytest.approx(80.0)
 
 
 def test_register_experiment_design_reagents_updates_local_registry_not_template(monkeypatch, tmp_path):

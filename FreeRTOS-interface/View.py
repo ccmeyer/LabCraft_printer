@@ -9662,8 +9662,77 @@ class ExperimentDesignDialog(QDialog):
                 if isinstance(data, dict) and data.get("head_type_id") == normalized:
                     combo.setCurrentIndex(idx)
                     break
+        combo.setProperty("_previous_head_type_payload", self._combo_current_payload(combo))
         combo.currentIndexChanged.connect(self._on_reagent_identity_changed)
         return combo
+
+    def _default_ejection_volume_for_head_type(
+        self,
+        printing_mode: str | None,
+        head_type_payload: dict | None,
+    ) -> float:
+        mode = normalize_printing_mode(printing_mode, fallback=PRINTING_MODE_DROPLET)
+        field_name = (
+            "default_stream_ejection_volume_nL"
+            if mode == PRINTING_MODE_STREAM
+            else "default_droplet_ejection_volume_nL"
+        )
+        fallback = printing_mode_default_ejection_volume_nl(mode)
+        try:
+            candidate = float((head_type_payload or {}).get(field_name))
+        except Exception:
+            return fallback
+        lo, hi = printing_mode_allowed_range_nl(mode)
+        if math.isfinite(candidate) and lo <= candidate <= hi:
+            return candidate
+        return fallback
+
+    def _volumes_close(self, a, b) -> bool:
+        try:
+            return abs(float(a) - float(b)) <= 1e-9
+        except Exception:
+            return False
+
+    def _is_default_like_ejection_volume(
+        self,
+        value: float,
+        printing_mode: str | None,
+        *head_type_payloads: dict | None,
+    ) -> bool:
+        mode = normalize_printing_mode(printing_mode, fallback=PRINTING_MODE_DROPLET)
+        candidates = [printing_mode_default_ejection_volume_nl(mode)]
+        candidates.extend(
+            self._default_ejection_volume_for_head_type(mode, payload)
+            for payload in head_type_payloads
+        )
+        return any(self._volumes_close(value, candidate) for candidate in candidates)
+
+    def _maybe_update_ejection_volume_for_head_type_change(
+        self,
+        row: int,
+        previous_head_type_payload: dict | None,
+        current_head_type_payload: dict | None,
+    ) -> None:
+        mode_combo: QComboBox = self._reagent_cell_widget(row, self.COL_MODE)
+        dv_spin: QDoubleSpinBox = self._reagent_cell_widget(row, self.COL_DROPLET)
+        if dv_spin is None:
+            return
+
+        mode = self._current_printing_mode_from_combo(mode_combo)
+        current_value = float(dv_spin.value())
+        if not self._is_default_like_ejection_volume(
+            current_value,
+            mode,
+            previous_head_type_payload,
+            current_head_type_payload,
+        ):
+            return
+
+        self._configure_ejection_volume_spinbox(
+            dv_spin,
+            mode,
+            preferred_value=self._default_ejection_volume_for_head_type(mode, current_head_type_payload),
+        )
 
     def _format_prior_availability(self, preview: dict | None) -> tuple[str, str, str]:
         preview = dict(preview or {})
@@ -9788,9 +9857,22 @@ class ExperimentDesignDialog(QDialog):
             self._refresh_prior_availability_for_row(row)
 
     def _on_reagent_identity_changed(self, *_args):
-        row = self._find_row_for_widget(self.sender())
+        sender = self.sender()
+        row = self._find_row_for_widget(sender)
         if row >= 0:
             name_edit: QLineEdit = self._reagent_cell_widget(row, self.COL_STOCK_LABEL)
+            head_type_combo: QComboBox = self._reagent_cell_widget(row, self.COL_HEAD_TYPE)
+            if sender is head_type_combo or sender == head_type_combo:
+                previous_payload = head_type_combo.property("_previous_head_type_payload")
+                if not isinstance(previous_payload, dict):
+                    previous_payload = None
+                current_payload = self._combo_current_payload(head_type_combo)
+                self._maybe_update_ejection_volume_for_head_type_change(
+                    row,
+                    previous_payload,
+                    current_payload,
+                )
+                head_type_combo.setProperty("_previous_head_type_payload", current_payload)
             resolved = self._resolve_reagent_selection_from_row(row)
             suggested_label = (resolved.get("resolved") or {}).get("display_name")
             if name_edit is not None and self._is_placeholder_stock_label(name_edit.text()) and suggested_label:
@@ -9806,12 +9888,16 @@ class ExperimentDesignDialog(QDialog):
             self._schedule_auto_update()
             return
         mode_combo: QComboBox = self._reagent_cell_widget(row, self.COL_MODE)
+        head_type_combo: QComboBox = self._reagent_cell_widget(row, self.COL_HEAD_TYPE)
         dv_spin: QDoubleSpinBox = self._reagent_cell_widget(row, self.COL_DROPLET)
         mode = self._current_printing_mode_from_combo(mode_combo)
         self._configure_ejection_volume_spinbox(
             dv_spin,
             mode,
-            preferred_value=printing_mode_default_ejection_volume_nl(mode),
+            preferred_value=self._default_ejection_volume_for_head_type(
+                mode,
+                self._combo_current_payload(head_type_combo),
+            ),
         )
         self._refresh_prior_availability_for_row(row)
         self._schedule_auto_update()

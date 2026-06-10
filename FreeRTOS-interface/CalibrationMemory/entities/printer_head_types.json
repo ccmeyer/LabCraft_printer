@@ -7,6 +7,8 @@
       "head_type_id": "nozzle_80um",
       "display_name": "80 um nozzle",
       "nominal_nozzle_diameter_um": 80.0,
+      "default_droplet_ejection_volume_nL": 7.0,
+      "default_stream_ejection_volume_nL": 35.0,
       "tags": [
         "baseline_study"
       ],
@@ -16,6 +18,8 @@
       "head_type_id": "nozzle_100um",
       "display_name": "100 um nozzle",
       "nominal_nozzle_diameter_um": 100.0,
+      "default_droplet_ejection_volume_nL": 9.0,
+      "default_stream_ejection_volume_nL": 60.0,
       "tags": [
         "baseline_study"
       ],
@@ -25,6 +29,8 @@
       "head_type_id": "nozzle_120um",
       "display_name": "120 um nozzle",
       "nominal_nozzle_diameter_um": 120.0,
+      "default_droplet_ejection_volume_nL": 12.0,
+      "default_stream_ejection_volume_nL": 80.0,
       "tags": [
         "baseline_study"
       ],

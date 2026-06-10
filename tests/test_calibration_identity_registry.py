@@ -54,6 +54,12 @@ def test_identity_registry_loads_seeded_defaults_and_roundtrips_updates(tmp_path
     assert set(reagents.keys()) == {"water", "glycerol_25pct", "glycerol_50pct"}
     assert set(head_types.keys()) == {"nozzle_80um", "nozzle_100um", "nozzle_120um"}
     assert len(printer_heads) == 15
+    assert head_types["nozzle_80um"].default_droplet_ejection_volume_nL == 7.0
+    assert head_types["nozzle_80um"].default_stream_ejection_volume_nL == 35.0
+    assert head_types["nozzle_100um"].default_droplet_ejection_volume_nL == 9.0
+    assert head_types["nozzle_100um"].default_stream_ejection_volume_nL == 60.0
+    assert head_types["nozzle_120um"].default_droplet_ejection_volume_nL == 12.0
+    assert head_types["nozzle_120um"].default_stream_ejection_volume_nL == 80.0
 
     updated = registry.upsert_reagent(
         {
@@ -69,6 +75,20 @@ def test_identity_registry_loads_seeded_defaults_and_roundtrips_updates(tmp_path
     )
     assert updated.stock_ids == ["Water_0.00_--"]
     assert registry.get_reagent("water").stock_ids == ["Water_0.00_--"]
+
+    updated_head_type = registry.upsert_printer_head_type(
+        {
+            "head_type_id": "nozzle_100um",
+            "display_name": "100 um nozzle",
+            "nominal_nozzle_diameter_um": 100.0,
+            "default_droplet_ejection_volume_nL": 9.5,
+            "default_stream_ejection_volume_nL": 62.5,
+        }
+    )
+    assert updated_head_type.default_droplet_ejection_volume_nL == 9.5
+    assert updated_head_type.default_stream_ejection_volume_nL == 62.5
+    assert registry.get_head_type("nozzle_100um").default_droplet_ejection_volume_nL == 9.5
+    assert registry.get_head_type("nozzle_100um").to_dict()["default_stream_ejection_volume_nL"] == 62.5
 
 
 def test_identity_registry_resolves_reagent_explicit_and_inferred_paths(tmp_path):
