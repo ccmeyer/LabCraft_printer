@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from PySide6 import QtCore, QtWidgets
 
+import PlateReaderAnalysisWindow as plate_reader_window_module
 import View
 from Controller import Controller
 from PlateReaderAnalysisRunner import PlateReaderAnalysisConfig, PlateReaderAnalysisPreviewResult
@@ -270,6 +271,8 @@ def test_window_defaults_experiment_and_key_paths_from_model(tmp_path, qapp):
     assert window.endpoint_last_n_spin.value() == 3
     assert window.run_button.isEnabled() is False
     assert window.validate_preview_button.isEnabled() is True
+    assert window.export_button.isEnabled() is False
+    assert window.open_export_folder_button.isEnabled() is False
 
     window.close()
 
@@ -368,6 +371,7 @@ def test_window_success_enables_report_and_folder_buttons(tmp_path, qapp):
     assert window.status_label.text() == "Finished"
     assert window.open_report_button.isEnabled() is True
     assert window.open_folder_button.isEnabled() is True
+    assert window.export_button.isEnabled() is True
     assert "finished" in window.log_output.toPlainText()
 
     window.close()
@@ -409,6 +413,7 @@ def test_window_success_with_manifest_populates_result_summary(tmp_path, qapp):
     assert "Endpoint-only data skipped timecourse plots" in window.result_messages.toPlainText()
     assert window.open_report_button.isEnabled() is True
     assert window.open_folder_button.isEnabled() is True
+    assert window.export_button.isEnabled() is True
 
     outputs = _output_table_rows(window.result_outputs_table)
     assert outputs["absolute_rfu_heatmaps"] == ("1", "1", "0", "2")
@@ -445,6 +450,7 @@ def test_window_missing_manifest_shows_result_error_but_keeps_result_buttons(tmp
     assert "manifest does not exist" in window.result_messages.toPlainText()
     assert window.open_report_button.isEnabled() is True
     assert window.open_folder_button.isEnabled() is True
+    assert window.export_button.isEnabled() is True
 
     window.close()
 
@@ -473,6 +479,7 @@ def test_window_invalid_manifest_schema_shows_result_error(tmp_path, qapp):
     assert window.result_summary_table.rowCount() == 0
     assert "unsupported manifest schema" in window.result_messages.toPlainText()
     assert window.open_report_button.isEnabled() is True
+    assert window.export_button.isEnabled() is True
 
     window.close()
 
@@ -490,6 +497,8 @@ def test_window_failure_restores_controls_and_keeps_result_buttons_disabled(tmp_
     assert window.cancel_button.isEnabled() is False
     assert window.open_report_button.isEnabled() is False
     assert window.open_folder_button.isEnabled() is False
+    assert window.export_button.isEnabled() is False
+    assert window.open_export_folder_button.isEnabled() is False
     assert window.result_summary_table.rowCount() == 0
     assert "did not finish successfully" in window.result_messages.toPlainText()
 
@@ -521,6 +530,107 @@ def test_window_start_rejected_by_controller_restores_idle_state(tmp_path, qapp)
     assert window.run_button.isEnabled() is True
     assert window.cancel_button.isEnabled() is False
     assert "already active" in window.log_output.toPlainText()
+
+    window.close()
+
+
+def test_window_export_package_uses_latest_payload_and_enables_export_folder(
+    tmp_path,
+    qapp,
+    monkeypatch,
+):
+    window, controller, experiment_dir, key_file, plate_file = _make_window(tmp_path, qapp)
+    output_dir = tmp_path / "analysis"
+    output_dir.mkdir()
+    report = output_dir / "analysis_report.html"
+    report.write_text("<html></html>", encoding="utf-8")
+    merged_csv = experiment_dir / "plate_reader_merged_tidy.csv"
+    merged_csv.write_text("well,rfu\nA1,100\n", encoding="utf-8")
+    raw_copy = experiment_dir / "raw_plate_reader" / plate_file.name
+    raw_copy.parent.mkdir()
+    raw_copy.write_text("raw\n", encoding="utf-8")
+    manifest_path = _write_manifest(output_dir)
+    export_path = tmp_path / "export.zip"
+    captured = {}
+
+    def fake_get_save_file_name(*_args, **_kwargs):
+        return str(export_path), "ZIP files (*.zip)"
+
+    def fake_export(config):
+        captured["config"] = config
+        export_path.write_bytes(b"zip")
+        return {"destination": str(export_path), "missing_files": []}
+
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName", fake_get_save_file_name)
+    monkeypatch.setattr(plate_reader_window_module, "export_plate_reader_analysis_package", fake_export)
+
+    _validate_window_preview(window, controller, experiment_dir, qapp)
+    window._on_run_clicked()
+    payload = {
+        "experiment_dir": str(experiment_dir),
+        "plate_reader_file": str(plate_file),
+        "copied_plate_reader_file": str(raw_copy),
+        "key_file": str(key_file),
+        "merged_csv": str(merged_csv),
+        "output_dir": str(output_dir),
+        "manifest_json": str(manifest_path),
+        "report_html": str(report),
+        "command_returncodes": {"associate": 0, "analyze": 0},
+    }
+    controller.plate_reader_analysis_finished.emit(True, "finished", payload)
+    qapp.processEvents()
+    assert window.export_button.isEnabled() is True
+
+    window._on_export_clicked()
+
+    assert captured["config"].analysis_payload == payload
+    assert Path(captured["config"].destination) == export_path
+    assert captured["config"].created_by == "LabCraft app"
+    assert window.open_export_folder_button.isEnabled() is True
+    assert "Exported plate-reader analysis package" in window.log_output.toPlainText()
+
+    window.close()
+
+
+def test_window_export_failure_logs_error_and_keeps_window_usable(tmp_path, qapp, monkeypatch):
+    window, controller, experiment_dir, *_ = _make_window(tmp_path, qapp)
+    output_dir = tmp_path / "analysis"
+    output_dir.mkdir()
+    report = output_dir / "analysis_report.html"
+    report.write_text("<html></html>", encoding="utf-8")
+    manifest_path = _write_manifest(output_dir)
+
+    monkeypatch.setattr(
+        QtWidgets.QFileDialog,
+        "getSaveFileName",
+        lambda *_args, **_kwargs: (str(tmp_path / "export.zip"), "ZIP files (*.zip)"),
+    )
+
+    def fake_export(_config):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(plate_reader_window_module, "export_plate_reader_analysis_package", fake_export)
+
+    _validate_window_preview(window, controller, experiment_dir, qapp)
+    window._on_run_clicked()
+    controller.plate_reader_analysis_finished.emit(
+        True,
+        "finished",
+        {
+            "experiment_dir": str(experiment_dir),
+            "output_dir": str(output_dir),
+            "manifest_json": str(manifest_path),
+            "report_html": str(report),
+        },
+    )
+    qapp.processEvents()
+
+    window._on_export_clicked()
+
+    assert window.status_label.text() == "Export failed"
+    assert "disk full" in window.log_output.toPlainText()
+    assert window.export_button.isEnabled() is True
+    assert window.open_export_folder_button.isEnabled() is False
 
     window.close()
 
@@ -589,6 +699,8 @@ def test_window_edit_after_success_clears_result_summary_and_buttons(tmp_path, q
     assert window.result_outputs_table.rowCount() == 0
     assert window.open_report_button.isEnabled() is False
     assert window.open_folder_button.isEnabled() is False
+    assert window.export_button.isEnabled() is False
+    assert window.open_export_folder_button.isEnabled() is False
     assert "Run analysis" in window.result_messages.toPlainText()
 
     window.close()

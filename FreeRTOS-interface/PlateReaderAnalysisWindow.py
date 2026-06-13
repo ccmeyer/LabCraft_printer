@@ -6,6 +6,7 @@ from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from PlateReaderAnalysisExport import PlateReaderAnalysisExportConfig, export_plate_reader_analysis_package
 from PlateReaderAnalysisRunner import PlateReaderAnalysisConfig, PlateReaderAnalysisPreviewResult
 
 
@@ -28,6 +29,7 @@ class PlateReaderAnalysisWindow(QtWidgets.QDialog):
         self._manifest_path: Path | None = None
         self._report_path: Path | None = None
         self._analysis_dir: Path | None = None
+        self._export_path: Path | None = None
 
         self.setWindowTitle("Plate Reader Analysis")
         self.resize(920, 760)
@@ -174,6 +176,12 @@ class PlateReaderAnalysisWindow(QtWidgets.QDialog):
         self.open_folder_button = QtWidgets.QPushButton("Open Analysis Folder")
         self.open_folder_button.setObjectName("openPlateReaderAnalysisFolderButton")
         self.open_folder_button.clicked.connect(self._open_analysis_folder)
+        self.export_button = QtWidgets.QPushButton("Export Package...")
+        self.export_button.setObjectName("exportPlateReaderAnalysisPackageButton")
+        self.export_button.clicked.connect(self._on_export_clicked)
+        self.open_export_folder_button = QtWidgets.QPushButton("Open Export Folder")
+        self.open_export_folder_button.setObjectName("openPlateReaderAnalysisExportFolderButton")
+        self.open_export_folder_button.clicked.connect(self._open_export_folder)
         self.close_button = QtWidgets.QPushButton("Close")
         self.close_button.clicked.connect(self.close)
         button_row.addWidget(self.validate_preview_button)
@@ -181,6 +189,8 @@ class PlateReaderAnalysisWindow(QtWidgets.QDialog):
         button_row.addWidget(self.cancel_button)
         button_row.addWidget(self.open_report_button)
         button_row.addWidget(self.open_folder_button)
+        button_row.addWidget(self.export_button)
+        button_row.addWidget(self.open_export_folder_button)
         button_row.addWidget(self.close_button)
         root.addLayout(button_row)
 
@@ -310,6 +320,7 @@ class PlateReaderAnalysisWindow(QtWidgets.QDialog):
         self._last_payload = {}
         self._report_path = None
         self._analysis_dir = None
+        self._export_path = None
         self._clear_result_summary("Validation preview running...")
         self._set_previewing(True)
         self._set_status("Validating preview...")
@@ -383,6 +394,7 @@ class PlateReaderAnalysisWindow(QtWidgets.QDialog):
         self._last_payload = {}
         self._report_path = None
         self._analysis_dir = None
+        self._export_path = None
         self._clear_result_summary("Analysis running...")
         self._update_result_buttons()
         self._set_running(True)
@@ -422,6 +434,7 @@ class PlateReaderAnalysisWindow(QtWidgets.QDialog):
         else:
             self._report_path = None
             self._analysis_dir = None
+            self._export_path = None
             self._clear_result_summary("Analysis did not finish successfully.")
         self._update_result_buttons()
 
@@ -642,6 +655,7 @@ class PlateReaderAnalysisWindow(QtWidgets.QDialog):
         self._last_payload = {}
         self._report_path = None
         self._analysis_dir = None
+        self._export_path = None
         self._clear_result_summary()
         if had_preview:
             self._set_status("Preview stale; validate before running.")
@@ -698,8 +712,60 @@ class PlateReaderAnalysisWindow(QtWidgets.QDialog):
     def _update_result_buttons(self):
         report_ok = self._report_path is not None and self._report_path.exists()
         folder_ok = self._analysis_dir is not None and self._analysis_dir.exists()
+        export_ok = folder_ok and bool(self._last_payload)
+        export_folder_ok = self._export_path is not None and self._export_path.exists()
         self.open_report_button.setEnabled((not self._running) and (not self._previewing) and report_ok)
         self.open_folder_button.setEnabled((not self._running) and (not self._previewing) and folder_ok)
+        self.export_button.setEnabled((not self._running) and (not self._previewing) and export_ok)
+        self.open_export_folder_button.setEnabled((not self._running) and (not self._previewing) and export_folder_ok)
+
+    def _default_export_path(self) -> Path:
+        experiment_dir = Path(str(self._last_payload.get("experiment_dir") or "")) if self._last_payload else Path()
+        if not str(experiment_dir) or experiment_dir.name == "":
+            experiment_dir = self._analysis_dir.parent if self._analysis_dir is not None else Path.home()
+        downloads = QtCore.QStandardPaths.writableLocation(QtCore.QStandardPaths.DownloadLocation)
+        base_dir = Path(downloads) if downloads else experiment_dir
+        stem_source = experiment_dir.name or "plate_reader_analysis"
+        safe_stem = "".join(char if char.isalnum() or char in ("-", "_") else "_" for char in stem_source).strip("_")
+        safe_stem = safe_stem or "plate_reader_analysis"
+        return base_dir / f"{safe_stem}_plate_reader_analysis_export.zip"
+
+    @QtCore.Slot()
+    def _on_export_clicked(self):
+        if self._analysis_dir is None or not self._analysis_dir.exists():
+            self._set_status("Export failed")
+            self._append_log("Analysis folder does not exist yet.")
+            return
+        path, _selected_filter = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export Plate Reader Analysis Package",
+            str(self._default_export_path()),
+            "ZIP files (*.zip);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            result = export_plate_reader_analysis_package(
+                PlateReaderAnalysisExportConfig(
+                    analysis_payload=dict(self._last_payload),
+                    destination=Path(path),
+                    created_by="LabCraft app",
+                )
+            )
+        except Exception as exc:
+            self._set_status("Export failed")
+            self._append_log(f"Failed to export plate-reader analysis package: {exc}")
+            self._export_path = None
+            self._update_result_buttons()
+            return
+
+        self._export_path = Path(str(result.get("destination") or path))
+        missing = result.get("missing_files") or []
+        self._set_status("Exported analysis package")
+        self._append_log(f"Exported plate-reader analysis package: {self._export_path}")
+        if missing:
+            self._append_log("Export completed with missing optional files: " + ", ".join(str(item) for item in missing))
+        self._update_result_buttons()
 
     @QtCore.Slot()
     def _open_report(self):
@@ -714,6 +780,13 @@ class PlateReaderAnalysisWindow(QtWidgets.QDialog):
             self._append_log("Analysis folder does not exist yet.")
             return
         QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(self._analysis_dir.resolve())))
+
+    @QtCore.Slot()
+    def _open_export_folder(self):
+        if self._export_path is None or not self._export_path.exists():
+            self._append_log("Export package does not exist yet.")
+            return
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(self._export_path.parent.resolve())))
 
     def closeEvent(self, event):
         if self._running or self._previewing:
