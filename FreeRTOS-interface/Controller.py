@@ -87,6 +87,11 @@ class Controller(QObject):
     regulator_calibration_batch_progress = QtCore.Signal(int, int, object)
     regulator_calibration_batch_finished = QtCore.Signal(bool, str, object)
 
+    # Plate-reader analysis signals
+    plate_reader_analysis_stage = QtCore.Signal(str)
+    plate_reader_analysis_output = QtCore.Signal(str)
+    plate_reader_analysis_finished = QtCore.Signal(bool, str, object)
+
     # Application update check signals
     app_update_check_started = QtCore.Signal()
     app_update_check_finished = QtCore.Signal(object)
@@ -124,6 +129,7 @@ class Controller(QObject):
         self._regulator_calibration_worker = None
         self._regulator_calibration_state = None
         self._regulator_calibration_batch_state = None
+        self._plate_reader_analysis_worker = None
         self._app_update_process = None
         self._app_update_check_thread = None
         self._app_update_check_worker = None
@@ -810,6 +816,47 @@ class Controller(QObject):
     def _on_qualification_finished(self, ok, message, payload):
         self.qualification_finished.emit(bool(ok), str(message), payload)
         self._qualification_worker = None
+
+    def is_plate_reader_analysis_running(self):
+        worker = getattr(self, "_plate_reader_analysis_worker", None)
+        if worker is None:
+            return False
+        is_running = getattr(worker, "isRunning", None)
+        return bool(worker is not None and (not callable(is_running) or is_running()))
+
+    def start_plate_reader_analysis(self, config, worker_factory=None):
+        if self.is_plate_reader_analysis_running():
+            self.plate_reader_analysis_output.emit("A plate-reader analysis run is already active.")
+            return False
+
+        if callable(worker_factory):
+            worker = worker_factory(config)
+        else:
+            from PlateReaderAnalysisRunner import PlateReaderAnalysisWorker
+
+            worker = PlateReaderAnalysisWorker(config, repo_root=self._repo_root)
+
+        self._plate_reader_analysis_worker = worker
+        worker.stage.connect(lambda msg: self.plate_reader_analysis_stage.emit(msg))
+        worker.output.connect(lambda msg: self.plate_reader_analysis_output.emit(msg))
+        worker.run_finished.connect(self._on_plate_reader_analysis_finished)
+        worker.start()
+        return True
+
+    def cancel_plate_reader_analysis(self):
+        worker = getattr(self, "_plate_reader_analysis_worker", None)
+        if worker is None:
+            return False
+        cancel = getattr(worker, "cancel", None)
+        if callable(cancel):
+            cancel()
+            return True
+        return False
+
+    @QtCore.Slot(bool, str, object)
+    def _on_plate_reader_analysis_finished(self, ok, message, payload):
+        self.plate_reader_analysis_finished.emit(bool(ok), str(message), payload)
+        self._plate_reader_analysis_worker = None
 
     def regulator_calibration_output_root(self):
         return self._repo_root / "local" / "regulator_optimization"

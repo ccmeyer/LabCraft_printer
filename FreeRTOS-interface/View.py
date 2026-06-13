@@ -458,6 +458,7 @@ class MainWindow(QMainWindow):
         self.color_dict = self.load_colors(self.color_dict_path)
         self._startup_focus_initialized = False
         self.audit_timeline_window = None
+        self._plate_reader_analysis_window = None
         self._app_update_close_requested = False
 
         self.setWindowTitle("Droplet Printer Interface v1.0.2")
@@ -585,6 +586,12 @@ class MainWindow(QMainWindow):
         self.audit_timeline_button = QtWidgets.QPushButton("Audit Timeline")
         self.audit_timeline_button.clicked.connect(self.show_experiment_audit)
         action_row.addWidget(self.audit_timeline_button, 1)
+
+        self.plate_reader_analysis_button = QtWidgets.QPushButton("Analyze Plate Reader...")
+        self.plate_reader_analysis_button.setObjectName("plateReaderAnalysisButton")
+        self.plate_reader_analysis_button.setToolTip("Associate plate-reader data with the concentration key and run analysis")
+        self.plate_reader_analysis_button.clicked.connect(self.show_plate_reader_analysis)
+        action_row.addWidget(self.plate_reader_analysis_button, 1)
 
         self.keyboard_shortcuts_button = QtWidgets.QPushButton("Shortcuts")
         self.keyboard_shortcuts_button.setToolTip("Show keyboard shortcuts")
@@ -1147,6 +1154,27 @@ class MainWindow(QMainWindow):
             window.model = self.model
             window.refresh()
 
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def show_plate_reader_analysis(self):
+        """Open the plate-reader analysis runner window."""
+        window = getattr(self, "_plate_reader_analysis_window", None)
+        if window is not None:
+            try:
+                window.show()
+                window.raise_()
+                window.activateWindow()
+                return
+            except RuntimeError:
+                self._plate_reader_analysis_window = None
+
+        from PlateReaderAnalysisWindow import PlateReaderAnalysisWindow
+
+        window = PlateReaderAnalysisWindow(self, model=self.model, controller=self.controller)
+        self._plate_reader_analysis_window = window
+        window.destroyed.connect(lambda *_args: setattr(self, "_plate_reader_analysis_window", None))
         window.show()
         window.raise_()
         window.activateWindow()
