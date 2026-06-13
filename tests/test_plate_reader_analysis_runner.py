@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 
 import pytest
 
 from PlateReaderAnalysisRunner import (
     PlateReaderAnalysisConfig,
+    PlateReaderAnalysisPreviewResult,
+    PlateReaderAnalysisPreviewWorker,
     PlateReaderAnalysisWorker,
+    build_plate_reader_analysis_preview,
 )
 
 
@@ -18,6 +22,59 @@ def _make_experiment(tmp_path: Path) -> tuple[Path, Path, Path]:
     plate_file = tmp_path / "plate_reader.txt"
     plate_file.write_text("raw plate reader export\n", encoding="utf-8")
     return experiment_dir, key_file, plate_file
+
+
+def _write_preview_plate_export(path: Path) -> None:
+    rows = [
+        ["##BLOCKS= 1"],
+        ["Plate:", "Plate1", "1.3", "502 540", "Manual"],
+        ["Time", "Temperature(C)", "A1", "A2", "A3"],
+        ["00:00:00", "37", "10", "20", "30"],
+        ["00:01:00", "37", "11", "21", "31"],
+        ["00:02:00", "37", "12", "22", "32"],
+        [],
+        ["~End"],
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-16", newline="") as handle:
+        csv.writer(handle, delimiter="\t").writerows(rows)
+
+
+def _write_endpoint_plate_export(path: Path) -> None:
+    metadata_row = [""] * 33
+    for index, value in {
+        0: "Plate:",
+        1: "Plate#1",
+        3: "PlateFormat",
+        4: "Endpoint",
+        5: "Fluorescence",
+        16: "509",
+        19: "384",
+        20: "488",
+    }.items():
+        metadata_row[index] = value
+    rows = [
+        ["##BLOCKS= 1"],
+        metadata_row,
+        ["", "Temperature(C)", "1", "2"],
+        ["", "23.5", "100", "200"],
+        ["", "", "300", "400"],
+        [],
+        ["~End"],
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-16", newline="") as handle:
+        csv.writer(handle, delimiter="\t").writerows(rows)
+
+
+def _write_preview_key(path: Path, *, zero_overlap: bool = False) -> None:
+    lines = (
+        ["Well ID,DNA_mM", "B1,1.0", "B2,2.0"]
+        if zero_overlap
+        else ["Well ID,DNA_mM", "A1,1.0", "A2,2.0", "A4,4.0"]
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _run_worker(worker: PlateReaderAnalysisWorker) -> tuple[tuple[bool, str, object], list[str], list[str]]:
@@ -33,6 +90,18 @@ def _run_worker(worker: PlateReaderAnalysisWorker) -> tuple[tuple[bool, str, obj
 
     assert len(finished) == 1
     return finished[0], stages, outputs
+
+
+def _run_preview_worker(worker: PlateReaderAnalysisPreviewWorker) -> tuple[tuple[bool, str, object], list[str]]:
+    stages: list[str] = []
+    finished: list[tuple[bool, str, object]] = []
+    worker.stage.connect(stages.append)
+    worker.run_finished.connect(lambda ok, message, payload: finished.append((ok, message, payload)))
+
+    worker.run()
+
+    assert len(finished) == 1
+    return finished[0], stages
 
 
 def _option_value(command: list[str], option: str) -> str:
@@ -58,6 +127,129 @@ def _successful_fake_runner(invocations: list, *, emit_progress: bool = True):
         raise AssertionError(f"Unexpected command step: {command.step}")
 
     return _run
+
+
+def test_preview_builder_summarizes_timecourse_inputs_without_writing_files(tmp_path):
+    experiment_dir = tmp_path / "experiment"
+    plate_file = tmp_path / "reader.txt"
+    key_file = experiment_dir / "concentration_key.csv"
+    experiment_dir.mkdir()
+    _write_preview_plate_export(plate_file)
+    _write_preview_key(key_file)
+
+    result = build_plate_reader_analysis_preview(
+        PlateReaderAnalysisConfig(experiment_dir=experiment_dir, plate_reader_file=plate_file)
+    )
+
+    assert isinstance(result, PlateReaderAnalysisPreviewResult)
+    assert result.ok is True
+    assert result.errors == []
+    assert result.summary["measured_well_count"] == 3
+    assert result.summary["key_well_count"] == 3
+    assert result.summary["keyed_measured_well_count"] == 2
+    assert result.summary["unkeyed_measured_well_count"] == 1
+    assert result.summary["missing_key_well_count"] == 1
+    assert result.summary["fluorophores"] == ["502_540"]
+    assert result.summary["timepoint_count"] == 3
+    assert result.summary["has_timecourse_data"] is True
+    assert result.summary["condition_columns"] == ["DNA_mM"]
+    assert result.summary["composition_count"] == 2
+    assert Path(result.paths["copied_plate_reader_file"]) == experiment_dir / "raw_plate_reader" / plate_file.name
+    assert Path(result.paths["merged_csv"]) == experiment_dir / "reader_merged_tidy.csv"
+    assert Path(result.paths["output_dir"]) == experiment_dir / "plate_reader_analysis"
+    assert not (experiment_dir / "raw_plate_reader").exists()
+    assert not Path(result.paths["merged_csv"]).exists()
+    assert any("measured well(s) are not present" in warning for warning in result.warnings)
+    assert any("keyed well(s) have no measured RFU data" in warning for warning in result.warnings)
+
+
+def test_preview_worker_emits_stage_and_result(tmp_path):
+    experiment_dir = tmp_path / "experiment"
+    plate_file = tmp_path / "reader.txt"
+    key_file = experiment_dir / "concentration_key.csv"
+    experiment_dir.mkdir()
+    _write_preview_plate_export(plate_file)
+    _write_preview_key(key_file)
+    worker = PlateReaderAnalysisPreviewWorker(
+        PlateReaderAnalysisConfig(experiment_dir=experiment_dir, plate_reader_file=plate_file)
+    )
+
+    (ok, message, payload), stages = _run_preview_worker(worker)
+
+    assert ok is True
+    assert "passed" in message
+    assert isinstance(payload, PlateReaderAnalysisPreviewResult)
+    assert payload.summary["keyed_measured_well_count"] == 2
+    assert stages == ["Validating plate-reader inputs", "Preview ready"]
+
+
+def test_preview_endpoint_only_data_sets_timecourse_warning(tmp_path):
+    experiment_dir = tmp_path / "experiment"
+    plate_file = tmp_path / "endpoint.txt"
+    key_file = experiment_dir / "concentration_key.csv"
+    experiment_dir.mkdir()
+    _write_endpoint_plate_export(plate_file)
+    key_file.write_text("Well ID,DNA_mM\nA1,1.0\nA2,2.0\nB1,3.0\nB2,4.0\n", encoding="utf-8")
+
+    result = build_plate_reader_analysis_preview(
+        PlateReaderAnalysisConfig(experiment_dir=experiment_dir, plate_reader_file=plate_file)
+    )
+
+    assert result.ok is True
+    assert result.summary["has_timecourse_data"] is False
+    assert result.summary["timepoint_count"] == 1
+    assert any("Endpoint-only data detected" in warning for warning in result.warnings)
+
+
+def test_preview_missing_inputs_are_blocking_and_do_not_write_files(tmp_path):
+    experiment_dir = tmp_path / "experiment"
+    experiment_dir.mkdir()
+    result = build_plate_reader_analysis_preview(
+        PlateReaderAnalysisConfig(experiment_dir=experiment_dir, plate_reader_file=tmp_path / "missing.txt")
+    )
+
+    assert result.ok is False
+    assert any("Plate-reader file" in error for error in result.errors)
+    assert any("Concentration key" in error for error in result.errors)
+    assert not (experiment_dir / "raw_plate_reader").exists()
+
+
+def test_preview_zero_keyed_measured_wells_is_blocking(tmp_path):
+    experiment_dir = tmp_path / "experiment"
+    plate_file = tmp_path / "reader.txt"
+    key_file = experiment_dir / "concentration_key.csv"
+    experiment_dir.mkdir()
+    _write_preview_plate_export(plate_file)
+    _write_preview_key(key_file, zero_overlap=True)
+
+    result = build_plate_reader_analysis_preview(
+        PlateReaderAnalysisConfig(experiment_dir=experiment_dir, plate_reader_file=plate_file)
+    )
+
+    assert result.ok is False
+    assert "No measured wells matched the concentration key." in result.errors
+    assert result.summary["keyed_measured_well_count"] == 0
+
+
+def test_preview_existing_outputs_are_warnings_not_errors(tmp_path):
+    experiment_dir = tmp_path / "experiment"
+    plate_file = tmp_path / "reader.txt"
+    key_file = experiment_dir / "concentration_key.csv"
+    output_dir = experiment_dir / "plate_reader_analysis"
+    experiment_dir.mkdir()
+    output_dir.mkdir()
+    _write_preview_plate_export(plate_file)
+    _write_preview_key(key_file)
+    (experiment_dir / "reader_merged_tidy.csv").write_text("old\n", encoding="utf-8")
+
+    result = build_plate_reader_analysis_preview(
+        PlateReaderAnalysisConfig(experiment_dir=experiment_dir, plate_reader_file=plate_file)
+    )
+
+    assert result.ok is True
+    assert result.errors == []
+    assert any("Merged tidy CSV already exists" in warning for warning in result.warnings)
+    assert any("Analysis output directory already exists" in warning for warning in result.warnings)
 
 
 def test_successful_run_copies_plate_file_runs_commands_and_returns_package_paths(tmp_path):

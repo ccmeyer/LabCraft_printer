@@ -88,6 +88,8 @@ class Controller(QObject):
     regulator_calibration_batch_finished = QtCore.Signal(bool, str, object)
 
     # Plate-reader analysis signals
+    plate_reader_analysis_preview_stage = QtCore.Signal(str)
+    plate_reader_analysis_preview_finished = QtCore.Signal(bool, str, object)
     plate_reader_analysis_stage = QtCore.Signal(str)
     plate_reader_analysis_output = QtCore.Signal(str)
     plate_reader_analysis_finished = QtCore.Signal(bool, str, object)
@@ -129,6 +131,7 @@ class Controller(QObject):
         self._regulator_calibration_worker = None
         self._regulator_calibration_state = None
         self._regulator_calibration_batch_state = None
+        self._plate_reader_analysis_preview_worker = None
         self._plate_reader_analysis_worker = None
         self._app_update_process = None
         self._app_update_check_thread = None
@@ -817,6 +820,13 @@ class Controller(QObject):
         self.qualification_finished.emit(bool(ok), str(message), payload)
         self._qualification_worker = None
 
+    def is_plate_reader_analysis_preview_running(self):
+        worker = getattr(self, "_plate_reader_analysis_preview_worker", None)
+        if worker is None:
+            return False
+        is_running = getattr(worker, "isRunning", None)
+        return bool(worker is not None and (not callable(is_running) or is_running()))
+
     def is_plate_reader_analysis_running(self):
         worker = getattr(self, "_plate_reader_analysis_worker", None)
         if worker is None:
@@ -824,7 +834,38 @@ class Controller(QObject):
         is_running = getattr(worker, "isRunning", None)
         return bool(worker is not None and (not callable(is_running) or is_running()))
 
+    def start_plate_reader_analysis_preview(self, config, worker_factory=None):
+        if self.is_plate_reader_analysis_running():
+            message = "A plate-reader analysis run is already active."
+            self.plate_reader_analysis_preview_finished.emit(False, message, {"errors": [message], "warnings": []})
+            return False
+        if self.is_plate_reader_analysis_preview_running():
+            message = "A plate-reader analysis preview is already active."
+            self.plate_reader_analysis_preview_finished.emit(False, message, {"errors": [message], "warnings": []})
+            return False
+
+        if callable(worker_factory):
+            worker = worker_factory(config)
+        else:
+            from PlateReaderAnalysisRunner import PlateReaderAnalysisPreviewWorker
+
+            worker = PlateReaderAnalysisPreviewWorker(config)
+
+        self._plate_reader_analysis_preview_worker = worker
+        worker.stage.connect(lambda msg: self.plate_reader_analysis_preview_stage.emit(msg))
+        worker.run_finished.connect(self._on_plate_reader_analysis_preview_finished)
+        worker.start()
+        return True
+
+    @QtCore.Slot(bool, str, object)
+    def _on_plate_reader_analysis_preview_finished(self, ok, message, payload):
+        self.plate_reader_analysis_preview_finished.emit(bool(ok), str(message), payload)
+        self._plate_reader_analysis_preview_worker = None
+
     def start_plate_reader_analysis(self, config, worker_factory=None):
+        if self.is_plate_reader_analysis_preview_running():
+            self.plate_reader_analysis_output.emit("A plate-reader analysis preview is already active.")
+            return False
         if self.is_plate_reader_analysis_running():
             self.plate_reader_analysis_output.emit("A plate-reader analysis run is already active.")
             return False
