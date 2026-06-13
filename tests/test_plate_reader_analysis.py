@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -260,6 +261,8 @@ def test_endpoint_summary_groups_conditions_and_computes_replicate_stats(tmp_pat
 
     endpoint = pd.read_csv(result.endpoint_csv)
     summary = pd.read_csv(result.composition_summary_csv)
+    assert result.manifest_json.exists()
+    assert result.report_html.exists()
 
     assert result.condition_columns == ["DNA_mM", "Mg_mM"]
     assert len(endpoint) == 4
@@ -1253,6 +1256,41 @@ def test_cli_with_merged_csv_creates_expected_outputs(tmp_path, capsys):
         / "including_outliers"
         / "488_509_cv_vs_mean_endpoint_rfu.png"
     ).exists()
+    manifest_path = output_dir / "analysis_manifest.json"
+    report_path = output_dir / "analysis_report.html"
+    assert manifest_path.exists()
+    assert report_path.exists()
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["schema_version"] == "plate_reader_analysis_manifest_v1"
+    assert manifest["inputs"]["endpoint_last_n"] == 3
+    assert manifest["dataset"]["total_rows"] == 14
+    assert manifest["dataset"]["endpoint_rows"] == 4
+    assert manifest["dataset"]["composition_rows"] == 2
+    assert manifest["dataset"]["keyed_well_count"] == 3
+    assert manifest["dataset"]["measured_well_count"] == 4
+    assert manifest["dataset"]["fluorophores"] == ["488_509"]
+    assert manifest["dataset"]["condition_columns"] == ["DNA_mM", "Mg_mM"]
+    assert manifest["dataset"]["has_timecourse_data"] is True
+    assert manifest["outliers"]["final_outlier_count"] == 0
+    output_records = manifest["outputs"]
+    assert all(not Path(record["path"]).is_absolute() for record in output_records)
+    output_categories = {record["category"] for record in output_records}
+    assert {
+        "analysis_package",
+        "summary_tables",
+        "absolute_rfu_heatmaps",
+        "endpoint_outlier_heatmaps",
+        "endpoint_variability",
+        "combined_timecourse_plots",
+        "endpoint_main_effects",
+    }.issubset(output_categories)
+    assert any(record["path"] == "endpoint_by_well.csv" for record in output_records)
+
+    report_html = report_path.read_text(encoding="utf-8")
+    assert "Plate Reader Analysis Report" in report_html
+    assert "endpoint_by_well.csv" in report_html
+    assert "heatmaps_absolute_rfu/488_509_endpoint_rfu.png" in report_html
 
     captured = capsys.readouterr()
     assert "[analysis] Resolving merged tidy data input" in captured.out
@@ -1263,6 +1301,8 @@ def test_cli_with_merged_csv_creates_expected_outputs(tmp_path, capsys):
     assert "Endpoint rows: 4" in captured.out
     assert "Composition rows: 2" in captured.out
     assert "Timecourse summary excluding outliers:" in captured.out
+    assert f"Analysis manifest: {manifest_path}" in captured.out
+    assert f"Analysis report: {report_path}" in captured.out
     assert "Endpoint outliers: 0" in captured.out
     assert "Timecourse plots: 2" in captured.out
     assert "Combined timecourse plots: 2" in captured.out
@@ -1313,6 +1353,13 @@ def test_cli_with_endpoint_only_data_skips_timecourse_plots(tmp_path, capsys):
     assert not list((output_dir / "timecourses").glob("*.png"))
     assert not list((output_dir / "timecourses_combined").glob("*.png"))
     assert not (output_dir / "timecourses_faceted").exists()
+    manifest = json.loads((output_dir / "analysis_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["dataset"]["has_timecourse_data"] is False
+    assert manifest["warnings"] == [
+        "Timecourse plots were skipped because fewer than two timepoints were found."
+    ]
+    report_html = (output_dir / "analysis_report.html").read_text(encoding="utf-8")
+    assert "Timecourse plots were skipped because fewer than two timepoints were found." in report_html
 
     captured = capsys.readouterr()
     assert "Endpoint rows: 4" in captured.out

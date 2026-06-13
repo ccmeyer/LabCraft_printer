@@ -133,6 +133,8 @@ def print_summary(result: analysis.AnalysisResult, merged_csv: Path) -> None:
     print(f"Timecourse summary: {result.timecourse_summary_csv}")
     print(f"Timecourse summary excluding outliers: {result.timecourse_excluding_outliers_summary_csv}")
     print(f"Outlier summary: {result.outlier_summary_csv}")
+    print(f"Analysis manifest: {result.manifest_json}")
+    print(f"Analysis report: {result.report_html}")
     print(f"Endpoint outliers: {result.outlier_count}")
     print(f"Absolute RFU heatmaps: {len(result.absolute_heatmap_pngs)}")
     print(f"Condition percent-difference heatmaps: {len(result.percent_difference_heatmap_pngs)}")

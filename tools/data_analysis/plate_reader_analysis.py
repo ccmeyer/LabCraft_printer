@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from html import escape
 from itertools import combinations, permutations
 from pathlib import Path
 from typing import Callable, Iterable
@@ -105,6 +108,8 @@ class AnalysisResult:
     faceted_timecourse_pngs: list[Path]
     endpoint_variability_csvs: list[Path]
     endpoint_variability_pngs: list[Path]
+    manifest_json: Path
+    report_html: Path
     outlier_count: int
     condition_columns: list[str]
     endpoint_rows: int
@@ -1853,6 +1858,323 @@ def write_endpoint_effect_outputs(
     return main_csvs, main_pngs, pairwise_csvs, pairwise_pngs, dose_csvs, dose_pngs
 
 
+def relative_output_path(path: Path, output_root: Path) -> str:
+    path = Path(path)
+    try:
+        return path.relative_to(output_root).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def infer_output_variant(path: Path) -> str | None:
+    text = path.as_posix()
+    for variant_name, _variant_label in ENDPOINT_EFFECT_VARIANTS:
+        if f"/{variant_name}/" in text or variant_name in path.name:
+            return variant_name
+    return None
+
+
+def infer_output_fluorophore(path: Path, fluorophores: Iterable[str]) -> str | None:
+    name = path.name
+    for fluorophore in sorted((str(value) for value in fluorophores), key=len, reverse=True):
+        safe_fluorophore = safe_filename(fluorophore)
+        if name.startswith(f"{safe_fluorophore}_") or f"_{safe_fluorophore}_" in name:
+            return fluorophore
+    return None
+
+
+def make_output_record(
+    output_root: Path,
+    path: Path,
+    *,
+    category: str,
+    title: str,
+    fluorophores: Iterable[str],
+) -> dict[str, str]:
+    record: dict[str, str] = {
+        "category": category,
+        "kind": Path(path).suffix.lower().lstrip("."),
+        "path": relative_output_path(Path(path), output_root),
+        "title": title,
+    }
+    fluorophore = infer_output_fluorophore(Path(path), fluorophores)
+    if fluorophore is not None:
+        record["fluorophore"] = fluorophore
+    variant = infer_output_variant(Path(path))
+    if variant is not None:
+        record["variant"] = variant
+    return record
+
+
+def add_output_records(
+    records: list[dict[str, str]],
+    output_root: Path,
+    paths: Iterable[Path],
+    *,
+    category: str,
+    title: str,
+    fluorophores: Iterable[str],
+) -> None:
+    for path in paths:
+        records.append(
+            make_output_record(
+                output_root,
+                path,
+                category=category,
+                title=title,
+                fluorophores=fluorophores,
+            )
+        )
+
+
+def build_analysis_output_records(
+    output_root: Path,
+    *,
+    manifest_json: Path,
+    report_html: Path,
+    endpoint_csv: Path,
+    composition_summary_csv: Path,
+    timecourse_summary_csv: Path,
+    timecourse_excluding_outliers_summary_csv: Path,
+    outlier_summary_csv: Path,
+    absolute_csvs: list[Path],
+    absolute_pngs: list[Path],
+    percent_csvs: list[Path],
+    percent_pngs: list[Path],
+    outlier_csvs: list[Path],
+    outlier_pngs: list[Path],
+    timecourse_pngs: list[Path],
+    combined_timecourse_pngs: list[Path],
+    faceted_timecourse_csvs: list[Path],
+    faceted_timecourse_pngs: list[Path],
+    endpoint_variability_csvs: list[Path],
+    endpoint_variability_pngs: list[Path],
+    main_effect_csvs: list[Path],
+    main_effect_pngs: list[Path],
+    pairwise_csvs: list[Path],
+    pairwise_pngs: list[Path],
+    dose_csvs: list[Path],
+    dose_pngs: list[Path],
+    fluorophores: list[str],
+) -> list[dict[str, str]]:
+    records: list[dict[str, str]] = []
+    records.append(
+        make_output_record(
+            output_root,
+            manifest_json,
+            category="analysis_package",
+            title="Analysis manifest",
+            fluorophores=fluorophores,
+        )
+    )
+    records.append(
+        make_output_record(
+            output_root,
+            report_html,
+            category="analysis_package",
+            title="Analysis report",
+            fluorophores=fluorophores,
+        )
+    )
+    for path, title in [
+        (endpoint_csv, "Endpoint by well"),
+        (composition_summary_csv, "Composition summary"),
+        (timecourse_summary_csv, "Timecourse summary"),
+        (timecourse_excluding_outliers_summary_csv, "Timecourse summary excluding outliers"),
+        (outlier_summary_csv, "Outlier summary"),
+    ]:
+        records.append(
+            make_output_record(
+                output_root,
+                path,
+                category="summary_tables",
+                title=title,
+                fluorophores=fluorophores,
+            )
+        )
+
+    add_output_records(records, output_root, absolute_csvs, category="absolute_rfu_heatmaps", title="Absolute RFU heatmap matrix", fluorophores=fluorophores)
+    add_output_records(records, output_root, absolute_pngs, category="absolute_rfu_heatmaps", title="Absolute RFU heatmap", fluorophores=fluorophores)
+    add_output_records(records, output_root, percent_csvs, category="condition_percent_difference_heatmaps", title="Condition percent-difference heatmap matrix", fluorophores=fluorophores)
+    add_output_records(records, output_root, percent_pngs, category="condition_percent_difference_heatmaps", title="Condition percent-difference heatmap", fluorophores=fluorophores)
+    add_output_records(records, output_root, outlier_csvs, category="endpoint_outlier_heatmaps", title="Endpoint outlier heatmap matrix", fluorophores=fluorophores)
+    add_output_records(records, output_root, outlier_pngs, category="endpoint_outlier_heatmaps", title="Endpoint outlier heatmap", fluorophores=fluorophores)
+    add_output_records(records, output_root, timecourse_pngs, category="timecourse_plots", title="Per-composition timecourse plot", fluorophores=fluorophores)
+    add_output_records(records, output_root, combined_timecourse_pngs, category="combined_timecourse_plots", title="Combined timecourse plot", fluorophores=fluorophores)
+    add_output_records(records, output_root, faceted_timecourse_csvs, category="faceted_timecourse_grid_plots", title="Faceted timecourse grid summary", fluorophores=fluorophores)
+    add_output_records(records, output_root, faceted_timecourse_pngs, category="faceted_timecourse_grid_plots", title="Faceted timecourse grid plot", fluorophores=fluorophores)
+    add_output_records(records, output_root, endpoint_variability_csvs, category="endpoint_variability", title="Endpoint variability summary", fluorophores=fluorophores)
+    add_output_records(records, output_root, endpoint_variability_pngs, category="endpoint_variability", title="Endpoint variability plot", fluorophores=fluorophores)
+    add_output_records(records, output_root, main_effect_csvs, category="endpoint_main_effects", title="Endpoint main-effect summary", fluorophores=fluorophores)
+    add_output_records(records, output_root, main_effect_pngs, category="endpoint_main_effects", title="Endpoint main-effect plot", fluorophores=fluorophores)
+    add_output_records(records, output_root, pairwise_csvs, category="endpoint_pairwise_interactions", title="Endpoint pairwise interaction matrix", fluorophores=fluorophores)
+    add_output_records(records, output_root, pairwise_pngs, category="endpoint_pairwise_interactions", title="Endpoint pairwise interaction plot", fluorophores=fluorophores)
+    add_output_records(records, output_root, dose_csvs, category="endpoint_faceted_dose_response", title="Endpoint faceted dose-response summary", fluorophores=fluorophores)
+    add_output_records(records, output_root, dose_pngs, category="endpoint_faceted_dose_response", title="Endpoint faceted dose-response plot", fluorophores=fluorophores)
+    return records
+
+
+def build_analysis_manifest(
+    *,
+    merged_csv: Path,
+    output_root: Path,
+    endpoint_last_n: int,
+    merged: pd.DataFrame,
+    endpoint: pd.DataFrame,
+    summary: pd.DataFrame,
+    condition_columns: list[str],
+    has_timecourse: bool,
+    outputs: list[dict[str, str]],
+    warnings: list[str],
+) -> dict[str, object]:
+    fluorophores = sorted(endpoint["fluorophore"].dropna().astype(str).unique())
+    keyed_wells = endpoint.loc[endpoint["is_keyed"].astype(bool), "well"].dropna().astype(str).unique()
+    return {
+        "schema_version": "plate_reader_analysis_manifest_v1",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "inputs": {
+            "merged_csv": str(Path(merged_csv).resolve()),
+            "output_dir": str(output_root.resolve()),
+            "endpoint_last_n": int(endpoint_last_n),
+        },
+        "dataset": {
+            "total_rows": int(len(merged)),
+            "endpoint_rows": int(len(endpoint)),
+            "composition_rows": int(len(summary)),
+            "keyed_well_count": int(len(keyed_wells)),
+            "measured_well_count": int(endpoint["well"].dropna().astype(str).nunique()),
+            "fluorophores": fluorophores,
+            "condition_columns": list(condition_columns),
+            "has_timecourse_data": bool(has_timecourse),
+        },
+        "outliers": {
+            "final_outlier_count": int(endpoint["is_endpoint_outlier"].astype(bool).sum()),
+            "outlier_summary_path": "outlier_summary.csv",
+        },
+        "outputs": outputs,
+        "warnings": warnings,
+    }
+
+
+def html_link(path: str, label: str | None = None) -> str:
+    escaped_path = escape(path, quote=True)
+    escaped_label = escape(label if label is not None else path)
+    return f'<a href="{escaped_path}">{escaped_label}</a>'
+
+
+def render_analysis_report(manifest: dict[str, object]) -> str:
+    dataset = manifest["dataset"]
+    inputs = manifest["inputs"]
+    outliers = manifest["outliers"]
+    outputs = list(manifest["outputs"])
+    warnings = list(manifest["warnings"])
+
+    def records_for(category: str, *, kind: str | None = None) -> list[dict[str, str]]:
+        records = [record for record in outputs if record["category"] == category]
+        if kind is not None:
+            records = [record for record in records if record["kind"] == kind]
+        return records
+
+    def image_section(title: str, category: str) -> str:
+        records = records_for(category, kind="png")
+        if not records:
+            return ""
+        cards = []
+        for record in records:
+            path = escape(record["path"], quote=True)
+            caption = escape(record["title"])
+            if "variant" in record:
+                caption = f"{caption} ({escape(record['variant'])})"
+            if "fluorophore" in record:
+                caption = f"{caption} - {escape(record['fluorophore'])}"
+            cards.append(
+                f'<figure><a href="{path}"><img src="{path}" alt="{caption}"></a>'
+                f"<figcaption>{caption}</figcaption></figure>"
+            )
+        return f"<section><h2>{escape(title)}</h2><div class=\"grid\">{''.join(cards)}</div></section>"
+
+    grouped_outputs: dict[str, list[dict[str, str]]] = {}
+    for record in outputs:
+        grouped_outputs.setdefault(record["category"], []).append(record)
+
+    output_sections = []
+    for category in sorted(grouped_outputs):
+        items = []
+        for record in grouped_outputs[category]:
+            label = f"{record['title']} ({record['kind']})"
+            if "variant" in record:
+                label += f" - {record['variant']}"
+            if "fluorophore" in record:
+                label += f" - {record['fluorophore']}"
+            items.append(f"<li>{html_link(record['path'], label)}</li>")
+        output_sections.append(f"<h3>{escape(category.replace('_', ' ').title())}</h3><ul>{''.join(items)}</ul>")
+
+    warning_html = ""
+    if warnings:
+        warning_items = "".join(f"<li>{escape(str(warning))}</li>" for warning in warnings)
+        warning_html = f"<section class=\"warnings\"><h2>Warnings</h2><ul>{warning_items}</ul></section>"
+
+    condition_columns = ", ".join(dataset["condition_columns"]) if dataset["condition_columns"] else "(none)"
+    fluorophores = ", ".join(dataset["fluorophores"]) if dataset["fluorophores"] else "(none)"
+    timecourse_note = ""
+    if not dataset["has_timecourse_data"]:
+        timecourse_note = "<p><strong>Timecourse plots were skipped because fewer than two timepoints were found.</strong></p>"
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Plate Reader Analysis Report</title>
+  <style>
+    body {{ font-family: Arial, sans-serif; margin: 24px; color: #1f2933; }}
+    h1, h2, h3 {{ color: #102a43; }}
+    .summary {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }}
+    .summary div {{ border: 1px solid #d9e2ec; padding: 12px; border-radius: 6px; background: #f8fafc; }}
+    .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }}
+    figure {{ margin: 0; border: 1px solid #d9e2ec; padding: 10px; border-radius: 6px; background: #fff; }}
+    img {{ max-width: 100%; height: auto; display: block; }}
+    figcaption {{ margin-top: 8px; font-size: 0.92rem; color: #334e68; }}
+    .warnings {{ border-left: 4px solid #f0b429; padding-left: 12px; background: #fffbea; }}
+    code {{ background: #f0f4f8; padding: 2px 4px; border-radius: 4px; }}
+    a {{ color: #1261a0; }}
+  </style>
+</head>
+<body>
+  <h1>Plate Reader Analysis Report</h1>
+  <section class="summary">
+    <div><strong>Merged CSV</strong><br>{escape(str(inputs["merged_csv"]))}</div>
+    <div><strong>Output Directory</strong><br>{escape(str(inputs["output_dir"]))}</div>
+    <div><strong>Endpoint Rows</strong><br>{dataset["endpoint_rows"]}</div>
+    <div><strong>Composition Rows</strong><br>{dataset["composition_rows"]}</div>
+    <div><strong>Measured Wells</strong><br>{dataset["measured_well_count"]}</div>
+    <div><strong>Keyed Wells</strong><br>{dataset["keyed_well_count"]}</div>
+    <div><strong>Endpoint Outliers</strong><br>{outliers["final_outlier_count"]}</div>
+    <div><strong>Has Timecourse Data</strong><br>{dataset["has_timecourse_data"]}</div>
+  </section>
+  <section>
+    <h2>Dataset</h2>
+    <p><strong>Fluorophores:</strong> {escape(fluorophores)}</p>
+    <p><strong>Condition columns:</strong> {escape(condition_columns)}</p>
+    <p><strong>Endpoint last N:</strong> {inputs["endpoint_last_n"]}</p>
+    {timecourse_note}
+  </section>
+  {warning_html}
+  {image_section("Absolute RFU Plate Heatmaps", "absolute_rfu_heatmaps")}
+  {image_section("Endpoint Outlier Heatmaps", "endpoint_outlier_heatmaps")}
+  {image_section("Endpoint Variability QC", "endpoint_variability")}
+  {image_section("Combined Timecourse Plots", "combined_timecourse_plots")}
+  {image_section("Endpoint Main Effects", "endpoint_main_effects")}
+  {image_section("Endpoint Pairwise Interactions", "endpoint_pairwise_interactions")}
+  {image_section("Endpoint Faceted Dose Response", "endpoint_faceted_dose_response")}
+  <section>
+    <h2>All Outputs</h2>
+    {''.join(output_sections)}
+  </section>
+</body>
+</html>
+"""
+
+
 def analyze_merged_tidy_csv(
     merged_csv: str | Path,
     output_dir: str | Path,
@@ -2090,6 +2412,57 @@ def analyze_merged_tidy_csv(
         outlier_csvs.append(outlier_csv)
         outlier_pngs.append(outlier_png)
 
+    manifest_json = output_root / "analysis_manifest.json"
+    report_html = output_root / "analysis_report.html"
+    warnings: list[str] = []
+    if not should_write_timecourse_plots:
+        warnings.append("Timecourse plots were skipped because fewer than two timepoints were found.")
+    fluorophores = sorted(endpoint["fluorophore"].dropna().astype(str).unique())
+    output_records = build_analysis_output_records(
+        output_root,
+        manifest_json=manifest_json,
+        report_html=report_html,
+        endpoint_csv=endpoint_csv,
+        composition_summary_csv=composition_summary_csv,
+        timecourse_summary_csv=timecourse_summary_csv,
+        timecourse_excluding_outliers_summary_csv=timecourse_excluding_outliers_summary_csv,
+        outlier_summary_csv=outlier_summary_csv,
+        absolute_csvs=absolute_csvs,
+        absolute_pngs=absolute_pngs,
+        percent_csvs=percent_csvs,
+        percent_pngs=percent_pngs,
+        outlier_csvs=outlier_csvs,
+        outlier_pngs=outlier_pngs,
+        timecourse_pngs=timecourse_pngs,
+        combined_timecourse_pngs=combined_timecourse_pngs,
+        faceted_timecourse_csvs=faceted_timecourse_csvs,
+        faceted_timecourse_pngs=faceted_timecourse_pngs,
+        endpoint_variability_csvs=endpoint_variability_csvs,
+        endpoint_variability_pngs=endpoint_variability_pngs,
+        main_effect_csvs=main_effect_csvs,
+        main_effect_pngs=main_effect_pngs,
+        pairwise_csvs=pairwise_csvs,
+        pairwise_pngs=pairwise_pngs,
+        dose_csvs=dose_csvs,
+        dose_pngs=dose_pngs,
+        fluorophores=fluorophores,
+    )
+    manifest = build_analysis_manifest(
+        merged_csv=Path(merged_csv),
+        output_root=output_root,
+        endpoint_last_n=endpoint_last_n,
+        merged=merged,
+        endpoint=endpoint,
+        summary=summary,
+        condition_columns=condition_columns,
+        has_timecourse=should_write_timecourse_plots,
+        outputs=output_records,
+        warnings=warnings,
+    )
+    report_progress(progress_callback, "Writing analysis manifest and HTML report")
+    manifest_json.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    report_html.write_text(render_analysis_report(manifest), encoding="utf-8")
+
     report_progress(progress_callback, "Analysis output generation complete")
     return AnalysisResult(
         output_dir=output_root,
@@ -2116,6 +2489,8 @@ def analyze_merged_tidy_csv(
         faceted_timecourse_pngs=faceted_timecourse_pngs,
         endpoint_variability_csvs=endpoint_variability_csvs,
         endpoint_variability_pngs=endpoint_variability_pngs,
+        manifest_json=manifest_json,
+        report_html=report_html,
         outlier_count=int(endpoint["is_endpoint_outlier"].sum()),
         condition_columns=condition_columns,
         endpoint_rows=len(endpoint),

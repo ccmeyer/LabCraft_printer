@@ -17,7 +17,9 @@ You can also pass an existing merged tidy CSV directly:
 
 Outputs are written to `plate_reader_analysis/` in the experiment directory by
 default, or to `<merged_csv_stem>_analysis/` when using `--merged-csv`. The
-report includes endpoint tables, plate heatmaps, flagged outlier summaries, and
+analysis package includes `analysis_manifest.json` for downstream app
+integration and `analysis_report.html` for local review/export. The report links
+to endpoint tables, plate heatmaps, flagged outlier summaries, and
 per-composition timecourse plots under `plate_reader_analysis/timecourses/`.
 Combined per-fluorophore composition plots are written under
 `plate_reader_analysis/timecourses_combined/` with inclusive and
