@@ -1927,6 +1927,158 @@ def test_segmented_shadow_root_override_requires_repeated_contamination_evidence
         segmented["segmented_tail_root_window_override_reason"]
         == "insufficient_root_window_override_evidence"
     )
+    agreement = segmented["segmented_tail_lower_window_agreement"]
+    assert agreement["accepted"] is False
+    assert agreement["reason"] == "lower_window_agreement_insufficient_candidates"
+    assert agreement["contamination_frame_count"] == 2
+    assert [
+        fit["step_index"]
+        for fit in agreement["candidate_fits"]
+        if fit["eligible"]
+    ] == [4]
+
+
+def test_segmented_shadow_root_override_uses_lower_window_agreement_with_weak_evidence():
+    delays = list(range(3000, 3650, 50))
+    root_widths = [95, 95, 96, 97, 97, 96, 95, 94, 92, 88, 76, 58, 35]
+    step3_widths = [79, 79, 79, 78, 77, 76, 75, 72, 66, 55, 38, 25, 20]
+    step4_widths = [77, 77, 77, 76, 75, 74, 73, 70, 64, 52, 35, 22, 18]
+    backtrack_summaries = [
+        _root_selected_tail_summary_with_window_bank(
+            delay_from_emergence_us=delay,
+            root_width_px=root_width,
+            candidate_widths_by_step={
+                3: step3_width,
+                4: step4_width,
+            },
+            warnings=["attached_near_nozzle_breakup"] if index < 2 else [],
+        )
+        for index, (delay, root_width, step3_width, step4_width) in enumerate(
+            zip(delays, root_widths, step3_widths, step4_widths)
+        )
+    ]
+
+    segmented = mod.evaluate_online_stream_segmented_tail_shadow(
+        scout_summaries=[],
+        backtrack_summaries=backtrack_summaries,
+        baseline_width_px=95.0,
+        runtime_tail_start_delay_from_emergence_us=3450,
+        analysis_config={},
+    )
+
+    assert segmented["segmented_tail_source_trace_kind"] == "uniform_window"
+    assert segmented["segmented_tail_source_window_step_index"] == 4
+    assert (
+        segmented["segmented_tail_window_selection_reason"]
+        == "root_window_override_lower_window_agreement"
+    )
+    assert segmented["segmented_tail_root_window_override_applied"] is True
+    assert (
+        segmented["segmented_tail_root_window_override_reason"]
+        == "root_window_override_lower_window_agreement"
+    )
+    agreement = segmented["segmented_tail_lower_window_agreement"]
+    assert agreement["accepted"] is True
+    assert agreement["reason"] == "lower_window_agreement_accepted"
+    assert agreement["contamination_frame_count"] == 2
+    assert agreement["selected_representative_step"] == 4
+    assert [
+        item["step_index"]
+        for item in agreement["accepted_cluster"]
+    ] == [3, 4]
+
+
+def test_segmented_shadow_root_override_rejects_disagreeing_lower_windows_with_weak_evidence():
+    delays = list(range(3000, 3650, 50))
+    root_widths = [95, 95, 96, 97, 97, 96, 95, 94, 92, 88, 76, 58, 35]
+    step3_widths = [79, 79, 79, 78, 77, 76, 75, 72, 66, 55, 38, 25, 20]
+    step4_widths = [77, 77, 77, 76, 74, 65, 50, 30, 20, 18, 16, 15, 14]
+    backtrack_summaries = [
+        _root_selected_tail_summary_with_window_bank(
+            delay_from_emergence_us=delay,
+            root_width_px=root_width,
+            candidate_widths_by_step={
+                3: step3_width,
+                4: step4_width,
+            },
+            warnings=["attached_near_nozzle_breakup"] if index < 2 else [],
+        )
+        for index, (delay, root_width, step3_width, step4_width) in enumerate(
+            zip(delays, root_widths, step3_widths, step4_widths)
+        )
+    ]
+
+    segmented = mod.evaluate_online_stream_segmented_tail_shadow(
+        scout_summaries=[],
+        backtrack_summaries=backtrack_summaries,
+        baseline_width_px=95.0,
+        runtime_tail_start_delay_from_emergence_us=3450,
+        analysis_config={},
+    )
+
+    assert segmented["segmented_tail_source_trace_kind"] == "selected_window_fallback"
+    assert segmented["segmented_tail_source_window_step_index"] is None
+    assert segmented["segmented_tail_root_window_override_applied"] is False
+    assert (
+        segmented["segmented_tail_root_window_override_reason"]
+        == "insufficient_root_window_override_evidence"
+    )
+    agreement = segmented["segmented_tail_lower_window_agreement"]
+    assert agreement["accepted"] is False
+    assert agreement["reason"] == "lower_window_agreement_no_cluster"
+    assert {
+        fit["step_index"]: fit["tail_start_delay_from_emergence_us"]
+        for fit in agreement["candidate_fits"]
+        if fit["eligible"]
+    } == {3: 3325, 4: 3125}
+
+
+def test_segmented_shadow_root_override_lower_window_agreement_rejects_outlier():
+    delays = list(range(3000, 3650, 50))
+    root_widths = [95, 95, 96, 97, 97, 96, 95, 94, 92, 88, 76, 58, 35]
+    step3_widths = [79, 79, 79, 78, 77, 76, 75, 72, 66, 55, 38, 25, 20]
+    step4_widths = [77, 77, 77, 76, 75, 74, 73, 70, 64, 52, 35, 22, 18]
+    step5_widths = [70, 70, 69, 69, 68, 67, 65, 62, 58, 50, 35, 20, 18]
+    backtrack_summaries = [
+        _root_selected_tail_summary_with_window_bank(
+            delay_from_emergence_us=delay,
+            root_width_px=root_width,
+            candidate_widths_by_step={
+                3: step3_width,
+                4: step4_width,
+                5: step5_width,
+            },
+            warnings=["attached_near_nozzle_breakup"] if index < 2 else [],
+        )
+        for index, (delay, root_width, step3_width, step4_width, step5_width) in enumerate(
+            zip(delays, root_widths, step3_widths, step4_widths, step5_widths)
+        )
+    ]
+
+    segmented = mod.evaluate_online_stream_segmented_tail_shadow(
+        scout_summaries=[],
+        backtrack_summaries=backtrack_summaries,
+        baseline_width_px=95.0,
+        runtime_tail_start_delay_from_emergence_us=3450,
+        analysis_config={
+            "segmented_tail_root_override_max_candidate_step_index": 5,
+            "segmented_tail_lower_window_agreement_tolerance_us": 50,
+        },
+    )
+
+    assert segmented["segmented_tail_source_trace_kind"] == "uniform_window"
+    assert segmented["segmented_tail_source_window_step_index"] == 4
+    agreement = segmented["segmented_tail_lower_window_agreement"]
+    assert agreement["accepted"] is True
+    assert [
+        item["step_index"]
+        for item in agreement["accepted_cluster"]
+    ] == [3, 4]
+    assert {
+        fit["step_index"]: fit["tail_start_delay_from_emergence_us"]
+        for fit in agreement["candidate_fits"]
+        if fit["eligible"]
+    } == {3: 3325, 4: 3325, 5: 3225}
 
 
 def test_segmented_shadow_falls_back_when_lowest_selected_window_is_unqualified():

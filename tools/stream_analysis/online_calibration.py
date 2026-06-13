@@ -98,6 +98,11 @@ DEFAULT_ONLINE_STREAM_ANALYSIS_CONFIG = {
     "segmented_tail_root_override_max_collapse_span_us": 125,
     "segmented_tail_root_override_min_root_separation_growth_px": 1.0,
     "segmented_tail_root_override_max_early_range_px": 2.0,
+    "segmented_tail_lower_window_agreement_enabled": True,
+    "segmented_tail_lower_window_agreement_min_evidence_frames": 2,
+    "segmented_tail_lower_window_agreement_min_candidate_count": 2,
+    "segmented_tail_lower_window_agreement_min_step_index": 3,
+    "segmented_tail_lower_window_agreement_tolerance_us": 100,
 }
 
 

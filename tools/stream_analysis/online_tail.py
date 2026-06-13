@@ -2109,11 +2109,256 @@ def _root_override_separation_growth(
     }
 
 
+def _lower_window_agreement_disabled(reason: str) -> dict:
+    return {
+        "enabled": False,
+        "accepted": False,
+        "reason": str(reason),
+        "candidate_fits": [],
+        "accepted_cluster": [],
+        "selected_representative_step": None,
+        "selected_tail_start_delay_from_emergence_us": None,
+    }
+
+
+def _evaluate_lower_window_agreement_source(
+    *,
+    rows_by_step: dict[int, list[dict]],
+    modes_by_step: dict[int, list[str]],
+    candidate_diagnostics: list[dict] | None,
+    analysis_config: dict,
+) -> dict:
+    enabled = bool(analysis_config.get("segmented_tail_lower_window_agreement_enabled", True))
+    if not enabled:
+        return _lower_window_agreement_disabled("lower_window_agreement_disabled")
+    if segmented_tail_mod is None:
+        result = _lower_window_agreement_disabled("segmented_tail_module_unavailable")
+        result["enabled"] = True
+        return result
+
+    min_candidate_count = max(
+        1,
+        _to_int(
+            analysis_config.get("segmented_tail_lower_window_agreement_min_candidate_count"),
+            2,
+        ),
+    )
+    min_step = max(
+        1,
+        _to_int(
+            analysis_config.get("segmented_tail_lower_window_agreement_min_step_index"),
+            3,
+        ),
+    )
+    max_step = max(
+        int(min_step),
+        _to_int(analysis_config.get("segmented_tail_root_override_max_candidate_step_index"), 4),
+    )
+    tolerance_us = max(
+        0,
+        _to_int(
+            analysis_config.get("segmented_tail_lower_window_agreement_tolerance_us"),
+            100,
+        ),
+    )
+
+    diagnostics_by_step: dict[int, dict] = {}
+    for diag in list(candidate_diagnostics or []):
+        step = _to_int(dict(diag or {}).get("step_index"))
+        if step is not None:
+            diagnostics_by_step[int(step)] = dict(diag or {})
+
+    candidate_fits = []
+    for step in sorted(step for step in rows_by_step if int(step) > 0):
+        rows = list(rows_by_step.get(int(step)) or [])
+        mode = _most_common_string(modes_by_step.get(int(step)) or []) or "lower_consistent_window"
+        diag = diagnostics_by_step.get(int(step), {})
+        fit_summary = {
+            "step_index": int(step),
+            "mode": mode,
+            "qualified": bool(diag.get("qualified")),
+            "eligible": False,
+            "reason": "not_evaluated",
+            "baseline_width_px": _to_float_or_none(diag.get("baseline_width_px")),
+            "tail_start_delay_from_emergence_us": None,
+            "fit_status": None,
+            "model_name": None,
+            "tail_start_source": None,
+            "usable_point_count": _to_int(diag.get("usable_point_count"), 0),
+        }
+        if int(step) < int(min_step) or int(step) > int(max_step):
+            fit_summary["reason"] = "outside_agreement_step_range"
+            candidate_fits.append(fit_summary)
+            continue
+        if not bool(diag.get("qualified")):
+            fit_summary["reason"] = str(diag.get("selection_reason") or "unqualified_window")
+            candidate_fits.append(fit_summary)
+            continue
+        fit = segmented_tail_mod.evaluate_segmented_tail_trace(
+            rows,
+            baseline_width_px=fit_summary["baseline_width_px"],
+        )
+        tail_start = _to_int(dict(fit or {}).get("tail_start_delay_from_emergence_us"))
+        fit_status = str(dict(fit or {}).get("fit_status") or "")
+        fit_summary.update(
+            {
+                "fit_status": fit_status,
+                "model_name": dict(fit or {}).get("model_name"),
+                "tail_start_source": dict(fit or {}).get("tail_start_source"),
+                "tail_start_delay_from_emergence_us": tail_start,
+                "usable_point_count": _to_int(
+                    dict(fit or {}).get("usable_point_count"),
+                    fit_summary["usable_point_count"],
+                ),
+            }
+        )
+        if fit_status != "ok" or tail_start is None:
+            fit_summary["reason"] = "missing_candidate_tail_start"
+            candidate_fits.append(fit_summary)
+            continue
+        fit_summary["eligible"] = True
+        fit_summary["reason"] = "eligible"
+        candidate_fits.append(fit_summary)
+
+    eligible = [
+        dict(item)
+        for item in candidate_fits
+        if bool(item.get("eligible"))
+        and _to_int(item.get("tail_start_delay_from_emergence_us")) is not None
+    ]
+    result = {
+        "enabled": True,
+        "accepted": False,
+        "reason": "lower_window_agreement_insufficient_candidates",
+        "candidate_fits": _copy_jsonish(candidate_fits),
+        "accepted_cluster": [],
+        "selected_representative_step": None,
+        "selected_tail_start_delay_from_emergence_us": None,
+        "min_candidate_count": int(min_candidate_count),
+        "min_step_index": int(min_step),
+        "max_step_index": int(max_step),
+        "tolerance_us": int(tolerance_us),
+    }
+    if len(eligible) < int(min_candidate_count):
+        return result
+
+    ordered = sorted(
+        eligible,
+        key=lambda item: (
+            _to_int(item.get("tail_start_delay_from_emergence_us"), 0),
+            _to_int(item.get("step_index"), 0),
+        ),
+    )
+    clusters = []
+    for start_index, first in enumerate(ordered):
+        first_tail = _to_int(first.get("tail_start_delay_from_emergence_us"))
+        if first_tail is None:
+            continue
+        members = []
+        for item in ordered[start_index:]:
+            tail = _to_int(item.get("tail_start_delay_from_emergence_us"))
+            if tail is None:
+                continue
+            if int(tail) - int(first_tail) <= int(tolerance_us):
+                members.append(dict(item))
+        if len(members) < int(min_candidate_count):
+            continue
+        tails = [
+            int(item["tail_start_delay_from_emergence_us"])
+            for item in members
+            if _to_int(item.get("tail_start_delay_from_emergence_us")) is not None
+        ]
+        steps = [
+            int(item["step_index"])
+            for item in members
+            if _to_int(item.get("step_index")) is not None
+        ]
+        if not tails or not steps:
+            continue
+        clusters.append(
+            {
+                "members": members,
+                "count": int(len(members)),
+                "span_us": int(max(tails) - min(tails)),
+                "max_step_index": int(max(steps)),
+                "median_tail_start_delay_from_emergence_us": _median_or_none(tails),
+            }
+        )
+
+    if not clusters:
+        result["reason"] = "lower_window_agreement_no_cluster"
+        return result
+
+    selected_cluster = sorted(
+        clusters,
+        key=lambda item: (
+            -int(item["count"]),
+            int(item["span_us"]),
+            -int(item["max_step_index"]),
+        ),
+    )[0]
+    median_tail = _to_float_or_none(
+        selected_cluster.get("median_tail_start_delay_from_emergence_us")
+    )
+    cluster_members = list(selected_cluster.get("members") or [])
+    near_median = []
+    if median_tail is not None:
+        for item in cluster_members:
+            tail = _to_int(item.get("tail_start_delay_from_emergence_us"))
+            if tail is not None and abs(float(tail) - float(median_tail)) <= 50.0:
+                near_median.append(dict(item))
+    if near_median:
+        selected = max(near_median, key=lambda item: _to_int(item.get("step_index"), 0))
+    elif median_tail is not None:
+        selected = sorted(
+            cluster_members,
+            key=lambda item: (
+                abs(float(_to_int(item.get("tail_start_delay_from_emergence_us"), 0)) - float(median_tail)),
+                -_to_int(item.get("step_index"), 0),
+            ),
+        )[0]
+    else:
+        selected = max(cluster_members, key=lambda item: _to_int(item.get("step_index"), 0))
+
+    selected_step = _to_int(selected.get("step_index"))
+    selected_tail = _to_int(selected.get("tail_start_delay_from_emergence_us"))
+    selected_rows = list(rows_by_step.get(int(selected_step)) or []) if selected_step is not None else []
+    selected_trace = (
+        segmented_tail_mod.build_tail_width_trace(selected_rows)
+        if segmented_tail_mod is not None
+        else []
+    )
+    result.update(
+        {
+            "accepted": True,
+            "reason": "lower_window_agreement_accepted",
+            "accepted_cluster": _copy_jsonish(cluster_members),
+            "accepted_cluster_span_us": int(selected_cluster["span_us"]),
+            "accepted_cluster_median_tail_start_delay_from_emergence_us": median_tail,
+            "selected_representative_step": selected_step,
+            "selected_tail_start_delay_from_emergence_us": selected_tail,
+            "selected_source_rows": selected_rows,
+            "selected_source_trace": _copy_jsonish(selected_trace),
+            "selected_source_window_mode": selected.get("mode"),
+            "selected_baseline_width_px": _to_float_or_none(selected.get("baseline_width_px")),
+        }
+    )
+    return result
+
+
+def _lower_window_agreement_public_diagnostics(agreement: dict | None) -> dict:
+    payload = dict(agreement or {})
+    payload.pop("selected_source_rows", None)
+    payload.pop("selected_source_trace", None)
+    return _copy_jsonish(payload)
+
+
 def _select_root_window_override_source(
     *,
     all_summaries: list[dict],
     rows_by_step: dict[int, list[dict]],
     modes_by_step: dict[int, list[str]],
+    candidate_diagnostics: list[dict] | None = None,
     analysis_config: dict,
     min_points: int,
 ) -> dict:
@@ -2126,6 +2371,7 @@ def _select_root_window_override_source(
         "source_window_step_index": None,
         "source_window_mode": None,
         "candidate_diagnostics": [],
+        "lower_window_agreement": {},
     }
     if not bool(analysis_config.get("segmented_tail_root_window_override_enabled", True)):
         result["reason"] = "root_window_override_disabled"
@@ -2140,9 +2386,60 @@ def _select_root_window_override_source(
         _to_int(analysis_config.get("segmented_tail_root_override_min_contamination_frames"), 4),
     )
     if int(contamination_count) < int(min_contamination_frames):
+        min_agreement_evidence = max(
+            1,
+            _to_int(
+                analysis_config.get("segmented_tail_lower_window_agreement_min_evidence_frames"),
+                2,
+            ),
+        )
         result["reason"] = "insufficient_root_window_override_evidence"
         result["contamination_frame_count"] = int(contamination_count)
         result["min_contamination_frame_count"] = int(min_contamination_frames)
+        if int(contamination_count) < int(min_agreement_evidence):
+            result["lower_window_agreement"] = {
+                "enabled": bool(
+                    analysis_config.get("segmented_tail_lower_window_agreement_enabled", True)
+                ),
+                "accepted": False,
+                "reason": "lower_window_agreement_insufficient_evidence_frames",
+                "candidate_fits": [],
+                "accepted_cluster": [],
+                "selected_representative_step": None,
+                "selected_tail_start_delay_from_emergence_us": None,
+                "contamination_frame_count": int(contamination_count),
+                "min_evidence_frame_count": int(min_agreement_evidence),
+            }
+            return result
+        agreement = _evaluate_lower_window_agreement_source(
+            rows_by_step=rows_by_step,
+            modes_by_step=modes_by_step,
+            candidate_diagnostics=candidate_diagnostics,
+            analysis_config=analysis_config,
+        )
+        agreement["contamination_frame_count"] = int(contamination_count)
+        agreement["min_evidence_frame_count"] = int(min_agreement_evidence)
+        result["lower_window_agreement"] = _lower_window_agreement_public_diagnostics(agreement)
+        if bool(agreement.get("accepted")):
+            selected_step = _to_int(agreement.get("selected_representative_step"))
+            result.update(
+                {
+                    "applied": True,
+                    "reason": "root_window_override_lower_window_agreement",
+                    "source_rows": list(agreement.get("selected_source_rows") or []),
+                    "source_trace": _copy_jsonish(
+                        agreement.get("selected_source_trace") or []
+                    ),
+                    "baseline_width_px": _to_float_or_none(
+                        agreement.get("selected_baseline_width_px")
+                    ),
+                    "source_window_step_index": selected_step,
+                    "source_window_mode": agreement.get("selected_source_window_mode"),
+                    "selected_tail_start_delay_from_emergence_us": _to_int(
+                        agreement.get("selected_tail_start_delay_from_emergence_us")
+                    ),
+                }
+            )
         return result
 
     root_rows = list(rows_by_step.get(0) or [])
@@ -2325,6 +2622,7 @@ def _select_segmented_tail_source_rows(
         "root_window_override_applied": False,
         "root_window_override_reason": "root_window_override_not_evaluated",
         "root_window_override_candidate_diagnostics": [],
+        "lower_window_agreement": {},
     }
     if not bool(analysis_config.get("segmented_tail_uniform_window_enabled", True)):
         fallback["window_selection_reason"] = "uniform_window_disabled"
@@ -2402,6 +2700,7 @@ def _select_segmented_tail_source_rows(
             all_summaries=all_summaries,
             rows_by_step=rows_by_step,
             modes_by_step=modes_by_step,
+            candidate_diagnostics=diagnostics,
             analysis_config=analysis_config,
             min_points=int(min_points),
         )
@@ -2411,8 +2710,12 @@ def _select_segmented_tail_source_rows(
         fallback["root_window_override_candidate_diagnostics"] = _copy_jsonish(
             override.get("candidate_diagnostics") or []
         )
+        fallback["lower_window_agreement"] = _copy_jsonish(
+            override.get("lower_window_agreement") or {}
+        )
         if bool(override.get("applied")):
             step = _to_int(override.get("source_window_step_index"))
+            reason = str(override.get("reason") or "root_window_override_steep_collapse")
             return {
                 "source_rows": list(override.get("source_rows") or []),
                 "trace": _copy_jsonish(override.get("source_trace") or []),
@@ -2420,13 +2723,16 @@ def _select_segmented_tail_source_rows(
                 "source_trace_kind": "uniform_window",
                 "source_window_step_index": step,
                 "source_window_mode": override.get("source_window_mode"),
-                "window_selection_reason": "root_window_override_steep_collapse",
+                "window_selection_reason": reason,
                 "target_selected_window_step_index": None,
                 "candidate_window_traces": _copy_jsonish(diagnostics),
                 "root_window_override_applied": True,
                 "root_window_override_reason": override.get("reason"),
                 "root_window_override_candidate_diagnostics": _copy_jsonish(
                     override.get("candidate_diagnostics") or []
+                ),
+                "lower_window_agreement": _copy_jsonish(
+                    override.get("lower_window_agreement") or {}
                 ),
             }
         fallback["window_selection_reason"] = override.get("reason") or "no_selected_lower_window"
@@ -2627,6 +2933,9 @@ def evaluate_online_stream_segmented_tail_shadow(
             "segmented_tail_root_window_override_candidate_diagnostics": _copy_jsonish(
                 source_selection.get("root_window_override_candidate_diagnostics") or []
             ),
+            "segmented_tail_lower_window_agreement": _copy_jsonish(
+                source_selection.get("lower_window_agreement") or {}
+            ),
         }
     result = segmented_tail_mod.evaluate_segmented_tail_trace(
         source_rows,
@@ -2661,6 +2970,9 @@ def evaluate_online_stream_segmented_tail_shadow(
     )
     payload["segmented_tail_root_window_override_candidate_diagnostics"] = _copy_jsonish(
         source_selection.get("root_window_override_candidate_diagnostics") or []
+    )
+    payload["segmented_tail_lower_window_agreement"] = _copy_jsonish(
+        source_selection.get("lower_window_agreement") or {}
     )
     return payload
 
