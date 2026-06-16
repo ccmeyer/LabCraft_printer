@@ -773,7 +773,7 @@ def test_uploaded_design_selected_plan_overage_without_tolerance_fails():
     assert issue["effective_allowed_volume_nL"] == pytest.approx(950.0)
 
 
-def test_uploaded_design_printed_volume_tolerance_is_capped_by_final_volume():
+def test_uploaded_design_printed_volume_tolerance_extends_final_volume_acceptance():
     em = _make_model(
         target_volume_nl=990.0,
         final_volume_nl=1000.0,
@@ -798,13 +798,14 @@ def test_uploaded_design_printed_volume_tolerance_is_capped_by_final_volume():
 
     result = em.optimize_stock_solutions(quantum=0.1, max_refine=20, two_max_refine=20, allow_two=False)
 
-    assert not result.get("best")
-    assert result["effective_printed_volume_limit_nL"] == pytest.approx(1000.0)
+    assert result.get("best")
+    assert result["effective_printed_volume_limit_nL"] == pytest.approx(1040.0)
     issue = result["issues_by_key"][("__uploaded_design__", None)][0]
-    assert issue["code"] == "selected_plan_volume_budget_exceeded"
+    assert issue["code"] == "selected_plan_volume_budget_within_tolerance"
+    assert issue["severity"] == "warning"
     assert issue["required_volume_nL"] == pytest.approx(1010.0)
     assert issue["allowed_volume_nL"] == pytest.approx(990.0)
-    assert issue["effective_allowed_volume_nL"] == pytest.approx(1000.0)
+    assert issue["effective_allowed_volume_nL"] == pytest.approx(1040.0)
 
 
 def test_import_feasibility_report_flags_missing_max_stock():
@@ -996,6 +997,40 @@ def test_bnext_260513_tolerance_does_not_increase_selected_plan_volume():
     h4_rows = [row for row in report_100["composition_rows"] if "H4" in row.get("wells", [])]
     assert len(h4_rows) == 1
     assert h4_rows[0]["status"] == "OK"
+
+
+def test_bnext_basis_rep1_total_volume_tolerance_accepts_stream_quantization_overage():
+    design = pd.read_csv(
+        "FreeRTOS-interface/Experiments/bnext_basis_rep1/LABCRAFT_intermediate-mix-volume-fractions.csv"
+    )
+    max_df = pd.read_csv("FreeRTOS-interface/Experiments/bnext_basis_rep1/reagents_intermediate_info.csv")
+    em = _make_model(target_volume_nl=10000.0, final_volume_nl=10000.0)
+
+    report = em.build_import_feasibility_report(
+        design,
+        max_stock_df=max_df,
+        printed_volume_nL=10000.0,
+        printed_volume_tolerance_nL=150.0,
+        final_volume_nL=10000.0,
+        allow_two=False,
+    )
+
+    assert report["ok"] is True
+    assert report["effective_printed_volume_limit_nL"] == pytest.approx(10150.0)
+    g13_rows = [row for row in report["composition_rows"] if "G13" in row.get("wells", [])]
+    assert len(g13_rows) == 1
+    assert g13_rows[0]["status"] == "Near budget"
+    assert g13_rows[0]["selected_plan_required_volume_nL"] == pytest.approx(10140.0)
+    assert g13_rows[0]["selected_plan_overage_nL"] == pytest.approx(140.0)
+    assert "K12" in g13_rows[0]["wells"]
+    issue = next(
+        issue
+        for issue in report["issues"]
+        if issue.get("code") == "selected_plan_volume_budget_within_tolerance"
+    )
+    assert issue["row_label"] == "well G13"
+    assert issue["required_volume_nL"] == pytest.approx(10140.0)
+    assert issue["effective_allowed_volume_nL"] == pytest.approx(10150.0)
 
 
 def test_import_feasibility_report_accepts_labcraft_reagents_csv_for_bnext_design():

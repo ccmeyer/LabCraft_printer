@@ -1690,10 +1690,14 @@ class ExperimentModel(QObject):
         if not math.isfinite(V_tolerance) or V_tolerance < 0.0:
             V_tolerance = 0.0
 
-        # Safety: never allow printed budget to exceed final volume (quiet clamp)
+        # Clamp the nominal printed budget to the nominal final volume, but let the
+        # configured tolerance absorb small quantized overages of either value.
         if V_print > V_final:
             V_print = V_final
-        V_accept = min(float(V_final), float(V_print) + float(V_tolerance))
+        V_accept = min(
+            float(V_final) + float(V_tolerance),
+            float(V_print) + float(V_tolerance),
+        )
 
         # Build candidate lists + handle forced stocks
         self._unreachable_preview_map = {}
@@ -4008,7 +4012,10 @@ class ExperimentModel(QObject):
             printed_volume_tolerance = 0.0
         if not math.isfinite(printed_volume_tolerance) or printed_volume_tolerance < 0.0:
             printed_volume_tolerance = 0.0
-        effective_printed_volume = min(final_volume, printed_volume + printed_volume_tolerance)
+        effective_printed_volume = min(
+            final_volume + printed_volume_tolerance,
+            printed_volume + printed_volume_tolerance,
+        )
 
         parsed = self._parse_import_design_dataframe(
             df,
