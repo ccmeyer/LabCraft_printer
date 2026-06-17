@@ -67,6 +67,48 @@ def _parse_wavelength_cell(raw: object) -> int | None:
     return int(float(text))
 
 
+def _parse_wavelength_list_cell(raw: object) -> list[int]:
+    values: list[int] = []
+    for part in str(raw).strip().split():
+        wavelength = _parse_wavelength_cell(part)
+        if wavelength is None:
+            return []
+        values.append(wavelength)
+    return values
+
+
+def infer_structured_multi_channel_labels(
+    metadata_row: list[str],
+    *,
+    expected_count: int | None = None,
+) -> list[str]:
+    """
+    Infer labels from structured LabCraft multi-channel metadata.
+
+    In these exports, index 16 contains emission wavelength(s) for each
+    kinetic data block and index 20 contains the corresponding excitation
+    wavelength(s).
+    """
+    if expected_count is None or expected_count <= 1 or len(metadata_row) <= 20:
+        return []
+
+    declared_count = _parse_wavelength_cell(metadata_row[15]) if len(metadata_row) > 15 else None
+    if declared_count is not None and declared_count != expected_count:
+        return []
+
+    emission_values = _parse_wavelength_list_cell(metadata_row[16])
+    excitation_values = _parse_wavelength_list_cell(metadata_row[20])
+    if len(emission_values) != expected_count or len(excitation_values) != expected_count:
+        return []
+    if emission_values == excitation_values:
+        return []
+
+    return [
+        f"{excitation_nm}_{emission_nm}"
+        for excitation_nm, emission_nm in zip(excitation_values, emission_values)
+    ]
+
+
 def infer_single_channel_label(metadata_row: list[str]) -> str | None:
     """
     Infer an Ex/Em label from LabCraft single-channel metadata.
@@ -101,9 +143,14 @@ def infer_single_channel_label(metadata_row: list[str]) -> str | None:
 
 
 def extract_channel_labels(metadata_row: list[str], *, expected_count: int | None = None) -> list[str]:
-    """Extract unique Ex/Em labels from the metadata row and format as 502_540."""
+    """Extract unique Ex/Em labels from the metadata row and format as 460_502."""
+    structured_labels = infer_structured_multi_channel_labels(metadata_row, expected_count=expected_count)
+    if structured_labels:
+        return structured_labels
+
     labels: list[str] = []
     seen: set[str] = set()
+    occurrences: list[str] = []
 
     for raw in metadata_row:
         text = str(raw).strip()
@@ -111,9 +158,22 @@ def extract_channel_labels(metadata_row: list[str], *, expected_count: int | Non
         if not match:
             continue
         label = f"{match.group(1)}_{match.group(2)}"
+        occurrences.append(label)
         if label not in seen:
             seen.add(label)
             labels.append(label)
+
+    if expected_count is not None and expected_count > 1 and len(labels) == expected_count:
+        duplicate_labels: list[str] = []
+        duplicate_seen: set[str] = set()
+        first_seen: set[str] = set()
+        for label in occurrences:
+            if label in first_seen and label not in duplicate_seen:
+                duplicate_seen.add(label)
+                duplicate_labels.append(label)
+            first_seen.add(label)
+        if duplicate_labels:
+            labels = duplicate_labels + [label for label in labels if label not in duplicate_seen]
 
     if not labels:
         inferred_label = infer_single_channel_label(metadata_row)

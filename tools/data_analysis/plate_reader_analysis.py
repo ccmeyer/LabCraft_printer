@@ -32,6 +32,13 @@ OUTLIER_TRIPLICATE_MIN_GROUP_CV_PERCENT = 35.0
 OUTLIER_TRIPLICATE_LOW_SIGNAL_DROP_PERCENT = 60.0
 OUTLIER_TRIPLICATE_MAX_HIGH_PAIR_CV_PERCENT = 30.0
 OUTLIER_TRIPLICATE_HIGH_SIGNAL_ABOVE_MID_PERCENT = 100.0
+OUTLIER_LARGE_GROUP_MIN_N = 6
+OUTLIER_LARGE_GROUP_MIN_RELATIVE_DELTA_PERCENT = 60.0
+OUTLIER_LARGE_GROUP_IQR_FENCE_MULTIPLIER = 3.0
+OUTLIER_TIMECOURSE_MIN_TIMEPOINTS = 6
+OUTLIER_TIMECOURSE_MIN_DROP_FROM_PEAK_PERCENT = 60.0
+OUTLIER_TIMECOURSE_MAX_ENDPOINT_VS_GROUP_MEDIAN_PERCENT = 50.0
+OUTLIER_TIMECOURSE_MIN_PEAK_VS_GROUP_MEDIAN_PERCENT = 40.0
 ENDPOINT_EFFECT_VARIANTS = (
     ("including_outliers", "including outliers"),
     ("excluding_outliers", "excluding endpoint outliers"),
@@ -64,8 +71,18 @@ ANALYSIS_COLUMNS = {
     "condition_percent_difference_rfu",
     "condition_endpoint_median_rfu",
     "condition_endpoint_mad_rfu",
+    "condition_endpoint_iqr_rfu",
+    "condition_endpoint_outer_fence_low_rfu",
+    "condition_endpoint_outer_fence_high_rfu",
     "condition_endpoint_robust_zscore",
     "condition_endpoint_relative_delta_percent",
+    "timecourse_peak_rfu",
+    "timecourse_peak_time_minutes",
+    "timecourse_drop_from_peak_percent",
+    "timecourse_peak_vs_group_median_percent",
+    "is_timecourse_shape_outlier",
+    "is_well_outlier",
+    "is_linked_well_outlier",
     "is_endpoint_outlier_candidate",
     "outlier_candidate_reason",
     "is_endpoint_outlier",
@@ -336,7 +353,7 @@ def compute_endpoint_by_well(
         )
         / endpoint.loc[eligible, "condition_endpoint_mean_rfu"]
     )
-    endpoint = add_endpoint_outlier_flags(endpoint)
+    endpoint = add_endpoint_outlier_flags(endpoint, dataframe)
 
     ordered_columns = (
         [
@@ -361,8 +378,18 @@ def compute_endpoint_by_well(
             "condition_percent_difference_rfu",
             "condition_endpoint_median_rfu",
             "condition_endpoint_mad_rfu",
+            "condition_endpoint_iqr_rfu",
+            "condition_endpoint_outer_fence_low_rfu",
+            "condition_endpoint_outer_fence_high_rfu",
             "condition_endpoint_robust_zscore",
             "condition_endpoint_relative_delta_percent",
+            "timecourse_peak_rfu",
+            "timecourse_peak_time_minutes",
+            "timecourse_drop_from_peak_percent",
+            "timecourse_peak_vs_group_median_percent",
+            "is_timecourse_shape_outlier",
+            "is_well_outlier",
+            "is_linked_well_outlier",
             "is_endpoint_outlier_candidate",
             "outlier_candidate_reason",
             "is_endpoint_outlier",
@@ -477,12 +504,178 @@ def triplicate_split_outlier(endpoint_group: pd.DataFrame) -> tuple[int, str] | 
     return None
 
 
-def add_endpoint_outlier_flags(endpoint: pd.DataFrame) -> pd.DataFrame:
+def large_group_final_mask(
+    values: pd.Series,
+    relative_delta_percent: pd.Series,
+    *,
+    q1: float,
+    q3: float,
+    iqr: float,
+) -> pd.Series:
+    relative_gate = relative_delta_percent.abs() >= OUTLIER_LARGE_GROUP_MIN_RELATIVE_DELTA_PERCENT
+    if np.isfinite(iqr) and iqr > 0:
+        low_fence = q1 - OUTLIER_LARGE_GROUP_IQR_FENCE_MULTIPLIER * iqr
+        high_fence = q3 + OUTLIER_LARGE_GROUP_IQR_FENCE_MULTIPLIER * iqr
+        fence_gate = (values < low_fence) | (values > high_fence)
+    else:
+        fence_gate = pd.Series(False, index=values.index)
+    return relative_gate | fence_gate
+
+
+def compute_timecourse_trace_metrics(dataframe: pd.DataFrame) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    required_columns = {"well", "fluorophore", "time_minutes", "time_seconds", "rfu"}
+    if not required_columns.issubset(dataframe.columns):
+        return pd.DataFrame(
+            columns=[
+                "well",
+                "fluorophore",
+                "_timecourse_timepoint_count",
+                "timecourse_peak_rfu",
+                "timecourse_peak_time_minutes",
+            ]
+        )
+
+    for (well, fluorophore), group in dataframe.groupby(["well", "fluorophore"], sort=False):
+        trace = group.sort_values("time_seconds")
+        rfu = pd.to_numeric(trace["rfu"], errors="coerce")
+        valid = trace.loc[rfu.notna()].copy()
+        if valid.empty:
+            rows.append(
+                {
+                    "well": well,
+                    "fluorophore": fluorophore,
+                    "_timecourse_timepoint_count": 0,
+                    "timecourse_peak_rfu": np.nan,
+                    "timecourse_peak_time_minutes": np.nan,
+                }
+            )
+            continue
+        valid_rfu = pd.to_numeric(valid["rfu"], errors="coerce")
+        peak_index = valid_rfu.idxmax()
+        rows.append(
+            {
+                "well": well,
+                "fluorophore": fluorophore,
+                "_timecourse_timepoint_count": int(valid_rfu.count()),
+                "timecourse_peak_rfu": float(valid.loc[peak_index, "rfu"]),
+                "timecourse_peak_time_minutes": float(valid.loc[peak_index, "time_minutes"]),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def add_timecourse_shape_outlier_flags(endpoint: pd.DataFrame, timecourse_dataframe: pd.DataFrame) -> pd.DataFrame:
+    result = endpoint.copy()
+    metrics = compute_timecourse_trace_metrics(timecourse_dataframe)
+    if metrics.empty:
+        return result
+
+    result = result.merge(metrics, on=["well", "fluorophore"], how="left")
+    if "timecourse_peak_rfu_y" in result.columns:
+        result["timecourse_peak_rfu"] = result["timecourse_peak_rfu_y"].combine_first(result["timecourse_peak_rfu_x"])
+        result["timecourse_peak_time_minutes"] = result["timecourse_peak_time_minutes_y"].combine_first(
+            result["timecourse_peak_time_minutes_x"]
+        )
+        result = result.drop(
+            columns=[
+                "timecourse_peak_rfu_x",
+                "timecourse_peak_rfu_y",
+                "timecourse_peak_time_minutes_x",
+                "timecourse_peak_time_minutes_y",
+            ]
+        )
+
+    keyed = result.loc[
+        (result["condition_id"] != UNKEYED_CONDITION_ID)
+        & result["is_keyed"].astype(bool)
+    ]
+    for (_condition_id, _fluorophore), group in keyed.groupby(["condition_id", "fluorophore"]):
+        median_peak = float(group["timecourse_peak_rfu"].median())
+        median_endpoint = float(group["endpoint_rfu"].median())
+        if median_peak != 0 and np.isfinite(median_peak):
+            peak_vs_group = 100.0 * group["timecourse_peak_rfu"].astype(float) / median_peak
+        else:
+            peak_vs_group = pd.Series(np.nan, index=group.index)
+        if median_endpoint != 0 and np.isfinite(median_endpoint):
+            endpoint_vs_group = 100.0 * group["endpoint_rfu"].astype(float) / median_endpoint
+        else:
+            endpoint_vs_group = pd.Series(np.nan, index=group.index)
+        peaks = group["timecourse_peak_rfu"].astype(float)
+        drop_from_peak = pd.Series(np.nan, index=group.index)
+        nonzero_peak = peaks != 0
+        drop_from_peak.loc[nonzero_peak] = (
+            100.0 * (peaks.loc[nonzero_peak] - group.loc[nonzero_peak, "endpoint_rfu"].astype(float)) / peaks.loc[nonzero_peak]
+        )
+
+        result.loc[group.index, "timecourse_peak_vs_group_median_percent"] = peak_vs_group
+        result.loc[group.index, "timecourse_drop_from_peak_percent"] = drop_from_peak
+        shape_mask = (
+            (group["_timecourse_timepoint_count"] >= OUTLIER_TIMECOURSE_MIN_TIMEPOINTS)
+            & (peak_vs_group >= OUTLIER_TIMECOURSE_MIN_PEAK_VS_GROUP_MEDIAN_PERCENT)
+            & (endpoint_vs_group <= OUTLIER_TIMECOURSE_MAX_ENDPOINT_VS_GROUP_MEDIAN_PERCENT)
+            & (drop_from_peak >= OUTLIER_TIMECOURSE_MIN_DROP_FROM_PEAK_PERCENT)
+        )
+        shape_indices = group.index[shape_mask.to_numpy()]
+        if len(shape_indices) == 0:
+            continue
+        result.loc[shape_indices, "is_timecourse_shape_outlier"] = True
+        result.loc[shape_indices, "is_endpoint_outlier_candidate"] = True
+        result.loc[shape_indices, "outlier_candidate_reason"] = "timecourse_late_signal_collapse"
+        result.loc[shape_indices, "is_endpoint_outlier"] = True
+        result.loc[shape_indices, "outlier_reason"] = "timecourse_late_signal_collapse"
+
+    return result.drop(columns=["_timecourse_timepoint_count"], errors="ignore")
+
+
+def add_well_outlier_flags(endpoint: pd.DataFrame) -> pd.DataFrame:
+    result = endpoint.copy()
+    result["is_well_outlier"] = False
+    result["is_linked_well_outlier"] = False
+
+    keyed = result.loc[
+        (result["condition_id"] != UNKEYED_CONDITION_ID)
+        & result["is_keyed"].astype(bool)
+    ]
+    if keyed.empty:
+        return result
+
+    outlier_wells = set(keyed.loc[keyed["is_endpoint_outlier"].astype(bool), "well"].astype(str))
+    if not outlier_wells:
+        return result
+
+    keyed_outlier_well_mask = (
+        result["is_keyed"].astype(bool)
+        & (result["condition_id"] != UNKEYED_CONDITION_ID)
+        & result["well"].astype(str).isin(outlier_wells)
+    )
+    result.loc[keyed_outlier_well_mask, "is_well_outlier"] = True
+    result.loc[
+        keyed_outlier_well_mask & ~result["is_endpoint_outlier"].astype(bool),
+        "is_linked_well_outlier",
+    ] = True
+    return result
+
+
+def add_endpoint_outlier_flags(
+    endpoint: pd.DataFrame,
+    timecourse_dataframe: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     result = endpoint.copy()
     result["condition_endpoint_median_rfu"] = np.nan
     result["condition_endpoint_mad_rfu"] = np.nan
+    result["condition_endpoint_iqr_rfu"] = np.nan
+    result["condition_endpoint_outer_fence_low_rfu"] = np.nan
+    result["condition_endpoint_outer_fence_high_rfu"] = np.nan
     result["condition_endpoint_robust_zscore"] = np.nan
     result["condition_endpoint_relative_delta_percent"] = np.nan
+    result["timecourse_peak_rfu"] = np.nan
+    result["timecourse_peak_time_minutes"] = np.nan
+    result["timecourse_drop_from_peak_percent"] = np.nan
+    result["timecourse_peak_vs_group_median_percent"] = np.nan
+    result["is_timecourse_shape_outlier"] = False
+    result["is_well_outlier"] = False
+    result["is_linked_well_outlier"] = False
     result["is_endpoint_outlier_candidate"] = False
     result["outlier_candidate_reason"] = ""
     result["is_endpoint_outlier"] = False
@@ -499,8 +692,16 @@ def add_endpoint_outlier_flags(endpoint: pd.DataFrame) -> pd.DataFrame:
         values = group["endpoint_rfu"].astype(float)
         median = float(values.median())
         mad = float((values - median).abs().median())
+        q1 = float(values.quantile(0.25))
+        q3 = float(values.quantile(0.75))
+        iqr = q3 - q1
+        low_fence = q1 - OUTLIER_LARGE_GROUP_IQR_FENCE_MULTIPLIER * iqr
+        high_fence = q3 + OUTLIER_LARGE_GROUP_IQR_FENCE_MULTIPLIER * iqr
         result.loc[group.index, "condition_endpoint_median_rfu"] = median
         result.loc[group.index, "condition_endpoint_mad_rfu"] = mad
+        result.loc[group.index, "condition_endpoint_iqr_rfu"] = iqr
+        result.loc[group.index, "condition_endpoint_outer_fence_low_rfu"] = low_fence
+        result.loc[group.index, "condition_endpoint_outer_fence_high_rfu"] = high_fence
         if median != 0:
             relative_delta_percent = 100.0 * (values - median) / median
         else:
@@ -518,6 +719,15 @@ def add_endpoint_outlier_flags(endpoint: pd.DataFrame) -> pd.DataFrame:
             )
             candidate_indices = group.index[candidate_mask.to_numpy()]
             final_indices = group.index[final_mask.to_numpy()]
+            if len(group) >= OUTLIER_LARGE_GROUP_MIN_N:
+                large_final_mask = candidate_mask & large_group_final_mask(
+                    values,
+                    relative_delta_percent,
+                    q1=q1,
+                    q3=q3,
+                    iqr=iqr,
+                )
+                final_indices = group.index[large_final_mask.to_numpy()]
             result.loc[group.index, "condition_endpoint_robust_zscore"] = robust_z
             result.loc[candidate_indices, "is_endpoint_outlier_candidate"] = True
             result.loc[candidate_indices, "outlier_candidate_reason"] = "mad_zero_nonmedian"
@@ -538,6 +748,14 @@ def add_endpoint_outlier_flags(endpoint: pd.DataFrame) -> pd.DataFrame:
         final_mask = candidate_mask & (
             relative_delta_percent.abs() >= OUTLIER_MIN_RELATIVE_DELTA_PERCENT
         )
+        if len(group) >= OUTLIER_LARGE_GROUP_MIN_N:
+            final_mask = candidate_mask & large_group_final_mask(
+                values,
+                relative_delta_percent,
+                q1=q1,
+                q3=q3,
+                iqr=iqr,
+            )
         candidate_indices = group.index[candidate_mask.to_numpy()]
         final_indices = group.index[final_mask.to_numpy()]
         candidate_reason = f"robust_z_abs_ge_{OUTLIER_ROBUST_Z_THRESHOLD:g}"
@@ -556,7 +774,10 @@ def add_endpoint_outlier_flags(endpoint: pd.DataFrame) -> pd.DataFrame:
                 result.loc[outlier_index, "is_endpoint_outlier"] = True
                 result.loc[outlier_index, "outlier_reason"] = split_reason
 
-    return result
+    if timecourse_dataframe is not None and has_timecourse_data(timecourse_dataframe):
+        result = add_timecourse_shape_outlier_flags(result, timecourse_dataframe)
+
+    return add_well_outlier_flags(result)
 
 
 def summarize_condition_timecourses(dataframe: pd.DataFrame, condition_columns: list[str]) -> pd.DataFrame:
@@ -623,19 +844,39 @@ def write_condition_timecourse_plot(
 ) -> None:
     fig, ax = plt.subplots(figsize=(9, 5), constrained_layout=True)
     outlier_label_used = False
+    linked_outlier_label_used = False
 
     for _well, well_df in replicate_data.groupby("well"):
         well_df = well_df.sort_values("time_seconds")
         is_outlier = bool(well_df.get("is_endpoint_outlier", pd.Series(False, index=well_df.index)).any())
+        is_linked_outlier = bool(well_df.get("is_linked_well_outlier", pd.Series(False, index=well_df.index)).any())
+        if is_outlier:
+            color = "tab:red"
+            alpha = 0.9
+            linewidth = 1.6
+            zorder = 3
+        elif is_linked_outlier:
+            color = "#d8a300"
+            alpha = 0.9
+            linewidth = 1.4
+            zorder = 2
+        else:
+            color = "0.35"
+            alpha = 0.25
+            linewidth = 0.9
+            zorder = 1
         line_kwargs = {
-            "color": "tab:red" if is_outlier else "0.35",
-            "alpha": 0.9 if is_outlier else 0.25,
-            "linewidth": 1.6 if is_outlier else 0.9,
-            "zorder": 3 if is_outlier else 1,
+            "color": color,
+            "alpha": alpha,
+            "linewidth": linewidth,
+            "zorder": zorder,
         }
         if is_outlier and not outlier_label_used:
             line_kwargs["label"] = "endpoint outlier"
             outlier_label_used = True
+        elif is_linked_outlier and not linked_outlier_label_used:
+            line_kwargs["label"] = "same-well outlier in another channel"
+            linked_outlier_label_used = True
         ax.plot(
             well_df["time_minutes"],
             well_df["rfu"],
@@ -902,7 +1143,7 @@ def write_faceted_timecourse_grid_outputs(
     for variant_name, variant_label in ENDPOINT_EFFECT_VARIANTS:
         variant_data = keyed_prepared
         if variant_name == "excluding_outliers":
-            variant_data = variant_data.loc[~variant_data["is_endpoint_outlier"].astype(bool)]
+            variant_data = variant_data.loc[~variant_data["is_well_outlier"].astype(bool)]
         variant_dir = timecourse_root / variant_name
         variant_dir.mkdir(parents=True, exist_ok=True)
         if variant_data.empty or not condition_columns:
@@ -1041,7 +1282,7 @@ def keyed_endpoint_for_effects(endpoint: pd.DataFrame, *, exclude_outliers: bool
         & endpoint["is_keyed"].astype(bool)
     ].copy()
     if exclude_outliers:
-        keyed = keyed.loc[~keyed["is_endpoint_outlier"].astype(bool)].copy()
+        keyed = keyed.loc[~keyed["is_well_outlier"].astype(bool)].copy()
     return keyed
 
 
@@ -2226,15 +2467,25 @@ def analyze_merged_tidy_csv(
     report_progress(progress_callback, "Summarizing compositions and timecourses")
     summary = summarize_compositions(endpoint, condition_columns)
     timecourse_summary = summarize_condition_timecourses(prepared, condition_columns)
-    endpoint_flags = endpoint[["well", "fluorophore", "is_endpoint_outlier"]]
+    endpoint_flags = endpoint[
+        [
+            "well",
+            "fluorophore",
+            "is_endpoint_outlier",
+            "is_well_outlier",
+            "is_linked_well_outlier",
+        ]
+    ]
     keyed_prepared = prepared.loc[prepared["condition_id"] != UNKEYED_CONDITION_ID].merge(
         endpoint_flags,
         on=["well", "fluorophore"],
         how="left",
     )
     keyed_prepared["is_endpoint_outlier"] = keyed_prepared["is_endpoint_outlier"].fillna(False)
+    keyed_prepared["is_well_outlier"] = keyed_prepared["is_well_outlier"].fillna(False)
+    keyed_prepared["is_linked_well_outlier"] = keyed_prepared["is_linked_well_outlier"].fillna(False)
     timecourse_summary_excluding_outliers = summarize_condition_timecourses(
-        keyed_prepared.loc[~keyed_prepared["is_endpoint_outlier"].astype(bool)],
+        keyed_prepared.loc[~keyed_prepared["is_well_outlier"].astype(bool)],
         condition_columns,
     )
     should_write_timecourse_plots = has_timecourse_data(prepared)

@@ -20,7 +20,9 @@ def _merged_rows_for_well(
     is_keyed: bool,
     dna_mM: float | None,
     mg_mM: float | None,
+    fluorophore: str = "488_509",
 ) -> list[dict[str, object]]:
+    excitation_nm, emission_nm = fluorophore.split("_", maxsplit=1)
     rows: list[dict[str, object]] = []
     for index, rfu in enumerate(values):
         rows.append(
@@ -31,9 +33,9 @@ def _merged_rows_for_well(
                 "temperature_c": 37.0,
                 "well": well,
                 "is_keyed": is_keyed,
-                "fluorophore": "488_509",
-                "excitation_nm": 488,
-                "emission_nm": 509,
+                "fluorophore": fluorophore,
+                "excitation_nm": int(excitation_nm),
+                "emission_nm": int(emission_nm),
                 "rfu": rfu,
                 "DNA_mM": dna_mM,
                 "Mg_mM": mg_mM,
@@ -162,6 +164,50 @@ def _write_triplicate_split_outlier_merged_csv(path: Path) -> Path:
     rows.extend(_merged_rows_for_well("C1", [1214, 1214, 1214], is_keyed=True, dna_mM=3.0, mg_mM=5.0))
     rows.extend(_merged_rows_for_well("C2", [1422, 1422, 1422], is_keyed=True, dna_mM=3.0, mg_mM=5.0))
     rows.extend(_merged_rows_for_well("C3", [2007, 2007, 2007], is_keyed=True, dna_mM=3.0, mg_mM=5.0))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows).to_csv(path, index=False)
+    return path
+
+
+def _write_large_group_kinetic_outlier_merged_csv(path: Path) -> Path:
+    rows: list[dict[str, object]] = []
+    traces = {
+        "A1": [10, 70, 120, 160, 150, 130, 100, 70, 40, 20],
+        "A2": [10, 50, 80, 100, 100, 95, 95, 95, 95, 95],
+        "A3": [10, 70, 120, 142, 143, 143, 143, 143, 143, 143],
+        "A4": [10, 70, 125, 144, 145, 145, 145, 145, 145, 145],
+        "A5": [10, 75, 130, 148, 149, 149, 149, 149, 149, 149],
+        "A6": [10, 76, 131, 149, 150, 150, 150, 150, 150, 150],
+        "A7": [10, 77, 132, 150, 151, 151, 151, 151, 151, 151],
+        "A8": [10, 78, 133, 151, 152, 152, 152, 152, 152, 152],
+        "A9": [10, 79, 134, 153, 154, 154, 154, 154, 154, 154],
+        "A10": [10, 95, 160, 185, 187, 187, 187, 187, 187, 187],
+        "A11": [10, 100, 170, 190, 193, 193, 193, 193, 193, 193],
+        "A12": [10, 110, 180, 200, 206, 206, 206, 206, 206, 206],
+    }
+    for well, values in traces.items():
+        rows.extend(_merged_rows_for_well(well, values, is_keyed=True, dna_mM=5.0, mg_mM=5.0))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows).to_csv(path, index=False)
+    return path
+
+
+def _write_cross_channel_well_outlier_merged_csv(path: Path) -> Path:
+    rows: list[dict[str, object]] = []
+    for well, values in [
+        ("A1", [100, 100, 100]),
+        ("A2", [101, 101, 101]),
+        ("A3", [102, 102, 102]),
+        ("A4", [130, 130, 130]),
+    ]:
+        rows.extend(_merged_rows_for_well(well, values, is_keyed=True, dna_mM=1.0, mg_mM=5.0, fluorophore="488_509"))
+    for well, values in [
+        ("A1", [1000, 1000, 1000]),
+        ("A2", [1001, 1001, 1001]),
+        ("A3", [1002, 1002, 1002]),
+        ("A4", [1003, 1003, 1003]),
+    ]:
+        rows.extend(_merged_rows_for_well(well, values, is_keyed=True, dna_mM=1.0, mg_mM=5.0, fluorophore="561_590"))
     path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows).to_csv(path, index=False)
     return path
@@ -384,8 +430,18 @@ def test_endpoint_outlier_detection_flags_only_evaluated_keyed_replicates(tmp_pa
     expected_columns = {
         "condition_endpoint_median_rfu",
         "condition_endpoint_mad_rfu",
+        "condition_endpoint_iqr_rfu",
+        "condition_endpoint_outer_fence_low_rfu",
+        "condition_endpoint_outer_fence_high_rfu",
         "condition_endpoint_robust_zscore",
         "condition_endpoint_relative_delta_percent",
+        "timecourse_peak_rfu",
+        "timecourse_peak_time_minutes",
+        "timecourse_drop_from_peak_percent",
+        "timecourse_peak_vs_group_median_percent",
+        "is_timecourse_shape_outlier",
+        "is_well_outlier",
+        "is_linked_well_outlier",
         "is_endpoint_outlier_candidate",
         "outlier_candidate_reason",
         "is_endpoint_outlier",
@@ -460,6 +516,57 @@ def test_endpoint_outlier_detection_flags_only_evaluated_keyed_replicates(tmp_pa
     assert timecourse_png.stat().st_size > 0
 
 
+def test_outlier_exclusion_removes_all_channels_for_flagged_wells(tmp_path):
+    merged_csv = _write_cross_channel_well_outlier_merged_csv(tmp_path / "cross_channel_merged_tidy.csv")
+    result = analysis.analyze_merged_tidy_csv(merged_csv, tmp_path / "analysis")
+
+    endpoint = pd.read_csv(result.endpoint_csv)
+    outlier_summary = pd.read_csv(result.outlier_summary_csv)
+    excluded_timecourse = pd.read_csv(result.timecourse_excluding_outliers_summary_csv)
+
+    direct = endpoint.loc[(endpoint["well"] == "A4") & (endpoint["fluorophore"] == "488_509")].iloc[0]
+    linked = endpoint.loc[(endpoint["well"] == "A4") & (endpoint["fluorophore"] == "561_590")].iloc[0]
+    clean = endpoint.loc[(endpoint["well"] == "A3") & (endpoint["fluorophore"] == "561_590")].iloc[0]
+
+    assert bool(direct["is_endpoint_outlier"])
+    assert bool(direct["is_well_outlier"])
+    assert not bool(direct["is_linked_well_outlier"])
+    assert not bool(linked["is_endpoint_outlier"])
+    assert bool(linked["is_well_outlier"])
+    assert bool(linked["is_linked_well_outlier"])
+    assert not bool(clean["is_endpoint_outlier"])
+    assert not bool(clean["is_well_outlier"])
+    assert not bool(clean["is_linked_well_outlier"])
+
+    assert result.outlier_count == 1
+    assert set(outlier_summary["well"]) == {"A4"}
+    assert set(outlier_summary["fluorophore"]) == {"488_509"}
+
+    excluded_488 = excluded_timecourse.loc[
+        (excluded_timecourse["fluorophore"] == "488_509")
+        & (excluded_timecourse["time_seconds"] == 120.0)
+    ].iloc[0]
+    excluded_561 = excluded_timecourse.loc[
+        (excluded_timecourse["fluorophore"] == "561_590")
+        & (excluded_timecourse["time_seconds"] == 120.0)
+    ].iloc[0]
+    assert excluded_488["replicate_count"] == 3
+    assert excluded_488["mean_rfu"] == pytest.approx(np.mean([100.0, 101.0, 102.0]))
+    assert excluded_561["replicate_count"] == 3
+    assert excluded_561["mean_rfu"] == pytest.approx(np.mean([1000.0, 1001.0, 1002.0]))
+
+    outlier_heatmap_488 = pd.read_csv(
+        result.output_dir / "heatmaps_endpoint_outliers" / "488_509_endpoint_outlier_count.csv",
+        index_col=0,
+    )
+    outlier_heatmap_561 = pd.read_csv(
+        result.output_dir / "heatmaps_endpoint_outliers" / "561_590_endpoint_outlier_count.csv",
+        index_col=0,
+    )
+    assert outlier_heatmap_488.loc["A", "4"] == pytest.approx(1.0)
+    assert outlier_heatmap_561.loc["A", "4"] == pytest.approx(0.0)
+
+
 def test_triplicate_split_outlier_detection_adds_low_and_high_signal_fallbacks(tmp_path):
     merged_csv = _write_triplicate_split_outlier_merged_csv(tmp_path / "triplicate_split_merged_tidy.csv")
     result = analysis.analyze_merged_tidy_csv(merged_csv, tmp_path / "analysis")
@@ -522,6 +629,73 @@ def test_triplicate_split_outlier_detection_adds_low_and_high_signal_fallbacks(t
     assert high_split_excluded["mean_rfu"] == pytest.approx(np.mean([665.0, 1978.0]))
     assert moderate_excluded["replicate_count"] == 3
     assert moderate_excluded["mean_rfu"] == pytest.approx(np.mean([1214.0, 1422.0, 2007.0]))
+
+
+def test_large_replicate_kinetic_outlier_detection_flags_late_collapse_only(tmp_path):
+    merged_csv = _write_large_group_kinetic_outlier_merged_csv(tmp_path / "large_group_merged_tidy.csv")
+    result = analysis.analyze_merged_tidy_csv(merged_csv, tmp_path / "analysis")
+
+    endpoint = pd.read_csv(result.endpoint_csv)
+    outlier_summary = pd.read_csv(result.outlier_summary_csv)
+    excluded_timecourse = pd.read_csv(result.timecourse_excluding_outliers_summary_csv)
+
+    expected_columns = {
+        "condition_endpoint_iqr_rfu",
+        "condition_endpoint_outer_fence_low_rfu",
+        "condition_endpoint_outer_fence_high_rfu",
+        "timecourse_peak_rfu",
+        "timecourse_peak_time_minutes",
+        "timecourse_drop_from_peak_percent",
+        "timecourse_peak_vs_group_median_percent",
+        "is_timecourse_shape_outlier",
+        "is_well_outlier",
+        "is_linked_well_outlier",
+    }
+    assert expected_columns.issubset(endpoint.columns)
+
+    collapse = endpoint.loc[endpoint["well"] == "A1"].iloc[0]
+    low_plateau = endpoint.loc[endpoint["well"] == "A2"].iloc[0]
+    high_candidate = endpoint.loc[endpoint["well"] == "A12"].iloc[0]
+
+    assert bool(collapse["is_endpoint_outlier_candidate"])
+    assert bool(collapse["is_endpoint_outlier"])
+    assert bool(collapse["is_timecourse_shape_outlier"])
+    assert collapse["outlier_candidate_reason"] == "timecourse_late_signal_collapse"
+    assert collapse["outlier_reason"] == "timecourse_late_signal_collapse"
+    assert collapse["timecourse_peak_rfu"] == pytest.approx(160.0)
+    assert collapse["timecourse_drop_from_peak_percent"] >= 60.0
+    assert collapse["timecourse_peak_vs_group_median_percent"] >= 40.0
+
+    assert bool(low_plateau["is_endpoint_outlier_candidate"])
+    assert not bool(low_plateau["is_endpoint_outlier"])
+    assert not bool(low_plateau["is_timecourse_shape_outlier"])
+    assert low_plateau["outlier_candidate_reason"] == "robust_z_abs_ge_3.5"
+    assert pd.isna(low_plateau["outlier_reason"]) or low_plateau["outlier_reason"] == ""
+
+    assert bool(high_candidate["is_endpoint_outlier_candidate"])
+    assert not bool(high_candidate["is_endpoint_outlier"])
+    assert not bool(high_candidate["is_timecourse_shape_outlier"])
+    assert high_candidate["condition_endpoint_robust_zscore"] >= 3.5
+    assert high_candidate["condition_endpoint_relative_delta_percent"] < 60.0
+    assert high_candidate["endpoint_rfu"] < high_candidate["condition_endpoint_outer_fence_high_rfu"]
+
+    assert result.outlier_count == 1
+    assert set(outlier_summary["well"]) == {"A1"}
+    assert set(outlier_summary["outlier_reason"]) == {"timecourse_late_signal_collapse"}
+
+    final_timepoint = excluded_timecourse.loc[
+        (excluded_timecourse["condition_id"] == "condition_001")
+        & (excluded_timecourse["time_seconds"] == 540.0)
+    ].iloc[0]
+    assert final_timepoint["replicate_count"] == 11
+
+    outlier_heatmap = pd.read_csv(
+        result.output_dir / "heatmaps_endpoint_outliers" / "488_509_endpoint_outlier_count.csv",
+        index_col=0,
+    )
+    assert outlier_heatmap.loc["A", "1"] == pytest.approx(1.0)
+    assert outlier_heatmap.loc["A", "2"] == pytest.approx(0.0)
+    assert outlier_heatmap.loc["A", "12"] == pytest.approx(0.0)
 
 
 def test_combined_timecourse_summaries_and_plots_exclude_final_outliers_only(tmp_path):
@@ -1350,6 +1524,12 @@ def test_cli_with_endpoint_only_data_skips_timecourse_plots(tmp_path, capsys):
     timecourse = pd.read_csv(output_dir / "timecourse_summary.csv")
     assert len(timecourse) == 2
     assert set(timecourse["time_seconds"]) == {0.0}
+    endpoint = pd.read_csv(output_dir / "endpoint_by_well.csv")
+    assert endpoint["timecourse_peak_rfu"].isna().all()
+    assert endpoint["timecourse_peak_time_minutes"].isna().all()
+    assert endpoint["timecourse_drop_from_peak_percent"].isna().all()
+    assert endpoint["timecourse_peak_vs_group_median_percent"].isna().all()
+    assert not endpoint["is_timecourse_shape_outlier"].astype(bool).any()
     assert not list((output_dir / "timecourses").glob("*.png"))
     assert not list((output_dir / "timecourses_combined").glob("*.png"))
     assert not (output_dir / "timecourses_faceted").exists()

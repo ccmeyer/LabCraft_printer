@@ -81,6 +81,58 @@ def _write_single_channel_plate_export(path: Path) -> None:
         writer.writerows(rows)
 
 
+def _write_repeated_label_first_block_plate_export(path: Path) -> None:
+    rows = [
+        ["##BLOCKS= 1"],
+        [
+            "Plate:",
+            "Plate1",
+            "1.3",
+            "TimeFormat",
+            "Kinetic",
+            "Fluorescence",
+            "FALSE",
+            "Raw",
+            "FALSE",
+            "2",
+            "600",
+            "60",
+            "",
+            "",
+            "",
+            "2",
+            "502 540 ",
+            "1",
+            "6",
+            "384",
+            "460 515 ",
+            "Manual",
+            "",
+            "",
+            "",
+            "10",
+            "High",
+            "",
+            "",
+            "1",
+            "16",
+            "460 515 ",
+        ],
+        ["Time", "Temperature(C)", "A1", "A2", "A3"],
+        ["00:00:00", "37", "10", "20", ""],
+        ["00:01:00", "37", "11", "21", ""],
+        [],
+        ["00:00:00", "37", "100", "200", ""],
+        ["00:01:00", "37", "101", "201", ""],
+        [],
+        ["~End"],
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-16", newline="") as handle:
+        writer = csv.writer(handle, delimiter="\t")
+        writer.writerows(rows)
+
+
 def _matrix_timepoint_rows(time: str, temperature: str, values: tuple[int, int, int, int]) -> list[list[str]]:
     a1, a2, b1, b2 = values
     rows = [
@@ -379,6 +431,33 @@ def test_single_channel_export_with_split_ex_em_metadata_is_parsed(tmp_path):
     assert merged.groupby("fluorophore")["time"].nunique().to_dict() == {"485_510": 2}
     assert summary.keyed_wells == ["A1", "A2"]
     assert summary.missing_key_wells == ["A4"]
+
+
+def test_split_emission_excitation_metadata_defines_kinetic_block_labels(tmp_path):
+    exp_dir = tmp_path / "RepeatedFirstChannel-20260616_201900"
+    plate = exp_dir / "RepeatedFirstChannel_data.xls"
+    key = exp_dir / "concentration_key.csv"
+    _write_repeated_label_first_block_plate_export(plate)
+    _write_key(key)
+
+    merged, filter_result, summary = mod.build_merged_tidy_data(plate, key)
+
+    assert len(merged) == 8
+    assert filter_result.dropped_timepoints == []
+    assert set(merged["fluorophore"]) == {"460_502", "515_540"}
+    first_block_a1 = merged.loc[
+        (merged["well"] == "A1")
+        & (merged["fluorophore"] == "460_502")
+        & (merged["time"] == "00:00:00")
+    ].iloc[0]
+    second_block_a1 = merged.loc[
+        (merged["well"] == "A1")
+        & (merged["fluorophore"] == "515_540")
+        & (merged["time"] == "00:00:00")
+    ].iloc[0]
+    assert first_block_a1["rfu"] == 10
+    assert second_block_a1["rfu"] == 100
+    assert summary.keyed_wells == ["A1", "A2"]
 
 
 def test_matrix_txt_export_discovers_inputs_and_maps_plate_rows(tmp_path):
