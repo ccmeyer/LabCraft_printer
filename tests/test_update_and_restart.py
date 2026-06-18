@@ -1,7 +1,16 @@
 import json
+import hashlib
+import shutil
+import subprocess
 from pathlib import Path
 
+import pytest
+
+from tools import create_update_bundle
 import tools.update_and_restart as updater
+
+OFFLINE_SHA = "0123456789abcdef0123456789abcdef01234567"
+OTHER_OFFLINE_SHA = "fedcba9876543210fedcba9876543210fedcba98"
 
 
 def _write_file(path: Path):
@@ -31,6 +40,14 @@ class FakeGitRunner:
         behind_count: int = 0,
         check_commits: tuple[str, ...] = (),
         update_commits: tuple[str, ...] = (),
+        remote_url: str = "https://github.com/ccmeyer/LabCraft_printer",
+        offline_ref_sha: str = OFFLINE_SHA,
+        offline_fetch_returncode: int = 0,
+        offline_verify_returncode: int = 0,
+        offline_merge_returncode: int = 0,
+        offline_ahead_count: int | None = None,
+        offline_behind_count: int | None = None,
+        offline_check_commits: tuple[str, ...] = (),
     ):
         self.repo_root = repo_root
         self.branch = branch
@@ -50,6 +67,14 @@ class FakeGitRunner:
         self.behind_count = behind_count
         self.check_commits = check_commits
         self.update_commits = update_commits
+        self.remote_url = remote_url
+        self.offline_ref_sha = offline_ref_sha
+        self.offline_fetch_returncode = offline_fetch_returncode
+        self.offline_verify_returncode = offline_verify_returncode
+        self.offline_merge_returncode = offline_merge_returncode
+        self.offline_ahead_count = offline_ahead_count
+        self.offline_behind_count = offline_behind_count
+        self.offline_check_commits = offline_check_commits
         self.rev_parse_head_calls = 0
         self.calls: list[tuple[tuple[str, ...], Path, float, dict]] = []
 
@@ -79,6 +104,9 @@ class FakeGitRunner:
                 return updater.CommandResult(args_tuple, self.upstream_returncode, stderr="no upstream")
             return updater.CommandResult(args_tuple, 0, stdout=f"{self.upstream}\n")
 
+        if git_args == ("config", "--get", "remote.origin.url"):
+            return updater.CommandResult(args_tuple, 0, stdout=f"{self.remote_url}\n")
+
         if git_args == ("fetch", "--prune"):
             if self.fetch_returncode:
                 return updater.CommandResult(args_tuple, self.fetch_returncode, stderr="network unavailable")
@@ -87,11 +115,22 @@ class FakeGitRunner:
         if git_args == ("rev-parse", "@{u}"):
             return updater.CommandResult(args_tuple, 0, stdout=f"{self.upstream_sha}\n")
 
+        if git_args == ("rev-parse", updater.OFFLINE_UPDATE_REF):
+            return updater.CommandResult(args_tuple, 0, stdout=f"{self.offline_ref_sha}\n")
+
         if git_args == ("rev-list", "--left-right", "--count", "HEAD...@{u}"):
             return updater.CommandResult(args_tuple, 0, stdout=f"{self.ahead_count}\t{self.behind_count}\n")
 
+        if git_args == ("rev-list", "--left-right", "--count", f"HEAD...{updater.OFFLINE_UPDATE_REF}"):
+            ahead = self.ahead_count if self.offline_ahead_count is None else self.offline_ahead_count
+            behind = self.behind_count if self.offline_behind_count is None else self.offline_behind_count
+            return updater.CommandResult(args_tuple, 0, stdout=f"{ahead}\t{behind}\n")
+
         if git_args == ("log", "--oneline", "HEAD..@{u}"):
             return updater.CommandResult(args_tuple, 0, stdout="\n".join(self.check_commits) + ("\n" if self.check_commits else ""))
+
+        if git_args == ("log", "--oneline", f"HEAD..{updater.OFFLINE_UPDATE_REF}"):
+            return updater.CommandResult(args_tuple, 0, stdout="\n".join(self.offline_check_commits) + ("\n" if self.offline_check_commits else ""))
 
         if len(git_args) == 3 and git_args[:2] == ("log", "--oneline"):
             return updater.CommandResult(args_tuple, 0, stdout="\n".join(self.update_commits) + ("\n" if self.update_commits else ""))
@@ -107,6 +146,24 @@ class FakeGitRunner:
                 stderr="" if self.pull_returncode == 0 else "fatal: Not possible to fast-forward",
             )
 
+        if len(git_args) == 3 and git_args[:2] == ("bundle", "verify"):
+            if self.offline_verify_returncode:
+                return updater.CommandResult(args_tuple, self.offline_verify_returncode, stderr="bundle verify failed")
+            return updater.CommandResult(args_tuple, 0, stdout="The bundle is okay\n")
+
+        if len(git_args) == 4 and git_args[:2] == ("fetch", "--force"):
+            if self.offline_fetch_returncode:
+                return updater.CommandResult(args_tuple, self.offline_fetch_returncode, stderr="bundle fetch failed")
+            return updater.CommandResult(args_tuple, 0, stdout="")
+
+        if git_args == ("merge", "--ff-only", updater.OFFLINE_UPDATE_REF):
+            return updater.CommandResult(
+                args_tuple,
+                self.offline_merge_returncode,
+                stdout="Fast-forward\n" if self.offline_merge_returncode == 0 else "",
+                stderr="" if self.offline_merge_returncode == 0 else "fatal: Not possible to fast-forward",
+            )
+
         return updater.CommandResult(args_tuple, 99, stderr=f"unexpected command: {git_args!r}")
 
 
@@ -118,6 +175,37 @@ def _config(tmp_path: Path, **kwargs) -> updater.UpdaterConfig:
         log_path=log_path,
         **kwargs,
     )
+
+
+def _write_offline_manifest(
+    tmp_path: Path,
+    *,
+    branch: str = "main",
+    repo: str = "ccmeyer/LabCraft_printer",
+    remote: str = "origin",
+    head_sha: str = OFFLINE_SHA,
+    schema_version: str = updater.OFFLINE_BUNDLE_SCHEMA_VERSION,
+    bundle_name: str = "labcraft-main.bundle",
+    bundle_bytes: bytes = b"bundle bytes\n",
+    created_at_utc: str = "2026-06-18T12:00:00Z",
+) -> Path:
+    bundle_path = tmp_path / bundle_name
+    bundle_path.write_bytes(bundle_bytes)
+    manifest = {
+        "schema_version": schema_version,
+        "repo": repo,
+        "remote": remote,
+        "remote_url": "https://github.com/ccmeyer/LabCraft_printer",
+        "branch": branch,
+        "source_ref": f"refs/remotes/{remote}/{branch}",
+        "head_sha": head_sha,
+        "bundle_filename": bundle_name,
+        "bundle_sha256": hashlib.sha256(bundle_bytes).hexdigest(),
+        "created_at_utc": created_at_utc,
+    }
+    manifest_path = tmp_path / f"{Path(bundle_name).stem}.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    return manifest_path
 
 
 def test_linux_python_resolution_prefers_repo_venv_order(tmp_path):
@@ -218,6 +306,58 @@ def test_pull_failure_returns_git_pull_failed_and_does_not_relaunch(tmp_path):
     assert result.returncode == 5
     assert result.after_sha == result.before_sha
     assert not launches
+
+
+def test_offline_update_uses_bundle_merge_not_git_pull(tmp_path):
+    manifest_path = _write_offline_manifest(tmp_path, head_sha=OFFLINE_SHA)
+    runner = FakeGitRunner(tmp_path, before_sha="abc", after_sha=OFFLINE_SHA, offline_ref_sha=OFFLINE_SHA)
+
+    result = updater.run_update(
+        _config(tmp_path, offline_manifest_path=manifest_path),
+        command_runner=runner,
+    )
+
+    calls = [call[0] for call in runner.calls]
+    assert result.status == updater.STATUS_UPDATED
+    assert result.update_source == updater.UPDATE_SOURCE_OFFLINE
+    assert result.offline_manifest_path == manifest_path.resolve()
+    assert ("git", "pull", "--ff-only") not in calls
+    assert ("git", "merge", "--ff-only", updater.OFFLINE_UPDATE_REF) in calls
+    assert any(call[:3] == ("git", "fetch", "--force") for call in calls)
+
+
+def test_offline_update_merge_failure_returns_offline_update_failed(tmp_path):
+    manifest_path = _write_offline_manifest(tmp_path, head_sha=OFFLINE_SHA)
+    runner = FakeGitRunner(
+        tmp_path,
+        before_sha="abc",
+        after_sha="abc",
+        offline_ref_sha=OFFLINE_SHA,
+        offline_merge_returncode=128,
+    )
+
+    result = updater.run_update(
+        _config(tmp_path, offline_manifest_path=manifest_path),
+        command_runner=runner,
+    )
+
+    assert result.status == updater.STATUS_OFFLINE_UPDATE_FAILED
+    assert result.returncode == updater.EXIT_CODES[updater.STATUS_OFFLINE_UPDATE_FAILED]
+    assert result.after_sha == result.before_sha
+
+
+def test_offline_update_dirty_worktree_blocks_before_bundle_fetch(tmp_path):
+    manifest_path = _write_offline_manifest(tmp_path, head_sha=OFFLINE_SHA)
+    runner = FakeGitRunner(tmp_path, dirty_status=" M FreeRTOS-interface/App.py\n")
+
+    result = updater.run_update(
+        _config(tmp_path, offline_manifest_path=manifest_path),
+        command_runner=runner,
+    )
+
+    assert result.status == updater.STATUS_DIRTY_WORKTREE
+    assert result.update_source == updater.UPDATE_SOURCE_OFFLINE
+    assert not any(call[0][:3] == ("git", "fetch", "--force") for call in runner.calls)
 
 
 def test_relaunch_on_failure_relaunches_current_app_on_dirty_worktree(tmp_path):
@@ -469,6 +609,7 @@ def test_cli_parser_defaults_match_documented_usage():
     assert config.latest_result_path is None
     assert config.git_timeout_s == 300.0
     assert config.log_path is None
+    assert config.offline_manifest_path is None
 
 
 def test_cli_parser_accepts_relaunch_on_failure():
@@ -483,6 +624,12 @@ def test_cli_parser_accepts_gui():
     assert config.gui is True
     assert config.record_result is True
     assert config.latest_result_path == Path("local/result.json")
+
+
+def test_cli_parser_accepts_offline_manifest():
+    config = updater.parse_args(["--repo-root", ".", "--offline-manifest", "LabCraftUpdates/update.json"])
+
+    assert config.offline_manifest_path == Path("LabCraftUpdates/update.json")
 
 
 def test_progress_events_for_clean_noop_update(tmp_path):
@@ -623,6 +770,270 @@ def test_update_check_fetch_failure_returns_fetch_failed(tmp_path):
     assert "remote repository" in result.message
 
 
+def test_offline_update_check_skips_online_fetch_and_reports_available(tmp_path):
+    manifest_path = _write_offline_manifest(tmp_path, head_sha=OFFLINE_SHA)
+    runner = FakeGitRunner(
+        tmp_path,
+        offline_ref_sha=OFFLINE_SHA,
+        offline_ahead_count=0,
+        offline_behind_count=2,
+        offline_check_commits=("def456 Offline update", "abc123 Earlier update"),
+    )
+
+    result = updater.run_update_check(
+        _config(tmp_path, offline_manifest_path=manifest_path),
+        command_runner=runner,
+    )
+
+    calls = [call[0] for call in runner.calls]
+    assert result.status == updater.STATUS_UPDATE_AVAILABLE
+    assert result.update_source == updater.UPDATE_SOURCE_OFFLINE
+    assert result.offline_manifest_path == manifest_path.resolve()
+    assert result.offline_bundle_path == (tmp_path / "labcraft-main.bundle").resolve()
+    assert result.upstream == updater.OFFLINE_UPDATE_REF
+    assert result.behind_count == 2
+    assert result.commits == ("def456 Offline update", "abc123 Earlier update")
+    assert ("git", "fetch", "--prune") not in calls
+    assert ("git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}") not in calls
+    assert any(call[:3] == ("git", "fetch", "--force") for call in calls)
+
+
+def test_offline_update_check_up_to_date_and_diverged(tmp_path):
+    manifest_path = _write_offline_manifest(tmp_path, head_sha=OFFLINE_SHA)
+
+    up_to_date = updater.run_update_check(
+        _config(tmp_path, offline_manifest_path=manifest_path),
+        command_runner=FakeGitRunner(
+            tmp_path,
+            offline_ref_sha=OFFLINE_SHA,
+            offline_ahead_count=0,
+            offline_behind_count=0,
+        ),
+    )
+    assert up_to_date.status == updater.STATUS_UP_TO_DATE
+    assert up_to_date.update_source == updater.UPDATE_SOURCE_OFFLINE
+
+    diverged = updater.run_update_check(
+        _config(tmp_path, offline_manifest_path=manifest_path),
+        command_runner=FakeGitRunner(
+            tmp_path,
+            offline_ref_sha=OFFLINE_SHA,
+            offline_ahead_count=1,
+            offline_behind_count=2,
+        ),
+    )
+    assert diverged.status == updater.STATUS_DIVERGED
+    assert diverged.update_source == updater.UPDATE_SOURCE_OFFLINE
+
+
+@pytest.mark.parametrize(
+    ("manifest_mutation", "runner_kwargs", "message_part"),
+    [
+        (lambda path: path.unlink(), {}, "was not found"),
+        (lambda path: path.write_text("{ not json", encoding="utf-8"), {}, "not valid JSON"),
+        (
+            lambda path: path.write_text(
+                json.dumps({**json.loads(path.read_text(encoding="utf-8")), "schema_version": "bad"}),
+                encoding="utf-8",
+            ),
+            {},
+            "unsupported schema",
+        ),
+        (
+            lambda path: path.write_text(
+                json.dumps({**json.loads(path.read_text(encoding="utf-8")), "branch": "stable"}),
+                encoding="utf-8",
+            ),
+            {},
+            "branch",
+        ),
+        (lambda path: (path.parent / "labcraft-main.bundle").unlink(), {}, "bundle was not found"),
+        (
+            lambda path: path.write_text(
+                json.dumps({**json.loads(path.read_text(encoding="utf-8")), "bundle_sha256": "0" * 64}),
+                encoding="utf-8",
+            ),
+            {},
+            "SHA256",
+        ),
+        (lambda path: None, {"offline_verify_returncode": 1}, "verify"),
+        (lambda path: None, {"offline_fetch_returncode": 1}, "fetch"),
+        (lambda path: None, {"offline_ref_sha": OTHER_OFFLINE_SHA}, "head_sha"),
+    ],
+)
+def test_offline_update_check_invalid_bundle_returns_offline_bundle_invalid(tmp_path, manifest_mutation, runner_kwargs, message_part):
+    manifest_path = _write_offline_manifest(tmp_path, head_sha=OFFLINE_SHA)
+    manifest_mutation(manifest_path)
+    fake_kwargs = {"offline_ref_sha": OFFLINE_SHA}
+    fake_kwargs.update(runner_kwargs)
+    runner = FakeGitRunner(tmp_path, **fake_kwargs)
+
+    result = updater.run_update_check(
+        _config(tmp_path, offline_manifest_path=manifest_path),
+        command_runner=runner,
+    )
+
+    assert result.status == updater.STATUS_OFFLINE_BUNDLE_INVALID
+    assert result.returncode == updater.CHECK_EXIT_CODES[updater.STATUS_OFFLINE_BUNDLE_INVALID]
+    assert result.update_source == updater.UPDATE_SOURCE_OFFLINE
+    assert message_part in result.message
+
+
+def test_offline_update_check_dirty_worktree_blocks_before_bundle_fetch(tmp_path):
+    manifest_path = _write_offline_manifest(tmp_path, head_sha=OFFLINE_SHA)
+    runner = FakeGitRunner(tmp_path, dirty_status=" M FreeRTOS-interface/App.py\n")
+
+    result = updater.run_update_check(
+        _config(tmp_path, offline_manifest_path=manifest_path),
+        command_runner=runner,
+    )
+
+    assert result.status == updater.STATUS_DIRTY_WORKTREE
+    assert not any(call[0][:3] == ("git", "fetch", "--force") for call in runner.calls)
+
+
+def test_find_offline_update_manifests_scans_labcraftupdates_dirs_only(tmp_path):
+    root = tmp_path / "usb"
+    updates_dir = root / "LabCraftUpdates"
+    nested_dir = updates_dir / "nested"
+    nested_dir.mkdir(parents=True)
+    manifest = updates_dir / "update.json"
+    nested_manifest = nested_dir / "nested.json"
+    manifest.write_text("{}", encoding="utf-8")
+    nested_manifest.write_text("{}", encoding="utf-8")
+
+    found = updater.find_offline_update_manifests([root])
+
+    assert found == (manifest.resolve(),)
+
+
+def test_offline_fallback_does_not_scan_when_online_check_succeeds(tmp_path):
+    invalid_manifest = tmp_path / "missing.json"
+    runner = FakeGitRunner(tmp_path, fetch_returncode=0, ahead_count=0, behind_count=0)
+
+    result = updater.run_update_check_with_offline_fallback(
+        _config(tmp_path),
+        command_runner=runner,
+        manifest_paths=[invalid_manifest],
+    )
+
+    assert result.status == updater.STATUS_UP_TO_DATE
+    assert result.update_source == updater.UPDATE_SOURCE_ONLINE
+
+
+def test_offline_fallback_selects_newest_update_available_bundle(tmp_path):
+    old_manifest = _write_offline_manifest(
+        tmp_path,
+        head_sha=OFFLINE_SHA,
+        bundle_name="old.bundle",
+        created_at_utc="2026-06-18T10:00:00Z",
+    )
+    new_manifest = _write_offline_manifest(
+        tmp_path,
+        head_sha=OFFLINE_SHA,
+        bundle_name="new.bundle",
+        created_at_utc="2026-06-18T12:00:00Z",
+    )
+    runner = FakeGitRunner(
+        tmp_path,
+        fetch_returncode=128,
+        offline_ref_sha=OFFLINE_SHA,
+        offline_ahead_count=0,
+        offline_behind_count=1,
+        offline_check_commits=("def Offline update",),
+    )
+
+    result = updater.run_update_check_with_offline_fallback(
+        _config(tmp_path),
+        command_runner=runner,
+        manifest_paths=[old_manifest, new_manifest],
+    )
+
+    assert result.status == updater.STATUS_UPDATE_AVAILABLE
+    assert result.update_source == updater.UPDATE_SOURCE_OFFLINE
+    assert result.offline_manifest_path == new_manifest.resolve()
+
+
+def test_offline_fallback_returns_up_to_date_when_no_bundle_has_updates(tmp_path):
+    manifest_path = _write_offline_manifest(tmp_path, head_sha=OFFLINE_SHA)
+    runner = FakeGitRunner(
+        tmp_path,
+        fetch_returncode=128,
+        offline_ref_sha=OFFLINE_SHA,
+        offline_ahead_count=0,
+        offline_behind_count=0,
+    )
+
+    result = updater.run_update_check_with_offline_fallback(
+        _config(tmp_path),
+        command_runner=runner,
+        manifest_paths=[manifest_path],
+    )
+
+    assert result.status == updater.STATUS_UP_TO_DATE
+    assert result.update_source == updater.UPDATE_SOURCE_OFFLINE
+
+
+def test_offline_fallback_skips_invalid_and_diverged_candidates(tmp_path):
+    wrong_branch = _write_offline_manifest(
+        tmp_path,
+        branch="stable",
+        bundle_name="wrong-branch.bundle",
+        created_at_utc="2026-06-18T13:00:00Z",
+    )
+    diverged = _write_offline_manifest(
+        tmp_path,
+        head_sha=OFFLINE_SHA,
+        bundle_name="diverged.bundle",
+        created_at_utc="2026-06-18T12:00:00Z",
+    )
+    valid = _write_offline_manifest(
+        tmp_path,
+        head_sha=OFFLINE_SHA,
+        bundle_name="valid.bundle",
+        created_at_utc="2026-06-18T11:00:00Z",
+    )
+    base_runner = FakeGitRunner(tmp_path, fetch_returncode=128, offline_ref_sha=OFFLINE_SHA)
+    state = {"bundle_name": ""}
+
+    def runner(args, cwd, timeout_s, env_updates):
+        args_tuple = tuple(str(arg) for arg in args)
+        git_args = args_tuple[1:]
+        if len(git_args) == 4 and git_args[:2] == ("fetch", "--force"):
+            state["bundle_name"] = Path(git_args[2]).name
+        if git_args == ("rev-list", "--left-right", "--count", f"HEAD...{updater.OFFLINE_UPDATE_REF}"):
+            if state["bundle_name"] == "diverged.bundle":
+                return updater.CommandResult(args_tuple, 0, stdout="1\t2\n")
+            return updater.CommandResult(args_tuple, 0, stdout="0\t1\n")
+        if git_args == ("log", "--oneline", f"HEAD..{updater.OFFLINE_UPDATE_REF}"):
+            return updater.CommandResult(args_tuple, 0, stdout="def Offline update\n")
+        return base_runner(args, cwd, timeout_s, env_updates)
+
+    result = updater.run_update_check_with_offline_fallback(
+        _config(tmp_path),
+        command_runner=runner,
+        manifest_paths=[valid, diverged, wrong_branch],
+    )
+
+    assert result.status == updater.STATUS_UPDATE_AVAILABLE
+    assert result.offline_manifest_path == valid.resolve()
+
+
+def test_offline_fallback_preserves_fetch_failed_when_no_usable_bundle(tmp_path):
+    manifest_path = tmp_path / "missing.json"
+    runner = FakeGitRunner(tmp_path, fetch_returncode=128)
+
+    result = updater.run_update_check_with_offline_fallback(
+        _config(tmp_path),
+        command_runner=runner,
+        manifest_paths=[manifest_path],
+    )
+
+    assert result.status == updater.STATUS_FETCH_FAILED
+    assert result.update_source == updater.UPDATE_SOURCE_ONLINE
+    assert "No usable offline update bundle was found." in result.message
+
+
 def test_latest_result_json_written_for_updated_result(tmp_path):
     runner = FakeGitRunner(
         tmp_path,
@@ -644,6 +1055,34 @@ def test_latest_result_json_written_for_updated_result(tmp_path):
     assert payload["before_sha"] == "abc"
     assert payload["after_sha"] == "def"
     assert payload["commits"] == ["def Updated app"]
+
+
+def test_latest_result_json_written_for_offline_updated_result(tmp_path):
+    manifest_path = _write_offline_manifest(tmp_path, head_sha=OFFLINE_SHA)
+    runner = FakeGitRunner(
+        tmp_path,
+        before_sha="abc",
+        after_sha=OFFLINE_SHA,
+        offline_ref_sha=OFFLINE_SHA,
+        update_commits=("def Offline update",),
+    )
+
+    result = updater.run_update(
+        updater.UpdaterConfig(
+            repo_root=tmp_path,
+            no_relaunch=True,
+            record_result=True,
+            offline_manifest_path=manifest_path,
+        ),
+        command_runner=runner,
+    )
+
+    result_path = updater.default_latest_result_path(tmp_path)
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+    assert result.status == updater.STATUS_UPDATED
+    assert payload["status"] == updater.STATUS_UPDATED
+    assert payload["update_source"] == updater.UPDATE_SOURCE_OFFLINE
+    assert payload["offline_manifest_path"] == str(manifest_path.resolve())
 
 
 def test_latest_result_json_written_for_already_current_result(tmp_path):
@@ -672,3 +1111,65 @@ def test_latest_result_json_written_for_failed_result(tmp_path):
     assert result.status == updater.STATUS_DIRTY_WORKTREE
     assert payload["status"] == updater.STATUS_DIRTY_WORKTREE
     assert "local developer changes" in payload["message"]
+
+
+def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(repo),
+        shell=False,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_real_git_offline_bundle_check_and_update(tmp_path):
+    remote = tmp_path / "remote.git"
+    support = tmp_path / "support"
+    deployed = tmp_path / "deployed"
+    output_dir = tmp_path / "updates"
+
+    _git(tmp_path, "init", "--bare", str(remote))
+    support.mkdir()
+    _git(support, "init")
+    _git(support, "config", "user.email", "test@example.com")
+    _git(support, "config", "user.name", "Test User")
+    (support / "README.md").write_text("initial\n", encoding="utf-8")
+    _git(support, "add", "README.md")
+    _git(support, "commit", "-m", "initial")
+    _git(support, "branch", "-M", "stable")
+    _git(support, "remote", "add", "origin", str(remote))
+    _git(support, "push", "-u", "origin", "stable")
+
+    _git(tmp_path, "clone", "--branch", "stable", str(remote), str(deployed))
+    deployed_start = _git(deployed, "rev-parse", "HEAD").stdout.strip()
+
+    (support / "README.md").write_text("initial\nupdated\n", encoding="utf-8")
+    _git(support, "commit", "-am", "update app")
+    _git(support, "push", "origin", "stable")
+
+    bundle_result = create_update_bundle.create_update_bundle(
+        create_update_bundle.BundleConfig(repo_root=support, branch="stable", output_dir=output_dir),
+    )
+    manifest_path = bundle_result.manifest_path
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    check = updater.run_update_check(
+        updater.UpdaterConfig(repo_root=deployed, log_path=tmp_path / "check.log", offline_manifest_path=manifest_path),
+    )
+    assert check.status == updater.STATUS_UPDATE_AVAILABLE
+    assert check.update_source == updater.UPDATE_SOURCE_OFFLINE
+    assert check.behind_count == 1
+    assert check.head_sha == deployed_start
+    assert check.upstream_sha == manifest["head_sha"]
+
+    result = updater.run_update(
+        updater.UpdaterConfig(repo_root=deployed, no_relaunch=True, log_path=tmp_path / "update.log", offline_manifest_path=manifest_path),
+    )
+
+    assert result.status == updater.STATUS_UPDATED
+    assert result.update_source == updater.UPDATE_SOURCE_OFFLINE
+    assert result.after_sha == manifest["head_sha"]
+    assert _git(deployed, "rev-parse", "HEAD").stdout.strip() == manifest["head_sha"]

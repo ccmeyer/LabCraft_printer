@@ -52,7 +52,7 @@ class AppUpdateCheckWorker(QtCore.QObject):
         kwargs = {}
         if self.command_runner is not None:
             kwargs["command_runner"] = self.command_runner
-        result = update_and_restart.run_update_check(config, **kwargs)
+        result = update_and_restart.run_update_check_with_offline_fallback(config, **kwargs)
         self.finished.emit(result)
 
 
@@ -590,6 +590,13 @@ class Controller(QObject):
         command.append("--gui")
         command.append("--no-relaunch")
         command.append("--record-result")
+        check_result = self.get_last_app_update_check_result()
+        if (
+            getattr(check_result, "status", "") == "update_available"
+            and getattr(check_result, "update_source", "") == "offline"
+            and getattr(check_result, "offline_manifest_path", None)
+        ):
+            command.extend(["--offline-manifest", str(getattr(check_result, "offline_manifest_path"))])
         return command
 
     def launch_app_updater(self, wait_pid, launcher=None):

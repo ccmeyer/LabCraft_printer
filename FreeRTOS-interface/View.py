@@ -1013,6 +1013,7 @@ class MainWindow(QMainWindow):
 
     def request_app_update(self):
         """Launch the standalone updater, then close through the normal path."""
+        check_result = None
         check_getter = getattr(self.controller, "get_last_app_update_check_result", None)
         if callable(check_getter):
             check_result = check_getter()
@@ -1023,9 +1024,15 @@ class MainWindow(QMainWindow):
                 self.popup_message("No Update Available", getattr(check_result, "message", "No app update is available."))
                 return False
 
+        update_source = str(getattr(check_result, "update_source", "") or "")
+        if update_source == "offline":
+            source_text = "from the offline update bundle"
+        else:
+            source_text = "from the remote repository"
+
         response = self.popup_yes_no(
             "Update App",
-            "The app will close, update the application code, and reopen. "
+            f"The app will close, update the application code {source_text}, and reopen. "
             "A LabCraft updater window will show progress. Firmware will not be updated. Continue?",
         )
         if not self._is_yes_response(response):
@@ -1120,11 +1127,17 @@ class MainWindow(QMainWindow):
         before_sha = str(payload.get("before_sha") or "")
         after_sha = str(payload.get("after_sha") or "")
         log_path = str(payload.get("log_path") or "")
+        update_source = str(payload.get("update_source") or "")
+        offline_manifest_path = str(payload.get("offline_manifest_path") or "")
         commits = [str(commit) for commit in (payload.get("commits") or []) if str(commit).strip()]
 
         lines = [message]
         if status:
             lines.append(f"Status: {status}")
+        if update_source == "offline":
+            lines.append("Source: Offline bundle")
+            if offline_manifest_path:
+                lines.append(f"Manifest: {offline_manifest_path}")
         if before_sha or after_sha:
             lines.append(f"Before: {before_sha or 'unknown'}")
             lines.append(f"After: {after_sha or 'unknown'}")
@@ -4768,6 +4781,11 @@ class SpeedProfilesTab(QtWidgets.QWidget):
             self.app_update_button.setEnabled(not blockers)
             commits = [str(commit) for commit in getattr(result, "commits", ()) if str(commit).strip()]
             details = [message]
+            if str(getattr(result, "update_source", "") or "") == "offline":
+                details.append("Source: Offline bundle")
+                offline_manifest_path = str(getattr(result, "offline_manifest_path", "") or "")
+                if offline_manifest_path:
+                    details.append(f"Manifest: {offline_manifest_path}")
             if behind_count:
                 details.append(f"Pending commits: {behind_count}")
             if commits:

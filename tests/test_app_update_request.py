@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QMessageBox
 
 import Controller as controller_mod
 import View as view_mod
+from tools import update_and_restart as updater_mod
 from Controller import Controller
 from View import MainWindow, SpeedProfilesTab
 
@@ -78,6 +79,55 @@ def test_controller_builds_update_command_without_auto_relaunch(tmp_path, monkey
         "--no-relaunch",
         "--record-result",
     ]
+
+
+def test_controller_builds_update_command_with_offline_manifest(tmp_path, monkeypatch):
+    controller = _make_controller(tmp_path)
+    manifest_path = tmp_path / "LabCraftUpdates" / "update.json"
+    controller._last_app_update_check_result = SimpleNamespace(
+        status="update_available",
+        update_source="offline",
+        offline_manifest_path=manifest_path,
+    )
+    monkeypatch.setattr(controller_mod.sys, "executable", "python-under-test")
+
+    command = controller.build_app_update_command(wait_pid=1234)
+
+    assert command[-2:] == ["--offline-manifest", str(manifest_path)]
+    assert "--record-result" in command
+
+
+def test_controller_builds_update_command_without_offline_manifest_for_online_update(tmp_path, monkeypatch):
+    controller = _make_controller(tmp_path)
+    controller._last_app_update_check_result = SimpleNamespace(
+        status="update_available",
+        update_source="online",
+    )
+    monkeypatch.setattr(controller_mod.sys, "executable", "python-under-test")
+
+    command = controller.build_app_update_command(wait_pid=1234)
+
+    assert "--offline-manifest" not in command
+
+
+def test_app_update_check_worker_uses_offline_fallback_helper(tmp_path, monkeypatch, qapp):
+    calls = []
+    result = SimpleNamespace(status="up_to_date", message="done")
+
+    def fake_fallback(config, **kwargs):
+        calls.append((config, kwargs))
+        return result
+
+    monkeypatch.setattr(updater_mod, "run_update_check_with_offline_fallback", fake_fallback)
+    worker = controller_mod.AppUpdateCheckWorker(tmp_path, command_runner="runner")
+    emitted = []
+    worker.finished.connect(emitted.append)
+
+    worker.run()
+
+    assert emitted == [result]
+    assert calls[0][0].repo_root == tmp_path
+    assert calls[0][1]["command_runner"] == "runner"
 
 
 def test_controller_launch_success_stores_process(tmp_path):
@@ -215,6 +265,27 @@ def test_mainwindow_request_app_update_launches_and_closes(qapp, monkeypatch):
     assert window._app_update_close_requested is True
 
 
+def test_mainwindow_request_app_update_confirmation_mentions_offline_source(qapp, monkeypatch):
+    calls = []
+    prompts = []
+    controller = SimpleNamespace(
+        get_last_app_update_check_result=lambda: SimpleNamespace(
+            status="update_available",
+            update_source="offline",
+            offline_manifest_path="E:/LabCraftUpdates/update.json",
+        ),
+        get_app_update_blockers=lambda: [],
+        launch_app_updater=lambda wait_pid: calls.append(wait_pid) or (True, "started"),
+    )
+    window = _make_update_mainwindow(controller)
+    window.popup_yes_no = lambda title, message: prompts.append((title, message)) or QMessageBox.StandardButton.Yes
+    monkeypatch.setattr(view_mod.os, "getpid", lambda: 777)
+
+    assert MainWindow.request_app_update(window) is True
+    assert calls == [777]
+    assert "offline update bundle" in prompts[0][1]
+
+
 def test_mainwindow_request_app_update_launch_failure_stays_open(qapp):
     controller = SimpleNamespace(
         get_app_update_blockers=lambda: [],
@@ -345,6 +416,29 @@ def test_speed_tab_update_available_enables_update_and_shows_commits(qapp):
     assert "def Add result popup" in tab.main_window.messages[0][1]
 
 
+def test_speed_tab_offline_update_available_shows_source_details(qapp, tmp_path):
+    tab = _make_speed_tab_for_update_check()
+    manifest_path = tmp_path / "LabCraftUpdates" / "update.json"
+
+    SpeedProfilesTab._on_app_update_check_finished(
+        tab,
+        SimpleNamespace(
+            status="update_available",
+            message="1 offline update commit available.",
+            update_source="offline",
+            offline_manifest_path=manifest_path,
+            behind_count=1,
+            commits=("def Offline update",),
+        ),
+    )
+
+    assert tab.app_update_button.enabled is True
+    title, message = tab.main_window.messages[0]
+    assert title == "Updates Available"
+    assert "Source: Offline bundle" in message
+    assert str(manifest_path) in message
+
+
 def test_speed_tab_update_check_failure_keeps_update_disabled(qapp):
     tab = _make_speed_tab_for_update_check()
 
@@ -412,3 +506,21 @@ def test_mainwindow_startup_update_result_popup_shows_once_and_clears_marker(qap
     assert title == "Application Update Result"
     assert "LabCraft was updated successfully." in message
     assert "def Add result popup" in message
+
+
+def test_mainwindow_update_result_message_includes_offline_source(tmp_path):
+    manifest_path = tmp_path / "LabCraftUpdates" / "update.json"
+
+    message = MainWindow._format_app_update_result_message(
+        {
+            "status": "updated",
+            "message": "LabCraft was updated successfully.",
+            "update_source": "offline",
+            "offline_manifest_path": str(manifest_path),
+            "before_sha": "abc",
+            "after_sha": "def",
+        }
+    )
+
+    assert "Source: Offline bundle" in message
+    assert f"Manifest: {manifest_path}" in message

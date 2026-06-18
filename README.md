@@ -310,6 +310,36 @@ local/update_logs/
 
 For dirty worktrees, network failures, credential failures, or non-fast-forward Git state, the updater does not stash, reset, clean, or overwrite local changes. Use `Reopen Current Version` to relaunch the installed app version and contact support with the updater log.
 
+Offline operator flow:
+
+- Copy the support-provided `LabCraftUpdates` folder to a USB drive.
+- Plug the USB drive into the machine before clicking `Check for Updates`.
+- The app tries the normal online check first.
+- If the online check cannot contact the remote repository, the app scans removable drives for `LabCraftUpdates/*.json` manifests.
+- If a valid fast-forward offline bundle is found, the same `Update App` button updates from that bundle.
+
+### Create offline update bundles (support only)
+
+When a machine cannot reach GitHub, support can package the current deployment branch as a portable Git bundle plus manifest:
+
+```powershell
+.\env\Scripts\python.exe tools/create_update_bundle.py --branch stable
+```
+
+The files are written under:
+
+```text
+local/LabCraftUpdates/
+```
+
+Copy the `LabCraftUpdates` folder to the USB drive that will be sent to the operator. This workflow packages application code only; it does not flash firmware.
+
+For backend/manual validation on the target checkout, run the updater against the manifest JSON:
+
+```powershell
+.\env\Scripts\python.exe tools/update_and_restart.py --repo-root . --offline-manifest path\to\labcraft-stable-....json --no-relaunch
+```
+
 ## Pi setup status
 
 For a Raspberry Pi 5 running Raspberry Pi OS Bookworm, use the manual procedure below as the source of truth. Do not run the older root-level helper scripts during normal setup if you are following this README.

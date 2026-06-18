@@ -11,13 +11,15 @@ from __future__ import annotations
 import argparse
 import ctypes
 import errno
+import hashlib
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
@@ -35,6 +37,13 @@ STATUS_UP_TO_DATE = "up_to_date"
 STATUS_NO_UPSTREAM = "no_upstream"
 STATUS_DIVERGED = "diverged"
 STATUS_FETCH_FAILED = "fetch_failed"
+STATUS_OFFLINE_BUNDLE_INVALID = "offline_bundle_invalid"
+STATUS_OFFLINE_UPDATE_FAILED = "offline_update_failed"
+
+UPDATE_SOURCE_ONLINE = "online"
+UPDATE_SOURCE_OFFLINE = "offline"
+OFFLINE_BUNDLE_SCHEMA_VERSION = "labcraft_update_bundle_v1"
+OFFLINE_UPDATE_REF = "refs/labcraft/offline-update"
 
 EXIT_CODES = {
     STATUS_UPDATED: 0,
@@ -44,6 +53,8 @@ EXIT_CODES = {
     STATUS_WAIT_TIMEOUT: 4,
     STATUS_GIT_PULL_FAILED: 5,
     STATUS_RELAUNCH_FAILED: 6,
+    STATUS_OFFLINE_BUNDLE_INVALID: 7,
+    STATUS_OFFLINE_UPDATE_FAILED: 8,
 }
 
 CHECK_EXIT_CODES = {
@@ -54,6 +65,7 @@ CHECK_EXIT_CODES = {
     STATUS_NO_UPSTREAM: 7,
     STATUS_DIVERGED: 8,
     STATUS_FETCH_FAILED: 9,
+    STATUS_OFFLINE_BUNDLE_INVALID: 10,
 }
 
 DEFAULT_APP_PATH = Path("FreeRTOS-interface") / "App.py"
@@ -61,6 +73,7 @@ DEFAULT_WAIT_TIMEOUT_S = 120.0
 DEFAULT_GIT_TIMEOUT_S = 300.0
 DEFAULT_DEFERRED_LAUNCH_WAIT_TIMEOUT_S = 30.0
 DEFERRED_LAUNCH_ARG = "--deferred-launch"
+OFFLINE_UPDATES_DIR_NAME = "LabCraftUpdates"
 
 
 @dataclass(frozen=True)
@@ -81,6 +94,8 @@ class UpdateResult:
     before_sha: str = ""
     after_sha: str = ""
     log_path: Path | None = None
+    update_source: str = UPDATE_SOURCE_ONLINE
+    offline_manifest_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -97,6 +112,9 @@ class UpdateCheckResult:
     behind_count: int = 0
     commits: tuple[str, ...] = ()
     log_path: Path | None = None
+    update_source: str = UPDATE_SOURCE_ONLINE
+    offline_manifest_path: Path | None = None
+    offline_bundle_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -124,12 +142,33 @@ class UpdaterConfig:
     git_timeout_s: float = DEFAULT_GIT_TIMEOUT_S
     log_path: Path | None = None
     platform_name: str | None = None
+    offline_manifest_path: Path | None = None
 
 
 CommandRunner = Callable[[Sequence[str], Path, float, Mapping[str, str] | None], CommandResult]
 Launcher = Callable[[Sequence[str], Path], object]
 Waiter = Callable[[int, float], bool]
 ProgressCallback = Callable[[ProgressEvent], None]
+
+
+@dataclass(frozen=True)
+class OfflineBundleInfo:
+    manifest_path: Path
+    bundle_path: Path
+    manifest: dict
+    branch: str
+    remote: str
+    remote_url: str
+    repo: str
+    source_ref: str
+    head_sha: str
+
+
+class OfflineBundleError(RuntimeError):
+    def __init__(self, message: str, *, command_result: CommandResult | None = None) -> None:
+        super().__init__(message)
+        self.message = message
+        self.command_result = command_result
 
 
 class _LogBuffer:
@@ -261,6 +300,341 @@ def _run_git(
         repo_root,
         timeout_s,
         {"GIT_TERMINAL_PROMPT": "0"},
+    )
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _repo_slug_from_remote_url(remote_url: str) -> str:
+    text = str(remote_url or "").strip()
+    if not text:
+        return ""
+
+    match = re.search(r"github\.com[:/](?P<owner>[^/\s:]+)/(?P<repo>[^/\s]+?)(?:\.git)?/?$", text)
+    if match:
+        return f"{match.group('owner')}/{match.group('repo')}"
+
+    path_text = text.replace("\\", "/").rstrip("/")
+    name = path_text.rsplit("/", 1)[-1]
+    if name.endswith(".git"):
+        name = name[:-4]
+    return name
+
+
+def _record_or_log_command(
+    log: _LogBuffer,
+    result: CommandResult,
+    progress_callback: ProgressCallback | None,
+) -> None:
+    if progress_callback is None:
+        log.add_command(result)
+    else:
+        _record_command(log, result, progress_callback)
+
+
+def _resolve_offline_manifest_path(repo_root: Path, manifest_path: Path | str) -> Path:
+    path = Path(manifest_path)
+    return (path if path.is_absolute() else repo_root / path).resolve()
+
+
+def _resolve_manifest_bundle_path(manifest_path: Path, bundle_filename: object) -> Path:
+    if not isinstance(bundle_filename, str) or not bundle_filename.strip():
+        raise OfflineBundleError("Offline update manifest is missing bundle_filename.")
+
+    bundle_name = Path(bundle_filename)
+    if bundle_name.is_absolute() or "/" in bundle_filename or "\\" in bundle_filename or bundle_name.name != bundle_filename:
+        raise OfflineBundleError("Offline update manifest bundle_filename must be a filename next to the manifest.")
+
+    return (manifest_path.parent / bundle_name).resolve()
+
+
+def _load_offline_manifest(manifest_path: Path) -> dict:
+    if not manifest_path.is_file():
+        raise OfflineBundleError(f"Offline update manifest was not found: {manifest_path}")
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise OfflineBundleError(f"Offline update manifest is not valid JSON: {exc}") from exc
+    except OSError as exc:
+        raise OfflineBundleError(f"Offline update manifest could not be read: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise OfflineBundleError("Offline update manifest must contain a JSON object.")
+    return payload
+
+
+def _validate_offline_bundle(
+    repo_root: Path,
+    *,
+    manifest_path: Path | str,
+    branch: str,
+    config: UpdaterConfig,
+    log: _LogBuffer,
+    command_runner: CommandRunner,
+    progress_callback: ProgressCallback | None = None,
+) -> OfflineBundleInfo:
+    resolved_manifest_path = _resolve_offline_manifest_path(repo_root, manifest_path)
+    log.add(f"offline_manifest_path: {resolved_manifest_path}")
+    manifest = _load_offline_manifest(resolved_manifest_path)
+
+    schema_version = str(manifest.get("schema_version", "") or "")
+    if schema_version != OFFLINE_BUNDLE_SCHEMA_VERSION:
+        raise OfflineBundleError("Offline update manifest has an unsupported schema version.")
+
+    manifest_branch = str(manifest.get("branch", "") or "")
+    if not branch:
+        raise OfflineBundleError("Offline update cannot continue because the current branch could not be resolved.")
+    if manifest_branch != branch:
+        raise OfflineBundleError(
+            f"Offline update bundle is for branch {manifest_branch!r}, but this checkout is on {branch!r}."
+        )
+
+    remote = str(manifest.get("remote", "") or "")
+    if not remote:
+        raise OfflineBundleError("Offline update manifest is missing remote.")
+
+    repo = str(manifest.get("repo", "") or "")
+    if not repo:
+        raise OfflineBundleError("Offline update manifest is missing repo.")
+
+    remote_url = str(manifest.get("remote_url", "") or "")
+    manifest_remote_slug = _repo_slug_from_remote_url(remote_url)
+    if manifest_remote_slug and manifest_remote_slug != repo:
+        raise OfflineBundleError("Offline update manifest repo does not match its remote_url.")
+
+    remote_url_result = _run_git(
+        repo_root,
+        ["config", "--get", f"remote.{remote}.url"],
+        config.git_timeout_s,
+        command_runner,
+    )
+    _record_or_log_command(log, remote_url_result, progress_callback)
+    if remote_url_result.returncode != 0 or not remote_url_result.stdout.strip():
+        raise OfflineBundleError(
+            f"Offline update cannot resolve local remote URL for {remote!r}.",
+            command_result=remote_url_result,
+        )
+    local_remote_url = remote_url_result.stdout.strip()
+    local_repo_slug = _repo_slug_from_remote_url(local_remote_url)
+    if local_repo_slug != repo:
+        raise OfflineBundleError(
+            f"Offline update bundle is for repo {repo!r}, but this checkout remote is {local_repo_slug!r}."
+        )
+
+    source_ref = str(manifest.get("source_ref", "") or "")
+    expected_source_ref = f"refs/remotes/{remote}/{manifest_branch}"
+    if source_ref != expected_source_ref:
+        raise OfflineBundleError("Offline update manifest source_ref does not match its remote and branch.")
+
+    head_sha = str(manifest.get("head_sha", "") or "")
+    if not re.fullmatch(r"[0-9a-fA-F]{40,64}", head_sha):
+        raise OfflineBundleError("Offline update manifest has an invalid head_sha.")
+
+    bundle_path = _resolve_manifest_bundle_path(resolved_manifest_path, manifest.get("bundle_filename"))
+    if not bundle_path.is_file():
+        raise OfflineBundleError(f"Offline update bundle was not found: {bundle_path}")
+
+    expected_sha256 = str(manifest.get("bundle_sha256", "") or "").lower()
+    actual_sha256 = _sha256_file(bundle_path).lower()
+    if not expected_sha256 or actual_sha256 != expected_sha256:
+        raise OfflineBundleError("Offline update bundle SHA256 does not match the manifest.")
+
+    verify_result = _run_git(
+        repo_root,
+        ["bundle", "verify", str(bundle_path)],
+        config.git_timeout_s,
+        command_runner,
+    )
+    _record_or_log_command(log, verify_result, progress_callback)
+    if verify_result.returncode != 0:
+        raise OfflineBundleError(
+            "Git could not verify the offline update bundle.",
+            command_result=verify_result,
+        )
+
+    return OfflineBundleInfo(
+        manifest_path=resolved_manifest_path,
+        bundle_path=bundle_path,
+        manifest=manifest,
+        branch=manifest_branch,
+        remote=remote,
+        remote_url=remote_url,
+        repo=repo,
+        source_ref=source_ref,
+        head_sha=head_sha,
+    )
+
+
+def _prepare_offline_update_ref(
+    repo_root: Path,
+    *,
+    manifest_path: Path | str,
+    branch: str,
+    config: UpdaterConfig,
+    log: _LogBuffer,
+    command_runner: CommandRunner,
+    progress_callback: ProgressCallback | None = None,
+) -> OfflineBundleInfo:
+    info = _validate_offline_bundle(
+        repo_root,
+        manifest_path=manifest_path,
+        branch=branch,
+        config=config,
+        log=log,
+        command_runner=command_runner,
+        progress_callback=progress_callback,
+    )
+    fetch_result = _run_git(
+        repo_root,
+        ["fetch", "--force", str(info.bundle_path), f"{info.source_ref}:{OFFLINE_UPDATE_REF}"],
+        config.git_timeout_s,
+        command_runner,
+    )
+    _record_or_log_command(log, fetch_result, progress_callback)
+    if fetch_result.returncode != 0:
+        raise OfflineBundleError(
+            "Git could not fetch the offline update bundle.",
+            command_result=fetch_result,
+        )
+
+    ref_result = _run_git(repo_root, ["rev-parse", OFFLINE_UPDATE_REF], config.git_timeout_s, command_runner)
+    _record_or_log_command(log, ref_result, progress_callback)
+    if ref_result.returncode != 0 or not ref_result.stdout.strip():
+        raise OfflineBundleError(
+            "Git could not resolve the fetched offline update ref.",
+            command_result=ref_result,
+        )
+    fetched_sha = ref_result.stdout.strip()
+    if fetched_sha.lower() != info.head_sha.lower():
+        raise OfflineBundleError("Fetched offline update ref does not match the manifest head_sha.")
+
+    return info
+
+
+def _dedupe_paths(paths: Sequence[Path]) -> tuple[Path, ...]:
+    seen: set[str] = set()
+    result: list[Path] = []
+    for path in paths:
+        resolved = Path(path).resolve()
+        key = str(resolved).lower() if _is_windows() else str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(resolved)
+    return tuple(result)
+
+
+def _psutil_removable_roots(*, platform_name: str | None = None) -> tuple[Path, ...]:
+    try:
+        import psutil
+    except Exception:
+        return ()
+
+    roots: list[Path] = []
+    try:
+        partitions = psutil.disk_partitions(all=False)
+    except Exception:
+        return ()
+
+    is_windows = _is_windows(platform_name)
+    for partition in partitions:
+        mountpoint = getattr(partition, "mountpoint", "") or ""
+        if not mountpoint:
+            continue
+        opts = {part.strip().lower() for part in str(getattr(partition, "opts", "") or "").split(",")}
+        if is_windows:
+            if "removable" in opts or "cdrom" in opts:
+                roots.append(Path(mountpoint))
+        elif "removable" in opts or "cdrom" in opts:
+            roots.append(Path(mountpoint))
+    return _dedupe_paths(roots)
+
+
+def _default_offline_search_roots(*, platform_name: str | None = None) -> tuple[Path, ...]:
+    roots = list(_psutil_removable_roots(platform_name=platform_name))
+    if _is_windows(platform_name):
+        if not roots:
+            for code in range(ord("A"), ord("Z") + 1):
+                root = Path(f"{chr(code)}:\\")
+                if root.exists():
+                    roots.append(root)
+    else:
+        for root in (Path("/media"), Path("/run/media"), Path("/mnt"), Path("/Volumes")):
+            if root.exists():
+                roots.append(root)
+    return _dedupe_paths(roots)
+
+
+def _iter_labcraft_update_dirs(root: Path) -> tuple[Path, ...]:
+    root = Path(root)
+    candidates: list[Path] = []
+    if root.name == OFFLINE_UPDATES_DIR_NAME:
+        candidates.append(root)
+    candidates.append(root / OFFLINE_UPDATES_DIR_NAME)
+
+    try:
+        children = [child for child in root.iterdir() if child.is_dir()]
+    except OSError:
+        children = []
+    for child in children:
+        if child.name == OFFLINE_UPDATES_DIR_NAME:
+            candidates.append(child)
+        candidates.append(child / OFFLINE_UPDATES_DIR_NAME)
+        try:
+            grandchildren = [grandchild for grandchild in child.iterdir() if grandchild.is_dir()]
+        except OSError:
+            grandchildren = []
+        for grandchild in grandchildren:
+            if grandchild.name == OFFLINE_UPDATES_DIR_NAME:
+                candidates.append(grandchild)
+            candidates.append(grandchild / OFFLINE_UPDATES_DIR_NAME)
+
+    return _dedupe_paths([candidate for candidate in candidates if candidate.is_dir()])
+
+
+def find_offline_update_manifests(search_roots: Sequence[Path | str] | None = None) -> tuple[Path, ...]:
+    roots = (
+        tuple(Path(root) for root in search_roots)
+        if search_roots is not None
+        else _default_offline_search_roots()
+    )
+    manifests: list[Path] = []
+    for root in roots:
+        for updates_dir in _iter_labcraft_update_dirs(Path(root)):
+            try:
+                manifests.extend(path for path in updates_dir.glob("*.json") if path.is_file())
+            except OSError:
+                continue
+    return _dedupe_paths(sorted(manifests, key=lambda path: str(path)))
+
+
+def _offline_manifest_sort_timestamp(path: Path) -> float:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        created_at = str(payload.get("created_at_utc") or "")
+        if created_at:
+            return datetime.fromisoformat(created_at.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        pass
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _sort_offline_manifest_candidates(manifest_paths: Sequence[Path | str]) -> tuple[Path, ...]:
+    paths = _dedupe_paths([Path(path) for path in manifest_paths])
+    return tuple(
+        sorted(
+            paths,
+            key=lambda path: (_offline_manifest_sort_timestamp(path), str(path)),
+            reverse=True,
+        )
     )
 
 
@@ -506,6 +880,8 @@ def update_result_payload(result: UpdateResult, *, commits: Sequence[str] = ()) 
         "log_path": str(result.log_path) if result.log_path is not None else "",
         "updated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "commits": [str(commit) for commit in commits],
+        "update_source": result.update_source,
+        "offline_manifest_path": str(result.offline_manifest_path) if result.offline_manifest_path is not None else "",
     }
 
 
@@ -601,6 +977,8 @@ def _make_result(
     before_sha: str = "",
     after_sha: str = "",
     log_path: Path | None = None,
+    update_source: str = UPDATE_SOURCE_ONLINE,
+    offline_manifest_path: Path | None = None,
 ) -> UpdateResult:
     return UpdateResult(
         status=status,
@@ -611,6 +989,8 @@ def _make_result(
         before_sha=before_sha,
         after_sha=after_sha,
         log_path=log_path,
+        update_source=update_source,
+        offline_manifest_path=offline_manifest_path,
     )
 
 
@@ -627,6 +1007,9 @@ def _make_check_result(
     behind_count: int = 0,
     commits: Sequence[str] = (),
     log_path: Path | None = None,
+    update_source: str = UPDATE_SOURCE_ONLINE,
+    offline_manifest_path: Path | None = None,
+    offline_bundle_path: Path | None = None,
 ) -> UpdateCheckResult:
     return UpdateCheckResult(
         status=status,
@@ -641,6 +1024,9 @@ def _make_check_result(
         behind_count=int(behind_count),
         commits=tuple(str(commit) for commit in commits),
         log_path=log_path,
+        update_source=update_source,
+        offline_manifest_path=offline_manifest_path,
+        offline_bundle_path=offline_bundle_path,
     )
 
 
@@ -722,6 +1108,136 @@ def run_update_check(
                 branch=branch,
                 head_sha=head_sha,
                 log_path=log_path,
+            ),
+            log,
+            log_path,
+        )
+
+    if config.offline_manifest_path is not None:
+        try:
+            offline_info = _prepare_offline_update_ref(
+                repo_root,
+                manifest_path=config.offline_manifest_path,
+                branch=branch,
+                config=config,
+                log=log,
+                command_runner=command_runner,
+            )
+        except OfflineBundleError as exc:
+            if exc.command_result is not None:
+                log.add(f"offline_error_command: {' '.join(exc.command_result.args)}")
+            return _finish_check_result(
+                _make_check_result(
+                    STATUS_OFFLINE_BUNDLE_INVALID,
+                    str(exc.message),
+                    repo_root=repo_root,
+                    branch=branch,
+                    head_sha=head_sha,
+                    log_path=log_path,
+                    update_source=UPDATE_SOURCE_OFFLINE,
+                    offline_manifest_path=_resolve_offline_manifest_path(repo_root, config.offline_manifest_path),
+                ),
+                log,
+                log_path,
+            )
+
+        count_result = _run_git(
+            repo_root,
+            ["rev-list", "--left-right", "--count", f"HEAD...{OFFLINE_UPDATE_REF}"],
+            config.git_timeout_s,
+            command_runner,
+        )
+        log.add_command(count_result)
+        counts = _parse_rev_list_counts(count_result.stdout)
+        if count_result.returncode != 0 or counts is None:
+            return _finish_check_result(
+                _make_check_result(
+                    STATUS_OFFLINE_BUNDLE_INVALID,
+                    "Update check could not compare this checkout with the offline bundle.",
+                    repo_root=repo_root,
+                    branch=branch,
+                    upstream=OFFLINE_UPDATE_REF,
+                    head_sha=head_sha,
+                    upstream_sha=offline_info.head_sha,
+                    log_path=log_path,
+                    update_source=UPDATE_SOURCE_OFFLINE,
+                    offline_manifest_path=offline_info.manifest_path,
+                    offline_bundle_path=offline_info.bundle_path,
+                ),
+                log,
+                log_path,
+            )
+
+        ahead_count, behind_count = counts
+        if ahead_count > 0 and behind_count > 0:
+            return _finish_check_result(
+                _make_check_result(
+                    STATUS_DIVERGED,
+                    "This checkout has diverged from the offline update bundle. Contact support before updating.",
+                    repo_root=repo_root,
+                    branch=branch,
+                    upstream=OFFLINE_UPDATE_REF,
+                    head_sha=head_sha,
+                    upstream_sha=offline_info.head_sha,
+                    ahead_count=ahead_count,
+                    behind_count=behind_count,
+                    log_path=log_path,
+                    update_source=UPDATE_SOURCE_OFFLINE,
+                    offline_manifest_path=offline_info.manifest_path,
+                    offline_bundle_path=offline_info.bundle_path,
+                ),
+                log,
+                log_path,
+            )
+
+        if behind_count > 0:
+            log_result = _run_git(
+                repo_root,
+                ["log", "--oneline", f"HEAD..{OFFLINE_UPDATE_REF}"],
+                config.git_timeout_s,
+                command_runner,
+            )
+            log.add_command(log_result)
+            commits = _split_commit_lines(log_result.stdout) if log_result.returncode == 0 else ()
+            return _finish_check_result(
+                _make_check_result(
+                    STATUS_UPDATE_AVAILABLE,
+                    f"{behind_count} offline update commit{'s' if behind_count != 1 else ''} available.",
+                    repo_root=repo_root,
+                    branch=branch,
+                    upstream=OFFLINE_UPDATE_REF,
+                    head_sha=head_sha,
+                    upstream_sha=offline_info.head_sha,
+                    ahead_count=ahead_count,
+                    behind_count=behind_count,
+                    commits=commits,
+                    log_path=log_path,
+                    update_source=UPDATE_SOURCE_OFFLINE,
+                    offline_manifest_path=offline_info.manifest_path,
+                    offline_bundle_path=offline_info.bundle_path,
+                ),
+                log,
+                log_path,
+            )
+
+        message = "LabCraft is up to date with the offline update bundle."
+        if ahead_count > 0:
+            message = "No offline update is available. This checkout has local commits not present in the offline bundle."
+        return _finish_check_result(
+            _make_check_result(
+                STATUS_UP_TO_DATE,
+                message,
+                repo_root=repo_root,
+                branch=branch,
+                upstream=OFFLINE_UPDATE_REF,
+                head_sha=head_sha,
+                upstream_sha=offline_info.head_sha,
+                ahead_count=ahead_count,
+                behind_count=behind_count,
+                log_path=log_path,
+                update_source=UPDATE_SOURCE_OFFLINE,
+                offline_manifest_path=offline_info.manifest_path,
+                offline_bundle_path=offline_info.bundle_path,
             ),
             log,
             log_path,
@@ -861,11 +1377,48 @@ def _finish_check_result(result: UpdateCheckResult, log: _LogBuffer, log_path: P
         behind_count=result.behind_count,
         commits=result.commits,
         log_path=log_path,
+        update_source=result.update_source,
+        offline_manifest_path=result.offline_manifest_path,
+        offline_bundle_path=result.offline_bundle_path,
     )
     log.add(f"status: {result.status}")
     log.add(result.message)
     log.write(log_path)
     return result
+
+
+def run_update_check_with_offline_fallback(
+    config: UpdaterConfig,
+    *,
+    command_runner: CommandRunner = default_command_runner,
+    manifest_paths: Sequence[Path | str] | None = None,
+    search_roots: Sequence[Path | str] | None = None,
+) -> UpdateCheckResult:
+    online_result = run_update_check(config, command_runner=command_runner)
+    if online_result.status != STATUS_FETCH_FAILED:
+        return online_result
+
+    candidates = (
+        _sort_offline_manifest_candidates(manifest_paths)
+        if manifest_paths is not None
+        else _sort_offline_manifest_candidates(find_offline_update_manifests(search_roots))
+    )
+    first_up_to_date: UpdateCheckResult | None = None
+    for manifest_path in candidates:
+        offline_config = replace(config, offline_manifest_path=Path(manifest_path))
+        offline_result = run_update_check(offline_config, command_runner=command_runner)
+        if offline_result.status == STATUS_UPDATE_AVAILABLE:
+            return offline_result
+        if offline_result.status == STATUS_UP_TO_DATE and first_up_to_date is None:
+            first_up_to_date = offline_result
+
+    if first_up_to_date is not None:
+        return first_up_to_date
+
+    return replace(
+        online_result,
+        message=f"{online_result.message} No usable offline update bundle was found.",
+    )
 
 
 def run_update(
@@ -938,6 +1491,12 @@ def run_update(
         )
         return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
     before_sha = before_result.stdout.strip()
+    update_source = UPDATE_SOURCE_OFFLINE if config.offline_manifest_path is not None else UPDATE_SOURCE_ONLINE
+    resolved_offline_manifest_path = (
+        _resolve_offline_manifest_path(repo_root, config.offline_manifest_path)
+        if config.offline_manifest_path is not None
+        else None
+    )
 
     _emit_progress(progress_callback, "checking_local_changes", "Checking local changes...", log_path=log_path)
     status_result = _run_git(repo_root, ["status", "--porcelain"], config.git_timeout_s, command_runner)
@@ -950,6 +1509,8 @@ def run_update(
             branch=branch,
             before_sha=before_sha,
             log_path=log_path,
+            update_source=update_source,
+            offline_manifest_path=resolved_offline_manifest_path,
         )
         return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
     if status_result.stdout.strip():
@@ -961,34 +1522,83 @@ def run_update(
             before_sha=before_sha,
             after_sha=before_sha,
             log_path=log_path,
+            update_source=update_source,
+            offline_manifest_path=resolved_offline_manifest_path,
         )
         return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
 
-    _emit_progress(progress_callback, "applying_update", "Downloading and applying update...", log_path=log_path)
-    pull_result = _run_git(repo_root, ["pull", "--ff-only"], config.git_timeout_s, command_runner)
-    _record_command(log, pull_result, progress_callback)
-    if pull_result.returncode != 0:
-        result = _make_result(
-            STATUS_GIT_PULL_FAILED,
-            "Update cannot continue because git pull --ff-only failed. The current app version was not changed.",
-            repo_root=repo_root,
-            branch=branch,
-            before_sha=before_sha,
-            after_sha=before_sha,
-            log_path=log_path,
-        )
-        return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
+    offline_manifest_path = resolved_offline_manifest_path
+    if config.offline_manifest_path is not None:
+        _emit_progress(progress_callback, "validating_offline_bundle", "Validating offline update bundle...", log_path=log_path)
+        try:
+            offline_info = _prepare_offline_update_ref(
+                repo_root,
+                manifest_path=config.offline_manifest_path,
+                branch=branch,
+                config=config,
+                log=log,
+                command_runner=command_runner,
+                progress_callback=progress_callback,
+            )
+            offline_manifest_path = offline_info.manifest_path
+        except OfflineBundleError as exc:
+            result = _make_result(
+                STATUS_OFFLINE_BUNDLE_INVALID,
+                str(exc.message),
+                repo_root=repo_root,
+                branch=branch,
+                before_sha=before_sha,
+                after_sha=before_sha,
+                log_path=log_path,
+                update_source=UPDATE_SOURCE_OFFLINE,
+                offline_manifest_path=resolved_offline_manifest_path,
+            )
+            return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
+
+        _emit_progress(progress_callback, "applying_update", "Applying offline update...", log_path=log_path)
+        pull_result = _run_git(repo_root, ["merge", "--ff-only", OFFLINE_UPDATE_REF], config.git_timeout_s, command_runner)
+        _record_command(log, pull_result, progress_callback)
+        if pull_result.returncode != 0:
+            result = _make_result(
+                STATUS_OFFLINE_UPDATE_FAILED,
+                f"Update cannot continue because git merge --ff-only {OFFLINE_UPDATE_REF} failed. The current app version was not changed.",
+                repo_root=repo_root,
+                branch=branch,
+                before_sha=before_sha,
+                after_sha=before_sha,
+                log_path=log_path,
+                update_source=UPDATE_SOURCE_OFFLINE,
+                offline_manifest_path=offline_manifest_path,
+            )
+            return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
+    else:
+        _emit_progress(progress_callback, "applying_update", "Downloading and applying update...", log_path=log_path)
+        pull_result = _run_git(repo_root, ["pull", "--ff-only"], config.git_timeout_s, command_runner)
+        _record_command(log, pull_result, progress_callback)
+        if pull_result.returncode != 0:
+            result = _make_result(
+                STATUS_GIT_PULL_FAILED,
+                "Update cannot continue because git pull --ff-only failed. The current app version was not changed.",
+                repo_root=repo_root,
+                branch=branch,
+                before_sha=before_sha,
+                after_sha=before_sha,
+                log_path=log_path,
+            )
+            return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
 
     after_result = _run_git(repo_root, ["rev-parse", "HEAD"], config.git_timeout_s, command_runner)
     _record_command(log, after_result, progress_callback)
     if after_result.returncode != 0 or not after_result.stdout.strip():
         result = _make_result(
-            STATUS_GIT_PULL_FAILED,
+            STATUS_OFFLINE_UPDATE_FAILED if update_source == UPDATE_SOURCE_OFFLINE else STATUS_GIT_PULL_FAILED,
             "Update completed, but the resulting commit could not be resolved.",
             repo_root=repo_root,
             branch=branch,
             before_sha=before_sha,
             log_path=log_path,
+            update_source=update_source,
+            offline_manifest_path=offline_manifest_path,
         )
         return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
     after_sha = after_result.stdout.strip()
@@ -1004,6 +1614,8 @@ def run_update(
         before_sha=before_sha,
         after_sha=after_sha,
         log_path=log_path,
+        update_source=update_source,
+        offline_manifest_path=offline_manifest_path,
     )
     _maybe_write_latest_update_result(config, result, repo_root, command_runner)
 
@@ -1025,6 +1637,8 @@ def run_update(
                 before_sha=before_sha,
                 after_sha=after_sha,
                 log_path=log_path,
+                update_source=update_source,
+                offline_manifest_path=offline_manifest_path,
             )
             log.add(f"status: {result.status}")
             log.add(result.message)
@@ -1110,6 +1724,7 @@ def parse_args(argv: Sequence[str] | None = None) -> UpdaterConfig:
     parser.add_argument("--latest-result-path", default=None, help="Optional path for the latest update result JSON.")
     parser.add_argument("--git-timeout-s", type=float, default=DEFAULT_GIT_TIMEOUT_S, help="Timeout for each Git command.")
     parser.add_argument("--log-path", default=None, help="Optional updater log path.")
+    parser.add_argument("--offline-manifest", default=None, help="Manifest JSON for an offline update bundle.")
     args = parser.parse_args(argv)
 
     return UpdaterConfig(
@@ -1125,6 +1740,7 @@ def parse_args(argv: Sequence[str] | None = None) -> UpdaterConfig:
         latest_result_path=Path(args.latest_result_path) if args.latest_result_path else None,
         git_timeout_s=float(args.git_timeout_s),
         log_path=Path(args.log_path) if args.log_path else None,
+        offline_manifest_path=Path(args.offline_manifest) if args.offline_manifest else None,
     )
 
 
@@ -1173,6 +1789,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"Status: {result.status}")
     if result.branch:
         print(f"Branch: {result.branch}")
+    if result.update_source:
+        print(f"Source: {result.update_source}")
+    if result.offline_manifest_path is not None:
+        print(f"Offline manifest: {result.offline_manifest_path}")
     if result.before_sha:
         print(f"Before: {result.before_sha}")
     if result.after_sha:
