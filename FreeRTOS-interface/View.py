@@ -461,7 +461,7 @@ class MainWindow(QMainWindow):
         self._plate_reader_analysis_window = None
         self._app_update_close_requested = False
 
-        self.setWindowTitle("Droplet Printer Interface v1.0.2")
+        self.setWindowTitle("Droplet Printer Interface v1.0.3")
         self.init_ui()
         self.disconnected = False
         self._close_disconnect_pending = False
