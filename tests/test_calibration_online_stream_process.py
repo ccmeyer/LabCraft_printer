@@ -462,6 +462,21 @@ def test_controller_start_online_stream_calibration_forwards_to_manager():
     assert called["count"] == 1
 
 
+def test_controller_online_stream_tail_override_forwards_to_manager():
+    controller = Controller.__new__(Controller)
+    called = []
+    controller.model = SimpleNamespace(
+        calibration_manager=SimpleNamespace(
+            apply_online_stream_tail_start_override=lambda value: called.append(int(value)) or {"ok": True}
+        )
+    )
+
+    result = Controller.apply_online_stream_tail_start_override(controller, 4050)
+
+    assert result == {"ok": True}
+    assert called == [4050]
+
+
 def test_controller_start_droplet_calibration_sequence_forwards_pressure_mode():
     controller = Controller.__new__(Controller)
     called = []
@@ -3548,6 +3563,143 @@ def test_online_stream_debug_signal_publishes_final_tail_start_after_resolution(
     assert payload["tail_plot"]["tail_start_x_us"] == 3950
     assert payload["tail_plot"]["segmented_tail"]["tail_start_delay_from_emergence_us"] == 3900
     assert payload["tail_plot"]["segmented_tail"]["predicted_volume_nl"] == 71.73
+
+
+def test_online_stream_tail_start_override_recomputes_result_and_emits_payload(tmp_path):
+    proc = _flow_proc(tmp_path)
+    _seed_tail_flow_context(proc, steady_width_baseline_px=74.0)
+    proc._tail_start_delay_from_emergence_us = 3900
+    proc._predicted_stream_duration_us = 3900
+    proc._predicted_volume_nl = 71.73
+    proc._tail_fit_result = {
+        "tail_phase": {
+            "status": "captured",
+            "tail_start_delay_from_emergence_us": 3900,
+            "tail_start_selection_method": "segmented_regression",
+        }
+    }
+
+    payload = proc.apply_tail_start_override(4050)
+
+    result = payload["result"]
+    assert result["tail_phase"]["tail_start_delay_from_emergence_us"] == 4050
+    assert result["tail_phase"]["tail_start_selection_method"] == "manual_override"
+    assert result["predicted_stream_duration_us"] == 4050
+    assert abs(result["predicted_volume_nl"] - (-1.2 + 0.0187 * 4050)) < 1e-9
+    assert result["learned_tail_start_offset_us"] == 4050
+    assert result["manual_override"]["old_tail_start_delay_from_emergence_us"] == 3900
+    emitted = proc.calibrationDataUpdated.calls[-1][0][0]
+    assert emitted["result"]["tail_phase"]["tail_start_delay_from_emergence_us"] == 4050
+
+
+def test_online_stream_tail_start_override_rejects_missing_captured_tail(tmp_path):
+    proc = _flow_proc(tmp_path)
+    _seed_tail_flow_context(proc)
+    proc._tail_fit_result = {"tail_phase": {"status": "not_run"}}
+
+    try:
+        proc.apply_tail_start_override(4050)
+    except ValueError as exc:
+        assert "captured tail" in str(exc)
+    else:
+        raise AssertionError("Expected missing captured tail override to fail")
+
+
+def test_online_stream_tail_start_override_rejects_missing_flow_fit(tmp_path):
+    proc = _flow_proc(tmp_path)
+    proc._flow_fit_result = {"fit_status": "ok"}
+    proc._tail_start_delay_from_emergence_us = 3900
+    proc._predicted_stream_duration_us = 3900
+    proc._predicted_volume_nl = 71.73
+    proc._tail_fit_result = {
+        "tail_phase": {
+            "status": "captured",
+            "tail_start_delay_from_emergence_us": 3900,
+        }
+    }
+
+    try:
+        proc.apply_tail_start_override(4050)
+    except ValueError as exc:
+        assert "flow_rate_nl_per_us" in str(exc)
+    else:
+        raise AssertionError("Expected missing flow fit override to fail")
+
+
+def test_calibration_manager_tail_start_override_appends_superseding_stream_step(tmp_path):
+    source_payload = {
+        "measurements": [{"phase": "flow_rate", "value": 1}],
+        "result": {
+            "condition": {"print_pressure_psi": 0.42, "print_pulse_width_us": 1350},
+            "priors": {"source": "default"},
+            "flow_phase": {
+                "status": "captured",
+                "fit_status": "ok",
+                "flow_rate_nl_per_us": 0.0187,
+                "flow_intercept_nl": -1.2,
+            },
+            "tail_phase": {
+                "status": "captured",
+                "tail_start_delay_from_emergence_us": 3900,
+                "tail_start_selection_method": "segmented_regression",
+            },
+            "predicted_stream_duration_us": 3900,
+            "predicted_volume_nl": 71.73,
+            "learned_tail_start_offset_us": 3900,
+            "warnings": [],
+        },
+    }
+    mgr = CalibrationManager.__new__(CalibrationManager)
+    mgr.activeCalibration = None
+    mgr._run_id = "run_1"
+    mgr._run_idx = 0
+    mgr.data = {
+        "schema_version": 1,
+        "runs": [
+            {
+                "run_id": "run_1",
+                "steps": {"online_stream_calibration": [source_payload]},
+                "flat_measurements": [],
+            }
+        ],
+    }
+    mgr.model = SimpleNamespace(
+        experiment_model=SimpleNamespace(get_calibration_file_path=lambda: str(tmp_path / "calibration.json"))
+    )
+    mgr.get_current_settings = lambda: {"print_width": 1350, "print_pressure": 0.42}
+    mgr._build_calibration_stock_identity_snapshot = lambda: {"stock_solution": "water"}
+    mgr._update_stream_capture_online_summary_from_payload = lambda *args, **kwargs: None
+    mgr.record_analysis = lambda record: None
+    mgr._save_atomic = lambda: None
+    mgr.ensure_loaded = lambda: None
+    mgr.characterizationSummaryUpdated = Recorder()
+    memory_observations = []
+    audit_events = []
+    mgr._append_calibration_memory_observation = (
+        lambda observation_type, payload, **kwargs: memory_observations.append(
+            (observation_type, dict(payload or {}), dict(kwargs or {}))
+        )
+    )
+    mgr._record_calibration_audit_event = (
+        lambda event_type, summary, details=None, **kwargs: audit_events.append(
+            (event_type, summary, dict(details or {}), dict(kwargs or {}))
+        )
+    )
+
+    payload = CalibrationManager.apply_online_stream_tail_start_override(mgr, 4050)
+
+    steps = mgr.data["runs"][0]["steps"]["online_stream_calibration"]
+    assert len(steps) == 2
+    assert steps[0]["result"]["tail_phase"]["tail_start_delay_from_emergence_us"] == 3900
+    corrected = steps[1]["result"]
+    assert corrected["tail_phase"]["tail_start_delay_from_emergence_us"] == 4050
+    assert corrected["tail_phase"]["tail_start_selection_method"] == "manual_override"
+    assert corrected["predicted_stream_duration_us"] == 4050
+    assert abs(corrected["predicted_volume_nl"] - (-1.2 + 0.0187 * 4050)) < 1e-9
+    assert payload["result"]["learned_tail_start_offset_us"] == 4050
+    assert mgr.characterizationSummaryUpdated.calls
+    assert memory_observations[-1][0] == "online_stream_tail_start_override"
+    assert audit_events[-1][0] == "online_stream_tail_start_override"
 
 
 def test_online_stream_final_tail_fit_contains_uniform_window_segmented_diagnostics(tmp_path):

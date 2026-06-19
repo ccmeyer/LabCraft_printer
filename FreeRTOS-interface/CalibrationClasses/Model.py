@@ -6686,12 +6686,16 @@ class CalibrationManager(QObject):
         append under current run.steps[phase], and also append flat per-droplet
         rows when present (droplet volumes list, etc.).
         """
+        phase = getattr(self.activeCalibration, "phase_name", "unknown")
+        phase_key = self._resolve_phase_key(phase)
+        self._append_calibration_step_payload(data, phase_key=phase_key)
+
+    def _append_calibration_step_payload(self, data, *, phase_key: str):
         if self._run_idx is None:
             # fallback to default session in CWD
             self.begin_session(self.model.experiment_model.get_calibration_file_path(), notes="auto-started during data update")
 
-        phase = getattr(self.activeCalibration, "phase_name", "unknown")
-        phase_key = self._resolve_phase_key(phase)
+        phase_key = self._resolve_phase_key(phase_key)
 
         stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         settings = self.get_current_settings()
@@ -6803,6 +6807,94 @@ class CalibrationManager(QObject):
                     **stock_identity,
                 }
                 run_obj["flat_measurements"].append(row)
+
+    @staticmethod
+    def _online_stream_payload_has_captured_tail(payload) -> bool:
+        result = dict((payload or {}).get("result") or {})
+        tail_phase = dict(result.get("tail_phase") or {})
+        return bool(str(tail_phase.get("status") or "") == "captured")
+
+    def _latest_online_stream_calibration_payload(self) -> dict | None:
+        try:
+            self.ensure_loaded()
+        except Exception:
+            pass
+        runs = list((getattr(self, "data", {}) or {}).get("runs") or [])
+        run = None
+        try:
+            if self._run_idx is not None:
+                run = runs[int(self._run_idx)]
+        except Exception:
+            run = None
+        if run is None and runs:
+            run = runs[-1]
+        if not isinstance(run, dict):
+            return None
+        steps = list((run.get("steps") or {}).get("online_stream_calibration") or [])
+        for step in reversed(steps):
+            payload = dict(step or {})
+            if self._online_stream_payload_has_captured_tail(payload):
+                return payload
+        return None
+
+    def apply_online_stream_tail_start_override(self, tail_start_delay_from_emergence_us: int) -> dict:
+        active = getattr(self, "activeCalibration", None)
+        active_error = None
+        if (
+            active is not None
+            and str(getattr(active, "phase_name", "") or "") == "online_stream_calibration"
+            and hasattr(active, "apply_tail_start_override")
+        ):
+            try:
+                payload = active.apply_tail_start_override(tail_start_delay_from_emergence_us)
+                result = dict(payload.get("result") or {})
+                self._record_calibration_audit_event(
+                    "online_stream_tail_start_override",
+                    "Online stream tail start manually overridden",
+                    details=dict(result.get("manual_override") or {}),
+                    level="info",
+                    process_obj=active,
+                )
+                return payload
+            except ValueError as exc:
+                active_error = exc
+
+        source_payload = self._latest_online_stream_calibration_payload()
+        if source_payload is None:
+            if active_error is not None:
+                raise active_error
+            raise ValueError("No captured online stream calibration result is available to override.")
+
+        payload = OnlineStreamCalibrationProcess.build_manual_tail_start_override_payload(
+            source_payload,
+            tail_start_delay_from_emergence_us,
+        )
+        self._append_calibration_step_payload(
+            payload,
+            phase_key="online_stream_calibration",
+        )
+        result = dict(payload.get("result") or {})
+        manual_override = dict(result.get("manual_override") or {})
+        self._append_calibration_memory_observation(
+            "online_stream_tail_start_override",
+            {
+                "manual_override": manual_override,
+                "condition": dict(result.get("condition") or {}),
+                "flow_phase": dict(result.get("flow_phase") or {}),
+                "tail_phase": dict(result.get("tail_phase") or {}),
+                "predicted_stream_duration_us": result.get("predicted_stream_duration_us"),
+                "predicted_volume_nl": result.get("predicted_volume_nl"),
+                "learned_tail_start_offset_us": result.get("learned_tail_start_offset_us"),
+            },
+            phase_name="online_stream_calibration",
+        )
+        self._record_calibration_audit_event(
+            "online_stream_tail_start_override",
+            "Online stream tail start manually overridden",
+            details=manual_override,
+            level="info",
+        )
+        return payload
 
     @Slot(object)
     def onPresentImage(self, image):
@@ -9429,6 +9521,50 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         points.sort(key=lambda row: int(row["x_us"]))
         return points, bool(target_unavailable)
 
+    def _tail_debug_root_width_for_summary(self, summary):
+        width_px, usable = self._tail_debug_candidate_width_for_step(summary, 0)
+        if width_px is not None:
+            return float(width_px), bool(usable)
+        row = dict(summary or {})
+        for key in ("attached_width_px", "median_width_px"):
+            fallback_width_px = self._debug_float(row.get(key))
+            if fallback_width_px is not None:
+                return float(fallback_width_px), bool(row.get("tail_width_usable", True))
+        return None, False
+
+    def _build_tail_debug_root_points(self, committed_summaries, provisional_summary=None) -> list[dict]:
+        points = []
+        committed_rows = [dict(row or {}) for row in list(committed_summaries or [])]
+        for row in committed_rows:
+            x_us = self._debug_delay_us(row.get("delay_from_emergence_us"))
+            if x_us is None:
+                continue
+            width_px, usable = self._tail_debug_root_width_for_summary(row)
+            if width_px is None:
+                continue
+            points.append(
+                {
+                    "x_us": int(x_us),
+                    "y_px": self._debug_tail_width_plot_value(width_px),
+                    "accepted": bool(usable),
+                    "provisional": False,
+                }
+            )
+        if provisional_summary and not self._debug_summary_already_committed(committed_rows, provisional_summary):
+            x_us = self._debug_delay_us(provisional_summary.get("delay_from_emergence_us"))
+            width_px, usable = self._tail_debug_root_width_for_summary(provisional_summary)
+            if x_us is not None and width_px is not None:
+                points.append(
+                    {
+                        "x_us": int(x_us),
+                        "y_px": self._debug_tail_width_plot_value(width_px),
+                        "accepted": bool(usable),
+                        "provisional": True,
+                    }
+                )
+        points.sort(key=lambda row: int(row["x_us"]))
+        return points
+
     def _current_flow_frame_point_payload(self) -> dict | None:
         summary = dict(getattr(self, "_current_analysis_summary", {}) or {})
         x_us = self._flow_delay_offset_from_emergence_us(getattr(self, "_current_delay_us", None))
@@ -9562,6 +9698,14 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         current_frame_point, current_target_unavailable = self._current_tail_frame_point_payload(
             trace_step_index=trace_step_index,
         )
+        root_window_points = self._build_tail_debug_root_points(
+            getattr(self, "_tail_scout_delay_summaries", []) or [],
+            tail_provisional_summary if tail_mode == "scout" else None,
+        ) + self._build_tail_debug_root_points(
+            getattr(self, "_tail_backtrack_delay_summaries", []) or [],
+            tail_provisional_summary if tail_mode == "backtrack" else None,
+        )
+        root_window_points.sort(key=lambda row: int(dict(row or {}).get("x_us") or 0))
         trace_source_reason = str(trace_source.get("reason") or "")
         if trace_step_index is not None and (
             bool(scout_target_unavailable)
@@ -9585,12 +9729,17 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 "baseline_width_px": self._tail_debug_baseline_width_px(),
                 "scout_points": scout_points,
                 "backtrack_points": backtrack_points,
+                "root_window_points": root_window_points,
                 "current_frame_point": current_frame_point,
                 "tail_start_x_us": tail_start_x_us,
                 "segmented_tail": segmented_tail_payload,
                 "width_trace_source_kind": str(trace_source.get("kind") or "selected_window"),
                 "width_trace_source_window_step_index": trace_step_index,
                 "width_trace_source_reason": trace_source_reason,
+                "tail_override_available": bool(
+                    tail_start_x_us is not None
+                    and str((dict(self._tail_fit_result or {}).get("tail_phase") or {}).get("status") or "") == "captured"
+                ),
             },
         }
         try:
@@ -10841,6 +10990,121 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             "measurements": list(self._measurement_rows),
             "result": result,
         }
+
+    @staticmethod
+    def _manual_tail_override_int(value, *, field_name: str) -> int:
+        try:
+            return int(value)
+        except Exception as exc:
+            raise ValueError(f"Invalid online stream tail override {field_name}.") from exc
+
+    @staticmethod
+    def _manual_tail_override_float(value, *, field_name: str) -> float:
+        try:
+            return float(value)
+        except Exception as exc:
+            raise ValueError(f"Online stream tail override requires numeric {field_name}.") from exc
+
+    @classmethod
+    def build_manual_tail_start_override_payload(cls, source_payload: dict, tail_start_delay_from_emergence_us) -> dict:
+        source = json.loads(json.dumps(dict(source_payload or {}), default=numpy_encoder))
+        result = dict(source.get("result") or {})
+        tail_phase = dict(result.get("tail_phase") or {})
+        flow_phase = dict(result.get("flow_phase") or {})
+        if str(tail_phase.get("status") or "") != "captured":
+            raise ValueError("Online stream tail override requires a captured tail result.")
+
+        new_tail_start_us = cls._manual_tail_override_int(
+            tail_start_delay_from_emergence_us,
+            field_name="tail start",
+        )
+        if new_tail_start_us < 0:
+            raise ValueError("Online stream tail override tail start must be non-negative.")
+
+        flow_rate = cls._manual_tail_override_float(
+            flow_phase.get("flow_rate_nl_per_us"),
+            field_name="flow_rate_nl_per_us",
+        )
+        flow_intercept = cls._manual_tail_override_float(
+            flow_phase.get("flow_intercept_nl"),
+            field_name="flow_intercept_nl",
+        )
+        old_tail_start_us = None
+        try:
+            old_tail_start_us = int(tail_phase.get("tail_start_delay_from_emergence_us"))
+        except Exception:
+            old_tail_start_us = None
+        old_volume_nl = None
+        try:
+            old_volume_nl = float(result.get("predicted_volume_nl"))
+        except Exception:
+            old_volume_nl = None
+
+        new_volume_nl = float(flow_intercept + (flow_rate * float(new_tail_start_us)))
+        manual_override = {
+            "kind": "online_stream_tail_start_override",
+            "old_tail_start_delay_from_emergence_us": old_tail_start_us,
+            "new_tail_start_delay_from_emergence_us": int(new_tail_start_us),
+            "old_predicted_volume_nl": old_volume_nl,
+            "new_predicted_volume_nl": float(new_volume_nl),
+            "old_tail_start_selection_method": tail_phase.get("tail_start_selection_method"),
+            "new_tail_start_selection_method": "manual_override",
+        }
+
+        tail_phase["status"] = "captured"
+        tail_phase["tail_start_delay_from_emergence_us"] = int(new_tail_start_us)
+        tail_phase["tail_start_selection_method"] = "manual_override"
+        tail_phase["tail_start_evidence"] = "operator_manual_override"
+        tail_phase["manual_override"] = dict(manual_override)
+        tail_phase["operator_tail_start_override"] = True
+
+        result["tail_phase"] = tail_phase
+        result["predicted_stream_duration_us"] = int(new_tail_start_us)
+        result["predicted_volume_nl"] = float(new_volume_nl)
+        result["learned_tail_start_offset_us"] = int(new_tail_start_us)
+        result["manual_override"] = dict(manual_override)
+        warnings = [str(item) for item in list(result.get("warnings") or []) if str(item or "").strip()]
+        if "manual_tail_start_override" not in warnings:
+            warnings.append("manual_tail_start_override")
+        result["warnings"] = warnings
+
+        return {
+            "measurements": list(source.get("measurements") or []),
+            "result": result,
+        }
+
+    def apply_tail_start_override(self, tail_start_delay_from_emergence_us) -> dict:
+        source_payload = self._build_online_stream_result_payload(
+            predicted_stream_duration_us=self._predicted_stream_duration_us,
+            predicted_volume_nl=self._predicted_volume_nl,
+            include_tail_warnings=True,
+        )
+        payload = self.build_manual_tail_start_override_payload(
+            source_payload,
+            tail_start_delay_from_emergence_us,
+        )
+        result = dict(payload.get("result") or {})
+        tail_phase = dict(result.get("tail_phase") or {})
+        self._tail_fit_result = dict(self._tail_fit_result or {})
+        self._tail_fit_result["tail_phase"] = tail_phase
+        self._tail_fit_result["predicted_stream_duration_us"] = result.get("predicted_stream_duration_us")
+        self._tail_fit_result["predicted_volume_nl"] = result.get("predicted_volume_nl")
+        self._tail_start_delay_from_emergence_us = tail_phase.get("tail_start_delay_from_emergence_us")
+        self._predicted_stream_duration_us = result.get("predicted_stream_duration_us")
+        self._predicted_volume_nl = result.get("predicted_volume_nl")
+        self._write_tail_fit_artifact()
+        self._append_online_stream_memory_observation(
+            "online_stream_tail_start_override",
+            {
+                "manual_override": dict(result.get("manual_override") or {}),
+                "tail_phase": tail_phase,
+                "predicted_stream_duration_us": result.get("predicted_stream_duration_us"),
+                "predicted_volume_nl": result.get("predicted_volume_nl"),
+            },
+        )
+        self._emit_online_stream_debug_payload("manual_tail_override")
+        self.calibrationDataUpdated.emit(payload)
+        return payload
 
     @Slot()
     def onFitFlowRate(self):

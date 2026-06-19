@@ -2514,7 +2514,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
             QtWidgets.QSizePolicy.Expanding,
             QtWidgets.QSizePolicy.MinimumExpanding,
         )
-        plot_row = QtWidgets.QHBoxLayout(self.online_stream_plot_container)
+        plot_container_v = QtWidgets.QVBoxLayout(self.online_stream_plot_container)
+        plot_container_v.setContentsMargins(0, 0, 0, 0)
+        plot_container_v.setSpacing(6)
+        plot_row_widget = QtWidgets.QWidget()
+        plot_row = QtWidgets.QHBoxLayout(plot_row_widget)
         plot_row.setContentsMargins(0, 0, 0, 0)
         plot_row.setSpacing(10)
 
@@ -2539,9 +2543,40 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.online_stream_tail_chart_view = self._online_stream_tail_chart_bundle["view"]
         self.online_stream_tail_chart_view.setObjectName("online_stream_tail_chart_view")
         plot_row.addWidget(self.online_stream_tail_chart_view, 1)
+        plot_container_v.addWidget(plot_row_widget, 1)
+
+        self.online_stream_tail_override_panel = QtWidgets.QWidget()
+        self.online_stream_tail_override_panel.setObjectName("online_stream_tail_override_panel")
+        tail_override_row = QtWidgets.QHBoxLayout(self.online_stream_tail_override_panel)
+        tail_override_row.setContentsMargins(0, 0, 0, 0)
+        tail_override_row.setSpacing(6)
+        tail_override_row.addWidget(QtWidgets.QLabel("Tail start"))
+        self.online_stream_tail_start_spinbox = QtWidgets.QSpinBox()
+        self.online_stream_tail_start_spinbox.setObjectName("online_stream_tail_start_spinbox")
+        self.online_stream_tail_start_spinbox.setRange(0, 1_000_000)
+        self.online_stream_tail_start_spinbox.setSingleStep(25)
+        self.online_stream_tail_start_spinbox.setSuffix(" us")
+        self.online_stream_tail_start_spinbox.setKeyboardTracking(False)
+        tail_override_row.addWidget(self.online_stream_tail_start_spinbox)
+        self.online_stream_tail_apply_button = QtWidgets.QPushButton("Apply")
+        self.online_stream_tail_apply_button.setObjectName("online_stream_tail_apply_button")
+        self.online_stream_tail_apply_button.setEnabled(False)
+        tail_override_row.addWidget(self.online_stream_tail_apply_button)
+        self.online_stream_tail_reset_button = QtWidgets.QPushButton("Reset")
+        self.online_stream_tail_reset_button.setObjectName("online_stream_tail_reset_button")
+        self.online_stream_tail_reset_button.setEnabled(False)
+        tail_override_row.addWidget(self.online_stream_tail_reset_button)
+        tail_override_row.addStretch(1)
+        self.online_stream_tail_override_panel.hide()
+        plot_container_v.addWidget(self.online_stream_tail_override_panel, 0)
 
         self.online_stream_plot_container.hide()
         self._online_stream_debug_active = False
+        self._last_online_stream_tail_plot = {}
+        self._online_stream_tail_committed_start_us = None
+        self._online_stream_tail_override_preview_x_us = None
+        self._online_stream_tail_override_available = False
+        self._online_stream_tail_override_controls_updating = False
         self.analysis_layout.addWidget(self.online_stream_plot_container, 0)
 
         self.analysis_layout.addStretch(1)
@@ -2575,6 +2610,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         self.start_pressure_spin.valueChanged.connect(self.set_start_pressure)
         self.num_pressure_tests_spin.valueChanged.connect(self.set_num_pressure_tests)
+        self.online_stream_tail_start_spinbox.valueChanged.connect(
+            self._on_online_stream_tail_override_spin_changed
+        )
+        self.online_stream_tail_apply_button.clicked.connect(self.apply_online_stream_tail_start_override)
+        self.online_stream_tail_reset_button.clicked.connect(self.reset_online_stream_tail_start_override)
         self.record_calibration_checkbox.toggled.connect(self.set_record_mode_enabled)
         self.export_calibration_records_button.clicked.connect(self.export_calibration_records_to_downloads)
         self.enable_calibration_memory_checkbox.toggled.connect(self.set_calibration_memory_enabled)
@@ -5805,6 +5845,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         reference_series.setPen(self._make_chart_pen(reference_color_key, reference_fallback, width=2))
         marker_series = QtCharts.QLineSeries()
         marker_series.setPen(self._make_chart_pen("yellow", "#f1c40f", width=2, style=Qt.DashLine))
+        root_trace_series = QtCharts.QLineSeries()
+        root_trace_series.setPen(self._make_chart_pen("light_gray", "#cfd8dc", width=1, style=Qt.DotLine))
+        manual_preview_series = QtCharts.QLineSeries()
+        manual_preview_series.setPen(self._make_chart_pen("magenta", "#ff4fd8", width=2, style=Qt.DashLine))
         segmented_fit_series = QtCharts.QLineSeries()
         segmented_fit_series.setPen(self._make_chart_pen("purple", "#d946ef", width=2))
         segmented_marker_series = QtCharts.QLineSeries()
@@ -5824,6 +5868,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
             current_series,
             reference_series,
             marker_series,
+            root_trace_series,
+            manual_preview_series,
             segmented_fit_series,
             segmented_marker_series,
             segmented_knee_series,
@@ -5850,6 +5896,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "current_series": current_series,
             "reference_series": reference_series,
             "marker_series": marker_series,
+            "root_trace_series": root_trace_series,
+            "manual_preview_series": manual_preview_series,
             "segmented_fit_series": segmented_fit_series,
             "segmented_marker_series": segmented_marker_series,
             "segmented_knee_series": segmented_knee_series,
@@ -5897,6 +5945,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "current_series",
             "reference_series",
             "marker_series",
+            "root_trace_series",
+            "manual_preview_series",
             "segmented_fit_series",
             "segmented_marker_series",
             "segmented_knee_series",
@@ -5914,6 +5964,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if hasattr(self, "_online_stream_tail_chart_bundle"):
             self._clear_online_stream_chart_bundle(self._online_stream_tail_chart_bundle)
         self._online_stream_debug_active = False
+        self._last_online_stream_tail_plot = {}
+        self._online_stream_tail_committed_start_us = None
+        self._online_stream_tail_override_preview_x_us = None
+        if hasattr(self, "online_stream_tail_override_panel"):
+            self.online_stream_tail_override_panel.hide()
+            self._set_online_stream_tail_override_buttons()
         if hide and hasattr(self, "online_stream_plot_container"):
             self.online_stream_plot_container.hide()
 
@@ -5964,6 +6020,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._replace_xy_series(bundle["current_series"], current_points)
         self._replace_xy_series(bundle["reference_series"], fit_points)
         self._replace_xy_series(bundle["marker_series"], [])
+        self._replace_xy_series(bundle["root_trace_series"], [])
+        self._replace_xy_series(bundle["manual_preview_series"], [])
 
         all_xs = [x for x, _ in committed_points + provisional_points + current_points + fit_points]
         all_ys = [y for _, y in committed_points + provisional_points + current_points + fit_points]
@@ -5980,6 +6038,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         backtrack_points = [
             (float(row["x_us"]), float(row["y_px"]))
             for row in list(plot.get("backtrack_points") or [])
+            if dict(row or {}).get("x_us") is not None and dict(row or {}).get("y_px") is not None
+        ]
+        root_window_points = [
+            (float(row["x_us"]), float(row["y_px"]))
+            for row in list(plot.get("root_window_points") or [])
             if dict(row or {}).get("x_us") is not None and dict(row or {}).get("y_px") is not None
         ]
         current_point = dict(plot.get("current_frame_point") or {})
@@ -6013,8 +6076,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
             segmented_bracket_right_x_us = segmented_tail.get("two_break_tail_start_delay_from_emergence_us")
 
         all_xs = [x for x, _ in scout_points + backtrack_points + current_points + segmented_fit_points]
+        all_xs.extend([x for x, _ in root_window_points])
         if tail_start_x_us is not None:
             all_xs.append(float(tail_start_x_us))
+        preview_tail_start_x_us = getattr(self, "_online_stream_tail_override_preview_x_us", None)
+        if preview_tail_start_x_us is not None:
+            all_xs.append(float(preview_tail_start_x_us))
         for guide_x in (
             segmented_start_x_us,
             segmented_knee_x_us,
@@ -6025,6 +6092,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             if guide_x is not None:
                 all_xs.append(float(guide_x))
         all_ys = [y for _, y in scout_points + backtrack_points + current_points + segmented_fit_points]
+        all_ys.extend([y for _, y in root_window_points])
         if baseline_width_px is not None:
             all_ys.append(float(baseline_width_px))
 
@@ -6051,6 +6119,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._replace_xy_series(bundle["current_series"], current_points)
         self._replace_xy_series(bundle["reference_series"], baseline_points)
         self._replace_xy_series(bundle["marker_series"], tail_start_points)
+        self._replace_xy_series(bundle["root_trace_series"], root_window_points)
+        self._replace_xy_series(bundle["manual_preview_series"], _vertical_guide(preview_tail_start_x_us))
         self._replace_xy_series(bundle["segmented_fit_series"], segmented_fit_points)
         self._replace_xy_series(bundle["segmented_marker_series"], _vertical_guide(segmented_start_x_us))
         self._replace_xy_series(bundle["segmented_knee_series"], _vertical_guide(segmented_knee_x_us))
@@ -6080,7 +6150,122 @@ class DropletImagingDialog(QtWidgets.QDialog):
         trace_window_step = plot.get("width_trace_source_window_step_index")
         if trace_window_step is not None:
             title = f"{title} | trace window step={int(trace_window_step)}"
+        if preview_tail_start_x_us is not None:
+            title = f"{title} | preview {float(preview_tail_start_x_us):.0f} us"
         bundle["chart"].setTitle(title)
+
+    @staticmethod
+    def _online_stream_tail_start_int(value):
+        try:
+            return int(value)
+        except Exception:
+            return None
+
+    def _set_online_stream_tail_override_buttons(self):
+        committed = self._online_stream_tail_start_int(
+            getattr(self, "_online_stream_tail_committed_start_us", None)
+        )
+        available = bool(getattr(self, "_online_stream_tail_override_available", False))
+        changed = committed is not None and int(self.online_stream_tail_start_spinbox.value()) != int(committed)
+        self.online_stream_tail_apply_button.setEnabled(bool(available and changed))
+        self.online_stream_tail_reset_button.setEnabled(bool(committed is not None and changed))
+
+    def _sync_online_stream_tail_override_controls(self, tail_plot: dict | None):
+        plot = dict(tail_plot or {})
+        committed = self._online_stream_tail_start_int(plot.get("tail_start_x_us"))
+        available = bool(plot.get("tail_override_available", False))
+        self._online_stream_tail_override_available = bool(available and committed is not None)
+        if committed is None:
+            self._online_stream_tail_committed_start_us = None
+            self._online_stream_tail_override_preview_x_us = None
+            self.online_stream_tail_override_panel.hide()
+            self._set_online_stream_tail_override_buttons()
+            return
+
+        self.online_stream_tail_override_panel.show()
+        self.online_stream_tail_override_panel.setEnabled(bool(self._online_stream_tail_override_available))
+        if self._online_stream_tail_start_int(getattr(self, "_online_stream_tail_committed_start_us", None)) != committed:
+            self._online_stream_tail_override_controls_updating = True
+            try:
+                self.online_stream_tail_start_spinbox.setValue(int(committed))
+            finally:
+                self._online_stream_tail_override_controls_updating = False
+            self._online_stream_tail_override_preview_x_us = None
+        self._online_stream_tail_committed_start_us = int(committed)
+        if int(self.online_stream_tail_start_spinbox.value()) == int(committed):
+            self._online_stream_tail_override_preview_x_us = None
+        self._set_online_stream_tail_override_buttons()
+
+    def _on_online_stream_tail_override_spin_changed(self, value):
+        if bool(getattr(self, "_online_stream_tail_override_controls_updating", False)):
+            return
+        committed = self._online_stream_tail_start_int(
+            getattr(self, "_online_stream_tail_committed_start_us", None)
+        )
+        if committed is None:
+            self._online_stream_tail_override_preview_x_us = None
+        else:
+            value = int(value)
+            self._online_stream_tail_override_preview_x_us = None if value == int(committed) else int(value)
+        self._set_online_stream_tail_override_buttons()
+        if getattr(self, "_last_online_stream_tail_plot", None):
+            self._update_online_stream_tail_chart(self._last_online_stream_tail_plot)
+
+    def reset_online_stream_tail_start_override(self):
+        committed = self._online_stream_tail_start_int(
+            getattr(self, "_online_stream_tail_committed_start_us", None)
+        )
+        if committed is None:
+            return
+        self._online_stream_tail_override_controls_updating = True
+        try:
+            self.online_stream_tail_start_spinbox.setValue(int(committed))
+        finally:
+            self._online_stream_tail_override_controls_updating = False
+        self._online_stream_tail_override_preview_x_us = None
+        self._set_online_stream_tail_override_buttons()
+        if getattr(self, "_last_online_stream_tail_plot", None):
+            self._update_online_stream_tail_chart(self._last_online_stream_tail_plot)
+
+    def apply_online_stream_tail_start_override(self):
+        apply_fn = getattr(self.controller, "apply_online_stream_tail_start_override", None)
+        if not callable(apply_fn):
+            self.update_stage_and_log("Online stream tail override unavailable", "red")
+            return
+        tail_start_us = int(self.online_stream_tail_start_spinbox.value())
+        try:
+            payload = dict(apply_fn(tail_start_us) or {})
+        except Exception as exc:
+            self.update_stage_and_log(f"Tail override failed: {exc}", "red")
+            return
+        result = dict(payload.get("result") or {})
+        tail_phase = dict(result.get("tail_phase") or {})
+        committed = self._online_stream_tail_start_int(
+            tail_phase.get("tail_start_delay_from_emergence_us")
+        )
+        if committed is None:
+            committed = int(tail_start_us)
+        self._online_stream_tail_committed_start_us = int(committed)
+        self._online_stream_tail_override_preview_x_us = None
+        self._online_stream_tail_override_controls_updating = True
+        try:
+            self.online_stream_tail_start_spinbox.setValue(int(committed))
+        finally:
+            self._online_stream_tail_override_controls_updating = False
+        cached_plot = dict(getattr(self, "_last_online_stream_tail_plot", {}) or {})
+        cached_plot["tail_start_x_us"] = int(committed)
+        cached_plot["tail_override_available"] = True
+        self._last_online_stream_tail_plot = cached_plot
+        self._set_online_stream_tail_override_buttons()
+        self._update_online_stream_tail_chart(cached_plot)
+        volume = result.get("predicted_volume_nl")
+        if volume is None:
+            self.update_stage_and_log(f"Applied tail start override: {committed} us", "blue")
+        else:
+            self.update_stage_and_log(
+                f"Applied tail start override: {committed} us, volume {float(volume):.4g} nL",
+                "blue",
+            )
 
     def on_online_stream_debug_updated(self, payload):
         data = dict(payload or {})
@@ -6092,7 +6277,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._clear_online_stream_chart_bundle(self._online_stream_flow_chart_bundle)
             self._clear_online_stream_chart_bundle(self._online_stream_tail_chart_bundle)
         self._update_online_stream_flow_chart(data.get("flow_plot"))
-        self._update_online_stream_tail_chart(data.get("tail_plot"))
+        self._last_online_stream_tail_plot = dict(data.get("tail_plot") or {})
+        self._sync_online_stream_tail_override_controls(self._last_online_stream_tail_plot)
+        self._update_online_stream_tail_chart(self._last_online_stream_tail_plot)
 
     def _maybe_hide_online_stream_debug_for_nonstream_preview(self):
         if getattr(self, "_online_stream_debug_active", False) and not self._is_online_stream_calibration_active():

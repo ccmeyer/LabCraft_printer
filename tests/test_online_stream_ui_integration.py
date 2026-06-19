@@ -189,6 +189,7 @@ class _ControllerStub:
         self.apply_print_profile_calls = []
         self.set_print_pulse_width_calls = []
         self.start_pressure_values = []
+        self.tail_start_override_calls = []
 
     def start_read_camera(self):
         return None
@@ -345,6 +346,23 @@ class _ControllerStub:
         if handler is not None:
             handler()
         return True
+
+    def apply_online_stream_tail_start_override(self, tail_start_delay_from_emergence_us):
+        tail_start_us = int(tail_start_delay_from_emergence_us)
+        self.tail_start_override_calls.append(tail_start_us)
+        return {
+            "measurements": [],
+            "result": {
+                "tail_phase": {
+                    "status": "captured",
+                    "tail_start_delay_from_emergence_us": tail_start_us,
+                    "tail_start_selection_method": "manual_override",
+                },
+                "predicted_stream_duration_us": tail_start_us,
+                "predicted_volume_nl": 0.01 * float(tail_start_us),
+                "learned_tail_start_offset_us": tail_start_us,
+            },
+        }
 
 
 def _build_dialog(
@@ -1119,6 +1137,66 @@ def test_online_stream_debug_payload_shows_plots_and_updates_chart_series(monkey
     assert dialog._online_stream_tail_chart_bundle["secondary_series"].count() == 1
     assert dialog._online_stream_tail_chart_bundle["reference_series"].count() == 2
     assert dialog._online_stream_tail_chart_bundle["marker_series"].count() == 2
+
+    dialog.deleteLater()
+
+
+def test_online_stream_tail_override_previews_resets_and_applies(monkeypatch, qapp):
+    dialog, manager, controller = _build_dialog(monkeypatch, qapp)
+    manager.activeCalibration = SimpleNamespace(phase_name="online_stream_calibration")
+
+    manager.onlineStreamDebugUpdated.emit(
+        {
+            "phase_name": "online_stream_calibration",
+            "subphase": "completed",
+            "flow_plot": {"points": [], "current_frame_point": None, "fit": None},
+            "tail_plot": {
+                "baseline_width_px": 74.0,
+                "scout_points": [{"x_us": 1550, "y_px": 73.0, "provisional": False}],
+                "backtrack_points": [{"x_us": 1750, "y_px": 61.0, "provisional": False}],
+                "root_window_points": [
+                    {"x_us": 1550, "y_px": 74.0, "provisional": False},
+                    {"x_us": 1750, "y_px": 70.0, "provisional": False},
+                ],
+                "current_frame_point": None,
+                "tail_start_x_us": 1800,
+                "tail_override_available": True,
+            },
+        }
+    )
+    qapp.processEvents()
+
+    bundle = dialog._online_stream_tail_chart_bundle
+    assert dialog.online_stream_tail_override_panel.isHidden() is False
+    assert dialog.online_stream_tail_start_spinbox.value() == 1800
+    assert dialog.online_stream_tail_apply_button.isEnabled() is False
+    assert bundle["marker_series"].count() == 2
+    assert bundle["root_trace_series"].count() == 2
+
+    dialog.online_stream_tail_start_spinbox.setValue(1850)
+    qapp.processEvents()
+
+    assert dialog.online_stream_tail_apply_button.isEnabled() is True
+    assert dialog.online_stream_tail_reset_button.isEnabled() is True
+    assert bundle["marker_series"].count() == 2
+    assert bundle["manual_preview_series"].count() == 2
+
+    dialog.online_stream_tail_reset_button.click()
+    qapp.processEvents()
+
+    assert dialog.online_stream_tail_start_spinbox.value() == 1800
+    assert bundle["manual_preview_series"].count() == 0
+    assert dialog.online_stream_tail_apply_button.isEnabled() is False
+
+    dialog.online_stream_tail_start_spinbox.setValue(1900)
+    dialog.online_stream_tail_apply_button.click()
+    qapp.processEvents()
+
+    assert controller.tail_start_override_calls == [1900]
+    assert dialog.online_stream_tail_start_spinbox.value() == 1900
+    assert dialog.online_stream_tail_apply_button.isEnabled() is False
+    assert bundle["manual_preview_series"].count() == 0
+    assert bundle["marker_series"].count() == 2
 
     dialog.deleteLater()
 

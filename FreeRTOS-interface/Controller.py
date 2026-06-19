@@ -5043,6 +5043,11 @@ class Controller(QObject):
     def start_online_stream_calibration(self):
         self.model.calibration_manager.start_online_stream_calibration()
 
+    def apply_online_stream_tail_start_override(self, tail_start_delay_from_emergence_us: int):
+        return self.model.calibration_manager.apply_online_stream_tail_start_override(
+            tail_start_delay_from_emergence_us,
+        )
+
     def start_droplet_calibration_sequence(self, *, pressure_scan_mode: str = "band"):
         return self.model.calibration_manager.start_droplet_calibration_sequence(
             pressure_scan_mode=pressure_scan_mode,
