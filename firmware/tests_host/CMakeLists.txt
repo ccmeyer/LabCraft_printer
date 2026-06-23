@@ -29,6 +29,7 @@ add_executable(fw_tests
     tests/test_stepper_limit_policy.cpp
     tests/test_exti_debounce.cpp
     tests/test_crash_log_codec.cpp
+    tests/test_reset_report_policy.cpp
     tests/test_flash_safety.cpp
     tests/test_flash_output_state.cpp
     tests/test_printer_completion_bits.cpp
@@ -52,6 +53,7 @@ add_executable(fw_tests
     ../Core/Src/MotionQualificationMath.cpp
     ../Core/Src/StepperProfileMath.cpp
     ../Core/Src/CrashLogCodec.c
+    ../Core/Src/ResetReportPolicy.cpp
     ../Core/Src/FlashSafety.cpp
 )
 

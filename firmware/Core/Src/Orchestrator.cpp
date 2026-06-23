@@ -19,6 +19,7 @@
 #include "PressureTargetPolicy.h"
 #include "PressureSensor.h"
 #include "RegulatorProfileCommandPolicy.h"
+#include "ResetReportPolicy.h"
 #include "Logger.h"
 #include "Gantry.h"
 #include "Comm.h"
@@ -149,19 +150,13 @@ void runGripperOpenWatchdogCrashTest() {
   }
 }
 
-bool shouldSendResetReport(const CrashLogSnapshot& snap) {
-  return ((snap.flags & CRASHLOG_FLAG_PENDING) != 0u) ||
-         (snap.resetCause == CRASH_RESET_IWDG) ||
-         (snap.resetCause == CRASH_RESET_WWDG);
-}
-
 void maybeSendResetReport(uint8_t seq8, uint32_t seq32) {
   if (s_resetReportSent) {
     return;
   }
   CrashLogSnapshot snap{};
   CrashLog_GetSnapshot(&snap);
-  if (!shouldSendResetReport(snap)) {
+  if (!ResetReport_ShouldSend(&snap)) {
     return;
   }
   Comm::instance()->sendResetReport(seq8, seq32, &snap, CrashLog_IsWatchdogRecoveryBoot());
