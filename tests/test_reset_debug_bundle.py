@@ -80,6 +80,11 @@ def test_export_reset_debug_bundle_writes_zip_with_manifest_and_snapshots(tmp_pa
     reasons = {entry["reason"] for entry in manifest["black_box_snapshots"]}
     assert reasons == {"serial_reader_stopped", "reset_report"}
     assert all(entry["included"] for entry in manifest["black_box_snapshots"])
+    roles = {entry["reason"]: entry["role"] for entry in manifest["black_box_snapshots"]}
+    assert roles == {
+        "serial_reader_stopped": "same_session_context",
+        "reset_report": "primary_trigger",
+    }
     assert manifest["missing_files"] == []
 
     second = export_reset_debug_bundle(context, output_dir=downloads, created_at=created_at)
@@ -116,6 +121,35 @@ def test_export_reset_debug_bundle_records_missing_optional_files(tmp_path):
     assert ("board_reset_reports_jsonl", None) in missing
     assert ("black_box_snapshot", "serial_reader_stopped") in missing
     assert manifest["black_box_snapshots"][0]["included"] is False
+
+
+def test_export_reset_debug_bundle_preserves_zero_seq32_and_raw_flags(tmp_path):
+    created_at = datetime(2026, 6, 23, 12, 34, 56, tzinfo=timezone.utc)
+    context = {
+        "repo_root": str(tmp_path),
+        "reset_report": {
+            "summary": "Board restarted after software reset.",
+            "reset_cause": 3,
+            "reset_cause_name": "software",
+            "seq32": 0,
+            "reset_flags_raw": 0x14000000,
+            "reset_flag_names": ["software", "pin_reset"],
+            "reset_flag_summary": "software, pin_reset",
+        },
+    }
+
+    result = export_reset_debug_bundle(context, output_dir=tmp_path, created_at=created_at)
+
+    archive = Path(result["archive_path"])
+    assert archive.name == "LabCraft_reset_debug_bundle_20260623_123456_software_0.zip"
+    with zipfile.ZipFile(archive) as zf:
+        top = archive.stem
+        manifest = json.loads(zf.read(f"{top}/manifest.json").decode("utf-8"))
+
+    assert manifest["reset"]["seq32"] == 0
+    assert manifest["reset"]["reset_flags_raw"] == 0x14000000
+    assert manifest["reset"]["reset_flag_names"] == ["software", "pin_reset"]
+    assert manifest["reset"]["reset_flag_summary"] == "software, pin_reset"
 
 
 def test_export_connection_loss_debug_bundle_without_reset_report(tmp_path):
@@ -167,6 +201,7 @@ def test_export_connection_loss_debug_bundle_without_reset_report(tmp_path):
     assert manifest["machine"] == {"port": "COM9", "profile": "labcraft_v2"}
     assert manifest["black_box_snapshots"][0]["reason"] == "serial_reader_stopped"
     assert manifest["black_box_snapshots"][0]["included"] is True
+    assert manifest["black_box_snapshots"][0]["role"] == "primary_trigger"
     assert manifest["missing_files"] == []
 
 
@@ -239,6 +274,7 @@ def test_export_connection_loss_debug_bundle_labels_mcu_unresponsive_snapshot(tm
     assert manifest["connection_loss"]["reason"] == "mcu_unresponsive"
     assert manifest["black_box_snapshots"][0]["reason"] == "mcu_unresponsive"
     assert manifest["black_box_snapshots"][0]["included"] is True
+    assert manifest["black_box_snapshots"][0]["role"] == "primary_trigger"
 
 
 def test_export_reset_debug_bundle_requires_reset_report(tmp_path):

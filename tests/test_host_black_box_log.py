@@ -61,6 +61,23 @@ def test_reset_report_writes_snapshot_before_recovery_clears_session_state(qapp,
             "Last_accepted": command.command_number,
             "Last_retired": 0,
             "cmd_depth": 1,
+            "Pressure_P": 2162,
+            "Pressure_R": 1900,
+            "Tar_print": 2162,
+            "Tar_refuel": 1900,
+            "X": 100,
+            "Y": 200,
+            "Z": 300,
+            "Tar_X": 110,
+            "Tar_Y": 210,
+            "Tar_Z": 310,
+            "Print_width": 1300,
+            "Refuel_width": 3000,
+            "Disp_freq": 10,
+            "print_active": 1,
+            "refuel_active": 1,
+            "drop_total": 5,
+            "drop_remain": 2,
         }
     )
 
@@ -95,6 +112,14 @@ def test_reset_report_writes_snapshot_before_recovery_clears_session_state(qapp,
     assert snapshot["commands"]["queued"][0]["command_type"] == "LED_ON"
     assert snapshot["commands"]["queued"][0]["param1"] == 1
     assert snapshot["status_history"][-1]["Current_command"] == command.command_number
+    assert snapshot["status_history"][-1]["Pressure_P"] == 2162
+    assert snapshot["status_history"][-1]["Pressure_R"] == 1900
+    assert snapshot["status_history"][-1]["Tar_print"] == 2162
+    assert snapshot["status_history"][-1]["X"] == 100
+    assert snapshot["status_history"][-1]["Tar_X"] == 110
+    assert snapshot["status_history"][-1]["Print_width"] == 1300
+    assert snapshot["status_history"][-1]["print_active"] == 1
+    assert snapshot["status_history"][-1]["drop_remain"] == 2
     assert any(event["event"] == "queued" and event["request_id"] is None for event in snapshot["command_events"])
     assert any(event["kind"] == "ack" and event["payload"]["matched_pending"] for event in snapshot["black_box_events"])
     assert any(event["kind"] == "reset_report" for event in snapshot["black_box_events"])

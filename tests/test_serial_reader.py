@@ -174,6 +174,12 @@ def test_serial_reader_emits_reset_report_without_consuming_ack_path(qapp):
             mfr.TAG_RESET_ACTIVE_COMMAND,
             1,
             mfr.CMD_MAP["OPEN_GRIPPER"],
+            mfr.TAG_RESET_RCC_FLAGS,
+            4,
+            0,
+            0,
+            0,
+            0x20,
         ]
     )
     serial_stream = _frame(ack_payload) + _frame(reset_payload)
@@ -199,8 +205,61 @@ def test_serial_reader_emits_reset_report_without_consuming_ack_path(qapp):
     assert reports[0]["fault_stage_name"] == "hello_ack"
     assert reports[0]["pending"] is True
     assert reports[0]["recovery_boot"] is True
+    assert reports[0]["reset_flags_raw"] == 0x20000000
+    assert reports[0]["reset_flag_names"] == ["iwdg"]
+    assert reports[0]["reset_flag_summary"] == "iwdg"
     assert "during open_gripper" in reports[0]["summary"]
     assert "first late task pressure" in reports[0]["summary"]
+
+
+def test_serial_reader_decodes_optional_raw_reset_flags(qapp):
+    raw_flags = 0x10000000 | 0x04000000
+    reset_payload = bytes(
+        [
+            mfr.RESET_REPORT,
+            0x01,
+            mfr.TAG_RESET_SEQ32,
+            4,
+            0,
+            0,
+            0,
+            0,
+            mfr.TAG_RESET_CAUSE,
+            1,
+            3,
+            mfr.TAG_RESET_FLAGS,
+            4,
+            0,
+            0,
+            0,
+            0,
+            mfr.TAG_RESET_RCC_FLAGS,
+            4,
+            raw_flags & 0xFF,
+            (raw_flags >> 8) & 0xFF,
+            (raw_flags >> 16) & 0xFF,
+            (raw_flags >> 24) & 0xFF,
+        ]
+    )
+
+    report = mfr.SerialReader._parse_reset_report(reset_payload)
+
+    assert report is not None
+    assert report["seq32"] == 0
+    assert report["reset_cause_name"] == "software"
+    assert report["reset_flags_raw"] == raw_flags
+    assert report["reset_flag_names"] == ["software", "pin_reset"]
+    assert report["reset_flag_summary"] == "software, pin_reset"
+
+
+def test_serial_reader_accepts_older_reset_report_without_raw_flags(qapp):
+    report = mfr.SerialReader._parse_reset_report(_reset_report_payload(1))
+
+    assert report is not None
+    assert report["reset_cause_name"] == "power"
+    assert report["reset_flags_raw"] is None
+    assert report["reset_flag_names"] == []
+    assert report["reset_flag_summary"] == ""
 
 
 def test_serial_reader_summarizes_non_fault_reset_causes():

@@ -358,9 +358,36 @@ Common parse path for host->MCU commands:
 | `0xF6` | `CMD_BYE_ACK` | MCU->host | `[cmd, seq8]` + optional `TAG_SEQ32` | built in `_run` via `sendAckWithSeq32` | `Comm::sendAckWithSeq32` |
 | `0xF7` | `CMD_CLEAR_ACK` | MCU->host | `[cmd, seq8]` + optional `TAG_SEQ32` | built in `_run` via `sendAckWithSeq32` | `Comm::sendAckWithSeq32` |
 | `0xF8` | `CMD_BYE_DONE` | MCU->host | `[cmd, seq8]` + optional `TAG_SEQ32` | built in `performShutdown` | `Comm::sendAckWithSeq32` |
+| `0xF9` | `CMD_RESET_REPORT` | MCU->host | reset-report TLVs (below) | built after `HELLO_ACK` when `ResetReportPolicy` says to report | `Comm::sendResetReport` |
 | `0x02` | `CMD_STATUS` | MCU->host | status TLVs (below) | built in `Comm::statusTask` | `Comm::sendFrame` |
 
-### 6.4 Status telemetry tags (`Comm.h` constants)
+### 6.4 Reset report tags (`Comm.h` constants)
+
+`CMD_RESET_REPORT` frames are emitted once per host session after the `HELLO` / `HELLO_ACK` path when retained crash state or reset-cause policy requires a report. TLV value width is encoded by `len`; all multi-byte numeric fields are little-endian. The Python app treats missing optional tags as backward-compatible absent fields.
+
+| Tag ID | Name | Width | Source in firmware |
+|---|---|---|---|
+| `0x10` | `TAG_RESET_SEQ32` | 4 | host/control sequence attached to the report |
+| `0x11` | `TAG_RESET_CAUSE` | 1 | `CrashLogSnapshot.resetCause` classified from retained RCC flags |
+| `0x12` | `TAG_RESET_FLAGS` | 4 | `CrashLogSnapshot.flags` retained crash-log flags |
+| `0x13` | `TAG_RESET_LAST_FAULT` | 1 | `CrashLogSnapshot.lastFault` |
+| `0x14` | `TAG_RESET_LAST_TASK` | 1 | `CrashLogSnapshot.lastTask` |
+| `0x15` | `TAG_RESET_BOOT_COUNT` | 4 | `CrashLogSnapshot.bootCount` |
+| `0x16` | `TAG_RESET_FAULT_COUNT` | 4 | `CrashLogSnapshot.faultCountTotal` |
+| `0x17` | `TAG_RESET_WATCHDOG_COUNT` | 4 | `CrashLogSnapshot.watchdogResetCount` |
+| `0x18` | `TAG_RESET_WATCHDOG_STICKY_CT` | 4 | `CrashLogSnapshot.watchdogStickyCount` |
+| `0x19` | `TAG_RESET_WATCHDOG_RAW_SR` | 4 | `CrashLogSnapshot.watchdogRawStatus` |
+| `0x1A` | `TAG_RESET_UPTIME_MS` | 4 | `CrashLogSnapshot.uptimeMs` |
+| `0x1B` | `TAG_RESET_BOOT_STAGE` | 1 | `CrashLogSnapshot.bootStage` |
+| `0x1C` | `TAG_RESET_RECOVERY_BOOT` | 1 | `CrashLog_IsWatchdogRecoveryBoot()` result |
+| `0x1D` | `TAG_RESET_FAULT_STAGE` | 1 | `CrashLogSnapshot.faultStage` |
+| `0x1E` | `TAG_RESET_WATCHDOG_LATE_TASK` | 1 | `CrashLogSnapshot.watchdogLateTask` |
+| `0x1F` | `TAG_RESET_ACTIVE_COMMAND` | 1 | `CrashLogSnapshot.activeCommand` |
+| `0x20` | `TAG_RESET_RCC_FLAGS` | 4 | optional raw `CrashLogSnapshot.resetFlagsRaw`; Python decodes names from `LPWRRSTF`, `WWDGRSTF`, `IWDGRSTF`, `SFTRSTF`, `PORRSTF`, `PINRSTF`, and `BORRSTF` bits |
+
+`TAG_RESET_RCC_FLAGS` shares the numeric tag value `0x20` with status `TAG_X_POS`, but the tag namespaces are separated by frame opcode (`CMD_RESET_REPORT` vs `CMD_STATUS`).
+
+### 6.5 Status telemetry tags (`Comm.h` constants)
 
 `CMD_STATUS` frames are emitted in `Comm::statusTask()` (alternating chunk 0/chunk 1). TLV value width is encoded by `len` (mostly 2 or 4 bytes).
 
@@ -406,7 +433,7 @@ Common parse path for host->MCU commands:
 | `0x80` | `TAG_GRIP_PULSE` | yes | `Gripper::getPulseDurationMs()` |
 | `0x81` | `TAG_GRIP_REFRESH` | yes | `Gripper::getRefreshPeriodMs()` |
 
-### 6.5 Golden vector opportunities for `tests_host`
+### 6.6 Golden vector opportunities for `tests_host`
 
 Pure host-side encode/decode vectors that do not require HAL peripherals:
 

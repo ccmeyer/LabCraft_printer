@@ -1667,6 +1667,7 @@ TAG_RESET_RECOVERY_BOOT     = 0x1C
 TAG_RESET_FAULT_STAGE       = 0x1D
 TAG_RESET_WATCHDOG_LATE_TASK = 0x1E
 TAG_RESET_ACTIVE_COMMAND    = 0x1F
+TAG_RESET_RCC_FLAGS         = 0x20
 
 ACK_TLV_SEQ32 = 0x10
 ACK_TLV_RESULT = 0x11
@@ -1986,6 +1987,16 @@ RESET_CAUSE_SUMMARIES = {
     "low_power": "Board restarted after low-power reset.",
 }
 
+RESET_RCC_FLAG_NAMES = {
+    0x80000000: "low_power",
+    0x40000000: "wwdg",
+    0x20000000: "iwdg",
+    0x10000000: "software",
+    0x08000000: "por",
+    0x04000000: "pin_reset",
+    0x02000000: "bor",
+}
+
 CRASH_FAULT_NAMES = {
     0: "none",
     1: "hardfault",
@@ -2262,8 +2273,15 @@ class SerialReader(QThread):
                 return default
             return struct.unpack("<I", raw)[0]
 
+        def _u32_or_none(tag):
+            raw = tlvs.get(tag)
+            if raw is None or len(raw) != 4:
+                return None
+            return struct.unpack("<I", raw)[0]
+
         reset_cause = _u8(TAG_RESET_CAUSE)
         flags = _u32(TAG_RESET_FLAGS)
+        reset_flags_raw = _u32_or_none(TAG_RESET_RCC_FLAGS)
         last_fault = _u8(TAG_RESET_LAST_FAULT)
         last_task = _u8(TAG_RESET_LAST_TASK)
         boot_stage = _u8(TAG_RESET_BOOT_STAGE)
@@ -2280,6 +2298,12 @@ class SerialReader(QThread):
         fault_stage_name = CRASH_BOOT_STAGE_NAMES.get(fault_stage, f"stage_{fault_stage}")
         watchdog_late_task_name = CRASH_TASK_NAMES.get(watchdog_late_task, f"task_{watchdog_late_task}")
         active_command_name = CMD_NAME_BY_CODE.get(active_command, f"cmd_0x{active_command:02x}")
+        reset_flag_names = [
+            name
+            for bit, name in RESET_RCC_FLAG_NAMES.items()
+            if reset_flags_raw is not None and (reset_flags_raw & bit)
+        ]
+        reset_flag_summary = ", ".join(reset_flag_names)
 
         if reset_cause_name == "iwdg":
             summary = "Board restarted after watchdog reset."
@@ -2314,6 +2338,9 @@ class SerialReader(QThread):
             "reset_cause": reset_cause,
             "reset_cause_name": reset_cause_name,
             "flags": flags,
+            "reset_flags_raw": reset_flags_raw,
+            "reset_flag_names": reset_flag_names,
+            "reset_flag_summary": reset_flag_summary,
             "pending": pending,
             "sticky": sticky,
             "last_fault": last_fault,
@@ -4229,7 +4256,7 @@ class Machine(QObject):
         rx_to_main_thread_ms = None
         if host_rx_ns is not None:
             rx_to_main_thread_ms = round(max(0, now_ns - host_rx_ns) / 1_000_000.0, 3)
-        return {
+        sample = {
             "monotonic_ns": now_ns,
             "Current_command": self._coerce_optional_int(data.get("Current_command")),
             "Last_completed": self._coerce_optional_int(data.get("Last_completed")),
@@ -4243,6 +4270,35 @@ class Machine(QObject):
             "Flash_droplets": self._coerce_optional_int(data.get("Flash_droplets")),
             "rx_to_main_thread_ms": rx_to_main_thread_ms,
         }
+        for key in (
+            "Pressure_P",
+            "Pressure_R",
+            "Tar_print",
+            "Tar_refuel",
+            "X",
+            "Y",
+            "Z",
+            "P",
+            "R",
+            "Tar_X",
+            "Tar_Y",
+            "Tar_Z",
+            "Tar_P",
+            "Tar_R",
+            "Print_width",
+            "Refuel_width",
+            "Disp_freq",
+            "drop_total",
+            "drop_remain",
+            "print_active",
+            "refuel_active",
+            "Flashes",
+            "Flash_width",
+            "Ext_counter",
+        ):
+            if key in data:
+                sample[key] = self._coerce_optional_int(data.get(key))
+        return sample
 
     def _status_sample_for_output(self, sample, request_created_monotonic_ns=None):
         sample = dict(sample or {})
@@ -4259,6 +4315,34 @@ class Machine(QObject):
             "Flash_droplets": self._coerce_optional_int(sample.get("Flash_droplets")),
             "rx_to_main_thread_ms": sample.get("rx_to_main_thread_ms"),
         }
+        for key in (
+            "Pressure_P",
+            "Pressure_R",
+            "Tar_print",
+            "Tar_refuel",
+            "X",
+            "Y",
+            "Z",
+            "P",
+            "R",
+            "Tar_X",
+            "Tar_Y",
+            "Tar_Z",
+            "Tar_P",
+            "Tar_R",
+            "Print_width",
+            "Refuel_width",
+            "Disp_freq",
+            "drop_total",
+            "drop_remain",
+            "print_active",
+            "refuel_active",
+            "Flashes",
+            "Flash_width",
+            "Ext_counter",
+        ):
+            if key in sample:
+                out[key] = self._coerce_optional_int(sample.get(key))
         observed_ms = self._relative_ms(sample.get("monotonic_ns"), request_created_monotonic_ns)
         if observed_ms is not None:
             out["observed_ms"] = observed_ms

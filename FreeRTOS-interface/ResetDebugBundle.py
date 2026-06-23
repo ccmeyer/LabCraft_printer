@@ -20,9 +20,17 @@ class ResetDebugBundleError(Exception):
 
 
 def _sanitize_filename_part(value: Any, *, default: str = "unknown") -> str:
-    text = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "").strip())
+    raw_text = "" if value is None else str(value)
+    text = re.sub(r"[^A-Za-z0-9._-]+", "_", raw_text.strip())
     text = text.strip("._-")
     return text or default
+
+
+def _first_present(*values: Any, default: Any = None) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return default
 
 
 def _timestamp(created_at: datetime | None) -> tuple[str, str]:
@@ -169,9 +177,10 @@ def export_reset_debug_bundle(
         or machine.get("black_box_session_id")
         or connection_loss_report.get("session_id")
     )
+    reset_seq32 = _first_present(reset_report.get("seq32"), reset_report.get("reset_seq32"))
     if bundle_kind == "reset_report":
         reset_cause = reset_report.get("reset_cause_name") or reset_report.get("reset_cause") or "reset"
-        seq32 = reset_report.get("seq32") or reset_report.get("reset_seq32") or "unknown_seq"
+        seq32 = _first_present(reset_seq32, default="unknown_seq")
         archive_stem = (
             f"LabCraft_reset_debug_bundle_{timestamp_for_name}_"
             f"{_sanitize_filename_part(reset_cause, default='reset')}_"
@@ -198,6 +207,14 @@ def export_reset_debug_bundle(
     snapshots = _snapshot_entries(context)
     if not snapshots:
         missing_files.append({"kind": "black_box_snapshot", "reason": "none_available", "path": None})
+    primary_snapshot_path = ""
+    if bundle_kind == "reset_report":
+        for entry in reversed(snapshots):
+            if str(entry.get("reason") or "") == "reset_report" and entry.get("path"):
+                primary_snapshot_path = str(entry.get("path") or "")
+                break
+    else:
+        primary_snapshot_path = str(connection_loss_report.get("black_box_log_path") or "")
 
     manifest_base = {
         "schema_version": SCHEMA_VERSION,
@@ -209,7 +226,10 @@ def export_reset_debug_bundle(
             "summary": reset_report.get("summary"),
             "reset_cause": reset_report.get("reset_cause"),
             "reset_cause_name": reset_report.get("reset_cause_name"),
-            "seq32": reset_report.get("seq32") or reset_report.get("reset_seq32"),
+            "seq32": reset_seq32,
+            "reset_flags_raw": reset_report.get("reset_flags_raw"),
+            "reset_flag_names": list(reset_report.get("reset_flag_names") or []),
+            "reset_flag_summary": reset_report.get("reset_flag_summary"),
             "pending": reset_report.get("pending"),
             "sticky": reset_report.get("sticky"),
         },
@@ -289,6 +309,11 @@ def export_reset_debug_bundle(
             manifest_entry = dict(entry)
             manifest_entry["reason"] = reason
             manifest_entry["archive_path"] = arcname
+            manifest_entry["role"] = (
+                "primary_trigger"
+                if primary_snapshot_path and str(src_raw or "") == primary_snapshot_path
+                else "same_session_context"
+            )
             if src is not None and src.is_file():
                 _add_file(
                     zf,

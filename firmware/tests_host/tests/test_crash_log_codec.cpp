@@ -19,6 +19,12 @@ TEST(CrashLogCodec, PowerResetFlagsClassifyAsPower)
     LONGS_EQUAL((int)CRASH_RESET_POWER, (int)CrashLog_ClassifyResetFlags(flags));
 }
 
+TEST(CrashLogCodec, SoftwareFlagCurrentlyTakesPriorityOverPinFlag)
+{
+    const uint32_t flags = CRASHLOG_RCC_CSR_SFTRSTF | CRASHLOG_RCC_CSR_PINRSTF;
+    LONGS_EQUAL((int)CRASH_RESET_SOFTWARE, (int)CrashLog_ClassifyResetFlags(flags));
+}
+
 TEST(CrashLogCodec, FaultKindToMetricStringIsStable)
 {
     STRCMP_EQUAL("hard", CrashLog_FaultKindName(CRASH_FAULT_HARD));
