@@ -405,6 +405,7 @@ def test_release_serial_for_external_owner_failure_keeps_serial_open(qapp, test_
     assert machine.ser is ser
     assert machine._transport_ready is True
     assert machine._tx_paused is False
+    assert machine._expected_serial_reader_stop_reason is None
 
 
 def test_disconnect_board_still_sends_goodbye(qapp, test_profile):

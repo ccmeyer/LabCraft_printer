@@ -74,3 +74,65 @@ def test_handle_reset_report_emits_popup_when_log_write_fails():
     assert "Board restarted after power/brownout reset." in popups[0][1]
     assert "Homing state was cleared. Home the motors before resuming motion." in popups[0][1]
     assert "Log save failed: disk unavailable" in popups[0][1]
+
+
+def test_handle_serial_connection_lost_emits_guidance_popup():
+    popups = []
+
+    controller = Controller.__new__(Controller)
+    controller.model = SimpleNamespace(
+        machine_model=SimpleNamespace(
+            get_current_position_dict=lambda: {"X": 1, "Y": 2, "Z": 3},
+        )
+    )
+    controller.error_occurred_signal = SimpleNamespace(
+        emit=lambda title, message: popups.append((title, message))
+    )
+    controller.expected_position = {"X": 9, "Y": 9, "Z": 9}
+    controller.expected_location = "Home"
+
+    Controller.handle_serial_connection_lost(
+        controller,
+        {
+            "summary": "Machine serial connection ended unexpectedly (serial closed).",
+            "black_box_log_path": "logs/machine_black_box/session.json",
+            "black_box_log_error": None,
+        },
+    )
+
+    assert controller.expected_position == {"X": 1, "Y": 2, "Z": 3}
+    assert controller.expected_location is None
+    assert popups[0][0] == "Machine Connection Lost"
+    assert "Machine serial connection ended unexpectedly" in popups[0][1]
+    assert "Machine state is no longer trusted." in popups[0][1]
+    assert "Reconnect to the MCU and home the motors" in popups[0][1]
+    assert "Black-box log: logs/machine_black_box/session.json" in popups[0][1]
+
+
+def test_handle_serial_connection_lost_popup_survives_black_box_write_failure():
+    popups = []
+
+    controller = Controller.__new__(Controller)
+    controller.model = SimpleNamespace(
+        machine_model=SimpleNamespace(
+            get_current_position_dict=lambda: {"X": 1, "Y": 2, "Z": 3},
+        )
+    )
+    controller.error_occurred_signal = SimpleNamespace(
+        emit=lambda title, message: popups.append((title, message))
+    )
+    controller.expected_position = {"X": 9, "Y": 9, "Z": 9}
+    controller.expected_location = "Home"
+
+    Controller.handle_serial_connection_lost(
+        controller,
+        {
+            "summary": "Machine serial connection ended unexpectedly (OSError: device disconnected).",
+            "black_box_log_path": None,
+            "black_box_log_error": "disk unavailable",
+        },
+    )
+
+    assert popups[0][0] == "Machine Connection Lost"
+    assert "OSError: device disconnected" in popups[0][1]
+    assert "Black-box log save failed: disk unavailable" in popups[0][1]

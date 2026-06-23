@@ -2920,6 +2920,7 @@ class Machine(QObject):
     disconnect_complete_signal = Signal()  # Signal to stop timers
     machine_connected_signal = Signal(bool)  # Signal to emit when the machine is connected
     reset_report_received = Signal(dict)
+    serial_connection_lost = Signal(dict)
     all_calibration_droplets_printed = Signal()  # Signal to emit when all calibration droplets are printed
     require_gripper_confirmation = Signal(str)   # "OPEN" or "CLOSE"
     log_stats_updated = Signal(object)  # Signal to emit when log stats are updated
@@ -2948,6 +2949,8 @@ class Machine(QObject):
         self.reader = None
         self.black_box_recorder = HostBlackBoxRecorder(log_dir=black_box_log_dir)
         self._last_black_box_log_result = None
+        self._expected_serial_reader_stop_reason = None
+        self._handling_unclean_serial_loss = False
         
         self.fss = 13107
         self.psi_offset = 1638
@@ -3183,6 +3186,91 @@ class Machine(QObject):
             )
         return result
 
+    def _expect_serial_reader_stop(self, reason):
+        self._expected_serial_reader_stop_reason = str(reason or "expected")
+        self._record_black_box_event(
+            "expected_serial_reader_stop",
+            {
+                "reason": self._expected_serial_reader_stop_reason,
+                "port": getattr(self, "port", None),
+            },
+        )
+
+    def _consume_expected_serial_reader_stop(self):
+        reason = getattr(self, "_expected_serial_reader_stop_reason", None)
+        self._expected_serial_reader_stop_reason = None
+        return reason
+
+    def _has_operational_transport_session(self):
+        return bool(
+            getattr(self, "_transport_ready", False)
+            or getattr(self, "_session_recovery_in_progress", False)
+        )
+
+    def _is_unclean_serial_reader_stop(self, info, expected_reason):
+        if expected_reason:
+            return False
+        reason = str((info or {}).get("reason") or "")
+        if reason == "requested_stop":
+            return False
+        if reason == "exception":
+            return True
+        if reason in {"serial_closed", "completed"}:
+            return self._has_operational_transport_session()
+        return self._has_operational_transport_session()
+
+    def _serial_loss_report(self, info, snapshot_result):
+        info = dict(info or {})
+        snapshot_result = dict(snapshot_result or {})
+        reason = str(info.get("reason") or "unknown")
+        port = getattr(self, "port", None)
+        detail = reason.replace("_", " ")
+        summary = "Machine serial connection ended unexpectedly."
+        if info.get("exception_type"):
+            message = str(info.get("message") or "")
+            detail = f"{info.get('exception_type')}: {message}".rstrip(": ")
+            summary = f"Machine serial connection ended unexpectedly ({detail})."
+        elif reason:
+            summary = f"Machine serial connection ended unexpectedly ({detail})."
+        return {
+            "reason": reason,
+            "requested_stop": bool(info.get("requested_stop", False)),
+            "port": port,
+            "exception_type": info.get("exception_type"),
+            "message": info.get("message"),
+            "summary": summary,
+            "black_box_log_path": snapshot_result.get("path"),
+            "black_box_log_error": snapshot_result.get("error"),
+        }
+
+    def _clear_transport_after_unclean_serial_loss(self):
+        self.command_queue.clear_queue(reset_counter=True)
+        self.sent_command = None
+        self._cancel_pending_acks()
+        self._cancel_pending_pause_after_requests()
+        self._transport_capabilities = 0
+        self._transport_ready = False
+        self._next_ctl_seq32 = self._control_seq_base
+        self._tx_paused = True
+        self._sequence_pause = False
+        self._session_recovery_in_progress = False
+        self._waiting_for_post_clear_status = False
+        self._pending_clear_request = None
+        self._goodbye_seq32 = None
+        try:
+            if getattr(self, "execution_timer", None):
+                self.execution_timer.stop()
+        except Exception:
+            pass
+        try:
+            if self.ser is not None and getattr(self.ser, "is_open", False):
+                self.ser.close()
+        except Exception:
+            pass
+        self.ser = None
+        self.port = None
+        self.reader = None
+
     def _start_ack_wait(self, ack_code: int, seq32: int | None, timeout_ms: int,
                         on_ok: callable, on_timeout: callable, *, seq8: int | None = None):
         """Begin waiting for a specific ack_code with a one-shot timer."""
@@ -3354,6 +3442,7 @@ class Machine(QObject):
 
     def _teardown_transport_for_retry(self):
         """Close current transport before recursive reconnect attempts."""
+        self._expect_serial_reader_stop("connection_retry")
         try:
             self.stop_reader_thread()
         except Exception:
@@ -3367,6 +3456,7 @@ class Machine(QObject):
 
     def reset_board(self):
         print('Resetting board')
+        self._expect_serial_reader_stop("reset_board")
         self.command_queue.clear_queue(reset_counter=True)
         self._transport_capabilities = 0
         self._transport_ready = False
@@ -3518,6 +3608,7 @@ class Machine(QObject):
         
     def disconnect_handler(self):
         # self.reset_board()
+        self._expect_serial_reader_stop("disconnect_handler")
         self._record_black_box_event(
             "disconnect_complete",
             {"port": getattr(self, "port", None)},
@@ -3566,6 +3657,7 @@ class Machine(QObject):
             self._disconnect_log_reader_signals(log_reader)
 
         print(f"Releasing serial port for {reason} without GOODBYE...")
+        self._expect_serial_reader_stop(f"serial_handoff:{reason}")
         self._request_reader_stop(serial_reader, "Serial reader thread")
         self._request_reader_stop(log_reader, "Log reader thread")
         _serial_ms, serial_stopped = self._wait_for_reader_stop(
@@ -3582,6 +3674,7 @@ class Machine(QObject):
         )
         if not serial_stopped or not log_stopped:
             print(f"Serial release for {reason} failed because a reader thread did not stop cleanly.")
+            self._expected_serial_reader_stop_reason = None
             self._transport_ready = previous_transport_ready
             self._tx_paused = previous_tx_paused
             if timer_was_active:
@@ -3596,6 +3689,7 @@ class Machine(QObject):
                 ser.close()
         except Exception as exc:
             print(f"Serial release for {reason} failed while closing the port: {exc}")
+            self._expected_serial_reader_stop_reason = None
             self._transport_ready = previous_transport_ready
             self._tx_paused = previous_tx_paused
             if timer_was_active:
@@ -3681,6 +3775,7 @@ class Machine(QObject):
             self.reader = None
 
         if self.reader is None:
+            self._expected_serial_reader_stop_reason = None
             self.reader = SerialReader(self.ser)
             self.reader.status_received.connect(self.update_status)
             self.reader.ackReceived.connect(self._on_any_ack)
@@ -3710,8 +3805,29 @@ class Machine(QObject):
     def _on_serial_reader_stopped(self, info):
         info = dict(info or {})
         self._record_black_box_event("serial_reader_stopped", info)
-        if info.get("reason") != "requested_stop":
-            self._write_black_box_snapshot("serial_reader_stopped", info)
+        expected_reason = self._consume_expected_serial_reader_stop()
+        if expected_reason:
+            info["expected_stop_reason"] = expected_reason
+            self._record_black_box_event("serial_reader_stop_expected", info)
+            return
+        if info.get("reason") == "requested_stop":
+            return
+
+        snapshot_result = self._write_black_box_snapshot("serial_reader_stopped", info)
+        if not self._is_unclean_serial_reader_stop(info, expected_reason):
+            return
+        if self._handling_unclean_serial_loss:
+            return
+
+        self._handling_unclean_serial_loss = True
+        try:
+            report = self._serial_loss_report(info, snapshot_result)
+            self._record_black_box_event("serial_connection_lost", report)
+            self._clear_transport_after_unclean_serial_loss()
+            self.machine_connected_signal.emit(False)
+            self.serial_connection_lost.emit(report)
+        finally:
+            self._handling_unclean_serial_loss = False
 
     def stop_reader_thread(self):
         """

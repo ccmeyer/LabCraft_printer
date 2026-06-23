@@ -181,6 +181,9 @@ class Controller(QObject):
         
         self.machine.machine_connected_signal.connect(self.update_machine_connection_status)
         self.machine.reset_report_received.connect(self.handle_reset_report)
+        serial_loss_signal = getattr(self.machine, "serial_connection_lost", None)
+        if serial_loss_signal is not None:
+            serial_loss_signal.connect(self.handle_serial_connection_lost)
         self.machine.disconnect_complete_signal.connect(self.reset_board)
         self.machine.flash_state_updated.connect(self.model.update_flash_session_state)
         self.model.machine_model.command_numbers_updated.connect(self.update_command_numbers)
@@ -449,6 +452,29 @@ class Controller(QObject):
             log_status = f"Log save failed: {detail}"
         message = f"{summary}\n\n{guidance}\n\n{log_status}"
         self.error_occurred_signal.emit("Board Reset Detected", message)
+
+    def handle_serial_connection_lost(self, report: dict):
+        report = dict(report or {})
+        machine_model = self.model.machine_model
+        self.expected_position = machine_model.get_current_position_dict()
+        self.expected_location = None
+        summary = report.get("summary") or "Machine serial connection ended unexpectedly."
+        guidance = (
+            "Machine state is no longer trusted. Reconnect to the MCU and home the motors "
+            "before resuming motion or printing."
+        )
+        log_path = report.get("black_box_log_path")
+        log_error = report.get("black_box_log_error")
+        if log_path:
+            log_status = f"Black-box log: {log_path}"
+        elif log_error:
+            log_status = f"Black-box log save failed: {log_error}"
+        else:
+            log_status = "Black-box log: not available"
+        self.error_occurred_signal.emit(
+            "Machine Connection Lost",
+            f"{summary}\n\n{guidance}\n\n{log_status}",
+        )
 
     def _append_reset_report_log(self, report: dict) -> str:
         path = Path(getattr(self, "_reset_report_log_path", Path("logs") / "board_reset_reports.jsonl"))
