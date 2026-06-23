@@ -786,12 +786,44 @@ class MainWindow(QMainWindow):
     def popup_message(self, title, message):
         """Display a popup message with a title and message."""
         #print(f"Popup message: {title} - {message}")
+        if title == "Board Reset Detected":
+            self._popup_board_reset_message(title, message)
+            return
         msg = QtWidgets.QMessageBox(self)
         msg.setWindowTitle(title)
         msg.setText(message)
         transparent_icon = self.make_transparent_icon()
         msg.setWindowIcon(transparent_icon)
         msg.exec()
+
+    def _popup_board_reset_message(self, title, message):
+        msg = QtWidgets.QMessageBox(self)
+        msg.setWindowTitle(title)
+        msg.setText(message)
+        transparent_icon = self.make_transparent_icon()
+        msg.setWindowIcon(transparent_icon)
+        export_button = msg.addButton("Export Debug Bundle", QtWidgets.QMessageBox.ActionRole)
+        ok_button = msg.addButton(QtWidgets.QMessageBox.Ok)
+        try:
+            msg.setDefaultButton(ok_button)
+        except Exception:
+            pass
+        msg.exec()
+        if msg.clickedButton() is not export_button:
+            return
+        try:
+            result = self.controller.export_last_reset_debug_bundle()
+        except Exception as exc:
+            detail = str(exc) or exc.__class__.__name__
+            self.popup_message("Debug Bundle Export Failed", f"Could not export debug bundle:\n{detail}")
+            return
+        archive_path = ""
+        if isinstance(result, dict):
+            archive_path = str(result.get("archive_path") or "")
+        self.popup_message(
+            "Debug Bundle Exported",
+            f"Debug bundle written to:\n{archive_path or 'unknown location'}",
+        )
 
     def popup_options(self, title, message, options):
         dialog = OptionsDialog(title, message, options)

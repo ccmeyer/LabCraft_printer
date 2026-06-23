@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from pathlib import Path
 
 from Controller import Controller
 
@@ -8,7 +9,18 @@ def test_handle_reset_report_logs_and_emits_popup(tmp_path):
     popups = []
 
     controller = Controller.__new__(Controller)
+    controller._repo_root = tmp_path
     controller._reset_report_log_path = tmp_path / "board_reset_reports.jsonl"
+    controller.machine = SimpleNamespace(
+        get_reset_debug_bundle_context=lambda: {
+            "port": "COM9",
+            "profile": "test_profile",
+            "black_box_session_id": "session-abc",
+            "black_box_snapshots": [
+                {"path": str(tmp_path / "reset_report.json"), "reason": "reset_report"}
+            ],
+        }
+    )
     controller.model = SimpleNamespace(
         machine_model=SimpleNamespace(
             recover_after_board_reset=lambda: events.append(("recover", None)),
@@ -38,6 +50,13 @@ def test_handle_reset_report_logs_and_emits_popup(tmp_path):
     assert controller._reset_report_log_path.exists()
     text = controller._reset_report_log_path.read_text(encoding="utf-8")
     assert '"summary": "Board restarted after watchdog reset."' in text
+    context = controller._last_reset_debug_bundle_context
+    assert context["reset_report"] == report
+    assert context["reset_report_log_path"] == str(controller._reset_report_log_path)
+    assert context["reset_report_log_error"] is None
+    assert context["port"] == "COM9"
+    assert context["black_box_session_id"] == "session-abc"
+    assert context["black_box_snapshots"][0]["reason"] == "reset_report"
 
 
 def test_handle_reset_report_emits_popup_when_log_write_fails():
@@ -45,6 +64,8 @@ def test_handle_reset_report_emits_popup_when_log_write_fails():
     popups = []
 
     controller = Controller.__new__(Controller)
+    controller._repo_root = Path.cwd()
+    controller.machine = SimpleNamespace(get_reset_debug_bundle_context=lambda: {})
     controller.model = SimpleNamespace(
         machine_model=SimpleNamespace(
             recover_after_board_reset=lambda: events.append(("recover", None)),
@@ -74,6 +95,41 @@ def test_handle_reset_report_emits_popup_when_log_write_fails():
     assert "Board restarted after power/brownout reset." in popups[0][1]
     assert "Homing state was cleared. Home the motors before resuming motion." in popups[0][1]
     assert "Log save failed: disk unavailable" in popups[0][1]
+    assert controller._last_reset_debug_bundle_context["reset_report"] == report
+    assert controller._last_reset_debug_bundle_context["reset_report_log_error"] == "disk unavailable"
+
+
+def test_export_last_reset_debug_bundle_packages_current_context(tmp_path):
+    controller = Controller.__new__(Controller)
+    controller._last_reset_debug_bundle_context = {
+        "repo_root": str(tmp_path),
+        "reset_report": {
+            "summary": "Board restarted after watchdog reset.",
+            "reset_cause_name": "iwdg",
+            "seq32": 77,
+        },
+        "black_box_snapshots": [],
+    }
+
+    result = Controller.export_last_reset_debug_bundle(controller, output_dir=tmp_path)
+
+    archive_path = Path(result["archive_path"])
+    assert archive_path.exists()
+    assert archive_path.parent == tmp_path
+    assert result["archive_size_bytes"] > 0
+    assert result["manifest"]["reset"]["reset_cause_name"] == "iwdg"
+
+
+def test_export_last_reset_debug_bundle_requires_context(tmp_path):
+    controller = Controller.__new__(Controller)
+    controller._last_reset_debug_bundle_context = None
+
+    try:
+        Controller.export_last_reset_debug_bundle(controller, output_dir=tmp_path)
+    except RuntimeError as exc:
+        assert "No board reset debug context" in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError")
 
 
 def test_handle_serial_connection_lost_emits_guidance_popup():

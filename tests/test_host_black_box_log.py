@@ -82,6 +82,10 @@ def test_reset_report_writes_snapshot_before_recovery_clears_session_state(qapp,
     machine._on_reset_report(report)
 
     snapshot = _read_single_snapshot(tmp_path)
+    snapshot_history = machine.black_box_recorder.recent_snapshots()
+    assert len(snapshot_history) == 1
+    assert snapshot_history[0]["reason"] == "reset_report"
+    assert snapshot_history[0]["session_id"] == machine.black_box_recorder.session_id
     assert snapshot["schema_version"] == "host_black_box_v1"
     assert snapshot["reason"] == "reset_report"
     assert snapshot["last_reset_report"] == report

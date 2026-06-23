@@ -4,6 +4,7 @@ from serial.tools.list_ports import comports
 from Model import Model,PrinterHead,Slot
 from dfu_update import reset_board
 from dfu_update_worker import DfuUpdateWorker
+from ResetDebugBundle import export_reset_debug_bundle
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -148,6 +149,7 @@ class Controller(QObject):
         self._ui_dir = Path(__file__).resolve().parent              # LabCraft_Printer/FreeRTOS-interface
         self._repo_root = self._ui_dir.parent                       # LabCraft_Printer
         self._reset_report_log_path = self._repo_root / "logs" / "board_reset_reports.jsonl"
+        self._last_reset_debug_bundle_context = None
 
         self._dfu_script = (self._ui_dir / "dfu_update.py").resolve()
         self._cwd = self._repo_root                                 # IMPORTANT: run child from repo root
@@ -435,6 +437,7 @@ class Controller(QObject):
             self.model.machine_model.disconnect_machine()
 
     def handle_reset_report(self, report: dict):
+        report = dict(report or {})
         machine_model = self.model.machine_model
         machine_model.recover_after_board_reset()
         update_report = getattr(machine_model, "update_last_reset_report", None)
@@ -446,12 +449,57 @@ class Controller(QObject):
         guidance = "Homing state was cleared. Home the motors before resuming motion."
         try:
             log_path = self._append_reset_report_log(report)
+            log_error = None
             log_status = f"Saved to: {log_path}"
         except Exception as exc:
             detail = str(exc) or exc.__class__.__name__
+            log_path = None
+            log_error = detail
             log_status = f"Log save failed: {detail}"
+        self._last_reset_debug_bundle_context = self._build_reset_debug_bundle_context(
+            report,
+            reset_report_log_path=log_path,
+            reset_report_log_error=log_error,
+        )
         message = f"{summary}\n\n{guidance}\n\n{log_status}"
         self.error_occurred_signal.emit("Board Reset Detected", message)
+
+    def _build_reset_debug_bundle_context(self, report, *, reset_report_log_path=None, reset_report_log_error=None):
+        machine_context = {}
+        getter = getattr(getattr(self, "machine", None), "get_reset_debug_bundle_context", None)
+        if callable(getter):
+            try:
+                machine_context = dict(getter() or {})
+            except Exception as exc:
+                machine_context = {"context_error": str(exc) or exc.__class__.__name__}
+        return {
+            "repo_root": str(getattr(self, "_repo_root", Path(__file__).resolve().parents[1])),
+            "reset_report": dict(report or {}),
+            "reset_report_log_path": str(reset_report_log_path) if reset_report_log_path else None,
+            "reset_report_log_error": reset_report_log_error,
+            "machine": machine_context,
+            "port": machine_context.get("port"),
+            "profile": machine_context.get("profile"),
+            "black_box_session_id": machine_context.get("black_box_session_id"),
+            "black_box_snapshots": list(machine_context.get("black_box_snapshots") or []),
+        }
+
+    def _resolve_downloads_dir(self):
+        downloads = ""
+        try:
+            downloads = QtCore.QStandardPaths.writableLocation(QtCore.QStandardPaths.DownloadLocation)
+        except Exception:
+            downloads = ""
+        if not downloads:
+            downloads = str(Path.home() / "Downloads")
+        return Path(downloads).expanduser()
+
+    def export_last_reset_debug_bundle(self, output_dir=None):
+        context = getattr(self, "_last_reset_debug_bundle_context", None)
+        if not context:
+            raise RuntimeError("No board reset debug context is available to export.")
+        destination = Path(output_dir).expanduser() if output_dir is not None else self._resolve_downloads_dir()
+        return export_reset_debug_bundle(context, output_dir=destination)
 
     def handle_serial_connection_lost(self, report: dict):
         report = dict(report or {})

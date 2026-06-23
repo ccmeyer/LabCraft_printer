@@ -38,12 +38,13 @@ def _json_safe(value):
 
 
 class HostBlackBoxRecorder:
-    def __init__(self, log_dir=None, *, event_limit=512):
+    def __init__(self, log_dir=None, *, event_limit=512, snapshot_limit=64):
         self.session_id = f"{_filename_timestamp()}-{uuid.uuid4().hex[:8]}"
         if log_dir is None:
             log_dir = Path(__file__).resolve().parents[1] / "logs" / "machine_black_box"
         self.log_dir = Path(log_dir)
         self.events = deque(maxlen=int(event_limit))
+        self.snapshots = deque(maxlen=int(snapshot_limit))
         self.last_write_error = None
 
     def record(self, kind, payload=None, *, monotonic_ns=None):
@@ -58,6 +59,9 @@ class HostBlackBoxRecorder:
 
     def recent_events(self):
         return [dict(event) for event in self.events]
+
+    def recent_snapshots(self):
+        return [dict(snapshot) for snapshot in self.snapshots]
 
     def write_snapshot(self, snapshot):
         snapshot = dict(snapshot or {})
@@ -80,6 +84,14 @@ class HostBlackBoxRecorder:
                 fh.write("\n")
             tmp_path.replace(path)
             self.last_write_error = None
+            self.snapshots.append(
+                {
+                    "path": str(path),
+                    "reason": reason,
+                    "session_id": self.session_id,
+                    "host_time_utc": snapshot.get("host_time_utc"),
+                }
+            )
             return {"path": str(path), "error": None}
         except Exception as exc:
             detail = str(exc) or exc.__class__.__name__
