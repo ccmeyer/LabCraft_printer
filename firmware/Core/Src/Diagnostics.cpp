@@ -1,5 +1,6 @@
 #include "BoardConfig.h"
 #include "Diagnostics.h"
+#include "CrashWatchdogSelfTestPolicy.h"
 #include "DiagnosticResultEmitter.h"
 #include "Orchestrator.h"
 #include "OrchestratorCompletionPolicy.h"
@@ -22,7 +23,6 @@
 #include "Comm.h"
 #include "CommCodec.h"
 #include "CrashLog.h"
-#include "CrashLogCodec.h"
 #include "WatchdogSupervisor.h"
 #include "PressureTraceRecorder.h"
 #include "cmsis_os.h"
@@ -6448,67 +6448,27 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 						  {
 						    CrashLogSnapshot snap{};
 						    CrashLog_GetSnapshot(&snap);
-						    const bool pending = (snap.flags & CRASHLOG_FLAG_PENDING) != 0u;
-						    const bool sticky = (snap.flags & CRASHLOG_FLAG_WDT_ARM_STICKY) != 0u;
-						    const bool staleWatchdogHistory =
-						        pending &&
-						        sticky &&
-						        (snap.lastFault == CRASH_FAULT_WDT_STARVE) &&
-						        (snap.resetCause != CRASH_RESET_IWDG);
-						    const bool pass = (!pending && (snap.lastFault == CRASH_FAULT_NONE)) || staleWatchdogHistory;
 						    char metrics[224];
-						    snprintf(metrics,
-						             sizeof(metrics),
-						             "pending=%u;sticky=%u;fault=%s;task=%s;reset=%s;boot=%lu;fault_ct=%lu;wdg_ct=%lu;sticky_ct=%lu;raw_sr=%lu;boot_stage=%s;wdg_late=%s",
-						             pending ? 1u : 0u,
-						             sticky ? 1u : 0u,
-						             CrashLog_FaultKindName(snap.lastFault),
-						             CrashLog_TaskIdName(snap.lastTask),
-						             CrashLog_ResetCauseName(snap.resetCause),
-						             static_cast<unsigned long>(snap.bootCount),
-						             static_cast<unsigned long>(snap.faultCountTotal),
-						             static_cast<unsigned long>(snap.watchdogResetCount),
-						             static_cast<unsigned long>(snap.watchdogStickyCount),
-						             static_cast<unsigned long>(snap.watchdogRawStatus),
-						             CrashLog_BootStageName(snap.bootStage),
-						             CrashLog_TaskIdName(snap.watchdogLateTask));
+						    const bool pass = BuildCrashRecordSelfTestResult(snap, metrics, sizeof(metrics));
 						    if (!runOne(1041, "crash_record_retained_safe", pass, metrics)) goto selftest_done;
 						  }
 						#endif
 
 						#if (LC_WATCHDOG_SELFTEST_ENABLE != 0)
 						  {
-						    const WatchdogArmResult armResult = Watchdog_GetArmResult();
-						    const uint32_t enabled = Watchdog_IsEnabled();
-						    const uint32_t reqN = Watchdog_GetRequiredTaskCount();
-						    const uint32_t liveN = Watchdog_GetLiveTaskCount();
-						    const CrashTaskId lateTask = Watchdog_GetLateTask();
-						    const uint32_t recoveryBoot = CrashLog_IsWatchdogRecoveryBoot();
-						    const bool passArmed = (armResult == WATCHDOG_ARM_RESULT_ARMED) &&
-						        (enabled == 1u) &&
-						        (lateTask == CRASH_TASK_NONE) &&
-						        (reqN > 0u) &&
-						        (liveN == reqN);
-						    const bool passStickySkip = (armResult == WATCHDOG_ARM_RESULT_SKIPPED_STICKY_STATUS) &&
-						        (enabled == 0u) &&
-						        (lateTask == CRASH_TASK_NONE) &&
-						        (reqN == 0u) &&
-						        (liveN == 0u);
-						    const bool pass = passArmed || passStickySkip;
+						    WatchdogSelfTestSnapshot snap{};
+						    snap.armResult = Watchdog_GetArmResult();
+						    snap.enabled = Watchdog_IsEnabled();
+						    snap.requiredTaskCount = Watchdog_GetRequiredTaskCount();
+						    snap.liveTaskCount = Watchdog_GetLiveTaskCount();
+						    snap.lateTask = Watchdog_GetLateTask();
+						    snap.recoveryBoot = CrashLog_IsWatchdogRecoveryBoot();
+						    snap.timeoutMs = Watchdog_GetTimeoutMs();
+						    snap.initTimeoutMs = Watchdog_GetInitTimeoutMs();
+						    snap.rawStatus = Watchdog_GetRawStatus();
+						    snap.stickyStatusCount = Watchdog_GetStickyStatusCount();
 						    char metrics[192];
-						    snprintf(metrics,
-						             sizeof(metrics),
-						             "enabled=%lu;arm_result=%s;timeout_ms=%lu;init_timeout_ms=%lu;req_n=%lu;live_n=%lu;late_task=%s;raw_sr=%lu;sticky_ct=%lu;recovery_boot=%lu",
-						             static_cast<unsigned long>(enabled),
-						             Watchdog_ArmResultName(armResult),
-						             static_cast<unsigned long>(Watchdog_GetTimeoutMs()),
-						             static_cast<unsigned long>(Watchdog_GetInitTimeoutMs()),
-						             static_cast<unsigned long>(reqN),
-						             static_cast<unsigned long>(liveN),
-						             CrashLog_TaskIdName(lateTask),
-						             static_cast<unsigned long>(Watchdog_GetRawStatus()),
-						             static_cast<unsigned long>(Watchdog_GetStickyStatusCount()),
-						             static_cast<unsigned long>(recoveryBoot));
+						    const bool pass = BuildWatchdogSupervisorSelfTestResult(snap, metrics, sizeof(metrics));
 						    if (!runOne(1042, "watchdog_supervisor_safe", pass, metrics)) goto selftest_done;
 						  }
 						#endif

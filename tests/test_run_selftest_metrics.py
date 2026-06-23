@@ -35,7 +35,7 @@ def test_parse_metrics_keeps_rtos_memory_headroom_keys():
 
 def test_parse_metrics_keeps_crash_record_keys():
     mod = _load_run_selftest()
-    raw = "pending=0;sticky=1;fault=none;task=none;reset=pin;boot=42;fault_ct=3;wdg_ct=2;sticky_ct=4;raw_sr=3;boot_stage=hello_ack"
+    raw = "pending=0;sticky=1;fault=none;task=none;reset=pin;boot=42;fault_ct=3;wdg_ct=2;sticky_ct=4;raw_sr=3;boot_stage=hello_ack;wdg_late=status"
 
     metrics = mod.parse_metrics(raw)
 
@@ -51,6 +51,7 @@ def test_parse_metrics_keeps_crash_record_keys():
         "sticky_ct": 4,
         "raw_sr": 3,
         "boot_stage": "hello_ack",
+        "wdg_late": "status",
     }
 
 

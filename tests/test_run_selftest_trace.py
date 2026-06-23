@@ -61,13 +61,20 @@ def _hello_ack(mod) -> bytes:
     return _frame_payload(mod, bytes([mod.CMD_HELLO_ACK, 1]))
 
 
-def _selftest_done(mod, run_id: int) -> bytes:
+def _selftest_done(
+    mod,
+    run_id: int,
+    total: int = 1,
+    passed: int = 1,
+    failed: int = 0,
+    aborted: bool = False,
+) -> bytes:
     payload = bytearray([mod.CMD_SELFTEST_DONE, 2])
     payload += bytes([mod.TAG_RUN_ID, 4]) + run_id.to_bytes(4, "little")
-    payload += bytes([mod.TAG_TOTAL, 2]) + (1).to_bytes(2, "little")
-    payload += bytes([mod.TAG_PASSED, 2]) + (1).to_bytes(2, "little")
-    payload += bytes([mod.TAG_FAILED, 2]) + (0).to_bytes(2, "little")
-    payload += bytes([mod.TAG_ABORTED, 1, 0])
+    payload += bytes([mod.TAG_TOTAL, 2]) + total.to_bytes(2, "little")
+    payload += bytes([mod.TAG_PASSED, 2]) + passed.to_bytes(2, "little")
+    payload += bytes([mod.TAG_FAILED, 2]) + failed.to_bytes(2, "little")
+    payload += bytes([mod.TAG_ABORTED, 1, 1 if aborted else 0])
     return _frame_payload(mod, bytes(payload))
 
 
@@ -93,12 +100,21 @@ def _selftest_result_metrics(mod, test_id: int, name: str, passed: bool, metrics
 def _reset_report(mod, seq32: int = 1234) -> bytes:
     payload = bytearray([mod.CMD_RESET_REPORT, 2])
     payload += bytes([mod.TAG_RESET_SEQ32, 4]) + seq32.to_bytes(4, "little")
+    payload += bytes([mod.TAG_RESET_CAUSE, 1, 4])
+    payload += bytes([mod.TAG_RESET_FLAGS, 4]) + (0x20000000).to_bytes(4, "little")
     payload += bytes([mod.TAG_RESET_LAST_FAULT, 1, 2])
     payload += bytes([mod.TAG_RESET_LAST_TASK, 1, 3])
+    payload += bytes([mod.TAG_RESET_BOOT_COUNT, 4]) + (19).to_bytes(4, "little")
+    payload += bytes([mod.TAG_RESET_FAULT_COUNT, 4]) + (5).to_bytes(4, "little")
     payload += bytes([mod.TAG_RESET_WATCHDOG_COUNT, 4]) + (7).to_bytes(4, "little")
+    payload += bytes([mod.TAG_RESET_WATCHDOG_STICKY_CT, 4]) + (3).to_bytes(4, "little")
+    payload += bytes([mod.TAG_RESET_WATCHDOG_RAW_SR, 4]) + (0x20000000).to_bytes(4, "little")
+    payload += bytes([mod.TAG_RESET_UPTIME_MS, 4]) + (123456).to_bytes(4, "little")
+    payload += bytes([mod.TAG_RESET_BOOT_STAGE, 1, 9])
+    payload += bytes([mod.TAG_RESET_RECOVERY_BOOT, 1, 1])
+    payload += bytes([mod.TAG_RESET_FAULT_STAGE, 1, 10])
     payload += bytes([mod.TAG_RESET_WATCHDOG_LATE_TASK, 1, 1])
     payload += bytes([mod.TAG_RESET_ACTIVE_COMMAND, 1, mod.CMD_SELFTEST_START])
-    payload += bytes([mod.TAG_RESET_BOOT_STAGE, 1, 9])
     return _frame_payload(mod, bytes(payload))
 
 
@@ -1379,6 +1395,85 @@ def test_progress_heartbeat_is_not_recorded_as_result(monkeypatch, tmp_path):
     assert checks["selftest_progress_watchdog"]["details"]["progress_count"] == 1
 
 
+def test_crash_watchdog_selftest_results_are_recorded_with_metrics(monkeypatch, tmp_path):
+    mod = _load_run_selftest()
+    run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF
+    clock = FakeClock(step=0.001)
+    crash_metrics = (
+        "pending=0;sticky=0;fault=none;task=none;reset=power;boot=42;"
+        "fault_ct=3;wdg_ct=2;sticky_ct=4;raw_sr=3;boot_stage=hello_ack;wdg_late=none"
+    )
+    watchdog_metrics = (
+        "enabled=1;arm_result=armed;timeout_ms=4000;init_timeout_ms=20;"
+        "req_n=3;live_n=3;late_task=none;raw_sr=0;sticky_ct=0;recovery_boot=0"
+    )
+
+    inbound = b"".join(
+        [
+            _hello_ack(mod),
+            _selftest_result_metrics(mod, 1041, "crash_record_retained_safe", True, crash_metrics),
+            _selftest_result_metrics(mod, 1042, "watchdog_supervisor_safe", True, watchdog_metrics),
+            _selftest_done(mod, run_id, total=2, passed=2, failed=0),
+            _bye_ack(mod, 3),
+            _bye_done(mod, 3, run_id),
+        ]
+    )
+    serial = FakeSerial(inbound)
+    monkeypatch.setattr(mod, "time", SimpleNamespace(monotonic=clock.monotonic, time=clock.time))
+    monkeypatch.setattr(mod, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: serial))
+
+    out_path = tmp_path / "selftest.json"
+    args = SimpleNamespace(
+        port="/dev/ttyAMA0",
+        baud=115200,
+        profile="SAFE",
+        timeout_ms=2000,
+        hello_timeout_ms=1000,
+        hello_retry_ms=50,
+        fast_fail_on_missing_hello=False,
+        pressure_trace=False,
+        pressure_trace_test=None,
+        pressure_sweep_suite=None,
+        progress_timeout_ms=500,
+        progress_jsonl=False,
+        out=str(out_path),
+    )
+
+    rc = mod.run(args)
+
+    assert rc == 0
+    report = mod.json.loads(out_path.read_text(encoding="utf-8"))
+    results = {entry["name"]: entry for entry in report["results"]}
+    assert results["crash_record_retained_safe"]["test_id"] == 1041
+    assert results["crash_record_retained_safe"]["metrics"] == {
+        "pending": 0,
+        "sticky": 0,
+        "fault": "none",
+        "task": "none",
+        "reset": "power",
+        "boot": 42,
+        "fault_ct": 3,
+        "wdg_ct": 2,
+        "sticky_ct": 4,
+        "raw_sr": 3,
+        "boot_stage": "hello_ack",
+        "wdg_late": "none",
+    }
+    assert results["watchdog_supervisor_safe"]["test_id"] == 1042
+    assert results["watchdog_supervisor_safe"]["metrics"] == {
+        "enabled": 1,
+        "arm_result": "armed",
+        "timeout_ms": 4000,
+        "init_timeout_ms": 20,
+        "req_n": 3,
+        "live_n": 3,
+        "late_task": "none",
+        "raw_sr": 0,
+        "sticky_ct": 0,
+        "recovery_boot": 0,
+    }
+
+
 def test_reset_report_during_selftest_is_classified(monkeypatch, tmp_path, capsys):
     mod = _load_run_selftest()
     clock = FakeClock()
@@ -1426,9 +1521,24 @@ def test_reset_report_during_selftest_is_classified(monkeypatch, tmp_path, capsy
     checks = {c["name"]: c for c in report["host_checks"]}
     details = checks["selftest_progress_watchdog"]["details"]
     assert details["timeout_reason"] == "mcu_reset_report_seen"
-    assert details["reset_report"]["watchdog_count"] == 7
-    assert details["reset_report"]["watchdog_late_task"] == 1
-    assert details["reset_report"]["active_command"] == mod.CMD_SELFTEST_START
+    assert details["reset_report"] == {
+        "reset_seq32": 4321,
+        "reset_cause": 4,
+        "reset_flags": 0x20000000,
+        "last_fault": 2,
+        "last_task": 3,
+        "boot_count": 19,
+        "fault_count": 5,
+        "watchdog_count": 7,
+        "watchdog_sticky_count": 3,
+        "watchdog_raw_sr": 0x20000000,
+        "uptime_ms": 123456,
+        "boot_stage": 9,
+        "recovery_boot": 1,
+        "fault_stage": 10,
+        "watchdog_late_task": 1,
+        "active_command": mod.CMD_SELFTEST_START,
+    }
     reset_frames = [frame for frame in details["recent_frames"] if frame["cmd"] == mod.CMD_RESET_REPORT]
     assert reset_frames
     assert reset_frames[-1]["reset_seq32"] == 4321
@@ -1439,6 +1549,8 @@ def test_reset_report_during_selftest_is_classified(monkeypatch, tmp_path, capsy
         "selftest_timeout",
     ]
     assert events[1]["reset_report"]["reset_seq32"] == 4321
+    assert events[1]["reset_report"]["reset_cause"] == 4
+    assert events[1]["reset_report"]["watchdog_raw_sr"] == 0x20000000
     assert events[2]["reason"] == "mcu_reset_report_seen"
 
 

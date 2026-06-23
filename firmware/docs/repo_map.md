@@ -134,10 +134,12 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
   - `firmware/Core/Inc/Orchestrator.h`, `firmware/Core/Src/Orchestrator.cpp`
   - `firmware/Core/Inc/Diagnostics.h`, `firmware/Core/Src/Diagnostics.cpp`
   - `firmware/Core/Inc/DiagnosticResultEmitter.h`, `firmware/Core/Src/DiagnosticResultEmitter.cpp`
+  - `firmware/Core/Inc/CrashWatchdogSelfTestPolicy.h`, `firmware/Core/Src/CrashWatchdogSelfTestPolicy.cpp`
   - `firmware/Core/Inc/OrchestratorCompletionPolicy.h`, `firmware/Core/Src/OrchestratorCompletionPolicy.cpp`
   - `firmware/Core/Inc/SelfTestCommandPolicy.h`
   - Functions: `Orchestrator::begin`, `Orchestrator::_run`, `Orchestrator::executeCommand`, `enqueueFromISR`, `startHomeAsync`, `startRegHomeAsync`, `_flashTaskLoop`
   - Self-test entrypoint: `CMD_SELFTEST_START` remains dispatched from `Orchestrator::executeCommand`, but the SAFE/FULL diagnostic sequence now lives in `DiagnosticsRunner::runSelfTest`. `DiagnosticResultEmitter` owns the byte layout for `CMD_SELFTEST_RESULT` and `CMD_SELFTEST_DONE` payloads.
+  - `CrashWatchdogSelfTestPolicy` owns the host-tested pass/fail policy and compact metrics for SAFE rows `1041 crash_record_retained_safe` and `1042 watchdog_supervisor_safe`; `DiagnosticsRunner` samples runtime state and emits the unchanged result frames.
   - Custom regulator pressure traces use selector `2110` plus self-test start TLVs `TAG_TRACE_CHANNEL`, `TAG_TRACE_PRESSURE_MPSI`, `TAG_TRACE_PULSE_US`, `TAG_TRACE_PULSE_COUNT`, and `TAG_TRACE_FREQUENCY_HZ`; `Orchestrator` copies them into `DiagnosticsRequest::customPressureTrace`, and `DiagnosticsRunner` validates the RAM-only recipe before calling the shared pressure trace runner.
   - Motion qualification diagnostics `2007 motion_home_repeatability_factory` and `2008 motion_pattern_return_factory` live in `DiagnosticsRunner::runSelfTest`, use existing X/Y homing and gantry motion primitives, and publish compact repeatability metrics for Python-side candidate analysis.
   - Pressure qualification diagnostics `2201 pressure_hold_leak_factory`, `2202 pressure_target_cycle_repeatability_factory`, and `2203 pressure_motor_position_hysteresis_factory` live in `DiagnosticsRunner::runSelfTest`, use existing print-channel pressure regulator/sensor primitives, restore the baseline target, pause the regulator at exit, and publish compact hold/leak/repeatability/hysteresis metrics for Python-side candidate analysis.
