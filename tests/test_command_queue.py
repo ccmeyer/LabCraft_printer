@@ -163,6 +163,35 @@ def test_machine_snapshot_classifies_completion_command_not_sent(qapp, test_prof
     assert snapshot["commands"][-1]["sent_ms"] is None
 
 
+def test_machine_records_untraced_command_events(qapp, test_profile):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+
+    command = machine.command_queue.add_command("LED_ON", 0, 0, 0)
+
+    assert machine.command_event_history[-1]["request_id"] is None
+    assert machine.command_event_history[-1]["event"] == "queued"
+    assert machine.command_event_history[-1]["command_number"] == command.command_number
+    assert any(
+        event["kind"] == "command_lifecycle"
+        and event["payload"]["command_number"] == command.command_number
+        for event in machine.black_box_recorder.recent_events()
+    )
+
+
+def test_settings_trace_snapshot_filters_untraced_command_events(qapp, test_profile):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+    untraced = machine.command_queue.add_command("LED_ON", 0, 0, 0)
+    commands = _register_settings_trace(machine)
+
+    snapshot = machine.get_settings_trace_snapshot("req-1")
+
+    assert snapshot["commands"][-1]["command_number"] == commands[-1].command_number
+    assert all(
+        event["command_number"] != untraced.command_number
+        for event in snapshot["recent_command_events"]
+    )
+
+
 def test_machine_snapshot_classifies_completion_command_sent_not_retired(qapp, test_profile):
     machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
     commands = _register_settings_trace(machine)

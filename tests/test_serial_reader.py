@@ -346,3 +346,26 @@ def test_serial_reader_request_stop_is_idempotent_and_waits_with_requested_timeo
     assert reader.interrupt_calls == 1
     assert reader.wait_calls == [mfr.SERIAL_READER_STOP_WAIT_MS]
     assert ser.cancel_calls == 1
+
+
+def test_serial_reader_emits_exception_stop_reason(qapp):
+    class _FailingSerial:
+        is_open = True
+
+        def read(self, _n):
+            raise OSError("device disconnected")
+
+    reader = mfr.SerialReader(_FailingSerial())
+    stops = []
+    reader.readerStopped.connect(stops.append)
+
+    reader.run()
+
+    assert stops == [
+        {
+            "reason": "exception",
+            "requested_stop": False,
+            "exception_type": "OSError",
+            "message": "device disconnected",
+        }
+    ]

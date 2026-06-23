@@ -26,6 +26,7 @@ import select
 
 from hardware.profile import CURRENT_PROFILE, HardwareProfile
 from hardware.null_devices import NullCamera
+from HostBlackBoxLog import HostBlackBoxRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -2179,11 +2180,22 @@ class SerialReader(QThread):
     status_received = Signal(dict)
     ackReceived     = Signal(object)  # dict with ack_cmd, seq8, seq32
     resetReportReceived = Signal(dict)
+    readerStopped = Signal(dict)
 
     def __init__(self, ser, parent=None):
         super().__init__(parent)
         self.ser = ser
         self._stop_requested = False
+
+    def _reader_stop_info(self, reason, exc=None):
+        info = {
+            "reason": str(reason or "unknown"),
+            "requested_stop": bool(self._stop_requested),
+        }
+        if exc is not None:
+            info["exception_type"] = exc.__class__.__name__
+            info["message"] = str(exc)
+        return info
         
     @staticmethod
     def _parse_ack(payload: bytes) -> dict:
@@ -2328,9 +2340,15 @@ class SerialReader(QThread):
 
 
     def run(self):
-        while not self.isInterruptionRequested():
-            try:
+        stop_info = None
+        try:
+            while True:
+                if self.isInterruptionRequested():
+                    stop_info = self._reader_stop_info("requested_stop")
+                    break
                 if not self.ser or not self.ser.is_open:
+                    reason = "requested_stop" if self._stop_requested else "serial_closed"
+                    stop_info = self._reader_stop_info(reason)
                     break
                 hdr = self.ser.read(2)
                 if len(hdr)!=2 or hdr[0]!=START_BYTE: continue
@@ -2362,8 +2380,14 @@ class SerialReader(QThread):
                     print(f"Ack received: {ack['ack_cmd']} seq8={ack['seq8']} seq32={ack['seq32']}")
                     self.ackReceived.emit(ack)
 
-            except (serial.SerialException, OSError, TypeError, ValueError, IndexError):
-                break
+        except (serial.SerialException, OSError, TypeError, ValueError, IndexError) as exc:
+            reason = "requested_stop" if self._stop_requested else "exception"
+            stop_info = self._reader_stop_info(reason, exc)
+        finally:
+            if stop_info is None:
+                reason = "requested_stop" if self._stop_requested else "completed"
+                stop_info = self._reader_stop_info(reason)
+            self.readerStopped.emit(stop_info)
 
     def request_stop(self):
         if self._stop_requested:
@@ -2902,7 +2926,14 @@ class Machine(QObject):
     log_message_received = Signal(str)  # Signal to emit when a log message is received
     flash_state_updated = Signal(object)
 
-    def __init__(self,model, profile: HardwareProfile = CURRENT_PROFILE, serial_factory=serial.Serial):
+    def __init__(
+        self,
+        model,
+        profile: HardwareProfile = CURRENT_PROFILE,
+        serial_factory=serial.Serial,
+        *,
+        black_box_log_dir=None,
+    ):
         super().__init__()
         self.model = model
         self.profile = profile
@@ -2913,7 +2944,10 @@ class Machine(QObject):
         self.command_queue = CommandQueue(event_callback=self._record_command_event)
         self.baud = 115200  # Default baud rate for serial communication
         self.ser = None
+        self.port = None
         self.reader = None
+        self.black_box_recorder = HostBlackBoxRecorder(log_dir=black_box_log_dir)
+        self._last_black_box_log_result = None
         
         self.fss = 13107
         self.psi_offset = 1638
@@ -2924,8 +2958,8 @@ class Machine(QObject):
         self.sent_command = None
         self._last_reset_report = None
         self._flash_state = default_flash_safety_state()
-        self.status_history = deque(maxlen=128)
-        self.command_event_history = deque(maxlen=256)
+        self.status_history = deque(maxlen=512)
+        self.command_event_history = deque(maxlen=512)
         self._settings_trace_requests = {}
         self._latest_status_sample = None
 
@@ -3022,6 +3056,133 @@ class Machine(QObject):
             return (ack_code, -1, int(seq8))
         return (ack_code, -1, -1)  # last-ditch fallback
 
+    def _record_black_box_event(self, kind, payload=None):
+        recorder = getattr(self, "black_box_recorder", None)
+        if recorder is None:
+            return None
+        try:
+            return recorder.record(kind, payload or {})
+        except Exception as exc:
+            print(f"Black-box event record failed: {exc}")
+            return None
+
+    def _ack_key_for_output(self, key):
+        try:
+            ack_code, seq32, seq8 = key
+        except Exception:
+            return {"raw": str(key)}
+
+        seq32 = self._coerce_optional_int(seq32)
+        seq8 = self._coerce_optional_int(seq8)
+        return {
+            "ack_cmd": self._coerce_optional_int(ack_code),
+            "seq32": None if seq32 == -1 else seq32,
+            "seq8": None if seq8 == -1 else seq8,
+        }
+
+    def _ack_event_payload(self, ack, *, matched_pending, handler=None, ignored_control_ack=False):
+        ack = dict(ack or {})
+        payload = {
+            "ack_cmd": self._coerce_optional_int(ack.get("ack_cmd")),
+            "seq8": self._coerce_optional_int(ack.get("seq8")),
+            "seq32": self._coerce_optional_int(ack.get("seq32")),
+            "ack_result": ack.get("ack_result"),
+            "expected_seq32": self._coerce_optional_int(ack.get("expected_seq32")),
+            "capabilities": self._coerce_optional_int(ack.get("capabilities")),
+            "matched_pending": bool(matched_pending),
+            "ignored_control_ack": bool(ignored_control_ack),
+        }
+        if handler:
+            payload["handler"] = str(handler)
+        return payload
+
+    def _compact_command_for_black_box(self, command):
+        return {
+            "command_number": self._coerce_optional_int(getattr(command, "command_number", None)),
+            "command_type": str(getattr(command, "command_type", "") or ""),
+            "status": str(getattr(command, "status", "") or ""),
+            "param1": self._coerce_optional_int(getattr(command, "param1", None)),
+            "param2": self._coerce_optional_int(getattr(command, "param2", None)),
+            "param3": self._coerce_optional_int(getattr(command, "param3", None)),
+            "send_attempts": self._coerce_optional_int(getattr(command, "send_attempts", None)),
+        }
+
+    def _status_sample_for_black_box(self, sample):
+        sample = dict(sample or {})
+        out = self._status_sample_for_output(sample)
+        out["monotonic_ns"] = self._coerce_optional_int(sample.get("monotonic_ns"))
+        return out
+
+    def _black_box_transport_state(self):
+        queue = getattr(getattr(self, "command_queue", None), "queue", [])
+        completed = getattr(getattr(self, "command_queue", None), "completed", [])
+        pending_acks = getattr(self, "_pending_acks", {})
+        return {
+            "port": getattr(self, "port", None),
+            "serial_open": bool(getattr(getattr(self, "ser", None), "is_open", False)),
+            "profile": str(getattr(getattr(self, "profile", None), "name", "") or ""),
+            "transport_ready": bool(getattr(self, "_transport_ready", False)),
+            "tx_paused": bool(getattr(self, "_tx_paused", False)),
+            "sequence_pause": bool(getattr(self, "_sequence_pause", False)),
+            "session_recovery_in_progress": bool(getattr(self, "_session_recovery_in_progress", False)),
+            "waiting_for_post_clear_status": bool(getattr(self, "_waiting_for_post_clear_status", False)),
+            "pending_ack_count": len(pending_acks),
+            "pending_ack_keys": [self._ack_key_for_output(key) for key in list(pending_acks.keys())],
+            "command_queue_depth": len(queue),
+            "completed_command_count": len(completed),
+            "latest_status": self._status_sample_for_black_box(getattr(self, "_latest_status_sample", {}) or {}),
+        }
+
+    def _build_black_box_snapshot(self, reason, trigger=None):
+        recorder = getattr(self, "black_box_recorder", None)
+        queue = getattr(getattr(self, "command_queue", None), "queue", [])
+        completed = getattr(getattr(self, "command_queue", None), "completed", [])
+        return {
+            "schema_version": "host_black_box_v1",
+            "reason": str(reason or "snapshot"),
+            "session_id": getattr(recorder, "session_id", None),
+            "trigger": dict(trigger or {}),
+            "transport": self._black_box_transport_state(),
+            "last_reset_report": dict(getattr(self, "_last_reset_report", {}) or {}),
+            "status_history": [
+                self._status_sample_for_black_box(sample)
+                for sample in list(getattr(self, "status_history", []))
+            ],
+            "command_events": [
+                dict(event)
+                for event in list(getattr(self, "command_event_history", []))
+            ],
+            "black_box_events": recorder.recent_events() if recorder is not None else [],
+            "commands": {
+                "queued": [self._compact_command_for_black_box(cmd) for cmd in list(queue)],
+                "completed": [self._compact_command_for_black_box(cmd) for cmd in list(completed)],
+            },
+        }
+
+    def _write_black_box_snapshot(self, reason, trigger=None):
+        recorder = getattr(self, "black_box_recorder", None)
+        if recorder is None:
+            return {"path": None, "error": "black_box_recorder_missing"}
+        snapshot = self._build_black_box_snapshot(reason, trigger)
+        try:
+            result = recorder.write_snapshot(snapshot)
+        except Exception as exc:
+            result = {"path": None, "error": str(exc) or exc.__class__.__name__}
+        result = dict(result or {"path": None, "error": "black_box_write_returned_empty"})
+        self._last_black_box_log_result = dict(result or {})
+        if result.get("error"):
+            self._record_black_box_event(
+                "black_box_log_write_failed",
+                {"reason": str(reason or "snapshot"), "error": result.get("error")},
+            )
+            print(f"Black-box log write failed: {result.get('error')}")
+        else:
+            self._record_black_box_event(
+                "black_box_log_written",
+                {"reason": str(reason or "snapshot"), "path": result.get("path")},
+            )
+        return result
+
     def _start_ack_wait(self, ack_code: int, seq32: int | None, timeout_ms: int,
                         on_ok: callable, on_timeout: callable, *, seq8: int | None = None):
         """Begin waiting for a specific ack_code with a one-shot timer."""
@@ -3048,6 +3209,7 @@ class Machine(QObject):
         entry = self._pending_acks.pop(key, None)
         if not entry:
             return
+        self._record_black_box_event("ack_timeout", {"key": self._ack_key_for_output(key)})
         try:
             self._invoke_ack_callback(entry["to"])
         finally:
@@ -3068,6 +3230,10 @@ class Machine(QObject):
         seq32    = ack.get("seq32")
         seq8     = ack.get("seq8")
         if ack_code == CMD_QUEUE_ACK and self._handle_pause_after_queue_ack(ack):
+            self._record_black_box_event(
+                "ack",
+                self._ack_event_payload(ack, matched_pending=True, handler="pause_after"),
+            )
             return
 
         # Try SEQ32 first, then fall back to seq8
@@ -3079,13 +3245,29 @@ class Machine(QObject):
 
         if entry:
             entry["timer"].stop()
+            self._record_black_box_event(
+                "ack",
+                self._ack_event_payload(ack, matched_pending=True, handler="pending_ack"),
+            )
             try:
                 self._invoke_ack_callback(entry["ok"], ack)
             finally:
                 entry["timer"].deleteLater()
         else:
             if ack_code == CMD_QUEUE_ACK and seq32 is not None and int(seq32) >= int(self._control_seq_base):
+                self._record_black_box_event(
+                    "ack",
+                    self._ack_event_payload(
+                        ack,
+                        matched_pending=False,
+                        ignored_control_ack=True,
+                    ),
+                )
                 return
+            self._record_black_box_event(
+                "ack",
+                self._ack_event_payload(ack, matched_pending=False),
+            )
             # Optional: log stray ACKs
             print(f"Stray ACK: code=0x{ack_code:02X} seq32={seq32} seq8={seq8}")
             pass
@@ -3096,6 +3278,7 @@ class Machine(QObject):
             self.ser = self._serial_factory(self.port, self.baud, timeout=0.1)
             if not self.ser.is_open:
                 raise IOError("Port not open")
+            self._record_black_box_event("connect_board", {"port": self.port})
             
             self.begin_reader_thread()
             self._send_hello()
@@ -3335,6 +3518,10 @@ class Machine(QObject):
         
     def disconnect_handler(self):
         # self.reset_board()
+        self._record_black_box_event(
+            "disconnect_complete",
+            {"port": getattr(self, "port", None)},
+        )
         # Now it's safe to close the main serial
         try:
             if self.ser is not None:
@@ -3428,6 +3615,10 @@ class Machine(QObject):
         return True
 
     def disconnect_board(self, error=False):
+        self._record_black_box_event(
+            "disconnect_requested",
+            {"error": bool(error), "port": getattr(self, "port", None)},
+        )
         if not self.ser:
             self.disconnect_handler()
             return
@@ -3494,7 +3685,14 @@ class Machine(QObject):
             self.reader.status_received.connect(self.update_status)
             self.reader.ackReceived.connect(self._on_any_ack)
             self.reader.resetReportReceived.connect(self._on_reset_report)
+            reader_stopped = getattr(self.reader, "readerStopped", None)
+            if reader_stopped is not None:
+                reader_stopped.connect(self._on_serial_reader_stopped)
             self.reader.start()
+            self._record_black_box_event(
+                "serial_reader_started",
+                {"port": getattr(self, "port", None)},
+            )
             print('Serial reader thread started')
         else:
             print('Serial reader thread already running')
@@ -3502,9 +3700,18 @@ class Machine(QObject):
     @Slot(dict)
     def _on_reset_report(self, report):
         self._last_reset_report = dict(report)
+        self._record_black_box_event("reset_report", dict(report))
+        self._write_black_box_snapshot("reset_report", {"report": dict(report)})
         self._reset_session_state_for_recovery()
         self._begin_recovery_handshake()
         self.reset_report_received.emit(dict(report))
+
+    @Slot(dict)
+    def _on_serial_reader_stopped(self, info):
+        info = dict(info or {})
+        self._record_black_box_event("serial_reader_stopped", info)
+        if info.get("reason") != "requested_stop":
+            self._write_black_box_snapshot("serial_reader_stopped", info)
 
     def stop_reader_thread(self):
         """
@@ -3756,9 +3963,7 @@ class Machine(QObject):
     def _record_command_event(self, command, event_name):
         metadata = dict(getattr(command, "trace_metadata", {}) or {})
         request_id = metadata.get("request_id")
-        if not request_id:
-            return
-        request_id = str(request_id)
+        request_id = str(request_id) if request_id else None
         observed_ns = int(time.monotonic_ns())
         request_created_monotonic_ns = metadata.get("request_created_monotonic_ns")
         event = {
@@ -3773,6 +3978,7 @@ class Machine(QObject):
             "observed_ms": self._relative_ms(observed_ns, request_created_monotonic_ns),
         }
         self.command_event_history.append(event)
+        self._record_black_box_event("command_lifecycle", event)
 
     def register_settings_trace_binding(self, payload):
         payload = dict(payload or {})
@@ -4090,6 +4296,9 @@ class Machine(QObject):
             self._record_command_event(command, "sent")
 
     def _handle_transport_fault(self, message):
+        payload = {"message": str(message)}
+        self._record_black_box_event("transport_fault", payload)
+        self._write_black_box_snapshot("transport_fault", payload)
         self._tx_paused = True
         try:
             self.stop_execution_timer()
