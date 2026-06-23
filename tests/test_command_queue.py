@@ -411,3 +411,64 @@ def test_queue_busy_resends_are_bounded(qapp, test_profile):
     assert machine._tx_paused is True
     assert errors
     assert "remained busy" in errors[-1]
+
+
+class _OpenSerial:
+    is_open = True
+
+
+def test_queue_ack_timeout_retries_before_transport_loss(qapp, test_profile):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+    lost_reports = []
+    machine.serial_connection_lost.connect(lost_reports.append)
+    machine.pump_send_queue = Mock()
+    command = machine.wait_ms(10)
+    command.send_attempts = machine._queue_ack_max_retries - 1
+    command.mark_as_sent()
+
+    machine._on_queue_ack_timeout(command.command_number)
+
+    assert lost_reports == []
+    assert command.status == "Added"
+    machine.pump_send_queue.assert_called_once()
+
+
+def test_queue_ack_timeout_at_retry_limit_marks_mcu_unresponsive(qapp, test_profile, tmp_path):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
+    lost_reports = []
+    connected_states = []
+    machine.serial_connection_lost.connect(lost_reports.append)
+    machine.machine_connected_signal.connect(connected_states.append)
+    machine.ser = _OpenSerial()
+    machine.port = "COM9"
+    command = machine.wait_ms(10)
+    machine._transport_ready = True
+    machine._tx_paused = False
+    command.send_attempts = machine._queue_ack_max_retries
+    command.mark_as_sent()
+
+    machine._on_queue_ack_timeout(command.command_number)
+
+    assert connected_states == [False]
+    assert len(lost_reports) == 1
+    assert lost_reports[0]["reason"] == "mcu_unresponsive"
+    assert lost_reports[0]["trigger_reason"] == "ack_timeout"
+    assert "command ACK" in lost_reports[0]["summary"]
+    assert machine._transport_ready is False
+    assert machine._tx_paused is True
+    assert len(machine.command_queue.queue) == 0
+
+
+def test_command_queue_rejects_commands_after_untrusted_transport(qapp, test_profile):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+    errors = []
+    machine.error_occurred.connect(errors.append)
+    machine._transport_ready = False
+    machine._command_queue_blocked_reason = "mcu_unresponsive"
+
+    result = machine.add_command_to_queue("DISABLE_MOTORS", 0, 0, 0)
+
+    assert result is False
+    assert len(machine.command_queue.queue) == 0
+    assert errors
+    assert "machine connection is not trusted" in errors[-1]

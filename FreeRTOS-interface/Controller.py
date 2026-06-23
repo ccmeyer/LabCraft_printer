@@ -505,7 +505,7 @@ class Controller(QObject):
                 snapshots.append(
                     {
                         "path": black_box_path,
-                        "reason": "serial_reader_stopped",
+                        "reason": report.get("black_box_reason") or "serial_reader_stopped",
                         "session_id": machine_context.get("black_box_session_id"),
                         "error": black_box_error,
                     }

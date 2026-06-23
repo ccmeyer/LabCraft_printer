@@ -202,6 +202,41 @@ def test_handle_serial_connection_lost_popup_survives_black_box_write_failure():
     assert context["connection_loss_report"]["black_box_log_error"] == "disk unavailable"
 
 
+def test_handle_serial_connection_lost_preserves_mcu_unresponsive_snapshot_reason():
+    popups = []
+
+    controller = Controller.__new__(Controller)
+    controller.model = SimpleNamespace(
+        machine_model=SimpleNamespace(
+            get_current_position_dict=lambda: {"X": 1, "Y": 2, "Z": 3},
+        )
+    )
+    controller.error_occurred_signal = SimpleNamespace(
+        emit=lambda title, message: popups.append((title, message))
+    )
+    controller.expected_position = {"X": 9, "Y": 9, "Z": 9}
+    controller.expected_location = "Home"
+
+    Controller.handle_serial_connection_lost(
+        controller,
+        {
+            "reason": "mcu_unresponsive",
+            "summary": "MCU stopped responding; no valid frames received for 2500 ms.",
+            "black_box_reason": "mcu_unresponsive",
+            "black_box_log_path": "logs/machine_black_box/mcu_unresponsive.json",
+            "black_box_log_error": None,
+        },
+    )
+
+    assert popups[0][0] == "Machine Connection Lost"
+    assert "MCU stopped responding" in popups[0][1]
+    assert "Black-box log: logs/machine_black_box/mcu_unresponsive.json" in popups[0][1]
+    context = controller._last_connection_loss_debug_bundle_context
+    assert context["connection_loss_report"]["reason"] == "mcu_unresponsive"
+    assert context["black_box_snapshots"][0]["reason"] == "mcu_unresponsive"
+    assert context["black_box_snapshots"][0]["path"] == "logs/machine_black_box/mcu_unresponsive.json"
+
+
 def test_export_last_connection_loss_debug_bundle_packages_current_context(tmp_path):
     snapshot = tmp_path / "serial_reader_stopped.json"
     snapshot.write_text('{"reason": "serial_reader_stopped"}', encoding="utf-8")

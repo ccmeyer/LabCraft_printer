@@ -2974,6 +2974,14 @@ class Machine(QObject):
         self._transport_ready = False
         self._queue_ack_timeout_ms = 200
         self._queue_ack_max_retries = 3
+        self._mcu_response_timeout_ms = 2500
+        self._mcu_response_check_interval_ms = 250
+        self._last_mcu_rx_monotonic_ns = None
+        self._last_mcu_rx_kind = None
+        self._transport_ready_monotonic_ns = None
+        self._mcu_unresponsive_reported = False
+        self._handling_mcu_unresponsive = False
+        self._command_queue_blocked_reason = None
         self._pause_after_ack_timeout_ms = 1000
         self._pause_after_confirm_timeout_ms = 2500
         self._pending_pause_after_requests = {}
@@ -2986,6 +2994,9 @@ class Machine(QObject):
 
         self.execution_timer = QTimer(self)
         self.execution_timer.timeout.connect(self.pump_send_queue)
+        self._mcu_response_timer = QTimer(self)
+        self._mcu_response_timer.setInterval(self._mcu_response_check_interval_ms)
+        self._mcu_response_timer.timeout.connect(self._check_mcu_response_health)
         self._session_recovery_in_progress = False
         self._waiting_for_post_clear_status = False
 
@@ -3069,6 +3080,71 @@ class Machine(QObject):
             print(f"Black-box event record failed: {exc}")
             return None
 
+    def _mark_mcu_rx(self, frame_kind):
+        self._last_mcu_rx_monotonic_ns = int(time.monotonic_ns())
+        self._last_mcu_rx_kind = str(frame_kind or "frame")
+
+    def _last_mcu_rx_age_ms(self, now_ns=None):
+        last_ns = self._coerce_optional_int(getattr(self, "_last_mcu_rx_monotonic_ns", None))
+        if last_ns is None:
+            return None
+        if now_ns is None:
+            now_ns = int(time.monotonic_ns())
+        return max(0.0, (int(now_ns) - int(last_ns)) / 1_000_000.0)
+
+    def _start_mcu_response_watchdog(self):
+        now_ns = int(time.monotonic_ns())
+        self._transport_ready_monotonic_ns = now_ns
+        if self._last_mcu_rx_monotonic_ns is None:
+            self._last_mcu_rx_monotonic_ns = now_ns
+            self._last_mcu_rx_kind = "transport_ready"
+        self._mcu_unresponsive_reported = False
+        timer = getattr(self, "_mcu_response_timer", None)
+        if timer is not None:
+            try:
+                timer.start(self._mcu_response_check_interval_ms)
+            except TypeError:
+                timer.start()
+
+    def _stop_mcu_response_watchdog(self):
+        timer = getattr(self, "_mcu_response_timer", None)
+        if timer is not None:
+            try:
+                timer.stop()
+            except Exception:
+                pass
+
+    def _check_mcu_response_health(self, now_ns=None):
+        if not getattr(self, "_transport_ready", False):
+            return
+        if getattr(self, "_mcu_unresponsive_reported", False):
+            return
+        ser = getattr(self, "ser", None)
+        if ser is None or not getattr(ser, "is_open", False):
+            return
+
+        if now_ns is None:
+            now_ns = int(time.monotonic_ns())
+        last_ns = self._coerce_optional_int(getattr(self, "_last_mcu_rx_monotonic_ns", None))
+        if last_ns is None:
+            last_ns = self._coerce_optional_int(getattr(self, "_transport_ready_monotonic_ns", None))
+        if last_ns is None:
+            return
+
+        age_ms = max(0.0, (int(now_ns) - int(last_ns)) / 1_000_000.0)
+        timeout_ms = int(getattr(self, "_mcu_response_timeout_ms", 2500) or 2500)
+        if age_ms < timeout_ms:
+            return
+
+        self._handle_mcu_unresponsive(
+            "no_mcu_frames",
+            {
+                "last_frame_kind": getattr(self, "_last_mcu_rx_kind", None),
+                "last_frame_age_ms": round(age_ms, 3),
+                "timeout_ms": timeout_ms,
+            },
+        )
+
     def _ack_key_for_output(self, key):
         try:
             ack_code, seq32, seq8 = key
@@ -3120,6 +3196,7 @@ class Machine(QObject):
         queue = getattr(getattr(self, "command_queue", None), "queue", [])
         completed = getattr(getattr(self, "command_queue", None), "completed", [])
         pending_acks = getattr(self, "_pending_acks", {})
+        last_rx_age = self._last_mcu_rx_age_ms()
         return {
             "port": getattr(self, "port", None),
             "serial_open": bool(getattr(getattr(self, "ser", None), "is_open", False)),
@@ -3134,6 +3211,11 @@ class Machine(QObject):
             "command_queue_depth": len(queue),
             "completed_command_count": len(completed),
             "latest_status": self._status_sample_for_black_box(getattr(self, "_latest_status_sample", {}) or {}),
+            "last_mcu_rx_kind": getattr(self, "_last_mcu_rx_kind", None),
+            "last_mcu_rx_monotonic_ns": self._coerce_optional_int(getattr(self, "_last_mcu_rx_monotonic_ns", None)),
+            "last_mcu_rx_age_ms": round(last_rx_age, 3) if last_rx_age is not None else None,
+            "mcu_response_timeout_ms": self._coerce_optional_int(getattr(self, "_mcu_response_timeout_ms", None)),
+            "mcu_unresponsive_reported": bool(getattr(self, "_mcu_unresponsive_reported", False)),
         }
 
     def _build_black_box_snapshot(self, reason, trigger=None):
@@ -3256,6 +3338,41 @@ class Machine(QObject):
             "exception_type": info.get("exception_type"),
             "message": info.get("message"),
             "summary": summary,
+            "black_box_reason": "serial_reader_stopped",
+            "black_box_log_path": snapshot_result.get("path"),
+            "black_box_log_error": snapshot_result.get("error"),
+        }
+
+    def _mcu_unresponsive_report(self, trigger, snapshot_result):
+        trigger = dict(trigger or {})
+        snapshot_result = dict(snapshot_result or {})
+        age_ms = self._coerce_optional_int(trigger.get("last_frame_age_ms"))
+        if age_ms is None:
+            age_ms = self._last_mcu_rx_age_ms()
+        timeout_ms = self._coerce_optional_int(trigger.get("timeout_ms"))
+        if timeout_ms is None:
+            timeout_ms = self._coerce_optional_int(getattr(self, "_mcu_response_timeout_ms", None))
+        trigger_reason = str(trigger.get("trigger_reason") or trigger.get("reason") or "unknown")
+        if trigger_reason == "ack_timeout":
+            summary = "MCU command transport stopped responding while waiting for a command ACK."
+        elif age_ms is not None:
+            summary = f"MCU stopped responding; no valid frames received for {int(round(age_ms))} ms."
+        else:
+            summary = "MCU stopped responding; no valid frames are being received."
+        return {
+            "reason": "mcu_unresponsive",
+            "trigger_reason": trigger_reason,
+            "requested_stop": False,
+            "port": getattr(self, "port", None),
+            "summary": summary,
+            "last_mcu_rx_kind": getattr(self, "_last_mcu_rx_kind", None),
+            "last_mcu_rx_age_ms": round(float(age_ms), 3) if age_ms is not None else None,
+            "mcu_response_timeout_ms": timeout_ms,
+            "pending_ack_keys": [
+                self._ack_key_for_output(key)
+                for key in list(getattr(self, "_pending_acks", {}).keys())
+            ],
+            "black_box_reason": "mcu_unresponsive",
             "black_box_log_path": snapshot_result.get("path"),
             "black_box_log_error": snapshot_result.get("error"),
         }
@@ -3267,6 +3384,7 @@ class Machine(QObject):
         self._cancel_pending_pause_after_requests()
         self._transport_capabilities = 0
         self._transport_ready = False
+        self._command_queue_blocked_reason = "serial_connection_lost"
         self._next_ctl_seq32 = self._control_seq_base
         self._tx_paused = True
         self._sequence_pause = False
@@ -3287,6 +3405,62 @@ class Machine(QObject):
         self.ser = None
         self.port = None
         self.reader = None
+        self._stop_mcu_response_watchdog()
+
+    def _clear_transport_after_mcu_unresponsive(self):
+        self.command_queue.clear_queue(reset_counter=True)
+        self.sent_command = None
+        self._cancel_pending_acks()
+        self._cancel_pending_pause_after_requests()
+        self._transport_capabilities = 0
+        self._transport_ready = False
+        self._command_queue_blocked_reason = "mcu_unresponsive"
+        self._next_ctl_seq32 = self._control_seq_base
+        self._tx_paused = True
+        self._sequence_pause = False
+        self._session_recovery_in_progress = False
+        self._waiting_for_post_clear_status = False
+        self._pending_clear_request = None
+        self._goodbye_seq32 = None
+        self._stop_mcu_response_watchdog()
+        try:
+            if getattr(self, "execution_timer", None):
+                self.execution_timer.stop()
+        except Exception:
+            pass
+
+    def _handle_mcu_unresponsive(self, trigger_reason, trigger=None):
+        if getattr(self, "_handling_mcu_unresponsive", False):
+            return
+        if getattr(self, "_mcu_unresponsive_reported", False):
+            return
+
+        trigger = dict(trigger or {})
+        trigger["trigger_reason"] = str(trigger_reason or trigger.get("trigger_reason") or "unknown")
+        trigger.setdefault("port", getattr(self, "port", None))
+        trigger.setdefault("last_frame_kind", getattr(self, "_last_mcu_rx_kind", None))
+        age_ms = self._last_mcu_rx_age_ms()
+        if age_ms is not None:
+            trigger.setdefault("last_frame_age_ms", round(age_ms, 3))
+        trigger.setdefault("timeout_ms", getattr(self, "_mcu_response_timeout_ms", None))
+        trigger.setdefault(
+            "pending_ack_keys",
+            [self._ack_key_for_output(key) for key in list(getattr(self, "_pending_acks", {}).keys())],
+        )
+
+        self._handling_mcu_unresponsive = True
+        self._mcu_unresponsive_reported = True
+        self._stop_mcu_response_watchdog()
+        try:
+            self._record_black_box_event("mcu_unresponsive", trigger)
+            snapshot_result = self._write_black_box_snapshot("mcu_unresponsive", trigger)
+            report = self._mcu_unresponsive_report(trigger, snapshot_result)
+            self._record_black_box_event("serial_connection_lost", report)
+            self._clear_transport_after_mcu_unresponsive()
+            self.machine_connected_signal.emit(False)
+            self.serial_connection_lost.emit(report)
+        finally:
+            self._handling_mcu_unresponsive = False
 
     def _start_ack_wait(self, ack_code: int, seq32: int | None, timeout_ms: int,
                         on_ok: callable, on_timeout: callable, *, seq8: int | None = None):
@@ -3331,6 +3505,7 @@ class Machine(QObject):
         """
         ack = {"ack_cmd": int, "seq8": int, "seq32": int|None}
         """
+        self._mark_mcu_rx("ack")
         ack_code = ack.get("ack_cmd")
         seq32    = ack.get("seq32")
         seq8     = ack.get("seq8")
@@ -3379,6 +3554,17 @@ class Machine(QObject):
 
     def connect_board(self, port):
         try:
+            if (
+                self.ser is not None
+                and getattr(self.ser, "is_open", False)
+                and not getattr(self, "_transport_ready", False)
+                and str(getattr(self, "port", port)) == str(port)
+            ):
+                self.port = port
+                self._record_black_box_event("connect_board_reuse_open_serial", {"port": self.port})
+                self.begin_reader_thread()
+                self._send_hello()
+                return
             self.port = port
             self.ser = self._serial_factory(self.port, self.baud, timeout=0.1)
             if not self.ser.is_open:
@@ -3396,6 +3582,7 @@ class Machine(QObject):
     def _send_hello(self):
         self._transport_ready = False
         self._transport_capabilities = 0
+        self._stop_mcu_response_watchdog()
         hello_seq = self._alloc_ctl_seq32()
         self._write_frame(build_frame(HELLO, hello_seq))
         self._start_ack_wait(
@@ -3424,9 +3611,11 @@ class Machine(QObject):
         self._session_recovery_in_progress = False
         self._transport_capabilities = capabilities
         self._transport_ready = True
+        self._command_queue_blocked_reason = None
         self._tx_paused = False
         self._sequence_pause = False
         self._waiting_for_post_clear_status = False
+        self._start_mcu_response_watchdog()
         self.begin_execution_timer()
         self.pump_send_queue()
         self.machine_connected_signal.emit(True)
@@ -3460,6 +3649,7 @@ class Machine(QObject):
     def _teardown_transport_for_retry(self):
         """Close current transport before recursive reconnect attempts."""
         self._expect_serial_reader_stop("connection_retry")
+        self._stop_mcu_response_watchdog()
         try:
             self.stop_reader_thread()
         except Exception:
@@ -3474,6 +3664,7 @@ class Machine(QObject):
     def reset_board(self):
         print('Resetting board')
         self._expect_serial_reader_stop("reset_board")
+        self._stop_mcu_response_watchdog()
         self.command_queue.clear_queue(reset_counter=True)
         self._transport_capabilities = 0
         self._transport_ready = False
@@ -3592,12 +3783,14 @@ class Machine(QObject):
         self._cancel_pending_pause_after_requests()
         self._transport_capabilities = 0
         self._transport_ready = False
+        self._command_queue_blocked_reason = "board_reset_recovery"
         self._next_ctl_seq32 = self._control_seq_base
         self._tx_paused = True
         self._sequence_pause = False
         self._waiting_for_post_clear_status = False
         self._pending_clear_request = None
         self._goodbye_seq32 = None
+        self._stop_mcu_response_watchdog()
         if getattr(self, 'execution_timer', None):
             try:
                 self.execution_timer.stop()
@@ -3626,6 +3819,7 @@ class Machine(QObject):
     def disconnect_handler(self):
         # self.reset_board()
         self._expect_serial_reader_stop("disconnect_handler")
+        self._stop_mcu_response_watchdog()
         self._record_black_box_event(
             "disconnect_complete",
             {"port": getattr(self, "port", None)},
@@ -3666,6 +3860,7 @@ class Machine(QObject):
 
         previous_transport_ready = bool(getattr(self, "_transport_ready", False))
         previous_tx_paused = bool(getattr(self, "_tx_paused", False))
+        self._stop_mcu_response_watchdog()
         self._cancel_pending_acks()
 
         serial_reader = self.reader
@@ -3694,6 +3889,8 @@ class Machine(QObject):
             self._expected_serial_reader_stop_reason = None
             self._transport_ready = previous_transport_ready
             self._tx_paused = previous_tx_paused
+            if previous_transport_ready:
+                self._start_mcu_response_watchdog()
             if timer_was_active:
                 try:
                     self.begin_execution_timer()
@@ -3709,6 +3906,8 @@ class Machine(QObject):
             self._expected_serial_reader_stop_reason = None
             self._transport_ready = previous_transport_ready
             self._tx_paused = previous_tx_paused
+            if previous_transport_ready:
+                self._start_mcu_response_watchdog()
             if timer_was_active:
                 try:
                     self.begin_execution_timer()
@@ -3811,6 +4010,7 @@ class Machine(QObject):
 
     @Slot(dict)
     def _on_reset_report(self, report):
+        self._mark_mcu_rx("reset_report")
         self._last_reset_report = dict(report)
         self._record_black_box_event("reset_report", dict(report))
         self._write_black_box_snapshot("reset_report", {"report": dict(report)})
@@ -4310,6 +4510,7 @@ class Machine(QObject):
         Update the status of the machine with the received data.
         """
         if isinstance(data, dict):
+            self._mark_mcu_rx("status")
             observed_monotonic_ns = int(time.monotonic_ns())
             sample = self._status_sample_from_dict(data, observed_monotonic_ns)
             self.status_history.append(sample)
@@ -4372,6 +4573,22 @@ class Machine(QObject):
         #     if not completed:
         #         print('Cannot add manual command while commands are in queue')
         #         return False
+        blocked_reason = getattr(self, "_command_queue_blocked_reason", None)
+        if blocked_reason and not getattr(self, "_transport_ready", False):
+            message = (
+                f"Cannot queue {command_type}: machine connection is not trusted after "
+                f"{blocked_reason}. Reconnect to the MCU and home the motors before sending commands."
+            )
+            self._record_black_box_event(
+                "command_rejected_untrusted_transport",
+                {
+                    "command_type": str(command_type or ""),
+                    "blocked_reason": str(blocked_reason),
+                },
+            )
+            print(message)
+            self.error_occurred.emit(message)
+            return False
         command = self.command_queue.add_command(
             command_type,
             param1,
@@ -4509,8 +4726,17 @@ class Machine(QObject):
         if command is None or command.status in {"Completed", "Canceled", "Accepted", "Executing"}:
             return
         if int(getattr(command, "send_attempts", 0) or 0) >= int(self._queue_ack_max_retries):
-            self._handle_transport_fault(
-                f"Timed out waiting for queue ACK for command {seq32} after {command.send_attempts} attempts."
+            self._handle_mcu_unresponsive(
+                "ack_timeout",
+                {
+                    "command_number": int(seq32 or 0),
+                    "command_type": str(getattr(command, "command_type", "") or ""),
+                    "send_attempts": int(getattr(command, "send_attempts", 0) or 0),
+                    "message": (
+                        f"Timed out waiting for queue ACK for command {seq32} "
+                        f"after {command.send_attempts} attempts."
+                    ),
+                },
             )
             return
         if command.reset_for_resend():

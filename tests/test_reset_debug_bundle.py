@@ -201,6 +201,46 @@ def test_export_connection_loss_debug_bundle_records_missing_snapshot(tmp_path):
     assert manifest["black_box_snapshots"][0]["included"] is False
 
 
+def test_export_connection_loss_debug_bundle_labels_mcu_unresponsive_snapshot(tmp_path):
+    downloads = tmp_path / "Downloads"
+    snapshot = _write_json(
+        tmp_path / "mcu_unresponsive.json",
+        {"schema_version": "host_black_box_v1", "reason": "mcu_unresponsive"},
+    )
+    created_at = datetime(2026, 6, 23, 12, 34, 56, tzinfo=timezone.utc)
+    context = {
+        "bundle_kind": "connection_loss",
+        "repo_root": str(tmp_path),
+        "connection_loss_report": {
+            "summary": "MCU stopped responding; no valid frames received for 2500 ms.",
+            "reason": "mcu_unresponsive",
+            "port": "COM9",
+            "black_box_log_path": str(snapshot),
+        },
+        "black_box_session_id": "session-abc",
+        "black_box_snapshots": [
+            {
+                "path": str(snapshot),
+                "reason": "mcu_unresponsive",
+                "session_id": "session-abc",
+            }
+        ],
+    }
+
+    result = export_reset_debug_bundle(context, output_dir=downloads, created_at=created_at)
+
+    archive = Path(result["archive_path"])
+    with zipfile.ZipFile(archive) as zf:
+        names = set(zf.namelist())
+        top = archive.stem
+        assert f"{top}/black_box/mcu_unresponsive/mcu_unresponsive.json" in names
+        manifest = json.loads(zf.read(f"{top}/manifest.json").decode("utf-8"))
+
+    assert manifest["connection_loss"]["reason"] == "mcu_unresponsive"
+    assert manifest["black_box_snapshots"][0]["reason"] == "mcu_unresponsive"
+    assert manifest["black_box_snapshots"][0]["included"] is True
+
+
 def test_export_reset_debug_bundle_requires_reset_report(tmp_path):
     try:
         export_reset_debug_bundle({}, output_dir=tmp_path)

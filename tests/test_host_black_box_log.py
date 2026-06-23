@@ -239,3 +239,111 @@ def test_unclean_serial_loss_with_log_write_failure_still_emits_and_clears(qapp,
     assert lost_reports[0]["black_box_log_error"] == "disk unavailable"
     assert "OSError" in lost_reports[0]["summary"]
     assert len(machine.command_queue.queue) == 0
+
+
+def test_mcu_unresponsive_after_established_session_emits_and_preserves_serial(qapp, test_profile, tmp_path):
+    machine = _make_machine(qapp, test_profile, tmp_path)
+    lost_reports = []
+    connected_states = []
+    machine.serial_connection_lost.connect(lost_reports.append)
+    machine.machine_connected_signal.connect(connected_states.append)
+    command = machine.command_queue.add_command("LED_ON", 1, 2, 3)
+    ack_timer = _DummyTimer()
+    machine._pending_acks[(mfr.CMD_QUEUE_ACK, command.command_number, -1)] = {
+        "timer": ack_timer,
+        "ok": None,
+        "to": None,
+    }
+    now_ns = time.monotonic_ns()
+    machine._transport_ready = True
+    machine._tx_paused = False
+    machine._last_mcu_rx_monotonic_ns = now_ns - 3_000_000_000
+    machine._last_mcu_rx_kind = "status"
+
+    machine._check_mcu_response_health(now_ns=now_ns)
+
+    assert connected_states == [False]
+    assert len(lost_reports) == 1
+    report = lost_reports[0]
+    assert report["reason"] == "mcu_unresponsive"
+    assert report["trigger_reason"] == "no_mcu_frames"
+    assert report["black_box_reason"] == "mcu_unresponsive"
+    assert report["black_box_log_path"]
+    assert "no valid frames received" in report["summary"]
+    assert machine.ser is not None
+    assert machine.ser.is_open is True
+    assert machine.port == "COM9"
+    assert machine.reader is None
+    assert machine._transport_ready is False
+    assert machine._tx_paused is True
+    assert len(machine.command_queue.queue) == 0
+    assert machine._pending_acks == {}
+    assert ack_timer.stop_calls == 1
+    assert ack_timer.delete_calls == 1
+
+    snapshot = _read_single_snapshot(tmp_path)
+    assert snapshot["reason"] == "mcu_unresponsive"
+    assert snapshot["transport"]["serial_open"] is True
+    assert snapshot["transport"]["command_queue_depth"] == 1
+    assert snapshot["commands"]["queued"][0]["command_number"] == command.command_number
+    assert any(event["kind"] == "mcu_unresponsive" for event in snapshot["black_box_events"])
+
+
+def test_recent_status_prevents_mcu_unresponsive_detection(qapp, test_profile, tmp_path):
+    machine = _make_machine(qapp, test_profile, tmp_path)
+    lost_reports = []
+    machine.serial_connection_lost.connect(lost_reports.append)
+    old_ns = time.monotonic_ns() - 3_000_000_000
+    machine._transport_ready = True
+    machine._last_mcu_rx_monotonic_ns = old_ns
+    machine._last_mcu_rx_kind = "status"
+
+    machine.update_status({"Current_command": 0, "Last_completed": 0, "cmd_depth": 0})
+    now_ns = machine._last_mcu_rx_monotonic_ns + 1_000_000_000
+    machine._check_mcu_response_health(now_ns=now_ns)
+
+    assert lost_reports == []
+    assert list(tmp_path.glob("*.json")) == []
+    assert machine._transport_ready is True
+
+
+def test_reset_report_after_mcu_unresponsive_still_writes_reset_snapshot(qapp, test_profile, tmp_path):
+    machine = _make_machine(qapp, test_profile, tmp_path)
+    lost_reports = []
+    reset_reports = []
+    machine.serial_connection_lost.connect(lost_reports.append)
+    machine.reset_report_received.connect(reset_reports.append)
+    now_ns = time.monotonic_ns()
+    machine._transport_ready = True
+    machine._last_mcu_rx_monotonic_ns = now_ns - 3_000_000_000
+
+    machine._check_mcu_response_health(now_ns=now_ns)
+    report = {"summary": "Board restarted after external reset pin event.", "reset_cause_name": "pin_reset"}
+    machine._on_reset_report(report)
+
+    snapshots = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in sorted(tmp_path.glob("*.json"))
+    ]
+    assert [item["reason"] for item in snapshots] == ["mcu_unresponsive", "reset_report"]
+    assert lost_reports[0]["reason"] == "mcu_unresponsive"
+    assert reset_reports == [report]
+
+
+def test_mcu_unresponsive_write_failure_still_emits_and_clears(qapp, test_profile, tmp_path):
+    machine = _make_machine(qapp, test_profile, tmp_path)
+    lost_reports = []
+    machine.serial_connection_lost.connect(lost_reports.append)
+    machine._transport_ready = True
+    machine.command_queue.add_command("LED_ON", 0, 0, 0)
+    machine.black_box_recorder.write_snapshot = lambda _snapshot: {"path": None, "error": "disk unavailable"}
+    now_ns = time.monotonic_ns()
+    machine._last_mcu_rx_monotonic_ns = now_ns - 3_000_000_000
+
+    machine._check_mcu_response_health(now_ns=now_ns)
+
+    assert len(lost_reports) == 1
+    assert lost_reports[0]["black_box_log_path"] is None
+    assert lost_reports[0]["black_box_log_error"] == "disk unavailable"
+    assert len(machine.command_queue.queue) == 0
+    assert any(event["kind"] == "black_box_log_write_failed" for event in machine.black_box_recorder.recent_events())
