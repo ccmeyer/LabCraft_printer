@@ -1978,6 +1978,13 @@ RESET_CAUSE_NAMES = {
     6: "low_power",
 }
 
+RESET_CAUSE_SUMMARIES = {
+    "power": "Board restarted after power/brownout reset.",
+    "pin_reset": "Board restarted after external reset pin event.",
+    "software": "Board restarted after software reset.",
+    "low_power": "Board restarted after low-power reset.",
+}
+
 CRASH_FAULT_NAMES = {
     0: "none",
     1: "hardfault",
@@ -2269,7 +2276,10 @@ class SerialReader(QThread):
         elif pending:
             summary = "Board restarted after a retained crash event."
         else:
-            summary = f"Board restarted after {reset_cause_name} reset."
+            summary = RESET_CAUSE_SUMMARIES.get(
+                reset_cause_name,
+                f"Board restarted after {reset_cause_name} reset.",
+            )
 
         if pending and last_fault_name == "wdt":
             details = []

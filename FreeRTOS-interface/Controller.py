@@ -432,12 +432,22 @@ class Controller(QObject):
             self.model.machine_model.disconnect_machine()
 
     def handle_reset_report(self, report: dict):
-        self.model.machine_model.recover_after_board_reset()
-        self.expected_position = self.model.machine_model.get_current_position_dict()
+        machine_model = self.model.machine_model
+        machine_model.recover_after_board_reset()
+        update_report = getattr(machine_model, "update_last_reset_report", None)
+        if callable(update_report):
+            update_report(report)
+        self.expected_position = machine_model.get_current_position_dict()
         self.expected_location = None
-        log_path = self._append_reset_report_log(report)
         summary = report.get("summary", "Board reset detected.")
-        message = f"{summary}\n\nSaved to: {log_path}"
+        guidance = "Homing state was cleared. Home the motors before resuming motion."
+        try:
+            log_path = self._append_reset_report_log(report)
+            log_status = f"Saved to: {log_path}"
+        except Exception as exc:
+            detail = str(exc) or exc.__class__.__name__
+            log_status = f"Log save failed: {detail}"
+        message = f"{summary}\n\n{guidance}\n\n{log_status}"
         self.error_occurred_signal.emit("Board Reset Detected", message)
 
     def _append_reset_report_log(self, report: dict) -> str:

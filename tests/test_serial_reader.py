@@ -8,6 +8,24 @@ def _frame(payload: bytes) -> bytes:
     return bytes([mfr.START_BYTE, len(payload)]) + payload + struct.pack("<H", crc)
 
 
+def _reset_report_payload(reset_cause: int) -> bytes:
+    return bytes(
+        [
+            mfr.RESET_REPORT,
+            0x01,
+            mfr.TAG_RESET_SEQ32,
+            4,
+            1,
+            0,
+            0,
+            0,
+            mfr.TAG_RESET_CAUSE,
+            1,
+            reset_cause,
+        ]
+    )
+
+
 class FakeSerial:
     def __init__(self, data: bytes):
         self._buf = bytearray(data)
@@ -183,6 +201,22 @@ def test_serial_reader_emits_reset_report_without_consuming_ack_path(qapp):
     assert reports[0]["recovery_boot"] is True
     assert "during open_gripper" in reports[0]["summary"]
     assert "first late task pressure" in reports[0]["summary"]
+
+
+def test_serial_reader_summarizes_non_fault_reset_causes():
+    cases = [
+        (1, "power", "Board restarted after power/brownout reset."),
+        (2, "pin_reset", "Board restarted after external reset pin event."),
+        (3, "software", "Board restarted after software reset."),
+        (6, "low_power", "Board restarted after low-power reset."),
+    ]
+
+    for cause, expected_name, expected_summary in cases:
+        report = mfr.SerialReader._parse_reset_report(_reset_report_payload(cause))
+
+        assert report is not None
+        assert report["reset_cause_name"] == expected_name
+        assert report["summary"] == expected_summary
 
 
 def test_serial_reader_decodes_queue_ack_result_and_expected_seq32(qapp):
