@@ -138,21 +138,52 @@ def export_reset_debug_bundle(
 ) -> dict[str, Any]:
     context = dict(context or {})
     reset_report = dict(context.get("reset_report") or {})
-    if not reset_report:
+    connection_loss_report = dict(
+        context.get("connection_loss_report")
+        or context.get("serial_connection_lost_report")
+        or {}
+    )
+    bundle_kind = str(context.get("bundle_kind") or "").strip()
+    if not bundle_kind:
+        if reset_report:
+            bundle_kind = "reset_report"
+        elif connection_loss_report:
+            bundle_kind = "connection_loss"
+        else:
+            bundle_kind = "reset_report"
+    if bundle_kind == "reset_report" and not reset_report:
         raise ResetDebugBundleError("No reset report is available to export.")
+    if bundle_kind == "connection_loss" and not connection_loss_report:
+        raise ResetDebugBundleError("No connection-loss report is available to export.")
+    if bundle_kind not in {"reset_report", "connection_loss"}:
+        raise ResetDebugBundleError(f"Unsupported debug bundle kind: {bundle_kind or 'unknown'}")
 
     out_dir = _resolve_output_dir(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     repo_root = Path(context.get("repo_root") or REPO_ROOT).expanduser().resolve()
     timestamp_for_name, exported_at_utc = _timestamp(created_at)
-    reset_cause = reset_report.get("reset_cause_name") or reset_report.get("reset_cause") or "reset"
-    seq32 = reset_report.get("seq32") or reset_report.get("reset_seq32") or "unknown_seq"
-    archive_stem = (
-        f"LabCraft_reset_debug_bundle_{timestamp_for_name}_"
-        f"{_sanitize_filename_part(reset_cause, default='reset')}_"
-        f"{_sanitize_filename_part(seq32, default='unknown_seq')}"
+    machine = dict(context.get("machine") or {})
+    session_id = (
+        context.get("black_box_session_id")
+        or machine.get("black_box_session_id")
+        or connection_loss_report.get("session_id")
     )
+    if bundle_kind == "reset_report":
+        reset_cause = reset_report.get("reset_cause_name") or reset_report.get("reset_cause") or "reset"
+        seq32 = reset_report.get("seq32") or reset_report.get("reset_seq32") or "unknown_seq"
+        archive_stem = (
+            f"LabCraft_reset_debug_bundle_{timestamp_for_name}_"
+            f"{_sanitize_filename_part(reset_cause, default='reset')}_"
+            f"{_sanitize_filename_part(seq32, default='unknown_seq')}"
+        )
+    else:
+        reason = connection_loss_report.get("reason") or "connection_loss"
+        archive_stem = (
+            f"LabCraft_connection_lost_debug_bundle_{timestamp_for_name}_"
+            f"{_sanitize_filename_part(reason, default='connection_loss')}_"
+            f"{_sanitize_filename_part(session_id, default='unknown_session')}"
+        )
     archive_path = _unique_archive_path(out_dir, archive_stem)
     top_dir = archive_path.stem
 
@@ -170,6 +201,7 @@ def export_reset_debug_bundle(
 
     manifest_base = {
         "schema_version": SCHEMA_VERSION,
+        "bundle_kind": bundle_kind,
         "exported_at_utc": exported_at_utc,
         "archive_name": archive_path.name,
         "bundle_root": top_dir,
@@ -181,11 +213,19 @@ def export_reset_debug_bundle(
             "pending": reset_report.get("pending"),
             "sticky": reset_report.get("sticky"),
         },
-        "session_id": context.get("black_box_session_id")
-        or dict(context.get("machine") or {}).get("black_box_session_id"),
+        "connection_loss": {
+            "summary": connection_loss_report.get("summary"),
+            "reason": connection_loss_report.get("reason"),
+            "requested_stop": connection_loss_report.get("requested_stop"),
+            "exception_type": connection_loss_report.get("exception_type"),
+            "message": connection_loss_report.get("message"),
+            "black_box_log_path": connection_loss_report.get("black_box_log_path"),
+            "black_box_log_error": connection_loss_report.get("black_box_log_error"),
+        },
+        "session_id": session_id,
         "machine": {
-            "port": context.get("port") or dict(context.get("machine") or {}).get("port"),
-            "profile": context.get("profile") or dict(context.get("machine") or {}).get("profile"),
+            "port": context.get("port") or machine.get("port") or connection_loss_report.get("port"),
+            "profile": context.get("profile") or machine.get("profile"),
         },
         "app": {
             "repo_root": str(repo_root),
@@ -202,29 +242,38 @@ def export_reset_debug_bundle(
     }
 
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        _add_json(
-            zf,
-            _archive_path(top_dir, "reset_report", "current_reset_report.json"),
-            reset_report,
-            included_files=included_files,
-            kind="current_reset_report",
-        )
-
-        if reset_log_path is not None and reset_log_path.is_file():
-            _add_file(
+        if bundle_kind == "reset_report":
+            _add_json(
                 zf,
-                reset_log_path,
-                _archive_path(top_dir, "reset_report", "board_reset_reports.jsonl"),
+                _archive_path(top_dir, "reset_report", "current_reset_report.json"),
+                reset_report,
                 included_files=included_files,
-                kind="board_reset_reports_jsonl",
+                kind="current_reset_report",
             )
+
+            if reset_log_path is not None and reset_log_path.is_file():
+                _add_file(
+                    zf,
+                    reset_log_path,
+                    _archive_path(top_dir, "reset_report", "board_reset_reports.jsonl"),
+                    included_files=included_files,
+                    kind="board_reset_reports_jsonl",
+                )
+            else:
+                missing_files.append(
+                    {
+                        "kind": "board_reset_reports_jsonl",
+                        "path": str(reset_log_path) if reset_log_path is not None else None,
+                        "error": reset_log_error or "not_available",
+                    }
+                )
         else:
-            missing_files.append(
-                {
-                    "kind": "board_reset_reports_jsonl",
-                    "path": str(reset_log_path) if reset_log_path is not None else None,
-                    "error": reset_log_error or "not_available",
-                }
+            _add_json(
+                zf,
+                _archive_path(top_dir, "connection_loss", "current_connection_loss_report.json"),
+                connection_loss_report,
+                included_files=included_files,
+                kind="current_connection_loss_report",
             )
 
         used_arcnames: set[str] = set()

@@ -163,6 +163,11 @@ def test_handle_serial_connection_lost_emits_guidance_popup():
     assert "Machine state is no longer trusted." in popups[0][1]
     assert "Reconnect to the MCU and home the motors" in popups[0][1]
     assert "Black-box log: logs/machine_black_box/session.json" in popups[0][1]
+    context = controller._last_connection_loss_debug_bundle_context
+    assert context["bundle_kind"] == "connection_loss"
+    assert context["connection_loss_report"]["black_box_log_path"] == "logs/machine_black_box/session.json"
+    assert context["black_box_snapshots"][0]["reason"] == "serial_reader_stopped"
+    assert context["black_box_snapshots"][0]["path"] == "logs/machine_black_box/session.json"
 
 
 def test_handle_serial_connection_lost_popup_survives_black_box_write_failure():
@@ -192,3 +197,47 @@ def test_handle_serial_connection_lost_popup_survives_black_box_write_failure():
     assert popups[0][0] == "Machine Connection Lost"
     assert "OSError: device disconnected" in popups[0][1]
     assert "Black-box log save failed: disk unavailable" in popups[0][1]
+    context = controller._last_connection_loss_debug_bundle_context
+    assert context["bundle_kind"] == "connection_loss"
+    assert context["connection_loss_report"]["black_box_log_error"] == "disk unavailable"
+
+
+def test_export_last_connection_loss_debug_bundle_packages_current_context(tmp_path):
+    snapshot = tmp_path / "serial_reader_stopped.json"
+    snapshot.write_text('{"reason": "serial_reader_stopped"}', encoding="utf-8")
+    controller = Controller.__new__(Controller)
+    controller._last_connection_loss_debug_bundle_context = {
+        "bundle_kind": "connection_loss",
+        "repo_root": str(tmp_path),
+        "connection_loss_report": {
+            "summary": "Machine serial connection ended unexpectedly (serial closed).",
+            "reason": "serial_closed",
+            "port": "COM9",
+            "black_box_log_path": str(snapshot),
+        },
+        "black_box_session_id": "session-abc",
+        "black_box_snapshots": [
+            {"path": str(snapshot), "reason": "serial_reader_stopped", "session_id": "session-abc"}
+        ],
+    }
+
+    result = Controller.export_last_connection_loss_debug_bundle(controller, output_dir=tmp_path)
+
+    archive_path = Path(result["archive_path"])
+    assert archive_path.exists()
+    assert archive_path.parent == tmp_path
+    assert result["archive_size_bytes"] > 0
+    assert result["manifest"]["bundle_kind"] == "connection_loss"
+    assert result["manifest"]["connection_loss"]["reason"] == "serial_closed"
+
+
+def test_export_last_connection_loss_debug_bundle_requires_context(tmp_path):
+    controller = Controller.__new__(Controller)
+    controller._last_connection_loss_debug_bundle_context = None
+
+    try:
+        Controller.export_last_connection_loss_debug_bundle(controller, output_dir=tmp_path)
+    except RuntimeError as exc:
+        assert "No machine connection-loss debug context" in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError")

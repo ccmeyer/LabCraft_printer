@@ -3186,7 +3186,7 @@ class Machine(QObject):
             )
         return result
 
-    def get_reset_debug_bundle_context(self):
+    def get_debug_bundle_context(self):
         recorder = getattr(self, "black_box_recorder", None)
         recent_snapshots = []
         if recorder is not None and hasattr(recorder, "recent_snapshots"):
@@ -3199,6 +3199,9 @@ class Machine(QObject):
             "black_box_snapshots": recent_snapshots,
             "black_box_last_write_result": dict(getattr(self, "_last_black_box_log_result", {}) or {}),
         }
+
+    def get_reset_debug_bundle_context(self):
+        return self.get_debug_bundle_context()
 
     def _expect_serial_reader_stop(self, reason):
         self._expected_serial_reader_stop_reason = str(reason or "expected")

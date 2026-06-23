@@ -54,10 +54,16 @@ TEST(ResetReportPolicy, LowPowerResetSendsReport)
     CHECK_TRUE(ResetReport_ShouldSend(&snap));
 }
 
-TEST(ResetReportPolicy, UnknownResetWithoutPendingCrashDoesNotSendReport)
+TEST(ResetReportPolicy, UnknownResetWithoutPendingCrashSendsReport)
 {
     const CrashLogSnapshot snap = makeSnapshot(CRASH_RESET_UNKNOWN);
-    CHECK_FALSE(ResetReport_ShouldSend(&snap));
+    CHECK_TRUE(ResetReport_ShouldSend(&snap));
+}
+
+TEST(ResetReportPolicy, UnexpectedResetEnumStillSendsReport)
+{
+    const CrashLogSnapshot snap = makeSnapshot(static_cast<CrashResetCause>(99));
+    CHECK_TRUE(ResetReport_ShouldSend(&snap));
 }
 
 TEST(ResetReportPolicy, NullSnapshotDoesNotSendReport)

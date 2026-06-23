@@ -150,6 +150,7 @@ class Controller(QObject):
         self._repo_root = self._ui_dir.parent                       # LabCraft_Printer
         self._reset_report_log_path = self._repo_root / "logs" / "board_reset_reports.jsonl"
         self._last_reset_debug_bundle_context = None
+        self._last_connection_loss_debug_bundle_context = None
 
         self._dfu_script = (self._ui_dir / "dfu_update.py").resolve()
         self._cwd = self._repo_root                                 # IMPORTANT: run child from repo root
@@ -464,15 +465,23 @@ class Controller(QObject):
         message = f"{summary}\n\n{guidance}\n\n{log_status}"
         self.error_occurred_signal.emit("Board Reset Detected", message)
 
-    def _build_reset_debug_bundle_context(self, report, *, reset_report_log_path=None, reset_report_log_error=None):
+    def _get_machine_debug_bundle_context(self):
         machine_context = {}
-        getter = getattr(getattr(self, "machine", None), "get_reset_debug_bundle_context", None)
+        machine = getattr(self, "machine", None)
+        getter = getattr(machine, "get_debug_bundle_context", None)
+        if not callable(getter):
+            getter = getattr(machine, "get_reset_debug_bundle_context", None)
         if callable(getter):
             try:
                 machine_context = dict(getter() or {})
             except Exception as exc:
                 machine_context = {"context_error": str(exc) or exc.__class__.__name__}
+        return machine_context
+
+    def _build_reset_debug_bundle_context(self, report, *, reset_report_log_path=None, reset_report_log_error=None):
+        machine_context = self._get_machine_debug_bundle_context()
         return {
+            "bundle_kind": "reset_report",
             "repo_root": str(getattr(self, "_repo_root", Path(__file__).resolve().parents[1])),
             "reset_report": dict(report or {}),
             "reset_report_log_path": str(reset_report_log_path) if reset_report_log_path else None,
@@ -482,6 +491,34 @@ class Controller(QObject):
             "profile": machine_context.get("profile"),
             "black_box_session_id": machine_context.get("black_box_session_id"),
             "black_box_snapshots": list(machine_context.get("black_box_snapshots") or []),
+        }
+
+    def _build_connection_loss_debug_bundle_context(self, report):
+        report = dict(report or {})
+        machine_context = self._get_machine_debug_bundle_context()
+        snapshots = [dict(item or {}) for item in list(machine_context.get("black_box_snapshots") or [])]
+        black_box_path = report.get("black_box_log_path")
+        black_box_error = report.get("black_box_log_error")
+        if black_box_path or black_box_error:
+            existing_paths = {str(item.get("path") or "") for item in snapshots}
+            if str(black_box_path or "") not in existing_paths:
+                snapshots.append(
+                    {
+                        "path": black_box_path,
+                        "reason": "serial_reader_stopped",
+                        "session_id": machine_context.get("black_box_session_id"),
+                        "error": black_box_error,
+                    }
+                )
+        return {
+            "bundle_kind": "connection_loss",
+            "repo_root": str(getattr(self, "_repo_root", Path(__file__).resolve().parents[1])),
+            "connection_loss_report": report,
+            "machine": machine_context,
+            "port": report.get("port") or machine_context.get("port"),
+            "profile": machine_context.get("profile"),
+            "black_box_session_id": machine_context.get("black_box_session_id"),
+            "black_box_snapshots": snapshots,
         }
 
     def _resolve_downloads_dir(self):
@@ -498,6 +535,13 @@ class Controller(QObject):
         context = getattr(self, "_last_reset_debug_bundle_context", None)
         if not context:
             raise RuntimeError("No board reset debug context is available to export.")
+        destination = Path(output_dir).expanduser() if output_dir is not None else self._resolve_downloads_dir()
+        return export_reset_debug_bundle(context, output_dir=destination)
+
+    def export_last_connection_loss_debug_bundle(self, output_dir=None):
+        context = getattr(self, "_last_connection_loss_debug_bundle_context", None)
+        if not context:
+            raise RuntimeError("No machine connection-loss debug context is available to export.")
         destination = Path(output_dir).expanduser() if output_dir is not None else self._resolve_downloads_dir()
         return export_reset_debug_bundle(context, output_dir=destination)
 
@@ -519,6 +563,7 @@ class Controller(QObject):
             log_status = f"Black-box log save failed: {log_error}"
         else:
             log_status = "Black-box log: not available"
+        self._last_connection_loss_debug_bundle_context = self._build_connection_loss_debug_bundle_context(report)
         self.error_occurred_signal.emit(
             "Machine Connection Lost",
             f"{summary}\n\n{guidance}\n\n{log_status}",

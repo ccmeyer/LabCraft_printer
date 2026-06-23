@@ -789,6 +789,9 @@ class MainWindow(QMainWindow):
         if title == "Board Reset Detected":
             self._popup_board_reset_message(title, message)
             return
+        if title == "Machine Connection Lost":
+            self._popup_machine_connection_lost_message(title, message)
+            return
         msg = QtWidgets.QMessageBox(self)
         msg.setWindowTitle(title)
         msg.setText(message)
@@ -797,6 +800,12 @@ class MainWindow(QMainWindow):
         msg.exec()
 
     def _popup_board_reset_message(self, title, message):
+        self._popup_debug_bundle_message(title, message, self.controller.export_last_reset_debug_bundle)
+
+    def _popup_machine_connection_lost_message(self, title, message):
+        self._popup_debug_bundle_message(title, message, self.controller.export_last_connection_loss_debug_bundle)
+
+    def _popup_debug_bundle_message(self, title, message, export_callback):
         msg = QtWidgets.QMessageBox(self)
         msg.setWindowTitle(title)
         msg.setText(message)
@@ -812,7 +821,7 @@ class MainWindow(QMainWindow):
         if msg.clickedButton() is not export_button:
             return
         try:
-            result = self.controller.export_last_reset_debug_bundle()
+            result = export_callback()
         except Exception as exc:
             detail = str(exc) or exc.__class__.__name__
             self.popup_message("Debug Bundle Export Failed", f"Could not export debug bundle:\n{detail}")
