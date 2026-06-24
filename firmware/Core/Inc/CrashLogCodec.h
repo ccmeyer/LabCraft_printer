@@ -20,6 +20,8 @@ const char* CrashLog_FaultKindName(CrashFaultKind kind);
 const char* CrashLog_ResetCauseName(CrashResetCause cause);
 const char* CrashLog_TaskIdName(CrashTaskId taskId);
 CrashTaskId CrashLog_TaskIdFromTaskName(const char* taskName);
+CrashTaskId CrashLog_SelectStackOverflowTaskId(CrashTaskId hookTaskId, CrashTaskId activeTaskId);
+uint32_t CrashLog_PackTaskName4(const char* taskName);
 
 #ifdef __cplusplus
 }

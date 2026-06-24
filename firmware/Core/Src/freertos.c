@@ -26,6 +26,7 @@
 /* USER CODE BEGIN Includes */
 #include "CrashLog.h"
 #include "CrashLogCodec.h"
+#include "WatchdogSupervisor.h"
 
 /* USER CODE END Includes */
 
@@ -124,10 +125,27 @@ void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
   {
   }
 #else
-  (void)xTask;
   g_stackOverflowHookFired = 1u;
-  CrashTaskId taskId = CrashLog_TaskIdFromTaskName(pcTaskName);
-  CrashLog_RecordAndHaltFromHandler(CRASH_FAULT_STACK_OVF, taskId);
+  const char* taskName = pcTaskName;
+  CrashTaskId taskId = CrashLog_TaskIdFromTaskName(taskName);
+  if ((taskId == CRASH_TASK_NONE) && (xTask != NULL)) {
+    const char* handleName = pcTaskGetName(xTask);
+    if ((handleName != NULL) && (handleName[0] != '\0')) {
+      taskName = handleName;
+      taskId = CrashLog_TaskIdFromTaskName(handleName);
+    }
+  }
+  CrashLog_RecordStackOverflowFromHook(taskId, taskName);
+  __disable_irq();
+  if (Watchdog_IsArmed() != 0u) {
+    for (;;)
+    {
+    }
+  }
+  NVIC_SystemReset();
+  for (;;)
+  {
+  }
 #endif
 }
 

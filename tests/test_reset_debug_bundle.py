@@ -135,6 +135,7 @@ def test_export_reset_debug_bundle_preserves_zero_seq32_and_raw_flags(tmp_path):
             "reset_flags_raw": 0x14000000,
             "reset_flag_names": ["software", "pin_reset"],
             "reset_flag_summary": "software, pin_reset",
+            "fault_task_name4": "Orch",
         },
     }
 
@@ -150,6 +151,7 @@ def test_export_reset_debug_bundle_preserves_zero_seq32_and_raw_flags(tmp_path):
     assert manifest["reset"]["reset_flags_raw"] == 0x14000000
     assert manifest["reset"]["reset_flag_names"] == ["software", "pin_reset"]
     assert manifest["reset"]["reset_flag_summary"] == "software, pin_reset"
+    assert manifest["reset"]["fault_task_name4"] == "Orch"
 
 
 def test_export_connection_loss_debug_bundle_without_reset_report(tmp_path):

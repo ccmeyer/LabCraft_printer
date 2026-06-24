@@ -67,6 +67,15 @@ typedef enum {
   CRASH_TASK_HOME_Z,
   CRASH_TASK_HOME_P,
   CRASH_TASK_HOME_R,
+  CRASH_TASK_PRINTER,
+  CRASH_TASK_GRIPPER,
+  CRASH_TASK_LED,
+  CRASH_TASK_LED_FADE,
+  CRASH_TASK_LOG_STATS,
+  CRASH_TASK_HEARTBEAT,
+  CRASH_TASK_WATCHDOG,
+  CRASH_TASK_IDLE,
+  CRASH_TASK_TIMER,
   CRASH_TASK_COUNT
 } CrashTaskId;
 
@@ -106,6 +115,7 @@ typedef struct {
   CrashBootStage faultStage;
   CrashTaskId watchdogLateTask;
   uint8_t activeCommand;
+  uint32_t faultTaskName4;
 } CrashLogSnapshot;
 
 #define CRASHLOG_FLAG_VALID            0x00000001u
@@ -117,6 +127,7 @@ void CrashLog_EarlyBootInit(void);
 void CrashLog_RecordFault(CrashFaultKind kind, CrashTaskId taskIdHint);
 void CrashLog_RecordWatchdogFault(CrashTaskId lateTask);
 void CrashLog_RecordFaultFromHandler(CrashFaultKind kind, CrashTaskId taskIdHint);
+void CrashLog_RecordStackOverflowFromHook(CrashTaskId taskIdHint, const char* taskName);
 void CrashLog_RecordAndHalt(CrashFaultKind kind, CrashTaskId taskIdHint);
 void CrashLog_RecordAndHaltFromHandler(CrashFaultKind kind, CrashTaskId taskIdHint);
 void CrashLog_RecordWatchdogSticky(uint32_t rawStatus);

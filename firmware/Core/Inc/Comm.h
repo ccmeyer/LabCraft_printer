@@ -88,6 +88,7 @@ static constexpr uint8_t TAG_RESET_FAULT_STAGE        = 0x1D;
 static constexpr uint8_t TAG_RESET_WATCHDOG_LATE_TASK = 0x1E;
 static constexpr uint8_t TAG_RESET_ACTIVE_COMMAND     = 0x1F;
 static constexpr uint8_t TAG_RESET_RCC_FLAGS          = 0x20;
+static constexpr uint8_t TAG_RESET_TASK_NAME4         = 0x21;
 
 static constexpr uint8_t ACK_RESULT_ACCEPTED = 1;
 static constexpr uint8_t ACK_RESULT_DUPLICATE = 2;

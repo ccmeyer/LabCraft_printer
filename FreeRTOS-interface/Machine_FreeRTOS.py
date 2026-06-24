@@ -1668,6 +1668,7 @@ TAG_RESET_FAULT_STAGE       = 0x1D
 TAG_RESET_WATCHDOG_LATE_TASK = 0x1E
 TAG_RESET_ACTIVE_COMMAND    = 0x1F
 TAG_RESET_RCC_FLAGS         = 0x20
+TAG_RESET_TASK_NAME4        = 0x21
 
 ACK_TLV_SEQ32 = 0x10
 ACK_TLV_RESULT = 0x11
@@ -2023,6 +2024,15 @@ CRASH_TASK_NAMES = {
     9: "home_z",
     10: "home_print_regulator",
     11: "home_refuel_regulator",
+    12: "printer",
+    13: "gripper",
+    14: "led",
+    15: "led_fade",
+    16: "log_stats",
+    17: "heartbeat",
+    18: "watchdog",
+    19: "idle",
+    20: "timer",
 }
 
 CRASH_BOOT_STAGE_NAMES = {
@@ -2279,9 +2289,17 @@ class SerialReader(QThread):
                 return None
             return struct.unpack("<I", raw)[0]
 
+        def _name4_or_none(tag):
+            raw = tlvs.get(tag)
+            if raw is None or len(raw) != 4:
+                return None
+            text = raw.split(b"\x00", 1)[0].decode("ascii", errors="ignore").strip()
+            return text or None
+
         reset_cause = _u8(TAG_RESET_CAUSE)
         flags = _u32(TAG_RESET_FLAGS)
         reset_flags_raw = _u32_or_none(TAG_RESET_RCC_FLAGS)
+        fault_task_name4 = _name4_or_none(TAG_RESET_TASK_NAME4)
         last_fault = _u8(TAG_RESET_LAST_FAULT)
         last_task = _u8(TAG_RESET_LAST_TASK)
         boot_stage = _u8(TAG_RESET_BOOT_STAGE)
@@ -2328,7 +2346,10 @@ class SerialReader(QThread):
             details.append(f"fault stage {fault_stage_name}")
             summary += " Watchdog starvation: " + ", ".join(details) + "."
         elif last_fault_name != "none":
-            summary += f" Last fault: {last_fault_name} in {last_task_name} task at stage {fault_stage_name}."
+            task_label = f"{last_task_name} task"
+            if fault_task_name4:
+                task_label = f"{task_label} ({fault_task_name4})"
+            summary += f" Last fault: {last_fault_name} in {task_label} at stage {fault_stage_name}."
         elif sticky:
             summary += f" Sticky watchdog state was recorded at stage {boot_stage_name}."
 
@@ -2341,6 +2362,7 @@ class SerialReader(QThread):
             "reset_flags_raw": reset_flags_raw,
             "reset_flag_names": reset_flag_names,
             "reset_flag_summary": reset_flag_summary,
+            "fault_task_name4": fault_task_name4,
             "pending": pending,
             "sticky": sticky,
             "last_fault": last_fault,

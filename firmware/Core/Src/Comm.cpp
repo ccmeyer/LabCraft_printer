@@ -96,7 +96,7 @@ void Comm::begin() {
 
     // spawn status‐sender task @50 ms intervals
     xTaskCreate(
-      statusTaskEntry, "Status", 384,
+      statusTaskEntry, "Status", 768,
       this,                // pvParameters
       tskIDLE_PRIORITY+1,  // priority
       nullptr
@@ -285,6 +285,7 @@ void Comm::sendResetReport(uint8_t seq8, uint32_t seq32, const CrashLogSnapshot*
   appendU8(payload, idx, TAG_RESET_WATCHDOG_LATE_TASK, static_cast<uint8_t>(snap->watchdogLateTask));
   appendU8(payload, idx, TAG_RESET_ACTIVE_COMMAND, snap->activeCommand);
   appendU32(payload, idx, TAG_RESET_RCC_FLAGS, snap->resetFlagsRaw);
+  appendU32(payload, idx, TAG_RESET_TASK_NAME4, snap->faultTaskName4);
   sendFrame(_huart, payload, idx);
 }
 

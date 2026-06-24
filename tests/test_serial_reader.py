@@ -252,6 +252,56 @@ def test_serial_reader_decodes_optional_raw_reset_flags(qapp):
     assert report["reset_flag_summary"] == "software, pin_reset"
 
 
+def test_serial_reader_decodes_optional_fault_task_name4(qapp):
+    reset_payload = bytes(
+        [
+            mfr.RESET_REPORT,
+            0x01,
+            mfr.TAG_RESET_SEQ32,
+            4,
+            0,
+            0,
+            0,
+            0,
+            mfr.TAG_RESET_CAUSE,
+            1,
+            3,
+            mfr.TAG_RESET_FLAGS,
+            4,
+            mfr.CRASHLOG_FLAG_PENDING,
+            0,
+            0,
+            0,
+            mfr.TAG_RESET_LAST_FAULT,
+            1,
+            6,
+            mfr.TAG_RESET_LAST_TASK,
+            1,
+            2,
+            mfr.TAG_RESET_FAULT_STAGE,
+            1,
+            7,
+            mfr.TAG_RESET_ACTIVE_COMMAND,
+            1,
+            mfr.CMD_MAP["ABSOLUTE_XY"],
+            mfr.TAG_RESET_TASK_NAME4,
+            4,
+            ord("O"),
+            ord("r"),
+            ord("c"),
+            ord("h"),
+        ]
+    )
+
+    report = mfr.SerialReader._parse_reset_report(reset_payload)
+
+    assert report is not None
+    assert report["fault_task_name4"] == "Orch"
+    assert report["last_task_name"] == "orchestrator"
+    assert "stack_overflow in orchestrator task (Orch)" in report["summary"]
+    assert "stage comm_rx_rearmed" in report["summary"]
+
+
 def test_serial_reader_accepts_older_reset_report_without_raw_flags(qapp):
     report = mfr.SerialReader._parse_reset_report(_reset_report_payload(1))
 
@@ -260,6 +310,14 @@ def test_serial_reader_accepts_older_reset_report_without_raw_flags(qapp):
     assert report["reset_flags_raw"] is None
     assert report["reset_flag_names"] == []
     assert report["reset_flag_summary"] == ""
+    assert report["fault_task_name4"] is None
+
+
+def test_serial_reader_maps_new_crash_task_ids():
+    assert mfr.CRASH_TASK_NAMES[12] == "printer"
+    assert mfr.CRASH_TASK_NAMES[13] == "gripper"
+    assert mfr.CRASH_TASK_NAMES[18] == "watchdog"
+    assert mfr.CRASH_TASK_NAMES[20] == "timer"
 
 
 def test_serial_reader_summarizes_non_fault_reset_causes():

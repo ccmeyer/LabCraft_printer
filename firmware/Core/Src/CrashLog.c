@@ -19,9 +19,9 @@ static volatile CrashTaskId g_activeTask = CRASH_TASK_NONE;
 static volatile uint8_t g_activeCommand = 0u;
 
 static const uint32_t kCrashLogMagic = 0x43524153u;
-static const uint32_t kCrashLogVersion = 2u;
+static const uint32_t kCrashLogVersion = 3u;
 static const uint32_t kCrashLogVersionShift = 16u;
-static const uint32_t kCrashLogRegCount = 19u;
+static const uint32_t kCrashLogRegCount = 20u;
 
 enum {
   CRASHLOG_BKP_MAGIC = 0,
@@ -42,7 +42,8 @@ enum {
   CRASHLOG_BKP_WATCHDOG_RAW_STATUS = 15,
   CRASHLOG_BKP_FAULT_STAGE = 16,
   CRASHLOG_BKP_WATCHDOG_LATE_TASK = 17,
-  CRASHLOG_BKP_ACTIVE_COMMAND = 18
+  CRASHLOG_BKP_ACTIVE_COMMAND = 18,
+  CRASHLOG_BKP_FAULT_TASK_NAME4 = 19
 };
 
 static void CrashLog_EnableBackupAccess(void)
@@ -150,6 +151,7 @@ static void CrashLog_FillSnapshot(CrashLogSnapshot* out)
   out->faultStage = (CrashBootStage)CrashLog_Read(CRASHLOG_BKP_FAULT_STAGE);
   out->watchdogLateTask = (CrashTaskId)CrashLog_Read(CRASHLOG_BKP_WATCHDOG_LATE_TASK);
   out->activeCommand = (uint8_t)CrashLog_Read(CRASHLOG_BKP_ACTIVE_COMMAND);
+  out->faultTaskName4 = CrashLog_Read(CRASHLOG_BKP_FAULT_TASK_NAME4);
 }
 
 static void CrashLog_WriteFaultRecord(CrashFaultKind kind,
@@ -159,7 +161,8 @@ static void CrashLog_WriteFaultRecord(CrashFaultKind kind,
                                       uint32_t cfsr,
                                       uint32_t hfsr,
                                       uint32_t mmfar,
-                                      uint32_t bfar)
+                                      uint32_t bfar,
+                                      uint32_t taskName4)
 {
   const uint32_t flags = CrashLog_FlagsOnly(CrashLog_Read(CRASHLOG_BKP_FLAGS));
   CrashLog_Write(CRASHLOG_BKP_FLAGS, CrashLog_FlagsWithVersion(flags | CRASHLOG_FLAG_PENDING | CRASHLOG_FLAG_VALID));
@@ -174,6 +177,7 @@ static void CrashLog_WriteFaultRecord(CrashFaultKind kind,
   CrashLog_Write(CRASHLOG_BKP_FAULT_STAGE, (uint32_t)g_bootStage);
   CrashLog_Write(CRASHLOG_BKP_WATCHDOG_LATE_TASK, (uint32_t)watchdogLateTask);
   CrashLog_Write(CRASHLOG_BKP_ACTIVE_COMMAND, (uint32_t)g_activeCommand);
+  CrashLog_Write(CRASHLOG_BKP_FAULT_TASK_NAME4, taskName4);
   __DSB();
   __ISB();
 }
@@ -236,7 +240,8 @@ void CrashLog_RecordFault(CrashFaultKind kind, CrashTaskId taskIdHint)
                             SCB->CFSR,
                             SCB->HFSR,
                             SCB->MMFAR,
-                            SCB->BFAR);
+                            SCB->BFAR,
+                            0u);
 }
 
 void CrashLog_RecordWatchdogFault(CrashTaskId lateTask)
@@ -262,7 +267,8 @@ void CrashLog_RecordWatchdogFault(CrashTaskId lateTask)
                             SCB->CFSR,
                             SCB->HFSR,
                             SCB->MMFAR,
-                            SCB->BFAR);
+                            SCB->BFAR,
+                            0u);
 }
 
 void CrashLog_RecordFaultFromHandler(CrashFaultKind kind, CrashTaskId taskIdHint)
@@ -283,7 +289,31 @@ void CrashLog_RecordFaultFromHandler(CrashFaultKind kind, CrashTaskId taskIdHint
                             SCB->CFSR,
                             SCB->HFSR,
                             SCB->MMFAR,
-                            SCB->BFAR);
+                            SCB->BFAR,
+                            0u);
+}
+
+void CrashLog_RecordStackOverflowFromHook(CrashTaskId taskIdHint, const char* taskName)
+{
+#if (LC_CRASHLOG_ENABLE == 0) || (LC_CRASHLOG_FAULT_HOOKS_ENABLE == 0)
+  (void)taskIdHint;
+  (void)taskName;
+  return;
+#endif
+  CrashLog_EnableBackupAccess();
+  if (CrashLog_IsStorageValid() == 0u) {
+    CrashLog_ResetStorage();
+  }
+  const CrashTaskId taskId = CrashLog_SelectStackOverflowTaskId(taskIdHint, g_activeTask);
+  CrashLog_WriteFaultRecord(CRASH_FAULT_STACK_OVF,
+                            taskId,
+                            CRASH_TASK_NONE,
+                            HAL_GetTick(),
+                            SCB->CFSR,
+                            SCB->HFSR,
+                            SCB->MMFAR,
+                            SCB->BFAR,
+                            CrashLog_PackTaskName4(taskName));
 }
 
 void CrashLog_RecordAndHalt(CrashFaultKind kind, CrashTaskId taskIdHint)
@@ -386,6 +416,7 @@ void CrashLog_MarkBootHealthy(void)
   CrashLog_Write(CRASHLOG_BKP_FAULT_STAGE, (uint32_t)CRASH_BOOT_STAGE_RESET);
   CrashLog_Write(CRASHLOG_BKP_WATCHDOG_LATE_TASK, (uint32_t)CRASH_TASK_NONE);
   CrashLog_Write(CRASHLOG_BKP_ACTIVE_COMMAND, 0u);
+  CrashLog_Write(CRASHLOG_BKP_FAULT_TASK_NAME4, 0u);
 }
 
 void CrashLog_GetSnapshot(CrashLogSnapshot* out)

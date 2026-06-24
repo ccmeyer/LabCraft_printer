@@ -59,6 +59,15 @@ const char* CrashLog_TaskIdName(CrashTaskId taskId)
     case CRASH_TASK_HOME_Z: return "homez";
     case CRASH_TASK_HOME_P: return "homep";
     case CRASH_TASK_HOME_R: return "homer";
+    case CRASH_TASK_PRINTER: return "prnt";
+    case CRASH_TASK_GRIPPER: return "grip";
+    case CRASH_TASK_LED: return "led";
+    case CRASH_TASK_LED_FADE: return "ledfade";
+    case CRASH_TASK_LOG_STATS: return "logstats";
+    case CRASH_TASK_HEARTBEAT: return "heart";
+    case CRASH_TASK_WATCHDOG: return "wdog";
+    case CRASH_TASK_IDLE: return "idle";
+    case CRASH_TASK_TIMER: return "timer";
     default: return "none";
   }
 }
@@ -76,5 +85,41 @@ CrashTaskId CrashLog_TaskIdFromTaskName(const char* taskName)
   if (strcmp(taskName, "HomeZ") == 0) return CRASH_TASK_HOME_Z;
   if (strcmp(taskName, "HomePR_P") == 0) return CRASH_TASK_HOME_P;
   if (strcmp(taskName, "HomePR_R") == 0) return CRASH_TASK_HOME_R;
+  if (strcmp(taskName, "PRNT") == 0) return CRASH_TASK_PRINTER;
+  if (strcmp(taskName, "GRP_REFR") == 0) return CRASH_TASK_GRIPPER;
+  if (strcmp(taskName, "LED") == 0) return CRASH_TASK_LED;
+  if (strcmp(taskName, "LEDFade") == 0) return CRASH_TASK_LED_FADE;
+  if (strcmp(taskName, "LogStats") == 0) return CRASH_TASK_LOG_STATS;
+  if (strcmp(taskName, "Heartbeat") == 0) return CRASH_TASK_HEARTBEAT;
+  if (strcmp(taskName, "Wdog") == 0) return CRASH_TASK_WATCHDOG;
+  if (strcmp(taskName, "IDLE") == 0 || strcmp(taskName, "IDLE ") == 0) return CRASH_TASK_IDLE;
+  if (strcmp(taskName, "Tmr Svc") == 0 || strcmp(taskName, "Timer") == 0) return CRASH_TASK_TIMER;
   return CRASH_TASK_NONE;
+}
+
+CrashTaskId CrashLog_SelectStackOverflowTaskId(CrashTaskId hookTaskId, CrashTaskId activeTaskId)
+{
+  if (hookTaskId != CRASH_TASK_NONE) {
+    return hookTaskId;
+  }
+  if (activeTaskId != CRASH_TASK_NONE) {
+    return activeTaskId;
+  }
+  return CRASH_TASK_NONE;
+}
+
+uint32_t CrashLog_PackTaskName4(const char* taskName)
+{
+  uint32_t packed = 0u;
+  if (taskName == NULL) {
+    return 0u;
+  }
+  for (uint32_t i = 0u; i < 4u; ++i) {
+    const unsigned char ch = (unsigned char)taskName[i];
+    if (ch == '\0') {
+      break;
+    }
+    packed |= ((uint32_t)ch << (8u * i));
+  }
+  return packed;
 }

@@ -197,7 +197,7 @@ void Orchestrator::begin() {
 
   xTaskCreate(
     _taskEntry, "Orch",
-    3328,    this,
+    4096,    this,
     tskIDLE_PRIORITY + 2,
     &_taskHandle
   );

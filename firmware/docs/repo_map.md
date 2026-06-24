@@ -139,6 +139,7 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
   - `firmware/Core/Inc/SelfTestCommandPolicy.h`
   - Functions: `Orchestrator::begin`, `Orchestrator::_run`, `Orchestrator::executeCommand`, `enqueueFromISR`, `startHomeAsync`, `startRegHomeAsync`, `_flashTaskLoop`
   - Self-test entrypoint: `CMD_SELFTEST_START` remains dispatched from `Orchestrator::executeCommand`, but the SAFE/FULL diagnostic sequence now lives in `DiagnosticsRunner::runSelfTest`. `DiagnosticResultEmitter` owns the byte layout for `CMD_SELFTEST_RESULT` and `CMD_SELFTEST_DONE` payloads.
+  - Stack-overflow crash attribution records the active command plus the mapped FreeRTOS task ID and compact task-name prefix so `RESET_REPORT` can identify the overflowing task when possible.
   - `CrashWatchdogSelfTestPolicy` owns the host-tested pass/fail policy and compact metrics for SAFE rows `1041 crash_record_retained_safe` and `1042 watchdog_supervisor_safe`; `DiagnosticsRunner` samples runtime state and emits the unchanged result frames.
   - Custom regulator pressure traces use selector `2110` plus self-test start TLVs `TAG_TRACE_CHANNEL`, `TAG_TRACE_PRESSURE_MPSI`, `TAG_TRACE_PULSE_US`, `TAG_TRACE_PULSE_COUNT`, and `TAG_TRACE_FREQUENCY_HZ`; `Orchestrator` copies them into `DiagnosticsRequest::customPressureTrace`, and `DiagnosticsRunner` validates the RAM-only recipe before calling the shared pressure trace runner.
   - Motion qualification diagnostics `2007 motion_home_repeatability_factory` and `2008 motion_pattern_return_factory` live in `DiagnosticsRunner::runSelfTest`, use existing X/Y homing and gantry motion primitives, and publish compact repeatability metrics for Python-side candidate analysis.
@@ -384,8 +385,9 @@ Common parse path for host->MCU commands:
 | `0x1E` | `TAG_RESET_WATCHDOG_LATE_TASK` | 1 | `CrashLogSnapshot.watchdogLateTask` |
 | `0x1F` | `TAG_RESET_ACTIVE_COMMAND` | 1 | `CrashLogSnapshot.activeCommand` |
 | `0x20` | `TAG_RESET_RCC_FLAGS` | 4 | optional raw `CrashLogSnapshot.resetFlagsRaw`; Python decodes names from `LPWRRSTF`, `WWDGRSTF`, `IWDGRSTF`, `SFTRSTF`, `PORRSTF`, `PINRSTF`, and `BORRSTF` bits |
+| `0x21` | `TAG_RESET_TASK_NAME4` | 4 | optional packed 4-byte prefix of the FreeRTOS task name captured by the stack-overflow hook |
 
-`TAG_RESET_RCC_FLAGS` shares the numeric tag value `0x20` with status `TAG_X_POS`, but the tag namespaces are separated by frame opcode (`CMD_RESET_REPORT` vs `CMD_STATUS`).
+Reset-report tags share numeric values with status tags, for example `0x20` / `0x21`, but the tag namespaces are separated by frame opcode (`CMD_RESET_REPORT` vs `CMD_STATUS`).
 
 ### 6.5 Status telemetry tags (`Comm.h` constants)
 
