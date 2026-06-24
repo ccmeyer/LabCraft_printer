@@ -74,7 +74,7 @@
 #define configMAX_PRIORITIES                     ( 7 )
 #define configMINIMAL_STACK_SIZE                 ((uint16_t)128)
 /* Sized to preserve diagnostic/self-test headroom while keeping SRAM margin for ISR/main stack. */
-#define configTOTAL_HEAP_SIZE                    ((size_t)49152)
+#define configTOTAL_HEAP_SIZE                    ((size_t)54272)
 #define configMAX_TASK_NAME_LEN                  ( 16 )
 #define configGENERATE_RUN_TIME_STATS            1
 #define configUSE_TRACE_FACILITY                 1
