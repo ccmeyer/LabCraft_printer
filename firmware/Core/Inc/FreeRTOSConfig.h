@@ -168,6 +168,8 @@ standard names. */
 
 /* USER CODE BEGIN Defines */
 /* Section where parameter definitions can be added (for instance, to override default ones in FreeRTOS.h) */
+#define INCLUDE_uxTaskGetStackHighWaterMark     1
+
 #if (LC_STACK_OVERFLOW_CHECK_ENABLE != 0)
 #define configCHECK_FOR_STACK_OVERFLOW          2
 #else
