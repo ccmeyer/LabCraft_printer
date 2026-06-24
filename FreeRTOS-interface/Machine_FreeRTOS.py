@@ -1650,6 +1650,9 @@ TAG_Y_ACCEL       = 0x74
 TAG_Z_ACCEL       = 0x75
 TAG_GRIP_PULSE    = 0x80
 TAG_GRIP_REFRESH  = 0x81
+TAG_ORCH_STACK_HWM = 0x90
+TAG_ORCH_STACK_PHASE = 0x91
+TAG_ORCH_STACK_CMD = 0x92
 
 TAG_RESET_SEQ32             = 0x10
 TAG_RESET_CAUSE             = 0x11
@@ -1736,6 +1739,10 @@ TAG_MAP = {
 
     TAG_GRIP_PULSE:    ("Grip_pulse", 4, False),
     TAG_GRIP_REFRESH:  ("Grip_refresh", 4, False),
+
+    TAG_ORCH_STACK_HWM: ("Orch_stack_hwm_words", 2, False),
+    TAG_ORCH_STACK_PHASE: ("Orch_stack_phase", 1, False),
+    TAG_ORCH_STACK_CMD: ("Orch_stack_cmd", 4, False),
 
     TAG_X_MAX_HZ:     ("X_max_hz", 4, False),
     TAG_Y_MAX_HZ:     ("Y_max_hz", 4, False),
@@ -2196,6 +2203,26 @@ def apply_flash_safety_log_event(state: dict | None, event: dict | None) -> dict
         return next_state
 
     return next_state
+
+
+ORCH_STACK_PHASE_NAMES = {
+    0: "unknown",
+    1: "cmd_start",
+    2: "abs_xy_before_move",
+    3: "abs_xy_after_move",
+    4: "abs_xy_wait_x",
+    5: "abs_xy_wait_y",
+    6: "cmd_done",
+}
+
+
+def orch_stack_phase_name(phase) -> str:
+    try:
+        value = int(phase)
+    except (TypeError, ValueError):
+        return "unknown"
+    return ORCH_STACK_PHASE_NAMES.get(value, "unknown")
+
 
 class SerialReader(QThread):
     status_received = Signal(dict)
@@ -4291,6 +4318,10 @@ class Machine(QObject):
             "cmd_depth": self._coerce_optional_int(data.get("cmd_depth")),
             "Flash_delay": self._coerce_optional_int(data.get("Flash_delay")),
             "Flash_droplets": self._coerce_optional_int(data.get("Flash_droplets")),
+            "Orch_stack_hwm_words": self._coerce_optional_int(data.get("Orch_stack_hwm_words")),
+            "Orch_stack_phase": self._coerce_optional_int(data.get("Orch_stack_phase")),
+            "Orch_stack_phase_name": orch_stack_phase_name(data.get("Orch_stack_phase")),
+            "Orch_stack_cmd": self._coerce_optional_int(data.get("Orch_stack_cmd")),
             "rx_to_main_thread_ms": rx_to_main_thread_ms,
         }
         for key in (
@@ -4336,6 +4367,10 @@ class Machine(QObject):
             "cmd_depth": self._coerce_optional_int(sample.get("cmd_depth")),
             "Flash_delay": self._coerce_optional_int(sample.get("Flash_delay")),
             "Flash_droplets": self._coerce_optional_int(sample.get("Flash_droplets")),
+            "Orch_stack_hwm_words": self._coerce_optional_int(sample.get("Orch_stack_hwm_words")),
+            "Orch_stack_phase": self._coerce_optional_int(sample.get("Orch_stack_phase")),
+            "Orch_stack_phase_name": orch_stack_phase_name(sample.get("Orch_stack_phase")),
+            "Orch_stack_cmd": self._coerce_optional_int(sample.get("Orch_stack_cmd")),
             "rx_to_main_thread_ms": sample.get("rx_to_main_thread_ms"),
         }
         for key in (

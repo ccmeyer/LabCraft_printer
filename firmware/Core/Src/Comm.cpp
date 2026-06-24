@@ -486,6 +486,9 @@ void Comm::statusTask() {
 				uint32_t pauseAfterSeq32 = Orchestrator::getPauseAfterSeq32();
 				uint32_t pauseWatermarkReached = Orchestrator::getPauseWatermarkReached() ? 1u : 0u;
 				uint32_t transportPaused = Orchestrator::isTransportPaused() ? 1u : 0u;
+				uint16_t orchStackHwm = Orchestrator::getOrchStackHwmWords();
+				uint8_t orchStackPhase = Orchestrator::getOrchStackPhase();
+				uint32_t orchStackCmd = Orchestrator::getOrchStackCmdNum();
 
 				// Command byte first
 				payload[idx++] = CMD_STATUS;
@@ -519,6 +522,9 @@ void Comm::statusTask() {
 				APPEND_S32(payload, idx, TAG_PAUSE_AFTER_CMD, pauseAfterSeq32);
 				appendU8(payload, idx, TAG_PAUSE_WATERMARK_REACHED, static_cast<uint8_t>(pauseWatermarkReached));
 				appendU8(payload, idx, TAG_TRANSPORT_PAUSED, static_cast<uint8_t>(transportPaused));
+				APPEND_U16(payload, idx, TAG_ORCH_STACK_HWM, orchStackHwm);
+				appendU8(payload, idx, TAG_ORCH_STACK_PHASE, orchStackPhase);
+				appendU32(payload, idx, TAG_ORCH_STACK_CMD, orchStackCmd);
 
 					sendFrame(_huart, payload, idx);
 					recordStatusSend(CHUNK_0);
@@ -578,6 +584,9 @@ void Comm::statusTask() {
 				uint32_t pauseAfterSeq32 = Orchestrator::getPauseAfterSeq32();
 				uint32_t pauseWatermarkReached = Orchestrator::getPauseWatermarkReached() ? 1u : 0u;
 				uint32_t transportPaused = Orchestrator::isTransportPaused() ? 1u : 0u;
+				uint16_t orchStackHwm = Orchestrator::getOrchStackHwmWords();
+				uint8_t orchStackPhase = Orchestrator::getOrchStackPhase();
+				uint32_t orchStackCmd = Orchestrator::getOrchStackCmdNum();
 
 				// Command byte first
 				payload[idx++] = CMD_STATUS;
@@ -611,6 +620,9 @@ void Comm::statusTask() {
 				APPEND_S32(payload, idx, TAG_PAUSE_AFTER_CMD, pauseAfterSeq32);
 				appendU8(payload, idx, TAG_PAUSE_WATERMARK_REACHED, static_cast<uint8_t>(pauseWatermarkReached));
 				appendU8(payload, idx, TAG_TRANSPORT_PAUSED, static_cast<uint8_t>(transportPaused));
+				APPEND_U16(payload, idx, TAG_ORCH_STACK_HWM, orchStackHwm);
+				appendU8(payload, idx, TAG_ORCH_STACK_PHASE, orchStackPhase);
+				appendU32(payload, idx, TAG_ORCH_STACK_CMD, orchStackCmd);
 
 			        sendFrame(_huart, payload, idx);
 			        recordStatusSend(CHUNK_1);

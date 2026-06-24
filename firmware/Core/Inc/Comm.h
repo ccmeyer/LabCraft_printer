@@ -71,6 +71,10 @@ static constexpr uint8_t TAG_Z_ACCEL   = 0x75;
 static constexpr uint8_t TAG_GRIP_PULSE     = 0x80;
 static constexpr uint8_t TAG_GRIP_REFRESH   = 0x81;
 
+static constexpr uint8_t TAG_ORCH_STACK_HWM   = 0x90;
+static constexpr uint8_t TAG_ORCH_STACK_PHASE = 0x91;
+static constexpr uint8_t TAG_ORCH_STACK_CMD   = 0x92;
+
 static constexpr uint8_t TAG_RESET_SEQ32               = 0x10;
 static constexpr uint8_t TAG_RESET_CAUSE              = 0x11;
 static constexpr uint8_t TAG_RESET_FLAGS              = 0x12;

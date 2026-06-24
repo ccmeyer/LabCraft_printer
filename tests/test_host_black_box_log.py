@@ -46,6 +46,22 @@ def _read_single_snapshot(tmp_path):
     return json.loads(files[0].read_text(encoding="utf-8"))
 
 
+def test_orchestrator_stack_status_tlvs_decode_with_phase_name():
+    payload = bytearray()
+    payload.extend([mfr.TAG_ORCH_STACK_HWM, 2])
+    payload.extend((37).to_bytes(2, "little"))
+    payload.extend([mfr.TAG_ORCH_STACK_PHASE, 1, 4])
+    payload.extend([mfr.TAG_ORCH_STACK_CMD, 4])
+    payload.extend((182).to_bytes(4, "little"))
+
+    decoded = mfr.parse_tlv_payload(bytes(payload))
+
+    assert decoded["Orch_stack_hwm_words"] == 37
+    assert decoded["Orch_stack_phase"] == 4
+    assert decoded["Orch_stack_cmd"] == 182
+    assert mfr.orch_stack_phase_name(decoded["Orch_stack_phase"]) == "abs_xy_wait_x"
+
+
 def test_reset_report_writes_snapshot_before_recovery_clears_session_state(qapp, test_profile, tmp_path):
     machine = _make_machine(qapp, test_profile, tmp_path)
     emitted = []
@@ -78,6 +94,9 @@ def test_reset_report_writes_snapshot_before_recovery_clears_session_state(qapp,
             "refuel_active": 1,
             "drop_total": 5,
             "drop_remain": 2,
+            "Orch_stack_hwm_words": 37,
+            "Orch_stack_phase": 4,
+            "Orch_stack_cmd": command.command_number,
         }
     )
 
@@ -131,6 +150,10 @@ def test_reset_report_writes_snapshot_before_recovery_clears_session_state(qapp,
     assert snapshot["status_history"][-1]["Print_width"] == 1300
     assert snapshot["status_history"][-1]["print_active"] == 1
     assert snapshot["status_history"][-1]["drop_remain"] == 2
+    assert snapshot["status_history"][-1]["Orch_stack_hwm_words"] == 37
+    assert snapshot["status_history"][-1]["Orch_stack_phase"] == 4
+    assert snapshot["status_history"][-1]["Orch_stack_phase_name"] == "abs_xy_wait_x"
+    assert snapshot["status_history"][-1]["Orch_stack_cmd"] == command.command_number
     assert any(event["event"] == "queued" and event["request_id"] is None for event in snapshot["command_events"])
     assert any(event["kind"] == "ack" and event["payload"]["matched_pending"] for event in snapshot["black_box_events"])
     assert any(event["kind"] == "reset_report" for event in snapshot["black_box_events"])

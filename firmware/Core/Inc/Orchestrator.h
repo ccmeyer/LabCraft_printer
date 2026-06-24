@@ -229,7 +229,19 @@ public:
 	  return instance()->_currentCmdNum;
   }
 
-  bool waitForBit(EventBits_t bit);
+  static uint16_t getOrchStackHwmWords() { return instance()->_orchStackHwmWords; }
+  static uint8_t getOrchStackPhase() { return instance()->_orchStackPhase; }
+  static uint32_t getOrchStackCmdNum() { return instance()->_orchStackCmdNum; }
+
+  static constexpr uint8_t ORCH_STACK_PHASE_UNKNOWN = 0;
+  static constexpr uint8_t ORCH_STACK_PHASE_CMD_START = 1;
+  static constexpr uint8_t ORCH_STACK_PHASE_ABS_XY_BEFORE_MOVE = 2;
+  static constexpr uint8_t ORCH_STACK_PHASE_ABS_XY_AFTER_MOVE = 3;
+  static constexpr uint8_t ORCH_STACK_PHASE_ABS_XY_WAIT_X = 4;
+  static constexpr uint8_t ORCH_STACK_PHASE_ABS_XY_WAIT_Y = 5;
+  static constexpr uint8_t ORCH_STACK_PHASE_CMD_DONE = 6;
+
+  bool waitForBit(EventBits_t bit, uint8_t orchStackPhase = ORCH_STACK_PHASE_UNKNOWN);
   bool waitForBits(EventBits_t bits);
   void executeCommand(const Command &cmd);
 
@@ -386,6 +398,7 @@ private:
 
   bool pauseAwareDelayTicks(TickType_t& remainingTicks);
   static TickType_t msToAtLeast1Tick(uint32_t ms);
+  void sampleOrchStack(uint8_t phase);
 
   TaskHandle_t   _flashTaskHandle = nullptr;
   // flash-monitor task entry
@@ -398,6 +411,9 @@ private:
   uint32_t			 _flashDelay;
   uint16_t			 _imagingDroplets;
   uint16_t			 _imagingFreq;
+  volatile uint16_t _orchStackHwmWords = 0;
+  volatile uint8_t _orchStackPhase = ORCH_STACK_PHASE_UNKNOWN;
+  volatile uint32_t _orchStackCmdNum = 0;
 
   static constexpr uint32_t kFlashAckMs = 5; // how long to hold the "flash fired" pin high
 

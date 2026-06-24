@@ -423,8 +423,30 @@ bool Orchestrator::pauseAwareDelayTicks(TickType_t& remainingTicks)
   return true;
 }
 
-bool Orchestrator::waitForBit(EventBits_t bit) {
+void Orchestrator::sampleOrchStack(uint8_t phase) {
+#if (INCLUDE_uxTaskGetStackHighWaterMark == 1)
+  const UBaseType_t hwm = uxTaskGetStackHighWaterMark(nullptr);
+  const uint16_t bounded = (hwm > 0xFFFFu) ? 0xFFFFu : static_cast<uint16_t>(hwm);
+  if ((_orchStackHwmWords == 0u) || (bounded < _orchStackHwmWords)) {
+    _orchStackHwmWords = bounded;
+    _orchStackPhase = phase;
+    _orchStackCmdNum = _currentCmdNum;
+  }
+#else
+  (void)phase;
+  _orchStackHwmWords = 0;
+  _orchStackPhase = ORCH_STACK_PHASE_UNKNOWN;
+  _orchStackCmdNum = 0;
+#endif
+}
+
+bool Orchestrator::waitForBit(EventBits_t bit, uint8_t orchStackPhase) {
   const TickType_t ticks = pdMS_TO_TICKS(50);
+  const TickType_t sampleEvery = msToAtLeast1Tick(200u);
+  TickType_t lastSample = xTaskGetTickCount();
+  if (orchStackPhase != ORCH_STACK_PHASE_UNKNOWN) {
+    sampleOrchStack(orchStackPhase);
+  }
   while (true) {
     Watchdog_CheckIn(CRASH_TASK_ORCH);
     drainAckQueue();
@@ -442,6 +464,13 @@ bool Orchestrator::waitForBit(EventBits_t bit) {
       ticks
     );
     drainAckQueue();
+    if (orchStackPhase != ORCH_STACK_PHASE_UNKNOWN) {
+      const TickType_t now = xTaskGetTickCount();
+      if ((now - lastSample) >= sampleEvery) {
+        sampleOrchStack(orchStackPhase);
+        lastSample = now;
+      }
+    }
     if ( (result & bit) != 0 ) {
       return true;  // we got the signal, normal completion
     }
@@ -647,6 +676,7 @@ void Orchestrator::executeCommand(const Command &cmd) {
 	    _lastSeq8 = cmd.seq8;
 	    _currentCmdNum = (uint32_t(_seqEpoch) << 8) | uint32_t(cmd.seq8);
 	  }
+  sampleOrchStack(ORCH_STACK_PHASE_CMD_START);
 //  _currentCmdNum = cmd.seq;
 
   // clear done‐bits
@@ -767,9 +797,12 @@ void Orchestrator::executeCommand(const Command &cmd) {
 		}
         case CMD_ABS_XY: {
           // p1=X, p2=Y, p3=freqHz
+          sampleOrchStack(ORCH_STACK_PHASE_ABS_XY_BEFORE_MOVE);
           Gantry::instance()->moveTo(cmd.p1,cmd.p2,cmd.p3);
+          sampleOrchStack(ORCH_STACK_PHASE_ABS_XY_AFTER_MOVE);
           commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(
-              waitForBit(BIT_STEPPER1_DONE) && waitForBit(BIT_STEPPER2_DONE)
+              waitForBit(BIT_STEPPER1_DONE, ORCH_STACK_PHASE_ABS_XY_WAIT_X) &&
+              waitForBit(BIT_STEPPER2_DONE, ORCH_STACK_PHASE_ABS_XY_WAIT_Y)
           );
           break;
         }
@@ -1338,6 +1371,7 @@ void Orchestrator::executeCommand(const Command &cmd) {
   if (!commandCompleted) {
       return;
   }
+  sampleOrchStack(ORCH_STACK_PHASE_CMD_DONE);
   OrchestratorCompletionPolicy::retireCurrentCommand(_currentCmdNum, _lastExecutedCmdNum, _lastRetiredCmdNum);
   }
 
