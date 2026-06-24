@@ -1,7 +1,79 @@
 from types import SimpleNamespace
 from pathlib import Path
+from unittest.mock import Mock, call
 
 from Controller import Controller
+
+
+class SignalRecorder:
+    def __init__(self):
+        self.calls = []
+
+    def emit(self, *args):
+        self.calls.append(args)
+
+
+class ResetWell:
+    def __init__(self, remaining):
+        self.remaining = int(remaining)
+
+    def get_remaining_droplets(self, _stock_id):
+        return self.remaining
+
+
+class ResetWellPlate:
+    def __init__(self, remaining):
+        self.remaining = int(remaining)
+
+    def get_all_wells_with_reactions(self, fill_by="rows", serpentine=True):
+        return [ResetWell(self.remaining)]
+
+
+def _make_reset_controller(tmp_path, *, array_state="idle", has_progress=False, remaining=5):
+    events = []
+    popups = []
+
+    controller = Controller.__new__(Controller)
+    controller._repo_root = tmp_path
+    controller._reset_report_log_path = tmp_path / "board_reset_reports.jsonl"
+    controller.machine = SimpleNamespace(get_reset_debug_bundle_context=lambda: {})
+    controller.array_state_changed = SignalRecorder()
+    controller.error_occurred_signal = SimpleNamespace(
+        emit=lambda title, message: popups.append((title, message))
+    )
+    controller.expected_position = {"X": 9, "Y": 9, "Z": 9}
+    controller.expected_location = "Home"
+    controller._array_state = array_state
+    controller._array_context = {
+        "stock_id": "stock-a",
+        "queued_wells": [{"well_id": "A1", "target_droplets": 5}],
+        "planned_well_ids": {"A1"},
+        "current_barrier_seq32": 123,
+    }
+    controller._soft_stop_clear_uncertain = True
+    controller.model = SimpleNamespace(
+        record_experiment_audit_event=Mock(),
+        machine_model=SimpleNamespace(
+            recover_after_board_reset=lambda: events.append(("recover", None)),
+            update_last_reset_report=lambda report: events.append(("update", dict(report))),
+            get_current_position_dict=lambda: {"X": 1, "Y": 2, "Z": 3},
+            get_current_print_pressure=lambda: 1.11,
+            get_target_print_pressure=lambda: 1.23,
+            get_current_refuel_pressure=lambda: 0.44,
+            get_target_refuel_pressure=lambda: 0.56,
+            get_print_pulse_width=lambda: 1450,
+            get_refuel_pulse_width=lambda: 3200,
+        ),
+        rack_model=SimpleNamespace(
+            get_gripper_printer_head=lambda: SimpleNamespace(get_stock_id=lambda: "stock-a"),
+            gripper_printer_head=SimpleNamespace(get_stock_id=lambda: "stock-a"),
+        ),
+        well_plate=ResetWellPlate(remaining),
+        experiment_model=SimpleNamespace(
+            get_progress_status=lambda: {"has_printed_progress": bool(has_progress)}
+        ),
+    )
+    return controller, events, popups
 
 
 def test_handle_reset_report_logs_and_emits_popup(tmp_path):
@@ -58,6 +130,98 @@ def test_handle_reset_report_logs_and_emits_popup(tmp_path):
     assert context["port"] == "COM9"
     assert context["black_box_session_id"] == "session-abc"
     assert context["black_box_snapshots"][0]["reason"] == "reset_report"
+
+
+def test_handle_reset_report_marks_active_array_resume_ready_when_progress_exists(tmp_path):
+    controller, events, popups = _make_reset_controller(
+        tmp_path,
+        array_state="running",
+        has_progress=True,
+        remaining=4,
+    )
+
+    Controller.handle_reset_report(controller, {"summary": "Board restarted."})
+
+    assert controller.get_array_run_state() == "resume_ready"
+    assert controller._array_context is None
+    assert controller._soft_stop_clear_uncertain is False
+    assert controller.array_state_changed.calls == [("resume_ready",)]
+    assert events == [("recover", None), ("update", {"summary": "Board restarted."})]
+    assert popups[0][0] == "Board Reset Detected"
+    controller.model.record_experiment_audit_event.assert_called_once()
+    assert controller.model.record_experiment_audit_event.call_args.args[:2] == (
+        "print_array_interrupted_by_board_reset",
+        "Print array interrupted by board reset",
+    )
+    assert controller.model.record_experiment_audit_event.call_args.kwargs["level"] == "warning"
+
+
+def test_handle_reset_report_marks_active_array_idle_without_progress(tmp_path):
+    controller, _events, _popups = _make_reset_controller(
+        tmp_path,
+        array_state="running",
+        has_progress=False,
+        remaining=4,
+    )
+
+    Controller.handle_reset_report(controller, {"summary": "Board restarted."})
+
+    assert controller.get_array_run_state() == "idle"
+    assert controller._array_context is None
+    assert controller.array_state_changed.calls == [("idle",)]
+
+
+def test_update_machine_connection_status_restores_reset_print_settings_once():
+    controller = Controller.__new__(Controller)
+    controller._pending_reset_print_settings_restore = {
+        "target_print_pressure_psi": 1.23,
+        "target_refuel_pressure_psi": 0.56,
+        "print_pulse_width_us": 1450,
+        "refuel_pulse_width_us": 3200,
+    }
+    controller.model = SimpleNamespace(machine_model=SimpleNamespace(connect_machine=Mock()))
+    controller.set_print_pulse_width = Mock(return_value=True)
+    controller.set_refuel_pulse_width = Mock(return_value=True)
+    controller.set_absolute_print_pressure = Mock(return_value=True)
+    controller.set_absolute_refuel_pressure = Mock(return_value=True)
+
+    Controller.update_machine_connection_status(controller, True)
+    Controller.update_machine_connection_status(controller, True)
+
+    controller.model.machine_model.connect_machine.assert_has_calls([call(), call()])
+    controller.set_print_pulse_width.assert_called_once_with(
+        1450,
+        manual=True,
+        trace_metadata={
+            "source": "board_reset_reconnect_restore",
+            "setting_key": "print_pulse_width_us",
+        },
+    )
+    controller.set_refuel_pulse_width.assert_called_once_with(
+        3200,
+        manual=True,
+        trace_metadata={
+            "source": "board_reset_reconnect_restore",
+            "setting_key": "refuel_pulse_width_us",
+        },
+    )
+    controller.set_absolute_print_pressure.assert_called_once_with(
+        1.23,
+        manual=True,
+        trace_metadata={
+            "source": "board_reset_reconnect_restore",
+            "setting_key": "target_print_pressure_psi",
+        },
+    )
+    controller.set_absolute_refuel_pressure.assert_called_once_with(
+        0.56,
+        manual=True,
+        trace_metadata={
+            "source": "board_reset_reconnect_restore",
+            "setting_key": "target_refuel_pressure_psi",
+        },
+    )
+    assert controller._pending_reset_print_settings_restore is None
 
 
 def test_handle_reset_report_emits_popup_when_log_write_fails():

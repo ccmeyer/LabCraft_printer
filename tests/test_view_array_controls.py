@@ -93,7 +93,7 @@ class DummyCommand:
 def test_well_plate_widget_refreshes_array_runner_buttons():
     widget = _make_widget(array_state="idle", has_head=True)
     WellPlateWidget.update_start_print_array_button(widget)
-    assert widget.start_print_array_button.text == "Start Print"
+    assert widget.start_print_array_button.text == "Start Array"
     assert widget.start_print_array_button.enabled is True
 
     widget.controller.get_array_run_state = lambda: "running"

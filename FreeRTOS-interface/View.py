@@ -3852,7 +3852,7 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         self.stock_prep_button.clicked.connect(self.open_stock_prep_dialog)
         self.bottom_layout.addWidget(self.stock_prep_button)
 
-        self.start_print_array_button = QPushButton("Start Print")
+        self.start_print_array_button = QPushButton("Start Array")
         self.start_print_array_button.setStyleSheet(f"background-color: {self.color_dict['darker_gray']}; color: white;")
         self.start_print_array_button.setEnabled(False)
         self.start_print_array_button.clicked.connect(self.start_print_array)
@@ -3901,7 +3901,7 @@ class WellPlateWidget(QtWidgets.QGroupBox):
             self._set_array_button_state(self.start_print_array_button, has_head, 'dark_blue')
             return
 
-        self.start_print_array_button.setText("Start Print")
+        self.start_print_array_button.setText("Start Array")
         self._set_array_button_state(self.start_print_array_button, has_head, 'dark_blue')
 
     def start_print_array(self):

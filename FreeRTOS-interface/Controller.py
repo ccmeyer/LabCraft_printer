@@ -174,6 +174,7 @@ class Controller(QObject):
 
         self._array_state = "idle"
         self._array_context = None
+        self._pending_reset_print_settings_restore = None
 
         # Connect the machine's signals to the controller's handlers
         self.machine.status_updated.connect(self.handle_status_update)
@@ -433,6 +434,7 @@ class Controller(QObject):
         if status:
             print("Controller: Machine connected successfully.")
             self.model.machine_model.connect_machine()
+            self._restore_print_settings_after_board_reset()
         else:
             print("Controller: Failed to connect to the machine.")
             self.model.machine_model.disconnect_machine()
@@ -440,6 +442,8 @@ class Controller(QObject):
     def handle_reset_report(self, report: dict):
         report = dict(report or {})
         machine_model = self.model.machine_model
+        self._pending_reset_print_settings_restore = self._snapshot_print_settings_for_reset_restore(machine_model)
+        self._interrupt_array_after_board_reset(report)
         machine_model.recover_after_board_reset()
         update_report = getattr(machine_model, "update_last_reset_report", None)
         if callable(update_report):
@@ -1962,6 +1966,159 @@ class Controller(QObject):
             return value
         except Exception:
             return default
+
+    @staticmethod
+    def _finite_float_or_none(value, *, minimum=None):
+        try:
+            result = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(result):
+            return None
+        if minimum is not None and result < minimum:
+            return None
+        return result
+
+    @staticmethod
+    def _valid_pulse_width_or_none(value):
+        try:
+            result = int(round(float(value)))
+        except (TypeError, ValueError):
+            return None
+        if 100 <= result <= 10000:
+            return result
+        return None
+
+    def _snapshot_print_settings_for_reset_restore(self, machine_model=None):
+        if machine_model is None:
+            machine_model = getattr(getattr(self, "model", None), "machine_model", None)
+        if machine_model is None:
+            return None
+
+        snapshot = {}
+        target_print = self._finite_float_or_none(
+            self._safe_audit_value(machine_model, "get_target_print_pressure"),
+            minimum=0.0,
+        )
+        target_refuel = self._finite_float_or_none(
+            self._safe_audit_value(machine_model, "get_target_refuel_pressure"),
+            minimum=0.0,
+        )
+        print_width = self._valid_pulse_width_or_none(
+            self._safe_audit_value(machine_model, "get_print_pulse_width")
+        )
+        refuel_width = self._valid_pulse_width_or_none(
+            self._safe_audit_value(machine_model, "get_refuel_pulse_width")
+        )
+
+        if target_print is not None:
+            snapshot["target_print_pressure_psi"] = target_print
+        if target_refuel is not None:
+            snapshot["target_refuel_pressure_psi"] = target_refuel
+        if print_width is not None:
+            snapshot["print_pulse_width_us"] = print_width
+        if refuel_width is not None:
+            snapshot["refuel_pulse_width_us"] = refuel_width
+        return snapshot or None
+
+    def _restore_print_settings_after_board_reset(self):
+        settings = getattr(self, "_pending_reset_print_settings_restore", None)
+        if not isinstance(settings, dict) or not settings:
+            return False
+
+        self._pending_reset_print_settings_restore = None
+        commands = [
+            ("print_pulse_width_us", self.set_print_pulse_width),
+            ("refuel_pulse_width_us", self.set_refuel_pulse_width),
+            ("target_print_pressure_psi", self.set_absolute_print_pressure),
+            ("target_refuel_pressure_psi", self.set_absolute_refuel_pressure),
+        ]
+        queued_any = False
+        for key, setter in commands:
+            if key not in settings:
+                continue
+            try:
+                result = setter(
+                    settings[key],
+                    manual=True,
+                    trace_metadata={
+                        "source": "board_reset_reconnect_restore",
+                        "setting_key": key,
+                    },
+                )
+                queued_any = bool(result) or queued_any
+            except Exception as exc:
+                print(f"Could not restore {key} after board reset: {exc}")
+        return queued_any
+
+    def _get_experiment_progress_status_for_array(self):
+        experiment_model = getattr(getattr(self, "model", None), "experiment_model", None)
+        get_status = getattr(experiment_model, "get_progress_status", None)
+        if not callable(get_status):
+            return {}
+        try:
+            return dict(get_status() or {})
+        except Exception as exc:
+            return {"error": str(exc) or exc.__class__.__name__}
+
+    def _array_has_remaining_wells_for_loaded_stock(self):
+        rack_model = getattr(getattr(self, "model", None), "rack_model", None)
+        printer_head = None
+        getter = getattr(rack_model, "get_gripper_printer_head", None)
+        if callable(getter):
+            try:
+                printer_head = getter()
+            except Exception:
+                printer_head = None
+        if printer_head is None:
+            printer_head = getattr(rack_model, "gripper_printer_head", None)
+
+        stock_id = self._safe_audit_value(printer_head, "get_stock_id")
+        if not stock_id:
+            return None
+        try:
+            return bool(self._get_array_remaining_wells(stock_id))
+        except Exception:
+            return None
+
+    def _interrupt_array_after_board_reset(self, report=None):
+        previous_state = self.get_array_run_state()
+        if previous_state not in {"running", "stop_requested"}:
+            return None
+
+        context = getattr(self, "_array_context", None)
+        try:
+            audit_details = self._build_print_array_snapshot(context)
+        except Exception:
+            audit_details = {}
+
+        progress_status = self._get_experiment_progress_status_for_array()
+        has_progress = bool(progress_status.get("has_printed_progress", False))
+        has_remaining = self._array_has_remaining_wells_for_loaded_stock()
+        next_state = "resume_ready" if has_progress and has_remaining is not False else "idle"
+
+        self._array_context = None
+        self._soft_stop_clear_uncertain = False
+        self._set_array_run_state(next_state)
+
+        report = dict(report or {})
+        audit_details.update(
+            {
+                "finalize_reason": "board_reset",
+                "previous_array_state": previous_state,
+                "array_state": self.get_array_run_state(),
+                "progress_status": progress_status,
+                "remaining_wells_for_loaded_stock": has_remaining,
+                "reset_summary": report.get("summary"),
+            }
+        )
+        self._record_print_array_audit_event(
+            "print_array_interrupted_by_board_reset",
+            "Print array interrupted by board reset",
+            details=audit_details,
+            level="warning",
+        )
+        return next_state
 
     def _build_print_settings_snapshot(self):
         machine_model = getattr(getattr(self, "model", None), "machine_model", None)
