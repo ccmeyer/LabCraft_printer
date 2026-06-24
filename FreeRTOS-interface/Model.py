@@ -9769,6 +9769,7 @@ class MachineModel(QObject):
         self.last_reset_report = None
         self.last_reset_summary = ""
         self.last_reset_report_active = False
+        self.evap_plate_dock_check_required_after_reset = False
 
     def update_ports(self, ports):
         self.available_ports = ports
@@ -9810,6 +9811,7 @@ class MachineModel(QObject):
         self.gripper_active = False
         self.reset_home_status()
         self.home_status_signal.emit()
+        self.mark_evap_plate_dock_check_required_after_reset()
 
     def update_last_reset_report(self, report):
         self.last_reset_report = dict(report)
@@ -9824,6 +9826,12 @@ class MachineModel(QObject):
         self.last_reset_report_active = False
         self.reset_report_updated.emit()
         self.machine_state_updated.emit(self.machine_connected)
+
+    def mark_evap_plate_dock_check_required_after_reset(self):
+        self.evap_plate_dock_check_required_after_reset = True
+
+    def clear_evap_plate_dock_check_required_after_reset(self):
+        self.evap_plate_dock_check_required_after_reset = False
 
     def connect_balance(self):
         self.balance_connected = True

@@ -4002,6 +4002,24 @@ class WellPlateWidget(QtWidgets.QGroupBox):
                 self.main_window.popup_message("Cannot Start Print Array", message)
                 return
 
+        dock_context_getter = getattr(self.controller, "get_evap_plate_dock_check_context", None)
+        dock_context = (
+            dock_context_getter(request_kind="resume" if is_resume else "start")
+            if callable(dock_context_getter)
+            else {"required": False}
+        )
+        if bool((dock_context or {}).get("required")):
+            response = self.main_window.popup_yes_no(
+                str((dock_context or {}).get("title") or "Evaporation Plate Dock Check"),
+                str(
+                    (dock_context or {}).get("message")
+                    or "Confirm the evaporation plate is in the dock position before continuing."
+                ),
+            )
+            if not self.main_window._is_yes_response(response):
+                return
+            print_kwargs["evap_plate_dock_confirmed"] = True
+
         self.controller.print_array(**print_kwargs)
 
     def request_array_soft_stop(self):

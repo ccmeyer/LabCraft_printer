@@ -45,6 +45,7 @@ def test_handle_reset_report_logs_and_emits_popup(tmp_path):
     assert popups[0][0] == "Board Reset Detected"
     assert "Board restarted after watchdog reset." in popups[0][1]
     assert "Homing state was cleared. Home the motors before resuming motion." in popups[0][1]
+    assert "confirm the evaporation plate is in the dock position" in popups[0][1]
     assert "Saved to:" in popups[0][1]
     assert str(controller._reset_report_log_path) in popups[0][1]
     assert controller._reset_report_log_path.exists()
@@ -94,6 +95,7 @@ def test_handle_reset_report_emits_popup_when_log_write_fails():
     assert popups[0][0] == "Board Reset Detected"
     assert "Board restarted after power/brownout reset." in popups[0][1]
     assert "Homing state was cleared. Home the motors before resuming motion." in popups[0][1]
+    assert "confirm the evaporation plate is in the dock position" in popups[0][1]
     assert "Log save failed: disk unavailable" in popups[0][1]
     assert controller._last_reset_debug_bundle_context["reset_report"] == report
     assert controller._last_reset_debug_bundle_context["reset_report_log_error"] == "disk unavailable"

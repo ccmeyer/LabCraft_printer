@@ -84,6 +84,23 @@ def test_recover_after_board_reset_preserves_banner_and_clears_transient_state(q
     assert machine_model.current_location == "Unknown"
     assert machine_model.last_reset_report_active is True
     assert machine_model.last_reset_summary == "watchdog reset"
+    assert machine_model.evap_plate_dock_check_required_after_reset is True
+
+
+def test_evap_plate_dock_reset_latch_survives_home_until_cleared(qapp):
+    machine_model = MachineModel()
+
+    assert machine_model.evap_plate_dock_check_required_after_reset is False
+
+    machine_model.recover_after_board_reset()
+    assert machine_model.evap_plate_dock_check_required_after_reset is True
+
+    machine_model.handle_home_complete()
+    assert machine_model.motors_homed is True
+    assert machine_model.evap_plate_dock_check_required_after_reset is True
+
+    machine_model.clear_evap_plate_dock_check_required_after_reset()
+    assert machine_model.evap_plate_dock_check_required_after_reset is False
 
 
 def test_pressure_conversion_and_rolling_buffers(qapp):

@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 from PySide6.QtWidgets import QMessageBox
 
@@ -22,9 +22,19 @@ class DummyButton:
         self.style = style
 
 
-def _make_widget(*, array_state="idle", has_head=True, preflight=None, choice="Cancel"):
+def _make_widget(
+    *,
+    array_state="idle",
+    has_head=True,
+    preflight=None,
+    choice="Cancel",
+    dock_context=None,
+    yes_no_responses=None,
+):
     if preflight is None:
         preflight = {"ok": True, "code": "ok", "message": "", "record": None}
+    if dock_context is None:
+        dock_context = {"required": False, "reasons": [], "title": "", "message": ""}
     widget = WellPlateWidget.__new__(WellPlateWidget)
     widget.color_dict = {
         "dark_blue": "#123456",
@@ -37,6 +47,7 @@ def _make_widget(*, array_state="idle", has_head=True, preflight=None, choice="C
         request_array_soft_stop=Mock(),
         get_array_run_state=lambda: array_state,
         get_print_array_imaging_calibration_preflight=Mock(return_value=preflight),
+        get_evap_plate_dock_check_context=Mock(return_value=dock_context),
         apply_applied_imaging_calibration_print_settings=Mock(
             return_value={"ok": True, "message": "Set print pulse width to 1450 us and print pressure to 1.350 psi."}
         ),
@@ -46,8 +57,13 @@ def _make_widget(*, array_state="idle", has_head=True, preflight=None, choice="C
             gripper_printer_head=object() if has_head else None,
         )
     )
+    popup_yes_no = (
+        Mock(side_effect=yes_no_responses)
+        if yes_no_responses is not None
+        else Mock(return_value=QMessageBox.StandardButton.Yes)
+    )
     widget.main_window = SimpleNamespace(
-        popup_yes_no=Mock(return_value=QMessageBox.StandardButton.Yes),
+        popup_yes_no=popup_yes_no,
         popup_choice=Mock(return_value=choice),
         popup_message=Mock(),
         _is_yes_response=lambda response: MainWindow._is_yes_response(response),
@@ -108,6 +124,45 @@ def test_well_plate_widget_resume_prompt_uses_resume_copy():
     widget.controller.print_array.assert_called_once_with()
 
 
+def test_well_plate_widget_first_print_dock_prompt_confirms_before_printing():
+    widget = _make_widget(
+        dock_context={
+            "required": True,
+            "reasons": ["first_experiment_print"],
+            "title": "Evaporation Plate Dock Check",
+            "message": "Confirm the evaporation plate is docked.",
+        }
+    )
+
+    WellPlateWidget.start_print_array(widget)
+
+    assert widget.main_window.popup_yes_no.call_args_list == [
+        call("Start Print Array", "Are you sure you want to start the print array?"),
+        call("Evaporation Plate Dock Check", "Confirm the evaporation plate is docked."),
+    ]
+    widget.controller.print_array.assert_called_once_with(evap_plate_dock_confirmed=True)
+
+
+def test_well_plate_widget_dock_prompt_cancel_blocks_printing():
+    widget = _make_widget(
+        dock_context={
+            "required": True,
+            "reasons": ["first_experiment_print"],
+            "title": "Evaporation Plate Dock Check",
+            "message": "Confirm the evaporation plate is docked.",
+        },
+        yes_no_responses=[
+            QMessageBox.StandardButton.Yes,
+            QMessageBox.StandardButton.No,
+        ],
+    )
+
+    WellPlateWidget.start_print_array(widget)
+
+    assert widget.main_window.popup_yes_no.call_count == 2
+    widget.controller.print_array.assert_not_called()
+
+
 def test_well_plate_widget_missing_applied_calibration_cancel_does_not_print():
     widget = _make_widget(
         preflight={
@@ -122,6 +177,29 @@ def test_well_plate_widget_missing_applied_calibration_cancel_does_not_print():
     WellPlateWidget.start_print_array(widget)
 
     widget.main_window.popup_choice.assert_called_once()
+    widget.controller.print_array.assert_not_called()
+
+
+def test_well_plate_widget_preflight_cancel_does_not_show_dock_prompt():
+    widget = _make_widget(
+        preflight={
+            "ok": False,
+            "code": "missing_record",
+            "message": "No applied imaging calibration was found.",
+            "record": None,
+        },
+        choice="Cancel",
+        dock_context={
+            "required": True,
+            "reasons": ["first_experiment_print"],
+            "title": "Evaporation Plate Dock Check",
+            "message": "Confirm the evaporation plate is docked.",
+        },
+    )
+
+    WellPlateWidget.start_print_array(widget)
+
+    widget.controller.get_evap_plate_dock_check_context.assert_not_called()
     widget.controller.print_array.assert_not_called()
 
 
@@ -174,6 +252,35 @@ def test_well_plate_widget_settings_mismatch_can_proceed_with_override():
     WellPlateWidget.start_print_array(widget)
 
     widget.controller.print_array.assert_called_once_with(settings_mismatch_override=True)
+
+
+def test_well_plate_widget_reset_resume_passes_dock_confirmation_with_overrides():
+    widget = _make_widget(
+        array_state="resume_ready",
+        preflight={
+            "ok": False,
+            "code": "pressure_mismatch",
+            "message": "Current print pressure does not match the applied imaging calibration.",
+            "record": {"run_id": "run-2", "pw_us": 1450, "pressure_psi": 1.35},
+        },
+        choice="Proceed with current settings",
+        dock_context={
+            "required": True,
+            "reasons": ["after_board_reset"],
+            "title": "Evaporation Plate Dock Check",
+            "message": "Confirm the evaporation plate is docked after reset.",
+        },
+    )
+
+    WellPlateWidget.start_print_array(widget)
+
+    widget.controller.get_evap_plate_dock_check_context.assert_called_once_with(
+        request_kind="resume"
+    )
+    widget.controller.print_array.assert_called_once_with(
+        settings_mismatch_override=True,
+        evap_plate_dock_confirmed=True,
+    )
 
 
 def test_shift_p_shortcut_uses_well_plate_print_launch_path():

@@ -99,6 +99,8 @@ def _make_controller(
     imaging_guard_message="Applied imaging calibration is required.",
     imaging_guard_code=None,
     imaging_guard_record=None,
+    progress_status=None,
+    reset_dock_required=False,
 ):
     c = Controller.__new__(Controller)
     c.array_complete = Emitter()
@@ -157,6 +159,8 @@ def _make_controller(
         imaging_guard_code = "ok" if imaging_guard_ok else "missing_record"
     if imaging_guard_record is None and imaging_guard_ok:
         imaging_guard_record = {"run_id": "run-1", "pw_us": 1400, "pressure_psi": 1.20}
+    if progress_status is None:
+        progress_status = {"has_printed_progress": True}
     c.model = SimpleNamespace(
         well_plate=well_plate,
         update_state=Mock(side_effect=lambda status: None),
@@ -178,6 +182,7 @@ def _make_controller(
         ),
         experiment_model=SimpleNamespace(
             create_progress_file=Mock(),
+            get_progress_status=Mock(return_value=progress_status),
             validate_applied_imaging_calibration_for_print=Mock(
                 return_value={
                     "ok": bool(imaging_guard_ok),
@@ -187,6 +192,10 @@ def _make_controller(
                 }
             ),
         ),
+    )
+    c.model.machine_model.evap_plate_dock_check_required_after_reset = bool(reset_dock_required)
+    c.model.machine_model.clear_evap_plate_dock_check_required_after_reset = (
+        lambda: setattr(c.model.machine_model, "evap_plate_dock_check_required_after_reset", False)
     )
     return c
 
@@ -219,6 +228,68 @@ def _restore_calls(restore_accels=None):
         call(1, restore_accels[1]),
         call(2, restore_accels[2], handler=ANY),
     ]
+
+
+def test_evap_plate_dock_context_requires_first_experiment_start_not_resume():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        progress_status={"has_printed_progress": False},
+    )
+
+    start_context = Controller.get_evap_plate_dock_check_context(c, request_kind="start")
+    resume_context = Controller.get_evap_plate_dock_check_context(c, request_kind="resume")
+
+    assert start_context["required"] is True
+    assert start_context["reasons"] == ["first_experiment_print"]
+    assert resume_context["required"] is False
+    assert resume_context["reasons"] == []
+
+
+def test_evap_plate_dock_context_requires_after_board_reset_for_start_and_resume():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        reset_dock_required=True,
+    )
+
+    start_context = Controller.get_evap_plate_dock_check_context(c, request_kind="start")
+    resume_context = Controller.get_evap_plate_dock_check_context(c, request_kind="resume")
+
+    assert "after_board_reset" in start_context["reasons"]
+    assert start_context["required"] is True
+    assert resume_context["reasons"] == ["after_board_reset"]
+    assert resume_context["required"] is True
+
+
+def test_print_array_blocks_when_evap_plate_dock_confirmation_required():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        progress_status={"has_printed_progress": False},
+    )
+
+    Controller.print_array(c)
+
+    assert c.error_occurred_signal.calls[-1][0] == "Evaporation Plate Dock Check Required"
+    c.close_gripper.assert_not_called()
+    c.move_to_location.assert_not_called()
+    c.set_absolute_coordinates.assert_not_called()
+    assert c.get_array_run_state() == "idle"
+
+
+def test_print_array_confirmed_after_reset_clears_reset_dock_latch():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        reset_dock_required=True,
+    )
+
+    Controller.print_array(c, evap_plate_dock_confirmed=True)
+
+    assert c.model.machine_model.evap_plate_dock_check_required_after_reset is False
+    c.close_gripper.assert_called_once_with()
+    assert c.get_array_run_state() == "running"
 
 
 def test_print_array_blocks_when_plate_not_calibrated():

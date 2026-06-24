@@ -447,7 +447,11 @@ class Controller(QObject):
         self.expected_position = machine_model.get_current_position_dict()
         self.expected_location = None
         summary = report.get("summary", "Board reset detected.")
-        guidance = "Homing state was cleared. Home the motors before resuming motion."
+        guidance = (
+            "Homing state was cleared. Home the motors before resuming motion. "
+            "Before the next print array starts or resumes, confirm the evaporation "
+            "plate is in the dock position."
+        )
         try:
             log_path = self._append_reset_report_log(report)
             log_error = None
@@ -4047,8 +4051,67 @@ class Controller(QObject):
             "pw_us": pw_us,
             "pressure_psi": pressure_psi,
         }
+
+    def get_evap_plate_dock_check_context(self, request_kind=None):
+        """Return whether the operator must confirm the evaporation plate dock state."""
+        kind = str(request_kind or "").strip().lower()
+        if kind in {"resume_ready", "resume print", "resume_print"}:
+            kind = "resume"
+        elif kind not in {"start", "resume"}:
+            kind = "resume" if self.get_array_run_state() == "resume_ready" else "start"
+
+        reasons = []
+        progress_status = None
+
+        if kind == "start":
+            experiment_model = getattr(getattr(self, "model", None), "experiment_model", None)
+            get_status = getattr(experiment_model, "get_progress_status", None)
+            if callable(get_status):
+                try:
+                    progress_status = dict(get_status() or {})
+                except Exception as exc:
+                    progress_status = {"error": str(exc) or exc.__class__.__name__}
+                if not bool(progress_status.get("has_printed_progress", False)):
+                    reasons.append("first_experiment_print")
+
+        machine_model = getattr(getattr(self, "model", None), "machine_model", None)
+        if bool(getattr(machine_model, "evap_plate_dock_check_required_after_reset", False)):
+            reasons.append("after_board_reset")
+
+        required = bool(reasons)
+        message_parts = []
+        if "first_experiment_print" in reasons:
+            message_parts.append(
+                "This is the first print array for the current experiment."
+            )
+        if "after_board_reset" in reasons:
+            message_parts.append(
+                "A board reset occurred since the last print array start or resume. "
+                "Homing does not move the evaporation plate back to the dock."
+            )
+        if not message_parts:
+            message_parts.append("The evaporation plate dock check is not required.")
+        message_parts.append(
+            "Confirm the evaporation plate is seated in the dock position and the "
+            "plate travel area is clear before continuing."
+        )
+
+        return {
+            "required": required,
+            "reasons": reasons,
+            "title": "Evaporation Plate Dock Check",
+            "message": "\n\n".join(message_parts),
+            "request_kind": kind,
+            "progress_status": progress_status,
+        }
     
-    def print_array(self, *, imaging_calibration_override=False, settings_mismatch_override=False):
+    def print_array(
+        self,
+        *,
+        imaging_calibration_override=False,
+        settings_mismatch_override=False,
+        evap_plate_dock_confirmed=False,
+    ):
         '''
         Iterates through all wells with an assigned reaction and prints the 
         required number of droplets for the currently loaded printer head.
@@ -4098,6 +4161,18 @@ class Controller(QObject):
                 return
             print(f"Print array imaging calibration override accepted: {code}")
 
+        dock_check = self.get_evap_plate_dock_check_context(
+            request_kind="resume" if starting_state == "resume_ready" else "start"
+        )
+        if bool(dock_check.get("required")) and not bool(evap_plate_dock_confirmed):
+            message = str(
+                dock_check.get("message")
+                or "Confirm the evaporation plate is in the dock position before continuing."
+            )
+            self.error_occurred_signal.emit("Evaporation Plate Dock Check Required", message)
+            print("Cannot print: evaporation plate dock confirmation is required")
+            return
+
         transport_resumed = False
         if starting_state == "resume_ready" and self.model.machine_model.transport_paused:
             self.resume_commands()
@@ -4106,6 +4181,19 @@ class Controller(QObject):
         if not self._start_array_run_context():
             print('Cannot print: No remaining droplets for the loaded stock')
             return
+        if (
+            bool(evap_plate_dock_confirmed)
+            and "after_board_reset" in (dock_check.get("reasons") or [])
+        ):
+            clear_dock_check = getattr(
+                self.model.machine_model,
+                "clear_evap_plate_dock_check_required_after_reset",
+                None,
+            )
+            if callable(clear_dock_check):
+                clear_dock_check()
+            else:
+                self.model.machine_model.evap_plate_dock_check_required_after_reset = False
         self._record_print_array_audit_event(
             "print_array_requested",
             "Print array request accepted",
@@ -4113,6 +4201,8 @@ class Controller(QObject):
                 "request_kind": "resume" if starting_state == "resume_ready" else "start",
                 "imaging_calibration_override": bool(imaging_calibration_override),
                 "settings_mismatch_override": bool(settings_mismatch_override),
+                "evap_plate_dock_confirmed": bool(evap_plate_dock_confirmed),
+                "evap_plate_dock_check_reasons": list(dock_check.get("reasons") or []),
             },
         )
         if starting_state == "resume_ready":
