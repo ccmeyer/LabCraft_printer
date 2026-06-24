@@ -424,20 +424,11 @@ bool Orchestrator::pauseAwareDelayTicks(TickType_t& remainingTicks)
 }
 
 void Orchestrator::sampleOrchStack(uint8_t phase) {
-#if (INCLUDE_uxTaskGetStackHighWaterMark == 1)
-  const UBaseType_t hwm = uxTaskGetStackHighWaterMark(nullptr);
-  const uint16_t bounded = (hwm > 0xFFFFu) ? 0xFFFFu : static_cast<uint16_t>(hwm);
-  if ((_orchStackHwmWords == 0u) || (bounded < _orchStackHwmWords)) {
-    _orchStackHwmWords = bounded;
-    _orchStackPhase = phase;
-    _orchStackCmdNum = _currentCmdNum;
-  }
-#else
-  (void)phase;
+  // Keep this path cheap: phase/cmd telemetry is emitted from normal status
+  // frames, while stack high-water scanning is intentionally disabled.
   _orchStackHwmWords = 0;
-  _orchStackPhase = ORCH_STACK_PHASE_UNKNOWN;
-  _orchStackCmdNum = 0;
-#endif
+  _orchStackPhase = phase;
+  _orchStackCmdNum = _currentCmdNum;
 }
 
 bool Orchestrator::waitForBit(EventBits_t bit, uint8_t orchStackPhase) {

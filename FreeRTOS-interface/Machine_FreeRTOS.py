@@ -4306,6 +4306,8 @@ class Machine(QObject):
         rx_to_main_thread_ms = None
         if host_rx_ns is not None:
             rx_to_main_thread_ms = round(max(0, now_ns - host_rx_ns) / 1_000_000.0, 3)
+        orch_phase = self._coerce_optional_int(data.get("Orch_stack_phase"))
+        orch_cmd = self._coerce_optional_int(data.get("Orch_stack_cmd"))
         sample = {
             "monotonic_ns": now_ns,
             "Current_command": self._coerce_optional_int(data.get("Current_command")),
@@ -4319,9 +4321,12 @@ class Machine(QObject):
             "Flash_delay": self._coerce_optional_int(data.get("Flash_delay")),
             "Flash_droplets": self._coerce_optional_int(data.get("Flash_droplets")),
             "Orch_stack_hwm_words": self._coerce_optional_int(data.get("Orch_stack_hwm_words")),
-            "Orch_stack_phase": self._coerce_optional_int(data.get("Orch_stack_phase")),
-            "Orch_stack_phase_name": orch_stack_phase_name(data.get("Orch_stack_phase")),
-            "Orch_stack_cmd": self._coerce_optional_int(data.get("Orch_stack_cmd")),
+            "Orch_stack_phase": orch_phase,
+            "Orch_stack_phase_name": orch_stack_phase_name(orch_phase),
+            "Orch_stack_cmd": orch_cmd,
+            "Orch_phase": orch_phase,
+            "Orch_phase_name": orch_stack_phase_name(orch_phase),
+            "Orch_cmd": orch_cmd,
             "rx_to_main_thread_ms": rx_to_main_thread_ms,
         }
         for key in (
@@ -4356,6 +4361,8 @@ class Machine(QObject):
 
     def _status_sample_for_output(self, sample, request_created_monotonic_ns=None):
         sample = dict(sample or {})
+        orch_phase = self._coerce_optional_int(sample.get("Orch_stack_phase"))
+        orch_cmd = self._coerce_optional_int(sample.get("Orch_stack_cmd"))
         out = {
             "Current_command": self._coerce_optional_int(sample.get("Current_command")),
             "Last_completed": self._coerce_optional_int(sample.get("Last_completed")),
@@ -4368,9 +4375,12 @@ class Machine(QObject):
             "Flash_delay": self._coerce_optional_int(sample.get("Flash_delay")),
             "Flash_droplets": self._coerce_optional_int(sample.get("Flash_droplets")),
             "Orch_stack_hwm_words": self._coerce_optional_int(sample.get("Orch_stack_hwm_words")),
-            "Orch_stack_phase": self._coerce_optional_int(sample.get("Orch_stack_phase")),
-            "Orch_stack_phase_name": orch_stack_phase_name(sample.get("Orch_stack_phase")),
-            "Orch_stack_cmd": self._coerce_optional_int(sample.get("Orch_stack_cmd")),
+            "Orch_stack_phase": orch_phase,
+            "Orch_stack_phase_name": orch_stack_phase_name(orch_phase),
+            "Orch_stack_cmd": orch_cmd,
+            "Orch_phase": orch_phase,
+            "Orch_phase_name": orch_stack_phase_name(orch_phase),
+            "Orch_cmd": orch_cmd,
             "rx_to_main_thread_ms": sample.get("rx_to_main_thread_ms"),
         }
         for key in (
