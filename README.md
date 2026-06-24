@@ -127,6 +127,27 @@ Outputs:
 - Campaign report: `hil_reports/qualification_campaigns/<machine_id>/<timestamp>/campaign_report.json`
 - Campaign CSV: `hil_reports/qualification_campaigns/<machine_id>/<timestamp>/campaign_summary.csv`
 
+## Firmware Local Checks
+
+Prerequisites:
+
+- CMake available on `PATH`
+- STM32CubeIDE installed at `C:\ST\STM32CubeIDE_1.18.1\STM32CubeIDE`, or pass `-CubeIde` to `firmware/scripts/build_firmware_headless.ps1`
+
+Run host firmware tests plus a headless CubeIDE build:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_checks.ps1 -Config Debug
+```
+
+The firmware scripts resolve the project from the repo checkout, so moved workspaces do not need script edits. If the headless build reports that the project cannot be found, verify the checkout path and rerun the build script with an explicit project path:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File firmware/scripts/build_firmware_headless.ps1 `
+  -Config Debug `
+  -ProjectDir C:\Users\conar\LabCraft_printer\firmware
+```
+
 ## Firmware HIL + Camera Benchmark
 
 Run full firmware checks + Pi flash + selftest + optional camera benchmark:

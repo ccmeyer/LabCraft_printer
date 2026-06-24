@@ -3277,6 +3277,7 @@ class Machine(QObject):
             "session_id": getattr(recorder, "session_id", None),
             "trigger": dict(trigger or {}),
             "transport": self._black_box_transport_state(),
+            "flash_state": dict(getattr(self, "_flash_state", default_flash_safety_state()) or default_flash_safety_state()),
             "last_reset_report": dict(getattr(self, "_last_reset_report", {}) or {}),
             "status_history": [
                 self._status_sample_for_black_box(sample)

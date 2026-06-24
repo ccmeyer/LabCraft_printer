@@ -297,6 +297,14 @@ public:
   static uint32_t getFlashInitOkCount() { return instance()->g_flash_init_ok_count; }
   static uint32_t getFlashInitTaskCreateFailCount() { return instance()->g_flash_init_task_create_fail_count; }
   static uint32_t getFlashInitTimerCreateFailCount() { return instance()->g_flash_init_timer_create_fail_count; }
+  static uint32_t getFlashTriggerAcceptedCount() { return instance()->g_flash_trigger_accepted_count; }
+  static uint32_t getFlashTriggerIgnoredDisarmedCount() { return instance()->g_flash_trigger_ignored_disarmed_count; }
+  static uint32_t getFlashTriggerIgnoredFaultCount() { return instance()->g_flash_trigger_ignored_fault_count; }
+  static uint32_t getFlashTriggerIgnoredBusyCount() { return instance()->g_flash_trigger_ignored_busy_count; }
+  static uint32_t getFlashTriggerIgnoredLineLowCount() { return instance()->g_flash_trigger_ignored_line_low_count; }
+  static uint32_t getFlashTriggerReleaseTimeoutCount() { return instance()->g_flash_trigger_release_timeout_count; }
+  static uint32_t getFlashAckTimeoutCount() { return instance()->g_flash_ack_timeout_count; }
+  static uint32_t getFlashPrintCompletionTimeoutCount() { return instance()->g_flash_print_completion_timeout_count; }
   static uint16_t getImagingDroplets()  { return instance()->_imagingDroplets; }
   static bool isFlashSessionArmed()     { return FlashSafety::isSessionArmed(instance()->_flashSafety); }
   static bool isFlashFaultLatched()     { return FlashSafety::isFaultLatched(instance()->_flashSafety); }
@@ -320,6 +328,14 @@ public:
   static uint32_t getFlashInitOkCount() { return 0; }
   static uint32_t getFlashInitTaskCreateFailCount() { return 0; }
   static uint32_t getFlashInitTimerCreateFailCount() { return 0; }
+  static uint32_t getFlashTriggerAcceptedCount() { return 0; }
+  static uint32_t getFlashTriggerIgnoredDisarmedCount() { return 0; }
+  static uint32_t getFlashTriggerIgnoredFaultCount() { return 0; }
+  static uint32_t getFlashTriggerIgnoredBusyCount() { return 0; }
+  static uint32_t getFlashTriggerIgnoredLineLowCount() { return 0; }
+  static uint32_t getFlashTriggerReleaseTimeoutCount() { return 0; }
+  static uint32_t getFlashAckTimeoutCount() { return 0; }
+  static uint32_t getFlashPrintCompletionTimeoutCount() { return 0; }
   static uint16_t getImagingDroplets()  { return 0; }
   static bool isFlashSessionArmed()     { return false; }
   static bool isFlashFaultLatched()     { return false; }
@@ -398,6 +414,14 @@ private:
   volatile uint32_t g_flash_init_ok_count = 0;
   volatile uint32_t g_flash_init_task_create_fail_count = 0;
   volatile uint32_t g_flash_init_timer_create_fail_count = 0;
+  volatile uint32_t g_flash_trigger_accepted_count = 0;
+  volatile uint32_t g_flash_trigger_ignored_disarmed_count = 0;
+  volatile uint32_t g_flash_trigger_ignored_fault_count = 0;
+  volatile uint32_t g_flash_trigger_ignored_busy_count = 0;
+  volatile uint32_t g_flash_trigger_ignored_line_low_count = 0;
+  volatile uint32_t g_flash_trigger_release_timeout_count = 0;
+  volatile uint32_t g_flash_ack_timeout_count = 0;
+  volatile uint32_t g_flash_print_completion_timeout_count = 0;
 
   bool _isFlashTriggerHigh() const;
   void _clearFlashTaskNotifications();
@@ -405,13 +429,20 @@ private:
   void _disarmFlashSession(const char* reason, bool clearFault);
   void _latchFlashFault(FlashSafety::FaultReason reason, bool deferLog);
   void _emitPendingFlashFaultLogs();
+  uint32_t _flashAckTimeoutMs() const;
+  uint32_t _flashPrintCompletionTimeoutMs(uint16_t droplets, uint16_t rateHz) const;
+  bool _waitForFlashTriggerRelease(uint32_t timeoutMs);
+  bool _waitForFlashAckAfter(uint32_t baselineAckCount, uint32_t timeoutMs);
+  bool _waitForFlashPrintDone(uint32_t timeoutMs);
+  void _finishFlashMonitorCycle(bool successful);
+  void _faultFlashMonitorCycle(FlashSafety::FaultReason reason, bool cancelPrinter);
   void _logFlashArmed();
   void _logFlashDisarmed(const char* reason);
   void _logFlashFault(FlashSafety::FaultReason reason);
 
   static void _flashAckTimerCb(TimerHandle_t);
 
-  bool _flashInProgress = false;
+  volatile bool _flashInProgress = false;
 
 
   static void _homeTaskEntry(void* ctx);

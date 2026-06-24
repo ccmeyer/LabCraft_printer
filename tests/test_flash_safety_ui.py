@@ -56,6 +56,10 @@ class _DropletCameraModelStub:
             return "Repeated trigger while line was still high"
         if self.flash_fault_reason == "line_high_on_arm":
             return "Trigger line high while arming"
+        if self.flash_fault_reason == "flash_ack_timeout":
+            return "Flash trigger was accepted but no flash ACK was observed"
+        if self.flash_fault_reason == "print_completion_timeout":
+            return "Droplet burst did not complete within the flash safety timeout"
         return "None"
 
 
@@ -144,7 +148,7 @@ def test_droplet_imager_disables_manual_flash_and_stops_timer_on_fault(monkeypat
     dialog.capturing = True
     cam.flash_session_armed = False
     cam.flash_fault_latched = True
-    cam.flash_fault_reason = "line_stuck_high"
+    cam.flash_fault_reason = "flash_ack_timeout"
 
     dialog.update_flash_info()
 
@@ -157,6 +161,7 @@ def test_droplet_imager_disables_manual_flash_and_stops_timer_on_fault(monkeypat
     assert dialog.camera_timer.isActive() is False
     assert "Flash safety fault latched" in dialog.flash_safety_label.text()
     assert "Close and reopen the imager" in dialog.flash_safety_label.text()
+    assert "no flash ACK was observed" in dialog.flash_safety_label.text()
 
     cam.flash_fault_latched = False
     cam.flash_fault_reason = ""
@@ -189,7 +194,7 @@ def test_flash_fault_disables_shared_nozzle_buttons_in_both_tabs(monkeypatch, qa
     dialog, cam = _build_droplet_dialog(monkeypatch, qapp)
 
     cam.flash_fault_latched = True
-    cam.flash_fault_reason = "line_stuck_high"
+    cam.flash_fault_reason = "flash_ack_timeout"
     dialog.update_flash_info()
     qapp.processEvents()
 
@@ -219,7 +224,7 @@ def test_flash_fault_keeps_active_online_stream_stop_button_enabled(monkeypatch,
     )
 
     cam.flash_fault_latched = True
-    cam.flash_fault_reason = "line_stuck_high"
+    cam.flash_fault_reason = "flash_ack_timeout"
     dialog.update_flash_info()
 
     assert dialog.calibrate_online_stream_button.isEnabled() is True

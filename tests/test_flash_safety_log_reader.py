@@ -8,6 +8,14 @@ def test_parse_flash_safety_log_event_recognizes_expected_lines():
         "kind": "fault",
         "reason": "line_high_on_arm",
     }
+    assert mfr.parse_flash_safety_log_event("FLASH_FAULT reason=flash_ack_timeout") == {
+        "kind": "fault",
+        "reason": "flash_ack_timeout",
+    }
+    assert mfr.parse_flash_safety_log_event("FLASH_FAULT reason=print_completion_timeout") == {
+        "kind": "fault",
+        "reason": "print_completion_timeout",
+    }
     assert mfr.parse_flash_safety_log_event("FLASH_DISARMED reason=shutdown") == {
         "kind": "disarmed",
         "reason": "shutdown",

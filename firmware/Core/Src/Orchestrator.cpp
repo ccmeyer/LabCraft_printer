@@ -197,7 +197,7 @@ void Orchestrator::begin() {
 
   xTaskCreate(
     _taskEntry, "Orch",
-    4096,    this,
+    3840,    this,
     tskIDLE_PRIORITY + 2,
     &_taskHandle
   );
@@ -845,13 +845,19 @@ void Orchestrator::executeCommand(const Command &cmd) {
             if (_flashAckTmr) {
               xTimerStop(_flashAckTmr, 0);
             }
-            if (_flashTaskHandle && _flashAckTmr && !taskExisted) {
-                if (_armFlashSession()) {
+            if (_flashTaskHandle && _flashAckTmr) {
+                if (!taskExisted) {
+                    if (_armFlashSession()) {
+                        g_flash_init_ok_count++;
+                    }
+                } else if (FlashSafety::isSessionArmed(_flashSafety)) {
+                    MX_FLASH_ArmOutput();
                     g_flash_init_ok_count++;
+                } else if (!FlashSafety::isFaultLatched(_flashSafety)) {
+                    if (_armFlashSession()) {
+                        g_flash_init_ok_count++;
+                    }
                 }
-            } else if (_flashTaskHandle && _flashAckTmr && FlashSafety::isSessionArmed(_flashSafety)) {
-                MX_FLASH_ArmOutput();
-                g_flash_init_ok_count++;
             }
 		#endif
           break;
@@ -1681,6 +1687,25 @@ bool Orchestrator::enterRefuelVacuumModeWithAsyncHome(int32_t targetRaw,
 #if LC_HAS_IMAGING == 1
 extern TIM_HandleTypeDef htim12;		// Used to time the flash delay accurately down to the microsecond
 
+namespace {
+constexpr uint32_t kFlashTriggerReleaseTimeoutMs = 500u;
+constexpr uint32_t kFlashAckMinTimeoutMs = 250u;
+constexpr uint32_t kFlashAckGraceMs = 250u;
+constexpr uint32_t kFlashPrintCompletionGraceMs = 1000u;
+constexpr uint32_t kFlashPrintCompletionMinMs = 1000u;
+constexpr uint32_t kFlashPrintCompletionMaxMs = 30000u;
+
+uint32_t clampU32(uint32_t value, uint32_t minValue, uint32_t maxValue) {
+  if (value < minValue) {
+    return minValue;
+  }
+  if (value > maxValue) {
+    return maxValue;
+  }
+  return value;
+}
+}  // namespace
+
 
 void Orchestrator::setFlashDelay(uint32_t flashDelay) {
 	_flashDelay = flashDelay;
@@ -1733,6 +1758,99 @@ void Orchestrator::_emitPendingFlashFaultLogs() {
     _logFlashFault(_flashSafety.faultReason);
     _logFlashDisarmed("fault");
   }
+}
+
+uint32_t Orchestrator::_flashAckTimeoutMs() const {
+  const uint32_t delayMs = (_flashDelay + 999u) / 1000u;
+  const uint32_t withGrace = delayMs + kFlashAckGraceMs;
+  return (withGrace < kFlashAckMinTimeoutMs) ? kFlashAckMinTimeoutMs : withGrace;
+}
+
+uint32_t Orchestrator::_flashPrintCompletionTimeoutMs(uint16_t droplets, uint16_t rateHz) const {
+  const uint32_t safeRateHz = (rateHz == 0u) ? 1u : static_cast<uint32_t>(rateHz);
+  const uint64_t pulseMs =
+      ((static_cast<uint64_t>(droplets) * 1000ULL) + static_cast<uint64_t>(safeRateHz) - 1ULL) /
+      static_cast<uint64_t>(safeRateHz);
+  const uint64_t withGrace = pulseMs + static_cast<uint64_t>(kFlashPrintCompletionGraceMs);
+  const uint32_t bounded = (withGrace > 0xFFFFFFFFULL)
+      ? kFlashPrintCompletionMaxMs
+      : static_cast<uint32_t>(withGrace);
+  return clampU32(bounded, kFlashPrintCompletionMinMs, kFlashPrintCompletionMaxMs);
+}
+
+bool Orchestrator::_waitForFlashTriggerRelease(uint32_t timeoutMs) {
+  const TickType_t timeoutTicks = msToAtLeast1Tick(timeoutMs);
+  const TickType_t start = xTaskGetTickCount();
+  for (;;) {
+    const auto releaseAction = FlashSafety::onReleasePoll(_flashSafety, _isFlashTriggerHigh());
+    if (releaseAction == FlashSafety::ReleaseAction::Released) {
+      return true;
+    }
+    if ((xTaskGetTickCount() - start) >= timeoutTicks) {
+      return false;
+    }
+    vTaskDelay(msToAtLeast1Tick(1u));
+  }
+}
+
+bool Orchestrator::_waitForFlashAckAfter(uint32_t baselineAckCount, uint32_t timeoutMs) {
+  if (g_flash_ack_count != baselineAckCount) {
+    return true;
+  }
+  const TickType_t timeoutTicks = msToAtLeast1Tick(timeoutMs);
+  const TickType_t start = xTaskGetTickCount();
+  while ((xTaskGetTickCount() - start) < timeoutTicks) {
+    if (g_flash_ack_count != baselineAckCount) {
+      return true;
+    }
+    vTaskDelay(msToAtLeast1Tick(1u));
+  }
+  return g_flash_ack_count != baselineAckCount;
+}
+
+bool Orchestrator::_waitForFlashPrintDone(uint32_t timeoutMs) {
+  const EventBits_t result = xEventGroupWaitBits(
+      _doneEvents,
+      BIT_FLASH_PRINT_DONE,
+      pdTRUE,
+      pdTRUE,
+      msToAtLeast1Tick(timeoutMs));
+  return (result & BIT_FLASH_PRINT_DONE) != 0u;
+}
+
+void Orchestrator::_finishFlashMonitorCycle(bool successful) {
+  _clearFlashTaskNotifications();
+  _flashInProgress = false;
+  if (successful) {
+    g_flash_task_done_count++;
+  }
+  xEventGroupSetBits(_doneEvents, BIT_FLASH_DONE);
+}
+
+void Orchestrator::_faultFlashMonitorCycle(FlashSafety::FaultReason reason, bool cancelPrinter) {
+  if (cancelPrinter) {
+    if (auto* printer = Printer::instance()) {
+      printer->cancelDispense();
+    }
+  }
+  switch (reason) {
+    case FlashSafety::FaultReason::LineStuckHigh:
+      g_flash_trigger_release_timeout_count++;
+      break;
+    case FlashSafety::FaultReason::FlashAckTimeout:
+      g_flash_ack_timeout_count++;
+      break;
+    case FlashSafety::FaultReason::PrintCompletionTimeout:
+      g_flash_print_completion_timeout_count++;
+      break;
+    case FlashSafety::FaultReason::None:
+    case FlashSafety::FaultReason::LineHighOnArm:
+    case FlashSafety::FaultReason::RetriggerWhileHigh:
+    default:
+      break;
+  }
+  _latchFlashFault(reason, false);
+  _finishFlashMonitorCycle(false);
 }
 
 bool Orchestrator::_armFlashSession() {
@@ -1799,13 +1917,30 @@ void Orchestrator::flashNotifyFromISR(uint16_t GPIO_Pin) {
 	if (_instance && GPIO_Pin == _instance->_trigPin && _instance->_flashTaskHandle) {
 		g_exti8_count++;
 	    const bool lineHigh = _instance->_isFlashTriggerHigh();
-	    const auto triggerAction = FlashSafety::onTrigger(_instance->_flashSafety, lineHigh);
-	    if (triggerAction == FlashSafety::TriggerAction::IgnoredDisarmed ||
-	        triggerAction == FlashSafety::TriggerAction::IgnoredFaultLatched ||
-	        triggerAction == FlashSafety::TriggerAction::IgnoredBusy ||
-	        triggerAction == FlashSafety::TriggerAction::IgnoredLineLow) {
+	    if (lineHigh && _instance->_flashInProgress &&
+	        FlashSafety::isSessionArmed(_instance->_flashSafety) &&
+	        !FlashSafety::isFaultLatched(_instance->_flashSafety)) {
+	      _instance->g_flash_trigger_ignored_busy_count++;
 	      return;
 	    }
+	    const auto triggerAction = FlashSafety::onTrigger(_instance->_flashSafety, lineHigh);
+	    switch (triggerAction) {
+          case FlashSafety::TriggerAction::IgnoredDisarmed:
+            _instance->g_flash_trigger_ignored_disarmed_count++;
+            return;
+          case FlashSafety::TriggerAction::IgnoredFaultLatched:
+            _instance->g_flash_trigger_ignored_fault_count++;
+            return;
+          case FlashSafety::TriggerAction::IgnoredBusy:
+            _instance->g_flash_trigger_ignored_busy_count++;
+            return;
+          case FlashSafety::TriggerAction::IgnoredLineLow:
+            _instance->g_flash_trigger_ignored_line_low_count++;
+            return;
+          case FlashSafety::TriggerAction::Accepted:
+            _instance->g_flash_trigger_accepted_count++;
+            break;
+        }
 
 		HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
 	    BaseType_t woke = pdFALSE;
@@ -1848,6 +1983,7 @@ void Orchestrator::_flashTaskLoop() {
 
     _flashInProgress = true;
     xEventGroupClearBits(_doneEvents, BIT_FLASH_DONE);
+    const uint32_t ackBaseline = g_flash_ack_count;
 
     const bool waitForPrintCompletion = (_imagingDroplets != 0u);
     if (!waitForPrintCompletion) {
@@ -1866,25 +2002,27 @@ void Orchestrator::_flashTaskLoop() {
 //    Logger::instance()->log("-FLASH COMP-\r\n");
 
     // then don’t proceed until the Pi’s line goes back low
-    for (;;) {
-      const auto releaseAction = FlashSafety::onReleasePoll(_flashSafety, _isFlashTriggerHigh());
-      if (releaseAction == FlashSafety::ReleaseAction::Released) {
-        break;
-      }
-      vTaskDelay(pdMS_TO_TICKS(1));
+    if (!_waitForFlashTriggerRelease(kFlashTriggerReleaseTimeoutMs)) {
+      _faultFlashMonitorCycle(FlashSafety::FaultReason::LineStuckHigh, waitForPrintCompletion);
+      continue;
     }
 
     _emitPendingFlashFaultLogs();
 
     if (waitForPrintCompletion) {
-      (void)waitForBit(BIT_FLASH_PRINT_DONE);
+      const uint32_t printTimeoutMs = _flashPrintCompletionTimeoutMs(_imagingDroplets, _imagingFreq);
+      if (!_waitForFlashPrintDone(printTimeoutMs)) {
+        _faultFlashMonitorCycle(FlashSafety::FaultReason::PrintCompletionTimeout, true);
+        continue;
+      }
     }
 
-    _clearFlashTaskNotifications();
+    if (!_waitForFlashAckAfter(ackBaseline, _flashAckTimeoutMs())) {
+      _faultFlashMonitorCycle(FlashSafety::FaultReason::FlashAckTimeout, false);
+      continue;
+    }
 
-    _flashInProgress = false;
-    g_flash_task_done_count++;
-    xEventGroupSetBits(_doneEvents, BIT_FLASH_DONE);
+    _finishFlashMonitorCycle(true);
   }
 }
 

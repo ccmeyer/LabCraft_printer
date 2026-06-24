@@ -96,7 +96,7 @@ void Comm::begin() {
 
     // spawn status‐sender task @50 ms intervals
     xTaskCreate(
-      statusTaskEntry, "Status", 768,
+      statusTaskEntry, "Status", 512,
       this,                // pvParameters
       tskIDLE_PRIORITY+1,  // priority
       nullptr

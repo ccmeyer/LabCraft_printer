@@ -30954,6 +30954,8 @@ class DropletCameraModel(QObject):
         "line_high_on_arm": "Trigger line high while arming",
         "retrigger_while_high": "Repeated trigger while line was still high",
         "line_stuck_high": "Trigger line stayed high for too long",
+        "flash_ack_timeout": "Flash trigger was accepted but no flash ACK was observed",
+        "print_completion_timeout": "Droplet burst did not complete within the flash safety timeout",
     }
 
     def __init__(self,steps_conv_path):

@@ -94,6 +94,12 @@ def test_reset_report_writes_snapshot_before_recovery_clears_session_state(qapp,
         }
     )
 
+    machine._flash_state = {
+        "flash_session_armed": False,
+        "flash_fault_latched": True,
+        "flash_fault_reason": "flash_ack_timeout",
+    }
+
     report = {"summary": "Board restarted after watchdog reset.", "reset_cause_name": "iwdg"}
 
     machine._on_reset_report(report)
@@ -106,6 +112,11 @@ def test_reset_report_writes_snapshot_before_recovery_clears_session_state(qapp,
     assert snapshot["schema_version"] == "host_black_box_v1"
     assert snapshot["reason"] == "reset_report"
     assert snapshot["last_reset_report"] == report
+    assert snapshot["flash_state"] == {
+        "flash_session_armed": False,
+        "flash_fault_latched": True,
+        "flash_fault_reason": "flash_ack_timeout",
+    }
     assert snapshot["transport"]["port"] == "COM9"
     assert snapshot["transport"]["serial_open"] is True
     assert snapshot["transport"]["command_queue_depth"] == 1

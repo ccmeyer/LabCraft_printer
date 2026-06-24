@@ -9,7 +9,9 @@ enum class FaultReason : uint8_t {
   None = 0u,
   LineHighOnArm,
   RetriggerWhileHigh,
-  LineStuckHigh
+  LineStuckHigh,
+  FlashAckTimeout,
+  PrintCompletionTimeout
 };
 
 enum class ArmAction : uint8_t {

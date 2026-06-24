@@ -6201,6 +6201,14 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 					    const uint32_t flashInitOkCount = Orchestrator::getFlashInitOkCount();
 					    const uint32_t flashInitTaskCreateFailCount = Orchestrator::getFlashInitTaskCreateFailCount();
 					    const uint32_t flashInitTimerCreateFailCount = Orchestrator::getFlashInitTimerCreateFailCount();
+					    const uint32_t flashTriggerAcceptedCount = Orchestrator::getFlashTriggerAcceptedCount();
+					    const uint32_t flashTriggerIgnoredDisarmedCount = Orchestrator::getFlashTriggerIgnoredDisarmedCount();
+					    const uint32_t flashTriggerIgnoredFaultCount = Orchestrator::getFlashTriggerIgnoredFaultCount();
+					    const uint32_t flashTriggerIgnoredBusyCount = Orchestrator::getFlashTriggerIgnoredBusyCount();
+					    const uint32_t flashTriggerIgnoredLineLowCount = Orchestrator::getFlashTriggerIgnoredLineLowCount();
+					    const uint32_t flashTriggerReleaseTimeoutCount = Orchestrator::getFlashTriggerReleaseTimeoutCount();
+					    const uint32_t flashAckTimeoutCount = Orchestrator::getFlashAckTimeoutCount();
+					    const uint32_t flashPrintCompletionTimeoutCount = Orchestrator::getFlashPrintCompletionTimeoutCount();
 					    const uint32_t flashSessionArmed = Orchestrator::isFlashSessionArmed() ? 1u : 0u;
 					    const uint32_t flashFaultLatched = Orchestrator::isFlashFaultLatched() ? 1u : 0u;
 					    const char* flashFaultReason = Orchestrator::getFlashFaultReason();
@@ -6216,9 +6224,10 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         flashWidthMinNs = static_cast<uint32_t>(Flash::kMinPulseNs);
                         flashWidthMaxNs = static_cast<uint32_t>(Flash::kMaxPulseNs);
 	#endif
-					    char metrics[384];
+					    char metrics[768];
 					    snprintf(metrics, sizeof(metrics),
                                 "flash_delay_us=%lu;flash_width_ns=%lu;flash_width_min_ns=%lu;flash_width_max_ns=%lu;"
+                                 "ft_acc=%lu;ft_ign_dis=%lu;ft_ign_fault=%lu;ft_ign_busy=%lu;ft_ign_low=%lu;ft_rel_to=%lu;ft_ack_to=%lu;ft_print_to=%lu;"
                                  "ext_count=%lu;flash_ack_count=%lu;flash_task_wake_count=%lu;flash_task_done_count=%lu;"
                                  "flash_init_cmd_count=%lu;flash_init_ok_count=%lu;flash_init_task_create_fail_count=%lu;flash_init_timer_create_fail_count=%lu;"
                                  "flash_session_armed=%lu;flash_fault_latched=%lu;flash_fault_reason=%s;flash_output_armed=%lu;flash_output_mode=%s",
@@ -6226,6 +6235,14 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 					             static_cast<unsigned long>(flashWidthNs),
                                  static_cast<unsigned long>(flashWidthMinNs),
                                  static_cast<unsigned long>(flashWidthMaxNs),
+                                 static_cast<unsigned long>(flashTriggerAcceptedCount),
+                                 static_cast<unsigned long>(flashTriggerIgnoredDisarmedCount),
+                                 static_cast<unsigned long>(flashTriggerIgnoredFaultCount),
+                                 static_cast<unsigned long>(flashTriggerIgnoredBusyCount),
+                                 static_cast<unsigned long>(flashTriggerIgnoredLineLowCount),
+                                 static_cast<unsigned long>(flashTriggerReleaseTimeoutCount),
+                                 static_cast<unsigned long>(flashAckTimeoutCount),
+                                 static_cast<unsigned long>(flashPrintCompletionTimeoutCount),
                                  static_cast<unsigned long>(extCount),
                                  static_cast<unsigned long>(flashAckCount),
                                  static_cast<unsigned long>(flashTaskWakeCount),
@@ -6249,6 +6266,14 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         const uint32_t ackPre = Orchestrator::getFlashAckCount();
                         const uint32_t wakePre = Orchestrator::getFlashTaskWakeCount();
                         const uint32_t donePre = Orchestrator::getFlashTaskDoneCount();
+                        const uint32_t acceptedPre = Orchestrator::getFlashTriggerAcceptedCount();
+                        const uint32_t ignoredDisarmedPre = Orchestrator::getFlashTriggerIgnoredDisarmedCount();
+                        const uint32_t ignoredFaultPre = Orchestrator::getFlashTriggerIgnoredFaultCount();
+                        const uint32_t ignoredBusyPre = Orchestrator::getFlashTriggerIgnoredBusyCount();
+                        const uint32_t ignoredLineLowPre = Orchestrator::getFlashTriggerIgnoredLineLowCount();
+                        const uint32_t releaseTimeoutPre = Orchestrator::getFlashTriggerReleaseTimeoutCount();
+                        const uint32_t ackTimeoutPre = Orchestrator::getFlashAckTimeoutCount();
+                        const uint32_t printTimeoutPre = Orchestrator::getFlashPrintCompletionTimeoutCount();
                         static constexpr uint32_t kBurstCycles = 5u;
                         uint32_t started = 0u;
                         uint32_t timedOut = 0u;
@@ -6271,12 +6296,28 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         const uint32_t ackPost = Orchestrator::getFlashAckCount();
                         const uint32_t wakePost = Orchestrator::getFlashTaskWakeCount();
                         const uint32_t donePost = Orchestrator::getFlashTaskDoneCount();
+                        const uint32_t acceptedPost = Orchestrator::getFlashTriggerAcceptedCount();
+                        const uint32_t ignoredDisarmedPost = Orchestrator::getFlashTriggerIgnoredDisarmedCount();
+                        const uint32_t ignoredFaultPost = Orchestrator::getFlashTriggerIgnoredFaultCount();
+                        const uint32_t ignoredBusyPost = Orchestrator::getFlashTriggerIgnoredBusyCount();
+                        const uint32_t ignoredLineLowPost = Orchestrator::getFlashTriggerIgnoredLineLowCount();
+                        const uint32_t releaseTimeoutPost = Orchestrator::getFlashTriggerReleaseTimeoutCount();
+                        const uint32_t ackTimeoutPost = Orchestrator::getFlashAckTimeoutCount();
+                        const uint32_t printTimeoutPost = Orchestrator::getFlashPrintCompletionTimeoutCount();
                         setImagingDroplets(priorDrops);
 
                         const uint32_t dExt = extPost - extPre;
                         const uint32_t dAck = ackPost - ackPre;
                         const uint32_t dWake = wakePost - wakePre;
                         const uint32_t dDone = donePost - donePre;
+                        const uint32_t dAccepted = acceptedPost - acceptedPre;
+                        const uint32_t dIgnoredDisarmed = ignoredDisarmedPost - ignoredDisarmedPre;
+                        const uint32_t dIgnoredFault = ignoredFaultPost - ignoredFaultPre;
+                        const uint32_t dIgnoredBusy = ignoredBusyPost - ignoredBusyPre;
+                        const uint32_t dIgnoredLineLow = ignoredLineLowPost - ignoredLineLowPre;
+                        const uint32_t dReleaseTimeout = releaseTimeoutPost - releaseTimeoutPre;
+                        const uint32_t dAckTimeout = ackTimeoutPost - ackTimeoutPre;
+                        const uint32_t dPrintTimeout = printTimeoutPost - printTimeoutPre;
                         const bool taskPresent = (_flashTaskHandle != nullptr);
                         const uint32_t flashSessionArmed = Orchestrator::isFlashSessionArmed() ? 1u : 0u;
                         const uint32_t flashFaultLatched = Orchestrator::isFlashFaultLatched() ? 1u : 0u;
@@ -6288,10 +6329,15 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                            (timedOut == 0u) &&
                                            (dWake >= started) &&
                                            (dDone >= started) &&
-                                           (dAck >= started));
-                        char metrics[320];
+                                           (dAck >= started) &&
+                                           (dReleaseTimeout == 0u) &&
+                                           (dAckTimeout == 0u) &&
+                                           (dPrintTimeout == 0u) &&
+                                           (flashFaultLatched == 0u));
+                        char metrics[640];
                         snprintf(metrics, sizeof(metrics),
                                  "skipped_no_flash_task=%lu;cycles_req=%lu;cycles_started=%lu;cycles_timeout=%lu;ext_delta=%lu;flash_ack_delta=%lu;flash_task_wake_delta=%lu;flash_task_done_delta=%lu;"
+                                 "ft_acc_delta=%lu;ft_ign_dis_delta=%lu;ft_ign_fault_delta=%lu;ft_ign_busy_delta=%lu;ft_ign_low_delta=%lu;ft_rel_to_delta=%lu;ft_ack_to_delta=%lu;ft_print_to_delta=%lu;"
                                  "flash_session_armed=%lu;flash_fault_latched=%lu;flash_fault_reason=%s;flash_output_armed=%lu;flash_output_mode=%s",
                                  static_cast<unsigned long>(taskPresent ? 0u : 1u),
                                  static_cast<unsigned long>(kBurstCycles),
@@ -6301,6 +6347,14 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                  static_cast<unsigned long>(dAck),
                                  static_cast<unsigned long>(dWake),
                                  static_cast<unsigned long>(dDone),
+                                 static_cast<unsigned long>(dAccepted),
+                                 static_cast<unsigned long>(dIgnoredDisarmed),
+                                 static_cast<unsigned long>(dIgnoredFault),
+                                 static_cast<unsigned long>(dIgnoredBusy),
+                                 static_cast<unsigned long>(dIgnoredLineLow),
+                                 static_cast<unsigned long>(dReleaseTimeout),
+                                 static_cast<unsigned long>(dAckTimeout),
+                                 static_cast<unsigned long>(dPrintTimeout),
                                  static_cast<unsigned long>(flashSessionArmed),
                                  static_cast<unsigned long>(flashFaultLatched),
                                  flashFaultReason,

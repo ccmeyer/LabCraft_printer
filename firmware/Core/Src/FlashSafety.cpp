@@ -11,6 +11,10 @@ const char* faultReasonToken(FaultReason reason)
       return "retrigger_while_high";
     case FaultReason::LineStuckHigh:
       return "line_stuck_high";
+    case FaultReason::FlashAckTimeout:
+      return "flash_ack_timeout";
+    case FaultReason::PrintCompletionTimeout:
+      return "print_completion_timeout";
     case FaultReason::None:
     default:
       return "none";
