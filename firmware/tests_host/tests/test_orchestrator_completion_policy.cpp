@@ -50,6 +50,25 @@ TEST(OrchestratorCompletionPolicyTests, WaitCommandOnlyRetiresWhenDelayCompletes
     CHECK_TRUE(OrchestratorCompletionPolicy::didPauseAwareDelayComplete(true, 0u));
 }
 
+TEST(OrchestratorCompletionPolicyTests, AbsXyMotionHoldIgnoresSmallMoves) {
+    CHECK_FALSE(OrchestratorCompletionPolicy::shouldHoldRegulatorsForAbsXy(4999, 1200, 5000u, false));
+    CHECK_FALSE(OrchestratorCompletionPolicy::shouldHoldRegulatorsForAbsXy(-1200, -4999, 5000u, false));
+}
+
+TEST(OrchestratorCompletionPolicyTests, AbsXyMotionHoldTriggersAtThreshold) {
+    CHECK_TRUE(OrchestratorCompletionPolicy::shouldHoldRegulatorsForAbsXy(5000, 0, 5000u, false));
+    CHECK_TRUE(OrchestratorCompletionPolicy::shouldHoldRegulatorsForAbsXy(0, -5000, 5000u, false));
+}
+
+TEST(OrchestratorCompletionPolicyTests, AbsXyMotionHoldUsesLongestAxis) {
+    CHECK_TRUE(OrchestratorCompletionPolicy::shouldHoldRegulatorsForAbsXy(3000, -9000, 5000u, false));
+    CHECK_TRUE(OrchestratorCompletionPolicy::shouldHoldRegulatorsForAbsXy(-9000, 3000, 5000u, false));
+}
+
+TEST(OrchestratorCompletionPolicyTests, AbsXyMotionHoldDoesNotTriggerWhilePrinting) {
+    CHECK_FALSE(OrchestratorCompletionPolicy::shouldHoldRegulatorsForAbsXy(20000, 20000, 5000u, true));
+}
+
 TEST(OrchestratorCompletionPolicyTests, DispenseLikeInterruptedWaitDoesNotRetire) {
     uint32_t lastExecuted = 20u;
     uint32_t lastRetired = 20u;

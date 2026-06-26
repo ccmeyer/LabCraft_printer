@@ -409,6 +409,95 @@ void PressureRegulator::pause() {
   _targetTransitionTravelLogged = false;
 }
 
+bool PressureRegulator::enterMotionHold() {
+  if (!_active || _taskHandle == nullptr) {
+    return false;
+  }
+  if (_motionHoldActive) {
+    return true;
+  }
+
+  const CrashTaskId watchdogTaskId = (_sensorPort == 0u) ? CRASH_TASK_PREG_P : CRASH_TASK_PREG_R;
+
+  taskENTER_CRITICAL();
+  _motionHoldActive = true;
+  _pressureOk = false;
+  _readyConsecutiveCount = 0;
+  _quietActive = false;
+  _quietPreHold = false;
+  _freezeI = false;
+  _recoveryActive = false;
+  _recoveryTicksRemaining = 0;
+  _recoveryCurrentBoostHz = 0;
+  _recoveryTicksExtended = 0;
+  _recoveryBypassRemaining = 0;
+  _targetTransitionMonitorActive = false;
+  _targetTransitionTravelLogged = false;
+  _integral = 0;
+  _I_contrib = 0;
+  taskEXIT_CRITICAL();
+
+  if (_stepping && _stepper != nullptr) {
+    _stepper->stop();
+    _stepping = false;
+  }
+  if (_doneBit != 0u) {
+    xEventGroupClearBits(Orchestrator::getDoneEvents(), _doneBit);
+  }
+  vTaskSuspend(_taskHandle);
+  Watchdog_DisableTask(watchdogTaskId);
+  return true;
+}
+
+void PressureRegulator::exitMotionHold() {
+  if (!_motionHoldActive || _taskHandle == nullptr) {
+    return;
+  }
+
+  const CrashTaskId watchdogTaskId = (_sensorPort == 0u) ? CRASH_TASK_PREG_P : CRASH_TASK_PREG_R;
+
+  int32_t measured = _target;
+  if (PressureSensor::instance()) {
+    measured = static_cast<int32_t>(PressureSensor::instance()->getLatestRaw(_sensorPort));
+  }
+  int32_t rampStart = measured;
+  if (rampStart < activeMinTarget()) rampStart = activeMinTarget();
+  if (rampStart > _maxTarget) rampStart = _maxTarget;
+
+  taskENTER_CRITICAL();
+  seedControlTarget(rampStart, HAL_GetTick());
+  _targetTransitionMonitorActive = (rampStart != _target) && (_stepper != nullptr);
+  _targetTransitionTravelLogged = false;
+  _targetTransitionStartPosition = (_stepper != nullptr) ? _stepper->getPosition() : 0;
+  _lastError = measured - controlTargetRaw();
+  _integral = 0;
+  _I_contrib = 0;
+  _pressureOk = false;
+  _readyConsecutiveCount = 0;
+  _quietActive = false;
+  _quietPreHold = false;
+  _freezeI = false;
+  _recoveryActive = false;
+  _recoveryTicksRemaining = 0;
+  _recoveryCurrentBoostHz = 0;
+  _recoveryTicksExtended = 0;
+  _recoveryBypassRemaining = 0;
+  _lastRateHz = 0;
+  _stepping = false;
+  _motionHoldActive = false;
+  taskEXIT_CRITICAL();
+
+  if (_innerPort != nullptr && _innerPin != 0) {
+    __HAL_GPIO_EXTI_CLEAR_FLAG(_innerPin);
+  }
+  if (_stepper != nullptr) {
+    _stepper->enableMotor();
+  }
+  Watchdog_EnableTask(watchdogTaskId);
+  Watchdog_CheckIn(watchdogTaskId);
+  vTaskResume(_taskHandle);
+}
+
 //void PressureRegulator::setPrintProfile(bool enabled) {
 //  _KPc = enabled ? _KP_print : _KP_track;
 //  _KIc = enabled ? _KI_print : _KI_track;
@@ -853,6 +942,15 @@ void PressureRegulator::controlLoop() {
   Logger::instance()->log("CONTROL LOOP\r\n");
   for (;;) {
     Watchdog_CheckIn(watchdogTaskId);
+
+    if (_motionHoldActive) {
+      if (_stepping && _stepper != nullptr) {
+        _stepper->stop();
+        _stepping = false;
+      }
+      vTaskDelay(period);
+      continue;
+    }
 
 	  // ---- Quiet window handling ----
 	  if (_quietActive) {

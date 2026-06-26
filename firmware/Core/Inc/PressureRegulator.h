@@ -110,6 +110,9 @@ public:
   uint32_t getTarget() const { return _target; }
   uint32_t getControlTarget() const;
   bool isTargetRamping() const;
+  bool enterMotionHold();
+  void exitMotionHold();
+  bool isMotionHoldActive() const { return _motionHoldActive; }
 
   bool isActive() const { return _active; }
 
@@ -222,6 +225,7 @@ private:
   bool               _homing     = false;
   bool				 _resetting	 = false;
   bool               _vacuumMode = false;
+  volatile bool      _motionHoldActive = false;
   uint32_t			 _stepLimit	 = 100000;
   uint32_t			 _resetPos	 = 500;
 

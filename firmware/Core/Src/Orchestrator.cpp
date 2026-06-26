@@ -57,6 +57,7 @@ const char* flashDisarmReasonToken(const char* reason)
 namespace {
 bool s_resetReportSent = false;
 namespace RegProfile = RegulatorProfileCommandPolicy;
+constexpr uint32_t kRegulatorMotionHoldAbsXyThresholdSteps = 5000u;
 
 RegProfile::RecoveryStaging s_regProfileRecoveryStaging[2]{};
 bool s_regProfileBaselineCaptured = false;
@@ -785,9 +786,29 @@ void Orchestrator::executeCommand(const Command &cmd) {
           Stepper::stepperR()->disableMotor();
 		#endif
           break;
-		}
+        }
         case CMD_ABS_XY: {
           // p1=X, p2=Y, p3=freqHz
+          const GantryPosition pos = Gantry::instance()->getPosition();
+          const int32_t dx = cmd.p1 - pos.x;
+          const int32_t dy = cmd.p2 - pos.y;
+          Printer* printer = Printer::instance();
+          const bool printerBusy = (printer != nullptr) && printer->isBusy();
+          const bool shouldHoldRegulators =
+              OrchestratorCompletionPolicy::shouldHoldRegulatorsForAbsXy(
+                  dx,
+                  dy,
+                  kRegulatorMotionHoldAbsXyThresholdSteps,
+                  printerBusy);
+          bool heldPrintRegulator = false;
+          bool heldRefuelRegulator = false;
+          if (shouldHoldRegulators) {
+            heldPrintRegulator = PressureRegulator::regP().enterMotionHold();
+          #if (LC_PRESSURE_PORTS > 1)
+            heldRefuelRegulator = PressureRegulator::regR().enterMotionHold();
+          #endif
+          }
+
           sampleOrchStack(ORCH_STACK_PHASE_ABS_XY_BEFORE_MOVE);
           Gantry::instance()->moveTo(cmd.p1,cmd.p2,cmd.p3);
           sampleOrchStack(ORCH_STACK_PHASE_ABS_XY_AFTER_MOVE);
@@ -795,6 +816,14 @@ void Orchestrator::executeCommand(const Command &cmd) {
               waitForBit(BIT_STEPPER1_DONE, ORCH_STACK_PHASE_ABS_XY_WAIT_X) &&
               waitForBit(BIT_STEPPER2_DONE, ORCH_STACK_PHASE_ABS_XY_WAIT_Y)
           );
+        #if (LC_PRESSURE_PORTS > 1)
+          if (heldRefuelRegulator) {
+            PressureRegulator::regR().exitMotionHold();
+          }
+        #endif
+          if (heldPrintRegulator) {
+            PressureRegulator::regP().exitMotionHold();
+          }
           break;
         }
         case CMD_GRIPPER_OPEN: {
