@@ -341,11 +341,31 @@ Offline operator flow:
 
 ### Create offline update bundles (support only)
 
-When a machine cannot reach GitHub, support can package the current deployment branch as a portable Git bundle plus manifest:
+When a machine cannot reach GitHub, support can package the current deployment branch as a portable Git bundle plus manifest. A full bundle is the safest default:
 
 ```powershell
 .\env\Scripts\python.exe tools/create_update_bundle.py --branch stable
 ```
+
+For smaller machine-specific bundles, ask the operator for the current commit on the offline machine:
+
+```bash
+git rev-parse HEAD
+```
+
+Then create an incremental bundle from the support checkout using that commit as the prerequisite base:
+
+```powershell
+.\env\Scripts\python.exe tools/create_update_bundle.py --branch stable --since <offline-head-sha>
+```
+
+As a convenience, support can package approximately the latest 20 commits when confident the offline machine already has `stable~20`:
+
+```powershell
+.\env\Scripts\python.exe tools/create_update_bundle.py --branch stable --last 20
+```
+
+Incremental bundles are smaller, but they require the target machine to already have the base commit. If that prerequisite is missing, `git bundle verify` and the app updater reject the bundle cleanly. Incremental bundles omit tags by default; add `--include-tags` only when tag refs are needed.
 
 The files are written under:
 
@@ -353,7 +373,7 @@ The files are written under:
 local/LabCraftUpdates/
 ```
 
-Copy the `LabCraftUpdates` folder to the USB drive that will be sent to the operator. This workflow packages application code only; it does not flash firmware.
+Copy the generated `.bundle` and `.json` files, or the full `LabCraftUpdates` folder, to the USB drive that will be sent to the operator. This workflow packages application code only; it does not flash firmware.
 
 For backend/manual validation on the target checkout, run the updater against the manifest JSON:
 

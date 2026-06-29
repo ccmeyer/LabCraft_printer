@@ -798,6 +798,37 @@ def test_offline_update_check_skips_online_fetch_and_reports_available(tmp_path)
     assert any(call[:3] == ("git", "fetch", "--force") for call in calls)
 
 
+def test_offline_update_check_accepts_incremental_manifest_metadata(tmp_path):
+    manifest_path = _write_offline_manifest(tmp_path, head_sha=OFFLINE_SHA)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload.update(
+        {
+            "bundle_mode": "incremental",
+            "base_selector": "abc123",
+            "base_sha": "abc123abc123abc123abc123abc123abc123abc1",
+            "base_short_sha": "abc123abc123",
+            "incremental_commit_count": 2,
+        }
+    )
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    runner = FakeGitRunner(
+        tmp_path,
+        offline_ref_sha=OFFLINE_SHA,
+        offline_ahead_count=0,
+        offline_behind_count=1,
+        offline_check_commits=("def456 Incremental update",),
+    )
+
+    result = updater.run_update_check(
+        _config(tmp_path, offline_manifest_path=manifest_path),
+        command_runner=runner,
+    )
+
+    assert result.status == updater.STATUS_UPDATE_AVAILABLE
+    assert result.update_source == updater.UPDATE_SOURCE_OFFLINE
+    assert result.commits == ("def456 Incremental update",)
+
+
 def test_offline_update_check_up_to_date_and_diverged(tmp_path):
     manifest_path = _write_offline_manifest(tmp_path, head_sha=OFFLINE_SHA)
 

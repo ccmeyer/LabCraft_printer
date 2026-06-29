@@ -29,6 +29,13 @@ STATUS_REF_RESOLVE_FAILED = "ref_resolve_failed"
 STATUS_BUNDLE_CREATE_FAILED = "bundle_create_failed"
 STATUS_BUNDLE_VERIFY_FAILED = "bundle_verify_failed"
 STATUS_WRITE_FAILED = "write_failed"
+STATUS_INVALID_ARGUMENT = "invalid_argument"
+STATUS_BASE_RESOLVE_FAILED = "base_resolve_failed"
+STATUS_BASE_NOT_ANCESTOR = "base_not_ancestor"
+STATUS_EMPTY_INCREMENTAL_RANGE = "empty_incremental_range"
+
+BUNDLE_MODE_FULL = "full"
+BUNDLE_MODE_INCREMENTAL = "incremental"
 
 EXIT_CODES = {
     STATUS_CREATED: 0,
@@ -39,6 +46,10 @@ EXIT_CODES = {
     STATUS_BUNDLE_CREATE_FAILED: 6,
     STATUS_BUNDLE_VERIFY_FAILED: 7,
     STATUS_WRITE_FAILED: 8,
+    STATUS_INVALID_ARGUMENT: 9,
+    STATUS_BASE_RESOLVE_FAILED: 10,
+    STATUS_BASE_NOT_ANCESTOR: 11,
+    STATUS_EMPTY_INCREMENTAL_RANGE: 12,
 }
 
 
@@ -57,7 +68,20 @@ class BundleConfig:
     remote: str = DEFAULT_REMOTE
     output_dir: Path = DEFAULT_OUTPUT_DIR
     fetch: bool = True
-    include_tags: bool = True
+    include_tags: bool | None = None
+    since: str | None = None
+    last: int | None = None
+
+
+@dataclass(frozen=True)
+class BundleRange:
+    bundle_mode: str
+    revisions: tuple[str, ...]
+    include_tags: bool
+    base_selector: str | None = None
+    base_sha: str | None = None
+    base_short_sha: str | None = None
+    incremental_commit_count: int | None = None
 
 
 @dataclass(frozen=True)
@@ -181,6 +205,95 @@ def _resolve_repo_root(requested_root: Path, command_runner: CommandRunner) -> P
     return Path(result.stdout.strip()).resolve()
 
 
+def _resolve_bundle_range(
+    repo_root: Path,
+    source_ref: str,
+    head_sha: str,
+    config: BundleConfig,
+    command_runner: CommandRunner,
+) -> BundleRange:
+    if config.since is not None and config.last is not None:
+        raise BundleCreateError(
+            STATUS_INVALID_ARGUMENT,
+            "Choose either --since or --last, not both.",
+        )
+
+    if config.last is not None and int(config.last) <= 0:
+        raise BundleCreateError(
+            STATUS_INVALID_ARGUMENT,
+            "--last must be a positive integer.",
+        )
+
+    if config.since is None and config.last is None:
+        include_tags = bool(config.include_tags) if config.include_tags is not None else True
+        return BundleRange(
+            bundle_mode=BUNDLE_MODE_FULL,
+            revisions=(source_ref,),
+            include_tags=include_tags,
+        )
+
+    if config.last is not None:
+        base_selector = f"{source_ref}~{int(config.last)}"
+    else:
+        base_selector = str(config.since or "").strip()
+
+    if not base_selector:
+        raise BundleCreateError(
+            STATUS_INVALID_ARGUMENT,
+            "--since must name a commit, tag, or other revision.",
+        )
+
+    base_result = _run_git(repo_root, ["rev-parse", "--verify", f"{base_selector}^{{commit}}"], command_runner)
+    if base_result.returncode != 0 or not base_result.stdout.strip():
+        raise BundleCreateError(
+            STATUS_BASE_RESOLVE_FAILED,
+            f"Bundle creation could not resolve incremental base {base_selector!r}.",
+            command_result=base_result,
+        )
+    base_sha = base_result.stdout.strip()
+
+    ancestor_result = _run_git(repo_root, ["merge-base", "--is-ancestor", base_sha, head_sha], command_runner)
+    if ancestor_result.returncode != 0:
+        raise BundleCreateError(
+            STATUS_BASE_NOT_ANCESTOR,
+            "Incremental bundle base is not an ancestor of the requested branch head.",
+            command_result=ancestor_result,
+        )
+
+    count_result = _run_git(repo_root, ["rev-list", "--count", f"{base_sha}..{head_sha}"], command_runner)
+    if count_result.returncode != 0 or not count_result.stdout.strip():
+        raise BundleCreateError(
+            STATUS_BASE_RESOLVE_FAILED,
+            "Bundle creation could not count commits in the incremental range.",
+            command_result=count_result,
+        )
+    try:
+        incremental_commit_count = int(count_result.stdout.strip())
+    except ValueError as exc:
+        raise BundleCreateError(
+            STATUS_BASE_RESOLVE_FAILED,
+            "Bundle creation received an invalid commit count for the incremental range.",
+            command_result=count_result,
+        ) from exc
+
+    if incremental_commit_count <= 0:
+        raise BundleCreateError(
+            STATUS_EMPTY_INCREMENTAL_RANGE,
+            "Incremental bundle range is empty; the base commit already matches the branch head.",
+        )
+
+    include_tags = bool(config.include_tags) if config.include_tags is not None else False
+    return BundleRange(
+        bundle_mode=BUNDLE_MODE_INCREMENTAL,
+        revisions=(source_ref, f"^{base_sha}"),
+        include_tags=include_tags,
+        base_selector=base_selector,
+        base_sha=base_sha,
+        base_short_sha=base_sha[:12],
+        incremental_commit_count=incremental_commit_count,
+    )
+
+
 def _write_manifest(path: Path, manifest: dict) -> None:
     path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -222,6 +335,7 @@ def create_update_bundle(
         )
     head_sha = head_result.stdout.strip()
     head_short_sha = head_sha[:12]
+    bundle_range = _resolve_bundle_range(repo_root, source_ref, head_sha, config, command_runner)
 
     output_dir = Path(config.output_dir)
     if not output_dir.is_absolute():
@@ -240,8 +354,8 @@ def create_update_bundle(
             f"Output files already exist for {base_name}; choose a different output directory or retry later.",
         )
 
-    bundle_args = ["bundle", "create", str(bundle_path), source_ref]
-    if config.include_tags:
+    bundle_args = ["bundle", "create", str(bundle_path), *bundle_range.revisions]
+    if bundle_range.include_tags:
         bundle_args.append("--tags")
     bundle_result = _run_git(repo_root, bundle_args, command_runner)
     if bundle_result.returncode != 0:
@@ -275,7 +389,12 @@ def create_update_bundle(
         "bundle_filename": bundle_path.name,
         "bundle_sha256": bundle_sha256,
         "bundle_size_bytes": bundle_size,
-        "include_tags": bool(config.include_tags),
+        "include_tags": bool(bundle_range.include_tags),
+        "bundle_mode": bundle_range.bundle_mode,
+        "base_selector": bundle_range.base_selector,
+        "base_sha": bundle_range.base_sha,
+        "base_short_sha": bundle_range.base_short_sha,
+        "incremental_commit_count": bundle_range.incremental_commit_count,
         "producer": PRODUCER,
     }
     _write_manifest(manifest_path, manifest)
@@ -298,7 +417,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--remote", default=DEFAULT_REMOTE, help="Remote name to fetch and package.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Directory for bundle and manifest.")
     parser.add_argument("--no-fetch", action="store_true", help="Skip git fetch and use the existing remote-tracking ref.")
-    parser.add_argument("--no-tags", action="store_true", help="Do not include tags in the Git bundle.")
+    range_group = parser.add_mutually_exclusive_group()
+    range_group.add_argument("--since", default=None, help="Create an incremental bundle newer than this base revision.")
+    range_group.add_argument("--last", type=int, default=None, help="Create an incremental bundle for roughly the latest N commits.")
+    tag_group = parser.add_mutually_exclusive_group()
+    tag_group.add_argument("--no-tags", action="store_true", help="Do not include tags in the Git bundle.")
+    tag_group.add_argument("--include-tags", action="store_true", help="Include tags even for incremental bundles.")
     return parser
 
 
@@ -312,6 +436,9 @@ def _success_summary(result: BundleResult) -> dict:
         "head_sha": result.manifest["head_sha"],
         "bundle_sha256": result.manifest["bundle_sha256"],
         "bundle_size_bytes": result.manifest["bundle_size_bytes"],
+        "bundle_mode": result.manifest["bundle_mode"],
+        "base_sha": result.manifest["base_sha"],
+        "incremental_commit_count": result.manifest["incremental_commit_count"],
     }
 
 
@@ -337,13 +464,20 @@ def main(
     out = stdout or sys.stdout
     err = stderr or sys.stderr
     args = build_arg_parser().parse_args(argv)
+    include_tags = None
+    if args.include_tags:
+        include_tags = True
+    elif args.no_tags:
+        include_tags = False
     config = BundleConfig(
         repo_root=Path(args.repo_root),
         branch=str(args.branch),
         remote=str(args.remote),
         output_dir=Path(args.output_dir),
         fetch=not bool(args.no_fetch),
-        include_tags=not bool(args.no_tags),
+        include_tags=include_tags,
+        since=args.since,
+        last=args.last,
     )
     try:
         result = create_update_bundle(config, command_runner=command_runner, now=now)
