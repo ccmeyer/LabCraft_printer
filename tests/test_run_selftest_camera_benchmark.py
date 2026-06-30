@@ -50,16 +50,42 @@ class FakeClock:
         self.now += self.step
         return self.now
 
+    def monotonic_ns(self) -> int:
+        return int(self.monotonic() * 1_000_000_000)
+
+    def sleep(self, seconds: float):
+        self.now += float(seconds)
+
     def time(self) -> float:
         return 1700000000.0
 
 
 def _frame_payload(mod, payload: bytes) -> bytes:
-    return mod.frame_payload(payload)
+    if hasattr(mod, "frame_payload"):
+        return mod.frame_payload(payload)
+    crc = mod._crc16(payload)
+    return bytes([0xAA, len(payload)]) + payload + bytes([crc & 0xFF, (crc >> 8) & 0xFF])
 
 
 def _hello_ack(mod) -> bytes:
     return _frame_payload(mod, bytes([mod.CMD_HELLO_ACK, 1]))
+
+
+def _hello_ack_with_caps(mod) -> bytes:
+    payload = bytearray([mod.CMD_HELLO_ACK, 1])
+    payload += bytes([mod.TAG_CAPABILITIES, 4]) + mod.SELFTEST_TRANSPORT_CAPS.to_bytes(4, "little")
+    return _frame_payload(mod, bytes(payload))
+
+
+def _queue_ack(mod, seq8: int, seq32: int, result: int | None = None, expected: int | None = None) -> bytes:
+    if result is None:
+        result = mod.ACK_RESULT_ACCEPTED
+    payload = bytearray([mod.CMD_QUEUE_ACK, seq8 & 0xFF])
+    payload += bytes([mod.TAG_SEQ32, 4]) + int(seq32).to_bytes(4, "little")
+    payload += bytes([mod.TAG_ACK_RESULT, 1, int(result)])
+    if expected is not None:
+        payload += bytes([mod.TAG_EXPECTED_SEQ32, 4]) + int(expected).to_bytes(4, "little")
+    return _frame_payload(mod, bytes(payload))
 
 
 def _selftest_done(mod, run_id: int, failed: int = 0, aborted: int = 0) -> bytes:
@@ -80,6 +106,47 @@ def _bye_done(mod, seq8: int, seq32: int) -> bytes:
     payload = bytearray([mod.CMD_BYE_DONE, seq8])
     payload += bytes([mod.TAG_SEQ32, 4]) + seq32.to_bytes(4, "little")
     return _frame_payload(mod, bytes(payload))
+
+
+def _write_payload(frame: bytes) -> bytes:
+    assert frame[0] == 0xAA
+    ln = frame[1]
+    return frame[2 : 2 + ln]
+
+
+def _build_control_for(mod):
+    def _build_control(cmd: int, seq8: int, seq32: int, tlvs: bytes = b"") -> bytes:
+        payload = bytes([cmd, seq8 & 0xFF, mod.TAG_SEQ32, 4])
+        payload += int(seq32).to_bytes(4, "little")
+        payload += tlvs
+        return _frame_payload(mod, payload)
+
+    return _build_control
+
+
+def _write_seq32(mod, frame: bytes) -> int:
+    payload = _write_payload(frame)
+    tlv = mod._parse_tlvs(payload[2:])
+    return int.from_bytes(tlv[mod.TAG_SEQ32], "little")
+
+
+def _strict_benchmark_payload(run_id: int, *, cycles: int = 10, next_seq32: int = 5) -> dict:
+    return {
+        "status": "ok",
+        "summary": {
+            "requested_cycles": cycles,
+            "completed_cycles": cycles,
+            "success_cycles": cycles,
+            "success_rate": 1.0,
+            "ack_seen_cycles": cycles,
+            "frame_selected_cycles": cycles,
+            "effective_fps": 9.5,
+        },
+        "init_diag": {"config_match": True},
+        "cycles": [],
+        "run_id": run_id,
+        "next_seq32": next_seq32,
+    }
 
 
 def test_summarize_cycles_basic():
@@ -165,6 +232,131 @@ def test_status_snapshot_parses_status_tlvs_from_payload_index_1():
     assert snap["print_active"] == 1
 
 
+def test_benchmark_queue_command_helper_uses_monotonic_seq32(monkeypatch):
+    mod = _load_module(BENCH_PATH, "camera_flash_benchmark_mod_queue_helper")
+    inbound = b"".join(
+        [
+            _queue_ack(mod, seq8=1, seq32=1),
+            _queue_ack(mod, seq8=2, seq32=2),
+        ]
+    )
+    serial = FakeSerial(inbound)
+    clock = FakeClock()
+    monkeypatch.setattr(
+        mod,
+        "time",
+        SimpleNamespace(monotonic=clock.monotonic, monotonic_ns=clock.monotonic_ns, sleep=clock.sleep),
+    )
+
+    build_control = _build_control_for(mod)
+    first = mod._send_queued_command(
+        serial,
+        build_control,
+        name="init_flash",
+        cmd=mod.CMD_INIT_FLASH,
+        seq32=1,
+    )
+    second = mod._send_queued_command(
+        serial,
+        build_control,
+        name="flash_duration",
+        cmd=mod.CMD_SET_FLASH_DURATION,
+        seq32=2,
+        p1=1000,
+    )
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert [_write_seq32(mod, frame) for frame in serial.writes] == [1, 2]
+
+
+def test_benchmark_queue_command_helper_rejects_gap_ack(monkeypatch):
+    mod = _load_module(BENCH_PATH, "camera_flash_benchmark_mod_queue_gap")
+    serial = FakeSerial(_queue_ack(mod, seq8=5, seq32=5, result=mod.ACK_RESULT_GAP, expected=1))
+    clock = FakeClock()
+    monkeypatch.setattr(
+        mod,
+        "time",
+        SimpleNamespace(monotonic=clock.monotonic, monotonic_ns=clock.monotonic_ns, sleep=clock.sleep),
+    )
+
+    result = mod._send_queued_command(
+        serial,
+        _build_control_for(mod),
+        name="init_flash",
+        cmd=mod.CMD_INIT_FLASH,
+        seq32=5,
+    )
+
+    assert result["ok"] is False
+    assert result["reason"] == "gap"
+    assert result["attempts"][0]["expected_seq32_from_mcu"] == 1
+
+
+def test_camera_flash_benchmark_setup_gap_returns_setup_failed_without_cycles(monkeypatch):
+    mod = _load_module(BENCH_PATH, "camera_flash_benchmark_mod_setup_gap")
+    serial = FakeSerial(_queue_ack(mod, seq8=1, seq32=1, result=mod.ACK_RESULT_GAP, expected=1))
+    clock = FakeClock()
+    monkeypatch.setattr(
+        mod,
+        "time",
+        SimpleNamespace(monotonic=clock.monotonic, monotonic_ns=clock.monotonic_ns, sleep=clock.sleep),
+    )
+
+    payload = mod.run_camera_flash_benchmark(
+        serial,
+        _build_control_for(mod),
+        run_id=1234,
+        config=mod.BenchmarkConfig(cycles=3),
+        start_seq32=1,
+    )
+
+    assert payload["status"] == "setup_failed"
+    assert payload["setup_failure_reason"] == "command_ack_failed"
+    assert payload["next_seq32"] == 1
+    assert payload["summary"]["completed_cycles"] == 0
+    assert payload["cycles"] == []
+
+
+def test_camera_flash_benchmark_config_mismatch_returns_setup_failed_without_cycles(monkeypatch):
+    mod = _load_module(BENCH_PATH, "camera_flash_benchmark_mod_config_mismatch")
+    status = bytearray([mod.CMD_STATUS])
+    status += bytes([mod.TAG_FLASH_WIDTH, 4]) + (1000).to_bytes(4, "little")
+    status += bytes([mod.TAG_FLASH_DELAY, 4]) + (9999).to_bytes(4, "little")
+    status += bytes([mod.TAG_FLASH_DROPS, 4]) + (0).to_bytes(4, "little")
+    inbound = b"".join(
+        [
+            _queue_ack(mod, seq8=1, seq32=1),
+            _queue_ack(mod, seq8=2, seq32=2),
+            _queue_ack(mod, seq8=3, seq32=3),
+            _queue_ack(mod, seq8=4, seq32=4),
+            _frame_payload(mod, bytes(status)),
+        ]
+    )
+    serial = FakeSerial(inbound)
+    clock = FakeClock()
+    monkeypatch.setattr(
+        mod,
+        "time",
+        SimpleNamespace(monotonic=clock.monotonic, monotonic_ns=clock.monotonic_ns, sleep=clock.sleep),
+    )
+
+    payload = mod.run_camera_flash_benchmark(
+        serial,
+        _build_control_for(mod),
+        run_id=1234,
+        config=mod.BenchmarkConfig(cycles=3, flash_delay_us=5000),
+        start_seq32=1,
+    )
+
+    assert payload["status"] == "setup_failed"
+    assert payload["setup_failure_reason"] == "config_mismatch"
+    assert payload["next_seq32"] == 5
+    assert payload["init_diag"]["config_match"] is False
+    assert payload["summary"]["completed_cycles"] == 0
+    assert payload["cycles"] == []
+
+
 def test_run_selftest_writes_camera_benchmark_artifact(monkeypatch, tmp_path):
     run_mod = _load_module(RUN_SELFTEST_PATH, "run_selftest_mod_cam_ok")
     run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF
@@ -186,17 +378,13 @@ def test_run_selftest_writes_camera_benchmark_artifact(monkeypatch, tmp_path):
         def __init__(self, **kwargs):
             self.kwargs = kwargs
 
-    def fake_bench_run(_ser, _build_control, *, run_id, config):
+    def fake_bench_run(_ser, _build_control, *, run_id, config, start_seq32=1):
         assert isinstance(config, FakeCfg)
         assert config.kwargs.get("mode") == "flash_only"
         assert config.kwargs.get("run_order") == "pre_selftest"
         assert config.kwargs.get("num_droplets") == 0
-        return {
-            "status": "ok",
-            "summary": {"effective_fps": 9.5, "completed_cycles": 10},
-            "cycles": [],
-            "run_id": run_id,
-        }
+        assert start_seq32 == 1
+        return _strict_benchmark_payload(run_id, cycles=10, next_seq32=5)
 
     fake_bench = SimpleNamespace(BenchmarkConfig=FakeCfg, run_camera_flash_benchmark=fake_bench_run)
     monkeypatch.setitem(sys.modules, "camera_flash_benchmark", fake_bench)
@@ -239,6 +427,211 @@ def test_run_selftest_writes_camera_benchmark_artifact(monkeypatch, tmp_path):
     assert artifact.exists()
     payload = run_mod.json.loads(artifact.read_text(encoding="utf-8"))
     assert payload["summary"]["effective_fps"] == 9.5
+
+
+def test_run_selftest_pre_benchmark_advances_selftest_seq32(monkeypatch, tmp_path):
+    run_mod = _load_module(RUN_SELFTEST_PATH, "run_selftest_mod_cam_seq32")
+    run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF
+    clock = FakeClock()
+
+    inbound = b"".join(
+        [
+            _hello_ack_with_caps(run_mod),
+            _queue_ack(run_mod, seq8=2, seq32=5),
+            _selftest_done(run_mod, run_id),
+            _bye_ack(run_mod, 3),
+            _bye_done(run_mod, 3, run_id),
+        ]
+    )
+    serial = FakeSerial(inbound)
+    monkeypatch.setattr(run_mod, "time", SimpleNamespace(monotonic=clock.monotonic, time=clock.time))
+    monkeypatch.setattr(run_mod, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: serial))
+
+    class FakeCfg:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    def fake_bench_run(_ser, _build_control, *, run_id, config, start_seq32=1):
+        assert isinstance(config, FakeCfg)
+        assert start_seq32 == 1
+        return _strict_benchmark_payload(run_id, cycles=10, next_seq32=5)
+
+    fake_bench = SimpleNamespace(BenchmarkConfig=FakeCfg, run_camera_flash_benchmark=fake_bench_run)
+    monkeypatch.setitem(sys.modules, "camera_flash_benchmark", fake_bench)
+
+    out_path = tmp_path / "selftest.json"
+    args = SimpleNamespace(
+        port="/dev/ttyAMA0",
+        baud=115200,
+        profile="SAFE",
+        timeout_ms=2000,
+        hello_timeout_ms=1000,
+        hello_retry_ms=50,
+        fast_fail_on_missing_hello=False,
+        camera_benchmark=True,
+        camera_benchmark_cycles=10,
+        camera_benchmark_exposure_us=20000,
+        camera_benchmark_flash_delay_us=5000,
+        camera_benchmark_flash_width_us=1000,
+        camera_benchmark_num_droplets=1,
+        camera_benchmark_attempt_timeout_ms=250,
+        camera_benchmark_max_new_frames=6,
+        camera_benchmark_order="pre_selftest",
+        camera_benchmark_mode="flash_only",
+        camera_benchmark_preflight_pressure_timeout_ms=1000,
+        pressure_trace=False,
+        pressure_trace_test=None,
+        pressure_sweep_suite=None,
+        out=str(out_path),
+    )
+
+    rc = run_mod.run(args)
+    assert rc == 0
+    start_payload = next(_write_payload(w) for w in serial.writes if _write_payload(w)[0] == run_mod.CMD_SELFTEST_START)
+    assert start_payload[1] == 2
+    start_tlv = run_mod.parse_tlvs(start_payload[2:])
+    assert int.from_bytes(start_tlv[run_mod.TAG_SEQ32], "little") == 5
+    report = run_mod.json.loads(out_path.read_text(encoding="utf-8"))
+    checks = {c["name"]: c for c in report["host_checks"]}
+    assert checks["camera_flash_benchmark"]["details"]["next_seq32"] == 5
+    assert checks["selftest_start_ack"]["pass"] is True
+
+
+def test_run_selftest_camera_benchmark_functional_failure_sets_rc2(monkeypatch, tmp_path):
+    run_mod = _load_module(RUN_SELFTEST_PATH, "run_selftest_mod_cam_functional_fail")
+    run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF
+    clock = FakeClock()
+
+    inbound = b"".join(
+        [
+            _hello_ack(run_mod),
+            _selftest_done(run_mod, run_id),
+            _bye_ack(run_mod, 3),
+            _bye_done(run_mod, 3, run_id),
+        ]
+    )
+    serial = FakeSerial(inbound)
+    monkeypatch.setattr(run_mod, "time", SimpleNamespace(monotonic=clock.monotonic, time=clock.time))
+    monkeypatch.setattr(run_mod, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: serial))
+
+    class FakeCfg:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    def fake_bench_run(_ser, _build_control, *, run_id, config, start_seq32=1):
+        return {
+            "status": "ok",
+            "summary": {
+                "requested_cycles": 10,
+                "completed_cycles": 10,
+                "ack_seen_cycles": 0,
+                "frame_selected_cycles": 0,
+                "success_cycles": 0,
+                "success_rate": 0.0,
+            },
+            "init_diag": {"config_match": True},
+            "cycles": [],
+            "run_id": run_id,
+            "next_seq32": 5,
+        }
+
+    fake_bench = SimpleNamespace(BenchmarkConfig=FakeCfg, run_camera_flash_benchmark=fake_bench_run)
+    monkeypatch.setitem(sys.modules, "camera_flash_benchmark", fake_bench)
+
+    out_path = tmp_path / "selftest.json"
+    args = SimpleNamespace(
+        port="/dev/ttyAMA0",
+        baud=115200,
+        profile="SAFE",
+        timeout_ms=2000,
+        hello_timeout_ms=1000,
+        hello_retry_ms=50,
+        fast_fail_on_missing_hello=False,
+        camera_benchmark=True,
+        camera_benchmark_order="pre_selftest",
+        camera_benchmark_mode="flash_only",
+        camera_benchmark_preflight_pressure_timeout_ms=1000,
+        pressure_trace=False,
+        pressure_trace_test=None,
+        pressure_sweep_suite=None,
+        out=str(out_path),
+    )
+
+    rc = run_mod.run(args)
+    assert rc == 2
+    report = run_mod.json.loads(out_path.read_text(encoding="utf-8"))
+    checks = {c["name"]: c for c in report["host_checks"]}
+    assert checks["camera_flash_benchmark"]["pass"] is False
+    assert checks["camera_flash_benchmark"]["details"]["status"] == "ok"
+
+
+def test_run_selftest_camera_benchmark_setup_failed_sets_rc2(monkeypatch, tmp_path):
+    run_mod = _load_module(RUN_SELFTEST_PATH, "run_selftest_mod_cam_setup_fail")
+    run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF
+    clock = FakeClock()
+
+    inbound = b"".join(
+        [
+            _hello_ack(run_mod),
+            _selftest_done(run_mod, run_id),
+            _bye_ack(run_mod, 3),
+            _bye_done(run_mod, 3, run_id),
+        ]
+    )
+    serial = FakeSerial(inbound)
+    monkeypatch.setattr(run_mod, "time", SimpleNamespace(monotonic=clock.monotonic, time=clock.time))
+    monkeypatch.setattr(run_mod, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: serial))
+
+    class FakeCfg:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    def fake_bench_run(_ser, _build_control, *, run_id, config, start_seq32=1):
+        return {
+            "status": "setup_failed",
+            "setup_failure_reason": "command_ack_failed",
+            "summary": {
+                "requested_cycles": 10,
+                "completed_cycles": 0,
+                "ack_seen_cycles": 0,
+                "frame_selected_cycles": 0,
+                "success_cycles": 0,
+                "success_rate": 0.0,
+            },
+            "init_diag": {"config_match": False},
+            "cycles": [],
+            "run_id": run_id,
+            "next_seq32": 1,
+        }
+
+    fake_bench = SimpleNamespace(BenchmarkConfig=FakeCfg, run_camera_flash_benchmark=fake_bench_run)
+    monkeypatch.setitem(sys.modules, "camera_flash_benchmark", fake_bench)
+
+    out_path = tmp_path / "selftest.json"
+    args = SimpleNamespace(
+        port="/dev/ttyAMA0",
+        baud=115200,
+        profile="SAFE",
+        timeout_ms=2000,
+        hello_timeout_ms=1000,
+        hello_retry_ms=50,
+        fast_fail_on_missing_hello=False,
+        camera_benchmark=True,
+        camera_benchmark_order="pre_selftest",
+        camera_benchmark_mode="flash_only",
+        camera_benchmark_preflight_pressure_timeout_ms=1000,
+        pressure_trace=False,
+        pressure_trace_test=None,
+        pressure_sweep_suite=None,
+        out=str(out_path),
+    )
+
+    rc = run_mod.run(args)
+    assert rc == 2
+    report = run_mod.json.loads(out_path.read_text(encoding="utf-8"))
+    checks = {c["name"]: c for c in report["host_checks"]}
+    assert checks["camera_flash_benchmark"]["pass"] is False
+    assert checks["camera_flash_benchmark"]["details"]["status"] == "setup_failed"
 
 
 def test_run_selftest_camera_benchmark_runtime_error_sets_rc3(monkeypatch, tmp_path):

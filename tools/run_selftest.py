@@ -513,6 +513,36 @@ def _resolve_camera_benchmark_order(mode: str, requested_order: str) -> str:
     return order_norm
 
 
+def _camera_benchmark_payload_pass(payload: dict) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("status") != "ok":
+        return False
+    init_diag = payload.get("init_diag") or {}
+    if not isinstance(init_diag, dict) or not bool(init_diag.get("config_match", False)):
+        return False
+    summary = payload.get("summary") or {}
+    if not isinstance(summary, dict):
+        return False
+    requested = summary.get("requested_cycles")
+    if requested is None:
+        config = payload.get("config") or {}
+        requested = config.get("cycles") if isinstance(config, dict) else None
+    try:
+        requested_i = int(requested)
+    except (TypeError, ValueError):
+        return False
+    if requested_i <= 0:
+        return False
+    for key in ("completed_cycles", "ack_seen_cycles", "frame_selected_cycles", "success_cycles"):
+        try:
+            if int(summary.get(key)) != requested_i:
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
 def _run_camera_benchmark_phase(
     args: argparse.Namespace,
     *,
@@ -523,7 +553,8 @@ def _run_camera_benchmark_phase(
     phase: str,
     mode: str,
     requested_order: str,
-) -> bool:
+    start_seq32: int = 1,
+) -> tuple[bool, bool, int]:
     bench_artifact = _camera_benchmark_artifact_path(args.out)
     try:
         from camera_flash_benchmark import BenchmarkConfig, run_camera_flash_benchmark
@@ -556,12 +587,18 @@ def _run_camera_benchmark_phase(
             build_control_fn,
             run_id=run_id,
             config=bench_cfg,
+            start_seq32=start_seq32,
         )
+        try:
+            next_seq32 = int(bench_payload.get("next_seq32", start_seq32))
+        except (TypeError, ValueError, AttributeError):
+            next_seq32 = int(start_seq32)
+        bench_pass = _camera_benchmark_payload_pass(bench_payload)
         write_json_atomic(bench_artifact, bench_payload)
         host_checks.append(
             {
                 "name": "camera_flash_benchmark",
-                "pass": True,
+                "pass": bench_pass,
                 "details": {
                     "status": bench_payload.get("status", "ok"),
                     "artifact": bench_artifact,
@@ -569,6 +606,8 @@ def _run_camera_benchmark_phase(
                     "mode": mode,
                     "requested_order": str(requested_order),
                     "resolved_order": str(phase),
+                    "start_seq32": int(start_seq32),
+                    "next_seq32": int(next_seq32),
                     "summary": bench_payload.get("summary", {}),
                     "preflight": bench_payload.get("preflight", {}),
                     "init_diag": bench_payload.get("init_diag", {}),
@@ -578,7 +617,7 @@ def _run_camera_benchmark_phase(
             }
         )
         print(f"Wrote camera benchmark artifact: {bench_artifact}")
-        return False
+        return False, not bench_pass, next_seq32
     except ImportError as e:
         host_checks.append(
             {
@@ -597,7 +636,7 @@ def _run_camera_benchmark_phase(
             }
         )
         print(f"Skipping camera benchmark due to missing dependency: {e}")
-        return False
+        return False, False, int(start_seq32)
     except Exception as e:
         host_checks.append(
             {
@@ -616,7 +655,7 @@ def _run_camera_benchmark_phase(
             }
         )
         print(f"Camera benchmark failed: {e}")
-        return True
+        return True, False, int(start_seq32)
 
 
 def _write_sweep_artifacts(base_out: str, run_id: int, results: list[dict]) -> tuple[str, str] | tuple[None, None]:
@@ -788,6 +827,8 @@ def run(args: argparse.Namespace) -> int:
     aborted = False
 
     camera_benchmark_runtime_error = False
+    camera_benchmark_failed = False
+    next_seq32 = 1
     with serial.Serial(args.port, args.baud, timeout=0.1) as ser:
         reader = FrameReader()
 
@@ -869,7 +910,7 @@ def run(args: argparse.Namespace) -> int:
         bench_order = _resolve_camera_benchmark_order(bench_mode, requested_bench_order)
         run_benchmark = bool(getattr(args, "camera_benchmark", False))
         if run_benchmark and bench_order == "pre_selftest":
-            camera_benchmark_runtime_error = _run_camera_benchmark_phase(
+            bench_runtime_error, bench_failed, next_seq32 = _run_camera_benchmark_phase(
                 args,
                 ser=ser,
                 run_id=run_id,
@@ -878,7 +919,10 @@ def run(args: argparse.Namespace) -> int:
                 phase="pre_selftest",
                 mode=bench_mode,
                 requested_order=requested_bench_order,
+                start_seq32=next_seq32,
             )
+            camera_benchmark_runtime_error = bench_runtime_error or camera_benchmark_runtime_error
+            camera_benchmark_failed = bench_failed or camera_benchmark_failed
 
         profile_val = profile_map[profile]
         # Mirror profile into TAG_P1 so current firmware decode can branch without
@@ -907,7 +951,7 @@ def run(args: argparse.Namespace) -> int:
         tlvs += bytes([TAG_PROFILE, 1, profile_val])
         tlvs += bytes([TAG_RUN_ID, 4]) + run_id.to_bytes(4, "little")
         tlvs += bytes([TAG_TIMEOUT_MS, 4]) + effective_timeout_ms.to_bytes(4, "little")
-        selftest_seq32 = 1 if use_selftest_transport else run_id
+        selftest_seq32 = next_seq32 if use_selftest_transport else run_id
         ser.write(build_control(CMD_SELFTEST_START, 2, selftest_seq32, tlvs))
 
         if use_selftest_transport:
@@ -1258,7 +1302,7 @@ def run(args: argparse.Namespace) -> int:
                     "timestamp": now_iso(),
                 }
             )
-            camera_benchmark_runtime_error = _run_camera_benchmark_phase(
+            bench_runtime_error, bench_failed, _post_next_seq32 = _run_camera_benchmark_phase(
                 args,
                 ser=ser,
                 run_id=run_id,
@@ -1267,7 +1311,10 @@ def run(args: argparse.Namespace) -> int:
                 phase="post_selftest",
                 mode=bench_mode,
                 requested_order=requested_bench_order,
-            ) or camera_benchmark_runtime_error
+                start_seq32=1,
+            )
+            camera_benchmark_runtime_error = bench_runtime_error or camera_benchmark_runtime_error
+            camera_benchmark_failed = bench_failed or camera_benchmark_failed
 
         skip_goodbye = bool(getattr(args, "skip_goodbye", False) or gripper_seal_suite or gripper_seal_stress_suite)
         if done_seen and not skip_goodbye:
@@ -1441,6 +1488,8 @@ def run(args: argparse.Namespace) -> int:
             print(f"Wrote sweep artifacts: {sweep_json} | {sweep_csv}")
         if camera_benchmark_runtime_error:
             rc = 3
+        elif camera_benchmark_failed and rc == 0:
+            rc = 2
         print(f"Wrote self-test report: {args.out}")
         return rc
 

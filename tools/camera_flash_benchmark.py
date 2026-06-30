@@ -14,6 +14,7 @@ CMD_SET_FLASH_DURATION = 0xC2
 CMD_SET_FLASH_DELAY = 0xC3
 CMD_SET_IMAGING_DROPLETS = 0xC4
 CMD_STATUS = 0x02
+CMD_QUEUE_ACK = 0xFE
 CMD_ENABLE_MOTORS = 0x08
 CMD_HOME_XY = 0x43
 CMD_HOME_PR_BOTH = 0x44
@@ -30,6 +31,9 @@ TAG_EXT_COUNT = 0x64
 TAG_P1 = 0x01
 TAG_P2 = 0x02
 TAG_P3 = 0x03
+TAG_SEQ32 = 0x10
+TAG_ACK_RESULT = 0x11
+TAG_EXPECTED_SEQ32 = 0x12
 TAG_PRINT_P = 0x12
 TAG_REFUEL_P = 0x13
 TAG_TAR_PRINT_P = 0x14
@@ -37,9 +41,18 @@ TAG_TAR_REFUEL_P = 0x15
 TAG_ACTIVE_P = 0x40
 TAG_ACTIVE_R = 0x41
 
+ACK_RESULT_ACCEPTED = 1
+ACK_RESULT_DUPLICATE = 2
+ACK_RESULT_GAP = 3
+ACK_RESULT_BUSY = 4
+ACK_RESULT_WATERMARK_SET = 5
+ACK_RESULT_WATERMARK_REJECTED = 6
+
 SAFE_FLASH_WIDTH_MIN_NS = 100
 SAFE_FLASH_WIDTH_MAX_NS = 5000
 MACHINE_READY_TIMEOUT_MS_MIN = 15000
+QUEUE_ACK_TIMEOUT_MS = 500
+QUEUE_ACK_MAX_RETRIES = 3
 HOME_FAST_HZ = 30000
 HOME_SLOW_HZ = 3000
 HOME_BACKOFF_STEPS = 400
@@ -363,6 +376,174 @@ def _parse_tlvs(payload: bytes) -> dict[int, bytes]:
     return out
 
 
+def _tlv_u32(tlv: dict[int, bytes], tag: int) -> int | None:
+    raw = tlv.get(tag)
+    if raw is None or len(raw) != 4:
+        return None
+    return int.from_bytes(raw, "little")
+
+
+def _tlv_u8(tlv: dict[int, bytes], tag: int) -> int | None:
+    raw = tlv.get(tag)
+    if raw is None or len(raw) != 1:
+        return None
+    return int(raw[0])
+
+
+def _decode_ack_result(code: int | None) -> str | None:
+    if code is None:
+        return None
+    return {
+        ACK_RESULT_ACCEPTED: "accepted",
+        ACK_RESULT_DUPLICATE: "duplicate",
+        ACK_RESULT_GAP: "gap",
+        ACK_RESULT_BUSY: "busy",
+        ACK_RESULT_WATERMARK_SET: "watermark_set",
+        ACK_RESULT_WATERMARK_REJECTED: "watermark_rejected",
+    }.get(int(code), f"unknown_{int(code)}")
+
+
+def _read_queue_ack(ser, *, seq8: int, seq32: int, timeout_ms: int = QUEUE_ACK_TIMEOUT_MS) -> dict:
+    deadline = time.monotonic() + (max(1, int(timeout_ms)) / 1000.0)
+    state = 0
+    expected_len = 0
+    buf = bytearray()
+    observed = []
+    while time.monotonic() < deadline:
+        chunk = ser.read(1)
+        if not chunk:
+            continue
+        for b in chunk:
+            if state == 0:
+                if b == 0xAA:
+                    state = 1
+                continue
+            if state == 1:
+                expected_len = int(b)
+                buf.clear()
+                state = 2
+                continue
+
+            buf.append(b)
+            if len(buf) < expected_len + 2:
+                continue
+            payload = bytes(buf[:expected_len])
+            rec_crc = int(buf[expected_len]) | (int(buf[expected_len + 1]) << 8)
+            state = 0
+            buf.clear()
+            if _crc16(payload) != rec_crc or len(payload) < 2:
+                continue
+            cmd = int(payload[0])
+            observed_seq8 = int(payload[1])
+            if cmd != CMD_QUEUE_ACK:
+                observed.append({"cmd": cmd, "seq8": observed_seq8})
+                continue
+            tlv = _parse_tlvs(payload[2:])
+            observed_seq32 = _tlv_u32(tlv, TAG_SEQ32)
+            ack_result_code = _tlv_u8(tlv, TAG_ACK_RESULT)
+            ack = {
+                "cmd": cmd,
+                "seq8": observed_seq8,
+                "seq32": observed_seq32,
+                "expected_seq8": int(seq8) & 0xFF,
+                "expected_seq32": int(seq32),
+                "ack_result": _decode_ack_result(ack_result_code),
+                "ack_result_code": ack_result_code,
+                "expected_seq32_from_mcu": _tlv_u32(tlv, TAG_EXPECTED_SEQ32),
+            }
+            if observed_seq32 != int(seq32):
+                observed.append(dict(ack))
+                continue
+            if observed_seq8 != (int(seq8) & 0xFF):
+                ack["seq8_mismatch"] = True
+            if observed:
+                ack["observed_ignored"] = observed
+            return ack
+    return {
+        "seq8": int(seq8) & 0xFF,
+        "seq32": int(seq32),
+        "expected_seq32": int(seq32),
+        "ack_result": "timeout",
+        "ack_result_code": None,
+        "timeout_ms": int(timeout_ms),
+        "observed_ignored": observed,
+    }
+
+
+def _command_tlvs(*, p1: int | None = None, p2: int | None = None, p3: int | None = None) -> bytes:
+    tlv = b""
+    if p1 is not None:
+        tlv += bytes([TAG_P1, 4]) + int(p1).to_bytes(4, "little", signed=False)
+    if p2 is not None:
+        tlv += bytes([TAG_P2, 4]) + int(p2).to_bytes(4, "little", signed=False)
+    if p3 is not None:
+        tlv += bytes([TAG_P3, 4]) + int(p3).to_bytes(4, "little", signed=False)
+    return tlv
+
+
+def _send_queued_command(
+    ser,
+    build_control_fn,
+    *,
+    name: str,
+    cmd: int,
+    seq32: int,
+    p1: int | None = None,
+    p2: int | None = None,
+    p3: int | None = None,
+    ack_timeout_ms: int = QUEUE_ACK_TIMEOUT_MS,
+    max_retries: int = QUEUE_ACK_MAX_RETRIES,
+) -> dict:
+    seq32 = int(seq32)
+    seq8 = seq32 & 0xFF
+    tlvs = _command_tlvs(p1=p1, p2=p2, p3=p3)
+    attempts = []
+    for attempt_index in range(1, max(1, int(max_retries)) + 1):
+        sent_ns = time.monotonic_ns()
+        ser.write(build_control_fn(int(cmd), seq8, seq32, tlvs))
+        ack = _read_queue_ack(ser, seq8=seq8, seq32=seq32, timeout_ms=ack_timeout_ms)
+        ack["attempt_index"] = int(attempt_index)
+        ack["sent_ns"] = int(sent_ns)
+        attempts.append(ack)
+        result = str(ack.get("ack_result") or "")
+        if result == "accepted" or (result == "duplicate" and attempt_index > 1):
+            return {
+                "ok": True,
+                "name": str(name),
+                "cmd": int(cmd),
+                "seq8": seq8,
+                "seq32": seq32,
+                "ack_result": result,
+                "attempts": attempts,
+            }
+        if result == "busy" and attempt_index < max(1, int(max_retries)):
+            continue
+        if result == "timeout" and attempt_index < max(1, int(max_retries)):
+            continue
+        reason = result or "malformed_ack"
+        if result == "duplicate":
+            reason = "duplicate_without_retry"
+        return {
+            "ok": False,
+            "name": str(name),
+            "cmd": int(cmd),
+            "seq8": seq8,
+            "seq32": seq32,
+            "reason": reason,
+            "ack_result": result,
+            "attempts": attempts,
+        }
+    return {
+        "ok": False,
+        "name": str(name),
+        "cmd": int(cmd),
+        "seq8": seq8,
+        "seq32": seq32,
+        "reason": "retry_exhausted",
+        "attempts": attempts,
+    }
+
+
 def _status_snapshot_from_serial(ser, *, sample_ms: int = 250) -> dict:
     deadline = time.monotonic() + (max(1, int(sample_ms)) / 1000.0)
     state = 0
@@ -469,33 +650,12 @@ def _pressure_preflight(ser, timeout_ms: int) -> tuple[bool, dict]:
     return False, latest
 
 
-def _send_control(
-    ser,
-    build_control_fn,
-    *,
-    cmd: int,
-    seq8: int,
-    run_id: int,
-    p1: int | None = None,
-    p2: int | None = None,
-    p3: int | None = None,
-) -> int:
-    tlv = b""
-    if p1 is not None:
-        tlv = bytes([TAG_P1, 4]) + int(p1).to_bytes(4, "little", signed=False)
-    if p2 is not None:
-        tlv += bytes([TAG_P2, 4]) + int(p2).to_bytes(4, "little", signed=False)
-    if p3 is not None:
-        tlv += bytes([TAG_P3, 4]) + int(p3).to_bytes(4, "little", signed=False)
-    ser.write(build_control_fn(cmd, seq8, run_id, tlv))
-    return (seq8 + 1) & 0xFF
-
-
-def _machine_ready_preflight(ser, build_control_fn, *, run_id: int, seq8: int, timeout_ms: int) -> tuple[int, dict]:
+def _machine_ready_preflight(ser, build_control_fn, *, start_seq32: int, timeout_ms: int) -> tuple[int, dict]:
     started_ns = time.monotonic_ns()
     timeout_ms = max(MACHINE_READY_TIMEOUT_MS_MIN, int(timeout_ms))
     status_before = _status_snapshot_from_serial(ser, sample_ms=250)
     phases = []
+    next_seq32 = int(start_seq32)
 
     def _mark_phase(
         name: str,
@@ -505,51 +665,70 @@ def _machine_ready_preflight(ser, build_control_fn, *, run_id: int, seq8: int, t
         p2: int | None = None,
         p3: int | None = None,
     ):
-        nonlocal seq8
+        nonlocal next_seq32
         t0 = time.monotonic_ns()
-        seq8 = _send_control(
+        ack = _send_queued_command(
             ser,
             build_control_fn,
+            name=name,
             cmd=cmd,
-            seq8=seq8,
-            run_id=run_id,
+            seq32=next_seq32,
             p1=p1,
             p2=p2,
             p3=p3,
         )
         t1 = time.monotonic_ns()
+        if ack.get("ok"):
+            next_seq32 += 1
         phases.append(
             {
                 "name": name,
                 "cmd": int(cmd),
                 "sent_ns": int(t1),
                 "duration_ms": (t1 - t0) / 1_000_000.0,
+                "ack": ack,
             }
         )
+        return bool(ack.get("ok"))
 
-    _mark_phase("enable_motors", CMD_ENABLE_MOTORS)
-    _mark_phase(
+    if not _mark_phase("enable_motors", CMD_ENABLE_MOTORS):
+        ok = False
+        status_ready = status_before
+        reason = "command_setup_failed"
+    elif not _mark_phase(
         "home_xy",
         CMD_HOME_XY,
         p1=HOME_FAST_HZ,
         p2=HOME_SLOW_HZ,
         p3=HOME_BACKOFF_STEPS,
-    )
-    _mark_phase(
+    ):
+        ok = False
+        status_ready = status_before
+        reason = "command_setup_failed"
+    elif not _mark_phase(
         "home_pressure_regs",
         CMD_HOME_PR_BOTH,
         p1=HOME_FAST_HZ,
         p2=HOME_SLOW_HZ,
         p3=HOME_BACKOFF_STEPS,
-    )
-    _mark_phase("start_print_reg", CMD_P_REG_START)
-    _mark_phase("start_refuel_reg", CMD_R_REG_START)
-
-    ok, status_ready = _pressure_preflight(ser, timeout_ms)
+    ):
+        ok = False
+        status_ready = status_before
+        reason = "command_setup_failed"
+    elif not _mark_phase("start_print_reg", CMD_P_REG_START):
+        ok = False
+        status_ready = status_before
+        reason = "command_setup_failed"
+    elif not _mark_phase("start_refuel_reg", CMD_R_REG_START):
+        ok = False
+        status_ready = status_before
+        reason = "command_setup_failed"
+    else:
+        ok, status_ready = _pressure_preflight(ser, timeout_ms)
+        reason = None if ok else "pressure_not_ready_timeout"
     finished_ns = time.monotonic_ns()
-    reason = None if ok else "pressure_not_ready_timeout"
     return (
-        seq8,
+        next_seq32,
         {
             "required": True,
             "pass": bool(ok),
@@ -587,74 +766,121 @@ def run_camera_flash_benchmark(
     *,
     run_id: int,
     config: BenchmarkConfig,
+    start_seq32: int = 1,
 ) -> dict:
-    import numpy as np
-    from picamera2 import Picamera2
-
-    trigger_chip, trigger_offset = _gpiofind(f"GPIO{config.trigger_pin_bcm}")
-    ack_chip, ack_offset = _gpiofind(f"GPIO{config.flash_ack_pin_bcm}")
-    trig = _make_output_line(trigger_chip, trigger_offset, initial=0)
-    ack = _make_rising_edge_input(ack_chip, ack_offset)
-    camera = None
     mode = str(getattr(config, "mode", "flash_only") or "flash_only").strip().lower()
     run_order = str(getattr(config, "run_order", "pre_selftest") or "pre_selftest").strip().lower()
     if mode not in ("flash_only", "print_then_flash"):
         mode = "flash_only"
     if run_order not in ("pre_selftest", "post_selftest"):
         run_order = "pre_selftest"
+    next_seq32 = int(start_seq32)
+    trig = None
+    ack = None
+    camera = None
     did_start_pressure_regs = False
+    safe_flash_width = max(SAFE_FLASH_WIDTH_MIN_NS, min(SAFE_FLASH_WIDTH_MAX_NS, int(config.flash_width_us)))
+    effective_droplets = 0 if mode == "flash_only" else max(1, int(config.num_droplets))
+    preflight_timeout_ms = max(50, int(getattr(config, "preflight_pressure_timeout_ms", 1000)))
+
+    def _config_payload(timeout_ms: int) -> dict:
+        return {
+            "cycles": int(config.cycles),
+            "exposure_us": int(config.exposure_us),
+            "flash_delay_us": int(config.flash_delay_us),
+            "flash_width_us": int(config.flash_width_us),
+            "safe_flash_width_ns_applied": int(safe_flash_width),
+            "num_droplets": int(config.num_droplets),
+            "effective_num_droplets": int(effective_droplets),
+            "attempt_timeout_ms": int(config.attempt_timeout_ms),
+            "max_new_frames": int(config.max_new_frames),
+            "trigger_pin_bcm": int(config.trigger_pin_bcm),
+            "flash_ack_pin_bcm": int(config.flash_ack_pin_bcm),
+            "trigger_settle_ms": int(config.trigger_settle_ms),
+            "post_cycle_settle_ms": int(config.post_cycle_settle_ms),
+            "trigger_retries": int(config.trigger_retries),
+            "mode": mode,
+            "run_order": run_order,
+            "preflight_pressure_timeout_ms": int(timeout_ms),
+        }
+
+    def _zero_summary(reason: str, started_ns: int, finished_ns: int) -> dict:
+        summary = summarize_cycles([], config.cycles, started_ns, finished_ns)
+        summary["reason_distribution"] = {str(reason): int(max(1, int(config.cycles)))}
+        summary["completed_cycles"] = 0
+        summary["success_cycles"] = 0
+        summary["ack_seen_cycles"] = 0
+        summary["frame_selected_cycles"] = 0
+        summary["success_rate"] = 0.0
+        return summary
+
+    def _setup_failed_payload(
+        *,
+        reason: str,
+        preflight: dict,
+        init_diag: dict,
+        status_snapshot: dict | None = None,
+        failed_command: dict | None = None,
+    ) -> dict:
+        started_ns = time.monotonic_ns()
+        finished_ns = started_ns
+        diag = dict(init_diag)
+        diag.setdefault("config_match", False)
+        if failed_command is not None:
+            diag["failed_command"] = failed_command
+        return {
+            "status": "setup_failed",
+            "setup_failure_reason": str(reason),
+            "mode": mode,
+            "run_order": run_order,
+            "next_seq32": int(next_seq32),
+            "started_ns": started_ns,
+            "finished_ns": finished_ns,
+            "elapsed_ms": (finished_ns - started_ns) / 1_000_000.0,
+            "config": _config_payload(preflight_timeout_ms),
+            "preflight": preflight,
+            "init_diag": diag,
+            "status_snapshot_pre": status_snapshot or {},
+            "status_snapshot_post": {},
+            "status_snapshot_delta": {"ext_count_delta": None, "flash_num_delta": None},
+            "summary": _zero_summary("setup_failed", started_ns, finished_ns),
+            "cycles": [],
+        }
+
     try:
-        safe_flash_width = max(SAFE_FLASH_WIDTH_MIN_NS, min(SAFE_FLASH_WIDTH_MAX_NS, int(config.flash_width_us)))
-        effective_droplets = 0 if mode == "flash_only" else max(1, int(config.num_droplets))
-        seq8 = 32
         preflight = {"required": mode == "print_then_flash", "pass": True, "timeout_ms": 0, "status": {}}
         if mode == "print_then_flash":
             timeout_ms = max(
                 MACHINE_READY_TIMEOUT_MS_MIN, int(getattr(config, "preflight_pressure_timeout_ms", 1000))
             )
-            seq8, preflight = _machine_ready_preflight(
+            preflight_timeout_ms = timeout_ms
+            next_seq32, preflight = _machine_ready_preflight(
                 ser,
                 build_control_fn,
-                run_id=run_id,
-                seq8=seq8,
+                start_seq32=next_seq32,
                 timeout_ms=timeout_ms,
             )
             did_start_pressure_regs = True
             if not bool(preflight.get("pass", False)):
+                if preflight.get("reason") == "command_setup_failed":
+                    return _setup_failed_payload(
+                        reason="command_ack_failed",
+                        preflight=preflight,
+                        init_diag={"config_match": False, "setup_acks": [], "preflight": preflight},
+                    )
                 started_ns = time.monotonic_ns()
                 finished_ns = started_ns
                 cycles = []
-                summary = summarize_cycles(cycles, config.cycles, started_ns, finished_ns)
-                summary["reason_distribution"] = {"skipped_not_pressure_ready": int(max(1, int(config.cycles)))}
-                summary["completed_cycles"] = 0
-                summary["success_cycles"] = 0
-                summary["success_rate"] = 0.0
+                summary = _zero_summary("skipped_not_pressure_ready", started_ns, finished_ns)
                 return {
                     "status": "skipped_not_pressure_ready",
                     "mode": mode,
                     "run_order": run_order,
+                    "next_seq32": int(next_seq32),
                     "started_ns": started_ns,
                     "finished_ns": finished_ns,
                     "elapsed_ms": (finished_ns - started_ns) / 1_000_000.0,
-                    "config": {
-                        "cycles": int(config.cycles),
-                        "exposure_us": int(config.exposure_us),
-                        "flash_delay_us": int(config.flash_delay_us),
-                        "flash_width_us": int(config.flash_width_us),
-                        "safe_flash_width_ns_applied": int(safe_flash_width),
-                        "num_droplets": int(config.num_droplets),
-                        "effective_num_droplets": int(effective_droplets),
-                        "attempt_timeout_ms": int(config.attempt_timeout_ms),
-                        "max_new_frames": int(config.max_new_frames),
-                        "trigger_pin_bcm": int(config.trigger_pin_bcm),
-                        "flash_ack_pin_bcm": int(config.flash_ack_pin_bcm),
-                        "trigger_settle_ms": int(config.trigger_settle_ms),
-                        "post_cycle_settle_ms": int(config.post_cycle_settle_ms),
-                        "trigger_retries": int(config.trigger_retries),
-                        "mode": mode,
-                        "run_order": run_order,
-                        "preflight_pressure_timeout_ms": timeout_ms,
-                    },
+                    "config": _config_payload(timeout_ms),
                     "preflight": preflight,
                     "init_diag": {},
                     "status_snapshot_pre": {},
@@ -665,34 +891,30 @@ def run_camera_flash_benchmark(
                 }
 
         # Apply fixed imaging settings once (fixed-settings benchmark path).
-        ser.write(build_control_fn(CMD_INIT_FLASH, seq8, run_id))
-        seq8 = (seq8 + 1) & 0xFF
-        ser.write(
-            build_control_fn(
-                CMD_SET_FLASH_DURATION,
-                seq8,
-                run_id,
-                bytes([TAG_P1, 4]) + int(safe_flash_width).to_bytes(4, "little"),
+        setup_acks = []
+        for name, cmd, p1 in (
+            ("init_flash", CMD_INIT_FLASH, None),
+            ("flash_duration", CMD_SET_FLASH_DURATION, int(safe_flash_width)),
+            ("flash_delay", CMD_SET_FLASH_DELAY, int(config.flash_delay_us)),
+            ("imaging_droplets", CMD_SET_IMAGING_DROPLETS, int(effective_droplets)),
+        ):
+            ack_diag = _send_queued_command(
+                ser,
+                build_control_fn,
+                name=name,
+                cmd=cmd,
+                seq32=next_seq32,
+                p1=p1,
             )
-        )
-        seq8 = (seq8 + 1) & 0xFF
-        ser.write(
-            build_control_fn(
-                CMD_SET_FLASH_DELAY,
-                seq8,
-                run_id,
-                bytes([TAG_P1, 4]) + int(config.flash_delay_us).to_bytes(4, "little"),
-            )
-        )
-        seq8 = (seq8 + 1) & 0xFF
-        ser.write(
-            build_control_fn(
-                CMD_SET_IMAGING_DROPLETS,
-                seq8,
-                run_id,
-                bytes([TAG_P1, 4]) + int(effective_droplets).to_bytes(4, "little"),
-            )
-        )
+            setup_acks.append(ack_diag)
+            if not bool(ack_diag.get("ok", False)):
+                return _setup_failed_payload(
+                    reason="command_ack_failed",
+                    preflight=preflight,
+                    init_diag={"config_match": False, "setup_acks": setup_acks},
+                    failed_command=ack_diag,
+                )
+            next_seq32 += 1
 
         init_status = _status_snapshot_from_serial(ser, sample_ms=250)
         init_diag = {
@@ -700,6 +922,7 @@ def run_camera_flash_benchmark(
             "observed_flash_delay_us": init_status.get("flash_delay_us"),
             "observed_flash_width_ns": init_status.get("flash_width_ns"),
             "observed_imaging_droplets": init_status.get("imaging_droplets"),
+            "setup_acks": setup_acks,
             "config_match": (
                 init_status.get("flash_delay_us") == int(config.flash_delay_us)
                 and init_status.get("flash_width_ns") == int(safe_flash_width)
@@ -708,7 +931,21 @@ def run_camera_flash_benchmark(
             if int(init_status.get("status_frames_seen", 0)) > 0
             else False,
         }
+        if not bool(init_diag.get("config_match", False)):
+            return _setup_failed_payload(
+                reason="config_mismatch",
+                preflight=preflight,
+                init_diag=init_diag,
+                status_snapshot=init_status,
+            )
 
+        import numpy as np
+        from picamera2 import Picamera2
+
+        trigger_chip, trigger_offset = _gpiofind(f"GPIO{config.trigger_pin_bcm}")
+        ack_chip, ack_offset = _gpiofind(f"GPIO{config.flash_ack_pin_bcm}")
+        trig = _make_output_line(trigger_chip, trigger_offset, initial=0)
+        ack = _make_rising_edge_input(ack_chip, ack_offset)
         camera = Picamera2(1)
         vid_cfg = camera.create_video_configuration(
             main={"size": camera.sensor_resolution, "format": "RGB888"},
@@ -901,28 +1138,11 @@ def run_camera_flash_benchmark(
             "status": "ok",
             "mode": mode,
             "run_order": run_order,
+            "next_seq32": int(next_seq32),
             "started_ns": started_ns,
             "finished_ns": finished_ns,
             "elapsed_ms": (finished_ns - started_ns) / 1_000_000.0,
-            "config": {
-                "cycles": int(config.cycles),
-                "exposure_us": int(config.exposure_us),
-                "flash_delay_us": int(config.flash_delay_us),
-                "flash_width_us": int(config.flash_width_us),
-                "safe_flash_width_ns_applied": int(safe_flash_width),
-                "num_droplets": int(config.num_droplets),
-                "effective_num_droplets": int(effective_droplets),
-                "attempt_timeout_ms": int(config.attempt_timeout_ms),
-                "max_new_frames": int(config.max_new_frames),
-                "trigger_pin_bcm": int(config.trigger_pin_bcm),
-                "flash_ack_pin_bcm": int(config.flash_ack_pin_bcm),
-                "trigger_settle_ms": int(config.trigger_settle_ms),
-                "post_cycle_settle_ms": int(config.post_cycle_settle_ms),
-                "trigger_retries": int(config.trigger_retries),
-                "mode": mode,
-                "run_order": run_order,
-                "preflight_pressure_timeout_ms": int(getattr(config, "preflight_pressure_timeout_ms", 1000)),
-            },
+            "config": _config_payload(preflight_timeout_ms),
             "preflight": preflight,
             "init_diag": init_diag,
             "status_snapshot_pre": status_pre,
@@ -947,15 +1167,18 @@ def run_camera_flash_benchmark(
             except Exception:
                 pass
         try:
-            trig.set_value(0)
+            if trig is not None:
+                trig.set_value(0)
         except Exception:
             pass
         try:
-            ack.release()
+            if ack is not None:
+                ack.release()
         except Exception:
             pass
         try:
-            trig.release()
+            if trig is not None:
+                trig.release()
         except Exception:
             pass
         if camera is not None:
