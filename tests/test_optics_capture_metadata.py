@@ -380,6 +380,8 @@ def test_droplet_imager_close_defers_while_capture_or_calibration_is_active():
     dialog._imager_close_after_stop_requested = False
     dialog._imager_close_after_stop_started_monotonic = None
     dialog._imager_close_retry_count = 0
+    dialog._imager_force_close_requested = False
+    dialog._imager_force_close_prompt_active = False
     dialog._should_confirm_close_without_applied_calibration = lambda: False
     dialog.update_stage_and_log = Mock()
     dialog._set_capture_request_pending = _set_capture_request_pending
@@ -426,6 +428,8 @@ def test_droplet_imager_deferred_close_rechecks_unapplied_prompt_and_can_be_canc
     dialog._imager_close_after_stop_requested = True
     dialog._imager_close_after_stop_started_monotonic = 10.0
     dialog._imager_close_retry_count = 2
+    dialog._imager_force_close_requested = False
+    dialog._imager_force_close_prompt_active = False
     dialog._should_confirm_close_without_applied_calibration = lambda: True
     dialog._close_without_applied_calibration_message = lambda: "Apply result before closing?"
     dialog.update_stage_and_log = Mock()
@@ -447,31 +451,119 @@ def test_droplet_imager_deferred_close_rechecks_unapplied_prompt_and_can_be_canc
     )
 
 
-def test_droplet_imager_deferred_close_timeout_stops_retry_and_leaves_window_open():
+def test_droplet_imager_deferred_close_timeout_keep_waiting_resumes_retry():
     dialog = DropletImagingDialog.__new__(DropletImagingDialog)
     dialog._capture_request_pending = True
     dialog._stream_capture_dialog_closing = True
     dialog._imager_close_after_stop_requested = True
     dialog._imager_close_after_stop_started_monotonic = 100.0
     dialog._imager_close_retry_count = 5
+    dialog._imager_force_close_requested = False
+    dialog._imager_force_close_prompt_active = False
     dialog.IMAGER_CLOSE_STOP_TIMEOUT_S = 10.0
     dialog._imager_close_monotonic = Mock(return_value=111.0)
     dialog._schedule_imager_close_retry = Mock()
+    dialog._ask_force_close_imager_after_timeout = Mock(return_value=False)
     dialog.update_stage_and_log = Mock()
     dialog.close = Mock()
 
     DropletImagingDialog._retry_imager_close_after_stop(dialog)
 
+    assert dialog._imager_close_after_stop_requested is True
+    assert dialog._imager_close_after_stop_started_monotonic == 111.0
+    assert dialog._imager_close_retry_count == 0
+    assert dialog._stream_capture_dialog_closing is True
+    assert dialog._imager_force_close_requested is False
+    assert dialog._imager_force_close_prompt_active is False
+    dialog._ask_force_close_imager_after_timeout.assert_called_once_with()
+    dialog._schedule_imager_close_retry.assert_called_once_with(100)
+    dialog.close.assert_not_called()
+    dialog.update_stage_and_log.assert_called_once_with(
+        "Still waiting for calibration/camera cleanup before closing.",
+        "orange",
+    )
+
+
+def test_droplet_imager_deferred_close_timeout_force_close_requests_minimal_close():
+    dialog = DropletImagingDialog.__new__(DropletImagingDialog)
+    dialog._capture_request_pending = True
+    dialog.capturing = True
+    dialog._stream_capture_dialog_closing = True
+    dialog._imager_close_after_stop_requested = True
+    dialog._imager_close_after_stop_started_monotonic = 100.0
+    dialog._imager_close_retry_count = 5
+    dialog._imager_force_close_requested = False
+    dialog._imager_force_close_prompt_active = False
+    dialog.IMAGER_CLOSE_STOP_TIMEOUT_S = 10.0
+    dialog._imager_close_monotonic = Mock(return_value=111.0)
+    dialog._ask_force_close_imager_after_timeout = Mock(return_value=True)
+    dialog._schedule_imager_close_retry = Mock()
+    dialog._set_capture_request_pending = Mock(side_effect=lambda pending: setattr(dialog, "_capture_request_pending", bool(pending)))
+    dialog.camera_timer = SimpleNamespace(stop=Mock())
+    dialog.refuel_monitor_timer = SimpleNamespace(stop=Mock())
+    dialog.refuel_panel_refresh_timer = SimpleNamespace(stop=Mock())
+    dialog.close = Mock()
+
+    DropletImagingDialog._retry_imager_close_after_stop(dialog)
+
+    assert dialog._imager_force_close_requested is True
     assert dialog._imager_close_after_stop_requested is False
     assert dialog._imager_close_after_stop_started_monotonic is None
     assert dialog._imager_close_retry_count == 0
-    assert dialog._stream_capture_dialog_closing is False
+    assert dialog.capturing is False
+    dialog._ask_force_close_imager_after_timeout.assert_called_once_with()
+    dialog._set_capture_request_pending.assert_called_once_with(False)
+    dialog.camera_timer.stop.assert_called_once_with()
+    dialog.refuel_monitor_timer.stop.assert_called_once_with()
+    dialog.refuel_panel_refresh_timer.stop.assert_called_once_with()
     dialog._schedule_imager_close_retry.assert_not_called()
-    dialog.close.assert_not_called()
-    dialog.update_stage_and_log.assert_called_once_with(
-        "Close is still waiting for calibration/camera cleanup; the imager remains open.",
-        "orange",
+    dialog.close.assert_called_once_with()
+
+
+def test_droplet_imager_force_close_event_accepts_without_controller_cleanup():
+    dialog = DropletImagingDialog.__new__(DropletImagingDialog)
+    event = _CloseEvent()
+    controller = SimpleNamespace(
+        set_droplet_capture_profile=Mock(),
+        set_command_dispatch_interval=Mock(),
+        disable_print_profile=Mock(),
     )
+    dialog.controller = controller
+    dialog._imager_force_close_requested = True
+    dialog._imager_close_after_stop_requested = True
+    dialog._imager_close_after_stop_started_monotonic = 100.0
+    dialog._imager_close_retry_count = 3
+    dialog._imager_force_close_prompt_active = False
+    dialog._stream_capture_dialog_closing = True
+    dialog._should_confirm_close_without_applied_calibration = Mock(side_effect=AssertionError("force close should skip unapplied prompt"))
+    dialog._imager_close_blocked_by_capture_or_calibration = Mock(side_effect=AssertionError("force close should skip blocked check"))
+    dialog.stop_droplet_camera = Mock()
+    dialog._set_stream_capture_read_camera_enabled = Mock()
+    dialog._stop_refuel_monitor = Mock()
+
+    DropletImagingDialog.closeEvent(dialog, event)
+
+    assert event.accepted is True
+    assert event.ignored is False
+    assert dialog._imager_force_close_requested is False
+    assert dialog._imager_close_after_stop_requested is False
+    assert dialog._imager_close_after_stop_started_monotonic is None
+    assert dialog._imager_close_retry_count == 0
+    assert dialog._stream_capture_dialog_closing is True
+    controller.set_droplet_capture_profile.assert_not_called()
+    controller.set_command_dispatch_interval.assert_not_called()
+    controller.disable_print_profile.assert_not_called()
+    dialog.stop_droplet_camera.assert_not_called()
+    dialog._set_stream_capture_read_camera_enabled.assert_not_called()
+    dialog._stop_refuel_monitor.assert_not_called()
+
+
+def test_droplet_imager_force_close_prompt_warns_to_restart_app():
+    dialog = DropletImagingDialog.__new__(DropletImagingDialog)
+
+    message = DropletImagingDialog._force_close_imager_prompt_message(dialog)
+
+    assert "Close and reopen the app before using the droplet imager again." in message
 
 
 def test_controller_overlapping_capture_resolves_waiting_callback():

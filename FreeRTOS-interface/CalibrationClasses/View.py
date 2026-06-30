@@ -1528,6 +1528,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._imager_close_after_stop_requested = False
         self._imager_close_after_stop_started_monotonic = None
         self._imager_close_retry_count = 0
+        self._imager_force_close_requested = False
+        self._imager_force_close_prompt_active = False
         self._stream_capture_gripper_preamble_attempted = False
         self._stream_capture_gripper_restore_attempted = False
         self._stream_capture_loading_move_attempted = False
@@ -9972,6 +9974,54 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._imager_close_after_stop_started_monotonic = None
         self._imager_close_retry_count = 0
         self._stream_capture_dialog_closing = False
+        self._imager_force_close_prompt_active = False
+
+    def _force_close_imager_prompt_message(self):
+        return (
+            "The droplet imager is still waiting for calibration/camera cleanup. "
+            "Force close the imager window anyway?\n\n"
+            "Force closing skips camera cleanup and may leave the imager backend in a dirty state. "
+            "Close and reopen the app before using the droplet imager again."
+        )
+
+    def _ask_force_close_imager_after_timeout(self):
+        message_box = QtWidgets.QMessageBox(self)
+        message_box.setIcon(QtWidgets.QMessageBox.Warning)
+        message_box.setWindowTitle("Force close droplet imager?")
+        message_box.setText(self._force_close_imager_prompt_message())
+        keep_waiting_button = message_box.addButton("Keep Waiting", QtWidgets.QMessageBox.RejectRole)
+        force_close_button = message_box.addButton("Force Close", QtWidgets.QMessageBox.DestructiveRole)
+        message_box.setDefaultButton(keep_waiting_button)
+        message_box.exec()
+        return message_box.clickedButton() is force_close_button
+
+    def _stop_imager_ui_timers_for_force_close(self):
+        for timer_name in ("camera_timer", "refuel_monitor_timer", "refuel_panel_refresh_timer"):
+            timer = getattr(self, timer_name, None)
+            if timer is None:
+                continue
+            try:
+                timer.stop()
+            except Exception:
+                pass
+
+    def _request_imager_force_close(self):
+        self._imager_force_close_requested = True
+        self._imager_close_after_stop_requested = False
+        self._imager_close_after_stop_started_monotonic = None
+        self._imager_close_retry_count = 0
+        self._imager_force_close_prompt_active = False
+        self._stream_capture_dialog_closing = True
+        self._stop_imager_ui_timers_for_force_close()
+        try:
+            self._set_capture_request_pending(False)
+        except Exception:
+            self._capture_request_pending = False
+        self.capturing = False
+        try:
+            self.close()
+        except Exception:
+            self._imager_force_close_requested = False
 
     def _imager_close_monotonic(self):
         try:
@@ -10005,16 +10055,26 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 elapsed_s = 0.0
             timeout_s = float(getattr(self, "IMAGER_CLOSE_STOP_TIMEOUT_S", 10.0) or 10.0)
             if elapsed_s >= timeout_s:
-                self._reset_imager_deferred_close_state()
+                if bool(getattr(self, "_imager_force_close_prompt_active", False)):
+                    return
+                self._imager_force_close_prompt_active = True
+                force_close = False
+                try:
+                    force_close = bool(self._ask_force_close_imager_after_timeout())
+                finally:
+                    self._imager_force_close_prompt_active = False
+                if force_close:
+                    self._request_imager_force_close()
+                    return
+                self._imager_close_after_stop_started_monotonic = self._imager_close_monotonic()
+                self._imager_close_retry_count = 0
                 updater = getattr(self, "update_stage_and_log", None)
                 if callable(updater):
                     try:
-                        updater(
-                            "Close is still waiting for calibration/camera cleanup; the imager remains open.",
-                            "orange",
-                        )
+                        updater("Still waiting for calibration/camera cleanup before closing.", "orange")
                     except Exception:
                         pass
+                self._schedule_imager_close_retry(100)
                 return
             self._schedule_imager_close_retry(100)
             return
@@ -10074,6 +10134,16 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
     def closeEvent(self, event):
         """Handle the closing of the dialog."""
+        if bool(getattr(self, "_imager_force_close_requested", False)):
+            self._imager_force_close_requested = False
+            self._imager_close_after_stop_requested = False
+            self._imager_close_after_stop_started_monotonic = None
+            self._imager_close_retry_count = 0
+            self._imager_force_close_prompt_active = False
+            self._stream_capture_dialog_closing = True
+            event.accept()
+            return
+
         deferred_close_requested = bool(getattr(self, "_imager_close_after_stop_requested", False))
         if self._should_confirm_close_without_applied_calibration():
             response = QtWidgets.QMessageBox.question(
