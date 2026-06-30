@@ -544,6 +544,48 @@ def test_camera_flash_benchmark_warmup_excluded_from_counted_summary(monkeypatch
     assert len(payload["cycles"]) == 2
 
 
+def test_camera_flash_benchmark_min_trigger_period_enforces_start_spacing(monkeypatch):
+    mod = _load_module(BENCH_PATH, "camera_flash_benchmark_mod_min_period")
+    inbound = b"".join(
+        [
+            _queue_ack(mod, seq8=1, seq32=1),
+            _queue_ack(mod, seq8=2, seq32=2),
+            _queue_ack(mod, seq8=3, seq32=3),
+            _queue_ack(mod, seq8=4, seq32=4),
+            _bench_status_frame(mod, imaging_droplets=0, flash_num=0, ext_count=0),
+            _bench_status_frame(mod, imaging_droplets=0, flash_num=1, ext_count=1),
+            _bench_status_frame(mod, imaging_droplets=0, flash_num=2, ext_count=2),
+        ]
+    )
+    serial = FakeSerial(inbound)
+    clock = FakeClock(step=0.001)
+    FakePicamera2.values = [235.0, 235.0]
+    monkeypatch.setattr(
+        mod,
+        "time",
+        SimpleNamespace(monotonic=clock.monotonic, monotonic_ns=clock.monotonic_ns, sleep=clock.sleep),
+    )
+    monkeypatch.setitem(sys.modules, "picamera2", SimpleNamespace(Picamera2=FakePicamera2))
+    monkeypatch.setattr(mod, "_gpiofind", lambda _name: ("gpiochip0", 0))
+    monkeypatch.setattr(mod, "_make_output_line", lambda *_args, **_kwargs: FakeOutputLine())
+    monkeypatch.setattr(mod, "_make_rising_edge_input", lambda *_args, **_kwargs: FakeAckLine())
+
+    payload = mod.run_camera_flash_benchmark(
+        serial,
+        _build_control_for(mod),
+        run_id=1234,
+        config=mod.BenchmarkConfig(cycles=2, warmup_cycles=0, max_new_frames=1, min_trigger_period_ms=100),
+        start_seq32=1,
+    )
+
+    assert payload["status"] == "ok"
+    assert payload["config"]["min_trigger_period_ms"] == 100
+    assert payload["cycles"][0]["previous_trigger_start_delta_ms"] is None
+    assert payload["cycles"][0]["trigger_period_wait_ms"] == 0.0
+    assert payload["cycles"][1]["previous_trigger_start_delta_ms"] >= 100.0
+    assert payload["cycles"][1]["trigger_period_wait_ms"] > 0.0
+
+
 def test_coordinated_flash_preflight_sends_expected_monotonic_commands(monkeypatch):
     mod = _load_module(BENCH_PATH, "camera_flash_benchmark_mod_coordinated_preflight")
     target_raw = mod._pressure_raw_from_psi(0.6)
@@ -739,6 +781,7 @@ def test_run_selftest_accepts_coordinated_flash_config(monkeypatch, tmp_path):
         camera_benchmark_max_new_frames=6,
         camera_benchmark_preflight_pressure_timeout_ms=15000,
         camera_benchmark_warmup_cycles=2,
+        camera_benchmark_min_trigger_period_ms=100,
     )
 
     runtime_error, bench_failed, next_seq32 = run_mod._run_camera_benchmark_phase(
@@ -759,6 +802,7 @@ def test_run_selftest_accepts_coordinated_flash_config(monkeypatch, tmp_path):
     assert captured["config"]["mode"] == "coordinated_flash"
     assert captured["config"]["num_droplets"] == 1
     assert captured["config"]["warmup_cycles"] == 2
+    assert captured["config"]["min_trigger_period_ms"] == 100
     assert host_checks[0]["pass"] is True
 
 

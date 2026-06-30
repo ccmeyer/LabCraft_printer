@@ -594,6 +594,7 @@ def _run_camera_benchmark_phase(
                 50, int(getattr(args, "camera_benchmark_preflight_pressure_timeout_ms", 1000))
             ),
             warmup_cycles=max(0, int(getattr(args, "camera_benchmark_warmup_cycles", 1))),
+            min_trigger_period_ms=max(0, int(getattr(args, "camera_benchmark_min_trigger_period_ms", 0))),
         )
         bench_payload = run_camera_flash_benchmark(
             ser,
@@ -1529,6 +1530,7 @@ def main() -> int:
     p.add_argument("--camera-benchmark-flash-width-us", type=int, default=1000)
     p.add_argument("--camera-benchmark-num-droplets", type=int, default=1)
     p.add_argument("--camera-benchmark-warmup-cycles", type=int, default=1)
+    p.add_argument("--camera-benchmark-min-trigger-period-ms", type=int, default=0)
     p.add_argument("--camera-benchmark-order", choices=("auto", "pre_selftest", "post_selftest"), default="auto")
     p.add_argument("--camera-benchmark-mode", choices=("flash_only", "print_then_flash", "coordinated_flash"), default="flash_only")
     p.add_argument("--camera-benchmark-preflight-pressure-timeout-ms", type=int, default=1000)

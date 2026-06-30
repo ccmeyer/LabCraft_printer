@@ -446,6 +446,9 @@ For fixed settings (no per-shot setting churn), the benchmark:
    - `CMD_SET_FLASH_DELAY`
    - `CMD_SET_IMAGING_DROPLETS`
 4. Runs warm-up trigger cycles first, then repeated counted trigger cycles using Pi GPIO trigger/ack lines.
+   `--camera-benchmark-min-trigger-period-ms` can enforce a minimum
+   trigger-start-to-trigger-start period; cycles that already exceed the
+   period are not delayed further.
 5. Selects flashed frames using the same time-gated threshold/fallback pattern as normal capture.
 6. Stores per-cycle timestamps and aggregate latency/FPS statistics.
 

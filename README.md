@@ -173,14 +173,17 @@ Outputs in `hil_reports/`:
 
 The camera benchmark supports `flash_only`, `print_then_flash`, and
 `coordinated_flash` modes. `flash_only` defaults to one warm-up trigger cycle
-before counted qualification cycles. Run the coordinated flash lane directly on
-the Pi when you want to exercise flash capture while pressure regulation,
-valve actuation, and gripper refresh are active:
+before counted qualification cycles. Use
+`--camera-benchmark-min-trigger-period-ms N` to enforce a minimum trigger
+start-to-start period during rate characterization. Run the coordinated flash
+lane directly on the Pi when you want to exercise flash capture while pressure
+regulation, valve actuation, and gripper refresh are active:
 
 ```bash
 python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --camera-benchmark \
   --camera-benchmark-mode coordinated_flash --camera-benchmark-order post_selftest \
-  --camera-benchmark-cycles 20 --out hil_reports/camera_capture_coordinated_flash.json
+  --camera-benchmark-cycles 20 --camera-benchmark-min-trigger-period-ms 100 \
+  --out hil_reports/camera_capture_coordinated_flash.json
 ```
 
 ## Pull Calibration Records From The Pi

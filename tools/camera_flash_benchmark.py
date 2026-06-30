@@ -93,6 +93,7 @@ class BenchmarkConfig:
     run_order: str = "pre_selftest"
     preflight_pressure_timeout_ms: int = 1000
     warmup_cycles: int = 1
+    min_trigger_period_ms: int = 0
     coordinated_pressure_psi: float = COORDINATED_PRESSURE_PSI_DEFAULT
     coordinated_gripper_refresh_ms: int = COORDINATED_GRIPPER_REFRESH_MS_DEFAULT
 
@@ -952,6 +953,7 @@ def run_camera_flash_benchmark(
     safe_flash_width = max(SAFE_FLASH_WIDTH_MIN_NS, min(SAFE_FLASH_WIDTH_MAX_NS, int(config.flash_width_us)))
     effective_droplets = 0 if mode == "flash_only" else max(1, int(config.num_droplets))
     preflight_timeout_ms = max(50, int(getattr(config, "preflight_pressure_timeout_ms", 1000)))
+    min_trigger_period_ms = max(0, int(getattr(config, "min_trigger_period_ms", 0)))
 
     def _config_payload(timeout_ms: int) -> dict:
         return {
@@ -973,6 +975,7 @@ def run_camera_flash_benchmark(
             "run_order": run_order,
             "preflight_pressure_timeout_ms": int(timeout_ms),
             "warmup_cycles": max(0, int(getattr(config, "warmup_cycles", 1))),
+            "min_trigger_period_ms": int(min_trigger_period_ms),
             "coordinated_pressure_psi": float(getattr(config, "coordinated_pressure_psi", COORDINATED_PRESSURE_PSI_DEFAULT)),
             "coordinated_gripper_refresh_ms": int(
                 getattr(config, "coordinated_gripper_refresh_ms", COORDINATED_GRIPPER_REFRESH_MS_DEFAULT)
@@ -1238,6 +1241,8 @@ def run_camera_flash_benchmark(
         buf = deque(maxlen=16)  # (arr, md, t_done_ns, mean)
         timeout_s = max(0.001, float(config.attempt_timeout_ms) / 1000.0)
         max_new_frames = max(1, int(config.max_new_frames))
+        min_trigger_period_ns = int(min_trigger_period_ms) * 1_000_000
+        last_trigger_start_ns = None
 
         def _capture_cycle(cycle_idx: int, phase: str) -> dict:
             row = {
@@ -1399,9 +1404,35 @@ def run_camera_flash_benchmark(
                 time.sleep(post_ms / 1000.0)
             return row
 
+        def _capture_cycle_with_rate_limit(cycle_idx: int, phase: str) -> dict:
+            nonlocal last_trigger_start_ns
+            previous_start_ns = last_trigger_start_ns
+            waited_ms = 0.0
+            if previous_start_ns is not None and min_trigger_period_ns > 0:
+                now_ns = time.monotonic_ns()
+                earliest_ns = int(previous_start_ns) + min_trigger_period_ns
+                if now_ns < earliest_ns:
+                    wait_ns = earliest_ns - now_ns
+                    waited_ms = wait_ns / 1_000_000.0
+                    time.sleep(wait_ns / 1_000_000_000.0)
+            row = _capture_cycle(cycle_idx, phase)
+            start_ns = row.get("t_cycle_start")
+            if isinstance(start_ns, int):
+                last_trigger_start_ns = start_ns
+            else:
+                last_trigger_start_ns = time.monotonic_ns()
+            row["min_trigger_period_ms"] = int(min_trigger_period_ms)
+            row["trigger_period_wait_ms"] = float(waited_ms)
+            row["previous_trigger_start_delta_ms"] = (
+                (int(last_trigger_start_ns) - int(previous_start_ns)) / 1_000_000.0
+                if previous_start_ns is not None
+                else None
+            )
+            return row
+
         warmup_count = max(0, int(getattr(config, "warmup_cycles", 1)))
         warmup_started_ns = time.monotonic_ns()
-        warmup_results = [_capture_cycle(i, "warmup") for i in range(warmup_count)]
+        warmup_results = [_capture_cycle_with_rate_limit(i, "warmup") for i in range(warmup_count)]
         warmup_finished_ns = time.monotonic_ns()
         warmup_summary = summarize_cycles(warmup_results, warmup_count, warmup_started_ns, warmup_finished_ns)
 
@@ -1409,7 +1440,7 @@ def run_camera_flash_benchmark(
         status_pre = _status_snapshot_from_serial(ser, sample_ms=250)
         started_ns = time.monotonic_ns()
         for cycle_idx in range(max(1, int(config.cycles))):
-            results.append(_capture_cycle(cycle_idx, "counted"))
+            results.append(_capture_cycle_with_rate_limit(cycle_idx, "counted"))
 
         finished_ns = time.monotonic_ns()
         status_post = _status_snapshot_from_serial(ser, sample_ms=250)
