@@ -421,6 +421,7 @@ def test_export_online_stream_report_runtime_rgb_fix_passes_settling_override(tm
 
     def _fake_runtime_rgb_fix_replay(*args, **kwargs):
         captured["flow_fit_policy_override"] = kwargs.get("flow_fit_policy_override")
+        captured["pixel_size_um"] = kwargs.get("pixel_size_um")
         return {
             "frame_rows": list(mod._iter_jsonl(run_dir / "frames.jsonl")),
             "fit": {
@@ -454,12 +455,65 @@ def test_export_online_stream_report_runtime_rgb_fix_passes_settling_override(tm
     payload = mod.export_online_stream_experiment_report(
         exp_dir,
         correction_mode="runtime_rgb_fix",
+        um_per_pixel=1.5824,
         settling_aware_fit_enabled=False,
     )
 
     assert captured["flow_fit_policy_override"] == {"settling_aware_fit_enabled": False}
+    assert captured["pixel_size_um"] == pytest.approx(1.5824)
     assert payload["correction_mode"] == "runtime_rgb_fix"
     assert payload["flow_fit_policy_override"] == {"settling_aware_fit_enabled": False}
+    assert payload["um_per_pixel"] == pytest.approx(1.5824)
+
+
+def test_runtime_rgb_fix_frame_rows_passes_pixel_size_to_runtime(tmp_path, monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(mod.cv2, "imread", lambda *args, **kwargs: object())
+
+    def _fake_analyze_online_stream_frame(**kwargs):
+        captured["pixel_size_um"] = kwargs.get("pixel_size_um")
+        return {
+            "summary": {
+                "status": "accepted",
+                "measurement_qc_pass": True,
+                "nozzle_qc_pass": True,
+                "silhouette_qc_pass": True,
+                "visible_volume_nl": 42.0,
+                "pixel_size_um": kwargs.get("pixel_size_um"),
+                "flow_measurement_usable": True,
+            },
+        }
+
+    monkeypatch.setattr(mod.runtime_mod, "analyze_online_stream_frame", _fake_analyze_online_stream_frame)
+
+    rows = [
+        {
+            "phase": "flow_rate",
+            "delay_us": 1000,
+            "delay_from_emergence_us": 100,
+            "replicate_index": 1,
+            "image_ref": {
+                "image_relpath": "captures/frame_0001.png",
+                "capture_index": 1,
+            },
+        }
+    ]
+
+    corrected = mod._runtime_rgb_fix_frame_rows_for_run(
+        tmp_path,
+        rows,
+        correction_context={
+            "nozzle_center_px": [110, 60],
+            "emergence_time_us": 900,
+        },
+        plan_snapshot={},
+        pixel_size_um=1.5824,
+    )
+
+    assert captured["pixel_size_um"] == pytest.approx(1.5824)
+    assert corrected[0]["visible_volume_nl"] == pytest.approx(42.0)
+    assert corrected[0]["pixel_size_um"] == pytest.approx(1.5824)
 
 
 def test_export_online_stream_report_writes_tail_settling_diagnostics(tmp_path):
@@ -540,3 +594,55 @@ def test_report_online_stream_experiment_cli_passes_tail_settling_toggle(monkeyp
     assert captured["kwargs"]["settling_aware_fit_enabled"] is False
     assert captured["kwargs"]["tail_settling_rule_enabled"] is False
     assert captured["kwargs"]["segmented_tail_review"] is True
+
+
+def test_report_online_stream_experiment_cli_uses_manifest_um_per_pixel(monkeypatch, tmp_path):
+    captured = {}
+
+    def _fake_export(experiment_root, **kwargs):
+        captured["experiment_root"] = experiment_root
+        captured["kwargs"] = kwargs
+        return {"ok": True}
+
+    manifest_path = tmp_path / "manifest.json"
+    _write_json(manifest_path, {"optics_layer": {"um_per_pixel": 1.5824}})
+    monkeypatch.setattr(report_cli_mod.online_report_mod, "export_online_stream_experiment_report", _fake_export)
+
+    rc = report_cli_mod.main(
+        [
+            "--experiment-root",
+            str(tmp_path / "exp"),
+            "--manifest",
+            str(manifest_path),
+        ]
+    )
+
+    assert rc == 0
+    assert captured["kwargs"]["um_per_pixel"] == pytest.approx(1.5824)
+
+
+def test_report_online_stream_experiment_cli_um_per_pixel_overrides_manifest(monkeypatch, tmp_path):
+    captured = {}
+
+    def _fake_export(experiment_root, **kwargs):
+        captured["experiment_root"] = experiment_root
+        captured["kwargs"] = kwargs
+        return {"ok": True}
+
+    manifest_path = tmp_path / "manifest.json"
+    _write_json(manifest_path, {"optics_layer": {"um_per_pixel": 1.0}})
+    monkeypatch.setattr(report_cli_mod.online_report_mod, "export_online_stream_experiment_report", _fake_export)
+
+    rc = report_cli_mod.main(
+        [
+            "--experiment-root",
+            str(tmp_path / "exp"),
+            "--manifest",
+            str(manifest_path),
+            "--um-per-pixel",
+            "1.5824",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["kwargs"]["um_per_pixel"] == pytest.approx(1.5824)

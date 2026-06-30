@@ -1,7 +1,10 @@
 import json
+import math
 from pathlib import Path
 
 from tools.stream_analysis.build_tail_validation_manifest import (
+    ASSIGNED_UM_PER_PIXEL,
+    CODE_DEFAULT_UM_PER_PIXEL,
     DEFAULT_OUTPUT,
     MANIFEST_ID,
     SCHEMA_VERSION,
@@ -62,6 +65,14 @@ def test_stream_tail_validation_manifest_counts_and_subsets():
         "Water": 138,
     }
     assert manifest["summary"]["total_density_unassigned_rows"] == 0
+    assert manifest["summary"]["optics_assignment_counts"] == {
+        str(ASSIGNED_UM_PER_PIXEL): 156,
+    }
+    assert manifest["summary"]["optics_unassigned_rows"] == 0
+    assert manifest["summary"]["total_optics_assignment_counts"] == {
+        str(ASSIGNED_UM_PER_PIXEL): 210,
+    }
+    assert manifest["summary"]["total_optics_unassigned_rows"] == 0
 
 
 def test_stream_tail_validation_manifest_density_layer_assignments():
@@ -97,6 +108,32 @@ def test_stream_tail_validation_manifest_density_layer_assignments():
     assert water_run["gravimetric"]["gravimetric_volume_nl"] == water_run["gravimetric"][
         "gravimetric_volume_nl_water_density"
     ]
+
+
+def test_stream_tail_validation_manifest_optics_layer_assignments():
+    manifest = _load_manifest()
+
+    optics_layer = manifest["optics_layer"]
+    assert optics_layer["schema_version"] == "optics_assignment_v1"
+    assert optics_layer["um_per_pixel"] == ASSIGNED_UM_PER_PIXEL
+    assert optics_layer["assignment_basis"] == "historical_machine"
+    assert optics_layer["assignment_source"] == "user_confirmed_manifest_review"
+    assert optics_layer["assignment_confidence"] == "confirmed"
+    assert optics_layer["stored_in_run_artifacts"] is False
+    assert optics_layer["code_default_um_per_pixel"] == CODE_DEFAULT_UM_PER_PIXEL
+    assert math.isclose(
+        optics_layer["volume_scale_vs_code_default"],
+        (ASSIGNED_UM_PER_PIXEL / CODE_DEFAULT_UM_PER_PIXEL) ** 3,
+        rel_tol=1e-12,
+    )
+
+    all_rows = list(manifest["runs"]) + list(manifest["excluded_rows"])
+    assert len(all_rows) == 210
+    assert all(row["optics"]["um_per_pixel"] == ASSIGNED_UM_PER_PIXEL for row in all_rows)
+    assert all(row["optics"]["assignment_basis"] == "historical_machine" for row in all_rows)
+    assert all(row["optics"]["assignment_source"] == "user_confirmed_manifest_review" for row in all_rows)
+    assert all(row["optics"]["assignment_confidence"] == "confirmed" for row in all_rows)
+    assert all(row["optics"]["stored_in_run_artifacts"] is False for row in all_rows)
 
 
 def test_stream_tail_validation_manifest_has_replayable_relative_paths():

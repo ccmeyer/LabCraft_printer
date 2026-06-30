@@ -22,6 +22,8 @@ SCHEMA_VERSION = "online_stream_tail_validation_manifest_v1"
 MANIFEST_ID = "online_stream_tail_gravimetric_validation_v1"
 DENSITY_ASSUMPTION_G_PER_ML = 1.0
 DENSITY_MEASUREMENTS_CSV = Path("tools") / "stream_analysis" / "manifests" / "stream_density_measurements.csv"
+CODE_DEFAULT_UM_PER_PIXEL = 1.5696
+ASSIGNED_UM_PER_PIXEL = 1.5824
 
 EXPERIMENT_DENSITY_ASSIGNMENTS = {
     "EF-Ts_rep1-20260424_223016": "EFTs",
@@ -48,6 +50,7 @@ EXPERIMENT_DENSITY_ASSIGNMENTS = {
 }
 
 ASSIGNMENT_SOURCE = "user_confirmed_manifest_review"
+OPTICS_ASSIGNMENT_BASIS = "historical_machine"
 
 
 def _parse_float(value: Any) -> float | None:
@@ -127,6 +130,16 @@ def _density_assignment(experiment_id: str, density_measurements: dict[str, floa
         "assignment_basis": "experiment_id" if solution_id else None,
         "assignment_source": ASSIGNMENT_SOURCE if solution_id else None,
         "assignment_confidence": "confirmed" if solution_id else "unassigned",
+    }
+
+
+def _optics_assignment() -> dict[str, Any]:
+    return {
+        "um_per_pixel": ASSIGNED_UM_PER_PIXEL,
+        "assignment_basis": OPTICS_ASSIGNMENT_BASIS,
+        "assignment_source": ASSIGNMENT_SOURCE,
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": False,
     }
 
 
@@ -338,6 +351,7 @@ def build_manifest(repo_root: Path = REPO_ROOT, experiments_root: Path = DEFAULT
                     "dataset_name": dataset_name,
                 }
                 density = _density_assignment(experiment_id, density_measurements)
+                optics = _optics_assignment()
                 water_density_volume_nl = mass_per_print_mg * 1000.0
                 density_corrected_volume_nl = _gravimetric_volume_nl(
                     mass_per_print_mg,
@@ -349,6 +363,7 @@ def build_manifest(repo_root: Path = REPO_ROOT, experiments_root: Path = DEFAULT
                         **base,
                         "exclusion_reasons": reasons,
                         "density": density,
+                        "optics": optics,
                         "gravimetric": {
                             "mass_per_print_mg": _round(mass_per_print_mg, 6),
                             "gravimetric_volume_nl": _round(density_corrected_volume_nl, 3),
@@ -388,6 +403,7 @@ def build_manifest(repo_root: Path = REPO_ROOT, experiments_root: Path = DEFAULT
                     "subsets": subsets,
                     "condition": condition,
                     "density": density,
+                    "optics": optics,
                     "gravimetric": {
                         "mass_per_print_mg": _round(mass_per_print_mg, 6),
                         "gravimetric_volume_nl": _round(density_corrected_volume_nl, 3),
@@ -459,6 +475,15 @@ def build_manifest(repo_root: Path = REPO_ROOT, experiments_root: Path = DEFAULT
         str(row.get("density", {}).get("solution_id") or "unassigned")
         for row in excluded_rows
     )
+    optics_assignment_counts = Counter(
+        str(run.get("optics", {}).get("um_per_pixel") or "unassigned")
+        for run in runs
+    )
+    total_optics_assignment_counts = Counter(optics_assignment_counts)
+    total_optics_assignment_counts.update(
+        str(row.get("optics", {}).get("um_per_pixel") or "unassigned")
+        for row in excluded_rows
+    )
     exclusion_counts = Counter(
         reason
         for row in excluded_rows
@@ -474,6 +499,10 @@ def build_manifest(repo_root: Path = REPO_ROOT, experiments_root: Path = DEFAULT
         "density_unassigned_rows": density_solution_counts.get("unassigned", 0),
         "total_density_solution_counts": dict(sorted(total_density_solution_counts.items())),
         "total_density_unassigned_rows": total_density_solution_counts.get("unassigned", 0),
+        "optics_assignment_counts": dict(sorted(optics_assignment_counts.items())),
+        "optics_unassigned_rows": optics_assignment_counts.get("unassigned", 0),
+        "total_optics_assignment_counts": dict(sorted(total_optics_assignment_counts.items())),
+        "total_optics_unassigned_rows": total_optics_assignment_counts.get("unassigned", 0),
         "experiment_count": len(experiment_summaries),
         "full_replayable_experiment_count": sum(
             1 for item in experiment_summaries.values() if item["full_replayable_rows"]
@@ -500,6 +529,17 @@ def build_manifest(repo_root: Path = REPO_ROOT, experiments_root: Path = DEFAULT
                 "gravimetric_volume_nl_water_density and volume_error_vs_gravimetric_nl "
                 "preserve the original 1.0 g/mL water-density calculation."
             ),
+        },
+        "optics_layer": {
+            "schema_version": "optics_assignment_v1",
+            "um_per_pixel": ASSIGNED_UM_PER_PIXEL,
+            "assignment_basis": OPTICS_ASSIGNMENT_BASIS,
+            "assignment_source": ASSIGNMENT_SOURCE,
+            "assignment_confidence": "confirmed",
+            "stored_in_run_artifacts": False,
+            "code_default_um_per_pixel": CODE_DEFAULT_UM_PER_PIXEL,
+            "volume_scale_vs_code_default": (ASSIGNED_UM_PER_PIXEL / CODE_DEFAULT_UM_PER_PIXEL) ** 3,
+            "volume_scale_note": "Visible volume scales with um_per_pixel ** 3.",
         },
         "selection_criteria": {
             "experiments_root": _rel(experiments_root, repo_root),

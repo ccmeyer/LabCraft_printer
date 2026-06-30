@@ -445,6 +445,7 @@ def _flow_frame_row_from_runtime_summary(
         optical_activation_clearance_px=summary.get("optical_activation_clearance_px"),
         lower_edge_jitter_px=summary.get("lower_edge_jitter_px"),
         boundary_chroma_aberration_score=summary.get("boundary_chroma_aberration_score"),
+        pixel_size_um=summary.get("pixel_size_um"),
         late_coverage_candidate=summary.get("late_coverage_candidate"),
         late_coverage_metric=summary.get("late_coverage_metric"),
         flow_volume_complete_ok=summary.get("flow_volume_complete_ok"),
@@ -500,6 +501,7 @@ def _tail_frame_row_from_runtime_summary(
         near_nozzle_detached_warning=bool(summary.get("near_nozzle_detached_warning")),
         late_frame_warning=bool(summary.get("late_frame_warning")),
         attached_bottom_guard_hit=bool(summary.get("attached_bottom_guard_hit")),
+        pixel_size_um=summary.get("pixel_size_um"),
     )
 
 
@@ -509,6 +511,7 @@ def _runtime_rgb_fix_frame_rows_for_run(
     *,
     correction_context: dict,
     plan_snapshot: dict,
+    pixel_size_um: float | None = None,
 ) -> list[dict]:
     corrected_rows = []
     analysis_config = (plan_snapshot.get("analysis_config") or None)
@@ -553,6 +556,7 @@ def _runtime_rgb_fix_frame_rows_for_run(
             capture_ref=image_ref,
             capture_index=capture_index,
             frame_color_order="bgr",
+            pixel_size_um=pixel_size_um,
         )
         summary = dict(analysis.get("summary") or {})
         if phase == "flow_rate":
@@ -688,6 +692,7 @@ def _replay_runtime_rgb_fix_online_stream_run(
     *,
     correction_cache: dict | None = None,
     flow_fit_policy_override: dict | None = None,
+    pixel_size_um: float | None = None,
 ) -> dict:
     plan_snapshot = _load_json(run_dir / "plan_snapshot.json")
     flow_fit_artifact = _load_json(run_dir / "flow_fit.json")
@@ -699,11 +704,17 @@ def _replay_runtime_rgb_fix_online_stream_run(
         plan_snapshot=plan_snapshot,
         correction_cache=correction_cache,
     )
+    if pixel_size_um is not None:
+        correction_context = {
+            **correction_context,
+            "um_per_pixel": float(pixel_size_um),
+        }
     corrected_frame_rows = _runtime_rgb_fix_frame_rows_for_run(
         run_dir,
         frame_rows,
         correction_context=correction_context,
         plan_snapshot=plan_snapshot,
+        pixel_size_um=pixel_size_um,
     )
     return _replay_online_stream_run_from_frame_rows(
         run_dir,
@@ -721,6 +732,15 @@ def _validate_density_g_per_ml(density_g_per_ml: float | int | None) -> float:
     if density is None or float(density) <= 0.0:
         raise ValueError("gravimetric density must be a positive number in g/mL.")
     return float(density)
+
+
+def _validate_um_per_pixel(um_per_pixel: float | int | None) -> float | None:
+    if um_per_pixel is None:
+        return None
+    value = _float_or_none(um_per_pixel)
+    if value is None or float(value) <= 0.0:
+        raise ValueError("um_per_pixel must be a positive number.")
+    return float(value)
 
 
 def _gravimetric_per_print_nl(
@@ -1061,6 +1081,7 @@ def _run_context(
     correction_mode: str | None = None,
     correction_cache: dict | None = None,
     flow_fit_policy_override: dict | None = None,
+    um_per_pixel: float | None = None,
 ) -> dict:
     correction_mode = _normalized_correction_mode(correction_mode)
     run_id = _clean_text(metadata_row.get("Dataset name"))
@@ -1085,6 +1106,7 @@ def _run_context(
             run_dir,
             correction_cache=correction_cache,
             flow_fit_policy_override=flow_fit_policy_override,
+            pixel_size_um=um_per_pixel,
         )
         frame_rows = list(corrected_replay.get("frame_rows") or [])
         fit = dict(corrected_replay.get("fit") or {})
@@ -1442,6 +1464,7 @@ def _export_report_from_contexts(
     correction_mode: str | None = None,
     correction_rule: dict | None = None,
     flow_fit_policy_override: dict | None = None,
+    um_per_pixel: float | None = None,
     segmented_tail_review: bool = False,
     segmented_tail_contexts: list[dict] | None = None,
 ) -> dict:
@@ -1513,6 +1536,7 @@ def _export_report_from_contexts(
         "output_root": str(stage_dir),
         "run_id_filter": None if run_id_filter is None else str(run_id_filter),
         "gravimetric_density_g_per_ml": float(_validate_density_g_per_ml(density_g_per_ml)),
+        "um_per_pixel": _validate_um_per_pixel(um_per_pixel),
         "correction_mode": correction_mode,
         "correction_rule": None if correction_rule is None else dict(correction_rule),
         "flow_fit_policy_override": (
@@ -2371,12 +2395,14 @@ def export_online_stream_experiment_report(
     run_id: str | None = None,
     density_g_per_ml: float | int = 1.0,
     correction_mode: str | None = None,
+    um_per_pixel: float | int | None = None,
     settling_aware_fit_enabled: bool | None = None,
     tail_settling_rule_enabled: bool | None = None,
     segmented_tail_review: bool = False,
 ):
     experiment_root = dataset_mod.resolve_experiment_root(experiment_root)
     density_g_per_ml = _validate_density_g_per_ml(density_g_per_ml)
+    um_per_pixel = _validate_um_per_pixel(um_per_pixel)
     correction_mode = _normalized_correction_mode(correction_mode)
     analysis_config_override = {}
     if settling_aware_fit_enabled is not None:
@@ -2416,6 +2442,7 @@ def export_online_stream_experiment_report(
             correction_mode=correction_mode,
             correction_cache=correction_cache,
             flow_fit_policy_override=flow_fit_policy_override,
+            um_per_pixel=um_per_pixel,
         )
         for row in metadata_rows
     ]
@@ -2436,6 +2463,7 @@ def export_online_stream_experiment_report(
         density_g_per_ml=density_g_per_ml,
         correction_mode=correction_mode,
         flow_fit_policy_override=flow_fit_policy_override,
+        um_per_pixel=um_per_pixel,
         segmented_tail_review=segmented_tail_review,
         segmented_tail_contexts=segmented_tail_contexts,
         correction_rule=(

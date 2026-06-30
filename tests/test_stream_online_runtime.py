@@ -138,6 +138,7 @@ def test_analyze_online_stream_frame_returns_measurement_for_valid_attached_stre
     assert summary["measurement_qc_pass"] is True
     assert summary["silhouette_status"] == "ok"
     assert summary["attached_width_px"] is not None
+    assert summary["pixel_size_um"] == pytest.approx(mod.volume_mod.resolve_pixel_size_um())
     assert summary["visible_volume_nl"] is not None
     assert summary["attached_bottom_clearance_px"] > 96
     assert summary["flow_volume_geometry_ok"] is True
@@ -150,6 +151,36 @@ def test_analyze_online_stream_frame_returns_measurement_for_valid_attached_stre
     assert result["overlay"] is not None
     assert result["overlay"].shape == frame.shape + (3,)
     assert np.any(result["overlay"][80:170, 96:124] != np.stack([frame[80:170, 96:124]] * 3, axis=-1))
+
+
+def test_analyze_online_stream_frame_uses_explicit_pixel_size_for_volume():
+    frame = _frame_with_attached_stream(bottom_y=170)
+    small_pixel = mod.analyze_online_stream_frame(
+        frame_image=frame,
+        background_image=_blank_frame(),
+        nozzle_center_px=NOZZLE_CENTER_PX,
+        delay_us=4050,
+        emergence_time_us=3200,
+        analysis_config=None,
+        pixel_size_um=1.0,
+        _adaptive_retry=False,
+    )
+    large_pixel = mod.analyze_online_stream_frame(
+        frame_image=frame,
+        background_image=_blank_frame(),
+        nozzle_center_px=NOZZLE_CENTER_PX,
+        delay_us=4050,
+        emergence_time_us=3200,
+        analysis_config=None,
+        pixel_size_um=2.0,
+        _adaptive_retry=False,
+    )
+
+    assert small_pixel["summary"]["pixel_size_um"] == pytest.approx(1.0)
+    assert large_pixel["summary"]["pixel_size_um"] == pytest.approx(2.0)
+    assert large_pixel["summary"]["visible_volume_nl"] == pytest.approx(
+        small_pixel["summary"]["visible_volume_nl"] * 8.0
+    )
 
 
 def test_analyze_online_stream_frame_expands_left_when_contour_nears_corridor_edge():

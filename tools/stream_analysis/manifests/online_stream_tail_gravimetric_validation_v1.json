@@ -43,6 +43,17 @@
     "gravimetric_volume_formula": "mass_per_print_mg * 1000 / density_g_per_ml",
     "compatibility_note": "gravimetric_volume_nl is density-corrected. gravimetric_volume_nl_water_density and volume_error_vs_gravimetric_nl preserve the original 1.0 g/mL water-density calculation."
   },
+  "optics_layer": {
+    "schema_version": "optics_assignment_v1",
+    "um_per_pixel": 1.5824,
+    "assignment_basis": "historical_machine",
+    "assignment_source": "user_confirmed_manifest_review",
+    "assignment_confidence": "confirmed",
+    "stored_in_run_artifacts": false,
+    "code_default_um_per_pixel": 1.5696,
+    "volume_scale_vs_code_default": 1.0246648834651566,
+    "volume_scale_note": "Visible volume scales with um_per_pixel ** 3."
+  },
   "selection_criteria": {
     "experiments_root": "FreeRTOS-interface/Experiments",
     "included": [
@@ -90,6 +101,14 @@
       "Water": 138
     },
     "total_density_unassigned_rows": 0,
+    "optics_assignment_counts": {
+      "1.5824": 156
+    },
+    "optics_unassigned_rows": 0,
+    "total_optics_assignment_counts": {
+      "1.5824": 210
+    },
+    "total_optics_unassigned_rows": 0,
     "experiment_count": 21,
     "full_replayable_experiment_count": 18
   },
@@ -674,6 +693,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0809,
         "gravimetric_volume_nl": 74.425,
@@ -756,6 +782,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0811,
@@ -840,6 +873,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0795,
         "gravimetric_volume_nl": 73.137,
@@ -922,6 +962,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0812,
@@ -1007,6 +1054,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0805,
         "gravimetric_volume_nl": 74.057,
@@ -1090,6 +1144,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0893,
@@ -1175,6 +1236,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0829,
@@ -1262,6 +1330,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0824,
         "gravimetric_volume_nl": 82.4,
@@ -1346,6 +1421,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0824,
@@ -1432,6 +1514,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0825,
         "gravimetric_volume_nl": 82.5,
@@ -1517,6 +1606,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0803,
         "gravimetric_volume_nl": 80.3,
@@ -1601,6 +1697,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0811,
@@ -1688,6 +1791,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0796,
         "gravimetric_volume_nl": 79.6,
@@ -1772,6 +1882,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0788,
         "gravimetric_volume_nl": 71.963,
@@ -1854,6 +1971,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0734,
@@ -1938,6 +2062,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0692,
         "gravimetric_volume_nl": 63.196,
@@ -2017,6 +2148,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0711,
@@ -2098,6 +2236,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0712,
         "gravimetric_volume_nl": 65.023,
@@ -2177,6 +2322,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0568,
@@ -2260,6 +2412,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0557,
         "gravimetric_volume_nl": 50.868,
@@ -2341,6 +2500,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0554,
@@ -2424,6 +2590,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0571,
         "gravimetric_volume_nl": 52.146,
@@ -2505,6 +2678,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0591,
@@ -2588,6 +2768,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0937,
         "gravimetric_volume_nl": 85.571,
@@ -2668,6 +2855,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0914,
         "gravimetric_volume_nl": 83.47,
@@ -2747,6 +2941,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0925,
@@ -2831,6 +3032,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0916,
         "gravimetric_volume_nl": 83.653,
@@ -2910,6 +3118,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0944,
@@ -2994,6 +3209,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0838,
         "gravimetric_volume_nl": 76.53,
@@ -3077,6 +3299,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0841,
         "gravimetric_volume_nl": 76.804,
@@ -3158,6 +3387,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.084,
@@ -3241,6 +3477,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0843,
         "gravimetric_volume_nl": 76.986,
@@ -3321,6 +3564,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0849,
@@ -3406,6 +3656,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0696,
         "gravimetric_volume_nl": 63.562,
@@ -3490,6 +3747,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0703,
         "gravimetric_volume_nl": 64.201,
@@ -3572,6 +3836,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0708,
@@ -3657,6 +3928,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.07,
         "gravimetric_volume_nl": 63.927,
@@ -3740,6 +4018,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0706,
@@ -3825,6 +4110,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0559,
         "gravimetric_volume_nl": 51.05,
@@ -3908,6 +4200,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0556,
         "gravimetric_volume_nl": 50.776,
@@ -3989,6 +4288,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0551,
@@ -4073,6 +4379,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0553,
         "gravimetric_volume_nl": 50.502,
@@ -4155,6 +4468,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0566,
@@ -4239,6 +4559,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0835,
         "gravimetric_volume_nl": 76.256,
@@ -4318,6 +4645,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0797,
@@ -4399,6 +4733,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0823,
         "gravimetric_volume_nl": 75.16,
@@ -4478,6 +4819,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0819,
@@ -4562,6 +4910,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0839,
         "gravimetric_volume_nl": 76.621,
@@ -4645,6 +5000,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0821,
         "gravimetric_volume_nl": 74.977,
@@ -4726,6 +5088,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0823,
@@ -4810,6 +5179,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0821,
         "gravimetric_volume_nl": 74.977,
@@ -4892,6 +5268,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0815,
@@ -4976,6 +5359,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0653,
         "gravimetric_volume_nl": 59.635,
@@ -5057,6 +5447,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0633,
@@ -5140,6 +5537,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0628,
         "gravimetric_volume_nl": 57.352,
@@ -5221,6 +5625,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0654,
@@ -5304,6 +5715,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0692,
         "gravimetric_volume_nl": 69.2,
@@ -5385,6 +5803,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0688,
         "gravimetric_volume_nl": 68.8,
@@ -5465,6 +5890,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0681,
@@ -5548,6 +5980,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0698,
         "gravimetric_volume_nl": 69.8,
@@ -5628,6 +6067,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.069,
@@ -5710,6 +6156,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.069,
         "gravimetric_volume_nl": 69.0,
@@ -5790,6 +6243,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0687,
@@ -5873,6 +6333,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.071,
         "gravimetric_volume_nl": 71.0,
@@ -5953,6 +6420,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0704,
@@ -6038,6 +6512,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0706,
         "gravimetric_volume_nl": 70.6,
@@ -6118,6 +6599,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.071,
@@ -6203,6 +6691,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0724,
         "gravimetric_volume_nl": 72.4,
@@ -6286,6 +6781,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0705,
         "gravimetric_volume_nl": 70.5,
@@ -6368,6 +6870,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.074,
         "gravimetric_volume_nl": 74.0,
@@ -6449,6 +6958,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0712,
@@ -6533,6 +7049,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0711,
         "gravimetric_volume_nl": 71.1,
@@ -6614,6 +7137,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0725,
@@ -6697,6 +7227,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0707,
         "gravimetric_volume_nl": 70.7,
@@ -6778,6 +7315,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0699,
@@ -6861,6 +7405,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.068,
@@ -6946,6 +7497,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0703,
         "gravimetric_volume_nl": 70.3,
@@ -7026,6 +7584,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0687,
@@ -7110,6 +7675,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0709,
         "gravimetric_volume_nl": 70.9,
@@ -7193,6 +7765,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0679,
         "gravimetric_volume_nl": 67.9,
@@ -7274,6 +7853,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.067,
         "gravimetric_volume_nl": 67.0,
@@ -7353,6 +7939,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0743,
@@ -7436,6 +8029,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0791,
         "gravimetric_volume_nl": 79.1,
@@ -7515,6 +8115,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0627,
@@ -7597,6 +8204,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0633,
         "gravimetric_volume_nl": 63.3,
@@ -7677,6 +8291,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0613,
@@ -7759,6 +8380,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0588,
         "gravimetric_volume_nl": 58.8,
@@ -7839,6 +8467,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0586,
@@ -7921,6 +8556,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.06,
         "gravimetric_volume_nl": 60.0,
@@ -8000,6 +8642,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0907,
@@ -8085,6 +8734,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.092,
         "gravimetric_volume_nl": 92.0,
@@ -8165,6 +8821,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0932,
@@ -8250,6 +8913,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0663,
@@ -8337,6 +9007,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0656,
         "gravimetric_volume_nl": 60.35,
@@ -8421,6 +9098,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0669,
@@ -8508,6 +9192,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0638,
         "gravimetric_volume_nl": 58.694,
@@ -8592,6 +9283,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0645,
@@ -8678,6 +9376,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0672,
         "gravimetric_volume_nl": 61.822,
@@ -8762,6 +9467,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0679,
@@ -8848,6 +9560,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0674,
         "gravimetric_volume_nl": 62.006,
@@ -8933,6 +9652,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.066,
         "gravimetric_volume_nl": 61.798,
@@ -9016,6 +9742,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0676,
@@ -9101,6 +9834,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.069,
         "gravimetric_volume_nl": 64.607,
@@ -9184,6 +9924,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.066,
@@ -9269,6 +10016,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0635,
         "gravimetric_volume_nl": 59.457,
@@ -9352,6 +10106,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0671,
@@ -9438,6 +10199,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0758,
         "gravimetric_volume_nl": 72.815,
@@ -9521,6 +10289,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0767,
@@ -9606,6 +10381,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0813,
         "gravimetric_volume_nl": 78.098,
@@ -9690,6 +10472,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0914,
@@ -9777,6 +10566,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.084,
         "gravimetric_volume_nl": 83.251,
@@ -9861,6 +10657,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0832,
@@ -9947,6 +10750,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0824,
         "gravimetric_volume_nl": 81.665,
@@ -10031,6 +10841,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0841,
@@ -10117,6 +10934,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0826,
         "gravimetric_volume_nl": 81.863,
@@ -10201,6 +11025,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0351,
         "gravimetric_volume_nl": 35.1,
@@ -10283,6 +11114,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0312,
@@ -10368,6 +11206,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0368,
         "gravimetric_volume_nl": 36.8,
@@ -10450,6 +11295,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0406,
@@ -10535,6 +11387,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0404,
         "gravimetric_volume_nl": 40.4,
@@ -10619,6 +11478,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0363,
         "gravimetric_volume_nl": 36.3,
@@ -10698,6 +11564,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0398,
@@ -10780,6 +11653,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.037,
         "gravimetric_volume_nl": 37.0,
@@ -10860,6 +11740,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0382,
@@ -10944,6 +11831,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0595,
         "gravimetric_volume_nl": 59.5,
@@ -11027,6 +11921,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0594,
         "gravimetric_volume_nl": 59.4,
@@ -11109,6 +12010,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0597,
@@ -11194,6 +12102,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0607,
         "gravimetric_volume_nl": 60.7,
@@ -11275,6 +12190,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0604,
@@ -11358,6 +12280,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0607,
         "gravimetric_volume_nl": 60.7,
@@ -11440,6 +12369,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0743,
         "gravimetric_volume_nl": 74.3,
@@ -11520,6 +12456,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0737,
@@ -11602,6 +12545,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0724,
         "gravimetric_volume_nl": 72.4,
@@ -11683,6 +12633,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.075,
@@ -11769,6 +12726,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0748,
         "gravimetric_volume_nl": 74.8,
@@ -11852,6 +12816,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0486,
         "gravimetric_volume_nl": 48.6,
@@ -11931,6 +12902,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0489,
@@ -12012,6 +12990,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0481,
         "gravimetric_volume_nl": 48.1,
@@ -12091,6 +13076,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0482,
@@ -12172,6 +13164,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0488,
         "gravimetric_volume_nl": 48.8,
@@ -12251,6 +13250,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0482,
@@ -12334,6 +13340,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.053,
@@ -12419,6 +13432,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0532,
         "gravimetric_volume_nl": 53.2,
@@ -12502,6 +13522,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0568,
@@ -12587,6 +13614,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0666,
         "gravimetric_volume_nl": 66.6,
@@ -12671,6 +13705,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0382,
         "gravimetric_volume_nl": 38.2,
@@ -12751,6 +13792,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.041,
@@ -12834,6 +13882,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0454,
         "gravimetric_volume_nl": 45.4,
@@ -12916,6 +13971,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0534,
@@ -13001,6 +14063,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0538,
         "gravimetric_volume_nl": 53.8,
@@ -13083,6 +14152,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0552,
@@ -13167,6 +14243,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0546,
         "gravimetric_volume_nl": 54.6,
@@ -13248,6 +14331,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0547,
@@ -13331,6 +14421,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0499,
@@ -13416,6 +14513,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0534,
         "gravimetric_volume_nl": 53.4,
@@ -13499,6 +14603,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0511,
         "gravimetric_volume_nl": 51.1,
@@ -13577,6 +14688,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0676,
         "gravimetric_volume_nl": 67.6,
@@ -13602,6 +14720,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0671,
@@ -13629,6 +14754,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0677,
         "gravimetric_volume_nl": 67.7,
@@ -13654,6 +14786,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0677,
@@ -13681,6 +14820,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0683,
         "gravimetric_volume_nl": 68.3,
@@ -13706,6 +14852,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0541,
@@ -13733,6 +14886,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0541,
         "gravimetric_volume_nl": 54.1,
@@ -13758,6 +14918,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0547,
@@ -13785,6 +14952,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0544,
         "gravimetric_volume_nl": 54.4,
@@ -13810,6 +14984,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0542,
@@ -13837,6 +15018,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0406,
         "gravimetric_volume_nl": 40.6,
@@ -13862,6 +15050,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0404,
@@ -13889,6 +15084,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0406,
         "gravimetric_volume_nl": 40.6,
@@ -13914,6 +15116,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0402,
@@ -13941,6 +15150,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0399,
         "gravimetric_volume_nl": 39.9,
@@ -13966,6 +15182,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.062,
@@ -13993,6 +15216,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0619,
         "gravimetric_volume_nl": 61.9,
@@ -14018,6 +15248,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0616,
@@ -14045,6 +15282,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0631,
         "gravimetric_volume_nl": 63.1,
@@ -14070,6 +15314,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0627,
@@ -14097,6 +15348,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0877,
         "gravimetric_volume_nl": 87.7,
@@ -14122,6 +15380,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.087,
@@ -14149,6 +15414,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0867,
         "gravimetric_volume_nl": 86.7,
@@ -14174,6 +15446,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0871,
@@ -14201,6 +15480,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0871,
         "gravimetric_volume_nl": 87.1,
@@ -14226,6 +15512,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0711,
@@ -14253,6 +15546,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0715,
         "gravimetric_volume_nl": 71.5,
@@ -14278,6 +15578,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0701,
@@ -14305,6 +15612,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0594,
         "gravimetric_volume_nl": 59.4,
@@ -14330,6 +15644,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0577,
@@ -14357,6 +15678,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0589,
         "gravimetric_volume_nl": 58.9,
@@ -14382,6 +15710,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0599,
@@ -14409,6 +15744,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0971,
         "gravimetric_volume_nl": 97.1,
@@ -14434,6 +15776,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.096,
@@ -14461,6 +15810,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0976,
         "gravimetric_volume_nl": 97.6,
@@ -14486,6 +15842,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0978,
@@ -14513,6 +15876,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0713,
         "gravimetric_volume_nl": 71.3,
@@ -14538,6 +15908,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0709,
@@ -14565,6 +15942,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0705,
         "gravimetric_volume_nl": 70.5,
@@ -14590,6 +15974,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0936,
@@ -14617,6 +16008,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.094,
         "gravimetric_volume_nl": 94.0,
@@ -14642,6 +16040,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0945,
@@ -14669,6 +16074,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.1105,
         "gravimetric_volume_nl": 110.5,
@@ -14694,6 +16106,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.1105,
@@ -14721,6 +16140,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.1104,
         "gravimetric_volume_nl": 110.4,
@@ -14746,6 +16172,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0779,
@@ -14773,6 +16206,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.0779,
         "gravimetric_volume_nl": 77.9,
@@ -14798,6 +16238,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0792,
@@ -14825,6 +16272,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.1051,
         "gravimetric_volume_nl": 105.1,
@@ -14850,6 +16304,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.1047,
@@ -14877,6 +16338,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.1037,
         "gravimetric_volume_nl": 103.7,
@@ -14902,6 +16370,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0662,
@@ -14929,6 +16404,13 @@
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
       },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
+      },
       "gravimetric": {
         "mass_per_print_mg": 0.074,
         "gravimetric_volume_nl": 74.0,
@@ -14954,6 +16436,13 @@
         "assignment_basis": "experiment_id",
         "assignment_source": "user_confirmed_manifest_review",
         "assignment_confidence": "confirmed"
+      },
+      "optics": {
+        "um_per_pixel": 1.5824,
+        "assignment_basis": "historical_machine",
+        "assignment_source": "user_confirmed_manifest_review",
+        "assignment_confidence": "confirmed",
+        "stored_in_run_artifacts": false
       },
       "gravimetric": {
         "mass_per_print_mg": 0.0731,

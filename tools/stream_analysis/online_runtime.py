@@ -1921,6 +1921,7 @@ def analyze_online_stream_frame(
     frame_color_order: str = "bgr",
     background_color_order: str | None = None,
     sticky_window_state: dict | None = None,
+    pixel_size_um: float | None = None,
     _adaptive_retry: bool = True,
 ) -> dict:
     config = _resolved_analysis_config(analysis_config)
@@ -1954,6 +1955,7 @@ def analyze_online_stream_frame(
     stage4_frame = volume_mod._analyze_stage4_frame(
         stage3_frame,
         near_bottom_px=int(config["detached_near_bottom_warning_px"]),
+        pixel_size_um=pixel_size_um,
     )
 
     stage3_metric_row = dict(stage3_frame.get("metric_row") or {})
@@ -2248,6 +2250,7 @@ def analyze_online_stream_frame(
         "failure_reason": failure_reason,
         "attached_width_px": attached_width_px,
         "attached_width_mode": width_metrics.get("attached_width_mode"),
+        "pixel_size_um": stage4_frame.get("pixel_size_um"),
         "visible_volume_nl": visible_volume_nl,
         "attached_bottom_clearance_px": attached_bottom_clearance_px,
         "min_accepted_fluid_distance_from_bottom_px": frame_metric_row.get(
@@ -2402,6 +2405,7 @@ def analyze_online_stream_frame(
             frame_color_order=frame_color_order,
             background_color_order=background_color_order,
             sticky_window_state=sticky_window_state,
+            pixel_size_um=pixel_size_um,
             _adaptive_retry=False,
         )
     if bool(_adaptive_retry) and bool(config.get("adaptive_roi_expansion_enabled")):
