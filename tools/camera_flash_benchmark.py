@@ -16,8 +16,13 @@ CMD_SET_IMAGING_DROPLETS = 0xC4
 CMD_STATUS = 0x02
 CMD_QUEUE_ACK = 0xFE
 CMD_ENABLE_MOTORS = 0x08
+CMD_GRIPPER_OPEN = 0x10
+CMD_GRIPPER_OFF = 0x12
 CMD_HOME_XY = 0x43
 CMD_HOME_PR_BOTH = 0x44
+CMD_SET_GRIPPER_PARAMS = 0x62
+CMD_PR_PRINT = 0xE0
+CMD_PR_REFUEL = 0xE1
 CMD_P_REG_START = 0xE8
 CMD_R_REG_START = 0xEA
 CMD_P_REG_STOP = 0xE9
@@ -40,6 +45,8 @@ TAG_TAR_PRINT_P = 0x14
 TAG_TAR_REFUEL_P = 0x15
 TAG_ACTIVE_P = 0x40
 TAG_ACTIVE_R = 0x41
+TAG_GRIP_PULSE = 0x80
+TAG_GRIP_REFRESH = 0x81
 
 ACK_RESULT_ACCEPTED = 1
 ACK_RESULT_DUPLICATE = 2
@@ -56,6 +63,12 @@ QUEUE_ACK_MAX_RETRIES = 3
 HOME_FAST_HZ = 30000
 HOME_SLOW_HZ = 3000
 HOME_BACKOFF_STEPS = 400
+PRESSURE_FSS = 13107
+PRESSURE_PSI_OFFSET = 1638
+PRESSURE_PSI_MAX = 15
+COORDINATED_PRESSURE_PSI_DEFAULT = 0.6
+COORDINATED_GRIPPER_REFRESH_MS_DEFAULT = 1000
+COORDINATED_GRIPPER_PULSE_MS_DEFAULT = 800
 
 
 @dataclass
@@ -79,6 +92,9 @@ class BenchmarkConfig:
     mode: str = "flash_only"
     run_order: str = "pre_selftest"
     preflight_pressure_timeout_ms: int = 1000
+    warmup_cycles: int = 1
+    coordinated_pressure_psi: float = COORDINATED_PRESSURE_PSI_DEFAULT
+    coordinated_gripper_refresh_ms: int = COORDINATED_GRIPPER_REFRESH_MS_DEFAULT
 
 
 def _safe_percentile(values: list[float], pct: float) -> float | None:
@@ -567,6 +583,8 @@ def _status_snapshot_from_serial(ser, *, sample_ms: int = 250) -> dict:
         "refuel_target": None,
         "print_active": None,
         "refuel_active": None,
+        "grip_pulse_ms": None,
+        "grip_refresh_ms": None,
         "status_frames_seen": 0,
     }
     while time.monotonic() < deadline:
@@ -620,7 +638,15 @@ def _status_snapshot_from_serial(ser, *, sample_ms: int = 250) -> dict:
                 latest["print_active"] = int.from_bytes(tlv[TAG_ACTIVE_P], "little")
             if TAG_ACTIVE_R in tlv and len(tlv[TAG_ACTIVE_R]) == 2:
                 latest["refuel_active"] = int.from_bytes(tlv[TAG_ACTIVE_R], "little")
+            if TAG_GRIP_PULSE in tlv and len(tlv[TAG_GRIP_PULSE]) == 4:
+                latest["grip_pulse_ms"] = int.from_bytes(tlv[TAG_GRIP_PULSE], "little")
+            if TAG_GRIP_REFRESH in tlv and len(tlv[TAG_GRIP_REFRESH]) == 4:
+                latest["grip_refresh_ms"] = int.from_bytes(tlv[TAG_GRIP_REFRESH], "little")
     return latest
+
+
+def _pressure_raw_from_psi(psi: float) -> int:
+    return int(round((float(psi) / PRESSURE_PSI_MAX) * PRESSURE_FSS + PRESSURE_PSI_OFFSET, 0))
 
 
 def _is_pressure_ready(status: dict) -> bool:
@@ -750,6 +776,141 @@ def _machine_ready_preflight(ser, build_control_fn, *, start_seq32: int, timeout
     )
 
 
+def _coordinated_flash_preflight(
+    ser,
+    build_control_fn,
+    *,
+    start_seq32: int,
+    timeout_ms: int,
+    pressure_psi: float,
+    gripper_refresh_ms: int,
+) -> tuple[int, dict]:
+    started_ns = time.monotonic_ns()
+    timeout_ms = max(MACHINE_READY_TIMEOUT_MS_MIN, int(timeout_ms))
+    status_before = _status_snapshot_from_serial(ser, sample_ms=250)
+    phases = []
+    next_seq32 = int(start_seq32)
+    pressure_raw = _pressure_raw_from_psi(pressure_psi)
+    gripper_refresh_ms = max(1000, int(gripper_refresh_ms))
+
+    def _mark_phase(
+        name: str,
+        cmd: int,
+        *,
+        p1: int | None = None,
+        p2: int | None = None,
+        p3: int | None = None,
+    ) -> bool:
+        nonlocal next_seq32
+        t0 = time.monotonic_ns()
+        ack = _send_queued_command(
+            ser,
+            build_control_fn,
+            name=name,
+            cmd=cmd,
+            seq32=next_seq32,
+            p1=p1,
+            p2=p2,
+            p3=p3,
+        )
+        t1 = time.monotonic_ns()
+        if ack.get("ok"):
+            next_seq32 += 1
+        phases.append(
+            {
+                "name": name,
+                "cmd": int(cmd),
+                "sent_ns": int(t1),
+                "duration_ms": (t1 - t0) / 1_000_000.0,
+                "ack": ack,
+            }
+        )
+        return bool(ack.get("ok"))
+
+    setup_steps = (
+        ("enable_motors", CMD_ENABLE_MOTORS, None, None, None),
+        ("home_xy", CMD_HOME_XY, HOME_FAST_HZ, HOME_SLOW_HZ, HOME_BACKOFF_STEPS),
+        ("home_pressure_regs", CMD_HOME_PR_BOTH, HOME_FAST_HZ, HOME_SLOW_HZ, HOME_BACKOFF_STEPS),
+        ("set_print_pressure", CMD_PR_PRINT, pressure_raw, None, None),
+        ("set_refuel_pressure", CMD_PR_REFUEL, pressure_raw, None, None),
+        ("start_print_reg", CMD_P_REG_START, None, None, None),
+        ("start_refuel_reg", CMD_R_REG_START, None, None, None),
+    )
+    status_ready = status_before
+    reason = None
+    ok = True
+    for name, cmd, p1, p2, p3 in setup_steps:
+        if not _mark_phase(name, cmd, p1=p1, p2=p2, p3=p3):
+            ok = False
+            reason = "command_setup_failed"
+            break
+
+    if ok:
+        ok, status_ready = _pressure_preflight(ser, timeout_ms)
+        reason = None if ok else "pressure_not_ready_timeout"
+
+    gripper_snapshot = _status_snapshot_from_serial(ser, sample_ms=250) if ok else {}
+    prior_grip_refresh = gripper_snapshot.get("grip_refresh_ms")
+    prior_grip_pulse = gripper_snapshot.get("grip_pulse_ms")
+    applied_grip_pulse = int(prior_grip_pulse) if isinstance(prior_grip_pulse, int) else COORDINATED_GRIPPER_PULSE_MS_DEFAULT
+    gripper_wait_finished_ns = None
+    status_after_gripper = {}
+    if ok:
+        if not _mark_phase(
+            "set_gripper_params",
+            CMD_SET_GRIPPER_PARAMS,
+            p1=gripper_refresh_ms,
+            p2=applied_grip_pulse,
+        ):
+            ok = False
+            reason = "command_setup_failed"
+        elif not _mark_phase("open_gripper", CMD_GRIPPER_OPEN):
+            ok = False
+            reason = "command_setup_failed"
+        else:
+            time.sleep((applied_grip_pulse + 300) / 1000.0)
+            gripper_wait_finished_ns = time.monotonic_ns()
+            status_after_gripper = _status_snapshot_from_serial(ser, sample_ms=250)
+            observed_refresh = status_after_gripper.get("grip_refresh_ms")
+            observed_pulse = status_after_gripper.get("grip_pulse_ms")
+            if isinstance(observed_refresh, int) and observed_refresh != gripper_refresh_ms:
+                ok = False
+                reason = "gripper_config_mismatch"
+            elif isinstance(observed_pulse, int) and observed_pulse != applied_grip_pulse:
+                ok = False
+                reason = "gripper_config_mismatch"
+
+    finished_ns = time.monotonic_ns()
+    return (
+        next_seq32,
+        {
+            "required": True,
+            "pass": bool(ok),
+            "reason": reason,
+            "timeout_ms": int(timeout_ms),
+            "started_ns": int(started_ns),
+            "finished_ns": int(finished_ns),
+            "total_ms": (finished_ns - started_ns) / 1_000_000.0,
+            "status_before": status_before,
+            "status_after_pressure": status_ready,
+            "status_after_gripper": status_after_gripper,
+            "phases": phases,
+            "pressure": {
+                "target_psi": float(pressure_psi),
+                "target_raw": int(pressure_raw),
+                "status_ready": status_ready,
+            },
+            "gripper": {
+                "prior_refresh_ms": prior_grip_refresh,
+                "prior_pulse_ms": prior_grip_pulse,
+                "configured_refresh_ms": int(gripper_refresh_ms),
+                "configured_pulse_ms": int(applied_grip_pulse),
+                "open_wait_finished_ns": gripper_wait_finished_ns,
+            },
+        },
+    )
+
+
 def _wait_for_ack_with_level_probe(ack, timeout_s: float) -> tuple[bool, bool]:
     deadline = time.monotonic() + max(0.001, float(timeout_s))
     level_high_seen = False
@@ -776,7 +937,7 @@ def run_camera_flash_benchmark(
 ) -> dict:
     mode = str(getattr(config, "mode", "flash_only") or "flash_only").strip().lower()
     run_order = str(getattr(config, "run_order", "pre_selftest") or "pre_selftest").strip().lower()
-    if mode not in ("flash_only", "print_then_flash"):
+    if mode not in ("flash_only", "print_then_flash", "coordinated_flash"):
         mode = "flash_only"
     if run_order not in ("pre_selftest", "post_selftest"):
         run_order = "pre_selftest"
@@ -785,6 +946,9 @@ def run_camera_flash_benchmark(
     ack = None
     camera = None
     did_start_pressure_regs = False
+    cleanup_diag = []
+    cleanup_done = False
+    coordinated_diag = {"required": mode == "coordinated_flash"}
     safe_flash_width = max(SAFE_FLASH_WIDTH_MIN_NS, min(SAFE_FLASH_WIDTH_MAX_NS, int(config.flash_width_us)))
     effective_droplets = 0 if mode == "flash_only" else max(1, int(config.num_droplets))
     preflight_timeout_ms = max(50, int(getattr(config, "preflight_pressure_timeout_ms", 1000)))
@@ -808,6 +972,11 @@ def run_camera_flash_benchmark(
             "mode": mode,
             "run_order": run_order,
             "preflight_pressure_timeout_ms": int(timeout_ms),
+            "warmup_cycles": max(0, int(getattr(config, "warmup_cycles", 1))),
+            "coordinated_pressure_psi": float(getattr(config, "coordinated_pressure_psi", COORDINATED_PRESSURE_PSI_DEFAULT)),
+            "coordinated_gripper_refresh_ms": int(
+                getattr(config, "coordinated_gripper_refresh_ms", COORDINATED_GRIPPER_REFRESH_MS_DEFAULT)
+            ),
         }
 
     def _zero_summary(reason: str, started_ns: int, finished_ns: int) -> dict:
@@ -852,10 +1021,77 @@ def run_camera_flash_benchmark(
             "status_snapshot_delta": {"ext_count_delta": None, "flash_num_delta": None},
             "summary": _zero_summary("setup_failed", started_ns, finished_ns),
             "cycles": [],
+            "warmup_count": 0,
+            "warmup_cycles": [],
+            "warmup_summary": summarize_cycles([], 0, started_ns, finished_ns),
+            "coordinated_diag": coordinated_diag,
+            "cleanup": cleanup_diag,
         }
 
+    def _queue_cleanup_command(
+        name: str,
+        cmd: int,
+        *,
+        p1: int | None = None,
+        p2: int | None = None,
+        p3: int | None = None,
+    ) -> dict:
+        nonlocal next_seq32
+        diag = _send_queued_command(
+            ser,
+            build_control_fn,
+            name=name,
+            cmd=cmd,
+            seq32=next_seq32,
+            p1=p1,
+            p2=p2,
+            p3=p3,
+            ack_timeout_ms=QUEUE_ACK_TIMEOUT_MS,
+            max_retries=1,
+        )
+        if diag.get("ok"):
+            next_seq32 += 1
+        cleanup_diag.append(diag)
+        return diag
+
+    def _run_coordinated_cleanup():
+        nonlocal cleanup_done
+        if cleanup_done or mode != "coordinated_flash":
+            return
+        cleanup_done = True
+        gripper = ((coordinated_diag.get("preflight") or {}).get("gripper") or {})
+        prior_refresh = gripper.get("prior_refresh_ms")
+        prior_pulse = gripper.get("prior_pulse_ms")
+        if isinstance(prior_refresh, int) and isinstance(prior_pulse, int):
+            try:
+                _queue_cleanup_command(
+                    "restore_gripper_params",
+                    CMD_SET_GRIPPER_PARAMS,
+                    p1=prior_refresh,
+                    p2=prior_pulse,
+                )
+            except Exception as exc:
+                cleanup_diag.append({"ok": False, "name": "restore_gripper_params", "reason": str(exc)})
+        for name, cmd in (
+            ("gripper_off", CMD_GRIPPER_OFF),
+            ("stop_print_reg", CMD_P_REG_STOP),
+            ("stop_refuel_reg", CMD_R_REG_STOP),
+            ("stop_flash", CMD_STOP_FLASH),
+        ):
+            try:
+                _queue_cleanup_command(name, cmd)
+            except Exception as exc:
+                cleanup_diag.append({"ok": False, "name": name, "reason": str(exc)})
+
+    def _finalize_payload(payload: dict) -> dict:
+        if mode == "coordinated_flash":
+            _run_coordinated_cleanup()
+        payload["cleanup"] = cleanup_diag
+        payload["next_seq32"] = int(next_seq32)
+        return payload
+
     try:
-        preflight = {"required": mode == "print_then_flash", "pass": True, "timeout_ms": 0, "status": {}}
+        preflight = {"required": mode in ("print_then_flash", "coordinated_flash"), "pass": True, "timeout_ms": 0, "status": {}}
         if mode == "print_then_flash":
             timeout_ms = max(
                 MACHINE_READY_TIMEOUT_MS_MIN, int(getattr(config, "preflight_pressure_timeout_ms", 1000))
@@ -870,16 +1106,16 @@ def run_camera_flash_benchmark(
             did_start_pressure_regs = True
             if not bool(preflight.get("pass", False)):
                 if preflight.get("reason") == "command_setup_failed":
-                    return _setup_failed_payload(
+                    return _finalize_payload(_setup_failed_payload(
                         reason="command_ack_failed",
                         preflight=preflight,
                         init_diag={"config_match": False, "setup_acks": [], "preflight": preflight},
-                    )
+                    ))
                 started_ns = time.monotonic_ns()
                 finished_ns = started_ns
                 cycles = []
                 summary = _zero_summary("skipped_not_pressure_ready", started_ns, finished_ns)
-                return {
+                return _finalize_payload({
                     "status": "skipped_not_pressure_ready",
                     "mode": mode,
                     "run_order": run_order,
@@ -895,7 +1131,36 @@ def run_camera_flash_benchmark(
                     "status_snapshot_delta": {"ext_count_delta": None, "flash_num_delta": None},
                     "summary": summary,
                     "cycles": cycles,
-                }
+                    "warmup_count": 0,
+                    "warmup_cycles": [],
+                    "warmup_summary": summarize_cycles([], 0, started_ns, finished_ns),
+                    "coordinated_diag": coordinated_diag,
+                    "cleanup": cleanup_diag,
+                })
+        elif mode == "coordinated_flash":
+            timeout_ms = max(
+                MACHINE_READY_TIMEOUT_MS_MIN, int(getattr(config, "preflight_pressure_timeout_ms", 1000))
+            )
+            preflight_timeout_ms = timeout_ms
+            next_seq32, preflight = _coordinated_flash_preflight(
+                ser,
+                build_control_fn,
+                start_seq32=next_seq32,
+                timeout_ms=timeout_ms,
+                pressure_psi=float(getattr(config, "coordinated_pressure_psi", COORDINATED_PRESSURE_PSI_DEFAULT)),
+                gripper_refresh_ms=int(
+                    getattr(config, "coordinated_gripper_refresh_ms", COORDINATED_GRIPPER_REFRESH_MS_DEFAULT)
+                ),
+            )
+            did_start_pressure_regs = True
+            coordinated_diag["preflight"] = preflight
+            if not bool(preflight.get("pass", False)):
+                return _finalize_payload(_setup_failed_payload(
+                    reason=str(preflight.get("reason") or "coordinated_preflight_failed"),
+                    preflight=preflight,
+                    init_diag={"config_match": False, "setup_acks": [], "preflight": preflight},
+                    status_snapshot=(preflight.get("status_after_gripper") or preflight.get("status_after_pressure") or {}),
+                ))
 
         # Apply fixed imaging settings once (fixed-settings benchmark path).
         setup_acks = []
@@ -915,12 +1180,12 @@ def run_camera_flash_benchmark(
             )
             setup_acks.append(ack_diag)
             if not bool(ack_diag.get("ok", False)):
-                return _setup_failed_payload(
+                return _finalize_payload(_setup_failed_payload(
                     reason="command_ack_failed",
                     preflight=preflight,
                     init_diag={"config_match": False, "setup_acks": setup_acks},
                     failed_command=ack_diag,
-                )
+                ))
             next_seq32 += 1
 
         init_status = _status_snapshot_from_serial(ser, sample_ms=250)
@@ -939,12 +1204,12 @@ def run_camera_flash_benchmark(
             else False,
         }
         if not bool(init_diag.get("config_match", False)):
-            return _setup_failed_payload(
+            return _finalize_payload(_setup_failed_payload(
                 reason="config_mismatch",
                 preflight=preflight,
                 init_diag=init_diag,
                 status_snapshot=init_status,
-            )
+            ))
 
         import numpy as np
         from picamera2 import Picamera2
@@ -971,14 +1236,16 @@ def run_camera_flash_benchmark(
         camera.start()
 
         buf = deque(maxlen=16)  # (arr, md, t_done_ns, mean)
-        results = []
-        status_pre = _status_snapshot_from_serial(ser, sample_ms=250)
-        started_ns = time.monotonic_ns()
         timeout_s = max(0.001, float(config.attempt_timeout_ms) / 1000.0)
         max_new_frames = max(1, int(config.max_new_frames))
 
-        for cycle_idx in range(max(1, int(config.cycles))):
-            row = {"cycle_index": int(cycle_idx), "attempt_index": 1, "completed": False}
+        def _capture_cycle(cycle_idx: int, phase: str) -> dict:
+            row = {
+                "cycle_index": int(cycle_idx),
+                "phase": str(phase),
+                "attempt_index": 1,
+                "completed": False,
+            }
             t_cycle_start = time.monotonic_ns()
             row["t_cycle_start"] = t_cycle_start
 
@@ -1043,11 +1310,10 @@ def run_camera_flash_benchmark(
                         "cycle_total_ms": (t_cycle_end - t_cycle_start) / 1_000_000.0,
                     }
                 )
-                results.append(row)
                 post_ms = max(0, int(config.post_cycle_settle_ms))
                 if post_ms > 0:
                     time.sleep(post_ms / 1000.0)
-                continue
+                return row
 
             trig.set_value(0)
             row["t_trigger_set_low_after_ack"] = time.monotonic_ns()
@@ -1128,10 +1394,22 @@ def run_camera_flash_benchmark(
                     "cycle_total_ms": (t_cycle_end - t_cycle_start) / 1_000_000.0,
                 }
             )
-            results.append(row)
             post_ms = max(0, int(config.post_cycle_settle_ms))
             if post_ms > 0:
                 time.sleep(post_ms / 1000.0)
+            return row
+
+        warmup_count = max(0, int(getattr(config, "warmup_cycles", 1)))
+        warmup_started_ns = time.monotonic_ns()
+        warmup_results = [_capture_cycle(i, "warmup") for i in range(warmup_count)]
+        warmup_finished_ns = time.monotonic_ns()
+        warmup_summary = summarize_cycles(warmup_results, warmup_count, warmup_started_ns, warmup_finished_ns)
+
+        results = []
+        status_pre = _status_snapshot_from_serial(ser, sample_ms=250)
+        started_ns = time.monotonic_ns()
+        for cycle_idx in range(max(1, int(config.cycles))):
+            results.append(_capture_cycle(cycle_idx, "counted"))
 
         finished_ns = time.monotonic_ns()
         status_post = _status_snapshot_from_serial(ser, sample_ms=250)
@@ -1144,7 +1422,18 @@ def run_camera_flash_benchmark(
             "ext_count_delta": (int(ext_post) - int(ext_pre)) if isinstance(ext_pre, int) and isinstance(ext_post, int) else None,
             "flash_num_delta": (int(flash_post) - int(flash_pre)) if isinstance(flash_pre, int) and isinstance(flash_post, int) else None,
         }
-        return {
+        if mode == "coordinated_flash":
+            gripper = ((coordinated_diag.get("preflight") or {}).get("gripper") or {})
+            open_wait_finished_ns = gripper.get("open_wait_finished_ns")
+            refresh_ms = gripper.get("configured_refresh_ms")
+            overlap_window_satisfied = False
+            if isinstance(open_wait_finished_ns, int) and isinstance(refresh_ms, int):
+                overlap_window_satisfied = (finished_ns - open_wait_finished_ns) >= int(refresh_ms) * 1_000_000
+            coordinated_diag["counted_elapsed_ms"] = (finished_ns - started_ns) / 1_000_000.0
+            coordinated_diag["total_elapsed_ms"] = (finished_ns - ((coordinated_diag.get("preflight") or {}).get("started_ns") or started_ns)) / 1_000_000.0
+            coordinated_diag["overlap_window_satisfied"] = bool(overlap_window_satisfied)
+
+        return _finalize_payload({
             "status": "ok",
             "mode": mode,
             "run_order": run_order,
@@ -1160,8 +1449,18 @@ def run_camera_flash_benchmark(
             "status_snapshot_delta": status_delta,
             "summary": summary,
             "cycles": results,
-        }
+            "warmup_count": int(warmup_count),
+            "warmup_cycles": warmup_results,
+            "warmup_summary": warmup_summary,
+            "coordinated_diag": coordinated_diag,
+            "cleanup": cleanup_diag,
+        })
     finally:
+        if mode == "coordinated_flash":
+            try:
+                _run_coordinated_cleanup()
+            except Exception:
+                pass
         try:
             # Prevent benchmark setup from perturbing later selftest memory headroom.
             ser.write(build_control_fn(CMD_STOP_FLASH, 0x6F, run_id))
