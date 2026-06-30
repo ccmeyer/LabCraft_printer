@@ -422,7 +422,7 @@ The repository now includes a host-side camera benchmark integrated with the HIL
 - execution order: configurable
   - default: `auto`
     - resolves to `pre_selftest` for `flash_only`
-    - resolves to `post_selftest` for `print_then_flash`
+    - resolves to `post_selftest` for `print_then_flash` and `coordinated_flash`
   - explicit override: `pre_selftest` or `post_selftest` (runner re-sends HELLO before post-selftest benchmark to resume status frames)
 
 ### Methodology
@@ -435,23 +435,30 @@ For fixed settings (no per-shot setting churn), the benchmark:
    - `CMD_HOME_PR_BOTH` (with explicit fast/slow/backoff params)
    - `CMD_P_REG_START` / `CMD_R_REG_START`
    - waits for pressure-ready status within timeout
-2. Sends imaging config commands to firmware:
+2. If mode is `coordinated_flash`, runs the same homing/pressure setup, sets
+   print/refuel pressure targets to 0.6 psi, starts regulation, sets gripper
+   refresh to 1000 ms, opens the gripper, and then configures the flash path
+   with at least one imaging droplet so the firmware uses the print/refuel
+   valve path.
+3. Sends imaging config commands to firmware:
    - `CMD_INIT_FLASH`
    - `CMD_SET_FLASH_DURATION`
    - `CMD_SET_FLASH_DELAY`
    - `CMD_SET_IMAGING_DROPLETS`
-3. Runs repeated trigger cycles using Pi GPIO trigger/ack lines.
-4. Selects flashed frames using the same time-gated threshold/fallback pattern as normal capture.
-5. Stores per-cycle timestamps and aggregate latency/FPS statistics.
+4. Runs warm-up trigger cycles first, then repeated counted trigger cycles using Pi GPIO trigger/ack lines.
+5. Selects flashed frames using the same time-gated threshold/fallback pattern as normal capture.
+6. Stores per-cycle timestamps and aggregate latency/FPS statistics.
 
 Mode options:
 
 - `flash_only` (default baseline): forces `num_droplets=0` to isolate trigger/ack path.
 - `print_then_flash`: uses print path (`num_droplets>0`) and performs pressure-ready preflight before cycles.
+- `coordinated_flash`: uses print path (`num_droplets>=1`) while pressure regulation,
+  valve actuation, and stochastic gripper refresh overlap are active.
 
 Practical run-order note:
 
-- `print_then_flash` in `pre_selftest` order can lower SAFE selftest memory-headroom margins because the benchmark executes additional homing/regulation work before selftest metrics are captured.
+- `print_then_flash` or `coordinated_flash` in `pre_selftest` order can lower SAFE selftest memory-headroom margins because the benchmark executes additional homing/regulation work before selftest metrics are captured.
 - For stable SAFE selftest pass/fail behavior plus print-path benchmarking, use `post_selftest`.
 
 ### Recorded per-cycle timestamps

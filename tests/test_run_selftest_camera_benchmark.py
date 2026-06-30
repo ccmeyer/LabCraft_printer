@@ -88,6 +88,47 @@ def _queue_ack(mod, seq8: int, seq32: int, result: int | None = None, expected: 
     return _frame_payload(mod, bytes(payload))
 
 
+def _bench_status_frame(
+    mod,
+    *,
+    flash_width_ns: int = 1000,
+    flash_delay_us: int = 5000,
+    imaging_droplets: int = 0,
+    flash_num: int = 0,
+    ext_count: int = 0,
+    print_pressure: int | None = None,
+    refuel_pressure: int | None = None,
+    print_target: int | None = None,
+    refuel_target: int | None = None,
+    print_active: int | None = None,
+    refuel_active: int | None = None,
+    grip_refresh_ms: int | None = None,
+    grip_pulse_ms: int | None = None,
+) -> bytes:
+    payload = bytearray([mod.CMD_STATUS])
+    payload += bytes([mod.TAG_FLASH_WIDTH, 4]) + int(flash_width_ns).to_bytes(4, "little")
+    payload += bytes([mod.TAG_FLASH_DELAY, 4]) + int(flash_delay_us).to_bytes(4, "little")
+    payload += bytes([mod.TAG_FLASH_DROPS, 4]) + int(imaging_droplets).to_bytes(4, "little")
+    payload += bytes([mod.TAG_FLASH_NUM, 4]) + int(flash_num).to_bytes(4, "little")
+    payload += bytes([mod.TAG_EXT_COUNT, 4]) + int(ext_count).to_bytes(4, "little")
+    optional_u16 = (
+        (mod.TAG_PRINT_P, print_pressure),
+        (mod.TAG_REFUEL_P, refuel_pressure),
+        (mod.TAG_TAR_PRINT_P, print_target),
+        (mod.TAG_TAR_REFUEL_P, refuel_target),
+        (mod.TAG_ACTIVE_P, print_active),
+        (mod.TAG_ACTIVE_R, refuel_active),
+    )
+    for tag, value in optional_u16:
+        if value is not None:
+            payload += bytes([tag, 2]) + int(value).to_bytes(2, "little")
+    if grip_refresh_ms is not None:
+        payload += bytes([mod.TAG_GRIP_REFRESH, 4]) + int(grip_refresh_ms).to_bytes(4, "little")
+    if grip_pulse_ms is not None:
+        payload += bytes([mod.TAG_GRIP_PULSE, 4]) + int(grip_pulse_ms).to_bytes(4, "little")
+    return _frame_payload(mod, bytes(payload))
+
+
 def _selftest_done(mod, run_id: int, failed: int = 0, aborted: int = 0) -> bytes:
     payload = bytearray([mod.CMD_SELFTEST_DONE, 2])
     payload += bytes([mod.TAG_RUN_ID, 4]) + run_id.to_bytes(4, "little")
@@ -150,6 +191,83 @@ def _strict_benchmark_payload(run_id: int, *, cycles: int = 10, next_seq32: int 
     }
 
 
+class FakeOutputLine:
+    def __init__(self):
+        self.value = 0
+
+    def set_value(self, value: int):
+        self.value = int(value)
+
+    def read_value(self):
+        return self.value
+
+    def release(self):
+        return None
+
+
+class FakeAckLine:
+    def __init__(self):
+        self.value = 0
+
+    def event_wait(self, timeout_s: float) -> bool:
+        if float(timeout_s) <= 0:
+            return False
+        self.value = 1
+        return True
+
+    def event_consume(self):
+        return None
+
+    def read_value(self):
+        return self.value
+
+    def release(self):
+        return None
+
+
+class FakeCaptureRequest:
+    def __init__(self, value: float):
+        self.value = float(value)
+
+    def get_metadata(self):
+        return {}
+
+    def make_array(self, _name: str):
+        return [[self.value]]
+
+    def release(self):
+        return None
+
+
+class FakePicamera2:
+    values = []
+
+    def __init__(self, _index: int):
+        self.sensor_resolution = (1, 1)
+
+    def create_video_configuration(self, **_kwargs):
+        return {}
+
+    def configure(self, _cfg):
+        return None
+
+    def set_controls(self, _controls):
+        return None
+
+    def start(self):
+        return None
+
+    def capture_request(self):
+        value = self.values.pop(0) if self.values else 235.0
+        return FakeCaptureRequest(value)
+
+    def stop(self):
+        return None
+
+    def close(self):
+        return None
+
+
 def test_summarize_cycles_basic():
     mod = _load_module(BENCH_PATH, "camera_flash_benchmark_mod_summary")
     cycles = [
@@ -201,6 +319,7 @@ def test_resolve_camera_benchmark_order_auto():
     run_mod = _load_module(RUN_SELFTEST_PATH, "run_selftest_mod_order_resolve")
     assert run_mod._resolve_camera_benchmark_order("flash_only", "auto") == "pre_selftest"
     assert run_mod._resolve_camera_benchmark_order("print_then_flash", "auto") == "post_selftest"
+    assert run_mod._resolve_camera_benchmark_order("coordinated_flash", "auto") == "post_selftest"
     assert run_mod._resolve_camera_benchmark_order("print_then_flash", "pre_selftest") == "pre_selftest"
 
 
@@ -211,6 +330,17 @@ def test_camera_benchmark_payload_pass_requires_flash_detected_cycles():
 
     payload["summary"]["flash_detected_cycles"] = 9
     assert run_mod._camera_benchmark_payload_pass(payload) is False
+
+
+def test_camera_benchmark_payload_pass_requires_coordinated_overlap():
+    run_mod = _load_module(RUN_SELFTEST_PATH, "run_selftest_mod_coordinated_gate")
+    payload = _strict_benchmark_payload(run_id=123, cycles=10, next_seq32=5)
+    payload["mode"] = "coordinated_flash"
+    payload["coordinated_diag"] = {"overlap_window_satisfied": False}
+    assert run_mod._camera_benchmark_payload_pass(payload) is False
+
+    payload["coordinated_diag"]["overlap_window_satisfied"] = True
+    assert run_mod._camera_benchmark_payload_pass(payload) is True
 
 
 def test_status_snapshot_parses_status_tlvs_from_payload_index_1():
@@ -254,7 +384,7 @@ def test_benchmark_queue_command_helper_uses_monotonic_seq32(monkeypatch):
         ]
     )
     serial = FakeSerial(inbound)
-    clock = FakeClock()
+    clock = FakeClock(step=0.001)
     monkeypatch.setattr(
         mod,
         "time",
@@ -286,7 +416,7 @@ def test_benchmark_queue_command_helper_uses_monotonic_seq32(monkeypatch):
 def test_benchmark_queue_command_helper_rejects_gap_ack(monkeypatch):
     mod = _load_module(BENCH_PATH, "camera_flash_benchmark_mod_queue_gap")
     serial = FakeSerial(_queue_ack(mod, seq8=5, seq32=5, result=mod.ACK_RESULT_GAP, expected=1))
-    clock = FakeClock()
+    clock = FakeClock(step=0.001)
     monkeypatch.setattr(
         mod,
         "time",
@@ -370,6 +500,143 @@ def test_camera_flash_benchmark_config_mismatch_returns_setup_failed_without_cyc
     assert payload["cycles"] == []
 
 
+def test_camera_flash_benchmark_warmup_excluded_from_counted_summary(monkeypatch):
+    mod = _load_module(BENCH_PATH, "camera_flash_benchmark_mod_warmup")
+    inbound = b"".join(
+        [
+            _queue_ack(mod, seq8=1, seq32=1),
+            _queue_ack(mod, seq8=2, seq32=2),
+            _queue_ack(mod, seq8=3, seq32=3),
+            _queue_ack(mod, seq8=4, seq32=4),
+            _bench_status_frame(mod, imaging_droplets=0, flash_num=0, ext_count=0),
+            _bench_status_frame(mod, imaging_droplets=0, flash_num=1, ext_count=1),
+            _bench_status_frame(mod, imaging_droplets=0, flash_num=3, ext_count=3),
+        ]
+    )
+    serial = FakeSerial(inbound)
+    clock = FakeClock(step=0.001)
+    FakePicamera2.values = [0.0, 235.0, 235.0]
+    monkeypatch.setattr(
+        mod,
+        "time",
+        SimpleNamespace(monotonic=clock.monotonic, monotonic_ns=clock.monotonic_ns, sleep=clock.sleep),
+    )
+    monkeypatch.setitem(sys.modules, "picamera2", SimpleNamespace(Picamera2=FakePicamera2))
+    monkeypatch.setattr(mod, "_gpiofind", lambda _name: ("gpiochip0", 0))
+    monkeypatch.setattr(mod, "_make_output_line", lambda *_args, **_kwargs: FakeOutputLine())
+    monkeypatch.setattr(mod, "_make_rising_edge_input", lambda *_args, **_kwargs: FakeAckLine())
+
+    payload = mod.run_camera_flash_benchmark(
+        serial,
+        _build_control_for(mod),
+        run_id=1234,
+        config=mod.BenchmarkConfig(cycles=2, warmup_cycles=1, max_new_frames=1),
+        start_seq32=1,
+    )
+
+    assert payload["status"] == "ok"
+    assert payload["warmup_count"] == 1
+    assert payload["warmup_summary"]["flash_detected_cycles"] == 0
+    assert payload["warmup_cycles"][0]["reason"] == "fallback"
+    assert payload["summary"]["requested_cycles"] == 2
+    assert payload["summary"]["flash_detected_cycles"] == 2
+    assert payload["summary"]["success_cycles"] == 2
+    assert len(payload["cycles"]) == 2
+
+
+def test_coordinated_flash_preflight_sends_expected_monotonic_commands(monkeypatch):
+    mod = _load_module(BENCH_PATH, "camera_flash_benchmark_mod_coordinated_preflight")
+    target_raw = mod._pressure_raw_from_psi(0.6)
+    inbound = b"".join([_queue_ack(mod, seq8=i, seq32=i) for i in range(1, 10)])
+    serial = FakeSerial(inbound)
+    clock = FakeClock()
+    monkeypatch.setattr(
+        mod,
+        "time",
+        SimpleNamespace(monotonic=clock.monotonic, monotonic_ns=clock.monotonic_ns, sleep=clock.sleep),
+    )
+    status_calls = []
+
+    def fake_status_snapshot(_ser, *, sample_ms=250):
+        status_calls.append(sample_ms)
+        if len(status_calls) == 1:
+            return {}
+        if len(status_calls) == 2:
+            return {"grip_refresh_ms": 60000, "grip_pulse_ms": 800}
+        return {"grip_refresh_ms": 1000, "grip_pulse_ms": 800}
+
+    monkeypatch.setattr(mod, "_status_snapshot_from_serial", fake_status_snapshot)
+    monkeypatch.setattr(
+        mod,
+        "_pressure_preflight",
+        lambda _ser, _timeout_ms: (
+            True,
+            {
+                "print_pressure": target_raw,
+                "refuel_pressure": target_raw,
+                "print_target": target_raw,
+                "refuel_target": target_raw,
+                "print_active": 1,
+                "refuel_active": 1,
+            },
+        ),
+    )
+
+    next_seq32, preflight = mod._coordinated_flash_preflight(
+        serial,
+        _build_control_for(mod),
+        start_seq32=1,
+        timeout_ms=15000,
+        pressure_psi=0.6,
+        gripper_refresh_ms=1000,
+    )
+
+    assert next_seq32 == 10
+    assert preflight["pass"] is True
+    payloads = [_write_payload(frame) for frame in serial.writes]
+    assert [p[0] for p in payloads] == [
+        mod.CMD_ENABLE_MOTORS,
+        mod.CMD_HOME_XY,
+        mod.CMD_HOME_PR_BOTH,
+        mod.CMD_PR_PRINT,
+        mod.CMD_PR_REFUEL,
+        mod.CMD_P_REG_START,
+        mod.CMD_R_REG_START,
+        mod.CMD_SET_GRIPPER_PARAMS,
+        mod.CMD_GRIPPER_OPEN,
+    ]
+    assert [_write_seq32(mod, frame) for frame in serial.writes] == list(range(1, 10))
+    set_print_tlv = mod._parse_tlvs(payloads[3][2:])
+    set_refuel_tlv = mod._parse_tlvs(payloads[4][2:])
+    assert int.from_bytes(set_print_tlv[mod.TAG_P1], "little") == 2162
+    assert int.from_bytes(set_refuel_tlv[mod.TAG_P1], "little") == 2162
+
+
+def test_coordinated_flash_pressure_setup_ack_failure_returns_setup_failed(monkeypatch):
+    mod = _load_module(BENCH_PATH, "camera_flash_benchmark_mod_coordinated_setup_fail")
+    serial = FakeSerial(_queue_ack(mod, seq8=1, seq32=1, result=mod.ACK_RESULT_GAP, expected=1))
+    clock = FakeClock()
+    monkeypatch.setattr(
+        mod,
+        "time",
+        SimpleNamespace(monotonic=clock.monotonic, monotonic_ns=clock.monotonic_ns, sleep=clock.sleep),
+    )
+
+    payload = mod.run_camera_flash_benchmark(
+        serial,
+        _build_control_for(mod),
+        run_id=1234,
+        config=mod.BenchmarkConfig(cycles=3, mode="coordinated_flash"),
+        start_seq32=1,
+    )
+
+    assert payload["status"] == "setup_failed"
+    assert payload["setup_failure_reason"] == "command_setup_failed"
+    assert payload["summary"]["completed_cycles"] == 0
+    assert payload["cycles"] == []
+    assert payload["coordinated_diag"]["required"] is True
+
+
 def test_run_selftest_writes_camera_benchmark_artifact(monkeypatch, tmp_path):
     run_mod = _load_module(RUN_SELFTEST_PATH, "run_selftest_mod_cam_ok")
     run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF
@@ -440,6 +707,59 @@ def test_run_selftest_writes_camera_benchmark_artifact(monkeypatch, tmp_path):
     assert artifact.exists()
     payload = run_mod.json.loads(artifact.read_text(encoding="utf-8"))
     assert payload["summary"]["effective_fps"] == 9.5
+
+
+def test_run_selftest_accepts_coordinated_flash_config(monkeypatch, tmp_path):
+    run_mod = _load_module(RUN_SELFTEST_PATH, "run_selftest_mod_coordinated_config")
+    captured = {}
+
+    class FakeCfg:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    def fake_bench_run(_ser, _build_control, *, run_id, config, start_seq32=1):
+        captured["config"] = config.kwargs
+        return {
+            **_strict_benchmark_payload(run_id, cycles=4, next_seq32=12),
+            "mode": "coordinated_flash",
+            "coordinated_diag": {"overlap_window_satisfied": True},
+        }
+
+    fake_bench = SimpleNamespace(BenchmarkConfig=FakeCfg, run_camera_flash_benchmark=fake_bench_run)
+    monkeypatch.setitem(sys.modules, "camera_flash_benchmark", fake_bench)
+    host_checks = []
+    args = SimpleNamespace(
+        out=str(tmp_path / "selftest.json"),
+        camera_benchmark_cycles=4,
+        camera_benchmark_exposure_us=20000,
+        camera_benchmark_flash_delay_us=5000,
+        camera_benchmark_flash_width_us=1000,
+        camera_benchmark_num_droplets=1,
+        camera_benchmark_attempt_timeout_ms=250,
+        camera_benchmark_max_new_frames=6,
+        camera_benchmark_preflight_pressure_timeout_ms=15000,
+        camera_benchmark_warmup_cycles=2,
+    )
+
+    runtime_error, bench_failed, next_seq32 = run_mod._run_camera_benchmark_phase(
+        args,
+        ser=object(),
+        run_id=123,
+        host_checks=host_checks,
+        build_control_fn=lambda *_args, **_kwargs: b"",
+        phase="post_selftest",
+        mode="coordinated_flash",
+        requested_order="auto",
+        start_seq32=1,
+    )
+
+    assert runtime_error is False
+    assert bench_failed is False
+    assert next_seq32 == 12
+    assert captured["config"]["mode"] == "coordinated_flash"
+    assert captured["config"]["num_droplets"] == 1
+    assert captured["config"]["warmup_cycles"] == 2
+    assert host_checks[0]["pass"] is True
 
 
 def test_run_selftest_pre_benchmark_advances_selftest_seq32(monkeypatch, tmp_path):

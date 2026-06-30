@@ -503,13 +503,13 @@ def _camera_benchmark_artifact_path(base_out: str) -> str:
 
 def _resolve_camera_benchmark_order(mode: str, requested_order: str) -> str:
     mode_norm = str(mode or "flash_only").strip().lower()
-    if mode_norm not in ("flash_only", "print_then_flash"):
+    if mode_norm not in ("flash_only", "print_then_flash", "coordinated_flash"):
         mode_norm = "flash_only"
     order_norm = str(requested_order or "auto").strip().lower()
     if order_norm not in ("auto", "pre_selftest", "post_selftest"):
         order_norm = "auto"
     if order_norm == "auto":
-        return "post_selftest" if mode_norm == "print_then_flash" else "pre_selftest"
+        return "post_selftest" if mode_norm in ("print_then_flash", "coordinated_flash") else "pre_selftest"
     return order_norm
 
 
@@ -546,6 +546,12 @@ def _camera_benchmark_payload_pass(payload: dict) -> bool:
                 return False
         except (TypeError, ValueError):
             return False
+    if payload.get("mode") == "coordinated_flash":
+        coordinated_diag = payload.get("coordinated_diag") or {}
+        if not isinstance(coordinated_diag, dict):
+            return False
+        if not bool(coordinated_diag.get("overlap_window_satisfied", False)):
+            return False
     return True
 
 
@@ -566,11 +572,11 @@ def _run_camera_benchmark_phase(
         from camera_flash_benchmark import BenchmarkConfig, run_camera_flash_benchmark
 
         mode = str(mode or "flash_only").strip().lower()
-        if mode not in ("flash_only", "print_then_flash"):
+        if mode not in ("flash_only", "print_then_flash", "coordinated_flash"):
             mode = "flash_only"
         effective_droplets = (
             max(1, int(getattr(args, "camera_benchmark_num_droplets", 1)))
-            if mode == "print_then_flash"
+            if mode in ("print_then_flash", "coordinated_flash")
             else 0
         )
 
@@ -587,6 +593,7 @@ def _run_camera_benchmark_phase(
             preflight_pressure_timeout_ms=max(
                 50, int(getattr(args, "camera_benchmark_preflight_pressure_timeout_ms", 1000))
             ),
+            warmup_cycles=max(0, int(getattr(args, "camera_benchmark_warmup_cycles", 1))),
         )
         bench_payload = run_camera_flash_benchmark(
             ser,
@@ -615,8 +622,10 @@ def _run_camera_benchmark_phase(
                     "start_seq32": int(start_seq32),
                     "next_seq32": int(next_seq32),
                     "summary": bench_payload.get("summary", {}),
+                    "warmup_summary": bench_payload.get("warmup_summary", {}),
                     "preflight": bench_payload.get("preflight", {}),
                     "init_diag": bench_payload.get("init_diag", {}),
+                    "coordinated_diag": bench_payload.get("coordinated_diag", {}),
                     "status_snapshot_delta": bench_payload.get("status_snapshot_delta", {}),
                 },
                 "timestamp": now_iso(),
@@ -910,7 +919,7 @@ def run(args: argparse.Namespace) -> int:
                 return write_report_and_return(3)
 
         bench_mode = str(getattr(args, "camera_benchmark_mode", "flash_only") or "flash_only").strip().lower()
-        if bench_mode not in ("flash_only", "print_then_flash"):
+        if bench_mode not in ("flash_only", "print_then_flash", "coordinated_flash"):
             bench_mode = "flash_only"
         requested_bench_order = str(getattr(args, "camera_benchmark_order", "auto") or "auto").strip().lower()
         bench_order = _resolve_camera_benchmark_order(bench_mode, requested_bench_order)
@@ -1519,8 +1528,9 @@ def main() -> int:
     p.add_argument("--camera-benchmark-flash-delay-us", type=int, default=5000)
     p.add_argument("--camera-benchmark-flash-width-us", type=int, default=1000)
     p.add_argument("--camera-benchmark-num-droplets", type=int, default=1)
+    p.add_argument("--camera-benchmark-warmup-cycles", type=int, default=1)
     p.add_argument("--camera-benchmark-order", choices=("auto", "pre_selftest", "post_selftest"), default="auto")
-    p.add_argument("--camera-benchmark-mode", choices=("flash_only", "print_then_flash"), default="flash_only")
+    p.add_argument("--camera-benchmark-mode", choices=("flash_only", "print_then_flash", "coordinated_flash"), default="flash_only")
     p.add_argument("--camera-benchmark-preflight-pressure-timeout-ms", type=int, default=1000)
     p.add_argument("--camera-benchmark-attempt-timeout-ms", type=int, default=250)
     p.add_argument("--camera-benchmark-max-new-frames", type=int, default=6)
