@@ -1428,6 +1428,7 @@ class PrinterHeadRecoveryDialog(QtWidgets.QDialog):
 class DropletImagingDialog(QtWidgets.QDialog):
     REFUEL_LEVEL_CHART_WINDOW_SAMPLES = 100
     REFUEL_LEVEL_CHART_FALLBACK_HEIGHT_PX = 100.0
+    IMAGER_CLOSE_STOP_TIMEOUT_S = 10.0
     EXPORT_CALIBRATION_RECORDS_TEXT = "Export Calibration Records"
     EXPORT_CALIBRATION_RECORDS_ACTIVE_TEXT = "Exporting..."
     EXPORT_CALIBRATION_RECORDS_DEFAULT_TOOLTIP = (
@@ -1524,6 +1525,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._stream_capture_last_status = None
         self._stream_capture_mass_dialog = None
         self._stream_capture_dialog_closing = False
+        self._imager_close_after_stop_requested = False
+        self._imager_close_after_stop_started_monotonic = None
+        self._imager_close_retry_count = 0
         self._stream_capture_gripper_preamble_attempted = False
         self._stream_capture_gripper_restore_attempted = False
         self._stream_capture_loading_move_attempted = False
@@ -2631,8 +2635,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         self.model.calibration_manager.calibrationStageChanged.connect(self.update_stage_and_log)
         self.model.calibration_manager.calibrationCompleted.connect(self.on_calibration_completed)
+        self.model.calibration_manager.calibrationCompleted.connect(self._retry_imager_close_after_stop)
         self.model.calibration_manager.calibrationQueueCompleted.connect(self.on_calibration_queue_completed)
+        self.model.calibration_manager.calibrationQueueCompleted.connect(self._retry_imager_close_after_stop)
         self.model.calibration_manager.calibrationError.connect(self.on_calibration_error)
+        self.model.calibration_manager.calibrationError.connect(self._retry_imager_close_after_stop)
         self.model.calibration_manager.calibrationStageChanged.connect(self._on_refuel_calibration_stage_changed)
         self.model.calibration_manager.calibrationCompleted.connect(self._on_refuel_calibration_completed)
         self.model.calibration_manager.calibrationQueueCompleted.connect(self._on_refuel_calibration_queue_completed)
@@ -2640,6 +2647,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         capture_failed_signal = getattr(self.model.calibration_manager, "captureFailed", None)
         if capture_failed_signal is not None:
             capture_failed_signal.connect(self._on_droplet_capture_failed)
+            capture_failed_signal.connect(self._retry_imager_close_after_stop)
         self.model.calibration_manager.position_diff_dict_signal.connect(self.update_position_diffs)
         self.model.calibration_manager.characterizationSummaryUpdated.connect(self.populate_summary_table)
         self.model.calibration_manager.calibrationStageChanged.connect(self._refresh_manual_control_lock_state)
@@ -9939,8 +9947,134 @@ class DropletImagingDialog(QtWidgets.QDialog):
         )
         self.image_label.setPixmap(scaled_pixmap)
 
+    def _imager_close_blocked_by_capture_or_calibration(self):
+        if bool(getattr(self, "_capture_request_pending", False)):
+            return True
+        try:
+            if bool(getattr(self.controller, "pending_capture_active", False)):
+                return True
+        except Exception:
+            pass
+        manager = getattr(self.model, "calibration_manager", None)
+        if manager is None:
+            return False
+        if getattr(manager, "activeCalibration", None) is not None:
+            return True
+        try:
+            if len(getattr(manager, "calibration_queue", None) or []) > 0:
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _reset_imager_deferred_close_state(self):
+        self._imager_close_after_stop_requested = False
+        self._imager_close_after_stop_started_monotonic = None
+        self._imager_close_retry_count = 0
+        self._stream_capture_dialog_closing = False
+
+    def _imager_close_monotonic(self):
+        try:
+            return float(time.monotonic())
+        except Exception:
+            return 0.0
+
+    def _schedule_imager_close_retry(self, delay_ms=100):
+        if not bool(getattr(self, "_imager_close_after_stop_requested", False)):
+            return
+        try:
+            self._imager_close_retry_count = int(getattr(self, "_imager_close_retry_count", 0) or 0) + 1
+        except Exception:
+            self._imager_close_retry_count = 1
+        try:
+            QTimer.singleShot(max(0, int(delay_ms)), self._retry_imager_close_after_stop)
+        except Exception:
+            pass
+
+    def _retry_imager_close_after_stop(self, *_args):
+        if not bool(getattr(self, "_imager_close_after_stop_requested", False)):
+            return
+        if self._imager_close_blocked_by_capture_or_calibration():
+            started = getattr(self, "_imager_close_after_stop_started_monotonic", None)
+            if started is None:
+                started = self._imager_close_monotonic()
+                self._imager_close_after_stop_started_monotonic = started
+            try:
+                elapsed_s = max(0.0, self._imager_close_monotonic() - float(started))
+            except Exception:
+                elapsed_s = 0.0
+            timeout_s = float(getattr(self, "IMAGER_CLOSE_STOP_TIMEOUT_S", 10.0) or 10.0)
+            if elapsed_s >= timeout_s:
+                self._reset_imager_deferred_close_state()
+                updater = getattr(self, "update_stage_and_log", None)
+                if callable(updater):
+                    try:
+                        updater(
+                            "Close is still waiting for calibration/camera cleanup; the imager remains open.",
+                            "orange",
+                        )
+                    except Exception:
+                        pass
+                return
+            self._schedule_imager_close_retry(100)
+            return
+        try:
+            self.close()
+        except Exception:
+            self._reset_imager_deferred_close_state()
+
+    def _request_imager_close_after_capture_stop(self, event):
+        try:
+            event.ignore()
+        except Exception:
+            pass
+
+        first_request = not bool(getattr(self, "_imager_close_after_stop_requested", False))
+        self._imager_close_after_stop_requested = True
+        self._stream_capture_dialog_closing = True
+        if first_request:
+            self._imager_close_after_stop_started_monotonic = self._imager_close_monotonic()
+            self._imager_close_retry_count = 0
+            updater = getattr(self, "update_stage_and_log", None)
+            if callable(updater):
+                try:
+                    updater("Stopping calibration before closing imager...", "orange")
+                except Exception:
+                    pass
+            timer = getattr(self, "camera_timer", None)
+            if timer is not None:
+                try:
+                    timer.stop()
+                except Exception:
+                    pass
+            canceller = getattr(self.controller, "cancel_pending_droplet_capture", None)
+            if callable(canceller):
+                try:
+                    canceller("imager_close", emit_capture_failed=True, recover=True)
+                except Exception as exc:
+                    print(f"[Camera] imager close capture cancellation failed: {exc}")
+            manager = getattr(self.model, "calibration_manager", None)
+            calibration_active = getattr(manager, "activeCalibration", None) is not None
+            try:
+                queue_active = len(getattr(manager, "calibration_queue", None) or []) > 0
+            except Exception:
+                queue_active = False
+            if calibration_active or queue_active:
+                stopper = getattr(self.controller, "stop_calibration", None)
+                if callable(stopper):
+                    try:
+                        stopper()
+                    except Exception as exc:
+                        print(f"[Camera] imager close calibration stop failed: {exc}")
+            try:
+                self._set_capture_request_pending(False)
+            except Exception:
+                self._capture_request_pending = False
+        self._schedule_imager_close_retry(100)
+
     def closeEvent(self, event):
         """Handle the closing of the dialog."""
+        deferred_close_requested = bool(getattr(self, "_imager_close_after_stop_requested", False))
         if self._should_confirm_close_without_applied_calibration():
             response = QtWidgets.QMessageBox.question(
                 self,
@@ -9950,9 +10084,24 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 QtWidgets.QMessageBox.No,
             )
             if response != QtWidgets.QMessageBox.Yes:
+                if deferred_close_requested:
+                    self._reset_imager_deferred_close_state()
+                    updater = getattr(self, "update_stage_and_log", None)
+                    if callable(updater):
+                        try:
+                            updater("Close cancelled; calibration stop completed.", "orange")
+                        except Exception:
+                            pass
                 event.ignore()
                 return
 
+        if self._imager_close_blocked_by_capture_or_calibration():
+            self._request_imager_close_after_capture_stop(event)
+            return
+
+        self._imager_close_after_stop_requested = False
+        self._imager_close_after_stop_started_monotonic = None
+        self._imager_close_retry_count = 0
         self._stream_capture_dialog_closing = True
         recovery_dialog = getattr(self, "_printer_head_recovery_dialog", None)
         if recovery_dialog is not None:

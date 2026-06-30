@@ -25,6 +25,18 @@ class _BusyThenSuccessCaptureSignal:
         callback(np.zeros((8, 8, 3), dtype=np.uint8))
 
 
+class _CancelledCaptureSignal:
+    def __init__(self):
+        self.emit_count = 0
+
+    def emit(self, callback):
+        self.emit_count += 1
+        callback._capture_rejection_reason = "capture_cancelled"
+        callback._capture_cancel_reason = "unit_test_cancel"
+        callback._capture_rejection_state = {"worker_active": True}
+        callback(None)
+
+
 def test_capture_policy_busy_rejection_backs_off_without_consuming_attempt(monkeypatch):
     proc = BaseCalibrationProcess.__new__(BaseCalibrationProcess)
     events = []
@@ -75,6 +87,51 @@ def test_capture_policy_busy_rejection_backs_off_without_consuming_attempt(monke
     assert success_events[-1]["attempt"] == 1
     assert saved and saved[-1]["metadata"]["attempt"] == 1
     assert completed == [True]
+
+
+def test_capture_policy_cancelled_capture_is_terminal(monkeypatch):
+    proc = BaseCalibrationProcess.__new__(BaseCalibrationProcess)
+    events = []
+    errors = []
+    scheduled = []
+    capture_signal = _CancelledCaptureSignal()
+    proc._record_event = lambda event_type, payload=None, **kwargs: events.append(
+        (str(event_type), dict(payload or {}), dict(kwargs or {}))
+    )
+    proc._record_error = lambda *args, **kwargs: errors.append((args, kwargs))
+    proc._start_timeout = lambda *_args, **_kwargs: object()
+    proc._cancel_timeout = lambda *_args, **_kwargs: None
+    proc._last_capture_refs = {}
+    proc._active_capture_pair_id = None
+    proc._record_capture = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("cancelled capture should not be recorded")
+    )
+    proc.calibration_manager = SimpleNamespace(
+        captureImageRequested=capture_signal,
+        emitCaptureCompleted=lambda: (_ for _ in ()).throw(
+            AssertionError("cancelled capture should not complete")
+        ),
+    )
+    monkeypatch.setattr(
+        calibration_model.QTimer,
+        "singleShot",
+        lambda delay_ms, callback: scheduled.append((int(delay_ms), callback)),
+    )
+
+    BaseCalibrationProcess._capture_with_policy(
+        proc,
+        set_attr="droplet_image",
+        stage_text="unit capture",
+        attempts_total=3,
+        guard_timeout_ms=5_000,
+    )
+
+    assert capture_signal.emit_count == 1
+    assert scheduled == []
+    assert errors == []
+    cancelled_events = [payload for event_type, payload, _kwargs in events if event_type == "capture_cancelled"]
+    assert cancelled_events
+    assert cancelled_events[0]["cancel_reason"] == "unit_test_cancel"
 
 
 def test_pressure_band_replicate_capture_uses_extended_guard_for_recovery_retry():

@@ -7,6 +7,7 @@ from unittest.mock import Mock
 
 import numpy as np
 
+import CalibrationClasses.View as calibration_view
 from Controller import Controller
 from CalibrationClasses.View import DropletImagingDialog
 
@@ -48,6 +49,18 @@ class _CaptureGuardTimer:
         if self.single_shot:
             self.active = False
         self.timeout.emit()
+
+
+class _CloseEvent:
+    def __init__(self):
+        self.accepted = False
+        self.ignored = False
+
+    def accept(self):
+        self.accepted = True
+
+    def ignore(self):
+        self.ignored = True
 
 
 class _DropletCamera:
@@ -270,6 +283,195 @@ def test_controller_failed_edge_timeout_completion_clears_pending_before_guard_t
     timer.fire()
 
     assert machine.recover_calls == []
+
+
+def test_controller_cancel_pending_capture_recovers_clears_waiter_and_ignores_late_frame():
+    controller, machine, camera_model = _make_controller()
+    callback = Mock()
+
+    assert controller.capture_droplet_image(callback=callback, capture_context="unit_cancel") is True
+    request_id = controller.pending_capture_request_id
+    timer = controller.pending_capture_guard_timer
+
+    result = controller.cancel_pending_droplet_capture("unit_test")
+
+    assert result["cancelled"] is True
+    assert result["request_id"] == request_id
+    assert result["capture_context"] == "unit_cancel"
+    assert result["recovery_result"]["ok"] is True
+    assert machine.recover_calls
+    assert "unit_test" in machine.recover_calls[-1]
+    assert timer.active is False
+    assert controller.pending_capture_callback is None
+    assert controller.pending_capture_context is None
+    assert controller.pending_capture_active is False
+    callback.assert_called_once_with(None)
+    assert getattr(callback, "_capture_rejection_reason") == "capture_cancelled"
+    assert getattr(callback, "_capture_cancel_reason") == "unit_test"
+    controller.model.calibration_manager.captureFailed.emit.assert_called_once()
+
+    late_frame = np.full((4, 5, 3), 55, dtype=np.uint8)
+    controller._on_capture_completed_payload(
+        {
+            "status": "success",
+            "request_id": request_id,
+            "cap_id": 999,
+            "frame": late_frame,
+            "capture_info": {"cap_id": 999, "reason": "threshold"},
+        }
+    )
+
+    assert camera_model.update_calls == []
+
+
+def test_controller_cancel_pending_capture_is_idempotent_without_pending_capture():
+    controller, machine, _camera_model = _make_controller()
+
+    result = controller.cancel_pending_droplet_capture("nothing_to_cancel")
+
+    assert result["cancelled"] is False
+    assert result["reason"] == "no_pending_capture"
+    assert machine.recover_calls == []
+    controller.model.calibration_manager.captureFailed.emit.assert_not_called()
+
+
+def test_controller_stop_calibration_cancels_pending_capture_before_manager_stop():
+    controller, _machine, _camera_model = _make_controller()
+    callback = Mock()
+    stop_observations = []
+
+    def _stop():
+        stop_observations.append(controller.pending_capture_active)
+
+    controller.model.calibration_manager.stop = Mock(side_effect=_stop)
+
+    assert controller.capture_droplet_image(callback=callback) is True
+
+    controller.stop_calibration()
+
+    assert stop_observations == [False]
+    callback.assert_called_once_with(None)
+    controller.model.calibration_manager.stop.assert_called_once_with()
+    controller.model.calibration_manager.captureFailed.emit.assert_called_once()
+
+
+def test_droplet_imager_close_defers_while_capture_or_calibration_is_active():
+    dialog = DropletImagingDialog.__new__(DropletImagingDialog)
+    event = _CloseEvent()
+    cancel_pending = Mock()
+    stop_calibration = Mock()
+    camera_timer = SimpleNamespace(stop=Mock())
+    manager = SimpleNamespace(activeCalibration=object(), calibration_queue=[])
+    pending_values = []
+
+    def _set_capture_request_pending(pending):
+        pending_values.append(bool(pending))
+        dialog._capture_request_pending = bool(pending)
+
+    dialog.model = SimpleNamespace(calibration_manager=manager)
+    dialog.controller = SimpleNamespace(
+        pending_capture_active=True,
+        cancel_pending_droplet_capture=cancel_pending,
+        stop_calibration=stop_calibration,
+    )
+    dialog.camera_timer = camera_timer
+    dialog._capture_request_pending = True
+    dialog._stream_capture_dialog_closing = False
+    dialog._imager_close_after_stop_requested = False
+    dialog._imager_close_after_stop_started_monotonic = None
+    dialog._imager_close_retry_count = 0
+    dialog._should_confirm_close_without_applied_calibration = lambda: False
+    dialog.update_stage_and_log = Mock()
+    dialog._set_capture_request_pending = _set_capture_request_pending
+    dialog._schedule_imager_close_retry = Mock()
+    dialog._imager_close_monotonic = Mock(return_value=123.0)
+
+    DropletImagingDialog.closeEvent(dialog, event)
+
+    assert event.ignored is True
+    assert event.accepted is False
+    assert dialog._stream_capture_dialog_closing is True
+    assert dialog._imager_close_after_stop_requested is True
+    assert dialog._imager_close_after_stop_started_monotonic == 123.0
+    assert dialog._imager_close_retry_count == 0
+    camera_timer.stop.assert_called_once_with()
+    cancel_pending.assert_called_once_with("imager_close", emit_capture_failed=True, recover=True)
+    stop_calibration.assert_called_once_with()
+    dialog.update_stage_and_log.assert_called_once()
+    assert pending_values == [False]
+    dialog._schedule_imager_close_retry.assert_called_once_with(100)
+
+
+def test_droplet_imager_deferred_close_rechecks_unapplied_prompt_and_can_be_cancelled(monkeypatch):
+    dialog = DropletImagingDialog.__new__(DropletImagingDialog)
+    event = _CloseEvent()
+    close_calls = []
+    prompt_calls = []
+    manager = SimpleNamespace(activeCalibration=None, calibration_queue=[])
+
+    def _close():
+        close_calls.append(True)
+        DropletImagingDialog.closeEvent(dialog, event)
+
+    monkeypatch.setattr(
+        calibration_view.QtWidgets.QMessageBox,
+        "question",
+        lambda *args, **kwargs: prompt_calls.append(args) or calibration_view.QtWidgets.QMessageBox.No,
+    )
+
+    dialog.model = SimpleNamespace(calibration_manager=manager)
+    dialog.controller = SimpleNamespace(pending_capture_active=False)
+    dialog._capture_request_pending = False
+    dialog._stream_capture_dialog_closing = True
+    dialog._imager_close_after_stop_requested = True
+    dialog._imager_close_after_stop_started_monotonic = 10.0
+    dialog._imager_close_retry_count = 2
+    dialog._should_confirm_close_without_applied_calibration = lambda: True
+    dialog._close_without_applied_calibration_message = lambda: "Apply result before closing?"
+    dialog.update_stage_and_log = Mock()
+    dialog.close = Mock(side_effect=_close)
+
+    DropletImagingDialog._retry_imager_close_after_stop(dialog)
+
+    assert close_calls == [True]
+    assert prompt_calls
+    assert event.ignored is True
+    assert event.accepted is False
+    assert dialog._imager_close_after_stop_requested is False
+    assert dialog._imager_close_after_stop_started_monotonic is None
+    assert dialog._imager_close_retry_count == 0
+    assert dialog._stream_capture_dialog_closing is False
+    dialog.update_stage_and_log.assert_called_once_with(
+        "Close cancelled; calibration stop completed.",
+        "orange",
+    )
+
+
+def test_droplet_imager_deferred_close_timeout_stops_retry_and_leaves_window_open():
+    dialog = DropletImagingDialog.__new__(DropletImagingDialog)
+    dialog._capture_request_pending = True
+    dialog._stream_capture_dialog_closing = True
+    dialog._imager_close_after_stop_requested = True
+    dialog._imager_close_after_stop_started_monotonic = 100.0
+    dialog._imager_close_retry_count = 5
+    dialog.IMAGER_CLOSE_STOP_TIMEOUT_S = 10.0
+    dialog._imager_close_monotonic = Mock(return_value=111.0)
+    dialog._schedule_imager_close_retry = Mock()
+    dialog.update_stage_and_log = Mock()
+    dialog.close = Mock()
+
+    DropletImagingDialog._retry_imager_close_after_stop(dialog)
+
+    assert dialog._imager_close_after_stop_requested is False
+    assert dialog._imager_close_after_stop_started_monotonic is None
+    assert dialog._imager_close_retry_count == 0
+    assert dialog._stream_capture_dialog_closing is False
+    dialog._schedule_imager_close_retry.assert_not_called()
+    dialog.close.assert_not_called()
+    dialog.update_stage_and_log.assert_called_once_with(
+        "Close is still waiting for calibration/camera cleanup; the imager remains open.",
+        "orange",
+    )
 
 
 def test_controller_overlapping_capture_resolves_waiting_callback():

@@ -4805,6 +4805,101 @@ class Controller(QObject):
         self.pending_capture_recovery_attempted = False
         self.pending_capture_throughput_mode = False
 
+    def cancel_pending_droplet_capture(self, reason, *, emit_capture_failed: bool = True, recover: bool = True):
+        request_id = getattr(self, "pending_capture_request_id", None)
+        capture_context = getattr(self, "pending_capture_context", None)
+        callback = getattr(self, "pending_capture_callback", None)
+        state_before = self._get_droplet_capture_state()
+        result = {
+            "cancelled": False,
+            "request_id": request_id,
+            "capture_context": capture_context,
+            "reason": str(reason or "capture_cancelled"),
+            "state_before": state_before,
+            "recovery_result": None,
+            "state_after": None,
+        }
+        if not bool(getattr(self, "pending_capture_active", False)):
+            result["reason"] = "no_pending_capture"
+            result["state_after"] = self._get_droplet_capture_state()
+            return result
+
+        cancel_reason = str(reason or "capture_cancelled")
+        message = f"Droplet capture cancelled: {cancel_reason}"
+        self._record_active_calibration_event(
+            "capture_cancel_requested",
+            {
+                "request_id": request_id,
+                "capture_context": capture_context,
+                "reason": cancel_reason,
+                "state": state_before,
+            },
+            level="warning",
+        )
+
+        recovery_result = {"ok": False, "ready_for_retry": False, "reason": "recovery_skipped"}
+        if recover:
+            recovery_result = self._recover_current_droplet_capture(
+                request_id,
+                reason=f"capture_cancelled reason={cancel_reason} request_id={request_id}",
+            )
+        result["recovery_result"] = dict(recovery_result or {})
+
+        self.last_capture_queue_rejection_reason = "capture_cancelled"
+        self.last_capture_queue_rejection_state = state_before
+        self._clear_pending_capture()
+
+        if callback is not None:
+            try:
+                setattr(callback, "_capture_rejection_reason", "capture_cancelled")
+                setattr(callback, "_capture_rejection_state", state_before)
+                setattr(callback, "_capture_cancel_reason", cancel_reason)
+            except Exception:
+                pass
+            try:
+                callback(None)
+            except Exception as exc:
+                print(f"Callback raised after capture cancellation: {exc}")
+
+        state_after = self._get_droplet_capture_state()
+        result.update(
+            {
+                "cancelled": True,
+                "state_after": state_after,
+            }
+        )
+        recovery_ok = bool((recovery_result or {}).get("ok"))
+        if recover:
+            self._record_active_calibration_event(
+                "capture_cancel_recovered" if recovery_ok else "capture_cancel_failed",
+                {
+                    "request_id": request_id,
+                    "capture_context": capture_context,
+                    "reason": cancel_reason,
+                    "recovery_result": dict(recovery_result or {}),
+                    "state": state_after,
+                },
+                level="info" if recovery_ok else "warning",
+            )
+        else:
+            self._record_active_calibration_event(
+                "capture_cancel_recovery_skipped",
+                {
+                    "request_id": request_id,
+                    "capture_context": capture_context,
+                    "reason": cancel_reason,
+                    "state": state_after,
+                },
+                level="warning",
+            )
+
+        if emit_capture_failed:
+            try:
+                self.model.calibration_manager.captureFailed.emit(message)
+            except Exception:
+                pass
+        return result
+
     def _fail_pending_capture(self, msg: str, *, emit_capture_failed: bool = True):
         cb = self.pending_capture_callback
         request_id = getattr(self, "pending_capture_request_id", None)
@@ -5657,6 +5752,7 @@ class Controller(QObject):
 
     def stop_calibration(self):
         # Tell the Model to stop the calibration.
+        self.cancel_pending_droplet_capture("calibration_stop", emit_capture_failed=True, recover=True)
         self.model.calibration_manager.stop()
 
     def start_flash(self):

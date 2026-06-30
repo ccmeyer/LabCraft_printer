@@ -8113,6 +8113,22 @@ class BaseCalibrationProcess(QObject):
 
                 if frame is None:
                     rejection_reason = str(getattr(_on_result, "_capture_rejection_reason", "") or "")
+                    if rejection_reason == "capture_cancelled":
+                        self._record_event(
+                            "capture_cancelled",
+                            {
+                                "set_attr": str(set_attr),
+                                "stage_text": str(stage_text),
+                                "attempt": int(state["attempt"]),
+                                "attempts_total": int(attempts_total),
+                                "cancel_reason": str(
+                                    getattr(_on_result, "_capture_cancel_reason", "") or ""
+                                ),
+                                "state": getattr(_on_result, "_capture_rejection_state", None) or {},
+                            },
+                            level="warning",
+                        )
+                        return
                     if rejection_reason in busy_retry_reasons and state["busy_retries"] < busy_retry_limit:
                         state["busy_retries"] += 1
                         self._record_event(
