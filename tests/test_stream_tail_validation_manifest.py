@@ -42,6 +42,62 @@ def test_stream_tail_validation_manifest_counts_and_subsets():
         "missing_tail_summaries": 1,
     }
 
+    assert manifest["summary"]["density_solution_counts"] == {
+        "BSA_50per": 43,
+        "EFTs": 13,
+        "EFTu": 6,
+        "Pmix": 4,
+        "Ribo": 1,
+        "SolB": 5,
+        "Water": 84,
+    }
+    assert manifest["summary"]["density_unassigned_rows"] == 0
+    assert manifest["summary"]["total_density_solution_counts"] == {
+        "BSA_50per": 43,
+        "EFTs": 13,
+        "EFTu": 6,
+        "Pmix": 4,
+        "Ribo": 1,
+        "SolB": 5,
+        "Water": 138,
+    }
+    assert manifest["summary"]["total_density_unassigned_rows"] == 0
+
+
+def test_stream_tail_validation_manifest_density_layer_assignments():
+    manifest = _load_manifest()
+
+    density_layer = manifest["density_layer"]
+    assert density_layer["schema_version"] == "density_assignment_v1"
+    assert density_layer["assignment_source"] == "user_confirmed_manifest_review"
+    assert density_layer["assignment_basis"] == "experiment_id"
+    assert (REPO_ROOT / density_layer["density_source_csv"]).exists()
+    assert density_layer["measurements_g_per_ml"]["Water"] == 1.0
+    assert density_layer["measurements_g_per_ml"]["BSA_50per"] == 1.095
+    assert density_layer["experiment_assignments"]["Stream_online_rep11-20260409_093958"] == "Water"
+    assert density_layer["experiment_assignments"]["stream_120um_rep2-20260612_113906"] == "Water"
+
+    assert all(run["density"]["assignment_confidence"] == "confirmed" for run in manifest["runs"])
+    assert all(row["density"]["assignment_confidence"] == "confirmed" for row in manifest["excluded_rows"])
+
+    by_run = {run["run_id"]: run for run in manifest["runs"]}
+    eft_run = by_run["run_20260424_230828_897abe11"]
+    assert eft_run["density"]["solution_id"] == "EFTs"
+    assert eft_run["density"]["density_g_per_ml"] == 1.087
+    density_corrected_volume_nl = 0.0809 * 1000.0 / 1.087
+    assert eft_run["gravimetric"]["gravimetric_volume_nl"] == round(density_corrected_volume_nl, 3)
+    assert eft_run["gravimetric"]["gravimetric_volume_nl_water_density"] == 80.9
+    assert eft_run["current_analysis"]["volume_error_vs_gravimetric_density_corrected_nl"] == round(
+        eft_run["current_analysis"]["predicted_volume_nl"] - density_corrected_volume_nl,
+        6,
+    )
+
+    water_run = by_run["run_20260612_115255_6b9e930d"]
+    assert water_run["density"]["solution_id"] == "Water"
+    assert water_run["gravimetric"]["gravimetric_volume_nl"] == water_run["gravimetric"][
+        "gravimetric_volume_nl_water_density"
+    ]
+
 
 def test_stream_tail_validation_manifest_has_replayable_relative_paths():
     manifest = _load_manifest()
