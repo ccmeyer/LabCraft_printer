@@ -534,7 +534,13 @@ def _camera_benchmark_payload_pass(payload: dict) -> bool:
         return False
     if requested_i <= 0:
         return False
-    for key in ("completed_cycles", "ack_seen_cycles", "frame_selected_cycles", "success_cycles"):
+    for key in (
+        "completed_cycles",
+        "ack_seen_cycles",
+        "frame_selected_cycles",
+        "flash_detected_cycles",
+        "success_cycles",
+    ):
         try:
             if int(summary.get(key)) != requested_i:
                 return False

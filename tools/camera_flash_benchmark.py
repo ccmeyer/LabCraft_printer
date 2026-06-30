@@ -113,6 +113,11 @@ def summarize_cycles(cycles: list[dict], requested_cycles: int, started_ns: int,
         if bool(c.get("frame_selected_bool", False)) or isinstance(c.get("trigger_to_frame_ms"), (int, float))
     ]
     threshold_hits = [c for c in completed if str(c.get("reason", "")) == "threshold"]
+    flash_detected = [
+        c
+        for c in completed
+        if bool(c.get("flash_detected_bool", False)) or str(c.get("reason", "")) == "threshold"
+    ]
     fallback_hits = [c for c in completed if str(c.get("reason", "")) == "fallback"]
     last_resort_hits = [c for c in completed if str(c.get("reason", "")) == "last_resort"]
     ack_level_high = [c for c in completed if bool(c.get("ack_level_high_seen_bool", False))]
@@ -132,10 +137,11 @@ def summarize_cycles(cycles: list[dict], requested_cycles: int, started_ns: int,
     summary = {
         "requested_cycles": int(requested_cycles),
         "completed_cycles": len(completed),
-        "success_cycles": len(frame_selected),
-        "success_rate": (len(frame_selected) / len(completed)) if completed else 0.0,
+        "success_cycles": len(flash_detected),
+        "success_rate": (len(flash_detected) / len(completed)) if completed else 0.0,
         "ack_seen_cycles": len(ack_seen),
         "frame_selected_cycles": len(frame_selected),
+        "flash_detected_cycles": len(flash_detected),
         "threshold_cycles": len(threshold_hits),
         "fallback_cycles": len(fallback_hits),
         "last_resort_cycles": len(last_resort_hits),
@@ -811,6 +817,7 @@ def run_camera_flash_benchmark(
         summary["success_cycles"] = 0
         summary["ack_seen_cycles"] = 0
         summary["frame_selected_cycles"] = 0
+        summary["flash_detected_cycles"] = 0
         summary["success_rate"] = 0.0
         return summary
 
@@ -1030,6 +1037,7 @@ def run_camera_flash_benchmark(
                         "ack_seen_bool": False,
                         "ack_level_high_seen_bool": bool(ack_level_high_seen),
                         "frame_selected_bool": False,
+                        "flash_detected_bool": False,
                         "completed": True,
                         "t_cycle_end": t_cycle_end,
                         "cycle_total_ms": (t_cycle_end - t_cycle_start) / 1_000_000.0,
@@ -1097,6 +1105,7 @@ def run_camera_flash_benchmark(
             t_cycle_end = time.monotonic_ns()
             t_selected = int(chosen[2]) if chosen is not None else t_cycle_end
             selected_mean = float(chosen[3]) if chosen is not None else None
+            flash_detected = reason == "threshold"
 
             row.update(
                 {
@@ -1105,10 +1114,11 @@ def run_camera_flash_benchmark(
                     "threshold": float(threshold),
                     "selected_mean": selected_mean,
                     "post_arm_frames_seen": int(cap_seen),
-                    "success_bool": True,
+                    "success_bool": bool(flash_detected),
                     "ack_seen_bool": True,
                     "ack_level_high_seen_bool": bool(ack_level_high_seen),
                     "frame_selected_bool": bool(chosen is not None),
+                    "flash_detected_bool": bool(flash_detected),
                     "t_selected_frame_done": t_selected,
                     "t_cycle_end": t_cycle_end,
                     "trigger_to_ack_ms": (t_ack_edge - t_trigger_high) / 1_000_000.0,

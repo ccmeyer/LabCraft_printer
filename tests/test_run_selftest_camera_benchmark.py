@@ -140,6 +140,7 @@ def _strict_benchmark_payload(run_id: int, *, cycles: int = 10, next_seq32: int 
             "success_rate": 1.0,
             "ack_seen_cycles": cycles,
             "frame_selected_cycles": cycles,
+            "flash_detected_cycles": cycles,
             "effective_fps": 9.5,
         },
         "init_diag": {"config_match": True},
@@ -157,6 +158,7 @@ def test_summarize_cycles_basic():
             "success_bool": True,
             "ack_seen_bool": True,
             "frame_selected_bool": True,
+            "flash_detected_bool": True,
             "reason": "threshold",
             "trigger_to_ack_ms": 1.0,
             "ack_to_arm_ms": 0.1,
@@ -166,9 +168,10 @@ def test_summarize_cycles_basic():
         },
         {
             "completed": True,
-            "success_bool": True,
+            "success_bool": False,
             "ack_seen_bool": True,
             "frame_selected_bool": True,
+            "flash_detected_bool": False,
             "reason": "fallback",
             "trigger_to_ack_ms": 2.0,
             "ack_to_arm_ms": 0.2,
@@ -180,10 +183,11 @@ def test_summarize_cycles_basic():
     summary = mod.summarize_cycles(cycles, requested_cycles=2, started_ns=0, finished_ns=1_000_000_000)
     assert summary["requested_cycles"] == 2
     assert summary["completed_cycles"] == 2
-    assert summary["success_cycles"] == 2
-    assert summary["success_rate"] == 1.0
+    assert summary["success_cycles"] == 1
+    assert summary["success_rate"] == 0.5
     assert summary["ack_seen_cycles"] == 2
     assert summary["frame_selected_cycles"] == 2
+    assert summary["flash_detected_cycles"] == 1
     assert summary["threshold_cycles"] == 1
     assert summary["fallback_cycles"] == 1
     assert summary["effective_fps"] == 2.0
@@ -198,6 +202,15 @@ def test_resolve_camera_benchmark_order_auto():
     assert run_mod._resolve_camera_benchmark_order("flash_only", "auto") == "pre_selftest"
     assert run_mod._resolve_camera_benchmark_order("print_then_flash", "auto") == "post_selftest"
     assert run_mod._resolve_camera_benchmark_order("print_then_flash", "pre_selftest") == "pre_selftest"
+
+
+def test_camera_benchmark_payload_pass_requires_flash_detected_cycles():
+    run_mod = _load_module(RUN_SELFTEST_PATH, "run_selftest_mod_flash_detect_gate")
+    payload = _strict_benchmark_payload(run_id=123, cycles=10, next_seq32=5)
+    assert run_mod._camera_benchmark_payload_pass(payload) is True
+
+    payload["summary"]["flash_detected_cycles"] = 9
+    assert run_mod._camera_benchmark_payload_pass(payload) is False
 
 
 def test_status_snapshot_parses_status_tlvs_from_payload_index_1():
@@ -526,6 +539,7 @@ def test_run_selftest_camera_benchmark_functional_failure_sets_rc2(monkeypatch, 
                 "completed_cycles": 10,
                 "ack_seen_cycles": 0,
                 "frame_selected_cycles": 0,
+                "flash_detected_cycles": 0,
                 "success_cycles": 0,
                 "success_rate": 0.0,
             },
@@ -595,6 +609,7 @@ def test_run_selftest_camera_benchmark_setup_failed_sets_rc2(monkeypatch, tmp_pa
                 "completed_cycles": 0,
                 "ack_seen_cycles": 0,
                 "frame_selected_cycles": 0,
+                "flash_detected_cycles": 0,
                 "success_cycles": 0,
                 "success_rate": 0.0,
             },
