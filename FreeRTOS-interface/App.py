@@ -5,12 +5,20 @@ from PySide6.QtWidgets import QStyleFactory
 from PySide6.QtGui import QPalette, QColor, QPixmap, QIcon
 import os, json
 from pathlib import Path
+from datetime import datetime, timezone
+import threading
+import time
+import traceback
 
 APP_ORGANIZATION_NAME = "LabCraft"
 APP_APPLICATION_NAME = "LabCraft Printer"
 APP_DESKTOP_FILE_NAME = "labcraft-printer"
 SINGLE_INSTANCE_LOCK_FILENAME = "labcraft-printer-main.lock"
 EXIT_ALREADY_RUNNING = 1
+UI_FREEZE_DIAGNOSTIC_LOG_FILENAME = "ui-freeze-diagnostics.log"
+UI_FREEZE_WATCHDOG_INTERVAL_MS = 500
+UI_FREEZE_WATCHDOG_STALL_SECONDS = 5.0
+UI_FREEZE_WATCHDOG_REPEAT_SECONDS = 30.0
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -93,6 +101,89 @@ def load_settings(file_path):
         return loaded if isinstance(loaded, dict) else defaults.copy()
     except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
         return defaults.copy()
+
+def freeze_diagnostics_log_path():
+    log_dir = REPO_ROOT / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return log_dir / UI_FREEZE_DIAGNOSTIC_LOG_FILENAME
+
+def format_thread_dump(reason, *, now=None, current_frames=None):
+    timestamp = (now or datetime.now(timezone.utc)).isoformat().replace("+00:00", "Z")
+    frames = current_frames if current_frames is not None else sys._current_frames()
+    lines = [
+        "",
+        f"[{timestamp}] UI freeze watchdog: {reason}",
+        f"Process id: {os.getpid()}",
+    ]
+    for thread in threading.enumerate():
+        lines.append("")
+        lines.append(
+            f"--- Thread {thread.name} ident={thread.ident} daemon={thread.daemon} ---"
+        )
+        frame = frames.get(thread.ident)
+        if frame is None:
+            lines.append("No Python frame available.")
+            continue
+        lines.extend(traceback.format_stack(frame))
+    return "\n".join(lines).rstrip() + "\n"
+
+def append_freeze_diagnostics(message, log_path=None):
+    path = Path(log_path) if log_path is not None else freeze_diagnostics_log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(str(message))
+        if not str(message).endswith("\n"):
+            handle.write("\n")
+    return path
+
+def install_ui_freeze_watchdog(
+    app,
+    *,
+    interval_ms=UI_FREEZE_WATCHDOG_INTERVAL_MS,
+    stall_seconds=UI_FREEZE_WATCHDOG_STALL_SECONDS,
+    repeat_seconds=UI_FREEZE_WATCHDOG_REPEAT_SECONDS,
+    log_path=None,
+):
+    """
+    Log Python thread stacks if the Qt event loop stops servicing timers.
+
+    This is intentionally passive diagnostics. It does not attempt recovery or
+    send hardware commands, because the machine state may be mid-experiment.
+    """
+    heartbeat = {"last": time.monotonic(), "last_dump": 0.0}
+
+    timer = QTimer(app)
+    timer.setInterval(max(100, int(interval_ms)))
+    timer.timeout.connect(lambda: heartbeat.__setitem__("last", time.monotonic()))
+    timer.start()
+
+    def _watch():
+        poll_s = max(0.25, min(1.0, float(stall_seconds) / 4.0))
+        while True:
+            time.sleep(poll_s)
+            now_s = time.monotonic()
+            stalled_for = now_s - float(heartbeat["last"])
+            if stalled_for < float(stall_seconds):
+                continue
+            if now_s - float(heartbeat["last_dump"]) < float(repeat_seconds):
+                continue
+            heartbeat["last_dump"] = now_s
+            reason = f"Qt heartbeat stalled for {stalled_for:.1f}s"
+            dump = format_thread_dump(reason)
+            try:
+                path = append_freeze_diagnostics(dump, log_path=log_path)
+                print(f"[UIWatchdog] {reason}; wrote stack dump to {path}", flush=True)
+            except Exception as exc:
+                print(f"[UIWatchdog] {reason}; failed to write stack dump: {exc}", flush=True)
+                print(dump, flush=True)
+
+    thread = threading.Thread(target=_watch, name="LabCraftUIFreezeWatchdog", daemon=True)
+    thread.start()
+
+    # Keep references alive for the life of QApplication.
+    app._labcraft_ui_freeze_timer = timer
+    app._labcraft_ui_freeze_watchdog = thread
+    return timer, thread
 
 def main():
     app = QApplication(sys.argv)
@@ -185,6 +276,7 @@ def main():
         # # Show the main window
         # view.show()
 
+        install_ui_freeze_watchdog(app)
         return app.exec()
     finally:
         app_lock.unlock()

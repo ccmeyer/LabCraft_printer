@@ -31536,7 +31536,52 @@ class DropletCameraModel(QObject):
         print(f"[DropletCameraModel] Saving enabled -> {self._save_dir}")
         return self._save_dir
 
-    def stop_saving(self):
+    def _save_queue_pending_count(self):
+        try:
+            return int(getattr(self._save_queue, "unfinished_tasks", 0))
+        except Exception:
+            return 0
+
+    def _wait_for_save_queue_drain(self, timeout_s=3.0):
+        """
+        Wait for the image writer queue without risking an unbounded UI stall.
+        """
+        try:
+            timeout_s = max(0.0, float(timeout_s))
+        except Exception:
+            timeout_s = 3.0
+        deadline = time.monotonic() + timeout_s
+        queue_obj = self._save_queue
+        condition = getattr(queue_obj, "all_tasks_done", None)
+        if condition is None:
+            return self._save_queue_pending_count() <= 0
+
+        with condition:
+            while self._save_queue_pending_count() > 0:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                condition.wait(min(0.1, remaining))
+        return True
+
+    def _discard_pending_save_jobs(self):
+        dropped = 0
+        while True:
+            try:
+                self._save_queue.get_nowait()
+            except queue.Empty:
+                break
+            except Exception:
+                break
+            else:
+                dropped += 1
+                try:
+                    self._save_queue.task_done()
+                except Exception:
+                    pass
+        return dropped
+
+    def stop_saving(self, *, drain_timeout_s=3.0):
         """
         Stops saving and flushes the writer queue.
         """
@@ -31545,12 +31590,20 @@ class DropletCameraModel(QObject):
 
         self._saving_enabled = False
 
-        # try to flush queued work quickly
+        drained = False
+        pending_before = self._save_queue_pending_count()
         try:
-            # wait a bit for queue to drain
-            self._save_queue.join()
-        except Exception:
-            pass
+            drained = self._wait_for_save_queue_drain(timeout_s=drain_timeout_s)
+        except Exception as e:
+            print(f"[DropletCameraModel] Save queue drain check failed: {e}")
+
+        if not drained:
+            dropped = self._discard_pending_save_jobs()
+            print(
+                "[DropletCameraModel] Save queue did not drain within "
+                f"{float(drain_timeout_s):.1f}s; dropped {dropped} pending save job(s) "
+                f"(pending_before={pending_before})."
+            )
 
         self._stop_save_thread()
 

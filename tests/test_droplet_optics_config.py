@@ -237,3 +237,17 @@ def test_droplet_camera_update_image_writes_save_metadata(tmp_path, monkeypatch)
     assert row["commands_idle_at_frame"] is True
     assert row["machine_position"] == {"X": 110, "Y": 220, "Z": 330}
     assert row["controller_expected_position"] == {"X": 111, "Y": 222, "Z": 333}
+
+
+def test_droplet_camera_stop_saving_discards_pending_jobs_after_timeout(tmp_path, monkeypatch):
+    cam = _make_camera(tmp_path, monkeypatch)
+    cam._saving_enabled = True
+    cam._save_dir = str(tmp_path / "captures")
+    cam._save_queue.put_nowait(("frame-a.png", np.zeros((2, 2, 3), dtype=np.uint8), {}))
+    cam._save_queue.put_nowait(("frame-b.png", np.zeros((2, 2, 3), dtype=np.uint8), {}))
+
+    cam.stop_saving(drain_timeout_s=0.01)
+
+    assert cam._saving_enabled is False
+    assert cam._save_queue.empty()
+    assert cam._save_queue_pending_count() == 0
