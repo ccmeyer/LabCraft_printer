@@ -437,9 +437,11 @@ For fixed settings (no per-shot setting churn), the benchmark:
    - waits for pressure-ready status within timeout
 2. If mode is `coordinated_flash`, runs the same homing/pressure setup, sets
    print/refuel pressure targets to 0.6 psi, starts regulation, sets gripper
-   refresh to 1000 ms, opens the gripper, and then configures the flash path
-   with at least one imaging droplet so the firmware uses the print/refuel
-   valve path.
+   refresh/pulse defaults to 5000 ms / 500 ms, opens the gripper, and then
+   configures the flash path with at least one imaging droplet so the firmware
+   uses the print/refuel valve path. The refresh and pulse can be overridden
+   with `--camera-benchmark-coordinated-gripper-refresh-ms` and
+   `--camera-benchmark-coordinated-gripper-pulse-ms`.
 3. Sends imaging config commands to firmware:
    - `CMD_INIT_FLASH`
    - `CMD_SET_FLASH_DURATION`

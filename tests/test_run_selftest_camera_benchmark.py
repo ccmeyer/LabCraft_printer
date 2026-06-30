@@ -605,7 +605,7 @@ def test_coordinated_flash_preflight_sends_expected_monotonic_commands(monkeypat
             return {}
         if len(status_calls) == 2:
             return {"grip_refresh_ms": 60000, "grip_pulse_ms": 800}
-        return {"grip_refresh_ms": 1000, "grip_pulse_ms": 800}
+        return {"grip_refresh_ms": 5000, "grip_pulse_ms": 500}
 
     monkeypatch.setattr(mod, "_status_snapshot_from_serial", fake_status_snapshot)
     monkeypatch.setattr(
@@ -630,7 +630,8 @@ def test_coordinated_flash_preflight_sends_expected_monotonic_commands(monkeypat
         start_seq32=1,
         timeout_ms=15000,
         pressure_psi=0.6,
-        gripper_refresh_ms=1000,
+        gripper_refresh_ms=5000,
+        gripper_pulse_ms=500,
     )
 
     assert next_seq32 == 10
@@ -650,8 +651,11 @@ def test_coordinated_flash_preflight_sends_expected_monotonic_commands(monkeypat
     assert [_write_seq32(mod, frame) for frame in serial.writes] == list(range(1, 10))
     set_print_tlv = mod._parse_tlvs(payloads[3][2:])
     set_refuel_tlv = mod._parse_tlvs(payloads[4][2:])
+    set_gripper_tlv = mod._parse_tlvs(payloads[7][2:])
     assert int.from_bytes(set_print_tlv[mod.TAG_P1], "little") == 2162
     assert int.from_bytes(set_refuel_tlv[mod.TAG_P1], "little") == 2162
+    assert int.from_bytes(set_gripper_tlv[mod.TAG_P1], "little") == 5000
+    assert int.from_bytes(set_gripper_tlv[mod.TAG_P2], "little") == 500
 
 
 def test_coordinated_flash_pressure_setup_ack_failure_returns_setup_failed(monkeypatch):
@@ -782,6 +786,8 @@ def test_run_selftest_accepts_coordinated_flash_config(monkeypatch, tmp_path):
         camera_benchmark_preflight_pressure_timeout_ms=15000,
         camera_benchmark_warmup_cycles=2,
         camera_benchmark_min_trigger_period_ms=100,
+        camera_benchmark_coordinated_gripper_refresh_ms=10000,
+        camera_benchmark_coordinated_gripper_pulse_ms=500,
     )
 
     runtime_error, bench_failed, next_seq32 = run_mod._run_camera_benchmark_phase(
@@ -803,6 +809,8 @@ def test_run_selftest_accepts_coordinated_flash_config(monkeypatch, tmp_path):
     assert captured["config"]["num_droplets"] == 1
     assert captured["config"]["warmup_cycles"] == 2
     assert captured["config"]["min_trigger_period_ms"] == 100
+    assert captured["config"]["coordinated_gripper_refresh_ms"] == 10000
+    assert captured["config"]["coordinated_gripper_pulse_ms"] == 500
     assert host_checks[0]["pass"] is True
 
 

@@ -67,8 +67,8 @@ PRESSURE_FSS = 13107
 PRESSURE_PSI_OFFSET = 1638
 PRESSURE_PSI_MAX = 15
 COORDINATED_PRESSURE_PSI_DEFAULT = 0.6
-COORDINATED_GRIPPER_REFRESH_MS_DEFAULT = 1000
-COORDINATED_GRIPPER_PULSE_MS_DEFAULT = 800
+COORDINATED_GRIPPER_REFRESH_MS_DEFAULT = 5000
+COORDINATED_GRIPPER_PULSE_MS_DEFAULT = 500
 
 
 @dataclass
@@ -96,6 +96,7 @@ class BenchmarkConfig:
     min_trigger_period_ms: int = 0
     coordinated_pressure_psi: float = COORDINATED_PRESSURE_PSI_DEFAULT
     coordinated_gripper_refresh_ms: int = COORDINATED_GRIPPER_REFRESH_MS_DEFAULT
+    coordinated_gripper_pulse_ms: int = COORDINATED_GRIPPER_PULSE_MS_DEFAULT
 
 
 def _safe_percentile(values: list[float], pct: float) -> float | None:
@@ -785,6 +786,7 @@ def _coordinated_flash_preflight(
     timeout_ms: int,
     pressure_psi: float,
     gripper_refresh_ms: int,
+    gripper_pulse_ms: int,
 ) -> tuple[int, dict]:
     started_ns = time.monotonic_ns()
     timeout_ms = max(MACHINE_READY_TIMEOUT_MS_MIN, int(timeout_ms))
@@ -793,6 +795,7 @@ def _coordinated_flash_preflight(
     next_seq32 = int(start_seq32)
     pressure_raw = _pressure_raw_from_psi(pressure_psi)
     gripper_refresh_ms = max(1000, int(gripper_refresh_ms))
+    gripper_pulse_ms = max(1, int(gripper_pulse_ms))
 
     def _mark_phase(
         name: str,
@@ -853,7 +856,7 @@ def _coordinated_flash_preflight(
     gripper_snapshot = _status_snapshot_from_serial(ser, sample_ms=250) if ok else {}
     prior_grip_refresh = gripper_snapshot.get("grip_refresh_ms")
     prior_grip_pulse = gripper_snapshot.get("grip_pulse_ms")
-    applied_grip_pulse = int(prior_grip_pulse) if isinstance(prior_grip_pulse, int) else COORDINATED_GRIPPER_PULSE_MS_DEFAULT
+    applied_grip_pulse = int(gripper_pulse_ms)
     gripper_wait_finished_ns = None
     status_after_gripper = {}
     if ok:
@@ -979,6 +982,9 @@ def run_camera_flash_benchmark(
             "coordinated_pressure_psi": float(getattr(config, "coordinated_pressure_psi", COORDINATED_PRESSURE_PSI_DEFAULT)),
             "coordinated_gripper_refresh_ms": int(
                 getattr(config, "coordinated_gripper_refresh_ms", COORDINATED_GRIPPER_REFRESH_MS_DEFAULT)
+            ),
+            "coordinated_gripper_pulse_ms": int(
+                getattr(config, "coordinated_gripper_pulse_ms", COORDINATED_GRIPPER_PULSE_MS_DEFAULT)
             ),
         }
 
@@ -1153,6 +1159,9 @@ def run_camera_flash_benchmark(
                 pressure_psi=float(getattr(config, "coordinated_pressure_psi", COORDINATED_PRESSURE_PSI_DEFAULT)),
                 gripper_refresh_ms=int(
                     getattr(config, "coordinated_gripper_refresh_ms", COORDINATED_GRIPPER_REFRESH_MS_DEFAULT)
+                ),
+                gripper_pulse_ms=int(
+                    getattr(config, "coordinated_gripper_pulse_ms", COORDINATED_GRIPPER_PULSE_MS_DEFAULT)
                 ),
             )
             did_start_pressure_regs = True

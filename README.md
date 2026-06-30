@@ -175,14 +175,19 @@ The camera benchmark supports `flash_only`, `print_then_flash`, and
 `coordinated_flash` modes. `flash_only` defaults to one warm-up trigger cycle
 before counted qualification cycles. Use
 `--camera-benchmark-min-trigger-period-ms N` to enforce a minimum trigger
-start-to-start period during rate characterization. Run the coordinated flash
-lane directly on the Pi when you want to exercise flash capture while pressure
-regulation, valve actuation, and gripper refresh are active:
+start-to-start period during rate characterization. `coordinated_flash`
+defaults to a 5000 ms gripper refresh period with a 500 ms pump pulse; use
+`--camera-benchmark-coordinated-gripper-refresh-ms 10000` for a softer overlap
+test. Run the coordinated flash lane directly on the Pi when you want to
+exercise flash capture while pressure regulation, valve actuation, and gripper
+refresh are active:
 
 ```bash
 python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --camera-benchmark \
   --camera-benchmark-mode coordinated_flash --camera-benchmark-order post_selftest \
   --camera-benchmark-cycles 20 --camera-benchmark-min-trigger-period-ms 100 \
+  --camera-benchmark-coordinated-gripper-refresh-ms 5000 \
+  --camera-benchmark-coordinated-gripper-pulse-ms 500 \
   --out hil_reports/camera_capture_coordinated_flash.json
 ```
 
