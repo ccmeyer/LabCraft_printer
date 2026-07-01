@@ -563,6 +563,24 @@ def test_machine_capture_droplet_image_passes_capture_context_to_camera_worker()
     assert camera.calls[0]["success_reasons"] == ("threshold", "fallback")
 
 
+def test_machine_get_flash_safety_state_returns_normalized_copy():
+    machine = machine_mod.Machine.__new__(machine_mod.Machine)
+    machine._flash_state = {
+        "flash_session_armed": 1,
+        "flash_fault_latched": 0,
+        "flash_fault_reason": "unit_reason",
+        "extra": "ignored",
+    }
+
+    state = machine_mod.Machine.get_flash_safety_state(machine)
+
+    assert state == {
+        "flash_session_armed": True,
+        "flash_fault_latched": False,
+        "flash_fault_reason": "unit_reason",
+    }
+
+
 def test_capture_worker_emits_exactly_one_failure_result_after_retry_failure():
     camera = _make_async_camera()
     completion_seen = threading.Event()

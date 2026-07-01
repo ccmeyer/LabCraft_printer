@@ -7,7 +7,7 @@ import pytest
 
 import CaptureCoordinator
 from CaptureCoordinator import CaptureCoordinatorState, CaptureCoordinator as Coordinator
-from CaptureTypes import CaptureRequest, CaptureStatus
+from CaptureTypes import CaptureRequest, CaptureResult, CaptureSource, CaptureStatus
 
 
 def test_capture_coordinator_module_has_no_hardware_or_qt_imports():
@@ -30,6 +30,8 @@ def test_coordinator_starts_idle():
     assert coordinator.active_request is None
     assert coordinator.pending_active is False
     assert coordinator.pending_snapshot()["active"] is False
+    assert coordinator.flash_session_snapshot()["armed"] is False
+    assert coordinator.flash_session_snapshot()["preflight_active"] is False
     assert coordinator.last_result is None
     assert coordinator.is_active is False
 
@@ -149,6 +151,119 @@ def test_update_active_request_metadata_when_idle_does_not_create_state():
     assert coordinator.state is CaptureCoordinatorState.IDLE
     assert coordinator.active_request is None
     assert coordinator.pending_active is False
+
+
+def test_begin_and_arm_flash_session_records_preflight_state():
+    coordinator = Coordinator()
+    request = CaptureRequest(request_id="request-1", context="ctx", source="controller")
+    coordinator.begin_pending(request, context="ctx")
+
+    preflight = coordinator.begin_flash_preflight(
+        "request-1",
+        context="ctx",
+        session_id="session-1",
+        started_monotonic=20.0,
+        metadata={"phase": "preflight"},
+    )
+
+    assert preflight.armed is False
+    assert coordinator.flash_session_snapshot() == {
+        "active": True,
+        "request_id": "request-1",
+        "context": "ctx",
+        "session_id": "session-1",
+        "armed": False,
+        "preflight_active": True,
+        "preflight_started_monotonic": 20.0,
+        "armed_monotonic": None,
+        "disarmed_monotonic": None,
+        "disarm_reason": "",
+        "metadata": {"phase": "preflight"},
+    }
+
+    armed = coordinator.arm_flash_session(
+        "request-1",
+        armed_monotonic=21.0,
+        metadata={"state": {"flash_session_armed": True}},
+    )
+
+    assert armed.armed is True
+    snapshot = coordinator.flash_session_snapshot()
+    assert snapshot["armed"] is True
+    assert snapshot["preflight_active"] is False
+    assert snapshot["armed_monotonic"] == 21.0
+    assert snapshot["metadata"] == {
+        "phase": "preflight",
+        "state": {"flash_session_armed": True},
+    }
+
+
+def test_terminal_results_disarm_flash_session_but_stale_does_not():
+    coordinator = Coordinator()
+    outcome = coordinator.request_capture(context="ctx", delegate=lambda _request: True)
+    coordinator.begin_flash_preflight(outcome.request.request_id, context="ctx", started_monotonic=1.0)
+    coordinator.arm_flash_session(outcome.request.request_id, armed_monotonic=2.0)
+
+    stale = coordinator.record_stale_completion("old-request", reason="old_worker")
+
+    assert stale.status is CaptureStatus.STALE_IGNORED
+    assert coordinator.flash_session_snapshot()["armed"] is True
+
+    success = coordinator.complete_success(outcome.request.request_id, object(), reason="threshold")
+
+    assert success.status is CaptureStatus.SUCCESS
+    snapshot = coordinator.flash_session_snapshot()
+    assert snapshot["armed"] is False
+    assert snapshot["disarm_reason"] == "threshold"
+    assert snapshot["request_id"] == outcome.request.request_id
+
+
+def test_cancel_and_force_close_disarm_flash_session():
+    coordinator = Coordinator()
+    request = CaptureRequest(request_id="request-1", context="ctx", source="controller")
+    coordinator.begin_pending(request, context="ctx")
+    coordinator.begin_flash_preflight("request-1", context="ctx")
+    coordinator.arm_flash_session("request-1")
+
+    cancelled = coordinator.cancel_pending(reason="operator_stop")
+
+    assert cancelled.status is CaptureStatus.CANCELLED
+    assert coordinator.flash_session_snapshot()["armed"] is False
+    assert coordinator.flash_session_snapshot()["disarm_reason"] == "operator_stop"
+
+    coordinator.begin_pending(request, context="ctx")
+    coordinator.begin_flash_preflight("request-1", context="ctx")
+    coordinator.arm_flash_session("request-1")
+
+    detached = coordinator.detach_pending_for_force_close(reason="imager_force_close")
+
+    assert detached.status is CaptureStatus.DETACHED_FORCE_CLOSE
+    assert coordinator.flash_session_snapshot()["armed"] is False
+    assert coordinator.flash_session_snapshot()["disarm_reason"] == "imager_force_close"
+
+
+def test_delegate_returned_capture_result_is_preserved():
+    coordinator = Coordinator()
+
+    def delegate(request):
+        coordinator.begin_pending(request, context="ctx")
+        coordinator.begin_flash_preflight(request.request_id, context="ctx")
+        return CaptureResult.failure(
+            request.request_id,
+            CaptureStatus.FLASH_DISARMED,
+            reason="flash_disarmed",
+            source=CaptureSource.CONTROLLER,
+        )
+
+    outcome = coordinator.request_capture(context="ctx", delegate=delegate)
+
+    assert outcome.accepted is False
+    assert outcome.result.status is CaptureStatus.FLASH_DISARMED
+    assert coordinator.last_result.status is CaptureStatus.FLASH_DISARMED
+    assert coordinator.state is CaptureCoordinatorState.IDLE
+    assert coordinator.pending_active is False
+    assert coordinator.flash_session_snapshot()["armed"] is False
+    assert coordinator.flash_session_snapshot()["disarm_reason"] == "flash_disarmed"
 
 
 def test_cancel_pending_records_terminal_cancelled_result_and_clears_state():

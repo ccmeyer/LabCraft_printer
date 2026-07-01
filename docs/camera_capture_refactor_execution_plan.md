@@ -582,7 +582,7 @@ Rollback:
 
 ## Slice 9: Flash Session Representation In Python
 
-Status: `not_started`
+Status: `verified`
 
 Goal:
 
@@ -619,13 +619,14 @@ Focused tests:
 
 Validation:
 
-- Focused coordinator preflight tests.
-- Existing capture cancellation/close tests.
+- `.\env\Scripts\python.exe -m pytest -q tests\test_capture_types.py tests\test_capture_coordinator.py` -> 46 passed.
+- `.\env\Scripts\python.exe -m pytest -q tests\test_optics_capture_metadata.py tests\test_flash_safety_ui.py tests\test_droplet_camera_trigger_cleanup.py` -> 76 passed.
+- `.\env\Scripts\python.exe -m pytest -q` -> 2725 passed, 24 skipped.
 
 Proceed criteria:
 
-- No trigger is sent in tests unless Python session state is armed.
-- Firmware protocol remains unchanged.
+- No trigger is sent in tests unless Python session state is armed. Complete.
+- Firmware protocol remains unchanged. Complete.
 
 Rollback:
 

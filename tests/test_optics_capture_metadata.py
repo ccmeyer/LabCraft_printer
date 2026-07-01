@@ -142,6 +142,18 @@ class _MachineModel:
 class _CameraModel:
     def __init__(self):
         self.update_calls = []
+        self.flash_session_armed = True
+        self.flash_fault_latched = False
+        self.flash_fault_reason = ""
+
+    def get_flash_session_armed(self):
+        return bool(self.flash_session_armed)
+
+    def get_flash_fault_latched(self):
+        return bool(self.flash_fault_latched)
+
+    def get_flash_fault_reason(self):
+        return str(self.flash_fault_reason or "")
 
     def update_image(self, frame, *, capture_info=None, save_metadata=None):
         self.update_calls.append(
@@ -241,6 +253,10 @@ def test_controller_droplet_capture_ui_state_reports_pending_last_result_and_dir
     assert pending_state["pending_recovery_attempted"] is False
     assert pending_state["pending_throughput_mode"] is False
     assert pending_state["coordinator_state"] == "capturing"
+    assert pending_state["flash_session_armed"] is True
+    assert pending_state["flash_session_request_id"] == controller.pending_capture_request_id
+    assert pending_state["flash_session_context"] == "optics_scale_bar"
+    assert pending_state["flash_preflight_active"] is False
 
     controller._on_image_captured()
     completed_state = controller.get_droplet_capture_ui_state()
@@ -250,6 +266,7 @@ def test_controller_droplet_capture_ui_state_reports_pending_last_result_and_dir
     assert completed_state["last_result_reason"] == "threshold"
     assert completed_state["last_result_stale"] is False
     assert completed_state["last_result_dirty_shutdown"] is False
+    assert completed_state["flash_session_armed"] is False
 
 
 def test_controller_droplet_capture_ui_state_bootstraps_legacy_pending_fields():
@@ -290,6 +307,8 @@ def test_controller_mark_droplet_imager_force_close_marks_dirty_without_machine_
     assert controller.capture_coordinator.pending_active is False
     assert controller.capture_coordinator.last_result.status is CaptureStatus.DETACHED_FORCE_CLOSE
     assert controller.capture_coordinator.last_result.dirty_shutdown is True
+    assert controller.capture_coordinator.flash_session_snapshot()["armed"] is False
+    assert controller.capture_coordinator.flash_session_snapshot()["disarm_reason"] == "imager_force_close"
     assert timer.active is False
     assert machine.recover_calls == []
     assert machine.capture_calls == [
@@ -310,6 +329,7 @@ def test_controller_capture_context_is_written_to_next_frame_metadata():
     assert controller.capture_coordinator.active_request.request_id == controller.pending_capture_request_id
     assert controller.capture_coordinator.pending_request_id == controller.pending_capture_request_id
     assert controller.capture_coordinator.state is CaptureCoordinatorState.CAPTURING
+    assert controller.capture_coordinator.flash_session_snapshot()["armed"] is True
     assert controller._capture_pending_snapshot()["context"] == "optics_scale_bar"
     assert controller.pending_capture_context == "optics_scale_bar"
     assert controller.pending_capture_active is True
@@ -320,6 +340,8 @@ def test_controller_capture_context_is_written_to_next_frame_metadata():
     assert controller.capture_coordinator.active_request is None
     assert controller.capture_coordinator.pending_active is False
     assert controller.capture_coordinator.last_result.status is CaptureStatus.SUCCESS
+    assert controller.capture_coordinator.flash_session_snapshot()["armed"] is False
+    assert controller.capture_coordinator.flash_session_snapshot()["disarm_reason"] == "threshold"
     assert controller.pending_capture_context is None
     assert controller.pending_capture_active is False
     assert len(camera_model.update_calls) == 1
@@ -334,6 +356,72 @@ def test_controller_capture_context_is_written_to_next_frame_metadata():
     assert call["save_metadata"]["position_source"] == "controller_expected_position"
     assert call["save_metadata"]["commands_idle_at_frame"] is True
     assert isinstance(call["save_metadata"]["position_recorded_at"], str)
+
+
+def test_controller_unarmed_flash_preflight_rejects_before_machine_capture():
+    controller, machine, _camera_model = _make_controller()
+    callback = Mock()
+    controller.model.droplet_camera_model.flash_session_armed = False
+    controller.flash_session_preflight_timeout_ms = 0
+
+    assert controller.capture_droplet_image(callback=callback, capture_context="preflight") is False
+
+    assert machine.capture_calls == []
+    assert controller.pending_capture_active is False
+    assert controller.capture_coordinator.last_result.status is CaptureStatus.FLASH_DISARMED
+    assert controller.capture_coordinator.flash_session_snapshot()["armed"] is False
+    assert controller.capture_coordinator.flash_session_snapshot()["disarm_reason"] == "flash_disarmed"
+    callback.assert_called_once_with(None)
+    assert getattr(callback, "_capture_rejection_reason") == "flash_disarmed"
+    assert getattr(callback, "_capture_result_status") == CaptureStatus.FLASH_DISARMED.value
+
+
+def test_controller_fault_latched_preflight_rejects_before_machine_capture():
+    controller, machine, _camera_model = _make_controller()
+    callback = Mock()
+    machine.get_flash_safety_state = lambda: {
+        "flash_session_armed": False,
+        "flash_fault_latched": True,
+        "flash_fault_reason": "line_stuck_high",
+    }
+
+    assert controller.capture_droplet_image(callback=callback, capture_context="preflight_fault") is False
+
+    assert machine.capture_calls == []
+    assert controller.pending_capture_active is False
+    assert controller.capture_coordinator.last_result.status is CaptureStatus.FIRMWARE_FLASH_LATCHED
+    callback.assert_called_once_with(None)
+    assert getattr(callback, "_capture_rejection_reason") == "firmware_flash_latched"
+    assert getattr(callback, "_capture_result_status") == CaptureStatus.FIRMWARE_FLASH_LATCHED.value
+
+
+def test_controller_preflight_cancellation_does_not_queue_machine_capture():
+    controller, machine, _camera_model = _make_controller()
+    callback = Mock()
+    controller.model.droplet_camera_model.flash_session_armed = False
+    controller.flash_session_preflight_timeout_ms = 50
+    controller.flash_session_preflight_poll_ms = 1
+    process_calls = []
+
+    def cancel_during_preflight(_poll_ms):
+        process_calls.append(_poll_ms)
+        if len(process_calls) == 1:
+            controller.cancel_pending_droplet_capture(
+                "operator_stop_during_preflight",
+                emit_capture_failed=False,
+                recover=False,
+            )
+
+    controller._process_flash_preflight_events = cancel_during_preflight
+
+    assert controller.capture_droplet_image(callback=callback, capture_context="preflight_cancel") is False
+
+    assert process_calls
+    assert machine.capture_calls == []
+    callback.assert_called_once_with(None)
+    assert controller.pending_capture_active is False
+    assert controller.capture_coordinator.last_result.status is CaptureStatus.CANCELLED
+    assert controller.capture_coordinator.flash_session_snapshot()["armed"] is False
 
 
 def test_controller_queued_capture_stores_expected_machine_identity_metadata():

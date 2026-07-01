@@ -32,12 +32,26 @@ class CapturePendingState:
     throughput_mode: bool = False
 
 
+@dataclass(frozen=True)
+class CaptureFlashSessionState:
+    request_id: str
+    context: str | None = None
+    session_id: str | None = None
+    armed: bool = False
+    preflight_started_monotonic: float | None = None
+    armed_monotonic: float | None = None
+    disarmed_monotonic: float | None = None
+    disarm_reason: str = ""
+    metadata: dict | None = None
+
+
 class CaptureCoordinator:
     def __init__(self):
         self.state = CaptureCoordinatorState.IDLE
         self.active_request: CaptureRequest | None = None
         self.pending: CapturePendingState | None = None
         self.last_result: CaptureResult | None = None
+        self.flash_session: CaptureFlashSessionState | None = None
 
     @property
     def is_active(self) -> bool:
@@ -110,7 +124,7 @@ class CaptureCoordinator:
         self.state = CaptureCoordinatorState.REQUESTING
         self.active_request = request
         try:
-            accepted = True if delegate is None else bool(delegate(request))
+            delegate_result = True if delegate is None else delegate(request)
         except Exception as exc:
             result = CaptureResult.failure(
                 request.request_id,
@@ -120,9 +134,25 @@ class CaptureCoordinator:
                 source=CaptureSource.COORDINATOR,
             )
             self.last_result = result
+            self.disarm_flash_session(
+                reason=str(exc) or "capture_delegate_exception",
+                request_id=request.request_id,
+                metadata={"exception_type": type(exc).__name__},
+            )
             self.reset()
             raise
 
+        if isinstance(delegate_result, CaptureResult):
+            self.last_result = delegate_result
+            self.disarm_flash_session(
+                reason=delegate_result.reason or getattr(delegate_result.status, "value", str(delegate_result.status)),
+                request_id=request.request_id,
+                metadata=delegate_result.metadata,
+            )
+            self.reset()
+            return CaptureCoordinatorOutcome(False, request, delegate_result)
+
+        accepted = bool(delegate_result)
         if accepted:
             if self.pending is None or self.pending.request.request_id != request.request_id:
                 self.begin_pending(
@@ -144,6 +174,11 @@ class CaptureCoordinator:
             source=CaptureSource.COORDINATOR,
         )
         self.last_result = result
+        self.disarm_flash_session(
+            reason="capture_delegate_rejected",
+            request_id=request.request_id,
+            metadata={"status": CaptureStatus.QUEUE_REJECTED.value},
+        )
         self.reset()
         return CaptureCoordinatorOutcome(False, request, result)
 
@@ -216,6 +251,106 @@ class CaptureCoordinator:
         self.reset()
         return True
 
+    def begin_flash_preflight(
+        self,
+        request_id: str,
+        *,
+        context: str | None = None,
+        session_id: str | None = None,
+        started_monotonic: float | None = None,
+        metadata: dict | None = None,
+    ) -> CaptureFlashSessionState:
+        session = CaptureFlashSessionState(
+            request_id=str(request_id),
+            context=None if context is None else str(context),
+            session_id=str(session_id or request_id),
+            armed=False,
+            preflight_started_monotonic=started_monotonic if started_monotonic is not None else time.monotonic(),
+            metadata=dict(metadata or {}),
+        )
+        self.flash_session = session
+        return session
+
+    def arm_flash_session(
+        self,
+        request_id: str,
+        *,
+        context: str | None = None,
+        session_id: str | None = None,
+        armed_monotonic: float | None = None,
+        metadata: dict | None = None,
+    ) -> CaptureFlashSessionState | None:
+        if self.flash_session is None or str(self.flash_session.request_id) != str(request_id):
+            return None
+        merged = dict(self.flash_session.metadata or {})
+        merged.update(dict(metadata or {}))
+        session = replace(
+            self.flash_session,
+            context=self.flash_session.context if context is None else str(context),
+            session_id=self.flash_session.session_id if session_id is None else str(session_id),
+            armed=True,
+            armed_monotonic=armed_monotonic if armed_monotonic is not None else time.monotonic(),
+            disarmed_monotonic=None,
+            disarm_reason="",
+            metadata=merged,
+        )
+        self.flash_session = session
+        return session
+
+    def disarm_flash_session(
+        self,
+        *,
+        reason: str = "",
+        request_id: str | None = None,
+        disarmed_monotonic: float | None = None,
+        metadata: dict | None = None,
+    ) -> CaptureFlashSessionState | None:
+        if self.flash_session is None:
+            return None
+        if request_id is not None and str(self.flash_session.request_id) != str(request_id):
+            return None
+        merged = dict(self.flash_session.metadata or {})
+        merged.update(dict(metadata or {}))
+        session = replace(
+            self.flash_session,
+            armed=False,
+            disarmed_monotonic=disarmed_monotonic if disarmed_monotonic is not None else time.monotonic(),
+            disarm_reason=str(reason or "disarmed"),
+            metadata=merged,
+        )
+        self.flash_session = session
+        return session
+
+    def flash_session_snapshot(self) -> dict:
+        session = self.flash_session
+        if session is None:
+            return {
+                "active": False,
+                "request_id": None,
+                "context": None,
+                "session_id": None,
+                "armed": False,
+                "preflight_active": False,
+                "preflight_started_monotonic": None,
+                "armed_monotonic": None,
+                "disarmed_monotonic": None,
+                "disarm_reason": "",
+                "metadata": {},
+            }
+        return {
+            "active": bool(session.armed or session.disarmed_monotonic is None),
+            "request_id": session.request_id,
+            "context": session.context,
+            "session_id": session.session_id,
+            "armed": bool(session.armed),
+            "preflight_active": bool((not session.armed) and session.disarmed_monotonic is None),
+            "preflight_started_monotonic": session.preflight_started_monotonic,
+            "armed_monotonic": session.armed_monotonic,
+            "disarmed_monotonic": session.disarmed_monotonic,
+            "disarm_reason": session.disarm_reason,
+            "metadata": dict(session.metadata or {}),
+        }
+
     def update_active_request_metadata(self, metadata: dict | None = None) -> CaptureRequest | None:
         if self.active_request is None:
             return None
@@ -243,6 +378,7 @@ class CaptureCoordinator:
             source=CaptureSource.COORDINATOR,
         )
         self.last_result = result
+        self.disarm_flash_session(reason=reason, request_id=request_id, metadata=metadata)
         self.reset()
         return result
 
@@ -262,6 +398,7 @@ class CaptureCoordinator:
             source=CaptureSource.COORDINATOR,
         )
         self.last_result = result
+        self.disarm_flash_session(reason=reason, request_id=request_id, metadata=metadata)
         self.reset()
         return result
 
@@ -307,6 +444,7 @@ class CaptureCoordinator:
             source=CaptureSource.COORDINATOR,
         )
         self.last_result = result
+        self.disarm_flash_session(reason=reason or "success", request_id=request_id, metadata=metadata)
         self.reset()
         return result
 
@@ -332,6 +470,7 @@ class CaptureCoordinator:
             source=CaptureSource.COORDINATOR,
         )
         self.last_result = result
+        self.disarm_flash_session(reason=reason or str(status), request_id=request_id, metadata=metadata)
         self.reset()
         return result
 

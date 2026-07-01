@@ -22,7 +22,7 @@ import inspect
 from hardware.profile import CURRENT_PROFILE, HardwareProfile
 from hardware.null_devices import NullCamera
 from CaptureCoordinator import CaptureCoordinator
-from CaptureTypes import CaptureSource, CaptureStatus
+from CaptureTypes import CaptureResult, CaptureSource, CaptureStatus
 
 ARRAY_PAUSE_DEPARTURE_ACCEL = 32000
 ARRAY_PAUSE_DEPARTURE_SETTLE_MS = 200
@@ -4679,9 +4679,199 @@ class Controller(QObject):
             "state": self._get_droplet_capture_state(),
         }
 
+    @staticmethod
+    def _normalized_flash_safety_state(state=None):
+        data = dict(state or {}) if isinstance(state, dict) else {}
+        return {
+            "flash_session_armed": bool(data.get("flash_session_armed", False)),
+            "flash_fault_latched": bool(data.get("flash_fault_latched", False)),
+            "flash_fault_reason": str(data.get("flash_fault_reason", "") or ""),
+        }
+
+    def _get_flash_safety_state(self):
+        state = {
+            "flash_session_armed": False,
+            "flash_fault_latched": False,
+            "flash_fault_reason": "",
+        }
+        try:
+            cam = getattr(self.model, "droplet_camera_model", None)
+            armed_getter = getattr(cam, "get_flash_session_armed", None)
+            fault_getter = getattr(cam, "get_flash_fault_latched", None)
+            reason_getter = getattr(cam, "get_flash_fault_reason", None)
+            if callable(armed_getter):
+                state["flash_session_armed"] = bool(armed_getter())
+            else:
+                state["flash_session_armed"] = bool(getattr(cam, "flash_session_armed", False))
+            if callable(fault_getter):
+                state["flash_fault_latched"] = bool(fault_getter())
+            else:
+                state["flash_fault_latched"] = bool(getattr(cam, "flash_fault_latched", False))
+            if callable(reason_getter):
+                state["flash_fault_reason"] = str(reason_getter() or "")
+            else:
+                state["flash_fault_reason"] = str(getattr(cam, "flash_fault_reason", "") or "")
+        except Exception:
+            state = self._normalized_flash_safety_state(state)
+
+        try:
+            getter = getattr(self.machine, "get_flash_safety_state", None)
+            if callable(getter):
+                machine_state = getter()
+                if isinstance(machine_state, dict):
+                    state.update(machine_state)
+        except Exception as exc:
+            state["flash_state_error"] = str(exc)
+        return self._normalized_flash_safety_state(state)
+
+    def _process_flash_preflight_events(self, poll_ms):
+        try:
+            app = QtCore.QCoreApplication.instance()
+        except Exception:
+            app = None
+        if app is not None:
+            try:
+                app.processEvents(QtCore.QEventLoop.AllEvents, max(1, int(poll_ms)))
+                return
+            except Exception:
+                pass
+        time.sleep(max(0.0, float(poll_ms) / 1000.0))
+
+    def _flash_preflight_failure_result(
+        self,
+        *,
+        request_id,
+        callback,
+        capture_context,
+        status,
+        reason,
+        state,
+        recovery_attempted=False,
+    ):
+        reason = str(reason or "flash_disarmed")
+        status = status if isinstance(status, CaptureStatus) else CaptureStatus(status)
+        metadata = {
+            "request_id": request_id,
+            "capture_context": capture_context,
+            "rejection_reason": reason,
+            "rejection_state": dict(state or {}),
+            "recovery_attempted": bool(recovery_attempted),
+        }
+        self.last_capture_queue_rejection_reason = reason
+        self.last_capture_queue_rejection_state = dict(state or {})
+        self._record_active_calibration_event(
+            "capture_flash_preflight_failed",
+            dict(metadata),
+            level="warning",
+        )
+        self._clear_pending_capture(callback=callback, capture_context=capture_context)
+        if callback is not None:
+            try:
+                setattr(callback, "_capture_rejection_reason", reason)
+                setattr(callback, "_capture_rejection_state", dict(state or {}))
+            except Exception:
+                pass
+            self._attach_capture_callback_result_metadata(
+                callback,
+                request_id=request_id,
+                status=status,
+                metadata=metadata,
+            )
+            try:
+                callback(None)
+            except Exception as exc:
+                print(f"Callback raised after flash preflight failure: {exc}")
+        return CaptureResult.failure(
+            request_id,
+            status,
+            metadata=metadata,
+            reason=reason,
+            source=CaptureSource.CONTROLLER,
+        )
+
+    def _run_flash_session_preflight(
+        self,
+        *,
+        request_id,
+        callback,
+        capture_context,
+        recovery_attempted=False,
+    ):
+        coordinator = self._ensure_capture_coordinator()
+        monotonic_fn = getattr(self, "_monotonic_fn", time.monotonic)
+        started = monotonic_fn()
+        coordinator.begin_flash_preflight(
+            request_id,
+            context=capture_context,
+            started_monotonic=started,
+            metadata={
+                "recovery_attempted": bool(recovery_attempted),
+            },
+        )
+        timeout_ms = max(0, int(getattr(self, "flash_session_preflight_timeout_ms", 500)))
+        poll_ms = max(1, int(getattr(self, "flash_session_preflight_poll_ms", 25)))
+        deadline = time.monotonic() + (float(timeout_ms) / 1000.0)
+
+        while True:
+            pending = coordinator.pending_snapshot()
+            if (not bool(pending.get("active"))) or str(pending.get("request_id")) != str(request_id):
+                state = self._get_flash_safety_state()
+                return CaptureResult.cancelled(
+                    request_id,
+                    metadata={
+                        "capture_context": capture_context,
+                        "rejection_reason": "capture_cancelled",
+                        "rejection_state": state,
+                    },
+                    reason="capture_cancelled",
+                    source=CaptureSource.CONTROLLER,
+                )
+
+            state = self._get_flash_safety_state()
+            if bool(state.get("flash_fault_latched", False)):
+                return self._flash_preflight_failure_result(
+                    request_id=request_id,
+                    callback=callback,
+                    capture_context=capture_context,
+                    status=CaptureStatus.FIRMWARE_FLASH_LATCHED,
+                    reason="firmware_flash_latched",
+                    state=state,
+                    recovery_attempted=recovery_attempted,
+                )
+            if bool(state.get("flash_session_armed", False)):
+                session = coordinator.arm_flash_session(
+                    request_id,
+                    context=capture_context,
+                    armed_monotonic=monotonic_fn(),
+                    metadata={"flash_safety_state": state},
+                )
+                self._record_active_calibration_event(
+                    "capture_flash_preflight_armed",
+                    {
+                        "request_id": request_id,
+                        "capture_context": capture_context,
+                        "session_id": None if session is None else session.session_id,
+                        "state": state,
+                    },
+                )
+                return True
+
+            if timeout_ms <= 0 or time.monotonic() >= deadline:
+                return self._flash_preflight_failure_result(
+                    request_id=request_id,
+                    callback=callback,
+                    capture_context=capture_context,
+                    status=CaptureStatus.FLASH_DISARMED,
+                    reason="flash_disarmed",
+                    state=state,
+                    recovery_attempted=recovery_attempted,
+                )
+            self._process_flash_preflight_events(min(poll_ms, max(1, int((deadline - time.monotonic()) * 1000))))
+
     def get_droplet_capture_ui_state(self):
         coordinator = self._ensure_capture_coordinator()
         snapshot = coordinator.pending_snapshot()
+        flash_snapshot = coordinator.flash_session_snapshot()
         self._sync_legacy_pending_capture_fields(coordinator)
         last_result = getattr(coordinator, "last_result", None)
         last_status = getattr(last_result, "status", None)
@@ -4700,6 +4890,10 @@ class Controller(QObject):
             "last_result_stale": False if last_result is None else bool(getattr(last_result, "stale", False)),
             "last_result_dirty_shutdown": False if last_result is None else bool(getattr(last_result, "dirty_shutdown", False)),
             "dirty_shutdown": bool(getattr(self, "droplet_imager_dirty_shutdown", False)),
+            "flash_session_armed": bool(flash_snapshot.get("armed")),
+            "flash_session_request_id": flash_snapshot.get("request_id"),
+            "flash_session_context": flash_snapshot.get("context"),
+            "flash_preflight_active": bool(flash_snapshot.get("preflight_active")),
         }
 
     def _sync_legacy_pending_capture_fields(self, coordinator=None):
@@ -4929,6 +5123,15 @@ class Controller(QObject):
             },
         )
         self._sync_legacy_pending_capture_fields(coordinator)
+        preflight_result = self._run_flash_session_preflight(
+            request_id=capture_request_id,
+            callback=callback,
+            capture_context=capture_context,
+            recovery_attempted=recovery_attempted,
+        )
+        if isinstance(preflight_result, CaptureResult):
+            return preflight_result
+        self._sync_legacy_pending_capture_fields(coordinator)
         try:
             capture_method = self.machine.capture_droplet_image
             accepts_request_id = True
@@ -4986,6 +5189,15 @@ class Controller(QObject):
             )
             self._clear_pending_capture(callback=callback, capture_context=capture_context)
             self._notify_capture_callback_failed(callback)
+            coordinator.disarm_flash_session(
+                reason=reason,
+                request_id=capture_request_id,
+                metadata={
+                    "state": state,
+                    "capture_context": capture_context,
+                    "recovery_attempted": bool(recovery_attempted),
+                },
+            )
             return False
         queued_monotonic_ns = time.monotonic_ns()
         expected_identity = self._record_expected_capture_identity(
@@ -5364,7 +5576,7 @@ class Controller(QObject):
                     capture_context=capture_context,
                     recovery_attempted=True,
                 )
-                if requeued:
+                if requeued is True:
                     return
                 msg = "Droplet capture recovery completed, but retry capture could not be queued."
                 try:

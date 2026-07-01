@@ -5776,6 +5776,18 @@ class Machine(QObject):
         if callable(getter):
             return getter()
         return {}
+
+    def get_flash_safety_state(self):
+        state = default_flash_safety_state()
+        try:
+            state.update(dict(getattr(self, "_flash_state", {}) or {}))
+        except Exception:
+            pass
+        return {
+            "flash_session_armed": bool(state.get("flash_session_armed", False)),
+            "flash_fault_latched": bool(state.get("flash_fault_latched", False)),
+            "flash_fault_reason": str(state.get("flash_fault_reason", "") or ""),
+        }
     
     def stop_droplet_camera(self):
         self.droplet_camera.stop_camera()
