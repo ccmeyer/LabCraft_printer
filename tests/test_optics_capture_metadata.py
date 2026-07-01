@@ -298,12 +298,15 @@ def test_controller_droplet_capture_perf_enable_disable_and_disabled_noop():
     assert controller.set_droplet_capture_performance_diagnostics_enabled(True) is True
     assert controller.is_droplet_capture_performance_diagnostics_enabled() is True
     controller.record_droplet_capture_performance_marker("ui_trigger_received", {"ui_sequence": 1})
-    assert controller.build_droplet_capture_performance_snapshot()["event_count"] == 1
+    snapshot = controller.build_droplet_capture_performance_snapshot()
+    assert snapshot["event_count"] == 3
+    assert snapshot["event_log_tail"][0]["event_kind"] == "diagnostics_enabled"
+    assert snapshot["event_log_tail"][1]["event_kind"] == "calibration_diagnostics_bridge_status"
 
     assert controller.set_droplet_capture_performance_diagnostics_enabled(False) is False
     assert controller.is_droplet_capture_performance_diagnostics_enabled() is False
     controller.record_droplet_capture_performance_marker("ui_trigger_received", {"ui_sequence": 2})
-    assert controller.build_droplet_capture_performance_snapshot()["event_count"] == 1
+    assert controller.build_droplet_capture_performance_snapshot()["event_count"] == 3
 
 
 def test_controller_droplet_capture_perf_records_rejection_when_enabled():
@@ -331,7 +334,8 @@ def test_controller_droplet_capture_perf_records_camera_phase():
 
     snapshot = controller.build_droplet_capture_performance_snapshot()
     assert snapshot["event_counts"]["camera_phase"] == 1
-    assert snapshot["event_log_tail"][0]["phase"] == "edge_wait_done"
+    camera_phase = next(row for row in snapshot["event_log_tail"] if row["event_kind"] == "camera_phase")
+    assert camera_phase["phase"] == "edge_wait_done"
 
 
 def test_controller_droplet_capture_perf_completion_payload_timings():

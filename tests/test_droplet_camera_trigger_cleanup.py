@@ -647,6 +647,8 @@ def test_capture_worker_finishes_on_missing_flash_edge_without_stuck_active():
 def test_capture_retry_timeout_drops_trigger_low_after_each_attempt(monkeypatch):
     camera = _make_async_camera()
     backend = _install_backend(camera, _FakeBackend("2", edge=_EdgeNeverReady()))
+    phases = []
+    camera.capture_phase_signal.connect(lambda payload: phases.append((payload.get("phase"), dict(payload))))
     sleep_calls = []
     monkeypatch.setattr(machine_mod.time, "sleep", lambda seconds: sleep_calls.append(float(seconds)))
 
@@ -664,6 +666,75 @@ def test_capture_retry_timeout_drops_trigger_low_after_each_attempt(monkeypatch)
 
     assert backend.trigger_line.values == [1, 0, 1, 0, 1, 0]
     assert sleep_calls.count(0.005) == 3
+    phase_names = [phase for phase, _payload in phases]
+    assert phase_names.count("retry_attempt_start") == 3
+    assert phase_names.count("retry_attempt_result") == 3
+    assert phase_names.count("retrying") == 2
+    assert phase_names[-1] == "retry_exhausted"
+    retry_results = [payload for phase, payload in phases if phase == "retry_attempt_result"]
+    assert [payload["reason"] for payload in retry_results] == ["edge_timeout"] * 3
+    assert [payload["will_retry"] for payload in retry_results] == [True, True, False]
+    assert all(payload["waited"] is True for payload in retry_results)
+
+
+def test_capture_retry_frame_selection_emits_retrying_and_success_markers(monkeypatch):
+    camera = _make_async_camera()
+    backend = _install_backend(camera, _FakeBackend("2"))
+    phases = []
+    capture_calls = []
+    sleep_calls = []
+    camera.capture_phase_signal.connect(lambda payload: phases.append((payload.get("phase"), dict(payload))))
+    monkeypatch.setattr(machine_mod.time, "sleep", lambda seconds: sleep_calls.append(float(seconds)))
+
+    def _fake_capture_non_blocking(**_kwargs):
+        capture_calls.append(1)
+        if len(capture_calls) == 1:
+            camera.latest_frame = None
+            camera._cap_result = {
+                "reason": "below_threshold",
+                "mean": 5.0,
+                "threshold": 29.0,
+                "cap_id": 21,
+            }
+        else:
+            camera.latest_frame = np.full((3, 4, 3), 88, dtype=np.uint8)
+            camera._cap_result = {
+                "reason": "threshold",
+                "mean": 180.0,
+                "threshold": 29.0,
+                "cap_id": 22,
+            }
+        camera._cap_done.set()
+
+    camera.capture_non_blocking = _fake_capture_non_blocking
+
+    result = DropletCamera.capture_with_retry_sync(
+        camera,
+        attempts=3,
+        attempt_timeout_s=0.001,
+        small_sleep_between=0.02,
+        request_id="req-frame-retry",
+        generation=0,
+        backend=backend,
+        backend_id="2",
+    )
+
+    assert result["status"] == "success"
+    assert result["cap_id"] == 22
+    assert len(capture_calls) == 2
+    assert sleep_calls == [0.02]
+    phase_names = [phase for phase, _payload in phases]
+    assert phase_names.count("retry_attempt_start") == 2
+    assert phase_names.count("retry_attempt_result") == 2
+    assert phase_names.count("retrying") == 1
+    assert phase_names[-1] == "retry_success"
+    retry_results = [payload for phase, payload in phases if phase == "retry_attempt_result"]
+    assert retry_results[0]["reason"] == "below_threshold"
+    assert retry_results[0]["success"] is False
+    assert retry_results[0]["will_retry"] is True
+    assert retry_results[1]["reason"] == "threshold"
+    assert retry_results[1]["success"] is True
+    assert retry_results[1]["will_retry"] is False
 
 
 def test_capture_trigger_pulse_is_clamped_and_reported(monkeypatch):

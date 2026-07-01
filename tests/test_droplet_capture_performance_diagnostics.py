@@ -13,6 +13,12 @@ def test_droplet_capture_perf_disabled_recording_is_noop():
     assert diagnostics.build_snapshot()["event_count"] == 0
 
 
+def test_droplet_capture_perf_default_buffer_is_large_enough_for_calibration_runs():
+    diagnostics = DropletCapturePerformanceDiagnostics()
+
+    assert diagnostics.max_events == 20000
+
+
 def test_droplet_capture_perf_enabled_events_are_bounded_and_json_safe():
     diagnostics = DropletCapturePerformanceDiagnostics(max_events=2)
     diagnostics.set_enabled(True)
@@ -23,7 +29,7 @@ def test_droplet_capture_perf_enabled_events_are_bounded_and_json_safe():
     snapshot = diagnostics.build_snapshot(reason="unit_test")
 
     assert snapshot["kind"] == "droplet_capture_performance_snapshot"
-    assert snapshot["schema_version"] == 2
+    assert snapshot["schema_version"] == 3
     assert snapshot["reason"] == "unit_test"
     assert snapshot["event_count"] == 2
     assert snapshot["event_counts"]["controller_completion_received"] == 1
@@ -83,6 +89,7 @@ def test_droplet_capture_perf_snapshot_summarizes_calibration_capture_and_settin
         {
             "capture_diag_id": "cap-diag-1",
             "calibration_run_id": "run-1",
+            "calibration_run_index": 0,
             "calibration_process": "NozzlePositionCalibrationProcess",
             "calibration_phase": "nozzle_position",
             "stage_text": "Capturing background image",
@@ -149,6 +156,7 @@ def test_droplet_capture_perf_snapshot_summarizes_calibration_capture_and_settin
     capture_summary = snapshot["calibration_capture_summaries"][0]
     assert capture_summary["capture_diag_id"] == "cap-diag-1"
     assert capture_summary["request_id"] == "request-1"
+    assert capture_summary["calibration_run_index"] == 0
     assert capture_summary["set_attr"] == "background_image"
     assert capture_summary["status"] == "success"
 
@@ -156,6 +164,109 @@ def test_droplet_capture_perf_snapshot_summarizes_calibration_capture_and_settin
     assert settings_summary["settings_request_id"] == "settings-1"
     assert settings_summary["command_count"] == 1
     assert settings_summary["completion_command_number"] == 44
+
+
+def test_droplet_capture_perf_snapshot_recovers_nested_capture_context():
+    diagnostics = DropletCapturePerformanceDiagnostics(max_events=20)
+    diagnostics.set_enabled(True)
+    capture_context = {
+        "kind": "calibration_capture",
+        "capture_diag_id": "cap-nested",
+        "calibration_run_id": "run-nested",
+        "calibration_run_index": 0,
+        "calibration_process": "NozzleFocusCalibrationProcess",
+        "calibration_phase": "focus",
+        "stage_text": "Capturing focus frame",
+        "set_attr": "droplet_image",
+        "capture_role": "focus_frame",
+        "attempt": 2,
+        "attempts_total": 7,
+    }
+
+    diagnostics.record(
+        "controller_request_received",
+        {
+            "request_id": "request-nested",
+            "capture_context": capture_context,
+        },
+    )
+    diagnostics.record("camera_phase", {"request_id": "request-nested", "phase": "trigger_high"})
+    diagnostics.record(
+        "camera_phase",
+        {
+            "request_id": "request-nested",
+            "phase": "edge_wait_done",
+            "fired": True,
+            "elapsed_ms": 155.5,
+        },
+    )
+    diagnostics.record(
+        "camera_phase",
+        {
+            "request_id": "request-nested",
+            "phase": "retry_attempt_result",
+            "reason": "threshold",
+            "mean": 200.0,
+            "threshold": 29.0,
+        },
+    )
+    diagnostics.record(
+        "controller_completion_received",
+        {
+            "request_id": "request-nested",
+            "status": "success",
+            "worker_duration_ms": 40.0,
+            "queue_to_worker_start_ms": 1.0,
+            "worker_complete_to_controller_ms": 0.5,
+        },
+    )
+
+    snapshot = diagnostics.build_snapshot()
+
+    capture_summary = snapshot["calibration_capture_summaries"][0]
+    assert capture_summary["capture_diag_id"] == "cap-nested"
+    assert capture_summary["request_id"] == "request-nested"
+    assert capture_summary["calibration_run_index"] == 0
+    assert capture_summary["calibration_process"] == "NozzleFocusCalibrationProcess"
+    assert capture_summary["stage_text"] == "Capturing focus frame"
+    assert capture_summary["capture_role"] == "focus_frame"
+    assert capture_summary["attempts_total"] == 7
+    assert capture_summary["status"] == "success"
+    assert capture_summary["worker_duration_ms"] == 40.0
+    assert capture_summary["trigger_count"] == 1
+    assert capture_summary["edge_wait_done_count"] == 1
+    assert capture_summary["edge_timeout_count"] == 0
+    assert capture_summary["delayed_ack_count"] == 1
+    assert capture_summary["retry_reasons"] == ["threshold"]
+
+
+def test_droplet_capture_perf_snapshot_parses_stringified_capture_context_only_on_export():
+    diagnostics = DropletCapturePerformanceDiagnostics(max_events=10)
+    diagnostics.set_enabled(True)
+    capture_context = {
+        "capture_diag_id": "cap-string",
+        "calibration_process": "TrajectoryCalibrationProcess",
+        "calibration_phase": "trajectory",
+        "capture_role": "trajectory_frame",
+    }
+
+    diagnostics.record(
+        "controller_completion_received",
+        {
+            "request_id": "request-string",
+            "capture_context": str(capture_context),
+            "status": "success",
+        },
+    )
+
+    assert diagnostics.events[0]["capture_context"] == str(capture_context)
+
+    snapshot = diagnostics.build_snapshot()
+    capture_summary = snapshot["calibration_capture_summaries"][0]
+    assert capture_summary["capture_diag_id"] == "cap-string"
+    assert capture_summary["request_id"] == "request-string"
+    assert capture_summary["calibration_process"] == "TrajectoryCalibrationProcess"
+    assert capture_summary["capture_role"] == "trajectory_frame"
 
 
 def test_controller_writes_droplet_capture_perf_snapshot(tmp_path):
@@ -170,7 +281,14 @@ def test_controller_writes_droplet_capture_perf_snapshot(tmp_path):
     assert path.exists()
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["reason"] == "unit_test"
-    assert payload["event_count"] == 1
+    assert payload["event_count"] == 3
+    assert {
+        row["event_kind"] for row in payload["event_log_tail"]
+    } == {
+        "diagnostics_enabled",
+        "calibration_diagnostics_bridge_status",
+        "ui_trigger_received",
+    }
 
 
 class _SignalStub:
@@ -186,24 +304,36 @@ class _SignalStub:
 
 
 def test_controller_bridges_calibration_performance_markers():
+    manager_enabled = {"value": False}
+
+    def _set_manager_enabled(enabled):
+        manager_enabled["value"] = bool(enabled)
+
     manager = SimpleNamespace(
         capturePerformanceDiagnosticEvent=_SignalStub(),
-        set_capture_performance_diagnostics_enabled=lambda enabled: enabled,
+        set_capture_performance_diagnostics_enabled=_set_manager_enabled,
+        is_capture_performance_diagnostics_enabled=lambda: manager_enabled["value"],
     )
     controller = Controller.__new__(Controller)
     controller.model = SimpleNamespace(calibration_manager=manager)
     controller._connect_calibration_capture_performance_diagnostics()
 
     controller.set_droplet_capture_performance_diagnostics_enabled(True)
+    controller._connect_calibration_capture_performance_diagnostics()
     manager.capturePerformanceDiagnosticEvent.emit(
         "calibration_stage_changed",
         {"calibration_process": "NozzlePositionCalibrationProcess", "stage_text": "Capturing"},
     )
 
     snapshot = controller.build_droplet_capture_performance_snapshot()
-    assert snapshot["event_count"] == 1
-    assert snapshot["event_log_tail"][0]["event_kind"] == "calibration_stage_changed"
-    assert snapshot["event_log_tail"][0]["stage_text"] == "Capturing"
+    assert snapshot["event_count"] == 3
+    assert snapshot["event_log_tail"][0]["event_kind"] == "diagnostics_enabled"
+    assert snapshot["event_log_tail"][0]["max_events"] == 20000
+    assert snapshot["event_log_tail"][0]["bridge_connected"] is True
+    assert snapshot["event_log_tail"][0]["calibration_manager_enabled"] is True
+    assert snapshot["event_log_tail"][1]["event_kind"] == "calibration_diagnostics_bridge_status"
+    assert snapshot["event_log_tail"][2]["event_kind"] == "calibration_stage_changed"
+    assert snapshot["event_log_tail"][2]["stage_text"] == "Capturing"
 
 
 def test_controller_handle_capture_request_passes_calibration_context():

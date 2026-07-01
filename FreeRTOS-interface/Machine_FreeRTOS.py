@@ -797,6 +797,7 @@ class DropletCamera(QObject):
         backend=None,
         backend_id=None,
         level="info",
+        print_phase=True,
         **fields,
     ):
         elapsed_ms = 0.0
@@ -815,7 +816,8 @@ class DropletCamera(QObject):
             "elapsed_ms": f"{elapsed_ms:.1f}",
         }
         details.update(fields)
-        print("[CameraPhase] " + str(phase) + " " + " ".join(f"{k}={v}" for k, v in details.items()))
+        if print_phase:
+            print("[CameraPhase] " + str(phase) + " " + " ".join(f"{k}={v}" for k, v in details.items()))
         payload = {
             "phase": str(phase),
             "request_id": request_id,
@@ -1322,9 +1324,23 @@ class DropletCamera(QObject):
         last_reason = None
         backend = self._resolve_capture_backend(backend)
         backend_id = backend_id if backend_id is not None else getattr(backend, "backend_id", None)
+        retry_started_ns = time.monotonic_ns()
 
         for i in range(attempts):
             self._raise_if_worker_context_stale(backend=backend, generation=generation, action="retry_attempt")
+            attempt_index = i + 1
+            self._log_capture_phase(
+                "retry_attempt_start",
+                request_id=request_id,
+                generation=generation,
+                started_ns=retry_started_ns,
+                backend=backend,
+                retry_attempt=attempt_index,
+                retry_attempts=int(attempts),
+                max_new_frames=int(max_new_frames),
+                attempt_timeout_s=float(attempt_timeout_s),
+                print_phase=False,
+            )
             # For each attempt, suppress automatic emission; we'll emit once on success.
             try:
                 self.capture_non_blocking(max_new_frames=max_new_frames,
@@ -1340,6 +1356,8 @@ class DropletCamera(QObject):
                     request_id=request_id,
                     generation=generation,
                     backend=backend,
+                    retry_attempt=attempt_index,
+                    retry_attempts=int(attempts),
                     error=str(exc),
                     level="warning",
                 )
@@ -1357,6 +1375,19 @@ class DropletCamera(QObject):
             waited = self._cap_done.wait(attempt_timeout_s + 0.2)
             if not waited:
                 last_reason = "attempt_timeout"
+                self._log_capture_phase(
+                    "retry_attempt_result",
+                    request_id=request_id,
+                    generation=generation,
+                    started_ns=retry_started_ns,
+                    backend=backend,
+                    retry_attempt=attempt_index,
+                    retry_attempts=int(attempts),
+                    waited=False,
+                    reason=last_reason,
+                    will_retry=i < attempts - 1,
+                    print_phase=False,
+                )
                 print(f"[Retry] attempt {i+1}/{attempts} timed out waiting for completion")
             else:
                 res = self._cap_result or {}
@@ -1365,11 +1396,43 @@ class DropletCamera(QObject):
                     raise StaleCaptureBackend(str(res.get("error") or "stale_backend"))
                 print(f"[Retry] attempt {i+1}/{attempts} result reason={last_reason} "
                     f"mean={res.get('mean')} thr={res.get('threshold')}")
+                attempt_success = (last_reason in set(success_reasons)) and self.latest_frame is not None
+                self._log_capture_phase(
+                    "retry_attempt_result",
+                    request_id=request_id,
+                    generation=generation,
+                    started_ns=retry_started_ns,
+                    backend=backend,
+                    retry_attempt=attempt_index,
+                    retry_attempts=int(attempts),
+                    waited=True,
+                    reason=str(last_reason),
+                    mean=res.get("mean"),
+                    threshold=res.get("threshold"),
+                    cap_id=res.get("cap_id"),
+                    success=bool(attempt_success),
+                    will_retry=(not attempt_success) and i < attempts - 1,
+                    print_phase=False,
+                )
 
                 # success criterion: first frame that *crossed* threshold
-                if (last_reason in set(success_reasons)) and self.latest_frame is not None:
+                if attempt_success:
                     capture_info = dict(res)
                     capture_info.pop("arr", None)
+                    self._log_capture_phase(
+                        "retry_success",
+                        request_id=request_id,
+                        generation=generation,
+                        started_ns=retry_started_ns,
+                        backend=backend,
+                        retry_attempt=attempt_index,
+                        retry_attempts=int(attempts),
+                        reason=str(last_reason),
+                        mean=res.get("mean"),
+                        threshold=res.get("threshold"),
+                        cap_id=res.get("cap_id"),
+                        print_phase=False,
+                    )
                     return {
                         "status": "success",
                         "request_id": request_id,
@@ -1383,9 +1446,33 @@ class DropletCamera(QObject):
 
             # not acceptable → try again unless we’re out of attempts
             if i < attempts - 1:
+                self._log_capture_phase(
+                    "retrying",
+                    request_id=request_id,
+                    generation=generation,
+                    started_ns=retry_started_ns,
+                    backend=backend,
+                    retry_attempt=attempt_index,
+                    retry_attempts=int(attempts),
+                    next_retry_attempt=attempt_index + 1,
+                    reason=str(last_reason or ""),
+                    sleep_s=float(small_sleep_between),
+                    print_phase=False,
+                )
                 time.sleep(small_sleep_between)
 
         msg = f"Flash capture failed after {attempts} attempts (last_reason={last_reason})"
+        self._log_capture_phase(
+            "retry_exhausted",
+            request_id=request_id,
+            generation=generation,
+            started_ns=retry_started_ns,
+            backend=backend,
+            retry_attempts=int(attempts),
+            reason=str(last_reason or ""),
+            level="warning",
+            print_phase=False,
+        )
         raise RuntimeError(msg)
     
     def capture_with_retry_async(
