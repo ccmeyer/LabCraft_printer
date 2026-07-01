@@ -67,7 +67,7 @@ Before starting any implementation slice:
 | Slice | Status | Scope | Required gate before next slice |
 | --- | --- | --- | --- |
 | 0. Baseline and guardrails | verified | Confirm starting tests and HIL baseline | Baseline recorded |
-| 1. Typed request/result contract | not_started | Add pure-Python dataclasses/enums and tests | Typed result tests pass |
+| 1. Typed request/result contract | verified | Add pure-Python dataclasses/enums and tests | Typed result tests pass |
 | 2. Coordinator skeleton | not_started | Add imported `CaptureCoordinator` module that delegates existing path | Coordinator unit tests pass with no behavior change |
 | 3. Route Controller pending state | not_started | Move Controller pending state through coordinator facade | Existing capture/cancel tests pass |
 | 4. Typed cancellation and stale completion | not_started | Replace ad hoc cancellation/stale handling internally | Cancellation/stale tests pass |
@@ -153,7 +153,7 @@ Rollback:
 
 ## Slice 1: Typed Request/Result Contract
 
-Status: `not_started`
+Status: `verified`
 
 Goal:
 
@@ -164,12 +164,10 @@ Call path:
 
 `calibration/UI request -> CaptureRequest -> CaptureResult -> legacy adapter`
 
-Likely files touched:
+Files touched:
 
-- new module near `FreeRTOS-interface/Controller.py`, for example
-  `FreeRTOS-interface/CaptureCoordinator.py` or
-  `FreeRTOS-interface/CaptureTypes.py`
-- focused tests under `tests/`
+- `FreeRTOS-interface/CaptureTypes.py`
+- `tests/test_capture_types.py`
 
 Behavior change:
 
@@ -181,6 +179,7 @@ Behavior change:
   - `busy`
   - `queue_rejected`
   - `backend_unavailable`
+  - `recovery_succeeded`
   - `recovery_failed`
   - `flash_disarmed`
   - `firmware_flash_fault`
@@ -201,14 +200,18 @@ Focused tests:
 
 Validation:
 
-- Focused new tests.
-- `.\env\Scripts\python.exe -m pytest -q tests\test_optics_capture_metadata.py tests\test_run_selftest_camera_benchmark.py`
+- Focused new tests:
+  `.\env\Scripts\python.exe -m pytest -q tests\test_capture_types.py`
+  passed with `22 passed in 0.13s`.
+- Regression tests:
+  `.\env\Scripts\python.exe -m pytest -q tests\test_optics_capture_metadata.py tests\test_run_selftest_camera_benchmark.py`
+  passed with `47 passed in 2.24s`.
 
 Proceed criteria:
 
-- Types are imported without Qt/hardware dependencies.
-- Tests prove retryable/recoverable/cancelled/stale semantics.
-- No existing runtime path depends on the new types yet.
+- Types are imported without Qt/hardware dependencies. Complete.
+- Tests prove retryable/recoverable/cancelled/stale semantics. Complete.
+- No existing runtime path depends on the new types yet. Complete.
 
 Rollback:
 
