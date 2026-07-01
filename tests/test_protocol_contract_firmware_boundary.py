@@ -60,3 +60,15 @@ def test_ack_and_control_codes_match_firmware_header():
     assert mfr.RESET_REPORT == fw["CMD_RESET_REPORT"]
     assert mfr.CMD_QUEUE_ACK == fw["CMD_QUEUE_ACK"]
     assert mfr.PAUSE_AFTER_SEQ32 == fw["CMD_PAUSE_AFTER_SEQ32"]
+
+
+def test_gripper_firmware_does_not_software_trigger_flash_exti():
+    text = Path("firmware/Core/Src/Gripper.cpp").read_text(encoding="utf-8")
+    for token in (
+        "EXTI8_SoftwareTrigger",
+        "EXTI->SWIER",
+        "MX_FLASH_TriggerCallback",
+        "flashNotifyFromISR",
+    ):
+        assert token not in text
+    assert "xEventGroupSetBits(eg, BIT_GRIPPER_DONE)" in text

@@ -13,12 +13,6 @@
 #include "event_groups.h"
 #include "semphr.h"
 
-static void EXTI8_SoftwareTrigger(void)
-{
-    EXTI->PR = (1u<<8);         // clear pending
-    EXTI->SWIER |= (1u<<8);     // software trigger EXTI8
-}
-
 // singleton
 Gripper& Gripper::instance() {
   static Gripper g;
@@ -123,7 +117,6 @@ void Gripper::open() {
   _refreshEnabled = true;
 
   recordPumpPulse(false);
-  EXTI8_SoftwareTrigger();
   // start refreshing from now on
   if (_refreshTimer) {
     xTimerStart(_refreshTimer, 0);
