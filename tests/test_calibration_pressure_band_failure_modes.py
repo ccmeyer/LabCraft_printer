@@ -111,6 +111,28 @@ class _TimeoutThenSuccessCaptureSignal:
         callback(np.zeros((8, 8, 3), dtype=np.uint8))
 
 
+class _RecordingSuccessCaptureSignal:
+    def __init__(self):
+        self.callback_attrs = {}
+
+    def emit(self, callback):
+        self.callback_attrs = {
+            "capture_diag_id": getattr(callback, "_capture_diag_id", None),
+            "calibration_run_id": getattr(callback, "_capture_calibration_run_id", None),
+            "calibration_run_index": getattr(callback, "_capture_calibration_run_index", None),
+            "calibration_process": getattr(callback, "_capture_calibration_process", None),
+            "calibration_phase": getattr(callback, "_capture_calibration_phase", None),
+            "stage_text": getattr(callback, "_capture_stage_text", None),
+            "set_attr": getattr(callback, "_capture_set_attr", None),
+            "capture_role": getattr(callback, "_capture_role", None),
+            "attempt": getattr(callback, "_capture_attempt", None),
+            "attempts_total": getattr(callback, "_capture_attempts_total", None),
+        }
+        callback._capture_request_id = "request-unit"
+        callback._capture_result_status = CaptureStatus.SUCCESS.value
+        callback(np.zeros((8, 8, 3), dtype=np.uint8))
+
+
 def _make_capture_policy_fixture(monkeypatch, capture_signal):
     proc = BaseCalibrationProcess.__new__(BaseCalibrationProcess)
     events = []
@@ -119,6 +141,8 @@ def _make_capture_policy_fixture(monkeypatch, capture_signal):
     completed = []
     scheduled = []
     timeouts = []
+    capture_perf_events = []
+    proc.phase_name = "unit_phase"
     proc._record_event = lambda event_type, payload=None, **kwargs: events.append(
         (str(event_type), dict(payload or {}), dict(kwargs or {}))
     )
@@ -134,6 +158,12 @@ def _make_capture_policy_fixture(monkeypatch, capture_signal):
     proc.calibration_manager = SimpleNamespace(
         captureImageRequested=capture_signal,
         emitCaptureCompleted=lambda: completed.append(True),
+        _run_id="run-unit",
+        _run_idx=2,
+        record_capture_performance_marker=lambda event_kind, payload=None, **kwargs: capture_perf_events.append(
+            (str(event_kind), dict(payload or {}), dict(kwargs or {}))
+        )
+        or dict(payload or {}),
     )
     monkeypatch.setattr(
         calibration_model.QTimer,
@@ -148,7 +178,111 @@ def _make_capture_policy_fixture(monkeypatch, capture_signal):
         completed=completed,
         scheduled=scheduled,
         timeouts=timeouts,
+        capture_perf_events=capture_perf_events,
     )
+
+
+def test_capture_policy_records_performance_markers_and_callback_context(monkeypatch):
+    capture_signal = _RecordingSuccessCaptureSignal()
+    fixture = _make_capture_policy_fixture(monkeypatch, capture_signal)
+
+    BaseCalibrationProcess._capture_with_policy(
+        fixture.proc,
+        set_attr="background_image",
+        stage_text="Capturing background image",
+        attempts_total=3,
+        guard_timeout_ms=5_000,
+    )
+
+    attrs = capture_signal.callback_attrs
+    assert attrs["capture_diag_id"]
+    assert attrs["calibration_run_id"] == "run-unit"
+    assert attrs["calibration_run_index"] == 2
+    assert attrs["calibration_process"] == "BaseCalibrationProcess"
+    assert attrs["calibration_phase"] == "unit_phase"
+    assert attrs["stage_text"] == "Capturing background image"
+    assert attrs["set_attr"] == "background_image"
+    assert attrs["capture_role"] == "background"
+    assert attrs["attempt"] == 1
+    assert attrs["attempts_total"] == 3
+
+    event_kinds = [event[0] for event in fixture.capture_perf_events]
+    assert "calibration_capture_attempt_started" in event_kinds
+    assert "calibration_capture_callback_received" in event_kinds
+    assert "calibration_capture_frame_recorded" in event_kinds
+    assert "calibration_capture_result" in event_kinds
+    assert "calibration_capture_completed_emitted" in event_kinds
+    result_payload = next(
+        payload for kind, payload, _kwargs in fixture.capture_perf_events
+        if kind == "calibration_capture_result"
+    )
+    assert result_payload["request_id"] == "request-unit"
+    assert result_payload["status"] == "success"
+    assert result_payload["capture_status"] == CaptureStatus.SUCCESS.value
+
+
+def test_request_settings_with_recording_records_performance_markers(monkeypatch):
+    proc = BaseCalibrationProcess.__new__(BaseCalibrationProcess)
+    proc.phase_name = "unit_phase"
+    events = []
+    capture_perf_events = []
+
+    class _SettingsSignal:
+        def emit(self, settings, callback):
+            bind = getattr(callback, "_settings_bind_callback")
+            bind(
+                {
+                    "request_id": getattr(callback, "_settings_request_id"),
+                    "context": getattr(callback, "_settings_context"),
+                    "settings": dict(settings),
+                    "commands": [
+                        {
+                            "command_number": 123,
+                            "command_type": "SET_DELAY_F",
+                            "setting_key": "flash_delay",
+                            "requested_value": settings["flash_delay"],
+                        }
+                    ],
+                    "completion_command_number": 123,
+                }
+            )
+            callback()
+
+    proc.calibration_manager = SimpleNamespace(
+        changeSettingsRequested=_SettingsSignal(),
+        _run_id="run-unit",
+        _run_idx=2,
+        record_capture_performance_marker=lambda event_kind, payload=None, **kwargs: capture_perf_events.append(
+            (str(event_kind), dict(payload or {}), dict(kwargs or {}))
+        )
+        or dict(payload or {}),
+    )
+    proc._record_event = lambda event_type, payload=None, **kwargs: events.append(
+        (str(event_type), dict(payload or {}), dict(kwargs or {}))
+    )
+    proc._start_timeout = lambda *_args, **_kwargs: object()
+    proc._cancel_timeout = lambda *_args, **_kwargs: None
+
+    completed = []
+    BaseCalibrationProcess._request_settings_with_recording(
+        proc,
+        {"flash_delay": 6100},
+        lambda: completed.append(True),
+        context="background",
+        guard_timeout_ms=1000,
+    )
+
+    assert completed == [True]
+    event_kinds = [event[0] for event in capture_perf_events]
+    assert event_kinds == [
+        "calibration_settings_requested",
+        "calibration_settings_bound",
+        "calibration_settings_completed",
+    ]
+    bound_payload = capture_perf_events[1][1]
+    assert bound_payload["settings_request_id"]
+    assert bound_payload["commands"][0]["command_number"] == 123
+    assert bound_payload["completion_command_number"] == 123
 
 
 def test_capture_policy_busy_rejection_backs_off_without_consuming_attempt(monkeypatch):

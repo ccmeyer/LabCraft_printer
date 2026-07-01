@@ -2726,10 +2726,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         group_v.setSpacing(6)
 
         self.enable_droplet_capture_performance_diagnostics_checkbox = QtWidgets.QCheckBox(
-            "Enable Droplet Capture Performance Diagnostics"
+            "Enable Droplet/Calibration Capture Performance Diagnostics"
         )
         self.enable_droplet_capture_performance_diagnostics_checkbox.setToolTip(
-            "Record lightweight timing markers for manual droplet captures."
+            "Record lightweight timing markers for manual and calibration droplet captures."
         )
         diagnostics_enabled = self._is_droplet_capture_performance_diagnostics_enabled()
         self.enable_droplet_capture_performance_diagnostics_checkbox.setChecked(diagnostics_enabled)

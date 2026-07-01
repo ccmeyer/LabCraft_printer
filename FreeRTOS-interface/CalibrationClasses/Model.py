@@ -1346,6 +1346,7 @@ class CalibrationManager(QObject):
     streamCaptureStateChanged = Signal(dict)
     streamCalibrationSequenceStateChanged = Signal(dict)
     dropletCalibrationSequenceStateChanged = Signal(dict)
+    capturePerformanceDiagnosticEvent = Signal(str, object)
 
     analyzedImageUpdated = Signal(object)
     onlineStreamDebugUpdated = Signal(dict)
@@ -1459,6 +1460,7 @@ class CalibrationManager(QObject):
         # Recorder mode: captures per-process runtime telemetry for offline replay/debug.
         self.record_mode_enabled = True
         self._process_recorder = CalibrationProcessRecorder(model)
+        self._capture_performance_diagnostics_enabled = False
 
         # Persisted JSON
         self._lock = threading.Lock()
@@ -1516,6 +1518,40 @@ class CalibrationManager(QObject):
         self._reset_stream_gravimetric_capture_state()
         self._reset_stream_calibration_sequence_state()
         self._reset_droplet_calibration_sequence_state()
+
+    def set_capture_performance_diagnostics_enabled(self, enabled):
+        self._capture_performance_diagnostics_enabled = bool(enabled)
+        return self._capture_performance_diagnostics_enabled
+
+    def is_capture_performance_diagnostics_enabled(self):
+        return bool(getattr(self, "_capture_performance_diagnostics_enabled", False))
+
+    def _capture_performance_context(self, process_obj=None):
+        active = process_obj if process_obj is not None else getattr(self, "activeCalibration", None)
+        process_name = active.__class__.__name__ if active is not None else None
+        phase_name = getattr(active, "phase_name", None) if active is not None else None
+        if not phase_name and process_name:
+            try:
+                phase_name = self._resolve_phase_key(process_name)
+            except Exception:
+                phase_name = None
+        return {
+            "calibration_run_id": getattr(self, "_run_id", None),
+            "calibration_run_index": getattr(self, "_run_idx", None),
+            "calibration_process": process_name,
+            "calibration_phase": phase_name,
+        }
+
+    def record_capture_performance_marker(self, event_kind, payload=None, *, process_obj=None):
+        if not self.is_capture_performance_diagnostics_enabled():
+            return None
+        out = self._capture_performance_context(process_obj=process_obj)
+        if isinstance(payload, dict):
+            for key, value in payload.items():
+                if value is not None:
+                    out[str(key)] = value
+        self.capturePerformanceDiagnosticEvent.emit(str(event_kind or "calibration_event"), out)
+        return out
 
     # ------------- Per-process recorder -------------
 
@@ -3195,6 +3231,13 @@ class CalibrationManager(QObject):
         )
         self.characterizationSummaryUpdated.emit()
         self._emit_readiness()
+        self.record_capture_performance_marker(
+            "calibration_session_started",
+            {
+                "notes": notes or "",
+                "calibration_file_path": str(self.calibration_file_path or ""),
+            },
+        )
         self._record_calibration_audit_event(
             "calibration_session_started",
             "Calibration session started",
@@ -3215,6 +3258,14 @@ class CalibrationManager(QObject):
             if emit_stage:
                 self.calibrationStageChanged.emit("Calibration session ended", "purple")
             normalized_outcome = str(outcome or "completed")
+            self.record_capture_performance_marker(
+                "calibration_session_ended",
+                {
+                    "outcome": normalized_outcome,
+                    "error_message": str(error_message or ""),
+                    "calibration_file_path": str(self.calibration_file_path or ""),
+                },
+            )
             self._record_calibration_audit_event(
                 "calibration_session_ended",
                 "Calibration session ended",
@@ -3431,6 +3482,14 @@ class CalibrationManager(QObject):
                 debug_signal.connect(self.onOnlineStreamDebugUpdated)
             self._begin_process_recording(self.activeCalibration)
             process_name = self.activeCalibration.__class__.__name__
+            self.record_capture_performance_marker(
+                "calibration_process_started",
+                {
+                    "process_name": process_name,
+                    "queue_depth": len(getattr(self, "calibration_queue", []) or []),
+                },
+                process_obj=self.activeCalibration,
+            )
             self._record_calibration_audit_event(
                 "calibration_process_started",
                 f"Calibration process started: {process_name}",
@@ -3472,6 +3531,14 @@ class CalibrationManager(QObject):
                     "error_message": "Calibration terminated by user",
                 },
                 level="warning",
+                process_obj=proc,
+            )
+            self.record_capture_performance_marker(
+                "calibration_process_stopped",
+                {
+                    "outcome": "stopped",
+                    "error_message": "Calibration terminated by user",
+                },
                 process_obj=proc,
             )
             self._cleanup_finished_process(proc)
@@ -6565,6 +6632,10 @@ class CalibrationManager(QObject):
             {"message": str(message)},
             state_name=getattr(self.activeCalibration, "phase_name", None),
         )
+        self.record_capture_performance_marker(
+            "calibration_stage_changed",
+            {"stage_text": str(message)},
+        )
 
     @Slot()
     def onCalibrationCompleted(self):
@@ -6580,6 +6651,14 @@ class CalibrationManager(QObject):
             outcome="completed",
         )
         process_name = process_obj.__class__.__name__ if process_obj is not None else "unknown"
+        self.record_capture_performance_marker(
+            "calibration_process_completed",
+            {
+                "outcome": "completed",
+                "error_message": "",
+            },
+            process_obj=process_obj,
+        )
         self._record_calibration_audit_event(
             "calibration_process_completed",
             f"Calibration process completed: {process_name}",
@@ -6636,6 +6715,14 @@ class CalibrationManager(QObject):
             "calibration_process_stopped"
             if normalized_status == "stopped"
             else "calibration_process_failed"
+        )
+        self.record_capture_performance_marker(
+            event_type,
+            {
+                "outcome": normalized_status,
+                "error_message": str(error_message or ""),
+            },
+            process_obj=process_obj,
         )
         self._record_calibration_audit_event(
             event_type,
@@ -7821,6 +7908,28 @@ class BaseCalibrationProcess(QObject):
         except Exception:
             pass
 
+    def _capture_performance_payload(self, payload: dict | None = None):
+        out = {
+            "calibration_process": self.__class__.__name__,
+            "calibration_phase": getattr(self, "phase_name", None),
+        }
+        if isinstance(payload, dict):
+            out.update(payload)
+        return out
+
+    def _record_capture_performance_marker(self, event_kind: str, payload: dict | None = None):
+        recorder = getattr(self.calibration_manager, "record_capture_performance_marker", None)
+        if not callable(recorder):
+            return None
+        try:
+            return recorder(
+                str(event_kind),
+                self._capture_performance_payload(payload),
+                process_obj=self,
+            )
+        except Exception:
+            return None
+
     def _record_analysis(self, payload: dict):
         try:
             if hasattr(self.calibration_manager, "record_analysis"):
@@ -7945,6 +8054,17 @@ class BaseCalibrationProcess(QObject):
                 None if completion_command in (None, "") else int(completion_command)
             )
             self._record_event("settings_bound", bound_payload)
+            self._record_capture_performance_marker(
+                "calibration_settings_bound",
+                {
+                    "settings_request_id": str(bound_payload.get("request_id") or request_id),
+                    "requested_settings": dict(bound_payload.get("settings") or settings_obj),
+                    "context": str(bound_payload.get("context") or context or ""),
+                    "timeout_ms": timeout_ms,
+                    "commands": [dict(item or {}) for item in list(bound_payload.get("commands") or [])],
+                    "completion_command_number": bound_payload.get("completion_command_number"),
+                },
+            )
 
         self._record_event(
             "settings_requested",
@@ -7952,6 +8072,15 @@ class BaseCalibrationProcess(QObject):
                 "request_id": str(request_id),
                 "settings": settings_obj,
                 "context": str(context or ""),
+            },
+        )
+        self._record_capture_performance_marker(
+            "calibration_settings_requested",
+            {
+                "settings_request_id": str(request_id),
+                "requested_settings": settings_obj,
+                "context": str(context or ""),
+                "timeout_ms": timeout_ms,
             },
         )
 
@@ -7969,6 +8098,14 @@ class BaseCalibrationProcess(QObject):
                     "context": str(context or ""),
                 },
                 level="warning",
+            )
+            self._record_capture_performance_marker(
+                "calibration_settings_cancelled",
+                {
+                    "settings_request_id": str(request_id),
+                    "requested_settings": settings_obj,
+                    "context": str(context or ""),
+                },
             )
 
         def _wrapped(*args, **kwargs):
@@ -7991,6 +8128,15 @@ class BaseCalibrationProcess(QObject):
                     },
                     level="warning",
                 )
+                self._record_capture_performance_marker(
+                    "calibration_settings_completed_ignored",
+                    {
+                        "settings_request_id": str(request_id),
+                        "requested_settings": settings_obj,
+                        "context": str(context or ""),
+                        "late_completion_ms": late_completion_ms,
+                    },
+                )
                 return
             request_state["resolved"] = True
             self._cancel_timeout(request_state["timer"])
@@ -8000,6 +8146,14 @@ class BaseCalibrationProcess(QObject):
                 {
                     "request_id": str(request_id),
                     "settings": settings_obj,
+                    "context": str(context or ""),
+                },
+            )
+            self._record_capture_performance_marker(
+                "calibration_settings_completed",
+                {
+                    "settings_request_id": str(request_id),
+                    "requested_settings": settings_obj,
                     "context": str(context or ""),
                 },
             )
@@ -8035,6 +8189,15 @@ class BaseCalibrationProcess(QObject):
                             "diagnostic_snapshot": _build_diagnostic_snapshot(),
                         },
                         level="warning",
+                    )
+                    self._record_capture_performance_marker(
+                        "calibration_settings_timeout",
+                        {
+                            "settings_request_id": str(request_id),
+                            "requested_settings": settings_obj,
+                            "context": str(context or ""),
+                            "guard_timeout_ms": int(timeout_ms),
+                        },
                     )
                     if on_timeout is not None:
                         on_timeout()
@@ -8160,6 +8323,8 @@ class BaseCalibrationProcess(QObject):
         busy_retry_reasons = {"controller_pending", "camera_worker_active"}
         busy_retry_delay_ms = int(max(1, busy_retry_delay_ms))
         busy_retry_limit = max(1, int(math.ceil(max(1, int(guard_timeout_ms)) / busy_retry_delay_ms)))
+        capture_diag_id = uuid.uuid4().hex
+        role = str(set_attr).replace("_image", "")
 
         def _arm_one_attempt():
             if on_result is None:
@@ -8172,6 +8337,19 @@ class BaseCalibrationProcess(QObject):
                         "attempts_total": int(attempts_total),
                     },
                 )
+            self._record_capture_performance_marker(
+                "calibration_capture_attempt_started",
+                {
+                    "capture_diag_id": capture_diag_id,
+                    "set_attr": str(set_attr),
+                    "stage_text": str(stage_text),
+                    "capture_role": role or "capture",
+                    "attempt": int(state["attempt"]),
+                    "attempts_total": int(attempts_total),
+                    "guard_timeout_ms": int(guard_timeout_ms),
+                    "retry_delay_ms": int(retry_delay_ms),
+                },
+            )
             # # Stage text (with retry suffix after the first attempt)
             # if state["attempt"] == 1:
             #     self.stageChanged.emit(stage_text)
@@ -8202,6 +8380,21 @@ class BaseCalibrationProcess(QObject):
                 guard_timer_ref["t"] = None
 
                 capture_result = self._capture_policy_result_from_callback(frame, _on_result)
+                self._record_capture_performance_marker(
+                    "calibration_capture_callback_received",
+                    {
+                        "capture_diag_id": capture_diag_id,
+                        "request_id": str(capture_result.request_id),
+                        "set_attr": str(set_attr),
+                        "stage_text": str(stage_text),
+                        "capture_role": role or "capture",
+                        "attempt": int(state["attempt"]),
+                        "attempts_total": int(attempts_total),
+                        "frame_present": frame is not None,
+                        "capture_status": capture_result.status.value,
+                        "reason": capture_result.reason,
+                    },
+                )
 
                 if on_result is not None:
                     handled = on_result(
@@ -8211,6 +8404,20 @@ class BaseCalibrationProcess(QObject):
                         attempt=int(state["attempt"]),
                     )
                     if handled:
+                        self._record_capture_performance_marker(
+                            "calibration_capture_result_hook_handled",
+                            {
+                                "capture_diag_id": capture_diag_id,
+                                "request_id": str(capture_result.request_id),
+                                "set_attr": str(set_attr),
+                                "stage_text": str(stage_text),
+                                "capture_role": role or "capture",
+                                "attempt": int(state["attempt"]),
+                                "attempts_total": int(attempts_total),
+                                "capture_status": capture_result.status.value,
+                                "reason": capture_result.reason,
+                            },
+                        )
                         return
 
                 if capture_result.status != CaptureStatus.SUCCESS:
@@ -8229,6 +8436,21 @@ class BaseCalibrationProcess(QObject):
                                 "capture_status": capture_result.status.value,
                             },
                             level="warning",
+                        )
+                        self._record_capture_performance_marker(
+                            "calibration_capture_result",
+                            {
+                                "capture_diag_id": capture_diag_id,
+                                "request_id": str(capture_result.request_id),
+                                "set_attr": str(set_attr),
+                                "stage_text": str(stage_text),
+                                "capture_role": role or "capture",
+                                "attempt": int(state["attempt"]),
+                                "attempts_total": int(attempts_total),
+                                "status": "cancelled",
+                                "capture_status": capture_result.status.value,
+                                "reason": capture_result.reason,
+                            },
                         )
                         return
                     if capture_result.status == CaptureStatus.BUSY and state["busy_retries"] < busy_retry_limit:
@@ -8277,6 +8499,22 @@ class BaseCalibrationProcess(QObject):
                         },
                         level="warning",
                     )
+                    self._record_capture_performance_marker(
+                        "calibration_capture_result",
+                        {
+                            "capture_diag_id": capture_diag_id,
+                            "request_id": str(capture_result.request_id),
+                            "set_attr": str(set_attr),
+                            "stage_text": str(stage_text),
+                            "capture_role": role or "capture",
+                            "attempt": int(state["attempt"]),
+                            "attempts_total": int(attempts_total),
+                            "status": "failed",
+                            "capture_status": capture_result.status.value,
+                            "rejection_reason": rejection_reason or capture_result.reason,
+                            "retryable": bool(capture_result.retryable),
+                        },
+                    )
                     terminal_statuses = {
                         CaptureStatus.FLASH_DISARMED,
                         CaptureStatus.FIRMWARE_FLASH_FAULT,
@@ -8310,7 +8548,6 @@ class BaseCalibrationProcess(QObject):
                 # Success
                 frame = capture_result.frame
                 setattr(self, set_attr, frame)
-                role = str(set_attr).replace("_image", "")
                 capture_meta = {
                     "set_attr": str(set_attr),
                     "stage_text": str(stage_text),
@@ -8340,6 +8577,19 @@ class BaseCalibrationProcess(QObject):
                 capture_ref = self._record_capture(frame, role=role or "capture", metadata=capture_meta)
                 if capture_ref is not None:
                     self._last_capture_refs[set_attr] = capture_ref
+                self._record_capture_performance_marker(
+                    "calibration_capture_frame_recorded",
+                    {
+                        "capture_diag_id": capture_diag_id,
+                        "request_id": str(capture_result.request_id),
+                        "set_attr": str(set_attr),
+                        "stage_text": str(stage_text),
+                        "capture_role": role or "capture",
+                        "attempt": int(state["attempt"]),
+                        "attempts_total": int(attempts_total),
+                        "capture_ref": capture_ref or {},
+                    },
+                )
                 self._record_event(
                     "capture_result",
                     {
@@ -8350,15 +8600,79 @@ class BaseCalibrationProcess(QObject):
                         "capture_ref": capture_ref or {},
                     },
                 )
+                self._record_capture_performance_marker(
+                    "calibration_capture_result",
+                    {
+                        "capture_diag_id": capture_diag_id,
+                        "request_id": str(capture_result.request_id),
+                        "set_attr": str(set_attr),
+                        "stage_text": str(stage_text),
+                        "capture_role": role or "capture",
+                        "attempt": int(state["attempt"]),
+                        "attempts_total": int(attempts_total),
+                        "status": "success",
+                        "capture_status": capture_result.status.value,
+                        "capture_ref": capture_ref or {},
+                    },
+                )
                 if on_success is not None:
+                    self._record_capture_performance_marker(
+                        "calibration_capture_on_success_started",
+                        {
+                            "capture_diag_id": capture_diag_id,
+                            "request_id": str(capture_result.request_id),
+                            "set_attr": str(set_attr),
+                            "stage_text": str(stage_text),
+                            "capture_role": role or "capture",
+                            "attempt": int(state["attempt"]),
+                            "attempts_total": int(attempts_total),
+                        },
+                    )
                     try:
                         on_success(frame)
                     except Exception:
                         pass
+                    self._record_capture_performance_marker(
+                        "calibration_capture_on_success_finished",
+                        {
+                            "capture_diag_id": capture_diag_id,
+                            "request_id": str(capture_result.request_id),
+                            "set_attr": str(set_attr),
+                            "stage_text": str(stage_text),
+                            "capture_role": role or "capture",
+                            "attempt": int(state["attempt"]),
+                            "attempts_total": int(attempts_total),
+                        },
+                    )
                 # Inform the state machine we’re done with this capture
+                self._record_capture_performance_marker(
+                    "calibration_capture_completed_emitted",
+                    {
+                        "capture_diag_id": capture_diag_id,
+                        "request_id": str(capture_result.request_id),
+                        "set_attr": str(set_attr),
+                        "stage_text": str(stage_text),
+                        "capture_role": role or "capture",
+                        "attempt": int(state["attempt"]),
+                        "attempts_total": int(attempts_total),
+                    },
+                )
                 self.calibration_manager.emitCaptureCompleted()
 
             # Fire the request (controller will call _on_result with frame or None)
+            try:
+                setattr(_on_result, "_capture_diag_id", capture_diag_id)
+                setattr(_on_result, "_capture_calibration_run_id", getattr(self.calibration_manager, "_run_id", None))
+                setattr(_on_result, "_capture_calibration_run_index", getattr(self.calibration_manager, "_run_idx", None))
+                setattr(_on_result, "_capture_calibration_process", self.__class__.__name__)
+                setattr(_on_result, "_capture_calibration_phase", getattr(self, "phase_name", None))
+                setattr(_on_result, "_capture_stage_text", str(stage_text))
+                setattr(_on_result, "_capture_set_attr", str(set_attr))
+                setattr(_on_result, "_capture_role", role or "capture")
+                setattr(_on_result, "_capture_attempt", int(state["attempt"]))
+                setattr(_on_result, "_capture_attempts_total", int(attempts_total))
+            except Exception:
+                pass
             self.calibration_manager.captureImageRequested.emit(_on_result)
 
         # Kick off the first attempt

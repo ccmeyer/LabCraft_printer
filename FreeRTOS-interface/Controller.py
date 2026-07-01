@@ -41,7 +41,7 @@ CALIBRATION_MODE_PRINT_PULSE_WIDTH_US = {
 
 
 class DropletCapturePerformanceDiagnostics:
-    """Small in-memory event buffer for manual droplet-capture timing diagnostics."""
+    """Small in-memory event buffer for droplet-capture timing diagnostics."""
 
     def __init__(self, max_events=2000):
         self.max_events = int(max(1, max_events))
@@ -137,11 +137,22 @@ class DropletCapturePerformanceDiagnostics:
             if ui_sequence is not None:
                 by_ui_sequence.setdefault(str(ui_sequence), []).append(row)
 
+        def _first_by_kind(rows):
+            first = {}
+            for item in rows:
+                first.setdefault(str(item.get("event_kind") or ""), item)
+            return first
+
+        def _last_by_kind(rows, event_kind):
+            wanted = str(event_kind)
+            for item in reversed(rows):
+                if str(item.get("event_kind") or "") == wanted:
+                    return item
+            return {}
+
         request_summaries = []
         for request_id, rows in by_request.items():
-            first_by_kind = {}
-            for row in rows:
-                first_by_kind.setdefault(str(row.get("event_kind") or ""), row)
+            first_by_kind = _first_by_kind(rows)
             completion = first_by_kind.get("controller_completion_received") or {}
             summary = {
                 "request_id": request_id,
@@ -166,9 +177,7 @@ class DropletCapturePerformanceDiagnostics:
 
         ui_sequence_summaries = []
         for ui_sequence, rows in by_ui_sequence.items():
-            first_by_kind = {}
-            for row in rows:
-                first_by_kind.setdefault(str(row.get("event_kind") or ""), row)
+            first_by_kind = _first_by_kind(rows)
             received = first_by_kind.get("ui_trigger_received") or {}
             returned = first_by_kind.get("ui_request_returned") or {}
             ignored = next((row for row in rows if str(row.get("event_kind") or "").startswith("ui_trigger_ignored")), {})
@@ -187,9 +196,139 @@ class DropletCapturePerformanceDiagnostics:
                 )
             )
 
+        by_calibration_process = {}
+        by_capture_diag = {}
+        by_settings_request = {}
+        for row in events:
+            process = row.get("calibration_process")
+            phase = row.get("calibration_phase")
+            if process or phase:
+                key = (
+                    str(row.get("calibration_run_id") or ""),
+                    str(row.get("calibration_run_index") if row.get("calibration_run_index") is not None else ""),
+                    str(process or ""),
+                    str(phase or ""),
+                )
+                by_calibration_process.setdefault(key, []).append(row)
+            capture_diag_id = row.get("capture_diag_id")
+            if capture_diag_id:
+                by_capture_diag.setdefault(str(capture_diag_id), []).append(row)
+            settings_request_id = row.get("settings_request_id")
+            if settings_request_id:
+                by_settings_request.setdefault(str(settings_request_id), []).append(row)
+
+        calibration_process_summaries = []
+        for (run_id, run_index, process, phase), rows in by_calibration_process.items():
+            first_by_kind = _first_by_kind(rows)
+            started = first_by_kind.get("calibration_process_started") or rows[0]
+            terminal = (
+                first_by_kind.get("calibration_process_completed")
+                or first_by_kind.get("calibration_process_failed")
+                or first_by_kind.get("calibration_process_stopped")
+                or first_by_kind.get("calibration_session_ended")
+                or rows[-1]
+            )
+            calibration_process_summaries.append(
+                self._json_safe(
+                    {
+                        "calibration_run_id": run_id or None,
+                        "calibration_run_index": int(run_index) if str(run_index).isdigit() else None,
+                        "calibration_process": process or None,
+                        "calibration_phase": phase or None,
+                        "event_count": len(rows),
+                        "started_event_index": started.get("event_index"),
+                        "terminal_event_kind": terminal.get("event_kind"),
+                        "duration_ms": self._delta_ms(
+                            started.get("monotonic_ns"),
+                            terminal.get("monotonic_ns"),
+                        ),
+                    }
+                )
+            )
+
+        calibration_capture_summaries = []
+        for capture_diag_id, rows in by_capture_diag.items():
+            first_by_kind = _first_by_kind(rows)
+            attempt = first_by_kind.get("calibration_capture_attempt_started") or rows[0]
+            callback = first_by_kind.get("calibration_capture_callback_received") or {}
+            result = _last_by_kind(rows, "calibration_capture_result") or rows[-1]
+            completed = _last_by_kind(rows, "calibration_capture_completed_emitted")
+            attempts = sorted(
+                {
+                    int(row.get("attempt"))
+                    for row in rows
+                    if row.get("attempt") is not None and str(row.get("attempt")).lstrip("-").isdigit()
+                }
+            )
+            calibration_capture_summaries.append(
+                self._json_safe(
+                    {
+                        "capture_diag_id": capture_diag_id,
+                        "request_id": callback.get("request_id") or result.get("request_id"),
+                        "calibration_run_id": attempt.get("calibration_run_id"),
+                        "calibration_process": attempt.get("calibration_process"),
+                        "calibration_phase": attempt.get("calibration_phase"),
+                        "stage_text": attempt.get("stage_text"),
+                        "set_attr": attempt.get("set_attr"),
+                        "capture_role": attempt.get("capture_role"),
+                        "attempts": attempts,
+                        "attempts_total": attempt.get("attempts_total"),
+                        "status": result.get("capture_status") or result.get("status"),
+                        "attempt_to_callback_ms": self._delta_ms(
+                            attempt.get("monotonic_ns"),
+                            callback.get("monotonic_ns"),
+                        ),
+                        "attempt_to_result_ms": self._delta_ms(
+                            attempt.get("monotonic_ns"),
+                            result.get("monotonic_ns"),
+                        ),
+                        "attempt_to_capture_completed_emit_ms": self._delta_ms(
+                            attempt.get("monotonic_ns"),
+                            completed.get("monotonic_ns"),
+                        ),
+                    }
+                )
+            )
+
+        settings_request_summaries = []
+        for settings_request_id, rows in by_settings_request.items():
+            first_by_kind = _first_by_kind(rows)
+            requested = first_by_kind.get("calibration_settings_requested") or rows[0]
+            bound = first_by_kind.get("calibration_settings_bound") or {}
+            terminal = (
+                _last_by_kind(rows, "calibration_settings_completed")
+                or _last_by_kind(rows, "calibration_settings_timeout")
+                or _last_by_kind(rows, "calibration_settings_cancelled")
+                or _last_by_kind(rows, "calibration_settings_completed_ignored")
+                or rows[-1]
+            )
+            settings_request_summaries.append(
+                self._json_safe(
+                    {
+                        "settings_request_id": settings_request_id,
+                        "calibration_run_id": requested.get("calibration_run_id"),
+                        "calibration_process": requested.get("calibration_process"),
+                        "calibration_phase": requested.get("calibration_phase"),
+                        "context": requested.get("context"),
+                        "requested_settings": requested.get("requested_settings"),
+                        "command_count": len(bound.get("commands") or []),
+                        "completion_command_number": bound.get("completion_command_number"),
+                        "terminal_event_kind": terminal.get("event_kind"),
+                        "request_to_bound_ms": self._delta_ms(
+                            requested.get("monotonic_ns"),
+                            bound.get("monotonic_ns"),
+                        ),
+                        "request_to_terminal_ms": self._delta_ms(
+                            requested.get("monotonic_ns"),
+                            terminal.get("monotonic_ns"),
+                        ),
+                    }
+                )
+            )
+
         snapshot = {
             "kind": "droplet_capture_performance_snapshot",
-            "schema_version": 1,
+            "schema_version": 2,
             "reason": str(reason or "manual_export"),
             "generated_at_utc": self._now_utc(),
             "generated_monotonic_ns": int(time.monotonic_ns()),
@@ -201,6 +340,9 @@ class DropletCapturePerformanceDiagnostics:
             "rejection_counts": dict(rejection_counts),
             "request_summaries": request_summaries,
             "ui_sequence_summaries": ui_sequence_summaries,
+            "calibration_process_summaries": calibration_process_summaries,
+            "calibration_capture_summaries": calibration_capture_summaries,
+            "settings_request_summaries": settings_request_summaries,
             "event_log_tail": events,
             "last_snapshot_path": self.last_snapshot_path,
         }
@@ -409,6 +551,7 @@ class Controller(QObject):
         self.model.calibration_manager.moveRequested.connect(self.handle_move_request)
         self.model.calibration_manager.moveAbsoluteRequested.connect(self.handle_absolute_move_request)
         self.model.calibration_manager.changeSettingsRequested.connect(self.handle_settings_change_request)
+        self._connect_calibration_capture_performance_diagnostics()
         try:
             camera = self.machine.droplet_camera
             phase_signal = getattr(camera, "capture_phase_signal", None)
@@ -422,6 +565,25 @@ class Controller(QObject):
                 self._connect_qt_signal(camera.capture_failed_signal, self._on_capture_failed, queued=True)
         except AttributeError:
             print("Droplet camera not initialized or image_captured_signal not available.")
+
+    def _connect_calibration_capture_performance_diagnostics(self):
+        if bool(getattr(self, "_calibration_capture_performance_diagnostics_connected", False)):
+            return
+        manager = getattr(getattr(self, "model", None), "calibration_manager", None)
+        signal = getattr(manager, "capturePerformanceDiagnosticEvent", None)
+        if signal is None:
+            return
+        try:
+            signal.connect(self._on_calibration_capture_performance_diagnostic_event)
+            self._calibration_capture_performance_diagnostics_connected = True
+        except (TypeError, RuntimeError):
+            pass
+
+    def _on_calibration_capture_performance_diagnostic_event(self, event_kind, payload=None):
+        return self.record_droplet_capture_performance_marker(
+            event_kind,
+            payload if isinstance(payload, dict) else {},
+        )
     
     def disconnect_droplet_camera_signals(self):
         try:
@@ -5640,9 +5802,35 @@ class Controller(QObject):
     def set_save_directory(self, directory):
         self.model.droplet_camera_model.set_save_directory(directory)      
 
+    def _calibration_capture_context_from_callback(self, callback):
+        if callback is None:
+            return None
+        capture_diag_id = str(getattr(callback, "_capture_diag_id", "") or "")
+        calibration_process = str(getattr(callback, "_capture_calibration_process", "") or "")
+        calibration_phase = str(getattr(callback, "_capture_calibration_phase", "") or "")
+        if not (capture_diag_id or calibration_process or calibration_phase):
+            return None
+        context = {
+            "kind": "calibration_capture",
+            "capture_diag_id": capture_diag_id,
+            "calibration_run_id": getattr(callback, "_capture_calibration_run_id", None),
+            "calibration_run_index": getattr(callback, "_capture_calibration_run_index", None),
+            "calibration_process": calibration_process,
+            "calibration_phase": calibration_phase,
+            "stage_text": str(getattr(callback, "_capture_stage_text", "") or ""),
+            "set_attr": str(getattr(callback, "_capture_set_attr", "") or ""),
+            "capture_role": str(getattr(callback, "_capture_role", "") or ""),
+            "attempt": getattr(callback, "_capture_attempt", None),
+            "attempts_total": getattr(callback, "_capture_attempts_total", None),
+        }
+        return {key: value for key, value in context.items() if value not in (None, "")}
+
     def handle_capture_request(self, callback):
         # protect against overlapping requests
-        self.capture_droplet_image(callback=callback)
+        self.capture_droplet_image(
+            callback=callback,
+            capture_context=self._calibration_capture_context_from_callback(callback),
+        )
 
     def _capture_callback_status_for_reason(self, reason):
         reason = str(reason or "")
@@ -6093,7 +6281,15 @@ class Controller(QObject):
 
     def set_droplet_capture_performance_diagnostics_enabled(self, enabled):
         diagnostics = self._ensure_droplet_capture_performance_diagnostics()
-        return diagnostics.set_enabled(bool(enabled))
+        enabled = diagnostics.set_enabled(bool(enabled))
+        manager = getattr(getattr(self, "model", None), "calibration_manager", None)
+        setter = getattr(manager, "set_capture_performance_diagnostics_enabled", None)
+        if callable(setter):
+            try:
+                setter(enabled)
+            except Exception:
+                pass
+        return enabled
 
     def is_droplet_capture_performance_diagnostics_enabled(self):
         diagnostics = self._ensure_droplet_capture_performance_diagnostics()
