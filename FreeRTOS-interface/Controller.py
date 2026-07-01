@@ -5316,11 +5316,17 @@ class Controller(QObject):
 
     def _capture_callback_status_for_reason(self, reason):
         reason = str(reason or "")
-        if reason in {"controller_pending", "callback_pending", "context_pending", "camera_worker_active"}:
+        if reason in {
+            "controller_pending",
+            "callback_pending",
+            "context_pending",
+            "camera_worker_active",
+            "camera_capture_active",
+        }:
             return CaptureStatus.BUSY
         if reason in {"machine_rejected", "queue_rejected"}:
             return CaptureStatus.QUEUE_REJECTED
-        if reason == "camera_backend_unavailable":
+        if reason in {"camera_backend_unavailable", "camera_backend_unsupported", "camera_not_started"}:
             return CaptureStatus.BACKEND_UNAVAILABLE
         if reason == "capture_cancelled":
             return CaptureStatus.CANCELLED

@@ -714,6 +714,41 @@ def test_controller_classifies_backend_unavailable_queue_rejection():
     assert getattr(callback, "_capture_rejection_reason") == "camera_backend_unavailable"
 
 
+def test_controller_queue_rejection_callback_metadata_preserves_typed_camera_states():
+    cases = [
+        (
+            {"cap_active": True},
+            "camera_capture_active",
+            CaptureStatus.BUSY.value,
+        ),
+        (
+            {"camera_started": False},
+            "camera_not_started",
+            CaptureStatus.BACKEND_UNAVAILABLE.value,
+        ),
+        (
+            {
+                "camera_started": True,
+                "backend_available": False,
+                "backend_error": "gpio_edge_fd_unavailable: missing event_get_fd",
+            },
+            "camera_backend_unsupported",
+            CaptureStatus.BACKEND_UNAVAILABLE.value,
+        ),
+    ]
+    for state_update, expected_reason, expected_status in cases:
+        controller, machine, _camera_model = _make_controller()
+        callback = Mock()
+        machine.capture_return = False
+        machine.capture_state.update(state_update)
+
+        assert controller.capture_droplet_image(callback=callback, capture_context="optics_scale_bar") is False
+
+        callback.assert_called_once_with(None)
+        assert getattr(callback, "_capture_rejection_reason") == expected_reason
+        assert getattr(callback, "_capture_result_status") == expected_status
+
+
 def test_controller_classifies_missing_gpio_fd_as_backend_unsupported():
     assert Controller._classify_capture_queue_rejection(
         {

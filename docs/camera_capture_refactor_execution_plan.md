@@ -74,9 +74,9 @@ Before starting any implementation slice:
 | 5. Shared calibration policy adapter | verified | Convert `_capture_with_policy` to typed results | Calibration policy tests pass |
 | 6. Remove calibration capture bypasses | verified | Migrate direct calibration capture callbacks into shared policy | No direct calibration capture bypasses remain |
 | 7. UI observes coordinator state | verified | Simplify imager UI pending/close state around coordinator | Close/force-close tests pass |
-| 8. Machine request identity hardening | not_started | Carry request id/generation through camera worker payloads | Stale worker tests pass |
-| 9. Flash session representation in Python | not_started | Represent arm/disarm/preflight states without firmware protocol change | Preflight/fault classification tests pass |
-| 10. Firmware flash fault/latch surfacing | not_started | Surface flash faults and latched states as typed capture-blocking results | Python tests plus firmware/HIL plan ready |
+| 8. Machine request identity hardening | verified | Carry request id/generation through camera worker payloads | Stale worker tests pass |
+| 9. Flash session representation in Python | verified | Represent arm/disarm/preflight states without firmware protocol change | Preflight/fault classification tests pass |
+| 10. Firmware flash fault/latch surfacing | verified | Surface flash faults and latched states as typed capture-blocking results | Python tests plus firmware/HIL plan ready |
 | 11. Ready/busy ACK-line redesign | deferred | Future firmware/Pi contract change using existing ACK line | Separate firmware/HIL milestone approved |
 
 ## Slice 0: Baseline And Guardrails

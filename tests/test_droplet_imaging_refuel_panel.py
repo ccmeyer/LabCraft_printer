@@ -41,11 +41,19 @@ def _make_calibration_manager_stub():
     )
 
 
-def _build_droplet_dialog(monkeypatch, qapp, *, refuel_model=None, main_window=None, open_refuel_camera_callback=None):
+def _build_droplet_dialog(
+    monkeypatch,
+    qapp,
+    *,
+    refuel_model=None,
+    main_window=None,
+    open_refuel_camera_callback=None,
+    start_read_camera_side_effect=None,
+    status_calls=None,
+):
     monkeypatch.setattr(DropletImagingDialog, "_quick_controls_expanded_default", False, raising=False)
     for method_name in (
         "setup_shortcuts",
-        "start_droplet_camera",
         "set_exposure_time",
         "set_flash_delay",
         "set_flash_duration",
@@ -54,11 +62,9 @@ def _build_droplet_dialog(monkeypatch, qapp, *, refuel_model=None, main_window=N
         "set_num_pressure_tests",
         "populate_summary_table",
         "refresh_calibration_memory_recommendation",
-        "update_stage_and_log",
         "on_calibration_completed",
         "on_calibration_queue_completed",
         "on_calibration_error",
-        "_refresh_manual_control_lock_state",
         "_sync_stream_capture_panel_state",
         "_ensure_stream_capture_followup_state",
         "_ensure_stream_calibration_sequence_followup_state",
@@ -99,7 +105,8 @@ def _build_droplet_dialog(monkeypatch, qapp, *, refuel_model=None, main_window=N
 
     controller = SimpleNamespace(
         _command_calls=command_calls,
-        start_read_camera=Mock(),
+        start_droplet_camera=Mock(),
+        start_read_camera=Mock(side_effect=start_read_camera_side_effect),
         stop_read_camera=Mock(),
         start_refuel_camera=Mock(),
         stop_refuel_camera=Mock(),
@@ -128,6 +135,17 @@ def _build_droplet_dialog(monkeypatch, qapp, *, refuel_model=None, main_window=N
     )
     if main_window is None:
         main_window = SimpleNamespace(color_dict={}, pause_machine=Mock())
+    status_calls = [] if status_calls is None else status_calls
+    monkeypatch.setattr(
+        DropletImagingDialog,
+        "update_stage_and_log",
+        lambda self, message, color=None: status_calls.append((str(message), color)),
+    )
+    monkeypatch.setattr(
+        DropletImagingDialog,
+        "_refresh_manual_control_lock_state",
+        lambda self, *args, **kwargs: None,
+    )
     dialog = DropletImagingDialog(
         main_window,
         model,
@@ -141,6 +159,10 @@ def _build_droplet_dialog(monkeypatch, qapp, *, refuel_model=None, main_window=N
 def test_refuel_panel_default_disabled_and_no_capture(monkeypatch, qapp):
     dialog, refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
 
+    controller.start_droplet_camera.assert_called_once_with()
+    controller.start_read_camera.assert_called_once_with()
+    assert dialog._read_camera_stream_armed is True
+    assert dialog._read_camera_stream_reconciled is True
     assert dialog.control_panel_scroll.widget() is dialog.control_panel
     assert dialog.layout.itemAt(0).widget() is dialog.control_panel_scroll
     assert dialog.control_panel_scroll.widgetResizable() is True
@@ -172,6 +194,23 @@ def test_refuel_panel_default_disabled_and_no_capture(monkeypatch, qapp):
     controller.start_refuel_camera.assert_not_called()
     controller.capture_refuel_image.assert_not_called()
     controller.capture_refuel_image_with_context.assert_not_called()
+
+
+def test_droplet_imager_startup_read_camera_arm_failure_is_nonfatal(monkeypatch, qapp):
+    status_calls = []
+    dialog, _refuel_model, controller = _build_droplet_dialog(
+        monkeypatch,
+        qapp,
+        start_read_camera_side_effect=RuntimeError("queue offline"),
+        status_calls=status_calls,
+    )
+
+    controller.start_droplet_camera.assert_called_once_with()
+    controller.start_read_camera.assert_called_once_with()
+    assert dialog._read_camera_stream_armed is False
+    assert dialog._read_camera_stream_reconciled is False
+    assert status_calls
+    assert "Could not arm droplet flash/read-camera session on open: queue offline" in status_calls[0][0]
 
 
 def test_refuel_panel_open_camera_button_uses_explicit_callback_without_capture(monkeypatch, qapp):

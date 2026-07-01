@@ -27,6 +27,22 @@ class _BusyThenSuccessCaptureSignal:
         callback(np.zeros((8, 8, 3), dtype=np.uint8))
 
 
+class _LegacyReasonThenSuccessCaptureSignal:
+    def __init__(self, reason, *, rejection_state=None):
+        self.emit_count = 0
+        self.reason = str(reason)
+        self.rejection_state = dict(rejection_state or {})
+
+    def emit(self, callback):
+        self.emit_count += 1
+        if self.emit_count == 1:
+            callback._capture_rejection_reason = self.reason
+            callback._capture_rejection_state = dict(self.rejection_state)
+            callback(None)
+            return
+        callback(np.zeros((8, 8, 3), dtype=np.uint8))
+
+
 class _CancelledCaptureSignal:
     def __init__(self):
         self.emit_count = 0
@@ -185,6 +201,66 @@ def test_capture_policy_busy_rejection_backs_off_without_consuming_attempt(monke
     assert success_events[-1]["attempt"] == 1
     assert saved and saved[-1]["metadata"]["attempt"] == 1
     assert completed == [True]
+
+
+def test_capture_policy_camera_capture_active_uses_busy_backoff(monkeypatch):
+    capture_signal = _LegacyReasonThenSuccessCaptureSignal(
+        "camera_capture_active",
+        rejection_state={"cap_active": True},
+    )
+    fixture = _make_capture_policy_fixture(monkeypatch, capture_signal)
+
+    BaseCalibrationProcess._capture_with_policy(
+        fixture.proc,
+        set_attr="droplet_image",
+        stage_text="unit capture",
+        attempts_total=2,
+        guard_timeout_ms=5_000,
+        busy_retry_delay_ms=1_250,
+    )
+
+    busy_events = [payload for event_type, payload, _kwargs in fixture.events if event_type == "capture_busy_retry"]
+    assert busy_events
+    assert busy_events[-1]["capture_status"] == CaptureStatus.BUSY.value
+    assert fixture.scheduled and fixture.scheduled[0][0] == 1_250
+
+    fixture.scheduled.pop(0)[1]()
+
+    assert capture_signal.emit_count == 2
+    assert fixture.saved[-1]["metadata"]["attempt"] == 1
+    assert fixture.completed == [True]
+
+
+def test_capture_policy_camera_backend_rejections_retry_as_backend_unavailable(monkeypatch):
+    cases = [
+        ("camera_backend_unsupported", {"backend_error": "gpio_edge_fd_unavailable"}),
+        ("camera_not_started", {"camera_started": False}),
+    ]
+    for reason, rejection_state in cases:
+        capture_signal = _LegacyReasonThenSuccessCaptureSignal(
+            reason,
+            rejection_state=rejection_state,
+        )
+        fixture = _make_capture_policy_fixture(monkeypatch, capture_signal)
+
+        BaseCalibrationProcess._capture_with_policy(
+            fixture.proc,
+            set_attr="droplet_image",
+            stage_text="unit capture",
+            attempts_total=2,
+            retry_delay_ms=85,
+            guard_timeout_ms=5_000,
+        )
+
+        failure_events = [payload for event_type, payload, _kwargs in fixture.events if event_type == "capture_result"]
+        assert failure_events[-1]["capture_status"] == CaptureStatus.BACKEND_UNAVAILABLE.value
+        assert failure_events[-1]["rejection_reason"] == reason
+        assert fixture.scheduled and fixture.scheduled[0][0] == 85
+
+        fixture.scheduled.pop(0)[1]()
+
+        assert capture_signal.emit_count == 2
+        assert fixture.completed == [True]
 
 
 def test_capture_policy_cancelled_capture_is_terminal(monkeypatch):

@@ -1485,9 +1485,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.flash_active = False
         self.saving_active = False
         self.analysis_active = False
-        self.start_droplet_camera()
         self._read_camera_stream_armed = False
         self._read_camera_stream_reconciled = False
+        self.start_droplet_camera()
+        self._arm_read_camera_stream_on_open()
 
         # Timer for periodic image capture
         self.camera_timer = QTimer(self)
@@ -6840,6 +6841,24 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.controller.stop_read_camera()
         self._read_camera_stream_armed = desired_enabled
         self._read_camera_stream_reconciled = True
+
+    def _arm_read_camera_stream_on_open(self):
+        try:
+            state = self._get_stream_capture_state()
+            status = str((state or {}).get("status") or "idle")
+            if status in self._STREAM_CAPTURE_READ_CAMERA_DISARM_STATUSES:
+                return
+            self._set_stream_capture_read_camera_enabled(True)
+        except Exception as exc:
+            message = f"Could not arm droplet flash/read-camera session on open: {exc}"
+            updater = getattr(self, "update_stage_and_log", None)
+            if callable(updater):
+                try:
+                    updater(message, "orange")
+                    return
+                except Exception:
+                    pass
+            print(f"[Camera] {message}")
 
     def _sync_stream_capture_read_camera_state(self, status: str):
         self._set_stream_capture_read_camera_enabled(

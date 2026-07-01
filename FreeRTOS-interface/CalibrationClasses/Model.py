@@ -8109,11 +8109,17 @@ class BaseCalibrationProcess(QObject):
             except ValueError:
                 pass
         reason = str(rejection_reason or "").strip()
-        if reason in {"controller_pending", "callback_pending", "context_pending", "camera_worker_active"}:
+        if reason in {
+            "controller_pending",
+            "callback_pending",
+            "context_pending",
+            "camera_worker_active",
+            "camera_capture_active",
+        }:
             return CaptureStatus.BUSY
         if reason in {"machine_rejected", "queue_rejected"}:
             return CaptureStatus.QUEUE_REJECTED
-        if reason == "camera_backend_unavailable":
+        if reason in {"camera_backend_unavailable", "camera_backend_unsupported", "camera_not_started"}:
             return CaptureStatus.BACKEND_UNAVAILABLE
         if reason == "capture_cancelled":
             return CaptureStatus.CANCELLED
