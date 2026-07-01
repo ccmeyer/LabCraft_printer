@@ -4893,14 +4893,62 @@ class Controller(QObject):
         # protect against overlapping requests
         self.capture_droplet_image(callback=callback)
 
-    def _notify_capture_callback_failed(self, callback):
+    def _capture_callback_status_for_reason(self, reason):
+        reason = str(reason or "")
+        if reason in {"controller_pending", "callback_pending", "context_pending", "camera_worker_active"}:
+            return CaptureStatus.BUSY
+        if reason in {"machine_rejected", "queue_rejected"}:
+            return CaptureStatus.QUEUE_REJECTED
+        if reason == "camera_backend_unavailable":
+            return CaptureStatus.BACKEND_UNAVAILABLE
+        if reason == "capture_cancelled":
+            return CaptureStatus.CANCELLED
+        if reason == "flash_disarmed":
+            return CaptureStatus.FLASH_DISARMED
+        if reason == "flash_fault":
+            return CaptureStatus.FIRMWARE_FLASH_LATCHED
+        if reason == "firmware_flash_fault":
+            return CaptureStatus.FIRMWARE_FLASH_FAULT
+        if reason == "firmware_flash_latched":
+            return CaptureStatus.FIRMWARE_FLASH_LATCHED
+        return CaptureStatus.INTERNAL_ERROR
+
+    def _attach_capture_callback_result_metadata(
+        self,
+        callback,
+        *,
+        request_id=None,
+        status=None,
+        metadata=None,
+    ):
         if callback is None:
             return
         try:
-            setattr(callback, "_capture_rejection_reason", self.last_capture_queue_rejection_reason)
-            setattr(callback, "_capture_rejection_state", self.last_capture_queue_rejection_state)
+            if request_id is not None:
+                setattr(callback, "_capture_request_id", str(request_id))
+            if status is not None:
+                status_value = status.value if isinstance(status, CaptureStatus) else str(status)
+                setattr(callback, "_capture_result_status", status_value)
+            if metadata is not None:
+                setattr(callback, "_capture_result_metadata", dict(metadata or {}))
         except Exception:
             pass
+
+    def _notify_capture_callback_failed(self, callback):
+        if callback is None:
+            return
+        reason = self.last_capture_queue_rejection_reason
+        state = self.last_capture_queue_rejection_state
+        try:
+            setattr(callback, "_capture_rejection_reason", reason)
+            setattr(callback, "_capture_rejection_state", state)
+        except Exception:
+            pass
+        self._attach_capture_callback_result_metadata(
+            callback,
+            status=self._capture_callback_status_for_reason(reason),
+            metadata={"rejection_reason": reason, "rejection_state": state},
+        )
         try:
             callback(None)
         except Exception as e:
@@ -5027,6 +5075,18 @@ class Controller(QObject):
                 setattr(callback, "_capture_cancel_reason", cancel_reason)
             except Exception:
                 pass
+            self._attach_capture_callback_result_metadata(
+                callback,
+                request_id=request_id,
+                status=CaptureStatus.CANCELLED,
+                metadata={
+                    "capture_context": capture_context,
+                    "rejection_reason": "capture_cancelled",
+                    "cancel_reason": cancel_reason,
+                    "rejection_state": state_before,
+                    "recovery_result": dict(recovery_result or {}),
+                },
+            )
             try:
                 callback(None)
             except Exception as exc:
@@ -5087,6 +5147,12 @@ class Controller(QObject):
         )
         self._clear_pending_capture()
         if cb:
+            self._attach_capture_callback_result_metadata(
+                cb,
+                request_id=request_id,
+                status=CaptureStatus.INTERNAL_ERROR,
+                metadata={"message": str(msg), "state": self._get_droplet_capture_state()},
+            )
             try:
                 cb(None)
             except Exception as e:
@@ -5298,6 +5364,21 @@ class Controller(QObject):
         )
         print(f"[Camera] capture blocked: {message}")
         if callback is not None:
+            state = self._get_droplet_capture_state()
+            try:
+                setattr(callback, "_capture_rejection_reason", "flash_fault")
+                setattr(callback, "_capture_rejection_state", state)
+            except Exception:
+                pass
+            self._attach_capture_callback_result_metadata(
+                callback,
+                status=CaptureStatus.FIRMWARE_FLASH_LATCHED,
+                metadata={
+                    "rejection_reason": "flash_fault",
+                    "rejection_state": state,
+                    "message": message,
+                },
+            )
             try:
                 callback(None)
             except Exception as exc:
@@ -5613,6 +5694,12 @@ class Controller(QObject):
         
         # If a callback was set for the capture, call it.
         if callback:
+            self._attach_capture_callback_result_metadata(
+                callback,
+                request_id=request_id,
+                status=CaptureStatus.SUCCESS,
+                metadata=metadata,
+            )
             callback(frame)
 
     @QtCore.Slot(str)

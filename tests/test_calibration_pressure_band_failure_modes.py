@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from tests.calibration_test_utils import Recorder, SignalStub, ensure_calibration_import_stubs
 
@@ -9,6 +10,7 @@ ensure_calibration_import_stubs()
 
 import CalibrationClasses.Model as calibration_model  # noqa: E402
 from CalibrationClasses.Model import BaseCalibrationProcess, PressureBandCalibrationProcess  # noqa: E402
+from CaptureTypes import CaptureStatus  # noqa: E402
 
 
 class _BusyThenSuccessCaptureSignal:
@@ -35,6 +37,102 @@ class _CancelledCaptureSignal:
         callback._capture_cancel_reason = "unit_test_cancel"
         callback._capture_rejection_state = {"worker_active": True}
         callback(None)
+
+
+class _TypedStatusThenSuccessCaptureSignal:
+    def __init__(self, status, *, reason="", metadata=None):
+        self.emit_count = 0
+        self.status = status
+        self.reason = str(reason or status)
+        self.metadata = dict(metadata or {})
+
+    def emit(self, callback):
+        self.emit_count += 1
+        if self.emit_count == 1 and self.status == CaptureStatus.SUCCESS:
+            callback._capture_request_id = "typed-success-request"
+            callback._capture_result_status = CaptureStatus.SUCCESS.value
+            callback._capture_result_metadata = dict(self.metadata)
+            callback(np.zeros((8, 8, 3), dtype=np.uint8))
+            return
+        if self.emit_count == 1:
+            callback._capture_result_status = (
+                self.status.value if isinstance(self.status, CaptureStatus) else str(self.status)
+            )
+            callback._capture_rejection_reason = self.reason
+            callback._capture_result_metadata = dict(self.metadata)
+            callback(None)
+            return
+        callback._capture_request_id = "typed-success-request"
+        callback._capture_result_status = CaptureStatus.SUCCESS.value
+        callback._capture_result_metadata = {"cap_id": "typed-success"}
+        callback(np.zeros((8, 8, 3), dtype=np.uint8))
+
+
+class _TerminalTypedCaptureSignal:
+    def __init__(self, status, *, reason=""):
+        self.emit_count = 0
+        self.status = status
+        self.reason = str(reason or status)
+
+    def emit(self, callback):
+        self.emit_count += 1
+        callback._capture_result_status = (
+            self.status.value if isinstance(self.status, CaptureStatus) else str(self.status)
+        )
+        callback._capture_rejection_reason = self.reason
+        callback._capture_result_metadata = {"source": "unit"}
+        callback(None)
+
+
+class _TimeoutThenSuccessCaptureSignal:
+    def __init__(self):
+        self.emit_count = 0
+
+    def emit(self, callback):
+        self.emit_count += 1
+        if self.emit_count == 1:
+            return
+        callback(np.zeros((8, 8, 3), dtype=np.uint8))
+
+
+def _make_capture_policy_fixture(monkeypatch, capture_signal):
+    proc = BaseCalibrationProcess.__new__(BaseCalibrationProcess)
+    events = []
+    errors = []
+    saved = []
+    completed = []
+    scheduled = []
+    timeouts = []
+    proc._record_event = lambda event_type, payload=None, **kwargs: events.append(
+        (str(event_type), dict(payload or {}), dict(kwargs or {}))
+    )
+    proc._record_error = lambda *args, **kwargs: errors.append((args, kwargs))
+    proc._start_timeout = lambda *_args, **kwargs: timeouts.append(kwargs.get("on_timeout")) or object()
+    proc._cancel_timeout = lambda *_args, **_kwargs: None
+    proc._last_capture_refs = {}
+    proc._active_capture_pair_id = None
+    proc._record_capture = lambda frame, role="capture", metadata=None: saved.append(
+        {"frame": frame, "role": role, "metadata": dict(metadata or {})}
+    ) or {"capture_id": "cap-test", "image_relpath": "captures/cap-test.jpg"}
+    proc.calibrationError = SimpleNamespace(emit=lambda msg: errors.append((("emit", msg), {})))
+    proc.calibration_manager = SimpleNamespace(
+        captureImageRequested=capture_signal,
+        emitCaptureCompleted=lambda: completed.append(True),
+    )
+    monkeypatch.setattr(
+        calibration_model.QTimer,
+        "singleShot",
+        lambda delay_ms, callback: scheduled.append((int(delay_ms), callback)),
+    )
+    return SimpleNamespace(
+        proc=proc,
+        events=events,
+        errors=errors,
+        saved=saved,
+        completed=completed,
+        scheduled=scheduled,
+        timeouts=timeouts,
+    )
 
 
 def test_capture_policy_busy_rejection_backs_off_without_consuming_attempt(monkeypatch):
@@ -132,6 +230,142 @@ def test_capture_policy_cancelled_capture_is_terminal(monkeypatch):
     cancelled_events = [payload for event_type, payload, _kwargs in events if event_type == "capture_cancelled"]
     assert cancelled_events
     assert cancelled_events[0]["cancel_reason"] == "unit_test_cancel"
+
+
+def test_capture_policy_success_uses_typed_result_and_emits_completed(monkeypatch):
+    capture_signal = _TypedStatusThenSuccessCaptureSignal(CaptureStatus.SUCCESS)
+    fixture = _make_capture_policy_fixture(monkeypatch, capture_signal)
+
+    BaseCalibrationProcess._capture_with_policy(
+        fixture.proc,
+        set_attr="droplet_image",
+        stage_text="unit capture",
+        attempts_total=1,
+        guard_timeout_ms=5_000,
+    )
+
+    assert capture_signal.emit_count == 1
+    assert hasattr(fixture.proc, "droplet_image")
+    assert fixture.saved and fixture.saved[-1]["metadata"]["attempt"] == 1
+    assert fixture.completed == [True]
+    success_events = [payload for event_type, payload, _kwargs in fixture.events if event_type == "capture_result"]
+    assert success_events[-1]["status"] == "success"
+    assert fixture.errors == []
+
+
+def test_capture_policy_guard_timeout_consumes_attempt_and_retries(monkeypatch):
+    capture_signal = _TimeoutThenSuccessCaptureSignal()
+    fixture = _make_capture_policy_fixture(monkeypatch, capture_signal)
+
+    BaseCalibrationProcess._capture_with_policy(
+        fixture.proc,
+        set_attr="droplet_image",
+        stage_text="unit capture",
+        attempts_total=2,
+        retry_delay_ms=75,
+        guard_timeout_ms=5_000,
+    )
+
+    assert capture_signal.emit_count == 1
+    assert fixture.timeouts and callable(fixture.timeouts[0])
+    fixture.timeouts[0]()
+
+    failure_events = [payload for event_type, payload, _kwargs in fixture.events if event_type == "capture_result"]
+    assert failure_events[-1]["status"] == "failed"
+    assert failure_events[-1]["capture_status"] == CaptureStatus.TIMEOUT.value
+    assert fixture.scheduled and fixture.scheduled[0][0] == 75
+
+    fixture.scheduled.pop(0)[1]()
+
+    assert capture_signal.emit_count == 2
+    assert fixture.completed == [True]
+    assert fixture.saved[-1]["metadata"]["attempt"] == 2
+
+
+def test_capture_policy_queue_rejection_retries_using_typed_status(monkeypatch):
+    capture_signal = _TypedStatusThenSuccessCaptureSignal(
+        CaptureStatus.QUEUE_REJECTED,
+        reason="machine_rejected",
+        metadata={"request_id": "queue-reject"},
+    )
+    fixture = _make_capture_policy_fixture(monkeypatch, capture_signal)
+
+    BaseCalibrationProcess._capture_with_policy(
+        fixture.proc,
+        set_attr="droplet_image",
+        stage_text="unit capture",
+        attempts_total=2,
+        retry_delay_ms=80,
+        guard_timeout_ms=5_000,
+    )
+
+    failure_events = [payload for event_type, payload, _kwargs in fixture.events if event_type == "capture_result"]
+    assert failure_events[-1]["capture_status"] == CaptureStatus.QUEUE_REJECTED.value
+    assert failure_events[-1]["rejection_reason"] == "machine_rejected"
+    assert fixture.scheduled and fixture.scheduled[0][0] == 80
+
+    fixture.scheduled.pop(0)[1]()
+
+    assert capture_signal.emit_count == 2
+    assert fixture.completed == [True]
+
+
+def test_capture_policy_backend_unavailable_retries_using_typed_status(monkeypatch):
+    capture_signal = _TypedStatusThenSuccessCaptureSignal(
+        CaptureStatus.BACKEND_UNAVAILABLE,
+        reason="camera_backend_unavailable",
+    )
+    fixture = _make_capture_policy_fixture(monkeypatch, capture_signal)
+
+    BaseCalibrationProcess._capture_with_policy(
+        fixture.proc,
+        set_attr="droplet_image",
+        stage_text="unit capture",
+        attempts_total=2,
+        retry_delay_ms=90,
+        guard_timeout_ms=5_000,
+    )
+
+    failure_events = [payload for event_type, payload, _kwargs in fixture.events if event_type == "capture_result"]
+    assert failure_events[-1]["capture_status"] == CaptureStatus.BACKEND_UNAVAILABLE.value
+    assert fixture.scheduled and fixture.scheduled[0][0] == 90
+
+    fixture.scheduled.pop(0)[1]()
+
+    assert capture_signal.emit_count == 2
+    assert fixture.completed == [True]
+
+
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    [
+        (CaptureStatus.FLASH_DISARMED, "flash_disarmed"),
+        (CaptureStatus.FIRMWARE_FLASH_FAULT, "firmware_flash_fault"),
+        (CaptureStatus.FIRMWARE_FLASH_LATCHED, "firmware_flash_latched"),
+    ],
+)
+def test_capture_policy_flash_safety_statuses_are_terminal(monkeypatch, status, reason):
+    capture_signal = _TerminalTypedCaptureSignal(status, reason=reason)
+    fixture = _make_capture_policy_fixture(monkeypatch, capture_signal)
+    final_failures = []
+
+    BaseCalibrationProcess._capture_with_policy(
+        fixture.proc,
+        set_attr="droplet_image",
+        stage_text="unit capture",
+        attempts_total=3,
+        retry_delay_ms=75,
+        guard_timeout_ms=5_000,
+        on_final_failure=lambda: final_failures.append(True),
+    )
+
+    assert capture_signal.emit_count == 1
+    assert fixture.scheduled == []
+    assert final_failures == [True]
+    assert fixture.errors
+    failure_events = [payload for event_type, payload, _kwargs in fixture.events if event_type == "capture_result"]
+    assert failure_events[-1]["capture_status"] == status.value
+    assert failure_events[-1]["rejection_reason"] == reason
 
 
 def test_pressure_band_replicate_capture_uses_extended_guard_for_recovery_retry():

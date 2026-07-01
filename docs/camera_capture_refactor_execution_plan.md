@@ -376,7 +376,7 @@ Rollback:
 
 ## Slice 5: Shared Calibration Policy Adapter
 
-Status: `not_started`
+Status: `verified`
 
 Goal:
 
@@ -409,8 +409,12 @@ Focused tests:
 
 Validation:
 
-- Focused calibration policy tests.
-- `.\env\Scripts\python.exe -m pytest -q tests\test_optics_capture_metadata.py`
+- `.\env\Scripts\python.exe -m pytest -q tests\test_calibration_pressure_band_failure_modes.py` -> `37 passed in 7.55s`
+- `.\env\Scripts\python.exe -m pytest -q tests\test_optics_capture_metadata.py` -> `30 passed in 5.47s`
+- `.\env\Scripts\python.exe -m pytest -q tests\test_capture_types.py tests\test_capture_coordinator.py` -> `38 passed in 0.49s`
+- `.\env\Scripts\python.exe -m pytest -q tests\test_refuel_camera_controller.py tests\test_app_update_request.py` -> `47 passed in 5.31s`
+- `.\env\Scripts\python.exe -m pytest -q tests\test_droplet_camera_trigger_cleanup.py tests\test_flash_safety_ui.py tests\test_run_selftest_camera_benchmark.py` -> `45 passed in 6.64s`
+- `.\env\Scripts\python.exe -m pytest -q` -> `2689 passed, 24 skipped in 495.14s`
 
 Proceed criteria:
 

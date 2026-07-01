@@ -45,6 +45,7 @@ from tools.stream_analysis import online_calibration as online_cal_mod
 from tools.stream_analysis import online_fit as online_fit_mod
 from tools.stream_analysis import online_runtime as online_runtime_mod
 from tools.stream_analysis import online_tail as online_tail_mod
+from CaptureTypes import CaptureResult, CaptureSource, CaptureStatus
 
 # ---- numpy encoder helper (robust JSON) ----
 def numpy_encoder(obj):
@@ -8053,6 +8054,79 @@ class BaseCalibrationProcess(QObject):
 
         return _cancel_pending
 
+    def _capture_policy_result_from_callback(self, frame, callback) -> CaptureResult:
+        request_id = str(getattr(callback, "_capture_request_id", "") or f"calibration_callback_{id(callback):x}")
+        metadata = {}
+        raw_metadata = getattr(callback, "_capture_result_metadata", None)
+        if isinstance(raw_metadata, dict):
+            metadata.update(raw_metadata)
+        rejection_reason = str(getattr(callback, "_capture_rejection_reason", "") or "")
+        rejection_state = getattr(callback, "_capture_rejection_state", None) or {}
+        cancel_reason = str(getattr(callback, "_capture_cancel_reason", "") or "")
+        if rejection_reason:
+            metadata.setdefault("rejection_reason", rejection_reason)
+        if rejection_state:
+            metadata.setdefault("rejection_state", rejection_state)
+        if cancel_reason:
+            metadata.setdefault("cancel_reason", cancel_reason)
+
+        if frame is not None:
+            return CaptureResult.success(
+                request_id,
+                frame,
+                metadata=metadata,
+                reason=str(getattr(callback, "_capture_result_reason", "") or "capture_completed"),
+                source=CaptureSource.CALIBRATION,
+            )
+
+        status = self._capture_policy_status_from_callback(callback, rejection_reason)
+        if status == CaptureStatus.SUCCESS:
+            status = CaptureStatus.INTERNAL_ERROR
+        reason = cancel_reason or rejection_reason or str(status.value)
+        retryable = status in {
+            CaptureStatus.TIMEOUT,
+            CaptureStatus.BUSY,
+            CaptureStatus.QUEUE_REJECTED,
+            CaptureStatus.BACKEND_UNAVAILABLE,
+            CaptureStatus.INTERNAL_ERROR,
+        }
+        recoverable = status == CaptureStatus.BACKEND_UNAVAILABLE
+        return CaptureResult.failure(
+            request_id,
+            status,
+            metadata=metadata,
+            reason=reason,
+            retryable=retryable,
+            recoverable=recoverable,
+            source=CaptureSource.CALIBRATION,
+        )
+
+    def _capture_policy_status_from_callback(self, callback, rejection_reason: str) -> CaptureStatus:
+        raw_status = str(getattr(callback, "_capture_result_status", "") or "")
+        if raw_status:
+            try:
+                return CaptureStatus(raw_status)
+            except ValueError:
+                pass
+        reason = str(rejection_reason or "").strip()
+        if reason in {"controller_pending", "callback_pending", "context_pending", "camera_worker_active"}:
+            return CaptureStatus.BUSY
+        if reason in {"machine_rejected", "queue_rejected"}:
+            return CaptureStatus.QUEUE_REJECTED
+        if reason == "camera_backend_unavailable":
+            return CaptureStatus.BACKEND_UNAVAILABLE
+        if reason == "capture_cancelled":
+            return CaptureStatus.CANCELLED
+        if reason == "flash_disarmed":
+            return CaptureStatus.FLASH_DISARMED
+        if reason in {"flash_fault", "firmware_flash_fault"}:
+            return CaptureStatus.FIRMWARE_FLASH_FAULT
+        if reason == "firmware_flash_latched":
+            return CaptureStatus.FIRMWARE_FLASH_LATCHED
+        if not reason:
+            return CaptureStatus.TIMEOUT
+        return CaptureStatus.INTERNAL_ERROR
+
     def _capture_with_policy(
         self,
         *,
@@ -8098,11 +8172,19 @@ class BaseCalibrationProcess(QObject):
             #         i=state["attempt"], n=attempts_total
             #     ))
 
+            def _capture_guard_timeout():
+                try:
+                    setattr(_on_result, "_capture_result_status", CaptureStatus.TIMEOUT.value)
+                    setattr(_on_result, "_capture_rejection_reason", "timeout")
+                except Exception:
+                    pass
+                _on_result(None)
+
             # Start a guard timeout for this attempt
             guard_timer_ref["t"] = self._start_timeout(
                 guard_timeout_ms,
                 err_msg=None,  # we’ll treat it as a normal capture failure below
-                on_timeout=lambda: _on_result(None)  # resolve like a failed capture
+                on_timeout=_capture_guard_timeout  # resolve like a failed capture
             )
 
             # Single-shot callback used by the controller
@@ -8111,9 +8193,12 @@ class BaseCalibrationProcess(QObject):
                 self._cancel_timeout(guard_timer_ref["t"])
                 guard_timer_ref["t"] = None
 
-                if frame is None:
-                    rejection_reason = str(getattr(_on_result, "_capture_rejection_reason", "") or "")
-                    if rejection_reason == "capture_cancelled":
+                capture_result = self._capture_policy_result_from_callback(frame, _on_result)
+
+                if capture_result.status != CaptureStatus.SUCCESS:
+                    rejection_reason = str(capture_result.metadata.get("rejection_reason", "") or "")
+                    rejection_state = capture_result.metadata.get("rejection_state") or {}
+                    if capture_result.status == CaptureStatus.CANCELLED:
                         self._record_event(
                             "capture_cancelled",
                             {
@@ -8121,15 +8206,14 @@ class BaseCalibrationProcess(QObject):
                                 "stage_text": str(stage_text),
                                 "attempt": int(state["attempt"]),
                                 "attempts_total": int(attempts_total),
-                                "cancel_reason": str(
-                                    getattr(_on_result, "_capture_cancel_reason", "") or ""
-                                ),
-                                "state": getattr(_on_result, "_capture_rejection_state", None) or {},
+                                "cancel_reason": str(capture_result.metadata.get("cancel_reason", "") or capture_result.reason),
+                                "state": rejection_state,
+                                "capture_status": capture_result.status.value,
                             },
                             level="warning",
                         )
                         return
-                    if rejection_reason in busy_retry_reasons and state["busy_retries"] < busy_retry_limit:
+                    if capture_result.status == CaptureStatus.BUSY and state["busy_retries"] < busy_retry_limit:
                         state["busy_retries"] += 1
                         self._record_event(
                             "capture_busy_retry",
@@ -8141,14 +8225,15 @@ class BaseCalibrationProcess(QObject):
                                 "busy_retry": int(state["busy_retries"]),
                                 "busy_retry_limit": int(busy_retry_limit),
                                 "retry_delay_ms": int(busy_retry_delay_ms),
-                                "reason": rejection_reason,
-                                "state": getattr(_on_result, "_capture_rejection_state", None) or {},
+                                "reason": rejection_reason or capture_result.reason,
+                                "state": rejection_state,
+                                "capture_status": capture_result.status.value,
                             },
                             level="warning",
                         )
                         QTimer.singleShot(busy_retry_delay_ms, _arm_one_attempt)
                         return
-                    if rejection_reason in busy_retry_reasons:
+                    if capture_result.status == CaptureStatus.BUSY:
                         self._record_event(
                             "capture_busy_retry_exhausted",
                             {
@@ -8157,7 +8242,8 @@ class BaseCalibrationProcess(QObject):
                                 "attempt": int(state["attempt"]),
                                 "attempts_total": int(attempts_total),
                                 "busy_retry_limit": int(busy_retry_limit),
-                                "reason": rejection_reason,
+                                "reason": rejection_reason or capture_result.reason,
+                                "capture_status": capture_result.status.value,
                             },
                             level="warning",
                         )
@@ -8168,24 +8254,33 @@ class BaseCalibrationProcess(QObject):
                             "stage_text": str(stage_text),
                             "attempt": int(state["attempt"]),
                             "status": "failed",
-                            "rejection_reason": rejection_reason,
+                            "capture_status": capture_result.status.value,
+                            "rejection_reason": rejection_reason or capture_result.reason,
                         },
                         level="warning",
                     )
-                    # Failed this attempt
-                    if state["attempt"] < attempts_total:
+                    terminal_statuses = {
+                        CaptureStatus.FLASH_DISARMED,
+                        CaptureStatus.FIRMWARE_FLASH_FAULT,
+                        CaptureStatus.FIRMWARE_FLASH_LATCHED,
+                    }
+                    if (
+                        capture_result.retryable
+                        and capture_result.status not in terminal_statuses
+                        and state["attempt"] < attempts_total
+                    ):
                         state["attempt"] += 1
                         state["busy_retries"] = 0
-                        # Schedule the next try
                         QTimer.singleShot(retry_delay_ms, _arm_one_attempt)
                         return
-                    # Final failure
                     self._record_error(
                         final_error_msg,
                         {
                             "set_attr": str(set_attr),
                             "stage_text": str(stage_text),
                             "attempts_total": int(attempts_total),
+                            "capture_status": capture_result.status.value,
+                            "reason": capture_result.reason,
                         },
                     )
                     if on_final_failure is not None:
@@ -8195,6 +8290,7 @@ class BaseCalibrationProcess(QObject):
                     return
 
                 # Success
+                frame = capture_result.frame
                 setattr(self, set_attr, frame)
                 role = str(set_attr).replace("_image", "")
                 capture_meta = {
