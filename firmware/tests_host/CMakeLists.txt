@@ -32,6 +32,7 @@ add_executable(fw_tests
     tests/test_reset_report_policy.cpp
     tests/test_crash_watchdog_selftest_policy.cpp
     tests/test_flash_safety.cpp
+    tests/test_flash_cycle_policy.cpp
     tests/test_flash_output_state.cpp
     tests/test_printer_completion_bits.cpp
     tests/test_diagnostic_result_emitter.cpp
@@ -57,6 +58,7 @@ add_executable(fw_tests
     ../Core/Src/ResetReportPolicy.cpp
     ../Core/Src/CrashWatchdogSelfTestPolicy.cpp
     ../Core/Src/FlashSafety.cpp
+    ../Core/Src/FlashCyclePolicy.cpp
 )
 
 target_include_directories(fw_tests PRIVATE

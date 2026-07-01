@@ -100,6 +100,7 @@ extern void MX_FLASH_ReportOutputState(void);
 extern void MX_FLASH_ONCE();
 extern void MX_FLASH_TriggerCallback(uint16_t GPIO_Pin);
 extern void MX_FLASH_Acknowledge();
+extern uint8_t MX_FLASH_ShouldFireScheduled(void);
 
 extern void MX_TMC2208_Init(UART_HandleTypeDef* huart);
 
@@ -1381,10 +1382,12 @@ void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef* htim) {
     // Stop further interrupts on CH1 for this one-shot
     HAL_TIM_OC_Stop_IT(htim, TIM_CHANNEL_1);
 
-    // Fire the flash *now* (TIM1 OPM pulse via your Flash singleton)
-    MX_FLASH_ONCE();
+    if (MX_FLASH_ShouldFireScheduled() != 0u) {
+      // Fire the flash *now* (TIM1 OPM pulse via your Flash singleton)
+      MX_FLASH_ONCE();
 
-    MX_FLASH_Acknowledge();
+      MX_FLASH_Acknowledge();
+    }
   }
 }
 //void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef *htim) {

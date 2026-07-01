@@ -1748,6 +1748,7 @@ constexpr uint32_t kFlashAckGraceMs = 250u;
 constexpr uint32_t kFlashPrintCompletionGraceMs = 1000u;
 constexpr uint32_t kFlashPrintCompletionMinMs = 1000u;
 constexpr uint32_t kFlashPrintCompletionMaxMs = 30000u;
+constexpr uint32_t kFlashPrinterQueueTimeoutMs = 5u;
 
 uint32_t clampU32(uint32_t value, uint32_t minValue, uint32_t maxValue) {
   if (value < minValue) {
@@ -1776,6 +1777,12 @@ void Orchestrator::_clearFlashTaskNotifications() {
   (void)xTaskNotifyStateClear(_flashTaskHandle);
 }
 
+void Orchestrator::_stopScheduledFlashTimer() {
+  HAL_TIM_OC_Stop_IT(&htim12, TIM_CHANNEL_1);
+  __HAL_TIM_CLEAR_FLAG(&htim12, TIM_FLAG_CC1|TIM_FLAG_UPDATE);
+  __HAL_TIM_SET_COUNTER(&htim12, 0);
+}
+
 void Orchestrator::_logFlashArmed() {
   Logger::instance()->log("FLASH_ARMED\r\n");
 }
@@ -1789,6 +1796,8 @@ void Orchestrator::_logFlashFault(FlashSafety::FaultReason reason) {
 }
 
 void Orchestrator::_latchFlashFault(FlashSafety::FaultReason reason, bool deferLog) {
+  _stopScheduledFlashTimer();
+  FlashCyclePolicy::finish(_flashCycle);
   _flashSafety.sessionArmed = false;
   _flashSafety.awaitingRelease = false;
   _flashSafety.faultLatched = true;
@@ -1873,6 +1882,8 @@ bool Orchestrator::_waitForFlashPrintDone(uint32_t timeoutMs) {
 }
 
 void Orchestrator::_finishFlashMonitorCycle(bool successful) {
+  _stopScheduledFlashTimer();
+  FlashCyclePolicy::finish(_flashCycle);
   _clearFlashTaskNotifications();
   _flashInProgress = false;
   if (successful) {
@@ -1930,6 +1941,9 @@ void Orchestrator::_disarmFlashSession(const char* reason, bool clearFault) {
   const bool hadState = FlashSafety::isSessionArmed(_flashSafety) ||
                         FlashSafety::isFaultLatched(_flashSafety) ||
                         _flashSafety.awaitingRelease;
+  _stopScheduledFlashTimer();
+  FlashCyclePolicy::finish(_flashCycle);
+  _flashInProgress = false;
   _flashAckLow();
   if (_flashAckTmr) {
     xTimerStop(_flashAckTmr, 0);
@@ -1950,7 +1964,10 @@ void Orchestrator::_disarmFlashSession(const char* reason, bool clearFault) {
 
 
 // schedule a one-shot callback in N microseconds:
-void Orchestrator::scheduleFlashIn() {
+bool Orchestrator::scheduleFlashIn(uint32_t flashCycleId) {
+  if (!FlashCyclePolicy::schedule(_flashCycle, flashCycleId)) {
+    return false;
+  }
   // clear any pending flags
   __HAL_TIM_CLEAR_FLAG(&htim12, TIM_FLAG_CC1|TIM_FLAG_UPDATE);
 
@@ -1965,6 +1982,7 @@ void Orchestrator::scheduleFlashIn() {
 
   // start output-compare with interrupt
   HAL_TIM_OC_Start_IT(&htim12, TIM_CHANNEL_1);
+  return true;
 }
 
 void Orchestrator::flashNotifyFromISR(uint16_t GPIO_Pin) {
@@ -2038,19 +2056,29 @@ void Orchestrator::_flashTaskLoop() {
     _flashInProgress = true;
     xEventGroupClearBits(_doneEvents, BIT_FLASH_DONE);
     const uint32_t ackBaseline = g_flash_ack_count;
+    const uint32_t flashCycleId = FlashCyclePolicy::beginCycle(_flashCycle);
 
     const bool waitForPrintCompletion = (_imagingDroplets != 0u);
     if (!waitForPrintCompletion) {
-    	Orchestrator::instance()->scheduleFlashIn();
+        if (!Orchestrator::instance()->scheduleFlashIn(flashCycleId)) {
+            _finishFlashMonitorCycle(false);
+            continue;
+        }
     }
     else {
-        Printer::instance()->setFlashOnLast(true);
         xEventGroupClearBits(_doneEvents, BIT_FLASH_PRINT_DONE);
-        Printer::instance()->enqueue(
+        const bool queued = Printer::instance()->enqueueWithTimeout(
             _imagingDroplets,
             _imagingFreq,
             PulseMode::BOTH,
-            BIT_FLASH_PRINT_DONE);
+            msToAtLeast1Tick(kFlashPrinterQueueTimeoutMs),
+            BIT_FLASH_PRINT_DONE,
+            true,
+            flashCycleId);
+        if (!queued) {
+          _finishFlashMonitorCycle(false);
+          continue;
+        }
     }
 
 //    Logger::instance()->log("-FLASH COMP-\r\n");
@@ -2093,6 +2121,18 @@ void Orchestrator::_flashAckTimerCb(TimerHandle_t tmr) {
   self->_flashAckLow();
 }
 
+bool Orchestrator::shouldFireScheduledFlashFromISR() {
+  return FlashCyclePolicy::consumeScheduledFire(_flashCycle);
+}
+
+bool Orchestrator::noteFlashAckFromISR() {
+  if (!FlashCyclePolicy::noteAck(_flashCycle)) {
+    return false;
+  }
+  g_flash_ack_count++;
+  return true;
+}
+
 extern "C" void MX_FLASH_TriggerCallback(uint16_t GPIO_Pin) {
 //	HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
 	Orchestrator::instance()->flashNotifyFromISR(GPIO_Pin);
@@ -2102,19 +2142,28 @@ extern "C" void MX_FLASH_Acknowledge() {
 //	HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
     // Immediately raise the "flash fired" GPIO so the Pi can edge-trigger
     auto* orch = Orchestrator::instance();
+    if (!orch->noteFlashAckFromISR()) {
+      return;
+    }
     orch->_flashAckHigh();
-    orch->noteFlashAckFromISR();
 
     // Drop it low in ~2 ms via a FreeRTOS software timer
     BaseType_t hpw = pdFALSE;
-    xTimerStartFromISR(orch->_flashAckTmr, &hpw);
+    if (orch->_flashAckTmr) {
+      xTimerStartFromISR(orch->_flashAckTmr, &hpw);
+    }
     portYIELD_FROM_ISR(hpw);
+}
+extern "C" uint8_t MX_FLASH_ShouldFireScheduled() {
+    auto* orch = Orchestrator::instance();
+    return (orch && orch->shouldFireScheduledFlashFromISR()) ? 1u : 0u;
 }
 #else
 
 // Safe stubs so the project links even if callbacks remain referenced somewhere.
 extern "C" void MX_FLASH_TriggerCallback(uint16_t GPIO_Pin) { (void)GPIO_Pin; }
 extern "C" void MX_FLASH_Acknowledge() {}
+extern "C" uint8_t MX_FLASH_ShouldFireScheduled() { return 0u; }
 
 //void Orchestrator::scheduleFlashIn() {}
 //void Orchestrator::flashNotifyFromISR(uint16_t GPIO_Pin) { (void)GPIO_Pin; }

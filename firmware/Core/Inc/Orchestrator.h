@@ -11,6 +11,7 @@
 #include "PressureRegulator.h"
 #include "BoardConfig.h"
 #include "FlashSafety.h"
+#include "FlashCyclePolicy.h"
 #include "PrinterCompletionBits.h"
 
 #include <cstdint>
@@ -298,7 +299,7 @@ public:
   void flashNotifyFromISR(uint16_t GPIO_Pin);
   void setFlashDelay(uint32_t flashDelay);
   void setImagingDroplets(uint16_t imagingDroplets) { _imagingDroplets = imagingDroplets; }
-  void scheduleFlashIn();
+  bool scheduleFlashIn(uint32_t flashCycleId);
 
   static uint32_t getFlashDelay()       { return instance()->_flashDelay; }
   static uint32_t getExtCount()         { return instance()->g_exti8_count; }
@@ -321,7 +322,8 @@ public:
   static bool isFlashSessionArmed()     { return FlashSafety::isSessionArmed(instance()->_flashSafety); }
   static bool isFlashFaultLatched()     { return FlashSafety::isFaultLatched(instance()->_flashSafety); }
   static const char* getFlashFaultReason() { return FlashSafety::faultReasonToken(instance()->_flashSafety.faultReason); }
-  void noteFlashAckFromISR()            { g_flash_ack_count++; }
+  bool shouldFireScheduledFlashFromISR();
+  bool noteFlashAckFromISR();
 
 #else
 
@@ -329,7 +331,7 @@ public:
   void flashNotifyFromISR(uint16_t) {}
   void setFlashDelay(uint32_t) {}
   void setImagingDroplets(uint16_t) {}
-  void scheduleFlashIn() {}
+  bool scheduleFlashIn(uint32_t) { return false; }
 
   static uint32_t getFlashDelay()       { return 0; }
   static uint32_t getExtCount()         { return 0; }
@@ -352,6 +354,8 @@ public:
   static bool isFlashSessionArmed()     { return false; }
   static bool isFlashFaultLatched()     { return false; }
   static const char* getFlashFaultReason() { return "none"; }
+  bool shouldFireScheduledFlashFromISR() { return false; }
+  bool noteFlashAckFromISR() { return false; }
 
 #endif
 
@@ -421,6 +425,7 @@ private:
   GPIO_TypeDef*    _flashAckPort = GPIOE;
   uint16_t         _flashAckPin  = GPIO_PIN_12;
   FlashSafety::State _flashSafety{};
+  FlashCyclePolicy::State _flashCycle{};
   volatile bool _flashFaultLogPending = false;
   volatile uint32_t g_exti8_count = 0;
   volatile uint32_t g_flash_ack_count = 0;
@@ -440,6 +445,7 @@ private:
   volatile uint32_t g_flash_print_completion_timeout_count = 0;
 
   bool _isFlashTriggerHigh() const;
+  void _stopScheduledFlashTimer();
   void _clearFlashTaskNotifications();
   bool _armFlashSession();
   void _disarmFlashSession(const char* reason, bool clearFault);

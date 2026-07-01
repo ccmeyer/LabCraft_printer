@@ -148,7 +148,6 @@ void Printer::begin(
   _refuelPulseUs = refuelPulseUs;
   _normalPrintPrescaler = _htimPrint ? _htimPrint->Init.Prescaler : 0u;
   _normalRefuelPrescaler = _htimRefuel ? _htimRefuel->Init.Prescaler : 0u;
-  _flashOnLast = false;
 
   // Create queue and task
   _queue = xQueueCreate(8, sizeof(DispenseCommand));
@@ -208,8 +207,21 @@ void Printer::configureTimerRefuel() {
 #endif
 }
 
-void Printer::enqueue(uint16_t count, uint16_t rateHz, PulseMode mode, uint32_t completionBit) {
-  (void)enqueueWithTimeout(count, rateHz, mode, portMAX_DELAY, completionBit);
+void Printer::enqueue(
+    uint16_t count,
+    uint16_t rateHz,
+    PulseMode mode,
+    uint32_t completionBit,
+    bool flashOnLast,
+    uint32_t flashCycleId) {
+  (void)enqueueWithTimeout(
+      count,
+      rateHz,
+      mode,
+      portMAX_DELAY,
+      completionBit,
+      flashOnLast,
+      flashCycleId);
 }
 
 bool Printer::enqueueWithTimeout(
@@ -217,11 +229,13 @@ bool Printer::enqueueWithTimeout(
     uint16_t rateHz,
     PulseMode mode,
     TickType_t timeoutTicks,
-    uint32_t completionBit) {
+    uint32_t completionBit,
+    bool flashOnLast,
+    uint32_t flashCycleId) {
   if (_queue == nullptr) {
     return false;
   }
-  DispenseCommand cmd{count, rateHz, mode, completionBit};
+  DispenseCommand cmd{count, rateHz, mode, completionBit, flashOnLast, flashCycleId};
   if (xQueueSend(_queue, &cmd, 0) == pdTRUE) {
     return true;
   }
@@ -332,15 +346,12 @@ void Printer::taskLoop() {
 
 			#if LC_HAS_IMAGING == 1
 			  // If this was the final print pulse, schedule flash now
-			  if (_flashOnLast && _remaining == 1) {
-				_flashOnLast = false;
-				Orchestrator::instance()->scheduleFlashIn();
+			  if (cmd.flashOnLast && _remaining == 1) {
+				(void)Orchestrator::instance()->scheduleFlashIn(cmd.flashCycleId);
 			  }
 			#else
 			  // No flash support: just clear the flag so it doesn't linger
-			  if (_flashOnLast && _remaining == 1) {
-				_flashOnLast = false;
-			  }
+			  (void)cmd.flashOnLast;
 			#endif
             PressureRegulator::regP().endDispenseQuiet(2);
             disturbance.tickMs = HAL_GetTick();

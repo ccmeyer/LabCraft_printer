@@ -32,6 +32,8 @@ public:
     uint16_t rateHz;
     PulseMode   mode;
     uint32_t completionBit;
+    bool flashOnLast = false;
+    uint32_t flashCycleId = 0;
   };
 
   /// Get the singleton
@@ -63,7 +65,9 @@ public:
     uint16_t count,
     uint16_t rateHz,
     PulseMode mode,
-    uint32_t completionBit = PRINTER_COMPLETION_HOST_DONE_BIT
+    uint32_t completionBit = PRINTER_COMPLETION_HOST_DONE_BIT,
+    bool flashOnLast = false,
+    uint32_t flashCycleId = 0
   );
 
   /// Enqueue with explicit timeout (used by self-test to avoid deadlock).
@@ -72,7 +76,9 @@ public:
     uint16_t rateHz,
     PulseMode mode,
     TickType_t timeoutTicks,
-    uint32_t completionBit = PRINTER_COMPLETION_HOST_DONE_BIT
+    uint32_t completionBit = PRINTER_COMPLETION_HOST_DONE_BIT,
+    bool flashOnLast = false,
+    uint32_t flashCycleId = 0
   );
 
   /// Diagnostic-only guard to bound pressure-ready waits inside taskLoop().
@@ -118,10 +124,6 @@ public:
 
   void onCompareMatch(TIM_HandleTypeDef* htim);
 
-  /// Call this _before_ enqueue() to flash after the last pulse
-  void setFlashOnLast(bool enable) { _flashOnLast = enable; }
-
-
 private:
   // hardware
   TIM_HandleTypeDef* _htimRefuel = nullptr;
@@ -155,8 +157,6 @@ private:
   bool _diagnosticPulseRefuel = false;
   uint32_t _normalPrintPrescaler = 0;
   uint32_t _normalRefuelPrescaler = 0;
-
-  bool  _flashOnLast     = false;
 
   // dispense loop
   void taskLoop();
