@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import ANY, Mock
 
-from PySide6 import QtCore, QtGui
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from tests.calibration_test_utils import SignalStub, ensure_calibration_import_stubs
 
@@ -49,6 +49,9 @@ def _build_droplet_dialog(
     main_window=None,
     open_refuel_camera_callback=None,
     start_read_camera_side_effect=None,
+    capture_droplet_image_return=True,
+    last_capture_queue_rejection_reason=None,
+    capture_ui_state=None,
     status_calls=None,
 ):
     monkeypatch.setattr(DropletImagingDialog, "_quick_controls_expanded_default", False, raising=False)
@@ -105,9 +108,11 @@ def _build_droplet_dialog(
 
     controller = SimpleNamespace(
         _command_calls=command_calls,
+        last_capture_queue_rejection_reason=last_capture_queue_rejection_reason,
         start_droplet_camera=Mock(),
         start_read_camera=Mock(side_effect=start_read_camera_side_effect),
         stop_read_camera=Mock(),
+        capture_droplet_image=Mock(return_value=capture_droplet_image_return),
         start_refuel_camera=Mock(),
         stop_refuel_camera=Mock(),
         capture_refuel_image=Mock(),
@@ -133,6 +138,18 @@ def _build_droplet_dialog(
         refuel_only=_command_mock("refuel_only"),
         move_to_location=_command_mock("move_to_location"),
     )
+    if capture_ui_state is not None:
+        controller.get_droplet_capture_ui_state = Mock(return_value=dict(capture_ui_state))
+    else:
+        controller.get_droplet_capture_ui_state = Mock(
+            return_value={
+                "pending_active": False,
+                "dirty_shutdown": False,
+                "last_result_status": None,
+                "last_result_reason": "",
+                "last_result_dirty_shutdown": False,
+            }
+        )
     if main_window is None:
         main_window = SimpleNamespace(color_dict={}, pause_machine=Mock())
     status_calls = [] if status_calls is None else status_calls
@@ -211,6 +228,68 @@ def test_droplet_imager_startup_read_camera_arm_failure_is_nonfatal(monkeypatch,
     assert dialog._read_camera_stream_reconciled is False
     assert status_calls
     assert "Could not arm droplet flash/read-camera session on open: queue offline" in status_calls[0][0]
+
+
+def test_trigger_flash_rejected_by_disarmed_flash_session_warns_logger_connection(monkeypatch, qapp):
+    warning_calls = []
+    status_calls = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "warning",
+        lambda _parent, title, message: warning_calls.append((str(title), str(message))),
+    )
+    dialog, _refuel_model, controller = _build_droplet_dialog(
+        monkeypatch,
+        qapp,
+        capture_droplet_image_return=False,
+        status_calls=status_calls,
+    )
+
+    def _reject_capture(*_args, **_kwargs):
+        controller.last_capture_queue_rejection_reason = "flash_disarmed"
+        return False
+
+    controller.capture_droplet_image.side_effect = _reject_capture
+
+    dialog.toggle_flash()
+
+    assert dialog._capture_request_pending is False
+    assert warning_calls
+    assert warning_calls[-1][0] == "Flash Session Not Armed"
+    assert "flash session did not successfully arm" in warning_calls[-1][1]
+    assert "logger connection" in warning_calls[-1][1]
+    assert status_calls
+    assert "logger connection" in status_calls[-1][0]
+
+
+def test_calibration_capture_error_from_disarmed_flash_session_mentions_logger_connection(monkeypatch, qapp):
+    original_on_calibration_error = DropletImagingDialog.on_calibration_error
+    warning_calls = []
+    status_calls = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "warning",
+        lambda _parent, title, message: warning_calls.append((str(title), str(message))),
+    )
+    dialog, _refuel_model, controller = _build_droplet_dialog(
+        monkeypatch,
+        qapp,
+        last_capture_queue_rejection_reason="flash_disarmed",
+        status_calls=status_calls,
+    )
+    dialog.reset_calibration_buttons = Mock()
+    dialog._refresh_manual_control_lock_state = Mock()
+    dialog._prompt_calibration_verdict = Mock()
+
+    original_on_calibration_error(dialog, "Failed to capture background image.")
+
+    assert warning_calls
+    assert warning_calls[-1][0] == "Calibration Error"
+    assert "Failed to capture background image." in warning_calls[-1][1]
+    assert "flash session did not successfully arm" in warning_calls[-1][1]
+    assert "logger connection" in warning_calls[-1][1]
+    assert status_calls
+    assert any("logger connection" in message for message, _color in status_calls)
 
 
 def test_refuel_panel_open_camera_button_uses_explicit_callback_without_capture(monkeypatch, qapp):

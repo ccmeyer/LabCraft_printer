@@ -1435,6 +1435,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         "Create a zip of the current experiment's calibration recordings in Downloads."
     )
     EXPORT_CALIBRATION_RECORDS_ACTIVE_TOOLTIP = "Calibration records export is in progress."
+    FLASH_SESSION_NOT_ARMED_WARNING = (
+        "The flash session did not successfully arm, so the droplet imager cannot capture an image. "
+        "Check the logger connection, then close and reopen the droplet imager or reconnect the machine."
+    )
 
     _quick_controls_expanded_default = False
     _info_panel_section_default_states = {
@@ -4460,6 +4464,38 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "Close and reopen the app before using the droplet imager again."
         )
 
+    def _last_capture_rejection_indicates_flash_disarmed(self):
+        controller = getattr(self, "controller", None)
+        reason = str(getattr(controller, "last_capture_queue_rejection_reason", "") or "")
+        if reason == "flash_disarmed":
+            return True
+        if reason:
+            return False
+        try:
+            state = self._get_droplet_capture_ui_state()
+            status = str(state.get("last_result_status", "") or "")
+            result_reason = str(state.get("last_result_reason", "") or "")
+            return status == "flash_disarmed" or result_reason == "flash_disarmed"
+        except Exception:
+            return False
+
+    def _flash_session_not_armed_warning(self):
+        return self.FLASH_SESSION_NOT_ARMED_WARNING
+
+    def _show_flash_session_not_armed_warning(self, *, popup=True):
+        message = self._flash_session_not_armed_warning()
+        updater = getattr(self, "update_stage_and_log", None)
+        if callable(updater):
+            try:
+                updater(message, "orange")
+            except Exception:
+                pass
+        if popup:
+            try:
+                QtWidgets.QMessageBox.warning(self, "Flash Session Not Armed", message)
+            except Exception:
+                pass
+
     def _show_imager_dirty_shutdown_warning(self, *, optics=False):
         message = self._imager_dirty_shutdown_warning()
         if optics:
@@ -6476,8 +6512,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if self._is_flash_fault_latched():
             return
         ok = self.controller.capture_droplet_image()
-        if ok is not False:
-            self._set_capture_request_pending(True)
+        if ok is False:
+            if self._last_capture_rejection_indicates_flash_disarmed():
+                self._show_flash_session_not_armed_warning()
+            return
+        self._set_capture_request_pending(True)
 
     def toggle_saving(self):
         if self.saving_active:
@@ -7366,10 +7405,17 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         Called when the calibration process encounters an error.
         """
+        display_message = str(error_message)
+        if (
+            self._last_capture_rejection_indicates_flash_disarmed()
+            and "capture" in display_message.lower()
+        ):
+            display_message = f"{display_message}\n\n{self._flash_session_not_armed_warning()}"
+            self._show_flash_session_not_armed_warning(popup=False)
         self.update_stage_and_log("Calibration Error", "red")
         self.reset_calibration_buttons()
         self._refresh_manual_control_lock_state()
-        QtWidgets.QMessageBox.warning(self, "Calibration Error", error_message)
+        QtWidgets.QMessageBox.warning(self, "Calibration Error", display_message)
         try:
             if bool(getattr(self.model.calibration_manager, "should_suppress_process_verdict", lambda: False)()):
                 self.model.calibration_manager.clear_pending_process_verdict(
@@ -7380,7 +7426,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             pass
         QTimer.singleShot(
             0,
-            lambda err=str(error_message): self._prompt_calibration_verdict(
+            lambda err=str(display_message): self._prompt_calibration_verdict(
                 default_outcome="failed",
                 error_message=err,
             ),
