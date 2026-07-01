@@ -113,6 +113,8 @@ class DropletCapturePerformanceDiagnostics:
         for key in (
             "calibration_run_id",
             "calibration_run_index",
+            "calibration_process_instance_id",
+            "calibration_process_instance_index",
             "calibration_process",
             "calibration_phase",
             "stage_text",
@@ -205,6 +207,17 @@ class DropletCapturePerformanceDiagnostics:
             except (TypeError, ValueError):
                 return None
 
+        def _int_or_none(value):
+            try:
+                if value in (None, ""):
+                    return None
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
+        def _command_completed_ms(command):
+            return _float_or_none((command or {}).get("completed_ms"))
+
         request_summaries = []
         for request_id, rows in by_request.items():
             first_by_kind = _first_by_kind(rows)
@@ -258,13 +271,18 @@ class DropletCapturePerformanceDiagnostics:
             context = self._event_capture_context(row, context_by_request)
             process = context.get("calibration_process")
             phase = context.get("calibration_phase")
-            if process or phase:
-                key = (
-                    str(context.get("calibration_run_id") or ""),
-                    str(context.get("calibration_run_index") if context.get("calibration_run_index") is not None else ""),
-                    str(process or ""),
-                    str(phase or ""),
-                )
+            process_instance_id = context.get("calibration_process_instance_id")
+            if process or phase or process_instance_id:
+                if process_instance_id:
+                    key = ("instance", str(process_instance_id))
+                else:
+                    key = (
+                        "legacy",
+                        str(context.get("calibration_run_id") or ""),
+                        str(context.get("calibration_run_index") if context.get("calibration_run_index") is not None else ""),
+                        str(process or ""),
+                        str(phase or ""),
+                    )
                 by_calibration_process.setdefault(key, []).append(row)
             capture_diag_id = context.get("capture_diag_id")
             if capture_diag_id:
@@ -274,24 +292,47 @@ class DropletCapturePerformanceDiagnostics:
                 by_settings_request.setdefault(str(settings_request_id), []).append(row)
 
         calibration_process_summaries = []
-        for (run_id, run_index, process, phase), rows in by_calibration_process.items():
+        for key, rows in by_calibration_process.items():
             first_by_kind = _first_by_kind(rows)
             started = first_by_kind.get("calibration_process_started") or rows[0]
             terminal = (
-                first_by_kind.get("calibration_process_completed")
-                or first_by_kind.get("calibration_process_failed")
-                or first_by_kind.get("calibration_process_stopped")
-                or first_by_kind.get("calibration_session_ended")
+                _last_by_kind(rows, "calibration_process_completed")
+                or _last_by_kind(rows, "calibration_process_failed")
+                or _last_by_kind(rows, "calibration_process_stopped")
+                or _last_by_kind(rows, "calibration_session_ended")
                 or rows[-1]
             )
+            context = {}
+            capture_diag_ids = set()
+            settings_request_ids = set()
+            for row in rows:
+                context.update(self._event_capture_context(row, context_by_request))
+                capture_diag_id = self._event_capture_context(row, context_by_request).get("capture_diag_id")
+                if capture_diag_id:
+                    capture_diag_ids.add(str(capture_diag_id))
+                settings_request_id = row.get("settings_request_id")
+                if settings_request_id:
+                    settings_request_ids.add(str(settings_request_id))
+            if key and key[0] == "legacy":
+                _tag, run_id, run_index, process, phase = key
+                context.setdefault("calibration_run_id", run_id or None)
+                context.setdefault("calibration_run_index", _int_or_none(run_index))
+                context.setdefault("calibration_process", process or None)
+                context.setdefault("calibration_phase", phase or None)
             calibration_process_summaries.append(
                 self._json_safe(
                     {
-                        "calibration_run_id": run_id or None,
-                        "calibration_run_index": int(run_index) if str(run_index).isdigit() else None,
-                        "calibration_process": process or None,
-                        "calibration_phase": phase or None,
+                        "calibration_run_id": context.get("calibration_run_id"),
+                        "calibration_run_index": _int_or_none(context.get("calibration_run_index")),
+                        "calibration_process_instance_id": context.get("calibration_process_instance_id"),
+                        "calibration_process_instance_index": _int_or_none(
+                            context.get("calibration_process_instance_index")
+                        ),
+                        "calibration_process": context.get("calibration_process"),
+                        "calibration_phase": context.get("calibration_phase"),
                         "event_count": len(rows),
+                        "capture_count": len(capture_diag_ids),
+                        "settings_count": len(settings_request_ids),
                         "started_event_index": started.get("event_index"),
                         "terminal_event_kind": terminal.get("event_kind"),
                         "duration_ms": self._delta_ms(
@@ -360,6 +401,14 @@ class DropletCapturePerformanceDiagnostics:
                         "calibration_run_index": _first_nonempty(
                             context.get("calibration_run_index"),
                             attempt.get("calibration_run_index"),
+                        ),
+                        "calibration_process_instance_id": _first_nonempty(
+                            context.get("calibration_process_instance_id"),
+                            attempt.get("calibration_process_instance_id"),
+                        ),
+                        "calibration_process_instance_index": _first_nonempty(
+                            context.get("calibration_process_instance_index"),
+                            attempt.get("calibration_process_instance_index"),
                         ),
                         "calibration_process": _first_nonempty(
                             context.get("calibration_process"),
@@ -430,17 +479,71 @@ class DropletCapturePerformanceDiagnostics:
                 or _last_by_kind(rows, "calibration_settings_completed_ignored")
                 or rows[-1]
             )
+            context = {}
+            for row in rows:
+                context.update(self._event_capture_context(row, context_by_request))
+            commands = list(terminal.get("commands") or bound.get("commands") or [])
+            command_status_counts = Counter(
+                str(command.get("status") or "")
+                for command in commands
+                if command.get("status")
+            )
+            completed_values = [
+                value
+                for command in commands
+                for value in [_command_completed_ms(command)]
+                if value is not None
+            ]
+            slowest_command = None
+            if completed_values:
+                slowest_command = max(
+                    commands,
+                    key=lambda command: _command_completed_ms(command) if _command_completed_ms(command) is not None else -1.0,
+                )
+            completion_command_number = bound.get("completion_command_number")
+            completion_command_completed_ms = None
+            for command in commands:
+                if _int_or_none(command.get("command_number")) == _int_or_none(completion_command_number):
+                    completion_command_completed_ms = _command_completed_ms(command)
+                    break
             settings_request_summaries.append(
                 self._json_safe(
                     {
                         "settings_request_id": settings_request_id,
-                        "calibration_run_id": requested.get("calibration_run_id"),
-                        "calibration_process": requested.get("calibration_process"),
-                        "calibration_phase": requested.get("calibration_phase"),
+                        "calibration_run_id": _first_nonempty(
+                            context.get("calibration_run_id"),
+                            requested.get("calibration_run_id"),
+                        ),
+                        "calibration_run_index": _first_nonempty(
+                            context.get("calibration_run_index"),
+                            requested.get("calibration_run_index"),
+                        ),
+                        "calibration_process_instance_id": _first_nonempty(
+                            context.get("calibration_process_instance_id"),
+                            requested.get("calibration_process_instance_id"),
+                        ),
+                        "calibration_process_instance_index": _first_nonempty(
+                            context.get("calibration_process_instance_index"),
+                            requested.get("calibration_process_instance_index"),
+                        ),
+                        "calibration_process": _first_nonempty(
+                            context.get("calibration_process"),
+                            requested.get("calibration_process"),
+                        ),
+                        "calibration_phase": _first_nonempty(
+                            context.get("calibration_phase"),
+                            requested.get("calibration_phase"),
+                        ),
                         "context": requested.get("context"),
                         "requested_settings": requested.get("requested_settings"),
-                        "command_count": len(bound.get("commands") or []),
-                        "completion_command_number": bound.get("completion_command_number"),
+                        "command_count": len(commands),
+                        "completion_command_number": completion_command_number,
+                        "commands": commands,
+                        "command_status_counts": dict(command_status_counts),
+                        "slowest_command": slowest_command,
+                        "max_command_completed_ms": max(completed_values) if completed_values else None,
+                        "completion_command_completed_ms": completion_command_completed_ms,
+                        "stall_hint": terminal.get("stall_hint"),
                         "terminal_event_kind": terminal.get("event_kind"),
                         "request_to_bound_ms": self._delta_ms(
                             requested.get("monotonic_ns"),
@@ -456,7 +559,7 @@ class DropletCapturePerformanceDiagnostics:
 
         snapshot = {
             "kind": "droplet_capture_performance_snapshot",
-            "schema_version": 3,
+            "schema_version": 4,
             "reason": str(reason or "manual_export"),
             "generated_at_utc": self._now_utc(),
             "generated_monotonic_ns": int(time.monotonic_ns()),
@@ -5965,6 +6068,8 @@ class Controller(QObject):
             "capture_diag_id": capture_diag_id,
             "calibration_run_id": getattr(callback, "_capture_calibration_run_id", None),
             "calibration_run_index": getattr(callback, "_capture_calibration_run_index", None),
+            "calibration_process_instance_id": getattr(callback, "_capture_calibration_process_instance_id", None),
+            "calibration_process_instance_index": getattr(callback, "_capture_calibration_process_instance_index", None),
             "calibration_process": calibration_process,
             "calibration_phase": calibration_phase,
             "stage_text": str(getattr(callback, "_capture_stage_text", "") or ""),

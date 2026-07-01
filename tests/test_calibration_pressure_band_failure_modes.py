@@ -120,6 +120,8 @@ class _RecordingSuccessCaptureSignal:
             "capture_diag_id": getattr(callback, "_capture_diag_id", None),
             "calibration_run_id": getattr(callback, "_capture_calibration_run_id", None),
             "calibration_run_index": getattr(callback, "_capture_calibration_run_index", None),
+            "calibration_process_instance_id": getattr(callback, "_capture_calibration_process_instance_id", None),
+            "calibration_process_instance_index": getattr(callback, "_capture_calibration_process_instance_index", None),
             "calibration_process": getattr(callback, "_capture_calibration_process", None),
             "calibration_phase": getattr(callback, "_capture_calibration_phase", None),
             "stage_text": getattr(callback, "_capture_stage_text", None),
@@ -143,6 +145,8 @@ def _make_capture_policy_fixture(monkeypatch, capture_signal):
     timeouts = []
     capture_perf_events = []
     proc.phase_name = "unit_phase"
+    proc._capture_performance_process_instance_id = "proc-instance-unit"
+    proc._capture_performance_process_instance_index = 8
     proc._record_event = lambda event_type, payload=None, **kwargs: events.append(
         (str(event_type), dict(payload or {}), dict(kwargs or {}))
     )
@@ -198,6 +202,8 @@ def test_capture_policy_records_performance_markers_and_callback_context(monkeyp
     assert attrs["capture_diag_id"]
     assert attrs["calibration_run_id"] == "run-unit"
     assert attrs["calibration_run_index"] == 2
+    assert attrs["calibration_process_instance_id"] == "proc-instance-unit"
+    assert attrs["calibration_process_instance_index"] == 8
     assert attrs["calibration_process"] == "BaseCalibrationProcess"
     assert attrs["calibration_phase"] == "unit_phase"
     assert attrs["stage_text"] == "Capturing background image"
@@ -224,6 +230,8 @@ def test_capture_policy_records_performance_markers_and_callback_context(monkeyp
 def test_request_settings_with_recording_records_performance_markers(monkeypatch):
     proc = BaseCalibrationProcess.__new__(BaseCalibrationProcess)
     proc.phase_name = "unit_phase"
+    proc._capture_performance_process_instance_id = "proc-settings-unit"
+    proc._capture_performance_process_instance_index = 3
     events = []
     capture_perf_events = []
 
@@ -246,6 +254,28 @@ def test_request_settings_with_recording_records_performance_markers(monkeypatch
                     "completion_command_number": 123,
                 }
             )
+            callback._settings_trace_provider = lambda: {
+                "request_id": getattr(callback, "_settings_request_id"),
+                "context": getattr(callback, "_settings_context"),
+                "requested_settings": dict(settings),
+                "timeout_ms": getattr(callback, "_settings_guard_timeout_ms"),
+                "commands": [
+                    {
+                        "command_number": 123,
+                        "command_type": "SET_DELAY_F",
+                        "setting_key": "flash_delay",
+                        "requested_value": settings["flash_delay"],
+                        "status": "Completed",
+                        "queued_ms": 1.0,
+                        "sent_ms": 2.0,
+                        "accepted_ms": 3.0,
+                        "executing_ms": 4.0,
+                        "completed_ms": 12.5,
+                        "canceled_ms": None,
+                    }
+                ],
+                "stall_hint": "unknown",
+            }
             callback()
 
     proc.calibration_manager = SimpleNamespace(
@@ -283,6 +313,23 @@ def test_request_settings_with_recording_records_performance_markers(monkeypatch
     assert bound_payload["settings_request_id"]
     assert bound_payload["commands"][0]["command_number"] == 123
     assert bound_payload["completion_command_number"] == 123
+    completed_payload = capture_perf_events[2][1]
+    assert completed_payload["commands"] == [
+        {
+            "command_number": 123,
+            "command_type": "SET_DELAY_F",
+            "setting_key": "flash_delay",
+            "requested_value": 6100,
+            "status": "Completed",
+            "queued_ms": 1.0,
+            "sent_ms": 2.0,
+            "accepted_ms": 3.0,
+            "executing_ms": 4.0,
+            "completed_ms": 12.5,
+            "canceled_ms": None,
+        }
+    ]
+    assert completed_payload["stall_hint"] == "unknown"
 
 
 def test_capture_policy_busy_rejection_backs_off_without_consuming_attempt(monkeypatch):

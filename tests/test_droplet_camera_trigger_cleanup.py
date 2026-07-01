@@ -675,6 +675,10 @@ def test_capture_retry_timeout_drops_trigger_low_after_each_attempt(monkeypatch)
     assert [payload["reason"] for payload in retry_results] == ["edge_timeout"] * 3
     assert [payload["will_retry"] for payload in retry_results] == [True, True, False]
     assert all(payload["waited"] is True for payload in retry_results)
+    assert all("elapsed_ms" in payload for payload in retry_results)
+    assert all("retry_total_elapsed_ms" in payload for payload in retry_results)
+    assert retry_results[-1]["retry_total_elapsed_ms"] >= retry_results[0]["retry_total_elapsed_ms"]
+    assert retry_results[-1]["retry_total_elapsed_ms"] >= retry_results[-1]["elapsed_ms"]
 
 
 def test_capture_retry_frame_selection_emits_retrying_and_success_markers(monkeypatch):
@@ -732,9 +736,13 @@ def test_capture_retry_frame_selection_emits_retrying_and_success_markers(monkey
     assert retry_results[0]["reason"] == "below_threshold"
     assert retry_results[0]["success"] is False
     assert retry_results[0]["will_retry"] is True
+    assert "retry_total_elapsed_ms" in retry_results[0]
     assert retry_results[1]["reason"] == "threshold"
     assert retry_results[1]["success"] is True
     assert retry_results[1]["will_retry"] is False
+    assert "retry_total_elapsed_ms" in retry_results[1]
+    retry_success = next(payload for phase, payload in phases if phase == "retry_success")
+    assert retry_success["retry_total_elapsed_ms"] >= retry_results[0]["retry_total_elapsed_ms"]
 
 
 def test_capture_trigger_pulse_is_clamped_and_reported(monkeypatch):

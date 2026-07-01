@@ -1325,18 +1325,27 @@ class DropletCamera(QObject):
         backend = self._resolve_capture_backend(backend)
         backend_id = backend_id if backend_id is not None else getattr(backend, "backend_id", None)
         retry_started_ns = time.monotonic_ns()
+        attempt_started_ns = retry_started_ns
+
+        def _retry_total_elapsed_ms():
+            try:
+                return (time.monotonic_ns() - int(retry_started_ns)) / 1_000_000.0
+            except Exception:
+                return 0.0
 
         for i in range(attempts):
             self._raise_if_worker_context_stale(backend=backend, generation=generation, action="retry_attempt")
             attempt_index = i + 1
+            attempt_started_ns = time.monotonic_ns()
             self._log_capture_phase(
                 "retry_attempt_start",
                 request_id=request_id,
                 generation=generation,
-                started_ns=retry_started_ns,
+                started_ns=attempt_started_ns,
                 backend=backend,
                 retry_attempt=attempt_index,
                 retry_attempts=int(attempts),
+                retry_total_elapsed_ms=_retry_total_elapsed_ms(),
                 max_new_frames=int(max_new_frames),
                 attempt_timeout_s=float(attempt_timeout_s),
                 print_phase=False,
@@ -1355,9 +1364,11 @@ class DropletCamera(QObject):
                     "stale_worker_exit",
                     request_id=request_id,
                     generation=generation,
+                    started_ns=attempt_started_ns,
                     backend=backend,
                     retry_attempt=attempt_index,
                     retry_attempts=int(attempts),
+                    retry_total_elapsed_ms=_retry_total_elapsed_ms(),
                     error=str(exc),
                     level="warning",
                 )
@@ -1379,10 +1390,11 @@ class DropletCamera(QObject):
                     "retry_attempt_result",
                     request_id=request_id,
                     generation=generation,
-                    started_ns=retry_started_ns,
+                    started_ns=attempt_started_ns,
                     backend=backend,
                     retry_attempt=attempt_index,
                     retry_attempts=int(attempts),
+                    retry_total_elapsed_ms=_retry_total_elapsed_ms(),
                     waited=False,
                     reason=last_reason,
                     will_retry=i < attempts - 1,
@@ -1401,10 +1413,11 @@ class DropletCamera(QObject):
                     "retry_attempt_result",
                     request_id=request_id,
                     generation=generation,
-                    started_ns=retry_started_ns,
+                    started_ns=attempt_started_ns,
                     backend=backend,
                     retry_attempt=attempt_index,
                     retry_attempts=int(attempts),
+                    retry_total_elapsed_ms=_retry_total_elapsed_ms(),
                     waited=True,
                     reason=str(last_reason),
                     mean=res.get("mean"),
@@ -1423,10 +1436,11 @@ class DropletCamera(QObject):
                         "retry_success",
                         request_id=request_id,
                         generation=generation,
-                        started_ns=retry_started_ns,
+                        started_ns=attempt_started_ns,
                         backend=backend,
                         retry_attempt=attempt_index,
                         retry_attempts=int(attempts),
+                        retry_total_elapsed_ms=_retry_total_elapsed_ms(),
                         reason=str(last_reason),
                         mean=res.get("mean"),
                         threshold=res.get("threshold"),
@@ -1450,10 +1464,11 @@ class DropletCamera(QObject):
                     "retrying",
                     request_id=request_id,
                     generation=generation,
-                    started_ns=retry_started_ns,
+                    started_ns=attempt_started_ns,
                     backend=backend,
                     retry_attempt=attempt_index,
                     retry_attempts=int(attempts),
+                    retry_total_elapsed_ms=_retry_total_elapsed_ms(),
                     next_retry_attempt=attempt_index + 1,
                     reason=str(last_reason or ""),
                     sleep_s=float(small_sleep_between),
@@ -1466,9 +1481,10 @@ class DropletCamera(QObject):
             "retry_exhausted",
             request_id=request_id,
             generation=generation,
-            started_ns=retry_started_ns,
+            started_ns=attempt_started_ns,
             backend=backend,
             retry_attempts=int(attempts),
+            retry_total_elapsed_ms=_retry_total_elapsed_ms(),
             reason=str(last_reason or ""),
             level="warning",
             print_phase=False,

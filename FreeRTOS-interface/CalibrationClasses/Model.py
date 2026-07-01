@@ -1510,6 +1510,7 @@ class CalibrationManager(QObject):
         self._stream_capture_state = {}
         self._stream_calibration_sequence_state = {}
         self._droplet_calibration_sequence_state = {}
+        self._capture_performance_process_instance_index = 0
 
         self.calibration_queue = []
 
@@ -1526,6 +1527,24 @@ class CalibrationManager(QObject):
     def is_capture_performance_diagnostics_enabled(self):
         return bool(getattr(self, "_capture_performance_diagnostics_enabled", False))
 
+    def _assign_capture_performance_process_instance(self, process_obj):
+        if process_obj is None:
+            return {}
+        next_index = int(getattr(self, "_capture_performance_process_instance_index", 0) or 0) + 1
+        self._capture_performance_process_instance_index = next_index
+        process_name = process_obj.__class__.__name__
+        instance_id = f"cal_process_{next_index}_{uuid.uuid4().hex[:8]}"
+        try:
+            setattr(process_obj, "_capture_performance_process_instance_id", instance_id)
+            setattr(process_obj, "_capture_performance_process_instance_index", next_index)
+        except Exception:
+            pass
+        return {
+            "calibration_process_instance_id": instance_id,
+            "calibration_process_instance_index": next_index,
+            "calibration_process": process_name,
+        }
+
     def _capture_performance_context(self, process_obj=None):
         active = process_obj if process_obj is not None else getattr(self, "activeCalibration", None)
         process_name = active.__class__.__name__ if active is not None else None
@@ -1540,6 +1559,8 @@ class CalibrationManager(QObject):
             "calibration_run_index": getattr(self, "_run_idx", None),
             "calibration_process": process_name,
             "calibration_phase": phase_name,
+            "calibration_process_instance_id": getattr(active, "_capture_performance_process_instance_id", None),
+            "calibration_process_instance_index": getattr(active, "_capture_performance_process_instance_index", None),
         }
 
     def record_capture_performance_marker(self, event_kind, payload=None, *, process_obj=None):
@@ -3480,6 +3501,7 @@ class CalibrationManager(QObject):
             debug_signal = getattr(self.activeCalibration, "onlineStreamDebugUpdated", None)
             if debug_signal is not None:
                 debug_signal.connect(self.onOnlineStreamDebugUpdated)
+            self._assign_capture_performance_process_instance(self.activeCalibration)
             self._begin_process_recording(self.activeCalibration)
             process_name = self.activeCalibration.__class__.__name__
             self.record_capture_performance_marker(
@@ -8043,6 +8065,32 @@ class BaseCalibrationProcess(QObject):
                     snapshot.setdefault("stall_hint", "unknown")
             return snapshot
 
+        def _compact_command_timings(snapshot):
+            commands = []
+            for item in list((snapshot or {}).get("commands") or []):
+                item = dict(item or {})
+                command_number = item.get("command_number")
+                try:
+                    command_number = None if command_number in (None, "") else int(command_number)
+                except (TypeError, ValueError):
+                    command_number = None
+                commands.append(
+                    {
+                        "command_number": command_number,
+                        "command_type": str(item.get("command_type") or ""),
+                        "setting_key": str(item.get("setting_key") or ""),
+                        "requested_value": item.get("requested_value"),
+                        "status": str(item.get("status") or ""),
+                        "queued_ms": item.get("queued_ms"),
+                        "sent_ms": item.get("sent_ms"),
+                        "accepted_ms": item.get("accepted_ms"),
+                        "executing_ms": item.get("executing_ms"),
+                        "completed_ms": item.get("completed_ms"),
+                        "canceled_ms": item.get("canceled_ms"),
+                    }
+                )
+            return commands
+
         def _record_bound(payload):
             bound_payload = dict(payload or {})
             bound_payload["request_id"] = str(bound_payload.get("request_id") or request_id)
@@ -8141,6 +8189,7 @@ class BaseCalibrationProcess(QObject):
             request_state["resolved"] = True
             self._cancel_timeout(request_state["timer"])
             request_state["timer"] = None
+            completion_snapshot = _build_diagnostic_snapshot()
             self._record_event(
                 "settings_completed",
                 {
@@ -8155,6 +8204,8 @@ class BaseCalibrationProcess(QObject):
                     "settings_request_id": str(request_id),
                     "requested_settings": settings_obj,
                     "context": str(context or ""),
+                    "commands": _compact_command_timings(completion_snapshot),
+                    "stall_hint": str(completion_snapshot.get("stall_hint") or ""),
                 },
             )
             if callback is not None:
@@ -8666,6 +8717,8 @@ class BaseCalibrationProcess(QObject):
                 setattr(_on_result, "_capture_calibration_run_index", getattr(self.calibration_manager, "_run_idx", None))
                 setattr(_on_result, "_capture_calibration_process", self.__class__.__name__)
                 setattr(_on_result, "_capture_calibration_phase", getattr(self, "phase_name", None))
+                setattr(_on_result, "_capture_calibration_process_instance_id", getattr(self, "_capture_performance_process_instance_id", None))
+                setattr(_on_result, "_capture_calibration_process_instance_index", getattr(self, "_capture_performance_process_instance_index", None))
                 setattr(_on_result, "_capture_stage_text", str(stage_text))
                 setattr(_on_result, "_capture_set_attr", str(set_attr))
                 setattr(_on_result, "_capture_role", role or "capture")

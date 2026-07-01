@@ -29,7 +29,7 @@ def test_droplet_capture_perf_enabled_events_are_bounded_and_json_safe():
     snapshot = diagnostics.build_snapshot(reason="unit_test")
 
     assert snapshot["kind"] == "droplet_capture_performance_snapshot"
-    assert snapshot["schema_version"] == 3
+    assert snapshot["schema_version"] == 4
     assert snapshot["reason"] == "unit_test"
     assert snapshot["event_count"] == 2
     assert snapshot["event_counts"]["controller_completion_received"] == 1
@@ -80,6 +80,8 @@ def test_droplet_capture_perf_snapshot_summarizes_calibration_capture_and_settin
         {
             "calibration_run_id": "run-1",
             "calibration_run_index": 0,
+            "calibration_process_instance_id": "proc-1",
+            "calibration_process_instance_index": 1,
             "calibration_process": "NozzlePositionCalibrationProcess",
             "calibration_phase": "nozzle_position",
         },
@@ -90,6 +92,8 @@ def test_droplet_capture_perf_snapshot_summarizes_calibration_capture_and_settin
             "capture_diag_id": "cap-diag-1",
             "calibration_run_id": "run-1",
             "calibration_run_index": 0,
+            "calibration_process_instance_id": "proc-1",
+            "calibration_process_instance_index": 1,
             "calibration_process": "NozzlePositionCalibrationProcess",
             "calibration_phase": "nozzle_position",
             "stage_text": "Capturing background image",
@@ -122,6 +126,8 @@ def test_droplet_capture_perf_snapshot_summarizes_calibration_capture_and_settin
         {
             "settings_request_id": "settings-1",
             "calibration_run_id": "run-1",
+            "calibration_process_instance_id": "proc-1",
+            "calibration_process_instance_index": 1,
             "calibration_process": "NozzlePositionCalibrationProcess",
             "calibration_phase": "nozzle_position",
             "context": "background",
@@ -132,16 +138,37 @@ def test_droplet_capture_perf_snapshot_summarizes_calibration_capture_and_settin
         "calibration_settings_bound",
         {
             "settings_request_id": "settings-1",
-            "commands": [{"command_number": 44, "command_type": "SET_DELAY_F"}],
+            "commands": [{"command_number": 44, "command_type": "SET_DELAY_F", "setting_key": "flash_delay"}],
             "completion_command_number": 44,
         },
     )
-    diagnostics.record("calibration_settings_completed", {"settings_request_id": "settings-1"})
+    diagnostics.record(
+        "calibration_settings_completed",
+        {
+            "settings_request_id": "settings-1",
+            "commands": [
+                {
+                    "command_number": 44,
+                    "command_type": "SET_DELAY_F",
+                    "setting_key": "flash_delay",
+                    "status": "Completed",
+                    "queued_ms": 2.0,
+                    "sent_ms": 4.0,
+                    "accepted_ms": 6.0,
+                    "executing_ms": 8.0,
+                    "completed_ms": 42.5,
+                }
+            ],
+            "stall_hint": "unknown",
+        },
+    )
     diagnostics.record(
         "calibration_process_completed",
         {
             "calibration_run_id": "run-1",
             "calibration_run_index": 0,
+            "calibration_process_instance_id": "proc-1",
+            "calibration_process_instance_index": 1,
             "calibration_process": "NozzlePositionCalibrationProcess",
             "calibration_phase": "nozzle_position",
         },
@@ -151,12 +178,18 @@ def test_droplet_capture_perf_snapshot_summarizes_calibration_capture_and_settin
 
     process_summary = snapshot["calibration_process_summaries"][0]
     assert process_summary["calibration_process"] == "NozzlePositionCalibrationProcess"
+    assert process_summary["calibration_process_instance_id"] == "proc-1"
+    assert process_summary["calibration_process_instance_index"] == 1
+    assert process_summary["capture_count"] == 1
+    assert process_summary["settings_count"] == 1
     assert process_summary["terminal_event_kind"] == "calibration_process_completed"
 
     capture_summary = snapshot["calibration_capture_summaries"][0]
     assert capture_summary["capture_diag_id"] == "cap-diag-1"
     assert capture_summary["request_id"] == "request-1"
     assert capture_summary["calibration_run_index"] == 0
+    assert capture_summary["calibration_process_instance_id"] == "proc-1"
+    assert capture_summary["calibration_process_instance_index"] == 1
     assert capture_summary["set_attr"] == "background_image"
     assert capture_summary["status"] == "success"
 
@@ -164,6 +197,63 @@ def test_droplet_capture_perf_snapshot_summarizes_calibration_capture_and_settin
     assert settings_summary["settings_request_id"] == "settings-1"
     assert settings_summary["command_count"] == 1
     assert settings_summary["completion_command_number"] == 44
+    assert settings_summary["calibration_process_instance_id"] == "proc-1"
+    assert settings_summary["command_status_counts"] == {"Completed": 1}
+    assert settings_summary["max_command_completed_ms"] == 42.5
+    assert settings_summary["completion_command_completed_ms"] == 42.5
+    assert settings_summary["slowest_command"]["command_number"] == 44
+    assert settings_summary["stall_hint"] == "unknown"
+
+
+def test_droplet_capture_perf_snapshot_separates_repeated_process_instances():
+    diagnostics = DropletCapturePerformanceDiagnostics(max_events=20)
+    diagnostics.set_enabled(True)
+
+    for index in (1, 2):
+        instance_id = f"proc-{index}"
+        diagnostics.record(
+            "calibration_process_started",
+            {
+                "calibration_run_id": "run-1",
+                "calibration_run_index": 0,
+                "calibration_process_instance_id": instance_id,
+                "calibration_process_instance_index": index,
+                "calibration_process": "NozzlePositionCalibrationProcess",
+                "calibration_phase": "nozzle_position",
+            },
+        )
+        diagnostics.record(
+            "calibration_capture_attempt_started",
+            {
+                "capture_diag_id": f"cap-{index}",
+                "calibration_process_instance_id": instance_id,
+                "calibration_process_instance_index": index,
+                "calibration_process": "NozzlePositionCalibrationProcess",
+                "calibration_phase": "nozzle_position",
+                "attempt": 1,
+            },
+        )
+        diagnostics.record(
+            "calibration_process_completed",
+            {
+                "calibration_run_id": "run-1",
+                "calibration_run_index": 0,
+                "calibration_process_instance_id": instance_id,
+                "calibration_process_instance_index": index,
+                "calibration_process": "NozzlePositionCalibrationProcess",
+                "calibration_phase": "nozzle_position",
+            },
+        )
+
+    snapshot = diagnostics.build_snapshot()
+
+    summaries = sorted(
+        snapshot["calibration_process_summaries"],
+        key=lambda item: item["calibration_process_instance_index"],
+    )
+    assert len(summaries) == 2
+    assert [item["calibration_process_instance_id"] for item in summaries] == ["proc-1", "proc-2"]
+    assert [item["capture_count"] for item in summaries] == [1, 1]
 
 
 def test_droplet_capture_perf_snapshot_recovers_nested_capture_context():
@@ -347,6 +437,8 @@ def test_controller_handle_capture_request_passes_calibration_context():
     callback._capture_diag_id = "diag-1"
     callback._capture_calibration_run_id = "run-1"
     callback._capture_calibration_run_index = 4
+    callback._capture_calibration_process_instance_id = "proc-instance-4"
+    callback._capture_calibration_process_instance_index = 4
     callback._capture_calibration_process = "NozzlePositionCalibrationProcess"
     callback._capture_calibration_phase = "nozzle_position"
     callback._capture_stage_text = "Capturing background image"
@@ -363,5 +455,7 @@ def test_controller_handle_capture_request_passes_calibration_context():
     assert context["capture_diag_id"] == "diag-1"
     assert context["calibration_run_id"] == "run-1"
     assert context["calibration_run_index"] == 4
+    assert context["calibration_process_instance_id"] == "proc-instance-4"
+    assert context["calibration_process_instance_index"] == 4
     assert context["calibration_process"] == "NozzlePositionCalibrationProcess"
     assert context["set_attr"] == "background_image"
