@@ -434,12 +434,16 @@ class DropletCamera(QObject):
     capture_completed_signal = Signal(object)
     capture_failed_signal = Signal(str)  # emits error message on failure
     capture_phase_signal = Signal(object)
+    DEFAULT_TRIGGER_PULSE_S = 0.005
+    MIN_TRIGGER_PULSE_S = 0.001
+    MAX_TRIGGER_PULSE_S = 0.100
 
     def __init__(self):
         super().__init__()
         # >>> wiring <<<
         self.trigger_pin_out_bcm = 17   # Pi -> MCU trigger
         self.flash_fired_in_bcm  = 22   # MCU -> Pi flash-ack
+        self.droplet_trigger_pulse_s = self.DEFAULT_TRIGGER_PULSE_S
 
         # self._chip_name = "gpiochip4"
         self._trig_chip_name, self._trig_offset = _gpiofind("GPIO"+str(self.trigger_pin_out_bcm))
@@ -540,6 +544,19 @@ class DropletCamera(QObject):
             return
         if self._trig_line is not None:
             self._trig_line.set_value(0)
+
+    def _trigger_pulse_duration_s(self):
+        try:
+            value = float(getattr(self, "droplet_trigger_pulse_s", self.DEFAULT_TRIGGER_PULSE_S))
+        except Exception:
+            value = self.DEFAULT_TRIGGER_PULSE_S
+        if value != value:  # NaN
+            value = self.DEFAULT_TRIGGER_PULSE_S
+        if value < self.MIN_TRIGGER_PULSE_S:
+            return float(self.MIN_TRIGGER_PULSE_S)
+        if value > self.MAX_TRIGGER_PULSE_S:
+            return float(self.MAX_TRIGGER_PULSE_S)
+        return float(value)
 
     def _make_capture_backend(self, *, reason=""):
         self._capture_backend_seq = int(getattr(self, "_capture_backend_seq", 0)) + 1
@@ -1140,7 +1157,9 @@ class DropletCamera(QObject):
         trigger_asserted = False
         try:
             self._raise_if_worker_context_stale(backend=backend, generation=generation, action="trigger_high")
-            # Raise trigger to MCU
+            # Pulse the MCU trigger, then wait for the flash-fired ACK with the
+            # line low so delayed flash work cannot trip firmware line-high safety.
+            trigger_pulse_s = self._trigger_pulse_duration_s()
             backend.trigger_high()
             trigger_asserted = True
             self._log_capture_phase(
@@ -1150,6 +1169,28 @@ class DropletCamera(QObject):
                 started_ns=phase_started_ns,
                 backend=backend,
                 drained_edges=drain_count,
+                trigger_pulse_ms=f"{trigger_pulse_s * 1000.0:.1f}",
+            )
+            time.sleep(trigger_pulse_s)
+            backend.trigger_low()
+            trigger_asserted = False
+            self._log_capture_phase(
+                "trigger_low",
+                request_id=request_id,
+                generation=generation,
+                started_ns=phase_started_ns,
+                backend=backend,
+                drained_edges=drain_count,
+                trigger_pulse_ms=f"{trigger_pulse_s * 1000.0:.1f}",
+            )
+            self._log_capture_phase(
+                "trigger_pulse_done",
+                request_id=request_id,
+                generation=generation,
+                started_ns=phase_started_ns,
+                backend=backend,
+                drained_edges=drain_count,
+                trigger_pulse_ms=f"{trigger_pulse_s * 1000.0:.1f}",
             )
 
             # Wait for MCU "flash fired" ACK

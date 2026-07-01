@@ -429,6 +429,8 @@ def test_capture_non_blocking_logs_prearm_phases_before_arm():
         "drain_start",
         "drain_done",
         "trigger_high",
+        "trigger_low",
+        "trigger_pulse_done",
         "edge_wait_start",
         "edge_wait_done",
         "edge_consume_done",
@@ -640,6 +642,79 @@ def test_capture_worker_finishes_on_missing_flash_edge_without_stuck_active():
     assert payloads[0]["reason"] == "edge_timeout"
     assert camera._capture_worker_active.is_set() is False
     assert failures
+
+
+def test_capture_retry_timeout_drops_trigger_low_after_each_attempt(monkeypatch):
+    camera = _make_async_camera()
+    backend = _install_backend(camera, _FakeBackend("2", edge=_EdgeNeverReady()))
+    sleep_calls = []
+    monkeypatch.setattr(machine_mod.time, "sleep", lambda seconds: sleep_calls.append(float(seconds)))
+
+    with pytest.raises(RuntimeError, match="Flash capture failed after 3 attempts"):
+        DropletCamera.capture_with_retry_sync(
+            camera,
+            attempts=3,
+            attempt_timeout_s=0.001,
+            small_sleep_between=0,
+            request_id="req-retry-timeout",
+            generation=0,
+            backend=backend,
+            backend_id="2",
+        )
+
+    assert backend.trigger_line.values == [1, 0, 1, 0, 1, 0]
+    assert sleep_calls.count(0.005) == 3
+
+
+def test_capture_trigger_pulse_is_clamped_and_reported(monkeypatch):
+    camera = DropletCamera.__new__(DropletCamera)
+    camera.camera = object()
+    camera._cv = threading.Condition(threading.Lock())
+    camera._cap_done = threading.Event()
+    camera._cap_result = None
+    camera._cap_active = False
+    camera._cap_id = 7
+    camera._cap_request_id = None
+    camera._edge_in = _EdgeNoStaleThenFired()
+    camera._buf = [(np.zeros((2, 2, 3), dtype=np.uint8), {}, time.monotonic_ns() - 1_000_000, 1.0)]
+    camera.k_sigma = 4.0
+    camera.min_delta = 25.0
+    camera._cap_emit_rotate = False
+    camera.droplet_trigger_pulse_s = 0.00001
+    phases = []
+    sleep_calls = []
+    trigger_events = []
+    camera._log_capture_phase = lambda phase, **payload: phases.append((str(phase), dict(payload)))
+    camera._trigger_high = lambda: trigger_events.append("high")
+    camera._trigger_low = lambda: trigger_events.append("low")
+    monkeypatch.setattr(machine_mod.time, "sleep", lambda seconds: sleep_calls.append(float(seconds)))
+
+    DropletCamera.capture_non_blocking(camera, timeout_s=0.01, request_id="req-clamp", generation=5)
+
+    assert trigger_events == ["high", "low"]
+    assert sleep_calls == [0.001]
+    trigger_high = next(payload for phase, payload in phases if phase == "trigger_high")
+    trigger_low = next(payload for phase, payload in phases if phase == "trigger_low")
+    pulse_done = next(payload for phase, payload in phases if phase == "trigger_pulse_done")
+    assert trigger_high["trigger_pulse_ms"] == "1.0"
+    assert trigger_low["trigger_pulse_ms"] == "1.0"
+    assert pulse_done["trigger_pulse_ms"] == "1.0"
+    assert [phase for phase, _payload in phases].index("trigger_low") < [
+        phase for phase, _payload in phases
+    ].index("edge_wait_start")
+
+
+def test_capture_trigger_pulse_duration_clamps_bounds_and_invalid_values():
+    camera = DropletCamera.__new__(DropletCamera)
+
+    camera.droplet_trigger_pulse_s = 999.0
+    assert DropletCamera._trigger_pulse_duration_s(camera) == 0.100
+
+    camera.droplet_trigger_pulse_s = -1.0
+    assert DropletCamera._trigger_pulse_duration_s(camera) == 0.001
+
+    camera.droplet_trigger_pulse_s = float("nan")
+    assert DropletCamera._trigger_pulse_duration_s(camera) == 0.005
 
 
 def test_recover_stale_capture_releases_trigger_done_and_worker_active():
