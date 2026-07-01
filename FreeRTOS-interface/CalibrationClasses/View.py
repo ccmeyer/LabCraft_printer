@@ -1550,7 +1550,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._optics_last_analysis = None
         self._capture_request_pending = False
         self._droplet_capture_perf_ui_sequence = 0
+        self._droplet_capture_perf_raw_sequence = 0
         self._droplet_capture_perf_last_request_id = None
+        self._droplet_capture_perf_event_filter_installed = False
         self._calibration_record_export_thread = None
         self._calibration_record_export_worker = None
         self._calibration_record_export_in_progress = False
@@ -2704,6 +2706,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         else:
             self._apply_default_calibration_tab_from_printing_mode()
         self.populate_summary_table()
+        self._install_droplet_capture_raw_attempt_filter()
         self._refresh_manual_control_lock_state()
         self._refresh_optics_controls()
         self._apply_flash_safety_ui_state()
@@ -4516,6 +4519,169 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 return None
         return None
 
+    def _droplet_capture_performance_diagnostics_enabled(self):
+        getter = getattr(self.controller, "is_droplet_capture_performance_diagnostics_enabled", None)
+        if callable(getter):
+            try:
+                return bool(getter())
+            except Exception:
+                return False
+        return False
+
+    def _install_droplet_capture_raw_attempt_filter(self):
+        if bool(getattr(self, "_droplet_capture_perf_event_filter_installed", False)):
+            return
+        app = QApplication.instance()
+        if app is None:
+            return
+        try:
+            app.installEventFilter(self)
+            self._droplet_capture_perf_event_filter_installed = True
+        except Exception:
+            self._droplet_capture_perf_event_filter_installed = False
+
+    def _remove_droplet_capture_raw_attempt_filter(self):
+        if not bool(getattr(self, "_droplet_capture_perf_event_filter_installed", False)):
+            return
+        app = QApplication.instance()
+        if app is not None:
+            try:
+                app.removeEventFilter(self)
+            except Exception:
+                pass
+        self._droplet_capture_perf_event_filter_installed = False
+
+    def _event_object_belongs_to_imager(self, watched):
+        current = watched
+        while current is not None:
+            if current is self:
+                return True
+            try:
+                current = current.parent()
+            except Exception:
+                return False
+        return False
+
+    def _event_global_pos(self, event):
+        getter = getattr(event, "globalPosition", None)
+        if callable(getter):
+            try:
+                return getter().toPoint()
+            except Exception:
+                pass
+        getter = getattr(event, "globalPos", None)
+        if callable(getter):
+            try:
+                return getter()
+            except Exception:
+                pass
+        return None
+
+    def _event_hits_flash_button(self, event):
+        button = getattr(self, "flash_button", None)
+        if button is None:
+            return False
+        try:
+            if not self.isVisible() or not button.isVisible():
+                return False
+        except Exception:
+            return False
+        global_pos = self._event_global_pos(event)
+        if global_pos is None:
+            return False
+        try:
+            return bool(button.rect().contains(button.mapFromGlobal(global_pos)))
+        except Exception:
+            return False
+
+    def _raw_trigger_attempt_state(self):
+        state = self._get_droplet_capture_ui_state()
+        pending = bool(state.get("pending_active", False))
+        if bool(state.get("_authoritative", False)):
+            self._capture_request_pending = pending
+        else:
+            pending = bool(pending or getattr(self, "_capture_request_pending", False))
+        calibration_busy = bool(DropletImagingDialog._is_calibration_busy(self))
+        dirty_shutdown = bool(self._imager_dirty_shutdown_active())
+        flash_fault_latched = bool(self._is_flash_fault_latched())
+        ignored_reason = None
+        if calibration_busy:
+            ignored_reason = "calibration_busy"
+        elif pending:
+            ignored_reason = "pending_capture"
+        elif dirty_shutdown:
+            ignored_reason = "dirty_shutdown"
+        elif flash_fault_latched:
+            ignored_reason = "flash_fault_latched"
+        return {
+            "ignored_reason": ignored_reason,
+            "capture_pending": pending,
+            "calibration_busy": calibration_busy,
+            "dirty_shutdown": dirty_shutdown,
+            "flash_fault_latched": flash_fault_latched,
+            "pending_request_id": state.get("pending_request_id"),
+        }
+
+    def _record_droplet_capture_raw_trigger_attempt(self, source, *, event=None, watched=None):
+        if not self._droplet_capture_performance_diagnostics_enabled():
+            return None
+        try:
+            raw_sequence = int(getattr(self, "_droplet_capture_perf_raw_sequence", 0) or 0) + 1
+        except Exception:
+            raw_sequence = 1
+        self._droplet_capture_perf_raw_sequence = raw_sequence
+        payload = {
+            "raw_sequence": raw_sequence,
+            "source": str(source or "unknown"),
+            **self._raw_trigger_attempt_state(),
+        }
+        button = getattr(self, "flash_button", None)
+        if button is not None:
+            try:
+                payload["button_enabled"] = bool(button.isEnabled())
+            except Exception:
+                pass
+        shortcut = getattr(self, "manual_flash_shortcut", None)
+        if shortcut is not None:
+            try:
+                payload["shortcut_enabled"] = bool(shortcut.isEnabled())
+            except Exception:
+                pass
+        if event is not None:
+            auto_repeat = getattr(event, "isAutoRepeat", None)
+            if callable(auto_repeat):
+                try:
+                    payload["auto_repeat"] = bool(auto_repeat())
+                except Exception:
+                    pass
+        if watched is not None:
+            try:
+                payload["event_target"] = type(watched).__name__
+            except Exception:
+                pass
+        return self._record_droplet_capture_performance_marker("ui_raw_trigger_attempt", payload)
+
+    def _record_droplet_capture_raw_trigger_attempt_from_event(self, watched, event):
+        try:
+            event_type = event.type()
+            if event_type == QtCore.QEvent.KeyPress:
+                if self._event_object_belongs_to_imager(watched) and event.key() == Qt.Key_Space:
+                    self._record_droplet_capture_raw_trigger_attempt(
+                        "space_key",
+                        event=event,
+                        watched=watched,
+                    )
+            elif event_type == QtCore.QEvent.MouseButtonPress:
+                button = getattr(event, "button", None)
+                if callable(button) and button() == Qt.LeftButton and self._event_hits_flash_button(event):
+                    self._record_droplet_capture_raw_trigger_attempt(
+                        "trigger_button_mouse",
+                        event=event,
+                        watched=watched,
+                    )
+        except Exception:
+            pass
+
     def _get_droplet_capture_ui_state(self):
         controller = getattr(self, "controller", None)
         getter = getattr(controller, "get_droplet_capture_ui_state", None)
@@ -5514,6 +5680,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._refresh_calibration_tab_lock_state()
 
     def eventFilter(self, watched, event):
+        self._record_droplet_capture_raw_trigger_attempt_from_event(watched, event)
         spinbox = self._manual_spinbox_focus_targets.get(watched)
         if spinbox is not None:
             if event.type() in (QtCore.QEvent.FocusIn, QtCore.QEvent.FocusOut):
@@ -10475,6 +10642,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
     def closeEvent(self, event):
         """Handle the closing of the dialog."""
         if bool(getattr(self, "_imager_force_close_requested", False)):
+            self._remove_droplet_capture_raw_attempt_filter()
             self._imager_force_close_requested = False
             self._imager_close_after_stop_requested = False
             self._imager_close_after_stop_started_monotonic = None
@@ -10538,6 +10706,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.stop_droplet_camera()
         self._set_stream_capture_read_camera_enabled(False)
         self.controller.disable_print_profile()
+        self._remove_droplet_capture_raw_attempt_filter()
         event.accept()
 
 
