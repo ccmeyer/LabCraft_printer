@@ -1553,6 +1553,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._droplet_capture_perf_raw_sequence = 0
         self._droplet_capture_perf_last_request_id = None
         self._droplet_capture_perf_event_filter_installed = False
+        self._droplet_capture_perf_last_raw_event = None
         self._calibration_record_export_thread = None
         self._calibration_record_export_worker = None
         self._calibration_record_export_in_progress = False
@@ -4622,6 +4623,103 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "pending_request_id": state.get("pending_request_id"),
         }
 
+    def _trigger_manual_control_enabled_state(self):
+        button_enabled = None
+        shortcut_enabled = None
+        button = getattr(self, "flash_button", None)
+        if button is not None:
+            try:
+                button_enabled = bool(button.isEnabled())
+            except Exception:
+                button_enabled = None
+        shortcut = getattr(self, "manual_flash_shortcut", None)
+        if shortcut is not None:
+            try:
+                shortcut_enabled = bool(shortcut.isEnabled())
+            except Exception:
+                shortcut_enabled = None
+        return button_enabled, shortcut_enabled
+
+    def _event_auto_repeat(self, event):
+        if event is None:
+            return None
+        auto_repeat = getattr(event, "isAutoRepeat", None)
+        if callable(auto_repeat):
+            try:
+                return bool(auto_repeat())
+            except Exception:
+                return None
+        return None
+
+    def _raw_trigger_event_identity(self, source, event):
+        if event is None:
+            return None
+        event_type = None
+        key = None
+        button = None
+        event_timestamp = None
+        try:
+            event_type = int(event.type())
+        except Exception:
+            event_type = str(getattr(event, "type", lambda: "")())
+        getter = getattr(event, "key", None)
+        if callable(getter):
+            try:
+                key = int(getter())
+            except Exception:
+                key = None
+        getter = getattr(event, "button", None)
+        if callable(getter):
+            try:
+                button = int(getter())
+            except Exception:
+                button = None
+        getter = getattr(event, "timestamp", None)
+        if callable(getter):
+            try:
+                event_timestamp = int(getter())
+            except Exception:
+                event_timestamp = None
+        return (
+            str(source or "unknown"),
+            event_type,
+            key,
+            button,
+            event_timestamp,
+            self._event_auto_repeat(event),
+            id(event),
+        )
+
+    def _should_record_droplet_capture_raw_trigger_event(self, source, event):
+        identity = self._raw_trigger_event_identity(source, event)
+        if identity is None:
+            return True
+        try:
+            now = time.monotonic()
+        except Exception:
+            now = 0.0
+        previous = getattr(self, "_droplet_capture_perf_last_raw_event", None)
+        if isinstance(previous, dict):
+            same_event_object = previous.get("event_id") == id(event)
+            previous_identity = previous.get("identity")
+            previous_identity_without_object = previous.get("identity_without_object")
+            identity_without_object = identity[:-1]
+            elapsed_ms = max(0.0, (now - float(previous.get("monotonic", 0.0))) * 1000.0)
+            if same_event_object:
+                return False
+            if (
+                previous_identity == identity
+                or previous_identity_without_object == identity_without_object
+            ) and elapsed_ms <= 25.0:
+                return False
+        self._droplet_capture_perf_last_raw_event = {
+            "identity": identity,
+            "identity_without_object": identity[:-1],
+            "event_id": id(event),
+            "monotonic": now,
+        }
+        return True
+
     def _record_droplet_capture_raw_trigger_attempt(self, source, *, event=None, watched=None):
         if not self._droplet_capture_performance_diagnostics_enabled():
             return None
@@ -4630,30 +4728,25 @@ class DropletImagingDialog(QtWidgets.QDialog):
         except Exception:
             raw_sequence = 1
         self._droplet_capture_perf_raw_sequence = raw_sequence
+        state = self._raw_trigger_attempt_state()
+        button_enabled, shortcut_enabled = self._trigger_manual_control_enabled_state()
+        if state.get("ignored_reason") is None and (
+            button_enabled is False or shortcut_enabled is False
+        ):
+            state["ignored_reason"] = "manual_controls_disabled"
         payload = {
             "raw_sequence": raw_sequence,
             "source": str(source or "unknown"),
-            **self._raw_trigger_attempt_state(),
+            **state,
         }
-        button = getattr(self, "flash_button", None)
-        if button is not None:
-            try:
-                payload["button_enabled"] = bool(button.isEnabled())
-            except Exception:
-                pass
-        shortcut = getattr(self, "manual_flash_shortcut", None)
-        if shortcut is not None:
-            try:
-                payload["shortcut_enabled"] = bool(shortcut.isEnabled())
-            except Exception:
-                pass
+        if button_enabled is not None:
+            payload["button_enabled"] = button_enabled
+        if shortcut_enabled is not None:
+            payload["shortcut_enabled"] = shortcut_enabled
         if event is not None:
-            auto_repeat = getattr(event, "isAutoRepeat", None)
-            if callable(auto_repeat):
-                try:
-                    payload["auto_repeat"] = bool(auto_repeat())
-                except Exception:
-                    pass
+            auto_repeat = self._event_auto_repeat(event)
+            if auto_repeat is not None:
+                payload["auto_repeat"] = auto_repeat
         if watched is not None:
             try:
                 payload["event_target"] = type(watched).__name__
@@ -4666,19 +4759,23 @@ class DropletImagingDialog(QtWidgets.QDialog):
             event_type = event.type()
             if event_type == QtCore.QEvent.KeyPress:
                 if self._event_object_belongs_to_imager(watched) and event.key() == Qt.Key_Space:
-                    self._record_droplet_capture_raw_trigger_attempt(
-                        "space_key",
-                        event=event,
-                        watched=watched,
-                    )
+                    source = "space_key"
+                    if self._should_record_droplet_capture_raw_trigger_event(source, event):
+                        self._record_droplet_capture_raw_trigger_attempt(
+                            source,
+                            event=event,
+                            watched=watched,
+                        )
             elif event_type == QtCore.QEvent.MouseButtonPress:
                 button = getattr(event, "button", None)
                 if callable(button) and button() == Qt.LeftButton and self._event_hits_flash_button(event):
-                    self._record_droplet_capture_raw_trigger_attempt(
-                        "trigger_button_mouse",
-                        event=event,
-                        watched=watched,
-                    )
+                    source = "trigger_button_mouse"
+                    if self._should_record_droplet_capture_raw_trigger_event(source, event):
+                        self._record_droplet_capture_raw_trigger_attempt(
+                            source,
+                            event=event,
+                            watched=watched,
+                        )
         except Exception:
             pass
 

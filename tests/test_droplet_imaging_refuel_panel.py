@@ -386,6 +386,9 @@ def test_raw_space_attempt_records_pending_ignore_for_capture_perf(monkeypatch, 
     assert payload["capture_pending"] is True
     assert payload["pending_request_id"] == "pending-1"
 
+    DropletImagingDialog.eventFilter(dialog, dialog.calibration_tabs, event)
+    controller.record_droplet_capture_performance_marker.assert_called_once()
+
 
 def test_raw_button_attempt_records_disabled_state_for_capture_perf(monkeypatch, qapp):
     dialog, _refuel_model, controller = _build_droplet_dialog(
@@ -418,6 +421,39 @@ def test_raw_button_attempt_records_disabled_state_for_capture_perf(monkeypatch,
     assert payload["button_enabled"] is False
     assert payload["capture_pending"] is True
     assert payload["pending_request_id"] == "pending-2"
+
+
+def test_raw_attempt_records_manual_controls_disabled_for_capture_perf(monkeypatch, qapp):
+    dialog, _refuel_model, controller = _build_droplet_dialog(
+        monkeypatch,
+        qapp,
+        capture_ui_state={
+            "pending_active": False,
+            "pending_request_id": None,
+            "dirty_shutdown": False,
+            "last_result_status": None,
+            "last_result_reason": "",
+            "last_result_dirty_shutdown": False,
+        },
+    )
+    controller.set_droplet_capture_performance_diagnostics_enabled(True)
+    dialog.flash_button.setEnabled(False)
+    controller.record_droplet_capture_performance_marker.reset_mock()
+
+    DropletImagingDialog._record_droplet_capture_raw_trigger_attempt(
+        dialog,
+        "space_key",
+    )
+
+    controller.capture_droplet_image.assert_not_called()
+    controller.record_droplet_capture_performance_marker.assert_called_once()
+    event_kind, payload = controller.record_droplet_capture_performance_marker.call_args.args
+    assert event_kind == "ui_raw_trigger_attempt"
+    assert payload["source"] == "space_key"
+    assert payload["ignored_reason"] == "manual_controls_disabled"
+    assert payload["button_enabled"] is False
+    assert payload["capture_pending"] is False
+    assert payload["pending_request_id"] is None
 
 
 def test_toggle_flash_records_request_and_pending_markers(monkeypatch, qapp):
