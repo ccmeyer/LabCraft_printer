@@ -68,7 +68,7 @@ Before starting any implementation slice:
 | --- | --- | --- | --- |
 | 0. Baseline and guardrails | verified | Confirm starting tests and HIL baseline | Baseline recorded |
 | 1. Typed request/result contract | verified | Add pure-Python dataclasses/enums and tests | Typed result tests pass |
-| 2. Coordinator skeleton | not_started | Add imported `CaptureCoordinator` module that delegates existing path | Coordinator unit tests pass with no behavior change |
+| 2. Coordinator skeleton | verified | Add imported `CaptureCoordinator` module that delegates existing path | Coordinator unit tests pass with no behavior change |
 | 3. Route Controller pending state | not_started | Move Controller pending state through coordinator facade | Existing capture/cancel tests pass |
 | 4. Typed cancellation and stale completion | not_started | Replace ad hoc cancellation/stale handling internally | Cancellation/stale tests pass |
 | 5. Shared calibration policy adapter | not_started | Convert `_capture_with_policy` to typed results | Calibration policy tests pass |
@@ -219,7 +219,7 @@ Rollback:
 
 ## Slice 2: Coordinator Skeleton
 
-Status: `not_started`
+Status: `verified`
 
 Goal:
 
@@ -230,11 +230,12 @@ Call path:
 
 `Controller.capture_droplet_image(...) -> CaptureCoordinator.request_capture(...) -> existing Controller delegate -> Machine.capture_droplet_image(...)`
 
-Likely files touched:
+Files touched:
 
 - `FreeRTOS-interface/Controller.py`
 - `FreeRTOS-interface/CaptureCoordinator.py`
-- focused tests under `tests/`
+- `tests/test_capture_coordinator.py`
+- `tests/test_optics_capture_metadata.py`
 
 Behavior change:
 
@@ -252,14 +253,21 @@ Focused tests:
 
 Validation:
 
-- Focused coordinator tests.
-- `.\env\Scripts\python.exe -m pytest -q tests\test_optics_capture_metadata.py`
+- Focused type/coordinator tests:
+  `.\env\Scripts\python.exe -m pytest -q tests\test_capture_types.py tests\test_capture_coordinator.py`
+  passed with `32 passed in 0.18s`.
+- Controller compatibility tests:
+  `.\env\Scripts\python.exe -m pytest -q tests\test_optics_capture_metadata.py`
+  passed with `27 passed in 2.08s`.
+- Regression tests:
+  `.\env\Scripts\python.exe -m pytest -q tests\test_droplet_camera_trigger_cleanup.py tests\test_flash_safety_ui.py tests\test_run_selftest_camera_benchmark.py`
+  passed with `45 passed in 3.12s`.
 
 Proceed criteria:
 
-- Coordinator can be tested without hardware.
-- Controller behavior remains compatible with existing tests.
-- Public Controller API remains stable.
+- Coordinator can be tested without hardware. Complete.
+- Controller behavior remains compatible with existing tests. Complete.
+- Public Controller API remains stable. Complete.
 
 Rollback:
 

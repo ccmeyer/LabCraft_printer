@@ -8,6 +8,8 @@ from unittest.mock import Mock
 import numpy as np
 
 import CalibrationClasses.View as calibration_view
+from CaptureCoordinator import CaptureCoordinatorState
+from CaptureTypes import CaptureStatus
 from Controller import Controller
 from CalibrationClasses.View import DropletImagingDialog
 
@@ -163,17 +165,33 @@ def _make_controller():
     return controller, machine, camera_model
 
 
+def test_controller_lazily_creates_capture_coordinator_for_new_constructed_tests():
+    controller, _machine, _camera_model = _make_controller()
+
+    assert not hasattr(controller, "capture_coordinator")
+
+    coordinator = controller._ensure_capture_coordinator()
+
+    assert coordinator.state is CaptureCoordinatorState.IDLE
+    assert controller.capture_coordinator is coordinator
+
+
 def test_controller_capture_context_is_written_to_next_frame_metadata():
     controller, machine, camera_model = _make_controller()
 
     assert controller.capture_droplet_image(capture_context="optics_scale_bar") is True
     assert machine.capture_calls[0]["throughput_mode"] is False
     assert machine.capture_calls[0]["capture_request_id"]
+    assert controller.capture_coordinator.active_request.request_id == controller.pending_capture_request_id
+    assert controller.capture_coordinator.state is CaptureCoordinatorState.CAPTURING
     assert controller.pending_capture_context == "optics_scale_bar"
     assert controller.pending_capture_active is True
 
     controller._on_image_captured()
 
+    assert controller.capture_coordinator.state is CaptureCoordinatorState.IDLE
+    assert controller.capture_coordinator.active_request is None
+    assert controller.capture_coordinator.last_result.status is CaptureStatus.SUCCESS
     assert controller.pending_capture_context is None
     assert controller.pending_capture_active is False
     assert len(camera_model.update_calls) == 1
@@ -211,6 +229,8 @@ def test_controller_clears_pending_callback_when_camera_rejects_capture():
     assert controller.pending_capture_callback is None
     assert controller.pending_capture_context is None
     assert controller.pending_capture_active is False
+    assert controller.capture_coordinator.state is CaptureCoordinatorState.IDLE
+    assert controller.capture_coordinator.last_result.status is CaptureStatus.QUEUE_REJECTED
     callback.assert_called_once_with(None)
     assert getattr(callback, "_capture_rejection_reason") == "machine_rejected"
 
@@ -305,6 +325,8 @@ def test_controller_cancel_pending_capture_recovers_clears_waiter_and_ignores_la
     assert controller.pending_capture_callback is None
     assert controller.pending_capture_context is None
     assert controller.pending_capture_active is False
+    assert controller.capture_coordinator.state is CaptureCoordinatorState.IDLE
+    assert controller.capture_coordinator.last_result.status is CaptureStatus.CANCELLED
     callback.assert_called_once_with(None)
     assert getattr(callback, "_capture_rejection_reason") == "capture_cancelled"
     assert getattr(callback, "_capture_cancel_reason") == "unit_test"
@@ -322,6 +344,7 @@ def test_controller_cancel_pending_capture_recovers_clears_waiter_and_ignores_la
     )
 
     assert camera_model.update_calls == []
+    assert controller.capture_coordinator.last_result.status is CaptureStatus.STALE_IGNORED
 
 
 def test_controller_cancel_pending_capture_is_idempotent_without_pending_capture():
@@ -597,6 +620,7 @@ def test_controller_capture_guard_recovers_once_and_requeues_original_callback()
     assert controller.pending_capture_active is True
     assert controller.pending_capture_recovery_attempted is True
     assert controller.pending_capture_request_id != first_request_id
+    assert controller.capture_coordinator.active_request.request_id == controller.pending_capture_request_id
     callback.assert_not_called()
     controller.model.calibration_manager.captureFailed.emit.assert_not_called()
 
@@ -618,6 +642,8 @@ def test_controller_capture_guard_recovers_once_and_requeues_original_callback()
     assert controller.pending_capture_context is None
     assert controller.pending_capture_active is False
     assert controller.pending_capture_started_monotonic is None
+    assert controller.capture_coordinator.state is CaptureCoordinatorState.IDLE
+    assert controller.capture_coordinator.last_result.status is CaptureStatus.SUCCESS
 
     assert controller.capture_droplet_image() is True
     assert len(machine.capture_calls) == 3
@@ -692,6 +718,8 @@ def test_controller_late_stale_completion_cannot_satisfy_requeued_capture():
     callback.assert_not_called()
     assert camera_model.update_calls == []
     assert controller.pending_capture_request_id == new_request_id
+    assert controller.capture_coordinator.last_result.status is CaptureStatus.STALE_IGNORED
+    assert controller.capture_coordinator.active_request.request_id == new_request_id
 
     new_frame = np.full((4, 5, 3), 20, dtype=np.uint8)
     controller._on_capture_completed_payload(

@@ -21,6 +21,8 @@ import inspect
 
 from hardware.profile import CURRENT_PROFILE, HardwareProfile
 from hardware.null_devices import NullCamera
+from CaptureCoordinator import CaptureCoordinator
+from CaptureTypes import CaptureSource, CaptureStatus
 
 ARRAY_PAUSE_DEPARTURE_ACCEL = 32000
 ARRAY_PAUSE_DEPARTURE_SETTLE_MS = 200
@@ -171,6 +173,7 @@ class Controller(QObject):
         self.pending_capture_throughput_mode = False
         self.last_capture_queue_rejection_reason = None
         self.last_capture_queue_rejection_state = None
+        self.capture_coordinator = CaptureCoordinator()
 
         self._array_state = "idle"
         self._array_context = None
@@ -4546,6 +4549,64 @@ class Controller(QObject):
     def start_droplet_camera(self):
         self.machine.start_droplet_camera()
 
+    def _ensure_capture_coordinator(self):
+        coordinator = getattr(self, "capture_coordinator", None)
+        if coordinator is None:
+            coordinator = CaptureCoordinator()
+            self.capture_coordinator = coordinator
+        return coordinator
+
+    def _record_capture_coordinator_success(self, request_id, frame, *, metadata=None, reason=""):
+        if request_id is None:
+            return
+        try:
+            coordinator = self._ensure_capture_coordinator()
+            if frame is None:
+                coordinator.complete_failure(
+                    request_id,
+                    status=CaptureStatus.INTERNAL_ERROR,
+                    metadata=metadata,
+                    reason=reason or "capture_completed_without_frame",
+                )
+                return
+            coordinator.complete_success(request_id, frame, metadata=metadata, reason=reason)
+        except Exception:
+            pass
+
+    def _record_capture_coordinator_failure(
+        self,
+        request_id,
+        *,
+        status=CaptureStatus.INTERNAL_ERROR,
+        metadata=None,
+        reason="",
+        retryable=False,
+        recoverable=False,
+    ):
+        if request_id is None:
+            return
+        try:
+            self._ensure_capture_coordinator().complete_failure(
+                request_id,
+                status=status,
+                metadata=metadata,
+                reason=reason,
+                retryable=retryable,
+                recoverable=recoverable,
+            )
+        except Exception:
+            pass
+
+    def _record_capture_coordinator_stale(self, request_id, *, metadata=None, reason="stale_completion_ignored"):
+        try:
+            self._ensure_capture_coordinator().record_stale_completion(
+                request_id,
+                metadata=metadata,
+                reason=reason,
+            )
+        except Exception:
+            pass
+
     def capture_droplet_image(self, callback=None, *, throughput_mode=False, capture_context=None):
         """
         Initiates a non-blocking image capture. If a callback is provided,
@@ -4607,12 +4668,24 @@ class Controller(QObject):
                 )
                 self._notify_capture_callback_failed(callback)
                 return False
-        return self._queue_capture_request(
-            callback=callback,
-            throughput_mode=throughput_mode,
-            capture_context=capture_context,
-            recovery_attempted=False,
+        monotonic_fn = getattr(self, "_monotonic_fn", time.monotonic)
+        coordinator = self._ensure_capture_coordinator()
+        if coordinator.is_active and not bool(getattr(self, "pending_capture_active", False)):
+            coordinator.reset()
+        outcome = coordinator.request_capture(
+            context=capture_context,
+            source=CaptureSource.CONTROLLER,
+            created_at_monotonic=monotonic_fn(),
+            metadata={"throughput_mode": bool(throughput_mode), "recovery_attempted": False},
+            delegate=lambda request: self._queue_capture_request(
+                callback=callback,
+                throughput_mode=throughput_mode,
+                capture_context=capture_context,
+                recovery_attempted=False,
+                capture_request_id=request.request_id,
+            ),
         )
+        return bool(outcome.accepted)
 
     def _queue_capture_request(
         self,
@@ -4621,8 +4694,9 @@ class Controller(QObject):
         throughput_mode=False,
         capture_context=None,
         recovery_attempted=False,
+        capture_request_id=None,
     ):
-        capture_request_id = uuid.uuid4().hex
+        capture_request_id = str(capture_request_id or uuid.uuid4().hex)
         self.last_capture_queue_rejection_reason = None
         self.last_capture_queue_rejection_state = None
         if callback is not None:
@@ -4679,8 +4753,26 @@ class Controller(QObject):
                 level="warning",
             )
             self._clear_pending_capture(callback=callback, capture_context=capture_context)
+            try:
+                if self._ensure_capture_coordinator().is_active:
+                    self._ensure_capture_coordinator().reset()
+            except Exception:
+                pass
             self._notify_capture_callback_failed(callback)
             return False
+        try:
+            self._ensure_capture_coordinator().adopt_active_request(
+                capture_request_id,
+                context=capture_context,
+                source=CaptureSource.CONTROLLER,
+                created_at_monotonic=self.pending_capture_started_monotonic,
+                metadata={
+                    "throughput_mode": bool(throughput_mode),
+                    "recovery_attempted": bool(recovery_attempted),
+                },
+            )
+        except Exception:
+            pass
         self._start_pending_capture_guard(throughput_mode=throughput_mode)
         print(
             f"[Camera] capture request queued request_id={capture_request_id} "
@@ -4847,6 +4939,16 @@ class Controller(QObject):
 
         self.last_capture_queue_rejection_reason = "capture_cancelled"
         self.last_capture_queue_rejection_state = state_before
+        self._record_capture_coordinator_failure(
+            request_id,
+            status=CaptureStatus.CANCELLED,
+            metadata={
+                "capture_context": capture_context,
+                "state_before": state_before,
+                "recovery_result": dict(recovery_result or {}),
+            },
+            reason=cancel_reason,
+        )
         self._clear_pending_capture()
 
         if callback is not None:
@@ -4907,6 +5009,12 @@ class Controller(QObject):
             "capture_failed",
             {"request_id": request_id, "message": str(msg), "state": self._get_droplet_capture_state()},
             level="warning",
+        )
+        self._record_capture_coordinator_failure(
+            request_id,
+            status=CaptureStatus.INTERNAL_ERROR,
+            metadata={"message": str(msg), "state": self._get_droplet_capture_state()},
+            reason=str(msg),
         )
         self._clear_pending_capture()
         if cb:
@@ -5356,6 +5464,15 @@ class Controller(QObject):
                 },
                 level="warning",
             )
+            self._record_capture_coordinator_stale(
+                request_id,
+                metadata={
+                    "expected_request_id": expected_request_id,
+                    "status": payload.get("status"),
+                    "generation": payload.get("generation"),
+                    "cap_id": payload.get("cap_id"),
+                },
+            )
             return
 
         status = str(payload.get("status") or "").lower()
@@ -5410,6 +5527,14 @@ class Controller(QObject):
                     "capture_context": capture_context,
                     "state": self._get_droplet_capture_state(),
                 },
+            )
+            metadata = dict(cap_info or {}) if isinstance(cap_info, dict) else {}
+            metadata.setdefault("capture_context", capture_context)
+            self._record_capture_coordinator_success(
+                request_id,
+                frame,
+                metadata=metadata,
+                reason=str(metadata.get("reason") or "capture_completed"),
             )
             self._clear_pending_capture()
         
