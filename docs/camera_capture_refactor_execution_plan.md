@@ -324,7 +324,7 @@ Rollback:
 
 ## Slice 4: Typed Cancellation And Stale Completion
 
-Status: `not_started`
+Status: `verified`
 
 Goal:
 
@@ -339,6 +339,7 @@ Likely files touched:
 
 - `FreeRTOS-interface/Controller.py`
 - `FreeRTOS-interface/CaptureCoordinator.py`
+- `tests/test_capture_coordinator.py`
 - `tests/test_optics_capture_metadata.py`
 
 Behavior change:
@@ -357,7 +358,12 @@ Focused tests:
 
 Validation:
 
-- `.\env\Scripts\python.exe -m pytest -q tests\test_optics_capture_metadata.py`
+- `.\env\Scripts\python.exe -m pytest -q tests\test_capture_types.py tests\test_capture_coordinator.py` -> `38 passed in 0.24s`
+- `.\env\Scripts\python.exe -m pytest -q tests\test_optics_capture_metadata.py` -> `30 passed in 2.13s`
+- `.\env\Scripts\python.exe -m pytest -q tests\test_refuel_camera_controller.py tests\test_app_update_request.py` -> `47 passed in 2.11s`
+- `.\env\Scripts\python.exe -m pytest -q tests\test_calibration_pressure_band_failure_modes.py` -> `30 passed in 1.83s`
+- `.\env\Scripts\python.exe -m pytest -q tests\test_droplet_camera_trigger_cleanup.py tests\test_flash_safety_ui.py tests\test_run_selftest_camera_benchmark.py` -> `45 passed in 3.15s`
+- `.\env\Scripts\python.exe -m pytest -q` -> `2682 passed, 24 skipped in 184.17s`
 
 Proceed criteria:
 

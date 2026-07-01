@@ -101,6 +101,57 @@ def test_clear_pending_preserves_state_when_callback_or_context_do_not_match():
     assert coordinator.pending_request_id == "request-1"
 
 
+def test_cancel_pending_records_terminal_cancelled_result_and_clears_state():
+    coordinator = Coordinator()
+    request = CaptureRequest(request_id="request-1", context="ctx", source="controller")
+    coordinator.begin_pending(request, context="ctx")
+
+    result = coordinator.cancel_pending(
+        reason="operator_stop",
+        metadata={"state_before": {"worker_active": True}},
+    )
+
+    assert result.status is CaptureStatus.CANCELLED
+    assert result.reason == "operator_stop"
+    assert result.retryable is False
+    assert result.recoverable is False
+    assert result.metadata == {"state_before": {"worker_active": True}}
+    assert coordinator.last_result == result
+    assert coordinator.state is CaptureCoordinatorState.IDLE
+    assert coordinator.active_request is None
+    assert coordinator.pending_active is False
+
+
+def test_cancel_pending_when_idle_is_idempotent_and_preserves_last_result():
+    coordinator = Coordinator()
+    outcome = coordinator.request_capture(delegate=lambda _request: False)
+
+    result = coordinator.cancel_pending(reason="nothing_active")
+
+    assert result is None
+    assert coordinator.last_result == outcome.result
+    assert coordinator.state is CaptureCoordinatorState.IDLE
+    assert coordinator.pending_active is False
+
+
+def test_stale_completion_after_cancel_does_not_reactivate_pending_state():
+    coordinator = Coordinator()
+    request = CaptureRequest(request_id="request-1", context="ctx", source="controller")
+    coordinator.begin_pending(request, context="ctx")
+    coordinator.cancel_pending(reason="operator_stop")
+
+    result = coordinator.record_stale_completion(
+        "request-1",
+        metadata={"status": "success", "cap_id": 7},
+    )
+
+    assert result.status is CaptureStatus.STALE_IGNORED
+    assert result.stale is True
+    assert coordinator.last_result == result
+    assert coordinator.state is CaptureCoordinatorState.IDLE
+    assert coordinator.pending_active is False
+
+
 def test_request_capture_transitions_requesting_before_delegate_and_capturing_after_accept():
     coordinator = Coordinator()
     observed_states = []

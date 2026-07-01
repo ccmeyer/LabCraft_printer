@@ -216,6 +216,25 @@ class CaptureCoordinator:
         self.reset()
         return True
 
+    def cancel_pending(
+        self,
+        *,
+        reason: str = "capture_cancelled",
+        metadata: dict | None = None,
+    ) -> CaptureResult | None:
+        if self.pending is None:
+            return None
+        request_id = self.pending.request.request_id
+        result = CaptureResult.cancelled(
+            request_id,
+            metadata=metadata,
+            reason=reason,
+            source=CaptureSource.COORDINATOR,
+        )
+        self.last_result = result
+        self.reset()
+        return result
+
     def pending_snapshot(self) -> dict:
         pending = self.pending
         if pending is None:

@@ -4669,6 +4669,18 @@ class Controller(QObject):
         except Exception:
             pass
 
+    def _record_capture_coordinator_cancelled(self, *, metadata=None, reason="capture_cancelled"):
+        try:
+            coordinator = self._ensure_capture_coordinator()
+            result = coordinator.cancel_pending(
+                metadata=metadata,
+                reason=reason,
+            )
+            self._sync_legacy_pending_capture_fields(coordinator)
+            return result
+        except Exception:
+            return None
+
     def capture_droplet_image(self, callback=None, *, throughput_mode=False, capture_context=None):
         """
         Initiates a non-blocking image capture. If a callback is provided,
@@ -4989,20 +5001,24 @@ class Controller(QObject):
                 reason=f"capture_cancelled reason={cancel_reason} request_id={request_id}",
             )
         result["recovery_result"] = dict(recovery_result or {})
+        state_after = self._get_droplet_capture_state()
 
         self.last_capture_queue_rejection_reason = "capture_cancelled"
         self.last_capture_queue_rejection_state = state_before
-        self._record_capture_coordinator_failure(
-            request_id,
-            status=CaptureStatus.CANCELLED,
+        cancel_result = self._record_capture_coordinator_cancelled(
             metadata={
                 "capture_context": capture_context,
                 "state_before": state_before,
+                "state_after": state_after,
                 "recovery_result": dict(recovery_result or {}),
             },
             reason=cancel_reason,
         )
-        self._clear_pending_capture()
+        if cancel_result is None:
+            self._clear_pending_capture()
+        else:
+            self._stop_pending_capture_guard()
+            self._sync_legacy_pending_capture_fields()
 
         if callback is not None:
             try:
@@ -5016,7 +5032,6 @@ class Controller(QObject):
             except Exception as exc:
                 print(f"Callback raised after capture cancellation: {exc}")
 
-        state_after = self._get_droplet_capture_state()
         result.update(
             {
                 "cancelled": True,
@@ -5527,6 +5542,7 @@ class Controller(QObject):
                     "status": payload.get("status"),
                     "generation": payload.get("generation"),
                     "cap_id": payload.get("cap_id"),
+                    "state": self._get_droplet_capture_state(),
                 },
             )
             return

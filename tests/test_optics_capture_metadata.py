@@ -379,6 +379,12 @@ def test_controller_cancel_pending_capture_recovers_clears_waiter_and_ignores_la
     assert controller.capture_coordinator.state is CaptureCoordinatorState.IDLE
     assert controller.capture_coordinator.pending_active is False
     assert controller.capture_coordinator.last_result.status is CaptureStatus.CANCELLED
+    assert controller.capture_coordinator.last_result.retryable is False
+    assert controller.capture_coordinator.last_result.recoverable is False
+    assert controller.capture_coordinator.last_result.metadata["capture_context"] == "unit_cancel"
+    assert controller.capture_coordinator.last_result.metadata["state_before"]["camera_started"] is True
+    assert controller.capture_coordinator.last_result.metadata["state_after"]["worker_active"] is False
+    assert controller.capture_coordinator.last_result.metadata["recovery_result"]["ok"] is True
     callback.assert_called_once_with(None)
     assert getattr(callback, "_capture_rejection_reason") == "capture_cancelled"
     assert getattr(callback, "_capture_cancel_reason") == "unit_test"
@@ -397,6 +403,30 @@ def test_controller_cancel_pending_capture_recovers_clears_waiter_and_ignores_la
 
     assert camera_model.update_calls == []
     assert controller.capture_coordinator.last_result.status is CaptureStatus.STALE_IGNORED
+    assert controller.capture_coordinator.last_result.metadata["state"]["camera_started"] is True
+
+
+def test_controller_cancel_pending_capture_clears_waiter_when_recovery_fails():
+    controller, machine, _camera_model = _make_controller()
+    callback = Mock()
+    machine.recover_return = {"ok": False, "ready_for_retry": False, "reason": "backend_still_busy"}
+
+    assert controller.capture_droplet_image(callback=callback, capture_context="unit_cancel_fail") is True
+    request_id = controller.pending_capture_request_id
+
+    result = controller.cancel_pending_droplet_capture("unit_test_failure")
+
+    assert result["cancelled"] is True
+    assert result["request_id"] == request_id
+    assert result["recovery_result"]["ok"] is False
+    assert result["recovery_result"]["reason"] == "backend_still_busy"
+    assert controller.pending_capture_active is False
+    assert controller.pending_capture_callback is None
+    assert controller.capture_coordinator.pending_active is False
+    assert controller.capture_coordinator.last_result.status is CaptureStatus.CANCELLED
+    assert controller.capture_coordinator.last_result.metadata["recovery_result"]["ok"] is False
+    callback.assert_called_once_with(None)
+    controller.model.calibration_manager.captureFailed.emit.assert_called_once()
 
 
 def test_controller_cancel_pending_capture_is_idempotent_without_pending_capture():
