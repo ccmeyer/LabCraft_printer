@@ -275,7 +275,7 @@ Rollback:
 
 ## Slice 3: Route Controller Pending State
 
-Status: `not_started`
+Status: `verified`
 
 Goal:
 
@@ -290,6 +290,7 @@ Likely files touched:
 
 - `FreeRTOS-interface/Controller.py`
 - `FreeRTOS-interface/CaptureCoordinator.py`
+- `tests/test_capture_coordinator.py`
 - `tests/test_optics_capture_metadata.py`
 
 Behavior change:
@@ -306,7 +307,11 @@ Focused tests:
 
 Validation:
 
-- `.\env\Scripts\python.exe -m pytest -q tests\test_optics_capture_metadata.py`
+- `.\env\Scripts\python.exe -m pytest -q tests\test_capture_types.py tests\test_capture_coordinator.py` -> `35 passed in 0.21s`
+- `.\env\Scripts\python.exe -m pytest -q tests\test_optics_capture_metadata.py` -> `29 passed in 2.10s`
+- `.\env\Scripts\python.exe -m pytest -q tests\test_refuel_camera_controller.py tests\test_app_update_request.py` -> `47 passed in 2.09s`
+- `.\env\Scripts\python.exe -m pytest -q tests\test_droplet_camera_trigger_cleanup.py tests\test_flash_safety_ui.py tests\test_run_selftest_camera_benchmark.py` -> `45 passed in 3.13s`
+- `.\env\Scripts\python.exe -m pytest -q` -> `2678 passed, 24 skipped in 194.74s`
 
 Proceed criteria:
 

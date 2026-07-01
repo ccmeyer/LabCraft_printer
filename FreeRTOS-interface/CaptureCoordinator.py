@@ -22,19 +22,59 @@ class CaptureCoordinatorOutcome:
     result: CaptureResult | None = None
 
 
+@dataclass(frozen=True)
+class CapturePendingState:
+    request: CaptureRequest
+    callback: object | None = None
+    context: str | None = None
+    started_monotonic: float | None = None
+    recovery_attempted: bool = False
+    throughput_mode: bool = False
+
+
 class CaptureCoordinator:
     def __init__(self):
         self.state = CaptureCoordinatorState.IDLE
         self.active_request: CaptureRequest | None = None
+        self.pending: CapturePendingState | None = None
         self.last_result: CaptureResult | None = None
 
     @property
     def is_active(self) -> bool:
-        return self.active_request is not None and self.state != CaptureCoordinatorState.IDLE
+        return (self.pending is not None or self.active_request is not None) and self.state != CaptureCoordinatorState.IDLE
+
+    @property
+    def pending_active(self) -> bool:
+        return self.pending is not None
+
+    @property
+    def pending_request_id(self) -> str | None:
+        return None if self.pending is None else self.pending.request.request_id
+
+    @property
+    def pending_callback(self):
+        return None if self.pending is None else self.pending.callback
+
+    @property
+    def pending_context(self) -> str | None:
+        return None if self.pending is None else self.pending.context
+
+    @property
+    def pending_started_monotonic(self) -> float | None:
+        return None if self.pending is None else self.pending.started_monotonic
+
+    @property
+    def pending_recovery_attempted(self) -> bool:
+        return False if self.pending is None else bool(self.pending.recovery_attempted)
+
+    @property
+    def pending_throughput_mode(self) -> bool:
+        return False if self.pending is None else bool(self.pending.throughput_mode)
 
     def reset(self):
         self.state = CaptureCoordinatorState.IDLE
         self.active_request = None
+        self.pending = None
 
     def request_capture(
         self,
@@ -43,6 +83,10 @@ class CaptureCoordinator:
         source: CaptureSource | str = CaptureSource.CONTROLLER,
         created_at_monotonic: float | None = None,
         metadata: dict | None = None,
+        callback=None,
+        started_monotonic: float | None = None,
+        recovery_attempted: bool = False,
+        throughput_mode: bool = False,
         delegate: Callable[[CaptureRequest], bool] | None = None,
     ) -> CaptureCoordinatorOutcome:
         request = self._make_request(
@@ -80,7 +124,17 @@ class CaptureCoordinator:
             raise
 
         if accepted:
-            self.state = CaptureCoordinatorState.CAPTURING
+            if self.pending is None or self.pending.request.request_id != request.request_id:
+                self.begin_pending(
+                    request,
+                    callback=callback,
+                    context=context,
+                    started_monotonic=started_monotonic,
+                    recovery_attempted=recovery_attempted,
+                    throughput_mode=throughput_mode,
+                )
+            else:
+                self.state = CaptureCoordinatorState.CAPTURING
             return CaptureCoordinatorOutcome(True, request, None)
 
         result = CaptureResult.failure(
@@ -101,6 +155,10 @@ class CaptureCoordinator:
         source: CaptureSource | str = CaptureSource.CONTROLLER,
         created_at_monotonic: float | None = None,
         metadata: dict | None = None,
+        callback=None,
+        started_monotonic: float | None = None,
+        recovery_attempted: bool = False,
+        throughput_mode: bool = False,
     ) -> CaptureRequest:
         request = CaptureRequest(
             request_id=str(request_id),
@@ -109,9 +167,78 @@ class CaptureCoordinator:
             created_at_monotonic=created_at_monotonic if created_at_monotonic is not None else time.monotonic(),
             metadata=metadata,
         )
-        self.active_request = request
-        self.state = CaptureCoordinatorState.CAPTURING
+        self.begin_pending(
+            request,
+            callback=callback,
+            context=context,
+            started_monotonic=started_monotonic,
+            recovery_attempted=recovery_attempted,
+            throughput_mode=throughput_mode,
+        )
         return request
+
+    def begin_pending(
+        self,
+        request: CaptureRequest,
+        *,
+        callback=None,
+        context: str | None = None,
+        started_monotonic: float | None = None,
+        recovery_attempted: bool = False,
+        throughput_mode: bool = False,
+    ) -> CapturePendingState:
+        pending = CapturePendingState(
+            request=request,
+            callback=callback,
+            context=request.context if context is None else str(context),
+            started_monotonic=(
+                request.created_at_monotonic
+                if started_monotonic is None
+                else float(started_monotonic)
+            ),
+            recovery_attempted=bool(recovery_attempted),
+            throughput_mode=bool(throughput_mode),
+        )
+        self.active_request = request
+        self.pending = pending
+        self.state = CaptureCoordinatorState.CAPTURING
+        return pending
+
+    def clear_pending(self, *, callback=None, context: str | None = None) -> bool:
+        if self.pending is None:
+            if callback is None and context is None:
+                self.reset()
+            return False
+        if callback is not None and self.pending.callback is not callback:
+            return False
+        if context is not None and self.pending.context != str(context):
+            return False
+        self.reset()
+        return True
+
+    def pending_snapshot(self) -> dict:
+        pending = self.pending
+        if pending is None:
+            return {
+                "active": False,
+                "request": None,
+                "request_id": None,
+                "callback": None,
+                "context": None,
+                "started_monotonic": None,
+                "recovery_attempted": False,
+                "throughput_mode": False,
+            }
+        return {
+            "active": True,
+            "request": pending.request,
+            "request_id": pending.request.request_id,
+            "callback": pending.callback,
+            "context": pending.context,
+            "started_monotonic": pending.started_monotonic,
+            "recovery_attempted": bool(pending.recovery_attempted),
+            "throughput_mode": bool(pending.throughput_mode),
+        }
 
     def complete_success(
         self,

@@ -176,6 +176,31 @@ def test_controller_lazily_creates_capture_coordinator_for_new_constructed_tests
     assert controller.capture_coordinator is coordinator
 
 
+def test_controller_bootstraps_coordinator_from_legacy_pending_fields():
+    controller, _machine, _camera_model = _make_controller()
+    callback = Mock()
+    controller.pending_capture_active = True
+    controller.pending_capture_request_id = "legacy-request"
+    controller.pending_capture_callback = callback
+    controller.pending_capture_context = "legacy_context"
+    controller.pending_capture_started_monotonic = 42.5
+    controller.pending_capture_recovery_attempted = True
+    controller.pending_capture_throughput_mode = True
+
+    coordinator = controller._ensure_capture_coordinator()
+    snapshot = controller._capture_pending_snapshot()
+
+    assert coordinator.pending_active is True
+    assert coordinator.pending_request_id == "legacy-request"
+    assert coordinator.pending_callback is callback
+    assert coordinator.pending_context == "legacy_context"
+    assert coordinator.pending_started_monotonic == 42.5
+    assert coordinator.pending_recovery_attempted is True
+    assert coordinator.pending_throughput_mode is True
+    assert snapshot["request_id"] == "legacy-request"
+    assert controller.pending_capture_active is True
+
+
 def test_controller_capture_context_is_written_to_next_frame_metadata():
     controller, machine, camera_model = _make_controller()
 
@@ -183,7 +208,9 @@ def test_controller_capture_context_is_written_to_next_frame_metadata():
     assert machine.capture_calls[0]["throughput_mode"] is False
     assert machine.capture_calls[0]["capture_request_id"]
     assert controller.capture_coordinator.active_request.request_id == controller.pending_capture_request_id
+    assert controller.capture_coordinator.pending_request_id == controller.pending_capture_request_id
     assert controller.capture_coordinator.state is CaptureCoordinatorState.CAPTURING
+    assert controller._capture_pending_snapshot()["context"] == "optics_scale_bar"
     assert controller.pending_capture_context == "optics_scale_bar"
     assert controller.pending_capture_active is True
 
@@ -191,6 +218,7 @@ def test_controller_capture_context_is_written_to_next_frame_metadata():
 
     assert controller.capture_coordinator.state is CaptureCoordinatorState.IDLE
     assert controller.capture_coordinator.active_request is None
+    assert controller.capture_coordinator.pending_active is False
     assert controller.capture_coordinator.last_result.status is CaptureStatus.SUCCESS
     assert controller.pending_capture_context is None
     assert controller.pending_capture_active is False
@@ -230,9 +258,32 @@ def test_controller_clears_pending_callback_when_camera_rejects_capture():
     assert controller.pending_capture_context is None
     assert controller.pending_capture_active is False
     assert controller.capture_coordinator.state is CaptureCoordinatorState.IDLE
+    assert controller.capture_coordinator.pending_active is False
+    assert controller._capture_pending_snapshot()["active"] is False
     assert controller.capture_coordinator.last_result.status is CaptureStatus.QUEUE_REJECTED
     callback.assert_called_once_with(None)
     assert getattr(callback, "_capture_rejection_reason") == "machine_rejected"
+
+
+def test_controller_clear_pending_capture_respects_callback_and_context_filters():
+    controller, _machine, _camera_model = _make_controller()
+    callback = Mock()
+
+    assert controller.capture_droplet_image(callback=callback, capture_context="ctx") is True
+    request_id = controller.pending_capture_request_id
+
+    assert controller._clear_pending_capture(callback=Mock()) is False
+    assert controller.pending_capture_active is True
+    assert controller.pending_capture_request_id == request_id
+    assert controller.capture_coordinator.pending_request_id == request_id
+
+    assert controller._clear_pending_capture(capture_context="other") is False
+    assert controller.pending_capture_active is True
+    assert controller.pending_capture_request_id == request_id
+
+    assert controller._clear_pending_capture(callback=callback, capture_context="ctx") is True
+    assert controller.pending_capture_active is False
+    assert controller.capture_coordinator.pending_active is False
 
 
 def test_controller_classifies_backend_unavailable_queue_rejection():
@@ -326,6 +377,7 @@ def test_controller_cancel_pending_capture_recovers_clears_waiter_and_ignores_la
     assert controller.pending_capture_context is None
     assert controller.pending_capture_active is False
     assert controller.capture_coordinator.state is CaptureCoordinatorState.IDLE
+    assert controller.capture_coordinator.pending_active is False
     assert controller.capture_coordinator.last_result.status is CaptureStatus.CANCELLED
     callback.assert_called_once_with(None)
     assert getattr(callback, "_capture_rejection_reason") == "capture_cancelled"
@@ -621,6 +673,8 @@ def test_controller_capture_guard_recovers_once_and_requeues_original_callback()
     assert controller.pending_capture_recovery_attempted is True
     assert controller.pending_capture_request_id != first_request_id
     assert controller.capture_coordinator.active_request.request_id == controller.pending_capture_request_id
+    assert controller.capture_coordinator.pending_request_id == controller.pending_capture_request_id
+    assert controller._capture_pending_snapshot()["recovery_attempted"] is True
     callback.assert_not_called()
     controller.model.calibration_manager.captureFailed.emit.assert_not_called()
 
@@ -643,6 +697,7 @@ def test_controller_capture_guard_recovers_once_and_requeues_original_callback()
     assert controller.pending_capture_active is False
     assert controller.pending_capture_started_monotonic is None
     assert controller.capture_coordinator.state is CaptureCoordinatorState.IDLE
+    assert controller.capture_coordinator.pending_active is False
     assert controller.capture_coordinator.last_result.status is CaptureStatus.SUCCESS
 
     assert controller.capture_droplet_image() is True
@@ -720,6 +775,8 @@ def test_controller_late_stale_completion_cannot_satisfy_requeued_capture():
     assert controller.pending_capture_request_id == new_request_id
     assert controller.capture_coordinator.last_result.status is CaptureStatus.STALE_IGNORED
     assert controller.capture_coordinator.active_request.request_id == new_request_id
+    assert controller.capture_coordinator.pending_request_id == new_request_id
+    assert controller.pending_capture_active is True
 
     new_frame = np.full((4, 5, 3), 20, dtype=np.uint8)
     controller._on_capture_completed_payload(

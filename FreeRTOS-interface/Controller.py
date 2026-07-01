@@ -808,7 +808,11 @@ class Controller(QObject):
         except Exception:
             blockers.append("Command queue state could not be checked.")
 
-        if bool(getattr(self, "pending_capture_active", False)):
+        try:
+            capture_active = self._pending_capture_active()
+        except Exception:
+            capture_active = bool(getattr(self, "pending_capture_active", False))
+        if capture_active:
             blockers.append("Image capture is active.")
 
         blockers.extend(self._get_app_update_calibration_blockers())
@@ -4554,7 +4558,59 @@ class Controller(QObject):
         if coordinator is None:
             coordinator = CaptureCoordinator()
             self.capture_coordinator = coordinator
+        if (
+            bool(self.__dict__.get("pending_capture_active", False))
+            and not bool(getattr(coordinator, "pending_active", False))
+        ):
+            request_id = self.__dict__.get("pending_capture_request_id") or uuid.uuid4().hex
+            started = self.__dict__.get("pending_capture_started_monotonic")
+            coordinator.adopt_active_request(
+                request_id,
+                context=self.__dict__.get("pending_capture_context"),
+                source=CaptureSource.CONTROLLER,
+                created_at_monotonic=started,
+                callback=self.__dict__.get("pending_capture_callback"),
+                started_monotonic=started,
+                recovery_attempted=bool(self.__dict__.get("pending_capture_recovery_attempted", False)),
+                throughput_mode=bool(self.__dict__.get("pending_capture_throughput_mode", False)),
+            )
+        self._sync_legacy_pending_capture_fields(coordinator)
         return coordinator
+
+    def _capture_pending_snapshot(self):
+        coordinator = self._ensure_capture_coordinator()
+        snapshot = coordinator.pending_snapshot()
+        self._sync_legacy_pending_capture_fields(coordinator)
+        return snapshot
+
+    def _pending_capture_active(self):
+        return bool(self._capture_pending_snapshot().get("active"))
+
+    def _pending_capture_request_id(self):
+        return self._capture_pending_snapshot().get("request_id")
+
+    def _sync_legacy_pending_capture_fields(self, coordinator=None):
+        if coordinator is None:
+            coordinator = getattr(self, "capture_coordinator", None)
+        if coordinator is None:
+            snapshot = {
+                "active": False,
+                "request_id": None,
+                "callback": None,
+                "context": None,
+                "started_monotonic": None,
+                "recovery_attempted": False,
+                "throughput_mode": False,
+            }
+        else:
+            snapshot = coordinator.pending_snapshot()
+        self.pending_capture_callback = snapshot.get("callback")
+        self.pending_capture_context = snapshot.get("context")
+        self.pending_capture_active = bool(snapshot.get("active"))
+        self.pending_capture_request_id = snapshot.get("request_id")
+        self.pending_capture_started_monotonic = snapshot.get("started_monotonic")
+        self.pending_capture_recovery_attempted = bool(snapshot.get("recovery_attempted", False))
+        self.pending_capture_throughput_mode = bool(snapshot.get("throughput_mode", False))
 
     def _record_capture_coordinator_success(self, request_id, frame, *, metadata=None, reason=""):
         if request_id is None:
@@ -4568,8 +4624,10 @@ class Controller(QObject):
                     metadata=metadata,
                     reason=reason or "capture_completed_without_frame",
                 )
+                self._sync_legacy_pending_capture_fields(coordinator)
                 return
             coordinator.complete_success(request_id, frame, metadata=metadata, reason=reason)
+            self._sync_legacy_pending_capture_fields(coordinator)
         except Exception:
             pass
 
@@ -4586,7 +4644,8 @@ class Controller(QObject):
         if request_id is None:
             return
         try:
-            self._ensure_capture_coordinator().complete_failure(
+            coordinator = self._ensure_capture_coordinator()
+            coordinator.complete_failure(
                 request_id,
                 status=status,
                 metadata=metadata,
@@ -4594,16 +4653,19 @@ class Controller(QObject):
                 retryable=retryable,
                 recoverable=recoverable,
             )
+            self._sync_legacy_pending_capture_fields(coordinator)
         except Exception:
             pass
 
     def _record_capture_coordinator_stale(self, request_id, *, metadata=None, reason="stale_completion_ignored"):
         try:
-            self._ensure_capture_coordinator().record_stale_completion(
+            coordinator = self._ensure_capture_coordinator()
+            coordinator.record_stale_completion(
                 request_id,
                 metadata=metadata,
                 reason=reason,
             )
+            self._sync_legacy_pending_capture_fields(coordinator)
         except Exception:
             pass
 
@@ -4624,26 +4686,27 @@ class Controller(QObject):
             )
             self._handle_blocked_capture(callback)
             return False
-        if bool(getattr(self, "pending_capture_active", False)):
+        pending_snapshot = self._capture_pending_snapshot()
+        if bool(pending_snapshot.get("active")):
             state = self._get_droplet_capture_state()
             self.last_capture_queue_rejection_reason = "controller_pending"
             self.last_capture_queue_rejection_state = state
             print(
                 "[Camera] capture rejected: reason=controller_pending "
-                f"pending_request_id={getattr(self, 'pending_capture_request_id', None)} state={state}"
+                f"pending_request_id={pending_snapshot.get('request_id')} state={state}"
             )
             self._record_active_calibration_event(
                 "capture_queue_rejected",
                 {
                     "reason": "controller_pending",
-                    "pending_request_id": getattr(self, "pending_capture_request_id", None),
+                    "pending_request_id": pending_snapshot.get("request_id"),
                     "state": state,
                 },
                 level="warning",
             )
             self._notify_capture_callback_failed(callback)
             return False
-        if capture_context is not None and getattr(self, "pending_capture_context", None) is not None:
+        if capture_context is not None and pending_snapshot.get("context") is not None:
             state = self._get_droplet_capture_state()
             self.last_capture_queue_rejection_reason = "context_pending"
             self.last_capture_queue_rejection_state = state
@@ -4656,7 +4719,7 @@ class Controller(QObject):
             self._notify_capture_callback_failed(callback)
             return False
         if callback is not None:
-            if self.pending_capture_callback is not None:
+            if pending_snapshot.get("callback") is not None:
                 state = self._get_droplet_capture_state()
                 self.last_capture_queue_rejection_reason = "callback_pending"
                 self.last_capture_queue_rejection_state = state
@@ -4670,13 +4733,14 @@ class Controller(QObject):
                 return False
         monotonic_fn = getattr(self, "_monotonic_fn", time.monotonic)
         coordinator = self._ensure_capture_coordinator()
-        if coordinator.is_active and not bool(getattr(self, "pending_capture_active", False)):
-            coordinator.reset()
         outcome = coordinator.request_capture(
             context=capture_context,
             source=CaptureSource.CONTROLLER,
             created_at_monotonic=monotonic_fn(),
             metadata={"throughput_mode": bool(throughput_mode), "recovery_attempted": False},
+            callback=callback,
+            recovery_attempted=False,
+            throughput_mode=throughput_mode,
             delegate=lambda request: self._queue_capture_request(
                 callback=callback,
                 throughput_mode=throughput_mode,
@@ -4699,15 +4763,24 @@ class Controller(QObject):
         capture_request_id = str(capture_request_id or uuid.uuid4().hex)
         self.last_capture_queue_rejection_reason = None
         self.last_capture_queue_rejection_state = None
-        if callback is not None:
-            self.pending_capture_callback = callback
-        self.pending_capture_context = None if capture_context is None else str(capture_context)
-        self.pending_capture_active = True
-        self.pending_capture_request_id = capture_request_id
-        self.pending_capture_recovery_attempted = bool(recovery_attempted)
-        self.pending_capture_throughput_mode = bool(throughput_mode)
         monotonic_fn = getattr(self, "_monotonic_fn", time.monotonic)
-        self.pending_capture_started_monotonic = monotonic_fn()
+        started_monotonic = monotonic_fn()
+        coordinator = self._ensure_capture_coordinator()
+        coordinator.adopt_active_request(
+            capture_request_id,
+            context=capture_context,
+            source=CaptureSource.CONTROLLER,
+            created_at_monotonic=started_monotonic,
+            callback=callback,
+            started_monotonic=started_monotonic,
+            recovery_attempted=bool(recovery_attempted),
+            throughput_mode=bool(throughput_mode),
+            metadata={
+                "throughput_mode": bool(throughput_mode),
+                "recovery_attempted": bool(recovery_attempted),
+            },
+        )
+        self._sync_legacy_pending_capture_fields(coordinator)
         try:
             capture_method = self.machine.capture_droplet_image
             accepts_request_id = True
@@ -4753,26 +4826,9 @@ class Controller(QObject):
                 level="warning",
             )
             self._clear_pending_capture(callback=callback, capture_context=capture_context)
-            try:
-                if self._ensure_capture_coordinator().is_active:
-                    self._ensure_capture_coordinator().reset()
-            except Exception:
-                pass
             self._notify_capture_callback_failed(callback)
             return False
-        try:
-            self._ensure_capture_coordinator().adopt_active_request(
-                capture_request_id,
-                context=capture_context,
-                source=CaptureSource.CONTROLLER,
-                created_at_monotonic=self.pending_capture_started_monotonic,
-                metadata={
-                    "throughput_mode": bool(throughput_mode),
-                    "recovery_attempted": bool(recovery_attempted),
-                },
-            )
-        except Exception:
-            pass
+        self._sync_legacy_pending_capture_fields(coordinator)
         self._start_pending_capture_guard(throughput_mode=throughput_mode)
         print(
             f"[Camera] capture request queued request_id={capture_request_id} "
@@ -4886,21 +4942,18 @@ class Controller(QObject):
             pass
 
     def _clear_pending_capture(self, *, callback=None, capture_context=None):
-        self._stop_pending_capture_guard()
-        if callback is None or self.pending_capture_callback is callback:
-            self.pending_capture_callback = None
-        if capture_context is None or self.pending_capture_context == str(capture_context):
-            self.pending_capture_context = None
-        self.pending_capture_active = False
-        self.pending_capture_started_monotonic = None
-        self.pending_capture_request_id = None
-        self.pending_capture_recovery_attempted = False
-        self.pending_capture_throughput_mode = False
+        coordinator = self._ensure_capture_coordinator()
+        cleared = coordinator.clear_pending(callback=callback, context=capture_context)
+        if cleared or (callback is None and capture_context is None):
+            self._stop_pending_capture_guard()
+        self._sync_legacy_pending_capture_fields(coordinator)
+        return cleared
 
     def cancel_pending_droplet_capture(self, reason, *, emit_capture_failed: bool = True, recover: bool = True):
-        request_id = getattr(self, "pending_capture_request_id", None)
-        capture_context = getattr(self, "pending_capture_context", None)
-        callback = getattr(self, "pending_capture_callback", None)
+        pending_snapshot = self._capture_pending_snapshot()
+        request_id = pending_snapshot.get("request_id")
+        capture_context = pending_snapshot.get("context")
+        callback = pending_snapshot.get("callback")
         state_before = self._get_droplet_capture_state()
         result = {
             "cancelled": False,
@@ -4911,7 +4964,7 @@ class Controller(QObject):
             "recovery_result": None,
             "state_after": None,
         }
-        if not bool(getattr(self, "pending_capture_active", False)):
+        if not bool(pending_snapshot.get("active")):
             result["reason"] = "no_pending_capture"
             result["state_after"] = self._get_droplet_capture_state()
             return result
@@ -5003,8 +5056,9 @@ class Controller(QObject):
         return result
 
     def _fail_pending_capture(self, msg: str, *, emit_capture_failed: bool = True):
-        cb = self.pending_capture_callback
-        request_id = getattr(self, "pending_capture_request_id", None)
+        pending_snapshot = self._capture_pending_snapshot()
+        cb = pending_snapshot.get("callback")
+        request_id = pending_snapshot.get("request_id")
         self._record_active_calibration_event(
             "capture_failed",
             {"request_id": request_id, "message": str(msg), "state": self._get_droplet_capture_state()},
@@ -5029,11 +5083,12 @@ class Controller(QObject):
                 pass
 
     def _on_pending_capture_timeout(self):
-        if not bool(getattr(self, "pending_capture_active", False)):
+        pending_snapshot = self._capture_pending_snapshot()
+        if not bool(pending_snapshot.get("active")):
             return
-        request_id = getattr(self, "pending_capture_request_id", None)
-        recovery_attempted = bool(getattr(self, "pending_capture_recovery_attempted", False))
-        started = getattr(self, "pending_capture_started_monotonic", None)
+        request_id = pending_snapshot.get("request_id")
+        recovery_attempted = bool(pending_snapshot.get("recovery_attempted", False))
+        started = pending_snapshot.get("started_monotonic")
         elapsed_s = None
         if started is not None:
             try:
@@ -5055,9 +5110,9 @@ class Controller(QObject):
             level="warning",
         )
         if not recovery_attempted:
-            callback = self.pending_capture_callback
-            capture_context = self.pending_capture_context
-            throughput_mode = bool(getattr(self, "pending_capture_throughput_mode", False))
+            callback = pending_snapshot.get("callback")
+            capture_context = pending_snapshot.get("context")
+            throughput_mode = bool(pending_snapshot.get("throughput_mode", False))
             recovery_result = self._recover_current_droplet_capture(
                 request_id,
                 reason=f"controller_timeout request_id={request_id}",
@@ -5446,8 +5501,9 @@ class Controller(QObject):
     def _on_capture_completed_payload(self, payload):
         payload = dict(payload or {}) if isinstance(payload, dict) else {"status": "failed", "error": str(payload)}
         request_id = payload.get("request_id")
-        expected_request_id = getattr(self, "pending_capture_request_id", None)
-        if not bool(getattr(self, "pending_capture_active", False)) or str(request_id) != str(expected_request_id):
+        pending_snapshot = self._capture_pending_snapshot()
+        expected_request_id = pending_snapshot.get("request_id")
+        if not bool(pending_snapshot.get("active")) or str(request_id) != str(expected_request_id):
             print(
                 "[Camera] stale capture completion ignored "
                 f"request_id={request_id} expected={expected_request_id} status={payload.get('status')}"
@@ -5496,11 +5552,12 @@ class Controller(QObject):
         self._fail_pending_capture(msg)
 
     def _complete_pending_capture_success(self, frame, *, cap_info=None):
-        request_id = getattr(self, "pending_capture_request_id", None)
-        capture_context = getattr(self, "pending_capture_context", None)
+        pending_snapshot = self._capture_pending_snapshot()
+        request_id = pending_snapshot.get("request_id")
+        capture_context = pending_snapshot.get("context")
         save_metadata = self._build_droplet_capture_save_metadata(capture_context=capture_context)
 
-        callback = self.pending_capture_callback
+        callback = pending_snapshot.get("callback")
 
         # Update the model and/or view (assuming your model has such a method)
         try:
