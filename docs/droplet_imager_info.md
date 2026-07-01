@@ -452,7 +452,11 @@ For fixed settings (no per-shot setting churn), the benchmark:
    trigger-start-to-trigger-start period; cycles that already exceed the
    period are not delayed further.
 5. Selects flashed frames using the same time-gated threshold/fallback pattern as normal capture.
-6. Stores per-cycle timestamps and aggregate latency/FPS statistics.
+6. Stores per-cycle timestamps, aggregate latency/FPS statistics, and a
+   `classification` block that separates firmware missed flashes from camera
+   detection misses. Counted cycles abort early after repeated edge timeouts
+   when `--camera-benchmark-early-abort-consecutive-edge-timeouts` is greater
+   than zero.
 
 Mode options:
 

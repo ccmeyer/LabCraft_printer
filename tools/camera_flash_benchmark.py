@@ -94,6 +94,7 @@ class BenchmarkConfig:
     preflight_pressure_timeout_ms: int = 1000
     warmup_cycles: int = 1
     min_trigger_period_ms: int = 0
+    early_abort_consecutive_edge_timeouts: int = 5
     coordinated_pressure_psi: float = COORDINATED_PRESSURE_PSI_DEFAULT
     coordinated_gripper_refresh_ms: int = COORDINATED_GRIPPER_REFRESH_MS_DEFAULT
     coordinated_gripper_pulse_ms: int = COORDINATED_GRIPPER_PULSE_MS_DEFAULT
@@ -191,6 +192,83 @@ def summarize_cycles(cycles: list[dict], requested_cycles: int, started_ns: int,
             "mean": float(statistics.mean(vals)),
         }
     return summary
+
+
+def _int_or_none(value) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def classify_capture_outcomes(cycles: list[dict], requested_cycles: int, status_delta: dict | None = None) -> dict:
+    completed = [c for c in cycles if bool(c.get("completed", False))]
+    ack_seen = [
+        c
+        for c in completed
+        if bool(c.get("ack_seen_bool", False)) or isinstance(c.get("trigger_to_ack_ms"), (int, float))
+    ]
+    frame_selected = [
+        c
+        for c in completed
+        if bool(c.get("frame_selected_bool", False)) or isinstance(c.get("trigger_to_frame_ms"), (int, float))
+    ]
+    flash_detected = [
+        c
+        for c in completed
+        if bool(c.get("flash_detected_bool", False)) or str(c.get("reason", "")) == "threshold"
+    ]
+    edge_timeout = [c for c in completed if str(c.get("reason", "")) == "edge_timeout"]
+    camera_detection_miss = [
+        c
+        for c in ack_seen
+        if bool(c.get("frame_selected_bool", False)) and not bool(c.get("flash_detected_bool", False))
+    ]
+    camera_frame_miss = [c for c in ack_seen if not bool(c.get("frame_selected_bool", False))]
+
+    status_delta = status_delta or {}
+    ext_delta = _int_or_none(status_delta.get("ext_count_delta"))
+    flash_delta = _int_or_none(status_delta.get("flash_num_delta"))
+    firmware_flash_success = flash_delta if flash_delta is not None else len(ack_seen)
+    missed_flash = (
+        max(0, int(ext_delta) - int(flash_delta))
+        if ext_delta is not None and flash_delta is not None
+        else len(edge_timeout)
+    )
+    trigger_not_observed = (
+        max(0, len(completed) - int(ext_delta))
+        if ext_delta is not None
+        else None
+    )
+
+    def _indices(rows: list[dict]) -> list[int]:
+        out = []
+        for row in rows:
+            idx = row.get("cycle_index")
+            if isinstance(idx, int):
+                out.append(idx)
+        return out
+
+    return {
+        "requested_cycles": int(requested_cycles),
+        "completed_cycles": len(completed),
+        "pi_trigger_attempt_cycles": len(completed),
+        "firmware_trigger_observed_cycles": ext_delta,
+        "firmware_flash_success_cycles": firmware_flash_success,
+        "missed_flash_cycles": missed_flash,
+        "trigger_attempt_not_observed_cycles": trigger_not_observed,
+        "ack_seen_cycles": len(ack_seen),
+        "camera_frame_selected_cycles": len(frame_selected),
+        "camera_flash_detected_cycles": len(flash_detected),
+        "camera_detection_miss_cycles": len(camera_detection_miss),
+        "camera_frame_miss_cycles": len(camera_frame_miss),
+        "edge_timeout_cycles": len(edge_timeout),
+        "camera_detection_miss_indices": _indices(camera_detection_miss),
+        "edge_timeout_indices": _indices(edge_timeout),
+        "status_counter_source": "status_delta"
+        if ext_delta is not None or flash_delta is not None
+        else "cycle_flags",
+    }
 
 
 def _gpiofind(name: str) -> tuple[str, int]:
@@ -957,6 +1035,9 @@ def run_camera_flash_benchmark(
     effective_droplets = 0 if mode == "flash_only" else max(1, int(config.num_droplets))
     preflight_timeout_ms = max(50, int(getattr(config, "preflight_pressure_timeout_ms", 1000)))
     min_trigger_period_ms = max(0, int(getattr(config, "min_trigger_period_ms", 0)))
+    early_abort_consecutive_edge_timeouts = max(
+        0, int(getattr(config, "early_abort_consecutive_edge_timeouts", 5))
+    )
 
     def _config_payload(timeout_ms: int) -> dict:
         return {
@@ -979,6 +1060,7 @@ def run_camera_flash_benchmark(
             "preflight_pressure_timeout_ms": int(timeout_ms),
             "warmup_cycles": max(0, int(getattr(config, "warmup_cycles", 1))),
             "min_trigger_period_ms": int(min_trigger_period_ms),
+            "early_abort_consecutive_edge_timeouts": int(early_abort_consecutive_edge_timeouts),
             "coordinated_pressure_psi": float(getattr(config, "coordinated_pressure_psi", COORDINATED_PRESSURE_PSI_DEFAULT)),
             "coordinated_gripper_refresh_ms": int(
                 getattr(config, "coordinated_gripper_refresh_ms", COORDINATED_GRIPPER_REFRESH_MS_DEFAULT)
@@ -1029,6 +1111,8 @@ def run_camera_flash_benchmark(
             "status_snapshot_post": {},
             "status_snapshot_delta": {"ext_count_delta": None, "flash_num_delta": None},
             "summary": _zero_summary("setup_failed", started_ns, finished_ns),
+            "classification": classify_capture_outcomes([], int(config.cycles), {}),
+            "early_abort": {"triggered": False, "reason": None},
             "cycles": [],
             "warmup_count": 0,
             "warmup_cycles": [],
@@ -1139,6 +1223,8 @@ def run_camera_flash_benchmark(
                     "status_snapshot_post": {},
                     "status_snapshot_delta": {"ext_count_delta": None, "flash_num_delta": None},
                     "summary": summary,
+                    "classification": classify_capture_outcomes([], int(config.cycles), {}),
+                    "early_abort": {"triggered": False, "reason": None},
                     "cycles": cycles,
                     "warmup_count": 0,
                     "warmup_cycles": [],
@@ -1446,10 +1532,29 @@ def run_camera_flash_benchmark(
         warmup_summary = summarize_cycles(warmup_results, warmup_count, warmup_started_ns, warmup_finished_ns)
 
         results = []
+        early_abort = {"triggered": False, "reason": None}
+        consecutive_edge_timeouts = 0
         status_pre = _status_snapshot_from_serial(ser, sample_ms=250)
         started_ns = time.monotonic_ns()
         for cycle_idx in range(max(1, int(config.cycles))):
-            results.append(_capture_cycle_with_rate_limit(cycle_idx, "counted"))
+            row = _capture_cycle_with_rate_limit(cycle_idx, "counted")
+            results.append(row)
+            if str(row.get("reason", "")) == "edge_timeout":
+                consecutive_edge_timeouts += 1
+            else:
+                consecutive_edge_timeouts = 0
+            if (
+                early_abort_consecutive_edge_timeouts > 0
+                and consecutive_edge_timeouts >= early_abort_consecutive_edge_timeouts
+            ):
+                early_abort = {
+                    "triggered": True,
+                    "reason": "consecutive_edge_timeouts",
+                    "after_completed_cycles": len(results),
+                    "consecutive_edge_timeouts": int(consecutive_edge_timeouts),
+                    "threshold": int(early_abort_consecutive_edge_timeouts),
+                }
+                break
 
         finished_ns = time.monotonic_ns()
         status_post = _status_snapshot_from_serial(ser, sample_ms=250)
@@ -1462,6 +1567,7 @@ def run_camera_flash_benchmark(
             "ext_count_delta": (int(ext_post) - int(ext_pre)) if isinstance(ext_pre, int) and isinstance(ext_post, int) else None,
             "flash_num_delta": (int(flash_post) - int(flash_pre)) if isinstance(flash_pre, int) and isinstance(flash_post, int) else None,
         }
+        classification = classify_capture_outcomes(results, int(config.cycles), status_delta)
         if mode == "coordinated_flash":
             gripper = ((coordinated_diag.get("preflight") or {}).get("gripper") or {})
             open_wait_finished_ns = gripper.get("open_wait_finished_ns")
@@ -1488,6 +1594,8 @@ def run_camera_flash_benchmark(
             "status_snapshot_post": status_post,
             "status_snapshot_delta": status_delta,
             "summary": summary,
+            "classification": classification,
+            "early_abort": early_abort,
             "cycles": results,
             "warmup_count": int(warmup_count),
             "warmup_cycles": warmup_results,

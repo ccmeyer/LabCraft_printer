@@ -595,6 +595,9 @@ def _run_camera_benchmark_phase(
             ),
             warmup_cycles=max(0, int(getattr(args, "camera_benchmark_warmup_cycles", 1))),
             min_trigger_period_ms=max(0, int(getattr(args, "camera_benchmark_min_trigger_period_ms", 0))),
+            early_abort_consecutive_edge_timeouts=max(
+                0, int(getattr(args, "camera_benchmark_early_abort_consecutive_edge_timeouts", 5))
+            ),
             coordinated_gripper_refresh_ms=max(
                 1000, int(getattr(args, "camera_benchmark_coordinated_gripper_refresh_ms", 5000))
             ),
@@ -629,6 +632,8 @@ def _run_camera_benchmark_phase(
                     "start_seq32": int(start_seq32),
                     "next_seq32": int(next_seq32),
                     "summary": bench_payload.get("summary", {}),
+                    "classification": bench_payload.get("classification", {}),
+                    "early_abort": bench_payload.get("early_abort", {}),
                     "warmup_summary": bench_payload.get("warmup_summary", {}),
                     "preflight": bench_payload.get("preflight", {}),
                     "init_diag": bench_payload.get("init_diag", {}),
@@ -1537,6 +1542,7 @@ def main() -> int:
     p.add_argument("--camera-benchmark-num-droplets", type=int, default=1)
     p.add_argument("--camera-benchmark-warmup-cycles", type=int, default=1)
     p.add_argument("--camera-benchmark-min-trigger-period-ms", type=int, default=0)
+    p.add_argument("--camera-benchmark-early-abort-consecutive-edge-timeouts", type=int, default=5)
     p.add_argument("--camera-benchmark-coordinated-gripper-refresh-ms", type=int, default=5000)
     p.add_argument("--camera-benchmark-coordinated-gripper-pulse-ms", type=int, default=500)
     p.add_argument("--camera-benchmark-order", choices=("auto", "pre_selftest", "post_selftest"), default="auto")

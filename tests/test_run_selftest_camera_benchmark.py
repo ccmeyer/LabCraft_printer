@@ -225,6 +225,20 @@ class FakeAckLine:
         return None
 
 
+class NeverAckLine:
+    def event_wait(self, _timeout_s: float) -> bool:
+        return False
+
+    def event_consume(self):
+        return None
+
+    def read_value(self):
+        return 0
+
+    def release(self):
+        return None
+
+
 class FakeCaptureRequest:
     def __init__(self, value: float):
         self.value = float(value)
@@ -341,6 +355,49 @@ def test_camera_benchmark_payload_pass_requires_coordinated_overlap():
 
     payload["coordinated_diag"]["overlap_window_satisfied"] = True
     assert run_mod._camera_benchmark_payload_pass(payload) is True
+
+
+def test_classify_capture_outcomes_separates_firmware_and_camera_misses():
+    mod = _load_module(BENCH_PATH, "camera_flash_benchmark_mod_classify")
+    cycles = [
+        {
+            "cycle_index": 0,
+            "completed": True,
+            "reason": "threshold",
+            "ack_seen_bool": True,
+            "frame_selected_bool": True,
+            "flash_detected_bool": True,
+        },
+        {
+            "cycle_index": 1,
+            "completed": True,
+            "reason": "fallback",
+            "ack_seen_bool": True,
+            "frame_selected_bool": True,
+            "flash_detected_bool": False,
+        },
+        {
+            "cycle_index": 2,
+            "completed": True,
+            "reason": "edge_timeout",
+            "ack_seen_bool": False,
+            "frame_selected_bool": False,
+            "flash_detected_bool": False,
+        },
+    ]
+
+    classification = mod.classify_capture_outcomes(
+        cycles,
+        requested_cycles=3,
+        status_delta={"ext_count_delta": 3, "flash_num_delta": 2},
+    )
+
+    assert classification["firmware_trigger_observed_cycles"] == 3
+    assert classification["firmware_flash_success_cycles"] == 2
+    assert classification["missed_flash_cycles"] == 1
+    assert classification["camera_detection_miss_cycles"] == 1
+    assert classification["camera_detection_miss_indices"] == [1]
+    assert classification["edge_timeout_indices"] == [2]
 
 
 def test_status_snapshot_parses_status_tlvs_from_payload_index_1():
@@ -586,6 +643,68 @@ def test_camera_flash_benchmark_min_trigger_period_enforces_start_spacing(monkey
     assert payload["cycles"][1]["trigger_period_wait_ms"] > 0.0
 
 
+def test_camera_flash_benchmark_early_aborts_consecutive_edge_timeouts(monkeypatch):
+    mod = _load_module(BENCH_PATH, "camera_flash_benchmark_mod_early_abort")
+    inbound = b"".join(
+        [
+            _queue_ack(mod, seq8=1, seq32=1),
+            _queue_ack(mod, seq8=2, seq32=2),
+            _queue_ack(mod, seq8=3, seq32=3),
+            _queue_ack(mod, seq8=4, seq32=4),
+        ]
+    )
+    serial = FakeSerial(inbound)
+    clock = FakeClock(step=0.001)
+    FakePicamera2.values = []
+    monkeypatch.setattr(
+        mod,
+        "time",
+        SimpleNamespace(monotonic=clock.monotonic, monotonic_ns=clock.monotonic_ns, sleep=clock.sleep),
+    )
+    monkeypatch.setitem(sys.modules, "picamera2", SimpleNamespace(Picamera2=FakePicamera2))
+    monkeypatch.setattr(mod, "_gpiofind", lambda _name: ("gpiochip0", 0))
+    monkeypatch.setattr(mod, "_make_output_line", lambda *_args, **_kwargs: FakeOutputLine())
+    monkeypatch.setattr(mod, "_make_rising_edge_input", lambda *_args, **_kwargs: NeverAckLine())
+    snapshots = [
+        {
+            "status_frames_seen": 1,
+            "flash_delay_us": 5000,
+            "flash_width_ns": 1000,
+            "imaging_droplets": 0,
+        },
+        {"status_frames_seen": 1, "ext_count": 10, "flash_num": 20},
+        {"status_frames_seen": 1, "ext_count": 13, "flash_num": 20},
+    ]
+
+    def fake_status_snapshot(_ser, *, sample_ms=250):
+        return snapshots.pop(0) if snapshots else {"status_frames_seen": 1, "ext_count": 13, "flash_num": 20}
+
+    monkeypatch.setattr(mod, "_status_snapshot_from_serial", fake_status_snapshot)
+
+    payload = mod.run_camera_flash_benchmark(
+        serial,
+        _build_control_for(mod),
+        run_id=1234,
+        config=mod.BenchmarkConfig(
+            cycles=10,
+            warmup_cycles=0,
+            attempt_timeout_ms=10,
+            early_abort_consecutive_edge_timeouts=3,
+        ),
+        start_seq32=1,
+    )
+
+    assert payload["status"] == "ok"
+    assert payload["early_abort"]["triggered"] is True
+    assert payload["early_abort"]["reason"] == "consecutive_edge_timeouts"
+    assert payload["summary"]["requested_cycles"] == 10
+    assert payload["summary"]["completed_cycles"] == 3
+    assert len(payload["cycles"]) == 3
+    assert payload["classification"]["firmware_trigger_observed_cycles"] == 3
+    assert payload["classification"]["firmware_flash_success_cycles"] == 0
+    assert payload["classification"]["missed_flash_cycles"] == 3
+
+
 def test_coordinated_flash_preflight_sends_expected_monotonic_commands(monkeypatch):
     mod = _load_module(BENCH_PATH, "camera_flash_benchmark_mod_coordinated_preflight")
     target_raw = mod._pressure_raw_from_psi(0.6)
@@ -786,6 +905,7 @@ def test_run_selftest_accepts_coordinated_flash_config(monkeypatch, tmp_path):
         camera_benchmark_preflight_pressure_timeout_ms=15000,
         camera_benchmark_warmup_cycles=2,
         camera_benchmark_min_trigger_period_ms=100,
+        camera_benchmark_early_abort_consecutive_edge_timeouts=7,
         camera_benchmark_coordinated_gripper_refresh_ms=10000,
         camera_benchmark_coordinated_gripper_pulse_ms=500,
     )
@@ -809,6 +929,7 @@ def test_run_selftest_accepts_coordinated_flash_config(monkeypatch, tmp_path):
     assert captured["config"]["num_droplets"] == 1
     assert captured["config"]["warmup_cycles"] == 2
     assert captured["config"]["min_trigger_period_ms"] == 100
+    assert captured["config"]["early_abort_consecutive_edge_timeouts"] == 7
     assert captured["config"]["coordinated_gripper_refresh_ms"] == 10000
     assert captured["config"]["coordinated_gripper_pulse_ms"] == 500
     assert host_checks[0]["pass"] is True

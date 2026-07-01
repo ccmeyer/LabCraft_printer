@@ -178,9 +178,11 @@ before counted qualification cycles. Use
 start-to-start period during rate characterization. `coordinated_flash`
 defaults to a 5000 ms gripper refresh period with a 500 ms pump pulse; use
 `--camera-benchmark-coordinated-gripper-refresh-ms 10000` for a softer overlap
-test. Run the coordinated flash lane directly on the Pi when you want to
-exercise flash capture while pressure regulation, valve actuation, and gripper
-refresh are active:
+test. The benchmark artifact includes a `classification` block separating
+firmware missed flashes from camera detection misses, and aborts early after 5
+consecutive edge timeouts by default. Run the coordinated flash lane directly
+on the Pi when you want to exercise flash capture while pressure regulation,
+valve actuation, and gripper refresh are active:
 
 ```bash
 python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --camera-benchmark \
