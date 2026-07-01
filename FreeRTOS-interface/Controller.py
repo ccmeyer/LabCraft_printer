@@ -174,6 +174,7 @@ class Controller(QObject):
         self.last_capture_queue_rejection_reason = None
         self.last_capture_queue_rejection_state = None
         self.capture_coordinator = CaptureCoordinator()
+        self.droplet_imager_dirty_shutdown = False
 
         self._array_state = "idle"
         self._array_context = None
@@ -4589,6 +4590,29 @@ class Controller(QObject):
     def _pending_capture_request_id(self):
         return self._capture_pending_snapshot().get("request_id")
 
+    def get_droplet_capture_ui_state(self):
+        coordinator = self._ensure_capture_coordinator()
+        snapshot = coordinator.pending_snapshot()
+        self._sync_legacy_pending_capture_fields(coordinator)
+        last_result = getattr(coordinator, "last_result", None)
+        last_status = getattr(last_result, "status", None)
+        if last_status is not None:
+            last_status = getattr(last_status, "value", last_status)
+        return {
+            "pending_active": bool(snapshot.get("active")),
+            "pending_request_id": snapshot.get("request_id"),
+            "pending_context": snapshot.get("context"),
+            "pending_started_monotonic": snapshot.get("started_monotonic"),
+            "pending_recovery_attempted": bool(snapshot.get("recovery_attempted", False)),
+            "pending_throughput_mode": bool(snapshot.get("throughput_mode", False)),
+            "coordinator_state": getattr(getattr(coordinator, "state", None), "value", getattr(coordinator, "state", None)),
+            "last_result_status": last_status,
+            "last_result_reason": "" if last_result is None else str(getattr(last_result, "reason", "") or ""),
+            "last_result_stale": False if last_result is None else bool(getattr(last_result, "stale", False)),
+            "last_result_dirty_shutdown": False if last_result is None else bool(getattr(last_result, "dirty_shutdown", False)),
+            "dirty_shutdown": bool(getattr(self, "droplet_imager_dirty_shutdown", False)),
+        }
+
     def _sync_legacy_pending_capture_fields(self, coordinator=None):
         if coordinator is None:
             coordinator = getattr(self, "capture_coordinator", None)
@@ -4611,6 +4635,29 @@ class Controller(QObject):
         self.pending_capture_started_monotonic = snapshot.get("started_monotonic")
         self.pending_capture_recovery_attempted = bool(snapshot.get("recovery_attempted", False))
         self.pending_capture_throughput_mode = bool(snapshot.get("throughput_mode", False))
+
+    def mark_droplet_imager_force_close(self, reason="imager_force_close"):
+        self.droplet_imager_dirty_shutdown = True
+        coordinator = self._ensure_capture_coordinator()
+        snapshot = coordinator.pending_snapshot()
+        metadata = {
+            "reason": str(reason or "imager_force_close"),
+            "pending_context": snapshot.get("context"),
+            "pending_request_id": snapshot.get("request_id"),
+        }
+        detach_result = coordinator.detach_pending_for_force_close(
+            reason=str(reason or "imager_force_close"),
+            metadata=metadata,
+        )
+        if detach_result is not None:
+            self._stop_pending_capture_guard()
+        self._sync_legacy_pending_capture_fields(coordinator)
+        return {
+            "dirty_shutdown": True,
+            "detached": detach_result is not None,
+            "result_status": None if detach_result is None else detach_result.status.value,
+            "reason": str(reason or "imager_force_close"),
+        }
 
     def _record_capture_coordinator_success(self, request_id, frame, *, metadata=None, reason=""):
         if request_id is None:

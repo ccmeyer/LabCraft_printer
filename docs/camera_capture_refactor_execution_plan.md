@@ -73,7 +73,7 @@ Before starting any implementation slice:
 | 4. Typed cancellation and stale completion | verified | Replace ad hoc cancellation/stale handling internally | Cancellation/stale tests pass |
 | 5. Shared calibration policy adapter | verified | Convert `_capture_with_policy` to typed results | Calibration policy tests pass |
 | 6. Remove calibration capture bypasses | verified | Migrate direct calibration capture callbacks into shared policy | No direct calibration capture bypasses remain |
-| 7. UI observes coordinator state | not_started | Simplify imager UI pending/close state around coordinator | Close/force-close tests pass |
+| 7. UI observes coordinator state | verified | Simplify imager UI pending/close state around coordinator | Close/force-close tests pass |
 | 8. Machine request identity hardening | not_started | Carry request id/generation through camera worker payloads | Stale worker tests pass |
 | 9. Flash session representation in Python | not_started | Represent arm/disarm/preflight states without firmware protocol change | Preflight/fault classification tests pass |
 | 10. Firmware flash fault/latch surfacing | not_started | Surface flash faults and latched states as typed capture-blocking results | Python tests plus firmware/HIL plan ready |
@@ -486,7 +486,7 @@ Rollback:
 
 ## Slice 7: UI Observes Coordinator State
 
-Status: `not_started`
+Status: `verified`
 
 Goal:
 
@@ -518,12 +518,16 @@ Focused tests:
 
 Validation:
 
-- `.\env\Scripts\python.exe -m pytest -q tests\test_optics_capture_metadata.py tests\test_droplet_imaging_summary_table.py`
+- `.\env\Scripts\python.exe -m pytest -q tests\test_capture_types.py tests\test_capture_coordinator.py tests\test_optics_capture_metadata.py` -> `80 passed in 2.22s`
+- `.\env\Scripts\python.exe -m pytest -q tests\test_optics_capture_metadata.py tests\test_droplet_imaging_summary_table.py tests\test_droplet_imaging_refuel_panel.py` -> `116 passed in 6.55s`
+- `.\env\Scripts\python.exe -m pytest -q` -> `2707 passed, 24 skipped in 201.15s`
+- `rg "_capture_request_pending" FreeRTOS-interface\CalibrationClasses\View.py` -> remaining uses are local mirror/setter/reset or accepted-request updates
+- `git diff --check` -> passed
 
 Proceed criteria:
 
-- No UI test depends on stale local pending state.
-- User can still close/force-close without blocking on camera cleanup.
+- No UI test depends on stale local pending state. Complete.
+- User can still close/force-close without blocking on camera cleanup. Complete.
 
 Rollback:
 

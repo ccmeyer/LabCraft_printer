@@ -65,6 +65,22 @@ class _CloseEvent:
         self.ignored = True
 
 
+class _WidgetState:
+    def __init__(self):
+        self.enabled = None
+        self.text = ""
+        self.tooltip = ""
+
+    def setEnabled(self, enabled):
+        self.enabled = bool(enabled)
+
+    def setText(self, text):
+        self.text = str(text)
+
+    def setToolTip(self, text):
+        self.tooltip = str(text)
+
+
 class _DropletCamera:
     def __init__(self):
         self.frame = np.full((8, 10, 3), 77, dtype=np.uint8)
@@ -159,6 +175,7 @@ def _make_controller():
     controller.pending_capture_throughput_mode = False
     controller.last_capture_queue_rejection_reason = None
     controller.last_capture_queue_rejection_state = None
+    controller.droplet_imager_dirty_shutdown = False
     controller._timer_factory = lambda _parent: _CaptureGuardTimer()
     controller._monotonic_fn = lambda: clock["value"]
     controller._test_clock = clock
@@ -199,6 +216,86 @@ def test_controller_bootstraps_coordinator_from_legacy_pending_fields():
     assert coordinator.pending_throughput_mode is True
     assert snapshot["request_id"] == "legacy-request"
     assert controller.pending_capture_active is True
+
+
+def test_controller_droplet_capture_ui_state_reports_pending_last_result_and_dirty_shutdown():
+    controller, _machine, _camera_model = _make_controller()
+
+    idle_state = controller.get_droplet_capture_ui_state()
+
+    assert idle_state["pending_active"] is False
+    assert idle_state["pending_request_id"] is None
+    assert idle_state["coordinator_state"] == "idle"
+    assert idle_state["last_result_status"] is None
+    assert idle_state["dirty_shutdown"] is False
+
+    assert controller.capture_droplet_image(capture_context="optics_scale_bar") is True
+    pending_state = controller.get_droplet_capture_ui_state()
+
+    assert pending_state["pending_active"] is True
+    assert pending_state["pending_request_id"] == controller.pending_capture_request_id
+    assert pending_state["pending_context"] == "optics_scale_bar"
+    assert pending_state["pending_started_monotonic"] == 100.0
+    assert pending_state["pending_recovery_attempted"] is False
+    assert pending_state["pending_throughput_mode"] is False
+    assert pending_state["coordinator_state"] == "capturing"
+
+    controller._on_image_captured()
+    completed_state = controller.get_droplet_capture_ui_state()
+
+    assert completed_state["pending_active"] is False
+    assert completed_state["last_result_status"] == CaptureStatus.SUCCESS.value
+    assert completed_state["last_result_reason"] == "threshold"
+    assert completed_state["last_result_stale"] is False
+    assert completed_state["last_result_dirty_shutdown"] is False
+
+
+def test_controller_droplet_capture_ui_state_bootstraps_legacy_pending_fields():
+    controller, _machine, _camera_model = _make_controller()
+    controller.pending_capture_active = True
+    controller.pending_capture_request_id = "legacy-request"
+    controller.pending_capture_context = "legacy_context"
+    controller.pending_capture_started_monotonic = 42.5
+    controller.pending_capture_recovery_attempted = True
+    controller.pending_capture_throughput_mode = True
+
+    state = controller.get_droplet_capture_ui_state()
+
+    assert state["pending_active"] is True
+    assert state["pending_request_id"] == "legacy-request"
+    assert state["pending_context"] == "legacy_context"
+    assert state["pending_started_monotonic"] == 42.5
+    assert state["pending_recovery_attempted"] is True
+    assert state["pending_throughput_mode"] is True
+    assert state["coordinator_state"] == "capturing"
+
+
+def test_controller_mark_droplet_imager_force_close_marks_dirty_without_machine_cleanup():
+    controller, machine, _camera_model = _make_controller()
+    assert controller.capture_droplet_image(capture_context="force_close") is True
+    timer = controller.pending_capture_guard_timer
+
+    result = controller.mark_droplet_imager_force_close("imager_force_close")
+
+    assert result == {
+        "dirty_shutdown": True,
+        "detached": True,
+        "result_status": CaptureStatus.DETACHED_FORCE_CLOSE.value,
+        "reason": "imager_force_close",
+    }
+    assert controller.droplet_imager_dirty_shutdown is True
+    assert controller.pending_capture_active is False
+    assert controller.capture_coordinator.pending_active is False
+    assert controller.capture_coordinator.last_result.status is CaptureStatus.DETACHED_FORCE_CLOSE
+    assert controller.capture_coordinator.last_result.dirty_shutdown is True
+    assert timer.active is False
+    assert machine.recover_calls == []
+    assert machine.capture_calls == [
+        {"throughput_mode": False, "capture_request_id": controller.capture_coordinator.last_result.request_id}
+    ]
+    state = controller.get_droplet_capture_ui_state()
+    assert state["dirty_shutdown"] is True
+    assert state["last_result_dirty_shutdown"] is True
 
 
 def test_controller_capture_context_is_written_to_next_frame_metadata():
@@ -509,6 +606,98 @@ def test_droplet_imager_close_defers_while_capture_or_calibration_is_active():
     dialog._schedule_imager_close_retry.assert_called_once_with(100)
 
 
+def test_droplet_imager_close_ignores_stale_local_pending_when_coordinator_idle():
+    dialog = DropletImagingDialog.__new__(DropletImagingDialog)
+    event = _CloseEvent()
+    manager = SimpleNamespace(activeCalibration=None, calibration_queue=[])
+    controller = SimpleNamespace(
+        get_droplet_capture_ui_state=Mock(
+            return_value={
+                "pending_active": False,
+                "dirty_shutdown": False,
+                "last_result_dirty_shutdown": False,
+            }
+        ),
+        set_droplet_capture_profile=Mock(),
+        set_command_dispatch_interval=Mock(),
+        disable_print_profile=Mock(),
+    )
+    dialog.model = SimpleNamespace(calibration_manager=manager)
+    dialog.controller = controller
+    dialog._capture_request_pending = True
+    dialog._stream_capture_dialog_closing = False
+    dialog._imager_close_after_stop_requested = False
+    dialog._imager_close_after_stop_started_monotonic = None
+    dialog._imager_close_retry_count = 0
+    dialog._imager_force_close_requested = False
+    dialog._imager_force_close_prompt_active = False
+    dialog._should_confirm_close_without_applied_calibration = lambda: False
+    dialog._printer_head_recovery_dialog = None
+    dialog._optics_session_active = False
+    dialog._close_stream_capture_mass_dialog = Mock()
+    dialog._reset_online_stream_debug_view = Mock()
+    dialog.camera_timer = SimpleNamespace(stop=Mock())
+    dialog._auto_export_refuel_performance_snapshot_on_close = Mock()
+    dialog._stop_refuel_monitor = Mock()
+    dialog.stop_droplet_camera = Mock()
+    dialog._set_stream_capture_read_camera_enabled = Mock()
+
+    DropletImagingDialog.closeEvent(dialog, event)
+
+    assert event.accepted is True
+    assert event.ignored is False
+    assert dialog._capture_request_pending is False
+    controller.set_droplet_capture_profile.assert_called_once_with("default")
+    dialog.stop_droplet_camera.assert_called_once_with()
+
+
+def test_droplet_imager_close_defers_on_coordinator_pending_even_when_local_idle():
+    dialog = DropletImagingDialog.__new__(DropletImagingDialog)
+    event = _CloseEvent()
+    cancel_pending = Mock()
+    stop_calibration = Mock()
+    camera_timer = SimpleNamespace(stop=Mock())
+    manager = SimpleNamespace(activeCalibration=object(), calibration_queue=[])
+    controller = SimpleNamespace(
+        get_droplet_capture_ui_state=Mock(
+            return_value={
+                "pending_active": True,
+                "pending_request_id": "request-1",
+                "dirty_shutdown": False,
+                "last_result_dirty_shutdown": False,
+            }
+        ),
+        cancel_pending_droplet_capture=cancel_pending,
+        stop_calibration=stop_calibration,
+    )
+    dialog.model = SimpleNamespace(calibration_manager=manager)
+    dialog.controller = controller
+    dialog.camera_timer = camera_timer
+    dialog._capture_request_pending = False
+    dialog._stream_capture_dialog_closing = False
+    dialog._imager_close_after_stop_requested = False
+    dialog._imager_close_after_stop_started_monotonic = None
+    dialog._imager_close_retry_count = 0
+    dialog._imager_force_close_requested = False
+    dialog._imager_force_close_prompt_active = False
+    dialog._should_confirm_close_without_applied_calibration = lambda: False
+    dialog.update_stage_and_log = Mock()
+    dialog._set_capture_request_pending = Mock(
+        side_effect=lambda pending: setattr(dialog, "_capture_request_pending", bool(pending))
+    )
+    dialog._schedule_imager_close_retry = Mock()
+    dialog._imager_close_monotonic = Mock(return_value=123.0)
+
+    DropletImagingDialog.closeEvent(dialog, event)
+
+    assert event.ignored is True
+    assert dialog._capture_request_pending is False
+    camera_timer.stop.assert_called_once_with()
+    cancel_pending.assert_called_once_with("imager_close", emit_capture_failed=True, recover=True)
+    stop_calibration.assert_called_once_with()
+    dialog._schedule_imager_close_retry.assert_called_once_with(100)
+
+
 def test_droplet_imager_deferred_close_rechecks_unapplied_prompt_and_can_be_cancelled(monkeypatch):
     dialog = DropletImagingDialog.__new__(DropletImagingDialog)
     event = _CloseEvent()
@@ -604,6 +793,7 @@ def test_droplet_imager_deferred_close_timeout_force_close_requests_minimal_clos
     dialog._ask_force_close_imager_after_timeout = Mock(return_value=True)
     dialog._schedule_imager_close_retry = Mock()
     dialog._set_capture_request_pending = Mock(side_effect=lambda pending: setattr(dialog, "_capture_request_pending", bool(pending)))
+    dialog.controller = SimpleNamespace(mark_droplet_imager_force_close=Mock())
     dialog.camera_timer = SimpleNamespace(stop=Mock())
     dialog.refuel_monitor_timer = SimpleNamespace(stop=Mock())
     dialog.refuel_panel_refresh_timer = SimpleNamespace(stop=Mock())
@@ -616,6 +806,7 @@ def test_droplet_imager_deferred_close_timeout_force_close_requests_minimal_clos
     assert dialog._imager_close_after_stop_started_monotonic is None
     assert dialog._imager_close_retry_count == 0
     assert dialog.capturing is False
+    dialog.controller.mark_droplet_imager_force_close.assert_called_once_with("imager_force_close")
     dialog._ask_force_close_imager_after_timeout.assert_called_once_with()
     dialog._set_capture_request_pending.assert_called_once_with(False)
     dialog.camera_timer.stop.assert_called_once_with()
@@ -869,6 +1060,146 @@ def test_optics_capture_previews_without_session_and_without_save_context():
     assert dialog.statuses == [
         ("Preview capture requested. Start a session when ready to save frames.", "green")
     ]
+
+
+def test_optics_capture_uses_coordinator_pending_state_when_local_idle():
+    dialog = _make_optics_dialog(commands_idle=True)
+    dialog._capture_request_pending = False
+    dialog.controller.get_droplet_capture_ui_state = Mock(
+        return_value={
+            "pending_active": True,
+            "pending_request_id": "request-1",
+            "dirty_shutdown": False,
+            "last_result_dirty_shutdown": False,
+        }
+    )
+
+    DropletImagingDialog.capture_optics_frame(dialog)
+
+    dialog.controller.capture_droplet_image.assert_not_called()
+    assert dialog._capture_request_pending is True
+    assert dialog.statuses == [
+        ("Capture already pending; wait for it to finish before requesting another.", "red")
+    ]
+
+
+def test_optics_controls_disable_capture_from_coordinator_pending_even_when_local_idle():
+    dialog = DropletImagingDialog.__new__(DropletImagingDialog)
+    dialog._capture_request_pending = False
+    dialog._optics_session_active = True
+    dialog._optics_session_dir = "session"
+    dialog._optics_last_analysis = {}
+    dialog.controller = SimpleNamespace(
+        get_droplet_capture_ui_state=Mock(
+            return_value={
+                "pending_active": True,
+                "dirty_shutdown": False,
+                "last_result_dirty_shutdown": False,
+            }
+        )
+    )
+    dialog._is_flash_fault_latched = lambda: False
+    dialog._optics_current_factor = lambda: 1.0
+    dialog._optics_current_source = lambda: "preset"
+    dialog._optics_step_conversion_source = lambda: "preset"
+    dialog.optics_current_factor_label = _WidgetState()
+    dialog.optics_session_dir_label = _WidgetState()
+    dialog.optics_start_session_button = _WidgetState()
+    dialog.optics_capture_frame_button = _WidgetState()
+    dialog.optics_reject_last_button = _WidgetState()
+    dialog.optics_analyze_button = _WidgetState()
+    dialog.optics_apply_button = _WidgetState()
+    dialog.optics_manual_override_button = _WidgetState()
+
+    DropletImagingDialog._refresh_optics_controls(dialog)
+
+    assert dialog._capture_request_pending is True
+    assert dialog.optics_capture_frame_button.enabled is False
+    assert dialog.optics_reject_last_button.enabled is False
+    assert dialog.optics_analyze_button.enabled is False
+
+
+def test_droplet_capture_finished_reenables_optics_controls_when_coordinator_idle():
+    dialog = DropletImagingDialog.__new__(DropletImagingDialog)
+    dialog._capture_request_pending = True
+    dialog._optics_session_active = True
+    dialog._optics_session_dir = "session"
+    dialog._optics_last_analysis = {}
+    dialog.controller = SimpleNamespace(
+        get_droplet_capture_ui_state=Mock(
+            return_value={
+                "pending_active": False,
+                "dirty_shutdown": False,
+                "last_result_dirty_shutdown": False,
+            }
+        )
+    )
+    dialog._is_flash_fault_latched = lambda: False
+    dialog._optics_current_factor = lambda: 1.0
+    dialog._optics_current_source = lambda: "preset"
+    dialog._optics_step_conversion_source = lambda: "preset"
+    dialog._refresh_manual_control_lock_state = Mock()
+    dialog.optics_current_factor_label = _WidgetState()
+    dialog.optics_session_dir_label = _WidgetState()
+    dialog.optics_start_session_button = _WidgetState()
+    dialog.optics_capture_frame_button = _WidgetState()
+    dialog.optics_reject_last_button = _WidgetState()
+    dialog.optics_analyze_button = _WidgetState()
+    dialog.optics_apply_button = _WidgetState()
+    dialog.optics_manual_override_button = _WidgetState()
+
+    DropletImagingDialog._on_droplet_capture_finished(dialog)
+
+    assert dialog._capture_request_pending is False
+    assert dialog.optics_capture_frame_button.enabled is True
+    assert dialog.optics_reject_last_button.enabled is True
+    assert dialog.optics_analyze_button.enabled is True
+
+
+def test_dirty_shutdown_blocks_later_imager_capture_requests():
+    dialog = _make_optics_dialog(commands_idle=True)
+    dialog.controller.get_droplet_capture_ui_state = Mock(
+        return_value={
+            "pending_active": False,
+            "dirty_shutdown": True,
+            "last_result_dirty_shutdown": True,
+        }
+    )
+
+    DropletImagingDialog.capture_optics_frame(dialog)
+
+    dialog.controller.capture_droplet_image.assert_not_called()
+    assert dialog.statuses == [
+        (
+            "Droplet imager was force closed. Close and reopen the app before using the droplet imager again.",
+            "red",
+        )
+    ]
+
+
+def test_dirty_shutdown_blocks_live_preview_capture_requests():
+    dialog = DropletImagingDialog.__new__(DropletImagingDialog)
+    dialog.capturing = False
+    dialog._capture_request_pending = False
+    dialog.controller = SimpleNamespace(
+        get_droplet_capture_ui_state=Mock(
+            return_value={
+                "pending_active": False,
+                "dirty_shutdown": True,
+                "last_result_dirty_shutdown": True,
+            }
+        ),
+        capture_droplet_image=Mock(return_value=True),
+    )
+    dialog.update_stage_and_log = Mock()
+
+    DropletImagingDialog.capture_image(dialog)
+
+    dialog.controller.capture_droplet_image.assert_not_called()
+    dialog.update_stage_and_log.assert_called_once_with(
+        "Droplet imager was force closed. Close and reopen the app before using the droplet imager again.",
+        "red",
+    )
 
 
 def test_optics_end_analyze_runs_scale_then_motion_and_writes_combined_payload(tmp_path, monkeypatch):

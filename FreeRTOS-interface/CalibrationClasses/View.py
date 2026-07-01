@@ -4394,13 +4394,93 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._refresh_manual_control_lock_state()
         self._refresh_optics_controls()
 
+    def _get_droplet_capture_ui_state(self):
+        controller = getattr(self, "controller", None)
+        getter = getattr(controller, "get_droplet_capture_ui_state", None)
+        if callable(getter):
+            try:
+                state = dict(getter() or {})
+                state["_authoritative"] = True
+                return state
+            except Exception:
+                pass
+        pending_active = False
+        try:
+            pending_active = bool(getattr(controller, "pending_capture_active", False))
+        except Exception:
+            pending_active = False
+        dirty_shutdown = False
+        try:
+            dirty_shutdown = bool(getattr(controller, "droplet_imager_dirty_shutdown", False))
+        except Exception:
+            dirty_shutdown = False
+        return {
+            "_authoritative": False,
+            "pending_active": pending_active,
+            "pending_request_id": None,
+            "pending_context": None,
+            "pending_started_monotonic": None,
+            "pending_recovery_attempted": False,
+            "pending_throughput_mode": False,
+            "coordinator_state": "unknown",
+            "last_result_status": None,
+            "last_result_reason": "",
+            "last_result_stale": False,
+            "last_result_dirty_shutdown": False,
+            "dirty_shutdown": dirty_shutdown,
+        }
+
+    def _capture_pending_for_ui(self):
+        state = self._get_droplet_capture_ui_state()
+        pending = bool(state.get("pending_active", False))
+        if bool(state.get("_authoritative", False)):
+            self._capture_request_pending = pending
+            return pending
+        return bool(pending or getattr(self, "_capture_request_pending", False))
+
+    def _capture_pending_for_close(self):
+        state = self._get_droplet_capture_ui_state()
+        pending = bool(state.get("pending_active", False))
+        if bool(state.get("_authoritative", False)):
+            self._capture_request_pending = pending
+            return pending
+        return bool(pending or getattr(self, "_capture_request_pending", False))
+
+    def _imager_dirty_shutdown_active(self):
+        state = self._get_droplet_capture_ui_state()
+        return bool(
+            state.get("dirty_shutdown", False)
+            or state.get("last_result_dirty_shutdown", False)
+        )
+
+    def _imager_dirty_shutdown_warning(self):
+        return (
+            "Droplet imager was force closed. "
+            "Close and reopen the app before using the droplet imager again."
+        )
+
+    def _show_imager_dirty_shutdown_warning(self, *, optics=False):
+        message = self._imager_dirty_shutdown_warning()
+        if optics:
+            try:
+                self._set_optics_status(message, "red")
+                return
+            except Exception:
+                pass
+        updater = getattr(self, "update_stage_and_log", None)
+        if callable(updater):
+            try:
+                updater(message, "red")
+                return
+            except Exception:
+                pass
+        print(message)
+
     def _on_droplet_capture_finished(self, *_args):
-        if getattr(self, "_capture_request_pending", False):
-            self._set_capture_request_pending(False)
+        self._set_capture_request_pending(False)
 
     def _on_droplet_capture_failed(self, message=""):
-        if getattr(self, "_capture_request_pending", False):
-            self._set_capture_request_pending(False)
+        self._set_capture_request_pending(False)
         tabs = getattr(self, "calibration_tabs", None)
         if tabs is not None and tabs.currentWidget() is getattr(self, "optics_tab", None):
             detail = str(message or "Camera did not return a frame.")
@@ -4410,7 +4490,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if not hasattr(self, "optics_start_session_button"):
             return
         active = bool(getattr(self, "_optics_session_active", False))
-        capture_pending = bool(getattr(self, "_capture_request_pending", False))
+        capture_pending = self._capture_pending_for_ui()
+        dirty_shutdown = self._imager_dirty_shutdown_active()
         flash_fault_latched = self._is_flash_fault_latched()
         analysis = getattr(self, "_optics_last_analysis", None) or {}
         summary = dict(analysis.get("summary") or {})
@@ -4437,7 +4518,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         session_dir = getattr(self, "_optics_session_dir", None)
         self.optics_session_dir_label.setText(f"Session: {session_dir or 'none'}")
         self.optics_start_session_button.setEnabled(not active)
-        self.optics_capture_frame_button.setEnabled((not capture_pending) and (not flash_fault_latched))
+        self.optics_capture_frame_button.setEnabled(
+            (not capture_pending)
+            and (not flash_fault_latched)
+            and (not dirty_shutdown)
+        )
         self.optics_reject_last_button.setEnabled(active and not capture_pending)
         self.optics_analyze_button.setEnabled(active and not capture_pending)
         self.optics_apply_button.setEnabled(auto_apply_ok)
@@ -4495,7 +4580,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._refresh_optics_controls()
 
     def capture_optics_frame(self):
-        if getattr(self, "_capture_request_pending", False):
+        if self._imager_dirty_shutdown_active():
+            self._show_imager_dirty_shutdown_warning(optics=True)
+            return
+        if self._capture_pending_for_ui():
             self._set_optics_status("Capture already pending; wait for it to finish before requesting another.", "red")
             return
         active = bool(getattr(self, "_optics_session_active", False))
@@ -5185,14 +5273,20 @@ class DropletImagingDialog(QtWidgets.QDialog):
         busy = DropletImagingDialog._is_calibration_busy(self)
         was_locked = getattr(self, "_manual_controls_locked", False)
         flash_fault_latched = self._is_flash_fault_latched()
-        capture_pending = bool(getattr(self, "_capture_request_pending", False))
+        capture_pending = self._capture_pending_for_ui()
+        dirty_shutdown = self._imager_dirty_shutdown_active()
 
         if busy and not was_locked:
             DropletImagingDialog._clear_manual_control_edit_state(self)
             DropletImagingDialog._sync_manual_controls_from_model(self, force=True)
 
         self._manual_controls_locked = busy
-        enabled = (not busy) and (not flash_fault_latched) and (not capture_pending)
+        enabled = (
+            (not busy)
+            and (not flash_fault_latched)
+            and (not capture_pending)
+            and (not dirty_shutdown)
+        )
 
         for widget in getattr(self, "_manual_lock_widgets", ()):
             if widget is not None:
@@ -6373,7 +6467,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         if DropletImagingDialog._is_calibration_busy(self):
             return
-        if getattr(self, "_capture_request_pending", False):
+        if self._capture_pending_for_ui():
+            return
+        if self._imager_dirty_shutdown_active():
+            self._show_imager_dirty_shutdown_warning()
             return
         if self._is_flash_fault_latched():
             return
@@ -6515,7 +6612,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             return self.EXPORT_CALIBRATION_RECORDS_ACTIVE_TOOLTIP
         if DropletImagingDialog._is_calibration_busy(self):
             return "Calibration is still running. Stop or finish calibration before exporting records."
-        if bool(getattr(self, "_capture_request_pending", False)):
+        if self._capture_pending_for_ui():
             return "A droplet image capture is still pending. Wait for the capture to finish before exporting records."
         return ""
 
@@ -7209,7 +7306,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.controller.start_droplet_camera()
 
     def capture_image(self):
-        if getattr(self, "_capture_request_pending", False):
+        if self._capture_pending_for_ui():
+            return
+        if self._imager_dirty_shutdown_active():
+            self._show_imager_dirty_shutdown_warning()
             return
         ok = self.controller.capture_droplet_image(throughput_mode=bool(self.capturing))
         if ok is not False:
@@ -9950,13 +10050,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.image_label.setPixmap(scaled_pixmap)
 
     def _imager_close_blocked_by_capture_or_calibration(self):
-        if bool(getattr(self, "_capture_request_pending", False)):
+        if self._capture_pending_for_close():
             return True
-        try:
-            if bool(getattr(self.controller, "pending_capture_active", False)):
-                return True
-        except Exception:
-            pass
         manager = getattr(self.model, "calibration_manager", None)
         if manager is None:
             return False
@@ -10012,6 +10107,13 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._imager_close_retry_count = 0
         self._imager_force_close_prompt_active = False
         self._stream_capture_dialog_closing = True
+        controller = getattr(self, "controller", None)
+        marker = getattr(controller, "mark_droplet_imager_force_close", None)
+        if callable(marker):
+            try:
+                marker("imager_force_close")
+            except Exception as exc:
+                print(f"[Camera] imager force-close dirty marker failed: {exc}")
         self._stop_imager_ui_timers_for_force_close()
         try:
             self._set_capture_request_pending(False)
@@ -10089,6 +10191,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         except Exception:
             pass
 
+        capture_pending = self._capture_pending_for_close()
         first_request = not bool(getattr(self, "_imager_close_after_stop_requested", False))
         self._imager_close_after_stop_requested = True
         self._stream_capture_dialog_closing = True
@@ -10108,7 +10211,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 except Exception:
                     pass
             canceller = getattr(self.controller, "cancel_pending_droplet_capture", None)
-            if callable(canceller):
+            if capture_pending and callable(canceller):
                 try:
                     canceller("imager_close", emit_capture_failed=True, recover=True)
                 except Exception as exc:

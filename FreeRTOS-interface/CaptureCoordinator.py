@@ -235,6 +235,25 @@ class CaptureCoordinator:
         self.reset()
         return result
 
+    def detach_pending_for_force_close(
+        self,
+        *,
+        reason: str = "detached_force_close",
+        metadata: dict | None = None,
+    ) -> CaptureResult | None:
+        if self.pending is None:
+            return None
+        request_id = self.pending.request.request_id
+        result = CaptureResult.detached_force_close(
+            request_id,
+            metadata=metadata,
+            reason=reason,
+            source=CaptureSource.COORDINATOR,
+        )
+        self.last_result = result
+        self.reset()
+        return result
+
     def pending_snapshot(self) -> dict:
         pending = self.pending
         if pending is None:

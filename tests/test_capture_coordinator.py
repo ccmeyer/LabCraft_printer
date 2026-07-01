@@ -134,6 +134,38 @@ def test_cancel_pending_when_idle_is_idempotent_and_preserves_last_result():
     assert coordinator.pending_active is False
 
 
+def test_detach_pending_for_force_close_records_dirty_shutdown_and_clears_state():
+    coordinator = Coordinator()
+    request = CaptureRequest(request_id="request-1", context="ctx", source="controller")
+    coordinator.begin_pending(request, context="ctx")
+
+    result = coordinator.detach_pending_for_force_close(
+        reason="imager_force_close",
+        metadata={"source": "unit"},
+    )
+
+    assert result.status is CaptureStatus.DETACHED_FORCE_CLOSE
+    assert result.reason == "imager_force_close"
+    assert result.retryable is False
+    assert result.dirty_shutdown is True
+    assert result.metadata == {"source": "unit"}
+    assert coordinator.last_result == result
+    assert coordinator.state is CaptureCoordinatorState.IDLE
+    assert coordinator.active_request is None
+    assert coordinator.pending_active is False
+
+
+def test_detach_pending_for_force_close_when_idle_preserves_last_result():
+    coordinator = Coordinator()
+    outcome = coordinator.request_capture(delegate=lambda _request: False)
+
+    result = coordinator.detach_pending_for_force_close(reason="nothing_active")
+
+    assert result is None
+    assert coordinator.last_result == outcome.result
+    assert coordinator.pending_active is False
+
+
 def test_stale_completion_after_cancel_does_not_reactivate_pending_state():
     coordinator = Coordinator()
     request = CaptureRequest(request_id="request-1", context="ctx", source="controller")
