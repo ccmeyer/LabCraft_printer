@@ -69,10 +69,10 @@ Before starting any implementation slice:
 | 0. Baseline and guardrails | verified | Confirm starting tests and HIL baseline | Baseline recorded |
 | 1. Typed request/result contract | verified | Add pure-Python dataclasses/enums and tests | Typed result tests pass |
 | 2. Coordinator skeleton | verified | Add imported `CaptureCoordinator` module that delegates existing path | Coordinator unit tests pass with no behavior change |
-| 3. Route Controller pending state | not_started | Move Controller pending state through coordinator facade | Existing capture/cancel tests pass |
-| 4. Typed cancellation and stale completion | not_started | Replace ad hoc cancellation/stale handling internally | Cancellation/stale tests pass |
-| 5. Shared calibration policy adapter | not_started | Convert `_capture_with_policy` to typed results | Calibration policy tests pass |
-| 6. Remove calibration capture bypasses | not_started | Migrate direct calibration capture callbacks into shared policy | No direct calibration capture bypasses remain |
+| 3. Route Controller pending state | verified | Move Controller pending state through coordinator facade | Existing capture/cancel tests pass |
+| 4. Typed cancellation and stale completion | verified | Replace ad hoc cancellation/stale handling internally | Cancellation/stale tests pass |
+| 5. Shared calibration policy adapter | verified | Convert `_capture_with_policy` to typed results | Calibration policy tests pass |
+| 6. Remove calibration capture bypasses | verified | Migrate direct calibration capture callbacks into shared policy | No direct calibration capture bypasses remain |
 | 7. UI observes coordinator state | not_started | Simplify imager UI pending/close state around coordinator | Close/force-close tests pass |
 | 8. Machine request identity hardening | not_started | Carry request id/generation through camera worker payloads | Stale worker tests pass |
 | 9. Flash session representation in Python | not_started | Represent arm/disarm/preflight states without firmware protocol change | Preflight/fault classification tests pass |
@@ -427,7 +427,7 @@ Rollback:
 
 ## Slice 6: Remove Calibration Capture Bypasses
 
-Status: `not_started`
+Status: `verified`
 
 Goal:
 
@@ -467,14 +467,18 @@ Focused tests:
 
 Validation:
 
-- Focused calibration tests.
-- `.\env\Scripts\python.exe -m pytest -q tests\test_optics_capture_metadata.py`
-- Any existing online stream calibration tests if present.
+- `.\env\Scripts\python.exe -m pytest -q tests\test_calibration_focus_process_quality_gate.py tests\test_calibration_online_stream_process.py` -> `129 passed in 18.52s`
+- `.\env\Scripts\python.exe -m pytest -q tests\test_calibration_pressure_band_failure_modes.py` -> `37 passed in 4.56s`
+- `.\env\Scripts\python.exe -m pytest -q tests\test_optics_capture_metadata.py` -> `30 passed in 4.84s`
+- `.\env\Scripts\python.exe -m pytest -q tests\test_capture_types.py tests\test_capture_coordinator.py` -> `38 passed in 0.44s`
+- `.\env\Scripts\python.exe -m pytest -q` -> `2695 passed, 24 skipped in 411.12s`
+- `rg "captureImageRequested\.emit" FreeRTOS-interface\CalibrationClasses\Model.py` -> one remaining emission in `_capture_with_policy`
+- `git diff --check` -> passed
 
 Proceed criteria:
 
-- The only calibration capture emission is the shared adapter path.
-- Metadata/recording behavior is unchanged in tests.
+- The only calibration capture emission is the shared adapter path. Complete.
+- Metadata/recording behavior is unchanged in tests. Complete.
 
 Rollback:
 

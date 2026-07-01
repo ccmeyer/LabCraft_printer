@@ -145,6 +145,37 @@ def test_focus_process_uses_tracked_y_when_machine_feedback_lags():
     assert proc.calibrationError.calls == []
 
 
+def test_focus_no_move_pre_refine_recapture_uses_shared_capture_policy():
+    proc = NozzleFocusCalibrationProcess.__new__(NozzleFocusCalibrationProcess)
+    capture_signal = SignalStub()
+    proc.calibration_manager = SimpleNamespace(captureImageRequested=capture_signal)
+    proc.model = SimpleNamespace(
+        machine_model=SimpleNamespace(get_current_position_dict=lambda: {"X": 10, "Y": 100, "Z": 20})
+    )
+    proc._tracked_pos = {"X": 10, "Y": 100, "Z": 20}
+    proc._loY = 0
+    proc._hiY = 500
+    proc._lo_br_y = None
+    proc._hi_br_y = None
+    proc.mode = "probe_dir"
+    proc._targets = deque(maxlen=proc._OSC_HISTORY)
+    capture_policy_calls = []
+    proc._capture_with_policy = lambda **kwargs: capture_policy_calls.append(dict(kwargs))
+
+    proc._move_to_Y_clamped(100)
+
+    assert capture_signal.calls == []
+    assert len(capture_policy_calls) == 1
+    assert capture_policy_calls[0] == {
+        "set_attr": "droplet_image",
+        "stage_text": "Recapturing focus frame",
+        "attempts_total": 7,
+        "retry_delay_ms": 75,
+        "guard_timeout_ms": 12_000,
+        "final_error_msg": "Failed to capture droplet for focus.",
+    }
+
+
 def test_initialize_focus_bounds_clamps_to_axis_limits():
     proc = NozzleFocusCalibrationProcess.__new__(NozzleFocusCalibrationProcess)
     proc.model = SimpleNamespace(

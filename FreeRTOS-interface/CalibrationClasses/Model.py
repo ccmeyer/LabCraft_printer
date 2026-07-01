@@ -8139,6 +8139,7 @@ class BaseCalibrationProcess(QObject):
         retry_stage_suffix: str = " (retry {i}/{n})",  # appended to stage text on retries
         on_success = None,  # called after setting the attribute (optional)
         on_final_failure = None,  # called after we exhaust attempts (optional)
+        on_result = None,  # optional hook that can handle a typed CaptureResult
         final_error_msg: str = "Image capture failed repeatedly."  # default error if no handler
     ):
         """
@@ -8155,15 +8156,16 @@ class BaseCalibrationProcess(QObject):
         busy_retry_limit = max(1, int(math.ceil(max(1, int(guard_timeout_ms)) / busy_retry_delay_ms)))
 
         def _arm_one_attempt():
-            self._record_event(
-                "capture_attempt",
-                {
-                    "set_attr": str(set_attr),
-                    "stage_text": str(stage_text),
-                    "attempt": int(state["attempt"]),
-                    "attempts_total": int(attempts_total),
-                },
-            )
+            if on_result is None:
+                self._record_event(
+                    "capture_attempt",
+                    {
+                        "set_attr": str(set_attr),
+                        "stage_text": str(stage_text),
+                        "attempt": int(state["attempt"]),
+                        "attempts_total": int(attempts_total),
+                    },
+                )
             # # Stage text (with retry suffix after the first attempt)
             # if state["attempt"] == 1:
             #     self.stageChanged.emit(stage_text)
@@ -8194,6 +8196,16 @@ class BaseCalibrationProcess(QObject):
                 guard_timer_ref["t"] = None
 
                 capture_result = self._capture_policy_result_from_callback(frame, _on_result)
+
+                if on_result is not None:
+                    handled = on_result(
+                        capture_result,
+                        set_attr=str(set_attr),
+                        stage_text=str(stage_text),
+                        attempt=int(state["attempt"]),
+                    )
+                    if handled:
+                        return
 
                 if capture_result.status != CaptureStatus.SUCCESS:
                     rejection_reason = str(capture_result.metadata.get("rejection_reason", "") or "")
@@ -10285,14 +10297,18 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._current_flow_capture_ref = {}
         self._current_flow_capture_failure = None
         setattr(self, set_attr, None)
-        timer_ref = {"timer": None}
 
-        def _finish(frame, *, failure_reason: str | None = None):
-            self._cancel_timeout(timer_ref["timer"])
-            timer_ref["timer"] = None
-            setattr(self, set_attr, frame)
-            if frame is None:
-                self._current_flow_capture_failure = str(failure_reason or "capture_failed")
+        def _handle_flow_result(capture_result, *, set_attr: str, stage_text: str, attempt: int) -> bool:
+            if capture_result.status == CaptureStatus.CANCELLED:
+                return False
+
+            if capture_result.status != CaptureStatus.SUCCESS:
+                self._current_flow_capture_failure = (
+                    "capture_timeout"
+                    if capture_result.status == CaptureStatus.TIMEOUT
+                    else "capture_failed"
+                )
+                setattr(self, set_attr, None)
                 self._record_event(
                     "capture_result",
                     {
@@ -10300,14 +10316,17 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                         "stage_text": str(stage_text),
                         "status": "failed",
                         "failure_reason": self._current_flow_capture_failure,
+                        "capture_status": capture_result.status.value,
                         "delay_us": int(self._current_delay_us or 0),
                         "replicate_index": int(self._flow_replicate_index + 1),
                     },
                     level="warning",
                 )
                 self.calibration_manager.emitCaptureCompleted()
-                return
+                return True
 
+            frame = capture_result.frame
+            setattr(self, set_attr, frame)
             bg_ref = self._get_capture_ref("background_image")
             capture_ref = self._record_capture(
                 frame,
@@ -10338,14 +10357,15 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 },
             )
             self.calibration_manager.emitCaptureCompleted()
+            return True
 
-        timer_ref["timer"] = self._start_timeout(
-            guard_timeout_ms,
-            err_msg=None,
-            on_timeout=lambda: _finish(None, failure_reason="capture_timeout"),
-        )
-        self.calibration_manager.captureImageRequested.emit(
-            lambda frame: _finish(frame, failure_reason="capture_failed")
+        self._capture_with_policy(
+            set_attr=set_attr,
+            stage_text=stage_text,
+            attempts_total=1,
+            guard_timeout_ms=guard_timeout_ms,
+            on_result=_handle_flow_result,
+            final_error_msg="Online stream flow frame capture failed.",
         )
 
     def _start_single_tail_capture(self, *, set_attr: str, stage_text: str, guard_timeout_ms: int = 10_000):
@@ -10364,14 +10384,18 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._current_tail_capture_ref = {}
         self._current_tail_capture_failure = None
         setattr(self, set_attr, None)
-        timer_ref = {"timer": None}
 
-        def _finish(frame, *, failure_reason: str | None = None):
-            self._cancel_timeout(timer_ref["timer"])
-            timer_ref["timer"] = None
-            setattr(self, set_attr, frame)
-            if frame is None:
-                self._current_tail_capture_failure = str(failure_reason or "capture_failed")
+        def _handle_tail_result(capture_result, *, set_attr: str, stage_text: str, attempt: int) -> bool:
+            if capture_result.status == CaptureStatus.CANCELLED:
+                return False
+
+            if capture_result.status != CaptureStatus.SUCCESS:
+                self._current_tail_capture_failure = (
+                    "capture_timeout"
+                    if capture_result.status == CaptureStatus.TIMEOUT
+                    else "capture_failed"
+                )
+                setattr(self, set_attr, None)
                 self._record_event(
                     "capture_result",
                     {
@@ -10379,6 +10403,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                         "stage_text": str(stage_text),
                         "status": "failed",
                         "failure_reason": self._current_tail_capture_failure,
+                        "capture_status": capture_result.status.value,
                         "delay_us": int(self._tail_current_delay_us or 0),
                         "replicate_index": int(self._tail_replicate_index + 1),
                         "tail_mode": str(self._tail_mode or "scout"),
@@ -10386,8 +10411,10 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                     level="warning",
                 )
                 self.calibration_manager.emitCaptureCompleted()
-                return
+                return True
 
+            frame = capture_result.frame
+            setattr(self, set_attr, frame)
             bg_ref = self._get_capture_ref("background_image")
             capture_ref = self._record_capture(
                 frame,
@@ -10420,14 +10447,15 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 },
             )
             self.calibration_manager.emitCaptureCompleted()
+            return True
 
-        timer_ref["timer"] = self._start_timeout(
-            guard_timeout_ms,
-            err_msg=None,
-            on_timeout=lambda: _finish(None, failure_reason="capture_timeout"),
-        )
-        self.calibration_manager.captureImageRequested.emit(
-            lambda frame: _finish(frame, failure_reason="capture_failed")
+        self._capture_with_policy(
+            set_attr=set_attr,
+            stage_text=stage_text,
+            attempts_total=1,
+            guard_timeout_ms=guard_timeout_ms,
+            on_result=_handle_tail_result,
+            final_error_msg="Online stream tail frame capture failed.",
         )
 
     @Slot()
@@ -14732,7 +14760,14 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
                 self._move_to_best_then_finish()
                 return
             # pre-refine: just recapture
-            self.calibration_manager.captureImageRequested.emit(self.handleDropletCaptured)
+            self._capture_with_policy(
+                set_attr="droplet_image",
+                stage_text="Recapturing focus frame",
+                attempts_total=7,
+                retry_delay_ms=75,
+                guard_timeout_ms=12_000,
+                final_error_msg="Failed to capture droplet for focus.",
+            )
             return
 
         self._request_tracked_move_relative_with_timeout(

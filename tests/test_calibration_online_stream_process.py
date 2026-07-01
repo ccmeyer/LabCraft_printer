@@ -25,6 +25,7 @@ from CalibrationClasses.Model import (  # noqa: E402
     CalibrationManager,
     OnlineStreamCalibrationProcess,
 )
+from CaptureTypes import CaptureStatus  # noqa: E402
 from Controller import Controller  # noqa: E402
 
 
@@ -57,6 +58,53 @@ def _capture_signal(frame):
             callback(self.payload)
 
     return _Signal(frame)
+
+
+class _TypedCaptureSignal:
+    def __init__(self, frame=None, *, status=CaptureStatus.SUCCESS, reason="", metadata=None):
+        self.frame = frame
+        self.status = status
+        self.reason = str(reason or (status.value if isinstance(status, CaptureStatus) else status))
+        self.metadata = dict(metadata or {})
+        self.count = 0
+
+    def emit(self, callback):
+        self.count += 1
+        callback._capture_result_status = (
+            self.status.value if isinstance(self.status, CaptureStatus) else str(self.status)
+        )
+        callback._capture_result_metadata = dict(self.metadata)
+        if self.status == CaptureStatus.SUCCESS:
+            callback(self.frame)
+            return
+        callback._capture_rejection_reason = self.reason
+        callback(None)
+
+
+def _install_online_capture_recorders(proc):
+    completed = []
+    events = []
+    captures = []
+    proc.calibration_manager.emitCaptureCompleted = lambda: completed.append(True)
+    proc.calibration_manager.record_process_event = (
+        lambda event_type, payload, **kwargs: events.append(
+            {"event_type": str(event_type), "payload": dict(payload or {}), "kwargs": dict(kwargs or {})}
+        )
+    )
+
+    def _record_capture(image, *, role, metadata=None):
+        capture_ref = {
+            "capture_id": f"cap_{role}",
+            "capture_index": len(captures) + 1,
+            "image_relpath": f"captures/{role}_{len(captures) + 1:04d}.png",
+            "capture_role": str(role),
+            "metadata": dict(metadata or {}),
+        }
+        captures.append({"image": image, "role": str(role), "metadata": dict(metadata or {}), "ref": capture_ref})
+        return capture_ref
+
+    proc._record_capture = _record_capture
+    return SimpleNamespace(completed=completed, events=events, captures=captures)
 
 
 def _flow_proc(tmp_path: Path):
@@ -1096,6 +1144,140 @@ def test_online_stream_capture_flow_frame_refreshes_plan_snapshot_after_budget_u
     snapshot = json.loads(Path(proc._plan_snapshot_path).read_text(encoding="utf-8"))
     assert snapshot["capture_budget"]["captures_used"] == 1
     assert snapshot["capture_budget"]["captures_remaining_hard"] == 60
+
+
+def test_online_stream_single_flow_capture_success_uses_shared_policy_metadata(tmp_path):
+    proc = _flow_proc(tmp_path)
+    frame = np.full((320, 220), 241, dtype=np.uint8)
+    capture_signal = _capture_signal(frame)
+    proc.calibration_manager.captureImageRequested = capture_signal
+    recorders = _install_online_capture_recorders(proc)
+
+    proc._start_single_flow_capture(
+        set_attr="flow_frame_image",
+        stage_text="Online stream flow frame",
+        guard_timeout_ms=9876,
+    )
+
+    assert capture_signal.count == 1
+    assert proc.flow_frame_image is frame
+    assert proc._current_flow_capture_ref["capture_id"] == "cap_flow_frame"
+    assert proc._last_capture_refs["flow_frame_image"]["capture_id"] == "cap_flow_frame"
+    assert recorders.completed == [True]
+    assert len(recorders.captures) == 1
+    capture = recorders.captures[0]
+    assert capture["role"] == "flow_frame"
+    assert capture["metadata"]["set_attr"] == "flow_frame_image"
+    assert capture["metadata"]["stage_text"] == "Online stream flow frame"
+    assert capture["metadata"]["delay_us"] == proc._current_delay_us
+    assert capture["metadata"]["replicate_index"] == proc._flow_replicate_index + 1
+    assert capture["metadata"]["pair_role"] == "flow_frame"
+    assert capture["metadata"]["subtract_background_capture_id"] == "cap_bg"
+    attempt_events = [event for event in recorders.events if event["event_type"] == "capture_attempt"]
+    assert len(attempt_events) == 1
+    result_events = [event for event in recorders.events if event["event_type"] == "capture_result"]
+    assert result_events[-1]["payload"]["status"] == "success"
+
+
+def test_online_stream_single_flow_capture_failure_records_data_row_outcome(tmp_path):
+    proc = _flow_proc(tmp_path)
+    capture_signal = _TypedCaptureSignal(
+        status=CaptureStatus.TIMEOUT,
+        reason="timeout",
+        metadata={"source": "unit"},
+    )
+    proc.calibration_manager.captureImageRequested = capture_signal
+    recorders = _install_online_capture_recorders(proc)
+
+    proc._start_single_flow_capture(
+        set_attr="flow_frame_image",
+        stage_text="Online stream flow frame",
+        guard_timeout_ms=9876,
+    )
+
+    assert capture_signal.count == 1
+    assert proc.flow_frame_image is None
+    assert proc._current_flow_capture_ref == {}
+    assert proc._current_flow_capture_failure == "capture_timeout"
+    assert recorders.completed == [True]
+    assert recorders.captures == []
+    result_events = [event for event in recorders.events if event["event_type"] == "capture_result"]
+    assert result_events[-1]["payload"]["status"] == "failed"
+    assert result_events[-1]["payload"]["failure_reason"] == "capture_timeout"
+    assert result_events[-1]["payload"]["capture_status"] == CaptureStatus.TIMEOUT.value
+
+
+def test_online_stream_single_tail_capture_success_uses_shared_policy_metadata(tmp_path):
+    proc = _flow_proc(tmp_path)
+    frame = np.full((320, 220), 242, dtype=np.uint8)
+    capture_signal = _capture_signal(frame)
+    proc.calibration_manager.captureImageRequested = capture_signal
+    recorders = _install_online_capture_recorders(proc)
+    proc._tail_mode = "backtrack"
+    proc._tail_current_delay_us = 4750
+    proc._tail_replicate_index = 2
+
+    proc._start_single_tail_capture(
+        set_attr="tail_frame_image",
+        stage_text="Online stream tail frame",
+        guard_timeout_ms=9876,
+    )
+
+    assert capture_signal.count == 1
+    assert proc.tail_frame_image is frame
+    assert proc._current_tail_capture_ref["capture_id"] == "cap_tail_frame"
+    assert proc._last_capture_refs["tail_frame_image"]["capture_id"] == "cap_tail_frame"
+    assert recorders.completed == [True]
+    assert len(recorders.captures) == 1
+    capture = recorders.captures[0]
+    assert capture["role"] == "tail_frame"
+    assert capture["metadata"]["set_attr"] == "tail_frame_image"
+    assert capture["metadata"]["stage_text"] == "Online stream tail frame"
+    assert capture["metadata"]["delay_us"] == 4750
+    assert capture["metadata"]["replicate_index"] == 3
+    assert capture["metadata"]["pair_role"] == "tail_frame"
+    assert capture["metadata"]["tail_mode"] == "backtrack"
+    assert capture["metadata"]["subtract_background_capture_id"] == "cap_bg"
+    result_events = [event for event in recorders.events if event["event_type"] == "capture_result"]
+    assert result_events[-1]["payload"]["status"] == "success"
+    assert result_events[-1]["payload"]["tail_mode"] == "backtrack"
+
+
+def test_online_stream_single_tail_capture_failure_preserves_tail_metadata(tmp_path):
+    proc = _flow_proc(tmp_path)
+    capture_signal = _TypedCaptureSignal(
+        status=CaptureStatus.QUEUE_REJECTED,
+        reason="machine_rejected",
+        metadata={"source": "unit"},
+    )
+    proc.calibration_manager.captureImageRequested = capture_signal
+    recorders = _install_online_capture_recorders(proc)
+    proc._tail_mode = "scout"
+    proc._tail_current_delay_us = 4850
+    proc._tail_replicate_index = 1
+
+    proc._start_single_tail_capture(
+        set_attr="tail_frame_image",
+        stage_text="Online stream tail frame",
+        guard_timeout_ms=9876,
+    )
+
+    assert capture_signal.count == 1
+    assert proc.tail_frame_image is None
+    assert proc._current_tail_capture_ref == {}
+    assert proc._current_tail_capture_failure == "capture_failed"
+    assert recorders.completed == [True]
+    assert recorders.captures == []
+    result_events = [event for event in recorders.events if event["event_type"] == "capture_result"]
+    assert result_events[-1]["payload"]["status"] == "failed"
+    assert result_events[-1]["payload"]["failure_reason"] == "capture_failed"
+    assert result_events[-1]["payload"]["capture_status"] == CaptureStatus.QUEUE_REJECTED.value
+    assert result_events[-1]["payload"]["tail_mode"] == "scout"
+
+
+def test_calibration_model_capture_emission_only_shared_adapter():
+    source = Path(calibration_model.__file__).read_text(encoding="utf-8")
+    assert source.count("captureImageRequested.emit") == 1
 
 
 def test_online_stream_apply_flow_delay_routes_to_fit_when_delays_are_exhausted(tmp_path):
