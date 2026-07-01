@@ -390,9 +390,92 @@ def test_controller_fault_latched_preflight_rejects_before_machine_capture():
     assert machine.capture_calls == []
     assert controller.pending_capture_active is False
     assert controller.capture_coordinator.last_result.status is CaptureStatus.FIRMWARE_FLASH_LATCHED
+    assert controller.capture_coordinator.last_result.metadata["flash_fault_reason"] == "line_stuck_high"
+    assert controller.capture_coordinator.last_result.metadata["flash_fault_source"] == "machine"
+    assert controller.capture_coordinator.last_result.metadata["rejection_state"]["flash_fault_reason"] == "line_stuck_high"
+    assert controller.capture_coordinator.flash_session_snapshot()["armed"] is False
+    assert controller.capture_coordinator.flash_session_snapshot()["disarm_reason"] == "firmware_flash_latched"
     callback.assert_called_once_with(None)
     assert getattr(callback, "_capture_rejection_reason") == "firmware_flash_latched"
     assert getattr(callback, "_capture_result_status") == CaptureStatus.FIRMWARE_FLASH_LATCHED.value
+    assert getattr(callback, "_capture_result_metadata")["flash_fault_reason"] == "line_stuck_high"
+
+
+def test_controller_model_latched_fault_routes_through_coordinator():
+    controller, machine, camera_model = _make_controller()
+    callback = Mock()
+    camera_model.flash_session_armed = False
+    camera_model.flash_fault_latched = True
+    camera_model.flash_fault_reason = "flash_ack_timeout"
+
+    assert controller.capture_droplet_image(callback=callback, capture_context="model_fault") is False
+
+    assert machine.capture_calls == []
+    assert controller.pending_capture_active is False
+    assert controller.capture_coordinator.last_result.status is CaptureStatus.FIRMWARE_FLASH_LATCHED
+    assert controller.capture_coordinator.last_result.reason == "firmware_flash_latched"
+    assert controller.capture_coordinator.last_result.metadata["flash_fault_reason"] == "flash_ack_timeout"
+    assert controller.capture_coordinator.last_result.metadata["flash_fault_source"] == "model"
+    callback.assert_called_once_with(None)
+    assert getattr(callback, "_capture_rejection_reason") == "firmware_flash_latched"
+    assert getattr(callback, "_capture_result_status") == CaptureStatus.FIRMWARE_FLASH_LATCHED.value
+
+    cancel_result = controller.cancel_pending_droplet_capture(
+        "after_fault_block",
+        emit_capture_failed=False,
+        recover=False,
+    )
+    assert cancel_result["cancelled"] is False
+    assert camera_model.flash_fault_latched is True
+    assert camera_model.flash_fault_reason == "flash_ack_timeout"
+
+
+def test_controller_flash_safety_state_any_latched_source_wins():
+    controller, machine, camera_model = _make_controller()
+    camera_model.flash_session_armed = True
+    camera_model.flash_fault_latched = True
+    camera_model.flash_fault_reason = "line_high_on_arm"
+    machine.get_flash_safety_state = lambda: {
+        "flash_session_armed": True,
+        "flash_fault_latched": False,
+        "flash_fault_reason": "",
+    }
+
+    state = controller._get_flash_safety_state()
+
+    assert state["flash_fault_latched"] is True
+    assert state["flash_session_armed"] is False
+    assert state["flash_fault_reason"] == "line_high_on_arm"
+    assert state["flash_fault_source"] == "model"
+    assert state["flash_armed_source"] == "model,machine"
+
+    camera_model.flash_fault_latched = False
+    camera_model.flash_fault_reason = ""
+    machine.get_flash_safety_state = lambda: {
+        "flash_session_armed": False,
+        "flash_fault_latched": True,
+        "flash_fault_reason": "print_completion_timeout",
+    }
+
+    state = controller._get_flash_safety_state()
+
+    assert state["flash_fault_latched"] is True
+    assert state["flash_session_armed"] is False
+    assert state["flash_fault_reason"] == "print_completion_timeout"
+    assert state["flash_fault_source"] == "machine"
+
+
+def test_controller_droplet_capture_ui_state_reports_flash_fault_primitives():
+    controller, _machine, camera_model = _make_controller()
+    camera_model.flash_session_armed = False
+    camera_model.flash_fault_latched = True
+    camera_model.flash_fault_reason = "retrigger_while_high"
+
+    state = controller.get_droplet_capture_ui_state()
+
+    assert state["flash_fault_latched"] is True
+    assert state["flash_fault_reason"] == "retrigger_while_high"
+    assert state["flash_fault_status"] == CaptureStatus.FIRMWARE_FLASH_LATCHED.value
 
 
 def test_controller_preflight_cancellation_does_not_queue_machine_capture():

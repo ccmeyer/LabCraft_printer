@@ -4,18 +4,17 @@ from tests.fakes import FakeSerialFactory
 
 def test_parse_flash_safety_log_event_recognizes_expected_lines():
     assert mfr.parse_flash_safety_log_event("FLASH_ARMED") == {"kind": "armed"}
-    assert mfr.parse_flash_safety_log_event("FLASH_FAULT reason=line_high_on_arm") == {
-        "kind": "fault",
-        "reason": "line_high_on_arm",
-    }
-    assert mfr.parse_flash_safety_log_event("FLASH_FAULT reason=flash_ack_timeout") == {
-        "kind": "fault",
-        "reason": "flash_ack_timeout",
-    }
-    assert mfr.parse_flash_safety_log_event("FLASH_FAULT reason=print_completion_timeout") == {
-        "kind": "fault",
-        "reason": "print_completion_timeout",
-    }
+    for reason in (
+        "line_high_on_arm",
+        "retrigger_while_high",
+        "line_stuck_high",
+        "flash_ack_timeout",
+        "print_completion_timeout",
+    ):
+        assert mfr.parse_flash_safety_log_event(f"FLASH_FAULT reason={reason}") == {
+            "kind": "fault",
+            "reason": reason,
+        }
     assert mfr.parse_flash_safety_log_event("FLASH_DISARMED reason=shutdown") == {
         "kind": "disarmed",
         "reason": "shutdown",

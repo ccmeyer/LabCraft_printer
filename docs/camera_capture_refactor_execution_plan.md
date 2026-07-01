@@ -634,7 +634,7 @@ Rollback:
 
 ## Slice 10: Firmware Flash Fault/Latch Surfacing
 
-Status: `not_started`
+Status: `verified`
 
 Goal:
 
@@ -668,14 +668,16 @@ Focused tests:
 
 Validation:
 
-- `.\env\Scripts\python.exe -m pytest -q tests\test_flash_safety_ui.py tests\test_optics_capture_metadata.py`
-- If firmware is edited, run firmware host/build checks required by
-  `firmware/AGENTS.md`.
+- `.\env\Scripts\python.exe -m pytest -q tests\test_flash_safety_log_reader.py tests\test_model_update_state.py` -> 11 passed.
+- `.\env\Scripts\python.exe -m pytest -q tests\test_flash_safety_ui.py tests\test_optics_capture_metadata.py tests\test_calibration_pressure_band_failure_modes.py` -> 93 passed.
+- `.\env\Scripts\python.exe -m pytest -q tests\test_capture_types.py tests\test_capture_coordinator.py` -> 46 passed.
+- `.\env\Scripts\python.exe -m pytest -q` -> 2728 passed, 24 skipped.
+- Firmware was not edited; firmware host/build checks were not required.
 
 Proceed criteria:
 
 - Fault/latch outcomes are visible in diagnostics and cannot wedge pending
-  capture state.
+  capture state. Complete.
 
 Rollback:
 

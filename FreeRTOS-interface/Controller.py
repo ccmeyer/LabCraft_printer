@@ -4688,41 +4688,90 @@ class Controller(QObject):
             "flash_fault_reason": str(data.get("flash_fault_reason", "") or ""),
         }
 
-    def _get_flash_safety_state(self):
+    def _get_model_flash_safety_state(self):
         state = {
             "flash_session_armed": False,
             "flash_fault_latched": False,
             "flash_fault_reason": "",
         }
-        try:
-            cam = getattr(self.model, "droplet_camera_model", None)
-            armed_getter = getattr(cam, "get_flash_session_armed", None)
-            fault_getter = getattr(cam, "get_flash_fault_latched", None)
-            reason_getter = getattr(cam, "get_flash_fault_reason", None)
-            if callable(armed_getter):
-                state["flash_session_armed"] = bool(armed_getter())
-            else:
-                state["flash_session_armed"] = bool(getattr(cam, "flash_session_armed", False))
-            if callable(fault_getter):
-                state["flash_fault_latched"] = bool(fault_getter())
-            else:
-                state["flash_fault_latched"] = bool(getattr(cam, "flash_fault_latched", False))
-            if callable(reason_getter):
-                state["flash_fault_reason"] = str(reason_getter() or "")
-            else:
-                state["flash_fault_reason"] = str(getattr(cam, "flash_fault_reason", "") or "")
-        except Exception:
-            state = self._normalized_flash_safety_state(state)
-
-        try:
-            getter = getattr(self.machine, "get_flash_safety_state", None)
-            if callable(getter):
-                machine_state = getter()
-                if isinstance(machine_state, dict):
-                    state.update(machine_state)
-        except Exception as exc:
-            state["flash_state_error"] = str(exc)
+        cam = getattr(self.model, "droplet_camera_model", None)
+        armed_getter = getattr(cam, "get_flash_session_armed", None)
+        fault_getter = getattr(cam, "get_flash_fault_latched", None)
+        reason_getter = getattr(cam, "get_flash_fault_reason", None)
+        if callable(armed_getter):
+            state["flash_session_armed"] = bool(armed_getter())
+        else:
+            state["flash_session_armed"] = bool(getattr(cam, "flash_session_armed", False))
+        if callable(fault_getter):
+            state["flash_fault_latched"] = bool(fault_getter())
+        else:
+            state["flash_fault_latched"] = bool(getattr(cam, "flash_fault_latched", False))
+        if callable(reason_getter):
+            state["flash_fault_reason"] = str(reason_getter() or "")
+        else:
+            state["flash_fault_reason"] = str(getattr(cam, "flash_fault_reason", "") or "")
         return self._normalized_flash_safety_state(state)
+
+    def _get_machine_flash_safety_state(self):
+        getter = getattr(self.machine, "get_flash_safety_state", None)
+        if callable(getter):
+            return self._normalized_flash_safety_state(getter())
+        return self._normalized_flash_safety_state({})
+
+    def _get_flash_safety_state(self):
+        errors = {}
+        try:
+            model_state = self._get_model_flash_safety_state()
+        except Exception as exc:
+            model_state = self._normalized_flash_safety_state({})
+            errors["model_flash_state_error"] = str(exc)
+        try:
+            machine_state = self._get_machine_flash_safety_state()
+        except Exception as exc:
+            machine_state = self._normalized_flash_safety_state({})
+            errors["machine_flash_state_error"] = str(exc)
+
+        fault_sources = []
+        if model_state.get("flash_fault_latched"):
+            fault_sources.append("model")
+        if machine_state.get("flash_fault_latched"):
+            fault_sources.append("machine")
+        armed_sources = []
+        if model_state.get("flash_session_armed"):
+            armed_sources.append("model")
+        if machine_state.get("flash_session_armed"):
+            armed_sources.append("machine")
+
+        fault_latched = bool(fault_sources)
+        fault_reason = ""
+        if fault_latched:
+            fault_reason = (
+                str(machine_state.get("flash_fault_reason") or "")
+                or str(model_state.get("flash_fault_reason") or "")
+            )
+        normalized = {
+            "flash_session_armed": bool(armed_sources) and not fault_latched,
+            "flash_fault_latched": fault_latched,
+            "flash_fault_reason": fault_reason,
+            "model_flash_state": dict(model_state),
+            "machine_flash_state": dict(machine_state),
+            "flash_fault_source": ",".join(fault_sources),
+            "flash_armed_source": ",".join(armed_sources),
+        }
+        normalized.update(errors)
+        return normalized
+
+    def _classify_flash_safety_state(self, state):
+        state = dict(state or {})
+        if bool(state.get("flash_fault_latched", False)):
+            metadata = {
+                "flash_fault_latched": True,
+                "flash_fault_reason": str(state.get("flash_fault_reason", "") or ""),
+                "flash_fault_source": str(state.get("flash_fault_source", "") or ""),
+                "flash_safety_state": dict(state),
+            }
+            return CaptureStatus.FIRMWARE_FLASH_LATCHED, "firmware_flash_latched", metadata
+        return None
 
     def _process_flash_preflight_events(self, poll_ms):
         try:
@@ -4755,6 +4804,8 @@ class Controller(QObject):
             "capture_context": capture_context,
             "rejection_reason": reason,
             "rejection_state": dict(state or {}),
+            "flash_fault_reason": str((state or {}).get("flash_fault_reason", "") or ""),
+            "flash_fault_source": str((state or {}).get("flash_fault_source", "") or ""),
             "recovery_attempted": bool(recovery_attempted),
         }
         self.last_capture_queue_rejection_reason = reason
@@ -4828,14 +4879,18 @@ class Controller(QObject):
                 )
 
             state = self._get_flash_safety_state()
-            if bool(state.get("flash_fault_latched", False)):
+            flash_block = self._classify_flash_safety_state(state)
+            if flash_block is not None:
+                status, reason, block_metadata = flash_block
+                failure_state = dict(state)
+                failure_state.update(block_metadata)
                 return self._flash_preflight_failure_result(
                     request_id=request_id,
                     callback=callback,
                     capture_context=capture_context,
-                    status=CaptureStatus.FIRMWARE_FLASH_LATCHED,
-                    reason="firmware_flash_latched",
-                    state=state,
+                    status=status,
+                    reason=reason,
+                    state=failure_state,
                     recovery_attempted=recovery_attempted,
                 )
             if bool(state.get("flash_session_armed", False)):
@@ -4872,6 +4927,7 @@ class Controller(QObject):
         coordinator = self._ensure_capture_coordinator()
         snapshot = coordinator.pending_snapshot()
         flash_snapshot = coordinator.flash_session_snapshot()
+        flash_state = self._get_flash_safety_state()
         self._sync_legacy_pending_capture_fields(coordinator)
         last_result = getattr(coordinator, "last_result", None)
         last_status = getattr(last_result, "status", None)
@@ -4894,6 +4950,13 @@ class Controller(QObject):
             "flash_session_request_id": flash_snapshot.get("request_id"),
             "flash_session_context": flash_snapshot.get("context"),
             "flash_preflight_active": bool(flash_snapshot.get("preflight_active")),
+            "flash_fault_latched": bool(flash_state.get("flash_fault_latched", False)),
+            "flash_fault_reason": str(flash_state.get("flash_fault_reason", "") or ""),
+            "flash_fault_status": (
+                CaptureStatus.FIRMWARE_FLASH_LATCHED.value
+                if bool(flash_state.get("flash_fault_latched", False))
+                else ""
+            ),
         }
 
     def _sync_legacy_pending_capture_fields(self, coordinator=None):
@@ -5018,16 +5081,6 @@ class Controller(QObject):
         """
         self.last_capture_queue_rejection_reason = None
         self.last_capture_queue_rejection_state = None
-        if self._is_flash_fault_latched():
-            self.last_capture_queue_rejection_reason = "flash_fault"
-            self.last_capture_queue_rejection_state = self._get_droplet_capture_state()
-            self._record_active_calibration_event(
-                "capture_queue_rejected",
-                {"reason": "flash_fault", "capture_context": capture_context},
-                level="warning",
-            )
-            self._handle_blocked_capture(callback)
-            return False
         pending_snapshot = self._capture_pending_snapshot()
         if bool(pending_snapshot.get("active")):
             state = self._get_droplet_capture_state()
