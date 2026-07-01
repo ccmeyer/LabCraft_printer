@@ -1356,6 +1356,7 @@ class DropletCamera(QObject):
         small_sleep_between=0.05,
         success_reasons=("threshold",),
         request_id=None,
+        capture_context=None,
     ):
         """
         Start a capture with internal retries. On success, emits capture_completed_signal once.
@@ -1382,6 +1383,7 @@ class DropletCamera(QObject):
             print(f"[Camera] capture rejected request_id={request_id} reason=backend_closed state={self.get_capture_state()}")
             return False
         backend_id = getattr(backend, "backend_id", None)
+        queued_monotonic_ns = time.monotonic_ns()
 
         self._capture_worker_active.set()
         with self._cv:
@@ -1389,6 +1391,7 @@ class DropletCamera(QObject):
             generation = int(self._capture_generation)
 
         def _runner():
+            worker_started_monotonic_ns = time.monotonic_ns()
             payload = None
             try:
                 payload = self.capture_with_retry_sync(
@@ -1432,6 +1435,7 @@ class DropletCamera(QObject):
                     "error": str(e),
                 }
             finally:
+                worker_completed_monotonic_ns = time.monotonic_ns()
                 # Release the worker latch before any Qt signal delivery. A stranded
                 # completion signal must not make every later capture look busy.
                 self._capture_worker_active.clear()
@@ -1450,6 +1454,15 @@ class DropletCamera(QObject):
                     "reason": "missing_payload",
                     "error": "Capture worker produced no payload.",
                 }
+
+            payload = dict(payload)
+            payload.setdefault("request_id", request_id)
+            payload.setdefault("generation", generation)
+            payload.setdefault("backend_id", backend_id)
+            payload["capture_context"] = capture_context
+            payload["queued_monotonic_ns"] = int(queued_monotonic_ns)
+            payload["worker_started_monotonic_ns"] = int(worker_started_monotonic_ns)
+            payload["worker_completed_monotonic_ns"] = int(worker_completed_monotonic_ns)
 
             current_generation = int(getattr(self, "_capture_generation", 0))
             current_backend = self._get_current_capture_backend()
@@ -5735,7 +5748,7 @@ class Machine(QObject):
         self.droplet_camera.start_camera()
         return
     
-    def capture_droplet_image(self, *, throughput_mode=False, capture_request_id=None):
+    def capture_droplet_image(self, *, throughput_mode=False, capture_request_id=None, capture_context=None):
         # Throughput mode is intended for repeated live imaging; keep strict mode for calibration.
         success_reasons = ("threshold", "fallback") if throughput_mode else ("threshold",)
         attempts = 2 if throughput_mode else 5
@@ -5749,6 +5762,7 @@ class Machine(QObject):
             small_sleep_between=small_sleep_between,
             success_reasons=success_reasons,
             request_id=capture_request_id,
+            capture_context=capture_context,
         )
 
     def recover_droplet_capture(self, reason=""):

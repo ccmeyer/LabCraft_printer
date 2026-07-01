@@ -101,6 +101,56 @@ def test_clear_pending_preserves_state_when_callback_or_context_do_not_match():
     assert coordinator.pending_request_id == "request-1"
 
 
+def test_update_active_request_metadata_preserves_pending_state():
+    coordinator = Coordinator()
+    callback = object()
+    request = CaptureRequest(
+        request_id="request-1",
+        context="ctx",
+        source="controller",
+        created_at_monotonic=12.0,
+        metadata={"existing": "value"},
+    )
+    coordinator.begin_pending(
+        request,
+        callback=callback,
+        context="ctx",
+        started_monotonic=15.0,
+        recovery_attempted=True,
+        throughput_mode=True,
+    )
+
+    updated = coordinator.update_active_request_metadata(
+        {"expected_generation": 7, "expected_backend_id": "backend-1"}
+    )
+
+    assert updated.request_id == "request-1"
+    assert updated.context == "ctx"
+    assert updated.metadata == {
+        "existing": "value",
+        "expected_generation": 7,
+        "expected_backend_id": "backend-1",
+    }
+    assert coordinator.active_request == updated
+    assert coordinator.pending.request == updated
+    assert coordinator.pending_callback is callback
+    assert coordinator.pending_context == "ctx"
+    assert coordinator.pending_started_monotonic == pytest.approx(15.0)
+    assert coordinator.pending_recovery_attempted is True
+    assert coordinator.pending_throughput_mode is True
+
+
+def test_update_active_request_metadata_when_idle_does_not_create_state():
+    coordinator = Coordinator()
+
+    result = coordinator.update_active_request_metadata({"expected_generation": 7})
+
+    assert result is None
+    assert coordinator.state is CaptureCoordinatorState.IDLE
+    assert coordinator.active_request is None
+    assert coordinator.pending_active is False
+
+
 def test_cancel_pending_records_terminal_cancelled_result_and_clears_state():
     coordinator = Coordinator()
     request = CaptureRequest(request_id="request-1", context="ctx", source="controller")

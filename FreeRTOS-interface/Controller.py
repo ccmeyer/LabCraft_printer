@@ -4590,6 +4590,95 @@ class Controller(QObject):
     def _pending_capture_request_id(self):
         return self._capture_pending_snapshot().get("request_id")
 
+    @staticmethod
+    def _identity_int_or_none(value):
+        if value in (None, ""):
+            return None
+        try:
+            return int(value)
+        except Exception:
+            return None
+
+    def _capture_expected_identity_metadata(self, *, request_id, capture_context, state, queued_monotonic_ns):
+        state = dict(state or {}) if isinstance(state, dict) else {}
+        return {
+            "expected_generation": self._identity_int_or_none(state.get("generation")),
+            "expected_backend_id": state.get("backend_id"),
+            "queued_machine_request_id": state.get("request_id") or request_id,
+            "queued_machine_cap_id": self._identity_int_or_none(state.get("cap_id")),
+            "queued_machine_state": dict(state),
+            "queued_monotonic_ns": int(queued_monotonic_ns),
+            "capture_context": capture_context,
+        }
+
+    def _record_expected_capture_identity(self, *, request_id, capture_context, queued_monotonic_ns):
+        state = self._get_droplet_capture_state()
+        metadata = self._capture_expected_identity_metadata(
+            request_id=request_id,
+            capture_context=capture_context,
+            state=state,
+            queued_monotonic_ns=queued_monotonic_ns,
+        )
+        try:
+            coordinator = self._ensure_capture_coordinator()
+            coordinator.update_active_request_metadata(metadata)
+            self._sync_legacy_pending_capture_fields(coordinator)
+        except Exception:
+            pass
+        return metadata
+
+    def _capture_completion_identity_mismatch(self, payload, pending_snapshot):
+        if not bool(pending_snapshot.get("active")):
+            return "no_active_pending_capture"
+        request_id = payload.get("request_id")
+        expected_request_id = pending_snapshot.get("request_id")
+        if str(request_id) != str(expected_request_id):
+            return "request_id_mismatch"
+
+        request = pending_snapshot.get("request")
+        request_metadata = {}
+        if request is not None:
+            try:
+                request_metadata = dict(getattr(request, "metadata", {}) or {})
+            except Exception:
+                request_metadata = {}
+        expected_generation = self._identity_int_or_none(request_metadata.get("expected_generation"))
+        if expected_generation is not None:
+            payload_generation = self._identity_int_or_none(payload.get("generation"))
+            if payload_generation is None:
+                return "missing_generation"
+            if payload_generation != expected_generation:
+                return "generation_mismatch"
+        expected_backend_id = request_metadata.get("expected_backend_id")
+        payload_backend_id = payload.get("backend_id")
+        if expected_backend_id not in (None, "") and payload_backend_id not in (None, ""):
+            if str(payload_backend_id) != str(expected_backend_id):
+                return "backend_id_mismatch"
+        return None
+
+    def _capture_completion_identity_metadata(self, *, payload, pending_snapshot, mismatch_reason):
+        request = pending_snapshot.get("request")
+        request_metadata = {}
+        if request is not None:
+            try:
+                request_metadata = dict(getattr(request, "metadata", {}) or {})
+            except Exception:
+                request_metadata = {}
+        return {
+            "mismatch_reason": str(mismatch_reason),
+            "request_id": payload.get("request_id"),
+            "expected_request_id": pending_snapshot.get("request_id"),
+            "status": payload.get("status"),
+            "generation": payload.get("generation"),
+            "expected_generation": request_metadata.get("expected_generation"),
+            "backend_id": payload.get("backend_id"),
+            "expected_backend_id": request_metadata.get("expected_backend_id"),
+            "cap_id": payload.get("cap_id"),
+            "capture_context": payload.get("capture_context"),
+            "expected_capture_context": pending_snapshot.get("context"),
+            "state": self._get_droplet_capture_state(),
+        }
+
     def get_droplet_capture_ui_state(self):
         coordinator = self._ensure_capture_coordinator()
         snapshot = coordinator.pending_snapshot()
@@ -4852,13 +4941,24 @@ class Controller(QObject):
                         for param in signature.parameters.values()
                     )
                 )
+                accepts_context = (
+                    "capture_context" in signature.parameters
+                    or any(
+                        param.kind == inspect.Parameter.VAR_KEYWORD
+                        for param in signature.parameters.values()
+                    )
+                )
             except (TypeError, ValueError):
                 accepts_request_id = True
+                accepts_context = True
             if accepts_request_id:
-                queued = capture_method(
-                    throughput_mode=throughput_mode,
-                    capture_request_id=capture_request_id,
-                )
+                kwargs = {
+                    "throughput_mode": throughput_mode,
+                    "capture_request_id": capture_request_id,
+                }
+                if accepts_context:
+                    kwargs["capture_context"] = capture_context
+                queued = capture_method(**kwargs)
             else:
                 queued = capture_method(throughput_mode=throughput_mode)
         except Exception:
@@ -4887,6 +4987,12 @@ class Controller(QObject):
             self._clear_pending_capture(callback=callback, capture_context=capture_context)
             self._notify_capture_callback_failed(callback)
             return False
+        queued_monotonic_ns = time.monotonic_ns()
+        expected_identity = self._record_expected_capture_identity(
+            request_id=capture_request_id,
+            capture_context=capture_context,
+            queued_monotonic_ns=queued_monotonic_ns,
+        )
         self._sync_legacy_pending_capture_fields(coordinator)
         self._start_pending_capture_guard(throughput_mode=throughput_mode)
         print(
@@ -4900,6 +5006,9 @@ class Controller(QObject):
                 "capture_context": capture_context,
                 "throughput_mode": bool(throughput_mode),
                 "recovery_attempted": bool(recovery_attempted),
+                "expected_generation": expected_identity.get("expected_generation"),
+                "expected_backend_id": expected_identity.get("expected_backend_id"),
+                "queued_monotonic_ns": expected_identity.get("queued_monotonic_ns"),
             },
         )
         return True
@@ -5646,40 +5755,58 @@ class Controller(QObject):
         request_id = payload.get("request_id")
         pending_snapshot = self._capture_pending_snapshot()
         expected_request_id = pending_snapshot.get("request_id")
-        if not bool(pending_snapshot.get("active")) or str(request_id) != str(expected_request_id):
+        mismatch_reason = self._capture_completion_identity_mismatch(payload, pending_snapshot)
+        if mismatch_reason is not None:
+            stale_metadata = self._capture_completion_identity_metadata(
+                payload=payload,
+                pending_snapshot=pending_snapshot,
+                mismatch_reason=mismatch_reason,
+            )
             print(
                 "[Camera] stale capture completion ignored "
-                f"request_id={request_id} expected={expected_request_id} status={payload.get('status')}"
+                f"request_id={request_id} expected={expected_request_id} "
+                f"status={payload.get('status')} reason={mismatch_reason}"
             )
             self._record_active_calibration_event(
                 "capture_stale_completion_ignored",
-                {
-                    "request_id": request_id,
-                    "expected_request_id": expected_request_id,
-                    "status": payload.get("status"),
-                    "generation": payload.get("generation"),
-                    "cap_id": payload.get("cap_id"),
-                    "state": self._get_droplet_capture_state(),
-                },
+                stale_metadata,
                 level="warning",
             )
             self._record_capture_coordinator_stale(
                 request_id,
-                metadata={
-                    "expected_request_id": expected_request_id,
-                    "status": payload.get("status"),
-                    "generation": payload.get("generation"),
-                    "cap_id": payload.get("cap_id"),
-                    "state": self._get_droplet_capture_state(),
-                },
+                metadata=stale_metadata,
+                reason=str(mismatch_reason),
             )
             return
 
         status = str(payload.get("status") or "").lower()
+        if status == "stale" or bool(payload.get("stale", False)):
+            stale_metadata = self._capture_completion_identity_metadata(
+                payload=payload,
+                pending_snapshot=pending_snapshot,
+                mismatch_reason="worker_marked_stale",
+            )
+            self._record_active_calibration_event(
+                "capture_stale_completion_ignored",
+                stale_metadata,
+                level="warning",
+            )
+            self._record_capture_coordinator_stale(
+                request_id,
+                metadata=stale_metadata,
+                reason="worker_marked_stale",
+            )
+            return
         if status == "success" and payload.get("frame") is not None:
             capture_info = dict(payload.get("capture_info") or {})
             capture_info.setdefault("request_id", request_id)
             capture_info.setdefault("cap_id", payload.get("cap_id"))
+            capture_info.setdefault("generation", payload.get("generation"))
+            capture_info.setdefault("backend_id", payload.get("backend_id"))
+            capture_info.setdefault("capture_context", payload.get("capture_context"))
+            for key in ("queued_monotonic_ns", "worker_started_monotonic_ns", "worker_completed_monotonic_ns"):
+                if key in payload:
+                    capture_info.setdefault(key, payload.get(key))
             self._complete_pending_capture_success(payload.get("frame"), cap_info=capture_info)
             return
 

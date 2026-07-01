@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Callable
 import time
@@ -215,6 +215,17 @@ class CaptureCoordinator:
             return False
         self.reset()
         return True
+
+    def update_active_request_metadata(self, metadata: dict | None = None) -> CaptureRequest | None:
+        if self.active_request is None:
+            return None
+        merged = dict(self.active_request.metadata or {})
+        merged.update(dict(metadata or {}))
+        request = replace(self.active_request, metadata=merged)
+        self.active_request = request
+        if self.pending is not None:
+            self.pending = replace(self.pending, request=request)
+        return request
 
     def cancel_pending(
         self,

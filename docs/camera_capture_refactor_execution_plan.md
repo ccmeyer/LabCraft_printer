@@ -535,7 +535,7 @@ Rollback:
 
 ## Slice 8: Machine Request Identity Hardening
 
-Status: `not_started`
+Status: `verified`
 
 Goal:
 
@@ -567,12 +567,14 @@ Focused tests:
 
 Validation:
 
-- Focused Machine/coordinator tests.
-- `.\env\Scripts\python.exe -m pytest -q tests\test_optics_capture_metadata.py tests\test_droplet_camera_trigger_cleanup.py`
+- `.\env\Scripts\python.exe -m pytest -q tests\test_capture_types.py tests\test_capture_coordinator.py` -> 42 passed.
+- `.\env\Scripts\python.exe -m pytest -q tests\test_optics_capture_metadata.py tests\test_droplet_camera_trigger_cleanup.py` -> 68 passed.
+- `.\env\Scripts\python.exe -m pytest -q` -> 2717 passed, 24 skipped.
+- Stale-worker identity search/coverage notes: focused tests cover same-request generation mismatch, missing generation when an expected generation is known, backend mismatch when both backend IDs are present, recovery requeue generation refresh, and Machine worker success/failure/stale payload identity fields.
 
 Proceed criteria:
 
-- Stale worker completion cannot update model, callback, or UI state.
+- Stale worker completion cannot update model, callback, or UI state. Complete.
 
 Rollback:
 

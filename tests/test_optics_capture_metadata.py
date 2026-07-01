@@ -96,6 +96,7 @@ class _Machine:
     def __init__(self):
         self.droplet_camera = _DropletCamera()
         self.capture_calls = []
+        self.last_capture_context = None
         self.recover_calls = []
         self.commands_idle = True
         self.capture_return = True
@@ -106,7 +107,8 @@ class _Machine:
             "camera_started": True,
         }
 
-    def capture_droplet_image(self, *, throughput_mode=False, capture_request_id=None):
+    def capture_droplet_image(self, *, throughput_mode=False, capture_request_id=None, capture_context=None):
+        self.last_capture_context = capture_context
         self.capture_calls.append(
             {
                 "throughput_mode": bool(throughput_mode),
@@ -302,6 +304,7 @@ def test_controller_capture_context_is_written_to_next_frame_metadata():
     controller, machine, camera_model = _make_controller()
 
     assert controller.capture_droplet_image(capture_context="optics_scale_bar") is True
+    assert machine.last_capture_context == "optics_scale_bar"
     assert machine.capture_calls[0]["throughput_mode"] is False
     assert machine.capture_calls[0]["capture_request_id"]
     assert controller.capture_coordinator.active_request.request_id == controller.pending_capture_request_id
@@ -331,6 +334,145 @@ def test_controller_capture_context_is_written_to_next_frame_metadata():
     assert call["save_metadata"]["position_source"] == "controller_expected_position"
     assert call["save_metadata"]["commands_idle_at_frame"] is True
     assert isinstance(call["save_metadata"]["position_recorded_at"], str)
+
+
+def test_controller_queued_capture_stores_expected_machine_identity_metadata():
+    controller, machine, _camera_model = _make_controller()
+    machine.capture_state.update(
+        {
+            "generation": 7,
+            "backend_id": "backend-A",
+            "cap_id": 12,
+            "request_id": "machine-request",
+        }
+    )
+
+    assert controller.capture_droplet_image(capture_context="identity_ctx") is True
+
+    metadata = controller.capture_coordinator.active_request.metadata
+    assert metadata["expected_generation"] == 7
+    assert metadata["expected_backend_id"] == "backend-A"
+    assert metadata["queued_machine_request_id"] == "machine-request"
+    assert metadata["queued_machine_cap_id"] == 12
+    assert isinstance(metadata["queued_monotonic_ns"], int)
+    assert metadata["capture_context"] == "identity_ctx"
+    assert machine.last_capture_context == "identity_ctx"
+
+
+def test_controller_matching_request_and_generation_completes_active_request():
+    controller, machine, camera_model = _make_controller()
+    callback = Mock()
+    machine.capture_state.update({"generation": 4, "backend_id": "backend-A"})
+    frame = np.full((4, 5, 3), 88, dtype=np.uint8)
+
+    assert controller.capture_droplet_image(callback=callback, capture_context="identity_ctx") is True
+    request_id = controller.pending_capture_request_id
+    controller._on_capture_completed_payload(
+        {
+            "status": "success",
+            "request_id": request_id,
+            "generation": 4,
+            "backend_id": "backend-A",
+            "capture_context": "identity_ctx",
+            "cap_id": 321,
+            "frame": frame,
+            "capture_info": {"cap_id": 321, "reason": "threshold"},
+            "queued_monotonic_ns": 10,
+            "worker_started_monotonic_ns": 20,
+            "worker_completed_monotonic_ns": 30,
+        }
+    )
+
+    callback.assert_called_once_with(frame)
+    assert controller.pending_capture_active is False
+    assert controller.capture_coordinator.last_result.status is CaptureStatus.SUCCESS
+    capture_info = camera_model.update_calls[0]["capture_info"]
+    assert capture_info["generation"] == 4
+    assert capture_info["backend_id"] == "backend-A"
+    assert capture_info["capture_context"] == "identity_ctx"
+    assert capture_info["worker_completed_monotonic_ns"] == 30
+
+
+def test_controller_same_request_mismatched_generation_is_stale_ignored():
+    controller, machine, camera_model = _make_controller()
+    callback = Mock()
+    machine.capture_state.update({"generation": 7, "backend_id": "backend-A"})
+    frame = np.full((4, 5, 3), 44, dtype=np.uint8)
+
+    assert controller.capture_droplet_image(callback=callback) is True
+    request_id = controller.pending_capture_request_id
+    controller._on_capture_completed_payload(
+        {
+            "status": "success",
+            "request_id": request_id,
+            "generation": 8,
+            "backend_id": "backend-A",
+            "cap_id": 111,
+            "frame": frame,
+            "capture_info": {"cap_id": 111},
+        }
+    )
+
+    callback.assert_not_called()
+    assert camera_model.update_calls == []
+    assert controller.pending_capture_active is True
+    assert controller.pending_capture_request_id == request_id
+    result = controller.capture_coordinator.last_result
+    assert result.status is CaptureStatus.STALE_IGNORED
+    assert result.metadata["mismatch_reason"] == "generation_mismatch"
+    assert result.metadata["expected_generation"] == 7
+    assert result.metadata["generation"] == 8
+
+
+def test_controller_same_request_missing_generation_is_stale_when_expected_known():
+    controller, machine, camera_model = _make_controller()
+    callback = Mock()
+    machine.capture_state.update({"generation": 7, "backend_id": "backend-A"})
+
+    assert controller.capture_droplet_image(callback=callback) is True
+    request_id = controller.pending_capture_request_id
+    controller._on_capture_completed_payload(
+        {
+            "status": "success",
+            "request_id": request_id,
+            "backend_id": "backend-A",
+            "cap_id": 112,
+            "frame": np.full((4, 5, 3), 45, dtype=np.uint8),
+            "capture_info": {"cap_id": 112},
+        }
+    )
+
+    callback.assert_not_called()
+    assert camera_model.update_calls == []
+    assert controller.pending_capture_request_id == request_id
+    assert controller.capture_coordinator.last_result.status is CaptureStatus.STALE_IGNORED
+    assert controller.capture_coordinator.last_result.metadata["mismatch_reason"] == "missing_generation"
+
+
+def test_controller_same_request_mismatched_backend_is_stale_when_both_present():
+    controller, machine, camera_model = _make_controller()
+    callback = Mock()
+    machine.capture_state.update({"generation": 7, "backend_id": "backend-A"})
+
+    assert controller.capture_droplet_image(callback=callback) is True
+    request_id = controller.pending_capture_request_id
+    controller._on_capture_completed_payload(
+        {
+            "status": "success",
+            "request_id": request_id,
+            "generation": 7,
+            "backend_id": "backend-B",
+            "cap_id": 113,
+            "frame": np.full((4, 5, 3), 46, dtype=np.uint8),
+            "capture_info": {"cap_id": 113},
+        }
+    )
+
+    callback.assert_not_called()
+    assert camera_model.update_calls == []
+    assert controller.pending_capture_request_id == request_id
+    assert controller.capture_coordinator.last_result.status is CaptureStatus.STALE_IGNORED
+    assert controller.capture_coordinator.last_result.metadata["mismatch_reason"] == "backend_id_mismatch"
 
 
 def test_controller_capture_context_is_one_shot():
@@ -1013,6 +1155,73 @@ def test_controller_late_stale_completion_cannot_satisfy_requeued_capture():
     callback.assert_called_once()
     assert callback.call_args.args[0] is new_frame
     assert camera_model.update_calls[-1]["capture_info"]["cap_id"] == 222
+
+
+def test_controller_recovery_requeue_refreshes_expected_machine_generation():
+    controller, machine, camera_model = _make_controller()
+    callback = Mock()
+    generations = [10, 11]
+    original_capture = machine.capture_droplet_image
+
+    def capture_with_generation(*, throughput_mode=False, capture_request_id=None, capture_context=None):
+        idx = len(machine.capture_calls)
+        machine.capture_state.update({"generation": generations[idx], "backend_id": "backend-A"})
+        return original_capture(
+            throughput_mode=throughput_mode,
+            capture_request_id=capture_request_id,
+            capture_context=capture_context,
+        )
+
+    machine.capture_droplet_image = capture_with_generation
+
+    assert controller.capture_droplet_image(callback=callback, capture_context="retry_identity") is True
+    first_request_id = controller.pending_capture_request_id
+    assert controller.capture_coordinator.active_request.metadata["expected_generation"] == 10
+
+    controller._test_clock["value"] = 108.25
+    controller.pending_capture_guard_timer.fire()
+
+    retry_request_id = controller.pending_capture_request_id
+    assert retry_request_id != first_request_id
+    assert controller.capture_coordinator.active_request.metadata["expected_generation"] == 11
+    assert controller.capture_coordinator.active_request.metadata["expected_backend_id"] == "backend-A"
+
+    stale_frame = np.full((4, 5, 3), 55, dtype=np.uint8)
+    controller._on_capture_completed_payload(
+        {
+            "status": "success",
+            "request_id": retry_request_id,
+            "generation": 10,
+            "backend_id": "backend-A",
+            "cap_id": 301,
+            "frame": stale_frame,
+            "capture_info": {"cap_id": 301},
+        }
+    )
+
+    callback.assert_not_called()
+    assert camera_model.update_calls == []
+    assert controller.pending_capture_request_id == retry_request_id
+    assert controller.capture_coordinator.last_result.status is CaptureStatus.STALE_IGNORED
+    assert controller.capture_coordinator.last_result.metadata["mismatch_reason"] == "generation_mismatch"
+
+    fresh_frame = np.full((4, 5, 3), 66, dtype=np.uint8)
+    controller._on_capture_completed_payload(
+        {
+            "status": "success",
+            "request_id": retry_request_id,
+            "generation": 11,
+            "backend_id": "backend-A",
+            "cap_id": 302,
+            "frame": fresh_frame,
+            "capture_info": {"cap_id": 302},
+        }
+    )
+
+    callback.assert_called_once_with(fresh_frame)
+    assert controller.pending_capture_active is False
+    assert camera_model.update_calls[-1]["capture_info"]["generation"] == 11
+    assert camera_model.update_calls[-1]["capture_info"]["cap_id"] == 302
 
 
 def _make_optics_dialog(*, commands_idle=True, active=True):

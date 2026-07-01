@@ -499,6 +499,70 @@ def test_capture_worker_clears_active_before_completion_emit():
     assert active_states == [False]
 
 
+def test_capture_worker_success_payload_includes_identity_context_and_timestamps():
+    camera = _make_async_camera()
+    completion_seen = threading.Event()
+    payloads = []
+
+    def _fake_sync(**kwargs):
+        return {
+            "status": "success",
+            "request_id": kwargs.get("request_id"),
+            "generation": kwargs.get("generation"),
+            "cap_id": 9,
+            "frame": camera.latest_frame,
+            "capture_info": {"cap_id": 9, "reason": "threshold"},
+            "reason": "threshold",
+        }
+
+    camera.capture_with_retry_sync = _fake_sync
+    camera.capture_completed_signal.connect(lambda payload: payloads.append(dict(payload)) or completion_seen.set())
+
+    assert DropletCamera.capture_with_retry_async(
+        camera,
+        request_id="req-ident",
+        capture_context="ctx-ident",
+    ) is True
+    assert completion_seen.wait(1.0)
+
+    payload = payloads[0]
+    assert payload["status"] == "success"
+    assert payload["request_id"] == "req-ident"
+    assert payload["generation"] == 1
+    assert payload["backend_id"] == "1"
+    assert payload["capture_context"] == "ctx-ident"
+    assert isinstance(payload["queued_monotonic_ns"], int)
+    assert isinstance(payload["worker_started_monotonic_ns"], int)
+    assert isinstance(payload["worker_completed_monotonic_ns"], int)
+    assert payload["queued_monotonic_ns"] <= payload["worker_started_monotonic_ns"]
+    assert payload["worker_started_monotonic_ns"] <= payload["worker_completed_monotonic_ns"]
+
+
+def test_machine_capture_droplet_image_passes_capture_context_to_camera_worker():
+    class _Camera:
+        def __init__(self):
+            self.calls = []
+
+        def capture_with_retry_async(self, **kwargs):
+            self.calls.append(dict(kwargs))
+            return True
+
+    machine = machine_mod.Machine.__new__(machine_mod.Machine)
+    camera = _Camera()
+    machine.droplet_camera = camera
+
+    assert machine_mod.Machine.capture_droplet_image(
+        machine,
+        throughput_mode=True,
+        capture_request_id="req-machine",
+        capture_context="ctx-machine",
+    ) is True
+
+    assert camera.calls[0]["request_id"] == "req-machine"
+    assert camera.calls[0]["capture_context"] == "ctx-machine"
+    assert camera.calls[0]["success_reasons"] == ("threshold", "fallback")
+
+
 def test_capture_worker_emits_exactly_one_failure_result_after_retry_failure():
     camera = _make_async_camera()
     completion_seen = threading.Event()
@@ -514,12 +578,22 @@ def test_capture_worker_emits_exactly_one_failure_result_after_retry_failure():
     camera.capture_completed_signal.connect(lambda payload: payloads.append(dict(payload)) or completion_seen.set())
     camera.capture_failed_signal.connect(lambda msg: failures.append(str(msg)))
 
-    assert DropletCamera.capture_with_retry_async(camera, request_id="req-fail") is True
+    assert DropletCamera.capture_with_retry_async(
+        camera,
+        request_id="req-fail",
+        capture_context="ctx-fail",
+    ) is True
     assert completion_seen.wait(1.0)
 
     assert len(payloads) == 1
     assert payloads[0]["status"] == "failed"
     assert payloads[0]["request_id"] == "req-fail"
+    assert payloads[0]["generation"] == 1
+    assert payloads[0]["backend_id"] == "1"
+    assert payloads[0]["capture_context"] == "ctx-fail"
+    assert isinstance(payloads[0]["queued_monotonic_ns"], int)
+    assert isinstance(payloads[0]["worker_started_monotonic_ns"], int)
+    assert isinstance(payloads[0]["worker_completed_monotonic_ns"], int)
     assert failures == ["retry budget exhausted"]
     assert camera._capture_worker_active.is_set() is False
 
@@ -620,7 +694,11 @@ def test_stale_worker_generation_cannot_complete_newer_request():
     camera.capture_with_retry_sync = _fake_sync
     camera.capture_completed_signal.connect(lambda payload: payloads.append(dict(payload)) or completion_seen.set())
 
-    assert DropletCamera.capture_with_retry_async(camera, request_id="old-request") is True
+    assert DropletCamera.capture_with_retry_async(
+        camera,
+        request_id="old-request",
+        capture_context="ctx-stale-generation",
+    ) is True
     assert sync_entered.wait(1.0)
 
     recovery = DropletCamera.recover_stale_capture(camera, reason="controller timeout")
@@ -631,6 +709,10 @@ def test_stale_worker_generation_cannot_complete_newer_request():
     assert payloads[0]["status"] == "stale"
     assert payloads[0]["stale"] is True
     assert payloads[0]["request_id"] == "old-request"
+    assert payloads[0]["capture_context"] == "ctx-stale-generation"
+    assert isinstance(payloads[0]["queued_monotonic_ns"], int)
+    assert isinstance(payloads[0]["worker_started_monotonic_ns"], int)
+    assert isinstance(payloads[0]["worker_completed_monotonic_ns"], int)
 
 
 def test_recover_stale_capture_replaces_backend_and_releases_old_once():
@@ -691,7 +773,11 @@ def test_async_worker_reports_stale_when_backend_was_replaced():
     camera.capture_with_retry_sync = _fake_sync
     camera.capture_completed_signal.connect(lambda payload: payloads.append(dict(payload)) or completion_seen.set())
 
-    assert DropletCamera.capture_with_retry_async(camera, request_id="backend-old") is True
+    assert DropletCamera.capture_with_retry_async(
+        camera,
+        request_id="backend-old",
+        capture_context="ctx-stale-backend",
+    ) is True
     assert sync_entered.wait(1.0)
 
     DropletCamera.recover_stale_capture(camera, reason="backend replaced")
@@ -701,6 +787,10 @@ def test_async_worker_reports_stale_when_backend_was_replaced():
     assert payloads[0]["status"] == "stale"
     assert payloads[0]["stale"] is True
     assert payloads[0]["stale_reason"] in {"worker_backend_superseded", "worker_generation_superseded"}
+    assert payloads[0]["capture_context"] == "ctx-stale-backend"
+    assert isinstance(payloads[0]["queued_monotonic_ns"], int)
+    assert isinstance(payloads[0]["worker_started_monotonic_ns"], int)
+    assert isinstance(payloads[0]["worker_completed_monotonic_ns"], int)
 
 
 def test_capture_worker_reports_stale_backend_and_clears_active():
@@ -714,11 +804,19 @@ def test_capture_worker_reports_stale_backend_and_clears_active():
     camera.capture_with_retry_sync = _fake_sync
     camera.capture_completed_signal.connect(lambda payload: payloads.append(dict(payload)) or completion_seen.set())
 
-    assert DropletCamera.capture_with_retry_async(camera, request_id="req-stale") is True
+    assert DropletCamera.capture_with_retry_async(
+        camera,
+        request_id="req-stale",
+        capture_context="ctx-stale-backend-exception",
+    ) is True
     assert completion_seen.wait(1.0)
 
     assert payloads[0]["status"] == "stale"
     assert payloads[0]["reason"] == "stale_backend"
+    assert payloads[0]["capture_context"] == "ctx-stale-backend-exception"
+    assert isinstance(payloads[0]["queued_monotonic_ns"], int)
+    assert isinstance(payloads[0]["worker_started_monotonic_ns"], int)
+    assert isinstance(payloads[0]["worker_completed_monotonic_ns"], int)
     assert camera._capture_worker_active.is_set() is False
 
 
