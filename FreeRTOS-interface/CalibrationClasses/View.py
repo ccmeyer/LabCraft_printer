@@ -1549,6 +1549,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._optics_rejected_filenames = []
         self._optics_last_analysis = None
         self._capture_request_pending = False
+        self._droplet_capture_perf_ui_sequence = 0
+        self._droplet_capture_perf_last_request_id = None
         self._calibration_record_export_thread = None
         self._calibration_record_export_worker = None
         self._calibration_record_export_in_progress = False
@@ -2153,6 +2155,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         debug_content_v.addWidget(self.pw_sweep_group)
         debug_content_v.addWidget(self.timecourse_group)
         debug_content_v.addWidget(self.stream_capture_group)
+        self.droplet_capture_performance_debug_group = self._build_droplet_capture_performance_debug_group()
+        debug_content_v.addWidget(self.droplet_capture_performance_debug_group)
         self.refuel_performance_debug_group = self._build_refuel_performance_debug_group()
         debug_content_v.addWidget(self.refuel_performance_debug_group)
         debug_content_v.addStretch(1)
@@ -2710,6 +2714,110 @@ class DropletImagingDialog(QtWidgets.QDialog):
         QTimer.singleShot(0, self._ensure_stream_capture_followup_state)
         QTimer.singleShot(0, self._ensure_stream_calibration_sequence_followup_state)
         QTimer.singleShot(0, self._ensure_droplet_calibration_sequence_followup_state)
+
+    def _build_droplet_capture_performance_debug_group(self):
+        group = QtWidgets.QGroupBox("Droplet Capture Performance Debug")
+        group_v = QtWidgets.QVBoxLayout(group)
+        group_v.setContentsMargins(8, 8, 8, 8)
+        group_v.setSpacing(6)
+
+        self.enable_droplet_capture_performance_diagnostics_checkbox = QtWidgets.QCheckBox(
+            "Enable Droplet Capture Performance Diagnostics"
+        )
+        self.enable_droplet_capture_performance_diagnostics_checkbox.setToolTip(
+            "Record lightweight timing markers for manual droplet captures."
+        )
+        diagnostics_enabled = self._is_droplet_capture_performance_diagnostics_enabled()
+        self.enable_droplet_capture_performance_diagnostics_checkbox.setChecked(diagnostics_enabled)
+        self.enable_droplet_capture_performance_diagnostics_checkbox.toggled.connect(
+            self._set_droplet_capture_performance_diagnostics_enabled
+        )
+        group_v.addWidget(self.enable_droplet_capture_performance_diagnostics_checkbox)
+
+        self.export_droplet_capture_performance_button = QtWidgets.QPushButton("Export Capture Perf Snapshot")
+        self.export_droplet_capture_performance_button.setToolTip(
+            "Write recent droplet capture timing markers to a JSON file."
+        )
+        self.export_droplet_capture_performance_button.clicked.connect(
+            self._export_droplet_capture_performance_snapshot
+        )
+        self.export_droplet_capture_performance_button.setEnabled(diagnostics_enabled)
+        group_v.addWidget(self.export_droplet_capture_performance_button)
+
+        self.droplet_capture_performance_debug_status_label = QtWidgets.QLabel(
+            "Capture performance diagnostics disabled"
+            if not diagnostics_enabled
+            else "Capture performance diagnostics enabled"
+        )
+        self.droplet_capture_performance_debug_status_label.setWordWrap(True)
+        group_v.addWidget(self.droplet_capture_performance_debug_status_label)
+        return group
+
+    def _is_droplet_capture_performance_diagnostics_enabled(self):
+        getter = getattr(self.controller, "is_droplet_capture_performance_diagnostics_enabled", None)
+        if callable(getter):
+            try:
+                return bool(getter())
+            except Exception:
+                return False
+        checkbox = getattr(self, "enable_droplet_capture_performance_diagnostics_checkbox", None)
+        return bool(checkbox is not None and checkbox.isChecked())
+
+    def _set_droplet_capture_performance_debug_status(self, message):
+        label = getattr(self, "droplet_capture_performance_debug_status_label", None)
+        if label is not None:
+            label.setText(str(message or ""))
+
+    def _set_droplet_capture_performance_diagnostics_enabled(self, checked):
+        checked = bool(checked)
+        setter = getattr(self.controller, "set_droplet_capture_performance_diagnostics_enabled", None)
+        if callable(setter):
+            try:
+                checked = bool(setter(checked))
+            except Exception:
+                checked = False
+        checkbox = getattr(self, "enable_droplet_capture_performance_diagnostics_checkbox", None)
+        if checkbox is not None and checkbox.isChecked() != checked:
+            was_blocked = checkbox.blockSignals(True)
+            try:
+                checkbox.setChecked(checked)
+            finally:
+                checkbox.blockSignals(was_blocked)
+        button = getattr(self, "export_droplet_capture_performance_button", None)
+        if button is not None:
+            button.setEnabled(checked)
+        self._set_droplet_capture_performance_debug_status(
+            "Capture performance diagnostics enabled" if checked else "Capture performance diagnostics disabled"
+        )
+
+    def _export_droplet_capture_performance_snapshot(self, *, reason="manual_export", show_status=True):
+        if not self._is_droplet_capture_performance_diagnostics_enabled():
+            if show_status:
+                self._set_droplet_capture_performance_debug_status(
+                    "Enable capture performance diagnostics before exporting."
+                )
+            return None
+        writer = getattr(self.controller, "write_droplet_capture_performance_snapshot", None)
+        if not callable(writer):
+            if show_status:
+                self._set_droplet_capture_performance_debug_status(
+                    "Capture performance snapshot export is unavailable."
+                )
+            return None
+        try:
+            path = writer(reason=reason)
+        except Exception as exc:
+            print(f"[DropletCapturePerf] snapshot export failed: {exc}")
+            if show_status:
+                self._set_droplet_capture_performance_debug_status(f"Capture perf snapshot export failed: {exc}")
+            return None
+        if show_status:
+            message = f"Capture perf snapshot saved: {path}"
+            self._set_droplet_capture_performance_debug_status(message)
+            button = getattr(self, "export_droplet_capture_performance_button", None)
+            if button is not None:
+                button.setToolTip(message)
+        return path
 
     def _build_refuel_performance_debug_group(self):
         group = QtWidgets.QGroupBox("Refuel Performance Debug")
@@ -4399,6 +4507,15 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._refresh_manual_control_lock_state()
         self._refresh_optics_controls()
 
+    def _record_droplet_capture_performance_marker(self, event_kind, payload=None):
+        recorder = getattr(self.controller, "record_droplet_capture_performance_marker", None)
+        if callable(recorder):
+            try:
+                return recorder(event_kind, payload if isinstance(payload, dict) else {})
+            except Exception:
+                return None
+        return None
+
     def _get_droplet_capture_ui_state(self):
         controller = getattr(self, "controller", None)
         getter = getattr(controller, "get_droplet_capture_ui_state", None)
@@ -4514,9 +4631,25 @@ class DropletImagingDialog(QtWidgets.QDialog):
         print(message)
 
     def _on_droplet_capture_finished(self, *_args):
+        request_id = getattr(self, "_droplet_capture_perf_last_request_id", None)
+        self._record_droplet_capture_performance_marker(
+            "ui_pending_cleared",
+            {"request_id": request_id, "reason": "image_updated"},
+        )
+        self._droplet_capture_perf_last_request_id = None
         self._set_capture_request_pending(False)
 
     def _on_droplet_capture_failed(self, message=""):
+        request_id = getattr(self, "_droplet_capture_perf_last_request_id", None)
+        self._record_droplet_capture_performance_marker(
+            "ui_capture_failed",
+            {"request_id": request_id, "message": str(message or "")},
+        )
+        self._record_droplet_capture_performance_marker(
+            "ui_pending_cleared",
+            {"request_id": request_id, "reason": "capture_failed"},
+        )
+        self._droplet_capture_perf_last_request_id = None
         self._set_capture_request_pending(False)
         tabs = getattr(self, "calibration_tabs", None)
         if tabs is not None and tabs.currentWidget() is getattr(self, "optics_tab", None):
@@ -6502,21 +6635,60 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         Triggers a flash for the droplet imaging.
         """
+        ui_sequence = int(getattr(self, "_droplet_capture_perf_ui_sequence", 0)) + 1
+        self._droplet_capture_perf_ui_sequence = ui_sequence
+        self._record_droplet_capture_performance_marker(
+            "ui_trigger_received",
+            {"ui_sequence": ui_sequence, "source": "manual_trigger"},
+        )
         if DropletImagingDialog._is_calibration_busy(self):
+            self._record_droplet_capture_performance_marker(
+                "ui_trigger_ignored",
+                {"ui_sequence": ui_sequence, "ignored_reason": "calibration_busy"},
+            )
             return
         if self._capture_pending_for_ui():
+            self._record_droplet_capture_performance_marker(
+                "ui_trigger_ignored",
+                {"ui_sequence": ui_sequence, "ignored_reason": "pending_capture"},
+            )
             return
         if self._imager_dirty_shutdown_active():
+            self._record_droplet_capture_performance_marker(
+                "ui_trigger_ignored",
+                {"ui_sequence": ui_sequence, "ignored_reason": "dirty_shutdown"},
+            )
             self._show_imager_dirty_shutdown_warning()
             return
         if self._is_flash_fault_latched():
+            self._record_droplet_capture_performance_marker(
+                "ui_trigger_ignored",
+                {"ui_sequence": ui_sequence, "ignored_reason": "flash_fault_latched"},
+            )
             return
         ok = self.controller.capture_droplet_image()
+        state = self._get_droplet_capture_ui_state()
+        request_id = state.get("pending_request_id")
+        rejection_reason = str(getattr(self.controller, "last_capture_queue_rejection_reason", "") or "")
+        self._record_droplet_capture_performance_marker(
+            "ui_request_returned",
+            {
+                "ui_sequence": ui_sequence,
+                "request_id": request_id,
+                "accepted": ok is not False,
+                "reason": rejection_reason,
+            },
+        )
         if ok is False:
             if self._last_capture_rejection_indicates_flash_disarmed():
                 self._show_flash_session_not_armed_warning()
             return
+        self._droplet_capture_perf_last_request_id = request_id
         self._set_capture_request_pending(True)
+        self._record_droplet_capture_performance_marker(
+            "ui_pending_set",
+            {"ui_sequence": ui_sequence, "request_id": request_id},
+        )
 
     def toggle_saving(self):
         if self.saving_active:

@@ -7,6 +7,7 @@ from dfu_update_worker import DfuUpdateWorker
 from ResetDebugBundle import export_reset_debug_bundle
 from pathlib import Path
 from datetime import datetime, timezone
+from collections import Counter, deque
 
 import time
 import numpy as np
@@ -37,6 +38,173 @@ CALIBRATION_MODE_PRINT_PULSE_WIDTH_US = {
     "droplet": 1300,
     "stream": 2500,
 }
+
+
+class DropletCapturePerformanceDiagnostics:
+    """Small in-memory event buffer for manual droplet-capture timing diagnostics."""
+
+    def __init__(self, max_events=2000):
+        self.max_events = int(max(1, max_events))
+        self.enabled = False
+        self.events = deque(maxlen=self.max_events)
+        self.next_event_index = 1
+        self.session_id = None
+        self.last_snapshot_path = None
+
+    @staticmethod
+    def _now_utc():
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    @classmethod
+    def _json_safe(cls, value):
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return value
+        if isinstance(value, dict):
+            return {str(k): cls._json_safe(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [cls._json_safe(v) for v in value]
+        if hasattr(value, "item"):
+            try:
+                return cls._json_safe(value.item())
+            except Exception:
+                pass
+        return str(value)
+
+    @staticmethod
+    def _coerce_ns(value):
+        try:
+            if value is None:
+                return None
+            return int(value)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _delta_ms(start_ns, end_ns):
+        start = DropletCapturePerformanceDiagnostics._coerce_ns(start_ns)
+        end = DropletCapturePerformanceDiagnostics._coerce_ns(end_ns)
+        if start is None or end is None:
+            return None
+        return max(0.0, float(end - start) / 1_000_000.0)
+
+    def set_enabled(self, enabled):
+        enabled = bool(enabled)
+        if enabled and not self.enabled:
+            self.events.clear()
+            self.next_event_index = 1
+            self.session_id = (
+                f"droplet_capture_perf_"
+                f"{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+            )
+        self.enabled = enabled
+        return self.enabled
+
+    def record(self, event_kind, payload=None):
+        if not self.enabled:
+            return None
+        record = {
+            "event_index": int(self.next_event_index),
+            "event_kind": str(event_kind or "event"),
+            "timestamp_utc": self._now_utc(),
+            "monotonic_ns": int(time.monotonic_ns()),
+            "session_id": self.session_id,
+        }
+        if isinstance(payload, dict):
+            for key, value in payload.items():
+                if key not in record:
+                    record[str(key)] = value
+        record = self._json_safe(record)
+        self.next_event_index += 1
+        self.events.append(record)
+        return dict(record)
+
+    def build_snapshot(self, *, reason="manual_export"):
+        events = list(self.events)
+        event_counts = Counter(str(row.get("event_kind") or "") for row in events)
+        rejection_counts = Counter(
+            str(row.get("reason") or row.get("rejection_reason") or row.get("ignored_reason") or "")
+            for row in events
+            if row.get("reason") or row.get("rejection_reason") or row.get("ignored_reason")
+        )
+
+        by_request = {}
+        by_ui_sequence = {}
+        for row in events:
+            request_id = row.get("request_id")
+            if request_id:
+                by_request.setdefault(str(request_id), []).append(row)
+            ui_sequence = row.get("ui_sequence")
+            if ui_sequence is not None:
+                by_ui_sequence.setdefault(str(ui_sequence), []).append(row)
+
+        request_summaries = []
+        for request_id, rows in by_request.items():
+            first_by_kind = {}
+            for row in rows:
+                first_by_kind.setdefault(str(row.get("event_kind") or ""), row)
+            completion = first_by_kind.get("controller_completion_received") or {}
+            summary = {
+                "request_id": request_id,
+                "event_count": len(rows),
+                "status": completion.get("status"),
+                "cap_id": completion.get("cap_id"),
+                "generation": completion.get("generation"),
+                "backend_id": completion.get("backend_id"),
+                "queue_to_worker_start_ms": completion.get("queue_to_worker_start_ms"),
+                "worker_duration_ms": completion.get("worker_duration_ms"),
+                "worker_complete_to_controller_ms": completion.get("worker_complete_to_controller_ms"),
+                "controller_completion_to_pending_clear_ms": self._delta_ms(
+                    (first_by_kind.get("controller_completion_received") or {}).get("monotonic_ns"),
+                    (first_by_kind.get("controller_pending_cleared") or {}).get("monotonic_ns"),
+                ),
+                "controller_completion_to_ui_clear_ms": self._delta_ms(
+                    (first_by_kind.get("controller_completion_received") or {}).get("monotonic_ns"),
+                    (first_by_kind.get("ui_pending_cleared") or {}).get("monotonic_ns"),
+                ),
+            }
+            request_summaries.append(self._json_safe(summary))
+
+        ui_sequence_summaries = []
+        for ui_sequence, rows in by_ui_sequence.items():
+            first_by_kind = {}
+            for row in rows:
+                first_by_kind.setdefault(str(row.get("event_kind") or ""), row)
+            received = first_by_kind.get("ui_trigger_received") or {}
+            returned = first_by_kind.get("ui_request_returned") or {}
+            ignored = next((row for row in rows if str(row.get("event_kind") or "").startswith("ui_trigger_ignored")), {})
+            ui_sequence_summaries.append(
+                self._json_safe(
+                    {
+                        "ui_sequence": ui_sequence,
+                        "request_id": returned.get("request_id"),
+                        "accepted": returned.get("accepted"),
+                        "ignored_reason": ignored.get("ignored_reason"),
+                        "trigger_to_return_ms": self._delta_ms(
+                            received.get("monotonic_ns"),
+                            returned.get("monotonic_ns"),
+                        ),
+                    }
+                )
+            )
+
+        snapshot = {
+            "kind": "droplet_capture_performance_snapshot",
+            "schema_version": 1,
+            "reason": str(reason or "manual_export"),
+            "generated_at_utc": self._now_utc(),
+            "generated_monotonic_ns": int(time.monotonic_ns()),
+            "enabled": bool(self.enabled),
+            "session_id": self.session_id,
+            "event_count": len(events),
+            "max_events": int(self.max_events),
+            "event_counts": dict(event_counts),
+            "rejection_counts": dict(rejection_counts),
+            "request_summaries": request_summaries,
+            "ui_sequence_summaries": ui_sequence_summaries,
+            "event_log_tail": events,
+            "last_snapshot_path": self.last_snapshot_path,
+        }
+        return self._json_safe(snapshot)
 
 
 class AppUpdateCheckWorker(QtCore.QObject):
@@ -175,6 +343,7 @@ class Controller(QObject):
         self.last_capture_queue_rejection_state = None
         self.capture_coordinator = CaptureCoordinator()
         self.droplet_imager_dirty_shutdown = False
+        self._droplet_capture_performance_diagnostics = DropletCapturePerformanceDiagnostics()
 
         self._array_state = "idle"
         self._array_context = None
@@ -4810,6 +4979,16 @@ class Controller(QObject):
         }
         self.last_capture_queue_rejection_reason = reason
         self.last_capture_queue_rejection_state = dict(state or {})
+        self.record_droplet_capture_performance_marker(
+            "flash_preflight_failed",
+            {
+                "request_id": request_id,
+                "capture_context": capture_context,
+                "status": status.value,
+                "reason": reason,
+                "recovery_attempted": bool(recovery_attempted),
+            },
+        )
         self._record_active_calibration_event(
             "capture_flash_preflight_failed",
             dict(metadata),
@@ -4851,6 +5030,14 @@ class Controller(QObject):
         coordinator = self._ensure_capture_coordinator()
         monotonic_fn = getattr(self, "_monotonic_fn", time.monotonic)
         started = monotonic_fn()
+        self.record_droplet_capture_performance_marker(
+            "flash_preflight_started",
+            {
+                "request_id": request_id,
+                "capture_context": capture_context,
+                "recovery_attempted": bool(recovery_attempted),
+            },
+        )
         coordinator.begin_flash_preflight(
             request_id,
             context=capture_context,
@@ -4867,6 +5054,14 @@ class Controller(QObject):
             pending = coordinator.pending_snapshot()
             if (not bool(pending.get("active"))) or str(pending.get("request_id")) != str(request_id):
                 state = self._get_flash_safety_state()
+                self.record_droplet_capture_performance_marker(
+                    "flash_preflight_cancelled",
+                    {
+                        "request_id": request_id,
+                        "capture_context": capture_context,
+                        "reason": "capture_cancelled",
+                    },
+                )
                 return CaptureResult.cancelled(
                     request_id,
                     metadata={
@@ -4907,6 +5102,14 @@ class Controller(QObject):
                         "capture_context": capture_context,
                         "session_id": None if session is None else session.session_id,
                         "state": state,
+                    },
+                )
+                self.record_droplet_capture_performance_marker(
+                    "flash_preflight_armed",
+                    {
+                        "request_id": request_id,
+                        "capture_context": capture_context,
+                        "session_id": None if session is None else session.session_id,
                     },
                 )
                 return True
@@ -5010,6 +5213,7 @@ class Controller(QObject):
             return
         try:
             coordinator = self._ensure_capture_coordinator()
+            pending_before = coordinator.pending_snapshot()
             if frame is None:
                 coordinator.complete_failure(
                     request_id,
@@ -5018,9 +5222,27 @@ class Controller(QObject):
                     reason=reason or "capture_completed_without_frame",
                 )
                 self._sync_legacy_pending_capture_fields(coordinator)
+                if bool(pending_before.get("active")) and str(pending_before.get("request_id")) == str(request_id):
+                    self.record_droplet_capture_performance_marker(
+                        "controller_pending_cleared",
+                        {
+                            "request_id": request_id,
+                            "capture_context": pending_before.get("context"),
+                            "terminal_status": CaptureStatus.INTERNAL_ERROR.value,
+                        },
+                    )
                 return
             coordinator.complete_success(request_id, frame, metadata=metadata, reason=reason)
             self._sync_legacy_pending_capture_fields(coordinator)
+            if bool(pending_before.get("active")) and str(pending_before.get("request_id")) == str(request_id):
+                self.record_droplet_capture_performance_marker(
+                    "controller_pending_cleared",
+                    {
+                        "request_id": request_id,
+                        "capture_context": pending_before.get("context"),
+                        "terminal_status": CaptureStatus.SUCCESS.value,
+                    },
+                )
         except Exception:
             pass
 
@@ -5038,6 +5260,7 @@ class Controller(QObject):
             return
         try:
             coordinator = self._ensure_capture_coordinator()
+            pending_before = coordinator.pending_snapshot()
             coordinator.complete_failure(
                 request_id,
                 status=status,
@@ -5047,6 +5270,16 @@ class Controller(QObject):
                 recoverable=recoverable,
             )
             self._sync_legacy_pending_capture_fields(coordinator)
+            if bool(pending_before.get("active")) and str(pending_before.get("request_id")) == str(request_id):
+                result_status = getattr(status, "value", status)
+                self.record_droplet_capture_performance_marker(
+                    "controller_pending_cleared",
+                    {
+                        "request_id": request_id,
+                        "capture_context": pending_before.get("context"),
+                        "terminal_status": result_status,
+                    },
+                )
         except Exception:
             pass
 
@@ -5065,11 +5298,21 @@ class Controller(QObject):
     def _record_capture_coordinator_cancelled(self, *, metadata=None, reason="capture_cancelled"):
         try:
             coordinator = self._ensure_capture_coordinator()
+            pending_before = coordinator.pending_snapshot()
             result = coordinator.cancel_pending(
                 metadata=metadata,
                 reason=reason,
             )
             self._sync_legacy_pending_capture_fields(coordinator)
+            if result is not None and bool(pending_before.get("active")):
+                self.record_droplet_capture_performance_marker(
+                    "controller_pending_cleared",
+                    {
+                        "request_id": pending_before.get("request_id"),
+                        "capture_context": pending_before.get("context"),
+                        "terminal_status": CaptureStatus.CANCELLED.value,
+                    },
+                )
             return result
         except Exception:
             return None
@@ -5081,11 +5324,28 @@ class Controller(QObject):
         """
         self.last_capture_queue_rejection_reason = None
         self.last_capture_queue_rejection_state = None
+        self.record_droplet_capture_performance_marker(
+            "controller_capture_requested",
+            {
+                "capture_context": capture_context,
+                "throughput_mode": bool(throughput_mode),
+                "callback_present": callback is not None,
+            },
+        )
         pending_snapshot = self._capture_pending_snapshot()
         if bool(pending_snapshot.get("active")):
             state = self._get_droplet_capture_state()
             self.last_capture_queue_rejection_reason = "controller_pending"
             self.last_capture_queue_rejection_state = state
+            self.record_droplet_capture_performance_marker(
+                "controller_capture_rejected",
+                {
+                    "reason": "controller_pending",
+                    "pending_request_id": pending_snapshot.get("request_id"),
+                    "capture_context": capture_context,
+                    "throughput_mode": bool(throughput_mode),
+                },
+            )
             print(
                 "[Camera] capture rejected: reason=controller_pending "
                 f"pending_request_id={pending_snapshot.get('request_id')} state={state}"
@@ -5105,6 +5365,15 @@ class Controller(QObject):
             state = self._get_droplet_capture_state()
             self.last_capture_queue_rejection_reason = "context_pending"
             self.last_capture_queue_rejection_state = state
+            self.record_droplet_capture_performance_marker(
+                "controller_capture_rejected",
+                {
+                    "reason": "context_pending",
+                    "pending_request_id": pending_snapshot.get("request_id"),
+                    "capture_context": capture_context,
+                    "throughput_mode": bool(throughput_mode),
+                },
+            )
             print(f"[Camera] capture rejected: reason=context_pending state={state}")
             self._record_active_calibration_event(
                 "capture_queue_rejected",
@@ -5118,6 +5387,15 @@ class Controller(QObject):
                 state = self._get_droplet_capture_state()
                 self.last_capture_queue_rejection_reason = "callback_pending"
                 self.last_capture_queue_rejection_state = state
+                self.record_droplet_capture_performance_marker(
+                    "controller_capture_rejected",
+                    {
+                        "reason": "callback_pending",
+                        "pending_request_id": pending_snapshot.get("request_id"),
+                        "capture_context": capture_context,
+                        "throughput_mode": bool(throughput_mode),
+                    },
+                )
                 print(f"[Camera] capture rejected: reason=callback_pending state={state}")
                 self._record_active_calibration_event(
                     "capture_queue_rejected",
@@ -5176,6 +5454,15 @@ class Controller(QObject):
             },
         )
         self._sync_legacy_pending_capture_fields(coordinator)
+        self.record_droplet_capture_performance_marker(
+            "controller_pending_set",
+            {
+                "request_id": capture_request_id,
+                "capture_context": capture_context,
+                "throughput_mode": bool(throughput_mode),
+                "recovery_attempted": bool(recovery_attempted),
+            },
+        )
         preflight_result = self._run_flash_session_preflight(
             request_id=capture_request_id,
             callback=callback,
@@ -5183,6 +5470,17 @@ class Controller(QObject):
             recovery_attempted=recovery_attempted,
         )
         if isinstance(preflight_result, CaptureResult):
+            self.record_droplet_capture_performance_marker(
+                "controller_capture_rejected",
+                {
+                    "request_id": capture_request_id,
+                    "capture_context": capture_context,
+                    "throughput_mode": bool(throughput_mode),
+                    "recovery_attempted": bool(recovery_attempted),
+                    "status": getattr(getattr(preflight_result, "status", None), "value", getattr(preflight_result, "status", None)),
+                    "reason": str(getattr(preflight_result, "reason", "") or ""),
+                },
+            )
             return preflight_result
         self._sync_legacy_pending_capture_fields(coordinator)
         try:
@@ -5218,6 +5516,15 @@ class Controller(QObject):
             else:
                 queued = capture_method(throughput_mode=throughput_mode)
         except Exception:
+            self.record_droplet_capture_performance_marker(
+                "machine_capture_exception",
+                {
+                    "request_id": capture_request_id,
+                    "capture_context": capture_context,
+                    "throughput_mode": bool(throughput_mode),
+                    "recovery_attempted": bool(recovery_attempted),
+                },
+            )
             self._clear_pending_capture(callback=callback, capture_context=capture_context)
             raise
         if queued is False:
@@ -5239,6 +5546,17 @@ class Controller(QObject):
                     "recovery_attempted": bool(recovery_attempted),
                 },
                 level="warning",
+            )
+            self.record_droplet_capture_performance_marker(
+                "machine_capture_rejected",
+                {
+                    "request_id": capture_request_id,
+                    "reason": reason,
+                    "state": state,
+                    "capture_context": capture_context,
+                    "throughput_mode": bool(throughput_mode),
+                    "recovery_attempted": bool(recovery_attempted),
+                },
             )
             self._clear_pending_capture(callback=callback, capture_context=capture_context)
             self._notify_capture_callback_failed(callback)
@@ -5266,6 +5584,18 @@ class Controller(QObject):
         )
         self._record_active_calibration_event(
             "capture_request_queued",
+            {
+                "request_id": capture_request_id,
+                "capture_context": capture_context,
+                "throughput_mode": bool(throughput_mode),
+                "recovery_attempted": bool(recovery_attempted),
+                "expected_generation": expected_identity.get("expected_generation"),
+                "expected_backend_id": expected_identity.get("expected_backend_id"),
+                "queued_monotonic_ns": expected_identity.get("queued_monotonic_ns"),
+            },
+        )
+        self.record_droplet_capture_performance_marker(
+            "machine_capture_queued",
             {
                 "request_id": capture_request_id,
                 "capture_context": capture_context,
@@ -5430,10 +5760,21 @@ class Controller(QObject):
 
     def _clear_pending_capture(self, *, callback=None, capture_context=None):
         coordinator = self._ensure_capture_coordinator()
+        before = coordinator.pending_snapshot()
         cleared = coordinator.clear_pending(callback=callback, context=capture_context)
         if cleared or (callback is None and capture_context is None):
             self._stop_pending_capture_guard()
         self._sync_legacy_pending_capture_fields(coordinator)
+        if cleared and bool(before.get("active")):
+            self.record_droplet_capture_performance_marker(
+                "controller_pending_cleared",
+                {
+                    "request_id": before.get("request_id"),
+                    "capture_context": before.get("context"),
+                    "clear_callback_filtered": callback is not None,
+                    "clear_context_filtered": capture_context is not None,
+                },
+            )
         return cleared
 
     def cancel_pending_droplet_capture(self, reason, *, emit_capture_failed: bool = True, recover: bool = True):
@@ -5494,6 +5835,18 @@ class Controller(QObject):
         else:
             self._stop_pending_capture_guard()
             self._sync_legacy_pending_capture_fields()
+
+        self.record_droplet_capture_performance_marker(
+            "controller_capture_cancelled",
+            {
+                "request_id": request_id,
+                "capture_context": capture_context,
+                "reason": cancel_reason,
+                "state_before": state_before,
+                "state_after": state_after,
+                "recovery_result": dict(recovery_result or {}),
+            },
+        )
 
         if callback is not None:
             try:
@@ -5571,6 +5924,15 @@ class Controller(QObject):
             status=CaptureStatus.INTERNAL_ERROR,
             metadata={"message": str(msg), "state": self._get_droplet_capture_state()},
             reason=str(msg),
+        )
+        self.record_droplet_capture_performance_marker(
+            "controller_capture_failed",
+            {
+                "request_id": request_id,
+                "capture_context": pending_snapshot.get("context"),
+                "message": str(msg),
+                "state": self._get_droplet_capture_state(),
+            },
         )
         self._clear_pending_capture()
         if cb:
@@ -5722,6 +6084,55 @@ class Controller(QObject):
             return "flash_fault"
         return "machine_rejected"
 
+    def _ensure_droplet_capture_performance_diagnostics(self):
+        diagnostics = getattr(self, "_droplet_capture_performance_diagnostics", None)
+        if diagnostics is None:
+            diagnostics = DropletCapturePerformanceDiagnostics()
+            self._droplet_capture_performance_diagnostics = diagnostics
+        return diagnostics
+
+    def set_droplet_capture_performance_diagnostics_enabled(self, enabled):
+        diagnostics = self._ensure_droplet_capture_performance_diagnostics()
+        return diagnostics.set_enabled(bool(enabled))
+
+    def is_droplet_capture_performance_diagnostics_enabled(self):
+        diagnostics = self._ensure_droplet_capture_performance_diagnostics()
+        return bool(diagnostics.enabled)
+
+    def record_droplet_capture_performance_marker(self, event_kind, payload=None):
+        diagnostics = getattr(self, "_droplet_capture_performance_diagnostics", None)
+        if diagnostics is None or not bool(getattr(diagnostics, "enabled", False)):
+            return None
+        return diagnostics.record(event_kind, payload if isinstance(payload, dict) else {})
+
+    def build_droplet_capture_performance_snapshot(self, reason="manual_export"):
+        diagnostics = self._ensure_droplet_capture_performance_diagnostics()
+        return diagnostics.build_snapshot(reason=reason)
+
+    def _default_droplet_capture_performance_snapshot_dir(self):
+        experiment_model = getattr(getattr(self, "model", None), "experiment_model", None)
+        experiment_path = getattr(experiment_model, "experiment_dir_path", None)
+        base = Path(str(experiment_path)) if experiment_path else Path.cwd()
+        return base / "calibration_recordings" / "droplet_capture_performance"
+
+    def write_droplet_capture_performance_snapshot(self, directory=None, reason="manual_export"):
+        diagnostics = self._ensure_droplet_capture_performance_diagnostics()
+        out_dir = Path(directory) if directory is not None else self._default_droplet_capture_performance_snapshot_dir()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        path = out_dir / f"droplet_capture_performance_{stamp}_{uuid.uuid4().hex[:8]}.json"
+        previous_path = diagnostics.last_snapshot_path
+        diagnostics.last_snapshot_path = str(path)
+        snapshot = diagnostics.build_snapshot(reason=reason)
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(snapshot, handle, indent=2)
+                handle.write("\n")
+        except Exception:
+            diagnostics.last_snapshot_path = previous_path
+            raise
+        return path
+
     def _record_active_calibration_event(self, event_type, payload=None, *, level="info"):
         try:
             active = getattr(self.model.calibration_manager, "activeCalibration", None)
@@ -5739,6 +6150,7 @@ class Controller(QObject):
     def _on_camera_capture_phase(self, payload):
         data = dict(payload or {}) if isinstance(payload, dict) else {"payload": payload}
         level = str(data.get("level") or "info")
+        self.record_droplet_capture_performance_marker("camera_phase", data)
         self._record_active_calibration_event("camera_capture_phase", data, level=level)
 
     def _emit_active_calibration_error(self, message: str):
@@ -6024,6 +6436,38 @@ class Controller(QObject):
     def _on_capture_completed_payload(self, payload):
         payload = dict(payload or {}) if isinstance(payload, dict) else {"status": "failed", "error": str(payload)}
         request_id = payload.get("request_id")
+        status = str(payload.get("status") or "").lower()
+        controller_received_ns = time.monotonic_ns()
+        queued_ns = payload.get("queued_monotonic_ns")
+        worker_started_ns = payload.get("worker_started_monotonic_ns")
+        worker_completed_ns = payload.get("worker_completed_monotonic_ns")
+        self.record_droplet_capture_performance_marker(
+            "controller_completion_received",
+            {
+                "request_id": request_id,
+                "status": status,
+                "cap_id": payload.get("cap_id"),
+                "generation": payload.get("generation"),
+                "backend_id": payload.get("backend_id"),
+                "capture_context": payload.get("capture_context"),
+                "queued_monotonic_ns": queued_ns,
+                "worker_started_monotonic_ns": worker_started_ns,
+                "worker_completed_monotonic_ns": worker_completed_ns,
+                "controller_received_monotonic_ns": controller_received_ns,
+                "queue_to_worker_start_ms": DropletCapturePerformanceDiagnostics._delta_ms(
+                    queued_ns,
+                    worker_started_ns,
+                ),
+                "worker_duration_ms": DropletCapturePerformanceDiagnostics._delta_ms(
+                    worker_started_ns,
+                    worker_completed_ns,
+                ),
+                "worker_complete_to_controller_ms": DropletCapturePerformanceDiagnostics._delta_ms(
+                    worker_completed_ns,
+                    controller_received_ns,
+                ),
+            },
+        )
         pending_snapshot = self._capture_pending_snapshot()
         expected_request_id = pending_snapshot.get("request_id")
         mismatch_reason = self._capture_completion_identity_mismatch(payload, pending_snapshot)
@@ -6048,9 +6492,20 @@ class Controller(QObject):
                 metadata=stale_metadata,
                 reason=str(mismatch_reason),
             )
+            self.record_droplet_capture_performance_marker(
+                "controller_completion_stale",
+                {
+                    "request_id": request_id,
+                    "expected_request_id": expected_request_id,
+                    "status": status,
+                    "reason": str(mismatch_reason),
+                    "cap_id": payload.get("cap_id"),
+                    "generation": payload.get("generation"),
+                    "backend_id": payload.get("backend_id"),
+                },
+            )
             return
 
-        status = str(payload.get("status") or "").lower()
         if status == "stale" or bool(payload.get("stale", False)):
             stale_metadata = self._capture_completion_identity_metadata(
                 payload=payload,
@@ -6066,6 +6521,18 @@ class Controller(QObject):
                 request_id,
                 metadata=stale_metadata,
                 reason="worker_marked_stale",
+            )
+            self.record_droplet_capture_performance_marker(
+                "controller_completion_stale",
+                {
+                    "request_id": request_id,
+                    "expected_request_id": expected_request_id,
+                    "status": status,
+                    "reason": "worker_marked_stale",
+                    "cap_id": payload.get("cap_id"),
+                    "generation": payload.get("generation"),
+                    "backend_id": payload.get("backend_id"),
+                },
             )
             return
         if status == "success" and payload.get("frame") is not None:
@@ -6104,6 +6571,16 @@ class Controller(QObject):
         # Update the model and/or view (assuming your model has such a method)
         try:
             self.model.droplet_camera_model.update_image(frame, capture_info=cap_info, save_metadata=save_metadata)
+            self.record_droplet_capture_performance_marker(
+                "model_image_updated",
+                {
+                    "request_id": request_id,
+                    "capture_context": capture_context,
+                    "cap_id": (cap_info or {}).get("cap_id") if isinstance(cap_info, dict) else None,
+                    "generation": (cap_info or {}).get("generation") if isinstance(cap_info, dict) else None,
+                    "backend_id": (cap_info or {}).get("backend_id") if isinstance(cap_info, dict) else None,
+                },
+            )
             droplet_count = self._current_imaging_droplet_count()
             if droplet_count > 0:
                 self._record_refuel_ejection_event(

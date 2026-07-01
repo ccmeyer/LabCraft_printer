@@ -106,6 +106,15 @@ def _build_droplet_dialog(
             return object()
         return Mock(side_effect=_side_effect)
 
+    droplet_capture_perf_enabled = {"value": False}
+
+    def _set_droplet_capture_perf_enabled(enabled):
+        droplet_capture_perf_enabled["value"] = bool(enabled)
+        return droplet_capture_perf_enabled["value"]
+
+    def _is_droplet_capture_perf_enabled():
+        return bool(droplet_capture_perf_enabled["value"])
+
     controller = SimpleNamespace(
         _command_calls=command_calls,
         last_capture_queue_rejection_reason=last_capture_queue_rejection_reason,
@@ -113,6 +122,10 @@ def _build_droplet_dialog(
         start_read_camera=Mock(side_effect=start_read_camera_side_effect),
         stop_read_camera=Mock(),
         capture_droplet_image=Mock(return_value=capture_droplet_image_return),
+        is_droplet_capture_performance_diagnostics_enabled=Mock(side_effect=_is_droplet_capture_perf_enabled),
+        set_droplet_capture_performance_diagnostics_enabled=Mock(side_effect=_set_droplet_capture_perf_enabled),
+        write_droplet_capture_performance_snapshot=Mock(return_value="C:/tmp/droplet_capture_perf.json"),
+        record_droplet_capture_performance_marker=Mock(),
         start_refuel_camera=Mock(),
         stop_refuel_camera=Mock(),
         capture_refuel_image=Mock(),
@@ -191,6 +204,10 @@ def test_refuel_panel_default_disabled_and_no_capture(monkeypatch, qapp):
     assert dialog.enable_refuel_process_monitoring_checkbox.isChecked() is False
     assert dialog.enable_refuel_process_monitoring_checkbox.isEnabled() is False
     assert dialog.refuel_performance_debug_group.title() == "Refuel Performance Debug"
+    assert dialog.droplet_capture_performance_debug_group.title() == "Droplet Capture Performance Debug"
+    assert dialog.enable_droplet_capture_performance_diagnostics_checkbox.isChecked() is False
+    assert dialog.export_droplet_capture_performance_button.isEnabled() is False
+    assert dialog.droplet_capture_performance_debug_status_label.text() == "Capture performance diagnostics disabled"
     assert dialog.enable_refuel_performance_diagnostics_checkbox.isChecked() is False
     assert dialog.export_refuel_performance_button.isEnabled() is False
     assert dialog.refuel_performance_debug_status_label.text() == "Performance diagnostics disabled"
@@ -290,6 +307,99 @@ def test_calibration_capture_error_from_disarmed_flash_session_mentions_logger_c
     assert "logger connection" in warning_calls[-1][1]
     assert status_calls
     assert any("logger connection" in message for message, _color in status_calls)
+
+
+def test_droplet_capture_performance_debug_checkbox_and_export(monkeypatch, qapp):
+    dialog, _refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
+
+    dialog.enable_droplet_capture_performance_diagnostics_checkbox.setChecked(True)
+    qapp.processEvents()
+
+    controller.set_droplet_capture_performance_diagnostics_enabled.assert_called_with(True)
+    assert dialog.export_droplet_capture_performance_button.isEnabled() is True
+    assert "enabled" in dialog.droplet_capture_performance_debug_status_label.text()
+
+    dialog.export_droplet_capture_performance_button.click()
+    qapp.processEvents()
+
+    controller.write_droplet_capture_performance_snapshot.assert_called_once_with(reason="manual_export")
+    assert "C:/tmp/droplet_capture_perf.json" in dialog.droplet_capture_performance_debug_status_label.text()
+
+
+def test_toggle_flash_records_pending_ignore_for_capture_perf(monkeypatch, qapp):
+    dialog, _refuel_model, controller = _build_droplet_dialog(
+        monkeypatch,
+        qapp,
+        capture_ui_state={
+            "pending_active": True,
+            "pending_request_id": "pending-1",
+            "dirty_shutdown": False,
+            "last_result_status": None,
+            "last_result_reason": "",
+            "last_result_dirty_shutdown": False,
+        },
+    )
+    controller.record_droplet_capture_performance_marker.reset_mock()
+
+    dialog.toggle_flash()
+
+    controller.capture_droplet_image.assert_not_called()
+    assert ("ui_trigger_received", {"ui_sequence": 1, "source": "manual_trigger"}) in [
+        call.args for call in controller.record_droplet_capture_performance_marker.call_args_list
+    ]
+    assert ("ui_trigger_ignored", {"ui_sequence": 1, "ignored_reason": "pending_capture"}) in [
+        call.args for call in controller.record_droplet_capture_performance_marker.call_args_list
+    ]
+
+
+def test_toggle_flash_records_request_and_pending_markers(monkeypatch, qapp):
+    state = {
+        "pending_active": False,
+        "pending_request_id": None,
+        "dirty_shutdown": False,
+        "last_result_status": None,
+        "last_result_reason": "",
+        "last_result_dirty_shutdown": False,
+    }
+
+    dialog, _refuel_model, controller = _build_droplet_dialog(
+        monkeypatch,
+        qapp,
+        capture_ui_state=state,
+    )
+
+    def _capture():
+        state["pending_active"] = True
+        state["pending_request_id"] = "request-1"
+        controller.get_droplet_capture_ui_state.return_value = dict(state)
+        return True
+
+    controller.capture_droplet_image.side_effect = _capture
+    controller.record_droplet_capture_performance_marker.reset_mock()
+
+    dialog.toggle_flash()
+
+    assert dialog._capture_request_pending is True
+    assert dialog._droplet_capture_perf_last_request_id == "request-1"
+    assert ("ui_request_returned", {
+        "ui_sequence": 1,
+        "request_id": "request-1",
+        "accepted": True,
+        "reason": "",
+    }) in [call.args for call in controller.record_droplet_capture_performance_marker.call_args_list]
+    assert ("ui_pending_set", {"ui_sequence": 1, "request_id": "request-1"}) in [
+        call.args for call in controller.record_droplet_capture_performance_marker.call_args_list
+    ]
+
+    controller.record_droplet_capture_performance_marker.reset_mock()
+    state["pending_active"] = False
+    controller.get_droplet_capture_ui_state.return_value = dict(state)
+    dialog._on_droplet_capture_finished()
+
+    assert dialog._capture_request_pending is False
+    assert ("ui_pending_cleared", {"request_id": "request-1", "reason": "image_updated"}) in [
+        call.args for call in controller.record_droplet_capture_performance_marker.call_args_list
+    ]
 
 
 def test_refuel_panel_open_camera_button_uses_explicit_callback_without_capture(monkeypatch, qapp):
