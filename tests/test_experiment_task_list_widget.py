@@ -20,17 +20,21 @@ class SignalStub:
 
 
 class HeadStub:
-    def __init__(self, stock_id, name, *, calibrated=False, calibration_chip=False):
+    def __init__(self, stock_id, name, *, calibrated=False, calibration_chip=False, printing_mode="droplet"):
         self.stock_id = stock_id
         self.name = name
         self.calibrated = bool(calibrated)
         self.calibration_chip = bool(calibration_chip)
+        self.printing_mode = printing_mode
 
     def get_stock_id(self):
         return self.stock_id
 
     def get_display_stock_name(self, new_line=False):
         return self.name.replace(" ", "\n") if new_line else self.name
+
+    def get_printing_mode(self):
+        return self.printing_mode
 
     def check_calibration_complete(self):
         return self.calibrated
@@ -58,16 +62,29 @@ class WellStub:
 
 
 class ExperimentModelStub:
-    def __init__(self, applied_stock_ids=()):
+    def __init__(self, applied_stock_ids=(), manual_refuel_by_stock=None):
         self.experiment_dir_path = "experiment-dir"
         self._applied_stock_ids = set(applied_stock_ids)
+        self._manual_refuel_by_stock = dict(manual_refuel_by_stock or {})
         self.applied_imaging_calibration_changed = SignalStub()
+        self.manual_refuel_check_changed = SignalStub()
 
     def get_applied_imaging_calibration(self, *, printer_head=None, **_kwargs):
         stock_id = printer_head.get_stock_id() if printer_head is not None else None
         if stock_id in self._applied_stock_ids:
-            return {"run_id": f"run-{stock_id}", "stock_id": stock_id}
+            return {
+                "run_id": f"run-{stock_id}",
+                "stock_id": stock_id,
+                "printing_mode": printer_head.get_printing_mode(),
+            }
         return None
+
+    def validate_manual_refuel_check_for_print(self, *, printer_head=None, machine_model=None, **_kwargs):
+        stock_id = printer_head.get_stock_id() if printer_head is not None else None
+        result = self._manual_refuel_by_stock.get(stock_id)
+        if isinstance(result, dict):
+            return dict(result)
+        return {"ok": True, "code": "not_required", "message": ""}
 
 
 class MachineModelStub:
@@ -111,17 +128,33 @@ def _make_widget(
     applied_stock_ids=(),
     progress_by_stock=None,
     preflight=None,
+    refuel_preflight=None,
     array_state="idle",
     calibration_summary_rows=None,
+    printing_modes=None,
+    manual_refuel_by_stock=None,
 ):
     if progress_by_stock is None:
         progress_by_stock = {"stock-a": [1, 1], "stock-b": [1]}
     if preflight is None:
         preflight = {"ok": True}
+    if refuel_preflight is None:
+        refuel_preflight = {"ok": True, "code": "not_required", "message": ""}
+    printing_modes = dict(printing_modes or {})
 
     heads = {
-        "stock-a": HeadStub("stock-a", "Reagent A", calibrated="stock-a" in calibrated_stock_ids),
-        "stock-b": HeadStub("stock-b", "Reagent B", calibrated="stock-b" in calibrated_stock_ids),
+        "stock-a": HeadStub(
+            "stock-a",
+            "Reagent A",
+            calibrated="stock-a" in calibrated_stock_ids,
+            printing_mode=printing_modes.get("stock-a", "droplet"),
+        ),
+        "stock-b": HeadStub(
+            "stock-b",
+            "Reagent B",
+            calibrated="stock-b" in calibrated_stock_ids,
+            printing_mode=printing_modes.get("stock-b", "droplet"),
+        ),
     }
     active_head = heads.get(active_stock)
     wells = []
@@ -131,7 +164,10 @@ def _make_widget(
                 wells.append(WellStub(stock_id, target=1, remaining=remaining))
 
     model = SimpleNamespace()
-    model.experiment_model = ExperimentModelStub(applied_stock_ids)
+    model.experiment_model = ExperimentModelStub(
+        applied_stock_ids,
+        manual_refuel_by_stock=manual_refuel_by_stock,
+    )
     model.machine_model = MachineModelStub(
         connected=connected,
         enabled=enabled,
@@ -175,6 +211,7 @@ def _make_widget(
         check_if_all_completed=Mock(return_value=queue_idle),
         get_array_run_state=Mock(return_value=array_state),
         get_print_array_imaging_calibration_preflight=Mock(return_value=preflight),
+        get_print_array_refuel_check_preflight=Mock(return_value=refuel_preflight),
         array_state_changed=SignalStub(),
         array_complete=SignalStub(),
         machine=SimpleNamespace(command_queue=command_queue),
@@ -394,6 +431,148 @@ def test_print_preflight_message_is_contextual_blocking_text(qapp):
     assert context["current_task"]["key"] == "print"
     assert context["current_task"]["state"] == "blocked"
     assert widget.blocking_label.text() == "Print pressure does not match the applied calibration."
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "required_refuel_check",
+        "deferred_refuel_check",
+        "missing_refuel_check",
+        "stale_refuel_check",
+    ],
+)
+def test_stream_refuel_preflight_blocks_before_print(qapp, code):
+    message = f"{code} message"
+    widget, _model, _controller, heads = _make_widget(
+        qapp,
+        active_stock="stock-a",
+        calibrated_stock_ids={"stock-a"},
+        applied_stock_ids={"stock-a"},
+        progress_by_stock={"stock-a": [1]},
+        printing_modes={"stock-a": "stream"},
+        refuel_preflight={"ok": False, "code": code, "message": message},
+    )
+
+    context = widget._head_context(heads["stock-a"])
+    task_keys = [task["key"] for task in context["tasks"]]
+
+    assert task_keys.index("manual_refuel") < task_keys.index("print")
+    assert context["current_task"]["key"] == "manual_refuel"
+    assert context["current_task"]["state"] == "blocked"
+    assert widget.next_label.text() == "Next: Manual refuel check for Reagent A"
+    assert widget.blocking_label.text() == message
+
+
+def test_passed_stream_refuel_check_marks_task_done_and_allows_print(qapp):
+    widget, _model, _controller, heads = _make_widget(
+        qapp,
+        active_stock="stock-a",
+        calibrated_stock_ids={"stock-a"},
+        applied_stock_ids={"stock-a"},
+        progress_by_stock={"stock-a": [1]},
+        printing_modes={"stock-a": "stream"},
+        refuel_preflight={"ok": True, "code": "passed_refuel_check", "message": "Manual refuel passed."},
+    )
+
+    context = widget._head_context(heads["stock-a"])
+    tasks_by_key = {task["key"]: task for task in context["tasks"]}
+
+    assert tasks_by_key["manual_refuel"]["state"] == "done"
+    assert context["current_task"]["key"] == "print"
+    assert widget.next_label.text() == "Next: Print array for Reagent A"
+
+
+@pytest.mark.parametrize(
+    "printing_mode, refuel_preflight",
+    [
+        ("droplet", {"ok": True, "code": "not_required", "message": ""}),
+        ("stream", {"ok": True, "code": "not_required", "message": ""}),
+    ],
+)
+def test_not_required_refuel_preflight_does_not_add_manual_task(qapp, printing_mode, refuel_preflight):
+    widget, _model, _controller, heads = _make_widget(
+        qapp,
+        active_stock="stock-a",
+        calibrated_stock_ids={"stock-a"},
+        applied_stock_ids={"stock-a"},
+        progress_by_stock={"stock-a": [1]},
+        printing_modes={"stock-a": printing_mode},
+        refuel_preflight=refuel_preflight,
+    )
+
+    context = widget._head_context(heads["stock-a"])
+
+    assert "manual_refuel" not in {task["key"] for task in context["tasks"]}
+    assert context["current_task"]["key"] == "print"
+
+
+def test_manual_refuel_check_signal_refreshes_active_head_section(qapp):
+    widget, model, controller, heads = _make_widget(
+        qapp,
+        active_stock="stock-a",
+        calibrated_stock_ids={"stock-a"},
+        applied_stock_ids={"stock-a"},
+        progress_by_stock={"stock-a": [1]},
+        printing_modes={"stock-a": "stream"},
+        refuel_preflight={
+            "ok": False,
+            "code": "required_refuel_check",
+            "message": "Manual refuel check is required.",
+        },
+    )
+    assert widget._head_context(heads["stock-a"])["current_task"]["key"] == "manual_refuel"
+
+    full_rebuild_calls = _spy_method(widget, "_full_rebuild")
+    global_update_calls = _spy_method(widget, "_update_global_section")
+    head_update_calls = _spy_method(widget, "_update_head_section")
+    progress_update_calls = _spy_method(widget, "_update_head_progress_header")
+    controller.get_print_array_refuel_check_preflight.return_value = {
+        "ok": True,
+        "code": "passed_refuel_check",
+        "message": "Manual refuel passed.",
+    }
+
+    model.experiment_model.manual_refuel_check_changed.emit({"stock_id": "stock-a"})
+    _wait_for_debounced_refresh(qapp)
+
+    assert full_rebuild_calls == []
+    assert global_update_calls == []
+    assert progress_update_calls == []
+    assert [call[0]["key"] for call in head_update_calls] == ["stock-a"]
+    assert widget._head_context(heads["stock-a"])["current_task"]["key"] == "print"
+    assert widget.next_label.text() == "Next: Print array for Reagent A"
+
+
+def test_saved_manual_refuel_status_drives_workflow_guide_after_reload(qapp):
+    widget, model, controller, heads = _make_widget(
+        qapp,
+        active_stock="stock-a",
+        calibrated_stock_ids={"stock-a"},
+        applied_stock_ids={"stock-a"},
+        progress_by_stock={"stock-a": [1]},
+        printing_modes={"stock-a": "stream"},
+        manual_refuel_by_stock={
+            "stock-a": {
+                "ok": False,
+                "code": "stale_refuel_check",
+                "message": "Saved manual refuel check is stale.",
+            }
+        },
+    )
+    controller.get_print_array_refuel_check_preflight.side_effect = (
+        lambda: model.experiment_model.validate_manual_refuel_check_for_print(
+            printer_head=heads["stock-a"],
+            machine_model=model.machine_model,
+        )
+    )
+
+    widget.refresh()
+    context = widget._head_context(heads["stock-a"])
+
+    assert context["current_task"]["key"] == "manual_refuel"
+    assert context["current_task"]["state"] == "blocked"
+    assert widget.blocking_label.text() == "Saved manual refuel check is stale."
 
 
 def test_queue_busy_is_contextual_print_blocker_only(qapp):

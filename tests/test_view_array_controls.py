@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import Mock, call
 
+import pytest
 from PySide6.QtWidgets import QMessageBox
 
 from View import CommandQueueWidget, MainWindow, WellPlateWidget
@@ -27,14 +28,20 @@ def _make_widget(
     array_state="idle",
     has_head=True,
     preflight=None,
+    refuel_preflight=None,
     choice="Cancel",
     dock_context=None,
     yes_no_responses=None,
+    bypass_result=None,
 ):
     if preflight is None:
         preflight = {"ok": True, "code": "ok", "message": "", "record": None}
+    if refuel_preflight is None:
+        refuel_preflight = {"ok": True, "code": "passed_refuel_check", "message": "", "record": {"status": "passed"}}
     if dock_context is None:
         dock_context = {"required": False, "reasons": [], "title": "", "message": ""}
+    if bypass_result is None:
+        bypass_result = {"status": "bypassed", "source": "print_array_preflight"}
     widget = WellPlateWidget.__new__(WellPlateWidget)
     widget.color_dict = {
         "dark_blue": "#123456",
@@ -47,6 +54,8 @@ def _make_widget(
         request_array_soft_stop=Mock(),
         get_array_run_state=lambda: array_state,
         get_print_array_imaging_calibration_preflight=Mock(return_value=preflight),
+        get_print_array_refuel_check_preflight=Mock(return_value=refuel_preflight),
+        record_manual_refuel_check_bypass=Mock(return_value=bypass_result),
         get_evap_plate_dock_check_context=Mock(return_value=dock_context),
         apply_applied_imaging_calibration_print_settings=Mock(
             return_value={"ok": True, "message": "Set print pulse width to 1450 us and print pressure to 1.350 psi."}
@@ -67,6 +76,7 @@ def _make_widget(
         popup_choice=Mock(return_value=choice),
         popup_message=Mock(),
         _is_yes_response=lambda response: MainWindow._is_yes_response(response),
+        pressure_box=SimpleNamespace(manual_refuel_check_after_stream_apply=Mock()),
     )
     widget.start_print_array_button = DummyButton()
     return widget
@@ -252,6 +262,177 @@ def test_well_plate_widget_settings_mismatch_can_proceed_with_override():
     WellPlateWidget.start_print_array(widget)
 
     widget.controller.print_array.assert_called_once_with(settings_mismatch_override=True)
+
+
+def test_well_plate_widget_refuel_check_not_required_allows_printing():
+    widget = _make_widget(
+        refuel_preflight={"ok": True, "code": "not_required", "message": "", "record": None},
+    )
+
+    WellPlateWidget.start_print_array(widget)
+
+    widget.controller.get_print_array_refuel_check_preflight.assert_called_once_with()
+    widget.controller.print_array.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "required_refuel_check",
+        "missing_refuel_check",
+        "deferred_refuel_check",
+        "failed_refuel_check",
+        "unclear_refuel_check",
+        "stale_refuel_check",
+    ],
+)
+def test_well_plate_widget_refuel_check_cancel_blocks_printing(code):
+    widget = _make_widget(
+        refuel_preflight={
+            "ok": False,
+            "code": code,
+            "message": "Manual refuel check is required.",
+            "record": {"status": "required"},
+        },
+        choice="Cancel",
+    )
+
+    WellPlateWidget.start_print_array(widget)
+
+    widget.main_window.popup_choice.assert_called_once()
+    widget.controller.record_manual_refuel_check_bypass.assert_not_called()
+    widget.main_window.pressure_box.manual_refuel_check_after_stream_apply.assert_not_called()
+    widget.controller.print_array.assert_not_called()
+
+
+def test_well_plate_widget_refuel_check_run_now_launches_manual_check_without_printing():
+    widget = _make_widget(
+        refuel_preflight={
+            "ok": False,
+            "code": "deferred_refuel_check",
+            "message": "Manual refuel check was deferred.",
+            "record": {"status": "deferred"},
+        },
+        choice="Run manual refuel check now",
+    )
+
+    WellPlateWidget.start_print_array(widget)
+
+    widget.main_window.pressure_box.manual_refuel_check_after_stream_apply.assert_called_once_with()
+    widget.controller.record_manual_refuel_check_bypass.assert_not_called()
+    widget.controller.print_array.assert_not_called()
+
+
+def test_well_plate_widget_refuel_check_bypass_records_and_prints():
+    widget = _make_widget(
+        refuel_preflight={
+            "ok": False,
+            "code": "missing_refuel_check",
+            "message": "No manual refuel check has been recorded.",
+            "record": None,
+        },
+        choice="Proceed without refuel check",
+    )
+
+    WellPlateWidget.start_print_array(widget)
+
+    widget.controller.record_manual_refuel_check_bypass.assert_called_once_with(
+        source="print_array_preflight",
+        reason="operator_bypass",
+    )
+    widget.controller.print_array.assert_called_once_with(manual_refuel_check_bypass=True)
+
+
+def test_well_plate_widget_refuel_bypass_failure_blocks_printing():
+    widget = _make_widget(
+        refuel_preflight={
+            "ok": False,
+            "code": "stale_refuel_check",
+            "message": "Manual refuel check is stale.",
+            "record": {"status": "passed"},
+        },
+        choice="Proceed without refuel check",
+        bypass_result={"ok": False, "message": "recording failed"},
+    )
+
+    WellPlateWidget.start_print_array(widget)
+
+    widget.controller.record_manual_refuel_check_bypass.assert_called_once()
+    widget.main_window.popup_message.assert_called_once_with(
+        "Manual Refuel Check Bypass Not Recorded",
+        "recording failed",
+    )
+    widget.controller.print_array.assert_not_called()
+
+
+def test_well_plate_widget_refuel_context_unavailable_blocks_without_bypass_prompt():
+    widget = _make_widget(
+        refuel_preflight={
+            "ok": False,
+            "code": "context_unavailable",
+            "message": "No printer head is loaded.",
+            "record": None,
+        },
+    )
+
+    WellPlateWidget.start_print_array(widget)
+
+    widget.main_window.popup_message.assert_called_once_with(
+        "Cannot Start Print Array",
+        "No printer head is loaded.",
+    )
+    widget.main_window.popup_choice.assert_not_called()
+    widget.controller.record_manual_refuel_check_bypass.assert_not_called()
+    widget.controller.print_array.assert_not_called()
+
+
+def test_well_plate_widget_imaging_cancel_prevents_refuel_prompt():
+    widget = _make_widget(
+        preflight={
+            "ok": False,
+            "code": "missing_record",
+            "message": "No applied imaging calibration was found.",
+            "record": None,
+        },
+        refuel_preflight={
+            "ok": False,
+            "code": "required_refuel_check",
+            "message": "Manual refuel check is required.",
+            "record": {"status": "required"},
+        },
+        choice="Cancel",
+    )
+
+    WellPlateWidget.start_print_array(widget)
+
+    widget.controller.get_print_array_refuel_check_preflight.assert_not_called()
+    widget.controller.record_manual_refuel_check_bypass.assert_not_called()
+    widget.controller.print_array.assert_not_called()
+
+
+def test_well_plate_widget_refuel_bypass_and_dock_confirmation_pass_both_flags():
+    widget = _make_widget(
+        refuel_preflight={
+            "ok": False,
+            "code": "unclear_refuel_check",
+            "message": "Manual refuel check was unclear.",
+            "record": {"status": "unclear"},
+        },
+        choice="Proceed without refuel check",
+        dock_context={
+            "required": True,
+            "reasons": ["first_experiment_print"],
+            "title": "Evaporation Plate Dock Check",
+            "message": "Confirm the evaporation plate is docked.",
+        },
+    )
+
+    WellPlateWidget.start_print_array(widget)
+
+    widget.controller.print_array.assert_called_once_with(
+        manual_refuel_check_bypass=True,
+        evap_plate_dock_confirmed=True,
+    )
 
 
 def test_well_plate_widget_reset_resume_passes_dock_confirmation_with_overrides():

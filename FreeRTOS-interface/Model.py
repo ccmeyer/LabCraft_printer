@@ -334,6 +334,7 @@ class ExperimentModel(QObject):
     experiment_generated = Signal(int, float)  # (n_reactions, worst_nonfill_volume_nL)
     targets_unreachable = Signal(object)  # list[dict]
     applied_imaging_calibration_changed = Signal(dict)
+    manual_refuel_check_changed = Signal(dict)
 
     def __init__(self, prof=None):
         super().__init__()
@@ -371,6 +372,10 @@ class ExperimentModel(QObject):
         }
         self.stock_prep_state: Dict[str, Any] = self._default_stock_prep_state()
         self.applied_imaging_calibrations: Dict[str, Any] = {
+            "schema_version": 1,
+            "records": {},
+        }
+        self.manual_refuel_checks: Dict[str, Any] = {
             "schema_version": 1,
             "records": {},
         }
@@ -5050,6 +5055,129 @@ class ExperimentModel(QObject):
         }
 
     @staticmethod
+    def _normalize_manual_refuel_checks(payload) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {"schema_version": 1, "records": {}}
+        raw_records = payload.get("records")
+        if not isinstance(raw_records, dict):
+            raw_records = {}
+        records = {}
+        for key, value in raw_records.items():
+            if isinstance(value, dict):
+                records[str(key)] = dict(value)
+        return {
+            "schema_version": int(payload.get("schema_version", 1) or 1),
+            "records": records,
+        }
+
+    @staticmethod
+    def _manual_refuel_applied_fingerprint(applied_record) -> str:
+        if not isinstance(applied_record, dict):
+            return ""
+        fields = (
+            "stock_id",
+            "printer_head_id",
+            "printing_mode",
+            "applied_printing_mode",
+            "factor_name",
+            "option_name",
+            "is_fill",
+            "measured_volume_nL",
+            "applied_design_volume_nL",
+            "pw_us",
+            "pressure_psi",
+            "run_id",
+            "phase",
+            "timestamp",
+            "source_row_fingerprint",
+        )
+        payload = {key: applied_record.get(key) for key in fields}
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+
+    @staticmethod
+    def _manual_refuel_float_or_none(value):
+        if value in (None, ""):
+            return None
+        try:
+            value = float(value)
+        except Exception:
+            return None
+        return value if math.isfinite(value) else None
+
+    @staticmethod
+    def _manual_refuel_int_or_none(value):
+        if value in (None, ""):
+            return None
+        try:
+            return int(round(float(value)))
+        except Exception:
+            return None
+
+    def _manual_refuel_machine_snapshot(self, machine_model=None) -> dict:
+        def _machine_value(getter_name):
+            getter = getattr(machine_model, getter_name, None) if machine_model is not None else None
+            if callable(getter):
+                try:
+                    return getter()
+                except Exception:
+                    return None
+            return None
+
+        print_current = self._manual_refuel_float_or_none(_machine_value("get_current_print_pressure"))
+        print_target = self._manual_refuel_float_or_none(_machine_value("get_target_print_pressure"))
+        refuel_current = self._manual_refuel_float_or_none(_machine_value("get_current_refuel_pressure"))
+        refuel_target = self._manual_refuel_float_or_none(_machine_value("get_target_refuel_pressure"))
+        print_pressure = print_target if print_target is not None else print_current
+        refuel_pressure = refuel_target if refuel_target is not None else refuel_current
+        return {
+            "print_pulse_width_us": self._manual_refuel_int_or_none(_machine_value("get_print_pulse_width")),
+            "refuel_pulse_width_us": self._manual_refuel_int_or_none(_machine_value("get_refuel_pulse_width")),
+            "print_pressure_psi": print_pressure,
+            "current_print_pressure_psi": print_current,
+            "target_print_pressure_psi": print_target,
+            "refuel_pressure_psi": refuel_pressure,
+            "current_refuel_pressure_psi": refuel_current,
+            "target_refuel_pressure_psi": refuel_target,
+        }
+
+    def _manual_refuel_context_and_key(
+        self,
+        *,
+        printer_head=None,
+        stock_id: str | None = None,
+        printer_head_id: str | None = None,
+        printing_mode: str | None = None,
+        factor_name: str | None = None,
+        option_name: str | None = None,
+        is_fill: bool | None = None,
+    ) -> tuple[dict | None, str | None]:
+        context = self._resolve_applied_imaging_context(
+            printer_head=printer_head,
+            stock_id=stock_id,
+            printer_head_id=printer_head_id,
+            printing_mode=printing_mode,
+            factor_name=factor_name,
+            option_name=option_name,
+            is_fill=is_fill,
+        )
+        if context is None:
+            return None, None
+        key = self._applied_imaging_key(
+            context["stock_id"],
+            context["printer_head_id"],
+            context["printing_mode"],
+            context["factor_name"],
+            context["option_name"],
+        )
+        return context, key
+
+    @staticmethod
+    def _normalize_manual_refuel_status(status) -> str:
+        normalized = str(status or "unknown").strip().lower()
+        allowed = {"unknown", "required", "deferred", "passed", "failed", "unclear", "bypassed"}
+        return normalized if normalized in allowed else "unknown"
+
+    @staticmethod
     def _stock_row_base_id(row: dict) -> str:
         name = row.get("option_name") or row.get("factor_name") or ""
         units = row.get("units", "")
@@ -5288,6 +5416,17 @@ class ExperimentModel(QObject):
         )
         state["records"][key] = record
         self.applied_imaging_calibrations = state
+        if normalize_printing_mode(record.get("applied_printing_mode") or record.get("printing_mode")) == PRINTING_MODE_STREAM:
+            self.mark_manual_refuel_check_required(
+                stock_id=record["stock_id"],
+                printer_head_id=record["printer_head_id"],
+                printing_mode=record["printing_mode"],
+                factor_name=record["factor_name"],
+                option_name=record["option_name"],
+                is_fill=record["is_fill"],
+                applied_record=record,
+                save=False,
+            )
         self.unsaved_changes = True
         self.applied_imaging_calibration_changed.emit(dict(record))
         if save and getattr(self, "experiment_file_path", None):
@@ -5328,6 +5467,337 @@ class ExperimentModel(QObject):
         )
         record = state.get("records", {}).get(key)
         return dict(record) if isinstance(record, dict) else None
+
+    def get_manual_refuel_check(
+        self,
+        *,
+        printer_head=None,
+        stock_id: str | None = None,
+        printer_head_id: str | None = None,
+        printing_mode: str | None = None,
+        factor_name: str | None = None,
+        option_name: str | None = None,
+        is_fill: bool | None = None,
+    ) -> dict | None:
+        _context, key = self._manual_refuel_context_and_key(
+            printer_head=printer_head,
+            stock_id=stock_id,
+            printer_head_id=printer_head_id,
+            printing_mode=printing_mode,
+            factor_name=factor_name,
+            option_name=option_name,
+            is_fill=is_fill,
+        )
+        if key is None:
+            return None
+        state = self._normalize_manual_refuel_checks(getattr(self, "manual_refuel_checks", None))
+        record = state.get("records", {}).get(key)
+        return dict(record) if isinstance(record, dict) else None
+
+    def _store_manual_refuel_check_record(self, key: str, record: dict, *, save: bool = True) -> dict:
+        state = self._normalize_manual_refuel_checks(getattr(self, "manual_refuel_checks", None))
+        state["records"][str(key)] = dict(record)
+        self.manual_refuel_checks = state
+        self.unsaved_changes = True
+        self.manual_refuel_check_changed.emit(dict(record))
+        if save and getattr(self, "experiment_file_path", None):
+            self.save_experiment()
+        return dict(record)
+
+    def mark_manual_refuel_check_required(
+        self,
+        *,
+        printer_head=None,
+        stock_id: str | None = None,
+        printer_head_id: str | None = None,
+        printing_mode: str | None = None,
+        factor_name: str | None = None,
+        option_name: str | None = None,
+        is_fill: bool | None = None,
+        source: str = "applied_stream_calibration",
+        applied_record: dict | None = None,
+        save: bool = True,
+    ) -> dict:
+        context, key = self._manual_refuel_context_and_key(
+            printer_head=printer_head,
+            stock_id=stock_id,
+            printer_head_id=printer_head_id,
+            printing_mode=printing_mode,
+            factor_name=factor_name,
+            option_name=option_name,
+            is_fill=is_fill,
+        )
+        if context is None or key is None:
+            raise ValueError("Could not resolve manual refuel check context.")
+        if normalize_printing_mode(context.get("printing_mode")) != PRINTING_MODE_STREAM:
+            raise ValueError("Manual refuel checks are only required for stream mode.")
+
+        applied_record = dict(
+            applied_record
+            or self.get_applied_imaging_calibration(
+                stock_id=context["stock_id"],
+                printer_head_id=context["printer_head_id"],
+                printing_mode=context["printing_mode"],
+                factor_name=context["factor_name"],
+                option_name=context["option_name"],
+                is_fill=context["is_fill"],
+            )
+            or {}
+        )
+        fingerprint = self._manual_refuel_applied_fingerprint(applied_record)
+        existing = self.get_manual_refuel_check(
+            stock_id=context["stock_id"],
+            printer_head_id=context["printer_head_id"],
+            printing_mode=context["printing_mode"],
+            factor_name=context["factor_name"],
+            option_name=context["option_name"],
+            is_fill=context["is_fill"],
+        )
+        if (
+            isinstance(existing, dict)
+            and self._normalize_manual_refuel_status(existing.get("status")) == "passed"
+            and str(existing.get("applied_calibration_fingerprint") or "") == fingerprint
+        ):
+            return dict(existing)
+
+        previous_status = (
+            self._normalize_manual_refuel_status(existing.get("status"))
+            if isinstance(existing, dict)
+            else "unknown"
+        )
+        record = {
+            "status": "required",
+            "source": str(source or "applied_stream_calibration"),
+            "stock_id": context["stock_id"],
+            "printer_head_id": context["printer_head_id"],
+            "printing_mode": context["printing_mode"],
+            "factor_name": context["factor_name"],
+            "option_name": context["option_name"],
+            "is_fill": bool(context["is_fill"]),
+            "applied_calibration_fingerprint": fingerprint,
+            "applied_calibration_record": applied_record or None,
+            "previous_status": previous_status,
+            "recorded_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+        return self._store_manual_refuel_check_record(key, record, save=save)
+
+    def record_manual_refuel_check_outcome(
+        self,
+        *,
+        status,
+        source,
+        printer_head=None,
+        stock_id: str | None = None,
+        printer_head_id: str | None = None,
+        printing_mode: str | None = None,
+        factor_name: str | None = None,
+        option_name: str | None = None,
+        is_fill: bool | None = None,
+        machine_model=None,
+        trial_droplet_count=None,
+        trial_count=None,
+        operator_judgment=None,
+        notes=None,
+        bypass_reason=None,
+        save: bool = True,
+    ) -> dict:
+        normalized_status = self._normalize_manual_refuel_status(status)
+        context, key = self._manual_refuel_context_and_key(
+            printer_head=printer_head,
+            stock_id=stock_id,
+            printer_head_id=printer_head_id,
+            printing_mode=printing_mode,
+            factor_name=factor_name,
+            option_name=option_name,
+            is_fill=is_fill,
+        )
+        if context is None or key is None:
+            raise ValueError("Could not resolve manual refuel check context.")
+        if normalize_printing_mode(context.get("printing_mode")) != PRINTING_MODE_STREAM:
+            raise ValueError("Manual refuel checks are only recorded for stream mode.")
+
+        existing = self.get_manual_refuel_check(
+            stock_id=context["stock_id"],
+            printer_head_id=context["printer_head_id"],
+            printing_mode=context["printing_mode"],
+            factor_name=context["factor_name"],
+            option_name=context["option_name"],
+            is_fill=context["is_fill"],
+        )
+        applied_record = self.get_applied_imaging_calibration(
+            stock_id=context["stock_id"],
+            printer_head_id=context["printer_head_id"],
+            printing_mode=context["printing_mode"],
+            factor_name=context["factor_name"],
+            option_name=context["option_name"],
+            is_fill=context["is_fill"],
+        )
+        snapshot = self._manual_refuel_machine_snapshot(machine_model)
+        record = {
+            "status": normalized_status,
+            "source": str(source or "manual_refuel_check"),
+            "stock_id": context["stock_id"],
+            "printer_head_id": context["printer_head_id"],
+            "printing_mode": context["printing_mode"],
+            "factor_name": context["factor_name"],
+            "option_name": context["option_name"],
+            "is_fill": bool(context["is_fill"]),
+            "applied_calibration_fingerprint": self._manual_refuel_applied_fingerprint(applied_record),
+            "applied_calibration_record": dict(applied_record) if isinstance(applied_record, dict) else None,
+            "previous_status": (
+                self._normalize_manual_refuel_status(existing.get("status"))
+                if isinstance(existing, dict)
+                else "unknown"
+            ),
+            "trial_droplet_count": self._manual_refuel_int_or_none(trial_droplet_count),
+            "trial_count": self._manual_refuel_int_or_none(trial_count),
+            "operator_judgment": None if operator_judgment in (None, "") else str(operator_judgment),
+            "notes": None if notes in (None, "") else str(notes),
+            "bypass_reason": None if bypass_reason in (None, "") else str(bypass_reason),
+            "recorded_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+        record.update(snapshot)
+        return self._store_manual_refuel_check_record(key, record, save=save)
+
+    def validate_manual_refuel_check_for_print(
+        self,
+        *,
+        printer_head,
+        machine_model=None,
+        pressure_tolerance_psi: float = 0.05,
+    ) -> dict:
+        if printer_head is None:
+            return {
+                "ok": False,
+                "code": "context_unavailable",
+                "message": "No printer head is loaded.",
+                "record": None,
+            }
+        if self._printer_head_printing_mode(printer_head) != PRINTING_MODE_STREAM:
+            return {"ok": True, "code": "not_required", "message": "", "record": None}
+
+        context, _key = self._manual_refuel_context_and_key(printer_head=printer_head)
+        if context is None:
+            return {
+                "ok": False,
+                "code": "context_unavailable",
+                "message": "No stream stock plan was found for the loaded printer head.",
+                "record": None,
+            }
+
+        applied_record = self.get_applied_imaging_calibration(
+            stock_id=context["stock_id"],
+            printer_head_id=context["printer_head_id"],
+            printing_mode=context["printing_mode"],
+            factor_name=context["factor_name"],
+            option_name=context["option_name"],
+            is_fill=context["is_fill"],
+        )
+        record = self.get_manual_refuel_check(
+            stock_id=context["stock_id"],
+            printer_head_id=context["printer_head_id"],
+            printing_mode=context["printing_mode"],
+            factor_name=context["factor_name"],
+            option_name=context["option_name"],
+            is_fill=context["is_fill"],
+        )
+        if not isinstance(record, dict):
+            return {
+                "ok": False,
+                "code": "missing_refuel_check",
+                "message": "No manual refuel check has been recorded for this stream calibration.",
+                "record": None,
+                "applied_record": applied_record,
+            }
+
+        status = self._normalize_manual_refuel_status(record.get("status"))
+        if status != "passed":
+            return {
+                "ok": False,
+                "code": f"{status}_refuel_check",
+                "message": f"Manual refuel check status is {status}; a passed check is required before stream printing.",
+                "record": record,
+                "applied_record": applied_record,
+            }
+
+        expected_fingerprint = self._manual_refuel_applied_fingerprint(applied_record)
+        if str(record.get("applied_calibration_fingerprint") or "") != expected_fingerprint:
+            return {
+                "ok": False,
+                "code": "stale_refuel_check",
+                "message": "Manual refuel check is stale for the currently applied stream calibration.",
+                "record": record,
+                "applied_record": applied_record,
+            }
+
+        snapshot = self._manual_refuel_machine_snapshot(machine_model)
+
+        def _settings_unavailable(message):
+            return {
+                "ok": False,
+                "code": "settings_unavailable",
+                "message": message,
+                "record": record,
+                "applied_record": applied_record,
+            }
+
+        for field, label in (
+            ("print_pulse_width_us", "print pulse width"),
+            ("refuel_pulse_width_us", "refuel pulse width"),
+        ):
+            recorded = self._manual_refuel_int_or_none(record.get(field))
+            current = self._manual_refuel_int_or_none(snapshot.get(field))
+            if recorded is None:
+                return _settings_unavailable(f"Manual refuel check is missing {label}.")
+            if current is None:
+                return _settings_unavailable(f"Cannot confirm current {label}.")
+            if int(recorded) != int(current):
+                return {
+                    "ok": False,
+                    "code": f"{field.replace('_us', '')}_mismatch",
+                    "message": (
+                        f"Current {label} does not match the passed manual refuel check "
+                        f"({recorded} us checked, {current} us current)."
+                    ),
+                    "record": record,
+                    "applied_record": applied_record,
+                }
+
+        tolerance = float(pressure_tolerance_psi)
+        for base, label in (("print", "print pressure"), ("refuel", "refuel pressure")):
+            recorded = self._manual_refuel_float_or_none(record.get(f"{base}_pressure_psi"))
+            if recorded is None:
+                return _settings_unavailable(f"Manual refuel check is missing {label}.")
+            current_values = []
+            for source_label, field in (
+                ("target", f"target_{base}_pressure_psi"),
+                ("current", f"current_{base}_pressure_psi"),
+            ):
+                value = self._manual_refuel_float_or_none(snapshot.get(field))
+                if value is not None:
+                    current_values.append((source_label, value))
+            if not current_values:
+                return _settings_unavailable(f"Cannot confirm current {label}.")
+            for source_label, value in current_values:
+                if abs(float(value) - float(recorded)) > tolerance:
+                    return {
+                        "ok": False,
+                        "code": f"{base}_pressure_mismatch",
+                        "message": (
+                            f"{source_label.title()} {label} does not match the passed manual refuel check "
+                            f"({float(recorded):.3f} psi checked, {float(value):.3f} psi {source_label})."
+                        ),
+                        "record": record,
+                        "applied_record": applied_record,
+                    }
+
+        return {
+            "ok": True,
+            "code": "passed_refuel_check",
+            "message": "",
+            "record": record,
+            "applied_record": applied_record,
+        }
 
     def validate_applied_imaging_calibration_for_print(
         self,
@@ -5866,6 +6336,9 @@ class ExperimentModel(QObject):
             "applied_imaging_calibrations": self._normalize_applied_imaging_calibrations(
                 getattr(self, "applied_imaging_calibrations", None)
             ),
+            "manual_refuel_checks": self._normalize_manual_refuel_checks(
+                getattr(self, "manual_refuel_checks", None)
+            ),
             "factors": [
                 {
                     "name": f.name,
@@ -5982,6 +6455,9 @@ class ExperimentModel(QObject):
         )
         self.applied_imaging_calibrations = self._normalize_applied_imaging_calibrations(
             d.get("applied_imaging_calibrations")
+        )
+        self.manual_refuel_checks = self._normalize_manual_refuel_checks(
+            d.get("manual_refuel_checks")
         )
         fill_droplet_nl = float(self.metadata.get("fill_droplet_volume_nL", self._default_fill_droplet_volume_nl()))
         self.metadata["fill_printing_mode"] = self._resolve_fill_printing_mode(
@@ -7395,8 +7871,12 @@ class ExperimentModel(QObject):
             payload["applied_imaging_calibrations"] = self._normalize_applied_imaging_calibrations(
                 payload.get("applied_imaging_calibrations")
             )
+            payload["manual_refuel_checks"] = self._normalize_manual_refuel_checks(
+                payload.get("manual_refuel_checks")
+            )
         else:
             payload["applied_imaging_calibrations"] = self._normalize_applied_imaging_calibrations(None)
+            payload["manual_refuel_checks"] = self._normalize_manual_refuel_checks(None)
         return payload
 
     def _write_duplicate_design(
@@ -7524,6 +8004,8 @@ class ExperimentModel(QObject):
             "well_selection": self._default_well_selection(),
         }
         self.stock_prep_state = self._default_stock_prep_state()
+        self.applied_imaging_calibrations = self._normalize_applied_imaging_calibrations(None)
+        self.manual_refuel_checks = self._normalize_manual_refuel_checks(None)
         self.plans_per_option.clear()
         self._unreachable_preview_map = {}
         self._target_preview_map = {}

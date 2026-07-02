@@ -99,6 +99,10 @@ def _make_controller(
     imaging_guard_message="Applied imaging calibration is required.",
     imaging_guard_code=None,
     imaging_guard_record=None,
+    refuel_guard_ok=True,
+    refuel_guard_message="Manual refuel check is required.",
+    refuel_guard_code=None,
+    refuel_guard_record=None,
     progress_status=None,
     reset_dock_required=False,
 ):
@@ -159,6 +163,10 @@ def _make_controller(
         imaging_guard_code = "ok" if imaging_guard_ok else "missing_record"
     if imaging_guard_record is None and imaging_guard_ok:
         imaging_guard_record = {"run_id": "run-1", "pw_us": 1400, "pressure_psi": 1.20}
+    if refuel_guard_code is None:
+        refuel_guard_code = "passed_refuel_check" if refuel_guard_ok else "required_refuel_check"
+    if refuel_guard_record is None and refuel_guard_ok:
+        refuel_guard_record = {"status": "passed"}
     if progress_status is None:
         progress_status = {"has_printed_progress": True}
     c.model = SimpleNamespace(
@@ -174,8 +182,11 @@ def _make_controller(
             clear_command_queue=Mock(),
             get_current_accelerations=lambda: current_accels,
             get_print_pulse_width=lambda: 1400,
+            get_refuel_pulse_width=lambda: 2200,
             get_current_print_pressure=lambda: 1.20,
             get_target_print_pressure=lambda: 1.20,
+            get_current_refuel_pressure=lambda: 0.30,
+            get_target_refuel_pressure=lambda: 0.30,
             transport_paused=False,
             pause_watermark_reached=False,
             resume_commands=Mock(),
@@ -190,6 +201,17 @@ def _make_controller(
                     "message": "" if imaging_guard_ok else imaging_guard_message,
                     "record": imaging_guard_record,
                 }
+            ),
+            validate_manual_refuel_check_for_print=Mock(
+                return_value={
+                    "ok": bool(refuel_guard_ok),
+                    "code": refuel_guard_code,
+                    "message": "" if refuel_guard_ok else refuel_guard_message,
+                    "record": refuel_guard_record,
+                }
+            ),
+            record_manual_refuel_check_outcome=Mock(
+                return_value={"status": "passed", "source": "manual_dialog"}
             ),
         ),
     )
@@ -394,6 +416,101 @@ def test_print_array_allows_settings_mismatch_with_explicit_override():
     assert c.error_occurred_signal.calls == []
 
 
+@pytest.mark.parametrize(
+    "code",
+    [
+        "required_refuel_check",
+        "missing_refuel_check",
+        "stale_refuel_check",
+    ],
+)
+def test_print_array_blocks_refuel_check_failures_without_bypass(code):
+    message = "Manual refuel check is required before stream printing."
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        refuel_guard_ok=False,
+        refuel_guard_code=code,
+        refuel_guard_message=message,
+    )
+
+    Controller.print_array(c)
+
+    assert c.error_occurred_signal.calls[0][1] == message
+    c.close_gripper.assert_not_called()
+    c.move_to_location.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("ok", "code", "record"),
+    [
+        (True, "passed_refuel_check", {"status": "passed"}),
+        (True, "not_required", None),
+    ],
+)
+def test_print_array_allows_passed_or_not_required_refuel_check(ok, code, record):
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        refuel_guard_ok=ok,
+        refuel_guard_code=code,
+        refuel_guard_record=record,
+    )
+
+    Controller.print_array(c)
+
+    c.close_gripper.assert_called_once_with()
+    assert c.error_occurred_signal.calls == []
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "required_refuel_check",
+        "missing_refuel_check",
+        "deferred_refuel_check",
+        "failed_refuel_check",
+        "unclear_refuel_check",
+        "bypassed_refuel_check",
+        "stale_refuel_check",
+        "settings_unavailable",
+        "print_pulse_width_mismatch",
+        "refuel_pulse_width_mismatch",
+        "print_pressure_mismatch",
+        "refuel_pressure_mismatch",
+    ],
+)
+def test_print_array_allows_promptable_refuel_check_failure_with_explicit_bypass(code):
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        refuel_guard_ok=False,
+        refuel_guard_code=code,
+        refuel_guard_message="Manual refuel check is not passed.",
+    )
+
+    Controller.print_array(c, manual_refuel_check_bypass=True)
+
+    c.close_gripper.assert_called_once_with()
+    assert c.error_occurred_signal.calls == []
+
+
+@pytest.mark.parametrize("code", ["context_unavailable", "validation_unavailable"])
+def test_print_array_refuel_context_failures_block_even_with_bypass(code):
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        refuel_guard_ok=False,
+        refuel_guard_code=code,
+        refuel_guard_message="Manual refuel check context is unavailable.",
+    )
+
+    Controller.print_array(c, manual_refuel_check_bypass=True)
+
+    assert c.error_occurred_signal.calls[0][1] == "Manual refuel check context is unavailable."
+    c.close_gripper.assert_not_called()
+
+
 def test_apply_applied_imaging_calibration_print_settings_only_sets_parameters():
     c = _make_controller(
         well_plate=FakeWellPlate([FakeWell("A1", 5)]),
@@ -412,6 +529,103 @@ def test_apply_applied_imaging_calibration_print_settings_only_sets_parameters()
     assert c.machine.set_absolute_print_pressure.call_args.args[0] == 1.35
     c.close_gripper.assert_not_called()
     c.move_to_location.assert_not_called()
+
+
+def test_refuel_check_preflight_delegates_with_loaded_head_and_machine_model():
+    printer_head = _make_printer_head()
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=printer_head,
+    )
+
+    result = Controller.get_print_array_refuel_check_preflight(c)
+
+    assert result["ok"] is True
+    c.model.experiment_model.validate_manual_refuel_check_for_print.assert_called_once_with(
+        printer_head=printer_head,
+        machine_model=c.model.machine_model,
+    )
+
+
+def test_refuel_check_preflight_reports_missing_head():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=None,
+    )
+
+    result = Controller.get_print_array_refuel_check_preflight(c)
+
+    assert result["ok"] is False
+    assert result["code"] == "context_unavailable"
+    c.model.experiment_model.validate_manual_refuel_check_for_print.assert_not_called()
+
+
+def test_refuel_check_preflight_is_not_required_for_legacy_profile():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        profile_name="legacy",
+    )
+
+    result = Controller.get_print_array_refuel_check_preflight(c)
+
+    assert result["ok"] is True
+    assert result["code"] == "not_required"
+    c.model.experiment_model.validate_manual_refuel_check_for_print.assert_not_called()
+
+
+def test_record_manual_refuel_check_outcome_passes_loaded_head_and_machine_model():
+    printer_head = _make_printer_head()
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=printer_head,
+    )
+    c.model.experiment_model.record_manual_refuel_check_outcome.return_value = {
+        "status": "passed",
+        "trial_count": 2,
+    }
+
+    result = Controller.record_manual_refuel_check_outcome(
+        c,
+        "passed",
+        "manual_dialog",
+        trial_count=2,
+    )
+
+    assert result["status"] == "passed"
+    c.model.experiment_model.record_manual_refuel_check_outcome.assert_called_once_with(
+        status="passed",
+        source="manual_dialog",
+        printer_head=printer_head,
+        machine_model=c.model.machine_model,
+        trial_count=2,
+    )
+
+
+def test_refuel_check_deferred_and_bypass_helpers_record_expected_statuses():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+    )
+
+    Controller.mark_manual_refuel_check_deferred(c)
+    Controller.record_manual_refuel_check_bypass(c, reason="operator_confirmed")
+
+    assert c.model.experiment_model.record_manual_refuel_check_outcome.call_args_list == [
+        call(
+            status="deferred",
+            source="post_apply_prompt",
+            printer_head=c.model.rack_model.gripper_printer_head,
+            machine_model=c.model.machine_model,
+        ),
+        call(
+            status="bypassed",
+            source="print_array_preflight",
+            printer_head=c.model.rack_model.gripper_printer_head,
+            machine_model=c.model.machine_model,
+            bypass_reason="operator_confirmed",
+        ),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -451,6 +665,7 @@ def test_print_array_skips_applied_imaging_guard_for_legacy_profile():
     Controller.print_array(c)
 
     c.model.experiment_model.validate_applied_imaging_calibration_for_print.assert_not_called()
+    c.model.experiment_model.validate_manual_refuel_check_for_print.assert_not_called()
     c.close_gripper.assert_called_once_with()
 
 

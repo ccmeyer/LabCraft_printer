@@ -1425,6 +1425,229 @@ class PrinterHeadRecoveryDialog(QtWidgets.QDialog):
         super().closeEvent(event)
 
 
+class ManualRefuelCheckDialog(QtWidgets.QDialog):
+    DEFAULT_TRIAL_DROPLETS = 20
+    SOURCE = "manual_refuel_check_dialog"
+
+    def __init__(self, parent, model, controller):
+        super().__init__(parent)
+        self.model = model
+        self.controller = controller
+        self.trial_count = 0
+        self.last_trial_droplet_count = None
+
+        self.setWindowTitle("Manual Refuel Check")
+        self.setModal(True)
+        self.setMinimumWidth(460)
+        self._build_ui()
+        self._setup_shortcuts()
+
+    def _build_ui(self):
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        self.status_label = QtWidgets.QLabel("Move to loading and center the visible channel level.")
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+
+        move_row = QtWidgets.QHBoxLayout()
+        self.move_loading_button = QtWidgets.QPushButton("Move to Loading")
+        self.move_loading_button.clicked.connect(self.move_to_loading)
+        move_row.addWidget(self.move_loading_button)
+        layout.addLayout(move_row)
+
+        pulse_group = QtWidgets.QGroupBox("Center Level")
+        pulse_grid = QtWidgets.QGridLayout(pulse_group)
+        self.refuel_5_button = QtWidgets.QPushButton("Refuel 5")
+        self.refuel_20_button = QtWidgets.QPushButton("Refuel 20")
+        self.print_only_5_button = QtWidgets.QPushButton("Print Only 5")
+        self.print_only_20_button = QtWidgets.QPushButton("Print Only 20")
+        self.refuel_5_button.clicked.connect(lambda: self.refuel_only(5))
+        self.refuel_20_button.clicked.connect(lambda: self.refuel_only(20))
+        self.print_only_5_button.clicked.connect(lambda: self.print_only(5))
+        self.print_only_20_button.clicked.connect(lambda: self.print_only(20))
+        pulse_grid.addWidget(self.refuel_5_button, 0, 0)
+        pulse_grid.addWidget(self.refuel_20_button, 0, 1)
+        pulse_grid.addWidget(self.print_only_5_button, 1, 0)
+        pulse_grid.addWidget(self.print_only_20_button, 1, 1)
+        layout.addWidget(pulse_group)
+
+        pressure_group = QtWidgets.QGroupBox("Refuel Pressure")
+        pressure_grid = QtWidgets.QGridLayout(pressure_group)
+        pressure_buttons = [
+            ("-1.0 psi", -1.0),
+            ("-0.1 psi", -0.1),
+            ("+0.1 psi", 0.1),
+            ("+1.0 psi", 1.0),
+        ]
+        self.refuel_pressure_buttons = []
+        for index, (label, delta) in enumerate(pressure_buttons):
+            button = QtWidgets.QPushButton(label)
+            button.clicked.connect(lambda _checked=False, value=delta: self.adjust_refuel_pressure(value))
+            self.refuel_pressure_buttons.append(button)
+            pressure_grid.addWidget(button, index // 2, index % 2)
+        layout.addWidget(pressure_group)
+
+        trial_group = QtWidgets.QGroupBox("Paired Trial")
+        trial_layout = QtWidgets.QHBoxLayout(trial_group)
+        trial_layout.addWidget(QtWidgets.QLabel("Droplets:"))
+        self.trial_droplets_spin = QtWidgets.QSpinBox()
+        self.trial_droplets_spin.setRange(1, 1000)
+        self.trial_droplets_spin.setValue(self.DEFAULT_TRIAL_DROPLETS)
+        self.trial_droplets_spin.setKeyboardTracking(False)
+        trial_layout.addWidget(self.trial_droplets_spin)
+        self.run_trial_button = QtWidgets.QPushButton("Run Trial")
+        self.run_trial_button.clicked.connect(self.run_paired_trial)
+        trial_layout.addWidget(self.run_trial_button)
+        layout.addWidget(trial_group)
+
+        outcome_group = QtWidgets.QGroupBox("Result")
+        outcome_grid = QtWidgets.QGridLayout(outcome_group)
+        self.stable_button = QtWidgets.QPushButton("Stable")
+        self.level_rose_button = QtWidgets.QPushButton("Level Rose")
+        self.level_fell_button = QtWidgets.QPushButton("Level Fell")
+        self.unclear_button = QtWidgets.QPushButton("Unclear")
+        self.stable_button.clicked.connect(lambda: self.record_outcome("passed", "stable"))
+        self.level_rose_button.clicked.connect(lambda: self.record_outcome("failed", "level_rose"))
+        self.level_fell_button.clicked.connect(lambda: self.record_outcome("failed", "level_fell"))
+        self.unclear_button.clicked.connect(lambda: self.record_outcome("unclear", "unclear"))
+        outcome_grid.addWidget(self.stable_button, 0, 0)
+        outcome_grid.addWidget(self.level_rose_button, 0, 1)
+        outcome_grid.addWidget(self.level_fell_button, 1, 0)
+        outcome_grid.addWidget(self.unclear_button, 1, 1)
+        layout.addWidget(outcome_group)
+
+        close_row = QtWidgets.QHBoxLayout()
+        close_row.addStretch(1)
+        self.close_button = QtWidgets.QPushButton("Close")
+        self.close_button.clicked.connect(self.accept)
+        close_row.addWidget(self.close_button)
+        layout.addLayout(close_row)
+
+    def _setup_shortcuts(self):
+        self.shortcut_pause = QShortcut(QKeySequence("Esc"), self)
+        self.shortcut_pause.setContext(Qt.WidgetWithChildrenShortcut)
+        self.shortcut_pause.activated.connect(self._pause_from_escape)
+
+    def _queue_idle(self):
+        checker = getattr(self.controller, "check_if_all_completed", None)
+        if not callable(checker):
+            self.status_label.setText("Command queue status is unavailable.")
+            return False
+        try:
+            idle = bool(checker())
+        except Exception:
+            idle = False
+        if not idle:
+            self.status_label.setText("Commands are still running. Wait for the queue to finish.")
+        return idle
+
+    def _queue_action(self, method_name, *args, success_message):
+        if not self._queue_idle():
+            return False
+        method = getattr(self.controller, method_name, None)
+        if not callable(method):
+            self.status_label.setText(f"{method_name} is unavailable.")
+            return False
+        result = method(*args, manual=True)
+        if result is False:
+            self.status_label.setText(f"Failed to queue {success_message.lower()}.")
+            return False
+        self.status_label.setText(success_message)
+        return True
+
+    def move_to_loading(self):
+        return self._queue_action("move_to_location", "loading", success_message="Queued move to loading.")
+
+    def refuel_only(self, count):
+        return self._queue_action(
+            "refuel_only",
+            int(count),
+            success_message=f"Queued {int(count)} refuel-only pulses.",
+        )
+
+    def print_only(self, count):
+        return self._queue_action(
+            "print_only",
+            int(count),
+            success_message=f"Queued {int(count)} print-only pulses.",
+        )
+
+    def adjust_refuel_pressure(self, delta):
+        return self._queue_action(
+            "set_relative_refuel_pressure",
+            float(delta),
+            success_message=f"Queued refuel pressure change {float(delta):+.1f} psi.",
+        )
+
+    def run_paired_trial(self):
+        count = int(self.trial_droplets_spin.value())
+        if self._queue_action(
+            "print_droplets",
+            count,
+            success_message=f"Queued paired trial with {count} droplets.",
+        ):
+            self.trial_count += 1
+            self.last_trial_droplet_count = count
+            return True
+        return False
+
+    def record_outcome(self, status, judgment):
+        if not self._queue_idle():
+            return False
+        recorder = getattr(self.controller, "record_manual_refuel_check_outcome", None)
+        if not callable(recorder):
+            self.status_label.setText("Manual refuel check recording is unavailable.")
+            return False
+        result = recorder(
+            status,
+            self.SOURCE,
+            operator_judgment=judgment,
+            trial_droplet_count=self.last_trial_droplet_count,
+            trial_count=self.trial_count,
+        )
+        if isinstance(result, dict) and result.get("ok") is False:
+            self.status_label.setText(str(result.get("message") or "Failed to record manual refuel check."))
+            return False
+        if status == "passed":
+            self.status_label.setText("Recorded stable manual refuel check.")
+        elif judgment == "level_rose":
+            self.status_label.setText("Recorded level rise. Decrease refuel pressure and retest.")
+        elif judgment == "level_fell":
+            self.status_label.setText("Recorded level fall. Increase refuel pressure and retest.")
+        else:
+            self.status_label.setText("Recorded unclear manual refuel check.")
+        return True
+
+    def _pause_from_escape(self):
+        parent = self.parent()
+        pause = getattr(parent, "pause_machine", None)
+        if callable(pause):
+            pause()
+            self.status_label.setText("Pause requested. Manual refuel check remains open.")
+            return
+        main_window = getattr(parent, "main_window", None)
+        pause = getattr(main_window, "pause_machine", None)
+        if callable(pause):
+            pause()
+            self.status_label.setText("Pause requested. Manual refuel check remains open.")
+            return
+        pause_commands = getattr(self.controller, "pause_commands", None)
+        if callable(pause_commands):
+            pause_commands()
+            self.status_label.setText("Pause requested. Manual refuel check remains open.")
+        else:
+            self.status_label.setText("Pause shortcut is unavailable in manual refuel check.")
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self._pause_from_escape()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
 class DropletImagingDialog(QtWidgets.QDialog):
     REFUEL_LEVEL_CHART_WINDOW_SAMPLES = 100
     REFUEL_LEVEL_CHART_FALLBACK_HEIGHT_PX = 100.0
@@ -1463,6 +1686,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         service_mode=False,
         initial_tab=None,
         open_refuel_camera_callback=None,
+        post_apply_manual_refuel_check_callback=None,
     ):
         super().__init__()
         print('\n---Created new droplet imaging dialog---\n')
@@ -1475,6 +1699,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.service_mode = bool(service_mode)
         self.initial_tab = str(initial_tab or "").strip().lower()
         self.open_refuel_camera_callback = open_refuel_camera_callback if callable(open_refuel_camera_callback) else None
+        self.post_apply_manual_refuel_check_callback = (
+            post_apply_manual_refuel_check_callback
+            if callable(post_apply_manual_refuel_check_callback)
+            else None
+        )
 
         # Hardware bounds for pressures (used globally)
         try:
@@ -6120,6 +6349,52 @@ class DropletImagingDialog(QtWidgets.QDialog):
         except Exception:
             return f"{value}{suffix}"
 
+    @staticmethod
+    def _manual_refuel_status_label_from_preflight(result):
+        if not isinstance(result, dict):
+            return "Status unavailable"
+        code = str(result.get("code") or "").strip()
+        if bool(result.get("ok", False)):
+            if code == "not_required":
+                return "Not required"
+            return "Passed"
+        message = str(result.get("message") or "").strip()
+        if message:
+            return message
+        labels = {
+            "missing_refuel_check": "Required",
+            "required_refuel_check": "Required",
+            "deferred_refuel_check": "Deferred",
+            "failed_refuel_check": "Failed",
+            "unclear_refuel_check": "Unclear",
+            "bypassed_refuel_check": "Bypassed",
+            "stale_refuel_check": "Stale",
+            "settings_unavailable": "Settings changed",
+            "print_pulse_width_mismatch": "Settings changed",
+            "refuel_pulse_width_mismatch": "Settings changed",
+            "print_pressure_mismatch": "Settings changed",
+            "refuel_pressure_mismatch": "Settings changed",
+            "context_unavailable": "Status unavailable",
+            "validation_unavailable": "Status unavailable",
+        }
+        return labels.get(code, "Status unavailable")
+
+    def _manual_refuel_status_banner_line(self, record):
+        if not self._post_apply_manual_refuel_check_is_stream(record):
+            return ""
+        getter = getattr(self.controller, "get_print_array_refuel_check_preflight", None)
+        if not callable(getter):
+            return "Manual refuel: Status unavailable"
+        try:
+            result = getter() or {}
+        except Exception:
+            result = {
+                "ok": False,
+                "code": "validation_unavailable",
+            }
+        status = self._manual_refuel_status_label_from_preflight(result)
+        return f"Manual refuel: {status}"
+
     def _refresh_applied_calibration_status_label(self):
         self._refresh_applied_calibration_banner()
 
@@ -6139,7 +6414,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         measured = self._format_applied_record_value(record, "measured_volume_nL", 3, " nL")
         pw = self._format_applied_record_value(record, "pw_us", None, " us")
         pressure = self._format_applied_record_value(record, "pressure_psi", 3, " psi")
-        label.setText(f"Applied: Run {run_id}, {measured}, PW {pw}, {pressure}")
+        text = f"Applied: Run {run_id}, {measured}, PW {pw}, {pressure}"
+        manual_refuel_line = self._manual_refuel_status_banner_line(record)
+        if manual_refuel_line:
+            text = f"{text}\n{manual_refuel_line}"
+        label.setText(text)
         color = self.color_dict.get("dark_blue", "#063f99")
         label.setStyleSheet(
             f"QLabel {{ background-color: {color}; color: white; padding: 5px; }}"
@@ -6251,6 +6530,113 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "original_printing_mode": original_mode,
             "applied_printing_mode": applied_mode,
         }
+
+    @staticmethod
+    def _response_is_yes(response) -> bool:
+        if isinstance(response, QtWidgets.QMessageBox.StandardButton):
+            return response == QtWidgets.QMessageBox.Yes
+        if isinstance(response, int):
+            return response == int(QtWidgets.QMessageBox.Yes)
+        if isinstance(response, str):
+            normalized = response.replace("&", "").strip().lower()
+            return normalized in {"yes", "y"}
+        return False
+
+    def _post_apply_manual_refuel_check_is_stream(self, applied_calibration) -> bool:
+        applied_calibration = dict(applied_calibration or {})
+        mode = (
+            self._normalize_printing_mode_value(applied_calibration.get("printing_mode"), fallback=None)
+            or self._normalize_printing_mode_value(applied_calibration.get("applied_printing_mode"), fallback=None)
+        )
+        return mode == "stream"
+
+    def _post_apply_manual_refuel_prompt_message(self, completion_message):
+        base = str(completion_message or "Stream calibration was applied to the design.")
+        return (
+            f"{base}\n\n"
+            "A manual refuel check is required before stream printing. "
+            "Run it now? The imager will close, the printer will move to the loading position, "
+            "and the manual refuel check window will open after the move completes."
+        )
+
+    def _record_post_apply_manual_refuel_deferred(self):
+        recorder = getattr(self.controller, "mark_manual_refuel_check_deferred", None)
+        if not callable(recorder):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Manual Refuel Check Not Deferred",
+                "The controller cannot record the deferred manual refuel check.",
+            )
+            return False
+        try:
+            result = recorder(source="post_apply_prompt")
+        except Exception as exc:
+            result = {
+                "ok": False,
+                "message": f"Could not record deferred manual refuel check: {exc}",
+            }
+        if isinstance(result, dict) and result.get("ok") is False:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Manual Refuel Check Not Deferred",
+                str(result.get("message") or "Could not record the deferred manual refuel check."),
+            )
+            return False
+        return True
+
+    def _prompt_post_apply_manual_refuel_check(self, applied_calibration, completion_message, *, settings_result=None):
+        if not self._post_apply_manual_refuel_check_is_stream(applied_calibration):
+            return False
+        if settings_result is not None and not bool(dict(settings_result or {}).get("ok")):
+            return False
+
+        profile_name = str(getattr(getattr(self.main_window, "profile", None), "name", "") or "").lower()
+        if profile_name == "legacy":
+            return False
+
+        message = self._post_apply_manual_refuel_prompt_message(completion_message)
+        prompt = getattr(self.main_window, "popup_yes_no", None)
+        if callable(prompt):
+            response = prompt("Manual Refuel Check Required", message)
+        else:
+            response = QtWidgets.QMessageBox.question(
+                self,
+                "Manual Refuel Check Required",
+                message,
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.Yes,
+            )
+
+        if not self._response_is_yes(response):
+            self._record_post_apply_manual_refuel_deferred()
+            return True
+
+        launcher = getattr(self, "post_apply_manual_refuel_check_callback", None)
+        if not callable(launcher):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Manual Refuel Check Unavailable",
+                "The manual refuel check launcher is not available from this calibration window.",
+            )
+            return True
+        try:
+            scheduled = launcher()
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Manual Refuel Check Unavailable",
+                f"Could not schedule the manual refuel check: {exc}",
+            )
+            return True
+        if scheduled is False:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Manual Refuel Check Not Started",
+                "The manual refuel check could not be scheduled.",
+            )
+            return True
+        self.close()
+        return True
 
     def _apply_print_settings_for_applied_calibration(self, applied_calibration, *, run_label="-"):
         applied_calibration = dict(applied_calibration or {})
@@ -9471,6 +9857,18 @@ class DropletImagingDialog(QtWidgets.QDialog):
             or original_mode
         )
 
+        def _prompt_manual_refuel_if_available(applied_calibration, completion_message, settings_result):
+            prompt = getattr(self, "_prompt_post_apply_manual_refuel_check", None)
+            if not callable(prompt):
+                return False
+            return bool(
+                prompt(
+                    applied_calibration,
+                    completion_message,
+                    settings_result=settings_result,
+                )
+            )
+
         # --- Special case: fill reagent
         if payload.get("is_fill"):
             try:
@@ -9535,6 +9933,17 @@ class DropletImagingDialog(QtWidgets.QDialog):
                         f"could not be changed.\n\n{settings_result.get('message', '')}"
                     ),
                 )
+            fill_message = (
+                f"Updated fill ejection volume to {out['new_fill_nL']:.3f} nL."
+                f"\nTotal fill drops: {out['total_drops_old']} -> {out['total_drops_new']} "
+                f"({out['total_drops_delta']:+d})"
+            )
+            if _prompt_manual_refuel_if_available(
+                applied_calibration,
+                fill_message,
+                settings_result,
+            ):
+                return
             QtWidgets.QMessageBox.information(
                 self, "Applied (Fill)",
                 (
@@ -9630,6 +10039,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         )
         if mode_switch_text:
             message = f"{message}\n{mode_switch_text}."
+        if _prompt_manual_refuel_if_available(
+            applied_calibration,
+            message,
+            settings_result,
+        ):
+            return
         QtWidgets.QMessageBox.information(
             self, "Applied",
             message

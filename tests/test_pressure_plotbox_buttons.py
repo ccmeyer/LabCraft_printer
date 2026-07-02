@@ -133,7 +133,21 @@ def _make_model(machine_model, events, *, printer_head=None):
     )
 
 
-def _make_controller(events, *, queue_clear=True):
+def _make_controller(events, *, queue_clear=True, imaging_preflight=None, refuel_preflight=None):
+    if imaging_preflight is None:
+        imaging_preflight = {
+            "ok": True,
+            "code": "ok",
+            "message": "",
+            "record": {"run_id": "stream_calibration"},
+        }
+    if refuel_preflight is None:
+        refuel_preflight = {
+            "ok": False,
+            "code": "required_refuel_check",
+            "message": "Manual refuel check is required.",
+            "record": {"status": "required"},
+        }
     return SimpleNamespace(
         toggle_regulation=Mock(),
         set_absolute_print_pressure=Mock(),
@@ -151,6 +165,8 @@ def _make_controller(events, *, queue_clear=True):
             side_effect=lambda: events.append("connect_droplet_camera_signals")
         ),
         enable_print_profile=Mock(side_effect=lambda: events.append("enable_print_profile")),
+        get_print_array_imaging_calibration_preflight=Mock(return_value=imaging_preflight),
+        get_print_array_refuel_check_preflight=Mock(return_value=refuel_preflight),
     )
 
 
@@ -161,6 +177,7 @@ def _patch_droplet_launch(monkeypatch, events, *, main_window, model, controller
             assert model_arg is model
             assert controller_arg is controller
             assert callable(kwargs.get("open_refuel_camera_callback"))
+            assert callable(kwargs.get("post_apply_manual_refuel_check_callback"))
             self.finished = _SignalStub()
             events.append("droplet_dialog_init")
 
@@ -187,6 +204,36 @@ def _patch_refuel_launch(monkeypatch, events, *, main_window, model, controller)
 
     monkeypatch.setattr(View.importlib, "reload", lambda module: module)
     monkeypatch.setattr(View.CalibrationClasses, "RefuelCameraWindow", _RefuelDialog)
+
+
+def _patch_manual_refuel_launch(monkeypatch, events, *, main_window, model, controller):
+    class _ManualRefuelDialog:
+        def __init__(self, main_window_arg, model_arg, controller_arg):
+            assert main_window_arg is main_window
+            assert model_arg is model
+            assert controller_arg is controller
+            self.finished = _SignalStub()
+            self.focus_calls = []
+            events.append("manual_refuel_dialog_init")
+
+        def show(self):
+            self.focus_calls.append("show")
+            events.append("manual_refuel_dialog_show")
+
+        def raise_(self):
+            self.focus_calls.append("raise")
+            events.append("manual_refuel_dialog_raise")
+
+        def activateWindow(self):
+            self.focus_calls.append("activate")
+            events.append("manual_refuel_dialog_activate")
+
+        def exec(self):
+            events.append("manual_refuel_dialog_exec")
+            return 0
+
+    monkeypatch.setattr(View.importlib, "reload", lambda module: module)
+    monkeypatch.setattr(View.CalibrationClasses, "ManualRefuelCheckDialog", _ManualRefuelDialog)
 
 
 def test_current_profile_pressure_box_removes_extra_bottom_buttons(qapp):
@@ -694,6 +741,7 @@ def test_current_profile_calibrate_pressure_rejects_duplicate_while_droplet_dial
             assert model_arg is model
             assert controller_arg is controller
             assert callable(kwargs.get("open_refuel_camera_callback"))
+            assert callable(kwargs.get("post_apply_manual_refuel_check_callback"))
             self.finished = _SignalStub()
             events.append("droplet_dialog_init")
 
@@ -798,6 +846,7 @@ def test_current_profile_calibrate_pressure_allows_relaunch_after_droplet_dialog
             assert model_arg is model
             assert controller_arg is controller
             assert callable(kwargs.get("open_refuel_camera_callback"))
+            assert callable(kwargs.get("post_apply_manual_refuel_check_callback"))
             self.finished = _SignalStub()
             events.append("droplet_dialog_init")
 
@@ -969,6 +1018,460 @@ def test_current_profile_refuel_camera_allows_relaunch_after_dialog_cleanup(monk
     ]
     assert popups == []
     assert box.refuel_camera_button.isEnabled()
+
+
+def test_current_profile_manual_refuel_check_rejects_when_queue_not_empty(monkeypatch, qapp):
+    events = []
+    popups = []
+    main_window = _make_main_window(CURRENT_PROFILE, popups)
+    model = _make_model(
+        _FakeMachineModel(
+            regulating_print_pressure=True,
+            regulating_refuel_pressure=True,
+        ),
+        events,
+        printer_head=object(),
+    )
+    controller = _make_controller(events, queue_clear=False)
+    box = PressurePlotBox(main_window, model, controller)
+
+    _patch_manual_refuel_launch(monkeypatch, events, main_window=main_window, model=model, controller=controller)
+
+    box.manual_refuel_check()
+
+    assert popups == [
+        (
+            "Commands Still Running",
+            "Please wait for the current commands to finish before starting the manual refuel check.",
+        )
+    ]
+    assert events == []
+    controller.get_print_array_imaging_calibration_preflight.assert_not_called()
+    controller.get_print_array_refuel_check_preflight.assert_not_called()
+
+
+def test_current_profile_manual_refuel_check_requires_gripper_head(monkeypatch, qapp):
+    events = []
+    popups = []
+    main_window = _make_main_window(CURRENT_PROFILE, popups)
+    model = _make_model(
+        _FakeMachineModel(
+            regulating_print_pressure=True,
+            regulating_refuel_pressure=True,
+        ),
+        events,
+        printer_head=None,
+    )
+    controller = _make_controller(events)
+    box = PressurePlotBox(main_window, model, controller)
+
+    _patch_manual_refuel_launch(monkeypatch, events, main_window=main_window, model=model, controller=controller)
+
+    box.manual_refuel_check()
+
+    assert popups == [
+        (
+            "No Printer Head",
+            "Please load a printer head into the gripper before starting the manual refuel check.",
+        )
+    ]
+    assert events == []
+    controller.get_print_array_imaging_calibration_preflight.assert_not_called()
+    controller.get_print_array_refuel_check_preflight.assert_not_called()
+
+
+def test_current_profile_manual_refuel_check_requires_both_regulated_pressures(monkeypatch, qapp):
+    events = []
+    popups = []
+    main_window = _make_main_window(CURRENT_PROFILE, popups)
+    model = _make_model(
+        _FakeMachineModel(
+            regulating_print_pressure=True,
+            regulating_refuel_pressure=False,
+        ),
+        events,
+        printer_head=object(),
+    )
+    controller = _make_controller(events)
+    box = PressurePlotBox(main_window, model, controller)
+
+    _patch_manual_refuel_launch(monkeypatch, events, main_window=main_window, model=model, controller=controller)
+
+    box.manual_refuel_check()
+
+    assert popups == [
+        (
+            "Pressure Not Regulated",
+            "Please regulate both print and refuel pressure before starting the manual refuel check.",
+        )
+    ]
+    assert events == []
+    controller.get_print_array_imaging_calibration_preflight.assert_not_called()
+    controller.get_print_array_refuel_check_preflight.assert_not_called()
+
+
+def test_current_profile_manual_refuel_check_requires_valid_imaging_calibration(monkeypatch, qapp):
+    events = []
+    popups = []
+    main_window = _make_main_window(CURRENT_PROFILE, popups)
+    model = _make_model(
+        _FakeMachineModel(
+            regulating_print_pressure=True,
+            regulating_refuel_pressure=True,
+        ),
+        events,
+        printer_head=object(),
+    )
+    controller = _make_controller(
+        events,
+        imaging_preflight={
+            "ok": False,
+            "code": "missing_applied_calibration",
+            "message": "Apply a stream calibration first.",
+        },
+    )
+    box = PressurePlotBox(main_window, model, controller)
+
+    _patch_manual_refuel_launch(monkeypatch, events, main_window=main_window, model=model, controller=controller)
+
+    box.manual_refuel_check()
+
+    assert popups == [
+        (
+            "Applied Calibration Required",
+            "Apply a stream calibration first.",
+        )
+    ]
+    assert events == []
+    controller.get_print_array_imaging_calibration_preflight.assert_called_once_with()
+    controller.get_print_array_refuel_check_preflight.assert_not_called()
+
+
+def test_current_profile_manual_refuel_check_rejects_non_stream_context(monkeypatch, qapp):
+    events = []
+    popups = []
+    main_window = _make_main_window(CURRENT_PROFILE, popups)
+    model = _make_model(
+        _FakeMachineModel(
+            regulating_print_pressure=True,
+            regulating_refuel_pressure=True,
+        ),
+        events,
+        printer_head=object(),
+    )
+    controller = _make_controller(
+        events,
+        refuel_preflight={
+            "ok": True,
+            "code": "not_required",
+            "message": "Manual refuel check is not required.",
+        },
+    )
+    box = PressurePlotBox(main_window, model, controller)
+
+    _patch_manual_refuel_launch(monkeypatch, events, main_window=main_window, model=model, controller=controller)
+
+    box.manual_refuel_check()
+
+    assert popups == [
+        (
+            "Stream Mode Required",
+            "Manual refuel checks are only required for stream-mode printer heads.",
+        )
+    ]
+    assert events == []
+    controller.get_print_array_imaging_calibration_preflight.assert_called_once_with()
+    controller.get_print_array_refuel_check_preflight.assert_called_once_with()
+
+
+def test_current_profile_manual_refuel_check_rejects_unavailable_context(monkeypatch, qapp):
+    events = []
+    popups = []
+    main_window = _make_main_window(CURRENT_PROFILE, popups)
+    model = _make_model(
+        _FakeMachineModel(
+            regulating_print_pressure=True,
+            regulating_refuel_pressure=True,
+        ),
+        events,
+        printer_head=object(),
+    )
+    controller = _make_controller(
+        events,
+        refuel_preflight={
+            "ok": False,
+            "code": "context_unavailable",
+            "message": "Load a printer head first.",
+        },
+    )
+    box = PressurePlotBox(main_window, model, controller)
+
+    _patch_manual_refuel_launch(monkeypatch, events, main_window=main_window, model=model, controller=controller)
+
+    box.manual_refuel_check()
+
+    assert popups == [
+        (
+            "Cannot Start Manual Refuel Check",
+            "Load a printer head first.",
+        )
+    ]
+    assert events == []
+    controller.get_print_array_imaging_calibration_preflight.assert_called_once_with()
+    controller.get_print_array_refuel_check_preflight.assert_called_once_with()
+
+
+def test_current_profile_manual_refuel_check_opens_dialog(monkeypatch, qapp):
+    events = []
+    popups = []
+    main_window = _make_main_window(CURRENT_PROFILE, popups)
+    model = _make_model(
+        _FakeMachineModel(
+            regulating_print_pressure=True,
+            regulating_refuel_pressure=True,
+        ),
+        events,
+        printer_head=object(),
+    )
+    controller = _make_controller(events)
+    box = PressurePlotBox(main_window, model, controller)
+
+    _patch_manual_refuel_launch(monkeypatch, events, main_window=main_window, model=model, controller=controller)
+
+    box.manual_refuel_check()
+
+    assert events == [
+        "manual_refuel_dialog_init",
+        "manual_refuel_dialog_exec",
+    ]
+    assert popups == []
+    controller.move_to_location.assert_not_called()
+    controller.get_print_array_imaging_calibration_preflight.assert_called_once_with()
+    controller.get_print_array_refuel_check_preflight.assert_called_once_with()
+
+
+def test_current_profile_post_apply_manual_refuel_check_moves_to_loading_then_opens(monkeypatch, qapp):
+    events = []
+    popups = []
+    main_window = _make_main_window(CURRENT_PROFILE, popups)
+    model = _make_model(
+        _FakeMachineModel(
+            regulating_print_pressure=True,
+            regulating_refuel_pressure=True,
+            current_location="camera",
+        ),
+        events,
+        printer_head=object(),
+    )
+    controller = _make_controller(events)
+    box = PressurePlotBox(main_window, model, controller)
+
+    _patch_manual_refuel_launch(monkeypatch, events, main_window=main_window, model=model, controller=controller)
+
+    box.manual_refuel_check_after_stream_apply()
+
+    controller.move_to_location.assert_called_once()
+    move_args = controller.move_to_location.call_args
+    assert move_args.args == ("loading",)
+    assert move_args.kwargs["manual"] is True
+    assert callable(move_args.kwargs["on_complete"])
+    assert events == []
+
+    move_args.kwargs["on_complete"]()
+
+    assert events == [
+        "manual_refuel_dialog_init",
+        "manual_refuel_dialog_exec",
+    ]
+    assert popups == []
+
+
+def test_current_profile_post_apply_manual_refuel_check_opens_immediately_at_loading(monkeypatch, qapp):
+    events = []
+    popups = []
+    main_window = _make_main_window(CURRENT_PROFILE, popups)
+    model = _make_model(
+        _FakeMachineModel(
+            regulating_print_pressure=True,
+            regulating_refuel_pressure=True,
+            current_location="loading",
+        ),
+        events,
+        printer_head=object(),
+    )
+    controller = _make_controller(events)
+    box = PressurePlotBox(main_window, model, controller)
+
+    _patch_manual_refuel_launch(monkeypatch, events, main_window=main_window, model=model, controller=controller)
+
+    box.manual_refuel_check_after_stream_apply()
+
+    controller.move_to_location.assert_not_called()
+    assert events == [
+        "manual_refuel_dialog_init",
+        "manual_refuel_dialog_exec",
+    ]
+    assert popups == []
+
+
+def test_current_profile_post_apply_manual_refuel_check_rejects_duplicate_loading_move(monkeypatch, qapp):
+    events = []
+    popups = []
+    main_window = _make_main_window(CURRENT_PROFILE, popups)
+    model = _make_model(
+        _FakeMachineModel(
+            regulating_print_pressure=True,
+            regulating_refuel_pressure=True,
+            current_location="camera",
+        ),
+        events,
+        printer_head=object(),
+    )
+    controller = _make_controller(events)
+    box = PressurePlotBox(main_window, model, controller)
+
+    _patch_manual_refuel_launch(monkeypatch, events, main_window=main_window, model=model, controller=controller)
+
+    box.manual_refuel_check_after_stream_apply()
+    box.manual_refuel_check_after_stream_apply()
+
+    controller.move_to_location.assert_called_once()
+    assert popups == [
+        (
+            "Manual Refuel Check Already Open",
+            "The manual refuel check is already opening or open. Close it before starting another check.",
+        )
+    ]
+    assert events == []
+
+
+def test_current_profile_post_apply_manual_refuel_check_move_failure_clears_pending(monkeypatch, qapp):
+    events = []
+    popups = []
+    main_window = _make_main_window(CURRENT_PROFILE, popups)
+    model = _make_model(
+        _FakeMachineModel(
+            regulating_print_pressure=True,
+            regulating_refuel_pressure=True,
+            current_location="camera",
+        ),
+        events,
+        printer_head=object(),
+    )
+    controller = _make_controller(events)
+    controller.move_to_location.return_value = False
+    box = PressurePlotBox(main_window, model, controller)
+
+    _patch_manual_refuel_launch(monkeypatch, events, main_window=main_window, model=model, controller=controller)
+
+    box.manual_refuel_check_after_stream_apply()
+
+    assert popups == [
+        (
+            "Move To Loading Failed",
+            "Could not queue the move to loading for the manual refuel check.",
+        )
+    ]
+    assert box._manual_refuel_check_launch_is_active() is False
+    assert events == []
+
+
+def test_current_profile_post_apply_request_waits_for_imager_cleanup(monkeypatch, qapp):
+    events = []
+    popups = []
+    callbacks = []
+    main_window = _make_main_window(CURRENT_PROFILE, popups)
+    model = _make_model(
+        _FakeMachineModel(
+            regulating_print_pressure=True,
+            regulating_refuel_pressure=True,
+            current_location="camera",
+        ),
+        events,
+        printer_head=object(),
+    )
+    controller = _make_controller(events)
+    box = PressurePlotBox(main_window, model, controller)
+    box._droplet_imager_dialog = object()
+
+    monkeypatch.setattr(View.QtCore.QTimer, "singleShot", lambda _ms, callback: callbacks.append(callback))
+    _patch_manual_refuel_launch(monkeypatch, events, main_window=main_window, model=model, controller=controller)
+
+    assert box.request_manual_refuel_check_after_imager_close() is True
+    assert box._manual_refuel_check_after_imager_pending is True
+    assert len(callbacks) == 1
+
+    callbacks.pop(0)()
+
+    assert box._manual_refuel_check_after_imager_pending is True
+    assert controller.move_to_location.call_count == 0
+    assert len(callbacks) == 1
+
+    box._droplet_imager_dialog = None
+    callbacks.pop(0)()
+
+    controller.move_to_location.assert_called_once()
+    assert box._manual_refuel_check_after_imager_pending is False
+    assert events == []
+
+
+def test_current_profile_manual_refuel_check_rejects_duplicate_while_dialog_open(monkeypatch, qapp):
+    events = []
+    popups = []
+    main_window = _make_main_window(CURRENT_PROFILE, popups)
+    model = _make_model(
+        _FakeMachineModel(
+            regulating_print_pressure=True,
+            regulating_refuel_pressure=True,
+        ),
+        events,
+        printer_head=object(),
+    )
+    controller = _make_controller(events)
+    box = PressurePlotBox(main_window, model, controller)
+
+    class _ManualRefuelDialog:
+        def __init__(self, main_window_arg, model_arg, controller_arg):
+            assert main_window_arg is main_window
+            assert model_arg is model
+            assert controller_arg is controller
+            self.finished = _SignalStub()
+            events.append("manual_refuel_dialog_init")
+
+        def show(self):
+            events.append("manual_refuel_dialog_show")
+
+        def raise_(self):
+            events.append("manual_refuel_dialog_raise")
+
+        def activateWindow(self):
+            events.append("manual_refuel_dialog_activate")
+
+        def exec(self):
+            events.append("manual_refuel_dialog_exec")
+            box.manual_refuel_check()
+            return 0
+
+    monkeypatch.setattr(View.importlib, "reload", lambda module: module)
+    monkeypatch.setattr(View.CalibrationClasses, "ManualRefuelCheckDialog", _ManualRefuelDialog)
+
+    box.manual_refuel_check()
+
+    assert events == [
+        "manual_refuel_dialog_init",
+        "manual_refuel_dialog_exec",
+        "manual_refuel_dialog_show",
+        "manual_refuel_dialog_raise",
+        "manual_refuel_dialog_activate",
+    ]
+    assert popups == [
+        (
+            "Manual Refuel Check Already Open",
+            "The manual refuel check is already opening or open. Close it before starting another check.",
+        )
+    ]
+    assert controller.get_print_array_imaging_calibration_preflight.call_count == 1
+    assert controller.get_print_array_refuel_check_preflight.call_count == 1
 
 
 def test_current_profile_calibrate_pressure_requires_camera_position_on_decline(monkeypatch, qapp):

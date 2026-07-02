@@ -367,11 +367,20 @@ def _printer_head(stock_id, *, printer_head_id="head-1", printing_mode="droplet"
     )
 
 
-def _machine_model_for_calibration(*, pw_us=1450, pressure_psi=1.35):
+def _machine_model_for_calibration(
+    *,
+    pw_us=1450,
+    pressure_psi=1.35,
+    refuel_pw_us=2200,
+    refuel_pressure_psi=0.30,
+):
     return SimpleNamespace(
         get_print_pulse_width=lambda: pw_us,
         get_current_print_pressure=lambda: pressure_psi,
         get_target_print_pressure=lambda: pressure_psi,
+        get_refuel_pulse_width=lambda: refuel_pw_us,
+        get_current_refuel_pressure=lambda: refuel_pressure_psi,
+        get_target_refuel_pressure=lambda: refuel_pressure_psi,
     )
 
 
@@ -455,6 +464,314 @@ def test_apply_droplet_volume_for_option_can_switch_printing_mode(
         machine_model=_machine_model_for_calibration(pw_us=1800, pressure_psi=1.80),
     )
     assert validation["ok"] is True
+
+
+def test_stream_calibration_marks_manual_refuel_check_required(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_calibrated_volume_design(em)
+    head = _printer_head(_stock_id_for_design_row(em, "glycerol"), printing_mode="stream")
+
+    em.apply_droplet_volume_for_option(
+        "glycerol",
+        None,
+        30.0,
+        write_keys_if_assigned=False,
+        printing_mode="stream",
+        applied_calibration={
+            "printer_head": head,
+            "measured_volume_nL": 30.0,
+            "pw_us": 1800,
+            "pressure_psi": 1.80,
+            "run_id": "stream-run",
+            "phase": "stream",
+            "timestamp": "2026-03-18T10:00:00Z",
+            "source_row_fingerprint": ("stream-run", "stream", "2026-03-18T10:00:00Z", 1800, 1.80, 30.0),
+        },
+    )
+
+    record = em.get_manual_refuel_check(printer_head=head)
+    assert record["status"] == "required"
+    assert record["printing_mode"] == "stream"
+    validation = em.validate_manual_refuel_check_for_print(
+        printer_head=head,
+        machine_model=_machine_model_for_calibration(pw_us=1800, pressure_psi=1.80),
+    )
+    assert validation["ok"] is False
+    assert validation["code"] == "required_refuel_check"
+
+
+def test_droplet_mode_calibration_does_not_require_manual_refuel_check(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_calibrated_volume_design(em)
+    head = _printer_head(_stock_id_for_design_row(em, "glycerol"), printing_mode="droplet")
+
+    em.apply_droplet_volume_for_option(
+        "glycerol",
+        None,
+        15.0,
+        write_keys_if_assigned=False,
+        printing_mode="droplet",
+        applied_calibration={
+            "printer_head": head,
+            "measured_volume_nL": 15.0,
+            "pw_us": 1450,
+            "pressure_psi": 1.35,
+            "run_id": "droplet-run",
+            "phase": "pressure_sweep_characterization",
+            "timestamp": "2026-03-18T09:02:00Z",
+            "source_row_fingerprint": ("droplet-run", "pressure_sweep", "2026-03-18T09:02:00Z", 1450, 1.35, 15.0),
+        },
+    )
+
+    assert em.get_manual_refuel_check(printer_head=head) is None
+    validation = em.validate_manual_refuel_check_for_print(
+        printer_head=head,
+        machine_model=_machine_model_for_calibration(),
+    )
+    assert validation["ok"] is True
+    assert validation["code"] == "not_required"
+
+
+def test_manual_refuel_pass_persists_and_revalidates_for_same_stream_calibration(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_calibrated_volume_design(em)
+    head = _printer_head(_stock_id_for_design_row(em, "glycerol"), printing_mode="stream")
+    calibration = {
+        "printer_head": head,
+        "measured_volume_nL": 30.0,
+        "pw_us": 1800,
+        "pressure_psi": 1.80,
+        "run_id": "stream-run",
+        "phase": "stream",
+        "timestamp": "2026-03-18T10:00:00Z",
+        "source_row_fingerprint": ("stream-run", "stream", "2026-03-18T10:00:00Z", 1800, 1.80, 30.0),
+    }
+    machine = _machine_model_for_calibration(
+        pw_us=1800,
+        pressure_psi=1.80,
+        refuel_pw_us=2400,
+        refuel_pressure_psi=0.42,
+    )
+    em.apply_droplet_volume_for_option(
+        "glycerol",
+        None,
+        30.0,
+        write_keys_if_assigned=False,
+        printing_mode="stream",
+        applied_calibration=calibration,
+    )
+
+    passed = em.record_manual_refuel_check_outcome(
+        printer_head=head,
+        status="passed",
+        source="manual_dialog",
+        machine_model=machine,
+        trial_droplet_count=20,
+        trial_count=2,
+        operator_judgment="stable",
+    )
+    assert passed["status"] == "passed"
+    assert passed["print_pulse_width_us"] == 1800
+    assert passed["refuel_pulse_width_us"] == 2400
+
+    validation = em.validate_manual_refuel_check_for_print(
+        printer_head=head,
+        machine_model=machine,
+    )
+    assert validation["ok"] is True
+
+    em.apply_droplet_volume_for_option(
+        "glycerol",
+        None,
+        30.0,
+        write_keys_if_assigned=False,
+        printing_mode="stream",
+        applied_calibration=calibration,
+    )
+    assert em.get_manual_refuel_check(printer_head=head)["status"] == "passed"
+
+    payload = json.loads(Path(em.experiment_file_path).read_text(encoding="utf-8"))
+    assert payload["manual_refuel_checks"]["schema_version"] == 1
+    reloaded_model = experiment_model_factory()
+    reloaded = reloaded_model.experiment_model
+    reloaded.load_experiment(em.experiment_file_path, em.experiment_dir_path)
+    reloaded_validation = reloaded.validate_manual_refuel_check_for_print(
+        printer_head=head,
+        machine_model=machine,
+    )
+    assert reloaded_validation["ok"] is True
+
+
+def test_new_stream_calibration_marks_existing_manual_refuel_pass_required(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_calibrated_volume_design(em)
+    head = _printer_head(_stock_id_for_design_row(em, "glycerol"), printing_mode="stream")
+    machine = _machine_model_for_calibration(pw_us=1800, pressure_psi=1.80)
+
+    em.apply_droplet_volume_for_option(
+        "glycerol",
+        None,
+        30.0,
+        write_keys_if_assigned=False,
+        printing_mode="stream",
+        applied_calibration={
+            "printer_head": head,
+            "measured_volume_nL": 30.0,
+            "pw_us": 1800,
+            "pressure_psi": 1.80,
+            "run_id": "stream-run-1",
+            "phase": "stream",
+            "timestamp": "2026-03-18T10:00:00Z",
+            "source_row_fingerprint": ("stream-run-1", "stream", "2026-03-18T10:00:00Z", 1800, 1.80, 30.0),
+        },
+    )
+    em.record_manual_refuel_check_outcome(
+        printer_head=head,
+        status="passed",
+        source="manual_dialog",
+        machine_model=machine,
+    )
+
+    em.apply_droplet_volume_for_option(
+        "glycerol",
+        None,
+        30.0,
+        write_keys_if_assigned=False,
+        printing_mode="stream",
+        applied_calibration={
+            "printer_head": head,
+            "measured_volume_nL": 30.0,
+            "pw_us": 1800,
+            "pressure_psi": 1.80,
+            "run_id": "stream-run-2",
+            "phase": "stream",
+            "timestamp": "2026-03-18T10:10:00Z",
+            "source_row_fingerprint": ("stream-run-2", "stream", "2026-03-18T10:10:00Z", 1800, 1.80, 30.0),
+        },
+    )
+
+    record = em.get_manual_refuel_check(printer_head=head)
+    assert record["status"] == "required"
+    assert record["previous_status"] == "passed"
+
+
+@pytest.mark.parametrize(
+    ("machine_kwargs", "expected_code"),
+    [
+        ({"pw_us": 1801}, "print_pulse_width_mismatch"),
+        ({"pressure_psi": 1.90}, "print_pressure_mismatch"),
+        ({"refuel_pw_us": 2401}, "refuel_pulse_width_mismatch"),
+        ({"refuel_pressure_psi": 0.55}, "refuel_pressure_mismatch"),
+    ],
+)
+def test_manual_refuel_pass_invalidates_when_settings_change(
+    experiment_model_factory,
+    machine_kwargs,
+    expected_code,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_calibrated_volume_design(em)
+    head = _printer_head(_stock_id_for_design_row(em, "glycerol"), printing_mode="stream")
+    base_machine = _machine_model_for_calibration(
+        pw_us=1800,
+        pressure_psi=1.80,
+        refuel_pw_us=2400,
+        refuel_pressure_psi=0.42,
+    )
+    em.apply_droplet_volume_for_option(
+        "glycerol",
+        None,
+        30.0,
+        write_keys_if_assigned=False,
+        printing_mode="stream",
+        applied_calibration={
+            "printer_head": head,
+            "measured_volume_nL": 30.0,
+            "pw_us": 1800,
+            "pressure_psi": 1.80,
+            "run_id": "stream-run",
+            "phase": "stream",
+            "timestamp": "2026-03-18T10:00:00Z",
+            "source_row_fingerprint": ("stream-run", "stream", "2026-03-18T10:00:00Z", 1800, 1.80, 30.0),
+        },
+    )
+    em.record_manual_refuel_check_outcome(
+        printer_head=head,
+        status="passed",
+        source="manual_dialog",
+        machine_model=base_machine,
+    )
+
+    values = {
+        "pw_us": 1800,
+        "pressure_psi": 1.80,
+        "refuel_pw_us": 2400,
+        "refuel_pressure_psi": 0.42,
+    }
+    values.update(machine_kwargs)
+    validation = em.validate_manual_refuel_check_for_print(
+        printer_head=head,
+        machine_model=_machine_model_for_calibration(**values),
+    )
+    assert validation["ok"] is False
+    assert validation["code"] == expected_code
+
+
+@pytest.mark.parametrize("status", ["deferred", "failed", "unclear", "bypassed"])
+def test_manual_refuel_non_passed_outcomes_block_preflight(
+    experiment_model_factory,
+    status,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_calibrated_volume_design(em)
+    head = _printer_head(_stock_id_for_design_row(em, "glycerol"), printing_mode="stream")
+    machine = _machine_model_for_calibration(pw_us=1800, pressure_psi=1.80)
+    em.apply_droplet_volume_for_option(
+        "glycerol",
+        None,
+        30.0,
+        write_keys_if_assigned=False,
+        printing_mode="stream",
+        applied_calibration={
+            "printer_head": head,
+            "measured_volume_nL": 30.0,
+            "pw_us": 1800,
+            "pressure_psi": 1.80,
+            "run_id": "stream-run",
+            "phase": "stream",
+            "timestamp": "2026-03-18T10:00:00Z",
+            "source_row_fingerprint": ("stream-run", "stream", "2026-03-18T10:00:00Z", 1800, 1.80, 30.0),
+        },
+    )
+
+    record = em.record_manual_refuel_check_outcome(
+        printer_head=head,
+        status=status,
+        source="unit_test",
+        machine_model=machine,
+        bypass_reason="operator_bypass" if status == "bypassed" else None,
+    )
+    validation = em.validate_manual_refuel_check_for_print(
+        printer_head=head,
+        machine_model=machine,
+    )
+    assert record["status"] == status
+    assert validation["ok"] is False
+    assert validation["code"] == f"{status}_refuel_check"
 
 
 def test_apply_fill_droplet_volume_persists_effective_and_intended_volume(

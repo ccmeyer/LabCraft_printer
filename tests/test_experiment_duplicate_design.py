@@ -36,6 +36,16 @@ def _write_source_artifacts(model: ExperimentModel, source_dir: Path):
             },
         },
     }
+    model.manual_refuel_checks = {
+        "schema_version": 1,
+        "records": {
+            "source-refuel-check": {
+                "stock_id": "Mg_1.00_mM",
+                "printer_head_id": "head-1",
+                "status": "passed",
+            },
+        },
+    }
     model.save_experiment()
 
     progress_payload = {
@@ -93,6 +103,10 @@ def test_duplicate_design_from_source_creates_fresh_run_state(tmp_path):
     assert duplicate_design["metadata"]["name"] == "SourceExp_replicate"
     assert duplicate_design["metadata"]["replicates"] == 2
     assert duplicate_design["applied_imaging_calibrations"] == {
+        "schema_version": 1,
+        "records": {},
+    }
+    assert duplicate_design["manual_refuel_checks"] == {
         "schema_version": 1,
         "records": {},
     }

@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from PySide6.QtCore import Qt
@@ -377,6 +378,8 @@ def _build_dialog(
     active_run_id=None,
     main_window=None,
     experiment_model=None,
+    post_apply_manual_refuel_check_callback=None,
+    refuel_preflight=None,
 ):
     for method_name in (
         "setup_shortcuts",
@@ -421,10 +424,18 @@ def _build_dialog(
         set_droplet_capture_profile=lambda *args, **kwargs: None,
         set_command_dispatch_interval=lambda *args, **kwargs: None,
         disable_print_profile=lambda: None,
+        get_print_array_refuel_check_preflight=Mock(
+            return_value=refuel_preflight or {"ok": True, "code": "not_required", "message": ""}
+        ),
     )
     if main_window is None:
         main_window = SimpleNamespace(color_dict={})
-    dialog = DropletImagingDialog(main_window, model, controller)
+    dialog = DropletImagingDialog(
+        main_window,
+        model,
+        controller,
+        post_apply_manual_refuel_check_callback=post_apply_manual_refuel_check_callback,
+    )
     qapp.processEvents()
     dialog._bridge_refresh_design_labels()
     return dialog, manager
@@ -1342,6 +1353,8 @@ def test_apply_marks_summary_row_and_persists_across_reopen(monkeypatch, qapp, t
     applied_record = experiment_model.get_applied_imaging_calibration()
     assert tuple(applied_record["source_row_fingerprint"]) == tuple(dialog._summary_row_fingerprint(raw))
     assert "Applied: Run" in dialog.bridge_applied_calibration_label.text()
+    assert "Applied: Run" in dialog.summary_applied_calibration_banner.text()
+    assert "Manual refuel:" not in dialog.summary_applied_calibration_banner.text()
     _assert_plain_colored_surface(dialog.summary_applied_calibration_banner.styleSheet(), DARK_BLUE)
     assert dialog.bridge_apply_btn.isEnabled() is False
     assert dialog.bridge_apply_btn.text() == "Selected calibration is applied"
@@ -1393,6 +1406,7 @@ def test_cross_mode_apply_confirms_and_switches_design_mode(monkeypatch, qapp, t
     experiment_model = _build_experiment_model("Water", current_mode="droplet")
     info_calls = []
     question_calls = []
+    launch_calls = []
     monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "information", lambda *args, **kwargs: info_calls.append(args))
     monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "warning", lambda *args, **kwargs: None)
     monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "critical", lambda *args, **kwargs: None)
@@ -1411,6 +1425,7 @@ def test_cross_mode_apply_confirms_and_switches_design_mode(monkeypatch, qapp, t
         current_mode="droplet",
         active_run_id="run_stream",
         experiment_model=experiment_model,
+        post_apply_manual_refuel_check_callback=lambda: launch_calls.append("launch") or True,
     )
     settings_calls = []
     _manager.changeSettingsRequested.connect(
@@ -1445,7 +1460,451 @@ def test_cross_mode_apply_confirms_and_switches_design_mode(monkeypatch, qapp, t
     assert applied_record["applied_printing_mode"] == "stream"
     assert applied_record["run_id"] == "run_stream"
     assert settings_calls[-1] == {"print_pulse_width": 1800, "print_pressure": 1.80}
+    assert launch_calls == ["launch"]
+    assert not info_calls
+
+    dialog.deleteLater()
+
+
+@pytest.mark.parametrize(
+    "refuel_preflight, expected_status",
+    [
+        (
+            {
+                "ok": False,
+                "code": "required_refuel_check",
+                "message": "Manual refuel check is required.",
+            },
+            "Manual refuel check is required.",
+        ),
+        ({"ok": False, "code": "deferred_refuel_check", "message": ""}, "Deferred"),
+        ({"ok": True, "code": "passed_refuel_check", "message": ""}, "Passed"),
+    ],
+)
+def test_stream_applied_calibration_banner_includes_manual_refuel_status(
+    monkeypatch,
+    qapp,
+    tmp_path,
+    refuel_preflight,
+    expected_status,
+):
+    runs = [
+        _make_run(
+            "run_stream",
+            stream_entries=[
+                {
+                    "timestamp": "2026-03-18T10:01:00Z",
+                    "pw_us": 1800,
+                    "pressure_psi": 1.80,
+                    "predicted_volume_nl": 72.6,
+                    "predicted_stream_duration_us": 3950,
+                    "flow_fit_status": "ok",
+                    "tail_phase_status": "captured",
+                }
+            ],
+        )
+    ]
+    main_window = SimpleNamespace(
+        color_dict={},
+        popup_yes_no=Mock(return_value=calibration_view.QtWidgets.QMessageBox.No),
+    )
+    experiment_model = _build_experiment_model("Water", current_mode="stream")
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "information", lambda *args, **kwargs: None)
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "critical", lambda *args, **kwargs: None)
+    dialog, manager = _build_dialog(
+        monkeypatch,
+        qapp,
+        tmp_path,
+        runs,
+        current_mode="stream",
+        active_run_id="run_stream",
+        main_window=main_window,
+        experiment_model=experiment_model,
+        refuel_preflight=refuel_preflight,
+    )
+    dialog.controller.mark_manual_refuel_check_deferred = Mock(return_value={"ok": True})
+    manager.changeSettingsRequested.connect(
+        lambda settings, callback: callback() if callable(callback) else None
+    )
+    stream_row = next(
+        idx for idx, row in enumerate(_visible_summary_rows(dialog))
+        if row.get("phase") == "stream"
+    )
+    _select_visible_row(dialog, stream_row)
+    qapp.processEvents()
+
+    dialog._apply_previewed_droplet_volume()
+    qapp.processEvents()
+
+    banner_text = dialog.summary_applied_calibration_banner.text()
+    assert "Applied: Run run_stream" in banner_text
+    assert f"Manual refuel: {expected_status}" in banner_text
+
+    dialog.deleteLater()
+
+
+def test_stream_applied_calibration_banner_handles_refuel_preflight_unavailable(
+    monkeypatch,
+    qapp,
+    tmp_path,
+):
+    runs = [
+        _make_run(
+            "run_stream",
+            stream_entries=[
+                {
+                    "timestamp": "2026-03-18T10:01:00Z",
+                    "pw_us": 1800,
+                    "pressure_psi": 1.80,
+                    "predicted_volume_nl": 72.6,
+                    "predicted_stream_duration_us": 3950,
+                    "flow_fit_status": "ok",
+                    "tail_phase_status": "captured",
+                }
+            ],
+        )
+    ]
+    main_window = SimpleNamespace(
+        color_dict={},
+        popup_yes_no=Mock(return_value=calibration_view.QtWidgets.QMessageBox.No),
+    )
+    experiment_model = _build_experiment_model("Water", current_mode="stream")
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "information", lambda *args, **kwargs: None)
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "critical", lambda *args, **kwargs: None)
+    dialog, manager = _build_dialog(
+        monkeypatch,
+        qapp,
+        tmp_path,
+        runs,
+        current_mode="stream",
+        active_run_id="run_stream",
+        main_window=main_window,
+        experiment_model=experiment_model,
+    )
+    delattr(dialog.controller, "get_print_array_refuel_check_preflight")
+    dialog.controller.mark_manual_refuel_check_deferred = Mock(return_value={"ok": True})
+    manager.changeSettingsRequested.connect(
+        lambda settings, callback: callback() if callable(callback) else None
+    )
+    stream_row = next(
+        idx for idx, row in enumerate(_visible_summary_rows(dialog))
+        if row.get("phase") == "stream"
+    )
+    _select_visible_row(dialog, stream_row)
+    qapp.processEvents()
+
+    dialog._apply_previewed_droplet_volume()
+    qapp.processEvents()
+
+    banner_text = dialog.summary_applied_calibration_banner.text()
+    assert "Applied: Run run_stream" in banner_text
+    assert "Manual refuel: Status unavailable" in banner_text
+
+    dialog.deleteLater()
+
+
+def test_stream_apply_yes_schedules_manual_refuel_check_and_closes_imager(monkeypatch, qapp, tmp_path):
+    runs = [
+        _make_run(
+            "run_stream",
+            stream_entries=[
+                {
+                    "timestamp": "2026-03-18T10:01:00Z",
+                    "pw_us": 1800,
+                    "pressure_psi": 1.80,
+                    "predicted_volume_nl": 72.6,
+                    "predicted_stream_duration_us": 3950,
+                    "flow_fit_status": "ok",
+                    "tail_phase_status": "captured",
+                }
+            ],
+        )
+    ]
+    main_window = SimpleNamespace(
+        color_dict={},
+        popup_yes_no=Mock(return_value=calibration_view.QtWidgets.QMessageBox.Yes),
+    )
+    launch = Mock(return_value=True)
+    question_calls = []
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "information", lambda *args, **kwargs: None)
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "critical", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        calibration_view.QtWidgets.QMessageBox,
+        "question",
+        lambda *args, **kwargs: question_calls.append(args) or calibration_view.QtWidgets.QMessageBox.Yes,
+    )
+    experiment_model = _build_experiment_model("Water", current_mode="droplet")
+    dialog, manager = _build_dialog(
+        monkeypatch,
+        qapp,
+        tmp_path,
+        runs,
+        current_mode="droplet",
+        active_run_id="run_stream",
+        main_window=main_window,
+        experiment_model=experiment_model,
+        post_apply_manual_refuel_check_callback=launch,
+    )
+    manager.changeSettingsRequested.connect(
+        lambda settings, callback: callback() if callable(callback) else None
+    )
+    close_calls = []
+    monkeypatch.setattr(dialog, "close", lambda: close_calls.append(True))
+    stream_row = next(
+        idx for idx, row in enumerate(_visible_summary_rows(dialog))
+        if row.get("phase") == "stream"
+    )
+    _select_visible_row(dialog, stream_row)
+    qapp.processEvents()
+
+    dialog._apply_previewed_droplet_volume()
+    qapp.processEvents()
+
+    assert question_calls
+    main_window.popup_yes_no.assert_called_once()
+    assert "Manual Refuel Check Required" in main_window.popup_yes_no.call_args.args[0]
+    launch.assert_called_once_with()
+    assert close_calls == [True]
+
+    dialog.deleteLater()
+
+
+def test_stream_apply_no_records_manual_refuel_check_deferred(monkeypatch, qapp, tmp_path):
+    runs = [
+        _make_run(
+            "run_stream",
+            stream_entries=[
+                {
+                    "timestamp": "2026-03-18T10:01:00Z",
+                    "pw_us": 1800,
+                    "pressure_psi": 1.80,
+                    "predicted_volume_nl": 72.6,
+                    "predicted_stream_duration_us": 3950,
+                    "flow_fit_status": "ok",
+                    "tail_phase_status": "captured",
+                }
+            ],
+        )
+    ]
+    main_window = SimpleNamespace(
+        color_dict={},
+        popup_yes_no=Mock(return_value=calibration_view.QtWidgets.QMessageBox.No),
+    )
+    launch = Mock(return_value=True)
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "information", lambda *args, **kwargs: None)
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "critical", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        calibration_view.QtWidgets.QMessageBox,
+        "question",
+        lambda *args, **kwargs: calibration_view.QtWidgets.QMessageBox.Yes,
+    )
+    experiment_model = _build_experiment_model("Water", current_mode="droplet")
+    dialog, manager = _build_dialog(
+        monkeypatch,
+        qapp,
+        tmp_path,
+        runs,
+        current_mode="droplet",
+        active_run_id="run_stream",
+        main_window=main_window,
+        experiment_model=experiment_model,
+        post_apply_manual_refuel_check_callback=launch,
+    )
+    manager.changeSettingsRequested.connect(
+        lambda settings, callback: callback() if callable(callback) else None
+    )
+    dialog.controller.mark_manual_refuel_check_deferred = Mock(return_value={"ok": True})
+    close_calls = []
+    monkeypatch.setattr(dialog, "close", lambda: close_calls.append(True))
+    stream_row = next(
+        idx for idx, row in enumerate(_visible_summary_rows(dialog))
+        if row.get("phase") == "stream"
+    )
+    _select_visible_row(dialog, stream_row)
+    qapp.processEvents()
+
+    dialog._apply_previewed_droplet_volume()
+    qapp.processEvents()
+
+    main_window.popup_yes_no.assert_called_once()
+    dialog.controller.mark_manual_refuel_check_deferred.assert_called_once_with(source="post_apply_prompt")
+    launch.assert_not_called()
+    assert close_calls == []
+
+    dialog.deleteLater()
+
+
+def test_droplet_apply_does_not_prompt_for_manual_refuel_check(monkeypatch, qapp, tmp_path):
+    runs = [
+        _make_run(
+            "run_focus",
+            sweep_entries=[
+                {"timestamp": "2026-03-18T09:00:00Z", "pw_us": 1400, "pressure_psi": 1.20, "mean_nL": 10.0, "cv_pct": 4.0, "valid": True},
+            ],
+        )
+    ]
+    main_window = SimpleNamespace(color_dict={}, popup_yes_no=Mock())
+    launch = Mock()
+    info_calls = []
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "information", lambda *args, **kwargs: info_calls.append(args))
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "critical", lambda *args, **kwargs: None)
+    experiment_model = _build_experiment_model("Water", current_mode="droplet")
+    dialog, manager = _build_dialog(
+        monkeypatch,
+        qapp,
+        tmp_path,
+        runs,
+        active_run_id="run_focus",
+        main_window=main_window,
+        experiment_model=experiment_model,
+        post_apply_manual_refuel_check_callback=launch,
+    )
+    manager.changeSettingsRequested.connect(
+        lambda settings, callback: callback() if callable(callback) else None
+    )
+    dialog.controller.mark_manual_refuel_check_deferred = Mock(return_value={"ok": True})
+    _select_visible_row(dialog, 0)
+    qapp.processEvents()
+
+    dialog._apply_previewed_droplet_volume()
+    qapp.processEvents()
+
+    main_window.popup_yes_no.assert_not_called()
+    dialog.controller.mark_manual_refuel_check_deferred.assert_not_called()
+    launch.assert_not_called()
     assert info_calls
+
+    dialog.deleteLater()
+
+
+def test_stream_apply_with_settings_failure_skips_immediate_manual_refuel_check(monkeypatch, qapp, tmp_path):
+    runs = [
+        _make_run(
+            "run_stream",
+            stream_entries=[
+                {
+                    "timestamp": "2026-03-18T10:01:00Z",
+                    "pw_us": 1800,
+                    "pressure_psi": 1.80,
+                    "predicted_volume_nl": 72.6,
+                    "predicted_stream_duration_us": 3950,
+                    "flow_fit_status": "ok",
+                    "tail_phase_status": "captured",
+                }
+            ],
+        )
+    ]
+
+    class FailingSignal:
+        def emit(self, *_args, **_kwargs):
+            raise RuntimeError("settings unavailable")
+
+    main_window = SimpleNamespace(color_dict={}, popup_yes_no=Mock())
+    launch = Mock()
+    warnings = []
+    info_calls = []
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "information", lambda *args, **kwargs: info_calls.append(args))
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "warning", lambda *args, **kwargs: warnings.append(args))
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "critical", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        calibration_view.QtWidgets.QMessageBox,
+        "question",
+        lambda *args, **kwargs: calibration_view.QtWidgets.QMessageBox.Yes,
+    )
+    experiment_model = _build_experiment_model("Water", current_mode="droplet")
+    dialog, _manager = _build_dialog(
+        monkeypatch,
+        qapp,
+        tmp_path,
+        runs,
+        current_mode="droplet",
+        active_run_id="run_stream",
+        main_window=main_window,
+        experiment_model=experiment_model,
+        post_apply_manual_refuel_check_callback=launch,
+    )
+    dialog.model.calibration_manager = SimpleNamespace(changeSettingsRequested=FailingSignal())
+    stream_row = next(
+        idx for idx, row in enumerate(_visible_summary_rows(dialog))
+        if row.get("phase") == "stream"
+    )
+    _select_visible_row(dialog, stream_row)
+    qapp.processEvents()
+
+    dialog._apply_previewed_droplet_volume()
+    qapp.processEvents()
+
+    assert any(args[1] == "Settings not changed" for args in warnings)
+    main_window.popup_yes_no.assert_not_called()
+    launch.assert_not_called()
+    assert info_calls
+
+    dialog.deleteLater()
+
+
+def test_stream_apply_yes_without_launcher_warns_and_keeps_imager_open(monkeypatch, qapp, tmp_path):
+    runs = [
+        _make_run(
+            "run_stream",
+            stream_entries=[
+                {
+                    "timestamp": "2026-03-18T10:01:00Z",
+                    "pw_us": 1800,
+                    "pressure_psi": 1.80,
+                    "predicted_volume_nl": 72.6,
+                    "predicted_stream_duration_us": 3950,
+                    "flow_fit_status": "ok",
+                    "tail_phase_status": "captured",
+                }
+            ],
+        )
+    ]
+    main_window = SimpleNamespace(
+        color_dict={},
+        popup_yes_no=Mock(return_value=calibration_view.QtWidgets.QMessageBox.Yes),
+    )
+    warnings = []
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "information", lambda *args, **kwargs: None)
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "warning", lambda *args, **kwargs: warnings.append(args))
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "critical", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        calibration_view.QtWidgets.QMessageBox,
+        "question",
+        lambda *args, **kwargs: calibration_view.QtWidgets.QMessageBox.Yes,
+    )
+    experiment_model = _build_experiment_model("Water", current_mode="droplet")
+    dialog, manager = _build_dialog(
+        monkeypatch,
+        qapp,
+        tmp_path,
+        runs,
+        current_mode="droplet",
+        active_run_id="run_stream",
+        main_window=main_window,
+        experiment_model=experiment_model,
+    )
+    manager.changeSettingsRequested.connect(
+        lambda settings, callback: callback() if callable(callback) else None
+    )
+    close_calls = []
+    monkeypatch.setattr(dialog, "close", lambda: close_calls.append(True))
+    stream_row = next(
+        idx for idx, row in enumerate(_visible_summary_rows(dialog))
+        if row.get("phase") == "stream"
+    )
+    _select_visible_row(dialog, stream_row)
+    qapp.processEvents()
+
+    dialog._apply_previewed_droplet_volume()
+    qapp.processEvents()
+
+    assert any(args[1] == "Manual Refuel Check Unavailable" for args in warnings)
+    assert close_calls == []
 
     dialog.deleteLater()
 

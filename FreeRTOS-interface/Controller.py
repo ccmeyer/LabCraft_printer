@@ -39,6 +39,20 @@ CALIBRATION_MODE_PRINT_PULSE_WIDTH_US = {
     "droplet": 1300,
     "stream": 2500,
 }
+PROMPTABLE_MANUAL_REFUEL_CHECK_CODES = {
+    "missing_refuel_check",
+    "required_refuel_check",
+    "deferred_refuel_check",
+    "failed_refuel_check",
+    "unclear_refuel_check",
+    "bypassed_refuel_check",
+    "stale_refuel_check",
+    "settings_unavailable",
+    "print_pulse_width_mismatch",
+    "refuel_pulse_width_mismatch",
+    "print_pressure_mismatch",
+    "refuel_pressure_mismatch",
+}
 
 
 class DropletCapturePerformanceDiagnostics:
@@ -4836,6 +4850,106 @@ class Controller(QObject):
         validation.setdefault("record", None)
         return validation
 
+    def get_print_array_refuel_check_preflight(self):
+        """Return manual refuel-check readiness for the loaded printer head."""
+        profile_name = str(getattr(getattr(self, "profile", None), "name", "") or "").lower()
+        if profile_name == "legacy":
+            return {"ok": True, "code": "not_required", "message": "", "record": None}
+
+        try:
+            printer_head = self.model.rack_model.get_gripper_printer_head()
+        except Exception:
+            printer_head = None
+        if printer_head is None:
+            return {
+                "ok": False,
+                "code": "context_unavailable",
+                "message": "No printer head is loaded.",
+                "record": None,
+            }
+
+        validator = getattr(
+            getattr(self.model, "experiment_model", None),
+            "validate_manual_refuel_check_for_print",
+            None,
+        )
+        if not callable(validator):
+            return {
+                "ok": False,
+                "code": "validation_unavailable",
+                "message": "Experiment model cannot confirm the manual refuel check.",
+                "record": None,
+            }
+
+        validation = validator(
+            printer_head=printer_head,
+            machine_model=self.model.machine_model,
+        )
+        if not isinstance(validation, dict):
+            return {
+                "ok": False,
+                "code": "validation_unavailable",
+                "message": "Experiment model returned an invalid manual refuel check result.",
+                "record": None,
+            }
+        validation.setdefault("code", "ok" if validation.get("ok") else "validation_failed")
+        validation.setdefault("message", "")
+        validation.setdefault("record", None)
+        return validation
+
+    def record_manual_refuel_check_outcome(self, status, source, **kwargs):
+        """Record an operator manual-refuel-check outcome for the loaded printer head."""
+        try:
+            printer_head = self.model.rack_model.get_gripper_printer_head()
+        except Exception:
+            printer_head = None
+        if printer_head is None:
+            return {
+                "ok": False,
+                "code": "context_unavailable",
+                "message": "No printer head is loaded.",
+                "record": None,
+            }
+
+        recorder = getattr(
+            getattr(self.model, "experiment_model", None),
+            "record_manual_refuel_check_outcome",
+            None,
+        )
+        if not callable(recorder):
+            return {
+                "ok": False,
+                "code": "recording_unavailable",
+                "message": "Experiment model cannot record the manual refuel check.",
+                "record": None,
+            }
+
+        try:
+            return recorder(
+                status=status,
+                source=source,
+                printer_head=printer_head,
+                machine_model=self.model.machine_model,
+                **kwargs,
+            )
+        except Exception as exc:
+            return {
+                "ok": False,
+                "code": "recording_failed",
+                "message": f"Could not record manual refuel check: {exc}",
+                "record": None,
+            }
+
+    def mark_manual_refuel_check_deferred(self, source="post_apply_prompt"):
+        return self.record_manual_refuel_check_outcome("deferred", source)
+
+    def record_manual_refuel_check_bypass(self, source="print_array_preflight", reason="operator_bypass"):
+        return self.record_manual_refuel_check_outcome(
+            "bypassed",
+            source,
+            bypass_reason=reason,
+        )
+
     def apply_applied_imaging_calibration_print_settings(self, record):
         """Apply PW and pressure from an applied imaging calibration record."""
         record = dict(record or {})
@@ -4923,6 +5037,7 @@ class Controller(QObject):
         imaging_calibration_override=False,
         settings_mismatch_override=False,
         evap_plate_dock_confirmed=False,
+        manual_refuel_check_bypass=False,
     ):
         '''
         Iterates through all wells with an assigned reaction and prints the 
@@ -4972,6 +5087,23 @@ class Controller(QObject):
                 print(f'Cannot print: {message}')
                 return
             print(f"Print array imaging calibration override accepted: {code}")
+
+        refuel_validation = self.get_print_array_refuel_check_preflight()
+        if not bool(refuel_validation.get("ok")):
+            code = str(refuel_validation.get("code") or "")
+            bypass_ok = (
+                bool(manual_refuel_check_bypass)
+                and code in PROMPTABLE_MANUAL_REFUEL_CHECK_CODES
+            )
+            if not bypass_ok:
+                message = str(
+                    refuel_validation.get("message")
+                    or "A passed manual refuel check is required before stream printing."
+                )
+                self.error_occurred_signal.emit('Error', message)
+                print(f'Cannot print: {message}')
+                return
+            print(f"Print array manual refuel check bypass accepted: {code}")
 
         dock_check = self.get_evap_plate_dock_check_context(
             request_kind="resume" if starting_state == "resume_ready" else "start"

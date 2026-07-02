@@ -51,6 +51,21 @@ from hardware.profile import CURRENT_PROFILE, HardwareProfile
 MassCalibrationDialog = None
 
 
+PROMPTABLE_MANUAL_REFUEL_CHECK_CODES = {
+    "missing_refuel_check",
+    "required_refuel_check",
+    "deferred_refuel_check",
+    "failed_refuel_check",
+    "unclear_refuel_check",
+    "bypassed_refuel_check",
+    "stale_refuel_check",
+    "settings_unavailable",
+    "print_pulse_width_mismatch",
+    "refuel_pulse_width_mismatch",
+    "print_pressure_mismatch",
+    "refuel_pressure_mismatch",
+}
+
 _VOLUME_INPUT_ERROR_STYLE = "border:1px solid #8a0303;"
 _VOLUME_INPUT_ISSUE_KEY = ("__metadata__", "volumes")
 
@@ -2384,6 +2399,9 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self._droplet_imager_launch_pending = False
         self._refuel_camera_dialog = None
         self._refuel_camera_launch_pending = False
+        self._manual_refuel_check_dialog = None
+        self._manual_refuel_check_launch_pending = False
+        self._manual_refuel_check_after_imager_pending = False
 
         prof = getattr(self.main_window, "profile", None)
         self.legacy_mode = prof.name == "legacy" if prof else True
@@ -3012,6 +3030,41 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             "The refuel camera is already opening or open. Close it before starting another refuel camera window.",
         )
 
+    def _manual_refuel_check_launch_is_active(self):
+        return bool(
+            getattr(self, "_manual_refuel_check_launch_pending", False)
+            or getattr(self, "_manual_refuel_check_after_imager_pending", False)
+            or getattr(self, "_manual_refuel_check_dialog", None) is not None
+        )
+
+    def _set_manual_refuel_check_launch_pending(self, pending):
+        self._manual_refuel_check_launch_pending = bool(pending)
+
+    def _clear_manual_refuel_check_launch_state(self, dialog=None):
+        if dialog is None or getattr(self, "_manual_refuel_check_dialog", None) is dialog:
+            self._manual_refuel_check_dialog = None
+        self._manual_refuel_check_launch_pending = False
+        self._manual_refuel_check_after_imager_pending = False
+
+    def _focus_active_manual_refuel_check_dialog(self):
+        dialog = getattr(self, "_manual_refuel_check_dialog", None)
+        if dialog is None:
+            return
+        for method_name in ("show", "raise_", "activateWindow"):
+            method = getattr(dialog, method_name, None)
+            if callable(method):
+                try:
+                    method()
+                except Exception:
+                    pass
+
+    def _reject_duplicate_manual_refuel_check_launch(self):
+        self._focus_active_manual_refuel_check_dialog()
+        self.popup_message_signal.emit(
+            "Manual Refuel Check Already Open",
+            "The manual refuel check is already opening or open. Close it before starting another check.",
+        )
+
     def calibrate_pressure(self):
         """Calibrate the pressure for a specific printer head."""
         # if not self.controller.check_if_all_completed():
@@ -3059,6 +3112,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
                 self.model,
                 self.controller,
                 open_refuel_camera_callback=self.refuel_camera,
+                post_apply_manual_refuel_check_callback=self.request_manual_refuel_check_after_imager_close,
             )
             self._droplet_imager_dialog = droplet_imaging_dialog
             self._refresh_droplet_imager_button_state()
@@ -3251,6 +3305,35 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         finally:
             self._clear_refuel_camera_launch_state(refuel_camera_dialog)
 
+    def _launch_manual_refuel_check_dialog(self):
+        """Open the manual refuel check dialog after preflight checks have passed."""
+        if getattr(self, "_manual_refuel_check_dialog", None) is not None:
+            self._reject_duplicate_manual_refuel_check_launch()
+            return
+
+        self._set_manual_refuel_check_launch_pending(True)
+        manual_dialog = None
+        try:
+            importlib.reload(CalibrationClasses.View)
+            importlib.reload(CalibrationClasses)
+            manual_dialog = CalibrationClasses.ManualRefuelCheckDialog(
+                self.main_window,
+                self.model,
+                self.controller,
+            )
+            self._manual_refuel_check_dialog = manual_dialog
+            finished_signal = getattr(manual_dialog, "finished", None)
+            if finished_signal is not None:
+                try:
+                    finished_signal.connect(
+                        lambda _result=None, dialog=manual_dialog: self._clear_manual_refuel_check_launch_state(dialog)
+                    )
+                except Exception:
+                    pass
+            manual_dialog.exec()
+        finally:
+            self._clear_manual_refuel_check_launch_state(manual_dialog)
+
     def droplet_imager(self):
         """Open the droplet imager dialog after verifying prerequisites."""
         if self._droplet_imager_launch_is_active():
@@ -3395,6 +3478,148 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         )
         if move_queued is False:
             self._clear_refuel_camera_launch_state()
+
+    def _manual_refuel_check_preflight_passed(self):
+        if not self.controller.check_if_all_completed():
+            self.popup_message_signal.emit(
+                "Commands Still Running",
+                "Please wait for the current commands to finish before starting the manual refuel check.",
+            )
+            return False
+
+        if self.model.rack_model.get_gripper_printer_head() is None:
+            self.popup_message_signal.emit(
+                "No Printer Head",
+                "Please load a printer head into the gripper before starting the manual refuel check.",
+            )
+            return False
+
+        if (
+            not self.model.machine_model.regulating_print_pressure
+            or not self.model.machine_model.regulating_refuel_pressure
+        ):
+            self.popup_message_signal.emit(
+                "Pressure Not Regulated",
+                "Please regulate both print and refuel pressure before starting the manual refuel check.",
+            )
+            return False
+
+        imaging_preflight_getter = getattr(self.controller, "get_print_array_imaging_calibration_preflight", None)
+        imaging_preflight = (
+            imaging_preflight_getter()
+            if callable(imaging_preflight_getter)
+            else {"ok": False, "message": "Applied imaging calibration validation is unavailable."}
+        )
+        if not bool((imaging_preflight or {}).get("ok")):
+            self.popup_message_signal.emit(
+                "Applied Calibration Required",
+                str((imaging_preflight or {}).get("message") or "Apply a stream calibration before checking refuel pressure."),
+            )
+            return False
+
+        refuel_preflight_getter = getattr(self.controller, "get_print_array_refuel_check_preflight", None)
+        refuel_preflight = (
+            refuel_preflight_getter()
+            if callable(refuel_preflight_getter)
+            else {"ok": False, "code": "validation_unavailable", "message": "Manual refuel check validation is unavailable."}
+        )
+        code = str((refuel_preflight or {}).get("code") or "")
+        if bool((refuel_preflight or {}).get("ok")) and code == "not_required":
+            self.popup_message_signal.emit(
+                "Stream Mode Required",
+                "Manual refuel checks are only required for stream-mode printer heads.",
+            )
+            return False
+        if code in {"context_unavailable", "validation_unavailable"}:
+            self.popup_message_signal.emit(
+                "Cannot Start Manual Refuel Check",
+                str((refuel_preflight or {}).get("message") or "Manual refuel check context is unavailable."),
+            )
+            return False
+        return True
+
+    def request_manual_refuel_check_after_imager_close(self):
+        """Schedule the post-apply manual refuel check after the droplet imager closes."""
+        if self._manual_refuel_check_launch_is_active():
+            self._reject_duplicate_manual_refuel_check_launch()
+            return False
+
+        self._manual_refuel_check_after_imager_pending = True
+
+        def _launch_after_imager_closed():
+            if not getattr(self, "_manual_refuel_check_after_imager_pending", False):
+                return
+            if getattr(self, "_droplet_imager_dialog", None) is not None:
+                QtCore.QTimer.singleShot(0, _launch_after_imager_closed)
+                return
+            self._manual_refuel_check_after_imager_pending = False
+            self.manual_refuel_check_after_stream_apply()
+
+        QtCore.QTimer.singleShot(0, _launch_after_imager_closed)
+        return True
+
+    def manual_refuel_check_after_stream_apply(self):
+        """Move to loading, then open the manual refuel check dialog after a stream apply."""
+        if self._manual_refuel_check_launch_is_active():
+            self._reject_duplicate_manual_refuel_check_launch()
+            return
+
+        if not self._manual_refuel_check_preflight_passed():
+            return
+
+        current_location = ""
+        getter = getattr(self.model.machine_model, "get_current_location", None)
+        if callable(getter):
+            try:
+                current_location = str(getter() or "").strip().lower()
+            except Exception:
+                current_location = ""
+        if current_location == "loading":
+            self._set_manual_refuel_check_launch_pending(True)
+            self._launch_manual_refuel_check_dialog()
+            return
+
+        mover = getattr(self.controller, "move_to_location", None)
+        if not callable(mover):
+            self.popup_message_signal.emit(
+                "Cannot Move To Loading",
+                "The controller cannot move to the loading position for the manual refuel check.",
+            )
+            return
+
+        self._set_manual_refuel_check_launch_pending(True)
+
+        def _launch_after_loading_move():
+            if getattr(self, "_manual_refuel_check_dialog", None) is not None:
+                self._reject_duplicate_manual_refuel_check_launch()
+                return
+            if not getattr(self, "_manual_refuel_check_launch_pending", False):
+                return
+            self._launch_manual_refuel_check_dialog()
+
+        move_queued = mover(
+            "loading",
+            manual=True,
+            on_complete=_launch_after_loading_move,
+        )
+        if move_queued is False:
+            self._clear_manual_refuel_check_launch_state()
+            self.popup_message_signal.emit(
+                "Move To Loading Failed",
+                "Could not queue the move to loading for the manual refuel check.",
+            )
+
+    def manual_refuel_check(self):
+        """Open the manual refuel check dialog after verifying prerequisites."""
+        if self._manual_refuel_check_launch_is_active():
+            self._reject_duplicate_manual_refuel_check_launch()
+            return
+
+        if not self._manual_refuel_check_preflight_passed():
+            return
+
+        self._set_manual_refuel_check_launch_pending(True)
+        self._launch_manual_refuel_check_dialog()
 
     def nozzle_position_dataset_capture(self):
         """Open the NozzlePosition checklist-driven dataset capture dialog."""
@@ -4000,6 +4225,69 @@ class WellPlateWidget(QtWidgets.QGroupBox):
                     return
             else:
                 self.main_window.popup_message("Cannot Start Print Array", message)
+                return
+
+        refuel_preflight_getter = getattr(self.controller, "get_print_array_refuel_check_preflight", None)
+        refuel_preflight = (
+            refuel_preflight_getter()
+            if callable(refuel_preflight_getter)
+            else {"ok": True, "code": "not_required", "message": "", "record": None}
+        )
+        if not bool((refuel_preflight or {}).get("ok")):
+            code = str((refuel_preflight or {}).get("code") or "")
+            message = str((refuel_preflight or {}).get("message") or "Manual refuel check could not be confirmed.")
+            if code not in PROMPTABLE_MANUAL_REFUEL_CHECK_CODES:
+                self.main_window.popup_message("Cannot Start Print Array", message)
+                return
+
+            choice_getter = getattr(self.main_window, "popup_choice", None)
+            if callable(choice_getter):
+                choice = choice_getter(
+                    "Manual Refuel Check Required",
+                    (
+                        f"{message}\n\n"
+                        "Choose whether to run the manual refuel check now, "
+                        "proceed without a recorded pass, or cancel."
+                    ),
+                    [
+                        "Run manual refuel check now",
+                        "Proceed without refuel check",
+                        "Cancel",
+                    ],
+                    default="Cancel",
+                )
+            else:
+                choice = "Cancel"
+
+            if choice == "Run manual refuel check now":
+                launcher = getattr(getattr(self.main_window, "pressure_box", None), "manual_refuel_check_after_stream_apply", None)
+                if callable(launcher):
+                    launcher()
+                else:
+                    self.main_window.popup_message(
+                        "Manual Refuel Check Unavailable",
+                        "The manual refuel check launcher is not available.",
+                    )
+                return
+
+            if choice == "Proceed without refuel check":
+                recorder = getattr(self.controller, "record_manual_refuel_check_bypass", None)
+                result = (
+                    recorder(source="print_array_preflight", reason="operator_bypass")
+                    if callable(recorder)
+                    else {
+                        "ok": False,
+                        "message": "Controller cannot record the manual refuel check bypass.",
+                    }
+                )
+                if isinstance(result, dict) and result.get("ok") is False:
+                    self.main_window.popup_message(
+                        "Manual Refuel Check Bypass Not Recorded",
+                        str(result.get("message") or "Could not record the manual refuel check bypass."),
+                    )
+                    return
+                print_kwargs["manual_refuel_check_bypass"] = True
+            else:
                 return
 
         dock_context_getter = getattr(self.controller, "get_evap_plate_dock_check_context", None)
@@ -6605,6 +6893,24 @@ class ExperimentTaskListWidget(QGroupBox):
         "in_progress": "#2b6cb0",
         "stopping": "#996515",
     }
+    MANUAL_REFUEL_CHECK_STATUS_LABELS = {
+        "passed_refuel_check": "Passed",
+        "not_required": "Not required",
+        "missing_refuel_check": "Required",
+        "required_refuel_check": "Required",
+        "deferred_refuel_check": "Deferred",
+        "failed_refuel_check": "Failed",
+        "unclear_refuel_check": "Unclear",
+        "bypassed_refuel_check": "Bypassed",
+        "stale_refuel_check": "Stale",
+        "settings_unavailable": "Settings changed",
+        "print_pulse_width_mismatch": "Settings changed",
+        "refuel_pulse_width_mismatch": "Settings changed",
+        "print_pressure_mismatch": "Settings changed",
+        "refuel_pressure_mismatch": "Settings changed",
+        "context_unavailable": "Status unavailable",
+        "validation_unavailable": "Status unavailable",
+    }
 
     def __init__(self, main_window, model, controller):
         super().__init__("EXPERIMENT GUIDE")
@@ -6690,6 +6996,7 @@ class ExperimentTaskListWidget(QGroupBox):
             self._on_calibration_summary_updated,
         )
         self._safe_connect(getattr(experiment_model, "applied_imaging_calibration_changed", None), self.request_refresh)
+        self._safe_connect(getattr(experiment_model, "manual_refuel_check_changed", None), self.request_refresh)
 
     def _on_experiment_loaded(self, *_args):
         self._manual_section_states.clear()
@@ -7076,6 +7383,65 @@ class ExperimentTaskListWidget(QGroupBox):
             return ""
         return str(result.get("message") or "")
 
+    def _manual_refuel_preflight_for_head(self, head, *, is_active=False):
+        if head is None:
+            return {"ok": True, "code": "not_required", "message": ""}
+
+        if is_active:
+            getter = getattr(self.controller, "get_print_array_refuel_check_preflight", None)
+            if callable(getter):
+                try:
+                    result = getter() or {}
+                except Exception as exc:
+                    result = {
+                        "ok": False,
+                        "code": "validation_unavailable",
+                        "message": f"Manual refuel check status could not be read: {exc}",
+                    }
+                if isinstance(result, dict):
+                    return result
+
+        experiment_model = getattr(self.model, "experiment_model", None)
+        validator = getattr(experiment_model, "validate_manual_refuel_check_for_print", None)
+        if callable(validator):
+            try:
+                result = validator(
+                    printer_head=head,
+                    machine_model=getattr(self.model, "machine_model", None),
+                )
+            except Exception as exc:
+                result = {
+                    "ok": False,
+                    "code": "validation_unavailable",
+                    "message": f"Manual refuel check status could not be read: {exc}",
+                }
+            if isinstance(result, dict):
+                return result
+
+        return {"ok": True, "code": "not_required", "message": ""}
+
+    def _manual_refuel_task_for_head(self, head, *, is_active=False):
+        result = self._manual_refuel_preflight_for_head(head, is_active=is_active)
+        if not isinstance(result, dict):
+            return None
+
+        ok = bool(result.get("ok", False))
+        code = str(result.get("code") or ("passed_refuel_check" if ok else "required_refuel_check"))
+        if ok and code == "not_required":
+            return None
+
+        message = str(result.get("message") or "").strip()
+        if not ok and not message:
+            status = self.MANUAL_REFUEL_CHECK_STATUS_LABELS.get(code, "Required")
+            message = f"Manual refuel check status: {status}."
+        return {
+            "key": "manual_refuel",
+            "label": "Manual refuel check",
+            "done": ok,
+            "blocking": "" if ok else message,
+            "preflight_code": code,
+        }
+
     def _head_context(self, head):
         active = self._active_head()
         is_active = active is head or (
@@ -7092,39 +7458,43 @@ class ExperimentTaskListWidget(QGroupBox):
         array_state_getter = getattr(self.controller, "get_array_run_state", None)
         array_state = array_state_getter() if callable(array_state_getter) else "idle"
 
-        tasks = []
-        tasks.append({"key": "load", "label": "Load printer head", "done": load_done, "blocking": ""})
-        tasks.append({
+        load_task = {"key": "load", "label": "Load printer head", "done": load_done, "blocking": ""}
+        calibrate_task = {
             "key": "calibrate",
             "label": "Calibrate printer head",
             "done": calibrated,
             "blocking": "" if is_active else "Load this printer head before calibrating.",
-        })
-        tasks.append({
+        }
+        apply_task = {
             "key": "apply",
             "label": "Apply calibration to experiment",
             "done": applied,
             "blocking": "" if calibrated else "Complete or select a calibration result first.",
-        })
-        tasks.append({
+        }
+        manual_refuel_task = self._manual_refuel_task_for_head(head, is_active=is_active)
+        print_task = {
             "key": "print",
             "label": "Print array",
             "done": printed,
             "blocking": "",
-        })
-        tasks.append({
+        }
+        recheck_task = {
             "key": "recheck",
             "label": "Bookend recheck",
             "done": False,
             "optional": True,
             "blocking": "Optional until this workflow has persisted recheck tracking.",
-        })
-        tasks.append({
+        }
+        dropoff_task = {
             "key": "dropoff",
             "label": "Drop off printer head",
             "done": dropped_off,
             "blocking": "" if printed else "Print this head's assigned wells first.",
-        })
+        }
+        tasks = [load_task, calibrate_task, apply_task]
+        if manual_refuel_task is not None:
+            tasks.append(manual_refuel_task)
+        tasks.extend([print_task, recheck_task, dropoff_task])
 
         if is_active and applied:
             preflight_message = self._preflight_blocking_message()
@@ -7138,27 +7508,29 @@ class ExperimentTaskListWidget(QGroupBox):
         if dropped_off:
             current = None
         elif not is_active:
-            current = tasks[0]
+            current = load_task
         elif not calibrated:
-            current = tasks[1]
+            current = calibrate_task
         elif not applied:
-            current = tasks[2]
+            current = apply_task
+        elif manual_refuel_task is not None and not manual_refuel_task.get("done"):
+            current = manual_refuel_task
         elif has_work and not printed:
-            current = tasks[3]
+            current = print_task
         elif printed and is_active:
-            current = tasks[5]
+            current = dropoff_task
 
         if current is not None:
             current["state"] = "current"
 
-        if current is tasks[0] and not queue_idle:
+        if current is load_task and not queue_idle:
             current["state"] = "blocked"
             current["blocking"] = "The command queue must finish before loading this printer head."
-        elif current is tasks[5] and not queue_idle:
+        elif current is dropoff_task and not queue_idle:
             current["state"] = "blocked"
             current["blocking"] = "The command queue must finish before dropping off this printer head."
 
-        if current is tasks[3]:
+        if current is print_task:
             if array_state == "running":
                 current["state"] = "in_progress"
                 current["blocking"] = "Array printing is in progress."
@@ -7171,14 +7543,16 @@ class ExperimentTaskListWidget(QGroupBox):
             elif preflight_message:
                 current["state"] = "blocked"
                 current["blocking"] = preflight_message
-        elif current is tasks[1] and not is_active:
+        elif manual_refuel_task is not None and current is manual_refuel_task:
+            current["state"] = "blocked" if current.get("blocking") else "current"
+        elif current is calibrate_task and not is_active:
             current["state"] = "blocked"
-        elif current is tasks[2] and not calibrated:
+        elif current is apply_task and not calibrated:
             current["state"] = "blocked"
-        elif current is tasks[5] and not printed:
+        elif current is dropoff_task and not printed:
             current["state"] = "blocked"
 
-        tasks[4]["state"] = "optional"
+        recheck_task["state"] = "optional"
 
         done_count = sum(1 for task in tasks if task.get("done") and not task.get("optional"))
         total_count = sum(1 for task in tasks if not task.get("optional"))
