@@ -98,6 +98,7 @@ class _Machine:
         self.capture_calls = []
         self.last_capture_context = None
         self.recover_calls = []
+        self.capture_perf_diag_enabled = None
         self.commands_idle = True
         self.capture_return = True
         self.recover_return = {"ok": True, "ready_for_retry": True}
@@ -126,6 +127,10 @@ class _Machine:
             }
         )
         return dict(self.recover_return)
+
+    def set_droplet_capture_performance_diagnostics_enabled(self, enabled):
+        self.capture_perf_diag_enabled = bool(enabled)
+        return self.capture_perf_diag_enabled
 
     def get_droplet_capture_state(self):
         return dict(self.capture_state)
@@ -297,6 +302,7 @@ def test_controller_droplet_capture_perf_enable_disable_and_disabled_noop():
 
     assert controller.set_droplet_capture_performance_diagnostics_enabled(True) is True
     assert controller.is_droplet_capture_performance_diagnostics_enabled() is True
+    assert _machine.capture_perf_diag_enabled is True
     controller.record_droplet_capture_performance_marker("ui_trigger_received", {"ui_sequence": 1})
     snapshot = controller.build_droplet_capture_performance_snapshot()
     assert snapshot["event_count"] == 3
@@ -305,6 +311,7 @@ def test_controller_droplet_capture_perf_enable_disable_and_disabled_noop():
 
     assert controller.set_droplet_capture_performance_diagnostics_enabled(False) is False
     assert controller.is_droplet_capture_performance_diagnostics_enabled() is False
+    assert _machine.capture_perf_diag_enabled is False
     controller.record_droplet_capture_performance_marker("ui_trigger_received", {"ui_sequence": 2})
     assert controller.build_droplet_capture_performance_snapshot()["event_count"] == 3
 

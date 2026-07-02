@@ -103,6 +103,43 @@ def test_camera_capture_phase_signal_records_active_calibration_event():
     ]
 
 
+def test_info_camera_capture_phase_does_not_record_active_calibration_event_when_diagnostics_disabled():
+    c = Controller.__new__(Controller)
+
+    capture = FakeSignal()
+    move = FakeSignal()
+    move_abs = FakeSignal()
+    settings = FakeSignal()
+    completion = FakeSignal()
+    phase = FakeSignal()
+    recorded = []
+
+    c.model = SimpleNamespace(
+        calibration_manager=SimpleNamespace(
+            captureImageRequested=capture,
+            moveRequested=move,
+            moveAbsoluteRequested=move_abs,
+            changeSettingsRequested=settings,
+            activeCalibration=SimpleNamespace(
+                _record_event=lambda event_type, payload, level="info": recorded.append(
+                    (event_type, dict(payload), level)
+                )
+            ),
+        )
+    )
+    c.machine = SimpleNamespace(
+        droplet_camera=SimpleNamespace(
+            capture_completed_signal=completion,
+            capture_phase_signal=phase,
+        )
+    )
+
+    Controller.connect_droplet_camera_signals(c)
+    phase.emit({"phase": "trigger_high", "request_id": "r1", "level": "info"})
+
+    assert recorded == []
+
+
 def test_handle_settings_change_request_binds_traced_commands_to_machine_snapshot():
     c = Controller.__new__(Controller)
 

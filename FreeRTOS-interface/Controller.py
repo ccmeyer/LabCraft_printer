@@ -218,10 +218,57 @@ class DropletCapturePerformanceDiagnostics:
         def _command_completed_ms(command):
             return _float_or_none((command or {}).get("completed_ms"))
 
+        def _camera_phase_rows(rows):
+            return [row for row in rows if str(row.get("event_kind") or "") == "camera_phase"]
+
+        def _last_camera_phase(camera_rows, phase):
+            wanted = str(phase)
+            for row in reversed(camera_rows):
+                if str(row.get("phase") or "") == wanted:
+                    return row
+            return {}
+
+        def _phase_elapsed_delta(camera_rows, start_phase, end_phase):
+            start = _float_or_none(_last_camera_phase(camera_rows, start_phase).get("elapsed_ms"))
+            end = _float_or_none(_last_camera_phase(camera_rows, end_phase).get("elapsed_ms"))
+            if start is None or end is None:
+                return None
+            return max(0.0, end - start)
+
+        def _worker_timing_fields(camera_rows):
+            retry_result = _last_camera_phase(camera_rows, "retry_attempt_result")
+            fields = {
+                "edge_wait_duration_ms": _phase_elapsed_delta(
+                    camera_rows,
+                    "edge_wait_start",
+                    "edge_wait_done",
+                ),
+                "post_ack_to_result_ms": _phase_elapsed_delta(
+                    camera_rows,
+                    "edge_wait_done",
+                    "retry_attempt_result",
+                ),
+                "arm_to_result_ms": _phase_elapsed_delta(
+                    camera_rows,
+                    "arm_start",
+                    "retry_attempt_result",
+                ),
+                "make_array_ms": _float_or_none(retry_result.get("make_array_ms")),
+                "signal_mean_ms": _float_or_none(retry_result.get("signal_mean_ms")),
+                "rotate_ms": _float_or_none(retry_result.get("rotate_ms")),
+                "frame_select_reason": retry_result.get("frame_select_reason"),
+                "selected_frame_mean": _float_or_none(retry_result.get("mean")),
+                "selected_frame_threshold": _float_or_none(retry_result.get("threshold")),
+                "cap_seen": _int_or_none(retry_result.get("cap_seen")),
+                "cap_max_new": _int_or_none(retry_result.get("cap_max_new")),
+            }
+            return fields
+
         request_summaries = []
         for request_id, rows in by_request.items():
             first_by_kind = _first_by_kind(rows)
             completion = first_by_kind.get("controller_completion_received") or {}
+            camera_rows = _camera_phase_rows(rows)
             summary = {
                 "request_id": request_id,
                 "event_count": len(rows),
@@ -241,6 +288,7 @@ class DropletCapturePerformanceDiagnostics:
                     (first_by_kind.get("ui_pending_cleared") or {}).get("monotonic_ns"),
                 ),
             }
+            summary.update(_worker_timing_fields(camera_rows))
             request_summaries.append(self._json_safe(summary))
 
         ui_sequence_summaries = []
@@ -361,7 +409,7 @@ class DropletCapturePerformanceDiagnostics:
                     if row.get("attempt") is not None and str(row.get("attempt")).lstrip("-").isdigit()
                 }
             )
-            camera_rows = [row for row in rows if str(row.get("event_kind") or "") == "camera_phase"]
+            camera_rows = _camera_phase_rows(rows)
             trigger_count = sum(1 for row in camera_rows if str(row.get("phase") or "") == "trigger_high")
             edge_done_rows = [row for row in camera_rows if str(row.get("phase") or "") == "edge_wait_done"]
             edge_timeout_count = sum(1 for row in edge_done_rows if row.get("fired") is False)
@@ -385,87 +433,85 @@ class DropletCapturePerformanceDiagnostics:
                 for row in retry_result_rows
                 if row.get("reason")
             ]
-            calibration_capture_summaries.append(
-                self._json_safe(
-                    {
-                        "capture_diag_id": capture_diag_id,
-                        "request_id": _first_nonempty(
-                            callback.get("request_id"),
-                            result.get("request_id"),
-                            completion.get("request_id"),
-                        ),
-                        "calibration_run_id": _first_nonempty(
-                            context.get("calibration_run_id"),
-                            attempt.get("calibration_run_id"),
-                        ),
-                        "calibration_run_index": _first_nonempty(
-                            context.get("calibration_run_index"),
-                            attempt.get("calibration_run_index"),
-                        ),
-                        "calibration_process_instance_id": _first_nonempty(
-                            context.get("calibration_process_instance_id"),
-                            attempt.get("calibration_process_instance_id"),
-                        ),
-                        "calibration_process_instance_index": _first_nonempty(
-                            context.get("calibration_process_instance_index"),
-                            attempt.get("calibration_process_instance_index"),
-                        ),
-                        "calibration_process": _first_nonempty(
-                            context.get("calibration_process"),
-                            attempt.get("calibration_process"),
-                        ),
-                        "calibration_phase": _first_nonempty(
-                            context.get("calibration_phase"),
-                            attempt.get("calibration_phase"),
-                        ),
-                        "stage_text": _first_nonempty(
-                            context.get("stage_text"),
-                            attempt.get("stage_text"),
-                        ),
-                        "set_attr": _first_nonempty(
-                            context.get("set_attr"),
-                            attempt.get("set_attr"),
-                        ),
-                        "capture_role": _first_nonempty(
-                            context.get("capture_role"),
-                            attempt.get("capture_role"),
-                        ),
-                        "attempts": attempts,
-                        "attempts_total": _first_nonempty(
-                            context.get("attempts_total"),
-                            attempt.get("attempts_total"),
-                        ),
-                        "status": _first_nonempty(
-                            result.get("capture_status"),
-                            result.get("status"),
-                            completion.get("status"),
-                        ),
-                        "worker_duration_ms": completion.get("worker_duration_ms"),
-                        "queue_to_worker_start_ms": completion.get("queue_to_worker_start_ms"),
-                        "worker_complete_to_controller_ms": completion.get("worker_complete_to_controller_ms"),
-                        "trigger_count": trigger_count,
-                        "worker_retry_count": max(0, trigger_count - 1),
-                        "edge_wait_done_count": len(edge_done_rows),
-                        "edge_timeout_count": edge_timeout_count,
-                        "delayed_ack_threshold_ms": delayed_ack_threshold_ms,
-                        "delayed_ack_count": delayed_ack_count,
-                        "max_edge_wait_elapsed_ms": max(edge_wait_values) if edge_wait_values else None,
-                        "retry_reasons": retry_reasons,
-                        "attempt_to_callback_ms": self._delta_ms(
-                            attempt.get("monotonic_ns"),
-                            callback.get("monotonic_ns"),
-                        ),
-                        "attempt_to_result_ms": self._delta_ms(
-                            attempt.get("monotonic_ns"),
-                            result.get("monotonic_ns"),
-                        ),
-                        "attempt_to_capture_completed_emit_ms": self._delta_ms(
-                            attempt.get("monotonic_ns"),
-                            completed.get("monotonic_ns"),
-                        ),
-                    }
-                )
-            )
+            capture_summary = {
+                "capture_diag_id": capture_diag_id,
+                "request_id": _first_nonempty(
+                    callback.get("request_id"),
+                    result.get("request_id"),
+                    completion.get("request_id"),
+                ),
+                "calibration_run_id": _first_nonempty(
+                    context.get("calibration_run_id"),
+                    attempt.get("calibration_run_id"),
+                ),
+                "calibration_run_index": _first_nonempty(
+                    context.get("calibration_run_index"),
+                    attempt.get("calibration_run_index"),
+                ),
+                "calibration_process_instance_id": _first_nonempty(
+                    context.get("calibration_process_instance_id"),
+                    attempt.get("calibration_process_instance_id"),
+                ),
+                "calibration_process_instance_index": _first_nonempty(
+                    context.get("calibration_process_instance_index"),
+                    attempt.get("calibration_process_instance_index"),
+                ),
+                "calibration_process": _first_nonempty(
+                    context.get("calibration_process"),
+                    attempt.get("calibration_process"),
+                ),
+                "calibration_phase": _first_nonempty(
+                    context.get("calibration_phase"),
+                    attempt.get("calibration_phase"),
+                ),
+                "stage_text": _first_nonempty(
+                    context.get("stage_text"),
+                    attempt.get("stage_text"),
+                ),
+                "set_attr": _first_nonempty(
+                    context.get("set_attr"),
+                    attempt.get("set_attr"),
+                ),
+                "capture_role": _first_nonempty(
+                    context.get("capture_role"),
+                    attempt.get("capture_role"),
+                ),
+                "attempts": attempts,
+                "attempts_total": _first_nonempty(
+                    context.get("attempts_total"),
+                    attempt.get("attempts_total"),
+                ),
+                "status": _first_nonempty(
+                    result.get("capture_status"),
+                    result.get("status"),
+                    completion.get("status"),
+                ),
+                "worker_duration_ms": completion.get("worker_duration_ms"),
+                "queue_to_worker_start_ms": completion.get("queue_to_worker_start_ms"),
+                "worker_complete_to_controller_ms": completion.get("worker_complete_to_controller_ms"),
+                "trigger_count": trigger_count,
+                "worker_retry_count": max(0, trigger_count - 1),
+                "edge_wait_done_count": len(edge_done_rows),
+                "edge_timeout_count": edge_timeout_count,
+                "delayed_ack_threshold_ms": delayed_ack_threshold_ms,
+                "delayed_ack_count": delayed_ack_count,
+                "max_edge_wait_elapsed_ms": max(edge_wait_values) if edge_wait_values else None,
+                "retry_reasons": retry_reasons,
+                "attempt_to_callback_ms": self._delta_ms(
+                    attempt.get("monotonic_ns"),
+                    callback.get("monotonic_ns"),
+                ),
+                "attempt_to_result_ms": self._delta_ms(
+                    attempt.get("monotonic_ns"),
+                    result.get("monotonic_ns"),
+                ),
+                "attempt_to_capture_completed_emit_ms": self._delta_ms(
+                    attempt.get("monotonic_ns"),
+                    completed.get("monotonic_ns"),
+                ),
+            }
+            capture_summary.update(_worker_timing_fields(camera_rows))
+            calibration_capture_summaries.append(self._json_safe(capture_summary))
 
         settings_request_summaries = []
         for settings_request_id, rows in by_settings_request.items():
@@ -559,7 +605,7 @@ class DropletCapturePerformanceDiagnostics:
 
         snapshot = {
             "kind": "droplet_capture_performance_snapshot",
-            "schema_version": 4,
+            "schema_version": 5,
             "reason": str(reason or "manual_export"),
             "generated_at_utc": self._now_utc(),
             "generated_monotonic_ns": int(time.monotonic_ns()),
@@ -837,6 +883,23 @@ class Controller(QObject):
             "calibration_manager_present": manager is not None,
             "calibration_manager_enabled": manager_enabled,
         }
+
+    def _set_droplet_camera_performance_diagnostics_enabled(self, enabled):
+        machine = getattr(self, "machine", None)
+        setter = getattr(machine, "set_droplet_capture_performance_diagnostics_enabled", None)
+        if callable(setter):
+            try:
+                return setter(bool(enabled))
+            except Exception:
+                return None
+        camera = getattr(machine, "droplet_camera", None)
+        camera_setter = getattr(camera, "set_capture_performance_diagnostics_enabled", None)
+        if callable(camera_setter):
+            try:
+                return camera_setter(bool(enabled))
+            except Exception:
+                return None
+        return None
     
     def disconnect_droplet_camera_signals(self):
         try:
@@ -6545,6 +6608,7 @@ class Controller(QObject):
                 setter(enabled)
             except Exception:
                 pass
+        self._set_droplet_camera_performance_diagnostics_enabled(enabled)
         bridge_status = self._calibration_capture_performance_bridge_status()
         self.record_droplet_capture_performance_marker(
             "diagnostics_enabled",
@@ -6620,7 +6684,11 @@ class Controller(QObject):
         data = dict(payload or {}) if isinstance(payload, dict) else {"payload": payload}
         level = str(data.get("level") or "info")
         self.record_droplet_capture_performance_marker("camera_phase", data)
-        self._record_active_calibration_event("camera_capture_phase", data, level=level)
+        diagnostics = getattr(self, "_droplet_capture_performance_diagnostics", None)
+        diagnostics_enabled = bool(getattr(diagnostics, "enabled", False))
+        level_text = level.strip().lower()
+        if diagnostics_enabled or level_text in {"warning", "warn", "error", "critical", "exception"}:
+            self._record_active_calibration_event("camera_capture_phase", data, level=level)
 
     def _emit_active_calibration_error(self, message: str):
         """

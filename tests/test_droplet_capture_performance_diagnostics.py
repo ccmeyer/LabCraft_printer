@@ -29,7 +29,7 @@ def test_droplet_capture_perf_enabled_events_are_bounded_and_json_safe():
     snapshot = diagnostics.build_snapshot(reason="unit_test")
 
     assert snapshot["kind"] == "droplet_capture_performance_snapshot"
-    assert snapshot["schema_version"] == 4
+    assert snapshot["schema_version"] == 5
     assert snapshot["reason"] == "unit_test"
     assert snapshot["event_count"] == 2
     assert snapshot["event_counts"]["controller_completion_received"] == 1
@@ -56,6 +56,26 @@ def test_droplet_capture_perf_snapshot_summarizes_timings():
             "worker_complete_to_controller_ms": 0.25,
         },
     )
+    diagnostics.record("camera_phase", {"request_id": "r1", "phase": "edge_wait_start", "elapsed_ms": 6.0})
+    diagnostics.record("camera_phase", {"request_id": "r1", "phase": "edge_wait_done", "elapsed_ms": 12.5})
+    diagnostics.record("camera_phase", {"request_id": "r1", "phase": "arm_start", "elapsed_ms": 13.0})
+    diagnostics.record(
+        "camera_phase",
+        {
+            "request_id": "r1",
+            "phase": "retry_attempt_result",
+            "elapsed_ms": 61.0,
+            "reason": "threshold",
+            "mean": 180.0,
+            "threshold": 29.0,
+            "make_array_ms": 4.5,
+            "signal_mean_ms": 1.25,
+            "rotate_ms": 2.0,
+            "frame_select_reason": "threshold",
+            "cap_seen": 1,
+            "cap_max_new": 10,
+        },
+    )
     diagnostics.record("controller_pending_cleared", {"request_id": "r1"})
     diagnostics.record("ui_pending_cleared", {"request_id": "r1"})
 
@@ -67,6 +87,17 @@ def test_droplet_capture_perf_snapshot_summarizes_timings():
     assert request_summary["queue_to_worker_start_ms"] == 1.5
     assert request_summary["worker_duration_ms"] == 8.0
     assert request_summary["worker_complete_to_controller_ms"] == 0.25
+    assert request_summary["edge_wait_duration_ms"] == 6.5
+    assert request_summary["post_ack_to_result_ms"] == 48.5
+    assert request_summary["arm_to_result_ms"] == 48.0
+    assert request_summary["make_array_ms"] == 4.5
+    assert request_summary["signal_mean_ms"] == 1.25
+    assert request_summary["rotate_ms"] == 2.0
+    assert request_summary["frame_select_reason"] == "threshold"
+    assert request_summary["selected_frame_mean"] == 180.0
+    assert request_summary["selected_frame_threshold"] == 29.0
+    assert request_summary["cap_seen"] == 1
+    assert request_summary["cap_max_new"] == 10
     assert request_summary["controller_completion_to_pending_clear_ms"] is not None
     assert snapshot["ui_sequence_summaries"][0]["accepted"] is True
 
@@ -285,6 +316,14 @@ def test_droplet_capture_perf_snapshot_recovers_nested_capture_context():
         "camera_phase",
         {
             "request_id": "request-nested",
+            "phase": "edge_wait_start",
+            "elapsed_ms": 6.0,
+        },
+    )
+    diagnostics.record(
+        "camera_phase",
+        {
+            "request_id": "request-nested",
             "phase": "edge_wait_done",
             "fired": True,
             "elapsed_ms": 155.5,
@@ -294,10 +333,25 @@ def test_droplet_capture_perf_snapshot_recovers_nested_capture_context():
         "camera_phase",
         {
             "request_id": "request-nested",
+            "phase": "arm_start",
+            "elapsed_ms": 156.0,
+        },
+    )
+    diagnostics.record(
+        "camera_phase",
+        {
+            "request_id": "request-nested",
             "phase": "retry_attempt_result",
+            "elapsed_ms": 190.0,
             "reason": "threshold",
             "mean": 200.0,
             "threshold": 29.0,
+            "make_array_ms": 3.0,
+            "signal_mean_ms": 0.75,
+            "rotate_ms": 1.5,
+            "frame_select_reason": "threshold",
+            "cap_seen": 1,
+            "cap_max_new": 10,
         },
     )
     diagnostics.record(
@@ -328,6 +382,17 @@ def test_droplet_capture_perf_snapshot_recovers_nested_capture_context():
     assert capture_summary["edge_timeout_count"] == 0
     assert capture_summary["delayed_ack_count"] == 1
     assert capture_summary["retry_reasons"] == ["threshold"]
+    assert capture_summary["edge_wait_duration_ms"] == 149.5
+    assert capture_summary["post_ack_to_result_ms"] == 34.5
+    assert capture_summary["arm_to_result_ms"] == 34.0
+    assert capture_summary["make_array_ms"] == 3.0
+    assert capture_summary["signal_mean_ms"] == 0.75
+    assert capture_summary["rotate_ms"] == 1.5
+    assert capture_summary["frame_select_reason"] == "threshold"
+    assert capture_summary["selected_frame_mean"] == 200.0
+    assert capture_summary["selected_frame_threshold"] == 29.0
+    assert capture_summary["cap_seen"] == 1
+    assert capture_summary["cap_max_new"] == 10
 
 
 def test_droplet_capture_perf_snapshot_parses_stringified_capture_context_only_on_export():

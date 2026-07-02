@@ -491,6 +491,8 @@ class DropletCamera(QObject):
         self._capture_worker_thread = None
         self._capture_generation = 0
         self._cap_request_id = None
+        self._capture_performance_diagnostics_enabled = False
+        self._capture_debug_logging_enabled = False
         
         # threshold tuning
         self.k_sigma   = 4.0
@@ -512,6 +514,35 @@ class DropletCamera(QObject):
         self._signal_stride = 1
         self._signal_channel = None
         self._cap_emit_rotate = True
+
+    def set_capture_performance_diagnostics_enabled(self, enabled):
+        self._capture_performance_diagnostics_enabled = bool(enabled)
+        return self._capture_performance_diagnostics_enabled
+
+    def is_capture_performance_diagnostics_enabled(self):
+        return bool(getattr(self, "_capture_performance_diagnostics_enabled", False))
+
+    def set_capture_debug_logging_enabled(self, enabled):
+        self._capture_debug_logging_enabled = bool(enabled)
+        return self._capture_debug_logging_enabled
+
+    def is_capture_debug_logging_enabled(self):
+        return bool(getattr(self, "_capture_debug_logging_enabled", False))
+
+    @staticmethod
+    def _capture_phase_is_warning_or_error(level):
+        text = str(level or "info").strip().lower()
+        return text in {"warning", "warn", "error", "critical", "exception"}
+
+    def _should_emit_capture_phase(self, level="info"):
+        return self.is_capture_performance_diagnostics_enabled() or self._capture_phase_is_warning_or_error(level)
+
+    def _should_print_capture_debug(self, level="info"):
+        return self.is_capture_debug_logging_enabled() or self._capture_phase_is_warning_or_error(level)
+
+    def _print_capture_debug(self, message, *, level="info"):
+        if self._should_print_capture_debug(level):
+            print(message)
 
     def _signal_mean(self, arr) -> float:
         if arr is None:
@@ -800,6 +831,11 @@ class DropletCamera(QObject):
         print_phase=True,
         **fields,
     ):
+        level_text = str(level or "info")
+        should_emit = self._should_emit_capture_phase(level_text)
+        should_print = bool(print_phase) and self._should_print_capture_debug(level_text)
+        if not should_emit and not should_print:
+            return None
         elapsed_ms = 0.0
         if started_ns is not None:
             try:
@@ -816,8 +852,10 @@ class DropletCamera(QObject):
             "elapsed_ms": f"{elapsed_ms:.1f}",
         }
         details.update(fields)
-        if print_phase:
+        if should_print:
             print("[CameraPhase] " + str(phase) + " " + " ".join(f"{k}={v}" for k, v in details.items()))
+        if not should_emit:
+            return None
         payload = {
             "phase": str(phase),
             "request_id": request_id,
@@ -825,7 +863,7 @@ class DropletCamera(QObject):
             "cap_id": int(getattr(self, "_cap_id", 0)),
             "backend_id": backend_id,
             "elapsed_ms": float(elapsed_ms),
-            "level": str(level or "info"),
+            "level": level_text,
         }
         payload.update(fields)
         try:
@@ -974,12 +1012,32 @@ class DropletCamera(QObject):
             if req is None:
                 continue
             t_done_ns = time.monotonic_ns()  # completion time (local monotonic)
+            diagnostics_enabled = self.is_capture_performance_diagnostics_enabled()
+            make_array_started_ns = time.monotonic_ns() if diagnostics_enabled else None
+            make_array_done_ns = None
             try:
                 md  = req.get_metadata()
                 arr = req.make_array("main")
+                make_array_done_ns = time.monotonic_ns() if diagnostics_enabled else None
             finally:
                 req.release()
+            mean_started_ns = time.monotonic_ns() if diagnostics_enabled else None
             mean = self._signal_mean(arr)
+            mean_done_ns = time.monotonic_ns() if diagnostics_enabled else None
+            frame_timing = None
+            if diagnostics_enabled:
+                frame_timing = {
+                    "make_array_ms": (
+                        float(make_array_done_ns - make_array_started_ns) / 1_000_000.0
+                        if make_array_started_ns is not None and make_array_done_ns is not None
+                        else None
+                    ),
+                    "signal_mean_ms": (
+                        float(mean_done_ns - mean_started_ns) / 1_000_000.0
+                        if mean_started_ns is not None and mean_done_ns is not None
+                        else None
+                    ),
+                }
             # print(f"{mean}")  # your debug
 
             with self._cv:
@@ -992,37 +1050,57 @@ class DropletCamera(QObject):
 
                         # track brightest among post-arm frames
                         if (self._cap_brightest is None) or (mean > self._cap_brightest[3]):
-                            self._cap_brightest = (arr, md, t_done_ns, mean)
+                            self._cap_brightest = (arr, md, t_done_ns, mean, frame_timing)
 
                         # first above-threshold wins
                         if mean >= self._cap_threshold:
-                            print(
+                            self._print_capture_debug(
                                 f"[Capture] request_id={getattr(self, '_cap_request_id', None)} "
                                 f"gen={getattr(self, '_capture_generation', 0)} "
                                 f"cap_id={self._cap_id} mean={mean:.1f} thr={self._cap_threshold:.1f}"
                             )
-                            self._complete_capture_locked(arr, md, mean, reason="threshold")
+                            self._complete_capture_locked(arr, md, mean, reason="threshold", frame_timing=frame_timing)
                         elif (self._cap_seen >= self._cap_max_new) or (time.monotonic() > self._cap_deadline):
                             # fallback to brightest seen post-arm
                             if self._cap_brightest is not None:
-                                b_arr, b_md, _b_t, b_mean = self._cap_brightest
-                                self._complete_capture_locked(b_arr, b_md, b_mean, reason="fallback")
+                                b_arr, b_md, _b_t, b_mean, b_timing = self._cap_brightest
+                                self._complete_capture_locked(
+                                    b_arr,
+                                    b_md,
+                                    b_mean,
+                                    reason="fallback",
+                                    frame_timing=b_timing,
+                                )
                             else:
-                                self._complete_capture_locked(arr, md, mean, reason="last_resort")
+                                self._complete_capture_locked(
+                                    arr,
+                                    md,
+                                    mean,
+                                    reason="last_resort",
+                                    frame_timing=frame_timing,
+                                )
 
                 self._cv.notify_all()
 
     # --- finalize one capture ---
-    def _complete_capture_locked(self, arr, md, mean, reason):
+    def _complete_capture_locked(self, arr, md, mean, reason, *, frame_timing=None):
         self._cap_active = False
         self._trigger_low()  # drop trigger now that we have a frame
 
+        diagnostics_enabled = self.is_capture_performance_diagnostics_enabled()
+        rotate_ms = None
         if self._cap_emit_rotate:
+            rotate_started_ns = time.monotonic_ns() if diagnostics_enabled else None
             arr = cv2.rotate(arr, cv2.ROTATE_90_CLOCKWISE)
+            rotate_done_ns = time.monotonic_ns() if diagnostics_enabled else None
+            if diagnostics_enabled and rotate_started_ns is not None and rotate_done_ns is not None:
+                rotate_ms = float(rotate_done_ns - rotate_started_ns) / 1_000_000.0
+        elif diagnostics_enabled:
+            rotate_ms = 0.0
 
         self.latest_frame = arr
         backend = self._get_current_capture_backend()
-        self._cap_result = {
+        result = {
             "arr": arr,
             "md": md,
             "mean": float(mean),
@@ -1033,6 +1111,20 @@ class DropletCamera(QObject):
             "generation": int(getattr(self, "_capture_generation", 0)),
             "backend_id": getattr(backend, "backend_id", None),
         }
+        if diagnostics_enabled:
+            if isinstance(frame_timing, dict):
+                for key in ("make_array_ms", "signal_mean_ms"):
+                    if key in frame_timing:
+                        result[key] = frame_timing.get(key)
+            result.update(
+                {
+                    "rotate_ms": rotate_ms,
+                    "frame_select_reason": str(reason),
+                    "cap_seen": int(getattr(self, "_cap_seen", 0)),
+                    "cap_max_new": int(getattr(self, "_cap_max_new", 0)),
+                }
+            )
+        self._cap_result = result
         self._cap_done.set()
         # print(f"[Chosen] mean={mean:.1f} reason={reason} "
         #       f"Exp(us)={md.get('ExposureTime') if md else None} "
@@ -1296,7 +1388,7 @@ class DropletCamera(QObject):
             self._cap_done.clear()
             self._cap_result = None
 
-            print(
+            self._print_capture_debug(
                 f"[Arm] request_id={request_id} gen={generation} cap_id={self._cap_id} "
                 f"backend_id={backend_id} "
                 f"base_mean={base_mean:.1f} base_std={base_std:.1f} "
@@ -1400,14 +1492,19 @@ class DropletCamera(QObject):
                     will_retry=i < attempts - 1,
                     print_phase=False,
                 )
-                print(f"[Retry] attempt {i+1}/{attempts} timed out waiting for completion")
+                self._print_capture_debug(
+                    f"[Retry] attempt {i+1}/{attempts} timed out waiting for completion",
+                    level="warning",
+                )
             else:
                 res = self._cap_result or {}
                 last_reason = res.get("reason", "unknown")
                 if last_reason == "stale_backend":
                     raise StaleCaptureBackend(str(res.get("error") or "stale_backend"))
-                print(f"[Retry] attempt {i+1}/{attempts} result reason={last_reason} "
-                    f"mean={res.get('mean')} thr={res.get('threshold')}")
+                self._print_capture_debug(
+                    f"[Retry] attempt {i+1}/{attempts} result reason={last_reason} "
+                    f"mean={res.get('mean')} thr={res.get('threshold')}"
+                )
                 attempt_success = (last_reason in set(success_reasons)) and self.latest_frame is not None
                 self._log_capture_phase(
                     "retry_attempt_result",
@@ -1423,6 +1520,12 @@ class DropletCamera(QObject):
                     mean=res.get("mean"),
                     threshold=res.get("threshold"),
                     cap_id=res.get("cap_id"),
+                    make_array_ms=res.get("make_array_ms"),
+                    signal_mean_ms=res.get("signal_mean_ms"),
+                    rotate_ms=res.get("rotate_ms"),
+                    frame_select_reason=res.get("frame_select_reason"),
+                    cap_seen=res.get("cap_seen"),
+                    cap_max_new=res.get("cap_max_new"),
                     success=bool(attempt_success),
                     will_retry=(not attempt_success) and i < attempts - 1,
                     print_phase=False,
@@ -1625,7 +1728,7 @@ class DropletCamera(QObject):
                 payload["current_generation"] = current_generation
 
             payload["worker_active"] = bool(self._capture_worker_active.is_set())
-            print(
+            self._print_capture_debug(
                 f"[Camera] capture complete request_id={request_id} "
                 f"status={payload.get('status')} cap_id={payload.get('cap_id')} "
                 f"gen={payload.get('generation')} current_gen={current_generation} "
@@ -1653,7 +1756,7 @@ class DropletCamera(QObject):
 
         t = threading.Thread(target=_runner, daemon=True)
         self._capture_worker_thread = t
-        print(
+        self._print_capture_debug(
             f"[Camera] capture queued request_id={request_id} gen={generation} "
             f"backend_id={backend_id} "
             f"attempts={attempts} max_new_frames={max_new_frames} timeout_s={attempt_timeout_s}"
@@ -5949,6 +6052,18 @@ class Machine(QObject):
     def set_droplet_capture_profile(self, profile_name: str):
         if hasattr(self.droplet_camera, "set_capture_profile"):
             self.droplet_camera.set_capture_profile(profile_name)
+
+    def set_droplet_capture_performance_diagnostics_enabled(self, enabled):
+        setter = getattr(self.droplet_camera, "set_capture_performance_diagnostics_enabled", None)
+        if callable(setter):
+            return setter(bool(enabled))
+        return bool(enabled)
+
+    def set_droplet_capture_debug_logging_enabled(self, enabled):
+        setter = getattr(self.droplet_camera, "set_capture_debug_logging_enabled", None)
+        if callable(setter):
+            return setter(bool(enabled))
+        return bool(enabled)
     
     def set_flash_duration(self,duration,handler=None,kwargs=None,manual=False,trace_metadata=None):
         duration = int(duration)

@@ -453,6 +453,7 @@ def _make_async_camera():
     camera._cap_active = False
     camera._cap_id = 7
     camera._cap_request_id = None
+    camera._emit_on_complete = True
     camera._capture_worker_active = threading.Event()
     camera._capture_worker_thread = None
     camera._capture_generation = 0
@@ -473,6 +474,100 @@ def _make_async_camera():
     camera.stop_camera = _stop_camera
     camera.start_camera = _start_camera
     return camera
+
+
+def test_capture_phase_signal_info_is_disabled_by_default():
+    camera = DropletCamera.__new__(DropletCamera)
+    camera._cap_id = 0
+    camera.capture_phase_signal = _Signal()
+    payloads = []
+    camera.capture_phase_signal.connect(lambda payload: payloads.append(dict(payload)))
+
+    DropletCamera._log_capture_phase(camera, "trigger_high", request_id="req-default")
+
+    assert payloads == []
+
+    DropletCamera._log_capture_phase(
+        camera,
+        "backend_error",
+        request_id="req-warning",
+        level="warning",
+    )
+    assert payloads[0]["phase"] == "backend_error"
+    assert payloads[0]["level"] == "warning"
+
+
+def test_capture_phase_signal_emits_when_diagnostics_enabled():
+    camera = DropletCamera.__new__(DropletCamera)
+    camera._cap_id = 0
+    camera.capture_phase_signal = _Signal()
+    payloads = []
+    camera.capture_phase_signal.connect(lambda payload: payloads.append(dict(payload)))
+    DropletCamera.set_capture_performance_diagnostics_enabled(camera, True)
+
+    DropletCamera._log_capture_phase(camera, "trigger_high", request_id="req-diag")
+
+    assert payloads
+    assert payloads[0]["phase"] == "trigger_high"
+    assert payloads[0]["request_id"] == "req-diag"
+
+
+def test_capture_debug_logging_suppresses_info_prints_by_default(capsys):
+    camera = DropletCamera.__new__(DropletCamera)
+    camera._cap_id = 0
+    camera.capture_phase_signal = _Signal()
+
+    DropletCamera._log_capture_phase(camera, "trigger_high", request_id="req-quiet")
+    assert capsys.readouterr().out == ""
+
+    DropletCamera._log_capture_phase(camera, "backend_error", request_id="req-warning", level="warning")
+    assert "[CameraPhase] backend_error" in capsys.readouterr().out
+
+    DropletCamera.set_capture_debug_logging_enabled(camera, True)
+    DropletCamera._log_capture_phase(camera, "trigger_high", request_id="req-loud")
+    assert "[CameraPhase] trigger_high" in capsys.readouterr().out
+
+
+def test_complete_capture_includes_selected_frame_timing_only_when_diagnostics_enabled():
+    camera = _make_async_camera()
+    frame = np.full((3, 4, 3), 120, dtype=np.uint8)
+    camera._cap_threshold = 29.0
+    camera._cap_seen = 2
+    camera._cap_max_new = 10
+    camera._cap_emit_rotate = False
+
+    with camera._cv:
+        DropletCamera._complete_capture_locked(
+            camera,
+            frame,
+            {},
+            120.0,
+            "threshold",
+            frame_timing={"make_array_ms": 1.25, "signal_mean_ms": 0.5},
+        )
+
+    assert "make_array_ms" not in camera._cap_result
+    assert "signal_mean_ms" not in camera._cap_result
+    assert "rotate_ms" not in camera._cap_result
+
+    DropletCamera.set_capture_performance_diagnostics_enabled(camera, True)
+    camera._cap_done.clear()
+    with camera._cv:
+        DropletCamera._complete_capture_locked(
+            camera,
+            frame,
+            {},
+            121.0,
+            "threshold",
+            frame_timing={"make_array_ms": 1.5, "signal_mean_ms": 0.75},
+        )
+
+    assert camera._cap_result["make_array_ms"] == 1.5
+    assert camera._cap_result["signal_mean_ms"] == 0.75
+    assert camera._cap_result["rotate_ms"] == 0.0
+    assert camera._cap_result["frame_select_reason"] == "threshold"
+    assert camera._cap_result["cap_seen"] == 2
+    assert camera._cap_result["cap_max_new"] == 10
 
 
 def test_capture_worker_clears_active_before_completion_emit():
@@ -646,6 +741,7 @@ def test_capture_worker_finishes_on_missing_flash_edge_without_stuck_active():
 
 def test_capture_retry_timeout_drops_trigger_low_after_each_attempt(monkeypatch):
     camera = _make_async_camera()
+    DropletCamera.set_capture_performance_diagnostics_enabled(camera, True)
     backend = _install_backend(camera, _FakeBackend("2", edge=_EdgeNeverReady()))
     phases = []
     camera.capture_phase_signal.connect(lambda payload: phases.append((payload.get("phase"), dict(payload))))
@@ -683,6 +779,7 @@ def test_capture_retry_timeout_drops_trigger_low_after_each_attempt(monkeypatch)
 
 def test_capture_retry_frame_selection_emits_retrying_and_success_markers(monkeypatch):
     camera = _make_async_camera()
+    DropletCamera.set_capture_performance_diagnostics_enabled(camera, True)
     backend = _install_backend(camera, _FakeBackend("2"))
     phases = []
     capture_calls = []
