@@ -1430,13 +1430,13 @@ class ManualRefuelCheckDialog(QtWidgets.QDialog):
     SOURCE = "manual_refuel_check_dialog"
     OUTCOME_BLOCKED_MESSAGE = "Run a paired trial before recording a result."
     BUTTON_STYLE_COLORS = {
-        "increase_strong": ("#bfdbfe", "#2563eb", "#1e3a8a"),
-        "increase_soft": ("#dbeafe", "#93c5fd", "#1e3a8a"),
-        "decrease_soft": ("#fee2e2", "#fca5a5", "#7f1d1d"),
-        "decrease_strong": ("#fecaca", "#dc2626", "#7f1d1d"),
-        "stable": ("#16a34a", "#15803d", "#ffffff"),
-        "done": ("#2563eb", "#1d4ed8", "#ffffff"),
-        "neutral": ("#e5e7eb", "#cbd5e1", "#111827"),
+        "increase_strong": ("#2563eb", "#ffffff"),
+        "increase_soft": ("#93c5fd", "#111827"),
+        "decrease_soft": ("#fca5a5", "#111827"),
+        "decrease_strong": ("#dc2626", "#ffffff"),
+        "stable": ("#15803d", "#ffffff"),
+        "done": ("#1d4ed8", "#ffffff"),
+        "neutral": ("#6b7280", "#ffffff"),
     }
 
     def __init__(self, parent, model, controller):
@@ -1455,7 +1455,7 @@ class ManualRefuelCheckDialog(QtWidgets.QDialog):
         self._update_outcome_buttons_enabled()
 
     def _button_style(self, role):
-        background, border, text = self.BUTTON_STYLE_COLORS.get(
+        background, text = self.BUTTON_STYLE_COLORS.get(
             role,
             self.BUTTON_STYLE_COLORS["neutral"],
         )
@@ -1463,15 +1463,15 @@ class ManualRefuelCheckDialog(QtWidgets.QDialog):
             "QPushButton {"
             f"background-color: {background};"
             f"color: {text};"
-            f"border: 1px solid {border};"
+            "border: none;"
             "border-radius: 4px;"
             "padding: 6px 8px;"
             "font-weight: 600;"
             "}"
             "QPushButton:disabled {"
-            "background-color: #e5e7eb;"
-            "color: #6b7280;"
-            "border: 1px solid #cbd5e1;"
+            "background-color: #9ca3af;"
+            "color: #ffffff;"
+            "border: none;"
             "}"
         )
 
