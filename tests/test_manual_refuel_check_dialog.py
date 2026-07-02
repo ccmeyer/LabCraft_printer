@@ -96,16 +96,19 @@ def test_manual_refuel_check_visual_control_order_and_labels(qapp):
     assert dialog.print_only_20_button.property("manual_refuel_style_role") == "decrease_strong"
 
 
-def test_manual_refuel_check_button_styles_use_solid_fills_without_colored_borders(qapp):
+def test_manual_refuel_check_button_styles_use_app_like_shaded_fills(qapp):
     dialog, _controller = _make_dialog(qapp)
 
-    assert "background-color: #2563eb" in dialog.refuel_20_button.styleSheet()
-    assert "background-color: #93c5fd" in dialog.refuel_5_button.styleSheet()
-    assert "background-color: #fca5a5" in dialog.print_only_5_button.styleSheet()
-    assert "background-color: #dc2626" in dialog.print_only_20_button.styleSheet()
+    assert "#063f99" in dialog.refuel_20_button.styleSheet()
+    assert "#275fb8" in dialog.refuel_5_button.styleSheet()
+    assert "#a92222" in dialog.print_only_5_button.styleSheet()
+    assert "#8a0303" in dialog.print_only_20_button.styleSheet()
     assert "color: #ffffff" in dialog.refuel_20_button.styleSheet()
-    assert "border: none" in dialog.refuel_20_button.styleSheet()
-    assert "border: 1px solid" not in dialog.refuel_20_button.styleSheet()
+    assert "qlineargradient" in dialog.refuel_20_button.styleSheet()
+    assert "QPushButton:hover" in dialog.refuel_20_button.styleSheet()
+    assert "QPushButton:pressed" in dialog.refuel_20_button.styleSheet()
+    assert "border: 1px solid #4d4d4d" in dialog.refuel_20_button.styleSheet()
+    assert "border: 1px solid #063f99" not in dialog.refuel_20_button.styleSheet()
 
 
 def test_manual_refuel_check_pressure_buttons_are_ordered_by_effect(qapp):
