@@ -119,7 +119,7 @@ def _build_droplet_dialog(
 
     def _set_droplet_capture_profile(profile_name):
         profile = str(profile_name or "default").strip().lower()
-        if profile not in {"default", "fast_detection", "throughput"}:
+        if profile not in {"default", "fast_detection", "legacy_full_rgb", "throughput"}:
             profile = "default"
         capture_profile["value"] = profile
         return profile
@@ -336,31 +336,31 @@ def test_droplet_capture_performance_debug_checkbox_and_export(monkeypatch, qapp
     assert "C:/tmp/droplet_capture_perf.json" in dialog.droplet_capture_performance_debug_status_label.text()
 
 
-def test_fast_detection_ab_profile_checkbox_toggles_profile_and_is_not_persisted(monkeypatch, qapp):
+def test_legacy_full_rgb_detection_checkbox_toggles_profile_and_is_not_persisted(monkeypatch, qapp):
     dialog, _refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
 
-    assert dialog.fast_detection_ab_profile_checkbox.isChecked() is False
+    assert dialog.legacy_full_rgb_detection_checkbox.isChecked() is False
 
     controller.set_droplet_capture_profile.reset_mock()
-    dialog.fast_detection_ab_profile_checkbox.setChecked(True)
+    dialog.legacy_full_rgb_detection_checkbox.setChecked(True)
     qapp.processEvents()
 
-    controller.set_droplet_capture_profile.assert_called_once_with("fast_detection")
-    assert dialog.fast_detection_ab_profile_checkbox.isChecked() is True
-    assert "Fast detection A/B profile enabled" in dialog.droplet_capture_performance_debug_status_label.text()
+    controller.set_droplet_capture_profile.assert_called_once_with("legacy_full_rgb")
+    assert dialog.legacy_full_rgb_detection_checkbox.isChecked() is True
+    assert "Legacy full-RGB detection enabled" in dialog.droplet_capture_performance_debug_status_label.text()
 
-    dialog.fast_detection_ab_profile_checkbox.setChecked(False)
+    dialog.legacy_full_rgb_detection_checkbox.setChecked(False)
     qapp.processEvents()
 
     controller.set_droplet_capture_profile.assert_called_with("default")
-    assert dialog.fast_detection_ab_profile_checkbox.isChecked() is False
-    assert "Fast detection A/B profile disabled" in dialog.droplet_capture_performance_debug_status_label.text()
+    assert dialog.legacy_full_rgb_detection_checkbox.isChecked() is False
+    assert "Legacy full-RGB detection disabled" in dialog.droplet_capture_performance_debug_status_label.text()
 
     second_dialog, _second_refuel_model, _second_controller = _build_droplet_dialog(monkeypatch, qapp)
-    assert second_dialog.fast_detection_ab_profile_checkbox.isChecked() is False
+    assert second_dialog.legacy_full_rgb_detection_checkbox.isChecked() is False
 
 
-def test_fast_detection_ab_profile_checkbox_reverts_when_capture_active(monkeypatch, qapp):
+def test_legacy_full_rgb_detection_checkbox_reverts_when_capture_active(monkeypatch, qapp):
     dialog, _refuel_model, controller = _build_droplet_dialog(
         monkeypatch,
         qapp,
@@ -374,23 +374,23 @@ def test_fast_detection_ab_profile_checkbox_reverts_when_capture_active(monkeypa
     )
 
     controller.set_droplet_capture_profile.reset_mock()
-    dialog.fast_detection_ab_profile_checkbox.setChecked(True)
+    dialog.legacy_full_rgb_detection_checkbox.setChecked(True)
     qapp.processEvents()
 
-    assert dialog.fast_detection_ab_profile_checkbox.isChecked() is False
+    assert dialog.legacy_full_rgb_detection_checkbox.isChecked() is False
     controller.set_droplet_capture_profile.assert_not_called()
     assert "Cannot change capture profile" in dialog.droplet_capture_performance_debug_status_label.text()
 
 
-def test_fast_detection_ab_profile_checkbox_reverts_when_calibration_active(monkeypatch, qapp):
+def test_legacy_full_rgb_detection_checkbox_reverts_when_calibration_active(monkeypatch, qapp):
     dialog, _refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
     dialog.model.calibration_manager.activeCalibration = object()
 
     controller.set_droplet_capture_profile.reset_mock()
-    dialog.fast_detection_ab_profile_checkbox.setChecked(True)
+    dialog.legacy_full_rgb_detection_checkbox.setChecked(True)
     qapp.processEvents()
 
-    assert dialog.fast_detection_ab_profile_checkbox.isChecked() is False
+    assert dialog.legacy_full_rgb_detection_checkbox.isChecked() is False
     controller.set_droplet_capture_profile.assert_not_called()
     assert "Cannot change capture profile" in dialog.droplet_capture_performance_debug_status_label.text()
 

@@ -74,7 +74,7 @@ def test_droplet_capture_perf_snapshot_summarizes_timings():
             "frame_select_reason": "threshold",
             "cap_seen": 1,
             "cap_max_new": 10,
-            "capture_profile": "fast_detection",
+            "capture_profile": "default",
             "signal_stride": 4,
             "signal_channel": 1,
             "cap_emit_rotate": True,
@@ -102,7 +102,7 @@ def test_droplet_capture_perf_snapshot_summarizes_timings():
     assert request_summary["selected_frame_threshold"] == 29.0
     assert request_summary["cap_seen"] == 1
     assert request_summary["cap_max_new"] == 10
-    assert request_summary["capture_profile"] == "fast_detection"
+    assert request_summary["capture_profile"] == "default"
     assert request_summary["signal_stride"] == 4
     assert request_summary["signal_channel"] == 1
     assert request_summary["cap_emit_rotate"] is True
@@ -360,9 +360,9 @@ def test_droplet_capture_perf_snapshot_recovers_nested_capture_context():
             "frame_select_reason": "threshold",
             "cap_seen": 1,
             "cap_max_new": 10,
-            "capture_profile": "fast_detection",
-            "signal_stride": 4,
-            "signal_channel": 1,
+            "capture_profile": "legacy_full_rgb",
+            "signal_stride": 1,
+            "signal_channel": None,
             "cap_emit_rotate": True,
         },
     )
@@ -405,9 +405,9 @@ def test_droplet_capture_perf_snapshot_recovers_nested_capture_context():
     assert capture_summary["selected_frame_threshold"] == 29.0
     assert capture_summary["cap_seen"] == 1
     assert capture_summary["cap_max_new"] == 10
-    assert capture_summary["capture_profile"] == "fast_detection"
-    assert capture_summary["signal_stride"] == 4
-    assert capture_summary["signal_channel"] == 1
+    assert capture_summary["capture_profile"] == "legacy_full_rgb"
+    assert capture_summary["signal_stride"] == 1
+    assert capture_summary["signal_channel"] is None
     assert capture_summary["cap_emit_rotate"] is True
 
 

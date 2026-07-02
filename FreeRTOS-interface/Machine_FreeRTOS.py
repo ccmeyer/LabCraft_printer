@@ -481,8 +481,8 @@ class DropletCamera(QObject):
         self._cap_brightest   = None  # among post-arm frames
         self._cap_emit_rotate = True
         self._cap_arm_ns      = 0     # <<< time gate: frames with t_done_ns > arm_ns are "new"
-        self._signal_stride   = 1
-        self._signal_channel  = None  # None => full RGB mean, else BGR channel index
+        self._signal_stride   = 4
+        self._signal_channel  = 1     # None => full RGB mean, else BGR channel index
         self._capture_profile = "default"
         
         self._cap_done = threading.Event()      # set when _complete_capture_locked runs
@@ -503,15 +503,16 @@ class DropletCamera(QObject):
     def set_capture_profile(self, profile_name: str):
         """
         Set capture behavior profile.
-        - default: preserve historical behavior (full-frame mean, rotate output)
-        - fast_detection: reduce signal detection work, preserve rotated output
+        - default: strided green-channel signal mean, rotate output
+        - fast_detection: compatibility alias for the default fast detection math
+        - legacy_full_rgb: historical full-frame RGB mean, rotate output
         - throughput: reduce per-frame CPU work and skip rotate
         """
         p = str(profile_name or "default").strip().lower()
-        if p == "fast_detection":
-            self._capture_profile = "fast_detection"
-            self._signal_stride = 4
-            self._signal_channel = 1  # green channel
+        if p == "legacy_full_rgb":
+            self._capture_profile = "legacy_full_rgb"
+            self._signal_stride = 1
+            self._signal_channel = None
             self._cap_emit_rotate = True
             return self._capture_profile
         if p == "throughput":
@@ -520,9 +521,9 @@ class DropletCamera(QObject):
             self._signal_channel = 1  # green channel
             self._cap_emit_rotate = False
             return self._capture_profile
-        self._capture_profile = "default"
-        self._signal_stride = 1
-        self._signal_channel = None
+        self._capture_profile = "fast_detection" if p == "fast_detection" else "default"
+        self._signal_stride = 4
+        self._signal_channel = 1  # green channel
         self._cap_emit_rotate = True
         return self._capture_profile
 

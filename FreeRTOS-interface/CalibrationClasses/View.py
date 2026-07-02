@@ -1430,19 +1430,20 @@ class ManualRefuelCheckDialog(QtWidgets.QDialog):
     SOURCE = "manual_refuel_check_dialog"
     OUTCOME_BLOCKED_MESSAGE = "Run a paired trial before recording a result."
     BUTTON_STYLE_COLORS = {
-        "increase_strong": ("#2563eb", "#ffffff"),
-        "increase_soft": ("#93c5fd", "#111827"),
-        "decrease_soft": ("#fca5a5", "#111827"),
-        "decrease_strong": ("#dc2626", "#ffffff"),
-        "stable": ("#15803d", "#ffffff"),
-        "done": ("#1d4ed8", "#ffffff"),
-        "neutral": ("#6b7280", "#ffffff"),
+        "increase_strong": ("dark_blue", "#063f99", "#ffffff"),
+        "increase_soft": ("light_blue", "#275fb8", "#ffffff"),
+        "decrease_soft": ("red", "#a92222", "#ffffff"),
+        "decrease_strong": ("dark_red", "#8a0303", "#ffffff"),
+        "stable": ("green", "#1c591e", "#ffffff"),
+        "done": ("dark_blue", "#063f99", "#ffffff"),
+        "neutral": ("dark_gray", "#4d4d4d", "#ffffff"),
     }
 
     def __init__(self, parent, model, controller):
         super().__init__(parent)
         self.model = model
         self.controller = controller
+        self.color_dict = dict(getattr(parent, "color_dict", {}) or {})
         self.trial_count = 0
         self.last_trial_droplet_count = None
         self._shortcut_handles = []
@@ -1454,24 +1455,56 @@ class ManualRefuelCheckDialog(QtWidgets.QDialog):
         self._setup_shortcuts()
         self._update_outcome_buttons_enabled()
 
-    def _button_style(self, role):
-        background, text = self.BUTTON_STYLE_COLORS.get(
+    def _resolve_button_color(self, role):
+        color_key, fallback, text = self.BUTTON_STYLE_COLORS.get(
             role,
             self.BUTTON_STYLE_COLORS["neutral"],
         )
+        return str(self.color_dict.get(color_key) or fallback), str(text)
+
+    @staticmethod
+    def _shift_color(hex_color, amount):
+        color = QColor(str(hex_color))
+        if not color.isValid():
+            color = QColor("#4d4d4d")
+        amount = max(-1.0, min(1.0, float(amount)))
+        channels = []
+        for channel in (color.red(), color.green(), color.blue()):
+            if amount >= 0:
+                shifted = channel + (255 - channel) * amount
+            else:
+                shifted = channel * (1 + amount)
+            channels.append(int(max(0, min(255, round(shifted)))))
+        return QColor(*channels).name()
+
+    def _button_style(self, role):
+        fill, text = self._resolve_button_color(role)
+        top = self._shift_color(fill, 0.28)
+        hover_fill = self._shift_color(fill, 0.10)
+        hover_top = self._shift_color(fill, 0.36)
+        pressed_fill = self._shift_color(fill, -0.18)
+        pressed_top = self._shift_color(fill, -0.06)
         return (
             "QPushButton {"
-            f"background-color: {background};"
+            f"background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {top}, stop:1 {fill});"
             f"color: {text};"
-            "border: none;"
+            "border: 1px solid #4d4d4d;"
             "border-radius: 4px;"
             "padding: 6px 8px;"
             "font-weight: 600;"
             "}"
+            "QPushButton:hover {"
+            f"background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {hover_top}, stop:1 {hover_fill});"
+            "}"
+            "QPushButton:pressed {"
+            f"background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {pressed_top}, stop:1 {pressed_fill});"
+            "padding-top: 7px;"
+            "padding-bottom: 5px;"
+            "}"
             "QPushButton:disabled {"
-            "background-color: #9ca3af;"
-            "color: #ffffff;"
-            "border: none;"
+            "background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #777777, stop:1 #555555);"
+            "color: #aaaaaa;"
+            "border: 1px solid #444444;"
             "}"
         )
 
@@ -3152,15 +3185,15 @@ class DropletImagingDialog(QtWidgets.QDialog):
         )
         group_v.addWidget(self.enable_droplet_capture_performance_diagnostics_checkbox)
 
-        self.fast_detection_ab_profile_checkbox = QtWidgets.QCheckBox("Use Fast Detection A/B Profile")
-        self.fast_detection_ab_profile_checkbox.setToolTip(
-            "Experimentally use strided green-channel flash detection while preserving normal image orientation."
+        self.legacy_full_rgb_detection_checkbox = QtWidgets.QCheckBox("Use Legacy Full-RGB Detection")
+        self.legacy_full_rgb_detection_checkbox.setToolTip(
+            "Use the older full-RGB flash detection path for comparison or rollback testing."
         )
-        self.fast_detection_ab_profile_checkbox.setChecked(False)
-        self.fast_detection_ab_profile_checkbox.toggled.connect(
-            self._set_fast_detection_ab_profile_enabled
+        self.legacy_full_rgb_detection_checkbox.setChecked(False)
+        self.legacy_full_rgb_detection_checkbox.toggled.connect(
+            self._set_legacy_full_rgb_detection_enabled
         )
-        group_v.addWidget(self.fast_detection_ab_profile_checkbox)
+        group_v.addWidget(self.legacy_full_rgb_detection_checkbox)
 
         self.export_droplet_capture_performance_button = QtWidgets.QPushButton("Export Capture Perf Snapshot")
         self.export_droplet_capture_performance_button.setToolTip(
@@ -3218,8 +3251,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "Capture performance diagnostics enabled" if checked else "Capture performance diagnostics disabled"
         )
 
-    def _set_fast_detection_ab_checkbox_checked(self, checked):
-        checkbox = getattr(self, "fast_detection_ab_profile_checkbox", None)
+    def _set_legacy_full_rgb_detection_checkbox_checked(self, checked):
+        checkbox = getattr(self, "legacy_full_rgb_detection_checkbox", None)
         if checkbox is None:
             return
         if checkbox.isChecked() == bool(checked):
@@ -3230,31 +3263,31 @@ class DropletImagingDialog(QtWidgets.QDialog):
         finally:
             checkbox.blockSignals(was_blocked)
 
-    def _set_fast_detection_ab_profile_enabled(self, checked):
+    def _set_legacy_full_rgb_detection_enabled(self, checked):
         checked = bool(checked)
         if DropletImagingDialog._is_calibration_busy(self) or self._capture_pending_for_ui():
-            self._set_fast_detection_ab_checkbox_checked(not checked)
+            self._set_legacy_full_rgb_detection_checkbox_checked(not checked)
             self._set_droplet_capture_performance_debug_status(
                 "Cannot change capture profile while calibration or capture is active."
             )
             return
         setter = getattr(self.controller, "set_droplet_capture_profile", None)
         if not callable(setter):
-            self._set_fast_detection_ab_checkbox_checked(False)
+            self._set_legacy_full_rgb_detection_checkbox_checked(False)
             self._set_droplet_capture_performance_debug_status("Capture profile control is unavailable.")
             return
-        profile = "fast_detection" if checked else "default"
+        profile = "legacy_full_rgb" if checked else "default"
         try:
             applied = setter(profile)
         except Exception as exc:
-            self._set_fast_detection_ab_checkbox_checked(False)
+            self._set_legacy_full_rgb_detection_checkbox_checked(False)
             self._set_droplet_capture_performance_debug_status(f"Could not set capture profile: {exc}")
             return
         normalized = str(applied or profile or "default").strip().lower()
-        enabled = normalized == "fast_detection"
-        self._set_fast_detection_ab_checkbox_checked(enabled)
+        enabled = normalized == "legacy_full_rgb"
+        self._set_legacy_full_rgb_detection_checkbox_checked(enabled)
         self._set_droplet_capture_performance_debug_status(
-            "Fast detection A/B profile enabled" if enabled else "Fast detection A/B profile disabled"
+            "Legacy full-RGB detection enabled" if enabled else "Legacy full-RGB detection disabled"
         )
 
     def _export_droplet_capture_performance_snapshot(self, *, reason="manual_export", show_status=True):
