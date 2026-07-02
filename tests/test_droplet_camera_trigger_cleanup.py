@@ -67,6 +67,19 @@ class _EdgeNoStaleThenFired:
         pass
 
 
+class _EdgeNoStaleThenFiredWithCallback(_EdgeNoStaleThenFired):
+    def __init__(self, callback):
+        super().__init__()
+        self._callback = callback
+
+    def event_wait(self, timeout):
+        self.wait_calls.append(timeout)
+        if len(self.wait_calls) <= 1:
+            return False
+        self._callback()
+        return True
+
+
 class _EdgeNeverReady:
     def __init__(self):
         self.wait_calls = []
@@ -440,6 +453,177 @@ def test_capture_non_blocking_logs_prearm_phases_before_arm():
     assert camera._cap_active is True
     assert camera._cap_done.is_set() is False
     assert camera._cap_id == 8
+    assert camera.get_capture_arm_timing_mode() == "ack_after_edge"
+
+
+def test_capture_non_blocking_early_arm_marks_before_ack_without_completing(monkeypatch):
+    camera = DropletCamera.__new__(DropletCamera)
+    camera.camera = object()
+    camera._cv = threading.Condition(threading.Lock())
+    camera._cap_done = threading.Event()
+    camera._cap_result = None
+    camera._cap_active = False
+    camera._cap_id = 7
+    camera._cap_request_id = None
+    now_ns = time.monotonic_ns()
+    camera._buf = [(np.zeros((2, 2, 3), dtype=np.uint8), {}, now_ns - 1_000_000, 1.0)]
+    camera.k_sigma = 4.0
+    camera.min_delta = 25.0
+    camera._cap_emit_rotate = False
+    camera.droplet_trigger_pulse_s = 0.001
+    DropletCamera.set_capture_arm_timing_mode(camera, "early_after_trigger_pulse")
+    observations = []
+
+    def _during_ack_wait():
+        observations.append(
+            {
+                "cap_done": camera._cap_done.is_set(),
+                "cap_active": bool(camera._cap_active),
+                "early_arm_ns": getattr(camera, "_cap_early_arm_ns", None),
+            }
+        )
+
+    camera._edge_in = _EdgeNoStaleThenFiredWithCallback(_during_ack_wait)
+    phases = []
+    trigger_events = []
+    camera._log_capture_phase = lambda phase, **payload: phases.append((str(phase), dict(payload)))
+    camera._trigger_high = lambda: trigger_events.append("high")
+    camera._trigger_low = lambda: trigger_events.append("low")
+    monkeypatch.setattr(machine_mod.time, "sleep", lambda _seconds: None)
+
+    DropletCamera.capture_non_blocking(camera, timeout_s=0.01, request_id="req-early", generation=5)
+
+    phase_names = [phase for phase, _payload in phases]
+    assert phase_names.index("trigger_pulse_done") < phase_names.index("early_arm_mark")
+    assert phase_names.index("early_arm_mark") < phase_names.index("edge_wait_start")
+    assert observations == [
+        {
+            "cap_done": False,
+            "cap_active": False,
+            "early_arm_ns": getattr(camera, "_cap_early_arm_ns"),
+        }
+    ]
+    arm_start = next(payload for phase, payload in phases if phase == "arm_start")
+    assert arm_start["capture_arm_timing_mode"] == "early_after_trigger_pulse"
+    assert arm_start["early_arm_mark"] is True
+    assert camera._cap_active is True
+    assert camera._cap_done.is_set() is False
+
+
+def test_capture_non_blocking_early_arm_selects_buffered_threshold_after_ack(monkeypatch):
+    camera = DropletCamera.__new__(DropletCamera)
+    camera.camera = object()
+    camera._cv = threading.Condition(threading.Lock())
+    camera._cap_done = threading.Event()
+    camera._cap_result = None
+    camera._cap_active = False
+    camera._cap_id = 7
+    camera._cap_request_id = None
+    now_ns = time.monotonic_ns()
+    camera._buf = [
+        (np.zeros((2, 2, 3), dtype=np.uint8), {}, now_ns - 2_000_000, 1.0),
+        (np.zeros((2, 2, 3), dtype=np.uint8), {}, now_ns - 1_000_000, 1.5),
+    ]
+    camera.k_sigma = 4.0
+    camera.min_delta = 25.0
+    camera._cap_emit_rotate = False
+    camera.droplet_trigger_pulse_s = 0.001
+    DropletCamera.set_capture_performance_diagnostics_enabled(camera, True)
+    DropletCamera.set_capture_arm_timing_mode(camera, "early_after_trigger_pulse")
+
+    bright_frame = np.full((2, 2, 3), 220, dtype=np.uint8)
+
+    def _during_ack_wait():
+        assert camera._cap_done.is_set() is False
+        assert camera._cap_active is False
+        camera._buf.append(
+            (
+                bright_frame,
+                {"ExposureTime": 20000},
+                int(camera._cap_early_arm_ns) + 1,
+                220.0,
+                {"make_array_ms": 1.0, "signal_mean_ms": 0.2},
+            )
+        )
+
+    camera._edge_in = _EdgeNoStaleThenFiredWithCallback(_during_ack_wait)
+    phases = []
+    trigger_events = []
+    camera._log_capture_phase = lambda phase, **payload: phases.append((str(phase), dict(payload)))
+    camera._trigger_high = lambda: trigger_events.append("high")
+    camera._trigger_low = lambda: trigger_events.append("low")
+    monkeypatch.setattr(machine_mod.time, "sleep", lambda _seconds: None)
+
+    DropletCamera.capture_non_blocking(
+        camera,
+        timeout_s=0.01,
+        emit_signal=False,
+        request_id="req-buffered",
+        generation=5,
+    )
+
+    assert camera._cap_done.is_set() is True
+    assert camera._cap_active is False
+    assert camera._cap_result["reason"] == "threshold"
+    assert camera._cap_result["capture_arm_timing_mode"] == "early_after_trigger_pulse"
+    assert camera._cap_result["early_arm_mark"] is True
+    assert camera._cap_result["early_arm_to_ack_ms"] is not None
+    assert camera._cap_result["early_arm_to_result_ms"] is not None
+    assert camera._cap_result["buffered_post_arm_frames"] == 1
+    assert camera._cap_result["buffered_threshold_selected"] is True
+    assert camera._cap_result["cap_seen"] == 1
+    assert [phase for phase, _payload in phases].index("edge_consume_done") < [
+        phase for phase, _payload in phases
+    ].index("arm_start")
+
+
+def test_capture_non_blocking_early_arm_ignores_buffered_low_frames_for_fallback(monkeypatch):
+    camera = DropletCamera.__new__(DropletCamera)
+    camera.camera = object()
+    camera._cv = threading.Condition(threading.Lock())
+    camera._cap_done = threading.Event()
+    camera._cap_result = None
+    camera._cap_active = False
+    camera._cap_id = 7
+    camera._cap_request_id = None
+    now_ns = time.monotonic_ns()
+    camera._buf = [
+        (np.zeros((2, 2, 3), dtype=np.uint8), {}, now_ns - 2_000_000, 1.0),
+        (np.zeros((2, 2, 3), dtype=np.uint8), {}, now_ns - 1_000_000, 1.5),
+    ]
+    camera.k_sigma = 4.0
+    camera.min_delta = 25.0
+    camera._cap_emit_rotate = False
+    camera.droplet_trigger_pulse_s = 0.001
+    DropletCamera.set_capture_arm_timing_mode(camera, "early_after_trigger_pulse")
+
+    def _during_ack_wait():
+        for offset, mean in enumerate((2.0, 3.0), start=1):
+            camera._buf.append(
+                (
+                    np.full((2, 2, 3), int(mean), dtype=np.uint8),
+                    {},
+                    int(camera._cap_early_arm_ns) + offset,
+                    mean,
+                    None,
+                )
+            )
+
+    camera._edge_in = _EdgeNoStaleThenFiredWithCallback(_during_ack_wait)
+    trigger_events = []
+    camera._log_capture_phase = lambda *_args, **_kwargs: None
+    camera._trigger_high = lambda: trigger_events.append("high")
+    camera._trigger_low = lambda: trigger_events.append("low")
+    monkeypatch.setattr(machine_mod.time, "sleep", lambda _seconds: None)
+
+    DropletCamera.capture_non_blocking(camera, timeout_s=0.01, request_id="req-low-buffered", generation=5)
+
+    assert camera._cap_done.is_set() is False
+    assert camera._cap_active is True
+    assert camera._cap_seen == 0
+    assert camera._cap_brightest is None
+    assert camera._cap_buffered_post_arm_frames == 2
+    assert camera._cap_buffered_threshold_selected is False
 
 
 def _make_async_camera():

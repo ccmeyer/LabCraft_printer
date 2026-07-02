@@ -3195,6 +3195,16 @@ class DropletImagingDialog(QtWidgets.QDialog):
         )
         group_v.addWidget(self.legacy_full_rgb_detection_checkbox)
 
+        self.early_arm_ab_timing_checkbox = QtWidgets.QCheckBox("Use Early Arm A/B Timing")
+        self.early_arm_ab_timing_checkbox.setToolTip(
+            "Experimentally arm frame selection earlier while still waiting for the MCU flash ACK before selecting."
+        )
+        self.early_arm_ab_timing_checkbox.setChecked(False)
+        self.early_arm_ab_timing_checkbox.toggled.connect(
+            self._set_early_arm_ab_timing_enabled
+        )
+        group_v.addWidget(self.early_arm_ab_timing_checkbox)
+
         self.export_droplet_capture_performance_button = QtWidgets.QPushButton("Export Capture Perf Snapshot")
         self.export_droplet_capture_performance_button.setToolTip(
             "Write recent droplet capture timing markers to a JSON file."
@@ -3288,6 +3298,45 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._set_legacy_full_rgb_detection_checkbox_checked(enabled)
         self._set_droplet_capture_performance_debug_status(
             "Legacy full-RGB detection enabled" if enabled else "Legacy full-RGB detection disabled"
+        )
+
+    def _set_early_arm_ab_timing_checkbox_checked(self, checked):
+        checkbox = getattr(self, "early_arm_ab_timing_checkbox", None)
+        if checkbox is None:
+            return
+        if checkbox.isChecked() == bool(checked):
+            return
+        was_blocked = checkbox.blockSignals(True)
+        try:
+            checkbox.setChecked(bool(checked))
+        finally:
+            checkbox.blockSignals(was_blocked)
+
+    def _set_early_arm_ab_timing_enabled(self, checked):
+        checked = bool(checked)
+        if DropletImagingDialog._is_calibration_busy(self) or self._capture_pending_for_ui():
+            self._set_early_arm_ab_timing_checkbox_checked(not checked)
+            self._set_droplet_capture_performance_debug_status(
+                "Cannot change capture timing while calibration or capture is active."
+            )
+            return
+        setter = getattr(self.controller, "set_droplet_capture_arm_timing_mode", None)
+        if not callable(setter):
+            self._set_early_arm_ab_timing_checkbox_checked(False)
+            self._set_droplet_capture_performance_debug_status("Capture timing control is unavailable.")
+            return
+        mode = "early_after_trigger_pulse" if checked else "ack_after_edge"
+        try:
+            applied = setter(mode)
+        except Exception as exc:
+            self._set_early_arm_ab_timing_checkbox_checked(False)
+            self._set_droplet_capture_performance_debug_status(f"Could not set capture timing: {exc}")
+            return
+        normalized = str(applied or mode or "ack_after_edge").strip().lower()
+        enabled = normalized == "early_after_trigger_pulse"
+        self._set_early_arm_ab_timing_checkbox_checked(enabled)
+        self._set_droplet_capture_performance_debug_status(
+            "Early arm A/B timing enabled" if enabled else "Early arm A/B timing disabled"
         )
 
     def _export_droplet_capture_performance_snapshot(self, *, reason="manual_export", show_status=True):
@@ -11479,6 +11528,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._stop_refuel_monitor("Monitoring disabled")
         try:
             self.controller.set_droplet_capture_profile("default")
+            setter = getattr(self.controller, "set_droplet_capture_arm_timing_mode", None)
+            if callable(setter):
+                setter("ack_after_edge")
             self.controller.set_command_dispatch_interval(90)
         except Exception:
             pass

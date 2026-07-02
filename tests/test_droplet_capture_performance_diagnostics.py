@@ -29,7 +29,7 @@ def test_droplet_capture_perf_enabled_events_are_bounded_and_json_safe():
     snapshot = diagnostics.build_snapshot(reason="unit_test")
 
     assert snapshot["kind"] == "droplet_capture_performance_snapshot"
-    assert snapshot["schema_version"] == 5
+    assert snapshot["schema_version"] == 6
     assert snapshot["reason"] == "unit_test"
     assert snapshot["event_count"] == 2
     assert snapshot["event_counts"]["controller_completion_received"] == 1
@@ -57,6 +57,7 @@ def test_droplet_capture_perf_snapshot_summarizes_timings():
         },
     )
     diagnostics.record("camera_phase", {"request_id": "r1", "phase": "edge_wait_start", "elapsed_ms": 6.0})
+    diagnostics.record("camera_phase", {"request_id": "r1", "phase": "early_arm_mark", "elapsed_ms": 5.0})
     diagnostics.record("camera_phase", {"request_id": "r1", "phase": "edge_wait_done", "elapsed_ms": 12.5})
     diagnostics.record("camera_phase", {"request_id": "r1", "phase": "arm_start", "elapsed_ms": 13.0})
     diagnostics.record(
@@ -78,6 +79,12 @@ def test_droplet_capture_perf_snapshot_summarizes_timings():
             "signal_stride": 4,
             "signal_channel": 1,
             "cap_emit_rotate": True,
+            "capture_arm_timing_mode": "early_after_trigger_pulse",
+            "early_arm_mark": True,
+            "early_arm_to_ack_ms": 7.5,
+            "early_arm_to_result_ms": 56.0,
+            "buffered_post_arm_frames": 2,
+            "buffered_threshold_selected": True,
         },
     )
     diagnostics.record("controller_pending_cleared", {"request_id": "r1"})
@@ -106,6 +113,12 @@ def test_droplet_capture_perf_snapshot_summarizes_timings():
     assert request_summary["signal_stride"] == 4
     assert request_summary["signal_channel"] == 1
     assert request_summary["cap_emit_rotate"] is True
+    assert request_summary["capture_arm_timing_mode"] == "early_after_trigger_pulse"
+    assert request_summary["early_arm_mark"] is True
+    assert request_summary["early_arm_to_ack_ms"] == 7.5
+    assert request_summary["early_arm_to_result_ms"] == 56.0
+    assert request_summary["buffered_post_arm_frames"] == 2
+    assert request_summary["buffered_threshold_selected"] is True
     assert request_summary["controller_completion_to_pending_clear_ms"] is not None
     assert snapshot["ui_sequence_summaries"][0]["accepted"] is True
 
@@ -332,6 +345,14 @@ def test_droplet_capture_perf_snapshot_recovers_nested_capture_context():
         "camera_phase",
         {
             "request_id": "request-nested",
+            "phase": "early_arm_mark",
+            "elapsed_ms": 5.5,
+        },
+    )
+    diagnostics.record(
+        "camera_phase",
+        {
+            "request_id": "request-nested",
             "phase": "edge_wait_done",
             "fired": True,
             "elapsed_ms": 155.5,
@@ -364,6 +385,12 @@ def test_droplet_capture_perf_snapshot_recovers_nested_capture_context():
             "signal_stride": 1,
             "signal_channel": None,
             "cap_emit_rotate": True,
+            "capture_arm_timing_mode": "early_after_trigger_pulse",
+            "early_arm_mark": True,
+            "early_arm_to_ack_ms": 150.0,
+            "early_arm_to_result_ms": 184.5,
+            "buffered_post_arm_frames": 3,
+            "buffered_threshold_selected": True,
         },
     )
     diagnostics.record(
@@ -409,6 +436,12 @@ def test_droplet_capture_perf_snapshot_recovers_nested_capture_context():
     assert capture_summary["signal_stride"] == 1
     assert capture_summary["signal_channel"] is None
     assert capture_summary["cap_emit_rotate"] is True
+    assert capture_summary["capture_arm_timing_mode"] == "early_after_trigger_pulse"
+    assert capture_summary["early_arm_mark"] is True
+    assert capture_summary["early_arm_to_ack_ms"] == 150.0
+    assert capture_summary["early_arm_to_result_ms"] == 184.5
+    assert capture_summary["buffered_post_arm_frames"] == 3
+    assert capture_summary["buffered_threshold_selected"] is True
 
 
 def test_droplet_capture_perf_snapshot_parses_stringified_capture_context_only_on_export():

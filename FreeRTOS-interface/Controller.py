@@ -251,6 +251,7 @@ class DropletCapturePerformanceDiagnostics:
 
         def _worker_timing_fields(camera_rows):
             retry_result = _last_camera_phase(camera_rows, "retry_attempt_result")
+            early_arm_row = _last_camera_phase(camera_rows, "early_arm_mark")
             fields = {
                 "edge_wait_duration_ms": _phase_elapsed_delta(
                     camera_rows,
@@ -279,6 +280,16 @@ class DropletCapturePerformanceDiagnostics:
                 "signal_stride": _int_or_none(retry_result.get("signal_stride")),
                 "signal_channel": retry_result.get("signal_channel"),
                 "cap_emit_rotate": retry_result.get("cap_emit_rotate"),
+                "capture_arm_timing_mode": retry_result.get("capture_arm_timing_mode"),
+                "early_arm_mark": bool(retry_result.get("early_arm_mark") or early_arm_row),
+                "early_arm_to_ack_ms": _float_or_none(
+                    retry_result.get("early_arm_to_ack_ms")
+                ) or _phase_elapsed_delta(camera_rows, "early_arm_mark", "edge_wait_done"),
+                "early_arm_to_result_ms": _float_or_none(
+                    retry_result.get("early_arm_to_result_ms")
+                ) or _phase_elapsed_delta(camera_rows, "early_arm_mark", "retry_attempt_result"),
+                "buffered_post_arm_frames": _int_or_none(retry_result.get("buffered_post_arm_frames")),
+                "buffered_threshold_selected": retry_result.get("buffered_threshold_selected"),
             }
             return fields
 
@@ -623,7 +634,7 @@ class DropletCapturePerformanceDiagnostics:
 
         snapshot = {
             "kind": "droplet_capture_performance_snapshot",
-            "schema_version": 5,
+            "schema_version": 6,
             "reason": str(reason or "manual_export"),
             "generated_at_utc": self._now_utc(),
             "generated_monotonic_ns": int(time.monotonic_ns()),
@@ -6256,6 +6267,24 @@ class Controller(QObject):
             except Exception:
                 return "default"
         return "default"
+
+    def set_droplet_capture_arm_timing_mode(self, mode: str):
+        setter = getattr(self.machine, "set_droplet_capture_arm_timing_mode", None)
+        if callable(setter):
+            try:
+                return setter(mode)
+            except Exception:
+                return "ack_after_edge"
+        return "ack_after_edge"
+
+    def get_droplet_capture_arm_timing_mode(self):
+        getter = getattr(self.machine, "get_droplet_capture_arm_timing_mode", None)
+        if callable(getter):
+            try:
+                return getter()
+            except Exception:
+                return "ack_after_edge"
+        return "ack_after_edge"
 
     def set_command_dispatch_interval(self, interval_ms: int):
         self.machine.set_execution_interval_ms(interval_ms)

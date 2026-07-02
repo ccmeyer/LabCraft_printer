@@ -481,9 +481,14 @@ class DropletCamera(QObject):
         self._cap_brightest   = None  # among post-arm frames
         self._cap_emit_rotate = True
         self._cap_arm_ns      = 0     # <<< time gate: frames with t_done_ns > arm_ns are "new"
+        self._cap_early_arm_ns = None
+        self._cap_ack_ns = None
+        self._cap_buffered_post_arm_frames = 0
+        self._cap_buffered_threshold_selected = False
         self._signal_stride   = 4
         self._signal_channel  = 1     # None => full RGB mean, else BGR channel index
         self._capture_profile = "default"
+        self._capture_arm_timing_mode = "ack_after_edge"
         
         self._cap_done = threading.Event()      # set when _complete_capture_locked runs
         self._cap_result = None                 # dict with mean/threshold/reason, and the image
@@ -537,6 +542,44 @@ class DropletCamera(QObject):
             "signal_channel": getattr(self, "_signal_channel", None),
             "cap_emit_rotate": bool(getattr(self, "_cap_emit_rotate", True)),
         }
+
+    def set_capture_arm_timing_mode(self, mode: str):
+        p = str(mode or "ack_after_edge").strip().lower()
+        if p == "early_after_trigger_pulse":
+            self._capture_arm_timing_mode = "early_after_trigger_pulse"
+        else:
+            self._capture_arm_timing_mode = "ack_after_edge"
+        return self._capture_arm_timing_mode
+
+    def get_capture_arm_timing_mode(self):
+        mode = str(getattr(self, "_capture_arm_timing_mode", "ack_after_edge") or "ack_after_edge")
+        if mode == "early_after_trigger_pulse":
+            return mode
+        return "ack_after_edge"
+
+    @staticmethod
+    def _frame_buffer_entry_parts(entry):
+        arr, md, t_done_ns, mean = entry[:4]
+        frame_timing = entry[4] if len(entry) > 4 else None
+        return arr, md, t_done_ns, mean, frame_timing
+
+    def _capture_arm_timing_metadata(self, *, result_ns=None):
+        mode = self.get_capture_arm_timing_mode()
+        early_arm_ns = getattr(self, "_cap_early_arm_ns", None)
+        ack_ns = getattr(self, "_cap_ack_ns", None)
+        metadata = {
+            "capture_arm_timing_mode": mode,
+            "early_arm_mark": bool(early_arm_ns),
+            "buffered_post_arm_frames": int(getattr(self, "_cap_buffered_post_arm_frames", 0) or 0),
+            "buffered_threshold_selected": bool(
+                getattr(self, "_cap_buffered_threshold_selected", False)
+            ),
+        }
+        if early_arm_ns and ack_ns:
+            metadata["early_arm_to_ack_ms"] = float(int(ack_ns) - int(early_arm_ns)) / 1_000_000.0
+        if early_arm_ns and result_ns:
+            metadata["early_arm_to_result_ms"] = float(int(result_ns) - int(early_arm_ns)) / 1_000_000.0
+        return metadata
 
     def set_capture_performance_diagnostics_enabled(self, enabled):
         self._capture_performance_diagnostics_enabled = bool(enabled)
@@ -839,6 +882,7 @@ class DropletCamera(QObject):
                 "backend_error": getattr(self, "_last_backend_error", None),
                 "backend_create_step": getattr(self, "_last_backend_create_step", None),
                 "grabber_running": bool(getattr(self, "_grab_running", False)),
+                "capture_arm_timing_mode": self.get_capture_arm_timing_mode(),
             }
 
     def _log_capture_phase(
@@ -913,6 +957,7 @@ class DropletCamera(QObject):
             self._cap_result.update(extra)
             if self.is_capture_performance_diagnostics_enabled():
                 self._cap_result.update(self._capture_profile_metadata())
+                self._cap_result.update(self._capture_arm_timing_metadata(result_ns=time.monotonic_ns()))
             self._cap_done.set()
             self._cv.notify_all()
 
@@ -1066,7 +1111,7 @@ class DropletCamera(QObject):
             # print(f"{mean}")  # your debug
 
             with self._cv:
-                self._buf.append((arr, md, t_done_ns, mean))
+                self._buf.append((arr, md, t_done_ns, mean, frame_timing))
 
                 if self._cap_active:
                     # time-gated: only evaluate frames strictly after arming time
@@ -1108,11 +1153,12 @@ class DropletCamera(QObject):
                 self._cv.notify_all()
 
     # --- finalize one capture ---
-    def _complete_capture_locked(self, arr, md, mean, reason, *, frame_timing=None):
+    def _complete_capture_locked(self, arr, md, mean, reason, *, frame_timing=None, selection_metadata=None):
         self._cap_active = False
         self._trigger_low()  # drop trigger now that we have a frame
 
         diagnostics_enabled = self.is_capture_performance_diagnostics_enabled()
+        result_ns = None
         rotate_ms = None
         if self._cap_emit_rotate:
             rotate_started_ns = time.monotonic_ns() if diagnostics_enabled else None
@@ -1141,6 +1187,7 @@ class DropletCamera(QObject):
                 for key in ("make_array_ms", "signal_mean_ms"):
                     if key in frame_timing:
                         result[key] = frame_timing.get(key)
+            result_ns = time.monotonic_ns()
             result.update(
                 {
                     "rotate_ms": rotate_ms,
@@ -1148,8 +1195,11 @@ class DropletCamera(QObject):
                     "cap_seen": int(getattr(self, "_cap_seen", 0)),
                     "cap_max_new": int(getattr(self, "_cap_max_new", 0)),
                     **self._capture_profile_metadata(),
+                    **self._capture_arm_timing_metadata(result_ns=result_ns),
                 }
             )
+            if isinstance(selection_metadata, dict):
+                result.update(selection_metadata)
         self._cap_result = result
         self._cap_done.set()
         # print(f"[Chosen] mean={mean:.1f} reason={reason} "
@@ -1166,13 +1216,18 @@ class DropletCamera(QObject):
     def _baseline_before_ns_locked(self, cutoff_ns, N=4):
         """Compute baseline mean/std from the last up-to-N frames with t_done_ns < cutoff_ns."""
         vals = []
-        for arr, md, t_done_ns, mean in reversed(self._buf):
+        for entry in reversed(self._buf):
+            _arr, _md, t_done_ns, mean, _frame_timing = self._frame_buffer_entry_parts(entry)
             if t_done_ns < cutoff_ns:
                 vals.append(mean)
                 if len(vals) >= N:
                     break
         if len(vals) < 2:
-            tail = [m for (_a,_m,_t,m) in list(self._buf)[-N:]]
+            tail = []
+            for entry in list(self._buf)[-N:]:
+                _arr, _md, t_done_ns, mean, _frame_timing = self._frame_buffer_entry_parts(entry)
+                if t_done_ns < cutoff_ns:
+                    tail.append(mean)
             vals = tail if tail else [0.0, 0.0]
         vals = np.array(vals, dtype=float)
         return float(np.mean(vals)), float(np.std(vals))
@@ -1222,12 +1277,19 @@ class DropletCamera(QObject):
             self._cap_done.clear()
             self._cap_result = None
             self._cap_request_id = request_id
+            self._cap_early_arm_ns = None
+            self._cap_ack_ns = None
+            self._cap_buffered_post_arm_frames = 0
+            self._cap_buffered_threshold_selected = False
 
         # Drain stale edges from previous runs
         drain_start_ns = time.monotonic_ns()
         drain_count = 0
         drain_max_edges = int(getattr(self, "prearm_drain_max_edges", 16))
         drain_timeout_s = float(getattr(self, "prearm_drain_timeout_s", 0.050))
+        arm_timing_mode = self.get_capture_arm_timing_mode()
+        early_arm_ns = None
+        ack_ns = None
         self._log_capture_phase(
             "drain_start",
             request_id=request_id,
@@ -1312,6 +1374,19 @@ class DropletCamera(QObject):
                 drained_edges=drain_count,
                 trigger_pulse_ms=f"{trigger_pulse_s * 1000.0:.1f}",
             )
+            if arm_timing_mode == "early_after_trigger_pulse":
+                early_arm_ns = time.monotonic_ns()
+                with self._cv:
+                    self._cap_early_arm_ns = early_arm_ns
+                self._log_capture_phase(
+                    "early_arm_mark",
+                    request_id=request_id,
+                    generation=generation,
+                    started_ns=phase_started_ns,
+                    backend=backend,
+                    drained_edges=drain_count,
+                    capture_arm_timing_mode=arm_timing_mode,
+                )
 
             # Wait for MCU "flash fired" ACK
             try:
@@ -1368,6 +1443,9 @@ class DropletCamera(QObject):
                     drained_edges=drain_count,
                 )
                 return
+            ack_ns = time.monotonic_ns()
+            with self._cv:
+                self._cap_ack_ns = ack_ns
             backend.event_consume()
             self._log_capture_phase(
                 "edge_consume_done",
@@ -1384,9 +1462,10 @@ class DropletCamera(QObject):
                 # safety and block later captures until restart.
                 backend.trigger_low()
 
-        # Arm the time gate AFTER the ack
+        # Default arms after ACK. Early A/B mode keeps completion gated until ACK,
+        # then evaluates buffered frames captured after the earlier arm timestamp.
         self._raise_if_worker_context_stale(backend=backend, generation=generation, action="arm_start")
-        arm_ns = time.monotonic_ns()
+        arm_ns = early_arm_ns if early_arm_ns is not None else time.monotonic_ns()
         self._log_capture_phase(
             "arm_start",
             request_id=request_id,
@@ -1394,6 +1473,8 @@ class DropletCamera(QObject):
             started_ns=phase_started_ns,
             backend=backend,
             drained_edges=drain_count,
+            capture_arm_timing_mode=arm_timing_mode,
+            early_arm_mark=bool(early_arm_ns),
         )
         with self._cv:
             base_mean, base_std = self._baseline_before_ns_locked(arm_ns, N=4)
@@ -1410,6 +1491,10 @@ class DropletCamera(QObject):
             self._cap_brightest   = None
             self._emit_on_complete = bool(emit_signal)
             self._cap_request_id = request_id
+            self._cap_early_arm_ns = early_arm_ns
+            self._cap_ack_ns = ack_ns
+            self._cap_buffered_post_arm_frames = 0
+            self._cap_buffered_threshold_selected = False
 
             self._cap_done.clear()
             self._cap_result = None
@@ -1420,6 +1505,29 @@ class DropletCamera(QObject):
                 f"base_mean={base_mean:.1f} base_std={base_std:.1f} "
                 f"threshold={threshold:.1f} arm_ns={arm_ns}"
             )
+            if early_arm_ns is not None:
+                buffered_entries = []
+                for entry in list(self._buf):
+                    parts = self._frame_buffer_entry_parts(entry)
+                    if parts[2] > early_arm_ns:
+                        buffered_entries.append(parts)
+                self._cap_buffered_post_arm_frames = len(buffered_entries)
+                for arr, md, _t_done_ns, mean, frame_timing in buffered_entries:
+                    if mean >= threshold:
+                        self._cap_seen = 1
+                        self._cap_buffered_threshold_selected = True
+                        self._complete_capture_locked(
+                            arr,
+                            md,
+                            mean,
+                            reason="threshold",
+                            frame_timing=frame_timing,
+                            selection_metadata={
+                                "buffered_post_arm_frames": len(buffered_entries),
+                                "buffered_threshold_selected": True,
+                            },
+                        )
+                        return
             
     def capture_with_retry_sync(
         self,
@@ -1556,6 +1664,12 @@ class DropletCamera(QObject):
                     signal_stride=res.get("signal_stride"),
                     signal_channel=res.get("signal_channel"),
                     cap_emit_rotate=res.get("cap_emit_rotate"),
+                    capture_arm_timing_mode=res.get("capture_arm_timing_mode"),
+                    early_arm_mark=res.get("early_arm_mark"),
+                    early_arm_to_ack_ms=res.get("early_arm_to_ack_ms"),
+                    early_arm_to_result_ms=res.get("early_arm_to_result_ms"),
+                    buffered_post_arm_frames=res.get("buffered_post_arm_frames"),
+                    buffered_threshold_selected=res.get("buffered_threshold_selected"),
                     success=bool(attempt_success),
                     will_retry=(not attempt_success) and i < attempts - 1,
                     print_phase=False,
@@ -6089,6 +6203,18 @@ class Machine(QObject):
         if callable(getter):
             return getter()
         return "default"
+
+    def set_droplet_capture_arm_timing_mode(self, mode: str):
+        setter = getattr(self.droplet_camera, "set_capture_arm_timing_mode", None)
+        if callable(setter):
+            return setter(mode)
+        return "ack_after_edge"
+
+    def get_droplet_capture_arm_timing_mode(self):
+        getter = getattr(self.droplet_camera, "get_capture_arm_timing_mode", None)
+        if callable(getter):
+            return getter()
+        return "ack_after_edge"
 
     def set_droplet_capture_performance_diagnostics_enabled(self, enabled):
         setter = getattr(self.droplet_camera, "set_capture_performance_diagnostics_enabled", None)
