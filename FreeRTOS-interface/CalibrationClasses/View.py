@@ -1429,6 +1429,15 @@ class ManualRefuelCheckDialog(QtWidgets.QDialog):
     DEFAULT_TRIAL_DROPLETS = 5
     SOURCE = "manual_refuel_check_dialog"
     OUTCOME_BLOCKED_MESSAGE = "Run a paired trial before recording a result."
+    BUTTON_STYLE_COLORS = {
+        "increase_strong": ("#bfdbfe", "#2563eb", "#1e3a8a"),
+        "increase_soft": ("#dbeafe", "#93c5fd", "#1e3a8a"),
+        "decrease_soft": ("#fee2e2", "#fca5a5", "#7f1d1d"),
+        "decrease_strong": ("#fecaca", "#dc2626", "#7f1d1d"),
+        "stable": ("#16a34a", "#15803d", "#ffffff"),
+        "done": ("#2563eb", "#1d4ed8", "#ffffff"),
+        "neutral": ("#e5e7eb", "#cbd5e1", "#111827"),
+    }
 
     def __init__(self, parent, model, controller):
         super().__init__(parent)
@@ -1444,6 +1453,31 @@ class ManualRefuelCheckDialog(QtWidgets.QDialog):
         self._build_ui()
         self._setup_shortcuts()
         self._update_outcome_buttons_enabled()
+
+    def _button_style(self, role):
+        background, border, text = self.BUTTON_STYLE_COLORS.get(
+            role,
+            self.BUTTON_STYLE_COLORS["neutral"],
+        )
+        return (
+            "QPushButton {"
+            f"background-color: {background};"
+            f"color: {text};"
+            f"border: 1px solid {border};"
+            "border-radius: 4px;"
+            "padding: 6px 8px;"
+            "font-weight: 600;"
+            "}"
+            "QPushButton:disabled {"
+            "background-color: #e5e7eb;"
+            "color: #6b7280;"
+            "border: 1px solid #cbd5e1;"
+            "}"
+        )
+
+    def _apply_button_style(self, button, role):
+        button.setProperty("manual_refuel_style_role", role)
+        button.setStyleSheet(self._button_style(role))
 
     def _build_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
@@ -1469,37 +1503,63 @@ class ManualRefuelCheckDialog(QtWidgets.QDialog):
         move_row.addWidget(self.move_loading_button)
         move_row.addStretch(1)
         center_layout.addLayout(move_row)
+        control_panel_layout = QtWidgets.QHBoxLayout()
+        control_panel_layout.setSpacing(12)
+
         pulse_grid = QtWidgets.QGridLayout()
-        self.refuel_5_button = QtWidgets.QPushButton("Refuel 5")
-        self.refuel_20_button = QtWidgets.QPushButton("Refuel 20")
-        self.print_only_5_button = QtWidgets.QPushButton("Print Only 5")
-        self.print_only_20_button = QtWidgets.QPushButton("Print Only 20")
+        self.pulse_grid = pulse_grid
+        pulse_grid.setHorizontalSpacing(8)
+        pulse_grid.setVerticalSpacing(6)
+        self.increase_level_label = QtWidgets.QLabel("Increase level")
+        self.increase_level_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.decrease_level_label = QtWidgets.QLabel("Decrease level")
+        self.decrease_level_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.refuel_20_button = QtWidgets.QPushButton("Refuel only 20 pulses (z)")
+        self.refuel_5_button = QtWidgets.QPushButton("Refuel only 5 pulses (x)")
+        self.print_only_5_button = QtWidgets.QPushButton("Print only 5 pulses (c)")
+        self.print_only_20_button = QtWidgets.QPushButton("Print only 20 pulses (v)")
+        self._apply_button_style(self.refuel_20_button, "increase_strong")
+        self._apply_button_style(self.refuel_5_button, "increase_soft")
+        self._apply_button_style(self.print_only_5_button, "decrease_soft")
+        self._apply_button_style(self.print_only_20_button, "decrease_strong")
         self.refuel_5_button.clicked.connect(lambda: self.refuel_only(5))
         self.refuel_20_button.clicked.connect(lambda: self.refuel_only(20))
         self.print_only_5_button.clicked.connect(lambda: self.print_only(5))
         self.print_only_20_button.clicked.connect(lambda: self.print_only(20))
-        pulse_grid.addWidget(self.refuel_5_button, 0, 0)
+        pulse_grid.addWidget(self.increase_level_label, 0, 0)
         pulse_grid.addWidget(self.refuel_20_button, 0, 1)
-        pulse_grid.addWidget(self.print_only_5_button, 1, 0)
-        pulse_grid.addWidget(self.print_only_20_button, 1, 1)
-        center_layout.addLayout(pulse_grid)
-        layout.addWidget(center_group)
+        pulse_grid.addWidget(self.refuel_5_button, 1, 1)
+        pulse_grid.addWidget(self.print_only_5_button, 2, 1)
+        pulse_grid.addWidget(self.decrease_level_label, 3, 0)
+        pulse_grid.addWidget(self.print_only_20_button, 3, 1)
+        pulse_grid.setColumnStretch(1, 1)
+        control_panel_layout.addLayout(pulse_grid, 3)
 
-        pressure_group = QtWidgets.QGroupBox("Refuel pressure")
-        pressure_grid = QtWidgets.QGridLayout(pressure_group)
+        self.center_level_divider = QtWidgets.QFrame()
+        self.center_level_divider.setFrameShape(QtWidgets.QFrame.VLine)
+        self.center_level_divider.setFrameShadow(QtWidgets.QFrame.Plain)
+        self.center_level_divider.setStyleSheet("color: #94a3b8;")
+        control_panel_layout.addWidget(self.center_level_divider)
+
+        pressure_layout = QtWidgets.QVBoxLayout()
+        self.pressure_layout = pressure_layout
+        pressure_layout.setSpacing(6)
         pressure_buttons = [
-            ("-1.0 psi", -1.0),
-            ("-0.1 psi", -0.1),
-            ("+0.1 psi", 0.1),
-            ("+1.0 psi", 1.0),
+            ("+1.0 psi (4)", 1.0, "increase_strong"),
+            ("+0.1 psi (3)", 0.1, "increase_soft"),
+            ("-0.1 psi (2)", -0.1, "decrease_soft"),
+            ("-1.0 psi (1)", -1.0, "decrease_strong"),
         ]
         self.refuel_pressure_buttons = []
-        for index, (label, delta) in enumerate(pressure_buttons):
+        for label, delta, role in pressure_buttons:
             button = QtWidgets.QPushButton(label)
             button.clicked.connect(lambda _checked=False, value=delta: self.adjust_refuel_pressure(value))
+            self._apply_button_style(button, role)
             self.refuel_pressure_buttons.append(button)
-            pressure_grid.addWidget(button, index // 2, index % 2)
-        layout.addWidget(pressure_group)
+            pressure_layout.addWidget(button)
+        control_panel_layout.addLayout(pressure_layout, 2)
+        center_layout.addLayout(control_panel_layout)
+        layout.addWidget(center_group)
 
         trial_group = QtWidgets.QGroupBox("2. Run paired trial")
         trial_outer_layout = QtWidgets.QVBoxLayout(trial_group)
@@ -1526,11 +1586,17 @@ class ManualRefuelCheckDialog(QtWidgets.QDialog):
         self.outcome_help_label = QtWidgets.QLabel(self.OUTCOME_BLOCKED_MESSAGE)
         self.outcome_help_label.setWordWrap(True)
         outcome_outer_layout.addWidget(self.outcome_help_label)
-        outcome_grid = QtWidgets.QGridLayout()
+        outcome_button_layout = QtWidgets.QVBoxLayout()
+        self.outcome_button_layout = outcome_button_layout
+        outcome_button_layout.setSpacing(6)
         self.stable_button = QtWidgets.QPushButton("Stable")
-        self.level_rose_button = QtWidgets.QPushButton("Level Rose")
-        self.level_fell_button = QtWidgets.QPushButton("Level Fell")
+        self.level_rose_button = QtWidgets.QPushButton("Level moved up")
+        self.level_fell_button = QtWidgets.QPushButton("Level moved down")
         self.unclear_button = QtWidgets.QPushButton("Unclear")
+        self._apply_button_style(self.stable_button, "stable")
+        self._apply_button_style(self.level_rose_button, "increase_soft")
+        self._apply_button_style(self.level_fell_button, "decrease_soft")
+        self._apply_button_style(self.unclear_button, "neutral")
         self.outcome_buttons = [
             self.stable_button,
             self.level_rose_button,
@@ -1541,16 +1607,16 @@ class ManualRefuelCheckDialog(QtWidgets.QDialog):
         self.level_rose_button.clicked.connect(lambda: self.record_outcome("failed", "level_rose"))
         self.level_fell_button.clicked.connect(lambda: self.record_outcome("failed", "level_fell"))
         self.unclear_button.clicked.connect(lambda: self.record_outcome("unclear", "unclear"))
-        outcome_grid.addWidget(self.stable_button, 0, 0)
-        outcome_grid.addWidget(self.level_rose_button, 0, 1)
-        outcome_grid.addWidget(self.level_fell_button, 1, 0)
-        outcome_grid.addWidget(self.unclear_button, 1, 1)
-        outcome_outer_layout.addLayout(outcome_grid)
+        for button in self.outcome_buttons:
+            outcome_button_layout.addWidget(button)
+        outcome_outer_layout.addLayout(outcome_button_layout)
         layout.addWidget(outcome_group)
 
         self.shortcut_help_label = QtWidgets.QLabel(
-            "Shortcuts: 1/2/3/4 refuel pressure -1.0/-0.1/+0.1/+1.0 psi; "
-            "z/x refuel 20/5; c/v print-only 5/20; w/e/r/t paired trial 1/5/10/20; Esc pause."
+            "Shortcuts: Refuel only 20 pulses (z), Refuel only 5 pulses (x), "
+            "Print only 5 pulses (c), Print only 20 pulses (v), "
+            "+1.0 psi (4), +0.1 psi (3), -0.1 psi (2), -1.0 psi (1), "
+            "w/e/r/t paired trial 1/5/10/20, Esc pause."
         )
         self.shortcut_help_label.setWordWrap(True)
         layout.addWidget(self.shortcut_help_label)
@@ -1559,6 +1625,7 @@ class ManualRefuelCheckDialog(QtWidgets.QDialog):
         close_row.addStretch(1)
         self.close_button = QtWidgets.QPushButton("Close")
         self.close_button.clicked.connect(self.accept)
+        self._apply_button_style(self.close_button, "neutral")
         close_row.addWidget(self.close_button)
         layout.addLayout(close_row)
 
@@ -1712,23 +1779,30 @@ class ManualRefuelCheckDialog(QtWidgets.QDialog):
                 "Manual refuel check passed. Close this window and start the print array again."
             )
             self.close_button.setText("Done")
+            self._apply_button_style(self.close_button, "done")
             self.close_button.setDefault(True)
             self.close_button.setFocus()
         elif judgment == "level_rose":
             self.status_label.setText(
-                "Recorded level rise. Decrease refuel pressure, re-center the level if needed, and retest."
+                "Recorded level moved up. Decrease refuel pressure, re-center the level if needed, and retest."
             )
             self.close_button.setText("Close")
+            self._apply_button_style(self.close_button, "neutral")
+            self.close_button.setDefault(False)
         elif judgment == "level_fell":
             self.status_label.setText(
-                "Recorded level fall. Increase refuel pressure, re-center the level if needed, and retest."
+                "Recorded level moved down. Increase refuel pressure, re-center the level if needed, and retest."
             )
             self.close_button.setText("Close")
+            self._apply_button_style(self.close_button, "neutral")
+            self.close_button.setDefault(False)
         else:
             self.status_label.setText(
                 "Recorded unclear manual refuel check. Re-center the level and run another paired trial."
             )
             self.close_button.setText("Close")
+            self._apply_button_style(self.close_button, "neutral")
+            self.close_button.setDefault(False)
         return True
 
     def _pause_from_escape(self):
