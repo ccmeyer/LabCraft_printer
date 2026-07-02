@@ -213,7 +213,8 @@ void Printer::enqueue(
     PulseMode mode,
     uint32_t completionBit,
     bool flashOnLast,
-    uint32_t flashCycleId) {
+    uint32_t flashCycleId,
+    TickType_t gateWaitTimeoutTicks) {
   (void)enqueueWithTimeout(
       count,
       rateHz,
@@ -221,7 +222,8 @@ void Printer::enqueue(
       portMAX_DELAY,
       completionBit,
       flashOnLast,
-      flashCycleId);
+      flashCycleId,
+      gateWaitTimeoutTicks);
 }
 
 bool Printer::enqueueWithTimeout(
@@ -231,11 +233,12 @@ bool Printer::enqueueWithTimeout(
     TickType_t timeoutTicks,
     uint32_t completionBit,
     bool flashOnLast,
-    uint32_t flashCycleId) {
+    uint32_t flashCycleId,
+    TickType_t gateWaitTimeoutTicks) {
   if (_queue == nullptr) {
     return false;
   }
-  DispenseCommand cmd{count, rateHz, mode, completionBit, flashOnLast, flashCycleId};
+  DispenseCommand cmd{count, rateHz, mode, completionBit, flashOnLast, flashCycleId, gateWaitTimeoutTicks};
   if (xQueueSend(_queue, &cmd, 0) == pdTRUE) {
     return true;
   }
@@ -272,6 +275,11 @@ uint32_t Printer::getRemaining() const {
   return _remaining;
 }
 
+void Printer::recordDispenseResult(PrinterDispenseResult result, uint32_t flashCycleId) {
+  _lastDispenseResult = result;
+  _lastDispenseResultCycleId = flashCycleId;
+}
+
 void Printer::taskEntry(void* pv) {
   static_cast<Printer*>(pv)->taskLoop();
   vTaskDelete(nullptr);
@@ -284,6 +292,7 @@ void Printer::taskLoop() {
 
       _remaining = cmd.count;
       _cancelRequested = false;              // clear any old cancel
+      PrinterDispenseResult commandResult = PrinterDispenseResult::Completed;
 
       // Apply per-command frequency if provided
       if (cmd.rateHz > 0) {
@@ -292,8 +301,15 @@ void Printer::taskLoop() {
 
       // --- wait for any in-flight gripper refresh to finish and
       //             then hold the vacuum window for the entire job.
-      bool printingHoldsGate = Gripper::instance().lockVacuumGate(portMAX_DELAY);
-      (void)printingHoldsGate; // for safety; expect true
+      bool printingHoldsGate = Gripper::instance().lockVacuumGate(cmd.gateWaitTimeoutTicks);
+      if (!printingHoldsGate) {
+        recordDispenseResult(PrinterDispenseResult::GateTimeout, cmd.flashCycleId);
+        _remaining = 0;
+        if (cmd.completionBit != 0u) {
+          xEventGroupSetBits(Orchestrator::getDoneEvents(), cmd.completionBit);
+        }
+        continue;
+      }
 
       const uint32_t rateHz = (_dispenseHz == 0u) ? 1u : _dispenseHz;
       TickType_t periodTicks = pdMS_TO_TICKS(1000u / rateHz);
@@ -347,7 +363,9 @@ void Printer::taskLoop() {
 			#if LC_HAS_IMAGING == 1
 			  // If this was the final print pulse, schedule flash now
 			  if (cmd.flashOnLast && _remaining == 1) {
-				(void)Orchestrator::instance()->scheduleFlashIn(cmd.flashCycleId);
+				if (!Orchestrator::instance()->scheduleFlashIn(cmd.flashCycleId)) {
+                  commandResult = PrinterDispenseResult::FlashScheduleFailed;
+                }
 			  }
 			#else
 			  // No flash support: just clear the flag so it doesn't linger
@@ -357,6 +375,9 @@ void Printer::taskLoop() {
             disturbance.tickMs = HAL_GetTick();
             disturbance.pressureAtTrigger = PressureSensor::instance()->getLatestRaw(0u);
             PressureRegulator::regP().notifyPulseEnd(disturbance);
+            if (commandResult == PrinterDispenseResult::FlashScheduleFailed) {
+              break;
+            }
         }
         if (cmd.mode == PulseMode::BOTH) {
           advancePhase(halfPeriodTicks, false);
@@ -415,6 +436,14 @@ void Printer::taskLoop() {
       }
       // --- always release the vacuum window at job end
       Gripper::instance().unlockVacuumGate();
+
+      if (commandResult == PrinterDispenseResult::Completed && _cancelRequested) {
+        commandResult = PrinterDispenseResult::Cancelled;
+      }
+      if (commandResult != PrinterDispenseResult::Completed) {
+        _remaining = 0;
+      }
+      recordDispenseResult(commandResult, cmd.flashCycleId);
 
       if (cmd.completionBit != 0u) {
         xEventGroupSetBits(Orchestrator::getDoneEvents(), cmd.completionBit);

@@ -1749,6 +1749,7 @@ constexpr uint32_t kFlashPrintCompletionGraceMs = 1000u;
 constexpr uint32_t kFlashPrintCompletionMinMs = 1000u;
 constexpr uint32_t kFlashPrintCompletionMaxMs = 30000u;
 constexpr uint32_t kFlashPrinterQueueTimeoutMs = 5u;
+constexpr uint32_t kFlashPrinterGateWaitTimeoutMs = 900u;
 
 uint32_t clampU32(uint32_t value, uint32_t minValue, uint32_t maxValue) {
   if (value < minValue) {
@@ -2058,6 +2059,14 @@ void Orchestrator::_flashTaskLoop() {
     const uint32_t ackBaseline = g_flash_ack_count;
     const uint32_t flashCycleId = FlashCyclePolicy::beginCycle(_flashCycle);
 
+    // Do not schedule flash or actuate valves until the trigger pulse is known low.
+    if (!_waitForFlashTriggerRelease(kFlashTriggerReleaseTimeoutMs)) {
+      _faultFlashMonitorCycle(FlashSafety::FaultReason::LineStuckHigh, false);
+      continue;
+    }
+
+    _emitPendingFlashFaultLogs();
+
     const bool waitForPrintCompletion = (_imagingDroplets != 0u);
     if (!waitForPrintCompletion) {
         if (!Orchestrator::instance()->scheduleFlashIn(flashCycleId)) {
@@ -2074,7 +2083,8 @@ void Orchestrator::_flashTaskLoop() {
             msToAtLeast1Tick(kFlashPrinterQueueTimeoutMs),
             BIT_FLASH_PRINT_DONE,
             true,
-            flashCycleId);
+            flashCycleId,
+            msToAtLeast1Tick(kFlashPrinterGateWaitTimeoutMs));
         if (!queued) {
           _finishFlashMonitorCycle(false);
           continue;
@@ -2083,18 +2093,17 @@ void Orchestrator::_flashTaskLoop() {
 
 //    Logger::instance()->log("-FLASH COMP-\r\n");
 
-    // then don’t proceed until the Pi’s line goes back low
-    if (!_waitForFlashTriggerRelease(kFlashTriggerReleaseTimeoutMs)) {
-      _faultFlashMonitorCycle(FlashSafety::FaultReason::LineStuckHigh, waitForPrintCompletion);
-      continue;
-    }
-
-    _emitPendingFlashFaultLogs();
-
     if (waitForPrintCompletion) {
       const uint32_t printTimeoutMs = _flashPrintCompletionTimeoutMs(_imagingDroplets, _imagingFreq);
       if (!_waitForFlashPrintDone(printTimeoutMs)) {
         _faultFlashMonitorCycle(FlashSafety::FaultReason::PrintCompletionTimeout, true);
+        continue;
+      }
+      auto* printer = Printer::instance();
+      const PrinterDispenseResult result = printer ? printer->getLastDispenseResult() : PrinterDispenseResult::Cancelled;
+      const uint32_t resultCycleId = printer ? printer->getLastDispenseResultCycleId() : 0u;
+      if (resultCycleId != flashCycleId || printerDispenseResultIsRecoverableNoAck(result)) {
+        _finishFlashMonitorCycle(false);
         continue;
       }
     }

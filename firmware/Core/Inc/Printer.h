@@ -34,6 +34,7 @@ public:
     uint32_t completionBit;
     bool flashOnLast = false;
     uint32_t flashCycleId = 0;
+    TickType_t gateWaitTimeoutTicks = portMAX_DELAY;
   };
 
   /// Get the singleton
@@ -67,7 +68,8 @@ public:
     PulseMode mode,
     uint32_t completionBit = PRINTER_COMPLETION_HOST_DONE_BIT,
     bool flashOnLast = false,
-    uint32_t flashCycleId = 0
+    uint32_t flashCycleId = 0,
+    TickType_t gateWaitTimeoutTicks = portMAX_DELAY
   );
 
   /// Enqueue with explicit timeout (used by self-test to avoid deadlock).
@@ -78,7 +80,8 @@ public:
     TickType_t timeoutTicks,
     uint32_t completionBit = PRINTER_COMPLETION_HOST_DONE_BIT,
     bool flashOnLast = false,
-    uint32_t flashCycleId = 0
+    uint32_t flashCycleId = 0,
+    TickType_t gateWaitTimeoutTicks = portMAX_DELAY
   );
 
   /// Diagnostic-only guard to bound pressure-ready waits inside taskLoop().
@@ -101,6 +104,9 @@ public:
 
   /// Get droplets remaining in current job
   uint32_t getRemaining() const;
+
+  PrinterDispenseResult getLastDispenseResult() const { return _lastDispenseResult; }
+  uint32_t getLastDispenseResultCycleId() const { return _lastDispenseResultCycleId; }
 
   void setPrintPulse(uint32_t us) { _printPulseUs = us; }		// Timer is set so 1 tick = 1 usec
   void setRefuelPulse(uint32_t us) { _refuelPulseUs = us; }		// Timer is set so 1 tick = 1 usec
@@ -157,10 +163,13 @@ private:
   bool _diagnosticPulseRefuel = false;
   uint32_t _normalPrintPrescaler = 0;
   uint32_t _normalRefuelPrescaler = 0;
+  volatile PrinterDispenseResult _lastDispenseResult = PrinterDispenseResult::Idle;
+  volatile uint32_t _lastDispenseResultCycleId = 0;
 
   // dispense loop
   void taskLoop();
   static void taskEntry(void* pv);
+  void recordDispenseResult(PrinterDispenseResult result, uint32_t flashCycleId);
 
   void configureTimerPrint();
   void configureTimerRefuel();

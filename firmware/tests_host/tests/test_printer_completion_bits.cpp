@@ -26,3 +26,11 @@ TEST(PrinterCompletionBitsTests, HostCompletionBitPreservesLegacyPrintingDoneSlo
 TEST(PrinterCompletionBitsTests, FlashCompletionBitUsesDedicatedHighOrderSlot) {
     UNSIGNED_LONGS_EQUAL(1u << 16, PRINTER_COMPLETION_FLASH_DONE_BIT);
 }
+
+TEST(PrinterCompletionBitsTests, RecoverableNoAckResultsAreClassified) {
+    CHECK_FALSE(printerDispenseResultIsRecoverableNoAck(PrinterDispenseResult::Idle));
+    CHECK_FALSE(printerDispenseResultIsRecoverableNoAck(PrinterDispenseResult::Completed));
+    CHECK_TRUE(printerDispenseResultIsRecoverableNoAck(PrinterDispenseResult::Cancelled));
+    CHECK_TRUE(printerDispenseResultIsRecoverableNoAck(PrinterDispenseResult::GateTimeout));
+    CHECK_TRUE(printerDispenseResultIsRecoverableNoAck(PrinterDispenseResult::FlashScheduleFailed));
+}
