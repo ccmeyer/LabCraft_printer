@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from PySide6 import QtCore, QtGui
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from CalibrationClasses.View import ManualRefuelCheckDialog
 
@@ -27,6 +27,31 @@ def _make_dialog(qapp, *, queue_idle=True, record_result=None):
     return dialog, controller
 
 
+def _activate_shortcut(dialog, key_sequence):
+    expected = QtGui.QKeySequence(key_sequence).toString().lower()
+    for shortcut in dialog._shortcut_handles:
+        if shortcut.key().toString().lower() == expected:
+            shortcut.activated.emit()
+            return shortcut
+    raise AssertionError(f"Shortcut {key_sequence!r} not found")
+
+
+def test_manual_refuel_check_defaults_and_guidance_are_visible(qapp):
+    dialog, _controller = _make_dialog(qapp)
+
+    assert dialog.trial_droplets_spin.value() == 5
+    group_titles = {group.title() for group in dialog.findChildren(QtWidgets.QGroupBox)}
+    visible_text = "\n".join(label.text() for label in dialog.findChildren(QtWidgets.QLabel))
+
+    assert {"1. Center level", "2. Run paired trial", "3. Record result"}.issubset(group_titles)
+    assert "Step 1" in dialog.status_label.text()
+    assert "middle of the channel" in visible_text
+    assert "Run paired print/refuel droplets" in visible_text
+    assert "Run a paired trial before recording" in visible_text
+    assert "Shortcuts:" in dialog.shortcut_help_label.text()
+    assert "w/e/r/t paired trial 1/5/10/20" in dialog.shortcut_help_label.text()
+
+
 def test_manual_refuel_check_buttons_queue_existing_manual_commands(qapp):
     dialog, controller = _make_dialog(qapp)
 
@@ -50,6 +75,7 @@ def test_manual_refuel_check_buttons_queue_existing_manual_commands(qapp):
     controller.print_droplets.assert_called_once_with(12, manual=True)
     assert dialog.trial_count == 1
     assert dialog.last_trial_droplet_count == 12
+    assert dialog.stable_button.isEnabled()
 
 
 def test_manual_refuel_check_pressure_buttons_queue_expected_deltas(qapp):
@@ -65,6 +91,47 @@ def test_manual_refuel_check_pressure_buttons_queue_expected_deltas(qapp):
         1.0,
     ]
     assert all(call.kwargs == {"manual": True} for call in controller.set_relative_refuel_pressure.call_args_list)
+
+
+def test_manual_refuel_check_shortcuts_queue_expected_manual_commands(qapp):
+    dialog, controller = _make_dialog(qapp)
+
+    for key in ("1", "2", "3", "4"):
+        _activate_shortcut(dialog, key)
+    for key in ("z", "x", "c", "v"):
+        _activate_shortcut(dialog, key)
+    for key in ("w", "e", "r", "t"):
+        _activate_shortcut(dialog, key)
+
+    assert [call.args[0] for call in controller.set_relative_refuel_pressure.call_args_list] == [
+        -1.0,
+        -0.1,
+        0.1,
+        1.0,
+    ]
+    assert [call.args[0] for call in controller.refuel_only.call_args_list] == [20, 5]
+    assert [call.args[0] for call in controller.print_only.call_args_list] == [5, 20]
+    assert [call.args[0] for call in controller.print_droplets.call_args_list] == [1, 5, 10, 20]
+    assert all(call.kwargs == {"manual": True} for call in controller.refuel_only.call_args_list)
+    assert all(call.kwargs == {"manual": True} for call in controller.print_only.call_args_list)
+    assert all(call.kwargs == {"manual": True} for call in controller.print_droplets.call_args_list)
+    assert dialog.trial_count == 4
+    assert dialog.last_trial_droplet_count == 20
+    assert dialog.trial_droplets_spin.value() == 20
+
+
+def test_manual_refuel_check_shortcuts_do_not_fire_while_trial_count_has_focus(qapp):
+    dialog, controller = _make_dialog(qapp)
+    dialog.show()
+    dialog.trial_droplets_spin.setFocus()
+    qapp.processEvents()
+
+    _activate_shortcut(dialog, "1")
+    _activate_shortcut(dialog, "e")
+
+    controller.set_relative_refuel_pressure.assert_not_called()
+    controller.print_droplets.assert_not_called()
+    assert dialog.trial_count == 0
 
 
 def test_manual_refuel_check_busy_queue_blocks_commands(qapp):
@@ -86,11 +153,26 @@ def test_manual_refuel_check_busy_queue_blocks_commands(qapp):
 
 def test_manual_refuel_check_busy_queue_blocks_outcome_recording(qapp):
     dialog, controller = _make_dialog(qapp, queue_idle=False)
+    dialog.trial_count = 1
+    dialog.last_trial_droplet_count = 5
+    dialog._update_outcome_buttons_enabled()
 
     dialog.stable_button.click()
 
     controller.record_manual_refuel_check_outcome.assert_not_called()
     assert "Commands are still running" in dialog.status_label.text()
+
+
+def test_manual_refuel_check_blocks_outcomes_before_paired_trial(qapp):
+    dialog, controller = _make_dialog(qapp)
+
+    assert not dialog.stable_button.isEnabled()
+    assert "Run a paired trial" in dialog.stable_button.toolTip()
+    assert "Run a paired trial" in dialog.outcome_help_label.text()
+    assert dialog.record_outcome("passed", "stable") is False
+
+    controller.record_manual_refuel_check_outcome.assert_not_called()
+    assert "Run a paired trial" in dialog.status_label.text()
 
 
 def test_manual_refuel_check_outcomes_record_status_judgment_and_trial_metadata(qapp):
@@ -99,7 +181,8 @@ def test_manual_refuel_check_outcomes_record_status_judgment_and_trial_metadata(
     dialog.run_trial_button.click()
 
     dialog.stable_button.click()
-    assert "stable" in dialog.status_label.text()
+    assert "passed" in dialog.status_label.text()
+    assert dialog.close_button.text() == "Done"
     dialog.level_rose_button.click()
     assert "Decrease refuel pressure" in dialog.status_label.text()
     dialog.level_fell_button.click()
@@ -130,6 +213,7 @@ def test_manual_refuel_check_recording_failure_shows_status_and_stays_open(qapp)
         record_result={"ok": False, "message": "recording failed"},
     )
     dialog.show()
+    dialog.run_paired_trial()
 
     assert dialog.record_outcome("passed", "stable") is False
 

@@ -874,8 +874,8 @@ class MainWindow(QMainWindow):
                 return option
         return default_option
     
-    def popup_yes_no(self,title, message):
-        msg = QtWidgets.QMessageBox(self)
+    def popup_yes_no(self,title, message, parent=None):
+        msg = QtWidgets.QMessageBox(parent or self)
         msg.setWindowTitle(title)
         msg.setText(message)
         msg.setStandardButtons(QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
@@ -3551,6 +3551,16 @@ class PressurePlotBox(QtWidgets.QGroupBox):
                 return
             if getattr(self, "_droplet_imager_dialog", None) is not None:
                 QtCore.QTimer.singleShot(0, _launch_after_imager_closed)
+                return
+            queue_idle = False
+            checker = getattr(self.controller, "check_if_all_completed", None)
+            if callable(checker):
+                try:
+                    queue_idle = bool(checker())
+                except Exception:
+                    queue_idle = False
+            if not queue_idle:
+                QtCore.QTimer.singleShot(100, _launch_after_imager_closed)
                 return
             self._manual_refuel_check_after_imager_pending = False
             self.manual_refuel_check_after_stream_apply()

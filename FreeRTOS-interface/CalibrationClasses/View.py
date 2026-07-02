@@ -1426,8 +1426,9 @@ class PrinterHeadRecoveryDialog(QtWidgets.QDialog):
 
 
 class ManualRefuelCheckDialog(QtWidgets.QDialog):
-    DEFAULT_TRIAL_DROPLETS = 20
+    DEFAULT_TRIAL_DROPLETS = 5
     SOURCE = "manual_refuel_check_dialog"
+    OUTCOME_BLOCKED_MESSAGE = "Run a paired trial before recording a result."
 
     def __init__(self, parent, model, controller):
         super().__init__(parent)
@@ -1435,30 +1436,40 @@ class ManualRefuelCheckDialog(QtWidgets.QDialog):
         self.controller = controller
         self.trial_count = 0
         self.last_trial_droplet_count = None
+        self._shortcut_handles = []
 
         self.setWindowTitle("Manual Refuel Check")
         self.setModal(True)
-        self.setMinimumWidth(460)
+        self.setMinimumWidth(560)
         self._build_ui()
         self._setup_shortcuts()
+        self._update_outcome_buttons_enabled()
 
     def _build_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
 
-        self.status_label = QtWidgets.QLabel("Move to loading and center the visible channel level.")
+        self.status_label = QtWidgets.QLabel(
+            "Step 1: move to loading and center the visible channel level."
+        )
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
 
+        center_group = QtWidgets.QGroupBox("1. Center level")
+        center_layout = QtWidgets.QVBoxLayout(center_group)
+        center_help = QtWidgets.QLabel(
+            "Use Move to Loading, Refuel Only, and Print Only until the fluid level is near the middle of the channel."
+        )
+        center_help.setWordWrap(True)
+        center_layout.addWidget(center_help)
         move_row = QtWidgets.QHBoxLayout()
         self.move_loading_button = QtWidgets.QPushButton("Move to Loading")
         self.move_loading_button.clicked.connect(self.move_to_loading)
         move_row.addWidget(self.move_loading_button)
-        layout.addLayout(move_row)
-
-        pulse_group = QtWidgets.QGroupBox("Center Level")
-        pulse_grid = QtWidgets.QGridLayout(pulse_group)
+        move_row.addStretch(1)
+        center_layout.addLayout(move_row)
+        pulse_grid = QtWidgets.QGridLayout()
         self.refuel_5_button = QtWidgets.QPushButton("Refuel 5")
         self.refuel_20_button = QtWidgets.QPushButton("Refuel 20")
         self.print_only_5_button = QtWidgets.QPushButton("Print Only 5")
@@ -1471,9 +1482,10 @@ class ManualRefuelCheckDialog(QtWidgets.QDialog):
         pulse_grid.addWidget(self.refuel_20_button, 0, 1)
         pulse_grid.addWidget(self.print_only_5_button, 1, 0)
         pulse_grid.addWidget(self.print_only_20_button, 1, 1)
-        layout.addWidget(pulse_group)
+        center_layout.addLayout(pulse_grid)
+        layout.addWidget(center_group)
 
-        pressure_group = QtWidgets.QGroupBox("Refuel Pressure")
+        pressure_group = QtWidgets.QGroupBox("Refuel pressure")
         pressure_grid = QtWidgets.QGridLayout(pressure_group)
         pressure_buttons = [
             ("-1.0 psi", -1.0),
@@ -1489,8 +1501,14 @@ class ManualRefuelCheckDialog(QtWidgets.QDialog):
             pressure_grid.addWidget(button, index // 2, index % 2)
         layout.addWidget(pressure_group)
 
-        trial_group = QtWidgets.QGroupBox("Paired Trial")
-        trial_layout = QtWidgets.QHBoxLayout(trial_group)
+        trial_group = QtWidgets.QGroupBox("2. Run paired trial")
+        trial_outer_layout = QtWidgets.QVBoxLayout(trial_group)
+        trial_help = QtWidgets.QLabel(
+            "Run paired print/refuel droplets and watch whether the channel level stays stable, rises, or falls."
+        )
+        trial_help.setWordWrap(True)
+        trial_outer_layout.addWidget(trial_help)
+        trial_layout = QtWidgets.QHBoxLayout()
         trial_layout.addWidget(QtWidgets.QLabel("Droplets:"))
         self.trial_droplets_spin = QtWidgets.QSpinBox()
         self.trial_droplets_spin.setRange(1, 1000)
@@ -1498,16 +1516,27 @@ class ManualRefuelCheckDialog(QtWidgets.QDialog):
         self.trial_droplets_spin.setKeyboardTracking(False)
         trial_layout.addWidget(self.trial_droplets_spin)
         self.run_trial_button = QtWidgets.QPushButton("Run Trial")
-        self.run_trial_button.clicked.connect(self.run_paired_trial)
+        self.run_trial_button.clicked.connect(lambda _checked=False: self.run_paired_trial())
         trial_layout.addWidget(self.run_trial_button)
+        trial_outer_layout.addLayout(trial_layout)
         layout.addWidget(trial_group)
 
-        outcome_group = QtWidgets.QGroupBox("Result")
-        outcome_grid = QtWidgets.QGridLayout(outcome_group)
+        outcome_group = QtWidgets.QGroupBox("3. Record result")
+        outcome_outer_layout = QtWidgets.QVBoxLayout(outcome_group)
+        self.outcome_help_label = QtWidgets.QLabel(self.OUTCOME_BLOCKED_MESSAGE)
+        self.outcome_help_label.setWordWrap(True)
+        outcome_outer_layout.addWidget(self.outcome_help_label)
+        outcome_grid = QtWidgets.QGridLayout()
         self.stable_button = QtWidgets.QPushButton("Stable")
         self.level_rose_button = QtWidgets.QPushButton("Level Rose")
         self.level_fell_button = QtWidgets.QPushButton("Level Fell")
         self.unclear_button = QtWidgets.QPushButton("Unclear")
+        self.outcome_buttons = [
+            self.stable_button,
+            self.level_rose_button,
+            self.level_fell_button,
+            self.unclear_button,
+        ]
         self.stable_button.clicked.connect(lambda: self.record_outcome("passed", "stable"))
         self.level_rose_button.clicked.connect(lambda: self.record_outcome("failed", "level_rose"))
         self.level_fell_button.clicked.connect(lambda: self.record_outcome("failed", "level_fell"))
@@ -1516,7 +1545,15 @@ class ManualRefuelCheckDialog(QtWidgets.QDialog):
         outcome_grid.addWidget(self.level_rose_button, 0, 1)
         outcome_grid.addWidget(self.level_fell_button, 1, 0)
         outcome_grid.addWidget(self.unclear_button, 1, 1)
+        outcome_outer_layout.addLayout(outcome_grid)
         layout.addWidget(outcome_group)
+
+        self.shortcut_help_label = QtWidgets.QLabel(
+            "Shortcuts: 1/2/3/4 refuel pressure -1.0/-0.1/+0.1/+1.0 psi; "
+            "z/x refuel 20/5; c/v print-only 5/20; w/e/r/t paired trial 1/5/10/20; Esc pause."
+        )
+        self.shortcut_help_label.setWordWrap(True)
+        layout.addWidget(self.shortcut_help_label)
 
         close_row = QtWidgets.QHBoxLayout()
         close_row.addStretch(1)
@@ -1526,9 +1563,60 @@ class ManualRefuelCheckDialog(QtWidgets.QDialog):
         layout.addLayout(close_row)
 
     def _setup_shortcuts(self):
+        shortcut_bindings = [
+            ("1", lambda: self.adjust_refuel_pressure(-1.0)),
+            ("2", lambda: self.adjust_refuel_pressure(-0.1)),
+            ("3", lambda: self.adjust_refuel_pressure(0.1)),
+            ("4", lambda: self.adjust_refuel_pressure(1.0)),
+            ("z", lambda: self.refuel_only(20)),
+            ("x", lambda: self.refuel_only(5)),
+            ("c", lambda: self.print_only(5)),
+            ("v", lambda: self.print_only(20)),
+            ("w", lambda: self.run_paired_trial(1)),
+            ("e", lambda: self.run_paired_trial(5)),
+            ("r", lambda: self.run_paired_trial(10)),
+            ("t", lambda: self.run_paired_trial(20)),
+        ]
+        for key_sequence, callback in shortcut_bindings:
+            shortcut = QShortcut(QKeySequence(key_sequence), self)
+            shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(lambda cb=callback: self._run_manual_shortcut(cb))
+            self._shortcut_handles.append(shortcut)
+
         self.shortcut_pause = QShortcut(QKeySequence("Esc"), self)
         self.shortcut_pause.setContext(Qt.WidgetWithChildrenShortcut)
         self.shortcut_pause.activated.connect(self._pause_from_escape)
+        self._shortcut_handles.append(self.shortcut_pause)
+
+    def _manual_shortcuts_enabled(self):
+        if self.trial_droplets_spin.hasFocus():
+            return False
+        focus_widget = QtWidgets.QApplication.focusWidget()
+        if focus_widget is None:
+            return True
+        return not (
+            focus_widget is self.trial_droplets_spin
+            or self.trial_droplets_spin.isAncestorOf(focus_widget)
+        )
+
+    def _run_manual_shortcut(self, callback):
+        if not self._manual_shortcuts_enabled():
+            return False
+        callback()
+        return True
+
+    def _update_outcome_buttons_enabled(self):
+        enabled = self.trial_count > 0
+        message = (
+            "A paired trial has been queued. Wait for it to finish, then record how the channel level changed."
+            if enabled
+            else self.OUTCOME_BLOCKED_MESSAGE
+        )
+        self.outcome_help_label.setText(message)
+        tooltip = "" if enabled else self.OUTCOME_BLOCKED_MESSAGE
+        for button in self.outcome_buttons:
+            button.setEnabled(enabled)
+            button.setToolTip(tooltip)
 
     def _queue_idle(self):
         checker = getattr(self.controller, "check_if_all_completed", None)
@@ -1581,19 +1669,28 @@ class ManualRefuelCheckDialog(QtWidgets.QDialog):
             success_message=f"Queued refuel pressure change {float(delta):+.1f} psi.",
         )
 
-    def run_paired_trial(self):
-        count = int(self.trial_droplets_spin.value())
+    def run_paired_trial(self, count=None):
+        if count is None:
+            count = int(self.trial_droplets_spin.value())
+        else:
+            count = int(count)
+            self.trial_droplets_spin.setValue(count)
         if self._queue_action(
             "print_droplets",
             count,
-            success_message=f"Queued paired trial with {count} droplets.",
+            success_message=f"Queued paired trial with {count} droplets. Watch the level, then record the result.",
         ):
             self.trial_count += 1
             self.last_trial_droplet_count = count
+            self._update_outcome_buttons_enabled()
             return True
         return False
 
     def record_outcome(self, status, judgment):
+        if self.trial_count <= 0:
+            self.status_label.setText(self.OUTCOME_BLOCKED_MESSAGE)
+            self.outcome_help_label.setText(self.OUTCOME_BLOCKED_MESSAGE)
+            return False
         if not self._queue_idle():
             return False
         recorder = getattr(self.controller, "record_manual_refuel_check_outcome", None)
@@ -1611,13 +1708,27 @@ class ManualRefuelCheckDialog(QtWidgets.QDialog):
             self.status_label.setText(str(result.get("message") or "Failed to record manual refuel check."))
             return False
         if status == "passed":
-            self.status_label.setText("Recorded stable manual refuel check.")
+            self.status_label.setText(
+                "Manual refuel check passed. Close this window and start the print array again."
+            )
+            self.close_button.setText("Done")
+            self.close_button.setDefault(True)
+            self.close_button.setFocus()
         elif judgment == "level_rose":
-            self.status_label.setText("Recorded level rise. Decrease refuel pressure and retest.")
+            self.status_label.setText(
+                "Recorded level rise. Decrease refuel pressure, re-center the level if needed, and retest."
+            )
+            self.close_button.setText("Close")
         elif judgment == "level_fell":
-            self.status_label.setText("Recorded level fall. Increase refuel pressure and retest.")
+            self.status_label.setText(
+                "Recorded level fall. Increase refuel pressure, re-center the level if needed, and retest."
+            )
+            self.close_button.setText("Close")
         else:
-            self.status_label.setText("Recorded unclear manual refuel check.")
+            self.status_label.setText(
+                "Recorded unclear manual refuel check. Re-center the level and run another paired trial."
+            )
+            self.close_button.setText("Close")
         return True
 
     def _pause_from_escape(self):
@@ -6597,7 +6708,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         message = self._post_apply_manual_refuel_prompt_message(completion_message)
         prompt = getattr(self.main_window, "popup_yes_no", None)
         if callable(prompt):
-            response = prompt("Manual Refuel Check Required", message)
+            response = prompt("Manual Refuel Check Required", message, parent=self)
         else:
             response = QtWidgets.QMessageBox.question(
                 self,

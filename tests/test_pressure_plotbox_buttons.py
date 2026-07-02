@@ -1415,6 +1415,48 @@ def test_current_profile_post_apply_request_waits_for_imager_cleanup(monkeypatch
     assert events == []
 
 
+def test_current_profile_post_apply_request_waits_for_cleanup_queue(monkeypatch, qapp):
+    events = []
+    popups = []
+    callbacks = []
+    main_window = _make_main_window(CURRENT_PROFILE, popups)
+    model = _make_model(
+        _FakeMachineModel(
+            regulating_print_pressure=True,
+            regulating_refuel_pressure=True,
+            current_location="camera",
+        ),
+        events,
+        printer_head=object(),
+    )
+    controller = _make_controller(events)
+    controller.check_if_all_completed.side_effect = [False, False, True, True]
+    box = PressurePlotBox(main_window, model, controller)
+    box._droplet_imager_dialog = object()
+
+    monkeypatch.setattr(View.QtCore.QTimer, "singleShot", lambda _ms, callback: callbacks.append(callback))
+    _patch_manual_refuel_launch(monkeypatch, events, main_window=main_window, model=model, controller=controller)
+
+    assert box.request_manual_refuel_check_after_imager_close() is True
+    callbacks.pop(0)()
+    box._droplet_imager_dialog = None
+
+    callbacks.pop(0)()
+    assert controller.move_to_location.call_count == 0
+    assert box._manual_refuel_check_after_imager_pending is True
+
+    callbacks.pop(0)()
+    assert controller.move_to_location.call_count == 0
+    assert box._manual_refuel_check_after_imager_pending is True
+
+    callbacks.pop(0)()
+
+    controller.move_to_location.assert_called_once()
+    assert box._manual_refuel_check_after_imager_pending is False
+    assert popups == []
+    assert events == []
+
+
 def test_current_profile_manual_refuel_check_rejects_duplicate_while_dialog_open(monkeypatch, qapp):
     events = []
     popups = []

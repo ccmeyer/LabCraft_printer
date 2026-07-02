@@ -1627,14 +1627,13 @@ def test_stream_apply_yes_schedules_manual_refuel_check_and_closes_imager(monkey
         popup_yes_no=Mock(return_value=calibration_view.QtWidgets.QMessageBox.Yes),
     )
     launch = Mock(return_value=True)
-    question_calls = []
     monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "information", lambda *args, **kwargs: None)
     monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "warning", lambda *args, **kwargs: None)
     monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "critical", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         calibration_view.QtWidgets.QMessageBox,
         "question",
-        lambda *args, **kwargs: question_calls.append(args) or calibration_view.QtWidgets.QMessageBox.Yes,
+        lambda *args, **kwargs: calibration_view.QtWidgets.QMessageBox.Yes,
     )
     experiment_model = _build_experiment_model("Water", current_mode="droplet")
     dialog, manager = _build_dialog(
@@ -1663,9 +1662,9 @@ def test_stream_apply_yes_schedules_manual_refuel_check_and_closes_imager(monkey
     dialog._apply_previewed_droplet_volume()
     qapp.processEvents()
 
-    assert question_calls
     main_window.popup_yes_no.assert_called_once()
     assert "Manual Refuel Check Required" in main_window.popup_yes_no.call_args.args[0]
+    assert main_window.popup_yes_no.call_args.kwargs["parent"] is dialog
     launch.assert_called_once_with()
     assert close_calls == [True]
 
@@ -1731,6 +1730,7 @@ def test_stream_apply_no_records_manual_refuel_check_deferred(monkeypatch, qapp,
     qapp.processEvents()
 
     main_window.popup_yes_no.assert_called_once()
+    assert main_window.popup_yes_no.call_args.kwargs["parent"] is dialog
     dialog.controller.mark_manual_refuel_check_deferred.assert_called_once_with(source="post_apply_prompt")
     launch.assert_not_called()
     assert close_calls == []
