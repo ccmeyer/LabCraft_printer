@@ -3152,6 +3152,16 @@ class DropletImagingDialog(QtWidgets.QDialog):
         )
         group_v.addWidget(self.enable_droplet_capture_performance_diagnostics_checkbox)
 
+        self.fast_detection_ab_profile_checkbox = QtWidgets.QCheckBox("Use Fast Detection A/B Profile")
+        self.fast_detection_ab_profile_checkbox.setToolTip(
+            "Experimentally use strided green-channel flash detection while preserving normal image orientation."
+        )
+        self.fast_detection_ab_profile_checkbox.setChecked(False)
+        self.fast_detection_ab_profile_checkbox.toggled.connect(
+            self._set_fast_detection_ab_profile_enabled
+        )
+        group_v.addWidget(self.fast_detection_ab_profile_checkbox)
+
         self.export_droplet_capture_performance_button = QtWidgets.QPushButton("Export Capture Perf Snapshot")
         self.export_droplet_capture_performance_button.setToolTip(
             "Write recent droplet capture timing markers to a JSON file."
@@ -3206,6 +3216,45 @@ class DropletImagingDialog(QtWidgets.QDialog):
             button.setEnabled(checked)
         self._set_droplet_capture_performance_debug_status(
             "Capture performance diagnostics enabled" if checked else "Capture performance diagnostics disabled"
+        )
+
+    def _set_fast_detection_ab_checkbox_checked(self, checked):
+        checkbox = getattr(self, "fast_detection_ab_profile_checkbox", None)
+        if checkbox is None:
+            return
+        if checkbox.isChecked() == bool(checked):
+            return
+        was_blocked = checkbox.blockSignals(True)
+        try:
+            checkbox.setChecked(bool(checked))
+        finally:
+            checkbox.blockSignals(was_blocked)
+
+    def _set_fast_detection_ab_profile_enabled(self, checked):
+        checked = bool(checked)
+        if DropletImagingDialog._is_calibration_busy(self) or self._capture_pending_for_ui():
+            self._set_fast_detection_ab_checkbox_checked(not checked)
+            self._set_droplet_capture_performance_debug_status(
+                "Cannot change capture profile while calibration or capture is active."
+            )
+            return
+        setter = getattr(self.controller, "set_droplet_capture_profile", None)
+        if not callable(setter):
+            self._set_fast_detection_ab_checkbox_checked(False)
+            self._set_droplet_capture_performance_debug_status("Capture profile control is unavailable.")
+            return
+        profile = "fast_detection" if checked else "default"
+        try:
+            applied = setter(profile)
+        except Exception as exc:
+            self._set_fast_detection_ab_checkbox_checked(False)
+            self._set_droplet_capture_performance_debug_status(f"Could not set capture profile: {exc}")
+            return
+        normalized = str(applied or profile or "default").strip().lower()
+        enabled = normalized == "fast_detection"
+        self._set_fast_detection_ab_checkbox_checked(enabled)
+        self._set_droplet_capture_performance_debug_status(
+            "Fast detection A/B profile enabled" if enabled else "Fast detection A/B profile disabled"
         )
 
     def _export_droplet_capture_performance_snapshot(self, *, reason="manual_export", show_status=True):

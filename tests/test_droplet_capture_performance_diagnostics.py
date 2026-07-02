@@ -74,6 +74,10 @@ def test_droplet_capture_perf_snapshot_summarizes_timings():
             "frame_select_reason": "threshold",
             "cap_seen": 1,
             "cap_max_new": 10,
+            "capture_profile": "fast_detection",
+            "signal_stride": 4,
+            "signal_channel": 1,
+            "cap_emit_rotate": True,
         },
     )
     diagnostics.record("controller_pending_cleared", {"request_id": "r1"})
@@ -98,6 +102,10 @@ def test_droplet_capture_perf_snapshot_summarizes_timings():
     assert request_summary["selected_frame_threshold"] == 29.0
     assert request_summary["cap_seen"] == 1
     assert request_summary["cap_max_new"] == 10
+    assert request_summary["capture_profile"] == "fast_detection"
+    assert request_summary["signal_stride"] == 4
+    assert request_summary["signal_channel"] == 1
+    assert request_summary["cap_emit_rotate"] is True
     assert request_summary["controller_completion_to_pending_clear_ms"] is not None
     assert snapshot["ui_sequence_summaries"][0]["accepted"] is True
 
@@ -352,6 +360,10 @@ def test_droplet_capture_perf_snapshot_recovers_nested_capture_context():
             "frame_select_reason": "threshold",
             "cap_seen": 1,
             "cap_max_new": 10,
+            "capture_profile": "fast_detection",
+            "signal_stride": 4,
+            "signal_channel": 1,
+            "cap_emit_rotate": True,
         },
     )
     diagnostics.record(
@@ -393,6 +405,10 @@ def test_droplet_capture_perf_snapshot_recovers_nested_capture_context():
     assert capture_summary["selected_frame_threshold"] == 29.0
     assert capture_summary["cap_seen"] == 1
     assert capture_summary["cap_max_new"] == 10
+    assert capture_summary["capture_profile"] == "fast_detection"
+    assert capture_summary["signal_stride"] == 4
+    assert capture_summary["signal_channel"] == 1
+    assert capture_summary["cap_emit_rotate"] is True
 
 
 def test_droplet_capture_perf_snapshot_parses_stringified_capture_context_only_on_export():

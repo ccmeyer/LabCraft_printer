@@ -483,6 +483,7 @@ class DropletCamera(QObject):
         self._cap_arm_ns      = 0     # <<< time gate: frames with t_done_ns > arm_ns are "new"
         self._signal_stride   = 1
         self._signal_channel  = None  # None => full RGB mean, else BGR channel index
+        self._capture_profile = "default"
         
         self._cap_done = threading.Event()      # set when _complete_capture_locked runs
         self._cap_result = None                 # dict with mean/threshold/reason, and the image
@@ -503,17 +504,38 @@ class DropletCamera(QObject):
         """
         Set capture behavior profile.
         - default: preserve historical behavior (full-frame mean, rotate output)
+        - fast_detection: reduce signal detection work, preserve rotated output
         - throughput: reduce per-frame CPU work and skip rotate
         """
         p = str(profile_name or "default").strip().lower()
+        if p == "fast_detection":
+            self._capture_profile = "fast_detection"
+            self._signal_stride = 4
+            self._signal_channel = 1  # green channel
+            self._cap_emit_rotate = True
+            return self._capture_profile
         if p == "throughput":
+            self._capture_profile = "throughput"
             self._signal_stride = 4
             self._signal_channel = 1  # green channel
             self._cap_emit_rotate = False
-            return
+            return self._capture_profile
+        self._capture_profile = "default"
         self._signal_stride = 1
         self._signal_channel = None
         self._cap_emit_rotate = True
+        return self._capture_profile
+
+    def get_capture_profile(self):
+        return str(getattr(self, "_capture_profile", "default") or "default")
+
+    def _capture_profile_metadata(self):
+        return {
+            "capture_profile": self.get_capture_profile(),
+            "signal_stride": int(getattr(self, "_signal_stride", 1) or 1),
+            "signal_channel": getattr(self, "_signal_channel", None),
+            "cap_emit_rotate": bool(getattr(self, "_cap_emit_rotate", True)),
+        }
 
     def set_capture_performance_diagnostics_enabled(self, enabled):
         self._capture_performance_diagnostics_enabled = bool(enabled)
@@ -888,6 +910,8 @@ class DropletCamera(QObject):
             if error is not None:
                 self._cap_result["error"] = str(error)
             self._cap_result.update(extra)
+            if self.is_capture_performance_diagnostics_enabled():
+                self._cap_result.update(self._capture_profile_metadata())
             self._cap_done.set()
             self._cv.notify_all()
 
@@ -1122,6 +1146,7 @@ class DropletCamera(QObject):
                     "frame_select_reason": str(reason),
                     "cap_seen": int(getattr(self, "_cap_seen", 0)),
                     "cap_max_new": int(getattr(self, "_cap_max_new", 0)),
+                    **self._capture_profile_metadata(),
                 }
             )
         self._cap_result = result
@@ -1526,6 +1551,10 @@ class DropletCamera(QObject):
                     frame_select_reason=res.get("frame_select_reason"),
                     cap_seen=res.get("cap_seen"),
                     cap_max_new=res.get("cap_max_new"),
+                    capture_profile=res.get("capture_profile"),
+                    signal_stride=res.get("signal_stride"),
+                    signal_channel=res.get("signal_channel"),
+                    cap_emit_rotate=res.get("cap_emit_rotate"),
                     success=bool(attempt_success),
                     will_retry=(not attempt_success) and i < attempts - 1,
                     print_phase=False,
@@ -6051,7 +6080,14 @@ class Machine(QObject):
 
     def set_droplet_capture_profile(self, profile_name: str):
         if hasattr(self.droplet_camera, "set_capture_profile"):
-            self.droplet_camera.set_capture_profile(profile_name)
+            return self.droplet_camera.set_capture_profile(profile_name)
+        return "default"
+
+    def get_droplet_capture_profile(self):
+        getter = getattr(self.droplet_camera, "get_capture_profile", None)
+        if callable(getter):
+            return getter()
+        return "default"
 
     def set_droplet_capture_performance_diagnostics_enabled(self, enabled):
         setter = getattr(self.droplet_camera, "set_capture_performance_diagnostics_enabled", None)

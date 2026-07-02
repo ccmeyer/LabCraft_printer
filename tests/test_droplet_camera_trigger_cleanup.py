@@ -528,6 +528,34 @@ def test_capture_debug_logging_suppresses_info_prints_by_default(capsys):
     assert "[CameraPhase] trigger_high" in capsys.readouterr().out
 
 
+def test_capture_profile_modes_preserve_default_and_add_fast_detection():
+    camera = DropletCamera.__new__(DropletCamera)
+
+    assert DropletCamera.set_capture_profile(camera, "default") == "default"
+    assert camera._signal_stride == 1
+    assert camera._signal_channel is None
+    assert camera._cap_emit_rotate is True
+    assert DropletCamera.get_capture_profile(camera) == "default"
+
+    assert DropletCamera.set_capture_profile(camera, "fast_detection") == "fast_detection"
+    assert camera._signal_stride == 4
+    assert camera._signal_channel == 1
+    assert camera._cap_emit_rotate is True
+    assert DropletCamera.get_capture_profile(camera) == "fast_detection"
+
+    assert DropletCamera.set_capture_profile(camera, "throughput") == "throughput"
+    assert camera._signal_stride == 4
+    assert camera._signal_channel == 1
+    assert camera._cap_emit_rotate is False
+    assert DropletCamera.get_capture_profile(camera) == "throughput"
+
+    assert DropletCamera.set_capture_profile(camera, "unknown") == "default"
+    assert camera._signal_stride == 1
+    assert camera._signal_channel is None
+    assert camera._cap_emit_rotate is True
+    assert DropletCamera.get_capture_profile(camera) == "default"
+
+
 def test_complete_capture_includes_selected_frame_timing_only_when_diagnostics_enabled():
     camera = _make_async_camera()
     frame = np.full((3, 4, 3), 120, dtype=np.uint8)
@@ -551,6 +579,7 @@ def test_complete_capture_includes_selected_frame_timing_only_when_diagnostics_e
     assert "rotate_ms" not in camera._cap_result
 
     DropletCamera.set_capture_performance_diagnostics_enabled(camera, True)
+    DropletCamera.set_capture_profile(camera, "fast_detection")
     camera._cap_done.clear()
     with camera._cv:
         DropletCamera._complete_capture_locked(
@@ -564,10 +593,14 @@ def test_complete_capture_includes_selected_frame_timing_only_when_diagnostics_e
 
     assert camera._cap_result["make_array_ms"] == 1.5
     assert camera._cap_result["signal_mean_ms"] == 0.75
-    assert camera._cap_result["rotate_ms"] == 0.0
+    assert camera._cap_result["rotate_ms"] >= 0.0
     assert camera._cap_result["frame_select_reason"] == "threshold"
     assert camera._cap_result["cap_seen"] == 2
     assert camera._cap_result["cap_max_new"] == 10
+    assert camera._cap_result["capture_profile"] == "fast_detection"
+    assert camera._cap_result["signal_stride"] == 4
+    assert camera._cap_result["signal_channel"] == 1
+    assert camera._cap_result["cap_emit_rotate"] is True
 
 
 def test_capture_worker_clears_active_before_completion_emit():

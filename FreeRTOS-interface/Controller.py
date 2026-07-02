@@ -275,6 +275,10 @@ class DropletCapturePerformanceDiagnostics:
                 "selected_frame_threshold": _float_or_none(retry_result.get("threshold")),
                 "cap_seen": _int_or_none(retry_result.get("cap_seen")),
                 "cap_max_new": _int_or_none(retry_result.get("cap_max_new")),
+                "capture_profile": retry_result.get("capture_profile"),
+                "signal_stride": _int_or_none(retry_result.get("signal_stride")),
+                "signal_channel": retry_result.get("signal_channel"),
+                "cap_emit_rotate": retry_result.get("cap_emit_rotate"),
             }
             return fields
 
@@ -6242,7 +6246,16 @@ class Controller(QObject):
         return result
 
     def set_droplet_capture_profile(self, profile_name: str):
-        self.machine.set_droplet_capture_profile(profile_name)
+        return self.machine.set_droplet_capture_profile(profile_name)
+
+    def get_droplet_capture_profile(self):
+        getter = getattr(self.machine, "get_droplet_capture_profile", None)
+        if callable(getter):
+            try:
+                return getter()
+            except Exception:
+                return "default"
+        return "default"
 
     def set_command_dispatch_interval(self, interval_ms: int):
         self.machine.set_execution_interval_ms(interval_ms)

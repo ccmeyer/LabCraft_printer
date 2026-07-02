@@ -115,6 +115,15 @@ def _build_droplet_dialog(
     def _is_droplet_capture_perf_enabled():
         return bool(droplet_capture_perf_enabled["value"])
 
+    capture_profile = {"value": "default"}
+
+    def _set_droplet_capture_profile(profile_name):
+        profile = str(profile_name or "default").strip().lower()
+        if profile not in {"default", "fast_detection", "throughput"}:
+            profile = "default"
+        capture_profile["value"] = profile
+        return profile
+
     controller = SimpleNamespace(
         _command_calls=command_calls,
         last_capture_queue_rejection_reason=last_capture_queue_rejection_reason,
@@ -141,7 +150,8 @@ def _build_droplet_dialog(
         ),
         stop_droplet_camera=Mock(),
         disable_print_profile=Mock(),
-        set_droplet_capture_profile=Mock(),
+        set_droplet_capture_profile=Mock(side_effect=_set_droplet_capture_profile),
+        get_droplet_capture_profile=Mock(side_effect=lambda: capture_profile["value"]),
         set_command_dispatch_interval=Mock(),
         enter_refuel_vacuum_mode=_command_mock("enter_refuel_vacuum_mode"),
         set_refuel_vacuum_pressure=_command_mock("set_refuel_vacuum_pressure"),
@@ -324,6 +334,65 @@ def test_droplet_capture_performance_debug_checkbox_and_export(monkeypatch, qapp
 
     controller.write_droplet_capture_performance_snapshot.assert_called_once_with(reason="manual_export")
     assert "C:/tmp/droplet_capture_perf.json" in dialog.droplet_capture_performance_debug_status_label.text()
+
+
+def test_fast_detection_ab_profile_checkbox_toggles_profile_and_is_not_persisted(monkeypatch, qapp):
+    dialog, _refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
+
+    assert dialog.fast_detection_ab_profile_checkbox.isChecked() is False
+
+    controller.set_droplet_capture_profile.reset_mock()
+    dialog.fast_detection_ab_profile_checkbox.setChecked(True)
+    qapp.processEvents()
+
+    controller.set_droplet_capture_profile.assert_called_once_with("fast_detection")
+    assert dialog.fast_detection_ab_profile_checkbox.isChecked() is True
+    assert "Fast detection A/B profile enabled" in dialog.droplet_capture_performance_debug_status_label.text()
+
+    dialog.fast_detection_ab_profile_checkbox.setChecked(False)
+    qapp.processEvents()
+
+    controller.set_droplet_capture_profile.assert_called_with("default")
+    assert dialog.fast_detection_ab_profile_checkbox.isChecked() is False
+    assert "Fast detection A/B profile disabled" in dialog.droplet_capture_performance_debug_status_label.text()
+
+    second_dialog, _second_refuel_model, _second_controller = _build_droplet_dialog(monkeypatch, qapp)
+    assert second_dialog.fast_detection_ab_profile_checkbox.isChecked() is False
+
+
+def test_fast_detection_ab_profile_checkbox_reverts_when_capture_active(monkeypatch, qapp):
+    dialog, _refuel_model, controller = _build_droplet_dialog(
+        monkeypatch,
+        qapp,
+        capture_ui_state={
+            "pending_active": True,
+            "dirty_shutdown": False,
+            "last_result_status": None,
+            "last_result_reason": "",
+            "last_result_dirty_shutdown": False,
+        },
+    )
+
+    controller.set_droplet_capture_profile.reset_mock()
+    dialog.fast_detection_ab_profile_checkbox.setChecked(True)
+    qapp.processEvents()
+
+    assert dialog.fast_detection_ab_profile_checkbox.isChecked() is False
+    controller.set_droplet_capture_profile.assert_not_called()
+    assert "Cannot change capture profile" in dialog.droplet_capture_performance_debug_status_label.text()
+
+
+def test_fast_detection_ab_profile_checkbox_reverts_when_calibration_active(monkeypatch, qapp):
+    dialog, _refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
+    dialog.model.calibration_manager.activeCalibration = object()
+
+    controller.set_droplet_capture_profile.reset_mock()
+    dialog.fast_detection_ab_profile_checkbox.setChecked(True)
+    qapp.processEvents()
+
+    assert dialog.fast_detection_ab_profile_checkbox.isChecked() is False
+    controller.set_droplet_capture_profile.assert_not_called()
+    assert "Cannot change capture profile" in dialog.droplet_capture_performance_debug_status_label.text()
 
 
 def test_toggle_flash_records_pending_ignore_for_capture_perf(monkeypatch, qapp):
