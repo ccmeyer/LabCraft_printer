@@ -280,6 +280,13 @@ class DropletCapturePerformanceDiagnostics:
                 "signal_stride": _int_or_none(retry_result.get("signal_stride")),
                 "signal_channel": retry_result.get("signal_channel"),
                 "cap_emit_rotate": retry_result.get("cap_emit_rotate"),
+                "detection_stream": retry_result.get("detection_stream"),
+                "lores_size": retry_result.get("lores_size"),
+                "lores_format": retry_result.get("lores_format"),
+                "lores_make_array_ms": _float_or_none(retry_result.get("lores_make_array_ms")),
+                "lores_signal_mean_ms": _float_or_none(retry_result.get("lores_signal_mean_ms")),
+                "main_make_array_ms": _float_or_none(retry_result.get("main_make_array_ms")),
+                "main_converted_for_selected_frame": retry_result.get("main_converted_for_selected_frame"),
                 "capture_arm_timing_mode": retry_result.get("capture_arm_timing_mode"),
                 "early_arm_mark": bool(retry_result.get("early_arm_mark") or early_arm_row),
                 "early_arm_to_ack_ms": _float_or_none(
@@ -662,7 +669,7 @@ class DropletCapturePerformanceDiagnostics:
 
         snapshot = {
             "kind": "droplet_capture_performance_snapshot",
-            "schema_version": 7,
+            "schema_version": 8,
             "reason": str(reason or "manual_export"),
             "generated_at_utc": self._now_utc(),
             "generated_monotonic_ns": int(time.monotonic_ns()),

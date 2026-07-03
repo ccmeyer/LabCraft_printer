@@ -437,6 +437,8 @@ class DropletCamera(QObject):
     DEFAULT_TRIGGER_PULSE_S = 0.005
     MIN_TRIGGER_PULSE_S = 0.001
     MAX_TRIGGER_PULSE_S = 0.100
+    DUAL_STREAM_LORES_SIZE = (320, 240)
+    DUAL_STREAM_LORES_FORMAT = "YUV420"
 
     def __init__(self):
         super().__init__()
@@ -463,10 +465,14 @@ class DropletCamera(QObject):
         self._configured_frame_duration_us = self.exposure_time
         self._stream_main_size = None
         self._stream_main_format = None
+        self._stream_lores_size = None
+        self._stream_lores_format = None
         self._stream_buffer_count = None
         self.latest_frame = None
 
-        # ring buffer of recent frames: (arr, md, t_done_ns, mean)
+        # Ring buffer of recent detection frames. Default mode stores
+        # (arr, md, t_done_ns, mean, frame_timing); dual-stream mode stores
+        # dict entries without retaining released camera requests.
         self._buf = deque(maxlen=16)
         self._grabber_frame_index = 0
         self._last_grabber_frame_done_ns = None
@@ -519,45 +525,71 @@ class DropletCamera(QObject):
         - default: strided green-channel signal mean, rotate output
         - fast_detection: compatibility alias for the default fast detection math
         - legacy_full_rgb: historical full-frame RGB mean, rotate output
+        - dual_stream_detection: lores Y/luma detection, full-res selected output
         - throughput: reduce per-frame CPU work and skip rotate
         """
         p = str(profile_name or "default").strip().lower()
+        old_stream_mode = self._capture_stream_mode()
         if p == "legacy_full_rgb":
             self._capture_profile = "legacy_full_rgb"
             self._signal_stride = 1
             self._signal_channel = None
             self._cap_emit_rotate = True
-            return self._capture_profile
-        if p == "throughput":
+        elif p == "throughput":
             self._capture_profile = "throughput"
             self._signal_stride = 4
             self._signal_channel = 1  # green channel
             self._cap_emit_rotate = False
-            return self._capture_profile
-        self._capture_profile = "fast_detection" if p == "fast_detection" else "default"
-        self._signal_stride = 4
-        self._signal_channel = 1  # green channel
-        self._cap_emit_rotate = True
+        elif p == "dual_stream_detection":
+            self._capture_profile = "dual_stream_detection"
+            self._signal_stride = 1
+            self._signal_channel = 0
+            self._cap_emit_rotate = True
+        else:
+            self._capture_profile = "fast_detection" if p == "fast_detection" else "default"
+            self._signal_stride = 4
+            self._signal_channel = 1  # green channel
+            self._cap_emit_rotate = True
+        if (
+            getattr(self, "camera", None) is not None
+            and bool(getattr(self, "_grab_running", False))
+            and self._capture_stream_mode() != old_stream_mode
+        ):
+            self.stop_camera()
+            self.start_camera()
         return self._capture_profile
 
     def get_capture_profile(self):
         return str(getattr(self, "_capture_profile", "default") or "default")
 
+    def _dual_stream_detection_enabled(self):
+        return self.get_capture_profile() == "dual_stream_detection"
+
+    def _capture_stream_mode(self):
+        return "dual" if self._dual_stream_detection_enabled() else "main"
+
     def _capture_profile_metadata(self):
+        detection_stream = "lores" if self._dual_stream_detection_enabled() else "main"
         return {
             "capture_profile": self.get_capture_profile(),
             "signal_stride": int(getattr(self, "_signal_stride", 1) or 1),
             "signal_channel": getattr(self, "_signal_channel", None),
             "cap_emit_rotate": bool(getattr(self, "_cap_emit_rotate", True)),
+            "detection_stream": detection_stream,
         }
 
     def _camera_config_metadata(self):
         main_size = getattr(self, "_stream_main_size", None)
         if isinstance(main_size, tuple):
             main_size = list(main_size)
+        lores_size = getattr(self, "_stream_lores_size", None)
+        if isinstance(lores_size, tuple):
+            lores_size = list(lores_size)
         return {
             "stream_main_size": main_size,
             "stream_main_format": getattr(self, "_stream_main_format", None),
+            "lores_size": lores_size,
+            "lores_format": getattr(self, "_stream_lores_format", None),
             "stream_buffer_count": getattr(self, "_stream_buffer_count", None),
             "configured_exposure_time_us": getattr(self, "exposure_time", None),
             "configured_frame_duration_us": getattr(
@@ -611,9 +643,46 @@ class DropletCamera(QObject):
 
     @staticmethod
     def _frame_buffer_entry_parts(entry):
+        if isinstance(entry, dict):
+            return (
+                entry.get("arr"),
+                entry.get("md"),
+                entry.get("t_done_ns"),
+                entry.get("mean"),
+                entry.get("frame_timing"),
+            )
         arr, md, t_done_ns, mean = entry[:4]
         frame_timing = entry[4] if len(entry) > 4 else None
         return arr, md, t_done_ns, mean, frame_timing
+
+    def _lores_signal_mean(self, arr) -> float:
+        if arr is None:
+            return 0.0
+        try:
+            width, height = tuple(getattr(self, "_stream_lores_size", None) or self.DUAL_STREAM_LORES_SIZE)
+            if getattr(arr, "ndim", 0) == 2:
+                plane = arr[: int(height), : int(width)]
+            elif getattr(arr, "ndim", 0) >= 3:
+                plane = arr[: int(height), : int(width), 0]
+            else:
+                plane = arr
+            return float(np.mean(plane))
+        except Exception:
+            return float(np.mean(arr))
+
+    def _capture_video_configuration_kwargs(self, sensor_resolution):
+        main_size = tuple(sensor_resolution)
+        main_format = "RGB888"
+        kwargs = {
+            "main": {"size": main_size, "format": main_format},
+            "buffer_count": 3,
+        }
+        if self._dual_stream_detection_enabled():
+            kwargs["lores"] = {
+                "size": tuple(self.DUAL_STREAM_LORES_SIZE),
+                "format": self.DUAL_STREAM_LORES_FORMAT,
+            }
+        return kwargs
 
     def _capture_arm_timing_metadata(self, *, result_ns=None):
         mode = self.get_capture_arm_timing_mode()
@@ -870,16 +939,15 @@ class DropletCamera(QObject):
             self.camera = None
 
         self.camera = Picamera2(1)
-        main_size = tuple(self.camera.sensor_resolution)
-        main_format = "RGB888"
-        buffer_count = 3
-        vid_cfg = self.camera.create_video_configuration(
-            main={"size": main_size, "format": main_format},
-            buffer_count=buffer_count
-        )
-        self._stream_main_size = main_size
-        self._stream_main_format = main_format
-        self._stream_buffer_count = buffer_count
+        config_kwargs = self._capture_video_configuration_kwargs(self.camera.sensor_resolution)
+        vid_cfg = self.camera.create_video_configuration(**config_kwargs)
+        main_config = config_kwargs.get("main") or {}
+        lores_config = config_kwargs.get("lores") or {}
+        self._stream_main_size = tuple(main_config.get("size") or self.camera.sensor_resolution)
+        self._stream_main_format = main_config.get("format")
+        self._stream_lores_size = tuple(lores_config.get("size")) if lores_config.get("size") else None
+        self._stream_lores_format = lores_config.get("format")
+        self._stream_buffer_count = int(config_kwargs.get("buffer_count") or 0)
         self._configured_frame_duration_us = int(self.exposure_time)
         self._grabber_frame_index = 0
         self._last_grabber_frame_done_ns = None
@@ -1145,91 +1213,166 @@ class DropletCamera(QObject):
                 continue
             t_done_ns = time.monotonic_ns()  # completion time (local monotonic)
             diagnostics_enabled = self.is_capture_performance_diagnostics_enabled()
-            make_array_started_ns = time.monotonic_ns() if diagnostics_enabled else None
-            make_array_done_ns = None
+            dual_stream = self._dual_stream_detection_enabled()
+            main_arr = None
+            md = None
+            mean = 0.0
+            frame_timing = None
             try:
                 md  = req.get_metadata()
-                arr = req.make_array("main")
-                make_array_done_ns = time.monotonic_ns() if diagnostics_enabled else None
+                if dual_stream:
+                    lores_started_ns = time.monotonic_ns() if diagnostics_enabled else None
+                    lores_done_ns = None
+                    lores = req.make_array("lores")
+                    lores_done_ns = time.monotonic_ns() if diagnostics_enabled else None
+                    mean_started_ns = time.monotonic_ns() if diagnostics_enabled else None
+                    mean = self._lores_signal_mean(lores)
+                    mean_done_ns = time.monotonic_ns() if diagnostics_enabled else None
+                    if diagnostics_enabled:
+                        frame_timing = {
+                            "detection_stream": "lores",
+                            "lores_make_array_ms": (
+                                float(lores_done_ns - lores_started_ns) / 1_000_000.0
+                                if lores_started_ns is not None and lores_done_ns is not None
+                                else None
+                            ),
+                            "lores_signal_mean_ms": (
+                                float(mean_done_ns - mean_started_ns) / 1_000_000.0
+                                if mean_started_ns is not None and mean_done_ns is not None
+                                else None
+                            ),
+                            "signal_mean_ms": (
+                                float(mean_done_ns - mean_started_ns) / 1_000_000.0
+                                if mean_started_ns is not None and mean_done_ns is not None
+                                else None
+                            ),
+                            "main_converted_for_selected_frame": False,
+                        }
+                else:
+                    make_array_started_ns = time.monotonic_ns() if diagnostics_enabled else None
+                    make_array_done_ns = None
+                    main_arr = req.make_array("main")
+                    make_array_done_ns = time.monotonic_ns() if diagnostics_enabled else None
+                    mean_started_ns = time.monotonic_ns() if diagnostics_enabled else None
+                    mean = self._signal_mean(main_arr)
+                    mean_done_ns = time.monotonic_ns() if diagnostics_enabled else None
+                    if diagnostics_enabled:
+                        main_make_array_ms = (
+                            float(make_array_done_ns - make_array_started_ns) / 1_000_000.0
+                            if make_array_started_ns is not None and make_array_done_ns is not None
+                            else None
+                        )
+                        frame_timing = {
+                            "detection_stream": "main",
+                            "make_array_ms": main_make_array_ms,
+                            "main_make_array_ms": main_make_array_ms,
+                            "signal_mean_ms": (
+                                float(mean_done_ns - mean_started_ns) / 1_000_000.0
+                                if mean_started_ns is not None and mean_done_ns is not None
+                                else None
+                            ),
+                            "main_converted_for_selected_frame": True,
+                        }
+                # print(f"{mean}")  # your debug
+
+                with self._cv:
+                    previous_frame_done_ns = getattr(self, "_last_grabber_frame_done_ns", None)
+                    frame_index = int(getattr(self, "_grabber_frame_index", 0) or 0) + 1
+                    self._grabber_frame_index = frame_index
+                    self._last_grabber_frame_done_ns = t_done_ns
+                    if diagnostics_enabled:
+                        if frame_timing is None:
+                            frame_timing = {}
+                        frame_timing.update(
+                            {
+                                "frame_index": frame_index,
+                                "frame_done_ns": int(t_done_ns),
+                                "selected_frame_interval_ms": self._frame_timing_delta_ms(
+                                    previous_frame_done_ns,
+                                    t_done_ns,
+                                ),
+                            }
+                        )
+                    if dual_stream:
+                        entry = {
+                            "arr": None,
+                            "md": md,
+                            "t_done_ns": t_done_ns,
+                            "mean": mean,
+                            "frame_timing": frame_timing,
+                        }
+                    else:
+                        entry = (main_arr, md, t_done_ns, mean, frame_timing)
+                    self._buf.append(entry)
+
+                    if self._cap_active:
+                        # time-gated: only evaluate frames strictly after arming time
+                        if t_done_ns > self._cap_arm_ns:
+                            self._cap_seen += 1
+
+                            # track brightest among post-arm frames
+                            brightest_mean = None
+                            if self._cap_brightest is not None:
+                                try:
+                                    brightest_mean = self._frame_buffer_entry_parts(self._cap_brightest)[3]
+                                except Exception:
+                                    brightest_mean = None
+                            if (self._cap_brightest is None) or (brightest_mean is None) or (mean > brightest_mean):
+                                self._cap_brightest = entry
+
+                            selected_arr = None
+                            selected_md = md
+                            selected_mean = mean
+                            selected_timing = frame_timing
+                            selected_reason = None
+
+                            # first above-threshold wins
+                            if mean >= self._cap_threshold:
+                                selected_reason = "threshold"
+                            elif (self._cap_seen >= self._cap_max_new) or (time.monotonic() > self._cap_deadline):
+                                selected_reason = "fallback"
+                                if not dual_stream and self._cap_brightest is not None:
+                                    selected_arr, selected_md, _b_t, selected_mean, selected_timing = (
+                                        self._frame_buffer_entry_parts(self._cap_brightest)
+                                    )
+
+                            if selected_reason is not None:
+                                if dual_stream:
+                                    main_started_ns = time.monotonic_ns() if diagnostics_enabled else None
+                                    main_done_ns = None
+                                    main_arr = req.make_array("main")
+                                    main_done_ns = time.monotonic_ns() if diagnostics_enabled else None
+                                    selected_arr = main_arr
+                                    if isinstance(entry, dict):
+                                        entry["arr"] = main_arr
+                                    if diagnostics_enabled:
+                                        if selected_timing is None:
+                                            selected_timing = {}
+                                        main_make_array_ms = (
+                                            float(main_done_ns - main_started_ns) / 1_000_000.0
+                                            if main_started_ns is not None and main_done_ns is not None
+                                            else None
+                                        )
+                                        selected_timing["make_array_ms"] = main_make_array_ms
+                                        selected_timing["main_make_array_ms"] = main_make_array_ms
+                                        selected_timing["main_converted_for_selected_frame"] = True
+                                self._print_capture_debug(
+                                    f"[Capture] request_id={getattr(self, '_cap_request_id', None)} "
+                                    f"gen={getattr(self, '_capture_generation', 0)} "
+                                    f"cap_id={self._cap_id} mean={selected_mean:.1f} "
+                                    f"thr={self._cap_threshold:.1f}"
+                                )
+                                self._complete_capture_locked(
+                                    selected_arr,
+                                    selected_md,
+                                    selected_mean,
+                                    reason=selected_reason,
+                                    frame_timing=selected_timing,
+                                )
+
+                    self._cv.notify_all()
             finally:
                 req.release()
-            mean_started_ns = time.monotonic_ns() if diagnostics_enabled else None
-            mean = self._signal_mean(arr)
-            mean_done_ns = time.monotonic_ns() if diagnostics_enabled else None
-            frame_timing = None
-            if diagnostics_enabled:
-                frame_timing = {
-                    "make_array_ms": (
-                        float(make_array_done_ns - make_array_started_ns) / 1_000_000.0
-                        if make_array_started_ns is not None and make_array_done_ns is not None
-                        else None
-                    ),
-                    "signal_mean_ms": (
-                        float(mean_done_ns - mean_started_ns) / 1_000_000.0
-                        if mean_started_ns is not None and mean_done_ns is not None
-                        else None
-                    ),
-                }
-            # print(f"{mean}")  # your debug
-
-            with self._cv:
-                previous_frame_done_ns = getattr(self, "_last_grabber_frame_done_ns", None)
-                frame_index = int(getattr(self, "_grabber_frame_index", 0) or 0) + 1
-                self._grabber_frame_index = frame_index
-                self._last_grabber_frame_done_ns = t_done_ns
-                if diagnostics_enabled:
-                    if frame_timing is None:
-                        frame_timing = {}
-                    frame_timing.update(
-                        {
-                            "frame_index": frame_index,
-                            "frame_done_ns": int(t_done_ns),
-                            "selected_frame_interval_ms": self._frame_timing_delta_ms(
-                                previous_frame_done_ns,
-                                t_done_ns,
-                            ),
-                        }
-                    )
-                self._buf.append((arr, md, t_done_ns, mean, frame_timing))
-
-                if self._cap_active:
-                    # time-gated: only evaluate frames strictly after arming time
-                    if t_done_ns > self._cap_arm_ns:
-                        self._cap_seen += 1
-
-                        # track brightest among post-arm frames
-                        if (self._cap_brightest is None) or (mean > self._cap_brightest[3]):
-                            self._cap_brightest = (arr, md, t_done_ns, mean, frame_timing)
-
-                        # first above-threshold wins
-                        if mean >= self._cap_threshold:
-                            self._print_capture_debug(
-                                f"[Capture] request_id={getattr(self, '_cap_request_id', None)} "
-                                f"gen={getattr(self, '_capture_generation', 0)} "
-                                f"cap_id={self._cap_id} mean={mean:.1f} thr={self._cap_threshold:.1f}"
-                            )
-                            self._complete_capture_locked(arr, md, mean, reason="threshold", frame_timing=frame_timing)
-                        elif (self._cap_seen >= self._cap_max_new) or (time.monotonic() > self._cap_deadline):
-                            # fallback to brightest seen post-arm
-                            if self._cap_brightest is not None:
-                                b_arr, b_md, _b_t, b_mean, b_timing = self._cap_brightest
-                                self._complete_capture_locked(
-                                    b_arr,
-                                    b_md,
-                                    b_mean,
-                                    reason="fallback",
-                                    frame_timing=b_timing,
-                                )
-                            else:
-                                self._complete_capture_locked(
-                                    arr,
-                                    md,
-                                    mean,
-                                    reason="last_resort",
-                                    frame_timing=frame_timing,
-                                )
-
-                self._cv.notify_all()
 
     # --- finalize one capture ---
     def _complete_capture_locked(self, arr, md, mean, reason, *, frame_timing=None, selection_metadata=None):
@@ -1263,7 +1406,15 @@ class DropletCamera(QObject):
         }
         if diagnostics_enabled:
             if isinstance(frame_timing, dict):
-                for key in ("make_array_ms", "signal_mean_ms"):
+                for key in (
+                    "make_array_ms",
+                    "signal_mean_ms",
+                    "lores_make_array_ms",
+                    "lores_signal_mean_ms",
+                    "main_make_array_ms",
+                    "detection_stream",
+                    "main_converted_for_selected_frame",
+                ):
                     if key in frame_timing:
                         result[key] = frame_timing.get(key)
                 selected_frame_index = frame_timing.get("frame_index")
@@ -1617,7 +1768,7 @@ class DropletCamera(QObject):
                         buffered_entries.append(parts)
                 self._cap_buffered_post_arm_frames = len(buffered_entries)
                 for arr, md, _t_done_ns, mean, frame_timing in buffered_entries:
-                    if mean >= threshold:
+                    if arr is not None and mean >= threshold:
                         self._cap_seen = 1
                         self._cap_buffered_threshold_selected = True
                         self._complete_capture_locked(
@@ -1768,6 +1919,13 @@ class DropletCamera(QObject):
                     signal_stride=res.get("signal_stride"),
                     signal_channel=res.get("signal_channel"),
                     cap_emit_rotate=res.get("cap_emit_rotate"),
+                    detection_stream=res.get("detection_stream"),
+                    lores_size=res.get("lores_size"),
+                    lores_format=res.get("lores_format"),
+                    lores_make_array_ms=res.get("lores_make_array_ms"),
+                    lores_signal_mean_ms=res.get("lores_signal_mean_ms"),
+                    main_make_array_ms=res.get("main_make_array_ms"),
+                    main_converted_for_selected_frame=res.get("main_converted_for_selected_frame"),
                     capture_arm_timing_mode=res.get("capture_arm_timing_mode"),
                     early_arm_mark=res.get("early_arm_mark"),
                     early_arm_to_ack_ms=res.get("early_arm_to_ack_ms"),

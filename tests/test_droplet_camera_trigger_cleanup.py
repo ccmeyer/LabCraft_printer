@@ -24,19 +24,28 @@ class _Signal:
 
 
 class _FakeCaptureRequest:
-    def __init__(self, frame, metadata):
+    def __init__(self, frame, metadata, *, lores_frame=None):
         self._frame = frame
+        self._lores_frame = lores_frame if lores_frame is not None else frame
         self._metadata = metadata
         self.released = False
+        self.make_array_calls = []
+        self.events = []
 
     def get_metadata(self):
         return dict(self._metadata)
 
-    def make_array(self, _stream_name):
+    def make_array(self, stream_name):
+        stream_name = str(stream_name)
+        self.make_array_calls.append(stream_name)
+        self.events.append(f"make_array:{stream_name}")
+        if stream_name == "lores":
+            return self._lores_frame
         return self._frame
 
     def release(self):
         self.released = True
+        self.events.append("release")
 
 
 class _FakeRequestCamera:
@@ -762,6 +771,12 @@ def test_capture_profile_modes_make_fast_detection_default_with_legacy_fallback(
     assert camera._cap_emit_rotate is True
     assert DropletCamera.get_capture_profile(camera) == "legacy_full_rgb"
 
+    assert DropletCamera.set_capture_profile(camera, "dual_stream_detection") == "dual_stream_detection"
+    assert camera._signal_stride == 1
+    assert camera._signal_channel == 0
+    assert camera._cap_emit_rotate is True
+    assert DropletCamera.get_capture_profile(camera) == "dual_stream_detection"
+
     assert DropletCamera.set_capture_profile(camera, "throughput") == "throughput"
     assert camera._signal_stride == 4
     assert camera._signal_channel == 1
@@ -773,6 +788,24 @@ def test_capture_profile_modes_make_fast_detection_default_with_legacy_fallback(
     assert camera._signal_channel == 1
     assert camera._cap_emit_rotate is True
     assert DropletCamera.get_capture_profile(camera) == "default"
+
+
+def test_video_configuration_kwargs_include_lores_only_for_dual_stream_profile():
+    camera = DropletCamera.__new__(DropletCamera)
+
+    DropletCamera.set_capture_profile(camera, "default")
+    default_kwargs = DropletCamera._capture_video_configuration_kwargs(camera, (1456, 1088))
+
+    assert default_kwargs["main"] == {"size": (1456, 1088), "format": "RGB888"}
+    assert default_kwargs["buffer_count"] == 3
+    assert "lores" not in default_kwargs
+
+    DropletCamera.set_capture_profile(camera, "dual_stream_detection")
+    dual_kwargs = DropletCamera._capture_video_configuration_kwargs(camera, (1456, 1088))
+
+    assert dual_kwargs["main"] == {"size": (1456, 1088), "format": "RGB888"}
+    assert dual_kwargs["lores"] == {"size": (320, 240), "format": "YUV420"}
+    assert dual_kwargs["buffer_count"] == 3
 
 
 def test_grabber_records_frame_index_and_interval_when_diagnostics_enabled():
@@ -804,6 +837,94 @@ def test_grabber_records_frame_index_and_interval_when_diagnostics_enabled():
     assert second["frame_index"] == 2
     assert second["selected_frame_interval_ms"] is not None
     assert second["selected_frame_interval_ms"] >= 0.0
+
+
+def test_dual_stream_grabber_releases_non_selected_frame_without_main_conversion():
+    camera = DropletCamera.__new__(DropletCamera)
+    camera._grab_running = True
+    camera._cv = threading.Condition(threading.Lock())
+    camera._buf = deque(maxlen=16)
+    camera._cap_active = False
+    camera._grabber_frame_index = 0
+    camera._last_grabber_frame_done_ns = None
+    camera._stream_lores_size = (320, 240)
+    camera._stream_lores_format = "YUV420"
+    DropletCamera.set_capture_profile(camera, "dual_stream_detection")
+    DropletCamera.set_capture_performance_diagnostics_enabled(camera, True)
+    main_frame = np.full((4, 4, 3), 200, dtype=np.uint8)
+    lores_frame = np.zeros((360, 384), dtype=np.uint8)
+    request = _FakeCaptureRequest(main_frame, {"ExposureTime": 20000}, lores_frame=lores_frame)
+    camera.camera = _FakeRequestCamera(camera, [request])
+
+    DropletCamera._grabber(camera)
+
+    assert request.make_array_calls == ["lores"]
+    assert request.events == ["make_array:lores", "release"]
+    assert request.released is True
+    entry = camera._buf[0]
+    assert entry["arr"] is None
+    assert entry["mean"] == 0.0
+    assert entry["frame_timing"]["detection_stream"] == "lores"
+    assert entry["frame_timing"]["main_converted_for_selected_frame"] is False
+
+
+def test_dual_stream_grabber_converts_main_for_selected_threshold_before_release():
+    camera = DropletCamera.__new__(DropletCamera)
+    camera._grab_running = True
+    camera._cv = threading.Condition(threading.Lock())
+    camera._buf = deque(maxlen=16)
+    camera._cap_active = True
+    camera._cap_arm_ns = 0
+    camera._cap_deadline = time.monotonic() + 1.0
+    camera._cap_max_new = 10
+    camera._cap_seen = 0
+    camera._cap_threshold = 29.0
+    camera._cap_brightest = None
+    camera._cap_emit_rotate = False
+    camera._cap_done = threading.Event()
+    camera._cap_result = None
+    camera._cap_id = 4
+    camera._cap_request_id = "dual-selected"
+    camera._cap_ack_ns = 1_000_000
+    camera._cap_ack_frame_index = 0
+    camera._cap_buffered_post_arm_frames = 0
+    camera._cap_buffered_threshold_selected = False
+    camera._emit_on_complete = False
+    camera._grabber_frame_index = 0
+    camera._last_grabber_frame_done_ns = None
+    camera._stream_main_size = (1456, 1088)
+    camera._stream_main_format = "RGB888"
+    camera._stream_lores_size = (320, 240)
+    camera._stream_lores_format = "YUV420"
+    camera._stream_buffer_count = 3
+    camera.exposure_time = 20000
+    camera._configured_frame_duration_us = 20000
+    camera._trigger_low = lambda: None
+    camera._backend_lock = threading.Lock()
+    camera._capture_backend = None
+    camera.image_captured_signal = _Signal()
+    DropletCamera.set_capture_profile(camera, "dual_stream_detection")
+    DropletCamera.set_capture_performance_diagnostics_enabled(camera, True)
+    main_frame = np.full((4, 4, 3), 200, dtype=np.uint8)
+    lores_frame = np.full((360, 384), 220, dtype=np.uint8)
+    request = _FakeCaptureRequest(main_frame, {"ExposureTime": 20000}, lores_frame=lores_frame)
+    camera.camera = _FakeRequestCamera(camera, [request])
+
+    DropletCamera._grabber(camera)
+
+    assert request.make_array_calls == ["lores", "main"]
+    assert request.events == ["make_array:lores", "make_array:main", "release"]
+    assert camera._cap_done.is_set() is True
+    assert camera._cap_active is False
+    assert np.array_equal(camera.latest_frame, main_frame)
+    assert camera._cap_result["reason"] == "threshold"
+    assert camera._cap_result["capture_profile"] == "dual_stream_detection"
+    assert camera._cap_result["detection_stream"] == "lores"
+    assert camera._cap_result["main_converted_for_selected_frame"] is True
+    assert camera._cap_result["lores_make_array_ms"] >= 0.0
+    assert camera._cap_result["lores_signal_mean_ms"] >= 0.0
+    assert camera._cap_result["main_make_array_ms"] >= 0.0
+    assert camera._cap_result["make_array_ms"] == camera._cap_result["main_make_array_ms"]
 
 
 def test_complete_capture_includes_selected_frame_timing_only_when_diagnostics_enabled():

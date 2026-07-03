@@ -29,7 +29,7 @@ def test_droplet_capture_perf_enabled_events_are_bounded_and_json_safe():
     snapshot = diagnostics.build_snapshot(reason="unit_test")
 
     assert snapshot["kind"] == "droplet_capture_performance_snapshot"
-    assert snapshot["schema_version"] == 7
+    assert snapshot["schema_version"] == 8
     assert snapshot["reason"] == "unit_test"
     assert snapshot["event_count"] == 2
     assert snapshot["event_counts"]["controller_completion_received"] == 1
@@ -79,6 +79,13 @@ def test_droplet_capture_perf_snapshot_summarizes_timings():
             "signal_stride": 4,
             "signal_channel": 1,
             "cap_emit_rotate": True,
+            "detection_stream": "lores",
+            "lores_size": [320, 240],
+            "lores_format": "YUV420",
+            "lores_make_array_ms": 0.12,
+            "lores_signal_mean_ms": 0.15,
+            "main_make_array_ms": 4.5,
+            "main_converted_for_selected_frame": True,
             "capture_arm_timing_mode": "early_after_trigger_pulse",
             "early_arm_mark": True,
             "early_arm_to_ack_ms": 7.5,
@@ -125,6 +132,13 @@ def test_droplet_capture_perf_snapshot_summarizes_timings():
     assert request_summary["signal_stride"] == 4
     assert request_summary["signal_channel"] == 1
     assert request_summary["cap_emit_rotate"] is True
+    assert request_summary["detection_stream"] == "lores"
+    assert request_summary["lores_size"] == [320, 240]
+    assert request_summary["lores_format"] == "YUV420"
+    assert request_summary["lores_make_array_ms"] == 0.12
+    assert request_summary["lores_signal_mean_ms"] == 0.15
+    assert request_summary["main_make_array_ms"] == 4.5
+    assert request_summary["main_converted_for_selected_frame"] is True
     assert request_summary["capture_arm_timing_mode"] == "early_after_trigger_pulse"
     assert request_summary["early_arm_mark"] is True
     assert request_summary["early_arm_to_ack_ms"] == 7.5
@@ -409,6 +423,13 @@ def test_droplet_capture_perf_snapshot_recovers_nested_capture_context():
             "signal_stride": 1,
             "signal_channel": None,
             "cap_emit_rotate": True,
+            "detection_stream": "lores",
+            "lores_size": [320, 240],
+            "lores_format": "YUV420",
+            "lores_make_array_ms": 0.1,
+            "lores_signal_mean_ms": 0.14,
+            "main_make_array_ms": 3.0,
+            "main_converted_for_selected_frame": True,
             "capture_arm_timing_mode": "early_after_trigger_pulse",
             "early_arm_mark": True,
             "early_arm_to_ack_ms": 150.0,
@@ -472,6 +493,13 @@ def test_droplet_capture_perf_snapshot_recovers_nested_capture_context():
     assert capture_summary["signal_stride"] == 1
     assert capture_summary["signal_channel"] is None
     assert capture_summary["cap_emit_rotate"] is True
+    assert capture_summary["detection_stream"] == "lores"
+    assert capture_summary["lores_size"] == [320, 240]
+    assert capture_summary["lores_format"] == "YUV420"
+    assert capture_summary["lores_make_array_ms"] == 0.1
+    assert capture_summary["lores_signal_mean_ms"] == 0.14
+    assert capture_summary["main_make_array_ms"] == 3.0
+    assert capture_summary["main_converted_for_selected_frame"] is True
     assert capture_summary["capture_arm_timing_mode"] == "early_after_trigger_pulse"
     assert capture_summary["early_arm_mark"] is True
     assert capture_summary["early_arm_to_ack_ms"] == 150.0
