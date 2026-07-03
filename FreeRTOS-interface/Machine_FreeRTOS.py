@@ -460,10 +460,16 @@ class DropletCamera(QObject):
         # camera
         self.camera = None
         self.exposure_time = 20_000  # us
+        self._configured_frame_duration_us = self.exposure_time
+        self._stream_main_size = None
+        self._stream_main_format = None
+        self._stream_buffer_count = None
         self.latest_frame = None
 
         # ring buffer of recent frames: (arr, md, t_done_ns, mean)
         self._buf = deque(maxlen=16)
+        self._grabber_frame_index = 0
+        self._last_grabber_frame_done_ns = None
 
         # grabber thread + state
         self._lock = threading.Lock()
@@ -483,6 +489,8 @@ class DropletCamera(QObject):
         self._cap_arm_ns      = 0     # <<< time gate: frames with t_done_ns > arm_ns are "new"
         self._cap_early_arm_ns = None
         self._cap_ack_ns = None
+        self._cap_ack_frame_index = None
+        self._cap_ack_frame_done_ns = None
         self._cap_buffered_post_arm_frames = 0
         self._cap_buffered_threshold_selected = False
         self._signal_stride   = 4
@@ -542,6 +550,50 @@ class DropletCamera(QObject):
             "signal_channel": getattr(self, "_signal_channel", None),
             "cap_emit_rotate": bool(getattr(self, "_cap_emit_rotate", True)),
         }
+
+    def _camera_config_metadata(self):
+        main_size = getattr(self, "_stream_main_size", None)
+        if isinstance(main_size, tuple):
+            main_size = list(main_size)
+        return {
+            "stream_main_size": main_size,
+            "stream_main_format": getattr(self, "_stream_main_format", None),
+            "stream_buffer_count": getattr(self, "_stream_buffer_count", None),
+            "configured_exposure_time_us": getattr(self, "exposure_time", None),
+            "configured_frame_duration_us": getattr(
+                self,
+                "_configured_frame_duration_us",
+                getattr(self, "exposure_time", None),
+            ),
+        }
+
+    @staticmethod
+    def _metadata_int(md, key):
+        try:
+            if not md:
+                return None
+            value = md.get(key)
+            if value is None:
+                return None
+            return int(value)
+        except Exception:
+            return None
+
+    def _selected_frame_metadata(self, md):
+        return {
+            "selected_metadata_exposure_time_us": self._metadata_int(md, "ExposureTime"),
+            "selected_metadata_frame_duration_us": self._metadata_int(md, "FrameDuration"),
+            "selected_metadata_sensor_timestamp_ns": self._metadata_int(md, "SensorTimestamp"),
+        }
+
+    @staticmethod
+    def _frame_timing_delta_ms(start_ns, end_ns):
+        try:
+            if start_ns is None or end_ns is None:
+                return None
+            return float(int(end_ns) - int(start_ns)) / 1_000_000.0
+        except Exception:
+            return None
 
     def set_capture_arm_timing_mode(self, mode: str):
         p = str(mode or "ack_after_edge").strip().lower()
@@ -818,10 +870,19 @@ class DropletCamera(QObject):
             self.camera = None
 
         self.camera = Picamera2(1)
+        main_size = tuple(self.camera.sensor_resolution)
+        main_format = "RGB888"
+        buffer_count = 3
         vid_cfg = self.camera.create_video_configuration(
-            main={"size": self.camera.sensor_resolution, "format": "RGB888"},
-            buffer_count=3
+            main={"size": main_size, "format": main_format},
+            buffer_count=buffer_count
         )
+        self._stream_main_size = main_size
+        self._stream_main_format = main_format
+        self._stream_buffer_count = buffer_count
+        self._configured_frame_duration_us = int(self.exposure_time)
+        self._grabber_frame_index = 0
+        self._last_grabber_frame_done_ns = None
         self.camera.configure(vid_cfg)
         self.camera.set_controls({
             "FrameDurationLimits": (self.exposure_time, self.exposure_time),
@@ -1065,6 +1126,7 @@ class DropletCamera(QObject):
 
     def change_exposure_time(self, exposure_time_us, handler=None):
         self.exposure_time = int(exposure_time_us)
+        self._configured_frame_duration_us = int(self.exposure_time)
         if self.camera:
             self.camera.set_controls({
                 "FrameDurationLimits": (self.exposure_time, self.exposure_time),
@@ -1111,6 +1173,23 @@ class DropletCamera(QObject):
             # print(f"{mean}")  # your debug
 
             with self._cv:
+                previous_frame_done_ns = getattr(self, "_last_grabber_frame_done_ns", None)
+                frame_index = int(getattr(self, "_grabber_frame_index", 0) or 0) + 1
+                self._grabber_frame_index = frame_index
+                self._last_grabber_frame_done_ns = t_done_ns
+                if diagnostics_enabled:
+                    if frame_timing is None:
+                        frame_timing = {}
+                    frame_timing.update(
+                        {
+                            "frame_index": frame_index,
+                            "frame_done_ns": int(t_done_ns),
+                            "selected_frame_interval_ms": self._frame_timing_delta_ms(
+                                previous_frame_done_ns,
+                                t_done_ns,
+                            ),
+                        }
+                    )
                 self._buf.append((arr, md, t_done_ns, mean, frame_timing))
 
                 if self._cap_active:
@@ -1187,6 +1266,23 @@ class DropletCamera(QObject):
                 for key in ("make_array_ms", "signal_mean_ms"):
                     if key in frame_timing:
                         result[key] = frame_timing.get(key)
+                selected_frame_index = frame_timing.get("frame_index")
+                selected_frame_done_ns = frame_timing.get("frame_done_ns")
+                result["selected_frame_index"] = selected_frame_index
+                result["selected_frame_interval_ms"] = frame_timing.get("selected_frame_interval_ms")
+                ack_frame_index = getattr(self, "_cap_ack_frame_index", None)
+                ack_ns = getattr(self, "_cap_ack_ns", None)
+                if selected_frame_index is not None and ack_frame_index is not None:
+                    try:
+                        result["selected_frame_index_after_ack"] = int(selected_frame_index) - int(ack_frame_index)
+                    except Exception:
+                        result["selected_frame_index_after_ack"] = None
+                else:
+                    result["selected_frame_index_after_ack"] = None
+                result["selected_frame_done_after_ack_ms"] = self._frame_timing_delta_ms(
+                    ack_ns,
+                    selected_frame_done_ns,
+                )
             result_ns = time.monotonic_ns()
             result.update(
                 {
@@ -1196,6 +1292,8 @@ class DropletCamera(QObject):
                     "cap_max_new": int(getattr(self, "_cap_max_new", 0)),
                     **self._capture_profile_metadata(),
                     **self._capture_arm_timing_metadata(result_ns=result_ns),
+                    **self._camera_config_metadata(),
+                    **self._selected_frame_metadata(md),
                 }
             )
             if isinstance(selection_metadata, dict):
@@ -1279,6 +1377,8 @@ class DropletCamera(QObject):
             self._cap_request_id = request_id
             self._cap_early_arm_ns = None
             self._cap_ack_ns = None
+            self._cap_ack_frame_index = None
+            self._cap_ack_frame_done_ns = None
             self._cap_buffered_post_arm_frames = 0
             self._cap_buffered_threshold_selected = False
 
@@ -1446,6 +1546,8 @@ class DropletCamera(QObject):
             ack_ns = time.monotonic_ns()
             with self._cv:
                 self._cap_ack_ns = ack_ns
+                self._cap_ack_frame_index = getattr(self, "_grabber_frame_index", None)
+                self._cap_ack_frame_done_ns = getattr(self, "_last_grabber_frame_done_ns", None)
             backend.event_consume()
             self._log_capture_phase(
                 "edge_consume_done",
@@ -1493,6 +1595,8 @@ class DropletCamera(QObject):
             self._cap_request_id = request_id
             self._cap_early_arm_ns = early_arm_ns
             self._cap_ack_ns = ack_ns
+            self._cap_ack_frame_index = getattr(self, "_cap_ack_frame_index", None)
+            self._cap_ack_frame_done_ns = getattr(self, "_cap_ack_frame_done_ns", None)
             self._cap_buffered_post_arm_frames = 0
             self._cap_buffered_threshold_selected = False
 
@@ -1670,6 +1774,18 @@ class DropletCamera(QObject):
                     early_arm_to_result_ms=res.get("early_arm_to_result_ms"),
                     buffered_post_arm_frames=res.get("buffered_post_arm_frames"),
                     buffered_threshold_selected=res.get("buffered_threshold_selected"),
+                    selected_frame_index=res.get("selected_frame_index"),
+                    selected_frame_interval_ms=res.get("selected_frame_interval_ms"),
+                    selected_frame_index_after_ack=res.get("selected_frame_index_after_ack"),
+                    selected_frame_done_after_ack_ms=res.get("selected_frame_done_after_ack_ms"),
+                    stream_main_size=res.get("stream_main_size"),
+                    stream_main_format=res.get("stream_main_format"),
+                    stream_buffer_count=res.get("stream_buffer_count"),
+                    configured_exposure_time_us=res.get("configured_exposure_time_us"),
+                    configured_frame_duration_us=res.get("configured_frame_duration_us"),
+                    selected_metadata_exposure_time_us=res.get("selected_metadata_exposure_time_us"),
+                    selected_metadata_frame_duration_us=res.get("selected_metadata_frame_duration_us"),
+                    selected_metadata_sensor_timestamp_ns=res.get("selected_metadata_sensor_timestamp_ns"),
                     success=bool(attempt_success),
                     will_retry=(not attempt_success) and i < attempts - 1,
                     print_phase=False,

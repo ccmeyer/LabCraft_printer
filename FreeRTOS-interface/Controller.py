@@ -290,6 +290,34 @@ class DropletCapturePerformanceDiagnostics:
                 ) or _phase_elapsed_delta(camera_rows, "early_arm_mark", "retry_attempt_result"),
                 "buffered_post_arm_frames": _int_or_none(retry_result.get("buffered_post_arm_frames")),
                 "buffered_threshold_selected": retry_result.get("buffered_threshold_selected"),
+                "selected_frame_index": _int_or_none(retry_result.get("selected_frame_index")),
+                "selected_frame_interval_ms": _float_or_none(
+                    retry_result.get("selected_frame_interval_ms")
+                ),
+                "selected_frame_index_after_ack": _int_or_none(
+                    retry_result.get("selected_frame_index_after_ack")
+                ),
+                "selected_frame_done_after_ack_ms": _float_or_none(
+                    retry_result.get("selected_frame_done_after_ack_ms")
+                ),
+                "stream_main_size": retry_result.get("stream_main_size"),
+                "stream_main_format": retry_result.get("stream_main_format"),
+                "stream_buffer_count": _int_or_none(retry_result.get("stream_buffer_count")),
+                "configured_exposure_time_us": _int_or_none(
+                    retry_result.get("configured_exposure_time_us")
+                ),
+                "configured_frame_duration_us": _int_or_none(
+                    retry_result.get("configured_frame_duration_us")
+                ),
+                "selected_metadata_exposure_time_us": _int_or_none(
+                    retry_result.get("selected_metadata_exposure_time_us")
+                ),
+                "selected_metadata_frame_duration_us": _int_or_none(
+                    retry_result.get("selected_metadata_frame_duration_us")
+                ),
+                "selected_metadata_sensor_timestamp_ns": _int_or_none(
+                    retry_result.get("selected_metadata_sensor_timestamp_ns")
+                ),
             }
             return fields
 
@@ -634,7 +662,7 @@ class DropletCapturePerformanceDiagnostics:
 
         snapshot = {
             "kind": "droplet_capture_performance_snapshot",
-            "schema_version": 6,
+            "schema_version": 7,
             "reason": str(reason or "manual_export"),
             "generated_at_utc": self._now_utc(),
             "generated_monotonic_ns": int(time.monotonic_ns()),

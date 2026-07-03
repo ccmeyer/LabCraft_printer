@@ -1,4 +1,5 @@
 import sys
+from collections import deque
 import threading
 import time
 import types
@@ -20,6 +21,34 @@ class _Signal:
     def emit(self, *args, **kwargs):
         for callback in list(self._callbacks):
             callback(*args, **kwargs)
+
+
+class _FakeCaptureRequest:
+    def __init__(self, frame, metadata):
+        self._frame = frame
+        self._metadata = metadata
+        self.released = False
+
+    def get_metadata(self):
+        return dict(self._metadata)
+
+    def make_array(self, _stream_name):
+        return self._frame
+
+    def release(self):
+        self.released = True
+
+
+class _FakeRequestCamera:
+    def __init__(self, owner, requests):
+        self._owner = owner
+        self._requests = list(requests)
+
+    def capture_request(self):
+        if not self._requests:
+            self._owner._grab_running = False
+            return None
+        return self._requests.pop(0)
 
 
 class _EdgeRaisesOnConsume:
@@ -746,6 +775,37 @@ def test_capture_profile_modes_make_fast_detection_default_with_legacy_fallback(
     assert DropletCamera.get_capture_profile(camera) == "default"
 
 
+def test_grabber_records_frame_index_and_interval_when_diagnostics_enabled():
+    camera = DropletCamera.__new__(DropletCamera)
+    camera._grab_running = True
+    camera._cv = threading.Condition(threading.Lock())
+    camera._buf = deque(maxlen=16)
+    camera._cap_active = False
+    camera._grabber_frame_index = 0
+    camera._last_grabber_frame_done_ns = None
+    camera._signal_stride = 4
+    camera._signal_channel = 1
+    DropletCamera.set_capture_performance_diagnostics_enabled(camera, True)
+    frame = np.full((4, 4, 3), 10, dtype=np.uint8)
+    requests = [
+        _FakeCaptureRequest(frame, {"ExposureTime": 20000}),
+        _FakeCaptureRequest(frame, {"ExposureTime": 20000}),
+    ]
+    camera.camera = _FakeRequestCamera(camera, requests)
+
+    DropletCamera._grabber(camera)
+
+    assert camera._grab_running is False
+    assert len(camera._buf) == 2
+    first = camera._buf[0][4]
+    second = camera._buf[1][4]
+    assert first["frame_index"] == 1
+    assert first["selected_frame_interval_ms"] is None
+    assert second["frame_index"] == 2
+    assert second["selected_frame_interval_ms"] is not None
+    assert second["selected_frame_interval_ms"] >= 0.0
+
+
 def test_complete_capture_includes_selected_frame_timing_only_when_diagnostics_enabled():
     camera = _make_async_camera()
     frame = np.full((3, 4, 3), 120, dtype=np.uint8)
@@ -767,18 +827,39 @@ def test_complete_capture_includes_selected_frame_timing_only_when_diagnostics_e
     assert "make_array_ms" not in camera._cap_result
     assert "signal_mean_ms" not in camera._cap_result
     assert "rotate_ms" not in camera._cap_result
+    assert "selected_frame_index" not in camera._cap_result
+    assert "selected_frame_interval_ms" not in camera._cap_result
+    assert "selected_frame_index_after_ack" not in camera._cap_result
+    assert "selected_frame_done_after_ack_ms" not in camera._cap_result
 
     DropletCamera.set_capture_performance_diagnostics_enabled(camera, True)
     DropletCamera.set_capture_profile(camera, "default")
+    camera._stream_main_size = (1456, 1088)
+    camera._stream_main_format = "RGB888"
+    camera._stream_buffer_count = 3
+    camera.exposure_time = 12000
+    camera._configured_frame_duration_us = 12000
+    camera._cap_ack_ns = 1_000_000
+    camera._cap_ack_frame_index = 40
     camera._cap_done.clear()
     with camera._cv:
         DropletCamera._complete_capture_locked(
             camera,
             frame,
-            {},
+            {
+                "ExposureTime": 11991,
+                "FrameDuration": 12000,
+                "SensorTimestamp": 555555,
+            },
             121.0,
             "threshold",
-            frame_timing={"make_array_ms": 1.5, "signal_mean_ms": 0.75},
+            frame_timing={
+                "make_array_ms": 1.5,
+                "signal_mean_ms": 0.75,
+                "frame_index": 42,
+                "frame_done_ns": 21_000_000,
+                "selected_frame_interval_ms": 19.5,
+            },
         )
 
     assert camera._cap_result["make_array_ms"] == 1.5
@@ -791,6 +872,18 @@ def test_complete_capture_includes_selected_frame_timing_only_when_diagnostics_e
     assert camera._cap_result["signal_stride"] == 4
     assert camera._cap_result["signal_channel"] == 1
     assert camera._cap_result["cap_emit_rotate"] is True
+    assert camera._cap_result["selected_frame_index"] == 42
+    assert camera._cap_result["selected_frame_interval_ms"] == 19.5
+    assert camera._cap_result["selected_frame_index_after_ack"] == 2
+    assert camera._cap_result["selected_frame_done_after_ack_ms"] == 20.0
+    assert camera._cap_result["stream_main_size"] == [1456, 1088]
+    assert camera._cap_result["stream_main_format"] == "RGB888"
+    assert camera._cap_result["stream_buffer_count"] == 3
+    assert camera._cap_result["configured_exposure_time_us"] == 12000
+    assert camera._cap_result["configured_frame_duration_us"] == 12000
+    assert camera._cap_result["selected_metadata_exposure_time_us"] == 11991
+    assert camera._cap_result["selected_metadata_frame_duration_us"] == 12000
+    assert camera._cap_result["selected_metadata_sensor_timestamp_ns"] == 555555
 
 
 def test_capture_worker_clears_active_before_completion_emit():

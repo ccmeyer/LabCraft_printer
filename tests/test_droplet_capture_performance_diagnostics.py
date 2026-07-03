@@ -29,7 +29,7 @@ def test_droplet_capture_perf_enabled_events_are_bounded_and_json_safe():
     snapshot = diagnostics.build_snapshot(reason="unit_test")
 
     assert snapshot["kind"] == "droplet_capture_performance_snapshot"
-    assert snapshot["schema_version"] == 6
+    assert snapshot["schema_version"] == 7
     assert snapshot["reason"] == "unit_test"
     assert snapshot["event_count"] == 2
     assert snapshot["event_counts"]["controller_completion_received"] == 1
@@ -85,6 +85,18 @@ def test_droplet_capture_perf_snapshot_summarizes_timings():
             "early_arm_to_result_ms": 56.0,
             "buffered_post_arm_frames": 2,
             "buffered_threshold_selected": True,
+            "selected_frame_index": 42,
+            "selected_frame_interval_ms": 19.8,
+            "selected_frame_index_after_ack": 1,
+            "selected_frame_done_after_ack_ms": 20.4,
+            "stream_main_size": [1456, 1088],
+            "stream_main_format": "RGB888",
+            "stream_buffer_count": 3,
+            "configured_exposure_time_us": 20000,
+            "configured_frame_duration_us": 20000,
+            "selected_metadata_exposure_time_us": 19984,
+            "selected_metadata_frame_duration_us": 20000,
+            "selected_metadata_sensor_timestamp_ns": 123456789,
         },
     )
     diagnostics.record("controller_pending_cleared", {"request_id": "r1"})
@@ -119,6 +131,18 @@ def test_droplet_capture_perf_snapshot_summarizes_timings():
     assert request_summary["early_arm_to_result_ms"] == 56.0
     assert request_summary["buffered_post_arm_frames"] == 2
     assert request_summary["buffered_threshold_selected"] is True
+    assert request_summary["selected_frame_index"] == 42
+    assert request_summary["selected_frame_interval_ms"] == 19.8
+    assert request_summary["selected_frame_index_after_ack"] == 1
+    assert request_summary["selected_frame_done_after_ack_ms"] == 20.4
+    assert request_summary["stream_main_size"] == [1456, 1088]
+    assert request_summary["stream_main_format"] == "RGB888"
+    assert request_summary["stream_buffer_count"] == 3
+    assert request_summary["configured_exposure_time_us"] == 20000
+    assert request_summary["configured_frame_duration_us"] == 20000
+    assert request_summary["selected_metadata_exposure_time_us"] == 19984
+    assert request_summary["selected_metadata_frame_duration_us"] == 20000
+    assert request_summary["selected_metadata_sensor_timestamp_ns"] == 123456789
     assert request_summary["controller_completion_to_pending_clear_ms"] is not None
     assert snapshot["ui_sequence_summaries"][0]["accepted"] is True
 
@@ -391,6 +415,18 @@ def test_droplet_capture_perf_snapshot_recovers_nested_capture_context():
             "early_arm_to_result_ms": 184.5,
             "buffered_post_arm_frames": 3,
             "buffered_threshold_selected": True,
+            "selected_frame_index": 84,
+            "selected_frame_interval_ms": 18.5,
+            "selected_frame_index_after_ack": 2,
+            "selected_frame_done_after_ack_ms": 36.0,
+            "stream_main_size": [1456, 1088],
+            "stream_main_format": "RGB888",
+            "stream_buffer_count": 3,
+            "configured_exposure_time_us": 12000,
+            "configured_frame_duration_us": 12000,
+            "selected_metadata_exposure_time_us": 11991,
+            "selected_metadata_frame_duration_us": 12000,
+            "selected_metadata_sensor_timestamp_ns": 987654321,
         },
     )
     diagnostics.record(
@@ -442,6 +478,18 @@ def test_droplet_capture_perf_snapshot_recovers_nested_capture_context():
     assert capture_summary["early_arm_to_result_ms"] == 184.5
     assert capture_summary["buffered_post_arm_frames"] == 3
     assert capture_summary["buffered_threshold_selected"] is True
+    assert capture_summary["selected_frame_index"] == 84
+    assert capture_summary["selected_frame_interval_ms"] == 18.5
+    assert capture_summary["selected_frame_index_after_ack"] == 2
+    assert capture_summary["selected_frame_done_after_ack_ms"] == 36.0
+    assert capture_summary["stream_main_size"] == [1456, 1088]
+    assert capture_summary["stream_main_format"] == "RGB888"
+    assert capture_summary["stream_buffer_count"] == 3
+    assert capture_summary["configured_exposure_time_us"] == 12000
+    assert capture_summary["configured_frame_duration_us"] == 12000
+    assert capture_summary["selected_metadata_exposure_time_us"] == 11991
+    assert capture_summary["selected_metadata_frame_duration_us"] == 12000
+    assert capture_summary["selected_metadata_sensor_timestamp_ns"] == 987654321
 
 
 def test_droplet_capture_perf_snapshot_parses_stringified_capture_context_only_on_export():
