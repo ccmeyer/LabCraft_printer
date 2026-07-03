@@ -1320,7 +1320,7 @@ class DropletCamera(QObject):
                             if (self._cap_brightest is None) or (brightest_mean is None) or (mean > brightest_mean):
                                 self._cap_brightest = entry
 
-                            selected_arr = None
+                            selected_arr = None if dual_stream else main_arr
                             selected_md = md
                             selected_mean = mean
                             selected_timing = frame_timing

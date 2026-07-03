@@ -868,6 +868,59 @@ def test_dual_stream_grabber_releases_non_selected_frame_without_main_conversion
     assert entry["frame_timing"]["main_converted_for_selected_frame"] is False
 
 
+def test_default_grabber_threshold_completes_with_current_main_frame():
+    camera = DropletCamera.__new__(DropletCamera)
+    camera._grab_running = True
+    camera._cv = threading.Condition(threading.Lock())
+    camera._buf = deque(maxlen=16)
+    camera._cap_active = True
+    camera._cap_arm_ns = 0
+    camera._cap_deadline = time.monotonic() + 1.0
+    camera._cap_max_new = 10
+    camera._cap_seen = 0
+    camera._cap_threshold = 29.0
+    camera._cap_brightest = None
+    camera._cap_emit_rotate = False
+    camera._cap_done = threading.Event()
+    camera._cap_result = None
+    camera._cap_id = 4
+    camera._cap_request_id = "default-selected"
+    camera._cap_ack_ns = 1_000_000
+    camera._cap_ack_frame_index = 0
+    camera._cap_buffered_post_arm_frames = 0
+    camera._cap_buffered_threshold_selected = False
+    camera._emit_on_complete = False
+    camera._grabber_frame_index = 0
+    camera._last_grabber_frame_done_ns = None
+    camera._stream_main_size = (1456, 1088)
+    camera._stream_main_format = "RGB888"
+    camera._stream_lores_size = (320, 240)
+    camera._stream_lores_format = "YUV420"
+    camera._stream_buffer_count = 3
+    camera.exposure_time = 20000
+    camera._configured_frame_duration_us = 20000
+    camera._trigger_low = lambda: None
+    camera._backend_lock = threading.Lock()
+    camera._capture_backend = None
+    camera.image_captured_signal = _Signal()
+    DropletCamera.set_capture_profile(camera, "default")
+    DropletCamera.set_capture_performance_diagnostics_enabled(camera, True)
+    main_frame = np.full((4, 4, 3), 200, dtype=np.uint8)
+    request = _FakeCaptureRequest(main_frame, {"ExposureTime": 20000})
+    camera.camera = _FakeRequestCamera(camera, [request])
+
+    DropletCamera._grabber(camera)
+
+    assert request.make_array_calls == ["main"]
+    assert request.events == ["make_array:main", "release"]
+    assert camera._cap_done.is_set() is True
+    assert camera._cap_active is False
+    assert np.array_equal(camera.latest_frame, main_frame)
+    assert camera._cap_result["reason"] == "threshold"
+    assert camera._cap_result["capture_profile"] == "default"
+    assert camera._cap_result["detection_stream"] == "main"
+
+
 def test_dual_stream_grabber_converts_main_for_selected_threshold_before_release():
     camera = DropletCamera.__new__(DropletCamera)
     camera._grab_running = True
