@@ -501,7 +501,11 @@ class DropletCamera(QObject):
         self._cap_buffered_threshold_selected = False
         self._signal_stride   = 4
         self._signal_channel  = 1     # None => full RGB mean, else BGR channel index
+        self._requested_capture_profile = "default"
         self._capture_profile = "default"
+        self._capture_profile_fallback_active = False
+        self._capture_profile_fallback_reason = None
+        self._capture_profile_fallback_error = None
         self._capture_arm_timing_mode = "ack_after_edge"
         
         self._cap_done = threading.Event()      # set when _complete_capture_locked runs
@@ -519,17 +523,15 @@ class DropletCamera(QObject):
         self.min_delta = 25.0
         self.max_wait_s = 1.0
 
-    def set_capture_profile(self, profile_name: str):
-        """
-        Set capture behavior profile.
-        - default: strided green-channel signal mean, rotate output
-        - fast_detection: compatibility alias for the default fast detection math
-        - legacy_full_rgb: historical full-frame RGB mean, rotate output
-        - dual_stream_detection: lores Y/luma detection, full-res selected output
-        - throughput: reduce per-frame CPU work and skip rotate
-        """
+    @staticmethod
+    def _normalize_capture_profile(profile_name: str):
         p = str(profile_name or "default").strip().lower()
-        old_stream_mode = self._capture_stream_mode()
+        if p in {"legacy_full_rgb", "throughput", "dual_stream_detection", "fast_detection"}:
+            return p
+        return "default"
+
+    def _apply_capture_profile_settings(self, profile_name: str):
+        p = self._normalize_capture_profile(profile_name)
         if p == "legacy_full_rgb":
             self._capture_profile = "legacy_full_rgb"
             self._signal_stride = 1
@@ -550,6 +552,34 @@ class DropletCamera(QObject):
             self._signal_stride = 4
             self._signal_channel = 1  # green channel
             self._cap_emit_rotate = True
+        return self._capture_profile
+
+    def _clear_capture_profile_fallback(self):
+        self._capture_profile_fallback_active = False
+        self._capture_profile_fallback_reason = None
+        self._capture_profile_fallback_error = None
+
+    def _activate_capture_profile_fallback(self, reason: str, error=None):
+        self._capture_profile_fallback_active = True
+        self._capture_profile_fallback_reason = str(reason or "capture_profile_fallback")
+        self._capture_profile_fallback_error = None if error is None else str(error)
+        self._apply_capture_profile_settings("default")
+        return self.get_capture_profile()
+
+    def set_capture_profile(self, profile_name: str):
+        """
+        Set capture behavior profile.
+        - default: strided green-channel signal mean, rotate output
+        - fast_detection: compatibility alias for the default fast detection math
+        - legacy_full_rgb: historical full-frame RGB mean, rotate output
+        - dual_stream_detection: lores Y/luma detection, full-res selected output
+        - throughput: reduce per-frame CPU work and skip rotate
+        """
+        p = self._normalize_capture_profile(profile_name)
+        old_stream_mode = self._capture_stream_mode()
+        self._requested_capture_profile = p
+        self._clear_capture_profile_fallback()
+        self._apply_capture_profile_settings(p)
         if (
             getattr(self, "camera", None) is not None
             and bool(getattr(self, "_grab_running", False))
@@ -562,6 +592,17 @@ class DropletCamera(QObject):
     def get_capture_profile(self):
         return str(getattr(self, "_capture_profile", "default") or "default")
 
+    def get_capture_profile_state(self):
+        return {
+            "requested_profile": str(
+                getattr(self, "_requested_capture_profile", self.get_capture_profile()) or "default"
+            ),
+            "effective_profile": self.get_capture_profile(),
+            "fallback_active": bool(getattr(self, "_capture_profile_fallback_active", False)),
+            "fallback_reason": getattr(self, "_capture_profile_fallback_reason", None),
+            "fallback_error": getattr(self, "_capture_profile_fallback_error", None),
+        }
+
     def _dual_stream_detection_enabled(self):
         return self.get_capture_profile() == "dual_stream_detection"
 
@@ -571,6 +612,7 @@ class DropletCamera(QObject):
     def _capture_profile_metadata(self):
         detection_stream = "lores" if self._dual_stream_detection_enabled() else "main"
         return {
+            **self.get_capture_profile_state(),
             "capture_profile": self.get_capture_profile(),
             "signal_stride": int(getattr(self, "_signal_stride", 1) or 1),
             "signal_channel": getattr(self, "_signal_channel", None),
@@ -670,6 +712,43 @@ class DropletCamera(QObject):
         except Exception:
             return float(np.mean(arr))
 
+    @staticmethod
+    def _is_valid_lores_detection(arr, mean) -> bool:
+        try:
+            if arr is None:
+                return False
+            if int(getattr(arr, "size", 0) or 0) <= 0:
+                return False
+            return bool(np.isfinite(float(mean)))
+        except Exception:
+            return False
+
+    def _handle_dual_stream_runtime_failure(self, exc, *, request_id=None, generation=None):
+        error_text = str(exc)
+        self._activate_capture_profile_fallback("dual_stream_lores_failed", error_text)
+        self._grab_running = False
+        self._log_capture_phase(
+            "capture_profile_fallback",
+            request_id=request_id,
+            generation=generation,
+            reason="dual_stream_lores_failed",
+            requested_profile=getattr(self, "_requested_capture_profile", None),
+            effective_profile=self.get_capture_profile(),
+            fallback_error=error_text,
+            level="warning",
+        )
+        with self._cv:
+            capture_active = bool(getattr(self, "_cap_active", False))
+            active_request_id = request_id or getattr(self, "_cap_request_id", None)
+        if capture_active:
+            self._set_capture_failure_result(
+                "dual_stream_lores_failed",
+                request_id=active_request_id,
+                generation=generation,
+                error=error_text,
+                fallback_reason="dual_stream_lores_failed",
+            )
+
     def _capture_video_configuration_kwargs(self, sensor_resolution):
         main_size = tuple(sensor_resolution)
         main_format = "RGB888"
@@ -683,6 +762,19 @@ class DropletCamera(QObject):
                 "format": self.DUAL_STREAM_LORES_FORMAT,
             }
         return kwargs
+
+    @staticmethod
+    def _close_camera_object(camera):
+        if camera is None:
+            return
+        try:
+            camera.stop()
+        except Exception:
+            pass
+        try:
+            camera.close()
+        except Exception:
+            pass
 
     def _capture_arm_timing_metadata(self, *, result_ns=None):
         mode = self.get_capture_arm_timing_mode()
@@ -928,38 +1020,53 @@ class DropletCamera(QObject):
             self._grab_thread.join(timeout=1.0)
             self._grab_thread = None
         if self.camera:
-            try:
-                self.camera.stop()
-            except Exception:
-                pass
-            try:
-                self.camera.close()
-            except Exception:
-                pass
+            self._close_camera_object(self.camera)
             self.camera = None
 
-        self.camera = Picamera2(1)
-        config_kwargs = self._capture_video_configuration_kwargs(self.camera.sensor_resolution)
-        vid_cfg = self.camera.create_video_configuration(**config_kwargs)
-        main_config = config_kwargs.get("main") or {}
-        lores_config = config_kwargs.get("lores") or {}
-        self._stream_main_size = tuple(main_config.get("size") or self.camera.sensor_resolution)
-        self._stream_main_format = main_config.get("format")
-        self._stream_lores_size = tuple(lores_config.get("size")) if lores_config.get("size") else None
-        self._stream_lores_format = lores_config.get("format")
-        self._stream_buffer_count = int(config_kwargs.get("buffer_count") or 0)
-        self._configured_frame_duration_us = int(self.exposure_time)
-        self._grabber_frame_index = 0
-        self._last_grabber_frame_done_ns = None
-        self.camera.configure(vid_cfg)
-        self.camera.set_controls({
-            "FrameDurationLimits": (self.exposure_time, self.exposure_time),
-            "ExposureTime": self.exposure_time,
-            "AeEnable": False,
-            "AwbEnable": False,
-            "AnalogueGain": 1.0,
-        })
-        self.camera.start()
+        attempted_dual_fallback = False
+        while True:
+            camera = None
+            try:
+                camera = Picamera2(1)
+                config_kwargs = self._capture_video_configuration_kwargs(camera.sensor_resolution)
+                vid_cfg = camera.create_video_configuration(**config_kwargs)
+                main_config = config_kwargs.get("main") or {}
+                lores_config = config_kwargs.get("lores") or {}
+                self._stream_main_size = tuple(main_config.get("size") or camera.sensor_resolution)
+                self._stream_main_format = main_config.get("format")
+                self._stream_lores_size = tuple(lores_config.get("size")) if lores_config.get("size") else None
+                self._stream_lores_format = lores_config.get("format")
+                self._stream_buffer_count = int(config_kwargs.get("buffer_count") or 0)
+                self._configured_frame_duration_us = int(self.exposure_time)
+                self._grabber_frame_index = 0
+                self._last_grabber_frame_done_ns = None
+                camera.configure(vid_cfg)
+                camera.set_controls({
+                    "FrameDurationLimits": (self.exposure_time, self.exposure_time),
+                    "ExposureTime": self.exposure_time,
+                    "AeEnable": False,
+                    "AwbEnable": False,
+                    "AnalogueGain": 1.0,
+                })
+                camera.start()
+                self.camera = camera
+                break
+            except Exception as exc:
+                self._close_camera_object(camera)
+                self.camera = None
+                if self._dual_stream_detection_enabled() and not attempted_dual_fallback:
+                    attempted_dual_fallback = True
+                    self._activate_capture_profile_fallback("dual_stream_config_failed", exc)
+                    self._log_capture_phase(
+                        "capture_profile_fallback",
+                        reason="dual_stream_config_failed",
+                        requested_profile=getattr(self, "_requested_capture_profile", None),
+                        effective_profile=self.get_capture_profile(),
+                        fallback_error=str(exc),
+                        level="warning",
+                    )
+                    continue
+                raise
 
         self._grab_running = True
         self._grab_thread = threading.Thread(target=self._grabber, daemon=True)
@@ -971,14 +1078,7 @@ class DropletCamera(QObject):
             self._grab_thread.join(timeout=1.0)
             self._grab_thread = None
         if self.camera:
-            try:
-                self.camera.stop()
-            except Exception:
-                pass
-            try:
-                self.camera.close()
-            except Exception:
-                pass
+            self._close_camera_object(self.camera)
             self.camera = None
         self._trigger_low()
 
@@ -1221,13 +1321,23 @@ class DropletCamera(QObject):
             try:
                 md  = req.get_metadata()
                 if dual_stream:
-                    lores_started_ns = time.monotonic_ns() if diagnostics_enabled else None
-                    lores_done_ns = None
-                    lores = req.make_array("lores")
-                    lores_done_ns = time.monotonic_ns() if diagnostics_enabled else None
-                    mean_started_ns = time.monotonic_ns() if diagnostics_enabled else None
-                    mean = self._lores_signal_mean(lores)
-                    mean_done_ns = time.monotonic_ns() if diagnostics_enabled else None
+                    try:
+                        lores_started_ns = time.monotonic_ns() if diagnostics_enabled else None
+                        lores_done_ns = None
+                        lores = req.make_array("lores")
+                        lores_done_ns = time.monotonic_ns() if diagnostics_enabled else None
+                        mean_started_ns = time.monotonic_ns() if diagnostics_enabled else None
+                        mean = self._lores_signal_mean(lores)
+                        mean_done_ns = time.monotonic_ns() if diagnostics_enabled else None
+                        if not self._is_valid_lores_detection(lores, mean):
+                            raise RuntimeError("invalid lores detection frame")
+                    except Exception as exc:
+                        self._handle_dual_stream_runtime_failure(
+                            exc,
+                            request_id=getattr(self, "_cap_request_id", None),
+                            generation=getattr(self, "_capture_generation", None),
+                        )
+                        continue
                     if diagnostics_enabled:
                         frame_timing = {
                             "detection_stream": "lores",
@@ -1503,6 +1613,23 @@ class DropletCamera(QObject):
         phase_started_ns = time.monotonic_ns()
         backend = self._resolve_capture_backend(backend)
         backend_id = backend_id if backend_id is not None else getattr(backend, "backend_id", None)
+        if (
+            self.camera is not None
+            and hasattr(self, "_grab_running")
+            and not bool(getattr(self, "_grab_running", False))
+        ):
+            try:
+                self.stop_camera()
+                self.start_camera()
+            except Exception as exc:
+                self._set_capture_failure_result(
+                    "camera_restart_failed",
+                    request_id=request_id,
+                    generation=generation,
+                    error=str(exc),
+                    backend_id=backend_id,
+                )
+                return
         if not self.camera:
             print("Camera not started.")
             self._set_capture_failure_result(
@@ -1916,6 +2043,11 @@ class DropletCamera(QObject):
                     cap_seen=res.get("cap_seen"),
                     cap_max_new=res.get("cap_max_new"),
                     capture_profile=res.get("capture_profile"),
+                    requested_profile=res.get("requested_profile"),
+                    effective_profile=res.get("effective_profile"),
+                    fallback_active=res.get("fallback_active"),
+                    fallback_reason=res.get("fallback_reason"),
+                    fallback_error=res.get("fallback_error"),
                     signal_stride=res.get("signal_stride"),
                     signal_channel=res.get("signal_channel"),
                     cap_emit_rotate=res.get("cap_emit_rotate"),
@@ -1981,6 +2113,25 @@ class DropletCamera(QObject):
 
             # not acceptable → try again unless we’re out of attempts
             if i < attempts - 1:
+                if last_reason == "dual_stream_lores_failed":
+                    try:
+                        self.stop_camera()
+                        self.start_camera()
+                    except Exception as exc:
+                        self._log_capture_phase(
+                            "capture_profile_fallback_restart_failed",
+                            request_id=request_id,
+                            generation=generation,
+                            started_ns=attempt_started_ns,
+                            backend=backend,
+                            retry_attempt=attempt_index,
+                            retry_attempts=int(attempts),
+                            retry_total_elapsed_ms=_retry_total_elapsed_ms(),
+                            reason=str(last_reason or ""),
+                            error=str(exc),
+                            level="warning",
+                        )
+                        raise
                 self._log_capture_phase(
                     "retrying",
                     request_id=request_id,
@@ -6477,6 +6628,18 @@ class Machine(QObject):
         if callable(getter):
             return getter()
         return "default"
+
+    def get_droplet_capture_profile_state(self):
+        getter = getattr(self.droplet_camera, "get_capture_profile_state", None)
+        if callable(getter):
+            return getter()
+        return {
+            "requested_profile": self.get_droplet_capture_profile(),
+            "effective_profile": self.get_droplet_capture_profile(),
+            "fallback_active": False,
+            "fallback_reason": None,
+            "fallback_error": None,
+        }
 
     def set_droplet_capture_arm_timing_mode(self, mode: str):
         setter = getattr(self.droplet_camera, "set_capture_arm_timing_mode", None)

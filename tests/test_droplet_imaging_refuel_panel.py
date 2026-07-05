@@ -116,6 +116,13 @@ def _build_droplet_dialog(
         return bool(droplet_capture_perf_enabled["value"])
 
     capture_profile = {"value": "default"}
+    capture_profile_state = {
+        "requested_profile": "default",
+        "effective_profile": "default",
+        "fallback_active": False,
+        "fallback_reason": None,
+        "fallback_error": None,
+    }
     arm_timing_mode = {"value": "ack_after_edge"}
 
     def _set_droplet_capture_profile(profile_name):
@@ -123,6 +130,15 @@ def _build_droplet_dialog(
         if profile not in {"default", "fast_detection", "legacy_full_rgb", "dual_stream_detection", "throughput"}:
             profile = "default"
         capture_profile["value"] = profile
+        capture_profile_state.update(
+            {
+                "requested_profile": profile,
+                "effective_profile": profile,
+                "fallback_active": False,
+                "fallback_reason": None,
+                "fallback_error": None,
+            }
+        )
         return profile
 
     def _set_droplet_capture_arm_timing_mode(mode):
@@ -160,6 +176,7 @@ def _build_droplet_dialog(
         disable_print_profile=Mock(),
         set_droplet_capture_profile=Mock(side_effect=_set_droplet_capture_profile),
         get_droplet_capture_profile=Mock(side_effect=lambda: capture_profile["value"]),
+        get_droplet_capture_profile_state=Mock(side_effect=lambda: dict(capture_profile_state)),
         set_droplet_capture_arm_timing_mode=Mock(side_effect=_set_droplet_capture_arm_timing_mode),
         get_droplet_capture_arm_timing_mode=Mock(side_effect=lambda: arm_timing_mode["value"]),
         set_command_dispatch_interval=Mock(),
@@ -395,6 +412,27 @@ def test_dual_stream_detection_checkbox_toggles_profile_and_is_not_persisted(mon
 
     second_dialog, _second_refuel_model, _second_controller = _build_droplet_dialog(monkeypatch, qapp)
     assert second_dialog.dual_stream_detection_checkbox.isChecked() is False
+
+
+def test_dual_stream_detection_checkbox_reverts_when_profile_falls_back(monkeypatch, qapp):
+    dialog, _refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
+    controller.set_droplet_capture_profile = Mock(return_value="default")
+    controller.get_droplet_capture_profile_state = Mock(
+        return_value={
+            "requested_profile": "dual_stream_detection",
+            "effective_profile": "default",
+            "fallback_active": True,
+            "fallback_reason": "dual_stream_config_failed",
+            "fallback_error": "create failed",
+        }
+    )
+
+    dialog.dual_stream_detection_checkbox.setChecked(True)
+    qapp.processEvents()
+
+    controller.set_droplet_capture_profile.assert_called_once_with("dual_stream_detection")
+    assert dialog.dual_stream_detection_checkbox.isChecked() is False
+    assert "Dual-stream detection unavailable" in dialog.droplet_capture_performance_debug_status_label.text()
 
 
 def test_dual_stream_detection_checkbox_reverts_when_capture_active(monkeypatch, qapp):

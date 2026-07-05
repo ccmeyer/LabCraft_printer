@@ -3344,14 +3344,32 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._set_dual_stream_detection_checkbox_checked(False)
             self._set_droplet_capture_performance_debug_status(f"Could not set capture profile: {exc}")
             return
+        state = {}
+        state_getter = getattr(self.controller, "get_droplet_capture_profile_state", None)
+        if callable(state_getter):
+            try:
+                maybe_state = state_getter()
+                if isinstance(maybe_state, dict):
+                    state = maybe_state
+            except Exception:
+                state = {}
         normalized = str(applied or profile or "default").strip().lower()
+        effective_profile = str(state.get("effective_profile") or normalized).strip().lower()
+        fallback_active = bool(state.get("fallback_active"))
         enabled = normalized == "dual_stream_detection"
+        if checked and fallback_active and effective_profile != "dual_stream_detection":
+            enabled = False
         self._set_dual_stream_detection_checkbox_checked(enabled)
         if enabled:
             self._set_legacy_full_rgb_detection_checkbox_checked(False)
-        self._set_droplet_capture_performance_debug_status(
-            "Dual-stream detection A/B enabled" if enabled else "Dual-stream detection A/B disabled"
-        )
+        if checked and fallback_active and effective_profile != "dual_stream_detection":
+            self._set_droplet_capture_performance_debug_status(
+                "Dual-stream detection unavailable; using single-stream detection."
+            )
+        else:
+            self._set_droplet_capture_performance_debug_status(
+                "Dual-stream detection A/B enabled" if enabled else "Dual-stream detection A/B disabled"
+            )
 
     def _set_early_arm_ab_timing_checkbox_checked(self, checked):
         checkbox = getattr(self, "early_arm_ab_timing_checkbox", None)

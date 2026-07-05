@@ -277,6 +277,11 @@ class DropletCapturePerformanceDiagnostics:
                 "cap_seen": _int_or_none(retry_result.get("cap_seen")),
                 "cap_max_new": _int_or_none(retry_result.get("cap_max_new")),
                 "capture_profile": retry_result.get("capture_profile"),
+                "requested_profile": retry_result.get("requested_profile"),
+                "effective_profile": retry_result.get("effective_profile"),
+                "capture_profile_fallback_active": retry_result.get("fallback_active"),
+                "capture_profile_fallback_reason": retry_result.get("fallback_reason"),
+                "capture_profile_fallback_error": retry_result.get("fallback_error"),
                 "signal_stride": _int_or_none(retry_result.get("signal_stride")),
                 "signal_channel": retry_result.get("signal_channel"),
                 "cap_emit_rotate": retry_result.get("cap_emit_rotate"),
@@ -669,7 +674,7 @@ class DropletCapturePerformanceDiagnostics:
 
         snapshot = {
             "kind": "droplet_capture_performance_snapshot",
-            "schema_version": 8,
+            "schema_version": 9,
             "reason": str(reason or "manual_export"),
             "generated_at_utc": self._now_utc(),
             "generated_monotonic_ns": int(time.monotonic_ns()),
@@ -6302,6 +6307,24 @@ class Controller(QObject):
             except Exception:
                 return "default"
         return "default"
+
+    def get_droplet_capture_profile_state(self):
+        getter = getattr(self.machine, "get_droplet_capture_profile_state", None)
+        if callable(getter):
+            try:
+                state = getter()
+                if isinstance(state, dict):
+                    return dict(state)
+            except Exception:
+                pass
+        profile = self.get_droplet_capture_profile()
+        return {
+            "requested_profile": profile,
+            "effective_profile": profile,
+            "fallback_active": False,
+            "fallback_reason": None,
+            "fallback_error": None,
+        }
 
     def set_droplet_capture_arm_timing_mode(self, mode: str):
         setter = getattr(self.machine, "set_droplet_capture_arm_timing_mode", None)

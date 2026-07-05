@@ -48,6 +48,16 @@ class _FakeCaptureRequest:
         self.events.append("release")
 
 
+class _FailingLoresCaptureRequest(_FakeCaptureRequest):
+    def make_array(self, stream_name):
+        stream_name = str(stream_name)
+        self.make_array_calls.append(stream_name)
+        self.events.append(f"make_array:{stream_name}")
+        if stream_name == "lores":
+            raise RuntimeError("lores unavailable")
+        return self._frame
+
+
 class _FakeRequestCamera:
     def __init__(self, owner, requests):
         self._owner = owner
@@ -193,6 +203,73 @@ class _FakeBackend:
             release()
         self.trigger_line.release()
         return True
+
+
+class _FakeThread:
+    def __init__(self, target=None, daemon=None):
+        self.target = target
+        self.daemon = daemon
+        self.started = False
+
+    def start(self):
+        self.started = True
+
+    def join(self, timeout=None):
+        pass
+
+    def is_alive(self):
+        return self.started
+
+
+class _FakePicamera2:
+    instances = []
+    failure_plan = []
+
+    def __init__(self, index):
+        self.index = index
+        self.sensor_resolution = (1456, 1088)
+        self.config_kwargs = None
+        self.configured = False
+        self.started = False
+        self.closed = False
+        self.stopped = False
+        _FakePicamera2.instances.append(self)
+
+    def _next_failure(self):
+        if _FakePicamera2.failure_plan:
+            return _FakePicamera2.failure_plan.pop(0)
+        return None
+
+    def create_video_configuration(self, **kwargs):
+        self.config_kwargs = dict(kwargs)
+        failure = self._next_failure()
+        if failure == "create":
+            raise RuntimeError("create failed")
+        return {"config": kwargs}
+
+    def configure(self, config):
+        failure = self._next_failure()
+        if failure == "configure":
+            raise RuntimeError("configure failed")
+        self.configured = True
+
+    def set_controls(self, controls):
+        failure = self._next_failure()
+        if failure == "set_controls":
+            raise RuntimeError("set_controls failed")
+        self.controls = dict(controls)
+
+    def start(self):
+        failure = self._next_failure()
+        if failure == "start":
+            raise RuntimeError("start failed")
+        self.started = True
+
+    def stop(self):
+        self.stopped = True
+
+    def close(self):
+        self.closed = True
 
 
 def _install_backend(camera, backend=None):
@@ -808,6 +885,59 @@ def test_video_configuration_kwargs_include_lores_only_for_dual_stream_profile()
     assert dual_kwargs["buffer_count"] == 3
 
 
+def _make_start_camera_profile_test_camera():
+    camera = DropletCamera.__new__(DropletCamera)
+    camera.camera = None
+    camera._grab_running = False
+    camera._grab_thread = None
+    camera._cap_id = 0
+    camera.exposure_time = 20000
+    camera.capture_phase_signal = _Signal()
+    DropletCamera.set_capture_profile(camera, "dual_stream_detection")
+    return camera
+
+
+def test_dual_stream_config_failure_falls_back_to_single_stream(monkeypatch):
+    _FakePicamera2.instances = []
+    _FakePicamera2.failure_plan = ["create"]
+    monkeypatch.setattr(machine_mod, "Picamera2", _FakePicamera2)
+    monkeypatch.setattr(machine_mod.threading, "Thread", _FakeThread)
+    camera = _make_start_camera_profile_test_camera()
+    payloads = []
+    camera.capture_phase_signal.connect(lambda payload: payloads.append(dict(payload)))
+
+    DropletCamera.start_camera(camera)
+
+    assert len(_FakePicamera2.instances) == 2
+    assert "lores" in _FakePicamera2.instances[0].config_kwargs
+    assert "lores" not in _FakePicamera2.instances[1].config_kwargs
+    assert DropletCamera.get_capture_profile(camera) == "default"
+    state = DropletCamera.get_capture_profile_state(camera)
+    assert state["requested_profile"] == "dual_stream_detection"
+    assert state["effective_profile"] == "default"
+    assert state["fallback_active"] is True
+    assert state["fallback_reason"] == "dual_stream_config_failed"
+    assert _FakePicamera2.instances[0].closed is True
+    assert _FakePicamera2.instances[1].started is True
+    assert payloads[-1]["phase"] == "capture_profile_fallback"
+    assert payloads[-1]["reason"] == "dual_stream_config_failed"
+
+
+def test_dual_stream_config_fallback_reraises_if_single_stream_start_fails(monkeypatch):
+    _FakePicamera2.instances = []
+    _FakePicamera2.failure_plan = ["create", "create"]
+    monkeypatch.setattr(machine_mod, "Picamera2", _FakePicamera2)
+    monkeypatch.setattr(machine_mod.threading, "Thread", _FakeThread)
+    camera = _make_start_camera_profile_test_camera()
+
+    with pytest.raises(RuntimeError, match="create failed"):
+        DropletCamera.start_camera(camera)
+
+    assert len(_FakePicamera2.instances) == 2
+    assert DropletCamera.get_capture_profile(camera) == "default"
+    assert DropletCamera.get_capture_profile_state(camera)["fallback_reason"] == "dual_stream_config_failed"
+
+
 def test_grabber_records_frame_index_and_interval_when_diagnostics_enabled():
     camera = DropletCamera.__new__(DropletCamera)
     camera._grab_running = True
@@ -866,6 +996,153 @@ def test_dual_stream_grabber_releases_non_selected_frame_without_main_conversion
     assert entry["mean"] == 0.0
     assert entry["frame_timing"]["detection_stream"] == "lores"
     assert entry["frame_timing"]["main_converted_for_selected_frame"] is False
+    assert DropletCamera.get_capture_profile_state(camera)["fallback_active"] is False
+
+
+def _make_active_dual_grabber_camera():
+    camera = DropletCamera.__new__(DropletCamera)
+    camera._grab_running = True
+    camera._cv = threading.Condition(threading.Lock())
+    camera._buf = deque(maxlen=16)
+    camera._cap_active = True
+    camera._cap_arm_ns = 0
+    camera._cap_deadline = time.monotonic() + 1.0
+    camera._cap_max_new = 10
+    camera._cap_seen = 0
+    camera._cap_threshold = 29.0
+    camera._cap_brightest = None
+    camera._cap_emit_rotate = False
+    camera._cap_done = threading.Event()
+    camera._cap_result = None
+    camera._cap_id = 4
+    camera._cap_request_id = "dual-runtime-fail"
+    camera._capture_generation = 12
+    camera._cap_ack_ns = 1_000_000
+    camera._cap_ack_frame_index = 0
+    camera._cap_buffered_post_arm_frames = 0
+    camera._cap_buffered_threshold_selected = False
+    camera._emit_on_complete = False
+    camera._grabber_frame_index = 0
+    camera._last_grabber_frame_done_ns = None
+    camera._stream_main_size = (1456, 1088)
+    camera._stream_main_format = "RGB888"
+    camera._stream_lores_size = (320, 240)
+    camera._stream_lores_format = "YUV420"
+    camera._stream_buffer_count = 3
+    camera.exposure_time = 20000
+    camera._configured_frame_duration_us = 20000
+    camera._trigger_low = lambda: None
+    camera._backend_lock = threading.Lock()
+    camera._capture_backend = None
+    camera.image_captured_signal = _Signal()
+    camera.capture_phase_signal = _Signal()
+    DropletCamera.set_capture_profile(camera, "dual_stream_detection")
+    DropletCamera.set_capture_performance_diagnostics_enabled(camera, True)
+    return camera
+
+
+def test_dual_stream_runtime_lores_failure_falls_back_without_main_conversion():
+    camera = _make_active_dual_grabber_camera()
+    payloads = []
+    camera.capture_phase_signal.connect(lambda payload: payloads.append(dict(payload)))
+    main_frame = np.full((4, 4, 3), 200, dtype=np.uint8)
+    request = _FailingLoresCaptureRequest(main_frame, {"ExposureTime": 20000})
+    camera.camera = _FakeRequestCamera(camera, [request])
+
+    DropletCamera._grabber(camera)
+
+    assert request.make_array_calls == ["lores"]
+    assert request.events == ["make_array:lores", "release"]
+    assert request.released is True
+    assert camera._cap_done.is_set() is True
+    assert camera._cap_result["reason"] == "dual_stream_lores_failed"
+    assert camera._cap_result["capture_profile"] == "default"
+    state = DropletCamera.get_capture_profile_state(camera)
+    assert state["requested_profile"] == "dual_stream_detection"
+    assert state["effective_profile"] == "default"
+    assert state["fallback_active"] is True
+    assert state["fallback_reason"] == "dual_stream_lores_failed"
+    assert any(
+        payload.get("phase") == "capture_profile_fallback"
+        and payload.get("reason") == "dual_stream_lores_failed"
+        for payload in payloads
+    )
+
+
+def test_dual_stream_runtime_nonfinite_lores_mean_triggers_fallback():
+    camera = _make_active_dual_grabber_camera()
+    main_frame = np.full((4, 4, 3), 200, dtype=np.uint8)
+    lores_frame = np.array([np.nan], dtype=np.float32)
+    request = _FakeCaptureRequest(main_frame, {"ExposureTime": 20000}, lores_frame=lores_frame)
+    camera.camera = _FakeRequestCamera(camera, [request])
+
+    DropletCamera._grabber(camera)
+
+    assert request.make_array_calls == ["lores"]
+    assert request.released is True
+    assert camera._cap_result["reason"] == "dual_stream_lores_failed"
+    assert DropletCamera.get_capture_profile_state(camera)["fallback_reason"] == "dual_stream_lores_failed"
+
+
+def test_dual_stream_lores_failure_restarts_camera_before_retry():
+    camera = _make_async_camera()
+    DropletCamera.set_capture_profile(camera, "dual_stream_detection")
+    DropletCamera.set_capture_performance_diagnostics_enabled(camera, True)
+    restart_calls = []
+
+    def _stop_camera():
+        restart_calls.append("stop")
+        camera._grab_running = False
+        camera.camera = None
+
+    def _start_camera():
+        restart_calls.append(("start", DropletCamera.get_capture_profile(camera)))
+        camera.camera = object()
+        camera._grab_running = True
+
+    camera.stop_camera = _stop_camera
+    camera.start_camera = _start_camera
+    calls = {"count": 0}
+
+    def _capture_non_blocking(**_kwargs):
+        calls["count"] += 1
+        camera._cap_done.clear()
+        if calls["count"] == 1:
+            DropletCamera._activate_capture_profile_fallback(
+                camera,
+                "dual_stream_lores_failed",
+                "lores unavailable",
+            )
+            camera.latest_frame = None
+            camera._cap_result = {
+                "reason": "dual_stream_lores_failed",
+                "capture_profile": "default",
+                "threshold": 0.0,
+                "mean": 0.0,
+            }
+        else:
+            camera.latest_frame = np.full((3, 4, 3), 88, dtype=np.uint8)
+            camera._cap_result = {
+                "reason": "threshold",
+                "capture_profile": "default",
+                "threshold": 29.0,
+                "mean": 88.0,
+                "cap_id": 9,
+            }
+        camera._cap_done.set()
+
+    camera.capture_non_blocking = _capture_non_blocking
+
+    result = DropletCamera.capture_with_retry_sync(
+        camera,
+        attempts=2,
+        request_id="retry-after-lores-fail",
+        generation=0,
+    )
+
+    assert result["status"] == "success"
+    assert calls["count"] == 2
+    assert restart_calls == ["stop", ("start", "default")]
 
 
 def test_default_grabber_threshold_completes_with_current_main_frame():

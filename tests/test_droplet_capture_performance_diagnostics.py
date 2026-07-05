@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 from Controller import Controller, DropletCapturePerformanceDiagnostics
 
@@ -29,7 +30,7 @@ def test_droplet_capture_perf_enabled_events_are_bounded_and_json_safe():
     snapshot = diagnostics.build_snapshot(reason="unit_test")
 
     assert snapshot["kind"] == "droplet_capture_performance_snapshot"
-    assert snapshot["schema_version"] == 8
+    assert snapshot["schema_version"] == 9
     assert snapshot["reason"] == "unit_test"
     assert snapshot["event_count"] == 2
     assert snapshot["event_counts"]["controller_completion_received"] == 1
@@ -76,6 +77,11 @@ def test_droplet_capture_perf_snapshot_summarizes_timings():
             "cap_seen": 1,
             "cap_max_new": 10,
             "capture_profile": "default",
+            "requested_profile": "dual_stream_detection",
+            "effective_profile": "default",
+            "fallback_active": True,
+            "fallback_reason": "dual_stream_lores_failed",
+            "fallback_error": "lores unavailable",
             "signal_stride": 4,
             "signal_channel": 1,
             "cap_emit_rotate": True,
@@ -129,6 +135,11 @@ def test_droplet_capture_perf_snapshot_summarizes_timings():
     assert request_summary["cap_seen"] == 1
     assert request_summary["cap_max_new"] == 10
     assert request_summary["capture_profile"] == "default"
+    assert request_summary["requested_profile"] == "dual_stream_detection"
+    assert request_summary["effective_profile"] == "default"
+    assert request_summary["capture_profile_fallback_active"] is True
+    assert request_summary["capture_profile_fallback_reason"] == "dual_stream_lores_failed"
+    assert request_summary["capture_profile_fallback_error"] == "lores unavailable"
     assert request_summary["signal_stride"] == 4
     assert request_summary["signal_channel"] == 1
     assert request_summary["cap_emit_rotate"] is True
@@ -159,6 +170,29 @@ def test_droplet_capture_perf_snapshot_summarizes_timings():
     assert request_summary["selected_metadata_sensor_timestamp_ns"] == 123456789
     assert request_summary["controller_completion_to_pending_clear_ms"] is not None
     assert snapshot["ui_sequence_summaries"][0]["accepted"] is True
+
+
+def test_controller_exposes_droplet_capture_profile_state():
+    controller = Controller.__new__(Controller)
+    controller.machine = SimpleNamespace(
+        get_droplet_capture_profile=Mock(return_value="default"),
+        get_droplet_capture_profile_state=Mock(
+            return_value={
+                "requested_profile": "dual_stream_detection",
+                "effective_profile": "default",
+                "fallback_active": True,
+                "fallback_reason": "dual_stream_config_failed",
+                "fallback_error": "create failed",
+            }
+        ),
+    )
+
+    state = Controller.get_droplet_capture_profile_state(controller)
+
+    assert state["requested_profile"] == "dual_stream_detection"
+    assert state["effective_profile"] == "default"
+    assert state["fallback_active"] is True
+    assert state["fallback_reason"] == "dual_stream_config_failed"
 
 
 def test_droplet_capture_perf_snapshot_summarizes_calibration_capture_and_settings():
