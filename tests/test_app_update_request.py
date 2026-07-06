@@ -51,6 +51,8 @@ def _make_controller(tmp_path):
     controller._app_update_process = None
     controller._dfu_thread = None
     controller._qualification_worker = None
+    controller._last_app_update_check_result = None
+    controller._last_app_rollback_check_result = None
     controller._array_state = "idle"
     controller._seq_state = "idle"
     controller.pending_capture_active = False
@@ -110,6 +112,64 @@ def test_controller_builds_update_command_without_offline_manifest_for_online_up
     assert "--offline-manifest" not in command
 
 
+def test_controller_builds_update_command_with_target_release_for_online_update(tmp_path, monkeypatch):
+    controller = _make_controller(tmp_path)
+    controller._last_app_update_check_result = SimpleNamespace(
+        status="update_available",
+        update_source="online",
+        target_release_version="v1.1.2",
+    )
+    monkeypatch.setattr(controller_mod.sys, "executable", "python-under-test")
+
+    command = controller.build_app_update_command(wait_pid=1234)
+
+    assert command[-2:] == ["--target-release", "v1.1.2"]
+    assert "--offline-manifest" not in command
+
+
+def test_controller_builds_rollback_command(tmp_path, monkeypatch):
+    controller = _make_controller(tmp_path)
+    controller._last_app_rollback_check_result = SimpleNamespace(
+        status="rollback_available",
+        update_source="online",
+    )
+    monkeypatch.setattr(controller_mod.sys, "executable", "python-under-test")
+
+    command = controller.build_app_rollback_command(wait_pid=1234)
+
+    assert command == [
+        "python-under-test",
+        "-u",
+        str((tmp_path / "tools" / "update_and_restart.py").resolve()),
+        "--repo-root",
+        str(tmp_path),
+        "--python",
+        "python-under-test",
+        "--wait-pid",
+        "1234",
+        "--gui",
+        "--no-relaunch",
+        "--record-result",
+        "--rollback",
+    ]
+
+
+def test_controller_builds_offline_rollback_command_with_manifest(tmp_path, monkeypatch):
+    controller = _make_controller(tmp_path)
+    manifest_path = tmp_path / "LabCraftUpdates" / "rollback.json"
+    controller._last_app_rollback_check_result = SimpleNamespace(
+        status="rollback_available",
+        update_source="offline",
+        offline_manifest_path=manifest_path,
+    )
+    monkeypatch.setattr(controller_mod.sys, "executable", "python-under-test")
+
+    command = controller.build_app_rollback_command(wait_pid=1234)
+
+    assert "--rollback" in command
+    assert command[-2:] == ["--offline-manifest", str(manifest_path)]
+
+
 def test_app_update_check_worker_uses_offline_fallback_helper(tmp_path, monkeypatch, qapp):
     calls = []
     result = SimpleNamespace(status="up_to_date", message="done")
@@ -130,6 +190,154 @@ def test_app_update_check_worker_uses_offline_fallback_helper(tmp_path, monkeypa
     assert calls[0][1]["command_runner"] == "runner"
 
 
+def test_app_update_check_worker_uses_selected_offline_manifest(tmp_path, monkeypatch, qapp):
+    calls = []
+    fallback_calls = []
+    result = SimpleNamespace(status="update_available", message="offline ready")
+    manifest_path = tmp_path / "LabCraftUpdates" / "update.json"
+
+    def fake_check(config, **kwargs):
+        calls.append((config, kwargs))
+        return result
+
+    monkeypatch.setattr(updater_mod, "run_update_check", fake_check)
+    monkeypatch.setattr(updater_mod, "run_update_check_with_offline_fallback", lambda *args, **kwargs: fallback_calls.append((args, kwargs)))
+    worker = controller_mod.AppUpdateCheckWorker(tmp_path, command_runner="runner", offline_manifest_path=manifest_path)
+    emitted = []
+    worker.finished.connect(emitted.append)
+
+    worker.run()
+
+    assert emitted == [result]
+    assert calls[0][0].repo_root == tmp_path
+    assert calls[0][0].offline_manifest_path == manifest_path
+    assert calls[0][1]["command_runner"] == "runner"
+    assert fallback_calls == []
+
+
+def test_app_rollback_check_worker_uses_rollback_check_helper(tmp_path, monkeypatch, qapp):
+    calls = []
+    result = SimpleNamespace(status="rollback_available", message="rollback ready")
+    manifest_path = tmp_path / "LabCraftUpdates" / "rollback.json"
+
+    def fake_rollback_check(config, **kwargs):
+        calls.append((config, kwargs))
+        return result
+
+    monkeypatch.setattr(updater_mod, "run_rollback_check", fake_rollback_check)
+    worker = controller_mod.AppRollbackCheckWorker(tmp_path, command_runner="runner", offline_manifest_path=manifest_path)
+    emitted = []
+    worker.finished.connect(emitted.append)
+
+    worker.run()
+
+    assert emitted == [result]
+    assert calls[0][0].repo_root == tmp_path
+    assert calls[0][0].rollback is True
+    assert calls[0][0].offline_manifest_path == manifest_path
+    assert calls[0][1]["command_runner"] == "runner"
+
+
+def test_controller_start_offline_app_update_check_passes_manifest(tmp_path, monkeypatch, qapp):
+    controller = _make_controller(tmp_path)
+    manifest_path = tmp_path / "LabCraftUpdates" / "update.json"
+    created = []
+    started = []
+    controller.app_update_check_started = SimpleNamespace(emit=lambda: started.append(True))
+
+    class FakeThread:
+        def __init__(self, parent=None):
+            self.parent = parent
+            self.started = SimpleNamespace(connect=lambda callback: setattr(self, "_started_callback", callback))
+            self.finished = SimpleNamespace(connect=lambda callback: None)
+
+        def start(self):
+            started.append("thread")
+
+        def isRunning(self):
+            return False
+
+        def quit(self):
+            pass
+
+        def deleteLater(self):
+            pass
+
+    class FakeWorker:
+        def __init__(self, repo_root, command_runner=None, offline_manifest_path=None):
+            created.append((Path(repo_root), command_runner, Path(offline_manifest_path)))
+            self.finished = SimpleNamespace(connect=lambda callback: None)
+
+        def moveToThread(self, thread):
+            pass
+
+        def run(self):
+            pass
+
+        def deleteLater(self):
+            pass
+
+    monkeypatch.setattr(controller_mod.QtCore, "QThread", FakeThread)
+    monkeypatch.setattr(controller_mod, "AppUpdateCheckWorker", FakeWorker)
+
+    ok, message = controller.start_offline_app_update_check(manifest_path, command_runner="runner")
+
+    assert ok is True
+    assert "started" in message
+    assert created == [(tmp_path, "runner", manifest_path)]
+    assert started
+
+
+def test_controller_start_offline_app_rollback_check_passes_manifest(tmp_path, monkeypatch, qapp):
+    controller = _make_controller(tmp_path)
+    manifest_path = tmp_path / "LabCraftUpdates" / "rollback.json"
+    created = []
+    started = []
+    controller.app_update_check_started = SimpleNamespace(emit=lambda: started.append(True))
+
+    class FakeThread:
+        def __init__(self, parent=None):
+            self.parent = parent
+            self.started = SimpleNamespace(connect=lambda callback: setattr(self, "_started_callback", callback))
+            self.finished = SimpleNamespace(connect=lambda callback: None)
+
+        def start(self):
+            started.append("thread")
+
+        def isRunning(self):
+            return False
+
+        def quit(self):
+            pass
+
+        def deleteLater(self):
+            pass
+
+    class FakeWorker:
+        def __init__(self, repo_root, command_runner=None, offline_manifest_path=None):
+            created.append((Path(repo_root), command_runner, Path(offline_manifest_path)))
+            self.finished = SimpleNamespace(connect=lambda callback: None)
+
+        def moveToThread(self, thread):
+            pass
+
+        def run(self):
+            pass
+
+        def deleteLater(self):
+            pass
+
+    monkeypatch.setattr(controller_mod.QtCore, "QThread", FakeThread)
+    monkeypatch.setattr(controller_mod, "AppRollbackCheckWorker", FakeWorker)
+
+    ok, message = controller.start_offline_app_rollback_check(manifest_path, command_runner="runner")
+
+    assert ok is True
+    assert "started" in message
+    assert created == [(tmp_path, "runner", manifest_path)]
+    assert started
+
+
 def test_controller_launch_success_stores_process(tmp_path):
     controller = _make_controller(tmp_path)
     process = FakeProcess()
@@ -145,6 +353,24 @@ def test_controller_launch_success_stores_process(tmp_path):
     assert "started" in message
     assert controller._app_update_process is process
     assert controller.is_app_update_process_running() is True
+    assert calls[0][1] == tmp_path
+
+
+def test_controller_launch_rollback_success_stores_process(tmp_path):
+    controller = _make_controller(tmp_path)
+    process = FakeProcess()
+    calls = []
+
+    def launcher(command, *, cwd):
+        calls.append((command, cwd))
+        return process
+
+    ok, message = controller.launch_app_rollback(wait_pid=99, launcher=launcher)
+
+    assert ok is True
+    assert "rollback started" in message
+    assert controller._app_update_process is process
+    assert "--rollback" in calls[0][0]
     assert calls[0][1] == tmp_path
 
 
@@ -193,7 +419,7 @@ def test_controller_app_update_blockers_cover_busy_states(tmp_path):
 
     blockers = controller.get_app_update_blockers()
 
-    assert "An application update is already running." in blockers
+    assert "An application update or rollback is already running." in blockers
     assert "Firmware update is running." in blockers
     assert "Machine qualification is running." in blockers
     assert "Print array state is running." in blockers
@@ -339,6 +565,78 @@ def test_mainwindow_request_app_update_blocks_when_check_is_up_to_date(qapp):
     assert window.close_calls["count"] == 0
 
 
+def test_mainwindow_request_app_rollback_requires_rollback_check(qapp):
+    controller = SimpleNamespace(
+        get_last_app_rollback_check_result=lambda: None,
+        get_app_update_blockers=lambda: [],
+        launch_app_rollback=lambda wait_pid: pytest.fail("rollback should not launch"),
+    )
+    window = _make_update_mainwindow(controller)
+
+    assert MainWindow.request_app_rollback(window) is False
+    assert window.messages == [("Check Rollback", "Check rollback before restoring a previous app version.")]
+    assert window.close_calls["count"] == 0
+
+
+def test_mainwindow_request_app_rollback_launches_and_closes(qapp, monkeypatch):
+    calls = []
+    prompts = []
+    controller = SimpleNamespace(
+        get_last_app_rollback_check_result=lambda: SimpleNamespace(
+            status="rollback_available",
+            update_source="online",
+            before_release_version="v1.2.0",
+            after_release_version="v1.1.2",
+            target_release_version="v1.1.2",
+        ),
+        get_app_update_blockers=lambda: [],
+        launch_app_rollback=lambda wait_pid: calls.append(wait_pid) or (True, "started"),
+    )
+    window = _make_update_mainwindow(controller)
+    window.popup_yes_no = lambda title, message: prompts.append((title, message)) or QMessageBox.StandardButton.Yes
+    monkeypatch.setattr(view_mod.os, "getpid", lambda: 777)
+
+    assert MainWindow.request_app_rollback(window) is True
+
+    assert calls == [777]
+    assert window.close_calls["count"] == 1
+    assert window._app_update_close_requested is True
+    assert prompts[0][0] == "Restore Previous App Version"
+    assert "v1.2.0 -> v1.1.2" in prompts[0][1]
+    assert "Firmware will not be updated" in prompts[0][1]
+    assert "support guidance" in prompts[0][1]
+
+
+def test_mainwindow_request_app_rollback_blocker_stays_open(qapp):
+    controller = SimpleNamespace(
+        get_last_app_rollback_check_result=lambda: SimpleNamespace(
+            status="rollback_available",
+            before_release_version="v1.2.0",
+            after_release_version="v1.1.2",
+        ),
+        get_app_update_blockers=lambda: ["Firmware update is running."],
+        launch_app_rollback=lambda wait_pid: pytest.fail("rollback should not launch"),
+    )
+    window = _make_update_mainwindow(controller)
+
+    assert MainWindow.request_app_rollback(window) is False
+    assert window.close_calls["count"] == 0
+    assert "Firmware update is running." in window.messages[0][1]
+
+
+def test_mainwindow_request_app_rollback_no_available_result_stays_open(qapp):
+    controller = SimpleNamespace(
+        get_last_app_rollback_check_result=lambda: SimpleNamespace(status="rollback_not_configured", message="No rollback."),
+        get_app_update_blockers=lambda: [],
+        launch_app_rollback=lambda wait_pid: pytest.fail("rollback should not launch"),
+    )
+    window = _make_update_mainwindow(controller)
+
+    assert MainWindow.request_app_rollback(window) is False
+    assert window.messages == [("No Rollback Available", "No rollback.")]
+    assert window.close_calls["count"] == 0
+
+
 def test_mainwindow_request_app_update_check_starts_controller_check(qapp):
     calls = {"count": 0}
     controller = SimpleNamespace(
@@ -363,14 +661,141 @@ def test_mainwindow_request_app_update_check_blocks_when_busy(qapp):
     assert "Command queue is not empty." in window.messages[0][1]
 
 
+def test_mainwindow_request_app_rollback_check_starts_controller_check(qapp):
+    calls = {"count": 0}
+    controller = SimpleNamespace(
+        get_app_update_blockers=lambda: [],
+        start_app_rollback_check=lambda: calls.__setitem__("count", calls["count"] + 1) or (True, "started"),
+    )
+    window = _make_update_mainwindow(controller)
+
+    assert MainWindow.request_app_rollback_check(window) is True
+    assert calls["count"] == 1
+    assert window.messages == []
+
+
+def test_mainwindow_request_app_rollback_check_blocks_when_busy(qapp):
+    controller = SimpleNamespace(
+        get_app_update_blockers=lambda: ["Command queue is not empty."],
+        start_app_rollback_check=lambda: pytest.fail("rollback check should not start"),
+    )
+    window = _make_update_mainwindow(controller)
+
+    assert MainWindow.request_app_rollback_check(window) is False
+    assert "Command queue is not empty." in window.messages[0][1]
+
+
+def test_mainwindow_request_offline_app_update_cancel_does_not_start(qapp, monkeypatch):
+    controller = SimpleNamespace(
+        get_app_update_blockers=lambda: [],
+        start_offline_app_update_check=lambda manifest_path: pytest.fail("offline check should not start"),
+    )
+    window = _make_update_mainwindow(controller)
+    monkeypatch.setattr(view_mod.QFileDialog, "getOpenFileName", lambda *args, **kwargs: ("", ""))
+
+    assert MainWindow.request_offline_app_update(window) is False
+    assert window.messages == []
+
+
+def test_mainwindow_request_offline_app_update_starts_selected_manifest(qapp, tmp_path):
+    calls = []
+    manifest_path = tmp_path / "LabCraftUpdates" / "update.json"
+    controller = SimpleNamespace(
+        get_app_update_blockers=lambda: [],
+        start_offline_app_update_check=lambda selected: calls.append(Path(selected)) or (True, "started"),
+    )
+    window = _make_update_mainwindow(controller)
+
+    assert MainWindow.request_offline_app_update(window, manifest_path=manifest_path) is True
+    assert calls == [manifest_path]
+    assert window.messages == []
+
+
+def test_mainwindow_request_offline_app_update_blocks_when_busy(qapp, tmp_path):
+    controller = SimpleNamespace(
+        get_app_update_blockers=lambda: ["Firmware update is running."],
+        start_offline_app_update_check=lambda manifest_path: pytest.fail("offline check should not start"),
+    )
+    window = _make_update_mainwindow(controller)
+
+    assert MainWindow.request_offline_app_update(window, manifest_path=tmp_path / "update.json") is False
+    assert "Firmware update is running." in window.messages[0][1]
+
+
+def test_mainwindow_request_offline_app_update_start_failure(qapp, tmp_path):
+    controller = SimpleNamespace(
+        get_app_update_blockers=lambda: [],
+        start_offline_app_update_check=lambda manifest_path: (False, "already running"),
+    )
+    window = _make_update_mainwindow(controller)
+
+    assert MainWindow.request_offline_app_update(window, manifest_path=tmp_path / "update.json") is False
+    assert window.messages == [("Cannot Install Offline Bundle", "already running")]
+
+
+def test_mainwindow_request_offline_app_rollback_cancel_does_not_start(qapp, monkeypatch):
+    controller = SimpleNamespace(
+        get_app_update_blockers=lambda: [],
+        start_offline_app_rollback_check=lambda manifest_path: pytest.fail("offline rollback check should not start"),
+    )
+    window = _make_update_mainwindow(controller)
+    monkeypatch.setattr(view_mod.QFileDialog, "getOpenFileName", lambda *args, **kwargs: ("", ""))
+
+    assert MainWindow.request_offline_app_rollback(window) is False
+    assert window.messages == []
+
+
+def test_mainwindow_request_offline_app_rollback_starts_selected_manifest(qapp, tmp_path):
+    calls = []
+    manifest_path = tmp_path / "LabCraftUpdates" / "rollback.json"
+    controller = SimpleNamespace(
+        get_app_update_blockers=lambda: [],
+        start_offline_app_rollback_check=lambda selected: calls.append(Path(selected)) or (True, "started"),
+    )
+    window = _make_update_mainwindow(controller)
+
+    assert MainWindow.request_offline_app_rollback(window, manifest_path=manifest_path) is True
+    assert calls == [manifest_path]
+    assert window.messages == []
+
+
+def test_mainwindow_request_offline_app_rollback_blocks_when_busy(qapp, tmp_path):
+    controller = SimpleNamespace(
+        get_app_update_blockers=lambda: ["Firmware update is running."],
+        start_offline_app_rollback_check=lambda manifest_path: pytest.fail("offline rollback check should not start"),
+    )
+    window = _make_update_mainwindow(controller)
+
+    assert MainWindow.request_offline_app_rollback(window, manifest_path=tmp_path / "rollback.json") is False
+    assert "Firmware update is running." in window.messages[0][1]
+
+
 def _make_speed_tab_for_update_check():
     tab = SpeedProfilesTab.__new__(SpeedProfilesTab)
     tab.app_update_status_label = _FakeLabel()
     tab.app_update_check_button = _FakeButton()
+    tab.app_update_offline_button = _FakeButton()
     tab.app_update_button = _FakeButton()
+    tab.app_rollback_check_button = _FakeButton()
+    tab.app_rollback_offline_button = _FakeButton()
+    tab.app_rollback_button = _FakeButton()
     tab.controller = SimpleNamespace(get_app_update_blockers=lambda: [])
     tab.main_window = SimpleNamespace(messages=[], popup_message=lambda title, message: tab.main_window.messages.append((title, message)))
     return tab
+
+
+def test_speed_tab_formats_current_app_version_label(qapp):
+    tab = SpeedProfilesTab.__new__(SpeedProfilesTab)
+    tab.controller = SimpleNamespace(get_app_version=lambda: "v1.1.2")
+
+    assert SpeedProfilesTab._format_current_app_version_label(tab) == "Current version: v1.1.2"
+
+
+def test_speed_tab_current_app_version_label_falls_back_to_unknown(qapp):
+    tab = SpeedProfilesTab.__new__(SpeedProfilesTab)
+    tab.controller = SimpleNamespace(get_app_version=lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    assert SpeedProfilesTab._format_current_app_version_label(tab) == "Current version: unknown"
 
 
 def test_speed_tab_update_check_started_disables_update_controls(qapp):
@@ -380,7 +805,103 @@ def test_speed_tab_update_check_started_disables_update_controls(qapp):
 
     assert tab.app_update_status_label.text_value == "Checking for updates..."
     assert tab.app_update_check_button.enabled is False
+    assert tab.app_update_offline_button.enabled is False
     assert tab.app_update_button.enabled is False
+    assert tab.app_rollback_check_button.enabled is False
+    assert tab.app_rollback_offline_button.enabled is False
+    assert tab.app_rollback_button.enabled is False
+
+
+def test_speed_tab_offline_update_check_started_uses_offline_status(qapp):
+    tab = _make_speed_tab_for_update_check()
+    tab._app_update_check_mode = "offline"
+
+    SpeedProfilesTab._on_app_update_check_started(tab)
+
+    assert tab.app_update_status_label.text_value == "Checking offline bundle..."
+    assert tab.app_update_check_button.enabled is False
+    assert tab.app_update_offline_button.enabled is False
+    assert tab.app_update_button.enabled is False
+    assert tab.app_rollback_check_button.enabled is False
+    assert tab.app_rollback_offline_button.enabled is False
+    assert tab.app_rollback_button.enabled is False
+
+
+def test_speed_tab_rollback_check_started_uses_rollback_status(qapp):
+    tab = _make_speed_tab_for_update_check()
+    tab._app_update_check_mode = "rollback"
+
+    SpeedProfilesTab._on_app_update_check_started(tab)
+
+    assert tab.app_update_status_label.text_value == "Checking rollback target..."
+    assert tab.app_update_check_button.enabled is False
+    assert tab.app_update_offline_button.enabled is False
+    assert tab.app_update_button.enabled is False
+    assert tab.app_rollback_check_button.enabled is False
+    assert tab.app_rollback_offline_button.enabled is False
+    assert tab.app_rollback_button.enabled is False
+
+
+def test_speed_tab_offline_rollback_check_started_uses_offline_rollback_status(qapp):
+    tab = _make_speed_tab_for_update_check()
+    tab._app_update_check_mode = "offline_rollback"
+
+    SpeedProfilesTab._on_app_update_check_started(tab)
+
+    assert tab.app_update_status_label.text_value == "Checking offline rollback bundle..."
+    assert tab.app_update_button.enabled is False
+    assert tab.app_rollback_button.enabled is False
+
+
+def test_speed_tab_offline_update_button_requests_manifest_check(qapp):
+    tab = _make_speed_tab_for_update_check()
+    calls = []
+    tab.main_window.request_offline_app_update = lambda: calls.append(True) or True
+
+    SpeedProfilesTab._on_offline_app_update_requested(tab)
+
+    assert calls == [True]
+    assert tab._app_update_check_mode == "offline"
+
+
+def test_speed_tab_offline_update_button_resets_mode_when_cancelled(qapp):
+    tab = _make_speed_tab_for_update_check()
+    tab.main_window.request_offline_app_update = lambda: False
+
+    SpeedProfilesTab._on_offline_app_update_requested(tab)
+
+    assert tab._app_update_check_mode == ""
+
+
+def test_speed_tab_rollback_check_button_requests_rollback_check(qapp):
+    tab = _make_speed_tab_for_update_check()
+    calls = []
+    tab.main_window.request_app_rollback_check = lambda: calls.append(True) or True
+
+    SpeedProfilesTab._on_app_rollback_check_requested(tab)
+
+    assert calls == [True]
+    assert tab._app_update_check_mode == "rollback"
+
+
+def test_speed_tab_offline_rollback_button_requests_manifest_check(qapp):
+    tab = _make_speed_tab_for_update_check()
+    calls = []
+    tab.main_window.request_offline_app_rollback = lambda: calls.append(True) or True
+
+    SpeedProfilesTab._on_offline_app_rollback_requested(tab)
+
+    assert calls == [True]
+    assert tab._app_update_check_mode == "offline_rollback"
+
+
+def test_speed_tab_rollback_check_button_resets_mode_when_cancelled(qapp):
+    tab = _make_speed_tab_for_update_check()
+    tab.main_window.request_app_rollback_check = lambda: False
+
+    SpeedProfilesTab._on_app_rollback_check_requested(tab)
+
+    assert tab._app_update_check_mode == ""
 
 
 def test_speed_tab_up_to_date_check_keeps_update_disabled(qapp):
@@ -393,7 +914,11 @@ def test_speed_tab_up_to_date_check_keeps_update_disabled(qapp):
 
     assert tab.app_update_status_label.text_value == "LabCraft is up to date."
     assert tab.app_update_check_button.enabled is True
+    assert tab.app_update_offline_button.enabled is True
     assert tab.app_update_button.enabled is False
+    assert tab.app_rollback_check_button.enabled is True
+    assert tab.app_rollback_offline_button.enabled is True
+    assert tab.app_rollback_button.enabled is False
     assert tab.main_window.messages == []
 
 
@@ -412,8 +937,93 @@ def test_speed_tab_update_available_enables_update_and_shows_commits(qapp):
 
     assert tab.app_update_status_label.text_value == "2 update commits available."
     assert tab.app_update_button.enabled is True
+    assert tab.app_rollback_button.enabled is False
     assert tab.main_window.messages
     assert "def Add result popup" in tab.main_window.messages[0][1]
+
+
+def test_speed_tab_rollback_available_enables_restore_and_shows_details(qapp):
+    tab = _make_speed_tab_for_update_check()
+
+    SpeedProfilesTab._on_app_update_check_finished(
+        tab,
+        SimpleNamespace(
+            status="rollback_available",
+            message="Rollback is available from v1.2.0 to v1.1.2.",
+            update_source="online",
+            before_release_version="v1.2.0",
+            after_release_version="v1.1.2",
+            target_release_version="v1.1.2",
+            target_release_tag="v1.1.2",
+            release_summary="Previous stable release.",
+            release_notes=("Restores previous camera behavior.",),
+        ),
+    )
+
+    assert tab.app_update_status_label.text_value == "Rollback is available from v1.2.0 to v1.1.2."
+    assert tab.app_update_button.enabled is False
+    assert tab.app_rollback_button.enabled is True
+    title, message = tab.main_window.messages[0]
+    assert title == "Rollback Available"
+    assert "Configured release rollback target" in message
+    assert "Rollback: v1.2.0 -> v1.1.2" in message
+    assert "Tag: v1.1.2" in message
+    assert "Restores previous camera behavior." in message
+
+
+def test_speed_tab_offline_rollback_available_shows_source_details(qapp, tmp_path):
+    tab = _make_speed_tab_for_update_check()
+    manifest_path = tmp_path / "LabCraftUpdates" / "rollback.json"
+
+    SpeedProfilesTab._on_app_update_check_finished(
+        tab,
+        SimpleNamespace(
+            status="rollback_available",
+            message="Rollback is available from v1.2.0 to v1.1.2 using the offline bundle.",
+            update_source="offline",
+            offline_manifest_path=manifest_path,
+            before_release_version="v1.2.0",
+            after_release_version="v1.1.2",
+            target_release_version="v1.1.2",
+        ),
+    )
+
+    assert tab.app_update_button.enabled is False
+    assert tab.app_rollback_button.enabled is True
+    title, message = tab.main_window.messages[0]
+    assert title == "Rollback Available"
+    assert "Offline rollback bundle" in message
+    assert str(manifest_path) in message
+
+
+def test_speed_tab_release_update_available_shows_release_details(qapp):
+    tab = _make_speed_tab_for_update_check()
+
+    SpeedProfilesTab._on_app_update_check_finished(
+        tab,
+        SimpleNamespace(
+            status="update_available",
+            message="LabCraft v1.1.2 is available.",
+            update_source="online",
+            target_release_version="v1.1.2",
+            release_summary="Release-aware online updates.",
+            release_notes=("Uses stable release tags.", "Leaves offline bundles unchanged."),
+            rollback_version="v1.1.1",
+            behind_count=2,
+            commits=("def Release-aware updater", "abc Metadata display"),
+        ),
+    )
+
+    assert tab.app_update_status_label.text_value == "LabCraft v1.1.2 is available."
+    assert tab.app_update_button.enabled is True
+    assert tab.app_rollback_button.enabled is False
+    title, message = tab.main_window.messages[0]
+    assert title == "Updates Available"
+    assert "Release: v1.1.2" in message
+    assert "Summary: Release-aware online updates." in message
+    assert "Uses stable release tags." in message
+    assert "Rollback: v1.1.1" in message
+    assert "def Release-aware updater" in message
 
 
 def test_speed_tab_offline_update_available_shows_source_details(qapp, tmp_path):
@@ -433,10 +1043,43 @@ def test_speed_tab_offline_update_available_shows_source_details(qapp, tmp_path)
     )
 
     assert tab.app_update_button.enabled is True
+    assert tab.app_rollback_button.enabled is False
     title, message = tab.main_window.messages[0]
     assert title == "Updates Available"
     assert "Source: Offline bundle" in message
     assert str(manifest_path) in message
+
+
+def test_speed_tab_offline_release_update_available_shows_release_details(qapp, tmp_path):
+    tab = _make_speed_tab_for_update_check()
+    manifest_path = tmp_path / "LabCraftUpdates" / "update.json"
+
+    SpeedProfilesTab._on_app_update_check_finished(
+        tab,
+        SimpleNamespace(
+            status="update_available",
+            message="LabCraft v1.1.2 is available from the offline bundle.",
+            update_source="offline",
+            offline_manifest_path=manifest_path,
+            target_release_version="v1.1.2",
+            release_summary="Release-aware offline bundle.",
+            release_notes=("Installs a named release from USB.",),
+            rollback_version="v1.1.1",
+            behind_count=1,
+            commits=("def Offline release update",),
+        ),
+    )
+
+    assert tab.app_update_button.enabled is True
+    assert tab.app_rollback_button.enabled is False
+    title, message = tab.main_window.messages[0]
+    assert title == "Updates Available"
+    assert "Source: Offline bundle" in message
+    assert str(manifest_path) in message
+    assert "Release: v1.1.2" in message
+    assert "Summary: Release-aware offline bundle." in message
+    assert "Installs a named release from USB." in message
+    assert "Rollback: v1.1.1" in message
 
 
 def test_speed_tab_update_check_failure_keeps_update_disabled(qapp):
@@ -449,6 +1092,7 @@ def test_speed_tab_update_check_failure_keeps_update_disabled(qapp):
 
     assert tab.app_update_status_label.text_value == "Update check could not contact the remote."
     assert tab.app_update_button.enabled is False
+    assert tab.app_rollback_button.enabled is False
 
 
 def test_mainwindow_init_does_not_schedule_startup_update_result():
@@ -483,6 +1127,8 @@ def test_mainwindow_startup_update_result_popup_shows_once_and_clears_marker(qap
                 "before_sha": "abc",
                 "after_sha": "def",
                 "log_path": str(tmp_path / "local" / "update_logs" / "update.log"),
+                "target_release_version": "v1.1.2",
+                "target_release_tag": "v1.1.2",
                 "commits": ["def Add result popup"],
             }
         ),
@@ -505,7 +1151,42 @@ def test_mainwindow_startup_update_result_popup_shows_once_and_clears_marker(qap
     title, message = window.messages[0]
     assert title == "Application Update Result"
     assert "LabCraft was updated successfully." in message
+    assert "Release: v1.1.2" in message
+    assert "Tag: v1.1.2" in message
     assert "def Add result popup" in message
+
+
+def test_mainwindow_startup_rollback_result_uses_rollback_title_and_message(qapp, tmp_path):
+    result_path = tmp_path / "local" / "update_logs" / "latest_update_result.json"
+    result_path.parent.mkdir(parents=True)
+    result_path.write_text(
+        json.dumps(
+            {
+                "operation": "rollback",
+                "status": "rolled_back",
+                "message": "LabCraft was rolled back from v1.2.0 to v1.1.2.",
+                "before_release_version": "v1.2.0",
+                "after_release_version": "v1.1.2",
+                "target_release_version": "v1.1.2",
+                "target_release_tag": "v1.1.2",
+                "before_sha": "newer",
+                "after_sha": "older",
+                "commits": ["newer Removed by rollback"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    window = _make_update_mainwindow(SimpleNamespace(_repo_root=tmp_path))
+
+    assert MainWindow.show_pending_app_update_result(window) is True
+
+    assert window.messages
+    title, message = window.messages[0]
+    assert title == "Application Rollback Result"
+    assert "Operation: Rollback" in message
+    assert "Before release: v1.2.0" in message
+    assert "After release: v1.1.2" in message
+    assert "Rollback commits:" in message
 
 
 def test_mainwindow_update_result_message_includes_offline_source(tmp_path):

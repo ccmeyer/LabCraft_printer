@@ -15,6 +15,7 @@ NOW = datetime(2026, 6, 18, 12, 0, 0, tzinfo=timezone.utc)
 BUNDLE_BYTES = b"fake bundle bytes\n"
 HEAD_SHA = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
 BASE_SHA = "00112233445566778899aabbccddeeff00112233"
+RELEASE_SHA = "11223344556677889900aabbccddeeff11223344"
 
 
 class FakeGitRunner:
@@ -27,6 +28,11 @@ class FakeGitRunner:
         remote_url: str = "https://github.com/ccmeyer/LabCraft_printer",
         head_sha: str = HEAD_SHA,
         base_sha: str = BASE_SHA,
+        release_version: str = "v1.1.2",
+        release_sha: str = RELEASE_SHA,
+        release_manifest_payload: dict | None = None,
+        release_tag_returncode: int = 0,
+        release_manifest_returncode: int = 0,
         fetch_returncode: int = 0,
         ref_returncode: int = 0,
         bundle_returncode: int = 0,
@@ -44,6 +50,11 @@ class FakeGitRunner:
         self.remote_url = remote_url
         self.head_sha = head_sha
         self.base_sha = base_sha
+        self.release_version = release_version
+        self.release_sha = release_sha
+        self.release_manifest_payload = release_manifest_payload
+        self.release_tag_returncode = release_tag_returncode
+        self.release_manifest_returncode = release_manifest_returncode
         self.fetch_returncode = fetch_returncode
         self.ref_returncode = ref_returncode
         self.bundle_returncode = bundle_returncode
@@ -82,17 +93,48 @@ class FakeGitRunner:
                 return bundler.CommandResult(args_tuple, self.ref_returncode, stderr="bad ref")
             return bundler.CommandResult(args_tuple, 0, stdout=f"{self.head_sha}\n")
 
+        if git_args == ("rev-parse", f"{self.release_version}^{{commit}}"):
+            if self.release_tag_returncode:
+                return bundler.CommandResult(args_tuple, self.release_tag_returncode, stderr="bad release tag")
+            return bundler.CommandResult(args_tuple, 0, stdout=f"{self.release_sha}\n")
+
+        if git_args == ("show", f"{self.release_version}:releases/{self.release_version}.json"):
+            if self.release_manifest_returncode:
+                return bundler.CommandResult(args_tuple, self.release_manifest_returncode, stderr="missing manifest")
+            payload = self.release_manifest_payload or {
+                "schema_version": bundler.RELEASE_MANIFEST_SCHEMA_VERSION,
+                "version": self.release_version,
+                "tag": self.release_version,
+                "channel": "stable",
+                "release_date": "2026-07-06",
+                "previous_version": "v1.1.1",
+                "rollback_version": "v1.1.1",
+                "requires_firmware": None,
+                "summary": "Release-aware offline bundle.",
+                "notes": ["Installs a named release."],
+                "validation": ["Focused tests pass."],
+            }
+            return bundler.CommandResult(args_tuple, 0, stdout=json.dumps(payload) + "\n")
+
         if len(git_args) == 3 and git_args[:2] == ("rev-parse", "--verify") and git_args[2].endswith("^{commit}"):
             if self.base_returncode:
                 return bundler.CommandResult(args_tuple, self.base_returncode, stderr="bad base")
             return bundler.CommandResult(args_tuple, 0, stdout=f"{self.base_sha}\n")
 
-        if git_args == ("merge-base", "--is-ancestor", self.base_sha, self.head_sha):
+        if (
+            len(git_args) == 4
+            and git_args[:3] == ("merge-base", "--is-ancestor", self.base_sha)
+            and git_args[3] in (self.head_sha, self.release_sha)
+        ):
             if self.ancestor_returncode:
                 return bundler.CommandResult(args_tuple, self.ancestor_returncode, stderr="not ancestor")
             return bundler.CommandResult(args_tuple, 0, stdout="")
 
-        if git_args == ("rev-list", "--count", f"{self.base_sha}..{self.head_sha}"):
+        if (
+            len(git_args) == 3
+            and git_args[:2] == ("rev-list", "--count")
+            and git_args[2] in (f"{self.base_sha}..{self.head_sha}", f"{self.base_sha}..{self.release_sha}")
+        ):
             if self.count_returncode:
                 return bundler.CommandResult(args_tuple, self.count_returncode, stderr="bad range")
             return bundler.CommandResult(args_tuple, 0, stdout=f"{self.incremental_count}\n")
@@ -151,6 +193,86 @@ def test_create_update_bundle_writes_manifest_and_summary_contract(tmp_path):
 
     bundle_call = next(call for call in runner.git_calls() if call[1:3] == ("bundle", "create"))
     assert bundle_call[4:] == ("refs/remotes/origin/stable", "--tags")
+
+
+def test_create_release_update_bundle_writes_release_manifest_fields(tmp_path):
+    runner = FakeGitRunner(tmp_path)
+    result = bundler.create_update_bundle(
+        bundler.BundleConfig(repo_root=tmp_path, output_dir=tmp_path / "out", release="v1.1.2"),
+        command_runner=runner,
+        now=NOW,
+    )
+
+    expected_name = "labcraft-v1.1.2-20260618T120000Z-112233445566"
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert result.bundle_path.name == f"{expected_name}.bundle"
+    assert result.manifest_path.name == f"{expected_name}.json"
+    assert manifest["source_ref"] == "refs/tags/v1.1.2"
+    assert manifest["head_sha"] == RELEASE_SHA
+    assert manifest["include_tags"] is True
+    assert manifest["release_version"] == "v1.1.2"
+    assert manifest["release_tag"] == "v1.1.2"
+    assert manifest["rollback_version"] == "v1.1.1"
+    assert manifest["release_manifest"]["summary"] == "Release-aware offline bundle."
+
+    bundle_call = next(call for call in runner.git_calls() if call[1:3] == ("bundle", "create"))
+    assert bundle_call[4:] == ("refs/tags/v1.1.2", "--tags")
+
+
+def test_incremental_release_bundle_includes_tags_by_default(tmp_path):
+    runner = FakeGitRunner(tmp_path)
+    result = bundler.create_update_bundle(
+        bundler.BundleConfig(repo_root=tmp_path, output_dir=tmp_path / "out", release="v1.1.2", since="abc123"),
+        command_runner=runner,
+        now=NOW,
+    )
+
+    assert result.manifest["bundle_mode"] == "incremental"
+    assert result.manifest["source_ref"] == "refs/tags/v1.1.2"
+    assert result.manifest["include_tags"] is True
+    bundle_call = next(call for call in runner.git_calls() if call[1:3] == ("bundle", "create"))
+    assert bundle_call[4:] == ("refs/tags/v1.1.2", f"^{BASE_SHA}", "--tags")
+
+
+def test_release_bundle_rejects_manifest_mismatch(tmp_path):
+    runner = FakeGitRunner(
+        tmp_path,
+        release_manifest_payload={
+            "schema_version": bundler.RELEASE_MANIFEST_SCHEMA_VERSION,
+            "version": "v9.9.9",
+            "tag": "v9.9.9",
+            "channel": "stable",
+            "release_date": "2026-07-06",
+            "previous_version": "v1.1.1",
+            "rollback_version": "v1.1.1",
+            "requires_firmware": None,
+            "summary": "Wrong release.",
+            "notes": [],
+            "validation": [],
+        },
+    )
+
+    with pytest.raises(bundler.BundleCreateError) as exc_info:
+        bundler.create_update_bundle(
+            bundler.BundleConfig(repo_root=tmp_path, output_dir=tmp_path / "out", release="v1.1.2"),
+            command_runner=runner,
+            now=NOW,
+        )
+
+    assert exc_info.value.status == bundler.STATUS_RELEASE_METADATA_INVALID
+
+
+def test_release_bundle_rejects_missing_tag(tmp_path):
+    runner = FakeGitRunner(tmp_path, release_tag_returncode=128)
+
+    with pytest.raises(bundler.BundleCreateError) as exc_info:
+        bundler.create_update_bundle(
+            bundler.BundleConfig(repo_root=tmp_path, output_dir=tmp_path / "out", release="v1.1.2"),
+            command_runner=runner,
+            now=NOW,
+        )
+
+    assert exc_info.value.status == bundler.STATUS_REF_RESOLVE_FAILED
 
 
 def test_fetch_runs_by_default_and_can_be_skipped(tmp_path):
@@ -310,6 +432,28 @@ def test_cli_returns_success_json(tmp_path):
     assert payload["head_sha"] == HEAD_SHA
     assert Path(payload["bundle_path"]).is_file()
     assert Path(payload["manifest_path"]).is_file()
+
+
+def test_cli_success_json_includes_release_fields(tmp_path):
+    runner = FakeGitRunner(tmp_path)
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    code = bundler.main(
+        ["--repo-root", str(tmp_path), "--output-dir", str(tmp_path / "out"), "--release", "v1.1.2"],
+        command_runner=runner,
+        now=NOW,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert code == 0
+    assert stderr.getvalue() == ""
+    payload = json.loads(stdout.getvalue())
+    assert payload["status"] == "created"
+    assert payload["release_version"] == "v1.1.2"
+    assert payload["release_tag"] == "v1.1.2"
+    assert payload["rollback_version"] == "v1.1.1"
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:

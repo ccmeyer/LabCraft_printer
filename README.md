@@ -337,12 +337,13 @@ Operators can update the Python application from the Firmware tab.
 Expected flow:
 
 - Click `Check for Updates`.
-- If the app is already current, it stays open and reports that no update is available.
-- If an update is available, the app shows pending commit summaries and enables `Update App`.
+- The online check fetches tags, reads the upstream `releases/latest.json`, and compares the local checkout with the latest stable release tag.
+- If the app is already current with that stable release, it stays open and reports that no update is available.
+- If an update is available, the app shows the target release version, release summary, release notes, rollback version when defined, and pending commit summaries, then enables `Update App`.
 - Click `Update App`; the app confirms that application code will update and firmware will not be flashed.
 - If the machine is connected, the normal disconnect/close flow runs first.
-- A `LabCraft Updater` window appears after the main app closes and shows update progress.
-- On success, the updater shows the status, commit range, installed commit summaries, and log path.
+- A `LabCraft Updater` window appears after the main app closes, resolves the same confirmed release, and applies it with a fast-forward merge of the release tag.
+- On success, the updater shows the status, installed release, commit range, installed commit summaries, and log path.
 - Close the updater window, then launch LabCraft again using the normal shortcut or launch command.
 
 If the update is blocked or fails, the updater window stays open and shows the log path. Support should ask for the path shown in the updater window, usually under:
@@ -356,14 +357,24 @@ For dirty worktrees, network failures, credential failures, or non-fast-forward 
 Offline operator flow:
 
 - Copy the support-provided `LabCraftUpdates` folder to a USB drive.
-- Plug the USB drive into the machine before clicking `Check for Updates`.
-- The app tries the normal online check first.
+- Plug the USB drive into the machine.
+- Click `Install Offline Bundle`, select the support-provided manifest JSON, and review the displayed release details.
+- If the bundle is valid and newer than the installed app, click `Update App` to install it through the same updater window and safe close flow.
+- The regular `Check for Updates` flow still tries the normal online check first.
 - If the online check cannot contact the remote repository, the app scans removable drives for `LabCraftUpdates/*.json` manifests.
-- If a valid fast-forward offline bundle is found, the same `Update App` button updates from that bundle.
+- If a valid fast-forward offline bundle is found automatically, the same `Update App` button updates from that bundle.
 
 ### Create offline update bundles (support only)
 
-When a machine cannot reach GitHub, support can package the current deployment branch as a portable Git bundle plus manifest. A full bundle is the safest default:
+When a machine cannot reach GitHub, support should package a named release as a portable Git bundle plus manifest. A full release bundle is the safest default:
+
+```powershell
+.\env\Scripts\python.exe tools/create_update_bundle.py --release v1.1.2
+```
+
+Release-aware bundles include the target release version, release manifest, release notes, and rollback version in the generated manifest so the app can show the operator which release will install.
+
+If support intentionally needs to package the current deployment branch without release metadata, use:
 
 ```powershell
 .\env\Scripts\python.exe tools/create_update_bundle.py --branch stable
@@ -378,16 +389,18 @@ git rev-parse HEAD
 Then create an incremental bundle from the support checkout using that commit as the prerequisite base:
 
 ```powershell
-.\env\Scripts\python.exe tools/create_update_bundle.py --branch stable --since <offline-head-sha>
+.\env\Scripts\python.exe tools/create_update_bundle.py --release v1.1.2 --since <offline-head-sha>
 ```
 
 As a convenience, support can package approximately the latest 20 commits when confident the offline machine already has `stable~20`:
 
 ```powershell
-.\env\Scripts\python.exe tools/create_update_bundle.py --branch stable --last 20
+.\env\Scripts\python.exe tools/create_update_bundle.py --release v1.1.2 --last 20
 ```
 
 Incremental bundles are smaller, but they require the target machine to already have the base commit. If that prerequisite is missing, `git bundle verify` and the app updater reject the bundle cleanly. Incremental bundles omit tags by default; add `--include-tags` only when tag refs are needed.
+
+Release-aware incremental bundles include tags by default so the target release tag is available inside the bundle.
 
 The files are written under:
 
@@ -402,6 +415,34 @@ For backend/manual validation on the target checkout, run the updater against th
 ```powershell
 .\env\Scripts\python.exe tools/update_and_restart.py --repo-root . --offline-manifest path\to\labcraft-stable-....json --no-relaunch
 ```
+
+### Controlled release rollback
+
+The Firmware tab includes support-guided rollback controls for restoring a previous application version without allowing arbitrary tag selection. Use rollback only with support guidance after confirming the machine is idle and no print, calibration, capture, or firmware operation is active.
+
+Expected UI flow:
+
+- Click `Check Rollback`.
+- If the installed release defines a rollback target, the app shows the exact path such as `v1.2.0 -> v1.1.2`.
+- Click `Restore Previous App Version`; the app confirms that application code will move backward and firmware will not be flashed.
+- A `LabCraft Rollback` window appears after the main app closes, verifies the same target again, and applies it.
+- For machines without GitHub access, click `Restore From Offline Rollback Bundle` and select a support-provided release-aware manifest.
+
+The backend command remains available for support cases where the main app cannot launch.
+
+Online rollback uses the installed `VERSION`, reads that release tag's manifest, and resets to its configured `rollback_version`:
+
+```powershell
+.\env\Scripts\python.exe tools/update_and_restart.py --repo-root . --rollback --no-relaunch --record-result
+```
+
+Offline rollback requires a selected release-aware bundle manifest for the target release:
+
+```powershell
+.\env\Scripts\python.exe tools/update_and_restart.py --repo-root . --rollback --offline-manifest path\to\labcraft-stable-....json --no-relaunch --record-result
+```
+
+The rollback command checks for a dirty worktree before fetching or resetting, verifies the target release metadata first, then applies the verified target with `git reset --hard`. If validation fails, the checkout is left at the current commit. After rollback, relaunch LabCraft normally and review the startup rollback result message or `local/update_logs/latest_update_result.json`.
 
 ## Pi setup status
 

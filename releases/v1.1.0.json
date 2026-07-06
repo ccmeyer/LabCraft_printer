@@ -1,0 +1,19 @@
+{
+  "channel": "stable",
+  "notes": [
+    "Marked the deployed stable branch head as the stable baseline release.",
+    "Includes existing branch-head online app update support.",
+    "Includes existing offline Git bundle update support."
+  ],
+  "previous_version": null,
+  "release_date": "2026-07-05",
+  "requires_firmware": null,
+  "rollback_version": null,
+  "schema_version": "labcraft_release_v1",
+  "summary": "Deployed stable baseline release.",
+  "tag": "v1.1.0",
+  "validation": [
+    "Release validation recorded outside this metadata slice."
+  ],
+  "version": "v1.1.0"
+}

@@ -34,6 +34,43 @@ def test_update_window_initializes_with_title(qapp, tmp_path):
     window.close()
 
 
+def test_update_window_rollback_initializes_with_rollback_text(qapp, tmp_path):
+    window = _make_window(qapp, tmp_path, config_kwargs={"rollback": True})
+
+    assert window.windowTitle() == "LabCraft Rollback"
+    assert window.status_label.text() == "Preparing rollback..."
+
+    window.close()
+
+
+def test_updater_worker_uses_rollback_runner_when_configured(qapp, tmp_path, monkeypatch):
+    calls = []
+    result = updater.UpdateResult(
+        updater.STATUS_ROLLED_BACK,
+        0,
+        "LabCraft was rolled back.",
+        repo_root=tmp_path,
+        operation=updater.OPERATION_ROLLBACK,
+    )
+
+    def fake_rollback(config, **kwargs):
+        calls.append((config, kwargs))
+        return result
+
+    monkeypatch.setattr(update_window.updater, "run_rollback", fake_rollback)
+    monkeypatch.setattr(update_window.updater, "run_update", lambda *args, **kwargs: pytest.fail("run_update called"))
+    worker = update_window.UpdaterWorker(_config(tmp_path, rollback=True), command_runner="runner")
+    emitted = []
+    worker.finished.connect(emitted.append)
+
+    worker.run()
+
+    assert emitted == [result]
+    assert calls[0][0].rollback is True
+    assert calls[0][0].no_relaunch is True
+    assert calls[0][1]["command_runner"] == "runner"
+
+
 def test_update_window_progress_event_updates_status(qapp, tmp_path):
     window = _make_window(qapp, tmp_path)
 
