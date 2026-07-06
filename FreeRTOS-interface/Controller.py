@@ -699,11 +699,12 @@ class DropletCapturePerformanceDiagnostics:
 class AppUpdateCheckWorker(QtCore.QObject):
     finished = QtCore.Signal(object)
 
-    def __init__(self, repo_root, command_runner=None, offline_manifest_path=None):
+    def __init__(self, repo_root, command_runner=None, offline_manifest_path=None, release_channel="stable"):
         super().__init__()
         self.repo_root = Path(repo_root)
         self.command_runner = command_runner
         self.offline_manifest_path = Path(offline_manifest_path) if offline_manifest_path is not None else None
+        self.release_channel = str(release_channel or "stable")
 
     @QtCore.Slot()
     def run(self):
@@ -712,11 +713,12 @@ class AppUpdateCheckWorker(QtCore.QObject):
         config = update_and_restart.UpdaterConfig(
             repo_root=self.repo_root,
             offline_manifest_path=self.offline_manifest_path,
+            release_channel=self.release_channel,
         )
         kwargs = {}
         if self.command_runner is not None:
             kwargs["command_runner"] = self.command_runner
-        if self.offline_manifest_path is not None:
+        if self.offline_manifest_path is not None or self.release_channel == "release_candidate":
             result = update_and_restart.run_update_check(config, **kwargs)
         else:
             result = update_and_restart.run_update_check_with_offline_fallback(config, **kwargs)
@@ -1448,7 +1450,7 @@ class Controller(QObject):
         except Exception:
             return "unknown"
 
-    def start_app_update_check(self, command_runner=None, offline_manifest_path=None):
+    def start_app_update_check(self, command_runner=None, offline_manifest_path=None, release_channel="stable"):
         if self.is_app_update_check_running():
             return False, "An update check is already running."
 
@@ -1457,6 +1459,7 @@ class Controller(QObject):
             self._repo_root,
             command_runner=command_runner,
             offline_manifest_path=offline_manifest_path,
+            release_channel=release_channel,
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)

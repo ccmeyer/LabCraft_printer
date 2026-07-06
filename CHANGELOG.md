@@ -25,6 +25,31 @@
 
 - Recommended rollback version: `v1.1.2`.
 
+## v1.1.3 - 2026-07-06
+
+### Added
+
+- Added a default-off `Include release candidates` checkbox in the Application Update area.
+- Added release-channel resolution so support-guided online update checks can target `release_candidate` from `releases/latest.json`.
+- Added release-candidate warnings to update details and confirmation messaging.
+
+### Changed
+
+- Normal online app updates still target the latest stable release tag by default.
+- Update apply behavior remains pinned to the confirmed release tag.
+- No firmware, device protocol, motion, or pressure-control changes.
+
+### Validation
+
+- Focused release-channel updater tests:
+  `.\env\Scripts\python.exe -m pytest -q tests/test_update_and_restart.py tests/test_app_update_request.py`
+
+### Rollback
+
+- Recommended rollback version: `v1.1.2`.
+
+
+
 ## v1.1.2 - 2026-07-06
 
 ### Added

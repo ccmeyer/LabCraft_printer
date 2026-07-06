@@ -48,6 +48,7 @@ class FakeGitRunner:
         update_commits: tuple[str, ...] = (),
         target_release_version: str = "v1.1.2",
         target_release_sha: str = "release789",
+        target_release_channel: str = "stable",
         release_summary: str = "Release-aware updater bootstrap.",
         release_notes: tuple[str, ...] = ("Adds release metadata.",),
         rollback_version: str = "v1.1.1",
@@ -92,6 +93,7 @@ class FakeGitRunner:
         self.update_commits = update_commits
         self.target_release_version = target_release_version
         self.target_release_sha = target_release_sha
+        self.target_release_channel = target_release_channel
         self.release_summary = release_summary
         self.release_notes = release_notes
         self.rollback_version = rollback_version
@@ -188,7 +190,7 @@ class FakeGitRunner:
                 "schema_version": updater.RELEASE_MANIFEST_SCHEMA_VERSION,
                 "version": self.target_release_version,
                 "tag": self.target_release_version,
-                "channel": "stable",
+                "channel": self.target_release_channel,
                 "release_date": "2026-07-06",
                 "previous_version": self.rollback_version,
                 "rollback_version": self.rollback_version,
@@ -1210,6 +1212,12 @@ def test_cli_parser_accepts_target_release():
     assert config.target_release == "v1.1.2"
 
 
+def test_cli_parser_accepts_release_channel():
+    config = updater.parse_args(["--repo-root", ".", "--release-channel", "release_candidate"])
+
+    assert config.release_channel == "release_candidate"
+
+
 def test_cli_parser_accepts_rollback():
     config = updater.parse_args(["--repo-root", ".", "--rollback"])
 
@@ -1324,6 +1332,62 @@ def test_update_check_behind_upstream_returns_update_available_with_commits(tmp_
         "def456 Add updater result dialog",
         "abc123 Improve update check",
     )
+
+
+def test_update_check_release_candidate_channel_reports_candidate_update(tmp_path):
+    runner = FakeGitRunner(
+        tmp_path,
+        ahead_count=0,
+        behind_count=2,
+        check_commits=("def456 Camera refactor RC", "abc123 Manual refuel checks"),
+        target_release_version="v1.2.0-rc.3",
+        target_release_sha="rc789",
+        target_release_channel="release_candidate",
+        release_summary="Camera refactor release candidate.",
+        release_notes=("Adds the camera refactor release candidate.",),
+        release_index_payload={
+            "schema_version": updater.RELEASE_INDEX_SCHEMA_VERSION,
+            "stable": "v1.1.3",
+            "release_candidate": "v1.2.0-rc.3",
+            "releases": ["v1.2.0-rc.3", "v1.1.3", "v1.1.2"],
+        },
+    )
+
+    result = updater.run_update_check(
+        _config(tmp_path, release_channel="release_candidate"),
+        command_runner=runner,
+    )
+
+    assert result.status == updater.STATUS_UPDATE_AVAILABLE
+    assert result.message == "LabCraft v1.2.0-rc.3 is available."
+    assert result.target_release_version == "v1.2.0-rc.3"
+    assert result.target_release_sha == "rc789"
+    assert result.release_summary == "Camera refactor release candidate."
+    assert result.release_notes == ("Adds the camera refactor release candidate.",)
+    assert ("git", "merge", "--ff-only", "v1.2.0-rc.3") not in [call[0] for call in runner.calls]
+
+
+def test_update_check_release_candidate_channel_without_candidate_fails_safely(tmp_path):
+    runner = FakeGitRunner(
+        tmp_path,
+        release_index_payload={
+            "schema_version": updater.RELEASE_INDEX_SCHEMA_VERSION,
+            "stable": "v1.1.3",
+            "release_candidate": None,
+            "releases": ["v1.1.3", "v1.1.2"],
+        },
+    )
+
+    result = updater.run_update_check(
+        _config(tmp_path, release_channel="release_candidate"),
+        command_runner=runner,
+    )
+
+    calls = [call[0] for call in runner.calls]
+    assert result.status == updater.STATUS_FETCH_FAILED
+    assert "release candidate release metadata" in result.message
+    assert "release_candidate" in result.message
+    assert not any(call[:2] == ("git", "merge") for call in calls)
 
 
 def test_update_check_dirty_worktree_blocks_before_fetch(tmp_path):
