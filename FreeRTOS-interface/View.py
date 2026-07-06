@@ -4551,13 +4551,9 @@ class SimplePositionWidget(QGroupBox):
 
 class SpeedProfilesTab(QtWidgets.QWidget):
     """
-    A mid-panel tab showing per-axis max speed and acceleration.
-    - Rows: X, Y, Z
-    - Columns: Axis | Max Speed (Hz) | Acceleration (steps/s^2)
-
-    Signals:
-        set_axis_maxspeed(axis_index:int, max_hz:int)
-        set_axis_accel(axis_index:int, accel_sps2:int)
+    A mid-panel maintenance tab for firmware, app updates, MCU logs, and
+    MCU task usage. The class name is retained for compatibility with the
+    existing MainWindow tab wiring.
     """
     set_axis_maxspeed = QtCore.Signal(int, int)
     set_axis_accel    = QtCore.Signal(int, int)
@@ -4573,23 +4569,8 @@ class SpeedProfilesTab(QtWidgets.QWidget):
         self._qualification_window = None
         self._regulator_calibration_window = None
 
-        # Prevent feedback loops when we update widgets from model signals
+        # Retained for compatibility with older helper slots.
         self._updating = False
-
-        # Reasonable UI limits
-        self._speed_min  = 1000       # Hz
-        self._speed_max  = 100000     # Hz
-        self._speed_step = 1000       # Hz
-
-        self._acc_min    = 1000      # steps/s^2
-        self._acc_max    = 200000    # steps/s^2
-        self._acc_step   = 10000      # steps/s^2
-
-        self._axis_rows = [
-            ("X", 0),
-            ("Y", 1),
-            ("Z", 2),
-        ]
 
         self._build_ui()
         self._connect_model_signals()
@@ -4597,16 +4578,220 @@ class SpeedProfilesTab(QtWidgets.QWidget):
         # Background to match the rest of the mid-panel
         self.setStyleSheet(f"QWidget#SpeedProfilesTab {{ background-color: {self.color_dict['darker_gray']}; }}")
 
-        # If the model already has values, try to show them once at startup
-        self._pull_initial_values_if_available()
-
     # ---------------- UI ----------------
 
     def _build_ui(self):
         layout = QtWidgets.QGridLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
-        layout.setHorizontalSpacing(14)
-        layout.setVerticalSpacing(10)
+        layout.setHorizontalSpacing(12)
+        layout.setVerticalSpacing(0)
+
+        actions_panel = QtWidgets.QWidget(self)
+        actions_panel.setObjectName("firmwareMaintenanceActions")
+        actions_panel.setMinimumWidth(320)
+        actions_panel.setMaximumWidth(460)
+        actions_v = QtWidgets.QVBoxLayout(actions_panel)
+        actions_v.setContentsMargins(0, 0, 0, 0)
+        actions_v.setSpacing(10)
+
+        monitor_panel = QtWidgets.QWidget(self)
+        monitor_panel.setObjectName("firmwareMaintenanceMonitor")
+        monitor_v = QtWidgets.QVBoxLayout(monitor_panel)
+        monitor_v.setContentsMargins(0, 0, 0, 0)
+        monitor_v.setSpacing(10)
+
+        fw_group = QtWidgets.QGroupBox("Firmware Update")
+        fw_group.setObjectName("firmwareUpdateGroup")
+        fw_v = QtWidgets.QVBoxLayout(fw_group)
+
+        self.fw_status = QtWidgets.QLabel("Idle")
+        self.fw_bar = QtWidgets.QProgressBar()
+        self.fw_bar.setRange(0, 100)
+        self.fw_bar.setValue(0)
+
+        self.firmware_update_button = QtWidgets.QPushButton("Update Firmware")
+        self.firmware_update_button.setStyleSheet("""
+                QPushButton:disabled {
+                    background-color: #555555;
+                    color: #AAAAAA;
+                    border: 1px solid #444444;
+                }
+                """)
+        self.firmware_update_button.clicked.connect(self._on_firmware_update_requested)
+
+        fw_v.addWidget(self.fw_status)
+        fw_v.addWidget(self.fw_bar)
+        fw_v.addWidget(self.firmware_update_button)
+        actions_v.addWidget(fw_group)
+
+        app_update_group = QtWidgets.QGroupBox("Application Update")
+        app_update_group.setObjectName("applicationUpdateGroup")
+        app_update_v = QtWidgets.QVBoxLayout(app_update_group)
+        app_update_v.setSpacing(8)
+
+        self.app_update_version_label = QtWidgets.QLabel(self._format_current_app_version_label())
+        self.app_update_version_label.setWordWrap(True)
+        app_update_v.addWidget(self.app_update_version_label)
+
+        self.app_update_status_label = QtWidgets.QLabel("Check for updates before updating.")
+        self.app_update_status_label.setWordWrap(True)
+        app_update_v.addWidget(self.app_update_status_label)
+
+        self.app_update_release_candidate_checkbox = QtWidgets.QCheckBox("Include release candidates")
+        self.app_update_release_candidate_checkbox.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.app_update_release_candidate_checkbox.setChecked(False)
+        self.app_update_release_candidate_checkbox.toggled.connect(self._on_app_release_candidate_toggled)
+        app_update_v.addWidget(self.app_update_release_candidate_checkbox)
+
+        app_button_grid = QtWidgets.QGridLayout()
+        app_button_grid.setHorizontalSpacing(8)
+        app_button_grid.setVerticalSpacing(8)
+
+        self.app_update_check_button = QtWidgets.QPushButton("Check Updates")
+        self.app_update_check_button.setObjectName("appUpdateCheckButton")
+        self.app_update_check_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.app_update_check_button.setToolTip("Check the configured online release channel.")
+        self.app_update_check_button.clicked.connect(self._on_app_update_check_requested)
+
+        self.app_update_offline_button = QtWidgets.QPushButton("Install Bundle")
+        self.app_update_offline_button.setObjectName("appUpdateOfflineButton")
+        self.app_update_offline_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.app_update_offline_button.setToolTip("Install a support-provided offline update bundle.")
+        self.app_update_offline_button.clicked.connect(self._on_offline_app_update_requested)
+
+        self.app_rollback_check_button = QtWidgets.QPushButton("Check Rollback")
+        self.app_rollback_check_button.setObjectName("appRollbackCheckButton")
+        self.app_rollback_check_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.app_rollback_check_button.setToolTip("Check the configured rollback target.")
+        self.app_rollback_check_button.clicked.connect(self._on_app_rollback_check_requested)
+
+        self.app_rollback_offline_button = QtWidgets.QPushButton("Offline Restore")
+        self.app_rollback_offline_button.setObjectName("appRollbackOfflineButton")
+        self.app_rollback_offline_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.app_rollback_offline_button.setToolTip("Restore using a support-provided offline rollback bundle.")
+        self.app_rollback_offline_button.clicked.connect(self._on_offline_app_rollback_requested)
+
+        self.app_update_button = QtWidgets.QPushButton("Update App")
+        self.app_update_button.setObjectName("appUpdateApplyButton")
+        self.app_update_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.app_update_button.setEnabled(False)
+        self.app_update_button.setToolTip("Apply the update found by the last check.")
+        self.app_update_button.clicked.connect(self._on_app_update_requested)
+
+        self.app_rollback_button = QtWidgets.QPushButton("Restore Previous")
+        self.app_rollback_button.setObjectName("appRollbackApplyButton")
+        self.app_rollback_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.app_rollback_button.setEnabled(False)
+        self.app_rollback_button.setToolTip("Restore the rollback target found by the last check.")
+        self.app_rollback_button.clicked.connect(self._on_app_rollback_requested)
+
+        app_buttons = (
+            self.app_update_check_button,
+            self.app_update_button,
+            self.app_update_offline_button,
+            self.app_rollback_check_button,
+            self.app_rollback_offline_button,
+            self.app_rollback_button,
+        )
+        for idx, button in enumerate(app_buttons):
+            button.setMinimumHeight(30)
+            app_button_grid.addWidget(button, idx // 2, idx % 2)
+        app_button_grid.setColumnStretch(0, 1)
+        app_button_grid.setColumnStretch(1, 1)
+        app_update_v.addLayout(app_button_grid)
+        actions_v.addWidget(app_update_group)
+
+        service_group = QtWidgets.QGroupBox("Service")
+        service_group.setObjectName("serviceGroup")
+        service_v = QtWidgets.QVBoxLayout(service_group)
+
+        self.machine_qualification_button = QtWidgets.QPushButton("Machine Qualification...")
+        self.machine_qualification_button.setObjectName("machineQualificationButton")
+        self.machine_qualification_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.machine_qualification_button.clicked.connect(self._on_machine_qualification_requested)
+        service_v.addWidget(self.machine_qualification_button)
+
+        self.regulator_calibration_button = QtWidgets.QPushButton("Regulator Calibration...")
+        self.regulator_calibration_button.setObjectName("regulatorCalibrationButton")
+        self.regulator_calibration_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.regulator_calibration_button.clicked.connect(self._on_regulator_calibration_requested)
+        service_v.addWidget(self.regulator_calibration_button)
+
+        self.reset_mcu_button = QtWidgets.QPushButton("Reset MCU")
+        self.reset_mcu_button.setObjectName("resetMcuButton")
+        self.reset_mcu_button.setStyleSheet("""
+            QPushButton {
+                background-color: #FF5555;
+                color: #FFFFFF;
+                border: 1px solid #FF4444;
+            }
+            QPushButton:disabled {
+                background-color: #555555;
+                color: #AAAAAA;
+                border: 1px solid #444444;
+            }
+        """)
+        self.reset_mcu_button.clicked.connect(self._on_reset_mcu_requested)
+        service_v.addWidget(self.reset_mcu_button)
+        actions_v.addWidget(service_group)
+        actions_v.addStretch(1)
+
+        self.logs_group = QtWidgets.QGroupBox("Log Messages")
+        self.logs_group.setObjectName("logMessagesGroup")
+        logs_v = QtWidgets.QVBoxLayout(self.logs_group)
+
+        self.logs_table = QtWidgets.QTableWidget(0, 1, self)
+        self.logs_table.setHorizontalHeaderLabels(["Message"])
+        self.logs_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.logs_table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self.logs_table.setAlternatingRowColors(True)
+        self.logs_table.verticalHeader().setVisible(False)
+        self.logs_table.horizontalHeader().setStretchLastSection(True)
+        self.logs_table.setWordWrap(False)
+        self.logs_table.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.logs_table.setContextMenuPolicy(QtCore.Qt.NoContextMenu)
+        self.logs_table.setMinimumHeight(240)
+        self._log_max_rows = 2000
+
+        logs_v.addWidget(self.logs_table)
+        monitor_v.addWidget(self.logs_group, 3)
+        self.logs_group.setStyleSheet(
+            f"QGroupBox {{ color: #DDD; border: 1px solid #444; margin-top: 6px; }}"
+            f"QTableWidget {{ background-color: {self.color_dict['darker_gray']}; }}"
+        )
+
+        self.tasks_group = QtWidgets.QGroupBox("MCU Task Usage")
+        self.tasks_group.setObjectName("mcuTaskUsageGroup")
+        tasks_v = QtWidgets.QVBoxLayout(self.tasks_group)
+
+        self.tasks_table = QtWidgets.QTableWidget(0, 2, self)
+        self.tasks_table.setHorizontalHeaderLabels(["Task", "CPU %"])
+        self.tasks_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.tasks_table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self.tasks_table.setAlternatingRowColors(True)
+        self.tasks_table.verticalHeader().setVisible(False)
+        self.tasks_table.horizontalHeader().setStretchLastSection(True)
+        self.tasks_table.setSortingEnabled(True)
+        self.tasks_table.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.tasks_table.setContextMenuPolicy(QtCore.Qt.NoContextMenu)
+        self.tasks_table.setMinimumHeight(140)
+        self.tasks_table.horizontalHeader().setDefaultAlignment(
+            QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter
+        )
+
+        tasks_v.addWidget(self.tasks_table)
+        monitor_v.addWidget(self.tasks_group, 1)
+        self.tasks_group.setStyleSheet(
+            f"QGroupBox {{ color: #DDD; border: 1px solid #444; margin-top: 6px; }}"
+            f"QTableWidget {{ background-color: {self.color_dict['darker_gray']}; }}"
+        )
+
+        layout.addWidget(actions_panel, 0, 0)
+        layout.addWidget(monitor_panel, 0, 1)
+        layout.setColumnStretch(0, 0)
+        layout.setColumnStretch(1, 1)
+        layout.setRowStretch(0, 1)
+        return
 
         # Header row
         hdr_axis = QtWidgets.QLabel("Axis")
@@ -4836,13 +5021,7 @@ class SpeedProfilesTab(QtWidgets.QWidget):
     # ------------- Model <-> View wiring -------------
 
     def _connect_model_signals(self):
-        # These signals should carry speeds or accels for all three axes
-        # Accept tuple/list order [X,Y,Z] or dicts like {"x":..,"y":..,"z":..}
-        if hasattr(self.model.machine_model, "speeds_changed"):
-            self.model.machine_model.speeds_changed.connect(self.on_speeds_changed)
-        if hasattr(self.model.machine_model, "accelerations_changed"):
-            self.model.machine_model.accelerations_changed.connect(self.on_accels_changed)
-                # Connect DFU signals if the controller exposes them
+        # Connect DFU signals if the controller exposes them
         if hasattr(self.controller, "dfu_progress"):
             self.controller.dfu_progress.connect(self._on_dfu_progress)
         if hasattr(self.controller, "dfu_stage"):
@@ -4859,9 +5038,6 @@ class SpeedProfilesTab(QtWidgets.QWidget):
 
         self.controller.machine.log_stats_updated.connect(self._on_stats_updated)
         self.controller.machine.log_message_received.connect(self._on_log_message_received)
-
-        self.set_axis_maxspeed.connect(self.controller.set_axis_maxspeed)
-        self.set_axis_accel.connect(self.controller.set_axis_accel)
 
     def _pull_initial_values_if_available(self):
         """If the model already exposes current values, reflect them at startup."""
@@ -4887,6 +5063,9 @@ class SpeedProfilesTab(QtWidgets.QWidget):
     @QtCore.Slot(object)
     def on_speeds_changed(self, speeds: Any):
         """Update spin boxes from a model signal carrying X/Y/Z speeds."""
+        boxes = getattr(self, "_speed_boxes", None)
+        if not boxes:
+            return
         # vals = self._extract_xyz(speeds)
         vals = self.model.machine_model.get_current_speeds()
         if vals is None:
@@ -4904,6 +5083,9 @@ class SpeedProfilesTab(QtWidgets.QWidget):
     @QtCore.Slot(object)
     def on_accels_changed(self, accels: Any):
         """Update spin boxes from a model signal carrying X/Y/Z accelerations."""
+        boxes = getattr(self, "_accel_boxes", None)
+        if not boxes:
+            return
         # vals = self._extract_xyz(accels)
         vals = self.model.machine_model.get_current_accelerations()
         if vals is None:

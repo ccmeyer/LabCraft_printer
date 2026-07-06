@@ -1,5 +1,25 @@
 # Changelog
 
+## v1.1.5 - 2026-07-06
+
+### Changed
+
+- Reorganized the Firmware tab into a two-column maintenance layout.
+- Grouped firmware update, application update, service, log, and MCU task usage controls.
+- Replaced the tall vertical stack of application update and rollback buttons with a compact button grid.
+- Removed the unused speed and acceleration controls from the Firmware tab.
+- No firmware, device protocol, motion, or pressure-control changes.
+
+### Validation
+
+- Focused Firmware tab and updater tests:
+  `.\env\Scripts\python.exe -m pytest -q tests/test_app_update_request.py tests/test_qualification_readonly_window.py tests/test_regulator_calibration_window.py`
+  `.\env\Scripts\python.exe -m pytest -q tests/test_update_and_restart.py`
+
+### Rollback
+
+- Recommended rollback version: `v1.1.4`.
+
 ## v1.1.4 - 2026-07-06
 
 ### Added

@@ -1021,6 +1021,62 @@ def _make_speed_tab_for_update_check():
     return tab
 
 
+class _FirmwareTabMachineModel(view_mod.QtCore.QObject):
+    speeds_changed = view_mod.QtCore.Signal(object)
+    accelerations_changed = view_mod.QtCore.Signal(object)
+
+    def get_current_speeds(self):
+        return (1000, 1000, 1000)
+
+    def get_current_accelerations(self):
+        return (1000, 1000, 1000)
+
+
+class _FirmwareTabMachine(view_mod.QtCore.QObject):
+    log_stats_updated = view_mod.QtCore.Signal(object)
+    log_message_received = view_mod.QtCore.Signal(str)
+
+
+class _FirmwareTabController(view_mod.QtCore.QObject):
+    def __init__(self):
+        super().__init__()
+        self.machine = _FirmwareTabMachine()
+
+    def get_app_version(self):
+        return "v1.1.5"
+
+
+def test_speed_tab_constructs_maintenance_layout_without_speed_controls(qapp):
+    main_window = view_mod.QtWidgets.QWidget()
+    main_window.color_dict = {"darker_gray": "#222222"}
+    main_window.popup_message = lambda *_args: None
+    main_window.popup_yes_no = lambda *_args: QMessageBox.StandardButton.No
+    main_window._is_yes_response = lambda _response: False
+    model = SimpleNamespace(machine_model=_FirmwareTabMachineModel())
+    controller = _FirmwareTabController()
+
+    tab = SpeedProfilesTab(main_window, model, controller, {"darker_gray": "#222222"})
+
+    assert tab.findChild(view_mod.QtWidgets.QWidget, "firmwareMaintenanceActions") is not None
+    assert tab.findChild(view_mod.QtWidgets.QWidget, "firmwareMaintenanceMonitor") is not None
+    assert tab.findChild(view_mod.QtWidgets.QGroupBox, "firmwareUpdateGroup") is not None
+    assert tab.findChild(view_mod.QtWidgets.QGroupBox, "applicationUpdateGroup") is not None
+    assert tab.findChild(view_mod.QtWidgets.QGroupBox, "serviceGroup") is not None
+    assert tab.findChild(view_mod.QtWidgets.QGroupBox, "logMessagesGroup") is not None
+    assert tab.findChild(view_mod.QtWidgets.QGroupBox, "mcuTaskUsageGroup") is not None
+    assert tab.app_update_check_button.text() == "Check Updates"
+    assert tab.app_update_offline_button.text() == "Install Bundle"
+    assert tab.app_rollback_offline_button.text() == "Offline Restore"
+    assert tab.app_rollback_button.text() == "Restore Previous"
+    assert tab.app_update_button.isEnabled() is False
+    assert tab.app_rollback_button.isEnabled() is False
+    assert tab.findChildren(view_mod.QtWidgets.QSpinBox) == []
+    assert not hasattr(tab, "_speed_boxes")
+    assert not hasattr(tab, "_accel_boxes")
+
+    tab.close()
+
+
 def test_speed_tab_formats_current_app_version_label(qapp):
     tab = SpeedProfilesTab.__new__(SpeedProfilesTab)
     tab.controller = SimpleNamespace(get_app_version=lambda: "v1.1.2")
