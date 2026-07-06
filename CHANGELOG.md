@@ -1,5 +1,30 @@
 # Changelog
 
+## v1.2.0-rc.3 - 2026-07-06
+
+### Added
+
+- Added release metadata for the `v1.2.0-rc.3` release candidate.
+- Integrated the camera/refuel release candidate line with release-aware online/offline updates and controlled rollback support.
+- Added droplet camera capture coordination, capture diagnostics, manual refuel checking, and dual-stream detection improvements from the v1.2.0 release-candidate line.
+
+### Changed
+
+- Set the app `VERSION` to `v1.2.0-rc.3`.
+- Advertised `v1.2.0-rc.3` as the current release candidate in `releases/latest.json` while leaving stable at `v1.1.2`.
+- Recorded that this release candidate uses the bundled firmware artifact from the v1.2.0 release-candidate line.
+
+### Validation
+
+- Full Python suite passed before the metadata-only RC3 bump:
+  `.\env\Scripts\python.exe -m pytest -q`
+- Focused release updater validation:
+  `.\env\Scripts\python.exe -m pytest -q tests/test_update_and_restart.py tests/test_create_update_bundle.py tests/test_app_update_request.py`
+
+### Rollback
+
+- Recommended rollback version: `v1.1.2`.
+
 ## v1.1.2 - 2026-07-06
 
 ### Added

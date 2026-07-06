@@ -1,0 +1,28 @@
+{
+  "channel": "stable",
+  "notes": [
+    "Integrates the camera/refuel release candidate line with the release-aware updater bootstrap.",
+    "Adds the droplet camera capture coordinator and typed capture-result plumbing.",
+    "Hardens coordinated flash, trigger sequencing, capture diagnostics, and camera benchmark validation.",
+    "Adds manual refuel calibration/check workflows and related diagnostics.",
+    "Promotes dual-stream detection, exposure-time, and camera worker selection improvements.",
+    "Includes release-aware online/offline updates, explicit offline bundle install, and controlled rollback UI from v1.1.2.",
+    "Updates the bundled firmware artifact for the camera/refuel release candidate."
+  ],
+  "previous_version": "v1.1.2",
+  "release_date": "2026-07-06",
+  "requires_firmware": {
+    "artifact": "firmware/artifacts/LabCraft_firmware.bin",
+    "note": "Firmware was updated on the v1.2.0 release-candidate line."
+  },
+  "rollback_version": "v1.1.2",
+  "schema_version": "labcraft_release_v1",
+  "summary": "Release candidate for camera/refuel changes with release-aware updates and rollback support.",
+  "tag": "v1.2.0-rc.3",
+  "validation": [
+    ".\\env\\Scripts\\python.exe -m pytest -q",
+    ".\\env\\Scripts\\python.exe -m pytest -q tests/test_update_and_restart.py tests/test_create_update_bundle.py tests/test_app_update_request.py",
+    "Get-ChildItem releases\\*.json | ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json | Out-Null }"
+  ],
+  "version": "v1.2.0-rc.3"
+}

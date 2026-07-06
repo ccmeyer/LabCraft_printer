@@ -1,6 +1,7 @@
 {
-  "release_candidate": null,
+  "release_candidate": "v1.2.0-rc.3",
   "releases": [
+    "v1.2.0-rc.3",
     "v1.1.2",
     "v1.1.1",
     "v1.1.0"
