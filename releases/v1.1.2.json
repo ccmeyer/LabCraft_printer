@@ -6,19 +6,22 @@
     "Adds installed app version display in the Application Update area.",
     "Changes online update checks to target the stable release tag named by upstream releases/latest.json.",
     "Changes online update apply behavior to fast-forward merge the selected release tag instead of pulling arbitrary branch head.",
+    "Adds release-aware offline bundle creation with tools/create_update_bundle.py --release <version>.",
+    "Adds release details to offline bundle manifests and offline update checks.",
     "Shows release summary, notes, rollback version, and installed release details in update messages.",
-    "Keeps existing offline Git bundle update behavior unchanged."
+    "Keeps existing branch/commit offline Git bundle manifests compatible."
   ],
   "previous_version": "v1.1.1",
   "release_date": "2026-07-06",
   "requires_firmware": null,
   "rollback_version": "v1.1.1",
   "schema_version": "labcraft_release_v1",
-  "summary": "Adds release metadata, installed version display, and release-aware online app updates.",
+  "summary": "Adds release metadata, installed version display, and release-aware online and offline app updates.",
   "tag": "v1.1.2",
   "validation": [
     ".\\env\\Scripts\\python.exe -m pytest -q tests/test_update_and_restart.py tests/test_create_update_bundle.py tests/test_app_update_request.py",
-    ".\\env\\Scripts\\python.exe -m pytest -q tests/test_update_and_restart.py tests/test_app_update_request.py"
+    ".\\env\\Scripts\\python.exe -m pytest -q tests/test_update_and_restart.py tests/test_app_update_request.py",
+    ".\\env\\Scripts\\python.exe -m pytest -q tests/test_create_update_bundle.py tests/test_update_and_restart.py tests/test_app_update_request.py"
   ],
   "version": "v1.1.2"
 }

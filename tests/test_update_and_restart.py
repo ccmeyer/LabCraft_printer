@@ -106,6 +106,7 @@ class FakeGitRunner:
         self.calls.append((args_tuple, Path(cwd), float(timeout_s), dict(env_updates or {})))
 
         git_args = args_tuple[1:]
+        offline_target_ref = f"{updater.OFFLINE_UPDATE_REF}^{{commit}}"
         if git_args == ("rev-parse", "--show-toplevel"):
             if self.top_level_returncode:
                 return updater.CommandResult(args_tuple, self.top_level_returncode, stderr="not a repo")
@@ -135,7 +136,7 @@ class FakeGitRunner:
                 return updater.CommandResult(args_tuple, self.fetch_returncode, stderr="network unavailable")
             return updater.CommandResult(args_tuple, 0, stdout="")
 
-        if git_args == ("rev-parse", updater.OFFLINE_UPDATE_REF):
+        if git_args in (("rev-parse", updater.OFFLINE_UPDATE_REF), ("rev-parse", offline_target_ref)):
             return updater.CommandResult(args_tuple, 0, stdout=f"{self.offline_ref_sha}\n")
 
         if len(git_args) == 2 and git_args[0] == "show" and git_args[1] == f"{self.upstream}:{updater.RELEASE_INDEX_PATH}":
@@ -176,7 +177,10 @@ class FakeGitRunner:
         if git_args == ("rev-list", "--left-right", "--count", f"HEAD...{self.target_release_sha}"):
             return updater.CommandResult(args_tuple, 0, stdout=f"{self.ahead_count}\t{self.behind_count}\n")
 
-        if git_args == ("rev-list", "--left-right", "--count", f"HEAD...{updater.OFFLINE_UPDATE_REF}"):
+        if git_args in (
+            ("rev-list", "--left-right", "--count", f"HEAD...{updater.OFFLINE_UPDATE_REF}"),
+            ("rev-list", "--left-right", "--count", f"HEAD...{offline_target_ref}"),
+        ):
             ahead = self.ahead_count if self.offline_ahead_count is None else self.offline_ahead_count
             behind = self.behind_count if self.offline_behind_count is None else self.offline_behind_count
             return updater.CommandResult(args_tuple, 0, stdout=f"{ahead}\t{behind}\n")
@@ -184,7 +188,10 @@ class FakeGitRunner:
         if git_args == ("log", "--oneline", f"HEAD..{self.target_release_version}"):
             return updater.CommandResult(args_tuple, 0, stdout="\n".join(self.check_commits) + ("\n" if self.check_commits else ""))
 
-        if git_args == ("log", "--oneline", f"HEAD..{updater.OFFLINE_UPDATE_REF}"):
+        if git_args in (
+            ("log", "--oneline", f"HEAD..{updater.OFFLINE_UPDATE_REF}"),
+            ("log", "--oneline", f"HEAD..{offline_target_ref}"),
+        ):
             return updater.CommandResult(args_tuple, 0, stdout="\n".join(self.offline_check_commits) + ("\n" if self.offline_check_commits else ""))
 
         if len(git_args) == 3 and git_args[:2] == ("log", "--oneline"):
@@ -219,7 +226,10 @@ class FakeGitRunner:
                 return updater.CommandResult(args_tuple, self.offline_fetch_returncode, stderr="bundle fetch failed")
             return updater.CommandResult(args_tuple, 0, stdout="")
 
-        if git_args == ("merge", "--ff-only", updater.OFFLINE_UPDATE_REF):
+        if git_args in (
+            ("merge", "--ff-only", updater.OFFLINE_UPDATE_REF),
+            ("merge", "--ff-only", offline_target_ref),
+        ):
             return updater.CommandResult(
                 args_tuple,
                 self.offline_merge_returncode,
@@ -251,21 +261,51 @@ def _write_offline_manifest(
     bundle_name: str = "labcraft-main.bundle",
     bundle_bytes: bytes = b"bundle bytes\n",
     created_at_utc: str = "2026-06-18T12:00:00Z",
+    release_version: str | None = None,
+    release_tag: str | None = None,
+    rollback_version: str = "v1.1.1",
+    release_manifest: dict | None = None,
 ) -> Path:
     bundle_path = tmp_path / bundle_name
     bundle_path.write_bytes(bundle_bytes)
+    release_tag = release_tag or release_version
+    source_ref = f"refs/remotes/{remote}/{branch}"
+    if release_version:
+        source_ref = f"refs/tags/{release_tag}"
     manifest = {
         "schema_version": schema_version,
         "repo": repo,
         "remote": remote,
         "remote_url": "https://github.com/ccmeyer/LabCraft_printer",
         "branch": branch,
-        "source_ref": f"refs/remotes/{remote}/{branch}",
+        "source_ref": source_ref,
         "head_sha": head_sha,
         "bundle_filename": bundle_name,
         "bundle_sha256": hashlib.sha256(bundle_bytes).hexdigest(),
         "created_at_utc": created_at_utc,
     }
+    if release_version:
+        manifest.update(
+            {
+                "release_version": release_version,
+                "release_tag": release_tag,
+                "rollback_version": rollback_version,
+                "release_manifest": release_manifest
+                or {
+                    "schema_version": updater.RELEASE_MANIFEST_SCHEMA_VERSION,
+                    "version": release_version,
+                    "tag": release_tag,
+                    "channel": "stable",
+                    "release_date": "2026-07-06",
+                    "previous_version": rollback_version,
+                    "rollback_version": rollback_version,
+                    "requires_firmware": None,
+                    "summary": "Release-aware offline bundle.",
+                    "notes": ["Installs a named release from USB."],
+                    "validation": ["Focused updater tests pass."],
+                },
+            }
+        )
     manifest_path = tmp_path / f"{Path(bundle_name).stem}.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     return manifest_path
@@ -423,7 +463,7 @@ def test_offline_update_uses_bundle_merge_not_git_pull(tmp_path):
     assert result.update_source == updater.UPDATE_SOURCE_OFFLINE
     assert result.offline_manifest_path == manifest_path.resolve()
     assert ("git", "pull", "--ff-only") not in calls
-    assert ("git", "merge", "--ff-only", updater.OFFLINE_UPDATE_REF) in calls
+    assert ("git", "merge", "--ff-only", f"{updater.OFFLINE_UPDATE_REF}^{{commit}}") in calls
     assert any(call[:3] == ("git", "fetch", "--force") for call in calls)
 
 
@@ -445,6 +485,29 @@ def test_offline_update_merge_failure_returns_offline_update_failed(tmp_path):
     assert result.status == updater.STATUS_OFFLINE_UPDATE_FAILED
     assert result.returncode == updater.EXIT_CODES[updater.STATUS_OFFLINE_UPDATE_FAILED]
     assert result.after_sha == result.before_sha
+
+
+def test_offline_release_update_apply_records_release_fields(tmp_path):
+    manifest_path = _write_offline_manifest(tmp_path, head_sha=OFFLINE_SHA, release_version="v1.1.2")
+    runner = FakeGitRunner(tmp_path, before_sha="abc", after_sha=OFFLINE_SHA, offline_ref_sha=OFFLINE_SHA)
+
+    result = updater.run_update(
+        _config(tmp_path, offline_manifest_path=manifest_path),
+        command_runner=runner,
+    )
+
+    assert result.status == updater.STATUS_UPDATED
+    assert result.update_source == updater.UPDATE_SOURCE_OFFLINE
+    assert result.target_release_version == "v1.1.2"
+    assert result.target_release_tag == "v1.1.2"
+    assert result.target_release_sha == OFFLINE_SHA
+    assert result.release_summary == "Release-aware offline bundle."
+    assert result.release_notes == ("Installs a named release from USB.",)
+    assert result.rollback_version == "v1.1.1"
+    payload = updater.update_result_payload(result)
+    assert payload["target_release_version"] == "v1.1.2"
+    assert payload["target_release_tag"] == "v1.1.2"
+    assert payload["target_release_sha"] == OFFLINE_SHA
 
 
 def test_offline_update_dirty_worktree_blocks_before_bundle_fetch(tmp_path):
@@ -953,6 +1016,64 @@ def test_offline_update_check_skips_online_fetch_and_reports_available(tmp_path)
     assert any(call[:3] == ("git", "fetch", "--force") for call in calls)
 
 
+def test_offline_release_update_check_reports_release_details(tmp_path):
+    manifest_path = _write_offline_manifest(tmp_path, head_sha=OFFLINE_SHA, release_version="v1.1.2")
+    runner = FakeGitRunner(
+        tmp_path,
+        offline_ref_sha=OFFLINE_SHA,
+        offline_ahead_count=0,
+        offline_behind_count=2,
+        offline_check_commits=("def Offline release update", "abc Earlier metadata"),
+    )
+
+    result = updater.run_update_check(
+        _config(tmp_path, offline_manifest_path=manifest_path),
+        command_runner=runner,
+    )
+
+    assert result.status == updater.STATUS_UPDATE_AVAILABLE
+    assert result.message == "LabCraft v1.1.2 is available from the offline bundle."
+    assert result.update_source == updater.UPDATE_SOURCE_OFFLINE
+    assert result.target_release_version == "v1.1.2"
+    assert result.target_release_tag == "v1.1.2"
+    assert result.target_release_sha == OFFLINE_SHA
+    assert result.release_summary == "Release-aware offline bundle."
+    assert result.release_notes == ("Installs a named release from USB.",)
+    assert result.rollback_version == "v1.1.1"
+    assert result.commits == ("def Offline release update", "abc Earlier metadata")
+
+
+def test_offline_release_manifest_invalid_fails_before_bundle_fetch(tmp_path):
+    manifest_path = _write_offline_manifest(
+        tmp_path,
+        head_sha=OFFLINE_SHA,
+        release_version="v1.1.2",
+        release_manifest={
+            "schema_version": updater.RELEASE_MANIFEST_SCHEMA_VERSION,
+            "version": "v9.9.9",
+            "tag": "v9.9.9",
+            "channel": "stable",
+            "release_date": "2026-07-06",
+            "previous_version": "v1.1.1",
+            "rollback_version": "v1.1.1",
+            "requires_firmware": None,
+            "summary": "Wrong release.",
+            "notes": [],
+            "validation": [],
+        },
+    )
+    runner = FakeGitRunner(tmp_path, offline_ref_sha=OFFLINE_SHA)
+
+    result = updater.run_update_check(
+        _config(tmp_path, offline_manifest_path=manifest_path),
+        command_runner=runner,
+    )
+
+    assert result.status == updater.STATUS_OFFLINE_BUNDLE_INVALID
+    assert "version does not match" in result.message
+    assert not any(call[0][:3] == ("git", "fetch", "--force") for call in runner.calls)
+
+
 def test_offline_update_check_accepts_incremental_manifest_metadata(tmp_path):
     manifest_path = _write_offline_manifest(tmp_path, head_sha=OFFLINE_SHA)
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -1185,13 +1306,14 @@ def test_offline_fallback_skips_invalid_and_diverged_candidates(tmp_path):
     def runner(args, cwd, timeout_s, env_updates):
         args_tuple = tuple(str(arg) for arg in args)
         git_args = args_tuple[1:]
+        offline_target_ref = f"{updater.OFFLINE_UPDATE_REF}^{{commit}}"
         if len(git_args) == 4 and git_args[:2] == ("fetch", "--force"):
             state["bundle_name"] = Path(git_args[2]).name
-        if git_args == ("rev-list", "--left-right", "--count", f"HEAD...{updater.OFFLINE_UPDATE_REF}"):
+        if git_args == ("rev-list", "--left-right", "--count", f"HEAD...{offline_target_ref}"):
             if state["bundle_name"] == "diverged.bundle":
                 return updater.CommandResult(args_tuple, 0, stdout="1\t2\n")
             return updater.CommandResult(args_tuple, 0, stdout="0\t1\n")
-        if git_args == ("log", "--oneline", f"HEAD..{updater.OFFLINE_UPDATE_REF}"):
+        if git_args == ("log", "--oneline", f"HEAD..{offline_target_ref}"):
             return updater.CommandResult(args_tuple, 0, stdout="def Offline update\n")
         return base_runner(args, cwd, timeout_s, env_updates)
 
@@ -1365,3 +1487,74 @@ def test_real_git_offline_bundle_check_and_update(tmp_path):
     assert result.update_source == updater.UPDATE_SOURCE_OFFLINE
     assert result.after_sha == manifest["head_sha"]
     assert _git(deployed, "rev-parse", "HEAD").stdout.strip() == manifest["head_sha"]
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_real_git_release_offline_bundle_check_and_update(tmp_path):
+    remote = tmp_path / "remote.git"
+    support = tmp_path / "support"
+    deployed = tmp_path / "deployed"
+    output_dir = tmp_path / "updates"
+
+    _git(tmp_path, "init", "--bare", str(remote))
+    support.mkdir()
+    _git(support, "init")
+    _git(support, "config", "user.email", "test@example.com")
+    _git(support, "config", "user.name", "Test User")
+    (support / "README.md").write_text("initial\n", encoding="utf-8")
+    _git(support, "add", "README.md")
+    _git(support, "commit", "-m", "initial")
+    _git(support, "branch", "-M", "stable")
+    _git(support, "remote", "add", "origin", str(remote))
+    _git(support, "push", "-u", "origin", "stable")
+
+    _git(tmp_path, "clone", "--branch", "stable", str(remote), str(deployed))
+
+    (support / "README.md").write_text("initial\nrelease\n", encoding="utf-8")
+    releases_dir = support / "releases"
+    releases_dir.mkdir()
+    release_manifest = {
+        "schema_version": "labcraft_release_v1",
+        "version": "v1.1.2",
+        "tag": "v1.1.2",
+        "channel": "stable",
+        "release_date": "2026-07-06",
+        "previous_version": "v1.1.1",
+        "rollback_version": "v1.1.1",
+        "requires_firmware": None,
+        "summary": "Release bundle smoke.",
+        "notes": ["Installs a named release."],
+        "validation": ["Real Git release bundle smoke test."],
+    }
+    (releases_dir / "v1.1.2.json").write_text(json.dumps(release_manifest), encoding="utf-8")
+    _git(support, "add", "README.md", "releases/v1.1.2.json")
+    _git(support, "commit", "-m", "release v1.1.2")
+    release_sha = _git(support, "rev-parse", "HEAD").stdout.strip()
+    _git(support, "tag", "-a", "v1.1.2", "-m", "LabCraft v1.1.2")
+    _git(support, "push", "origin", "stable", "--tags")
+
+    bundle_result = create_update_bundle.create_update_bundle(
+        create_update_bundle.BundleConfig(repo_root=support, branch="stable", output_dir=output_dir, release="v1.1.2"),
+    )
+    manifest_path = bundle_result.manifest_path
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    check = updater.run_update_check(
+        updater.UpdaterConfig(repo_root=deployed, log_path=tmp_path / "release-check.log", offline_manifest_path=manifest_path),
+    )
+    assert check.status == updater.STATUS_UPDATE_AVAILABLE
+    assert check.update_source == updater.UPDATE_SOURCE_OFFLINE
+    assert check.target_release_version == "v1.1.2"
+    assert check.release_summary == "Release bundle smoke."
+    assert check.upstream_sha == release_sha
+    assert manifest["source_ref"] == "refs/tags/v1.1.2"
+
+    result = updater.run_update(
+        updater.UpdaterConfig(repo_root=deployed, no_relaunch=True, log_path=tmp_path / "release-update.log", offline_manifest_path=manifest_path),
+    )
+
+    assert result.status == updater.STATUS_UPDATED
+    assert result.update_source == updater.UPDATE_SOURCE_OFFLINE
+    assert result.target_release_version == "v1.1.2"
+    assert result.after_sha == release_sha
+    assert _git(deployed, "rev-parse", "HEAD").stdout.strip() == release_sha

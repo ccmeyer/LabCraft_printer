@@ -20,6 +20,8 @@ DEFAULT_BRANCH = "stable"
 DEFAULT_REMOTE = "origin"
 DEFAULT_OUTPUT_DIR = Path("local") / "LabCraftUpdates"
 PRODUCER = "tools/create_update_bundle.py"
+RELEASE_MANIFEST_SCHEMA_VERSION = "labcraft_release_v1"
+RELEASE_VERSION_RE = re.compile(r"v[0-9]+(?:\.[0-9]+){2}(?:-[A-Za-z0-9][A-Za-z0-9.-]*)?")
 
 STATUS_CREATED = "created"
 STATUS_NOT_GIT_REPO = "not_git_repo"
@@ -33,6 +35,7 @@ STATUS_INVALID_ARGUMENT = "invalid_argument"
 STATUS_BASE_RESOLVE_FAILED = "base_resolve_failed"
 STATUS_BASE_NOT_ANCESTOR = "base_not_ancestor"
 STATUS_EMPTY_INCREMENTAL_RANGE = "empty_incremental_range"
+STATUS_RELEASE_METADATA_INVALID = "release_metadata_invalid"
 
 BUNDLE_MODE_FULL = "full"
 BUNDLE_MODE_INCREMENTAL = "incremental"
@@ -50,6 +53,7 @@ EXIT_CODES = {
     STATUS_BASE_RESOLVE_FAILED: 10,
     STATUS_BASE_NOT_ANCESTOR: 11,
     STATUS_EMPTY_INCREMENTAL_RANGE: 12,
+    STATUS_RELEASE_METADATA_INVALID: 13,
 }
 
 
@@ -71,6 +75,7 @@ class BundleConfig:
     include_tags: bool | None = None
     since: str | None = None
     last: int | None = None
+    release: str | None = None
 
 
 @dataclass(frozen=True)
@@ -93,6 +98,15 @@ class BundleResult:
     bundle_path: Path
     manifest_path: Path
     manifest: dict
+
+
+@dataclass(frozen=True)
+class ReleaseBundleInfo:
+    version: str
+    tag: str
+    sha: str
+    manifest: dict
+    rollback_version: str = ""
 
 
 class BundleCreateError(RuntimeError):
@@ -176,6 +190,90 @@ def _repo_slug_from_remote_url(remote_url: str) -> str:
     if name.endswith(".git"):
         name = name[:-4]
     return name
+
+
+def _normalize_release_version(value: object, *, context: str = "release version") -> str:
+    if not isinstance(value, str):
+        raise BundleCreateError(STATUS_RELEASE_METADATA_INVALID, f"{context} must be a string.")
+    version = value.strip()
+    if not version:
+        raise BundleCreateError(STATUS_RELEASE_METADATA_INVALID, f"{context} is empty.")
+    if "/" in version or "\\" in version or ".." in version or not RELEASE_VERSION_RE.fullmatch(version):
+        raise BundleCreateError(
+            STATUS_RELEASE_METADATA_INVALID,
+            f"{context} is not a supported LabCraft version: {version}",
+        )
+    return version
+
+
+def _release_rollback_version(manifest: dict) -> str:
+    rollback = manifest.get("rollback_version")
+    if rollback in (None, ""):
+        return ""
+    return _normalize_release_version(rollback, context="release manifest rollback_version")
+
+
+def _load_release_manifest(repo_root: Path, *, version: str, tag: str, command_runner: CommandRunner) -> dict:
+    result = _run_git(repo_root, ["show", f"{tag}:releases/{version}.json"], command_runner)
+    if result.returncode != 0:
+        raise BundleCreateError(
+            STATUS_RELEASE_METADATA_INVALID,
+            f"Bundle creation could not read release manifest for {version}.",
+            command_result=result,
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise BundleCreateError(
+            STATUS_RELEASE_METADATA_INVALID,
+            f"Release manifest for {version} is not valid JSON: {exc}",
+            command_result=result,
+        ) from exc
+    if not isinstance(payload, dict):
+        raise BundleCreateError(STATUS_RELEASE_METADATA_INVALID, f"Release manifest for {version} must be a JSON object.")
+    return payload
+
+
+def _validate_release_manifest(manifest: dict, *, expected_version: str, expected_tag: str) -> str:
+    if manifest.get("schema_version") != RELEASE_MANIFEST_SCHEMA_VERSION:
+        raise BundleCreateError(STATUS_RELEASE_METADATA_INVALID, "Release manifest has an unsupported schema_version.")
+    version = _normalize_release_version(manifest.get("version"), context="release manifest version")
+    tag = _normalize_release_version(manifest.get("tag"), context="release manifest tag")
+    if version != expected_version:
+        raise BundleCreateError(STATUS_RELEASE_METADATA_INVALID, "Release manifest version does not match --release.")
+    if tag != expected_tag:
+        raise BundleCreateError(STATUS_RELEASE_METADATA_INVALID, "Release manifest tag does not match --release.")
+    channel = str(manifest.get("channel") or "").strip()
+    if channel and channel != "stable":
+        raise BundleCreateError(STATUS_RELEASE_METADATA_INVALID, "Release manifest channel is not stable.")
+    return _release_rollback_version(manifest)
+
+
+def _resolve_release_bundle_info(
+    repo_root: Path,
+    *,
+    release: str,
+    command_runner: CommandRunner,
+) -> ReleaseBundleInfo:
+    version = _normalize_release_version(release, context="release")
+    tag = version
+    tag_result = _run_git(repo_root, ["rev-parse", f"{tag}^{{commit}}"], command_runner)
+    if tag_result.returncode != 0 or not tag_result.stdout.strip():
+        raise BundleCreateError(
+            STATUS_REF_RESOLVE_FAILED,
+            f"Bundle creation could not resolve release tag {tag}.",
+            command_result=tag_result,
+        )
+    sha = tag_result.stdout.strip()
+    manifest = _load_release_manifest(repo_root, version=version, tag=tag, command_runner=command_runner)
+    rollback_version = _validate_release_manifest(manifest, expected_version=version, expected_tag=tag)
+    return ReleaseBundleInfo(
+        version=version,
+        tag=tag,
+        sha=sha,
+        manifest=manifest,
+        rollback_version=rollback_version,
+    )
 
 
 def _sha256_file(path: Path) -> str:
@@ -282,7 +380,7 @@ def _resolve_bundle_range(
             "Incremental bundle range is empty; the base commit already matches the branch head.",
         )
 
-    include_tags = bool(config.include_tags) if config.include_tags is not None else False
+    include_tags = bool(config.include_tags) if config.include_tags is not None else bool(config.release)
     return BundleRange(
         bundle_mode=BUNDLE_MODE_INCREMENTAL,
         revisions=(source_ref, f"^{base_sha}"),
@@ -325,15 +423,24 @@ def create_update_bundle(
         )
     remote_url = remote_url_result.stdout.strip()
 
-    source_ref = f"refs/remotes/{config.remote}/{config.branch}"
-    head_result = _run_git(repo_root, ["rev-parse", source_ref], command_runner)
-    if head_result.returncode != 0 or not head_result.stdout.strip():
-        raise BundleCreateError(
-            STATUS_REF_RESOLVE_FAILED,
-            f"Bundle creation could not resolve {source_ref}.",
-            command_result=head_result,
-        )
-    head_sha = head_result.stdout.strip()
+    release_info = (
+        _resolve_release_bundle_info(repo_root, release=config.release, command_runner=command_runner)
+        if config.release
+        else None
+    )
+    if release_info is not None:
+        source_ref = f"refs/tags/{release_info.tag}"
+        head_sha = release_info.sha
+    else:
+        source_ref = f"refs/remotes/{config.remote}/{config.branch}"
+        head_result = _run_git(repo_root, ["rev-parse", source_ref], command_runner)
+        if head_result.returncode != 0 or not head_result.stdout.strip():
+            raise BundleCreateError(
+                STATUS_REF_RESOLVE_FAILED,
+                f"Bundle creation could not resolve {source_ref}.",
+                command_result=head_result,
+            )
+        head_sha = head_result.stdout.strip()
     head_short_sha = head_sha[:12]
     bundle_range = _resolve_bundle_range(repo_root, source_ref, head_sha, config, command_runner)
 
@@ -343,7 +450,7 @@ def create_update_bundle(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     stamp = _utc_stamp(now)
-    branch_part = _safe_filename_part(config.branch)
+    branch_part = _safe_filename_part(release_info.version if release_info is not None else config.branch)
     base_name = f"labcraft-{branch_part}-{stamp}-{head_short_sha}"
     bundle_path = output_dir / f"{base_name}.bundle"
     manifest_path = output_dir / f"{base_name}.json"
@@ -397,6 +504,15 @@ def create_update_bundle(
         "incremental_commit_count": bundle_range.incremental_commit_count,
         "producer": PRODUCER,
     }
+    if release_info is not None:
+        manifest.update(
+            {
+                "release_version": release_info.version,
+                "release_tag": release_info.tag,
+                "rollback_version": release_info.rollback_version,
+                "release_manifest": release_info.manifest,
+            }
+        )
     _write_manifest(manifest_path, manifest)
 
     return BundleResult(
@@ -417,6 +533,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--remote", default=DEFAULT_REMOTE, help="Remote name to fetch and package.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Directory for bundle and manifest.")
     parser.add_argument("--no-fetch", action="store_true", help="Skip git fetch and use the existing remote-tracking ref.")
+    parser.add_argument("--release", default=None, help="Package the named release tag, e.g. v1.1.2.")
     range_group = parser.add_mutually_exclusive_group()
     range_group.add_argument("--since", default=None, help="Create an incremental bundle newer than this base revision.")
     range_group.add_argument("--last", type=int, default=None, help="Create an incremental bundle for roughly the latest N commits.")
@@ -427,7 +544,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def _success_summary(result: BundleResult) -> dict:
-    return {
+    payload = {
         "status": result.status,
         "message": result.message,
         "bundle_path": str(result.bundle_path),
@@ -440,6 +557,15 @@ def _success_summary(result: BundleResult) -> dict:
         "base_sha": result.manifest["base_sha"],
         "incremental_commit_count": result.manifest["incremental_commit_count"],
     }
+    if result.manifest.get("release_version"):
+        payload.update(
+            {
+                "release_version": result.manifest["release_version"],
+                "release_tag": result.manifest["release_tag"],
+                "rollback_version": result.manifest.get("rollback_version", ""),
+            }
+        )
+    return payload
 
 
 def _error_summary(error: BundleCreateError) -> dict:
@@ -478,6 +604,7 @@ def main(
         include_tags=include_tags,
         since=args.since,
         last=args.last,
+        release=str(args.release).strip() if args.release else None,
     )
     try:
         result = create_update_bundle(config, command_runner=command_runner, now=now)

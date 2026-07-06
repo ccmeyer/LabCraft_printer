@@ -179,6 +179,7 @@ class OfflineBundleInfo:
     repo: str
     source_ref: str
     head_sha: str
+    release_info: ReleaseTargetInfo | None = None
 
 
 @dataclass(frozen=True)
@@ -528,6 +529,47 @@ def _release_fields(info: ReleaseTargetInfo | None) -> dict:
     }
 
 
+def _offline_update_target_ref() -> str:
+    return f"{OFFLINE_UPDATE_REF}^{{commit}}"
+
+
+def _offline_release_info_from_manifest(manifest: dict, *, head_sha: str) -> ReleaseTargetInfo | None:
+    release_keys = ("release_version", "release_tag", "release_manifest", "rollback_version")
+    if not any(manifest.get(key) not in (None, "") for key in release_keys):
+        return None
+
+    release_version = manifest.get("release_version")
+    release_tag = manifest.get("release_tag")
+    release_manifest = manifest.get("release_manifest")
+    if release_version in (None, "") or release_tag in (None, "") or release_manifest in (None, ""):
+        raise OfflineBundleError("Offline update release manifest is missing release_version, release_tag, or release_manifest.")
+    if not isinstance(release_manifest, dict):
+        raise OfflineBundleError("Offline update release_manifest must be a JSON object.")
+
+    try:
+        version = _normalize_release_version(release_version, context="offline release_version")
+        tag = _normalize_release_version(release_tag, context="offline release_tag")
+        info = _validate_release_manifest(release_manifest, expected_version=version)
+    except ReleaseMetadataError as exc:
+        raise OfflineBundleError(str(exc.message)) from exc
+
+    if info.tag != tag:
+        raise OfflineBundleError("Offline update release_tag does not match release_manifest tag.")
+
+    rollback = manifest.get("rollback_version")
+    rollback_version = info.rollback_version
+    if rollback not in (None, ""):
+        try:
+            manifest_rollback = _normalize_release_version(rollback, context="offline rollback_version")
+        except ReleaseMetadataError as exc:
+            raise OfflineBundleError(str(exc.message)) from exc
+        if rollback_version and manifest_rollback != rollback_version:
+            raise OfflineBundleError("Offline update rollback_version does not match release_manifest rollback_version.")
+        rollback_version = manifest_rollback
+
+    return replace(info, tag=tag, sha=head_sha, rollback_version=rollback_version)
+
+
 def _resolve_offline_manifest_path(repo_root: Path, manifest_path: Path | str) -> Path:
     path = Path(manifest_path)
     return (path if path.is_absolute() else repo_root / path).resolve()
@@ -616,14 +658,26 @@ def _validate_offline_bundle(
             f"Offline update bundle is for repo {repo!r}, but this checkout remote is {local_repo_slug!r}."
         )
 
+    release_fields_present = any(
+        manifest.get(key) not in (None, "")
+        for key in ("release_version", "release_tag", "release_manifest", "rollback_version")
+    )
     source_ref = str(manifest.get("source_ref", "") or "")
-    expected_source_ref = f"refs/remotes/{remote}/{manifest_branch}"
+    if release_fields_present:
+        try:
+            release_tag = _normalize_release_version(manifest.get("release_tag"), context="offline release_tag")
+        except ReleaseMetadataError as exc:
+            raise OfflineBundleError(str(exc.message)) from exc
+        expected_source_ref = f"refs/tags/{release_tag}"
+    else:
+        expected_source_ref = f"refs/remotes/{remote}/{manifest_branch}"
     if source_ref != expected_source_ref:
-        raise OfflineBundleError("Offline update manifest source_ref does not match its remote and branch.")
+        raise OfflineBundleError("Offline update manifest source_ref does not match its update target metadata.")
 
     head_sha = str(manifest.get("head_sha", "") or "")
     if not re.fullmatch(r"[0-9a-fA-F]{40,64}", head_sha):
         raise OfflineBundleError("Offline update manifest has an invalid head_sha.")
+    release_info = _offline_release_info_from_manifest(manifest, head_sha=head_sha)
 
     bundle_path = _resolve_manifest_bundle_path(resolved_manifest_path, manifest.get("bundle_filename"))
     if not bundle_path.is_file():
@@ -657,6 +711,7 @@ def _validate_offline_bundle(
         repo=repo,
         source_ref=source_ref,
         head_sha=head_sha,
+        release_info=release_info,
     )
 
 
@@ -692,7 +747,7 @@ def _prepare_offline_update_ref(
             command_result=fetch_result,
         )
 
-    ref_result = _run_git(repo_root, ["rev-parse", OFFLINE_UPDATE_REF], config.git_timeout_s, command_runner)
+    ref_result = _run_git(repo_root, ["rev-parse", _offline_update_target_ref()], config.git_timeout_s, command_runner)
     _record_or_log_command(log, ref_result, progress_callback)
     if ref_result.returncode != 0 or not ref_result.stdout.strip():
         raise OfflineBundleError(
@@ -1363,7 +1418,7 @@ def run_update_check(
 
         count_result = _run_git(
             repo_root,
-            ["rev-list", "--left-right", "--count", f"HEAD...{OFFLINE_UPDATE_REF}"],
+            ["rev-list", "--left-right", "--count", f"HEAD...{_offline_update_target_ref()}"],
             config.git_timeout_s,
             command_runner,
         )
@@ -1383,6 +1438,7 @@ def run_update_check(
                     update_source=UPDATE_SOURCE_OFFLINE,
                     offline_manifest_path=offline_info.manifest_path,
                     offline_bundle_path=offline_info.bundle_path,
+                    **_release_fields(offline_info.release_info),
                 ),
                 log,
                 log_path,
@@ -1390,10 +1446,13 @@ def run_update_check(
 
         ahead_count, behind_count = counts
         if ahead_count > 0 and behind_count > 0:
+            diverged_message = "This checkout has diverged from the offline update bundle. Contact support before updating."
+            if offline_info.release_info is not None:
+                diverged_message = f"This checkout has diverged from offline release {offline_info.release_info.version}. Contact support before updating."
             return _finish_check_result(
                 _make_check_result(
                     STATUS_DIVERGED,
-                    "This checkout has diverged from the offline update bundle. Contact support before updating.",
+                    diverged_message,
                     repo_root=repo_root,
                     branch=branch,
                     upstream=OFFLINE_UPDATE_REF,
@@ -1405,6 +1464,7 @@ def run_update_check(
                     update_source=UPDATE_SOURCE_OFFLINE,
                     offline_manifest_path=offline_info.manifest_path,
                     offline_bundle_path=offline_info.bundle_path,
+                    **_release_fields(offline_info.release_info),
                 ),
                 log,
                 log_path,
@@ -1413,16 +1473,19 @@ def run_update_check(
         if behind_count > 0:
             log_result = _run_git(
                 repo_root,
-                ["log", "--oneline", f"HEAD..{OFFLINE_UPDATE_REF}"],
+                ["log", "--oneline", f"HEAD..{_offline_update_target_ref()}"],
                 config.git_timeout_s,
                 command_runner,
             )
             log.add_command(log_result)
             commits = _split_commit_lines(log_result.stdout) if log_result.returncode == 0 else ()
+            update_message = f"{behind_count} offline update commit{'s' if behind_count != 1 else ''} available."
+            if offline_info.release_info is not None:
+                update_message = f"LabCraft {offline_info.release_info.version} is available from the offline bundle."
             return _finish_check_result(
                 _make_check_result(
                     STATUS_UPDATE_AVAILABLE,
-                    f"{behind_count} offline update commit{'s' if behind_count != 1 else ''} available.",
+                    update_message,
                     repo_root=repo_root,
                     branch=branch,
                     upstream=OFFLINE_UPDATE_REF,
@@ -1435,14 +1498,22 @@ def run_update_check(
                     update_source=UPDATE_SOURCE_OFFLINE,
                     offline_manifest_path=offline_info.manifest_path,
                     offline_bundle_path=offline_info.bundle_path,
+                    **_release_fields(offline_info.release_info),
                 ),
                 log,
                 log_path,
             )
 
         message = "LabCraft is up to date with the offline update bundle."
+        if offline_info.release_info is not None:
+            message = f"LabCraft is up to date with offline release {offline_info.release_info.version}."
         if ahead_count > 0:
             message = "No offline update is available. This checkout has local commits not present in the offline bundle."
+            if offline_info.release_info is not None:
+                message = (
+                    f"No offline update is available. This checkout has local commits not present in "
+                    f"offline release {offline_info.release_info.version}. Contact support before updating."
+                )
         return _finish_check_result(
             _make_check_result(
                 STATUS_UP_TO_DATE,
@@ -1458,6 +1529,7 @@ def run_update_check(
                 update_source=UPDATE_SOURCE_OFFLINE,
                 offline_manifest_path=offline_info.manifest_path,
                 offline_bundle_path=offline_info.bundle_path,
+                **_release_fields(offline_info.release_info),
             ),
             log,
             log_path,
@@ -1795,6 +1867,7 @@ def run_update(
                 progress_callback=progress_callback,
             )
             offline_manifest_path = offline_info.manifest_path
+            release_info = offline_info.release_info
         except OfflineBundleError as exc:
             result = _make_result(
                 STATUS_OFFLINE_BUNDLE_INVALID,
@@ -1810,12 +1883,13 @@ def run_update(
             return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
 
         _emit_progress(progress_callback, "applying_update", "Applying offline update...", log_path=log_path)
-        pull_result = _run_git(repo_root, ["merge", "--ff-only", OFFLINE_UPDATE_REF], config.git_timeout_s, command_runner)
+        offline_target_ref = _offline_update_target_ref()
+        pull_result = _run_git(repo_root, ["merge", "--ff-only", offline_target_ref], config.git_timeout_s, command_runner)
         _record_command(log, pull_result, progress_callback)
         if pull_result.returncode != 0:
             result = _make_result(
                 STATUS_OFFLINE_UPDATE_FAILED,
-                f"Update cannot continue because git merge --ff-only {OFFLINE_UPDATE_REF} failed. The current app version was not changed.",
+                f"Update cannot continue because git merge --ff-only {offline_target_ref} failed. The current app version was not changed.",
                 repo_root=repo_root,
                 branch=branch,
                 before_sha=before_sha,
@@ -1823,6 +1897,7 @@ def run_update(
                 log_path=log_path,
                 update_source=UPDATE_SOURCE_OFFLINE,
                 offline_manifest_path=offline_manifest_path,
+                **_release_fields(release_info),
             )
             return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
     else:

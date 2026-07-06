@@ -497,6 +497,37 @@ def test_speed_tab_offline_update_available_shows_source_details(qapp, tmp_path)
     assert str(manifest_path) in message
 
 
+def test_speed_tab_offline_release_update_available_shows_release_details(qapp, tmp_path):
+    tab = _make_speed_tab_for_update_check()
+    manifest_path = tmp_path / "LabCraftUpdates" / "update.json"
+
+    SpeedProfilesTab._on_app_update_check_finished(
+        tab,
+        SimpleNamespace(
+            status="update_available",
+            message="LabCraft v1.1.2 is available from the offline bundle.",
+            update_source="offline",
+            offline_manifest_path=manifest_path,
+            target_release_version="v1.1.2",
+            release_summary="Release-aware offline bundle.",
+            release_notes=("Installs a named release from USB.",),
+            rollback_version="v1.1.1",
+            behind_count=1,
+            commits=("def Offline release update",),
+        ),
+    )
+
+    assert tab.app_update_button.enabled is True
+    title, message = tab.main_window.messages[0]
+    assert title == "Updates Available"
+    assert "Source: Offline bundle" in message
+    assert str(manifest_path) in message
+    assert "Release: v1.1.2" in message
+    assert "Summary: Release-aware offline bundle." in message
+    assert "Installs a named release from USB." in message
+    assert "Rollback: v1.1.1" in message
+
+
 def test_speed_tab_update_check_failure_keeps_update_disabled(qapp):
     tab = _make_speed_tab_for_update_check()
 

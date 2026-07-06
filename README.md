@@ -342,7 +342,15 @@ Offline operator flow:
 
 ### Create offline update bundles (support only)
 
-When a machine cannot reach GitHub, support can package the current deployment branch as a portable Git bundle plus manifest. A full bundle is the safest default:
+When a machine cannot reach GitHub, support should package a named release as a portable Git bundle plus manifest. A full release bundle is the safest default:
+
+```powershell
+.\env\Scripts\python.exe tools/create_update_bundle.py --release v1.1.2
+```
+
+Release-aware bundles include the target release version, release manifest, release notes, and rollback version in the generated manifest so the app can show the operator which release will install.
+
+If support intentionally needs to package the current deployment branch without release metadata, use:
 
 ```powershell
 .\env\Scripts\python.exe tools/create_update_bundle.py --branch stable
@@ -357,16 +365,18 @@ git rev-parse HEAD
 Then create an incremental bundle from the support checkout using that commit as the prerequisite base:
 
 ```powershell
-.\env\Scripts\python.exe tools/create_update_bundle.py --branch stable --since <offline-head-sha>
+.\env\Scripts\python.exe tools/create_update_bundle.py --release v1.1.2 --since <offline-head-sha>
 ```
 
 As a convenience, support can package approximately the latest 20 commits when confident the offline machine already has `stable~20`:
 
 ```powershell
-.\env\Scripts\python.exe tools/create_update_bundle.py --branch stable --last 20
+.\env\Scripts\python.exe tools/create_update_bundle.py --release v1.1.2 --last 20
 ```
 
 Incremental bundles are smaller, but they require the target machine to already have the base commit. If that prerequisite is missing, `git bundle verify` and the app updater reject the bundle cleanly. Incremental bundles omit tags by default; add `--include-tags` only when tag refs are needed.
+
+Release-aware incremental bundles include tags by default so the target release tag is available inside the bundle.
 
 The files are written under:
 
