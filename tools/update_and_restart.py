@@ -44,6 +44,10 @@ UPDATE_SOURCE_ONLINE = "online"
 UPDATE_SOURCE_OFFLINE = "offline"
 OFFLINE_BUNDLE_SCHEMA_VERSION = "labcraft_update_bundle_v1"
 OFFLINE_UPDATE_REF = "refs/labcraft/offline-update"
+RELEASE_INDEX_SCHEMA_VERSION = "labcraft_release_index_v1"
+RELEASE_MANIFEST_SCHEMA_VERSION = "labcraft_release_v1"
+RELEASE_INDEX_PATH = "releases/latest.json"
+RELEASE_VERSION_RE = re.compile(r"v[0-9]+(?:\.[0-9]+){2}(?:-[A-Za-z0-9][A-Za-z0-9.-]*)?")
 
 EXIT_CODES = {
     STATUS_UPDATED: 0,
@@ -96,6 +100,12 @@ class UpdateResult:
     log_path: Path | None = None
     update_source: str = UPDATE_SOURCE_ONLINE
     offline_manifest_path: Path | None = None
+    target_release_version: str = ""
+    target_release_tag: str = ""
+    target_release_sha: str = ""
+    release_summary: str = ""
+    release_notes: tuple[str, ...] = ()
+    rollback_version: str = ""
 
 
 @dataclass(frozen=True)
@@ -115,6 +125,12 @@ class UpdateCheckResult:
     update_source: str = UPDATE_SOURCE_ONLINE
     offline_manifest_path: Path | None = None
     offline_bundle_path: Path | None = None
+    target_release_version: str = ""
+    target_release_tag: str = ""
+    target_release_sha: str = ""
+    release_summary: str = ""
+    release_notes: tuple[str, ...] = ()
+    rollback_version: str = ""
 
 
 @dataclass(frozen=True)
@@ -143,6 +159,7 @@ class UpdaterConfig:
     log_path: Path | None = None
     platform_name: str | None = None
     offline_manifest_path: Path | None = None
+    target_release: str | None = None
 
 
 CommandRunner = Callable[[Sequence[str], Path, float, Mapping[str, str] | None], CommandResult]
@@ -164,7 +181,24 @@ class OfflineBundleInfo:
     head_sha: str
 
 
+@dataclass(frozen=True)
+class ReleaseTargetInfo:
+    version: str
+    tag: str
+    sha: str
+    summary: str = ""
+    notes: tuple[str, ...] = ()
+    rollback_version: str = ""
+
+
 class OfflineBundleError(RuntimeError):
+    def __init__(self, message: str, *, command_result: CommandResult | None = None) -> None:
+        super().__init__(message)
+        self.message = message
+        self.command_result = command_result
+
+
+class ReleaseMetadataError(RuntimeError):
     def __init__(self, message: str, *, command_result: CommandResult | None = None) -> None:
         super().__init__(message)
         self.message = message
@@ -336,6 +370,162 @@ def _record_or_log_command(
         log.add_command(result)
     else:
         _record_command(log, result, progress_callback)
+
+
+def _run_git_with_log(
+    repo_root: Path,
+    git_args: Sequence[str],
+    config: UpdaterConfig,
+    command_runner: CommandRunner,
+    log: _LogBuffer,
+    progress_callback: ProgressCallback | None = None,
+) -> CommandResult:
+    result = _run_git(repo_root, git_args, config.git_timeout_s, command_runner)
+    _record_or_log_command(log, result, progress_callback)
+    return result
+
+
+def _normalize_release_version(value: object, *, context: str = "release version") -> str:
+    if not isinstance(value, str):
+        raise ReleaseMetadataError(f"{context} must be a string.")
+    version = value.strip()
+    if not version:
+        raise ReleaseMetadataError(f"{context} is empty.")
+    if "/" in version or "\\" in version or ".." in version or not RELEASE_VERSION_RE.fullmatch(version):
+        raise ReleaseMetadataError(f"{context} is not a supported LabCraft version: {version}")
+    return version
+
+
+def _load_git_json(
+    repo_root: Path,
+    *,
+    ref: str,
+    path: str,
+    config: UpdaterConfig,
+    command_runner: CommandRunner,
+    log: _LogBuffer,
+    progress_callback: ProgressCallback | None = None,
+) -> dict:
+    result = _run_git_with_log(
+        repo_root,
+        ["show", f"{ref}:{path}"],
+        config,
+        command_runner,
+        log,
+        progress_callback,
+    )
+    if result.returncode != 0:
+        raise ReleaseMetadataError(f"Release metadata could not be read from {ref}:{path}.", command_result=result)
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise ReleaseMetadataError(f"Release metadata at {ref}:{path} is not valid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ReleaseMetadataError(f"Release metadata at {ref}:{path} must contain a JSON object.")
+    return payload
+
+
+def _release_notes_from_manifest(manifest: dict) -> tuple[str, ...]:
+    raw_notes = manifest.get("notes", [])
+    if raw_notes is None:
+        return ()
+    if not isinstance(raw_notes, list):
+        raise ReleaseMetadataError("Release manifest notes must be a list.")
+    return tuple(str(note).strip() for note in raw_notes if str(note).strip())
+
+
+def _rollback_version_from_manifest(manifest: dict) -> str:
+    rollback = manifest.get("rollback_version")
+    if rollback in (None, ""):
+        return ""
+    return _normalize_release_version(rollback, context="release manifest rollback_version")
+
+
+def _validate_release_manifest(manifest: dict, *, expected_version: str) -> ReleaseTargetInfo:
+    if manifest.get("schema_version") != RELEASE_MANIFEST_SCHEMA_VERSION:
+        raise ReleaseMetadataError("Release manifest has an unsupported schema_version.")
+    version = _normalize_release_version(manifest.get("version"), context="release manifest version")
+    tag = _normalize_release_version(manifest.get("tag"), context="release manifest tag")
+    if version != expected_version:
+        raise ReleaseMetadataError("Release manifest version does not match the selected release.")
+    if tag != expected_version:
+        raise ReleaseMetadataError("Release manifest tag does not match the selected release.")
+    channel = str(manifest.get("channel") or "").strip()
+    if channel and channel != "stable":
+        raise ReleaseMetadataError("Release manifest channel is not stable.")
+    return ReleaseTargetInfo(
+        version=version,
+        tag=tag,
+        sha="",
+        summary=str(manifest.get("summary") or "").strip(),
+        notes=_release_notes_from_manifest(manifest),
+        rollback_version=_rollback_version_from_manifest(manifest),
+    )
+
+
+def _resolve_release_target(
+    repo_root: Path,
+    *,
+    upstream: str,
+    config: UpdaterConfig,
+    command_runner: CommandRunner,
+    log: _LogBuffer,
+    progress_callback: ProgressCallback | None = None,
+    target_release: str | None = None,
+) -> ReleaseTargetInfo:
+    if target_release:
+        version = _normalize_release_version(target_release, context="target release")
+    else:
+        index = _load_git_json(
+            repo_root,
+            ref=upstream,
+            path=RELEASE_INDEX_PATH,
+            config=config,
+            command_runner=command_runner,
+            log=log,
+            progress_callback=progress_callback,
+        )
+        if index.get("schema_version") != RELEASE_INDEX_SCHEMA_VERSION:
+            raise ReleaseMetadataError("Release index has an unsupported schema_version.")
+        version = _normalize_release_version(index.get("stable"), context="release index stable version")
+
+    tag = version
+    tag_result = _run_git_with_log(
+        repo_root,
+        ["rev-parse", f"{tag}^{{commit}}"],
+        config,
+        command_runner,
+        log,
+        progress_callback,
+    )
+    sha = tag_result.stdout.strip()
+    if tag_result.returncode != 0 or not sha:
+        raise ReleaseMetadataError(f"Release tag {tag} could not be resolved to a commit.", command_result=tag_result)
+
+    manifest = _load_git_json(
+        repo_root,
+        ref=tag,
+        path=f"releases/{version}.json",
+        config=config,
+        command_runner=command_runner,
+        log=log,
+        progress_callback=progress_callback,
+    )
+    info = _validate_release_manifest(manifest, expected_version=version)
+    return replace(info, sha=sha)
+
+
+def _release_fields(info: ReleaseTargetInfo | None) -> dict:
+    if info is None:
+        return {}
+    return {
+        "target_release_version": info.version,
+        "target_release_tag": info.tag,
+        "target_release_sha": info.sha,
+        "release_summary": info.summary,
+        "release_notes": info.notes,
+        "rollback_version": info.rollback_version,
+    }
 
 
 def _resolve_offline_manifest_path(repo_root: Path, manifest_path: Path | str) -> Path:
@@ -882,6 +1072,12 @@ def update_result_payload(result: UpdateResult, *, commits: Sequence[str] = ()) 
         "commits": [str(commit) for commit in commits],
         "update_source": result.update_source,
         "offline_manifest_path": str(result.offline_manifest_path) if result.offline_manifest_path is not None else "",
+        "target_release_version": result.target_release_version,
+        "target_release_tag": result.target_release_tag,
+        "target_release_sha": result.target_release_sha,
+        "release_summary": result.release_summary,
+        "release_notes": [str(note) for note in result.release_notes],
+        "rollback_version": result.rollback_version,
     }
 
 
@@ -979,6 +1175,12 @@ def _make_result(
     log_path: Path | None = None,
     update_source: str = UPDATE_SOURCE_ONLINE,
     offline_manifest_path: Path | None = None,
+    target_release_version: str = "",
+    target_release_tag: str = "",
+    target_release_sha: str = "",
+    release_summary: str = "",
+    release_notes: Sequence[str] = (),
+    rollback_version: str = "",
 ) -> UpdateResult:
     return UpdateResult(
         status=status,
@@ -991,6 +1193,12 @@ def _make_result(
         log_path=log_path,
         update_source=update_source,
         offline_manifest_path=offline_manifest_path,
+        target_release_version=target_release_version,
+        target_release_tag=target_release_tag,
+        target_release_sha=target_release_sha,
+        release_summary=release_summary,
+        release_notes=tuple(str(note) for note in release_notes if str(note).strip()),
+        rollback_version=rollback_version,
     )
 
 
@@ -1010,6 +1218,12 @@ def _make_check_result(
     update_source: str = UPDATE_SOURCE_ONLINE,
     offline_manifest_path: Path | None = None,
     offline_bundle_path: Path | None = None,
+    target_release_version: str = "",
+    target_release_tag: str = "",
+    target_release_sha: str = "",
+    release_summary: str = "",
+    release_notes: Sequence[str] = (),
+    rollback_version: str = "",
 ) -> UpdateCheckResult:
     return UpdateCheckResult(
         status=status,
@@ -1027,6 +1241,12 @@ def _make_check_result(
         update_source=update_source,
         offline_manifest_path=offline_manifest_path,
         offline_bundle_path=offline_bundle_path,
+        target_release_version=target_release_version,
+        target_release_tag=target_release_tag,
+        target_release_sha=target_release_sha,
+        release_summary=release_summary,
+        release_notes=tuple(str(note) for note in release_notes if str(note).strip()),
+        rollback_version=rollback_version,
     )
 
 
@@ -1260,7 +1480,7 @@ def run_update_check(
         )
     upstream = upstream_result.stdout.strip()
 
-    fetch_result = _run_git(repo_root, ["fetch", "--prune"], config.git_timeout_s, command_runner)
+    fetch_result = _run_git(repo_root, ["fetch", "--prune", "--tags"], config.git_timeout_s, command_runner)
     log.add_command(fetch_result)
     if fetch_result.returncode != 0:
         return _finish_check_result(
@@ -1277,24 +1497,45 @@ def run_update_check(
             log_path,
         )
 
-    upstream_sha_result = _run_git(repo_root, ["rev-parse", "@{u}"], config.git_timeout_s, command_runner)
-    log.add_command(upstream_sha_result)
-    upstream_sha = upstream_sha_result.stdout.strip() if upstream_sha_result.returncode == 0 else ""
+    try:
+        release_info = _resolve_release_target(
+            repo_root,
+            upstream=upstream,
+            config=config,
+            command_runner=command_runner,
+            log=log,
+            target_release=config.target_release,
+        )
+    except ReleaseMetadataError as exc:
+        return _finish_check_result(
+            _make_check_result(
+                STATUS_FETCH_FAILED,
+                f"Update check could not resolve the latest stable release metadata. {exc.message}",
+                repo_root=repo_root,
+                branch=branch,
+                upstream=upstream,
+                head_sha=head_sha,
+                log_path=log_path,
+            ),
+            log,
+            log_path,
+        )
 
-    count_result = _run_git(repo_root, ["rev-list", "--left-right", "--count", "HEAD...@{u}"], config.git_timeout_s, command_runner)
+    count_result = _run_git(repo_root, ["rev-list", "--left-right", "--count", f"HEAD...{release_info.sha}"], config.git_timeout_s, command_runner)
     log.add_command(count_result)
     counts = _parse_rev_list_counts(count_result.stdout)
     if count_result.returncode != 0 or counts is None:
         return _finish_check_result(
             _make_check_result(
                 STATUS_FETCH_FAILED,
-                "Update check could not compare this checkout with the remote branch. Contact support.",
+                "Update check could not compare this checkout with the selected stable release. Contact support.",
                 repo_root=repo_root,
                 branch=branch,
                 upstream=upstream,
                 head_sha=head_sha,
-                upstream_sha=upstream_sha,
+                upstream_sha=release_info.sha,
                 log_path=log_path,
+                **_release_fields(release_info),
             ),
             log,
             log_path,
@@ -1305,15 +1546,16 @@ def run_update_check(
         return _finish_check_result(
             _make_check_result(
                 STATUS_DIVERGED,
-                "This checkout has diverged from the remote branch. Contact support before updating.",
+                f"This checkout has diverged from {release_info.version}. Contact support before updating.",
                 repo_root=repo_root,
                 branch=branch,
                 upstream=upstream,
                 head_sha=head_sha,
-                upstream_sha=upstream_sha,
+                upstream_sha=release_info.sha,
                 ahead_count=ahead_count,
                 behind_count=behind_count,
                 log_path=log_path,
+                **_release_fields(release_info),
             ),
             log,
             log_path,
@@ -1321,30 +1563,34 @@ def run_update_check(
 
     commits: tuple[str, ...] = ()
     if behind_count > 0:
-        log_result = _run_git(repo_root, ["log", "--oneline", "HEAD..@{u}"], config.git_timeout_s, command_runner)
+        log_result = _run_git(repo_root, ["log", "--oneline", f"HEAD..{release_info.tag}"], config.git_timeout_s, command_runner)
         log.add_command(log_result)
         commits = _split_commit_lines(log_result.stdout) if log_result.returncode == 0 else ()
         return _finish_check_result(
             _make_check_result(
                 STATUS_UPDATE_AVAILABLE,
-                f"{behind_count} update commit{'s' if behind_count != 1 else ''} available.",
+                f"LabCraft {release_info.version} is available.",
                 repo_root=repo_root,
                 branch=branch,
                 upstream=upstream,
                 head_sha=head_sha,
-                upstream_sha=upstream_sha,
+                upstream_sha=release_info.sha,
                 ahead_count=ahead_count,
                 behind_count=behind_count,
                 commits=commits,
                 log_path=log_path,
+                **_release_fields(release_info),
             ),
             log,
             log_path,
         )
 
-    message = "LabCraft is up to date."
+    message = f"LabCraft is up to date with {release_info.version}."
     if ahead_count > 0:
-        message = "No remote update is available. This checkout has local commits not present upstream."
+        message = (
+            f"No stable update is available. This checkout has local commits not present in {release_info.version}. "
+            "Contact support before updating."
+        )
     return _finish_check_result(
         _make_check_result(
             STATUS_UP_TO_DATE,
@@ -1353,10 +1599,11 @@ def run_update_check(
             branch=branch,
             upstream=upstream,
             head_sha=head_sha,
-            upstream_sha=upstream_sha,
+            upstream_sha=release_info.sha,
             ahead_count=ahead_count,
             behind_count=behind_count,
             log_path=log_path,
+            **_release_fields(release_info),
         ),
         log,
         log_path,
@@ -1380,6 +1627,12 @@ def _finish_check_result(result: UpdateCheckResult, log: _LogBuffer, log_path: P
         update_source=result.update_source,
         offline_manifest_path=result.offline_manifest_path,
         offline_bundle_path=result.offline_bundle_path,
+        target_release_version=result.target_release_version,
+        target_release_tag=result.target_release_tag,
+        target_release_sha=result.target_release_sha,
+        release_summary=result.release_summary,
+        release_notes=result.release_notes,
+        rollback_version=result.rollback_version,
     )
     log.add(f"status: {result.status}")
     log.add(result.message)
@@ -1497,6 +1750,7 @@ def run_update(
         if config.offline_manifest_path is not None
         else None
     )
+    release_info: ReleaseTargetInfo | None = None
 
     _emit_progress(progress_callback, "checking_local_changes", "Checking local changes...", log_path=log_path)
     status_result = _run_git(repo_root, ["status", "--porcelain"], config.git_timeout_s, command_runner)
@@ -1572,18 +1826,71 @@ def run_update(
             )
             return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
     else:
-        _emit_progress(progress_callback, "applying_update", "Downloading and applying update...", log_path=log_path)
-        pull_result = _run_git(repo_root, ["pull", "--ff-only"], config.git_timeout_s, command_runner)
-        _record_command(log, pull_result, progress_callback)
-        if pull_result.returncode != 0:
+        _emit_progress(progress_callback, "resolving_release", "Resolving stable release target...", log_path=log_path)
+        upstream_result = _run_git(repo_root, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], config.git_timeout_s, command_runner)
+        _record_command(log, upstream_result, progress_callback)
+        if upstream_result.returncode != 0 or not upstream_result.stdout.strip():
             result = _make_result(
                 STATUS_GIT_PULL_FAILED,
-                "Update cannot continue because git pull --ff-only failed. The current app version was not changed.",
+                "Update cannot continue because this checkout does not have an upstream branch. The current app version was not changed.",
                 repo_root=repo_root,
                 branch=branch,
                 before_sha=before_sha,
                 after_sha=before_sha,
                 log_path=log_path,
+            )
+            return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
+        upstream = upstream_result.stdout.strip()
+
+        fetch_result = _run_git(repo_root, ["fetch", "--prune", "--tags"], config.git_timeout_s, command_runner)
+        _record_command(log, fetch_result, progress_callback)
+        if fetch_result.returncode != 0:
+            result = _make_result(
+                STATUS_GIT_PULL_FAILED,
+                "Update cannot continue because the remote repository could not be fetched. The current app version was not changed.",
+                repo_root=repo_root,
+                branch=branch,
+                before_sha=before_sha,
+                after_sha=before_sha,
+                log_path=log_path,
+            )
+            return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
+
+        try:
+            release_info = _resolve_release_target(
+                repo_root,
+                upstream=upstream,
+                config=config,
+                command_runner=command_runner,
+                log=log,
+                progress_callback=progress_callback,
+                target_release=config.target_release,
+            )
+        except ReleaseMetadataError as exc:
+            result = _make_result(
+                STATUS_GIT_PULL_FAILED,
+                f"Update cannot continue because the stable release metadata could not be resolved. {exc.message} The current app version was not changed.",
+                repo_root=repo_root,
+                branch=branch,
+                before_sha=before_sha,
+                after_sha=before_sha,
+                log_path=log_path,
+            )
+            return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
+
+        _emit_progress(progress_callback, "applying_update", f"Applying LabCraft {release_info.version}...", log_path=log_path)
+        merge_result = _run_git(repo_root, ["merge", "--ff-only", release_info.tag], config.git_timeout_s, command_runner)
+        _record_command(log, merge_result, progress_callback)
+        if merge_result.returncode != 0:
+            result = _make_result(
+                STATUS_GIT_PULL_FAILED,
+                f"Update cannot continue because git merge --ff-only {release_info.tag} failed. The current app version was not changed.",
+                repo_root=repo_root,
+                branch=branch,
+                before_sha=before_sha,
+                after_sha=before_sha,
+                log_path=log_path,
+                **_release_fields(release_info),
             )
             return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
 
@@ -1599,6 +1906,7 @@ def run_update(
             log_path=log_path,
             update_source=update_source,
             offline_manifest_path=offline_manifest_path,
+            **_release_fields(release_info),
         )
         return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
     after_sha = after_result.stdout.strip()
@@ -1616,6 +1924,7 @@ def run_update(
         log_path=log_path,
         update_source=update_source,
         offline_manifest_path=offline_manifest_path,
+        **_release_fields(release_info),
     )
     _maybe_write_latest_update_result(config, result, repo_root, command_runner)
 
@@ -1639,6 +1948,7 @@ def run_update(
                 log_path=log_path,
                 update_source=update_source,
                 offline_manifest_path=offline_manifest_path,
+                **_release_fields(release_info),
             )
             log.add(f"status: {result.status}")
             log.add(result.message)
@@ -1690,6 +2000,14 @@ def _finish_failure_result(
                 before_sha=result.before_sha,
                 after_sha=result.after_sha,
                 log_path=log_path,
+                update_source=result.update_source,
+                offline_manifest_path=result.offline_manifest_path,
+                target_release_version=result.target_release_version,
+                target_release_tag=result.target_release_tag,
+                target_release_sha=result.target_release_sha,
+                release_summary=result.release_summary,
+                release_notes=result.release_notes,
+                rollback_version=result.rollback_version,
             )
 
     log.add(f"status: {final_result.status}")
@@ -1725,6 +2043,7 @@ def parse_args(argv: Sequence[str] | None = None) -> UpdaterConfig:
     parser.add_argument("--git-timeout-s", type=float, default=DEFAULT_GIT_TIMEOUT_S, help="Timeout for each Git command.")
     parser.add_argument("--log-path", default=None, help="Optional updater log path.")
     parser.add_argument("--offline-manifest", default=None, help="Manifest JSON for an offline update bundle.")
+    parser.add_argument("--target-release", default=None, help="Specific stable release version to apply, e.g. v1.1.2.")
     args = parser.parse_args(argv)
 
     return UpdaterConfig(
@@ -1741,6 +2060,7 @@ def parse_args(argv: Sequence[str] | None = None) -> UpdaterConfig:
         git_timeout_s=float(args.git_timeout_s),
         log_path=Path(args.log_path) if args.log_path else None,
         offline_manifest_path=Path(args.offline_manifest) if args.offline_manifest else None,
+        target_release=str(args.target_release).strip() if args.target_release else None,
     )
 
 

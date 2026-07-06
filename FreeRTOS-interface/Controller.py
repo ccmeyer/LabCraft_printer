@@ -741,6 +741,12 @@ class Controller(QObject):
             and getattr(check_result, "offline_manifest_path", None)
         ):
             command.extend(["--offline-manifest", str(getattr(check_result, "offline_manifest_path"))])
+        elif (
+            getattr(check_result, "status", "") == "update_available"
+            and getattr(check_result, "update_source", "") != "offline"
+            and getattr(check_result, "target_release_version", "")
+        ):
+            command.extend(["--target-release", str(getattr(check_result, "target_release_version"))])
         return command
 
     def launch_app_updater(self, wait_pid, launcher=None):

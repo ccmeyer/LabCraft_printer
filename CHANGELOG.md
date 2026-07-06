@@ -8,10 +8,15 @@
 - Added release manifests for `v1.1.0`, `v1.1.1`, and `v1.1.2`.
 - Added a stable release index for future version-aware updater work.
 - Added installed app version display in the Application Update area.
+- Added release-aware online update checks using the stable release named by upstream `releases/latest.json`.
+- Added release-aware online update apply behavior using `git merge --ff-only <release-tag>`.
+- Added release details to update confirmation and startup result messages.
 
 ### Changed
 
-- No application updater behavior changes in this slice.
+- Online app updates now target named stable release tags instead of arbitrary upstream branch head.
+- The app passes the confirmed target release to the standalone updater process.
+- Offline Git bundle update behavior is unchanged.
 - No firmware, device protocol, motion, or pressure-control changes.
 
 ### Validation
@@ -19,6 +24,8 @@
 - Static metadata validation.
 - Focused updater-related tests:
   `.\env\Scripts\python.exe -m pytest -q tests/test_update_and_restart.py tests/test_create_update_bundle.py tests/test_app_update_request.py`
+- Focused release-aware updater tests:
+  `.\env\Scripts\python.exe -m pytest -q tests/test_update_and_restart.py tests/test_app_update_request.py`
 
 ### Rollback
 

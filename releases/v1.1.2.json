@@ -2,9 +2,11 @@
   "channel": "stable",
   "notes": [
     "Adds VERSION, CHANGELOG.md, and release manifests.",
-    "Adds a stable release index for future version-aware updater work.",
+    "Adds a stable release index for version-aware updater work.",
     "Adds installed app version display in the Application Update area.",
-    "Keeps existing branch-head online update behavior unchanged.",
+    "Changes online update checks to target the stable release tag named by upstream releases/latest.json.",
+    "Changes online update apply behavior to fast-forward merge the selected release tag instead of pulling arbitrary branch head.",
+    "Shows release summary, notes, rollback version, and installed release details in update messages.",
     "Keeps existing offline Git bundle update behavior unchanged."
   ],
   "previous_version": "v1.1.1",
@@ -12,10 +14,11 @@
   "requires_firmware": null,
   "rollback_version": "v1.1.1",
   "schema_version": "labcraft_release_v1",
-  "summary": "Adds bootstrap release metadata without changing updater behavior.",
+  "summary": "Adds release metadata, installed version display, and release-aware online app updates.",
   "tag": "v1.1.2",
   "validation": [
-    ".\\env\\Scripts\\python.exe -m pytest -q tests/test_update_and_restart.py tests/test_create_update_bundle.py tests/test_app_update_request.py"
+    ".\\env\\Scripts\\python.exe -m pytest -q tests/test_update_and_restart.py tests/test_create_update_bundle.py tests/test_app_update_request.py",
+    ".\\env\\Scripts\\python.exe -m pytest -q tests/test_update_and_restart.py tests/test_app_update_request.py"
   ],
   "version": "v1.1.2"
 }

@@ -1170,11 +1170,23 @@ class MainWindow(QMainWindow):
         log_path = str(payload.get("log_path") or "")
         update_source = str(payload.get("update_source") or "")
         offline_manifest_path = str(payload.get("offline_manifest_path") or "")
+        target_release_version = str(payload.get("target_release_version") or "")
+        target_release_tag = str(payload.get("target_release_tag") or "")
+        release_summary = str(payload.get("release_summary") or "")
+        rollback_version = str(payload.get("rollback_version") or "")
         commits = [str(commit) for commit in (payload.get("commits") or []) if str(commit).strip()]
 
         lines = [message]
         if status:
             lines.append(f"Status: {status}")
+        if target_release_version:
+            lines.append(f"Release: {target_release_version}")
+        if target_release_tag:
+            lines.append(f"Tag: {target_release_tag}")
+        if release_summary:
+            lines.append(f"Summary: {release_summary}")
+        if rollback_version:
+            lines.append(f"Rollback: {rollback_version}")
         if update_source == "offline":
             lines.append("Source: Offline bundle")
             if offline_manifest_path:
@@ -4859,6 +4871,25 @@ class SpeedProfilesTab(QtWidgets.QWidget):
                 offline_manifest_path = str(getattr(result, "offline_manifest_path", "") or "")
                 if offline_manifest_path:
                     details.append(f"Manifest: {offline_manifest_path}")
+            else:
+                target_release_version = str(getattr(result, "target_release_version", "") or "")
+                release_summary = str(getattr(result, "release_summary", "") or "")
+                rollback_version = str(getattr(result, "rollback_version", "") or "")
+                release_notes = [
+                    str(note)
+                    for note in getattr(result, "release_notes", ())
+                    if str(note).strip()
+                ]
+                if target_release_version:
+                    details.append(f"Release: {target_release_version}")
+                if release_summary:
+                    details.append(f"Summary: {release_summary}")
+                if release_notes:
+                    details.append("")
+                    details.append("Release notes:")
+                    details.extend(f"- {note}" for note in release_notes)
+                if rollback_version:
+                    details.append(f"Rollback: {rollback_version}")
             if behind_count:
                 details.append(f"Pending commits: {behind_count}")
             if commits:

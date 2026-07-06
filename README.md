@@ -315,12 +315,13 @@ Operators can update the Python application from the Firmware tab.
 Expected flow:
 
 - Click `Check for Updates`.
-- If the app is already current, it stays open and reports that no update is available.
-- If an update is available, the app shows pending commit summaries and enables `Update App`.
+- The online check fetches tags, reads the upstream `releases/latest.json`, and compares the local checkout with the latest stable release tag.
+- If the app is already current with that stable release, it stays open and reports that no update is available.
+- If an update is available, the app shows the target release version, release summary, release notes, rollback version when defined, and pending commit summaries, then enables `Update App`.
 - Click `Update App`; the app confirms that application code will update and firmware will not be flashed.
 - If the machine is connected, the normal disconnect/close flow runs first.
-- A `LabCraft Updater` window appears after the main app closes and shows update progress.
-- On success, the updater shows the status, commit range, installed commit summaries, and log path.
+- A `LabCraft Updater` window appears after the main app closes, resolves the same confirmed release, and applies it with a fast-forward merge of the release tag.
+- On success, the updater shows the status, installed release, commit range, installed commit summaries, and log path.
 - Close the updater window, then launch LabCraft again using the normal shortcut or launch command.
 
 If the update is blocked or fails, the updater window stays open and shows the log path. Support should ask for the path shown in the updater window, usually under:
@@ -337,7 +338,7 @@ Offline operator flow:
 - Plug the USB drive into the machine before clicking `Check for Updates`.
 - The app tries the normal online check first.
 - If the online check cannot contact the remote repository, the app scans removable drives for `LabCraftUpdates/*.json` manifests.
-- If a valid fast-forward offline bundle is found, the same `Update App` button updates from that bundle.
+- If a valid fast-forward offline bundle is found, the same `Update App` button updates from that bundle. Offline bundle behavior is still manifest/commit based.
 
 ### Create offline update bundles (support only)
 

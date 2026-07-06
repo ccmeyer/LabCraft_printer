@@ -110,6 +110,21 @@ def test_controller_builds_update_command_without_offline_manifest_for_online_up
     assert "--offline-manifest" not in command
 
 
+def test_controller_builds_update_command_with_target_release_for_online_update(tmp_path, monkeypatch):
+    controller = _make_controller(tmp_path)
+    controller._last_app_update_check_result = SimpleNamespace(
+        status="update_available",
+        update_source="online",
+        target_release_version="v1.1.2",
+    )
+    monkeypatch.setattr(controller_mod.sys, "executable", "python-under-test")
+
+    command = controller.build_app_update_command(wait_pid=1234)
+
+    assert command[-2:] == ["--target-release", "v1.1.2"]
+    assert "--offline-manifest" not in command
+
+
 def test_app_update_check_worker_uses_offline_fallback_helper(tmp_path, monkeypatch, qapp):
     calls = []
     result = SimpleNamespace(status="up_to_date", message="done")
@@ -430,6 +445,35 @@ def test_speed_tab_update_available_enables_update_and_shows_commits(qapp):
     assert "def Add result popup" in tab.main_window.messages[0][1]
 
 
+def test_speed_tab_release_update_available_shows_release_details(qapp):
+    tab = _make_speed_tab_for_update_check()
+
+    SpeedProfilesTab._on_app_update_check_finished(
+        tab,
+        SimpleNamespace(
+            status="update_available",
+            message="LabCraft v1.1.2 is available.",
+            update_source="online",
+            target_release_version="v1.1.2",
+            release_summary="Release-aware online updates.",
+            release_notes=("Uses stable release tags.", "Leaves offline bundles unchanged."),
+            rollback_version="v1.1.1",
+            behind_count=2,
+            commits=("def Release-aware updater", "abc Metadata display"),
+        ),
+    )
+
+    assert tab.app_update_status_label.text_value == "LabCraft v1.1.2 is available."
+    assert tab.app_update_button.enabled is True
+    title, message = tab.main_window.messages[0]
+    assert title == "Updates Available"
+    assert "Release: v1.1.2" in message
+    assert "Summary: Release-aware online updates." in message
+    assert "Uses stable release tags." in message
+    assert "Rollback: v1.1.1" in message
+    assert "def Release-aware updater" in message
+
+
 def test_speed_tab_offline_update_available_shows_source_details(qapp, tmp_path):
     tab = _make_speed_tab_for_update_check()
     manifest_path = tmp_path / "LabCraftUpdates" / "update.json"
@@ -497,6 +541,8 @@ def test_mainwindow_startup_update_result_popup_shows_once_and_clears_marker(qap
                 "before_sha": "abc",
                 "after_sha": "def",
                 "log_path": str(tmp_path / "local" / "update_logs" / "update.log"),
+                "target_release_version": "v1.1.2",
+                "target_release_tag": "v1.1.2",
                 "commits": ["def Add result popup"],
             }
         ),
@@ -519,6 +565,8 @@ def test_mainwindow_startup_update_result_popup_shows_once_and_clears_marker(qap
     title, message = window.messages[0]
     assert title == "Application Update Result"
     assert "LabCraft was updated successfully." in message
+    assert "Release: v1.1.2" in message
+    assert "Tag: v1.1.2" in message
     assert "def Add result popup" in message
 
 
