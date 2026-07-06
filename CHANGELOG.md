@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.1.6 - 2026-07-06
+
+### Fixed
+
+- Fixed updater window launches on Raspberry Pi checkouts where `env/bin/python` symlinks to the system Python.
+- Preserved the virtual-environment Python path instead of resolving it to `/usr/bin/python`.
+- Added a PySide6 import probe before closing the main app for update or rollback.
+- Added Python probe diagnostics to `local/update_logs/app_update_launcher_*.log`.
+- No firmware, device protocol, motion, or pressure-control changes.
+
+### Validation
+
+- Focused updater launcher tests:
+  `.\env\Scripts\python.exe -m pytest -q tests/test_app_update_request.py tests/test_update_and_restart.py`
+
+### Rollback
+
+- Recommended rollback version: `v1.1.5`.
+
 ## v1.1.5 - 2026-07-06
 
 ### Changed

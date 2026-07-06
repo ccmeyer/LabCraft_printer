@@ -825,13 +825,50 @@ class Controller(QObject):
                     env_root / "bin" / "python",
                 )
             )
+        candidates.append(Path(sys.executable))
+
+        probe_lines = []
+        seen = set()
         for candidate in candidates:
             try:
-                if candidate.is_file():
-                    return str(candidate.resolve())
-            except OSError:
+                candidate_path = str(candidate.absolute())
+                key = os.path.normcase(os.path.normpath(candidate_path))
+                if key in seen:
+                    continue
+                seen.add(key)
+                if not candidate.is_file():
+                    probe_lines.append(f"{candidate_path}: missing")
+                    continue
+                ok, message = self._probe_app_update_python(candidate_path)
+                probe_lines.append(message)
+                if ok:
+                    self._last_app_update_python_probe_lines = tuple(probe_lines)
+                    return candidate_path
+            except OSError as exc:
+                probe_lines.append(f"{candidate}: error checking candidate ({exc})")
                 continue
-        return sys.executable
+        self._last_app_update_python_probe_lines = tuple(probe_lines)
+        detail = "; ".join(probe_lines) if probe_lines else "no Python candidates were found"
+        raise RuntimeError(f"No Python environment with PySide6 was found for the updater window. {detail}")
+
+    def _probe_app_update_python(self, python_path):
+        try:
+            result = subprocess.run(
+                [str(python_path), "-c", "import PySide6"],
+                cwd=str(self._repo_root),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=5,
+            )
+        except Exception as exc:
+            return False, f"{python_path}: PySide6 probe failed ({exc})"
+        if result.returncode == 0:
+            return True, f"{python_path}: PySide6 OK"
+        output = (result.stderr or result.stdout or "").strip().splitlines()
+        reason = output[-1] if output else f"return code {result.returncode}"
+        return False, f"{python_path}: PySide6 unavailable ({reason})"
 
     def _app_update_launcher_log_path(self, operation_label):
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -849,6 +886,23 @@ class Controller(QObject):
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as fh:
             fh.write(str(text))
+
+    def _write_app_update_launcher_failure_log(self, operation_label, message, *, command=None):
+        log_path = self._app_update_launcher_log_path(operation_label)
+        probe_lines = tuple(getattr(self, "_last_app_update_python_probe_lines", ()) or ())
+        lines = [
+            f"started_at_utc: {datetime.now(timezone.utc).isoformat()}",
+            f"cwd: {self._repo_root}",
+        ]
+        if command is not None:
+            lines.append(f"command: {self._format_app_update_command(command)}")
+        if probe_lines:
+            lines.append("python_probe:")
+            lines.extend(f"- {line}" for line in probe_lines)
+        lines.append(f"launch_error: {message}")
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return log_path
 
     def _build_app_updater_base_command(self, wait_pid):
         updater_path = (self._repo_root / "tools" / "update_and_restart.py").resolve()
@@ -906,6 +960,11 @@ class Controller(QObject):
             f"cwd: {Path(cwd)}\n"
             f"command: {self._format_app_update_command(command)}\n\n"
         )
+        probe_lines = tuple(getattr(self, "_last_app_update_python_probe_lines", ()) or ())
+        if probe_lines:
+            header += "python_probe:\n"
+            header += "".join(f"- {line}\n" for line in probe_lines)
+            header += "\n"
         log_path.write_text(header, encoding="utf-8")
         log_file = log_path.open("a", encoding="utf-8")
         env = os.environ.copy()
@@ -967,15 +1026,25 @@ class Controller(QObject):
         return True, f"Application {operation_label} started."
 
     def launch_app_updater(self, wait_pid, launcher=None):
+        try:
+            command = self.build_app_update_command(wait_pid)
+        except Exception as exc:
+            log_path = self._write_app_update_launcher_failure_log("updater", str(exc))
+            return False, f"Could not start the application updater: {exc}. Launcher log: {log_path}"
         return self._launch_app_update_process(
-            self.build_app_update_command(wait_pid),
+            command,
             launcher=launcher,
             operation_label="updater",
         )
 
     def launch_app_rollback(self, wait_pid, launcher=None):
+        try:
+            command = self.build_app_rollback_command(wait_pid)
+        except Exception as exc:
+            log_path = self._write_app_update_launcher_failure_log("rollback", str(exc))
+            return False, f"Could not start the application rollback: {exc}. Launcher log: {log_path}"
         return self._launch_app_update_process(
-            self.build_app_rollback_command(wait_pid),
+            command,
             launcher=launcher,
             operation_label="rollback",
         )

@@ -65,7 +65,7 @@ def _make_controller(tmp_path):
 def test_controller_builds_update_command_without_auto_relaunch(tmp_path, monkeypatch):
     controller = _make_controller(tmp_path)
     monkeypatch.delenv("VIRTUAL_ENV", raising=False)
-    monkeypatch.setattr(controller_mod.sys, "executable", "python-under-test")
+    controller._resolve_app_update_python = lambda: "python-under-test"
 
     command = controller.build_app_update_command(wait_pid=1234)
 
@@ -94,7 +94,7 @@ def test_controller_builds_update_command_with_offline_manifest(tmp_path, monkey
         offline_manifest_path=manifest_path,
     )
     monkeypatch.delenv("VIRTUAL_ENV", raising=False)
-    monkeypatch.setattr(controller_mod.sys, "executable", "python-under-test")
+    controller._resolve_app_update_python = lambda: "python-under-test"
 
     command = controller.build_app_update_command(wait_pid=1234)
 
@@ -109,7 +109,7 @@ def test_controller_builds_update_command_without_offline_manifest_for_online_up
         update_source="online",
     )
     monkeypatch.delenv("VIRTUAL_ENV", raising=False)
-    monkeypatch.setattr(controller_mod.sys, "executable", "python-under-test")
+    controller._resolve_app_update_python = lambda: "python-under-test"
 
     command = controller.build_app_update_command(wait_pid=1234)
 
@@ -124,7 +124,7 @@ def test_controller_builds_update_command_with_target_release_for_online_update(
         target_release_version="v1.1.2",
     )
     monkeypatch.delenv("VIRTUAL_ENV", raising=False)
-    monkeypatch.setattr(controller_mod.sys, "executable", "python-under-test")
+    controller._resolve_app_update_python = lambda: "python-under-test"
 
     command = controller.build_app_update_command(wait_pid=1234)
 
@@ -139,7 +139,7 @@ def test_controller_builds_rollback_command(tmp_path, monkeypatch):
         update_source="online",
     )
     monkeypatch.delenv("VIRTUAL_ENV", raising=False)
-    monkeypatch.setattr(controller_mod.sys, "executable", "python-under-test")
+    controller._resolve_app_update_python = lambda: "python-under-test"
 
     command = controller.build_app_rollback_command(wait_pid=1234)
 
@@ -169,7 +169,7 @@ def test_controller_builds_offline_rollback_command_with_manifest(tmp_path, monk
         offline_manifest_path=manifest_path,
     )
     monkeypatch.delenv("VIRTUAL_ENV", raising=False)
-    monkeypatch.setattr(controller_mod.sys, "executable", "python-under-test")
+    controller._resolve_app_update_python = lambda: "python-under-test"
 
     command = controller.build_app_rollback_command(wait_pid=1234)
 
@@ -187,8 +187,9 @@ def test_controller_resolves_active_virtualenv_python_first(tmp_path, monkeypatc
     repo_python.write_text("", encoding="utf-8")
     monkeypatch.setenv("VIRTUAL_ENV", str(tmp_path / "active-env"))
     monkeypatch.setattr(controller_mod.sys, "executable", "python-under-test")
+    monkeypatch.setattr(controller, "_probe_app_update_python", lambda path: (True, f"{path}: PySide6 OK"))
 
-    assert controller._resolve_app_update_python() == str(active_python.resolve())
+    assert controller._resolve_app_update_python() == str(active_python.absolute())
 
 
 def test_controller_resolves_repo_env_python_before_sys_executable(tmp_path, monkeypatch):
@@ -198,8 +199,36 @@ def test_controller_resolves_repo_env_python_before_sys_executable(tmp_path, mon
     repo_python.write_text("", encoding="utf-8")
     monkeypatch.delenv("VIRTUAL_ENV", raising=False)
     monkeypatch.setattr(controller_mod.sys, "executable", "python-under-test")
+    monkeypatch.setattr(controller, "_probe_app_update_python", lambda path: (True, f"{path}: PySide6 OK"))
 
-    assert controller._resolve_app_update_python() == str(repo_python.resolve())
+    assert controller._resolve_app_update_python() == str(repo_python.absolute())
+
+
+def test_controller_resolver_skips_python_without_pyside6(tmp_path, monkeypatch):
+    controller = _make_controller(tmp_path)
+    active_python = tmp_path / "active-env" / "bin" / "python"
+    active_python.parent.mkdir(parents=True)
+    active_python.write_text("", encoding="utf-8")
+    repo_python = tmp_path / "env" / "bin" / "python"
+    repo_python.parent.mkdir(parents=True)
+    repo_python.write_text("", encoding="utf-8")
+    calls = []
+
+    def fake_probe(path):
+        calls.append(path)
+        if path == str(repo_python.absolute()):
+            return True, f"{path}: PySide6 OK"
+        return False, f"{path}: PySide6 unavailable (No module named 'PySide6')"
+
+    monkeypatch.setenv("VIRTUAL_ENV", str(tmp_path / "active-env"))
+    monkeypatch.setattr(controller_mod.sys, "executable", "python-under-test")
+    monkeypatch.setattr(controller, "_probe_app_update_python", fake_probe)
+
+    assert controller._resolve_app_update_python() == str(repo_python.absolute())
+    assert str(active_python.absolute()) in calls
+    assert str(repo_python.absolute()) in calls
+    assert any("PySide6 unavailable" in line for line in controller._last_app_update_python_probe_lines)
+    assert any("PySide6 OK" in line for line in controller._last_app_update_python_probe_lines)
 
 
 def test_app_update_check_worker_uses_offline_fallback_helper(tmp_path, monkeypatch, qapp):
@@ -501,10 +530,11 @@ def test_controller_launch_failure_does_not_mark_update_running(tmp_path):
 def test_controller_default_launcher_uses_detached_process_and_log(tmp_path, monkeypatch):
     controller = _make_controller(tmp_path)
     controller._app_update_launch_grace_s = 0
+    controller._resolve_app_update_python = lambda: "python-under-test"
+    controller._last_app_update_python_probe_lines = ("python-under-test: PySide6 OK",)
     popen_calls = []
     process = FakeProcess()
     monkeypatch.delenv("VIRTUAL_ENV", raising=False)
-    monkeypatch.setattr(controller_mod.sys, "executable", "python-under-test")
 
     def fake_popen(command, **kwargs):
         popen_calls.append((command, kwargs))
@@ -535,13 +565,15 @@ def test_controller_default_launcher_uses_detached_process_and_log(tmp_path, mon
     log_text = log_files[0].read_text(encoding="utf-8")
     assert f"cwd: {tmp_path}" in log_text
     assert "command: python-under-test -u" in log_text
+    assert "python_probe:" in log_text
+    assert "python-under-test: PySide6 OK" in log_text
 
 
 def test_controller_default_launcher_reports_immediate_exit(tmp_path, monkeypatch):
     controller = _make_controller(tmp_path)
     controller._app_update_launch_grace_s = 0
+    controller._resolve_app_update_python = lambda: "python-under-test"
     monkeypatch.delenv("VIRTUAL_ENV", raising=False)
-    monkeypatch.setattr(controller_mod.sys, "executable", "python-under-test")
     monkeypatch.setattr(controller_mod.subprocess, "Popen", lambda *args, **kwargs: FakeProcess(running=False))
 
     ok, message = controller.launch_app_updater(wait_pid=99)
@@ -557,8 +589,8 @@ def test_controller_default_launcher_reports_immediate_exit(tmp_path, monkeypatc
 def test_controller_default_launcher_failure_includes_launcher_log(tmp_path, monkeypatch):
     controller = _make_controller(tmp_path)
     controller._app_update_launch_grace_s = 0
+    controller._resolve_app_update_python = lambda: "python-under-test"
     monkeypatch.delenv("VIRTUAL_ENV", raising=False)
-    monkeypatch.setattr(controller_mod.sys, "executable", "python-under-test")
 
     def fake_popen(command, **kwargs):
         raise OSError("boom")
@@ -574,6 +606,37 @@ def test_controller_default_launcher_failure_includes_launcher_log(tmp_path, mon
     log_files = list((tmp_path / "local" / "update_logs").glob("app_update_launcher_updater_*.log"))
     assert len(log_files) == 1
     assert "launch_error: boom" in log_files[0].read_text(encoding="utf-8")
+
+
+def test_controller_launch_fails_before_spawn_without_gui_python(tmp_path, monkeypatch):
+    controller = _make_controller(tmp_path)
+    fake_python = tmp_path / "python-under-test"
+    fake_python.write_text("", encoding="utf-8")
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    monkeypatch.setattr(controller_mod.sys, "executable", str(fake_python))
+    monkeypatch.setattr(
+        controller,
+        "_probe_app_update_python",
+        lambda path: (False, f"{path}: PySide6 unavailable (No module named 'PySide6')"),
+    )
+    monkeypatch.setattr(
+        controller_mod.subprocess,
+        "Popen",
+        lambda *args, **kwargs: pytest.fail("updater process should not be spawned"),
+    )
+
+    ok, message = controller.launch_app_updater(wait_pid=99)
+
+    assert ok is False
+    assert "No Python environment with PySide6" in message
+    assert "Launcher log:" in message
+    assert controller._app_update_process is None
+    log_files = list((tmp_path / "local" / "update_logs").glob("app_update_launcher_updater_*.log"))
+    assert len(log_files) == 1
+    log_text = log_files[0].read_text(encoding="utf-8")
+    assert "python_probe:" in log_text
+    assert "PySide6 unavailable" in log_text
+    assert "launch_error:" in log_text
 
 
 def test_controller_cancel_app_update_process_terminates_running_process(tmp_path):
