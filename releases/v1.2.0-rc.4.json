@@ -1,0 +1,27 @@
+{
+  "channel": "release_candidate",
+  "notes": [
+    "Carries forward the camera/refuel release candidate line from v1.2.0-rc.3.",
+    "Includes the v1.1.3 release-candidate update toggle so operators can install release candidates from the UI with support guidance.",
+    "Keeps normal online updates on the stable release channel by default.",
+    "Keeps update apply behavior pinned to the confirmed release tag.",
+    "Keeps controlled rollback available to return release-candidate test machines to v1.1.3.",
+    "Updates the bundled firmware artifact for the camera/refuel release candidate."
+  ],
+  "previous_version": "v1.2.0-rc.3",
+  "release_date": "2026-07-06",
+  "requires_firmware": {
+    "artifact": "firmware/artifacts/LabCraft_firmware.bin",
+    "note": "Firmware was updated on the v1.2.0 release-candidate line."
+  },
+  "rollback_version": "v1.1.3",
+  "schema_version": "labcraft_release_v1",
+  "summary": "Release candidate for camera/refuel changes with the UI release-candidate update toggle.",
+  "tag": "v1.2.0-rc.4",
+  "validation": [
+    ".\\env\\Scripts\\python.exe -m pytest -q tests/test_update_and_restart.py tests/test_app_update_request.py",
+    "git diff --check",
+    "Get-ChildItem releases\\*.json | ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json | Out-Null }"
+  ],
+  "version": "v1.2.0-rc.4"
+}

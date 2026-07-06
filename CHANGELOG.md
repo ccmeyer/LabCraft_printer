@@ -1,5 +1,28 @@
 # Changelog
 
+## v1.2.0-rc.4 - 2026-07-06
+
+### Added
+
+- Added release metadata for the `v1.2.0-rc.4` release candidate.
+- Included the `v1.1.3` release-candidate update toggle in the v1.2.0 release-candidate line.
+- Added support-guided UI access for installing the current release candidate from `releases/latest.json`.
+
+### Changed
+
+- Set the app `VERSION` to `v1.2.0-rc.4`.
+- Kept `v1.1.3` as the latest stable release while advertising `v1.2.0-rc.4` as the current release candidate.
+- Set the recommended rollback version for this release candidate to `v1.1.3`.
+
+### Validation
+
+- Focused release-channel updater tests:
+  `.\env\Scripts\python.exe -m pytest -q tests/test_update_and_restart.py tests/test_app_update_request.py`
+
+### Rollback
+
+- Recommended rollback version: `v1.1.3`.
+
 ## v1.2.0-rc.3 - 2026-07-06
 
 ### Added
