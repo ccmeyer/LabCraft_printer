@@ -1,0 +1,20 @@
+{
+  "channel": "stable",
+  "notes": [
+    "Adds VERSION, CHANGELOG.md, and release manifests.",
+    "Adds a stable release index for future version-aware updater work.",
+    "Keeps existing branch-head online update behavior unchanged.",
+    "Keeps existing offline Git bundle update behavior unchanged."
+  ],
+  "previous_version": "v1.1.1",
+  "release_date": "2026-07-06",
+  "requires_firmware": null,
+  "rollback_version": "v1.1.1",
+  "schema_version": "labcraft_release_v1",
+  "summary": "Adds bootstrap release metadata without changing updater behavior.",
+  "tag": "v1.1.2",
+  "validation": [
+    ".\\env\\Scripts\\python.exe -m pytest -q tests/test_update_and_restart.py tests/test_create_update_bundle.py tests/test_app_update_request.py"
+  ],
+  "version": "v1.1.2"
+}

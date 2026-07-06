@@ -1,0 +1,20 @@
+{
+  "channel": "stable",
+  "notes": [
+    "Added a passive UI freeze watchdog and bounded droplet image shutdown handling.",
+    "Fixed stalled droplet capture stop/close handling in the imager sequence.",
+    "Added a second-stage prompt for force-closing the droplet imager after timeout failures.",
+    "Updated the stream calibration validation set to include density measurements."
+  ],
+  "previous_version": "v1.1.0",
+  "release_date": "2026-07-05",
+  "requires_firmware": null,
+  "rollback_version": "v1.1.0",
+  "schema_version": "labcraft_release_v1",
+  "summary": "UI and droplet imager bugfix release.",
+  "tag": "v1.1.1",
+  "validation": [
+    "Release validation recorded outside this metadata slice."
+  ],
+  "version": "v1.1.1"
+}
