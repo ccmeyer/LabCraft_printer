@@ -145,6 +145,81 @@ def test_app_update_check_worker_uses_offline_fallback_helper(tmp_path, monkeypa
     assert calls[0][1]["command_runner"] == "runner"
 
 
+def test_app_update_check_worker_uses_selected_offline_manifest(tmp_path, monkeypatch, qapp):
+    calls = []
+    fallback_calls = []
+    result = SimpleNamespace(status="update_available", message="offline ready")
+    manifest_path = tmp_path / "LabCraftUpdates" / "update.json"
+
+    def fake_check(config, **kwargs):
+        calls.append((config, kwargs))
+        return result
+
+    monkeypatch.setattr(updater_mod, "run_update_check", fake_check)
+    monkeypatch.setattr(updater_mod, "run_update_check_with_offline_fallback", lambda *args, **kwargs: fallback_calls.append((args, kwargs)))
+    worker = controller_mod.AppUpdateCheckWorker(tmp_path, command_runner="runner", offline_manifest_path=manifest_path)
+    emitted = []
+    worker.finished.connect(emitted.append)
+
+    worker.run()
+
+    assert emitted == [result]
+    assert calls[0][0].repo_root == tmp_path
+    assert calls[0][0].offline_manifest_path == manifest_path
+    assert calls[0][1]["command_runner"] == "runner"
+    assert fallback_calls == []
+
+
+def test_controller_start_offline_app_update_check_passes_manifest(tmp_path, monkeypatch, qapp):
+    controller = _make_controller(tmp_path)
+    manifest_path = tmp_path / "LabCraftUpdates" / "update.json"
+    created = []
+    started = []
+    controller.app_update_check_started = SimpleNamespace(emit=lambda: started.append(True))
+
+    class FakeThread:
+        def __init__(self, parent=None):
+            self.parent = parent
+            self.started = SimpleNamespace(connect=lambda callback: setattr(self, "_started_callback", callback))
+            self.finished = SimpleNamespace(connect=lambda callback: None)
+
+        def start(self):
+            started.append("thread")
+
+        def isRunning(self):
+            return False
+
+        def quit(self):
+            pass
+
+        def deleteLater(self):
+            pass
+
+    class FakeWorker:
+        def __init__(self, repo_root, command_runner=None, offline_manifest_path=None):
+            created.append((Path(repo_root), command_runner, Path(offline_manifest_path)))
+            self.finished = SimpleNamespace(connect=lambda callback: None)
+
+        def moveToThread(self, thread):
+            pass
+
+        def run(self):
+            pass
+
+        def deleteLater(self):
+            pass
+
+    monkeypatch.setattr(controller_mod.QtCore, "QThread", FakeThread)
+    monkeypatch.setattr(controller_mod, "AppUpdateCheckWorker", FakeWorker)
+
+    ok, message = controller.start_offline_app_update_check(manifest_path, command_runner="runner")
+
+    assert ok is True
+    assert "started" in message
+    assert created == [(tmp_path, "runner", manifest_path)]
+    assert started
+
+
 def test_controller_launch_success_stores_process(tmp_path):
     controller = _make_controller(tmp_path)
     process = FakeProcess()
@@ -378,10 +453,59 @@ def test_mainwindow_request_app_update_check_blocks_when_busy(qapp):
     assert "Command queue is not empty." in window.messages[0][1]
 
 
+def test_mainwindow_request_offline_app_update_cancel_does_not_start(qapp, monkeypatch):
+    controller = SimpleNamespace(
+        get_app_update_blockers=lambda: [],
+        start_offline_app_update_check=lambda manifest_path: pytest.fail("offline check should not start"),
+    )
+    window = _make_update_mainwindow(controller)
+    monkeypatch.setattr(view_mod.QFileDialog, "getOpenFileName", lambda *args, **kwargs: ("", ""))
+
+    assert MainWindow.request_offline_app_update(window) is False
+    assert window.messages == []
+
+
+def test_mainwindow_request_offline_app_update_starts_selected_manifest(qapp, tmp_path):
+    calls = []
+    manifest_path = tmp_path / "LabCraftUpdates" / "update.json"
+    controller = SimpleNamespace(
+        get_app_update_blockers=lambda: [],
+        start_offline_app_update_check=lambda selected: calls.append(Path(selected)) or (True, "started"),
+    )
+    window = _make_update_mainwindow(controller)
+
+    assert MainWindow.request_offline_app_update(window, manifest_path=manifest_path) is True
+    assert calls == [manifest_path]
+    assert window.messages == []
+
+
+def test_mainwindow_request_offline_app_update_blocks_when_busy(qapp, tmp_path):
+    controller = SimpleNamespace(
+        get_app_update_blockers=lambda: ["Firmware update is running."],
+        start_offline_app_update_check=lambda manifest_path: pytest.fail("offline check should not start"),
+    )
+    window = _make_update_mainwindow(controller)
+
+    assert MainWindow.request_offline_app_update(window, manifest_path=tmp_path / "update.json") is False
+    assert "Firmware update is running." in window.messages[0][1]
+
+
+def test_mainwindow_request_offline_app_update_start_failure(qapp, tmp_path):
+    controller = SimpleNamespace(
+        get_app_update_blockers=lambda: [],
+        start_offline_app_update_check=lambda manifest_path: (False, "already running"),
+    )
+    window = _make_update_mainwindow(controller)
+
+    assert MainWindow.request_offline_app_update(window, manifest_path=tmp_path / "update.json") is False
+    assert window.messages == [("Cannot Install Offline Bundle", "already running")]
+
+
 def _make_speed_tab_for_update_check():
     tab = SpeedProfilesTab.__new__(SpeedProfilesTab)
     tab.app_update_status_label = _FakeLabel()
     tab.app_update_check_button = _FakeButton()
+    tab.app_update_offline_button = _FakeButton()
     tab.app_update_button = _FakeButton()
     tab.controller = SimpleNamespace(get_app_update_blockers=lambda: [])
     tab.main_window = SimpleNamespace(messages=[], popup_message=lambda title, message: tab.main_window.messages.append((title, message)))
@@ -409,7 +533,40 @@ def test_speed_tab_update_check_started_disables_update_controls(qapp):
 
     assert tab.app_update_status_label.text_value == "Checking for updates..."
     assert tab.app_update_check_button.enabled is False
+    assert tab.app_update_offline_button.enabled is False
     assert tab.app_update_button.enabled is False
+
+
+def test_speed_tab_offline_update_check_started_uses_offline_status(qapp):
+    tab = _make_speed_tab_for_update_check()
+    tab._app_update_check_mode = "offline"
+
+    SpeedProfilesTab._on_app_update_check_started(tab)
+
+    assert tab.app_update_status_label.text_value == "Checking offline bundle..."
+    assert tab.app_update_check_button.enabled is False
+    assert tab.app_update_offline_button.enabled is False
+    assert tab.app_update_button.enabled is False
+
+
+def test_speed_tab_offline_update_button_requests_manifest_check(qapp):
+    tab = _make_speed_tab_for_update_check()
+    calls = []
+    tab.main_window.request_offline_app_update = lambda: calls.append(True) or True
+
+    SpeedProfilesTab._on_offline_app_update_requested(tab)
+
+    assert calls == [True]
+    assert tab._app_update_check_mode == "offline"
+
+
+def test_speed_tab_offline_update_button_resets_mode_when_cancelled(qapp):
+    tab = _make_speed_tab_for_update_check()
+    tab.main_window.request_offline_app_update = lambda: False
+
+    SpeedProfilesTab._on_offline_app_update_requested(tab)
+
+    assert tab._app_update_check_mode == ""
 
 
 def test_speed_tab_up_to_date_check_keeps_update_disabled(qapp):
@@ -422,6 +579,7 @@ def test_speed_tab_up_to_date_check_keeps_update_disabled(qapp):
 
     assert tab.app_update_status_label.text_value == "LabCraft is up to date."
     assert tab.app_update_check_button.enabled is True
+    assert tab.app_update_offline_button.enabled is True
     assert tab.app_update_button.enabled is False
     assert tab.main_window.messages == []
 

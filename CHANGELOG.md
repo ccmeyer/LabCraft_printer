@@ -12,6 +12,7 @@
 - Added release-aware online update apply behavior using `git merge --ff-only <release-tag>`.
 - Added release-aware offline bundle creation with `tools/create_update_bundle.py --release <version>`.
 - Added release details to offline bundle manifests and offline update checks.
+- Added an explicit `Install Offline Bundle` action for selecting support-provided update manifests.
 - Added release details to update confirmation and startup result messages.
 
 ### Changed
@@ -19,6 +20,7 @@
 - Online app updates now target named stable release tags instead of arbitrary upstream branch head.
 - The app passes the confirmed target release to the standalone updater process.
 - Offline Git bundle updates can now target named release tags while preserving compatibility with existing branch/commit manifests.
+- Operators can intentionally validate and install an offline bundle without waiting for the online check to fail.
 - No firmware, device protocol, motion, or pressure-control changes.
 
 ### Validation
@@ -30,6 +32,8 @@
   `.\env\Scripts\python.exe -m pytest -q tests/test_update_and_restart.py tests/test_app_update_request.py`
 - Focused release-aware offline bundle tests:
   `.\env\Scripts\python.exe -m pytest -q tests/test_create_update_bundle.py tests/test_update_and_restart.py tests/test_app_update_request.py`
+- Focused explicit offline install tests:
+  `.\env\Scripts\python.exe -m pytest -q tests/test_app_update_request.py tests/test_update_and_restart.py`
 
 ### Rollback
 

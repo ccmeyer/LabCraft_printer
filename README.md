@@ -335,10 +335,12 @@ For dirty worktrees, network failures, credential failures, or non-fast-forward 
 Offline operator flow:
 
 - Copy the support-provided `LabCraftUpdates` folder to a USB drive.
-- Plug the USB drive into the machine before clicking `Check for Updates`.
-- The app tries the normal online check first.
+- Plug the USB drive into the machine.
+- Click `Install Offline Bundle`, select the support-provided manifest JSON, and review the displayed release details.
+- If the bundle is valid and newer than the installed app, click `Update App` to install it through the same updater window and safe close flow.
+- The regular `Check for Updates` flow still tries the normal online check first.
 - If the online check cannot contact the remote repository, the app scans removable drives for `LabCraftUpdates/*.json` manifests.
-- If a valid fast-forward offline bundle is found, the same `Update App` button updates from that bundle. Offline bundle behavior is still manifest/commit based.
+- If a valid fast-forward offline bundle is found automatically, the same `Update App` button updates from that bundle.
 
 ### Create offline update bundles (support only)
 

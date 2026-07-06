@@ -8,6 +8,7 @@
     "Changes online update apply behavior to fast-forward merge the selected release tag instead of pulling arbitrary branch head.",
     "Adds release-aware offline bundle creation with tools/create_update_bundle.py --release <version>.",
     "Adds release details to offline bundle manifests and offline update checks.",
+    "Adds an explicit Install Offline Bundle action so operators can select a support-provided manifest.",
     "Shows release summary, notes, rollback version, and installed release details in update messages.",
     "Keeps existing branch/commit offline Git bundle manifests compatible."
   ],
@@ -21,7 +22,8 @@
   "validation": [
     ".\\env\\Scripts\\python.exe -m pytest -q tests/test_update_and_restart.py tests/test_create_update_bundle.py tests/test_app_update_request.py",
     ".\\env\\Scripts\\python.exe -m pytest -q tests/test_update_and_restart.py tests/test_app_update_request.py",
-    ".\\env\\Scripts\\python.exe -m pytest -q tests/test_create_update_bundle.py tests/test_update_and_restart.py tests/test_app_update_request.py"
+    ".\\env\\Scripts\\python.exe -m pytest -q tests/test_create_update_bundle.py tests/test_update_and_restart.py tests/test_app_update_request.py",
+    ".\\env\\Scripts\\python.exe -m pytest -q tests/test_app_update_request.py tests/test_update_and_restart.py"
   ],
   "version": "v1.1.2"
 }

@@ -1129,6 +1129,41 @@ class MainWindow(QMainWindow):
             return False
         return True
 
+    def request_offline_app_update(self, manifest_path=None):
+        blockers_getter = getattr(self.controller, "get_app_update_blockers", None)
+        blockers = blockers_getter() if callable(blockers_getter) else []
+        if blockers:
+            message = "Cannot install an offline bundle right now:\n\n" + "\n".join(
+                f"- {blocker}" for blocker in blockers
+            )
+            self.popup_message("Cannot Install Offline Bundle", message)
+            return False
+
+        selected_manifest = manifest_path
+        if selected_manifest is None:
+            selected_manifest, _selected_filter = QFileDialog.getOpenFileName(
+                self,
+                "Select Offline Update Manifest",
+                "",
+                "LabCraft update manifests (*.json);;JSON files (*.json);;All files (*)",
+            )
+            if not selected_manifest:
+                return False
+
+        starter = getattr(self.controller, "start_offline_app_update_check", None)
+        if not callable(starter):
+            self.popup_message(
+                "Cannot Install Offline Bundle",
+                "The controller does not support offline application update checks.",
+            )
+            return False
+
+        ok, message = starter(Path(selected_manifest))
+        if not ok:
+            self.popup_message("Cannot Install Offline Bundle", str(message or "Offline update check could not be started."))
+            return False
+        return True
+
     def _latest_app_update_result_path(self):
         repo_root = getattr(self.controller, "_repo_root", None)
         if repo_root is None:
@@ -4535,6 +4570,11 @@ class SpeedProfilesTab(QtWidgets.QWidget):
         self.app_update_check_button.clicked.connect(self._on_app_update_check_requested)
         app_update_v.addWidget(self.app_update_check_button)
 
+        self.app_update_offline_button = QtWidgets.QPushButton("Install Offline Bundle")
+        self.app_update_offline_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.app_update_offline_button.clicked.connect(self._on_offline_app_update_requested)
+        app_update_v.addWidget(self.app_update_offline_button)
+
         self.app_update_button = QtWidgets.QPushButton("Update App")
         self.app_update_button.setFocusPolicy(QtCore.Qt.NoFocus)
         self.app_update_button.setEnabled(False)
@@ -4834,7 +4874,15 @@ class SpeedProfilesTab(QtWidgets.QWidget):
 
     @QtCore.Slot()
     def _on_app_update_check_requested(self):
-        self.main_window.request_app_update_check()
+        self._app_update_check_mode = "online"
+        if not self.main_window.request_app_update_check():
+            self._app_update_check_mode = ""
+
+    @QtCore.Slot()
+    def _on_offline_app_update_requested(self):
+        self._app_update_check_mode = "offline"
+        if not self.main_window.request_offline_app_update():
+            self._app_update_check_mode = ""
 
     def _format_current_app_version_label(self):
         getter = getattr(self.controller, "get_app_version", None)
@@ -4848,13 +4896,24 @@ class SpeedProfilesTab(QtWidgets.QWidget):
 
     @QtCore.Slot()
     def _on_app_update_check_started(self):
-        self.app_update_status_label.setText("Checking for updates...")
+        mode = str(getattr(self, "_app_update_check_mode", "") or "")
+        if mode == "offline":
+            self.app_update_status_label.setText("Checking offline bundle...")
+        else:
+            self.app_update_status_label.setText("Checking for updates...")
         self.app_update_check_button.setEnabled(False)
+        offline_button = getattr(self, "app_update_offline_button", None)
+        if offline_button is not None:
+            offline_button.setEnabled(False)
         self.app_update_button.setEnabled(False)
 
     @QtCore.Slot(object)
     def _on_app_update_check_finished(self, result):
         self.app_update_check_button.setEnabled(True)
+        offline_button = getattr(self, "app_update_offline_button", None)
+        if offline_button is not None:
+            offline_button.setEnabled(True)
+        self._app_update_check_mode = ""
         status = str(getattr(result, "status", "") or "")
         message = str(getattr(result, "message", "") or "Update check finished.")
 
