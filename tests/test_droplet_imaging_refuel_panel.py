@@ -115,10 +115,10 @@ def _build_droplet_dialog(
     def _is_droplet_capture_perf_enabled():
         return bool(droplet_capture_perf_enabled["value"])
 
-    capture_profile = {"value": "default"}
+    capture_profile = {"value": "dual_stream_detection"}
     capture_profile_state = {
         "requested_profile": "default",
-        "effective_profile": "default",
+        "effective_profile": "dual_stream_detection",
         "fallback_active": False,
         "fallback_reason": None,
         "fallback_error": None,
@@ -127,19 +127,32 @@ def _build_droplet_dialog(
 
     def _set_droplet_capture_profile(profile_name):
         profile = str(profile_name or "default").strip().lower()
-        if profile not in {"default", "fast_detection", "legacy_full_rgb", "dual_stream_detection", "throughput"}:
+        if profile not in {
+            "default",
+            "fast_detection",
+            "single_stream_detection",
+            "legacy_full_rgb",
+            "dual_stream_detection",
+            "throughput",
+        }:
             profile = "default"
-        capture_profile["value"] = profile
+        if profile in {"default", "dual_stream_detection"}:
+            effective_profile = "dual_stream_detection"
+        elif profile in {"fast_detection", "single_stream_detection"}:
+            effective_profile = "single_stream_detection"
+        else:
+            effective_profile = profile
+        capture_profile["value"] = effective_profile
         capture_profile_state.update(
             {
                 "requested_profile": profile,
-                "effective_profile": profile,
+                "effective_profile": effective_profile,
                 "fallback_active": False,
                 "fallback_reason": None,
                 "fallback_error": None,
             }
         )
-        return profile
+        return effective_profile
 
     def _set_droplet_capture_arm_timing_mode(mode):
         value = str(mode or "ack_after_edge").strip().lower()
@@ -363,6 +376,21 @@ def test_droplet_capture_performance_debug_checkbox_and_export(monkeypatch, qapp
     assert "C:/tmp/droplet_capture_perf.json" in dialog.droplet_capture_performance_debug_status_label.text()
 
 
+def test_repeat_and_benchmark_capture_profiles_use_optimized_exposure_default(monkeypatch, qapp):
+    dialog, _refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
+
+    dialog.enter_repeat_capture_mode()
+
+    assert dialog.exposure_time_spinbox.value() == 16500
+
+    controller.set_droplet_capture_profile.reset_mock()
+    dialog.exposure_time_spinbox.setValue(5000)
+    dialog.apply_benchmark_capture_profile()
+
+    controller.set_droplet_capture_profile.assert_called_once_with("throughput")
+    assert dialog.exposure_time_spinbox.value() == 16500
+
+
 def test_legacy_full_rgb_detection_checkbox_toggles_profile_and_is_not_persisted(monkeypatch, qapp):
     dialog, _refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
 
@@ -374,7 +402,7 @@ def test_legacy_full_rgb_detection_checkbox_toggles_profile_and_is_not_persisted
 
     controller.set_droplet_capture_profile.assert_called_once_with("legacy_full_rgb")
     assert dialog.legacy_full_rgb_detection_checkbox.isChecked() is True
-    assert dialog.dual_stream_detection_checkbox.isChecked() is False
+    assert dialog.previous_single_stream_detection_checkbox.isChecked() is False
     assert "Legacy full-RGB detection enabled" in dialog.droplet_capture_performance_debug_status_label.text()
 
     dialog.legacy_full_rgb_detection_checkbox.setChecked(False)
@@ -386,56 +414,57 @@ def test_legacy_full_rgb_detection_checkbox_toggles_profile_and_is_not_persisted
 
     second_dialog, _second_refuel_model, _second_controller = _build_droplet_dialog(monkeypatch, qapp)
     assert second_dialog.legacy_full_rgb_detection_checkbox.isChecked() is False
-    assert second_dialog.dual_stream_detection_checkbox.isChecked() is False
+    assert second_dialog.previous_single_stream_detection_checkbox.isChecked() is False
 
 
-def test_dual_stream_detection_checkbox_toggles_profile_and_is_not_persisted(monkeypatch, qapp):
+def test_previous_single_stream_detection_checkbox_toggles_profile_and_is_not_persisted(monkeypatch, qapp):
     dialog, _refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
 
-    assert dialog.dual_stream_detection_checkbox.isChecked() is False
+    assert dialog.previous_single_stream_detection_checkbox.isChecked() is False
 
     controller.set_droplet_capture_profile.reset_mock()
-    dialog.dual_stream_detection_checkbox.setChecked(True)
+    dialog.previous_single_stream_detection_checkbox.setChecked(True)
     qapp.processEvents()
 
-    controller.set_droplet_capture_profile.assert_called_once_with("dual_stream_detection")
-    assert dialog.dual_stream_detection_checkbox.isChecked() is True
+    controller.set_droplet_capture_profile.assert_called_once_with("single_stream_detection")
+    assert dialog.previous_single_stream_detection_checkbox.isChecked() is True
     assert dialog.legacy_full_rgb_detection_checkbox.isChecked() is False
-    assert "Dual-stream detection A/B enabled" in dialog.droplet_capture_performance_debug_status_label.text()
+    assert "Previous single-stream detection enabled" in dialog.droplet_capture_performance_debug_status_label.text()
 
-    dialog.dual_stream_detection_checkbox.setChecked(False)
+    dialog.previous_single_stream_detection_checkbox.setChecked(False)
     qapp.processEvents()
 
     controller.set_droplet_capture_profile.assert_called_with("default")
-    assert dialog.dual_stream_detection_checkbox.isChecked() is False
-    assert "Dual-stream detection A/B disabled" in dialog.droplet_capture_performance_debug_status_label.text()
+    assert dialog.previous_single_stream_detection_checkbox.isChecked() is False
+    assert "Optimized dual-stream default enabled" in dialog.droplet_capture_performance_debug_status_label.text()
 
     second_dialog, _second_refuel_model, _second_controller = _build_droplet_dialog(monkeypatch, qapp)
-    assert second_dialog.dual_stream_detection_checkbox.isChecked() is False
+    assert second_dialog.previous_single_stream_detection_checkbox.isChecked() is False
 
 
-def test_dual_stream_detection_checkbox_reverts_when_profile_falls_back(monkeypatch, qapp):
+def test_previous_single_stream_detection_checkbox_reflects_automatic_fallback(monkeypatch, qapp):
     dialog, _refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
-    controller.set_droplet_capture_profile = Mock(return_value="default")
+    controller.set_droplet_capture_profile = Mock(return_value="single_stream_detection")
     controller.get_droplet_capture_profile_state = Mock(
         return_value={
-            "requested_profile": "dual_stream_detection",
-            "effective_profile": "default",
+            "requested_profile": "default",
+            "effective_profile": "single_stream_detection",
             "fallback_active": True,
             "fallback_reason": "dual_stream_config_failed",
             "fallback_error": "create failed",
         }
     )
 
-    dialog.dual_stream_detection_checkbox.setChecked(True)
+    dialog._set_previous_single_stream_detection_checkbox_checked(True)
+    dialog.previous_single_stream_detection_checkbox.setChecked(False)
     qapp.processEvents()
 
-    controller.set_droplet_capture_profile.assert_called_once_with("dual_stream_detection")
-    assert dialog.dual_stream_detection_checkbox.isChecked() is False
-    assert "Dual-stream detection unavailable" in dialog.droplet_capture_performance_debug_status_label.text()
+    controller.set_droplet_capture_profile.assert_called_once_with("default")
+    assert dialog.previous_single_stream_detection_checkbox.isChecked() is True
+    assert "Dual-stream default unavailable" in dialog.droplet_capture_performance_debug_status_label.text()
 
 
-def test_dual_stream_detection_checkbox_reverts_when_capture_active(monkeypatch, qapp):
+def test_previous_single_stream_detection_checkbox_reverts_when_capture_active(monkeypatch, qapp):
     dialog, _refuel_model, controller = _build_droplet_dialog(
         monkeypatch,
         qapp,
@@ -449,23 +478,23 @@ def test_dual_stream_detection_checkbox_reverts_when_capture_active(monkeypatch,
     )
 
     controller.set_droplet_capture_profile.reset_mock()
-    dialog.dual_stream_detection_checkbox.setChecked(True)
+    dialog.previous_single_stream_detection_checkbox.setChecked(True)
     qapp.processEvents()
 
-    assert dialog.dual_stream_detection_checkbox.isChecked() is False
+    assert dialog.previous_single_stream_detection_checkbox.isChecked() is False
     controller.set_droplet_capture_profile.assert_not_called()
     assert "Cannot change capture profile" in dialog.droplet_capture_performance_debug_status_label.text()
 
 
-def test_dual_stream_detection_checkbox_reverts_when_calibration_active(monkeypatch, qapp):
+def test_previous_single_stream_detection_checkbox_reverts_when_calibration_active(monkeypatch, qapp):
     dialog, _refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
     dialog.model.calibration_manager.activeCalibration = object()
 
     controller.set_droplet_capture_profile.reset_mock()
-    dialog.dual_stream_detection_checkbox.setChecked(True)
+    dialog.previous_single_stream_detection_checkbox.setChecked(True)
     qapp.processEvents()
 
-    assert dialog.dual_stream_detection_checkbox.isChecked() is False
+    assert dialog.previous_single_stream_detection_checkbox.isChecked() is False
     controller.set_droplet_capture_profile.assert_not_called()
     assert "Cannot change capture profile" in dialog.droplet_capture_performance_debug_status_label.text()
 

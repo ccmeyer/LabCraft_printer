@@ -582,7 +582,7 @@ def _run_camera_benchmark_phase(
 
         bench_cfg = BenchmarkConfig(
             cycles=max(1, int(getattr(args, "camera_benchmark_cycles", 100))),
-            exposure_us=max(1, int(getattr(args, "camera_benchmark_exposure_us", 20000))),
+            exposure_us=max(1, int(getattr(args, "camera_benchmark_exposure_us", 16500))),
             flash_delay_us=max(0, int(getattr(args, "camera_benchmark_flash_delay_us", 5000))),
             flash_width_us=max(1, int(getattr(args, "camera_benchmark_flash_width_us", 1000))),
             num_droplets=effective_droplets,
@@ -1536,7 +1536,7 @@ def main() -> int:
     p.add_argument("--fast-fail-on-missing-hello", action="store_true")
     p.add_argument("--camera-benchmark", action="store_true")
     p.add_argument("--camera-benchmark-cycles", type=int, default=100)
-    p.add_argument("--camera-benchmark-exposure-us", type=int, default=20000)
+    p.add_argument("--camera-benchmark-exposure-us", type=int, default=16500)
     p.add_argument("--camera-benchmark-flash-delay-us", type=int, default=5000)
     p.add_argument("--camera-benchmark-flash-width-us", type=int, default=1000)
     p.add_argument("--camera-benchmark-num-droplets", type=int, default=1)

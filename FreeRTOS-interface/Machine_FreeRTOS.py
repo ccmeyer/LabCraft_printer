@@ -439,6 +439,7 @@ class DropletCamera(QObject):
     MAX_TRIGGER_PULSE_S = 0.100
     DUAL_STREAM_LORES_SIZE = (320, 240)
     DUAL_STREAM_LORES_FORMAT = "YUV420"
+    DEFAULT_EXPOSURE_US = 16_500
 
     def __init__(self):
         super().__init__()
@@ -461,7 +462,7 @@ class DropletCamera(QObject):
 
         # camera
         self.camera = None
-        self.exposure_time = 20_000  # us
+        self.exposure_time = self.DEFAULT_EXPOSURE_US  # us
         self._configured_frame_duration_us = self.exposure_time
         self._stream_main_size = None
         self._stream_main_format = None
@@ -499,10 +500,10 @@ class DropletCamera(QObject):
         self._cap_ack_frame_done_ns = None
         self._cap_buffered_post_arm_frames = 0
         self._cap_buffered_threshold_selected = False
-        self._signal_stride   = 4
-        self._signal_channel  = 1     # None => full RGB mean, else BGR channel index
+        self._signal_stride   = 1
+        self._signal_channel  = 0     # None => full RGB mean, else BGR channel index
         self._requested_capture_profile = "default"
-        self._capture_profile = "default"
+        self._capture_profile = "dual_stream_detection"
         self._capture_profile_fallback_active = False
         self._capture_profile_fallback_reason = None
         self._capture_profile_fallback_error = None
@@ -526,7 +527,13 @@ class DropletCamera(QObject):
     @staticmethod
     def _normalize_capture_profile(profile_name: str):
         p = str(profile_name or "default").strip().lower()
-        if p in {"legacy_full_rgb", "throughput", "dual_stream_detection", "fast_detection"}:
+        if p in {
+            "legacy_full_rgb",
+            "throughput",
+            "dual_stream_detection",
+            "single_stream_detection",
+            "fast_detection",
+        }:
             return p
         return "default"
 
@@ -542,13 +549,13 @@ class DropletCamera(QObject):
             self._signal_stride = 4
             self._signal_channel = 1  # green channel
             self._cap_emit_rotate = False
-        elif p == "dual_stream_detection":
+        elif p in {"default", "dual_stream_detection"}:
             self._capture_profile = "dual_stream_detection"
             self._signal_stride = 1
             self._signal_channel = 0
             self._cap_emit_rotate = True
         else:
-            self._capture_profile = "fast_detection" if p == "fast_detection" else "default"
+            self._capture_profile = "single_stream_detection"
             self._signal_stride = 4
             self._signal_channel = 1  # green channel
             self._cap_emit_rotate = True
@@ -563,14 +570,15 @@ class DropletCamera(QObject):
         self._capture_profile_fallback_active = True
         self._capture_profile_fallback_reason = str(reason or "capture_profile_fallback")
         self._capture_profile_fallback_error = None if error is None else str(error)
-        self._apply_capture_profile_settings("default")
+        self._apply_capture_profile_settings("single_stream_detection")
         return self.get_capture_profile()
 
     def set_capture_profile(self, profile_name: str):
         """
         Set capture behavior profile.
-        - default: strided green-channel signal mean, rotate output
-        - fast_detection: compatibility alias for the default fast detection math
+        - default: optimized dual-stream detection with full-resolution selected output
+        - single_stream_detection: previous default, main-stream green-channel detection
+        - fast_detection: compatibility alias for single_stream_detection
         - legacy_full_rgb: historical full-frame RGB mean, rotate output
         - dual_stream_detection: lores Y/luma detection, full-res selected output
         - throughput: reduce per-frame CPU work and skip rotate

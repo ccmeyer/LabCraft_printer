@@ -3195,15 +3195,17 @@ class DropletImagingDialog(QtWidgets.QDialog):
         )
         group_v.addWidget(self.legacy_full_rgb_detection_checkbox)
 
-        self.dual_stream_detection_checkbox = QtWidgets.QCheckBox("Use Dual-Stream Detection A/B")
-        self.dual_stream_detection_checkbox.setToolTip(
-            "Experimentally detect flashes on a low-resolution stream while preserving full-resolution selected images."
+        self.previous_single_stream_detection_checkbox = QtWidgets.QCheckBox(
+            "Use Previous Single-Stream Detection"
         )
-        self.dual_stream_detection_checkbox.setChecked(False)
-        self.dual_stream_detection_checkbox.toggled.connect(
-            self._set_dual_stream_detection_enabled
+        self.previous_single_stream_detection_checkbox.setToolTip(
+            "Use the previous main-stream green-channel detection path instead of the optimized dual-stream default."
         )
-        group_v.addWidget(self.dual_stream_detection_checkbox)
+        self.previous_single_stream_detection_checkbox.setChecked(False)
+        self.previous_single_stream_detection_checkbox.toggled.connect(
+            self._set_previous_single_stream_detection_enabled
+        )
+        group_v.addWidget(self.previous_single_stream_detection_checkbox)
 
         self.early_arm_ab_timing_checkbox = QtWidgets.QCheckBox("Use Early Arm A/B Timing")
         self.early_arm_ab_timing_checkbox.setToolTip(
@@ -3307,13 +3309,13 @@ class DropletImagingDialog(QtWidgets.QDialog):
         enabled = normalized == "legacy_full_rgb"
         self._set_legacy_full_rgb_detection_checkbox_checked(enabled)
         if enabled:
-            self._set_dual_stream_detection_checkbox_checked(False)
+            self._set_previous_single_stream_detection_checkbox_checked(False)
         self._set_droplet_capture_performance_debug_status(
             "Legacy full-RGB detection enabled" if enabled else "Legacy full-RGB detection disabled"
         )
 
-    def _set_dual_stream_detection_checkbox_checked(self, checked):
-        checkbox = getattr(self, "dual_stream_detection_checkbox", None)
+    def _set_previous_single_stream_detection_checkbox_checked(self, checked):
+        checkbox = getattr(self, "previous_single_stream_detection_checkbox", None)
         if checkbox is None:
             return
         if checkbox.isChecked() == bool(checked):
@@ -3324,24 +3326,24 @@ class DropletImagingDialog(QtWidgets.QDialog):
         finally:
             checkbox.blockSignals(was_blocked)
 
-    def _set_dual_stream_detection_enabled(self, checked):
+    def _set_previous_single_stream_detection_enabled(self, checked):
         checked = bool(checked)
         if DropletImagingDialog._is_calibration_busy(self) or self._capture_pending_for_ui():
-            self._set_dual_stream_detection_checkbox_checked(not checked)
+            self._set_previous_single_stream_detection_checkbox_checked(not checked)
             self._set_droplet_capture_performance_debug_status(
                 "Cannot change capture profile while calibration or capture is active."
             )
             return
         setter = getattr(self.controller, "set_droplet_capture_profile", None)
         if not callable(setter):
-            self._set_dual_stream_detection_checkbox_checked(False)
+            self._set_previous_single_stream_detection_checkbox_checked(False)
             self._set_droplet_capture_performance_debug_status("Capture profile control is unavailable.")
             return
-        profile = "dual_stream_detection" if checked else "default"
+        profile = "single_stream_detection" if checked else "default"
         try:
             applied = setter(profile)
         except Exception as exc:
-            self._set_dual_stream_detection_checkbox_checked(False)
+            self._set_previous_single_stream_detection_checkbox_checked(False)
             self._set_droplet_capture_performance_debug_status(f"Could not set capture profile: {exc}")
             return
         state = {}
@@ -3356,19 +3358,19 @@ class DropletImagingDialog(QtWidgets.QDialog):
         normalized = str(applied or profile or "default").strip().lower()
         effective_profile = str(state.get("effective_profile") or normalized).strip().lower()
         fallback_active = bool(state.get("fallback_active"))
-        enabled = normalized == "dual_stream_detection"
-        if checked and fallback_active and effective_profile != "dual_stream_detection":
-            enabled = False
-        self._set_dual_stream_detection_checkbox_checked(enabled)
+        enabled = effective_profile == "single_stream_detection"
+        self._set_previous_single_stream_detection_checkbox_checked(enabled)
         if enabled:
             self._set_legacy_full_rgb_detection_checkbox_checked(False)
-        if checked and fallback_active and effective_profile != "dual_stream_detection":
+        if fallback_active and effective_profile == "single_stream_detection":
             self._set_droplet_capture_performance_debug_status(
-                "Dual-stream detection unavailable; using single-stream detection."
+                "Dual-stream default unavailable; using previous single-stream detection."
             )
         else:
             self._set_droplet_capture_performance_debug_status(
-                "Dual-stream detection A/B enabled" if enabled else "Dual-stream detection A/B disabled"
+                "Previous single-stream detection enabled"
+                if enabled else
+                "Optimized dual-stream default enabled"
             )
 
     def _set_early_arm_ab_timing_checkbox_checked(self, checked):
@@ -7646,8 +7648,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         Enters the repeat capture mode.
         """
-        DropletImagingDialog._sync_manual_spinbox_value(self, self.exposure_time_spinbox, 20000, force=True)
-        self.set_exposure_time(20000)
+        DropletImagingDialog._sync_manual_spinbox_value(self, self.exposure_time_spinbox, 16500, force=True)
+        self.set_exposure_time(16500)
         DropletImagingDialog._sync_manual_spinbox_value(self, self.num_droplets_spinbox, 0, force=True)
         self.set_imaging_droplets(0)
 
@@ -7663,8 +7665,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.set_flash_delay(5000)
         DropletImagingDialog._sync_manual_spinbox_value(self, self.flash_duration_spinbox, 1000, force=True)
         self.set_flash_duration(1000)
-        DropletImagingDialog._sync_manual_spinbox_value(self, self.exposure_time_spinbox, 20000, force=True)
-        self.set_exposure_time(20000)
+        DropletImagingDialog._sync_manual_spinbox_value(self, self.exposure_time_spinbox, 16500, force=True)
+        self.set_exposure_time(16500)
         DropletImagingDialog._sync_manual_spinbox_value(self, self.num_droplets_spinbox, 1, force=True)
         self.set_imaging_droplets(1)
 

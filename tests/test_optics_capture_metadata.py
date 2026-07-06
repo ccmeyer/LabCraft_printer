@@ -11,6 +11,7 @@ import CalibrationClasses.View as calibration_view
 from CaptureCoordinator import CaptureCoordinatorState
 from CaptureTypes import CaptureStatus
 from Controller import Controller
+from CalibrationClasses.Model import DropletCameraModel
 from CalibrationClasses.View import DropletImagingDialog
 
 
@@ -24,6 +25,14 @@ class _Signal:
     def emit(self, *args, **kwargs):
         for callback in list(self._callbacks):
             callback(*args, **kwargs)
+
+
+def test_droplet_camera_model_default_exposure_is_optimized_frame_duration(monkeypatch):
+    monkeypatch.setattr(DropletCameraModel, "_load_preset_step_conversion", lambda self: None)
+
+    model = DropletCameraModel(steps_conv_path="")
+
+    assert model.exposure_time == 16500
 
 
 class _CaptureGuardTimer:

@@ -827,20 +827,34 @@ def test_capture_debug_logging_suppresses_info_prints_by_default(capsys):
     assert "[CameraPhase] trigger_high" in capsys.readouterr().out
 
 
-def test_capture_profile_modes_make_fast_detection_default_with_legacy_fallback():
+def test_droplet_camera_default_exposure_is_optimized_frame_duration():
+    assert DropletCamera.DEFAULT_EXPOSURE_US == 16500
+
+
+def test_capture_profile_modes_promote_dual_stream_default_with_single_stream_fallback():
     camera = DropletCamera.__new__(DropletCamera)
 
-    assert DropletCamera.set_capture_profile(camera, "default") == "default"
-    assert camera._signal_stride == 4
-    assert camera._signal_channel == 1
+    assert DropletCamera.set_capture_profile(camera, "default") == "dual_stream_detection"
+    assert camera._signal_stride == 1
+    assert camera._signal_channel == 0
     assert camera._cap_emit_rotate is True
-    assert DropletCamera.get_capture_profile(camera) == "default"
+    assert DropletCamera.get_capture_profile(camera) == "dual_stream_detection"
+    state = DropletCamera.get_capture_profile_state(camera)
+    assert state["requested_profile"] == "default"
+    assert state["effective_profile"] == "dual_stream_detection"
 
-    assert DropletCamera.set_capture_profile(camera, "fast_detection") == "fast_detection"
+    assert DropletCamera.set_capture_profile(camera, "single_stream_detection") == "single_stream_detection"
     assert camera._signal_stride == 4
     assert camera._signal_channel == 1
     assert camera._cap_emit_rotate is True
-    assert DropletCamera.get_capture_profile(camera) == "fast_detection"
+    assert DropletCamera.get_capture_profile(camera) == "single_stream_detection"
+
+    assert DropletCamera.set_capture_profile(camera, "fast_detection") == "single_stream_detection"
+    assert camera._signal_stride == 4
+    assert camera._signal_channel == 1
+    assert camera._cap_emit_rotate is True
+    assert DropletCamera.get_capture_profile(camera) == "single_stream_detection"
+    assert DropletCamera.get_capture_profile_state(camera)["requested_profile"] == "fast_detection"
 
     assert DropletCamera.set_capture_profile(camera, "legacy_full_rgb") == "legacy_full_rgb"
     assert camera._signal_stride == 1
@@ -860,24 +874,25 @@ def test_capture_profile_modes_make_fast_detection_default_with_legacy_fallback(
     assert camera._cap_emit_rotate is False
     assert DropletCamera.get_capture_profile(camera) == "throughput"
 
-    assert DropletCamera.set_capture_profile(camera, "unknown") == "default"
-    assert camera._signal_stride == 4
-    assert camera._signal_channel == 1
+    assert DropletCamera.set_capture_profile(camera, "unknown") == "dual_stream_detection"
+    assert camera._signal_stride == 1
+    assert camera._signal_channel == 0
     assert camera._cap_emit_rotate is True
-    assert DropletCamera.get_capture_profile(camera) == "default"
+    assert DropletCamera.get_capture_profile(camera) == "dual_stream_detection"
+    assert DropletCamera.get_capture_profile_state(camera)["requested_profile"] == "default"
 
 
 def test_video_configuration_kwargs_include_lores_only_for_dual_stream_profile():
     camera = DropletCamera.__new__(DropletCamera)
 
+    DropletCamera.set_capture_profile(camera, "single_stream_detection")
+    single_kwargs = DropletCamera._capture_video_configuration_kwargs(camera, (1456, 1088))
+
+    assert single_kwargs["main"] == {"size": (1456, 1088), "format": "RGB888"}
+    assert single_kwargs["buffer_count"] == 3
+    assert "lores" not in single_kwargs
+
     DropletCamera.set_capture_profile(camera, "default")
-    default_kwargs = DropletCamera._capture_video_configuration_kwargs(camera, (1456, 1088))
-
-    assert default_kwargs["main"] == {"size": (1456, 1088), "format": "RGB888"}
-    assert default_kwargs["buffer_count"] == 3
-    assert "lores" not in default_kwargs
-
-    DropletCamera.set_capture_profile(camera, "dual_stream_detection")
     dual_kwargs = DropletCamera._capture_video_configuration_kwargs(camera, (1456, 1088))
 
     assert dual_kwargs["main"] == {"size": (1456, 1088), "format": "RGB888"}
@@ -911,10 +926,10 @@ def test_dual_stream_config_failure_falls_back_to_single_stream(monkeypatch):
     assert len(_FakePicamera2.instances) == 2
     assert "lores" in _FakePicamera2.instances[0].config_kwargs
     assert "lores" not in _FakePicamera2.instances[1].config_kwargs
-    assert DropletCamera.get_capture_profile(camera) == "default"
+    assert DropletCamera.get_capture_profile(camera) == "single_stream_detection"
     state = DropletCamera.get_capture_profile_state(camera)
     assert state["requested_profile"] == "dual_stream_detection"
-    assert state["effective_profile"] == "default"
+    assert state["effective_profile"] == "single_stream_detection"
     assert state["fallback_active"] is True
     assert state["fallback_reason"] == "dual_stream_config_failed"
     assert _FakePicamera2.instances[0].closed is True
@@ -934,7 +949,7 @@ def test_dual_stream_config_fallback_reraises_if_single_stream_start_fails(monke
         DropletCamera.start_camera(camera)
 
     assert len(_FakePicamera2.instances) == 2
-    assert DropletCamera.get_capture_profile(camera) == "default"
+    assert DropletCamera.get_capture_profile(camera) == "single_stream_detection"
     assert DropletCamera.get_capture_profile_state(camera)["fallback_reason"] == "dual_stream_config_failed"
 
 
@@ -1056,10 +1071,10 @@ def test_dual_stream_runtime_lores_failure_falls_back_without_main_conversion():
     assert request.released is True
     assert camera._cap_done.is_set() is True
     assert camera._cap_result["reason"] == "dual_stream_lores_failed"
-    assert camera._cap_result["capture_profile"] == "default"
+    assert camera._cap_result["capture_profile"] == "single_stream_detection"
     state = DropletCamera.get_capture_profile_state(camera)
     assert state["requested_profile"] == "dual_stream_detection"
-    assert state["effective_profile"] == "default"
+    assert state["effective_profile"] == "single_stream_detection"
     assert state["fallback_active"] is True
     assert state["fallback_reason"] == "dual_stream_lores_failed"
     assert any(
@@ -1116,7 +1131,7 @@ def test_dual_stream_lores_failure_restarts_camera_before_retry():
             camera.latest_frame = None
             camera._cap_result = {
                 "reason": "dual_stream_lores_failed",
-                "capture_profile": "default",
+                "capture_profile": "single_stream_detection",
                 "threshold": 0.0,
                 "mean": 0.0,
             }
@@ -1124,7 +1139,7 @@ def test_dual_stream_lores_failure_restarts_camera_before_retry():
             camera.latest_frame = np.full((3, 4, 3), 88, dtype=np.uint8)
             camera._cap_result = {
                 "reason": "threshold",
-                "capture_profile": "default",
+                "capture_profile": "single_stream_detection",
                 "threshold": 29.0,
                 "mean": 88.0,
                 "cap_id": 9,
@@ -1142,10 +1157,10 @@ def test_dual_stream_lores_failure_restarts_camera_before_retry():
 
     assert result["status"] == "success"
     assert calls["count"] == 2
-    assert restart_calls == ["stop", ("start", "default")]
+    assert restart_calls == ["stop", ("start", "single_stream_detection")]
 
 
-def test_default_grabber_threshold_completes_with_current_main_frame():
+def test_single_stream_grabber_threshold_completes_with_current_main_frame():
     camera = DropletCamera.__new__(DropletCamera)
     camera._grab_running = True
     camera._cv = threading.Condition(threading.Lock())
@@ -1180,7 +1195,7 @@ def test_default_grabber_threshold_completes_with_current_main_frame():
     camera._backend_lock = threading.Lock()
     camera._capture_backend = None
     camera.image_captured_signal = _Signal()
-    DropletCamera.set_capture_profile(camera, "default")
+    DropletCamera.set_capture_profile(camera, "single_stream_detection")
     DropletCamera.set_capture_performance_diagnostics_enabled(camera, True)
     main_frame = np.full((4, 4, 3), 200, dtype=np.uint8)
     request = _FakeCaptureRequest(main_frame, {"ExposureTime": 20000})
@@ -1194,7 +1209,7 @@ def test_default_grabber_threshold_completes_with_current_main_frame():
     assert camera._cap_active is False
     assert np.array_equal(camera.latest_frame, main_frame)
     assert camera._cap_result["reason"] == "threshold"
-    assert camera._cap_result["capture_profile"] == "default"
+    assert camera._cap_result["capture_profile"] == "single_stream_detection"
     assert camera._cap_result["detection_stream"] == "main"
 
 
@@ -1319,9 +1334,11 @@ def test_complete_capture_includes_selected_frame_timing_only_when_diagnostics_e
     assert camera._cap_result["frame_select_reason"] == "threshold"
     assert camera._cap_result["cap_seen"] == 2
     assert camera._cap_result["cap_max_new"] == 10
-    assert camera._cap_result["capture_profile"] == "default"
-    assert camera._cap_result["signal_stride"] == 4
-    assert camera._cap_result["signal_channel"] == 1
+    assert camera._cap_result["capture_profile"] == "dual_stream_detection"
+    assert camera._cap_result["requested_profile"] == "default"
+    assert camera._cap_result["effective_profile"] == "dual_stream_detection"
+    assert camera._cap_result["signal_stride"] == 1
+    assert camera._cap_result["signal_channel"] == 0
     assert camera._cap_result["cap_emit_rotate"] is True
     assert camera._cap_result["selected_frame_index"] == 42
     assert camera._cap_result["selected_frame_interval_ms"] == 19.5

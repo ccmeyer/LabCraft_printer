@@ -76,9 +76,9 @@ def test_droplet_capture_perf_snapshot_summarizes_timings():
             "frame_select_reason": "threshold",
             "cap_seen": 1,
             "cap_max_new": 10,
-            "capture_profile": "default",
-            "requested_profile": "dual_stream_detection",
-            "effective_profile": "default",
+            "capture_profile": "single_stream_detection",
+            "requested_profile": "default",
+            "effective_profile": "single_stream_detection",
             "fallback_active": True,
             "fallback_reason": "dual_stream_lores_failed",
             "fallback_error": "lores unavailable",
@@ -134,9 +134,9 @@ def test_droplet_capture_perf_snapshot_summarizes_timings():
     assert request_summary["selected_frame_threshold"] == 29.0
     assert request_summary["cap_seen"] == 1
     assert request_summary["cap_max_new"] == 10
-    assert request_summary["capture_profile"] == "default"
-    assert request_summary["requested_profile"] == "dual_stream_detection"
-    assert request_summary["effective_profile"] == "default"
+    assert request_summary["capture_profile"] == "single_stream_detection"
+    assert request_summary["requested_profile"] == "default"
+    assert request_summary["effective_profile"] == "single_stream_detection"
     assert request_summary["capture_profile_fallback_active"] is True
     assert request_summary["capture_profile_fallback_reason"] == "dual_stream_lores_failed"
     assert request_summary["capture_profile_fallback_error"] == "lores unavailable"
@@ -175,11 +175,11 @@ def test_droplet_capture_perf_snapshot_summarizes_timings():
 def test_controller_exposes_droplet_capture_profile_state():
     controller = Controller.__new__(Controller)
     controller.machine = SimpleNamespace(
-        get_droplet_capture_profile=Mock(return_value="default"),
+        get_droplet_capture_profile=Mock(return_value="single_stream_detection"),
         get_droplet_capture_profile_state=Mock(
             return_value={
-                "requested_profile": "dual_stream_detection",
-                "effective_profile": "default",
+                "requested_profile": "default",
+                "effective_profile": "single_stream_detection",
                 "fallback_active": True,
                 "fallback_reason": "dual_stream_config_failed",
                 "fallback_error": "create failed",
@@ -189,8 +189,8 @@ def test_controller_exposes_droplet_capture_profile_state():
 
     state = Controller.get_droplet_capture_profile_state(controller)
 
-    assert state["requested_profile"] == "dual_stream_detection"
-    assert state["effective_profile"] == "default"
+    assert state["requested_profile"] == "default"
+    assert state["effective_profile"] == "single_stream_detection"
     assert state["fallback_active"] is True
     assert state["fallback_reason"] == "dual_stream_config_failed"
 

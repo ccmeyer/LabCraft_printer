@@ -74,7 +74,7 @@ COORDINATED_GRIPPER_PULSE_MS_DEFAULT = 500
 @dataclass
 class BenchmarkConfig:
     cycles: int = 100
-    exposure_us: int = 20000
+    exposure_us: int = 16500
     flash_delay_us: int = 5000
     flash_width_us: int = 1000
     num_droplets: int = 1

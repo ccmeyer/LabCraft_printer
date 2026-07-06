@@ -31490,7 +31490,7 @@ class DropletCameraModel(QObject):
         self.flash_duration = 1000
         self.flash_delay = 5000
         self.num_droplets = 1
-        self.exposure_time = 20000
+        self.exposure_time = 16500
         self.flash_session_armed = False
         self.flash_fault_latched = False
         self.flash_fault_reason = ""
