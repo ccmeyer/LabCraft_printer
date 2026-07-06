@@ -1,5 +1,27 @@
 # Changelog
 
+## v1.1.4 - 2026-07-06
+
+### Added
+
+- Added launcher diagnostics in `local/update_logs/app_update_launcher_*.log` before the standalone updater starts.
+- Added immediate-exit detection for updater and rollback subprocess launches.
+
+### Changed
+
+- Application update and rollback launches now prefer the active virtual environment or repo-local Python environment.
+- Application update and rollback launches now use a detached subprocess so the updater can continue after the main app closes.
+- No firmware, device protocol, motion, or pressure-control changes.
+
+### Validation
+
+- Focused updater launcher tests:
+  `.\env\Scripts\python.exe -m pytest -q tests/test_app_update_request.py tests/test_update_and_restart.py`
+
+### Rollback
+
+- Recommended rollback version: `v1.1.3`.
+
 ## v1.1.3 - 2026-07-06
 
 ### Added

@@ -174,6 +174,7 @@ class Controller(QObject):
         self._app_update_check_worker = None
         self._last_app_update_check_result = None
         self._last_app_rollback_check_result = None
+        self._app_update_launch_grace_s = 0.25
 
         # Defaults; tweak if you keep them elsewhere
         self._dfu_script = Path(__file__).resolve().parent / "dfu_update.py"
@@ -805,16 +806,61 @@ class Controller(QObject):
         self._last_app_update_check_result = None
         self.app_update_check_finished.emit(result)
 
+    def _resolve_app_update_python(self):
+        candidates = []
+        virtual_env = os.environ.get("VIRTUAL_ENV")
+        if virtual_env:
+            venv_root = Path(virtual_env)
+            candidates.extend(
+                (
+                    venv_root / "Scripts" / "python.exe",
+                    venv_root / "bin" / "python",
+                )
+            )
+        for env_name in ("env", ".venv", "venv"):
+            env_root = self._repo_root / env_name
+            candidates.extend(
+                (
+                    env_root / "Scripts" / "python.exe",
+                    env_root / "bin" / "python",
+                )
+            )
+        for candidate in candidates:
+            try:
+                if candidate.is_file():
+                    return str(candidate.resolve())
+            except OSError:
+                continue
+        return sys.executable
+
+    def _app_update_launcher_log_path(self, operation_label):
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        safe_label = "".join(ch if ch.isalnum() else "_" for ch in str(operation_label or "updater")).strip("_")
+        if not safe_label:
+            safe_label = "updater"
+        return self._repo_root / "local" / "update_logs" / f"app_update_launcher_{safe_label}_{stamp}.log"
+
+    @staticmethod
+    def _format_app_update_command(command):
+        return " ".join(str(part) for part in command)
+
+    @staticmethod
+    def _append_text(path, text):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(str(text))
+
     def _build_app_updater_base_command(self, wait_pid):
         updater_path = (self._repo_root / "tools" / "update_and_restart.py").resolve()
+        python_path = self._resolve_app_update_python()
         command = [
-            sys.executable,
+            python_path,
             "-u",
             str(updater_path),
             "--repo-root",
             str(self._repo_root),
             "--python",
-            sys.executable,
+            python_path,
         ]
         if wait_pid is not None:
             command.extend(["--wait-pid", str(int(wait_pid))])
@@ -852,26 +898,70 @@ class Controller(QObject):
             command.extend(["--offline-manifest", str(getattr(check_result, "offline_manifest_path"))])
         return command
 
+    def _default_app_update_launcher(self, command, *, cwd, log_path):
+        log_path = Path(log_path)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        header = (
+            f"started_at_utc: {datetime.now(timezone.utc).isoformat()}\n"
+            f"cwd: {Path(cwd)}\n"
+            f"command: {self._format_app_update_command(command)}\n\n"
+        )
+        log_path.write_text(header, encoding="utf-8")
+        log_file = log_path.open("a", encoding="utf-8")
+        env = os.environ.copy()
+        env.setdefault("PYTHONUNBUFFERED", "1")
+        popen_kwargs = {
+            "cwd": str(cwd),
+            "shell": False,
+            "stdin": subprocess.DEVNULL,
+            "stdout": log_file,
+            "stderr": subprocess.STDOUT,
+            "close_fds": True,
+            "env": env,
+        }
+        if os.name == "nt":
+            detached = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+            new_group = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+            breakaway = getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000)
+            popen_kwargs["creationflags"] = detached | new_group | breakaway
+        else:
+            popen_kwargs["start_new_session"] = True
+        try:
+            return subprocess.Popen([str(part) for part in command], **popen_kwargs)
+        finally:
+            log_file.close()
+
     def _launch_app_update_process(self, command, launcher=None, *, operation_label="updater"):
         if self.is_app_update_process_running():
             return False, "An application update or rollback is already running."
 
-        def _default_launcher(cmd, *, cwd):
-            return subprocess.Popen(
-                list(cmd),
-                cwd=str(cwd),
-                shell=False,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-
-        launch = launcher or _default_launcher
+        log_path = None
         try:
-            process = launch(command, cwd=self._repo_root)
+            if launcher is None:
+                log_path = self._app_update_launcher_log_path(operation_label)
+                process = self._default_app_update_launcher(command, cwd=self._repo_root, log_path=log_path)
+            else:
+                process = launcher(command, cwd=self._repo_root)
         except Exception as exc:
             self._app_update_process = None
+            if log_path is not None:
+                self._append_text(log_path, f"\nlaunch_error: {exc}\n")
+                return False, f"Could not start the application {operation_label}: {exc}. Launcher log: {log_path}"
             return False, f"Could not start the application {operation_label}: {exc}"
+
+        grace_s = float(getattr(self, "_app_update_launch_grace_s", 0.0) or 0.0)
+        if grace_s > 0:
+            time.sleep(grace_s)
+        poll = getattr(process, "poll", None)
+        if callable(poll):
+            try:
+                returncode = poll()
+            except Exception:
+                returncode = None
+            if returncode is not None:
+                self._app_update_process = None
+                log_suffix = f" Launcher log: {log_path}" if log_path is not None else ""
+                return False, f"Application {operation_label} exited immediately with code {returncode}.{log_suffix}"
 
         self._app_update_process = process
         return True, f"Application {operation_label} started."
