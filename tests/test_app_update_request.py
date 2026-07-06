@@ -373,6 +373,20 @@ def _make_speed_tab_for_update_check():
     return tab
 
 
+def test_speed_tab_formats_current_app_version_label(qapp):
+    tab = SpeedProfilesTab.__new__(SpeedProfilesTab)
+    tab.controller = SimpleNamespace(get_app_version=lambda: "v1.1.2")
+
+    assert SpeedProfilesTab._format_current_app_version_label(tab) == "Current version: v1.1.2"
+
+
+def test_speed_tab_current_app_version_label_falls_back_to_unknown(qapp):
+    tab = SpeedProfilesTab.__new__(SpeedProfilesTab)
+    tab.controller = SimpleNamespace(get_app_version=lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    assert SpeedProfilesTab._format_current_app_version_label(tab) == "Current version: unknown"
+
+
 def test_speed_tab_update_check_started_disables_update_controls(qapp):
     tab = _make_speed_tab_for_update_check()
 

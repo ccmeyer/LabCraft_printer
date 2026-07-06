@@ -5,6 +5,7 @@ from Model import Model,PrinterHead,Slot
 from dfu_update import reset_board
 from dfu_update_worker import DfuUpdateWorker
 from ResetDebugBundle import export_reset_debug_bundle
+from AppVersion import get_app_version as read_app_version
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -684,6 +685,12 @@ class Controller(QObject):
 
     def get_last_app_update_check_result(self):
         return getattr(self, "_last_app_update_check_result", None)
+
+    def get_app_version(self):
+        try:
+            return read_app_version(self._repo_root)
+        except Exception:
+            return "unknown"
 
     def start_app_update_check(self, command_runner=None):
         if self.is_app_update_check_running():

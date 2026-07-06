@@ -7,6 +7,7 @@
 - Added repo-tracked application release metadata.
 - Added release manifests for `v1.1.0`, `v1.1.1`, and `v1.1.2`.
 - Added a stable release index for future version-aware updater work.
+- Added installed app version display in the Application Update area.
 
 ### Changed
 

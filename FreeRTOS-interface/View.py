@@ -4510,6 +4510,10 @@ class SpeedProfilesTab(QtWidgets.QWidget):
         app_update_group = QtWidgets.QGroupBox("Application Update")
         app_update_v = QtWidgets.QVBoxLayout(app_update_group)
 
+        self.app_update_version_label = QtWidgets.QLabel(self._format_current_app_version_label())
+        self.app_update_version_label.setWordWrap(True)
+        app_update_v.addWidget(self.app_update_version_label)
+
         self.app_update_status_label = QtWidgets.QLabel("Check for updates before updating.")
         self.app_update_status_label.setWordWrap(True)
         app_update_v.addWidget(self.app_update_status_label)
@@ -4819,6 +4823,16 @@ class SpeedProfilesTab(QtWidgets.QWidget):
     @QtCore.Slot()
     def _on_app_update_check_requested(self):
         self.main_window.request_app_update_check()
+
+    def _format_current_app_version_label(self):
+        getter = getattr(self.controller, "get_app_version", None)
+        version = ""
+        if callable(getter):
+            try:
+                version = str(getter() or "").strip()
+            except Exception:
+                version = ""
+        return f"Current version: {version or 'unknown'}"
 
     @QtCore.Slot()
     def _on_app_update_check_started(self):

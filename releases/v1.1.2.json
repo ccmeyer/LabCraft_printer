@@ -3,6 +3,7 @@
   "notes": [
     "Adds VERSION, CHANGELOG.md, and release manifests.",
     "Adds a stable release index for future version-aware updater work.",
+    "Adds installed app version display in the Application Update area.",
     "Keeps existing branch-head online update behavior unchanged.",
     "Keeps existing offline Git bundle update behavior unchanged."
   ],
