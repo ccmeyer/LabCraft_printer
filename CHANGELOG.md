@@ -14,6 +14,9 @@
 - Added release details to offline bundle manifests and offline update checks.
 - Added an explicit `Install Offline Bundle` action for selecting support-provided update manifests.
 - Added release details to update confirmation and startup result messages.
+- Added support-only release rollback using verified release metadata and `git reset --hard` after dirty-worktree checks.
+- Added rollback-specific updater window and startup result messaging.
+- Added controlled rollback UI actions for checking/restoring the configured rollback target and support-provided offline rollback bundles.
 
 ### Changed
 
@@ -21,6 +24,7 @@
 - The app passes the confirmed target release to the standalone updater process.
 - Offline Git bundle updates can now target named release tags while preserving compatibility with existing branch/commit manifests.
 - Operators can intentionally validate and install an offline bundle without waiting for the online check to fail.
+- Rollback remains constrained to release metadata or support-provided offline bundles; arbitrary tag selection is not exposed.
 - No firmware, device protocol, motion, or pressure-control changes.
 
 ### Validation
@@ -34,6 +38,8 @@
   `.\env\Scripts\python.exe -m pytest -q tests/test_create_update_bundle.py tests/test_update_and_restart.py tests/test_app_update_request.py`
 - Focused explicit offline install tests:
   `.\env\Scripts\python.exe -m pytest -q tests/test_app_update_request.py tests/test_update_and_restart.py`
+- Focused support rollback tests:
+  `.\env\Scripts\python.exe -m pytest -q tests/test_update_and_restart.py tests/test_update_window.py tests/test_app_update_request.py`
 
 ### Rollback
 

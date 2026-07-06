@@ -1164,6 +1164,128 @@ class MainWindow(QMainWindow):
             return False
         return True
 
+    def request_app_rollback_check(self):
+        blockers_getter = getattr(self.controller, "get_app_update_blockers", None)
+        blockers = blockers_getter() if callable(blockers_getter) else []
+        if blockers:
+            message = "Cannot check rollback right now:\n\n" + "\n".join(
+                f"- {blocker}" for blocker in blockers
+            )
+            self.popup_message("Cannot Check Rollback", message)
+            return False
+
+        starter = getattr(self.controller, "start_app_rollback_check", None)
+        if not callable(starter):
+            self.popup_message(
+                "Cannot Check Rollback",
+                "The controller does not support application rollback checks.",
+            )
+            return False
+
+        ok, message = starter()
+        if not ok:
+            self.popup_message("Cannot Check Rollback", str(message or "Rollback check could not be started."))
+            return False
+        return True
+
+    def request_offline_app_rollback(self, manifest_path=None):
+        blockers_getter = getattr(self.controller, "get_app_update_blockers", None)
+        blockers = blockers_getter() if callable(blockers_getter) else []
+        if blockers:
+            message = "Cannot check an offline rollback bundle right now:\n\n" + "\n".join(
+                f"- {blocker}" for blocker in blockers
+            )
+            self.popup_message("Cannot Check Offline Rollback", message)
+            return False
+
+        selected_manifest = manifest_path
+        if selected_manifest is None:
+            selected_manifest, _selected_filter = QFileDialog.getOpenFileName(
+                self,
+                "Select Offline Rollback Manifest",
+                "",
+                "LabCraft update manifests (*.json);;JSON files (*.json);;All files (*)",
+            )
+            if not selected_manifest:
+                return False
+
+        starter = getattr(self.controller, "start_offline_app_rollback_check", None)
+        if not callable(starter):
+            self.popup_message(
+                "Cannot Check Offline Rollback",
+                "The controller does not support offline application rollback checks.",
+            )
+            return False
+
+        ok, message = starter(Path(selected_manifest))
+        if not ok:
+            self.popup_message("Cannot Check Offline Rollback", str(message or "Offline rollback check could not be started."))
+            return False
+        return True
+
+    def request_app_rollback(self):
+        """Launch the standalone rollback updater, then close through the normal path."""
+        check_getter = getattr(self.controller, "get_last_app_rollback_check_result", None)
+        if not callable(check_getter):
+            self.popup_message("Cannot Restore App", "The controller does not support application rollback checks.")
+            return False
+
+        check_result = check_getter()
+        if check_result is None:
+            self.popup_message("Check Rollback", "Check rollback before restoring a previous app version.")
+            return False
+        if getattr(check_result, "status", "") != "rollback_available":
+            self.popup_message("No Rollback Available", getattr(check_result, "message", "No app rollback is available."))
+            return False
+
+        update_source = str(getattr(check_result, "update_source", "") or "")
+        if update_source == "offline":
+            source_text = "from the offline rollback bundle"
+        else:
+            source_text = "from the configured release rollback target"
+
+        before_release = str(getattr(check_result, "before_release_version", "") or "unknown")
+        after_release = str(
+            getattr(check_result, "after_release_version", "")
+            or getattr(check_result, "target_release_version", "")
+            or "unknown"
+        )
+        response = self.popup_yes_no(
+            "Restore Previous App Version",
+            f"The app will close, restore application code {source_text}, and reopen.\n\n"
+            f"Rollback path: {before_release} -> {after_release}\n\n"
+            "A LabCraft rollback window will show progress. Firmware will not be updated. "
+            "Use this only with LabCraft support guidance. Continue?",
+        )
+        if not self._is_yes_response(response):
+            return False
+
+        blockers_getter = getattr(self.controller, "get_app_update_blockers", None)
+        blockers = blockers_getter() if callable(blockers_getter) else []
+        if blockers:
+            message = "Application rollback cannot start right now:\n\n" + "\n".join(
+                f"- {blocker}" for blocker in blockers
+            )
+            self.popup_message("Cannot Restore App", message)
+            return False
+
+        launcher = getattr(self.controller, "launch_app_rollback", None)
+        if not callable(launcher):
+            self.popup_message(
+                "Cannot Restore App",
+                "The controller does not support application rollback.",
+            )
+            return False
+
+        ok, message = launcher(wait_pid=os.getpid())
+        if not ok:
+            self.popup_message("Cannot Restore App", str(message or "Rollback updater could not be started."))
+            return False
+
+        self._app_update_close_requested = True
+        self.close()
+        return True
+
     def _latest_app_update_result_path(self):
         repo_root = getattr(self.controller, "_repo_root", None)
         if repo_root is None:
@@ -1186,8 +1308,10 @@ class MainWindow(QMainWindow):
                 pass
             return False
 
+        operation = str(payload.get("operation") or "")
+        title = "Application Rollback Result" if operation == "rollback" else "Application Update Result"
         message = self._format_app_update_result_message(payload)
-        self.popup_message("Application Update Result", message)
+        self.popup_message(title, message)
 
         try:
             path.unlink()
@@ -1209,11 +1333,21 @@ class MainWindow(QMainWindow):
         target_release_tag = str(payload.get("target_release_tag") or "")
         release_summary = str(payload.get("release_summary") or "")
         rollback_version = str(payload.get("rollback_version") or "")
+        operation = str(payload.get("operation") or "")
+        before_release_version = str(payload.get("before_release_version") or "")
+        after_release_version = str(payload.get("after_release_version") or "")
         commits = [str(commit) for commit in (payload.get("commits") or []) if str(commit).strip()]
 
         lines = [message]
+        if operation == "rollback":
+            lines.append("Operation: Rollback")
+        elif operation and operation != "update":
+            lines.append(f"Operation: {operation}")
         if status:
             lines.append(f"Status: {status}")
+        if before_release_version or after_release_version:
+            lines.append(f"Before release: {before_release_version or 'unknown'}")
+            lines.append(f"After release: {after_release_version or 'unknown'}")
         if target_release_version:
             lines.append(f"Release: {target_release_version}")
         if target_release_tag:
@@ -1233,7 +1367,7 @@ class MainWindow(QMainWindow):
             lines.append(f"Log: {log_path}")
         if commits:
             lines.append("")
-            lines.append("Updates installed:")
+            lines.append("Rollback commits:" if operation == "rollback" else "Updates installed:")
             lines.extend(f"- {commit}" for commit in commits[:10])
             if len(commits) > 10:
                 lines.append(f"- ...and {len(commits) - 10} more")
@@ -4575,11 +4709,27 @@ class SpeedProfilesTab(QtWidgets.QWidget):
         self.app_update_offline_button.clicked.connect(self._on_offline_app_update_requested)
         app_update_v.addWidget(self.app_update_offline_button)
 
+        self.app_rollback_check_button = QtWidgets.QPushButton("Check Rollback")
+        self.app_rollback_check_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.app_rollback_check_button.clicked.connect(self._on_app_rollback_check_requested)
+        app_update_v.addWidget(self.app_rollback_check_button)
+
+        self.app_rollback_offline_button = QtWidgets.QPushButton("Restore From Offline Rollback Bundle")
+        self.app_rollback_offline_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.app_rollback_offline_button.clicked.connect(self._on_offline_app_rollback_requested)
+        app_update_v.addWidget(self.app_rollback_offline_button)
+
         self.app_update_button = QtWidgets.QPushButton("Update App")
         self.app_update_button.setFocusPolicy(QtCore.Qt.NoFocus)
         self.app_update_button.setEnabled(False)
         self.app_update_button.clicked.connect(self._on_app_update_requested)
         app_update_v.addWidget(self.app_update_button)
+
+        self.app_rollback_button = QtWidgets.QPushButton("Restore Previous App Version")
+        self.app_rollback_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.app_rollback_button.setEnabled(False)
+        self.app_rollback_button.clicked.connect(self._on_app_rollback_requested)
+        app_update_v.addWidget(self.app_rollback_button)
 
         layout.addWidget(app_update_group, row_after_table + 2, 0, 1, 3)
 
@@ -4873,6 +5023,10 @@ class SpeedProfilesTab(QtWidgets.QWidget):
         self.main_window.request_app_update()
 
     @QtCore.Slot()
+    def _on_app_rollback_requested(self):
+        self.main_window.request_app_rollback()
+
+    @QtCore.Slot()
     def _on_app_update_check_requested(self):
         self._app_update_check_mode = "online"
         if not self.main_window.request_app_update_check():
@@ -4882,6 +5036,18 @@ class SpeedProfilesTab(QtWidgets.QWidget):
     def _on_offline_app_update_requested(self):
         self._app_update_check_mode = "offline"
         if not self.main_window.request_offline_app_update():
+            self._app_update_check_mode = ""
+
+    @QtCore.Slot()
+    def _on_app_rollback_check_requested(self):
+        self._app_update_check_mode = "rollback"
+        if not self.main_window.request_app_rollback_check():
+            self._app_update_check_mode = ""
+
+    @QtCore.Slot()
+    def _on_offline_app_rollback_requested(self):
+        self._app_update_check_mode = "offline_rollback"
+        if not self.main_window.request_offline_app_rollback():
             self._app_update_check_mode = ""
 
     def _format_current_app_version_label(self):
@@ -4897,7 +5063,11 @@ class SpeedProfilesTab(QtWidgets.QWidget):
     @QtCore.Slot()
     def _on_app_update_check_started(self):
         mode = str(getattr(self, "_app_update_check_mode", "") or "")
-        if mode == "offline":
+        if mode == "offline_rollback":
+            self.app_update_status_label.setText("Checking offline rollback bundle...")
+        elif mode == "rollback":
+            self.app_update_status_label.setText("Checking rollback target...")
+        elif mode == "offline":
             self.app_update_status_label.setText("Checking offline bundle...")
         else:
             self.app_update_status_label.setText("Checking for updates...")
@@ -4905,7 +5075,16 @@ class SpeedProfilesTab(QtWidgets.QWidget):
         offline_button = getattr(self, "app_update_offline_button", None)
         if offline_button is not None:
             offline_button.setEnabled(False)
+        rollback_check_button = getattr(self, "app_rollback_check_button", None)
+        if rollback_check_button is not None:
+            rollback_check_button.setEnabled(False)
+        rollback_offline_button = getattr(self, "app_rollback_offline_button", None)
+        if rollback_offline_button is not None:
+            rollback_offline_button.setEnabled(False)
         self.app_update_button.setEnabled(False)
+        rollback_button = getattr(self, "app_rollback_button", None)
+        if rollback_button is not None:
+            rollback_button.setEnabled(False)
 
     @QtCore.Slot(object)
     def _on_app_update_check_finished(self, result):
@@ -4913,6 +5092,12 @@ class SpeedProfilesTab(QtWidgets.QWidget):
         offline_button = getattr(self, "app_update_offline_button", None)
         if offline_button is not None:
             offline_button.setEnabled(True)
+        rollback_check_button = getattr(self, "app_rollback_check_button", None)
+        if rollback_check_button is not None:
+            rollback_check_button.setEnabled(True)
+        rollback_offline_button = getattr(self, "app_rollback_offline_button", None)
+        if rollback_offline_button is not None:
+            rollback_offline_button.setEnabled(True)
         self._app_update_check_mode = ""
         status = str(getattr(result, "status", "") or "")
         message = str(getattr(result, "message", "") or "Update check finished.")
@@ -4923,6 +5108,9 @@ class SpeedProfilesTab(QtWidgets.QWidget):
             blockers_getter = getattr(self.controller, "get_app_update_blockers", None)
             blockers = blockers_getter() if callable(blockers_getter) else []
             self.app_update_button.setEnabled(not blockers)
+            rollback_button = getattr(self, "app_rollback_button", None)
+            if rollback_button is not None:
+                rollback_button.setEnabled(False)
             commits = [str(commit) for commit in getattr(result, "commits", ()) if str(commit).strip()]
             details = [message]
             if str(getattr(result, "update_source", "") or "") == "offline":
@@ -4958,7 +5146,56 @@ class SpeedProfilesTab(QtWidgets.QWidget):
             self.main_window.popup_message("Updates Available", "\n".join(details))
             return
 
+        if status == "rollback_available":
+            self.app_update_status_label.setText(message)
+            self.app_update_button.setEnabled(False)
+            blockers_getter = getattr(self.controller, "get_app_update_blockers", None)
+            blockers = blockers_getter() if callable(blockers_getter) else []
+            rollback_button = getattr(self, "app_rollback_button", None)
+            if rollback_button is not None:
+                rollback_button.setEnabled(not blockers)
+
+            details = [message]
+            if str(getattr(result, "update_source", "") or "") == "offline":
+                details.append("Source: Offline rollback bundle")
+                offline_manifest_path = str(getattr(result, "offline_manifest_path", "") or "")
+                if offline_manifest_path:
+                    details.append(f"Manifest: {offline_manifest_path}")
+            else:
+                details.append("Source: Configured release rollback target")
+            before_release = str(getattr(result, "before_release_version", "") or "")
+            after_release = str(
+                getattr(result, "after_release_version", "")
+                or getattr(result, "target_release_version", "")
+                or ""
+            )
+            if before_release or after_release:
+                details.append(f"Rollback: {before_release or 'unknown'} -> {after_release or 'unknown'}")
+            target_release_version = str(getattr(result, "target_release_version", "") or "")
+            target_release_tag = str(getattr(result, "target_release_tag", "") or "")
+            release_summary = str(getattr(result, "release_summary", "") or "")
+            release_notes = [
+                str(note)
+                for note in getattr(result, "release_notes", ())
+                if str(note).strip()
+            ]
+            if target_release_version:
+                details.append(f"Release: {target_release_version}")
+            if target_release_tag:
+                details.append(f"Tag: {target_release_tag}")
+            if release_summary:
+                details.append(f"Summary: {release_summary}")
+            if release_notes:
+                details.append("")
+                details.append("Release notes:")
+                details.extend(f"- {note}" for note in release_notes)
+            self.main_window.popup_message("Rollback Available", "\n".join(details))
+            return
+
         self.app_update_button.setEnabled(False)
+        rollback_button = getattr(self, "app_rollback_button", None)
+        if rollback_button is not None:
+            rollback_button.setEnabled(False)
         self.app_update_status_label.setText(message)
 
     @QtCore.Slot()

@@ -65,6 +65,31 @@ class AppUpdateCheckWorker(QtCore.QObject):
         self.finished.emit(result)
 
 
+class AppRollbackCheckWorker(QtCore.QObject):
+    finished = QtCore.Signal(object)
+
+    def __init__(self, repo_root, command_runner=None, offline_manifest_path=None):
+        super().__init__()
+        self.repo_root = Path(repo_root)
+        self.command_runner = command_runner
+        self.offline_manifest_path = Path(offline_manifest_path) if offline_manifest_path is not None else None
+
+    @QtCore.Slot()
+    def run(self):
+        from tools import update_and_restart
+
+        config = update_and_restart.UpdaterConfig(
+            repo_root=self.repo_root,
+            offline_manifest_path=self.offline_manifest_path,
+            rollback=True,
+        )
+        kwargs = {}
+        if self.command_runner is not None:
+            kwargs["command_runner"] = self.command_runner
+        result = update_and_restart.run_rollback_check(config, **kwargs)
+        self.finished.emit(result)
+
+
 class Controller(QObject):
     """Controller class for the application."""
     array_complete = Signal()
@@ -146,6 +171,7 @@ class Controller(QObject):
         self._app_update_check_thread = None
         self._app_update_check_worker = None
         self._last_app_update_check_result = None
+        self._last_app_rollback_check_result = None
 
         # Defaults; tweak if you keep them elsewhere
         self._dfu_script = Path(__file__).resolve().parent / "dfu_update.py"
@@ -693,6 +719,9 @@ class Controller(QObject):
     def get_last_app_update_check_result(self):
         return getattr(self, "_last_app_update_check_result", None)
 
+    def get_last_app_rollback_check_result(self):
+        return getattr(self, "_last_app_rollback_check_result", None)
+
     def get_app_version(self):
         try:
             return read_app_version(self._repo_root)
@@ -733,9 +762,47 @@ class Controller(QObject):
     @QtCore.Slot(object)
     def _handle_app_update_check_finished(self, result):
         self._last_app_update_check_result = result
+        self._last_app_rollback_check_result = None
         self.app_update_check_finished.emit(result)
 
-    def build_app_update_command(self, wait_pid):
+    def start_app_rollback_check(self, command_runner=None, offline_manifest_path=None):
+        if self.is_app_update_check_running():
+            return False, "An update or rollback check is already running."
+
+        thread = QtCore.QThread(self)
+        worker = AppRollbackCheckWorker(
+            self._repo_root,
+            command_runner=command_runner,
+            offline_manifest_path=offline_manifest_path,
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._handle_app_rollback_check_finished)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(lambda: setattr(self, "_app_update_check_thread", None))
+        thread.finished.connect(lambda: setattr(self, "_app_update_check_worker", None))
+
+        self._app_update_check_thread = thread
+        self._app_update_check_worker = worker
+        self.app_update_check_started.emit()
+        thread.start()
+        return True, "Rollback check started."
+
+    def start_offline_app_rollback_check(self, manifest_path, command_runner=None):
+        return self.start_app_rollback_check(
+            command_runner=command_runner,
+            offline_manifest_path=manifest_path,
+        )
+
+    @QtCore.Slot(object)
+    def _handle_app_rollback_check_finished(self, result):
+        self._last_app_rollback_check_result = result
+        self._last_app_update_check_result = None
+        self.app_update_check_finished.emit(result)
+
+    def _build_app_updater_base_command(self, wait_pid):
         updater_path = (self._repo_root / "tools" / "update_and_restart.py").resolve()
         command = [
             sys.executable,
@@ -751,6 +818,10 @@ class Controller(QObject):
         command.append("--gui")
         command.append("--no-relaunch")
         command.append("--record-result")
+        return command
+
+    def build_app_update_command(self, wait_pid):
+        command = self._build_app_updater_base_command(wait_pid)
         check_result = self.get_last_app_update_check_result()
         if (
             getattr(check_result, "status", "") == "update_available"
@@ -766,11 +837,21 @@ class Controller(QObject):
             command.extend(["--target-release", str(getattr(check_result, "target_release_version"))])
         return command
 
-    def launch_app_updater(self, wait_pid, launcher=None):
-        if self.is_app_update_process_running():
-            return False, "An application update is already running."
+    def build_app_rollback_command(self, wait_pid):
+        command = self._build_app_updater_base_command(wait_pid)
+        command.append("--rollback")
+        check_result = self.get_last_app_rollback_check_result()
+        if (
+            getattr(check_result, "status", "") == "rollback_available"
+            and getattr(check_result, "update_source", "") == "offline"
+            and getattr(check_result, "offline_manifest_path", None)
+        ):
+            command.extend(["--offline-manifest", str(getattr(check_result, "offline_manifest_path"))])
+        return command
 
-        command = self.build_app_update_command(wait_pid)
+    def _launch_app_update_process(self, command, launcher=None, *, operation_label="updater"):
+        if self.is_app_update_process_running():
+            return False, "An application update or rollback is already running."
 
         def _default_launcher(cmd, *, cwd):
             return subprocess.Popen(
@@ -787,16 +868,30 @@ class Controller(QObject):
             process = launch(command, cwd=self._repo_root)
         except Exception as exc:
             self._app_update_process = None
-            return False, f"Could not start the application updater: {exc}"
+            return False, f"Could not start the application {operation_label}: {exc}"
 
         self._app_update_process = process
-        return True, "Application updater started."
+        return True, f"Application {operation_label} started."
+
+    def launch_app_updater(self, wait_pid, launcher=None):
+        return self._launch_app_update_process(
+            self.build_app_update_command(wait_pid),
+            launcher=launcher,
+            operation_label="updater",
+        )
+
+    def launch_app_rollback(self, wait_pid, launcher=None):
+        return self._launch_app_update_process(
+            self.build_app_rollback_command(wait_pid),
+            launcher=launcher,
+            operation_label="rollback",
+        )
 
     def get_app_update_blockers(self):
         blockers = []
 
         if self.is_app_update_process_running():
-            blockers.append("An application update is already running.")
+            blockers.append("An application update or rollback is already running.")
 
         dfu_thread = getattr(self, "_dfu_thread", None)
         dfu_running = getattr(dfu_thread, "isRunning", None)

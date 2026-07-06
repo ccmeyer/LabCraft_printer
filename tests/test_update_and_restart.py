@@ -12,11 +12,16 @@ import tools.update_and_restart as updater
 
 OFFLINE_SHA = "0123456789abcdef0123456789abcdef01234567"
 OTHER_OFFLINE_SHA = "fedcba9876543210fedcba9876543210fedcba98"
+ROLLBACK_SHA = "1111111111111111111111111111111111111111"
 
 
 def _write_file(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("", encoding="utf-8")
+
+
+def _write_version(repo_root: Path, version: str = "v1.1.2") -> None:
+    (repo_root / "VERSION").write_text(f"{version}\n", encoding="utf-8")
 
 
 class FakeGitRunner:
@@ -52,6 +57,12 @@ class FakeGitRunner:
         release_manifest_returncode: int = 0,
         release_tag_returncode: int = 0,
         release_merge_returncode: int | None = None,
+        rollback_release_version: str = "v1.1.1",
+        rollback_release_sha: str = ROLLBACK_SHA,
+        rollback_release_manifest_payload: dict | None = None,
+        rollback_release_tag_returncode: int = 0,
+        rollback_release_manifest_returncode: int = 0,
+        reset_returncode: int = 0,
         remote_url: str = "https://github.com/ccmeyer/LabCraft_printer",
         offline_ref_sha: str = OFFLINE_SHA,
         offline_fetch_returncode: int = 0,
@@ -90,6 +101,12 @@ class FakeGitRunner:
         self.release_manifest_returncode = release_manifest_returncode
         self.release_tag_returncode = release_tag_returncode
         self.release_merge_returncode = pull_returncode if release_merge_returncode is None else release_merge_returncode
+        self.rollback_release_version = rollback_release_version
+        self.rollback_release_sha = rollback_release_sha
+        self.rollback_release_manifest_payload = rollback_release_manifest_payload
+        self.rollback_release_tag_returncode = rollback_release_tag_returncode
+        self.rollback_release_manifest_returncode = rollback_release_manifest_returncode
+        self.reset_returncode = reset_returncode
         self.remote_url = remote_url
         self.offline_ref_sha = offline_ref_sha
         self.offline_fetch_returncode = offline_fetch_returncode
@@ -152,9 +169,17 @@ class FakeGitRunner:
 
         if len(git_args) == 2 and git_args[0] == "rev-parse" and git_args[1].endswith("^{commit}"):
             release_tag = git_args[1][: -len("^{commit}")]
-            if self.release_tag_returncode or release_tag != self.target_release_version:
+            if release_tag == self.target_release_version:
+                if self.release_tag_returncode:
+                    return updater.CommandResult(args_tuple, self.release_tag_returncode, stderr="missing release tag")
+                return updater.CommandResult(args_tuple, 0, stdout=f"{self.target_release_sha}\n")
+            if release_tag == self.rollback_release_version:
+                if self.rollback_release_tag_returncode:
+                    return updater.CommandResult(args_tuple, self.rollback_release_tag_returncode, stderr="missing rollback tag")
+                return updater.CommandResult(args_tuple, 0, stdout=f"{self.rollback_release_sha}\n")
+            if self.release_tag_returncode:
                 return updater.CommandResult(args_tuple, self.release_tag_returncode or 1, stderr="missing release tag")
-            return updater.CommandResult(args_tuple, 0, stdout=f"{self.target_release_sha}\n")
+            return updater.CommandResult(args_tuple, 1, stderr="missing release tag")
 
         if len(git_args) == 2 and git_args[0] == "show" and git_args[1] == f"{self.target_release_version}:releases/{self.target_release_version}.json":
             if self.release_manifest_returncode:
@@ -170,6 +195,24 @@ class FakeGitRunner:
                 "requires_firmware": None,
                 "summary": self.release_summary,
                 "notes": list(self.release_notes),
+                "validation": ["Focused updater tests pass."],
+            }
+            return updater.CommandResult(args_tuple, 0, stdout=json.dumps(payload) + "\n")
+
+        if len(git_args) == 2 and git_args[0] == "show" and git_args[1] == f"{self.rollback_release_version}:releases/{self.rollback_release_version}.json":
+            if self.rollback_release_manifest_returncode:
+                return updater.CommandResult(args_tuple, self.rollback_release_manifest_returncode, stderr="missing rollback manifest")
+            payload = self.rollback_release_manifest_payload or {
+                "schema_version": updater.RELEASE_MANIFEST_SCHEMA_VERSION,
+                "version": self.rollback_release_version,
+                "tag": self.rollback_release_version,
+                "channel": "stable",
+                "release_date": "2026-07-05",
+                "previous_version": "v1.1.0",
+                "rollback_version": "v1.1.0",
+                "requires_firmware": None,
+                "summary": "Rollback release.",
+                "notes": ["Previous stable release."],
                 "validation": ["Focused updater tests pass."],
             }
             return updater.CommandResult(args_tuple, 0, stdout=json.dumps(payload) + "\n")
@@ -235,6 +278,17 @@ class FakeGitRunner:
                 self.offline_merge_returncode,
                 stdout="Fast-forward\n" if self.offline_merge_returncode == 0 else "",
                 stderr="" if self.offline_merge_returncode == 0 else "fatal: Not possible to fast-forward",
+            )
+
+        if git_args in (
+            ("reset", "--hard", self.rollback_release_version),
+            ("reset", "--hard", offline_target_ref),
+        ):
+            return updater.CommandResult(
+                args_tuple,
+                self.reset_returncode,
+                stdout="HEAD is now at rollback\n" if self.reset_returncode == 0 else "",
+                stderr="" if self.reset_returncode == 0 else "fatal: reset failed",
             )
 
         return updater.CommandResult(args_tuple, 99, stderr=f"unexpected command: {git_args!r}")
@@ -524,6 +578,358 @@ def test_offline_update_dirty_worktree_blocks_before_bundle_fetch(tmp_path):
     assert not any(call[0][:3] == ("git", "fetch", "--force") for call in runner.calls)
 
 
+def test_online_rollback_check_reports_available_target(tmp_path):
+    _write_version(tmp_path, "v1.2.0")
+    runner = FakeGitRunner(
+        tmp_path,
+        target_release_version="v1.2.0",
+        target_release_sha="2222222222222222222222222222222222222222",
+        rollback_version="v1.1.2",
+        rollback_release_version="v1.1.2",
+        rollback_release_sha=ROLLBACK_SHA,
+    )
+
+    result = updater.run_rollback_check(_config(tmp_path, rollback=True), command_runner=runner)
+
+    calls = [call[0] for call in runner.calls]
+    assert result.status == updater.STATUS_ROLLBACK_AVAILABLE
+    assert result.operation == updater.OPERATION_ROLLBACK
+    assert result.update_source == updater.UPDATE_SOURCE_ONLINE
+    assert result.before_release_version == "v1.2.0"
+    assert result.after_release_version == "v1.1.2"
+    assert result.target_release_version == "v1.1.2"
+    assert result.target_release_tag == "v1.1.2"
+    assert result.target_release_sha == ROLLBACK_SHA
+    assert result.message == "Rollback is available from v1.2.0 to v1.1.2."
+    assert ("git", "fetch", "--prune", "--tags") in calls
+    assert not any(call[:3] == ("git", "reset", "--hard") for call in calls)
+
+
+def test_online_rollback_check_dirty_worktree_blocks_before_fetch(tmp_path):
+    _write_version(tmp_path, "v1.1.2")
+    runner = FakeGitRunner(tmp_path, dirty_status=" M FreeRTOS-interface/App.py\n")
+
+    result = updater.run_rollback_check(_config(tmp_path, rollback=True), command_runner=runner)
+
+    calls = [call[0] for call in runner.calls]
+    assert result.status == updater.STATUS_DIRTY_WORKTREE
+    assert result.operation == updater.OPERATION_ROLLBACK
+    assert ("git", "fetch", "--prune", "--tags") not in calls
+    assert not any(call[:3] == ("git", "reset", "--hard") for call in calls)
+
+
+def test_online_rollback_check_missing_version_fails_safely(tmp_path):
+    runner = FakeGitRunner(tmp_path)
+
+    result = updater.run_rollback_check(_config(tmp_path, rollback=True), command_runner=runner)
+
+    calls = [call[0] for call in runner.calls]
+    assert result.status == updater.STATUS_ROLLBACK_TARGET_INVALID
+    assert "current release version" in result.message
+    assert ("git", "fetch", "--prune", "--tags") not in calls
+    assert not any(call[:3] == ("git", "reset", "--hard") for call in calls)
+
+
+def test_online_rollback_check_missing_current_manifest_fails_safely(tmp_path):
+    _write_version(tmp_path, "v1.1.2")
+    runner = FakeGitRunner(tmp_path, release_manifest_returncode=128)
+
+    result = updater.run_rollback_check(_config(tmp_path, rollback=True), command_runner=runner)
+
+    assert result.status == updater.STATUS_ROLLBACK_TARGET_INVALID
+    assert "current release metadata" in result.message
+    assert not any(call[0][:3] == ("git", "reset", "--hard") for call in runner.calls)
+
+
+def test_online_rollback_check_missing_rollback_version_returns_not_configured(tmp_path):
+    _write_version(tmp_path, "v1.1.2")
+    runner = FakeGitRunner(
+        tmp_path,
+        release_manifest_payload={
+            "schema_version": updater.RELEASE_MANIFEST_SCHEMA_VERSION,
+            "version": "v1.1.2",
+            "tag": "v1.1.2",
+            "channel": "stable",
+            "release_date": "2026-07-06",
+            "previous_version": "v1.1.1",
+            "rollback_version": None,
+            "requires_firmware": None,
+            "summary": "No rollback.",
+            "notes": [],
+            "validation": [],
+        },
+    )
+
+    result = updater.run_rollback_check(_config(tmp_path, rollback=True), command_runner=runner)
+
+    assert result.status == updater.STATUS_ROLLBACK_NOT_CONFIGURED
+    assert result.returncode == 0
+    assert "does not define a rollback version" in result.message
+    assert not any(call[0][:3] == ("git", "reset", "--hard") for call in runner.calls)
+
+
+def test_online_rollback_check_unknown_target_tag_fails_safely(tmp_path):
+    _write_version(tmp_path, "v1.1.2")
+    runner = FakeGitRunner(tmp_path, rollback_release_tag_returncode=128)
+
+    result = updater.run_rollback_check(_config(tmp_path, rollback=True), command_runner=runner)
+
+    assert result.status == updater.STATUS_ROLLBACK_TARGET_INVALID
+    assert "Release tag v1.1.1" in result.message
+    assert not any(call[0][:3] == ("git", "reset", "--hard") for call in runner.calls)
+
+
+def test_online_rollback_check_invalid_target_manifest_fails_safely(tmp_path):
+    _write_version(tmp_path, "v1.1.2")
+    runner = FakeGitRunner(
+        tmp_path,
+        rollback_release_manifest_payload={
+            "schema_version": updater.RELEASE_MANIFEST_SCHEMA_VERSION,
+            "version": "v9.9.9",
+            "tag": "v9.9.9",
+            "channel": "stable",
+            "release_date": "2026-07-05",
+            "previous_version": None,
+            "rollback_version": None,
+            "requires_firmware": None,
+            "summary": "Wrong target.",
+            "notes": [],
+            "validation": [],
+        },
+    )
+
+    result = updater.run_rollback_check(_config(tmp_path, rollback=True), command_runner=runner)
+
+    assert result.status == updater.STATUS_ROLLBACK_TARGET_INVALID
+    assert "version does not match" in result.message
+    assert not any(call[0][:3] == ("git", "reset", "--hard") for call in runner.calls)
+
+
+def test_offline_rollback_check_accepts_release_aware_bundle(tmp_path):
+    _write_version(tmp_path, "v1.2.0")
+    manifest_path = _write_offline_manifest(tmp_path, head_sha=OFFLINE_SHA, release_version="v1.1.2")
+    runner = FakeGitRunner(tmp_path, offline_ref_sha=OFFLINE_SHA)
+
+    result = updater.run_rollback_check(
+        _config(tmp_path, rollback=True, offline_manifest_path=manifest_path),
+        command_runner=runner,
+    )
+
+    calls = [call[0] for call in runner.calls]
+    assert result.status == updater.STATUS_ROLLBACK_AVAILABLE
+    assert result.operation == updater.OPERATION_ROLLBACK
+    assert result.update_source == updater.UPDATE_SOURCE_OFFLINE
+    assert result.offline_manifest_path == manifest_path.resolve()
+    assert result.before_release_version == "v1.2.0"
+    assert result.after_release_version == "v1.1.2"
+    assert result.target_release_version == "v1.1.2"
+    assert result.target_release_sha == OFFLINE_SHA
+    assert any(call[:3] == ("git", "fetch", "--force") for call in calls)
+    assert not any(call[:3] == ("git", "reset", "--hard") for call in calls)
+
+
+def test_offline_rollback_check_rejects_legacy_bundle(tmp_path):
+    _write_version(tmp_path, "v1.2.0")
+    manifest_path = _write_offline_manifest(tmp_path, head_sha=OFFLINE_SHA)
+    runner = FakeGitRunner(tmp_path, offline_ref_sha=OFFLINE_SHA)
+
+    result = updater.run_rollback_check(
+        _config(tmp_path, rollback=True, offline_manifest_path=manifest_path),
+        command_runner=runner,
+    )
+
+    assert result.status == updater.STATUS_OFFLINE_BUNDLE_INVALID
+    assert "release-aware offline bundle" in result.message
+    assert not any(call[0][:3] == ("git", "reset", "--hard") for call in runner.calls)
+
+
+def test_online_rollback_resets_to_manifest_rollback_version(tmp_path):
+    _write_version(tmp_path, "v1.1.2")
+    runner = FakeGitRunner(tmp_path, before_sha="abc", after_sha=ROLLBACK_SHA)
+
+    result = updater.run_rollback(_config(tmp_path, rollback=True), command_runner=runner)
+
+    calls = [call[0] for call in runner.calls]
+    assert result.status == updater.STATUS_ROLLED_BACK
+    assert result.operation == updater.OPERATION_ROLLBACK
+    assert result.update_source == updater.UPDATE_SOURCE_ONLINE
+    assert result.before_release_version == "v1.1.2"
+    assert result.after_release_version == "v1.1.1"
+    assert result.target_release_version == "v1.1.1"
+    assert result.target_release_tag == "v1.1.1"
+    assert result.target_release_sha == ROLLBACK_SHA
+    assert result.before_sha == "abc"
+    assert result.after_sha == ROLLBACK_SHA
+    assert ("git", "fetch", "--prune", "--tags") in calls
+    assert ("git", "reset", "--hard", "v1.1.1") in calls
+    assert ("git", "merge", "--ff-only", "v1.1.1") not in calls
+    assert ("git", "pull", "--ff-only") not in calls
+
+
+def test_online_rollback_dirty_worktree_blocks_before_fetch_or_reset(tmp_path):
+    _write_version(tmp_path, "v1.1.2")
+    runner = FakeGitRunner(tmp_path, dirty_status=" M FreeRTOS-interface/App.py\n")
+
+    result = updater.run_rollback(_config(tmp_path, rollback=True), command_runner=runner)
+
+    calls = [call[0] for call in runner.calls]
+    assert result.status == updater.STATUS_DIRTY_WORKTREE
+    assert result.operation == updater.OPERATION_ROLLBACK
+    assert ("git", "fetch", "--prune", "--tags") not in calls
+    assert not any(call[:3] == ("git", "reset", "--hard") for call in calls)
+
+
+def test_online_rollback_missing_version_fails_before_fetch_or_reset(tmp_path):
+    runner = FakeGitRunner(tmp_path)
+
+    result = updater.run_rollback(_config(tmp_path, rollback=True), command_runner=runner)
+
+    calls = [call[0] for call in runner.calls]
+    assert result.status == updater.STATUS_ROLLBACK_TARGET_INVALID
+    assert "VERSION" in result.message
+    assert ("git", "fetch", "--prune", "--tags") not in calls
+    assert not any(call[:3] == ("git", "reset", "--hard") for call in calls)
+
+
+def test_online_rollback_missing_current_release_manifest_fails_safely(tmp_path):
+    _write_version(tmp_path, "v1.1.2")
+    runner = FakeGitRunner(tmp_path, release_manifest_returncode=128)
+
+    result = updater.run_rollback(_config(tmp_path, rollback=True), command_runner=runner)
+
+    assert result.status == updater.STATUS_ROLLBACK_TARGET_INVALID
+    assert "rollback release target is invalid" in result.message
+    assert not any(call[0][:3] == ("git", "reset", "--hard") for call in runner.calls)
+
+
+def test_online_rollback_missing_rollback_version_fails_safely(tmp_path):
+    _write_version(tmp_path, "v1.1.2")
+    runner = FakeGitRunner(
+        tmp_path,
+        release_manifest_payload={
+            "schema_version": updater.RELEASE_MANIFEST_SCHEMA_VERSION,
+            "version": "v1.1.2",
+            "tag": "v1.1.2",
+            "channel": "stable",
+            "release_date": "2026-07-06",
+            "previous_version": "v1.1.1",
+            "rollback_version": None,
+            "requires_firmware": None,
+            "summary": "No rollback.",
+            "notes": [],
+            "validation": [],
+        },
+    )
+
+    result = updater.run_rollback(_config(tmp_path, rollback=True), command_runner=runner)
+
+    assert result.status == updater.STATUS_ROLLBACK_TARGET_INVALID
+    assert "does not define rollback_version" in result.message
+    assert not any(call[0][:3] == ("git", "reset", "--hard") for call in runner.calls)
+
+
+def test_online_rollback_unknown_target_tag_fails_safely(tmp_path):
+    _write_version(tmp_path, "v1.1.2")
+    runner = FakeGitRunner(tmp_path, rollback_release_tag_returncode=128)
+
+    result = updater.run_rollback(_config(tmp_path, rollback=True), command_runner=runner)
+
+    assert result.status == updater.STATUS_ROLLBACK_TARGET_INVALID
+    assert "Release tag v1.1.1" in result.message
+    assert not any(call[0][:3] == ("git", "reset", "--hard") for call in runner.calls)
+
+
+def test_online_rollback_invalid_target_manifest_fails_safely(tmp_path):
+    _write_version(tmp_path, "v1.1.2")
+    runner = FakeGitRunner(
+        tmp_path,
+        rollback_release_manifest_payload={
+            "schema_version": updater.RELEASE_MANIFEST_SCHEMA_VERSION,
+            "version": "v9.9.9",
+            "tag": "v9.9.9",
+            "channel": "stable",
+            "release_date": "2026-07-05",
+            "previous_version": None,
+            "rollback_version": None,
+            "requires_firmware": None,
+            "summary": "Wrong target.",
+            "notes": [],
+            "validation": [],
+        },
+    )
+
+    result = updater.run_rollback(_config(tmp_path, rollback=True), command_runner=runner)
+
+    assert result.status == updater.STATUS_ROLLBACK_TARGET_INVALID
+    assert "version does not match" in result.message
+    assert not any(call[0][:3] == ("git", "reset", "--hard") for call in runner.calls)
+
+
+def test_offline_rollback_resets_to_selected_release_bundle(tmp_path):
+    _write_version(tmp_path, "v1.1.2")
+    manifest_path = _write_offline_manifest(tmp_path, head_sha=OFFLINE_SHA, release_version="v1.1.1")
+    runner = FakeGitRunner(tmp_path, before_sha="abc", after_sha=OFFLINE_SHA, offline_ref_sha=OFFLINE_SHA)
+
+    result = updater.run_rollback(
+        _config(tmp_path, rollback=True, offline_manifest_path=manifest_path),
+        command_runner=runner,
+    )
+
+    calls = [call[0] for call in runner.calls]
+    assert result.status == updater.STATUS_ROLLED_BACK
+    assert result.operation == updater.OPERATION_ROLLBACK
+    assert result.update_source == updater.UPDATE_SOURCE_OFFLINE
+    assert result.offline_manifest_path == manifest_path.resolve()
+    assert result.before_release_version == "v1.1.2"
+    assert result.after_release_version == "v1.1.1"
+    assert result.target_release_version == "v1.1.1"
+    assert result.target_release_sha == OFFLINE_SHA
+    assert ("git", "reset", "--hard", f"{updater.OFFLINE_UPDATE_REF}^{{commit}}") in calls
+    assert not any(call[:2] == ("git", "merge") for call in calls)
+    assert ("git", "pull", "--ff-only") not in calls
+
+
+def test_offline_rollback_requires_release_aware_bundle(tmp_path):
+    _write_version(tmp_path, "v1.1.2")
+    manifest_path = _write_offline_manifest(tmp_path, head_sha=OFFLINE_SHA)
+    runner = FakeGitRunner(tmp_path, offline_ref_sha=OFFLINE_SHA)
+
+    result = updater.run_rollback(
+        _config(tmp_path, rollback=True, offline_manifest_path=manifest_path),
+        command_runner=runner,
+    )
+
+    assert result.status == updater.STATUS_ROLLBACK_TARGET_INVALID
+    assert "release-aware offline bundle" in result.message
+    assert not any(call[0][:3] == ("git", "reset", "--hard") for call in runner.calls)
+
+
+def test_latest_result_json_written_for_rollback_result(tmp_path):
+    _write_version(tmp_path, "v1.1.2")
+    runner = FakeGitRunner(
+        tmp_path,
+        before_sha="abc",
+        after_sha=ROLLBACK_SHA,
+        update_commits=("def Newer release commit",),
+    )
+
+    result = updater.run_rollback(
+        updater.UpdaterConfig(repo_root=tmp_path, no_relaunch=True, record_result=True, rollback=True),
+        command_runner=runner,
+    )
+
+    payload = json.loads(updater.default_latest_result_path(tmp_path).read_text(encoding="utf-8"))
+    assert result.status == updater.STATUS_ROLLED_BACK
+    assert payload["operation"] == updater.OPERATION_ROLLBACK
+    assert payload["status"] == updater.STATUS_ROLLED_BACK
+    assert payload["before_sha"] == "abc"
+    assert payload["after_sha"] == ROLLBACK_SHA
+    assert payload["before_release_version"] == "v1.1.2"
+    assert payload["after_release_version"] == "v1.1.1"
+    assert payload["target_release_version"] == "v1.1.1"
+    assert payload["commits"] == ["def Newer release commit"]
+
+
 def test_relaunch_on_failure_relaunches_current_app_on_dirty_worktree(tmp_path):
     runner = FakeGitRunner(tmp_path, dirty_status=" M FreeRTOS-interface/App.py\n")
     python_path = tmp_path / "venv" / "bin" / "python"
@@ -775,6 +1181,7 @@ def test_cli_parser_defaults_match_documented_usage():
     assert config.log_path is None
     assert config.offline_manifest_path is None
     assert config.target_release is None
+    assert config.rollback is False
 
 
 def test_cli_parser_accepts_relaunch_on_failure():
@@ -801,6 +1208,12 @@ def test_cli_parser_accepts_target_release():
     config = updater.parse_args(["--repo-root", ".", "--target-release", "v1.1.2"])
 
     assert config.target_release == "v1.1.2"
+
+
+def test_cli_parser_accepts_rollback():
+    config = updater.parse_args(["--repo-root", ".", "--rollback"])
+
+    assert config.rollback is True
 
 
 def test_progress_events_for_clean_noop_update(tmp_path):
@@ -1558,3 +1971,78 @@ def test_real_git_release_offline_bundle_check_and_update(tmp_path):
     assert result.target_release_version == "v1.1.2"
     assert result.after_sha == release_sha
     assert _git(deployed, "rev-parse", "HEAD").stdout.strip() == release_sha
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_real_git_online_rollback_resets_to_manifest_rollback_version(tmp_path):
+    remote = tmp_path / "remote.git"
+    support = tmp_path / "support"
+    deployed = tmp_path / "deployed"
+
+    _git(tmp_path, "init", "--bare", str(remote))
+    support.mkdir()
+    _git(support, "init")
+    _git(support, "config", "user.email", "test@example.com")
+    _git(support, "config", "user.name", "Test User")
+    _git(support, "remote", "add", "origin", str(remote))
+
+    releases_dir = support / "releases"
+    releases_dir.mkdir()
+    (support / "VERSION").write_text("v1.1.1\n", encoding="utf-8")
+    (support / "README.md").write_text("v1.1.1\n", encoding="utf-8")
+    release_111 = {
+        "schema_version": "labcraft_release_v1",
+        "version": "v1.1.1",
+        "tag": "v1.1.1",
+        "channel": "stable",
+        "release_date": "2026-07-05",
+        "previous_version": "v1.1.0",
+        "rollback_version": "v1.1.0",
+        "requires_firmware": None,
+        "summary": "Bugfix release.",
+        "notes": ["Small UI fixes."],
+        "validation": ["Real Git rollback smoke test."],
+    }
+    (releases_dir / "v1.1.1.json").write_text(json.dumps(release_111), encoding="utf-8")
+    _git(support, "add", "README.md", "VERSION", "releases/v1.1.1.json")
+    _git(support, "commit", "-m", "release v1.1.1")
+    _git(support, "branch", "-M", "stable")
+    rollback_sha = _git(support, "rev-parse", "HEAD").stdout.strip()
+    _git(support, "tag", "-a", "v1.1.1", "-m", "LabCraft v1.1.1")
+
+    (support / "VERSION").write_text("v1.1.2\n", encoding="utf-8")
+    (support / "README.md").write_text("v1.1.2\n", encoding="utf-8")
+    release_112 = {
+        "schema_version": "labcraft_release_v1",
+        "version": "v1.1.2",
+        "tag": "v1.1.2",
+        "channel": "stable",
+        "release_date": "2026-07-06",
+        "previous_version": "v1.1.1",
+        "rollback_version": "v1.1.1",
+        "requires_firmware": None,
+        "summary": "Updater bootstrap.",
+        "notes": ["Adds release-aware updater support."],
+        "validation": ["Real Git rollback smoke test."],
+    }
+    (releases_dir / "v1.1.2.json").write_text(json.dumps(release_112), encoding="utf-8")
+    _git(support, "add", "README.md", "VERSION", "releases/v1.1.2.json")
+    _git(support, "commit", "-m", "release v1.1.2")
+    release_sha = _git(support, "rev-parse", "HEAD").stdout.strip()
+    _git(support, "tag", "-a", "v1.1.2", "-m", "LabCraft v1.1.2")
+    _git(support, "push", "-u", "origin", "stable", "--tags")
+
+    _git(tmp_path, "clone", "--branch", "stable", str(remote), str(deployed))
+    assert _git(deployed, "rev-parse", "HEAD").stdout.strip() == release_sha
+
+    result = updater.run_rollback(
+        updater.UpdaterConfig(repo_root=deployed, no_relaunch=True, log_path=tmp_path / "rollback.log", rollback=True),
+    )
+
+    assert result.status == updater.STATUS_ROLLED_BACK
+    assert result.operation == updater.OPERATION_ROLLBACK
+    assert result.before_release_version == "v1.1.2"
+    assert result.after_release_version == "v1.1.1"
+    assert result.before_sha == release_sha
+    assert result.after_sha == rollback_sha
+    assert _git(deployed, "rev-parse", "HEAD").stdout.strip() == rollback_sha

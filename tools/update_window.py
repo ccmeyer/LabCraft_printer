@@ -13,7 +13,7 @@ from PySide6 import QtCore, QtWidgets
 from tools import update_and_restart as updater
 
 
-SUCCESS_STATUSES = {updater.STATUS_UPDATED, updater.STATUS_ALREADY_CURRENT}
+SUCCESS_STATUSES = {updater.STATUS_UPDATED, updater.STATUS_ALREADY_CURRENT, updater.STATUS_ROLLED_BACK}
 MANUAL_REOPEN_MESSAGE = (
     "{message}\n\n"
     "Close this updater window, then start LabCraft again using your normal shortcut or launch command."
@@ -49,7 +49,8 @@ class UpdaterWorker(QtCore.QObject):
             kwargs["command_runner"] = self.command_runner
         if self.waiter is not None:
             kwargs["waiter"] = self.waiter
-        result = updater.run_update(worker_config, **kwargs)
+        runner = updater.run_rollback if worker_config.rollback else updater.run_update
+        result = runner(worker_config, **kwargs)
         self.finished.emit(result)
 
 
@@ -77,7 +78,7 @@ class UpdaterWindow(QtWidgets.QDialog):
         self._thread: QtCore.QThread | None = None
         self._worker: UpdaterWorker | None = None
 
-        self.setWindowTitle("LabCraft Updater")
+        self.setWindowTitle("LabCraft Rollback" if config.rollback else "LabCraft Updater")
         self.resize(560, 380)
         self._build_ui()
 
@@ -87,7 +88,7 @@ class UpdaterWindow(QtWidgets.QDialog):
     def _build_ui(self) -> None:
         layout = QtWidgets.QVBoxLayout(self)
 
-        self.status_label = QtWidgets.QLabel("Preparing update...")
+        self.status_label = QtWidgets.QLabel("Preparing rollback..." if self.config.rollback else "Preparing update...")
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
 
@@ -136,7 +137,7 @@ class UpdaterWindow(QtWidgets.QDialog):
         if self._worker_running:
             return
         self._worker_running = True
-        self._set_running_state("Starting LabCraft updater...")
+        self._set_running_state("Starting LabCraft rollback..." if self.config.rollback else "Starting LabCraft updater...")
         self._thread = QtCore.QThread(self)
         self._worker = UpdaterWorker(
             self.config,

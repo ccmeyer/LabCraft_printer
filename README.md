@@ -394,6 +394,34 @@ For backend/manual validation on the target checkout, run the updater against th
 .\env\Scripts\python.exe tools/update_and_restart.py --repo-root . --offline-manifest path\to\labcraft-stable-....json --no-relaunch
 ```
 
+### Controlled release rollback
+
+The Firmware tab includes support-guided rollback controls for restoring a previous application version without allowing arbitrary tag selection. Use rollback only with support guidance after confirming the machine is idle and no print, calibration, capture, or firmware operation is active.
+
+Expected UI flow:
+
+- Click `Check Rollback`.
+- If the installed release defines a rollback target, the app shows the exact path such as `v1.2.0 -> v1.1.2`.
+- Click `Restore Previous App Version`; the app confirms that application code will move backward and firmware will not be flashed.
+- A `LabCraft Rollback` window appears after the main app closes, verifies the same target again, and applies it.
+- For machines without GitHub access, click `Restore From Offline Rollback Bundle` and select a support-provided release-aware manifest.
+
+The backend command remains available for support cases where the main app cannot launch.
+
+Online rollback uses the installed `VERSION`, reads that release tag's manifest, and resets to its configured `rollback_version`:
+
+```powershell
+.\env\Scripts\python.exe tools/update_and_restart.py --repo-root . --rollback --no-relaunch --record-result
+```
+
+Offline rollback requires a selected release-aware bundle manifest for the target release:
+
+```powershell
+.\env\Scripts\python.exe tools/update_and_restart.py --repo-root . --rollback --offline-manifest path\to\labcraft-stable-....json --no-relaunch --record-result
+```
+
+The rollback command checks for a dirty worktree before fetching or resetting, verifies the target release metadata first, then applies the verified target with `git reset --hard`. If validation fails, the checkout is left at the current commit. After rollback, relaunch LabCraft normally and review the startup rollback result message or `local/update_logs/latest_update_result.json`.
+
 ## Pi setup status
 
 For a Raspberry Pi 5 running Raspberry Pi OS Bookworm, use the manual procedure below as the source of truth. Do not run the older root-level helper scripts during normal setup if you are following this README.

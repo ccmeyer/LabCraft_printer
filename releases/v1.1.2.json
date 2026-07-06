@@ -10,6 +10,9 @@
     "Adds release details to offline bundle manifests and offline update checks.",
     "Adds an explicit Install Offline Bundle action so operators can select a support-provided manifest.",
     "Shows release summary, notes, rollback version, and installed release details in update messages.",
+    "Adds support-only rollback to a verified release target after dirty-worktree checks.",
+    "Shows rollback-specific updater window and startup result messaging.",
+    "Adds controlled rollback UI actions for restoring configured rollback targets and support-provided offline rollback bundles.",
     "Keeps existing branch/commit offline Git bundle manifests compatible."
   ],
   "previous_version": "v1.1.1",
@@ -17,13 +20,14 @@
   "requires_firmware": null,
   "rollback_version": "v1.1.1",
   "schema_version": "labcraft_release_v1",
-  "summary": "Adds release metadata, installed version display, and release-aware online and offline app updates.",
+  "summary": "Adds release metadata, installed version display, release-aware online/offline app updates, and controlled release rollback.",
   "tag": "v1.1.2",
   "validation": [
     ".\\env\\Scripts\\python.exe -m pytest -q tests/test_update_and_restart.py tests/test_create_update_bundle.py tests/test_app_update_request.py",
     ".\\env\\Scripts\\python.exe -m pytest -q tests/test_update_and_restart.py tests/test_app_update_request.py",
     ".\\env\\Scripts\\python.exe -m pytest -q tests/test_create_update_bundle.py tests/test_update_and_restart.py tests/test_app_update_request.py",
-    ".\\env\\Scripts\\python.exe -m pytest -q tests/test_app_update_request.py tests/test_update_and_restart.py"
+    ".\\env\\Scripts\\python.exe -m pytest -q tests/test_app_update_request.py tests/test_update_and_restart.py",
+    ".\\env\\Scripts\\python.exe -m pytest -q tests/test_update_and_restart.py tests/test_update_window.py tests/test_app_update_request.py"
   ],
   "version": "v1.1.2"
 }
