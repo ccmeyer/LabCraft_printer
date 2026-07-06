@@ -669,6 +669,7 @@ def test_experiment_designer_fill_mode_updates_volume_range_and_metadata(qapp):
 
 def test_experiment_designer_transposes_reagent_fields_and_reorders_prior(qapp):
     dialog = _build_real_dialog()
+    dialog.auto_update_chk.setChecked(False)
     dialog.setMinimumSize(0, 0)
     for idx in range(12):
         dialog._add_reagent_row(

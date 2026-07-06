@@ -68,29 +68,32 @@ def test_manager_submits_pending_process_verdict(tmp_path):
 
     proc = _DummyProcess()
     mgr._begin_process_recording(proc)
-    mgr._pending_process_verdict = mgr._build_pending_process_verdict_context(
-        proc,
-        default_outcome="failed",
-    )
-    latest = mgr.get_latest_recording_directory()
-    assert latest
+    try:
+        mgr._pending_process_verdict = mgr._build_pending_process_verdict_context(
+            proc,
+            default_outcome="failed",
+        )
+        latest = mgr.get_latest_recording_directory()
+        assert latest
 
-    out = mgr.submit_pending_process_verdict(
-        outcome="failed",
-        failure_summary="nozzle not centered",
-        suspected_cause="weak signal",
-        notes="repeat under brighter lighting",
-        submitted_by="unit-test",
-    )
-    assert out is not None
+        out = mgr.submit_pending_process_verdict(
+            outcome="failed",
+            failure_summary="nozzle not centered",
+            suspected_cause="weak signal",
+            notes="repeat under brighter lighting",
+            submitted_by="unit-test",
+        )
+        assert out is not None
 
-    verdict_path = Path(latest) / "verdict.json"
-    assert verdict_path.exists()
-    payload = json.loads(verdict_path.read_text(encoding="utf-8"))
-    assert payload["outcome"] == "failed"
-    assert payload["failure_summary"] == "nozzle not centered"
-    assert payload["suspected_cause"] == "weak signal"
-    assert mgr.get_pending_process_verdict() is None
+        verdict_path = Path(latest) / "verdict.json"
+        assert verdict_path.exists()
+        payload = json.loads(verdict_path.read_text(encoding="utf-8"))
+        assert payload["outcome"] == "failed"
+        assert payload["failure_summary"] == "nozzle not centered"
+        assert payload["suspected_cause"] == "weak signal"
+        assert mgr.get_pending_process_verdict() is None
+    finally:
+        mgr._process_recorder.finalize_run("completed")
 
 
 def test_non_verdict_process_does_not_create_pending_verdict_context(tmp_path):
@@ -99,10 +102,12 @@ def test_non_verdict_process_does_not_create_pending_verdict_context(tmp_path):
 
     proc = _NonVerdictProcess()
     mgr._begin_process_recording(proc)
+    try:
+        pending = mgr._build_pending_process_verdict_context(proc, default_outcome="success")
 
-    pending = mgr._build_pending_process_verdict_context(proc, default_outcome="success")
-
-    assert pending is None
+        assert pending is None
+    finally:
+        mgr._process_recorder.finalize_run("completed")
 
 
 def test_on_calibration_completed_cleans_up_process_and_sets_pending_verdict(tmp_path, monkeypatch):
