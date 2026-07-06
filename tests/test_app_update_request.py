@@ -1,6 +1,7 @@
 from pathlib import Path
 import inspect
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -187,7 +188,35 @@ def test_app_update_check_worker_uses_offline_fallback_helper(tmp_path, monkeypa
 
     assert emitted == [result]
     assert calls[0][0].repo_root == tmp_path
+    assert calls[0][0].release_channel == "stable"
     assert calls[0][1]["command_runner"] == "runner"
+
+
+def test_app_update_check_worker_passes_release_candidate_channel(tmp_path, monkeypatch, qapp):
+    calls = []
+    fallback_calls = []
+    result = SimpleNamespace(status="update_available", message="rc ready")
+
+    def fake_check(config, **kwargs):
+        calls.append((config, kwargs))
+        return result
+
+    monkeypatch.setattr(updater_mod, "run_update_check", fake_check)
+    monkeypatch.setattr(updater_mod, "run_update_check_with_offline_fallback", lambda *args, **kwargs: fallback_calls.append((args, kwargs)))
+    worker = controller_mod.AppUpdateCheckWorker(
+        tmp_path,
+        command_runner="runner",
+        release_channel="release_candidate",
+    )
+    emitted = []
+    worker.finished.connect(emitted.append)
+
+    worker.run()
+
+    assert emitted == [result]
+    assert calls[0][0].release_channel == "release_candidate"
+    assert calls[0][1]["command_runner"] == "runner"
+    assert fallback_calls == []
 
 
 def test_app_update_check_worker_uses_selected_offline_manifest(tmp_path, monkeypatch, qapp):
@@ -211,6 +240,7 @@ def test_app_update_check_worker_uses_selected_offline_manifest(tmp_path, monkey
     assert emitted == [result]
     assert calls[0][0].repo_root == tmp_path
     assert calls[0][0].offline_manifest_path == manifest_path
+    assert calls[0][0].release_channel == "stable"
     assert calls[0][1]["command_runner"] == "runner"
     assert fallback_calls == []
 
@@ -264,8 +294,8 @@ def test_controller_start_offline_app_update_check_passes_manifest(tmp_path, mon
             pass
 
     class FakeWorker:
-        def __init__(self, repo_root, command_runner=None, offline_manifest_path=None):
-            created.append((Path(repo_root), command_runner, Path(offline_manifest_path)))
+        def __init__(self, repo_root, command_runner=None, offline_manifest_path=None, release_channel="stable"):
+            created.append((Path(repo_root), command_runner, Path(offline_manifest_path), release_channel))
             self.finished = SimpleNamespace(connect=lambda callback: None)
 
         def moveToThread(self, thread):
@@ -284,7 +314,56 @@ def test_controller_start_offline_app_update_check_passes_manifest(tmp_path, mon
 
     assert ok is True
     assert "started" in message
-    assert created == [(tmp_path, "runner", manifest_path)]
+    assert created == [(tmp_path, "runner", manifest_path, "stable")]
+    assert started
+
+
+def test_controller_start_app_update_check_passes_release_candidate_channel(tmp_path, monkeypatch, qapp):
+    controller = _make_controller(tmp_path)
+    created = []
+    started = []
+    controller.app_update_check_started = SimpleNamespace(emit=lambda: started.append(True))
+
+    class FakeThread:
+        def __init__(self, parent=None):
+            self.parent = parent
+            self.started = SimpleNamespace(connect=lambda callback: setattr(self, "_started_callback", callback))
+            self.finished = SimpleNamespace(connect=lambda callback: None)
+
+        def start(self):
+            started.append("thread")
+
+        def isRunning(self):
+            return False
+
+        def quit(self):
+            pass
+
+        def deleteLater(self):
+            pass
+
+    class FakeWorker:
+        def __init__(self, repo_root, command_runner=None, offline_manifest_path=None, release_channel="stable"):
+            created.append((Path(repo_root), command_runner, offline_manifest_path, release_channel))
+            self.finished = SimpleNamespace(connect=lambda callback: None)
+
+        def moveToThread(self, thread):
+            pass
+
+        def run(self):
+            pass
+
+        def deleteLater(self):
+            pass
+
+    monkeypatch.setattr(controller_mod.QtCore, "QThread", FakeThread)
+    monkeypatch.setattr(controller_mod, "AppUpdateCheckWorker", FakeWorker)
+
+    ok, message = controller.start_app_update_check(command_runner="runner", release_channel="release_candidate")
+
+    assert ok is True
+    assert "started" in message
+    assert created == [(tmp_path, "runner", None, "release_candidate")]
     assert started
 
 
@@ -464,6 +543,18 @@ class _FakeButton:
         self.enabled = bool(value)
 
 
+class _FakeCheckBox(_FakeButton):
+    def __init__(self, checked=False):
+        super().__init__()
+        self.checked = bool(checked)
+
+    def isChecked(self):
+        return self.checked
+
+    def setChecked(self, value):
+        self.checked = bool(value)
+
+
 def test_mainwindow_request_app_update_cancels_when_user_says_no(qapp):
     controller = SimpleNamespace(
         get_app_update_blockers=lambda: [],
@@ -510,6 +601,29 @@ def test_mainwindow_request_app_update_confirmation_mentions_offline_source(qapp
     assert MainWindow.request_app_update(window) is True
     assert calls == [777]
     assert "offline update bundle" in prompts[0][1]
+
+
+def test_mainwindow_request_app_update_confirmation_mentions_release_candidate(qapp, monkeypatch):
+    calls = []
+    prompts = []
+    controller = SimpleNamespace(
+        get_last_app_update_check_result=lambda: SimpleNamespace(
+            status="update_available",
+            update_source="online",
+            target_release_version="v1.2.0-rc.3",
+        ),
+        get_app_update_blockers=lambda: [],
+        launch_app_updater=lambda wait_pid: calls.append(wait_pid) or (True, "started"),
+    )
+    window = _make_update_mainwindow(controller)
+    window.popup_yes_no = lambda title, message: prompts.append((title, message)) or QMessageBox.StandardButton.Yes
+    monkeypatch.setattr(view_mod.os, "getpid", lambda: 777)
+
+    assert MainWindow.request_app_update(window) is True
+    assert calls == [777]
+    assert "selected release candidate" in prompts[0][1]
+    assert "support-guided testing" in prompts[0][1]
+    assert "Firmware will not be updated." in prompts[0][1]
 
 
 def test_mainwindow_request_app_update_launch_failure_stays_open(qapp):
@@ -638,15 +752,28 @@ def test_mainwindow_request_app_rollback_no_available_result_stays_open(qapp):
 
 
 def test_mainwindow_request_app_update_check_starts_controller_check(qapp):
-    calls = {"count": 0}
+    calls = []
     controller = SimpleNamespace(
         get_app_update_blockers=lambda: [],
-        start_app_update_check=lambda: calls.__setitem__("count", calls["count"] + 1) or (True, "started"),
+        start_app_update_check=lambda release_channel="stable": calls.append(release_channel) or (True, "started"),
     )
     window = _make_update_mainwindow(controller)
 
     assert MainWindow.request_app_update_check(window) is True
-    assert calls["count"] == 1
+    assert calls == ["stable"]
+    assert window.messages == []
+
+
+def test_mainwindow_request_app_update_check_passes_release_candidate_channel(qapp):
+    calls = []
+    controller = SimpleNamespace(
+        get_app_update_blockers=lambda: [],
+        start_app_update_check=lambda release_channel="stable": calls.append(release_channel) or (True, "started"),
+    )
+    window = _make_update_mainwindow(controller)
+
+    assert MainWindow.request_app_update_check(window, release_channel="release_candidate") is True
+    assert calls == ["release_candidate"]
     assert window.messages == []
 
 
@@ -773,6 +900,7 @@ def test_mainwindow_request_offline_app_rollback_blocks_when_busy(qapp, tmp_path
 def _make_speed_tab_for_update_check():
     tab = SpeedProfilesTab.__new__(SpeedProfilesTab)
     tab.app_update_status_label = _FakeLabel()
+    tab.app_update_release_candidate_checkbox = _FakeCheckBox()
     tab.app_update_check_button = _FakeButton()
     tab.app_update_offline_button = _FakeButton()
     tab.app_update_button = _FakeButton()
@@ -804,6 +932,7 @@ def test_speed_tab_update_check_started_disables_update_controls(qapp):
     SpeedProfilesTab._on_app_update_check_started(tab)
 
     assert tab.app_update_status_label.text_value == "Checking for updates..."
+    assert tab.app_update_release_candidate_checkbox.enabled is False
     assert tab.app_update_check_button.enabled is False
     assert tab.app_update_offline_button.enabled is False
     assert tab.app_update_button.enabled is False
@@ -819,6 +948,7 @@ def test_speed_tab_offline_update_check_started_uses_offline_status(qapp):
     SpeedProfilesTab._on_app_update_check_started(tab)
 
     assert tab.app_update_status_label.text_value == "Checking offline bundle..."
+    assert tab.app_update_release_candidate_checkbox.enabled is False
     assert tab.app_update_check_button.enabled is False
     assert tab.app_update_offline_button.enabled is False
     assert tab.app_update_button.enabled is False
@@ -834,6 +964,7 @@ def test_speed_tab_rollback_check_started_uses_rollback_status(qapp):
     SpeedProfilesTab._on_app_update_check_started(tab)
 
     assert tab.app_update_status_label.text_value == "Checking rollback target..."
+    assert tab.app_update_release_candidate_checkbox.enabled is False
     assert tab.app_update_check_button.enabled is False
     assert tab.app_update_offline_button.enabled is False
     assert tab.app_update_button.enabled is False
@@ -849,8 +980,57 @@ def test_speed_tab_offline_rollback_check_started_uses_offline_rollback_status(q
     SpeedProfilesTab._on_app_update_check_started(tab)
 
     assert tab.app_update_status_label.text_value == "Checking offline rollback bundle..."
+    assert tab.app_update_release_candidate_checkbox.enabled is False
     assert tab.app_update_button.enabled is False
     assert tab.app_rollback_button.enabled is False
+
+
+def test_speed_tab_release_candidate_check_started_uses_candidate_status(qapp):
+    tab = _make_speed_tab_for_update_check()
+    tab._app_update_check_mode = "release_candidate"
+
+    SpeedProfilesTab._on_app_update_check_started(tab)
+
+    assert tab.app_update_status_label.text_value == "Checking release candidate updates..."
+    assert tab.app_update_release_candidate_checkbox.enabled is False
+    assert tab.app_update_button.enabled is False
+    assert tab.app_rollback_button.enabled is False
+
+
+def test_speed_tab_online_update_button_requests_stable_check_by_default(qapp):
+    tab = _make_speed_tab_for_update_check()
+    calls = []
+    tab.main_window.request_app_update_check = lambda release_channel="stable": calls.append(release_channel) or True
+
+    SpeedProfilesTab._on_app_update_check_requested(tab)
+
+    assert calls == ["stable"]
+    assert tab._app_update_check_mode == "online"
+
+
+def test_speed_tab_online_update_button_requests_release_candidate_when_checked(qapp):
+    tab = _make_speed_tab_for_update_check()
+    tab.app_update_release_candidate_checkbox.setChecked(True)
+    calls = []
+    tab.main_window.request_app_update_check = lambda release_channel="stable": calls.append(release_channel) or True
+
+    SpeedProfilesTab._on_app_update_check_requested(tab)
+
+    assert calls == ["release_candidate"]
+    assert tab._app_update_check_mode == "release_candidate"
+
+
+def test_speed_tab_release_candidate_toggle_disables_stale_actions(qapp):
+    tab = _make_speed_tab_for_update_check()
+    tab.app_update_button.setEnabled(True)
+    tab.app_rollback_button.setEnabled(True)
+    tab.app_update_status_label.setText("LabCraft v1.2.0-rc.3 is available.")
+
+    SpeedProfilesTab._on_app_release_candidate_toggled(tab, True)
+
+    assert tab.app_update_button.enabled is False
+    assert tab.app_rollback_button.enabled is False
+    assert tab.app_update_status_label.text_value == "Check for updates before updating."
 
 
 def test_speed_tab_offline_update_button_requests_manifest_check(qapp):
@@ -913,6 +1093,7 @@ def test_speed_tab_up_to_date_check_keeps_update_disabled(qapp):
     )
 
     assert tab.app_update_status_label.text_value == "LabCraft is up to date."
+    assert tab.app_update_release_candidate_checkbox.enabled is True
     assert tab.app_update_check_button.enabled is True
     assert tab.app_update_offline_button.enabled is True
     assert tab.app_update_button.enabled is False
@@ -936,6 +1117,7 @@ def test_speed_tab_update_available_enables_update_and_shows_commits(qapp):
     )
 
     assert tab.app_update_status_label.text_value == "2 update commits available."
+    assert tab.app_update_release_candidate_checkbox.enabled is True
     assert tab.app_update_button.enabled is True
     assert tab.app_rollback_button.enabled is False
     assert tab.main_window.messages
@@ -1024,6 +1206,33 @@ def test_speed_tab_release_update_available_shows_release_details(qapp):
     assert "Uses stable release tags." in message
     assert "Rollback: v1.1.1" in message
     assert "def Release-aware updater" in message
+
+
+def test_speed_tab_release_candidate_update_available_shows_warning(qapp):
+    tab = _make_speed_tab_for_update_check()
+
+    SpeedProfilesTab._on_app_update_check_finished(
+        tab,
+        SimpleNamespace(
+            status="update_available",
+            message="LabCraft v1.2.0-rc.3 is available.",
+            update_source="online",
+            target_release_version="v1.2.0-rc.3",
+            release_summary="Camera refactor release candidate.",
+            release_notes=("Adds camera refactor test code.",),
+            rollback_version="v1.1.3",
+            behind_count=2,
+            commits=("def Camera refactor", "abc Manual refuel checks"),
+        ),
+    )
+
+    assert tab.app_update_status_label.text_value == "LabCraft v1.2.0-rc.3 is available."
+    assert tab.app_update_button.enabled is True
+    title, message = tab.main_window.messages[0]
+    assert title == "Updates Available"
+    assert "Release: v1.2.0-rc.3" in message
+    assert "Release candidate: support-guided test release" in message
+    assert "Adds camera refactor test code." in message
 
 
 def test_speed_tab_offline_update_available_shows_source_details(qapp, tmp_path):

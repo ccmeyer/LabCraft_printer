@@ -55,6 +55,10 @@ _VOLUME_INPUT_ERROR_STYLE = "border:1px solid #8a0303;"
 _VOLUME_INPUT_ISSUE_KEY = ("__metadata__", "volumes")
 
 
+def is_release_candidate_version(version):
+    return "-rc" in str(version or "").lower()
+
+
 def _format_volume_nl(value: float) -> str:
     return f"{float(value):.6g}"
 
@@ -1066,15 +1070,22 @@ class MainWindow(QMainWindow):
                 return False
 
         update_source = str(getattr(check_result, "update_source", "") or "")
+        target_release_version = str(getattr(check_result, "target_release_version", "") or "")
+        release_candidate = update_source != "offline" and is_release_candidate_version(target_release_version)
         if update_source == "offline":
             source_text = "from the offline update bundle"
+        elif release_candidate:
+            source_text = "from the selected release candidate"
         else:
             source_text = "from the remote repository"
 
+        candidate_text = ""
+        if release_candidate:
+            candidate_text = " This is a release candidate intended for support-guided testing."
         response = self.popup_yes_no(
             "Update App",
             f"The app will close, update the application code {source_text}, and reopen. "
-            "A LabCraft updater window will show progress. Firmware will not be updated. Continue?",
+            f"A LabCraft updater window will show progress. Firmware will not be updated.{candidate_text} Continue?",
         )
         if not self._is_yes_response(response):
             return False
@@ -1105,7 +1116,7 @@ class MainWindow(QMainWindow):
         self.close()
         return True
 
-    def request_app_update_check(self):
+    def request_app_update_check(self, release_channel="stable"):
         blockers_getter = getattr(self.controller, "get_app_update_blockers", None)
         blockers = blockers_getter() if callable(blockers_getter) else []
         if blockers:
@@ -1123,7 +1134,7 @@ class MainWindow(QMainWindow):
             )
             return False
 
-        ok, message = starter()
+        ok, message = starter(release_channel=release_channel)
         if not ok:
             self.popup_message("Cannot Check for Updates", str(message or "Update check could not be started."))
             return False
@@ -4699,6 +4710,12 @@ class SpeedProfilesTab(QtWidgets.QWidget):
         self.app_update_status_label.setWordWrap(True)
         app_update_v.addWidget(self.app_update_status_label)
 
+        self.app_update_release_candidate_checkbox = QtWidgets.QCheckBox("Include release candidates")
+        self.app_update_release_candidate_checkbox.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.app_update_release_candidate_checkbox.setChecked(False)
+        self.app_update_release_candidate_checkbox.toggled.connect(self._on_app_release_candidate_toggled)
+        app_update_v.addWidget(self.app_update_release_candidate_checkbox)
+
         self.app_update_check_button = QtWidgets.QPushButton("Check for Updates")
         self.app_update_check_button.setFocusPolicy(QtCore.Qt.NoFocus)
         self.app_update_check_button.clicked.connect(self._on_app_update_check_requested)
@@ -5028,8 +5045,9 @@ class SpeedProfilesTab(QtWidgets.QWidget):
 
     @QtCore.Slot()
     def _on_app_update_check_requested(self):
-        self._app_update_check_mode = "online"
-        if not self.main_window.request_app_update_check():
+        release_channel = self._selected_app_update_release_channel()
+        self._app_update_check_mode = "release_candidate" if release_channel == "release_candidate" else "online"
+        if not self.main_window.request_app_update_check(release_channel=release_channel):
             self._app_update_check_mode = ""
 
     @QtCore.Slot()
@@ -5060,6 +5078,24 @@ class SpeedProfilesTab(QtWidgets.QWidget):
                 version = ""
         return f"Current version: {version or 'unknown'}"
 
+    def _selected_app_update_release_channel(self):
+        checkbox = getattr(self, "app_update_release_candidate_checkbox", None)
+        if checkbox is not None and checkbox.isChecked():
+            return "release_candidate"
+        return "stable"
+
+    @QtCore.Slot(bool)
+    def _on_app_release_candidate_toggled(self, checked=False):
+        update_button = getattr(self, "app_update_button", None)
+        if update_button is not None:
+            update_button.setEnabled(False)
+        rollback_button = getattr(self, "app_rollback_button", None)
+        if rollback_button is not None:
+            rollback_button.setEnabled(False)
+        status_label = getattr(self, "app_update_status_label", None)
+        if status_label is not None:
+            status_label.setText("Check for updates before updating.")
+
     @QtCore.Slot()
     def _on_app_update_check_started(self):
         mode = str(getattr(self, "_app_update_check_mode", "") or "")
@@ -5069,9 +5105,14 @@ class SpeedProfilesTab(QtWidgets.QWidget):
             self.app_update_status_label.setText("Checking rollback target...")
         elif mode == "offline":
             self.app_update_status_label.setText("Checking offline bundle...")
+        elif mode == "release_candidate":
+            self.app_update_status_label.setText("Checking release candidate updates...")
         else:
             self.app_update_status_label.setText("Checking for updates...")
         self.app_update_check_button.setEnabled(False)
+        candidate_checkbox = getattr(self, "app_update_release_candidate_checkbox", None)
+        if candidate_checkbox is not None:
+            candidate_checkbox.setEnabled(False)
         offline_button = getattr(self, "app_update_offline_button", None)
         if offline_button is not None:
             offline_button.setEnabled(False)
@@ -5089,6 +5130,9 @@ class SpeedProfilesTab(QtWidgets.QWidget):
     @QtCore.Slot(object)
     def _on_app_update_check_finished(self, result):
         self.app_update_check_button.setEnabled(True)
+        candidate_checkbox = getattr(self, "app_update_release_candidate_checkbox", None)
+        if candidate_checkbox is not None:
+            candidate_checkbox.setEnabled(True)
         offline_button = getattr(self, "app_update_offline_button", None)
         if offline_button is not None:
             offline_button.setEnabled(True)
@@ -5128,6 +5172,11 @@ class SpeedProfilesTab(QtWidgets.QWidget):
             ]
             if target_release_version:
                 details.append(f"Release: {target_release_version}")
+            if (
+                str(getattr(result, "update_source", "") or "") != "offline"
+                and is_release_candidate_version(target_release_version)
+            ):
+                details.append("Release candidate: support-guided test release")
             if release_summary:
                 details.append(f"Summary: {release_summary}")
             if release_notes:

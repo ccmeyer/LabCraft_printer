@@ -50,6 +50,9 @@ OPERATION_UPDATE = "update"
 OPERATION_ROLLBACK = "rollback"
 UPDATE_SOURCE_ONLINE = "online"
 UPDATE_SOURCE_OFFLINE = "offline"
+RELEASE_CHANNEL_STABLE = "stable"
+RELEASE_CHANNEL_RELEASE_CANDIDATE = "release_candidate"
+RELEASE_CHANNELS = (RELEASE_CHANNEL_STABLE, RELEASE_CHANNEL_RELEASE_CANDIDATE)
 OFFLINE_BUNDLE_SCHEMA_VERSION = "labcraft_update_bundle_v1"
 OFFLINE_UPDATE_REF = "refs/labcraft/offline-update"
 RELEASE_INDEX_SCHEMA_VERSION = "labcraft_release_index_v1"
@@ -180,6 +183,7 @@ class UpdaterConfig:
     platform_name: str | None = None
     offline_manifest_path: Path | None = None
     target_release: str | None = None
+    release_channel: str = RELEASE_CHANNEL_STABLE
     rollback: bool = False
 
 
@@ -463,6 +467,20 @@ def _rollback_version_from_manifest(manifest: dict) -> str:
     return _normalize_release_version(rollback, context="release manifest rollback_version")
 
 
+def _normalize_release_channel(channel: str | None) -> str:
+    selected = str(channel or RELEASE_CHANNEL_STABLE).strip()
+    if selected not in RELEASE_CHANNELS:
+        raise ReleaseMetadataError(f"Release channel {selected!r} is not supported.")
+    return selected
+
+
+def _release_channel_label(channel: str | None) -> str:
+    selected = str(channel or RELEASE_CHANNEL_STABLE).strip()
+    if selected == RELEASE_CHANNEL_RELEASE_CANDIDATE:
+        return "release candidate"
+    return "stable"
+
+
 def _validate_release_manifest(manifest: dict, *, expected_version: str) -> ReleaseTargetInfo:
     if manifest.get("schema_version") != RELEASE_MANIFEST_SCHEMA_VERSION:
         raise ReleaseMetadataError("Release manifest has an unsupported schema_version.")
@@ -473,8 +491,8 @@ def _validate_release_manifest(manifest: dict, *, expected_version: str) -> Rele
     if tag != expected_version:
         raise ReleaseMetadataError("Release manifest tag does not match the selected release.")
     channel = str(manifest.get("channel") or "").strip()
-    if channel and channel != "stable":
-        raise ReleaseMetadataError("Release manifest channel is not stable.")
+    if channel and channel not in RELEASE_CHANNELS:
+        raise ReleaseMetadataError("Release manifest channel must be stable or release_candidate.")
     return ReleaseTargetInfo(
         version=version,
         tag=tag,
@@ -509,7 +527,11 @@ def _resolve_release_target(
         )
         if index.get("schema_version") != RELEASE_INDEX_SCHEMA_VERSION:
             raise ReleaseMetadataError("Release index has an unsupported schema_version.")
-        version = _normalize_release_version(index.get("stable"), context="release index stable version")
+        channel = _normalize_release_channel(config.release_channel)
+        raw_version = index.get(channel)
+        if raw_version in (None, ""):
+            raise ReleaseMetadataError(f"Release index does not define a {channel} version.")
+        version = _normalize_release_version(raw_version, context=f"release index {channel} version")
 
     tag = version
     tag_result = _run_git_with_log(
@@ -1618,6 +1640,7 @@ def run_update_check(
         )
 
     try:
+        channel_label = _release_channel_label(config.release_channel)
         release_info = _resolve_release_target(
             repo_root,
             upstream=upstream,
@@ -1630,7 +1653,7 @@ def run_update_check(
         return _finish_check_result(
             _make_check_result(
                 STATUS_FETCH_FAILED,
-                f"Update check could not resolve the latest stable release metadata. {exc.message}",
+                f"Update check could not resolve the latest {channel_label} release metadata. {exc.message}",
                 repo_root=repo_root,
                 branch=branch,
                 upstream=upstream,
@@ -1648,7 +1671,7 @@ def run_update_check(
         return _finish_check_result(
             _make_check_result(
                 STATUS_FETCH_FAILED,
-                "Update check could not compare this checkout with the selected stable release. Contact support.",
+                "Update check could not compare this checkout with the selected release. Contact support.",
                 repo_root=repo_root,
                 branch=branch,
                 upstream=upstream,
@@ -1708,7 +1731,7 @@ def run_update_check(
     message = f"LabCraft is up to date with {release_info.version}."
     if ahead_count > 0:
         message = (
-            f"No stable update is available. This checkout has local commits not present in {release_info.version}. "
+            f"No {channel_label} update is available. This checkout has local commits not present in {release_info.version}. "
             "Contact support before updating."
         )
     return _finish_check_result(
@@ -2595,7 +2618,8 @@ def run_update(
             )
             return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
     else:
-        _emit_progress(progress_callback, "resolving_release", "Resolving stable release target...", log_path=log_path)
+        channel_label = _release_channel_label(config.release_channel)
+        _emit_progress(progress_callback, "resolving_release", f"Resolving {channel_label} release target...", log_path=log_path)
         upstream_result = _run_git(repo_root, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], config.git_timeout_s, command_runner)
         _record_command(log, upstream_result, progress_callback)
         if upstream_result.returncode != 0 or not upstream_result.stdout.strip():
@@ -2638,7 +2662,7 @@ def run_update(
         except ReleaseMetadataError as exc:
             result = _make_result(
                 STATUS_GIT_PULL_FAILED,
-                f"Update cannot continue because the stable release metadata could not be resolved. {exc.message} The current app version was not changed.",
+                f"Update cannot continue because the {channel_label} release metadata could not be resolved. {exc.message} The current app version was not changed.",
                 repo_root=repo_root,
                 branch=branch,
                 before_sha=before_sha,
@@ -2815,7 +2839,13 @@ def parse_args(argv: Sequence[str] | None = None) -> UpdaterConfig:
     parser.add_argument("--git-timeout-s", type=float, default=DEFAULT_GIT_TIMEOUT_S, help="Timeout for each Git command.")
     parser.add_argument("--log-path", default=None, help="Optional updater log path.")
     parser.add_argument("--offline-manifest", default=None, help="Manifest JSON for an offline update bundle.")
-    parser.add_argument("--target-release", default=None, help="Specific stable release version to apply, e.g. v1.1.2.")
+    parser.add_argument("--target-release", default=None, help="Specific release version to apply, e.g. v1.1.2.")
+    parser.add_argument(
+        "--release-channel",
+        choices=RELEASE_CHANNELS,
+        default=RELEASE_CHANNEL_STABLE,
+        help="Release channel to use when resolving latest.json without --target-release.",
+    )
     parser.add_argument("--rollback", action="store_true", help="Support-only rollback to a verified release target.")
     args = parser.parse_args(argv)
 
@@ -2834,6 +2864,7 @@ def parse_args(argv: Sequence[str] | None = None) -> UpdaterConfig:
         log_path=Path(args.log_path) if args.log_path else None,
         offline_manifest_path=Path(args.offline_manifest) if args.offline_manifest else None,
         target_release=str(args.target_release).strip() if args.target_release else None,
+        release_channel=str(args.release_channel).strip() if args.release_channel else RELEASE_CHANNEL_STABLE,
         rollback=bool(args.rollback),
     )
 

@@ -316,7 +316,10 @@ Expected flow:
 
 - Click `Check for Updates`.
 - The online check fetches tags, reads the upstream `releases/latest.json`, and compares the local checkout with the latest stable release tag.
-- If the app is already current with that stable release, it stays open and reports that no update is available.
+- Leave `Include release candidates` unchecked for normal updates.
+- For support-guided testing only, check `Include release candidates` before clicking `Check for Updates`; the app then targets the `release_candidate` release named in `releases/latest.json`.
+- Release candidate updates are still applied by a named release tag, and `Update App` remains disabled until a fresh check succeeds.
+- If the app is already current with the selected release, it stays open and reports that no update is available.
 - If an update is available, the app shows the target release version, release summary, release notes, rollback version when defined, and pending commit summaries, then enables `Update App`.
 - Click `Update App`; the app confirms that application code will update and firmware will not be flashed.
 - If the machine is connected, the normal disconnect/close flow runs first.
