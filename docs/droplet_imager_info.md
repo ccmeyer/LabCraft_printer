@@ -300,18 +300,19 @@ The important boundary is that frame selection happens before analysis. Analysis
 
 ## Current frame-identification logic
 
-The frame-identification step is intentionally simple and purely image-statistics-based:
+The frame-identification step is intentionally image-statistics-based:
 
 - no camera hardware trigger
 - no MCU timestamp returned with the image
 - no per-frame GPIO timestamp correlation beyond local monotonic timing
-- no ROI-based flash detection; selection is based on whole-frame mean intensity
+- default capture uses dual-stream detection: the low-resolution luma stream is used for flash detection, and the full-resolution main stream is converted only for the selected frame
+- the previous single-stream green-channel detector and older full-RGB detector remain debug fallback paths
 
 This has a few consequences:
 
-1. The system assumes the flashed frame is globally brighter than nearby frames.
+1. The system assumes the flashed frame is brighter than nearby frames in the detection representation.
 2. If the flash is weak or illumination varies, the threshold path can fail and trigger retries.
-3. If the flash does not brighten the full frame strongly enough, a visually useful frame may still be classified as `fallback`, which the retry wrapper currently treats as failure.
+3. If the flash does not brighten the detection stream strongly enough, a visually useful frame may still be classified as `fallback`, which the retry wrapper currently treats as failure.
 4. Any future change to camera exposure, gain, crop, or scene brightness can change capture reliability even if the firmware timing stays correct.
 
 ## Firmware timing notes
@@ -338,6 +339,7 @@ The Python name suggests camera behavior, but on the firmware side `CMD_INIT_FLA
 ### 2. The Pi camera is free-running
 
 The selected image is not a hardware-triggered exposure. It is the best frame inferred after a flash-fired notification. Any attempt to improve timing should start from this fact.
+An earlier Early Arm A/B path tried marking the capture window before the ACK, but it was not promoted; normal capture arms after the ACK edge.
 
 ### 3. Success is narrower than selection
 
@@ -387,7 +389,7 @@ If revisiting this system later, read in this order:
 These are the main places to look if capture reliability needs improvement:
 
 1. Pi-side flashed-frame detection
-   - use ROI-based brightness instead of full-frame mean
+   - tune or replace the dual-stream low-resolution detection metric
    - accept some `fallback` frames when quality metrics are good
    - record more timing/debug metadata per attempt
 
@@ -409,6 +411,7 @@ Today the droplet imager works as a split system:
 - Python owns the camera, GPIO handshake, retries, and analysis orchestration.
 - Firmware owns precise flash timing and the decision to flash directly or after printing droplets.
 - The chosen flashed frame is identified on the Pi by waiting for the MCU flash-fired edge and then selecting the first sufficiently bright post-ack frame from a free-running camera stream.
+- The normal droplet capture default is dual-stream detection at 16500 us exposure/frame duration, with previous single-stream detection available as an automatic fallback.
 
 That is the key design assumption to keep in mind before changing anything in this path.
 

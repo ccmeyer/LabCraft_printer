@@ -6326,24 +6326,6 @@ class Controller(QObject):
             "fallback_error": None,
         }
 
-    def set_droplet_capture_arm_timing_mode(self, mode: str):
-        setter = getattr(self.machine, "set_droplet_capture_arm_timing_mode", None)
-        if callable(setter):
-            try:
-                return setter(mode)
-            except Exception:
-                return "ack_after_edge"
-        return "ack_after_edge"
-
-    def get_droplet_capture_arm_timing_mode(self):
-        getter = getattr(self.machine, "get_droplet_capture_arm_timing_mode", None)
-        if callable(getter):
-            try:
-                return getter()
-            except Exception:
-                return "ack_after_edge"
-        return "ack_after_edge"
-
     def set_command_dispatch_interval(self, interval_ms: int):
         self.machine.set_execution_interval_ms(interval_ms)
 

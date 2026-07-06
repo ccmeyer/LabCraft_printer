@@ -1066,7 +1066,6 @@ def test_droplet_imager_close_ignores_stale_local_pending_when_coordinator_idle(
             }
         ),
         set_droplet_capture_profile=Mock(),
-        set_droplet_capture_arm_timing_mode=Mock(),
         set_command_dispatch_interval=Mock(),
         disable_print_profile=Mock(),
     )
@@ -1096,7 +1095,6 @@ def test_droplet_imager_close_ignores_stale_local_pending_when_coordinator_idle(
     assert event.ignored is False
     assert dialog._capture_request_pending is False
     controller.set_droplet_capture_profile.assert_called_once_with("default")
-    controller.set_droplet_capture_arm_timing_mode.assert_called_once_with("ack_after_edge")
     dialog.stop_droplet_camera.assert_called_once_with()
 
 

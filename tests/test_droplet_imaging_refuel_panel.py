@@ -123,8 +123,6 @@ def _build_droplet_dialog(
         "fallback_reason": None,
         "fallback_error": None,
     }
-    arm_timing_mode = {"value": "ack_after_edge"}
-
     def _set_droplet_capture_profile(profile_name):
         profile = str(profile_name or "default").strip().lower()
         if profile not in {
@@ -153,13 +151,6 @@ def _build_droplet_dialog(
             }
         )
         return effective_profile
-
-    def _set_droplet_capture_arm_timing_mode(mode):
-        value = str(mode or "ack_after_edge").strip().lower()
-        if value not in {"ack_after_edge", "early_after_trigger_pulse"}:
-            value = "ack_after_edge"
-        arm_timing_mode["value"] = value
-        return value
 
     controller = SimpleNamespace(
         _command_calls=command_calls,
@@ -190,8 +181,6 @@ def _build_droplet_dialog(
         set_droplet_capture_profile=Mock(side_effect=_set_droplet_capture_profile),
         get_droplet_capture_profile=Mock(side_effect=lambda: capture_profile["value"]),
         get_droplet_capture_profile_state=Mock(side_effect=lambda: dict(capture_profile_state)),
-        set_droplet_capture_arm_timing_mode=Mock(side_effect=_set_droplet_capture_arm_timing_mode),
-        get_droplet_capture_arm_timing_mode=Mock(side_effect=lambda: arm_timing_mode["value"]),
         set_command_dispatch_interval=Mock(),
         enter_refuel_vacuum_mode=_command_mock("enter_refuel_vacuum_mode"),
         set_refuel_vacuum_pressure=_command_mock("set_refuel_vacuum_pressure"),
@@ -361,6 +350,8 @@ def test_calibration_capture_error_from_disarmed_flash_session_mentions_logger_c
 
 def test_droplet_capture_performance_debug_checkbox_and_export(monkeypatch, qapp):
     dialog, _refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
+
+    assert not hasattr(dialog, "early_arm_ab_timing_checkbox")
 
     dialog.enable_droplet_capture_performance_diagnostics_checkbox.setChecked(True)
     qapp.processEvents()
@@ -532,65 +523,6 @@ def test_legacy_full_rgb_detection_checkbox_reverts_when_calibration_active(monk
     assert dialog.legacy_full_rgb_detection_checkbox.isChecked() is False
     controller.set_droplet_capture_profile.assert_not_called()
     assert "Cannot change capture profile" in dialog.droplet_capture_performance_debug_status_label.text()
-
-
-def test_early_arm_ab_timing_checkbox_toggles_mode_and_is_not_persisted(monkeypatch, qapp):
-    dialog, _refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
-
-    assert dialog.early_arm_ab_timing_checkbox.isChecked() is False
-
-    controller.set_droplet_capture_arm_timing_mode.reset_mock()
-    dialog.early_arm_ab_timing_checkbox.setChecked(True)
-    qapp.processEvents()
-
-    controller.set_droplet_capture_arm_timing_mode.assert_called_once_with("early_after_trigger_pulse")
-    assert dialog.early_arm_ab_timing_checkbox.isChecked() is True
-    assert "Early arm A/B timing enabled" in dialog.droplet_capture_performance_debug_status_label.text()
-
-    dialog.early_arm_ab_timing_checkbox.setChecked(False)
-    qapp.processEvents()
-
-    controller.set_droplet_capture_arm_timing_mode.assert_called_with("ack_after_edge")
-    assert dialog.early_arm_ab_timing_checkbox.isChecked() is False
-    assert "Early arm A/B timing disabled" in dialog.droplet_capture_performance_debug_status_label.text()
-
-    second_dialog, _second_refuel_model, _second_controller = _build_droplet_dialog(monkeypatch, qapp)
-    assert second_dialog.early_arm_ab_timing_checkbox.isChecked() is False
-
-
-def test_early_arm_ab_timing_checkbox_reverts_when_capture_active(monkeypatch, qapp):
-    dialog, _refuel_model, controller = _build_droplet_dialog(
-        monkeypatch,
-        qapp,
-        capture_ui_state={
-            "pending_active": True,
-            "dirty_shutdown": False,
-            "last_result_status": None,
-            "last_result_reason": "",
-            "last_result_dirty_shutdown": False,
-        },
-    )
-
-    controller.set_droplet_capture_arm_timing_mode.reset_mock()
-    dialog.early_arm_ab_timing_checkbox.setChecked(True)
-    qapp.processEvents()
-
-    assert dialog.early_arm_ab_timing_checkbox.isChecked() is False
-    controller.set_droplet_capture_arm_timing_mode.assert_not_called()
-    assert "Cannot change capture timing" in dialog.droplet_capture_performance_debug_status_label.text()
-
-
-def test_early_arm_ab_timing_checkbox_reverts_when_calibration_active(monkeypatch, qapp):
-    dialog, _refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
-    dialog.model.calibration_manager.activeCalibration = object()
-
-    controller.set_droplet_capture_arm_timing_mode.reset_mock()
-    dialog.early_arm_ab_timing_checkbox.setChecked(True)
-    qapp.processEvents()
-
-    assert dialog.early_arm_ab_timing_checkbox.isChecked() is False
-    controller.set_droplet_capture_arm_timing_mode.assert_not_called()
-    assert "Cannot change capture timing" in dialog.droplet_capture_performance_debug_status_label.text()
 
 
 def test_toggle_flash_records_pending_ignore_for_capture_perf(monkeypatch, qapp):
