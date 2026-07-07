@@ -1,0 +1,21 @@
+{
+  "channel": "stable",
+  "notes": [
+    "Metadata-only smoke-test release for validating the app-based updater window path from v1.1.10.",
+    "Provides a real stable tag target so machines on v1.1.10 can test Check Updates and Update App through the UI.",
+    "Keeps update, rollback, offline bundle, firmware, device protocol, motion, pressure-control, UI behavior, and Model behavior unchanged."
+  ],
+  "previous_version": "v1.1.10",
+  "release_date": "2026-07-07",
+  "requires_firmware": null,
+  "rollback_version": "v1.1.10",
+  "schema_version": "labcraft_release_v1",
+  "summary": "Metadata-only release for validating the Wayland updater window launch path.",
+  "tag": "v1.1.11",
+  "validation": [
+    ".\\env\\Scripts\\python.exe -m pytest -q tests/test_app_update_request.py tests/test_update_and_restart.py tests/test_update_window.py",
+    "git diff --check",
+    "Get-ChildItem releases\\*.json | ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json | Out-Null }"
+  ],
+  "version": "v1.1.11"
+}

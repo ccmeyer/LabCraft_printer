@@ -1,0 +1,23 @@
+{
+  "channel": "stable",
+  "notes": [
+    "Keeps virtual-environment Python paths intact when launching the updater window.",
+    "Verifies the selected updater Python can import PySide6 before closing the main app.",
+    "Adds Python candidate and PySide6 probe diagnostics to updater launcher logs.",
+    "Shows a clear launch failure instead of closing the app when no GUI-capable Python is available.",
+    "Keeps update, rollback, offline bundle, firmware, device protocol, motion, and pressure-control behavior unchanged."
+  ],
+  "previous_version": "v1.1.5",
+  "release_date": "2026-07-06",
+  "requires_firmware": null,
+  "rollback_version": "v1.1.5",
+  "schema_version": "labcraft_release_v1",
+  "summary": "Fixes updater window launch by preserving the virtual-environment Python path.",
+  "tag": "v1.1.6",
+  "validation": [
+    ".\\env\\Scripts\\python.exe -m pytest -q tests/test_app_update_request.py tests/test_update_and_restart.py",
+    "git diff --check",
+    "Get-ChildItem releases\\*.json | ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json | Out-Null }"
+  ],
+  "version": "v1.1.6"
+}

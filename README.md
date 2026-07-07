@@ -427,9 +427,10 @@ Expected UI flow:
 
 - Click `Check Rollback`.
 - If the installed release defines a rollback target, the app shows the exact path such as `v1.2.0 -> v1.1.2`.
+- If the online rollback check cannot fetch release tags, the app scans removable drives for `LabCraftUpdates/*.json` release-aware rollback manifests.
 - Click `Restore Previous App Version`; the app confirms that application code will move backward and firmware will not be flashed.
 - A `LabCraft Rollback` window appears after the main app closes, verifies the same target again, and applies it.
-- For machines without GitHub access, click `Restore From Offline Rollback Bundle` and select a support-provided release-aware manifest.
+- For explicit support-provided bundles, click `Restore From Offline Rollback Bundle` and select a release-aware manifest directly.
 
 The backend command remains available for support cases where the main app cannot launch.
 

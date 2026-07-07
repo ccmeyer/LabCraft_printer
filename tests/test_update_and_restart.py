@@ -1,12 +1,16 @@
 import json
 import json
 import hashlib
+import os
 import shutil
 import subprocess
+import sys
+import types
 from pathlib import Path
 
 import pytest
 
+import tools
 from tools import create_update_bundle
 import tools.update_and_restart as updater
 
@@ -707,6 +711,18 @@ def test_online_rollback_check_invalid_target_manifest_fails_safely(tmp_path):
     assert not any(call[0][:3] == ("git", "reset", "--hard") for call in runner.calls)
 
 
+def test_online_rollback_check_fetch_failure_returns_fetch_failed(tmp_path):
+    _write_version(tmp_path, "v1.2.0")
+    runner = FakeGitRunner(tmp_path, fetch_returncode=128)
+
+    result = updater.run_rollback_check(_config(tmp_path, rollback=True), command_runner=runner)
+
+    assert result.status == updater.STATUS_FETCH_FAILED
+    assert result.operation == updater.OPERATION_ROLLBACK
+    assert result.update_source == updater.UPDATE_SOURCE_ONLINE
+    assert "fetch release tags" in result.message
+
+
 def test_offline_rollback_check_accepts_release_aware_bundle(tmp_path):
     _write_version(tmp_path, "v1.2.0")
     manifest_path = _write_offline_manifest(tmp_path, head_sha=OFFLINE_SHA, release_version="v1.1.2")
@@ -1198,6 +1214,63 @@ def test_cli_parser_accepts_gui():
     assert config.gui is True
     assert config.record_result is True
     assert config.latest_result_path == Path("local/result.json")
+
+
+def test_gui_main_sanitizes_qt_environment_before_import(tmp_path, monkeypatch):
+    fake_update_window = types.ModuleType("tools.update_window")
+    observed = {}
+
+    def fake_run_gui(config):
+        observed["config"] = config
+        observed["env"] = {name: os.environ.get(name) for name in updater.QT_ENV_VARS_TO_REMOVE_FOR_GUI}
+        observed["qt_platform"] = os.environ.get("QT_QPA_PLATFORM")
+        return 0
+
+    fake_update_window.run_gui = fake_run_gui
+    monkeypatch.delattr(tools, "update_window", raising=False)
+    monkeypatch.setitem(sys.modules, "tools.update_window", fake_update_window)
+    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+    monkeypatch.setenv("QT_QPA_PLATFORM_PLUGIN_PATH", "/home/labcraft/LabCraft_printer/env/lib/python3.11/site-packages/cv2/qt/plugins")
+    monkeypatch.setenv("QT_QPA_FONTDIR", "/home/labcraft/LabCraft_printer/env/lib/python3.11/site-packages/cv2/qt/fonts")
+    monkeypatch.setenv("QT_PLUGIN_PATH", "/bad/plugin/path")
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+
+    exit_code = updater.main(["--repo-root", str(tmp_path), "--gui", "--no-relaunch"])
+
+    assert exit_code == 0
+    assert observed["config"].gui is True
+    assert observed["env"] == {
+        "QT_QPA_PLATFORM_PLUGIN_PATH": None,
+        "QT_QPA_FONTDIR": None,
+        "QT_PLUGIN_PATH": None,
+    }
+    assert observed["qt_platform"] == "wayland;xcb"
+
+
+def test_gui_qt_platform_preference_preserves_explicit_platform():
+    env = {
+        "WAYLAND_DISPLAY": "wayland-0",
+        "QT_QPA_PLATFORM": "offscreen",
+        "QT_QPA_PLATFORM_PLUGIN_PATH": "/bad/plugins",
+    }
+
+    removed = updater.sanitize_qt_environment_for_gui(env)
+
+    assert removed == {"QT_QPA_PLATFORM_PLUGIN_PATH": "/bad/plugins"}
+    assert env["QT_QPA_PLATFORM"] == "offscreen"
+
+
+def test_gui_qt_platform_preference_overrides_xcb_in_wayland_session():
+    env = {
+        "WAYLAND_DISPLAY": "wayland-0",
+        "QT_QPA_PLATFORM": "xcb",
+        "QT_QPA_PLATFORM_PLUGIN_PATH": "/bad/plugins",
+    }
+
+    removed = updater.sanitize_qt_environment_for_gui(env)
+
+    assert removed == {"QT_QPA_PLATFORM_PLUGIN_PATH": "/bad/plugins"}
+    assert env["QT_QPA_PLATFORM"] == "wayland;xcb"
 
 
 def test_cli_parser_accepts_offline_manifest():
@@ -1817,6 +1890,115 @@ def test_offline_fallback_preserves_fetch_failed_when_no_usable_bundle(tmp_path)
     assert result.status == updater.STATUS_FETCH_FAILED
     assert result.update_source == updater.UPDATE_SOURCE_ONLINE
     assert "No usable offline update bundle was found." in result.message
+
+
+def test_rollback_fallback_does_not_scan_when_online_check_succeeds(tmp_path):
+    _write_version(tmp_path, "v1.2.0")
+    missing_manifest = tmp_path / "missing.json"
+    runner = FakeGitRunner(
+        tmp_path,
+        target_release_version="v1.2.0",
+        rollback_version="v1.1.2",
+        rollback_release_version="v1.1.2",
+        rollback_release_sha=ROLLBACK_SHA,
+    )
+
+    result = updater.run_rollback_check_with_offline_fallback(
+        _config(tmp_path, rollback=True),
+        command_runner=runner,
+        manifest_paths=[missing_manifest],
+    )
+
+    assert result.status == updater.STATUS_ROLLBACK_AVAILABLE
+    assert result.update_source == updater.UPDATE_SOURCE_ONLINE
+    assert result.after_release_version == "v1.1.2"
+
+
+def test_rollback_fallback_selects_valid_release_bundle_after_fetch_failure(tmp_path):
+    _write_version(tmp_path, "v1.2.0")
+    old_manifest = _write_offline_manifest(
+        tmp_path,
+        head_sha=OFFLINE_SHA,
+        bundle_name="old-rollback.bundle",
+        created_at_utc="2026-06-18T10:00:00Z",
+        release_version="v1.1.1",
+    )
+    new_manifest = _write_offline_manifest(
+        tmp_path,
+        head_sha=OFFLINE_SHA,
+        bundle_name="new-rollback.bundle",
+        created_at_utc="2026-06-18T12:00:00Z",
+        release_version="v1.1.2",
+    )
+    runner = FakeGitRunner(tmp_path, fetch_returncode=128, offline_ref_sha=OFFLINE_SHA)
+
+    result = updater.run_rollback_check_with_offline_fallback(
+        _config(tmp_path, rollback=True),
+        command_runner=runner,
+        manifest_paths=[old_manifest, new_manifest],
+    )
+
+    assert result.status == updater.STATUS_ROLLBACK_AVAILABLE
+    assert result.update_source == updater.UPDATE_SOURCE_OFFLINE
+    assert result.offline_manifest_path == new_manifest.resolve()
+    assert result.before_release_version == "v1.2.0"
+    assert result.after_release_version == "v1.1.2"
+
+
+def test_rollback_fallback_skips_invalid_and_unusable_candidates(tmp_path):
+    _write_version(tmp_path, "v1.2.0")
+    wrong_branch = _write_offline_manifest(
+        tmp_path,
+        branch="stable",
+        bundle_name="wrong-branch-rollback.bundle",
+        created_at_utc="2026-06-18T13:00:00Z",
+        release_version="v1.1.2",
+    )
+    legacy = _write_offline_manifest(
+        tmp_path,
+        bundle_name="legacy-rollback.bundle",
+        created_at_utc="2026-06-18T12:00:00Z",
+    )
+    current_release = _write_offline_manifest(
+        tmp_path,
+        bundle_name="current-release-rollback.bundle",
+        created_at_utc="2026-06-18T11:00:00Z",
+        release_version="v1.2.0",
+    )
+    valid = _write_offline_manifest(
+        tmp_path,
+        bundle_name="valid-rollback.bundle",
+        created_at_utc="2026-06-18T10:00:00Z",
+        release_version="v1.1.2",
+    )
+    runner = FakeGitRunner(tmp_path, fetch_returncode=128, offline_ref_sha=OFFLINE_SHA)
+
+    result = updater.run_rollback_check_with_offline_fallback(
+        _config(tmp_path, rollback=True),
+        command_runner=runner,
+        manifest_paths=[valid, current_release, legacy, wrong_branch],
+    )
+
+    assert result.status == updater.STATUS_ROLLBACK_AVAILABLE
+    assert result.update_source == updater.UPDATE_SOURCE_OFFLINE
+    assert result.offline_manifest_path == valid.resolve()
+    assert result.after_release_version == "v1.1.2"
+
+
+def test_rollback_fallback_preserves_fetch_failed_when_no_usable_bundle(tmp_path):
+    _write_version(tmp_path, "v1.2.0")
+    manifest_path = tmp_path / "missing.json"
+    runner = FakeGitRunner(tmp_path, fetch_returncode=128)
+
+    result = updater.run_rollback_check_with_offline_fallback(
+        _config(tmp_path, rollback=True),
+        command_runner=runner,
+        manifest_paths=[manifest_path],
+    )
+
+    assert result.status == updater.STATUS_FETCH_FAILED
+    assert result.update_source == updater.UPDATE_SOURCE_ONLINE
+    assert "No usable offline rollback bundle was found." in result.message
 
 
 def test_latest_result_json_written_for_updated_result(tmp_path):

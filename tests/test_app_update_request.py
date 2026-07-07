@@ -64,7 +64,8 @@ def _make_controller(tmp_path):
 
 def test_controller_builds_update_command_without_auto_relaunch(tmp_path, monkeypatch):
     controller = _make_controller(tmp_path)
-    monkeypatch.setattr(controller_mod.sys, "executable", "python-under-test")
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    controller._resolve_app_update_python = lambda: "python-under-test"
 
     command = controller.build_app_update_command(wait_pid=1234)
 
@@ -92,7 +93,8 @@ def test_controller_builds_update_command_with_offline_manifest(tmp_path, monkey
         update_source="offline",
         offline_manifest_path=manifest_path,
     )
-    monkeypatch.setattr(controller_mod.sys, "executable", "python-under-test")
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    controller._resolve_app_update_python = lambda: "python-under-test"
 
     command = controller.build_app_update_command(wait_pid=1234)
 
@@ -106,7 +108,8 @@ def test_controller_builds_update_command_without_offline_manifest_for_online_up
         status="update_available",
         update_source="online",
     )
-    monkeypatch.setattr(controller_mod.sys, "executable", "python-under-test")
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    controller._resolve_app_update_python = lambda: "python-under-test"
 
     command = controller.build_app_update_command(wait_pid=1234)
 
@@ -120,7 +123,8 @@ def test_controller_builds_update_command_with_target_release_for_online_update(
         update_source="online",
         target_release_version="v1.1.2",
     )
-    monkeypatch.setattr(controller_mod.sys, "executable", "python-under-test")
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    controller._resolve_app_update_python = lambda: "python-under-test"
 
     command = controller.build_app_update_command(wait_pid=1234)
 
@@ -134,7 +138,8 @@ def test_controller_builds_rollback_command(tmp_path, monkeypatch):
         status="rollback_available",
         update_source="online",
     )
-    monkeypatch.setattr(controller_mod.sys, "executable", "python-under-test")
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    controller._resolve_app_update_python = lambda: "python-under-test"
 
     command = controller.build_app_rollback_command(wait_pid=1234)
 
@@ -163,12 +168,67 @@ def test_controller_builds_offline_rollback_command_with_manifest(tmp_path, monk
         update_source="offline",
         offline_manifest_path=manifest_path,
     )
-    monkeypatch.setattr(controller_mod.sys, "executable", "python-under-test")
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    controller._resolve_app_update_python = lambda: "python-under-test"
 
     command = controller.build_app_rollback_command(wait_pid=1234)
 
     assert "--rollback" in command
     assert command[-2:] == ["--offline-manifest", str(manifest_path)]
+
+
+def test_controller_resolves_active_virtualenv_python_first(tmp_path, monkeypatch):
+    controller = _make_controller(tmp_path)
+    active_python = tmp_path / "active-env" / "Scripts" / "python.exe"
+    active_python.parent.mkdir(parents=True)
+    active_python.write_text("", encoding="utf-8")
+    repo_python = tmp_path / "env" / "Scripts" / "python.exe"
+    repo_python.parent.mkdir(parents=True)
+    repo_python.write_text("", encoding="utf-8")
+    monkeypatch.setenv("VIRTUAL_ENV", str(tmp_path / "active-env"))
+    monkeypatch.setattr(controller_mod.sys, "executable", "python-under-test")
+    monkeypatch.setattr(controller, "_probe_app_update_python", lambda path: (True, f"{path}: PySide6 OK"))
+
+    assert controller._resolve_app_update_python() == str(active_python.absolute())
+
+
+def test_controller_resolves_repo_env_python_before_sys_executable(tmp_path, monkeypatch):
+    controller = _make_controller(tmp_path)
+    repo_python = tmp_path / "env" / "bin" / "python"
+    repo_python.parent.mkdir(parents=True)
+    repo_python.write_text("", encoding="utf-8")
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    monkeypatch.setattr(controller_mod.sys, "executable", "python-under-test")
+    monkeypatch.setattr(controller, "_probe_app_update_python", lambda path: (True, f"{path}: PySide6 OK"))
+
+    assert controller._resolve_app_update_python() == str(repo_python.absolute())
+
+
+def test_controller_resolver_skips_python_without_pyside6(tmp_path, monkeypatch):
+    controller = _make_controller(tmp_path)
+    active_python = tmp_path / "active-env" / "bin" / "python"
+    active_python.parent.mkdir(parents=True)
+    active_python.write_text("", encoding="utf-8")
+    repo_python = tmp_path / "env" / "bin" / "python"
+    repo_python.parent.mkdir(parents=True)
+    repo_python.write_text("", encoding="utf-8")
+    calls = []
+
+    def fake_probe(path):
+        calls.append(path)
+        if path == str(repo_python.absolute()):
+            return True, f"{path}: PySide6 OK"
+        return False, f"{path}: PySide6 unavailable (No module named 'PySide6')"
+
+    monkeypatch.setenv("VIRTUAL_ENV", str(tmp_path / "active-env"))
+    monkeypatch.setattr(controller_mod.sys, "executable", "python-under-test")
+    monkeypatch.setattr(controller, "_probe_app_update_python", fake_probe)
+
+    assert controller._resolve_app_update_python() == str(repo_python.absolute())
+    assert str(active_python.absolute()) in calls
+    assert str(repo_python.absolute()) in calls
+    assert any("PySide6 unavailable" in line for line in controller._last_app_update_python_probe_lines)
+    assert any("PySide6 OK" in line for line in controller._last_app_update_python_probe_lines)
 
 
 def test_app_update_check_worker_uses_offline_fallback_helper(tmp_path, monkeypatch, qapp):
@@ -245,8 +305,35 @@ def test_app_update_check_worker_uses_selected_offline_manifest(tmp_path, monkey
     assert fallback_calls == []
 
 
-def test_app_rollback_check_worker_uses_rollback_check_helper(tmp_path, monkeypatch, qapp):
+def test_app_rollback_check_worker_uses_offline_fallback_helper(tmp_path, monkeypatch, qapp):
     calls = []
+    result = SimpleNamespace(status="rollback_available", message="rollback ready")
+
+    def fake_rollback_fallback(config, **kwargs):
+        calls.append((config, kwargs))
+        return result
+
+    def fail_direct_check(*args, **kwargs):
+        raise AssertionError("Check Rollback without a manifest should use offline fallback helper")
+
+    monkeypatch.setattr(updater_mod, "run_rollback_check_with_offline_fallback", fake_rollback_fallback)
+    monkeypatch.setattr(updater_mod, "run_rollback_check", fail_direct_check)
+    worker = controller_mod.AppRollbackCheckWorker(tmp_path, command_runner="runner")
+    emitted = []
+    worker.finished.connect(emitted.append)
+
+    worker.run()
+
+    assert emitted == [result]
+    assert calls[0][0].repo_root == tmp_path
+    assert calls[0][0].rollback is True
+    assert calls[0][0].offline_manifest_path is None
+    assert calls[0][1]["command_runner"] == "runner"
+
+
+def test_app_rollback_check_worker_uses_selected_offline_manifest(tmp_path, monkeypatch, qapp):
+    calls = []
+    fallback_calls = []
     result = SimpleNamespace(status="rollback_available", message="rollback ready")
     manifest_path = tmp_path / "LabCraftUpdates" / "rollback.json"
 
@@ -255,6 +342,11 @@ def test_app_rollback_check_worker_uses_rollback_check_helper(tmp_path, monkeypa
         return result
 
     monkeypatch.setattr(updater_mod, "run_rollback_check", fake_rollback_check)
+    monkeypatch.setattr(
+        updater_mod,
+        "run_rollback_check_with_offline_fallback",
+        lambda *args, **kwargs: fallback_calls.append((args, kwargs)),
+    )
     worker = controller_mod.AppRollbackCheckWorker(tmp_path, command_runner="runner", offline_manifest_path=manifest_path)
     emitted = []
     worker.finished.connect(emitted.append)
@@ -266,6 +358,7 @@ def test_app_rollback_check_worker_uses_rollback_check_helper(tmp_path, monkeypa
     assert calls[0][0].rollback is True
     assert calls[0][0].offline_manifest_path == manifest_path
     assert calls[0][1]["command_runner"] == "runner"
+    assert fallback_calls == []
 
 
 def test_controller_start_offline_app_update_check_passes_manifest(tmp_path, monkeypatch, qapp):
@@ -467,6 +560,174 @@ def test_controller_launch_failure_does_not_mark_update_running(tmp_path):
     assert controller.is_app_update_process_running() is False
 
 
+def test_controller_default_launcher_uses_detached_process_and_log(tmp_path, monkeypatch):
+    controller = _make_controller(tmp_path)
+    controller._app_update_launch_grace_s = 0
+    controller._resolve_app_update_python = lambda: "python-under-test"
+    controller._last_app_update_python_probe_lines = ("python-under-test: PySide6 OK",)
+    popen_calls = []
+    process = FakeProcess()
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+    monkeypatch.setenv("QT_QPA_PLATFORM_PLUGIN_PATH", "/home/labcraft/LabCraft_printer/env/lib/python3.11/site-packages/cv2/qt/plugins")
+    monkeypatch.setenv("QT_QPA_FONTDIR", "/home/labcraft/LabCraft_printer/env/lib/python3.11/site-packages/cv2/qt/fonts")
+    monkeypatch.setenv("QT_PLUGIN_PATH", "/bad/plugin/path")
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    monkeypatch.setenv("XAUTHORITY", "/home/labcraft/.Xauthority")
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+    monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus")
+
+    def fake_popen(command, **kwargs):
+        popen_calls.append((command, kwargs))
+        return process
+
+    monkeypatch.setattr(controller_mod.subprocess, "Popen", fake_popen)
+
+    ok, message = controller.launch_app_updater(wait_pid=99)
+
+    assert ok is True
+    assert "started" in message
+    assert controller._app_update_process is process
+    assert len(popen_calls) == 1
+    command, kwargs = popen_calls[0]
+    assert command[0] == "python-under-test"
+    assert kwargs["cwd"] == str(tmp_path)
+    assert kwargs["shell"] is False
+    assert kwargs["stdin"] is controller_mod.subprocess.DEVNULL
+    assert kwargs["stderr"] is controller_mod.subprocess.STDOUT
+    assert kwargs["close_fds"] is True
+    env = kwargs["env"]
+    assert "QT_QPA_PLATFORM_PLUGIN_PATH" not in env
+    assert "QT_QPA_FONTDIR" not in env
+    assert "QT_PLUGIN_PATH" not in env
+    assert env["DISPLAY"] == ":0"
+    assert env["WAYLAND_DISPLAY"] == "wayland-0"
+    assert env["XAUTHORITY"] == "/home/labcraft/.Xauthority"
+    assert env["XDG_RUNTIME_DIR"] == "/run/user/1000"
+    assert env["DBUS_SESSION_BUS_ADDRESS"] == "unix:path=/run/user/1000/bus"
+    assert env["QT_QPA_PLATFORM"] == "wayland;xcb"
+    assert env["PYTHONUNBUFFERED"] == "1"
+    if controller_mod.os.name == "nt":
+        assert kwargs["creationflags"]
+    else:
+        assert kwargs["start_new_session"] is True
+
+    log_files = list((tmp_path / "local" / "update_logs").glob("app_update_launcher_updater_*.log"))
+    assert len(log_files) == 1
+    log_text = log_files[0].read_text(encoding="utf-8")
+    assert f"cwd: {tmp_path}" in log_text
+    assert "command: python-under-test -u" in log_text
+    assert "python_probe:" in log_text
+    assert "python-under-test: PySide6 OK" in log_text
+    assert "sanitized_qt_environment:" in log_text
+    assert "removed QT_QPA_PLATFORM_PLUGIN_PATH=" in log_text
+    assert "removed QT_QPA_FONTDIR=" in log_text
+    assert "removed QT_PLUGIN_PATH=" in log_text
+    assert "qt_platform:" in log_text
+    assert "preferred QT_QPA_PLATFORM=wayland;xcb because WAYLAND_DISPLAY=wayland-0" in log_text
+
+
+def test_controller_launch_environment_preserves_explicit_qt_platform():
+    env, removed, decision = Controller._app_update_launch_environment(
+        {
+            "WAYLAND_DISPLAY": "wayland-0",
+            "QT_QPA_PLATFORM": "offscreen",
+            "QT_QPA_PLATFORM_PLUGIN_PATH": "/bad/plugins",
+        }
+    )
+
+    assert env["QT_QPA_PLATFORM"] == "offscreen"
+    assert "QT_QPA_PLATFORM_PLUGIN_PATH" not in env
+    assert removed == (("QT_QPA_PLATFORM_PLUGIN_PATH", "/bad/plugins"),)
+    assert decision == "preserved QT_QPA_PLATFORM=offscreen"
+
+
+def test_controller_launch_environment_overrides_xcb_in_wayland_session():
+    env, removed, decision = Controller._app_update_launch_environment(
+        {
+            "WAYLAND_DISPLAY": "wayland-0",
+            "QT_QPA_PLATFORM": "XCB",
+            "QT_QPA_PLATFORM_PLUGIN_PATH": "/bad/plugins",
+        }
+    )
+
+    assert env["QT_QPA_PLATFORM"] == "wayland;xcb"
+    assert "QT_QPA_PLATFORM_PLUGIN_PATH" not in env
+    assert removed == (("QT_QPA_PLATFORM_PLUGIN_PATH", "/bad/plugins"),)
+    assert decision == "overrode QT_QPA_PLATFORM=XCB with wayland;xcb because WAYLAND_DISPLAY=wayland-0"
+
+
+def test_controller_default_launcher_reports_immediate_exit(tmp_path, monkeypatch):
+    controller = _make_controller(tmp_path)
+    controller._app_update_launch_grace_s = 0
+    controller._resolve_app_update_python = lambda: "python-under-test"
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    monkeypatch.setattr(controller_mod.subprocess, "Popen", lambda *args, **kwargs: FakeProcess(running=False))
+
+    ok, message = controller.launch_app_updater(wait_pid=99)
+
+    assert ok is False
+    assert "exited immediately" in message
+    assert "Launcher log:" in message
+    assert controller._app_update_process is None
+    log_files = list((tmp_path / "local" / "update_logs").glob("app_update_launcher_updater_*.log"))
+    assert len(log_files) == 1
+
+
+def test_controller_default_launcher_failure_includes_launcher_log(tmp_path, monkeypatch):
+    controller = _make_controller(tmp_path)
+    controller._app_update_launch_grace_s = 0
+    controller._resolve_app_update_python = lambda: "python-under-test"
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+
+    def fake_popen(command, **kwargs):
+        raise OSError("boom")
+
+    monkeypatch.setattr(controller_mod.subprocess, "Popen", fake_popen)
+
+    ok, message = controller.launch_app_updater(wait_pid=99)
+
+    assert ok is False
+    assert "boom" in message
+    assert "Launcher log:" in message
+    assert controller._app_update_process is None
+    log_files = list((tmp_path / "local" / "update_logs").glob("app_update_launcher_updater_*.log"))
+    assert len(log_files) == 1
+    assert "launch_error: boom" in log_files[0].read_text(encoding="utf-8")
+
+
+def test_controller_launch_fails_before_spawn_without_gui_python(tmp_path, monkeypatch):
+    controller = _make_controller(tmp_path)
+    fake_python = tmp_path / "python-under-test"
+    fake_python.write_text("", encoding="utf-8")
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    monkeypatch.setattr(controller_mod.sys, "executable", str(fake_python))
+    monkeypatch.setattr(
+        controller,
+        "_probe_app_update_python",
+        lambda path: (False, f"{path}: PySide6 unavailable (No module named 'PySide6')"),
+    )
+    monkeypatch.setattr(
+        controller_mod.subprocess,
+        "Popen",
+        lambda *args, **kwargs: pytest.fail("updater process should not be spawned"),
+    )
+
+    ok, message = controller.launch_app_updater(wait_pid=99)
+
+    assert ok is False
+    assert "No Python environment with PySide6" in message
+    assert "Launcher log:" in message
+    assert controller._app_update_process is None
+    log_files = list((tmp_path / "local" / "update_logs").glob("app_update_launcher_updater_*.log"))
+    assert len(log_files) == 1
+    log_text = log_files[0].read_text(encoding="utf-8")
+    assert "python_probe:" in log_text
+    assert "PySide6 unavailable" in log_text
+    assert "launch_error:" in log_text
+
+
 def test_controller_cancel_app_update_process_terminates_running_process(tmp_path):
     controller = _make_controller(tmp_path)
     process = FakeProcess()
@@ -538,9 +799,13 @@ class _FakeLabel:
 class _FakeButton:
     def __init__(self):
         self.enabled = True
+        self.style_value = ""
 
     def setEnabled(self, value):
         self.enabled = bool(value)
+
+    def setStyleSheet(self, value):
+        self.style_value = str(value)
 
 
 class _FakeCheckBox(_FakeButton):
@@ -899,6 +1164,7 @@ def test_mainwindow_request_offline_app_rollback_blocks_when_busy(qapp, tmp_path
 
 def _make_speed_tab_for_update_check():
     tab = SpeedProfilesTab.__new__(SpeedProfilesTab)
+    tab.color_dict = {"light_blue": "#55AAFF"}
     tab.app_update_status_label = _FakeLabel()
     tab.app_update_release_candidate_checkbox = _FakeCheckBox()
     tab.app_update_check_button = _FakeButton()
@@ -910,6 +1176,62 @@ def _make_speed_tab_for_update_check():
     tab.controller = SimpleNamespace(get_app_update_blockers=lambda: [])
     tab.main_window = SimpleNamespace(messages=[], popup_message=lambda title, message: tab.main_window.messages.append((title, message)))
     return tab
+
+
+class _FirmwareTabMachineModel(view_mod.QtCore.QObject):
+    speeds_changed = view_mod.QtCore.Signal(object)
+    accelerations_changed = view_mod.QtCore.Signal(object)
+
+    def get_current_speeds(self):
+        return (1000, 1000, 1000)
+
+    def get_current_accelerations(self):
+        return (1000, 1000, 1000)
+
+
+class _FirmwareTabMachine(view_mod.QtCore.QObject):
+    log_stats_updated = view_mod.QtCore.Signal(object)
+    log_message_received = view_mod.QtCore.Signal(str)
+
+
+class _FirmwareTabController(view_mod.QtCore.QObject):
+    def __init__(self):
+        super().__init__()
+        self.machine = _FirmwareTabMachine()
+
+    def get_app_version(self):
+        return "v1.1.5"
+
+
+def test_speed_tab_constructs_maintenance_layout_without_speed_controls(qapp):
+    main_window = view_mod.QtWidgets.QWidget()
+    main_window.color_dict = {"darker_gray": "#222222"}
+    main_window.popup_message = lambda *_args: None
+    main_window.popup_yes_no = lambda *_args: QMessageBox.StandardButton.No
+    main_window._is_yes_response = lambda _response: False
+    model = SimpleNamespace(machine_model=_FirmwareTabMachineModel())
+    controller = _FirmwareTabController()
+
+    tab = SpeedProfilesTab(main_window, model, controller, {"darker_gray": "#222222"})
+
+    assert tab.findChild(view_mod.QtWidgets.QWidget, "firmwareMaintenanceActions") is not None
+    assert tab.findChild(view_mod.QtWidgets.QWidget, "firmwareMaintenanceMonitor") is not None
+    assert tab.findChild(view_mod.QtWidgets.QGroupBox, "firmwareUpdateGroup") is not None
+    assert tab.findChild(view_mod.QtWidgets.QGroupBox, "applicationUpdateGroup") is not None
+    assert tab.findChild(view_mod.QtWidgets.QGroupBox, "serviceGroup") is not None
+    assert tab.findChild(view_mod.QtWidgets.QGroupBox, "logMessagesGroup") is not None
+    assert tab.findChild(view_mod.QtWidgets.QGroupBox, "mcuTaskUsageGroup") is not None
+    assert tab.app_update_check_button.text() == "Check Updates"
+    assert tab.app_update_offline_button.text() == "Install Bundle"
+    assert tab.app_rollback_offline_button.text() == "Offline Restore"
+    assert tab.app_rollback_button.text() == "Restore Previous"
+    assert tab.app_update_button.isEnabled() is False
+    assert tab.app_rollback_button.isEnabled() is False
+    assert tab.findChildren(view_mod.QtWidgets.QSpinBox) == []
+    assert not hasattr(tab, "_speed_boxes")
+    assert not hasattr(tab, "_accel_boxes")
+
+    tab.close()
 
 
 def test_speed_tab_formats_current_app_version_label(qapp):
@@ -928,6 +1250,8 @@ def test_speed_tab_current_app_version_label_falls_back_to_unknown(qapp):
 
 def test_speed_tab_update_check_started_disables_update_controls(qapp):
     tab = _make_speed_tab_for_update_check()
+    tab.app_update_button.setStyleSheet("background-color: #55AAFF; color: white;")
+    tab.app_rollback_button.setStyleSheet("background-color: #55AAFF; color: white;")
 
     SpeedProfilesTab._on_app_update_check_started(tab)
 
@@ -939,6 +1263,8 @@ def test_speed_tab_update_check_started_disables_update_controls(qapp):
     assert tab.app_rollback_check_button.enabled is False
     assert tab.app_rollback_offline_button.enabled is False
     assert tab.app_rollback_button.enabled is False
+    assert tab.app_update_button.style_value == ""
+    assert tab.app_rollback_button.style_value == ""
 
 
 def test_speed_tab_offline_update_check_started_uses_offline_status(qapp):
@@ -1024,12 +1350,16 @@ def test_speed_tab_release_candidate_toggle_disables_stale_actions(qapp):
     tab = _make_speed_tab_for_update_check()
     tab.app_update_button.setEnabled(True)
     tab.app_rollback_button.setEnabled(True)
+    tab.app_update_button.setStyleSheet("background-color: #55AAFF; color: white;")
+    tab.app_rollback_button.setStyleSheet("background-color: #55AAFF; color: white;")
     tab.app_update_status_label.setText("LabCraft v1.2.0-rc.3 is available.")
 
     SpeedProfilesTab._on_app_release_candidate_toggled(tab, True)
 
     assert tab.app_update_button.enabled is False
     assert tab.app_rollback_button.enabled is False
+    assert tab.app_update_button.style_value == ""
+    assert tab.app_rollback_button.style_value == ""
     assert tab.app_update_status_label.text_value == "Check for updates before updating."
 
 
@@ -1086,6 +1416,8 @@ def test_speed_tab_rollback_check_button_resets_mode_when_cancelled(qapp):
 
 def test_speed_tab_up_to_date_check_keeps_update_disabled(qapp):
     tab = _make_speed_tab_for_update_check()
+    tab.app_update_button.setStyleSheet("background-color: #55AAFF; color: white;")
+    tab.app_rollback_button.setStyleSheet("background-color: #55AAFF; color: white;")
 
     SpeedProfilesTab._on_app_update_check_finished(
         tab,
@@ -1100,6 +1432,8 @@ def test_speed_tab_up_to_date_check_keeps_update_disabled(qapp):
     assert tab.app_rollback_check_button.enabled is True
     assert tab.app_rollback_offline_button.enabled is True
     assert tab.app_rollback_button.enabled is False
+    assert tab.app_update_button.style_value == ""
+    assert tab.app_rollback_button.style_value == ""
     assert tab.main_window.messages == []
 
 
@@ -1119,9 +1453,31 @@ def test_speed_tab_update_available_enables_update_and_shows_commits(qapp):
     assert tab.app_update_status_label.text_value == "2 update commits available."
     assert tab.app_update_release_candidate_checkbox.enabled is True
     assert tab.app_update_button.enabled is True
+    assert tab.app_update_button.style_value == "background-color: #55AAFF; color: white;"
     assert tab.app_rollback_button.enabled is False
+    assert tab.app_rollback_button.style_value == ""
     assert tab.main_window.messages
     assert "def Add result popup" in tab.main_window.messages[0][1]
+
+
+def test_speed_tab_update_available_with_blockers_does_not_highlight_update(qapp):
+    tab = _make_speed_tab_for_update_check()
+    tab.controller = SimpleNamespace(get_app_update_blockers=lambda: ["Firmware update is running."])
+
+    SpeedProfilesTab._on_app_update_check_finished(
+        tab,
+        SimpleNamespace(
+            status="update_available",
+            message="LabCraft v1.1.7 is available.",
+            behind_count=1,
+            commits=("abc Highlight update action",),
+        ),
+    )
+
+    assert tab.app_update_button.enabled is False
+    assert tab.app_update_button.style_value == ""
+    assert tab.app_rollback_button.enabled is False
+    assert tab.app_rollback_button.style_value == ""
 
 
 def test_speed_tab_rollback_available_enables_restore_and_shows_details(qapp):
@@ -1144,7 +1500,9 @@ def test_speed_tab_rollback_available_enables_restore_and_shows_details(qapp):
 
     assert tab.app_update_status_label.text_value == "Rollback is available from v1.2.0 to v1.1.2."
     assert tab.app_update_button.enabled is False
+    assert tab.app_update_button.style_value == ""
     assert tab.app_rollback_button.enabled is True
+    assert tab.app_rollback_button.style_value == "background-color: #55AAFF; color: white;"
     title, message = tab.main_window.messages[0]
     assert title == "Rollback Available"
     assert "Configured release rollback target" in message
@@ -1171,7 +1529,9 @@ def test_speed_tab_offline_rollback_available_shows_source_details(qapp, tmp_pat
     )
 
     assert tab.app_update_button.enabled is False
+    assert tab.app_update_button.style_value == ""
     assert tab.app_rollback_button.enabled is True
+    assert tab.app_rollback_button.style_value == "background-color: #55AAFF; color: white;"
     title, message = tab.main_window.messages[0]
     assert title == "Rollback Available"
     assert "Offline rollback bundle" in message
@@ -1198,7 +1558,9 @@ def test_speed_tab_release_update_available_shows_release_details(qapp):
 
     assert tab.app_update_status_label.text_value == "LabCraft v1.1.2 is available."
     assert tab.app_update_button.enabled is True
+    assert tab.app_update_button.style_value == "background-color: #55AAFF; color: white;"
     assert tab.app_rollback_button.enabled is False
+    assert tab.app_rollback_button.style_value == ""
     title, message = tab.main_window.messages[0]
     assert title == "Updates Available"
     assert "Release: v1.1.2" in message
@@ -1228,6 +1590,7 @@ def test_speed_tab_release_candidate_update_available_shows_warning(qapp):
 
     assert tab.app_update_status_label.text_value == "LabCraft v1.2.0-rc.3 is available."
     assert tab.app_update_button.enabled is True
+    assert tab.app_update_button.style_value == "background-color: #55AAFF; color: white;"
     title, message = tab.main_window.messages[0]
     assert title == "Updates Available"
     assert "Release: v1.2.0-rc.3" in message
@@ -1252,7 +1615,9 @@ def test_speed_tab_offline_update_available_shows_source_details(qapp, tmp_path)
     )
 
     assert tab.app_update_button.enabled is True
+    assert tab.app_update_button.style_value == "background-color: #55AAFF; color: white;"
     assert tab.app_rollback_button.enabled is False
+    assert tab.app_rollback_button.style_value == ""
     title, message = tab.main_window.messages[0]
     assert title == "Updates Available"
     assert "Source: Offline bundle" in message
@@ -1280,7 +1645,9 @@ def test_speed_tab_offline_release_update_available_shows_release_details(qapp, 
     )
 
     assert tab.app_update_button.enabled is True
+    assert tab.app_update_button.style_value == "background-color: #55AAFF; color: white;"
     assert tab.app_rollback_button.enabled is False
+    assert tab.app_rollback_button.style_value == ""
     title, message = tab.main_window.messages[0]
     assert title == "Updates Available"
     assert "Source: Offline bundle" in message
@@ -1293,6 +1660,8 @@ def test_speed_tab_offline_release_update_available_shows_release_details(qapp, 
 
 def test_speed_tab_update_check_failure_keeps_update_disabled(qapp):
     tab = _make_speed_tab_for_update_check()
+    tab.app_update_button.setStyleSheet("background-color: #55AAFF; color: white;")
+    tab.app_rollback_button.setStyleSheet("background-color: #55AAFF; color: white;")
 
     SpeedProfilesTab._on_app_update_check_finished(
         tab,
@@ -1302,6 +1671,8 @@ def test_speed_tab_update_check_failure_keeps_update_disabled(qapp):
     assert tab.app_update_status_label.text_value == "Update check could not contact the remote."
     assert tab.app_update_button.enabled is False
     assert tab.app_rollback_button.enabled is False
+    assert tab.app_update_button.style_value == ""
+    assert tab.app_rollback_button.style_value == ""
 
 
 def test_mainwindow_init_does_not_schedule_startup_update_result():

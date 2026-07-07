@@ -1,0 +1,24 @@
+{
+  "channel": "stable",
+  "notes": [
+    "Reorganizes the Firmware tab into a maintenance-focused two-column layout.",
+    "Moves firmware update, application update, service, log, and MCU task usage controls into clearer groups.",
+    "Replaces the vertical stack of application update and rollback buttons with a compact two-column button grid.",
+    "Removes the visible speed and acceleration controls from the Firmware tab.",
+    "Keeps firmware flashing, application update, rollback, device protocol, motion, and pressure-control behavior unchanged."
+  ],
+  "previous_version": "v1.1.4",
+  "release_date": "2026-07-06",
+  "requires_firmware": null,
+  "rollback_version": "v1.1.4",
+  "schema_version": "labcraft_release_v1",
+  "summary": "Reorganizes the Firmware tab for clearer maintenance and update controls.",
+  "tag": "v1.1.5",
+  "validation": [
+    ".\\env\\Scripts\\python.exe -m pytest -q tests/test_app_update_request.py tests/test_qualification_readonly_window.py tests/test_regulator_calibration_window.py",
+    ".\\env\\Scripts\\python.exe -m pytest -q tests/test_update_and_restart.py",
+    "git diff --check",
+    "Get-ChildItem releases\\*.json | ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json | Out-Null }"
+  ],
+  "version": "v1.1.5"
+}

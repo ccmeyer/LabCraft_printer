@@ -36,6 +36,12 @@ ARRAY_ROW_START_OVERSHOOT_STEPS = 0
 PLATE_DOCK_SAFE_Z = 500
 PLATE_DOCK_X_OFFSET = -5000
 PLATE_SEATED_LOCATIONS = {"pause", "plate"}
+APP_UPDATE_QT_ENV_VARS_TO_REMOVE = (
+    "QT_QPA_PLATFORM_PLUGIN_PATH",
+    "QT_QPA_FONTDIR",
+    "QT_PLUGIN_PATH",
+)
+APP_UPDATE_QT_PLATFORM_WAYLAND = "wayland;xcb"
 CALIBRATION_MODE_PRINT_PULSE_WIDTH_US = {
     "droplet": 1300,
     "stream": 2500,
@@ -746,7 +752,10 @@ class AppRollbackCheckWorker(QtCore.QObject):
         kwargs = {}
         if self.command_runner is not None:
             kwargs["command_runner"] = self.command_runner
-        result = update_and_restart.run_rollback_check(config, **kwargs)
+        if self.offline_manifest_path is not None:
+            result = update_and_restart.run_rollback_check(config, **kwargs)
+        else:
+            result = update_and_restart.run_rollback_check_with_offline_fallback(config, **kwargs)
         self.finished.emit(result)
 
 
@@ -832,6 +841,7 @@ class Controller(QObject):
         self._app_update_check_worker = None
         self._last_app_update_check_result = None
         self._last_app_rollback_check_result = None
+        self._app_update_launch_grace_s = 0.25
 
         # Defaults; tweak if you keep them elsewhere
         self._dfu_script = Path(__file__).resolve().parent / "dfu_update.py"
@@ -1525,16 +1535,143 @@ class Controller(QObject):
         self._last_app_update_check_result = None
         self.app_update_check_finished.emit(result)
 
+    def _resolve_app_update_python(self):
+        candidates = []
+        virtual_env = os.environ.get("VIRTUAL_ENV")
+        if virtual_env:
+            venv_root = Path(virtual_env)
+            candidates.extend(
+                (
+                    venv_root / "Scripts" / "python.exe",
+                    venv_root / "bin" / "python",
+                )
+            )
+        for env_name in ("env", ".venv", "venv"):
+            env_root = self._repo_root / env_name
+            candidates.extend(
+                (
+                    env_root / "Scripts" / "python.exe",
+                    env_root / "bin" / "python",
+                )
+            )
+        candidates.append(Path(sys.executable))
+
+        probe_lines = []
+        seen = set()
+        for candidate in candidates:
+            try:
+                candidate_path = str(candidate.absolute())
+                key = os.path.normcase(os.path.normpath(candidate_path))
+                if key in seen:
+                    continue
+                seen.add(key)
+                if not candidate.is_file():
+                    probe_lines.append(f"{candidate_path}: missing")
+                    continue
+                ok, message = self._probe_app_update_python(candidate_path)
+                probe_lines.append(message)
+                if ok:
+                    self._last_app_update_python_probe_lines = tuple(probe_lines)
+                    return candidate_path
+            except OSError as exc:
+                probe_lines.append(f"{candidate}: error checking candidate ({exc})")
+                continue
+        self._last_app_update_python_probe_lines = tuple(probe_lines)
+        detail = "; ".join(probe_lines) if probe_lines else "no Python candidates were found"
+        raise RuntimeError(f"No Python environment with PySide6 was found for the updater window. {detail}")
+
+    def _probe_app_update_python(self, python_path):
+        try:
+            result = subprocess.run(
+                [str(python_path), "-c", "import PySide6"],
+                cwd=str(self._repo_root),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=5,
+            )
+        except Exception as exc:
+            return False, f"{python_path}: PySide6 probe failed ({exc})"
+        if result.returncode == 0:
+            return True, f"{python_path}: PySide6 OK"
+        output = (result.stderr or result.stdout or "").strip().splitlines()
+        reason = output[-1] if output else f"return code {result.returncode}"
+        return False, f"{python_path}: PySide6 unavailable ({reason})"
+
+    def _app_update_launcher_log_path(self, operation_label):
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        safe_label = "".join(ch if ch.isalnum() else "_" for ch in str(operation_label or "updater")).strip("_")
+        if not safe_label:
+            safe_label = "updater"
+        return self._repo_root / "local" / "update_logs" / f"app_update_launcher_{safe_label}_{stamp}.log"
+
+    @staticmethod
+    def _format_app_update_command(command):
+        return " ".join(str(part) for part in command)
+
+    @staticmethod
+    def _append_text(path, text):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(str(text))
+
+    @staticmethod
+    def _app_update_launch_environment(source_env=None):
+        env = dict(os.environ if source_env is None else source_env)
+        removed = []
+        for name in APP_UPDATE_QT_ENV_VARS_TO_REMOVE:
+            if name in env:
+                removed.append((name, env.pop(name)))
+        current_platform = str(env.get("QT_QPA_PLATFORM") or "").strip()
+        wayland_display = str(env.get("WAYLAND_DISPLAY") or "").strip()
+        if wayland_display and (not current_platform or current_platform.lower() == "xcb"):
+            env["QT_QPA_PLATFORM"] = APP_UPDATE_QT_PLATFORM_WAYLAND
+            if current_platform:
+                platform_decision = (
+                    f"overrode QT_QPA_PLATFORM={current_platform} with {APP_UPDATE_QT_PLATFORM_WAYLAND} "
+                    f"because WAYLAND_DISPLAY={wayland_display}"
+                )
+            else:
+                platform_decision = (
+                    f"preferred QT_QPA_PLATFORM={APP_UPDATE_QT_PLATFORM_WAYLAND} "
+                    f"because WAYLAND_DISPLAY={wayland_display}"
+                )
+        elif current_platform:
+            platform_decision = f"preserved QT_QPA_PLATFORM={current_platform}"
+        else:
+            platform_decision = "skipped Wayland preference because WAYLAND_DISPLAY is not set"
+        env.setdefault("PYTHONUNBUFFERED", "1")
+        return env, tuple(removed), platform_decision
+
+    def _write_app_update_launcher_failure_log(self, operation_label, message, *, command=None):
+        log_path = self._app_update_launcher_log_path(operation_label)
+        probe_lines = tuple(getattr(self, "_last_app_update_python_probe_lines", ()) or ())
+        lines = [
+            f"started_at_utc: {datetime.now(timezone.utc).isoformat()}",
+            f"cwd: {self._repo_root}",
+        ]
+        if command is not None:
+            lines.append(f"command: {self._format_app_update_command(command)}")
+        if probe_lines:
+            lines.append("python_probe:")
+            lines.extend(f"- {line}" for line in probe_lines)
+        lines.append(f"launch_error: {message}")
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return log_path
+
     def _build_app_updater_base_command(self, wait_pid):
         updater_path = (self._repo_root / "tools" / "update_and_restart.py").resolve()
+        python_path = self._resolve_app_update_python()
         command = [
-            sys.executable,
+            python_path,
             "-u",
             str(updater_path),
             "--repo-root",
             str(self._repo_root),
             "--python",
-            sys.executable,
+            python_path,
         ]
         if wait_pid is not None:
             command.extend(["--wait-pid", str(int(wait_pid))])
@@ -1572,40 +1709,104 @@ class Controller(QObject):
             command.extend(["--offline-manifest", str(getattr(check_result, "offline_manifest_path"))])
         return command
 
+    def _default_app_update_launcher(self, command, *, cwd, log_path):
+        log_path = Path(log_path)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        env, removed_qt_env, qt_platform_decision = self._app_update_launch_environment()
+        header = (
+            f"started_at_utc: {datetime.now(timezone.utc).isoformat()}\n"
+            f"cwd: {Path(cwd)}\n"
+            f"command: {self._format_app_update_command(command)}\n\n"
+        )
+        probe_lines = tuple(getattr(self, "_last_app_update_python_probe_lines", ()) or ())
+        if probe_lines:
+            header += "python_probe:\n"
+            header += "".join(f"- {line}\n" for line in probe_lines)
+            header += "\n"
+        if removed_qt_env:
+            header += "sanitized_qt_environment:\n"
+            header += "".join(f"- removed {name}={value}\n" for name, value in removed_qt_env)
+            header += "\n"
+        header += "qt_platform:\n"
+        header += f"- {qt_platform_decision}\n\n"
+        log_path.write_text(header, encoding="utf-8")
+        log_file = log_path.open("a", encoding="utf-8")
+        popen_kwargs = {
+            "cwd": str(cwd),
+            "shell": False,
+            "stdin": subprocess.DEVNULL,
+            "stdout": log_file,
+            "stderr": subprocess.STDOUT,
+            "close_fds": True,
+            "env": env,
+        }
+        if os.name == "nt":
+            detached = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+            new_group = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+            breakaway = getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000)
+            popen_kwargs["creationflags"] = detached | new_group | breakaway
+        else:
+            popen_kwargs["start_new_session"] = True
+        try:
+            return subprocess.Popen([str(part) for part in command], **popen_kwargs)
+        finally:
+            log_file.close()
+
     def _launch_app_update_process(self, command, launcher=None, *, operation_label="updater"):
         if self.is_app_update_process_running():
             return False, "An application update or rollback is already running."
 
-        def _default_launcher(cmd, *, cwd):
-            return subprocess.Popen(
-                list(cmd),
-                cwd=str(cwd),
-                shell=False,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-
-        launch = launcher or _default_launcher
+        log_path = None
         try:
-            process = launch(command, cwd=self._repo_root)
+            if launcher is None:
+                log_path = self._app_update_launcher_log_path(operation_label)
+                process = self._default_app_update_launcher(command, cwd=self._repo_root, log_path=log_path)
+            else:
+                process = launcher(command, cwd=self._repo_root)
         except Exception as exc:
             self._app_update_process = None
+            if log_path is not None:
+                self._append_text(log_path, f"\nlaunch_error: {exc}\n")
+                return False, f"Could not start the application {operation_label}: {exc}. Launcher log: {log_path}"
             return False, f"Could not start the application {operation_label}: {exc}"
+
+        grace_s = float(getattr(self, "_app_update_launch_grace_s", 0.0) or 0.0)
+        if grace_s > 0:
+            time.sleep(grace_s)
+        poll = getattr(process, "poll", None)
+        if callable(poll):
+            try:
+                returncode = poll()
+            except Exception:
+                returncode = None
+            if returncode is not None:
+                self._app_update_process = None
+                log_suffix = f" Launcher log: {log_path}" if log_path is not None else ""
+                return False, f"Application {operation_label} exited immediately with code {returncode}.{log_suffix}"
 
         self._app_update_process = process
         return True, f"Application {operation_label} started."
 
     def launch_app_updater(self, wait_pid, launcher=None):
+        try:
+            command = self.build_app_update_command(wait_pid)
+        except Exception as exc:
+            log_path = self._write_app_update_launcher_failure_log("updater", str(exc))
+            return False, f"Could not start the application updater: {exc}. Launcher log: {log_path}"
         return self._launch_app_update_process(
-            self.build_app_update_command(wait_pid),
+            command,
             launcher=launcher,
             operation_label="updater",
         )
 
     def launch_app_rollback(self, wait_pid, launcher=None):
+        try:
+            command = self.build_app_rollback_command(wait_pid)
+        except Exception as exc:
+            log_path = self._write_app_update_launcher_failure_log("rollback", str(exc))
+            return False, f"Could not start the application rollback: {exc}. Launcher log: {log_path}"
         return self._launch_app_update_process(
-            self.build_app_rollback_command(wait_pid),
+            command,
             launcher=launcher,
             operation_label="rollback",
         )

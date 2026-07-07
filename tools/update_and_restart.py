@@ -59,6 +59,12 @@ RELEASE_INDEX_SCHEMA_VERSION = "labcraft_release_index_v1"
 RELEASE_MANIFEST_SCHEMA_VERSION = "labcraft_release_v1"
 RELEASE_INDEX_PATH = "releases/latest.json"
 RELEASE_VERSION_RE = re.compile(r"v[0-9]+(?:\.[0-9]+){2}(?:-[A-Za-z0-9][A-Za-z0-9.-]*)?")
+QT_ENV_VARS_TO_REMOVE_FOR_GUI = (
+    "QT_QPA_PLATFORM_PLUGIN_PATH",
+    "QT_QPA_FONTDIR",
+    "QT_PLUGIN_PATH",
+)
+QT_PLATFORM_WAYLAND_PREFERENCE = "wayland;xcb"
 
 EXIT_CODES = {
     STATUS_UPDATED: 0,
@@ -269,6 +275,33 @@ def default_log_path(repo_root: Path) -> Path:
 
 def default_latest_result_path(repo_root: Path) -> Path:
     return repo_root / "local" / "update_logs" / "latest_update_result.json"
+
+
+def sanitize_qt_environment_for_gui(env: dict[str, str] | None = None) -> dict[str, str]:
+    target = os.environ if env is None else env
+    removed = {}
+    for name in QT_ENV_VARS_TO_REMOVE_FOR_GUI:
+        if name in target:
+            removed[name] = target.pop(name)
+    prefer_qt_platform_for_gui(target)
+    return removed
+
+
+def prefer_qt_platform_for_gui(env: dict[str, str] | None = None) -> str:
+    target = os.environ if env is None else env
+    current_platform = str(target.get("QT_QPA_PLATFORM") or "").strip()
+    wayland_display = str(target.get("WAYLAND_DISPLAY") or "").strip()
+    if wayland_display and (not current_platform or current_platform.lower() == "xcb"):
+        target["QT_QPA_PLATFORM"] = QT_PLATFORM_WAYLAND_PREFERENCE
+        if current_platform:
+            return (
+                f"overrode QT_QPA_PLATFORM={current_platform} with {QT_PLATFORM_WAYLAND_PREFERENCE} "
+                f"because WAYLAND_DISPLAY={wayland_display}"
+            )
+        return f"preferred QT_QPA_PLATFORM={QT_PLATFORM_WAYLAND_PREFERENCE} because WAYLAND_DISPLAY={wayland_display}"
+    if current_platform:
+        return f"preserved QT_QPA_PLATFORM={current_platform}"
+    return "skipped Wayland preference because WAYLAND_DISPLAY is not set"
 
 
 def _resolve_under_repo(repo_root: Path, value: Path | str) -> Path:
@@ -1820,6 +1853,42 @@ def run_update_check_with_offline_fallback(
     )
 
 
+def run_rollback_check_with_offline_fallback(
+    config: UpdaterConfig,
+    *,
+    command_runner: CommandRunner = default_command_runner,
+    manifest_paths: Sequence[Path | str] | None = None,
+    search_roots: Sequence[Path | str] | None = None,
+) -> UpdateCheckResult:
+    online_result = run_rollback_check(config, command_runner=command_runner)
+    if online_result.status != STATUS_FETCH_FAILED:
+        return online_result
+
+    candidates = (
+        _sort_offline_manifest_candidates(manifest_paths)
+        if manifest_paths is not None
+        else _sort_offline_manifest_candidates(find_offline_update_manifests(search_roots))
+    )
+    for manifest_path in candidates:
+        offline_config = replace(config, offline_manifest_path=Path(manifest_path))
+        offline_result = run_rollback_check(offline_config, command_runner=command_runner)
+        if offline_result.status == STATUS_ROLLBACK_AVAILABLE:
+            before_version = str(offline_result.before_release_version or "")
+            after_version = str(
+                offline_result.after_release_version
+                or offline_result.target_release_version
+                or ""
+            )
+            if before_version and after_version and before_version == after_version:
+                continue
+            return offline_result
+
+    return replace(
+        online_result,
+        message=f"{online_result.message} No usable offline rollback bundle was found.",
+    )
+
+
 def run_rollback_check(
     config: UpdaterConfig,
     *,
@@ -2003,7 +2072,7 @@ def run_rollback_check(
     if fetch_result.returncode != 0:
         return _finish_check_result(
             _make_check_result(
-                STATUS_ROLLBACK_TARGET_INVALID,
+                STATUS_FETCH_FAILED,
                 "Rollback check could not fetch release tags. Check network access or contact support.",
                 repo_root=repo_root,
                 branch=branch,
@@ -2899,6 +2968,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     config = parse_args(argv)
     if config.gui:
+        sanitize_qt_environment_for_gui()
         try:
             repo_parent = Path(__file__).resolve().parents[1]
             if str(repo_parent) not in sys.path:
