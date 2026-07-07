@@ -710,9 +710,13 @@ class _FakeLabel:
 class _FakeButton:
     def __init__(self):
         self.enabled = True
+        self.style_value = ""
 
     def setEnabled(self, value):
         self.enabled = bool(value)
+
+    def setStyleSheet(self, value):
+        self.style_value = str(value)
 
 
 class _FakeCheckBox(_FakeButton):
@@ -1071,6 +1075,7 @@ def test_mainwindow_request_offline_app_rollback_blocks_when_busy(qapp, tmp_path
 
 def _make_speed_tab_for_update_check():
     tab = SpeedProfilesTab.__new__(SpeedProfilesTab)
+    tab.color_dict = {"light_blue": "#55AAFF"}
     tab.app_update_status_label = _FakeLabel()
     tab.app_update_release_candidate_checkbox = _FakeCheckBox()
     tab.app_update_check_button = _FakeButton()
@@ -1156,6 +1161,8 @@ def test_speed_tab_current_app_version_label_falls_back_to_unknown(qapp):
 
 def test_speed_tab_update_check_started_disables_update_controls(qapp):
     tab = _make_speed_tab_for_update_check()
+    tab.app_update_button.setStyleSheet("background-color: #55AAFF; color: white;")
+    tab.app_rollback_button.setStyleSheet("background-color: #55AAFF; color: white;")
 
     SpeedProfilesTab._on_app_update_check_started(tab)
 
@@ -1167,6 +1174,8 @@ def test_speed_tab_update_check_started_disables_update_controls(qapp):
     assert tab.app_rollback_check_button.enabled is False
     assert tab.app_rollback_offline_button.enabled is False
     assert tab.app_rollback_button.enabled is False
+    assert tab.app_update_button.style_value == ""
+    assert tab.app_rollback_button.style_value == ""
 
 
 def test_speed_tab_offline_update_check_started_uses_offline_status(qapp):
@@ -1252,12 +1261,16 @@ def test_speed_tab_release_candidate_toggle_disables_stale_actions(qapp):
     tab = _make_speed_tab_for_update_check()
     tab.app_update_button.setEnabled(True)
     tab.app_rollback_button.setEnabled(True)
+    tab.app_update_button.setStyleSheet("background-color: #55AAFF; color: white;")
+    tab.app_rollback_button.setStyleSheet("background-color: #55AAFF; color: white;")
     tab.app_update_status_label.setText("LabCraft v1.2.0-rc.3 is available.")
 
     SpeedProfilesTab._on_app_release_candidate_toggled(tab, True)
 
     assert tab.app_update_button.enabled is False
     assert tab.app_rollback_button.enabled is False
+    assert tab.app_update_button.style_value == ""
+    assert tab.app_rollback_button.style_value == ""
     assert tab.app_update_status_label.text_value == "Check for updates before updating."
 
 
@@ -1314,6 +1327,8 @@ def test_speed_tab_rollback_check_button_resets_mode_when_cancelled(qapp):
 
 def test_speed_tab_up_to_date_check_keeps_update_disabled(qapp):
     tab = _make_speed_tab_for_update_check()
+    tab.app_update_button.setStyleSheet("background-color: #55AAFF; color: white;")
+    tab.app_rollback_button.setStyleSheet("background-color: #55AAFF; color: white;")
 
     SpeedProfilesTab._on_app_update_check_finished(
         tab,
@@ -1328,6 +1343,8 @@ def test_speed_tab_up_to_date_check_keeps_update_disabled(qapp):
     assert tab.app_rollback_check_button.enabled is True
     assert tab.app_rollback_offline_button.enabled is True
     assert tab.app_rollback_button.enabled is False
+    assert tab.app_update_button.style_value == ""
+    assert tab.app_rollback_button.style_value == ""
     assert tab.main_window.messages == []
 
 
@@ -1347,9 +1364,31 @@ def test_speed_tab_update_available_enables_update_and_shows_commits(qapp):
     assert tab.app_update_status_label.text_value == "2 update commits available."
     assert tab.app_update_release_candidate_checkbox.enabled is True
     assert tab.app_update_button.enabled is True
+    assert tab.app_update_button.style_value == "background-color: #55AAFF; color: white;"
     assert tab.app_rollback_button.enabled is False
+    assert tab.app_rollback_button.style_value == ""
     assert tab.main_window.messages
     assert "def Add result popup" in tab.main_window.messages[0][1]
+
+
+def test_speed_tab_update_available_with_blockers_does_not_highlight_update(qapp):
+    tab = _make_speed_tab_for_update_check()
+    tab.controller = SimpleNamespace(get_app_update_blockers=lambda: ["Firmware update is running."])
+
+    SpeedProfilesTab._on_app_update_check_finished(
+        tab,
+        SimpleNamespace(
+            status="update_available",
+            message="LabCraft v1.1.7 is available.",
+            behind_count=1,
+            commits=("abc Highlight update action",),
+        ),
+    )
+
+    assert tab.app_update_button.enabled is False
+    assert tab.app_update_button.style_value == ""
+    assert tab.app_rollback_button.enabled is False
+    assert tab.app_rollback_button.style_value == ""
 
 
 def test_speed_tab_rollback_available_enables_restore_and_shows_details(qapp):
@@ -1372,7 +1411,9 @@ def test_speed_tab_rollback_available_enables_restore_and_shows_details(qapp):
 
     assert tab.app_update_status_label.text_value == "Rollback is available from v1.2.0 to v1.1.2."
     assert tab.app_update_button.enabled is False
+    assert tab.app_update_button.style_value == ""
     assert tab.app_rollback_button.enabled is True
+    assert tab.app_rollback_button.style_value == "background-color: #55AAFF; color: white;"
     title, message = tab.main_window.messages[0]
     assert title == "Rollback Available"
     assert "Configured release rollback target" in message
@@ -1399,7 +1440,9 @@ def test_speed_tab_offline_rollback_available_shows_source_details(qapp, tmp_pat
     )
 
     assert tab.app_update_button.enabled is False
+    assert tab.app_update_button.style_value == ""
     assert tab.app_rollback_button.enabled is True
+    assert tab.app_rollback_button.style_value == "background-color: #55AAFF; color: white;"
     title, message = tab.main_window.messages[0]
     assert title == "Rollback Available"
     assert "Offline rollback bundle" in message
@@ -1426,7 +1469,9 @@ def test_speed_tab_release_update_available_shows_release_details(qapp):
 
     assert tab.app_update_status_label.text_value == "LabCraft v1.1.2 is available."
     assert tab.app_update_button.enabled is True
+    assert tab.app_update_button.style_value == "background-color: #55AAFF; color: white;"
     assert tab.app_rollback_button.enabled is False
+    assert tab.app_rollback_button.style_value == ""
     title, message = tab.main_window.messages[0]
     assert title == "Updates Available"
     assert "Release: v1.1.2" in message
@@ -1456,6 +1501,7 @@ def test_speed_tab_release_candidate_update_available_shows_warning(qapp):
 
     assert tab.app_update_status_label.text_value == "LabCraft v1.2.0-rc.3 is available."
     assert tab.app_update_button.enabled is True
+    assert tab.app_update_button.style_value == "background-color: #55AAFF; color: white;"
     title, message = tab.main_window.messages[0]
     assert title == "Updates Available"
     assert "Release: v1.2.0-rc.3" in message
@@ -1480,7 +1526,9 @@ def test_speed_tab_offline_update_available_shows_source_details(qapp, tmp_path)
     )
 
     assert tab.app_update_button.enabled is True
+    assert tab.app_update_button.style_value == "background-color: #55AAFF; color: white;"
     assert tab.app_rollback_button.enabled is False
+    assert tab.app_rollback_button.style_value == ""
     title, message = tab.main_window.messages[0]
     assert title == "Updates Available"
     assert "Source: Offline bundle" in message
@@ -1508,7 +1556,9 @@ def test_speed_tab_offline_release_update_available_shows_release_details(qapp, 
     )
 
     assert tab.app_update_button.enabled is True
+    assert tab.app_update_button.style_value == "background-color: #55AAFF; color: white;"
     assert tab.app_rollback_button.enabled is False
+    assert tab.app_rollback_button.style_value == ""
     title, message = tab.main_window.messages[0]
     assert title == "Updates Available"
     assert "Source: Offline bundle" in message
@@ -1521,6 +1571,8 @@ def test_speed_tab_offline_release_update_available_shows_release_details(qapp, 
 
 def test_speed_tab_update_check_failure_keeps_update_disabled(qapp):
     tab = _make_speed_tab_for_update_check()
+    tab.app_update_button.setStyleSheet("background-color: #55AAFF; color: white;")
+    tab.app_rollback_button.setStyleSheet("background-color: #55AAFF; color: white;")
 
     SpeedProfilesTab._on_app_update_check_finished(
         tab,
@@ -1530,6 +1582,8 @@ def test_speed_tab_update_check_failure_keeps_update_disabled(qapp):
     assert tab.app_update_status_label.text_value == "Update check could not contact the remote."
     assert tab.app_update_button.enabled is False
     assert tab.app_rollback_button.enabled is False
+    assert tab.app_update_button.style_value == ""
+    assert tab.app_rollback_button.style_value == ""
 
 
 def test_mainwindow_init_does_not_schedule_startup_update_result():

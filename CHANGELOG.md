@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.1.7 - 2026-07-06
+
+### Changed
+
+- Highlighted the `Update App` button when an update check finds an actionable app update.
+- Highlighted the `Restore Previous` button when a rollback check finds an actionable rollback target.
+- Cleared stale update and rollback action highlights when checks start, fail, or become non-actionable.
+- No firmware, device protocol, motion, or pressure-control changes.
+
+### Validation
+
+- Focused app-update UI and updater tests:
+  `.\env\Scripts\python.exe -m pytest -q tests/test_app_update_request.py tests/test_update_and_restart.py`
+
+### Rollback
+
+- Recommended rollback version: `v1.1.6`.
+
 ## v1.1.6 - 2026-07-06
 
 ### Fixed

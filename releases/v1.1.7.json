@@ -1,0 +1,22 @@
+{
+  "channel": "stable",
+  "notes": [
+    "Highlights the Update App button when an update check finds an actionable app update.",
+    "Highlights the Restore Previous button when a rollback check finds an actionable rollback target.",
+    "Clears stale action highlights when checks start, checks fail, results are non-actionable, or the release-candidate channel changes.",
+    "Keeps update, rollback, offline bundle, firmware, device protocol, motion, and pressure-control behavior unchanged."
+  ],
+  "previous_version": "v1.1.6",
+  "release_date": "2026-07-06",
+  "requires_firmware": null,
+  "rollback_version": "v1.1.6",
+  "schema_version": "labcraft_release_v1",
+  "summary": "Highlights the actionable app update or rollback button after successful checks.",
+  "tag": "v1.1.7",
+  "validation": [
+    ".\\env\\Scripts\\python.exe -m pytest -q tests/test_app_update_request.py tests/test_update_and_restart.py",
+    "git diff --check",
+    "Get-ChildItem releases\\*.json | ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json | Out-Null }"
+  ],
+  "version": "v1.1.7"
+}

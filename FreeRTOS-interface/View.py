@@ -5266,8 +5266,23 @@ class SpeedProfilesTab(QtWidgets.QWidget):
             return "release_candidate"
         return "stable"
 
+    def _app_update_action_style(self):
+        color = "#1b75bb"
+        if isinstance(getattr(self, "color_dict", None), dict):
+            color = self.color_dict.get("light_blue", color)
+        return f"background-color: {color}; color: white;"
+
+    def _set_app_action_highlight(self, button, active):
+        if button is not None:
+            button.setStyleSheet(self._app_update_action_style() if active else "")
+
+    def _clear_app_action_highlights(self):
+        self._set_app_action_highlight(getattr(self, "app_update_button", None), False)
+        self._set_app_action_highlight(getattr(self, "app_rollback_button", None), False)
+
     @QtCore.Slot(bool)
     def _on_app_release_candidate_toggled(self, checked=False):
+        self._clear_app_action_highlights()
         update_button = getattr(self, "app_update_button", None)
         if update_button is not None:
             update_button.setEnabled(False)
@@ -5280,6 +5295,7 @@ class SpeedProfilesTab(QtWidgets.QWidget):
 
     @QtCore.Slot()
     def _on_app_update_check_started(self):
+        self._clear_app_action_highlights()
         mode = str(getattr(self, "_app_update_check_mode", "") or "")
         if mode == "offline_rollback":
             self.app_update_status_label.setText("Checking offline rollback bundle...")
@@ -5311,6 +5327,7 @@ class SpeedProfilesTab(QtWidgets.QWidget):
 
     @QtCore.Slot(object)
     def _on_app_update_check_finished(self, result):
+        self._clear_app_action_highlights()
         self.app_update_check_button.setEnabled(True)
         candidate_checkbox = getattr(self, "app_update_release_candidate_checkbox", None)
         if candidate_checkbox is not None:
@@ -5333,10 +5350,13 @@ class SpeedProfilesTab(QtWidgets.QWidget):
             self.app_update_status_label.setText(message)
             blockers_getter = getattr(self.controller, "get_app_update_blockers", None)
             blockers = blockers_getter() if callable(blockers_getter) else []
-            self.app_update_button.setEnabled(not blockers)
+            can_update = not blockers
+            self.app_update_button.setEnabled(can_update)
+            self._set_app_action_highlight(self.app_update_button, can_update)
             rollback_button = getattr(self, "app_rollback_button", None)
             if rollback_button is not None:
                 rollback_button.setEnabled(False)
+                self._set_app_action_highlight(rollback_button, False)
             commits = [str(commit) for commit in getattr(result, "commits", ()) if str(commit).strip()]
             details = [message]
             if str(getattr(result, "update_source", "") or "") == "offline":
@@ -5384,7 +5404,9 @@ class SpeedProfilesTab(QtWidgets.QWidget):
             blockers = blockers_getter() if callable(blockers_getter) else []
             rollback_button = getattr(self, "app_rollback_button", None)
             if rollback_button is not None:
-                rollback_button.setEnabled(not blockers)
+                can_rollback = not blockers
+                rollback_button.setEnabled(can_rollback)
+                self._set_app_action_highlight(rollback_button, can_rollback)
 
             details = [message]
             if str(getattr(result, "update_source", "") or "") == "offline":
