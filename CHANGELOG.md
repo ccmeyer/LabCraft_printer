@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.1.17 - 2026-07-07
+
+### Changed
+
+- Added a metadata-only stable release for advertising the next camera/refuel release candidate to stable-channel machines.
+- Updated the release-candidate pointer from `v1.2.0-rc.4` to `v1.2.0-rc.6`.
+- Kept normal online updates on the stable release channel by default unless the operator enables release-candidate updates.
+- No firmware, device protocol, motion, pressure-control, Model behavior, updater logic, or rollback behavior changes.
+
+### Validation
+
+- Focused updater and updater window tests:
+  `.\env\Scripts\python.exe -m pytest -q tests/test_update_and_restart.py tests/test_app_update_request.py tests/test_update_window.py`
+
+### Rollback
+
+- Recommended rollback version: `v1.1.16`.
+
 ## v1.1.16 - 2026-07-07
 
 ### Changed
