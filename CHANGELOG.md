@@ -1,5 +1,27 @@
 # Changelog
 
+## v1.2.0-rc.6 - 2026-07-07
+
+### Changed
+
+- Carried forward the camera/refuel release-candidate line from `v1.2.0-rc.5`.
+- Merged the stable metadata release `v1.1.17` so stable-channel machines can discover this release candidate from the in-app updater.
+- Kept normal online updates on the stable release channel by default while preserving the support-guided release-candidate toggle.
+- Updated the release-candidate rollback target to `v1.1.17`.
+- No additional firmware, device protocol, motion, pressure-control, or Model changes beyond the existing camera/refuel release-candidate line.
+
+### Validation
+
+- Recommended before tagging:
+  `.\env\Scripts\python.exe -m pytest -q`
+- Metadata/static checks:
+  `git diff --check`
+  `Get-ChildItem releases\*.json | ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json | Out-Null }`
+
+### Rollback
+
+- Recommended rollback version: `v1.1.17`.
+
 ## v1.1.17 - 2026-07-07
 
 ### Changed
