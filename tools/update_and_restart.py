@@ -1853,6 +1853,42 @@ def run_update_check_with_offline_fallback(
     )
 
 
+def run_rollback_check_with_offline_fallback(
+    config: UpdaterConfig,
+    *,
+    command_runner: CommandRunner = default_command_runner,
+    manifest_paths: Sequence[Path | str] | None = None,
+    search_roots: Sequence[Path | str] | None = None,
+) -> UpdateCheckResult:
+    online_result = run_rollback_check(config, command_runner=command_runner)
+    if online_result.status != STATUS_FETCH_FAILED:
+        return online_result
+
+    candidates = (
+        _sort_offline_manifest_candidates(manifest_paths)
+        if manifest_paths is not None
+        else _sort_offline_manifest_candidates(find_offline_update_manifests(search_roots))
+    )
+    for manifest_path in candidates:
+        offline_config = replace(config, offline_manifest_path=Path(manifest_path))
+        offline_result = run_rollback_check(offline_config, command_runner=command_runner)
+        if offline_result.status == STATUS_ROLLBACK_AVAILABLE:
+            before_version = str(offline_result.before_release_version or "")
+            after_version = str(
+                offline_result.after_release_version
+                or offline_result.target_release_version
+                or ""
+            )
+            if before_version and after_version and before_version == after_version:
+                continue
+            return offline_result
+
+    return replace(
+        online_result,
+        message=f"{online_result.message} No usable offline rollback bundle was found.",
+    )
+
+
 def run_rollback_check(
     config: UpdaterConfig,
     *,
@@ -2036,7 +2072,7 @@ def run_rollback_check(
     if fetch_result.returncode != 0:
         return _finish_check_result(
             _make_check_result(
-                STATUS_ROLLBACK_TARGET_INVALID,
+                STATUS_FETCH_FAILED,
                 "Rollback check could not fetch release tags. Check network access or contact support.",
                 repo_root=repo_root,
                 branch=branch,

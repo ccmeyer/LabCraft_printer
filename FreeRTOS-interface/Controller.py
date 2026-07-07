@@ -94,7 +94,10 @@ class AppRollbackCheckWorker(QtCore.QObject):
         kwargs = {}
         if self.command_runner is not None:
             kwargs["command_runner"] = self.command_runner
-        result = update_and_restart.run_rollback_check(config, **kwargs)
+        if self.offline_manifest_path is not None:
+            result = update_and_restart.run_rollback_check(config, **kwargs)
+        else:
+            result = update_and_restart.run_rollback_check_with_offline_fallback(config, **kwargs)
         self.finished.emit(result)
 
 

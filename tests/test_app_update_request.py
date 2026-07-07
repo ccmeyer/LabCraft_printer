@@ -305,8 +305,35 @@ def test_app_update_check_worker_uses_selected_offline_manifest(tmp_path, monkey
     assert fallback_calls == []
 
 
-def test_app_rollback_check_worker_uses_rollback_check_helper(tmp_path, monkeypatch, qapp):
+def test_app_rollback_check_worker_uses_offline_fallback_helper(tmp_path, monkeypatch, qapp):
     calls = []
+    result = SimpleNamespace(status="rollback_available", message="rollback ready")
+
+    def fake_rollback_fallback(config, **kwargs):
+        calls.append((config, kwargs))
+        return result
+
+    def fail_direct_check(*args, **kwargs):
+        raise AssertionError("Check Rollback without a manifest should use offline fallback helper")
+
+    monkeypatch.setattr(updater_mod, "run_rollback_check_with_offline_fallback", fake_rollback_fallback)
+    monkeypatch.setattr(updater_mod, "run_rollback_check", fail_direct_check)
+    worker = controller_mod.AppRollbackCheckWorker(tmp_path, command_runner="runner")
+    emitted = []
+    worker.finished.connect(emitted.append)
+
+    worker.run()
+
+    assert emitted == [result]
+    assert calls[0][0].repo_root == tmp_path
+    assert calls[0][0].rollback is True
+    assert calls[0][0].offline_manifest_path is None
+    assert calls[0][1]["command_runner"] == "runner"
+
+
+def test_app_rollback_check_worker_uses_selected_offline_manifest(tmp_path, monkeypatch, qapp):
+    calls = []
+    fallback_calls = []
     result = SimpleNamespace(status="rollback_available", message="rollback ready")
     manifest_path = tmp_path / "LabCraftUpdates" / "rollback.json"
 
@@ -315,6 +342,11 @@ def test_app_rollback_check_worker_uses_rollback_check_helper(tmp_path, monkeypa
         return result
 
     monkeypatch.setattr(updater_mod, "run_rollback_check", fake_rollback_check)
+    monkeypatch.setattr(
+        updater_mod,
+        "run_rollback_check_with_offline_fallback",
+        lambda *args, **kwargs: fallback_calls.append((args, kwargs)),
+    )
     worker = controller_mod.AppRollbackCheckWorker(tmp_path, command_runner="runner", offline_manifest_path=manifest_path)
     emitted = []
     worker.finished.connect(emitted.append)
@@ -326,6 +358,7 @@ def test_app_rollback_check_worker_uses_rollback_check_helper(tmp_path, monkeypa
     assert calls[0][0].rollback is True
     assert calls[0][0].offline_manifest_path == manifest_path
     assert calls[0][1]["command_runner"] == "runner"
+    assert fallback_calls == []
 
 
 def test_controller_start_offline_app_update_check_passes_manifest(tmp_path, monkeypatch, qapp):
