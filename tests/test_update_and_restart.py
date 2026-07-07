@@ -1211,14 +1211,17 @@ def test_gui_main_sanitizes_qt_environment_before_import(tmp_path, monkeypatch):
     def fake_run_gui(config):
         observed["config"] = config
         observed["env"] = {name: os.environ.get(name) for name in updater.QT_ENV_VARS_TO_REMOVE_FOR_GUI}
+        observed["qt_platform"] = os.environ.get("QT_QPA_PLATFORM")
         return 0
 
     fake_update_window.run_gui = fake_run_gui
     monkeypatch.delattr(tools, "update_window", raising=False)
     monkeypatch.setitem(sys.modules, "tools.update_window", fake_update_window)
+    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
     monkeypatch.setenv("QT_QPA_PLATFORM_PLUGIN_PATH", "/home/labcraft/LabCraft_printer/env/lib/python3.11/site-packages/cv2/qt/plugins")
     monkeypatch.setenv("QT_QPA_FONTDIR", "/home/labcraft/LabCraft_printer/env/lib/python3.11/site-packages/cv2/qt/fonts")
     monkeypatch.setenv("QT_PLUGIN_PATH", "/bad/plugin/path")
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
 
     exit_code = updater.main(["--repo-root", str(tmp_path), "--gui", "--no-relaunch"])
 
@@ -1229,6 +1232,20 @@ def test_gui_main_sanitizes_qt_environment_before_import(tmp_path, monkeypatch):
         "QT_QPA_FONTDIR": None,
         "QT_PLUGIN_PATH": None,
     }
+    assert observed["qt_platform"] == "wayland;xcb"
+
+
+def test_gui_qt_platform_preference_preserves_explicit_platform():
+    env = {
+        "WAYLAND_DISPLAY": "wayland-0",
+        "QT_QPA_PLATFORM": "offscreen",
+        "QT_QPA_PLATFORM_PLUGIN_PATH": "/bad/plugins",
+    }
+
+    removed = updater.sanitize_qt_environment_for_gui(env)
+
+    assert removed == {"QT_QPA_PLATFORM_PLUGIN_PATH": "/bad/plugins"}
+    assert env["QT_QPA_PLATFORM"] == "offscreen"
 
 
 def test_cli_parser_accepts_offline_manifest():

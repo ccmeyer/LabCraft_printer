@@ -535,6 +535,7 @@ def test_controller_default_launcher_uses_detached_process_and_log(tmp_path, mon
     popen_calls = []
     process = FakeProcess()
     monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
     monkeypatch.setenv("QT_QPA_PLATFORM_PLUGIN_PATH", "/home/labcraft/LabCraft_printer/env/lib/python3.11/site-packages/cv2/qt/plugins")
     monkeypatch.setenv("QT_QPA_FONTDIR", "/home/labcraft/LabCraft_printer/env/lib/python3.11/site-packages/cv2/qt/fonts")
     monkeypatch.setenv("QT_PLUGIN_PATH", "/bad/plugin/path")
@@ -572,6 +573,7 @@ def test_controller_default_launcher_uses_detached_process_and_log(tmp_path, mon
     assert env["XAUTHORITY"] == "/home/labcraft/.Xauthority"
     assert env["XDG_RUNTIME_DIR"] == "/run/user/1000"
     assert env["DBUS_SESSION_BUS_ADDRESS"] == "unix:path=/run/user/1000/bus"
+    assert env["QT_QPA_PLATFORM"] == "wayland;xcb"
     assert env["PYTHONUNBUFFERED"] == "1"
     if controller_mod.os.name == "nt":
         assert kwargs["creationflags"]
@@ -589,6 +591,23 @@ def test_controller_default_launcher_uses_detached_process_and_log(tmp_path, mon
     assert "removed QT_QPA_PLATFORM_PLUGIN_PATH=" in log_text
     assert "removed QT_QPA_FONTDIR=" in log_text
     assert "removed QT_PLUGIN_PATH=" in log_text
+    assert "qt_platform:" in log_text
+    assert "preferred QT_QPA_PLATFORM=wayland;xcb because WAYLAND_DISPLAY=wayland-0" in log_text
+
+
+def test_controller_launch_environment_preserves_explicit_qt_platform():
+    env, removed, decision = Controller._app_update_launch_environment(
+        {
+            "WAYLAND_DISPLAY": "wayland-0",
+            "QT_QPA_PLATFORM": "offscreen",
+            "QT_QPA_PLATFORM_PLUGIN_PATH": "/bad/plugins",
+        }
+    )
+
+    assert env["QT_QPA_PLATFORM"] == "offscreen"
+    assert "QT_QPA_PLATFORM_PLUGIN_PATH" not in env
+    assert removed == (("QT_QPA_PLATFORM_PLUGIN_PATH", "/bad/plugins"),)
+    assert decision == "preserved QT_QPA_PLATFORM=offscreen"
 
 
 def test_controller_default_launcher_reports_immediate_exit(tmp_path, monkeypatch):

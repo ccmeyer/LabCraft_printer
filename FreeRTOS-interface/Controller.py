@@ -37,6 +37,7 @@ APP_UPDATE_QT_ENV_VARS_TO_REMOVE = (
     "QT_QPA_FONTDIR",
     "QT_PLUGIN_PATH",
 )
+APP_UPDATE_QT_PLATFORM_WAYLAND = "wayland;xcb"
 CALIBRATION_MODE_PRINT_PULSE_WIDTH_US = {
     "droplet": 1300,
     "stream": 2500,
@@ -899,8 +900,20 @@ class Controller(QObject):
         for name in APP_UPDATE_QT_ENV_VARS_TO_REMOVE:
             if name in env:
                 removed.append((name, env.pop(name)))
+        current_platform = str(env.get("QT_QPA_PLATFORM") or "").strip()
+        wayland_display = str(env.get("WAYLAND_DISPLAY") or "").strip()
+        if current_platform:
+            platform_decision = f"preserved QT_QPA_PLATFORM={current_platform}"
+        elif wayland_display:
+            env["QT_QPA_PLATFORM"] = APP_UPDATE_QT_PLATFORM_WAYLAND
+            platform_decision = (
+                f"preferred QT_QPA_PLATFORM={APP_UPDATE_QT_PLATFORM_WAYLAND} "
+                f"because WAYLAND_DISPLAY={wayland_display}"
+            )
+        else:
+            platform_decision = "skipped Wayland preference because WAYLAND_DISPLAY is not set"
         env.setdefault("PYTHONUNBUFFERED", "1")
-        return env, tuple(removed)
+        return env, tuple(removed), platform_decision
 
     def _write_app_update_launcher_failure_log(self, operation_label, message, *, command=None):
         log_path = self._app_update_launcher_log_path(operation_label)
@@ -970,7 +983,7 @@ class Controller(QObject):
     def _default_app_update_launcher(self, command, *, cwd, log_path):
         log_path = Path(log_path)
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        env, removed_qt_env = self._app_update_launch_environment()
+        env, removed_qt_env, qt_platform_decision = self._app_update_launch_environment()
         header = (
             f"started_at_utc: {datetime.now(timezone.utc).isoformat()}\n"
             f"cwd: {Path(cwd)}\n"
@@ -985,6 +998,8 @@ class Controller(QObject):
             header += "sanitized_qt_environment:\n"
             header += "".join(f"- removed {name}={value}\n" for name, value in removed_qt_env)
             header += "\n"
+        header += "qt_platform:\n"
+        header += f"- {qt_platform_decision}\n\n"
         log_path.write_text(header, encoding="utf-8")
         log_file = log_path.open("a", encoding="utf-8")
         popen_kwargs = {

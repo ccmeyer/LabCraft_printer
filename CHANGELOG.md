@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.1.10 - 2026-07-07
+
+### Fixed
+
+- Preferred Wayland for the standalone updater window when `WAYLAND_DISPLAY` is present.
+- Set `QT_QPA_PLATFORM=wayland;xcb` only when no explicit Qt platform is already configured.
+- Preserved explicit Qt platform choices and continued sanitizing OpenCV/cv2 Qt plugin paths.
+- No update targeting, rollback, offline bundle, firmware, device protocol, motion, pressure-control, UI behavior, or Model changes.
+
+### Validation
+
+- Focused updater launcher and updater window tests:
+  `.\env\Scripts\python.exe -m pytest -q tests/test_app_update_request.py tests/test_update_and_restart.py tests/test_update_window.py`
+
+### Rollback
+
+- Recommended rollback version: `v1.1.9`.
+
 ## v1.1.9 - 2026-07-07
 
 ### Changed

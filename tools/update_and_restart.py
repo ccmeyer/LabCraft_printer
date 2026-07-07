@@ -64,6 +64,7 @@ QT_ENV_VARS_TO_REMOVE_FOR_GUI = (
     "QT_QPA_FONTDIR",
     "QT_PLUGIN_PATH",
 )
+QT_PLATFORM_WAYLAND_PREFERENCE = "wayland;xcb"
 
 EXIT_CODES = {
     STATUS_UPDATED: 0,
@@ -282,7 +283,20 @@ def sanitize_qt_environment_for_gui(env: dict[str, str] | None = None) -> dict[s
     for name in QT_ENV_VARS_TO_REMOVE_FOR_GUI:
         if name in target:
             removed[name] = target.pop(name)
+    prefer_qt_platform_for_gui(target)
     return removed
+
+
+def prefer_qt_platform_for_gui(env: dict[str, str] | None = None) -> str:
+    target = os.environ if env is None else env
+    current_platform = str(target.get("QT_QPA_PLATFORM") or "").strip()
+    wayland_display = str(target.get("WAYLAND_DISPLAY") or "").strip()
+    if current_platform:
+        return f"preserved QT_QPA_PLATFORM={current_platform}"
+    if wayland_display:
+        target["QT_QPA_PLATFORM"] = QT_PLATFORM_WAYLAND_PREFERENCE
+        return f"preferred QT_QPA_PLATFORM={QT_PLATFORM_WAYLAND_PREFERENCE} because WAYLAND_DISPLAY={wayland_display}"
+    return "skipped Wayland preference because WAYLAND_DISPLAY is not set"
 
 
 def _resolve_under_repo(repo_root: Path, value: Path | str) -> Path:
