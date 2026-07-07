@@ -1,0 +1,23 @@
+{
+  "channel": "stable",
+  "notes": [
+    "Adds automatic offline rollback discovery to Check Rollback when online release-tag fetch fails.",
+    "Scans removable-drive LabCraftUpdates/*.json manifests and uses a valid release-aware rollback bundle when available.",
+    "Keeps manual Offline Restore manifest selection available as the explicit support-guided override path.",
+    "Skips advertising the metadata-incomplete v1.1.15 test tag and uses v1.1.14 as the previous valid stable release.",
+    "Keeps firmware, device protocol, motion, pressure-control, Model behavior, and update apply behavior unchanged."
+  ],
+  "previous_version": "v1.1.14",
+  "release_date": "2026-07-07",
+  "requires_firmware": null,
+  "rollback_version": "v1.1.14",
+  "schema_version": "labcraft_release_v1",
+  "summary": "Adds automatic offline rollback bundle discovery after online rollback fetch failure.",
+  "tag": "v1.1.16",
+  "validation": [
+    ".\\env\\Scripts\\python.exe -m pytest -q tests/test_update_and_restart.py tests/test_app_update_request.py tests/test_update_window.py",
+    "git diff --check",
+    "Get-ChildItem releases\\*.json | ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json | Out-Null }"
+  ],
+  "version": "v1.1.16"
+}

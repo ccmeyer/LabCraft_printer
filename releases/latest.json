@@ -2,6 +2,7 @@
   "release_candidate": "v1.2.0-rc.4",
   "releases": [
     "v1.2.0-rc.4",
+    "v1.1.16",
     "v1.1.14",
     "v1.1.13",
     "v1.1.12",
@@ -19,5 +20,5 @@
     "v1.1.0"
   ],
   "schema_version": "labcraft_release_index_v1",
-  "stable": "v1.1.14"
+  "stable": "v1.1.16"
 }

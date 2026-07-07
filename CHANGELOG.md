@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.1.16 - 2026-07-07
+
+### Changed
+
+- Added automatic offline rollback discovery to `Check Rollback` when online release-tag fetch fails.
+- Scans removable-drive `LabCraftUpdates/*.json` manifests and uses a valid release-aware rollback bundle when available.
+- Kept manual `Offline Restore` manifest selection available as the explicit support-guided override path.
+- Skipped advertising the metadata-incomplete `v1.1.15` test tag and used `v1.1.14` as the previous valid stable release.
+- No firmware, device protocol, motion, pressure-control, Model behavior, or update apply behavior changes.
+
+### Validation
+
+- Focused updater and updater window tests:
+  `.\env\Scripts\python.exe -m pytest -q tests/test_update_and_restart.py tests/test_app_update_request.py tests/test_update_window.py`
+
+### Rollback
+
+- Recommended rollback version: `v1.1.14`.
+
 ## v1.1.14 - 2026-07-07
 
 ### Changed
