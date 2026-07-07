@@ -1248,6 +1248,19 @@ def test_gui_qt_platform_preference_preserves_explicit_platform():
     assert env["QT_QPA_PLATFORM"] == "offscreen"
 
 
+def test_gui_qt_platform_preference_overrides_xcb_in_wayland_session():
+    env = {
+        "WAYLAND_DISPLAY": "wayland-0",
+        "QT_QPA_PLATFORM": "xcb",
+        "QT_QPA_PLATFORM_PLUGIN_PATH": "/bad/plugins",
+    }
+
+    removed = updater.sanitize_qt_environment_for_gui(env)
+
+    assert removed == {"QT_QPA_PLATFORM_PLUGIN_PATH": "/bad/plugins"}
+    assert env["QT_QPA_PLATFORM"] == "wayland;xcb"
+
+
 def test_cli_parser_accepts_offline_manifest():
     config = updater.parse_args(["--repo-root", ".", "--offline-manifest", "LabCraftUpdates/update.json"])
 

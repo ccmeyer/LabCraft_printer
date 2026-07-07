@@ -610,6 +610,21 @@ def test_controller_launch_environment_preserves_explicit_qt_platform():
     assert decision == "preserved QT_QPA_PLATFORM=offscreen"
 
 
+def test_controller_launch_environment_overrides_xcb_in_wayland_session():
+    env, removed, decision = Controller._app_update_launch_environment(
+        {
+            "WAYLAND_DISPLAY": "wayland-0",
+            "QT_QPA_PLATFORM": "XCB",
+            "QT_QPA_PLATFORM_PLUGIN_PATH": "/bad/plugins",
+        }
+    )
+
+    assert env["QT_QPA_PLATFORM"] == "wayland;xcb"
+    assert "QT_QPA_PLATFORM_PLUGIN_PATH" not in env
+    assert removed == (("QT_QPA_PLATFORM_PLUGIN_PATH", "/bad/plugins"),)
+    assert decision == "overrode QT_QPA_PLATFORM=XCB with wayland;xcb because WAYLAND_DISPLAY=wayland-0"
+
+
 def test_controller_default_launcher_reports_immediate_exit(tmp_path, monkeypatch):
     controller = _make_controller(tmp_path)
     controller._app_update_launch_grace_s = 0

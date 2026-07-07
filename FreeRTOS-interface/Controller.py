@@ -902,14 +902,20 @@ class Controller(QObject):
                 removed.append((name, env.pop(name)))
         current_platform = str(env.get("QT_QPA_PLATFORM") or "").strip()
         wayland_display = str(env.get("WAYLAND_DISPLAY") or "").strip()
-        if current_platform:
-            platform_decision = f"preserved QT_QPA_PLATFORM={current_platform}"
-        elif wayland_display:
+        if wayland_display and (not current_platform or current_platform.lower() == "xcb"):
             env["QT_QPA_PLATFORM"] = APP_UPDATE_QT_PLATFORM_WAYLAND
-            platform_decision = (
-                f"preferred QT_QPA_PLATFORM={APP_UPDATE_QT_PLATFORM_WAYLAND} "
-                f"because WAYLAND_DISPLAY={wayland_display}"
-            )
+            if current_platform:
+                platform_decision = (
+                    f"overrode QT_QPA_PLATFORM={current_platform} with {APP_UPDATE_QT_PLATFORM_WAYLAND} "
+                    f"because WAYLAND_DISPLAY={wayland_display}"
+                )
+            else:
+                platform_decision = (
+                    f"preferred QT_QPA_PLATFORM={APP_UPDATE_QT_PLATFORM_WAYLAND} "
+                    f"because WAYLAND_DISPLAY={wayland_display}"
+                )
+        elif current_platform:
+            platform_decision = f"preserved QT_QPA_PLATFORM={current_platform}"
         else:
             platform_decision = "skipped Wayland preference because WAYLAND_DISPLAY is not set"
         env.setdefault("PYTHONUNBUFFERED", "1")

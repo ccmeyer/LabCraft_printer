@@ -1,0 +1,23 @@
+{
+  "channel": "stable",
+  "notes": [
+    "Overrides QT_QPA_PLATFORM=xcb with wayland;xcb for the standalone updater window when a Wayland session is available.",
+    "Keeps missing QT_QPA_PLATFORM behavior from v1.1.10 by preferring wayland;xcb in Wayland sessions.",
+    "Preserves explicitly configured non-xcb Qt platform choices.",
+    "Keeps the OpenCV/cv2 Qt plugin path sanitation added in v1.1.8.",
+    "Keeps update, rollback, offline bundle, firmware, device protocol, motion, pressure-control, UI behavior, and Model behavior unchanged."
+  ],
+  "previous_version": "v1.1.11",
+  "release_date": "2026-07-07",
+  "requires_firmware": null,
+  "rollback_version": "v1.1.11",
+  "schema_version": "labcraft_release_v1",
+  "summary": "Overrides xcb for the updater window when running in a Wayland desktop session.",
+  "tag": "v1.1.12",
+  "validation": [
+    ".\\env\\Scripts\\python.exe -m pytest -q tests/test_app_update_request.py tests/test_update_and_restart.py tests/test_update_window.py",
+    "git diff --check",
+    "Get-ChildItem releases\\*.json | ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json | Out-Null }"
+  ],
+  "version": "v1.1.12"
+}

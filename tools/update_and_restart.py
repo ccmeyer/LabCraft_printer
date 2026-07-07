@@ -291,11 +291,16 @@ def prefer_qt_platform_for_gui(env: dict[str, str] | None = None) -> str:
     target = os.environ if env is None else env
     current_platform = str(target.get("QT_QPA_PLATFORM") or "").strip()
     wayland_display = str(target.get("WAYLAND_DISPLAY") or "").strip()
+    if wayland_display and (not current_platform or current_platform.lower() == "xcb"):
+        target["QT_QPA_PLATFORM"] = QT_PLATFORM_WAYLAND_PREFERENCE
+        if current_platform:
+            return (
+                f"overrode QT_QPA_PLATFORM={current_platform} with {QT_PLATFORM_WAYLAND_PREFERENCE} "
+                f"because WAYLAND_DISPLAY={wayland_display}"
+            )
+        return f"preferred QT_QPA_PLATFORM={QT_PLATFORM_WAYLAND_PREFERENCE} because WAYLAND_DISPLAY={wayland_display}"
     if current_platform:
         return f"preserved QT_QPA_PLATFORM={current_platform}"
-    if wayland_display:
-        target["QT_QPA_PLATFORM"] = QT_PLATFORM_WAYLAND_PREFERENCE
-        return f"preferred QT_QPA_PLATFORM={QT_PLATFORM_WAYLAND_PREFERENCE} because WAYLAND_DISPLAY={wayland_display}"
     return "skipped Wayland preference because WAYLAND_DISPLAY is not set"
 
 
