@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.1.9 - 2026-07-07
+
+### Changed
+
+- Added a metadata-only smoke-test release for validating the app-based updater window path from `v1.1.8`.
+- Updated stable release metadata so machines on `v1.1.8` can install `v1.1.9` through the UI.
+- No app logic, updater logic, UI behavior, rollback behavior, offline bundle, firmware, device protocol, motion, pressure-control, or Model changes.
+
+### Validation
+
+- Focused updater launcher and updater window tests:
+  `.\env\Scripts\python.exe -m pytest -q tests/test_app_update_request.py tests/test_update_and_restart.py tests/test_update_window.py`
+
+### Rollback
+
+- Recommended rollback version: `v1.1.8`.
+
 ## v1.1.8 - 2026-07-07
 
 ### Fixed
