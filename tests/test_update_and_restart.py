@@ -1,12 +1,16 @@
 import json
 import json
 import hashlib
+import os
 import shutil
 import subprocess
+import sys
+import types
 from pathlib import Path
 
 import pytest
 
+import tools
 from tools import create_update_bundle
 import tools.update_and_restart as updater
 
@@ -1198,6 +1202,33 @@ def test_cli_parser_accepts_gui():
     assert config.gui is True
     assert config.record_result is True
     assert config.latest_result_path == Path("local/result.json")
+
+
+def test_gui_main_sanitizes_qt_environment_before_import(tmp_path, monkeypatch):
+    fake_update_window = types.ModuleType("tools.update_window")
+    observed = {}
+
+    def fake_run_gui(config):
+        observed["config"] = config
+        observed["env"] = {name: os.environ.get(name) for name in updater.QT_ENV_VARS_TO_REMOVE_FOR_GUI}
+        return 0
+
+    fake_update_window.run_gui = fake_run_gui
+    monkeypatch.delattr(tools, "update_window", raising=False)
+    monkeypatch.setitem(sys.modules, "tools.update_window", fake_update_window)
+    monkeypatch.setenv("QT_QPA_PLATFORM_PLUGIN_PATH", "/home/labcraft/LabCraft_printer/env/lib/python3.11/site-packages/cv2/qt/plugins")
+    monkeypatch.setenv("QT_QPA_FONTDIR", "/home/labcraft/LabCraft_printer/env/lib/python3.11/site-packages/cv2/qt/fonts")
+    monkeypatch.setenv("QT_PLUGIN_PATH", "/bad/plugin/path")
+
+    exit_code = updater.main(["--repo-root", str(tmp_path), "--gui", "--no-relaunch"])
+
+    assert exit_code == 0
+    assert observed["config"].gui is True
+    assert observed["env"] == {
+        "QT_QPA_PLATFORM_PLUGIN_PATH": None,
+        "QT_QPA_FONTDIR": None,
+        "QT_PLUGIN_PATH": None,
+    }
 
 
 def test_cli_parser_accepts_offline_manifest():

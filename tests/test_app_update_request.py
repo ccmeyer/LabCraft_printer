@@ -535,6 +535,14 @@ def test_controller_default_launcher_uses_detached_process_and_log(tmp_path, mon
     popen_calls = []
     process = FakeProcess()
     monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    monkeypatch.setenv("QT_QPA_PLATFORM_PLUGIN_PATH", "/home/labcraft/LabCraft_printer/env/lib/python3.11/site-packages/cv2/qt/plugins")
+    monkeypatch.setenv("QT_QPA_FONTDIR", "/home/labcraft/LabCraft_printer/env/lib/python3.11/site-packages/cv2/qt/fonts")
+    monkeypatch.setenv("QT_PLUGIN_PATH", "/bad/plugin/path")
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    monkeypatch.setenv("XAUTHORITY", "/home/labcraft/.Xauthority")
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+    monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus")
 
     def fake_popen(command, **kwargs):
         popen_calls.append((command, kwargs))
@@ -555,6 +563,16 @@ def test_controller_default_launcher_uses_detached_process_and_log(tmp_path, mon
     assert kwargs["stdin"] is controller_mod.subprocess.DEVNULL
     assert kwargs["stderr"] is controller_mod.subprocess.STDOUT
     assert kwargs["close_fds"] is True
+    env = kwargs["env"]
+    assert "QT_QPA_PLATFORM_PLUGIN_PATH" not in env
+    assert "QT_QPA_FONTDIR" not in env
+    assert "QT_PLUGIN_PATH" not in env
+    assert env["DISPLAY"] == ":0"
+    assert env["WAYLAND_DISPLAY"] == "wayland-0"
+    assert env["XAUTHORITY"] == "/home/labcraft/.Xauthority"
+    assert env["XDG_RUNTIME_DIR"] == "/run/user/1000"
+    assert env["DBUS_SESSION_BUS_ADDRESS"] == "unix:path=/run/user/1000/bus"
+    assert env["PYTHONUNBUFFERED"] == "1"
     if controller_mod.os.name == "nt":
         assert kwargs["creationflags"]
     else:
@@ -567,6 +585,10 @@ def test_controller_default_launcher_uses_detached_process_and_log(tmp_path, mon
     assert "command: python-under-test -u" in log_text
     assert "python_probe:" in log_text
     assert "python-under-test: PySide6 OK" in log_text
+    assert "sanitized_qt_environment:" in log_text
+    assert "removed QT_QPA_PLATFORM_PLUGIN_PATH=" in log_text
+    assert "removed QT_QPA_FONTDIR=" in log_text
+    assert "removed QT_PLUGIN_PATH=" in log_text
 
 
 def test_controller_default_launcher_reports_immediate_exit(tmp_path, monkeypatch):

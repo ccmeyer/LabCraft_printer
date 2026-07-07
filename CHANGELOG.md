@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.1.8 - 2026-07-07
+
+### Fixed
+
+- Sanitized Qt plugin and font environment variables before launching the standalone updater window.
+- Prevented OpenCV/cv2 Qt plugin paths from being inherited by the PySide6 updater process.
+- Kept Pi display and desktop session variables available for the updater window.
+- Added defensive Qt environment cleanup inside the updater backend before importing the GUI window.
+- No firmware, device protocol, motion, or pressure-control changes.
+
+### Validation
+
+- Focused updater launcher and updater window tests:
+  `.\env\Scripts\python.exe -m pytest -q tests/test_app_update_request.py tests/test_update_and_restart.py tests/test_update_window.py`
+
+### Rollback
+
+- Recommended rollback version: `v1.1.7`.
+
 ## v1.1.7 - 2026-07-06
 
 ### Changed

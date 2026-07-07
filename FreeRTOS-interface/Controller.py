@@ -32,6 +32,11 @@ ARRAY_ROW_START_OVERSHOOT_STEPS = 0
 PLATE_DOCK_SAFE_Z = 500
 PLATE_DOCK_X_OFFSET = -5000
 PLATE_SEATED_LOCATIONS = {"pause", "plate"}
+APP_UPDATE_QT_ENV_VARS_TO_REMOVE = (
+    "QT_QPA_PLATFORM_PLUGIN_PATH",
+    "QT_QPA_FONTDIR",
+    "QT_PLUGIN_PATH",
+)
 CALIBRATION_MODE_PRINT_PULSE_WIDTH_US = {
     "droplet": 1300,
     "stream": 2500,
@@ -887,6 +892,16 @@ class Controller(QObject):
         with path.open("a", encoding="utf-8") as fh:
             fh.write(str(text))
 
+    @staticmethod
+    def _app_update_launch_environment(source_env=None):
+        env = dict(os.environ if source_env is None else source_env)
+        removed = []
+        for name in APP_UPDATE_QT_ENV_VARS_TO_REMOVE:
+            if name in env:
+                removed.append((name, env.pop(name)))
+        env.setdefault("PYTHONUNBUFFERED", "1")
+        return env, tuple(removed)
+
     def _write_app_update_launcher_failure_log(self, operation_label, message, *, command=None):
         log_path = self._app_update_launcher_log_path(operation_label)
         probe_lines = tuple(getattr(self, "_last_app_update_python_probe_lines", ()) or ())
@@ -955,6 +970,7 @@ class Controller(QObject):
     def _default_app_update_launcher(self, command, *, cwd, log_path):
         log_path = Path(log_path)
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        env, removed_qt_env = self._app_update_launch_environment()
         header = (
             f"started_at_utc: {datetime.now(timezone.utc).isoformat()}\n"
             f"cwd: {Path(cwd)}\n"
@@ -965,10 +981,12 @@ class Controller(QObject):
             header += "python_probe:\n"
             header += "".join(f"- {line}\n" for line in probe_lines)
             header += "\n"
+        if removed_qt_env:
+            header += "sanitized_qt_environment:\n"
+            header += "".join(f"- removed {name}={value}\n" for name, value in removed_qt_env)
+            header += "\n"
         log_path.write_text(header, encoding="utf-8")
         log_file = log_path.open("a", encoding="utf-8")
-        env = os.environ.copy()
-        env.setdefault("PYTHONUNBUFFERED", "1")
         popen_kwargs = {
             "cwd": str(cwd),
             "shell": False,

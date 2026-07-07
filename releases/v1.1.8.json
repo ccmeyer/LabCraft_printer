@@ -1,0 +1,23 @@
+{
+  "channel": "stable",
+  "notes": [
+    "Sanitizes Qt plugin and font environment variables before launching the standalone updater window.",
+    "Prevents OpenCV/cv2 Qt plugin paths from being inherited by the PySide6 updater process.",
+    "Keeps display and desktop session variables available so the updater window can still attach to the Pi desktop.",
+    "Adds the same defensive Qt environment cleanup inside the updater backend before importing the GUI window.",
+    "Keeps update, rollback, offline bundle, firmware, device protocol, motion, and pressure-control behavior unchanged."
+  ],
+  "previous_version": "v1.1.7",
+  "release_date": "2026-07-07",
+  "requires_firmware": null,
+  "rollback_version": "v1.1.7",
+  "schema_version": "labcraft_release_v1",
+  "summary": "Fixes updater window startup when OpenCV Qt plugin paths are present in the app environment.",
+  "tag": "v1.1.8",
+  "validation": [
+    ".\\env\\Scripts\\python.exe -m pytest -q tests/test_app_update_request.py tests/test_update_and_restart.py tests/test_update_window.py",
+    "git diff --check",
+    "Get-ChildItem releases\\*.json | ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json | Out-Null }"
+  ],
+  "version": "v1.1.8"
+}

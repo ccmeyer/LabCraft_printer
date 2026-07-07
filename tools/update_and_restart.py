@@ -59,6 +59,11 @@ RELEASE_INDEX_SCHEMA_VERSION = "labcraft_release_index_v1"
 RELEASE_MANIFEST_SCHEMA_VERSION = "labcraft_release_v1"
 RELEASE_INDEX_PATH = "releases/latest.json"
 RELEASE_VERSION_RE = re.compile(r"v[0-9]+(?:\.[0-9]+){2}(?:-[A-Za-z0-9][A-Za-z0-9.-]*)?")
+QT_ENV_VARS_TO_REMOVE_FOR_GUI = (
+    "QT_QPA_PLATFORM_PLUGIN_PATH",
+    "QT_QPA_FONTDIR",
+    "QT_PLUGIN_PATH",
+)
 
 EXIT_CODES = {
     STATUS_UPDATED: 0,
@@ -269,6 +274,15 @@ def default_log_path(repo_root: Path) -> Path:
 
 def default_latest_result_path(repo_root: Path) -> Path:
     return repo_root / "local" / "update_logs" / "latest_update_result.json"
+
+
+def sanitize_qt_environment_for_gui(env: dict[str, str] | None = None) -> dict[str, str]:
+    target = os.environ if env is None else env
+    removed = {}
+    for name in QT_ENV_VARS_TO_REMOVE_FOR_GUI:
+        if name in target:
+            removed[name] = target.pop(name)
+    return removed
 
 
 def _resolve_under_repo(repo_root: Path, value: Path | str) -> Path:
@@ -2899,6 +2913,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     config = parse_args(argv)
     if config.gui:
+        sanitize_qt_environment_for_gui()
         try:
             repo_parent = Path(__file__).resolve().parents[1]
             if str(repo_parent) not in sys.path:
