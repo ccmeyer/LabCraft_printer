@@ -11,6 +11,7 @@
 #include "Stepper.h"
 #include "PressureSensor.h"
 #include "PressureTraceRecorder.h"
+#include "PressureRegulatorWatchdogPolicy.h"
 #include "FreeRTOS.h"
 #include "task.h"
 #include <cmath>
@@ -191,6 +192,8 @@ public:
   static void handleInnerLimitFromIsr(uint16_t pin);
 
 private:
+  using WatchdogHold = PressureRegulatorWatchdogPolicy::Hold;
+
   Stepper*           _stepper    = nullptr;
   TIM_HandleTypeDef* _htim       = nullptr;
   int32_t            _target     = 0;
@@ -226,10 +229,17 @@ private:
   bool				 _resetting	 = false;
   bool               _vacuumMode = false;
   volatile bool      _motionHoldActive = false;
+  volatile uint8_t   _watchdogHoldMask =
+      PressureRegulatorWatchdogPolicy::holdBit(WatchdogHold::Inactive);
   uint32_t			 _stepLimit	 = 100000;
   uint32_t			 _resetPos	 = 500;
 
   int32_t activeMinTarget() const { return _vacuumMode ? _vacuumMinTarget : _minTarget; }
+  CrashTaskId _watchdogTaskId() const;
+  void _applyWatchdogState(bool checkIn);
+  void _holdWatchdog(WatchdogHold reason);
+  void _releaseWatchdog(WatchdogHold reason, bool checkIn);
+  bool _canEnterMotionHold() const;
 
   // control state
   bool     _stepping    = false;

@@ -94,6 +94,7 @@ void PressureRegulator::begin(
   loadDefaultRuntimeConfig();
 
   _active = false;
+  _watchdogHoldMask = PressureRegulatorWatchdogPolicy::holdBit(WatchdogHold::Inactive);
   _quietActive = false;
   _quietPreHold = false;
 //  _pausedByQuiet = false;
@@ -136,7 +137,7 @@ void PressureRegulator::begin(
   if (_taskHandle) {
     vTaskSuspend(_taskHandle);
   }
-  Watchdog_DisableTask((_sensorPort == 0u) ? CRASH_TASK_PREG_P : CRASH_TASK_PREG_R);
+  _applyWatchdogState(false);
   _stepper->stop();
 }
 
@@ -153,6 +154,51 @@ bool PressureRegulator::isTargetRamping() const {
       _controlTargetFixed,
       _target,
       TARGET_RAMP_FRACTIONAL_BITS);
+}
+
+CrashTaskId PressureRegulator::_watchdogTaskId() const {
+  return (_sensorPort == 0u) ? CRASH_TASK_PREG_P : CRASH_TASK_PREG_R;
+}
+
+void PressureRegulator::_applyWatchdogState(bool checkIn) {
+  const CrashTaskId watchdogTaskId = _watchdogTaskId();
+  const uint8_t mask = static_cast<uint8_t>(_watchdogHoldMask);
+  if (PressureRegulatorWatchdogPolicy::shouldEnableWatchdog(mask)) {
+    if (checkIn) {
+      Watchdog_CheckIn(watchdogTaskId);
+    } else {
+      Watchdog_EnableTask(watchdogTaskId);
+    }
+  } else {
+    Watchdog_DisableTask(watchdogTaskId);
+  }
+}
+
+void PressureRegulator::_holdWatchdog(WatchdogHold reason) {
+  taskENTER_CRITICAL();
+  _watchdogHoldMask = PressureRegulatorWatchdogPolicy::withHold(
+      static_cast<uint8_t>(_watchdogHoldMask),
+      reason);
+  taskEXIT_CRITICAL();
+  _applyWatchdogState(false);
+}
+
+void PressureRegulator::_releaseWatchdog(WatchdogHold reason, bool checkIn) {
+  taskENTER_CRITICAL();
+  _watchdogHoldMask = PressureRegulatorWatchdogPolicy::withoutHold(
+      static_cast<uint8_t>(_watchdogHoldMask),
+      reason);
+  taskEXIT_CRITICAL();
+  _applyWatchdogState(checkIn);
+}
+
+bool PressureRegulator::_canEnterMotionHold() const {
+  return PressureRegulatorWatchdogPolicy::canEnterMotionHold(
+      _active,
+      _taskHandle != nullptr,
+      _homing,
+      _resetting,
+      static_cast<uint8_t>(_watchdogHoldMask));
 }
 
 void PressureRegulator::loadDefaultRuntimeConfig() {
@@ -393,7 +439,7 @@ void PressureRegulator::start() {
   _stepping   = false;
 
   if (_taskHandle) vTaskResume(_taskHandle);
-  Watchdog_EnableTask((_sensorPort == 0u) ? CRASH_TASK_PREG_P : CRASH_TASK_PREG_R);
+  _releaseWatchdog(WatchdogHold::Inactive, true);
   Logger::instance()->log("[PReg] START port=%u handle=%p\r\n",
                           (unsigned)_sensorPort, _taskHandle);
   //  if (_taskHandle) xTaskNotifyGive(_taskHandle);
@@ -401,8 +447,8 @@ void PressureRegulator::start() {
 
 void PressureRegulator::pause() {
   _active = false;
+  _holdWatchdog(WatchdogHold::Inactive);
   if (_taskHandle) vTaskSuspend(_taskHandle);
-  Watchdog_DisableTask((_sensorPort == 0u) ? CRASH_TASK_PREG_P : CRASH_TASK_PREG_R);
   if (_stepping) { _stepper->stop(); _stepping = false; }
   _integral = 0;
   _targetTransitionMonitorActive = false;
@@ -410,14 +456,12 @@ void PressureRegulator::pause() {
 }
 
 bool PressureRegulator::enterMotionHold() {
-  if (!_active || _taskHandle == nullptr) {
+  if (!_canEnterMotionHold()) {
     return false;
   }
   if (_motionHoldActive) {
     return true;
   }
-
-  const CrashTaskId watchdogTaskId = (_sensorPort == 0u) ? CRASH_TASK_PREG_P : CRASH_TASK_PREG_R;
 
   taskENTER_CRITICAL();
   _motionHoldActive = true;
@@ -444,8 +488,8 @@ bool PressureRegulator::enterMotionHold() {
   if (_doneBit != 0u) {
     xEventGroupClearBits(Orchestrator::getDoneEvents(), _doneBit);
   }
+  _holdWatchdog(WatchdogHold::MotionHold);
   vTaskSuspend(_taskHandle);
-  Watchdog_DisableTask(watchdogTaskId);
   return true;
 }
 
@@ -453,8 +497,6 @@ void PressureRegulator::exitMotionHold() {
   if (!_motionHoldActive || _taskHandle == nullptr) {
     return;
   }
-
-  const CrashTaskId watchdogTaskId = (_sensorPort == 0u) ? CRASH_TASK_PREG_P : CRASH_TASK_PREG_R;
 
   int32_t measured = _target;
   if (PressureSensor::instance()) {
@@ -493,8 +535,7 @@ void PressureRegulator::exitMotionHold() {
   if (_stepper != nullptr) {
     _stepper->enableMotor();
   }
-  Watchdog_EnableTask(watchdogTaskId);
-  Watchdog_CheckIn(watchdogTaskId);
+  _releaseWatchdog(WatchdogHold::MotionHold, true);
   vTaskResume(_taskHandle);
 }
 
@@ -652,30 +693,24 @@ void PressureRegulator::homeWithValve(uint32_t fastHz, uint32_t slowHz, uint32_t
     // Prevent control loop from issuing new moves
     _homing = true;
     Printer::instance()->pauseDispense();
-    const CrashTaskId watchdogTaskId = (_sensorPort == 0u) ? CRASH_TASK_PREG_P : CRASH_TASK_PREG_R;
+    _holdWatchdog(WatchdogHold::Recovery);
     TaskHandle_t me = xTaskGetCurrentTaskHandle();
     const bool calledFromOwnTask = (_taskHandle && me == _taskHandle);
     const bool taskHandlePresent = (_taskHandle != nullptr);
     bool homeOk = false;
 
-    // If called from our own control task, temporarily remove it from watchdog coverage.
-    if (calledFromOwnTask) {
-      Watchdog_DisableTask(watchdogTaskId);
-    } else if (_taskHandle) {
+    // If called externally, keep the control task still while homing owns the stepper.
+    if (!calledFromOwnTask && _taskHandle) {
       vTaskSuspend(_taskHandle);
-      Watchdog_DisableTask(watchdogTaskId);
     }
 
     auto finishHome = [&]() {
       HAL_GPIO_WritePin(_valvePort, _valvePin, GPIO_PIN_RESET);
       _homing = false;
+      _releaseWatchdog(WatchdogHold::Recovery, true);
 
-      if (calledFromOwnTask) {
-        Watchdog_EnableTask(watchdogTaskId);
-        Watchdog_CheckIn(watchdogTaskId);
-      } else if (_active && taskHandlePresent) {
+      if (!calledFromOwnTask && _active && taskHandlePresent) {
         vTaskResume(_taskHandle);
-        Watchdog_EnableTask(watchdogTaskId);
       }
 
       if (homeOk) {
@@ -705,6 +740,7 @@ void PressureRegulator::homeWithValve(uint32_t fastHz, uint32_t slowHz, uint32_t
 void PressureRegulator::resetSyringe(CrashTaskId callerWatchdogTaskId) {
     // 1) mark and pause
     _resetting = true;
+    _holdWatchdog(WatchdogHold::Recovery);
     Logger::instance()->log("[PReg] Starting syringe reset\r\n");
     Printer::instance()->pauseDispense();
     bool resetOk = true;
@@ -784,6 +820,7 @@ void PressureRegulator::resetSyringe(CrashTaskId callerWatchdogTaskId) {
       Logger::instance()->log("[PReg] Syringe reset failed; dispense canceled\r\n");
     }
     _resetting = false;
+    _releaseWatchdog(WatchdogHold::Recovery, true);
 }
 
 bool PressureRegulator::enterVacuumMode(int32_t targetRaw,
@@ -937,11 +974,10 @@ void PressureRegulator::requestSafetyHome() {
 
 void PressureRegulator::controlLoop() {
   const TickType_t period = pdMS_TO_TICKS(5);  // 200 Hz tick
-  const CrashTaskId watchdogTaskId = (_sensorPort == 0u) ? CRASH_TASK_PREG_P : CRASH_TASK_PREG_R;
-  Watchdog_EnableTask(watchdogTaskId);
+  _applyWatchdogState(false);
   Logger::instance()->log("CONTROL LOOP\r\n");
   for (;;) {
-    Watchdog_CheckIn(watchdogTaskId);
+    _applyWatchdogState(true);
 
     if (_motionHoldActive) {
       if (_stepping && _stepper != nullptr) {
