@@ -1065,14 +1065,16 @@ class Controller(QObject):
         """Handle the status update and update the machine model."""
         self.model.update_state(status_dict)
         context = getattr(self, "_array_context", None) or {}
-        if (
-            self.get_array_run_state() == "stop_requested"
-            and context.get("soft_stop_pending")
-            and context.get("soft_stop_phase", "waiting_watermark") == "waiting_watermark"
-            and self.model.machine_model.pause_watermark_reached
-            and self.model.machine_model.transport_paused
-        ):
-            self._begin_soft_stop_clear_and_park()
+        if self.get_array_run_state() == "stop_requested" and context.get("soft_stop_pending"):
+            soft_stop_phase = context.get("soft_stop_phase", "waiting_watermark")
+            if (
+                soft_stop_phase == "waiting_watermark"
+                and self.model.machine_model.pause_watermark_reached
+                and self.model.machine_model.transport_paused
+            ):
+                self._begin_soft_stop_clear_and_park()
+            elif soft_stop_phase == "waiting_completion_catchup":
+                self._maybe_complete_array_soft_stop_after_catchup()
 
     def handle_error(self, error_message):
         """Handle errors from the machine."""
@@ -3313,19 +3315,132 @@ class Controller(QObject):
         self._set_array_run_state("stop_requested")
         context["soft_stop_pending"] = True
         context["soft_stop_phase"] = "waiting_watermark"
-        if not self.machine.request_pause_after_seq32(
-            current_barrier,
-            on_failure=lambda payload, barrier=current_barrier: self._abort_array_after_soft_stop_failure(
-                payload.get("reason", "unknown"),
-                payload.get("barrier_seq32", barrier),
-            ),
-        ):
+        context["soft_stop_rejected_barriers"] = set()
+        if not self._request_array_pause_after_barrier(current_barrier):
             return False
         self._record_print_array_audit_event(
             "print_array_soft_stop_requested",
             "Print array soft stop requested",
             details={"barrier_seq32": current_barrier},
         )
+        return True
+
+    @staticmethod
+    def _coerce_positive_seq32(value):
+        try:
+            seq32 = int(value or 0)
+        except (TypeError, ValueError):
+            return None
+        return seq32 if seq32 > 0 else None
+
+    def _soft_stop_rejected_barriers(self, context):
+        rejected = context.setdefault("soft_stop_rejected_barriers", set())
+        if isinstance(rejected, set):
+            return rejected
+        rejected_set = set()
+        try:
+            for value in rejected:
+                seq32 = self._coerce_positive_seq32(value)
+                if seq32 is not None:
+                    rejected_set.add(seq32)
+        except Exception:
+            rejected_set = set()
+        context["soft_stop_rejected_barriers"] = rejected_set
+        return rejected_set
+
+    def _latest_retired_command_number(self):
+        machine_model = getattr(getattr(self, "model", None), "machine_model", None)
+        value = getattr(machine_model, "last_retired_command_num", 0)
+        return self._coerce_positive_seq32(value) or 0
+
+    def _select_array_soft_stop_barrier(self, context):
+        if not isinstance(context, dict):
+            return None
+        rejected = self._soft_stop_rejected_barriers(context)
+        last_retired = self._latest_retired_command_number()
+        for well_info in list(context.get("queued_wells") or []):
+            if not isinstance(well_info, dict):
+                continue
+            seq32 = self._coerce_positive_seq32(well_info.get("dispense_seq32"))
+            if seq32 is None:
+                continue
+            if seq32 in rejected:
+                continue
+            if last_retired and seq32 <= last_retired:
+                continue
+            return seq32
+        return None
+
+    def _request_array_pause_after_barrier(self, barrier_seq32):
+        barrier_seq32 = self._coerce_positive_seq32(barrier_seq32)
+        if barrier_seq32 is None:
+            return False
+        return self.machine.request_pause_after_seq32(
+            barrier_seq32,
+            on_failure=lambda payload, barrier=barrier_seq32: self._handle_array_soft_stop_pause_after_failure(
+                payload,
+                requested_barrier_seq32=barrier,
+            ),
+        )
+
+    def _handle_array_soft_stop_pause_after_failure(self, payload=None, requested_barrier_seq32=None):
+        payload = dict(payload or {})
+        reason = str(payload.get("reason") or "unknown")
+        barrier_seq32 = (
+            self._coerce_positive_seq32(payload.get("barrier_seq32"))
+            or self._coerce_positive_seq32(requested_barrier_seq32)
+        )
+        ack_result = payload.get("ack_result")
+
+        if self._retry_array_soft_stop_after_stale_barrier(reason, ack_result, barrier_seq32):
+            return
+
+        self._abort_array_after_soft_stop_failure(reason, barrier_seq32)
+
+    def _retry_array_soft_stop_after_stale_barrier(self, reason, ack_result, barrier_seq32):
+        if str(reason or "") != "ack_rejected" or str(ack_result or "") != "watermark_rejected":
+            return False
+
+        context = getattr(self, "_array_context", None)
+        if not isinstance(context, dict):
+            return True
+        if self.get_array_run_state() != "stop_requested":
+            return True
+
+        phase = context.get("soft_stop_phase", "waiting_watermark")
+        if phase not in {"waiting_watermark", "waiting_completion_catchup"}:
+            return True
+
+        rejected = self._soft_stop_rejected_barriers(context)
+        if barrier_seq32 is not None:
+            rejected.add(int(barrier_seq32))
+
+        retry_barrier = self._select_array_soft_stop_barrier(context)
+        if retry_barrier is not None:
+            context["current_barrier_seq32"] = retry_barrier
+            context["soft_stop_pending"] = True
+            context["soft_stop_phase"] = "waiting_watermark"
+            ok = self._request_array_pause_after_barrier(retry_barrier)
+            if ok:
+                self._record_print_array_audit_event(
+                    "print_array_soft_stop_retargeted",
+                    "Print array soft stop retargeted after stale barrier",
+                    details={
+                        "rejected_barrier_seq32": barrier_seq32,
+                        "retry_barrier_seq32": retry_barrier,
+                    },
+                )
+            return True
+
+        context["current_barrier_seq32"] = None
+        context["soft_stop_pending"] = True
+        context["soft_stop_phase"] = "waiting_completion_catchup"
+        self._record_print_array_audit_event(
+            "print_array_soft_stop_waiting_for_completion",
+            "Print array soft stop waiting for completion after stale barrier",
+            details={"rejected_barrier_seq32": barrier_seq32},
+        )
+        self._maybe_complete_array_soft_stop_after_catchup()
         return True
 
     def _abort_array_after_soft_stop_failure(self, reason, barrier_seq32=None):
@@ -3356,6 +3471,28 @@ class Controller(QObject):
 
     def _warn_soft_stop_post_watermark(self, message):
         self.error_occurred_signal.emit("Soft Stop Warning", str(message or "Soft stop could not finish parking."))
+
+    def _maybe_complete_array_soft_stop_after_catchup(self):
+        context = getattr(self, "_array_context", None)
+        if not isinstance(context, dict):
+            return False
+        if context.get("soft_stop_phase") != "waiting_completion_catchup":
+            return False
+        if context.get("finalize_reason") is not None:
+            return False
+        if context.get("queued_wells"):
+            return False
+
+        stock_id = context.get("stock_id")
+        try:
+            remaining_wells = self._get_array_remaining_wells(stock_id)
+        except Exception:
+            remaining_wells = []
+
+        context["soft_stop_pending"] = False
+        context["soft_stop_phase"] = "done"
+        reason = "soft_stop" if remaining_wells else "completed"
+        return self._enqueue_array_finalize(reason)
 
     def _clear_command_queue_for_soft_stop(self, on_cleared=None):
         self.machine.clear_command_queue(handler=on_cleared)
@@ -5013,6 +5150,7 @@ class Controller(QObject):
             self._enqueue_array_finalize("completed")
         elif self.get_array_run_state() == "stop_requested":
             context["soft_stop_pending"] = True
+            self._maybe_complete_array_soft_stop_after_catchup()
         elif context.get("update_volume") and context.get("expected_volume") is not None and context.get("expected_volume") < 10:
             self._enqueue_array_finalize("refill_required")
         else:

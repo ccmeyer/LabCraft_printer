@@ -943,6 +943,123 @@ def test_request_array_soft_stop_sends_pause_after_current_barrier():
     assert callable(kwargs["on_failure"])
 
 
+def test_request_array_soft_stop_watermark_rejection_retries_next_queued_well():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5), FakeWell("A2", 2)]),
+        printer_head=_make_printer_head(),
+        initial_state="running",
+    )
+
+    def _reject_first_pause_after(barrier, on_success=None, on_failure=None):
+        if barrier == 123:
+            on_failure(
+                {
+                    "reason": "ack_rejected",
+                    "ack_result": "watermark_rejected",
+                    "barrier_seq32": 123,
+                }
+            )
+        return True
+
+    c.machine.request_pause_after_seq32 = Mock(side_effect=_reject_first_pause_after)
+    c._array_context = {
+        "queued_wells": [
+            {"well_id": "A1", "target_droplets": 5, "dispense_seq32": 123},
+            {"well_id": "A2", "target_droplets": 2, "dispense_seq32": 130},
+        ],
+        "current_barrier_seq32": 123,
+        "soft_stop_pending": False,
+    }
+
+    assert Controller.request_array_soft_stop(c) is True
+
+    requested_barriers = [call_args.args[0] for call_args in c.machine.request_pause_after_seq32.call_args_list]
+    assert requested_barriers == [123, 130]
+    c.machine.clear_command_queue.assert_not_called()
+    c.model.machine_model.clear_command_queue.assert_not_called()
+    assert c.get_array_run_state() == "stop_requested"
+    assert c._array_context["current_barrier_seq32"] == 130
+    assert c._array_context["soft_stop_phase"] == "waiting_watermark"
+    assert c._array_context["soft_stop_pending"] is True
+    assert c._array_context["soft_stop_rejected_barriers"] == {123}
+    assert c.error_occurred_signal.calls == []
+
+
+def test_request_array_soft_stop_repeated_watermark_rejection_waits_for_completion_catchup():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5), FakeWell("A2", 2)]),
+        printer_head=_make_printer_head(),
+        initial_state="running",
+    )
+
+    def _reject_all_pause_after(barrier, on_success=None, on_failure=None):
+        on_failure(
+            {
+                "reason": "ack_rejected",
+                "ack_result": "watermark_rejected",
+                "barrier_seq32": barrier,
+            }
+        )
+        return True
+
+    c.machine.request_pause_after_seq32 = Mock(side_effect=_reject_all_pause_after)
+    c._array_context = {
+        "queued_wells": [
+            {"well_id": "A1", "target_droplets": 5, "dispense_seq32": 123},
+            {"well_id": "A2", "target_droplets": 2, "dispense_seq32": 130},
+        ],
+        "current_barrier_seq32": 123,
+        "soft_stop_pending": False,
+    }
+
+    assert Controller.request_array_soft_stop(c) is True
+
+    requested_barriers = [call_args.args[0] for call_args in c.machine.request_pause_after_seq32.call_args_list]
+    assert requested_barriers == [123, 130]
+    c.machine.clear_command_queue.assert_not_called()
+    assert c.get_array_run_state() == "stop_requested"
+    assert c._array_context["current_barrier_seq32"] is None
+    assert c._array_context["soft_stop_phase"] == "waiting_completion_catchup"
+    assert c._array_context["soft_stop_pending"] is True
+    assert c._array_context["soft_stop_rejected_barriers"] == {123, 130}
+    assert c.error_occurred_signal.calls == []
+
+
+def test_request_array_soft_stop_watermark_rejection_without_future_barrier_waits_for_completion_catchup():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5), FakeWell("A2", 2)]),
+        printer_head=_make_printer_head(),
+        initial_state="running",
+    )
+
+    def _reject_pause_after(_barrier, on_success=None, on_failure=None):
+        on_failure(
+            {
+                "reason": "ack_rejected",
+                "ack_result": "watermark_rejected",
+                "barrier_seq32": 123,
+            }
+        )
+        return True
+
+    c.machine.request_pause_after_seq32 = Mock(side_effect=_reject_pause_after)
+    c._array_context = {
+        "stock_id": "stock-a",
+        "queued_wells": [{"well_id": "A1", "target_droplets": 5, "dispense_seq32": 123}],
+        "current_barrier_seq32": 123,
+        "soft_stop_pending": False,
+    }
+
+    assert Controller.request_array_soft_stop(c) is True
+
+    c.machine.clear_command_queue.assert_not_called()
+    assert c.get_array_run_state() == "stop_requested"
+    assert c._array_context["current_barrier_seq32"] is None
+    assert c._array_context["soft_stop_phase"] == "waiting_completion_catchup"
+    assert c._array_context["soft_stop_pending"] is True
+    assert c.error_occurred_signal.calls == []
+
+
 def test_request_array_soft_stop_write_failure_aborts_to_idle():
     c = _make_controller(
         well_plate=FakeWellPlate([FakeWell("A1", 5)]),
@@ -1136,6 +1253,42 @@ def test_handle_array_well_complete_soft_stop_waits_for_watermark():
     c._enqueue_array_finalize.assert_not_called()
 
 
+def test_handle_array_well_complete_completion_catchup_finalizes_soft_stop_when_wells_remain():
+    current = FakeWell("A1", 5)
+    later = FakeWell("A2", 2)
+    c = _make_controller(
+        well_plate=FakeWellPlate([current, later]),
+        printer_head=_make_printer_head(),
+        initial_state="stop_requested",
+    )
+    c._array_context = {
+        "stock_id": "stock-a",
+        "expected_volume": None,
+        "update_volume": False,
+        "droplet_volume": None,
+        "finalize_reason": None,
+        "queued_wells": [{"well_id": "A1", "target_droplets": 5, "dispense_seq32": 101}],
+        "planned_well_ids": {"A1"},
+        "soft_stop_pending": True,
+        "soft_stop_phase": "waiting_completion_catchup",
+    }
+    c._enqueue_array_finalize = Mock(return_value=True)
+
+    Controller._handle_array_well_complete(
+        c,
+        well_id="A1",
+        stock_id="stock-a",
+        target_droplets=5,
+        update_volume=False,
+    )
+
+    assert current.record_calls == [("stock-a", 5)]
+    assert c._array_context["queued_wells"] == []
+    assert c._array_context["soft_stop_pending"] is False
+    assert c._array_context["soft_stop_phase"] == "done"
+    c._enqueue_array_finalize.assert_called_once_with("soft_stop")
+
+
 def test_handle_status_update_completes_soft_stop_when_watermark_reached():
     c = _make_controller(
         well_plate=FakeWellPlate([FakeWell("A1", 5)]),
@@ -1151,6 +1304,29 @@ def test_handle_status_update_completes_soft_stop_when_watermark_reached():
 
     c.model.update_state.assert_called_once()
     c._begin_soft_stop_clear_and_park.assert_called_once_with()
+
+
+def test_handle_status_update_completion_catchup_finalizes_when_queue_is_empty():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 0), FakeWell("A2", 2)]),
+        printer_head=_make_printer_head(),
+        initial_state="stop_requested",
+    )
+    c._array_context = {
+        "stock_id": "stock-a",
+        "finalize_reason": None,
+        "queued_wells": [],
+        "soft_stop_pending": True,
+        "soft_stop_phase": "waiting_completion_catchup",
+    }
+    c._enqueue_array_finalize = Mock(return_value=True)
+
+    Controller.handle_status_update(c, {"Current_command": 130, "Last_completed": 130, "Last_retired": 130})
+
+    c.model.update_state.assert_called_once()
+    c._enqueue_array_finalize.assert_called_once_with("soft_stop")
+    assert c._array_context["soft_stop_pending"] is False
+    assert c._array_context["soft_stop_phase"] == "done"
 
 
 def test_handle_status_update_ignores_repeated_watermark_frames_after_clear_begins():
