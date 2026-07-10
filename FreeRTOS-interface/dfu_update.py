@@ -303,18 +303,10 @@ def _flash_with_dfu(bin_path: Path,
         cmd += ["--path", usb_path]        # optional disambiguation
 
     cmd += ["-a", str(alt), "-s", f"{flash_addr}{suffix}", "-D", str(bin_path)]
-    # cmd = ["dfu-util", "-a", "0", "-s", f"{flash_addr}:leave", "-D", str(bin_path)]
-    # subprocess.run(cmd, check=True, cwd=(str(cwd) if cwd else None))
-
-        # capture output so failures show up in your UI logs
     res = subprocess.run(
         cmd,
         cwd=(str(cwd) if cwd else None),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True
     )
-    print(res.stdout, end="")              # goes to worker output stream
     if res.returncode != 0:
         raise RuntimeError(f"dfu-util failed (rc={res.returncode})")
 
