@@ -6757,6 +6757,8 @@ class PlateCalibrationDialog(BaseCalibrationDialog):
             self.visual_aid_scene.addEllipse(pos[0], pos[1], well_radius * 2, well_radius * 2, pen=pen, brush=brush)
 
 class RackCalibrationDialog(BaseCalibrationDialog):
+    RACK_MOVE_ERROR_TITLE = "Rack Calibration Move Error"
+
     def __init__(self, main_window, model, controller):
         steps = ["Left","Right"]
         name_dict = {
@@ -6784,6 +6786,171 @@ class RackCalibrationDialog(BaseCalibrationDialog):
 
     def discard_temp_calibrations(self):
         self.model.rack_model.discard_temp_calibrations()
+
+    def _rack_move_error(self, message):
+        self.main_window.popup_message(self.RACK_MOVE_ERROR_TITLE, message)
+        return False
+
+    def _rack_home_z(self):
+        location_model = getattr(self.model, "location_model", None)
+        getter = getattr(location_model, "get_location_dict", None)
+        home_location = getter("home") if callable(getter) else None
+        try:
+            return int(home_location["Z"])
+        except (TypeError, ValueError, KeyError):
+            return None
+
+    def _rack_target_for_step(self, step_index):
+        step_name = self.steps[step_index]
+        converted_step_name = self.name_dict[step_name]
+        starting_coordinates = self.get_calibration_by_name(converted_step_name)
+        temp_coordinates = self.get_temp_calibration_by_name(converted_step_name)
+
+        if temp_coordinates:
+            target_coordinates = temp_coordinates.copy()
+        elif starting_coordinates:
+            avg_offset = self.calculate_average_offset()
+            target_coordinates = {
+                axis: int(starting_coordinates[axis]) + int(avg_offset[axis]) for axis in ['X', 'Y', 'Z']
+            }
+        else:
+            return None
+
+        try:
+            return {axis: int(target_coordinates[axis]) for axis in ['X', 'Y', 'Z']}
+        except (TypeError, ValueError, KeyError):
+            return None
+
+    def _rack_clearance_position(self, coordinates, z_override=None):
+        return {
+            'X': int(coordinates['X']) + int(self.offsets['X']),
+            'Y': int(coordinates['Y']) + int(self.offsets['Y']),
+            'Z': int(z_override) if z_override is not None else int(coordinates['Z']) + int(self.offsets['Z']),
+        }
+
+    def _queue_rack_absolute_coordinates(self, coordinates, error_message):
+        if self.controller.set_absolute_coordinates(*self.convert_dict_coords(coordinates), override=True) is False:
+            return self._rack_move_error(error_message)
+        return True
+
+    def _queue_rack_target_approach(self, target_coordinates):
+        clearance_coordinates = self._rack_clearance_position(target_coordinates)
+        if self._queue_rack_absolute_coordinates(
+            clearance_coordinates,
+            "Failed to queue the rack calibration clearance move.",
+        ) is False:
+            return False
+        return self._queue_rack_absolute_coordinates(
+            target_coordinates,
+            "Failed to queue the rack calibration target move.",
+        )
+
+    def _queue_rack_home_z_traverse_to_step(self, step_index):
+        home_z = self._rack_home_z()
+        if home_z is None:
+            return self._rack_move_error(
+                "Cannot move between rack calibration positions because home Z is unavailable.",
+            )
+
+        target_coordinates = self._rack_target_for_step(step_index)
+        if target_coordinates is None:
+            return True
+
+        try:
+            current_position = self.model.machine_model.get_current_position_dict_capital().copy()
+            current_position = {axis: int(current_position[axis]) for axis in ['X', 'Y', 'Z']}
+        except (TypeError, ValueError, KeyError):
+            return self._rack_move_error("Current machine position is unavailable for rack calibration travel.")
+        departure_clearance = self._rack_clearance_position(current_position)
+        target_home_clearance = self._rack_clearance_position(target_coordinates, z_override=home_z)
+        target_rack_clearance = self._rack_clearance_position(target_coordinates)
+
+        for coordinates, error_message in (
+            (departure_clearance, "Failed to queue the rack calibration departure clearance move."),
+            (target_home_clearance, "Failed to queue the rack calibration home-Z traverse move."),
+            (target_rack_clearance, "Failed to queue the rack calibration descent clearance move."),
+            (target_coordinates, "Failed to queue the rack calibration target move."),
+        ):
+            if self._queue_rack_absolute_coordinates(coordinates, error_message) is False:
+                return False
+        return True
+
+    def move_to_initial_position(self):
+        """Move to the current rack calibration point using rack-specific safe travel."""
+        target_coordinates = self._rack_target_for_step(self.current_step)
+        if target_coordinates is None:
+            return True
+        return self._queue_rack_target_approach(target_coordinates)
+
+    def move_to_offset_position(self):
+        """Move away from the current rack point using the existing +X rack clearance."""
+        current_position = self.model.machine_model.get_current_position_dict_capital().copy()
+        try:
+            current_position = {axis: int(current_position[axis]) for axis in ['X', 'Y', 'Z']}
+        except (TypeError, ValueError, KeyError):
+            return self._rack_move_error("Current machine position is unavailable for rack calibration travel.")
+        offset_position = self._rack_clearance_position(current_position)
+        return self._queue_rack_absolute_coordinates(
+            offset_position,
+            "Failed to queue the rack calibration offset move.",
+        )
+
+    def next_step(self):
+        if self.model.machine_model.is_busy():
+            self.main_window.popup_message("Machine Busy", "The machine is currently executing a command. Please wait for it to complete.")
+            return False
+
+        if self.current_step < len(self.steps):
+            next_step_index = self.current_step + 1
+            if next_step_index < len(self.steps) and self._rack_home_z() is None:
+                return self._rack_move_error(
+                    "Cannot move between rack calibration positions because home Z is unavailable.",
+                )
+
+            current_position = self.model.machine_model.get_current_position_dict_capital()
+            step_name = self.steps[self.current_step]
+            converted_step_name = self.name_dict[step_name]
+            self.set_calibration_position(converted_step_name, current_position)
+
+            if next_step_index < len(self.steps):
+                if self._queue_rack_home_z_traverse_to_step(next_step_index) is False:
+                    return False
+            else:
+                if self.move_to_offset_position() is False:
+                    return False
+
+            self.current_step += 1
+
+            if self.current_step < len(self.steps):
+                self.instructions_label.setText(f"Move to the {self.steps[self.current_step]} position and confirm the location.")
+            else:
+                self.instructions_label.setText("Calibration complete.")
+                self.next_button.setEnabled(False)
+                self.submit_button.setEnabled(True)
+                self.submit_button.setStyleSheet(f"background-color: {self.color_dict['dark_blue']}; color: white;")
+            self.back_button.setEnabled(True)
+
+            self.update_step_labels()
+            self.update_visual_aid()
+            return True
+        return False
+
+    def previous_step(self):
+        if self.current_step > 0:
+            previous_step_index = self.current_step - 1
+            if self._queue_rack_home_z_traverse_to_step(previous_step_index) is False:
+                return False
+
+            self.current_step = previous_step_index
+            self.instructions_label.setText(f"Move to the {self.steps[self.current_step]} position and confirm the location.")
+            self.next_button.setEnabled(True)
+            if self.current_step == 0:
+                self.back_button.setEnabled(False)
+
+            self.update_step_labels()
+            self.update_visual_aid()
+            return True
+        return False
 
     def update_visual_aid(self):
         """Update the visual aid for the rack position calibration."""
@@ -7112,37 +7279,249 @@ class RackBox(QGroupBox):
     
     def open_rack_calibration_dialog(self):
         """Open the rack calibration dialog."""
-        importlib.reload(CalibrationClasses.View)
-        importlib.reload(CalibrationClasses)
+        if not self._rack_calibration_machine_ready():
+            return False
 
-        rack_fix_dialog = CalibrationClasses.RackCalibrationFixDialog(self.main_window,self.model,self.controller)
-        rack_fix_dialog.exec()
+        gripper_head = self._rack_calibration_gripper_printer_head()
+        if gripper_head is not None:
+            if not self._is_rack_calibration_chip(gripper_head):
+                self.main_window.popup_message(
+                    "Calibration Chip Required",
+                    "Please remove the current printer head and load the calibration chip before calibrating the rack.",
+                )
+                return False
+            return self._run_guided_rack_calibration(manual_chip_loaded=False)
 
+        chip, origin_slot_number, message = self._rack_calibration_chip_origin()
+        if message:
+            self.main_window.popup_message("Calibration Chip Required", message)
+            return False
 
-        # if not self.model.machine_model.motors_are_enabled() or not self.model.machine_model.motors_are_homed():
-        #     self.main_window.popup_message("Motors Not Enabled or Homed","Please enable and home the motors before calibrating the well plate.")
-        #     return
-        # if self.model.rack_model.get_gripper_printer_head() != None:
-        #     print("Gripper is loaded")
-        #     if not self.model.rack_model.get_gripper_printer_head().is_calibration_chip():
-        #         self.main_window.popup_message("Calibration Chip Required","Please load the calibration chip into the gripper before calibrating the rack.")
-        #         return
-        #     else:
-        #         print("Calibration chip is loaded")
-        # else:
-        #     print("Gripper is empty")
-        #     self.main_window.popup_message("Gripper Empty","Please load the calibration chip into the gripper before calibrating the rack.")
-        #     return
-        # rack_calibration_dialog = RackCalibrationDialog(self.main_window,self.model,self.controller)
-        
-        # # Execute the dialog and check if the user completes the calibration
-        # if rack_calibration_dialog.exec() == QDialog.Accepted:
-        #     print("Calibration completed successfully.")
-        #     self.model.rack_model.update_calibration_data()
-        # else:
-        #     print("Calibration was canceled or failed.")
-        #     self.model.rack_model.discard_temp_calibrations()
-        #     # self.model.well_plate.discard_temp_calibrations()
+        response = self.main_window.popup_yes_no(
+            "Manual Calibration Chip Load",
+            "The rack calibration chip is not currently in the gripper. Open the gripper so you can insert the calibration chip manually?",
+        )
+        if self.main_window._is_no_response(response):
+            return False
+
+        return self._begin_manual_rack_calibration_chip_load(origin_slot_number)
+
+    def _rack_calibration_machine_ready(self):
+        machine_model = getattr(self.model, "machine_model", None)
+        motors_enabled = getattr(machine_model, "motors_are_enabled", None)
+        motors_homed = getattr(machine_model, "motors_are_homed", None)
+        if not callable(motors_enabled) or not callable(motors_homed):
+            self.main_window.popup_message(
+                "Motors Not Enabled or Homed",
+                "Motor status is unavailable. Please reconnect before calibrating the rack.",
+            )
+            return False
+        if not motors_enabled() or not motors_homed():
+            self.main_window.popup_message(
+                "Motors Not Enabled or Homed",
+                "Please enable and home the motors before calibrating the rack.",
+            )
+            return False
+        return True
+
+    def _rack_calibration_gripper_printer_head(self):
+        getter = getattr(self.rack_model, "get_gripper_printer_head", None)
+        if callable(getter):
+            return getter()
+        return getattr(self.rack_model, "gripper_printer_head", None)
+
+    def _is_rack_calibration_chip(self, printer_head):
+        checker = getattr(printer_head, "is_calibration_chip", None)
+        return bool(callable(checker) and checker())
+
+    def _rack_calibration_chip_origin(self):
+        manager = getattr(self.model, "printer_head_manager", None)
+        getter = getattr(manager, "get_calibration_chip", None)
+        chip = getter() if callable(getter) else None
+        if chip is None:
+            return None, None, "The calibration chip is unavailable."
+        if not self._is_rack_calibration_chip(chip):
+            return None, None, "The configured calibration chip is not marked as a calibration chip."
+
+        finder = getattr(self.rack_model, "find_slot_for_printer_head", None)
+        origin_slot_number = finder(chip) if callable(finder) else None
+        if origin_slot_number is None:
+            slots = getattr(self.rack_model, "slots", None)
+            if slots is None:
+                get_all_slots = getattr(self.rack_model, "get_all_slots", None)
+                slots = get_all_slots() if callable(get_all_slots) else None
+            if slots is not None:
+                for slot_number, slot in enumerate(slots):
+                    if getattr(slot, "printer_head", None) is chip:
+                        origin_slot_number = slot_number
+                        break
+        if origin_slot_number is None:
+            return chip, None, "The calibration chip is not assigned to a rack slot."
+        return chip, int(origin_slot_number), ""
+
+    def _begin_manual_rack_calibration_chip_load(self, origin_slot_number):
+        def after_open():
+            self.main_window.popup_message(
+                "Insert Calibration Chip",
+                "Insert the calibration chip into the gripper, then click OK to close the gripper.",
+            )
+            self.controller.complete_manual_calibration_chip_load(
+                origin_slot_number=origin_slot_number,
+                on_loaded=lambda: self._run_guided_rack_calibration(
+                    manual_chip_loaded=True,
+                    origin_slot_number=origin_slot_number,
+                ),
+            )
+
+        return self.controller.begin_manual_calibration_chip_load(
+            origin_slot_number=origin_slot_number,
+            on_open=after_open,
+        )
+
+    def _run_guided_rack_calibration(self, manual_chip_loaded=False, origin_slot_number=None):
+        rack_calibration_dialog = RackCalibrationDialog(self.main_window, self.model, self.controller)
+
+        if rack_calibration_dialog.exec() == QDialog.Accepted:
+            print("Rack calibration completed successfully.")
+            self.model.rack_model.update_calibration_data()
+        else:
+            print("Rack calibration was canceled or failed.")
+            self.model.rack_model.discard_temp_calibrations()
+
+        if manual_chip_loaded:
+            self._prompt_manual_rack_calibration_chip_cleanup(origin_slot_number)
+        return True
+
+    def _prompt_manual_rack_calibration_chip_cleanup(self, origin_slot_number):
+        if not self._rack_calibration_cleanup_chip_ready(silent_if_empty=True):
+            return False
+
+        options = ["Drop Off in Rack", "Manual Remove", "Leave in Gripper"]
+        chooser = getattr(self.main_window, "popup_choice", None)
+        if callable(chooser):
+            choice = chooser(
+                "Calibration Chip Cleanup",
+                "The calibration chip is still in the gripper.",
+                options,
+                default="Drop Off in Rack",
+            )
+        else:
+            response = self.main_window.popup_yes_no(
+                "Calibration Chip Cleanup",
+                "Drop the calibration chip back into its original rack slot?",
+            )
+            choice = "Leave in Gripper" if self.main_window._is_no_response(response) else "Drop Off in Rack"
+
+        if choice == "Drop Off in Rack":
+            return self._drop_off_manual_rack_calibration_chip(origin_slot_number)
+        elif choice == "Manual Remove":
+            return self._begin_manual_rack_calibration_chip_removal()
+        return True
+
+    def _rack_calibration_cleanup_failure(self, message):
+        self.main_window.popup_message("Calibration Chip Cleanup", message)
+        return False
+
+    def _rack_calibration_cleanup_chip_ready(self, silent_if_empty=False):
+        gripper_head = self._rack_calibration_gripper_printer_head()
+        if gripper_head is None:
+            if not silent_if_empty:
+                self._rack_calibration_cleanup_failure(
+                    "There is no calibration chip in the gripper to clean up.",
+                )
+            return False
+        if not self._is_rack_calibration_chip(gripper_head):
+            self._rack_calibration_cleanup_failure(
+                "The gripper is not holding a calibration chip. Cleanup was not started.",
+            )
+            return False
+        return True
+
+    def _resolve_manual_rack_calibration_origin_slot(self, origin_slot_number):
+        if origin_slot_number is None:
+            origin_slot_number = getattr(self.rack_model, "gripper_slot_number", None)
+        if origin_slot_number is None:
+            return None, "Cannot drop off the calibration chip automatically because its origin slot is unknown."
+
+        raw_slot_number = origin_slot_number
+        try:
+            origin_slot_number = int(origin_slot_number)
+        except (TypeError, ValueError):
+            return None, f"Calibration chip origin slot '{raw_slot_number}' is invalid."
+
+        slots = getattr(self.rack_model, "slots", None)
+        if slots is None:
+            get_all_slots = getattr(self.rack_model, "get_all_slots", None)
+            slots = get_all_slots() if callable(get_all_slots) else None
+        if slots is not None and not 0 <= origin_slot_number < len(slots):
+            return None, f"Calibration chip origin slot {origin_slot_number} is out of range."
+        return origin_slot_number, ""
+
+    def _drop_off_manual_rack_calibration_chip(self, origin_slot_number):
+        if not self._rack_calibration_cleanup_chip_ready():
+            return False
+
+        origin_slot_number, message = self._resolve_manual_rack_calibration_origin_slot(origin_slot_number)
+        if message:
+            return self._rack_calibration_cleanup_failure(message)
+
+        dropper = getattr(self.controller, "drop_off_printer_head", None)
+        if not callable(dropper):
+            return self._rack_calibration_cleanup_failure(
+                "Controller does not support automatic calibration chip dropoff.",
+            )
+
+        result = dropper(origin_slot_number, manual=True)
+        if result is False:
+            return self._rack_calibration_cleanup_failure(
+                "Failed to queue automatic calibration chip dropoff.",
+            )
+        return True
+
+    def _begin_manual_rack_calibration_chip_removal(self):
+        if not self._rack_calibration_cleanup_chip_ready():
+            return False
+
+        mover = getattr(self.controller, "move_to_location", None)
+        if not callable(mover):
+            return self._rack_calibration_cleanup_failure(
+                "Cannot move to home before manual calibration chip removal.",
+            )
+
+        begin_removal = getattr(self.controller, "begin_manual_calibration_chip_removal", None)
+        complete_removal = getattr(self.controller, "complete_manual_calibration_chip_removal", None)
+        if not callable(begin_removal) or not callable(complete_removal):
+            return self._rack_calibration_cleanup_failure(
+                "Controller does not support manual calibration chip removal.",
+            )
+
+        failure_reported = {"value": False}
+
+        def report_failure(message):
+            failure_reported["value"] = True
+            self._rack_calibration_cleanup_failure(str(message or "Manual calibration chip removal failed."))
+
+        def after_home():
+            failure_reported["value"] = False
+            result = begin_removal(on_open=after_open, on_failed=report_failure)
+            if result is False and not failure_reported["value"]:
+                report_failure("Failed to queue opening the gripper for calibration chip removal.")
+
+        def after_open():
+            self.main_window.popup_message(
+                "Remove Calibration Chip",
+                "Hold the calibration chip, remove it from the gripper, then click OK to close the gripper.",
+            )
+            failure_reported["value"] = False
+            result = complete_removal(on_failed=report_failure)
+            if result is False and not failure_reported["value"]:
+                report_failure("Failed to queue closing the gripper after calibration chip removal.")
+
+        if mover("home", manual=True, on_complete=after_home) is False:
+            return self._rack_calibration_cleanup_failure(
+                "Failed to queue the move home before manual calibration chip removal.",
+            )
+        return True
 
     def update_button_states(self, machine_connected):
         """Update the button states based on the machine connection state."""

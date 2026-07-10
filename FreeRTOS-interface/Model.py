@@ -9787,6 +9787,86 @@ class RackModel(QObject):
         self.gripper_updated.emit()
         self.sync_expected_to_actual()
         print("All slots cleared.")
+
+    def find_slot_for_printer_head(self, printer_head):
+        """Return the slot index containing this exact printer head object."""
+        for index, slot in enumerate(self.slots):
+            if slot.printer_head is printer_head:
+                return index
+        return None
+
+    def manual_load_calibration_chip_to_gripper(self, calibration_chip, origin_slot_number=None):
+        """
+        Represent a calibration chip that was manually inserted into the gripper.
+
+        This does not command hardware. It only updates rack/gripper state after an
+        operator-assisted manual load has physically completed.
+        """
+        if self.gripper_printer_head is not None:
+            return False, "Gripper is already holding a printer head."
+
+        is_calibration_chip = getattr(calibration_chip, "is_calibration_chip", None)
+        if not callable(is_calibration_chip) or not is_calibration_chip():
+            return False, "Manual load requires a calibration chip."
+
+        if origin_slot_number is None:
+            origin_slot_number = self.find_slot_for_printer_head(calibration_chip)
+
+        if origin_slot_number is None:
+            return False, "Calibration chip is not assigned to a rack slot."
+
+        try:
+            origin_slot_number = int(origin_slot_number)
+        except (TypeError, ValueError):
+            return False, f"Slot number {origin_slot_number} is out of range."
+
+        if not 0 <= origin_slot_number < len(self.slots):
+            return False, f"Slot number {origin_slot_number} is out of range."
+
+        slot = self.slots[origin_slot_number]
+        if slot.printer_head is not calibration_chip:
+            return False, "Origin slot does not contain the calibration chip."
+
+        self.gripper_printer_head = calibration_chip
+        self.gripper_slot_number = origin_slot_number
+        slot.change_printer_head(None, returned=True)
+        slot.set_locked(True)
+        self.slot_updated.emit()
+        self.gripper_updated.emit()
+        self.sync_expected_to_actual()
+        return True, ""
+
+    def manual_remove_calibration_chip_from_gripper(self):
+        """
+        Represent a calibration chip that was manually removed from the gripper.
+
+        This leaves the chip outside known rack/gripper state.
+        """
+        calibration_chip = self.gripper_printer_head
+        is_calibration_chip = getattr(calibration_chip, "is_calibration_chip", None)
+        if calibration_chip is None:
+            return False, "Gripper is empty."
+        if not callable(is_calibration_chip) or not is_calibration_chip():
+            return False, "Gripper is not holding a calibration chip."
+
+        origin_slot_number = self.gripper_slot_number
+        self.gripper_printer_head = None
+        self.gripper_slot_number = None
+
+        if origin_slot_number is not None:
+            try:
+                origin_slot_number = int(origin_slot_number)
+            except (TypeError, ValueError):
+                origin_slot_number = None
+        if origin_slot_number is not None and 0 <= origin_slot_number < len(self.slots):
+            slot = self.slots[origin_slot_number]
+            slot.change_printer_head(None)
+            slot.set_locked(False)
+
+        self.slot_updated.emit()
+        self.gripper_updated.emit()
+        self.sync_expected_to_actual()
+        return True, ""
     
     def verify_transfer_to_gripper(self, slot_number, use_expected: bool = False):
         """

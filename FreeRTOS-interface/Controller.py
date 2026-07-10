@@ -4501,6 +4501,189 @@ class Controller(QObject):
         """Close the gripper."""
         return self.machine.close_gripper(handler=handler)
 
+    def _emit_manual_calibration_chip_failure(self, title, message, on_failed=None):
+        self.error_occurred_signal.emit(title, message)
+        if callable(on_failed):
+            on_failed(message)
+        return False
+
+    def _get_calibration_chip_for_manual_load(self):
+        manager = getattr(getattr(self, "model", None), "printer_head_manager", None)
+        getter = getattr(manager, "get_calibration_chip", None)
+        if callable(getter):
+            return getter()
+        return None
+
+    def _get_gripper_printer_head_for_manual_calibration(self, rack_model):
+        getter = getattr(rack_model, "get_gripper_printer_head", None)
+        if callable(getter):
+            return getter()
+        return getattr(rack_model, "gripper_printer_head", None)
+
+    def _is_calibration_chip_for_manual_calibration(self, printer_head):
+        checker = getattr(printer_head, "is_calibration_chip", None)
+        return bool(callable(checker) and checker())
+
+    def _resolve_manual_calibration_chip_origin_slot(self, rack_model, calibration_chip, origin_slot_number=None):
+        if origin_slot_number is None:
+            finder = getattr(rack_model, "find_slot_for_printer_head", None)
+            if callable(finder):
+                origin_slot_number = finder(calibration_chip)
+
+        if origin_slot_number is None:
+            return None, "Calibration chip is not assigned to a rack slot."
+
+        raw_slot_number = origin_slot_number
+        try:
+            origin_slot_number = int(origin_slot_number)
+        except (TypeError, ValueError):
+            return None, f"Slot number {raw_slot_number} is out of range."
+
+        slots = getattr(rack_model, "slots", None)
+        if slots is None:
+            get_all_slots = getattr(rack_model, "get_all_slots", None)
+            slots = get_all_slots() if callable(get_all_slots) else None
+
+        if slots is None or not 0 <= origin_slot_number < len(slots):
+            return None, f"Slot number {origin_slot_number} is out of range."
+
+        if getattr(slots[origin_slot_number], "printer_head", None) is not calibration_chip:
+            return None, "Origin slot does not contain the calibration chip."
+
+        return origin_slot_number, ""
+
+    def _manual_calibration_chip_load_context(self, origin_slot_number=None):
+        rack_model = getattr(getattr(self, "model", None), "rack_model", None)
+        if rack_model is None:
+            return None, None, None, "Rack model is unavailable."
+
+        if self._get_gripper_printer_head_for_manual_calibration(rack_model) is not None:
+            return None, None, None, "Gripper is already holding a printer head."
+
+        calibration_chip = self._get_calibration_chip_for_manual_load()
+        if calibration_chip is None:
+            return None, None, None, "Calibration chip is unavailable."
+        if not self._is_calibration_chip_for_manual_calibration(calibration_chip):
+            return None, None, None, "Manual load requires a calibration chip."
+
+        origin_slot_number, message = self._resolve_manual_calibration_chip_origin_slot(
+            rack_model,
+            calibration_chip,
+            origin_slot_number=origin_slot_number,
+        )
+        if origin_slot_number is None:
+            return None, None, None, message
+
+        return rack_model, calibration_chip, origin_slot_number, ""
+
+    def _manual_calibration_chip_removal_context(self):
+        rack_model = getattr(getattr(self, "model", None), "rack_model", None)
+        if rack_model is None:
+            return None, "Rack model is unavailable."
+
+        gripper_head = self._get_gripper_printer_head_for_manual_calibration(rack_model)
+        if gripper_head is None:
+            return None, "Gripper is empty."
+        if not self._is_calibration_chip_for_manual_calibration(gripper_head):
+            return None, "Gripper is not holding a calibration chip."
+        return rack_model, ""
+
+    def begin_manual_calibration_chip_load(self, origin_slot_number=None, on_open=None, on_failed=None):
+        """Open the gripper so an operator can manually insert the calibration chip."""
+        title = "Manual Calibration Chip Load Failed"
+        _rack_model, _calibration_chip, _origin_slot_number, message = self._manual_calibration_chip_load_context(
+            origin_slot_number=origin_slot_number,
+        )
+        if message:
+            return self._emit_manual_calibration_chip_failure(title, message, on_failed=on_failed)
+
+        if self.open_gripper(handler=on_open) is False:
+            return self._emit_manual_calibration_chip_failure(
+                title,
+                "Failed to send open gripper command.",
+                on_failed=on_failed,
+            )
+        return True
+
+    def complete_manual_calibration_chip_load(self, origin_slot_number=None, on_loaded=None, on_failed=None):
+        """Close the gripper and record a completed manual calibration-chip load."""
+        title = "Manual Calibration Chip Load Failed"
+        rack_model, calibration_chip, origin_slot_number, message = self._manual_calibration_chip_load_context(
+            origin_slot_number=origin_slot_number,
+        )
+        if message:
+            return self._emit_manual_calibration_chip_failure(title, message, on_failed=on_failed)
+
+        def after_close():
+            loader = getattr(rack_model, "manual_load_calibration_chip_to_gripper", None)
+            if not callable(loader):
+                self._emit_manual_calibration_chip_failure(
+                    title,
+                    "Rack model does not support manual calibration chip loading.",
+                    on_failed=on_failed,
+                )
+                return
+            ok, load_message = loader(calibration_chip, origin_slot_number=origin_slot_number)
+            if not ok:
+                self._emit_manual_calibration_chip_failure(title, load_message, on_failed=on_failed)
+                return
+            if callable(on_loaded):
+                on_loaded()
+
+        if self.close_gripper(handler=after_close) is False:
+            return self._emit_manual_calibration_chip_failure(
+                title,
+                "Failed to send close gripper command.",
+                on_failed=on_failed,
+            )
+        return True
+
+    def begin_manual_calibration_chip_removal(self, on_open=None, on_failed=None):
+        """Open the gripper so an operator can manually remove the calibration chip."""
+        title = "Manual Calibration Chip Removal Failed"
+        _rack_model, message = self._manual_calibration_chip_removal_context()
+        if message:
+            return self._emit_manual_calibration_chip_failure(title, message, on_failed=on_failed)
+
+        if self.open_gripper(handler=on_open) is False:
+            return self._emit_manual_calibration_chip_failure(
+                title,
+                "Failed to send open gripper command.",
+                on_failed=on_failed,
+            )
+        return True
+
+    def complete_manual_calibration_chip_removal(self, on_removed=None, on_failed=None):
+        """Close the gripper and record a completed manual calibration-chip removal."""
+        title = "Manual Calibration Chip Removal Failed"
+        rack_model, message = self._manual_calibration_chip_removal_context()
+        if message:
+            return self._emit_manual_calibration_chip_failure(title, message, on_failed=on_failed)
+
+        def after_close():
+            remover = getattr(rack_model, "manual_remove_calibration_chip_from_gripper", None)
+            if not callable(remover):
+                self._emit_manual_calibration_chip_failure(
+                    title,
+                    "Rack model does not support manual calibration chip removal.",
+                    on_failed=on_failed,
+                )
+                return
+            ok, remove_message = remover()
+            if not ok:
+                self._emit_manual_calibration_chip_failure(title, remove_message, on_failed=on_failed)
+                return
+            if callable(on_removed):
+                on_removed()
+
+        if self.close_gripper(handler=after_close) is False:
+            return self._emit_manual_calibration_chip_failure(
+                title,
+                "Failed to send close gripper command.",
+                on_failed=on_failed,
+            )
+        return True
+
     def set_gripper_params(self, refresh_period_ms, pulse_duration_ms, handler=None, manual=False):
         """Update the firmware gripper refresh timing."""
         return self.machine.set_gripper_params(
