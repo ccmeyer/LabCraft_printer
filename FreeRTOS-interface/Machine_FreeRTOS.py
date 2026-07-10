@@ -2415,6 +2415,7 @@ TAG_RESET_WATCHDOG_LATE_TASK = 0x1E
 TAG_RESET_ACTIVE_COMMAND    = 0x1F
 TAG_RESET_RCC_FLAGS         = 0x20
 TAG_RESET_TASK_NAME4        = 0x21
+TAG_RESET_REG_CONTEXT       = 0x22
 
 ACK_TLV_SEQ32 = 0x10
 ACK_TLV_RESULT = 0x11
@@ -2800,6 +2801,116 @@ CRASH_BOOT_STAGE_NAMES = {
     11: "hello_ack",
 }
 
+REGULATOR_TELEMETRY_FLAGS = {
+    0x0001: ("active", "active"),
+    0x0002: ("homing", "homing"),
+    0x0004: ("resetting", "resetting"),
+    0x0008: ("motion_hold", "motion_hold"),
+    0x0010: ("quiet", "quiet"),
+    0x0020: ("stepping", "stepping"),
+    0x0040: ("inactive_hold", "inactive_hold"),
+    0x0080: ("motion_hold_wdg", "motion_hold_wdg"),
+    0x0100: ("recovery_hold", "recovery_hold"),
+}
+
+REGULATOR_TELEMETRY_EVENTS = {
+    0: "none",
+    1: "start",
+    2: "pause",
+    3: "motion_hold_enter",
+    4: "motion_hold_exit",
+    5: "home_begin",
+    6: "home_end_ok",
+    7: "home_end_fail",
+    8: "reset_begin",
+    9: "reset_end_ok",
+    10: "reset_end_fail",
+    11: "quiet_begin",
+    12: "quiet_end",
+    13: "inner_limit",
+    14: "step_limit",
+    15: "safety_home",
+}
+
+REGULATOR_TELEMETRY_AGE_UNKNOWN = 0xFFFFFFFF
+REGULATOR_RESET_CONTEXT_WIRE_SIZE = 30
+
+def _regulator_age(value):
+    if value is None or int(value) == REGULATOR_TELEMETRY_AGE_UNKNOWN:
+        return None
+    return int(value)
+
+def _decode_regulator_flags(flags):
+    flags = int(flags or 0)
+    result = {"raw": flags, "names": []}
+    for bit, (key, name) in REGULATOR_TELEMETRY_FLAGS.items():
+        enabled = bool(flags & bit)
+        result[key] = enabled
+        if enabled:
+            result["names"].append(name)
+    return result
+
+def _decode_regulator_channel(flags, watchdog_enabled, watchdog_age_ms, last_event, last_event_age_ms):
+    event = int(last_event or 0)
+    decoded = _decode_regulator_flags(flags)
+    decoded.update(
+        {
+            "watchdog_enabled": bool(watchdog_enabled),
+            "watchdog_age_ms": _regulator_age(watchdog_age_ms),
+            "last_event": event,
+            "last_event_name": REGULATOR_TELEMETRY_EVENTS.get(event, f"event_{event}"),
+            "last_event_age_ms": _regulator_age(last_event_age_ms),
+        }
+    )
+    return decoded
+
+def _decode_regulator_context(raw):
+    if raw is None:
+        return None
+    if len(raw) != REGULATOR_RESET_CONTEXT_WIRE_SIZE:
+        return {"valid": False, "error": "bad_length", "raw_length": len(raw)}
+    version, valid = raw[0], raw[1]
+    p_flags, r_flags = struct.unpack_from("<HH", raw, 2)
+    p_wdg_enabled, r_wdg_enabled = raw[6], raw[7]
+    p_wdg_age_ms, r_wdg_age_ms = struct.unpack_from("<II", raw, 8)
+    p_last_event, r_last_event = raw[16], raw[17]
+    p_last_event_age_ms, r_last_event_age_ms, snapshot_tick_ms = struct.unpack_from("<III", raw, 18)
+    return {
+        "version": version,
+        "valid": bool(valid),
+        "snapshot_tick_ms": snapshot_tick_ms,
+        "print": _decode_regulator_channel(
+            p_flags,
+            p_wdg_enabled,
+            p_wdg_age_ms,
+            p_last_event,
+            p_last_event_age_ms,
+        ),
+        "refuel": _decode_regulator_channel(
+            r_flags,
+            r_wdg_enabled,
+            r_wdg_age_ms,
+            r_last_event,
+            r_last_event_age_ms,
+        ),
+    }
+
+def _regulator_context_summary(context):
+    if not context or not context.get("valid"):
+        return ""
+    parts = []
+    for label, key in (("print", "print"), ("refuel", "refuel")):
+        channel = context.get(key) or {}
+        flags = ",".join(channel.get("names") or ["none"])
+        watchdog = "enabled" if channel.get("watchdog_enabled") else "disabled"
+        age = channel.get("watchdog_age_ms")
+        age_text = "unknown" if age is None else f"{age}ms"
+        parts.append(
+            f"{label} flags={flags} event={channel.get('last_event_name', 'unknown')} "
+            f"wdg={watchdog}/{age_text}"
+        )
+    return " Regulator context: " + "; ".join(parts) + "."
+
 def crc16_x25(data: bytes) -> int:
     crc = 0xFFFF
     for b in data:
@@ -3076,6 +3187,7 @@ class SerialReader(QThread):
         fault_stage = _u8(TAG_RESET_FAULT_STAGE, boot_stage)
         watchdog_late_task = _u8(TAG_RESET_WATCHDOG_LATE_TASK)
         active_command = _u8(TAG_RESET_ACTIVE_COMMAND)
+        regulator_context = _decode_regulator_context(tlvs.get(TAG_RESET_REG_CONTEXT))
         pending = bool(flags & CRASHLOG_FLAG_PENDING)
         sticky = bool(flags & CRASHLOG_FLAG_WDT_ARM_STICKY)
 
@@ -3122,6 +3234,9 @@ class SerialReader(QThread):
             summary += f" Last fault: {last_fault_name} in {task_label} at stage {fault_stage_name}."
         elif sticky:
             summary += f" Sticky watchdog state was recorded at stage {boot_stage_name}."
+        regulator_summary = _regulator_context_summary(regulator_context)
+        if regulator_summary and (reset_cause_name in {"iwdg", "wwdg"} or last_fault_name == "wdt"):
+            summary += regulator_summary
 
         return {
             "seq8": seq8,
@@ -3154,6 +3269,7 @@ class SerialReader(QThread):
             "fault_stage": fault_stage,
             "fault_stage_name": fault_stage_name,
             "recovery_boot": bool(_u8(TAG_RESET_RECOVERY_BOOT)),
+            "regulator_context": regulator_context,
             "summary": summary,
         }
 

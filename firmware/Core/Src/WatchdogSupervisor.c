@@ -1,6 +1,8 @@
 #include "WatchdogSupervisor.h"
 
 #include "main.h"
+#include "RegulatorTelemetry.h"
+#include "PressureRegulatorTelemetry.h"
 #include "FreeRTOS.h"
 #include "task.h"
 
@@ -189,6 +191,19 @@ static void Watchdog_Task(void* argument)
     g_lateTask = late;
     g_starved = 1u;
     g_healthyStartMs = 0u;
+    uint32_t pAgeMs = REG_TEL_AGE_UNKNOWN;
+    uint32_t rAgeMs = REG_TEL_AGE_UNKNOWN;
+    (void)Watchdog_GetTaskLastSeenAgeMs(CRASH_TASK_PREG_P, &pAgeMs);
+    (void)Watchdog_GetTaskLastSeenAgeMs(CRASH_TASK_PREG_R, &rAgeMs);
+    RegulatorTelemetryResetContext regulatorContext;
+    PressureRegulator_CaptureTelemetryContext(
+        &regulatorContext,
+        Watchdog_IsTaskEnabled(CRASH_TASK_PREG_P),
+        pAgeMs,
+        Watchdog_IsTaskEnabled(CRASH_TASK_PREG_R),
+        rAgeMs,
+        nowMs);
+    CrashLog_CaptureRegulatorContext(&regulatorContext);
     CrashLog_RecordWatchdogFault(late);
   }
 }
@@ -413,4 +428,40 @@ CrashTaskId Watchdog_GetLateTask(void)
   CrashTaskId late = CRASH_TASK_NONE;
   (void)Watchdog_Evaluate(HAL_GetTick(), NULL, NULL, &late);
   return late;
+}
+
+uint32_t Watchdog_IsTaskEnabled(CrashTaskId taskId)
+{
+#if (LC_WATCHDOG_CHECKINS_ENABLE == 0)
+  (void)taskId;
+  return 0u;
+#endif
+  const uint32_t bit = Watchdog_TaskBit(taskId);
+  if (bit == 0u) return 0u;
+  return ((g_enabledMask & bit) != 0u) ? 1u : 0u;
+}
+
+uint32_t Watchdog_GetTaskLastSeenAgeMs(CrashTaskId taskId, uint32_t* ageMs)
+{
+#if (LC_WATCHDOG_CHECKINS_ENABLE == 0)
+  (void)taskId;
+  if (ageMs != NULL) {
+    *ageMs = REG_TEL_AGE_UNKNOWN;
+  }
+  return 0u;
+#endif
+  if (ageMs == NULL) {
+    return 0u;
+  }
+  *ageMs = REG_TEL_AGE_UNKNOWN;
+  const uint32_t bit = Watchdog_TaskBit(taskId);
+  if ((bit == 0u) || ((g_enabledMask & bit) == 0u)) {
+    return 0u;
+  }
+  const uint32_t lastSeen = g_lastSeen[(uint32_t)taskId];
+  if (lastSeen == 0u) {
+    return 0u;
+  }
+  *ageMs = HAL_GetTick() - lastSeen;
+  return 1u;
 }

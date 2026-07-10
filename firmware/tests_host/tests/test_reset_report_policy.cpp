@@ -70,3 +70,46 @@ TEST(ResetReportPolicy, NullSnapshotDoesNotSendReport)
 {
     CHECK_FALSE(ResetReport_ShouldSend(nullptr));
 }
+
+TEST(ResetReportPolicy, InvalidRegulatorContextIsNotIncluded)
+{
+    CrashLogSnapshot snap = makeSnapshot(CRASH_RESET_IWDG);
+    snap.lastFault = CRASH_FAULT_WDT_STARVE;
+    snap.regulatorContext.valid = 0u;
+
+    CHECK_FALSE(ResetReport_ShouldIncludeRegulatorContext(&snap));
+}
+
+TEST(ResetReportPolicy, ValidRegulatorContextIsIncludedForWatchdogResets)
+{
+    CrashLogSnapshot iwdg = makeSnapshot(CRASH_RESET_IWDG);
+    CrashLogSnapshot wwdg = makeSnapshot(CRASH_RESET_WWDG);
+    iwdg.regulatorContext.valid = 1u;
+    wwdg.regulatorContext.valid = 1u;
+
+    CHECK_TRUE(ResetReport_ShouldIncludeRegulatorContext(&iwdg));
+    CHECK_TRUE(ResetReport_ShouldIncludeRegulatorContext(&wwdg));
+}
+
+TEST(ResetReportPolicy, ValidRegulatorContextIsIncludedForWatchdogFaultRecord)
+{
+    CrashLogSnapshot snap = makeSnapshot(CRASH_RESET_SOFTWARE);
+    snap.lastFault = CRASH_FAULT_WDT_STARVE;
+    snap.regulatorContext.valid = 1u;
+
+    CHECK_TRUE(ResetReport_ShouldIncludeRegulatorContext(&snap));
+}
+
+TEST(ResetReportPolicy, ValidRegulatorContextIsNotIncludedForUnrelatedReset)
+{
+    CrashLogSnapshot snap = makeSnapshot(CRASH_RESET_PIN);
+    snap.lastFault = CRASH_FAULT_NONE;
+    snap.regulatorContext.valid = 1u;
+
+    CHECK_FALSE(ResetReport_ShouldIncludeRegulatorContext(&snap));
+}
+
+TEST(ResetReportPolicy, NullSnapshotDoesNotIncludeRegulatorContext)
+{
+    CHECK_FALSE(ResetReport_ShouldIncludeRegulatorContext(nullptr));
+}

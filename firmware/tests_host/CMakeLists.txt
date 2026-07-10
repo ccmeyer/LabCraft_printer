@@ -23,6 +23,7 @@ add_executable(fw_tests
     tests/test_valve_pulse_qualification_math.cpp
     tests/test_pressure_target_policy.cpp
     tests/test_pressure_regulator_watchdog_policy.cpp
+    tests/test_regulator_telemetry.cpp
     tests/test_pressure_trace_math.cpp
     tests/test_pressure_sensor_focus_policy.cpp
     tests/test_motion_qualification_math.cpp
@@ -46,6 +47,7 @@ add_executable(fw_tests
     ../Core/Src/OrchestratorCompletionPolicy.cpp
     ../Core/Src/OrchestratorDecode.cpp
     ../Core/Src/nvm_codec.c
+    ../Core/Src/RegulatorTelemetry.c
     ../Core/Src/PressureRegulatorMath.cpp
     ../Core/Src/RegulatorProfileCommandPolicy.cpp
     ../Core/Src/PressureTraceRecorder.cpp

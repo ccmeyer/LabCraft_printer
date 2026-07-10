@@ -26,6 +26,42 @@ def _reset_report_payload(reset_cause: int) -> bytes:
     )
 
 
+def _tlv(tag: int, raw: bytes) -> bytes:
+    return bytes([tag, len(raw)]) + raw
+
+
+def _regulator_context_payload(
+    *,
+    p_flags=0x0089,
+    r_flags=0x0103,
+    p_wdg_enabled=0,
+    r_wdg_enabled=1,
+    p_wdg_age_ms=0xFFFFFFFF,
+    r_wdg_age_ms=42,
+    p_last_event=3,
+    r_last_event=14,
+    p_last_event_age_ms=12,
+    r_last_event_age_ms=0xFFFFFFFF,
+    snapshot_tick_ms=123456,
+) -> bytes:
+    return struct.pack(
+        "<BBHHBBIIBBIII",
+        1,
+        1,
+        p_flags,
+        r_flags,
+        p_wdg_enabled,
+        r_wdg_enabled,
+        p_wdg_age_ms,
+        r_wdg_age_ms,
+        p_last_event,
+        r_last_event,
+        p_last_event_age_ms,
+        r_last_event_age_ms,
+        snapshot_tick_ms,
+    )
+
+
 class FakeSerial:
     def __init__(self, data: bytes):
         self._buf = bytearray(data)
@@ -302,6 +338,71 @@ def test_serial_reader_decodes_optional_fault_task_name4(qapp):
     assert "stage comm_rx_rearmed" in report["summary"]
 
 
+def test_serial_reader_decodes_regulator_context_in_watchdog_reset_report(qapp):
+    reset_payload = bytes(
+        [
+            mfr.RESET_REPORT,
+            0x01,
+            mfr.TAG_RESET_SEQ32,
+            4,
+            1,
+            0,
+            0,
+            0,
+            mfr.TAG_RESET_CAUSE,
+            1,
+            4,
+            mfr.TAG_RESET_FLAGS,
+            4,
+            mfr.CRASHLOG_FLAG_PENDING,
+            0,
+            0,
+            0,
+            mfr.TAG_RESET_LAST_FAULT,
+            1,
+            2,
+            mfr.TAG_RESET_LAST_TASK,
+            1,
+            3,
+            mfr.TAG_RESET_WATCHDOG_LATE_TASK,
+            1,
+            4,
+        ]
+    ) + _tlv(mfr.TAG_RESET_REG_CONTEXT, _regulator_context_payload())
+
+    report = mfr.SerialReader._parse_reset_report(reset_payload)
+
+    assert report is not None
+    context = report["regulator_context"]
+    assert context["valid"] is True
+    assert context["snapshot_tick_ms"] == 123456
+    assert context["print"]["names"] == ["active", "motion_hold", "motion_hold_wdg"]
+    assert context["print"]["watchdog_enabled"] is False
+    assert context["print"]["watchdog_age_ms"] is None
+    assert context["print"]["last_event_name"] == "motion_hold_enter"
+    assert context["print"]["last_event_age_ms"] == 12
+    assert context["refuel"]["names"] == ["active", "homing", "recovery_hold"]
+    assert context["refuel"]["watchdog_enabled"] is True
+    assert context["refuel"]["watchdog_age_ms"] == 42
+    assert context["refuel"]["last_event_name"] == "step_limit"
+    assert context["refuel"]["last_event_age_ms"] is None
+    assert "Regulator context:" in report["summary"]
+    assert "refuel flags=active,homing,recovery_hold event=step_limit wdg=enabled/42ms" in report["summary"]
+
+
+def test_serial_reader_marks_bad_regulator_context_invalid(qapp):
+    reset_payload = _reset_report_payload(4) + _tlv(mfr.TAG_RESET_REG_CONTEXT, b"\x01\x01\x00")
+
+    report = mfr.SerialReader._parse_reset_report(reset_payload)
+
+    assert report is not None
+    assert report["regulator_context"] == {
+        "valid": False,
+        "error": "bad_length",
+        "raw_length": 3,
+    }
+
+
 def test_serial_reader_accepts_older_reset_report_without_raw_flags(qapp):
     report = mfr.SerialReader._parse_reset_report(_reset_report_payload(1))
 
@@ -311,6 +412,7 @@ def test_serial_reader_accepts_older_reset_report_without_raw_flags(qapp):
     assert report["reset_flag_names"] == []
     assert report["reset_flag_summary"] == ""
     assert report["fault_task_name4"] is None
+    assert report["regulator_context"] is None
 
 
 def test_serial_reader_maps_new_crash_task_ids():

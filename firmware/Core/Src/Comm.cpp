@@ -20,6 +20,7 @@
 #include "Logger.h"
 #include "CommCodec.h"
 #include "CrashLog.h"
+#include "ResetReportPolicy.h"
 #include "WatchdogSupervisor.h"
 
 #if (LC_HAS_IMAGING == 1)
@@ -42,6 +43,14 @@ inline void appendU32(uint8_t* payload, size_t& idx, uint8_t tag, uint32_t value
     payload[idx++] = static_cast<uint8_t>((value >> 8) & 0xFFu);
     payload[idx++] = static_cast<uint8_t>((value >> 16) & 0xFFu);
     payload[idx++] = static_cast<uint8_t>((value >> 24) & 0xFFu);
+}
+
+inline void appendBytes(uint8_t* payload, size_t& idx, uint8_t tag, const uint8_t* data, uint8_t len) {
+    payload[idx++] = tag;
+    payload[idx++] = len;
+    for (uint8_t i = 0u; i < len; ++i) {
+        payload[idx++] = data[i];
+    }
 }
 }
 
@@ -264,7 +273,7 @@ void Comm::sendResetReport(uint8_t seq8, uint32_t seq32, const CrashLogSnapshot*
       return;
   }
 
-  uint8_t payload[96] = {0};
+  uint8_t payload[160] = {0};
   size_t idx = 0;
   payload[idx++] = Orchestrator::CMD_RESET_REPORT;
   payload[idx++] = seq8;
@@ -286,6 +295,17 @@ void Comm::sendResetReport(uint8_t seq8, uint32_t seq32, const CrashLogSnapshot*
   appendU8(payload, idx, TAG_RESET_ACTIVE_COMMAND, snap->activeCommand);
   appendU32(payload, idx, TAG_RESET_RCC_FLAGS, snap->resetFlagsRaw);
   appendU32(payload, idx, TAG_RESET_TASK_NAME4, snap->faultTaskName4);
+  uint8_t regulatorContext[REG_TEL_RESET_CONTEXT_WIRE_SIZE] = {0u};
+  if (ResetReport_ShouldIncludeRegulatorContext(snap) &&
+      RegulatorTelemetry_PackResetContext(&snap->regulatorContext,
+                                          regulatorContext,
+                                          sizeof(regulatorContext)) != 0u) {
+    appendBytes(payload,
+                idx,
+                TAG_RESET_REG_CONTEXT,
+                regulatorContext,
+                static_cast<uint8_t>(sizeof(regulatorContext)));
+  }
   sendFrame(_huart, payload, idx);
 }
 
@@ -531,7 +551,7 @@ void Comm::statusTask() {
 					chunk = static_cast<Chunk>((chunk + 1) % CHUNK_COUNT);
 
 					break;
-        	}
+			}
 			case CHUNK_1: {
 				uint8_t payload[176] = {};
 				size_t idx = 0;

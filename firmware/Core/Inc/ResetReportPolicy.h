@@ -4,5 +4,6 @@
 #include "CrashLog.h"
 
 bool ResetReport_ShouldSend(const CrashLogSnapshot* snap);
+bool ResetReport_ShouldIncludeRegulatorContext(const CrashLogSnapshot* snap);
 
 #endif /* INC_RESETREPORTPOLICY_H_ */

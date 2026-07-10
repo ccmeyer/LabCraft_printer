@@ -141,6 +141,7 @@ public:
   // If you prefer "hard fail", remove this and update call sites instead.
   static PressureRegulator& regR() { return *get(0); }
 #endif
+  static PressureRegulator* tryGet(uint8_t sensorPort);
 
   bool isPressureOk() const { return _pressureOk; }
   void setRecoveryConfig(const RecoveryConfig& cfg) { _recoveryCfg = cfg; }
@@ -154,6 +155,7 @@ public:
   void notifyPulseEnd(const DisturbanceEvent& ev);
   bool isRecoveryActive() const { return _recoveryActive; }
   uint32_t getCurrentRecoveryBoostHz() const { return _recoveryCurrentBoostHz; }
+  RegulatorTelemetrySnapshot getTelemetrySnapshot() const;
   void setSlewConfig(const SlewConfig& cfg) { _slewCfg = cfg; }
   SlewConfig getSlewConfig() const { return _slewCfg; }
 
@@ -240,12 +242,16 @@ private:
   void _holdWatchdog(WatchdogHold reason);
   void _releaseWatchdog(WatchdogHold reason, bool checkIn);
   bool _canEnterMotionHold() const;
+  uint16_t _buildTelemetryFlags() const;
+  void _recordTelemetryEvent(RegulatorTelemetryEvent event);
 
   // control state
   bool     _stepping    = false;
   uint32_t _lastRateHz  = 0;
   bool     _lastDir     = false;
   uint32_t _currentArr = 0;
+  volatile uint8_t _lastTelemetryEvent = REG_TEL_EVENT_NONE;
+  volatile uint32_t _lastTelemetryEventTickMs = 0;
 
 //  bool 	   wasNegative = false;
 

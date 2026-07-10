@@ -2,6 +2,7 @@
 #define INC_CRASHLOG_H_
 
 #include <stdint.h>
+#include "RegulatorTelemetry.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -116,6 +117,7 @@ typedef struct {
   CrashTaskId watchdogLateTask;
   uint8_t activeCommand;
   uint32_t faultTaskName4;
+  RegulatorTelemetryResetContext regulatorContext;
 } CrashLogSnapshot;
 
 #define CRASHLOG_FLAG_VALID            0x00000001u
@@ -133,6 +135,7 @@ void CrashLog_RecordAndHaltFromHandler(CrashFaultKind kind, CrashTaskId taskIdHi
 void CrashLog_RecordWatchdogSticky(uint32_t rawStatus);
 void CrashLog_RequestWatchdogRecoveryReset(uint32_t rawStatus);
 void CrashLog_ClearWatchdogRecoveryReset(void);
+void CrashLog_CaptureRegulatorContext(const RegulatorTelemetryResetContext* context);
 uint32_t CrashLog_IsWatchdogRecoveryBoot(void);
 void CrashLog_MarkBootHealthy(void);
 void CrashLog_GetSnapshot(CrashLogSnapshot* out);

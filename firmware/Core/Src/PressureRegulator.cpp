@@ -11,6 +11,7 @@
 #include "Orchestrator.h"
 #include "Logger.h"
 #include "Printer.h"
+#include "PressureRegulatorTelemetry.h"
 #include "timers.h"
 #include "FreeRTOS.h"
 #include "event_groups.h"
@@ -63,6 +64,16 @@ static TickType_t pregMsToAtLeast1Tick(uint32_t ms)
 PressureRegulator* PressureRegulator::_registry[PressureRegulator::MAX_REGS] = { nullptr };
 int                PressureRegulator::_regCount = 0;
 
+PressureRegulator* PressureRegulator::tryGet(uint8_t sensorPort) {
+  for (int i = 0; i < _regCount && i < MAX_REGS; ++i) {
+    PressureRegulator* candidate = _registry[i];
+    if (candidate != nullptr && candidate->_sensorPort == sensorPort) {
+      return candidate;
+    }
+  }
+  return nullptr;
+}
+
 void PressureRegulator::begin(
   Stepper&           stepper,
   TIM_HandleTypeDef* htim,
@@ -95,6 +106,8 @@ void PressureRegulator::begin(
 
   _active = false;
   _watchdogHoldMask = PressureRegulatorWatchdogPolicy::holdBit(WatchdogHold::Inactive);
+  _lastTelemetryEvent = REG_TEL_EVENT_NONE;
+  _lastTelemetryEventTickMs = 0u;
   _quietActive = false;
   _quietPreHold = false;
 //  _pausedByQuiet = false;
@@ -199,6 +212,45 @@ bool PressureRegulator::_canEnterMotionHold() const {
       _homing,
       _resetting,
       static_cast<uint8_t>(_watchdogHoldMask));
+}
+
+uint16_t PressureRegulator::_buildTelemetryFlags() const {
+  const uint8_t watchdogMask = static_cast<uint8_t>(_watchdogHoldMask);
+  return RegulatorTelemetry_BuildFlags(
+      _active ? 1u : 0u,
+      _homing ? 1u : 0u,
+      _resetting ? 1u : 0u,
+      _motionHoldActive ? 1u : 0u,
+      _quietActive ? 1u : 0u,
+      _stepping ? 1u : 0u,
+      PressureRegulatorWatchdogPolicy::hasHold(watchdogMask, WatchdogHold::Inactive) ? 1u : 0u,
+      PressureRegulatorWatchdogPolicy::hasHold(watchdogMask, WatchdogHold::MotionHold) ? 1u : 0u,
+      PressureRegulatorWatchdogPolicy::hasHold(watchdogMask, WatchdogHold::Recovery) ? 1u : 0u);
+}
+
+void PressureRegulator::_recordTelemetryEvent(RegulatorTelemetryEvent event) {
+  const uint8_t currentEvent = static_cast<uint8_t>(_lastTelemetryEvent);
+  const uint8_t nextEvent = static_cast<uint8_t>(event);
+  const uint8_t selectedEvent = RegulatorTelemetry_SelectLastEvent(currentEvent, nextEvent);
+  if ((selectedEvent != currentEvent) || (nextEvent == currentEvent)) {
+    _lastTelemetryEvent = selectedEvent;
+    _lastTelemetryEventTickMs = HAL_GetTick();
+  }
+}
+
+RegulatorTelemetrySnapshot PressureRegulator::getTelemetrySnapshot() const {
+  RegulatorTelemetrySnapshot snapshot{};
+  snapshot.flags = _buildTelemetryFlags();
+  snapshot.watchdogEnabled = static_cast<uint8_t>(Watchdog_IsTaskEnabled(_watchdogTaskId()) ? 1u : 0u);
+  snapshot.watchdogAgeMs = REG_TEL_AGE_UNKNOWN;
+  (void)Watchdog_GetTaskLastSeenAgeMs(_watchdogTaskId(), &snapshot.watchdogAgeMs);
+  snapshot.lastEvent = static_cast<uint8_t>(_lastTelemetryEvent);
+  snapshot.lastEventAgeMs = REG_TEL_AGE_UNKNOWN;
+  const uint32_t eventTick = static_cast<uint32_t>(_lastTelemetryEventTickMs);
+  if ((snapshot.lastEvent != REG_TEL_EVENT_NONE) && (eventTick != 0u)) {
+    snapshot.lastEventAgeMs = HAL_GetTick() - eventTick;
+  }
+  return snapshot;
 }
 
 void PressureRegulator::loadDefaultRuntimeConfig() {
@@ -440,6 +492,7 @@ void PressureRegulator::start() {
 
   if (_taskHandle) vTaskResume(_taskHandle);
   _releaseWatchdog(WatchdogHold::Inactive, true);
+  _recordTelemetryEvent(REG_TEL_EVENT_START);
   Logger::instance()->log("[PReg] START port=%u handle=%p\r\n",
                           (unsigned)_sensorPort, _taskHandle);
   //  if (_taskHandle) xTaskNotifyGive(_taskHandle);
@@ -453,6 +506,7 @@ void PressureRegulator::pause() {
   _integral = 0;
   _targetTransitionMonitorActive = false;
   _targetTransitionTravelLogged = false;
+  _recordTelemetryEvent(REG_TEL_EVENT_PAUSE);
 }
 
 bool PressureRegulator::enterMotionHold() {
@@ -490,6 +544,7 @@ bool PressureRegulator::enterMotionHold() {
   }
   _holdWatchdog(WatchdogHold::MotionHold);
   vTaskSuspend(_taskHandle);
+  _recordTelemetryEvent(REG_TEL_EVENT_MOTION_HOLD_ENTER);
   return true;
 }
 
@@ -536,6 +591,7 @@ void PressureRegulator::exitMotionHold() {
     _stepper->enableMotor();
   }
   _releaseWatchdog(WatchdogHold::MotionHold, true);
+  _recordTelemetryEvent(REG_TEL_EVENT_MOTION_HOLD_EXIT);
   vTaskResume(_taskHandle);
 }
 
@@ -583,6 +639,7 @@ void PressureRegulator::beginDispenseQuiet(uint32_t /*pre_ms*/) {
   _quietActive  = true;
   _quietPreHold = true;      // stay quiet until endDispenseQuiet() is called
   _freezeI      = true;
+  _recordTelemetryEvent(REG_TEL_EVENT_QUIET_BEGIN);
   recordTraceEvent(PressureTraceEventType::QuietStart);
 //  if (_stepping) { _stepper->pauseMove(); _pausedByQuiet = true; }
   // Stop any in-flight “infinite” move so we won’t resume with stale sign/speed.
@@ -602,6 +659,7 @@ void PressureRegulator::beginDispenseQuiet(uint32_t /*pre_ms*/) {
 void PressureRegulator::endDispenseQuiet(uint32_t post_ms) {
   _quietPreHold     = false;                                   // allow release by time
   _quietReleaseTick = xTaskGetTickCount() + pdMS_TO_TICKS(post_ms);
+  _recordTelemetryEvent(REG_TEL_EVENT_QUIET_END);
   recordTraceEvent(PressureTraceEventType::QuietEnd, static_cast<uint16_t>(post_ms));
 }
 
@@ -694,6 +752,7 @@ void PressureRegulator::homeWithValve(uint32_t fastHz, uint32_t slowHz, uint32_t
     _homing = true;
     Printer::instance()->pauseDispense();
     _holdWatchdog(WatchdogHold::Recovery);
+    _recordTelemetryEvent(REG_TEL_EVENT_HOME_BEGIN);
     TaskHandle_t me = xTaskGetCurrentTaskHandle();
     const bool calledFromOwnTask = (_taskHandle && me == _taskHandle);
     const bool taskHandlePresent = (_taskHandle != nullptr);
@@ -708,6 +767,7 @@ void PressureRegulator::homeWithValve(uint32_t fastHz, uint32_t slowHz, uint32_t
       HAL_GPIO_WritePin(_valvePort, _valvePin, GPIO_PIN_RESET);
       _homing = false;
       _releaseWatchdog(WatchdogHold::Recovery, true);
+      _recordTelemetryEvent(homeOk ? REG_TEL_EVENT_HOME_END_OK : REG_TEL_EVENT_HOME_END_FAIL);
 
       if (!calledFromOwnTask && _active && taskHandlePresent) {
         vTaskResume(_taskHandle);
@@ -741,6 +801,7 @@ void PressureRegulator::resetSyringe(CrashTaskId callerWatchdogTaskId) {
     // 1) mark and pause
     _resetting = true;
     _holdWatchdog(WatchdogHold::Recovery);
+    _recordTelemetryEvent(REG_TEL_EVENT_RESET_BEGIN);
     Logger::instance()->log("[PReg] Starting syringe reset\r\n");
     Printer::instance()->pauseDispense();
     bool resetOk = true;
@@ -821,6 +882,7 @@ void PressureRegulator::resetSyringe(CrashTaskId callerWatchdogTaskId) {
     }
     _resetting = false;
     _releaseWatchdog(WatchdogHold::Recovery, true);
+    _recordTelemetryEvent(resetOk ? REG_TEL_EVENT_RESET_END_OK : REG_TEL_EVENT_RESET_END_FAIL);
 }
 
 bool PressureRegulator::enterVacuumMode(int32_t targetRaw,
@@ -1016,6 +1078,7 @@ void PressureRegulator::controlLoop() {
 	uint32_t notif = 0;
 	(void)xTaskNotifyWait(0, 0xFFFFFFFFu, &notif, 0);
 	if (notif & NOTIF_INNER_LIMIT) {
+	  _recordTelemetryEvent(REG_TEL_EVENT_INNER_LIMIT);
 //	  Logger::instance()->log("[PReg] Inner limit tripped → homing now\r\n");
 //	  homeWithValve(kHomeFastHzDefault, kHomeSlowHzDefault, kHomeBackoffDefault);
 	  homeWithValveFast();
@@ -1023,6 +1086,7 @@ void PressureRegulator::controlLoop() {
 	}
 	if (notif & NOTIF_SAFETY_HOME) {
 	  Logger::instance()->log("[PReg] Safety home requested\r\n");
+	  _recordTelemetryEvent(REG_TEL_EVENT_SAFETY_HOME);
 	  homeWithValveFast();
 	}
 
@@ -1036,6 +1100,7 @@ void PressureRegulator::controlLoop() {
     int32_t pos = _stepper->getPosition();
     if ( (uint32_t)llabs((long long)pos) >= _stepLimit ) {
 //      Logger::instance()->log("[PReg] Position exceeded, auto-reset syringe\r\n");
+      _recordTelemetryEvent(REG_TEL_EVENT_STEP_LIMIT);
       homeWithValveFast();
       vTaskDelay(period);
       continue;
@@ -1436,6 +1501,41 @@ void PressureRegulator::_innerDebounceTimerCb(TimerHandle_t timer)
 }
 
 // C‐API wrappers
+
+extern "C" void PressureRegulator_CaptureTelemetryContext(RegulatorTelemetryResetContext* out,
+                                                          uint32_t pWatchdogEnabled,
+                                                          uint32_t pWatchdogAgeMs,
+                                                          uint32_t rWatchdogEnabled,
+                                                          uint32_t rWatchdogAgeMs,
+                                                          uint32_t snapshotTickMs)
+{
+  if (out == nullptr) {
+    return;
+  }
+  RegulatorTelemetry_InitResetContext(out);
+  out->valid = 1u;
+  out->snapshotTickMs = snapshotTickMs;
+  out->pWatchdogEnabled = static_cast<uint8_t>(pWatchdogEnabled ? 1u : 0u);
+  out->rWatchdogEnabled = static_cast<uint8_t>(rWatchdogEnabled ? 1u : 0u);
+  out->pWatchdogAgeMs = pWatchdogAgeMs;
+  out->rWatchdogAgeMs = rWatchdogAgeMs;
+
+  if (auto* regP = PressureRegulator::tryGet(0u)) {
+    const auto snap = regP->getTelemetrySnapshot();
+    out->pFlags = snap.flags;
+    out->pLastEvent = snap.lastEvent;
+    out->pLastEventAgeMs = snap.lastEventAgeMs;
+  }
+
+#if (LC_PRESSURE_PORTS > 1)
+  if (auto* regR = PressureRegulator::tryGet(1u)) {
+    const auto snap = regR->getTelemetrySnapshot();
+    out->rFlags = snap.flags;
+    out->rLastEvent = snap.lastEvent;
+    out->rLastEventAgeMs = snap.lastEventAgeMs;
+  }
+#endif
+}
 
 extern "C" {
 

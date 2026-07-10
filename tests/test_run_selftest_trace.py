@@ -88,6 +88,25 @@ def _bye_done(mod, seq8: int, seq32: int) -> bytes:
     return _frame_payload(mod, bytes(payload))
 
 
+def _regulator_context_payload() -> bytes:
+    return struct.pack(
+        "<BBHHBBIIBBIII",
+        1,
+        1,
+        0x0089,
+        0x0103,
+        0,
+        1,
+        0xFFFFFFFF,
+        42,
+        3,
+        14,
+        12,
+        0xFFFFFFFF,
+        123456,
+    )
+
+
 def _selftest_result_metrics(mod, test_id: int, name: str, passed: bool, metrics: str) -> bytes:
     payload = bytearray([mod.CMD_SELFTEST_RESULT, 2])
     payload += bytes([mod.TAG_TEST_ID, 2]) + test_id.to_bytes(2, "little")
@@ -115,6 +134,8 @@ def _reset_report(mod, seq32: int = 1234) -> bytes:
     payload += bytes([mod.TAG_RESET_FAULT_STAGE, 1, 10])
     payload += bytes([mod.TAG_RESET_WATCHDOG_LATE_TASK, 1, 1])
     payload += bytes([mod.TAG_RESET_ACTIVE_COMMAND, 1, mod.CMD_SELFTEST_START])
+    raw_context = _regulator_context_payload()
+    payload += bytes([mod.TAG_RESET_REG_CONTEXT, len(raw_context)]) + raw_context
     return _frame_payload(mod, bytes(payload))
 
 
@@ -1520,6 +1541,47 @@ def test_reset_report_during_selftest_is_classified(monkeypatch, tmp_path, capsy
     assert report["aborted"] is True
     checks = {c["name"]: c for c in report["host_checks"]}
     details = checks["selftest_progress_watchdog"]["details"]
+    expected_regulator_context = {
+        "version": 1,
+        "valid": True,
+        "snapshot_tick_ms": 123456,
+        "print": {
+            "raw": 0x0089,
+            "names": ["active", "motion_hold", "motion_hold_wdg"],
+            "active": True,
+            "homing": False,
+            "resetting": False,
+            "motion_hold": True,
+            "quiet": False,
+            "stepping": False,
+            "inactive_hold": False,
+            "motion_hold_wdg": True,
+            "recovery_hold": False,
+            "watchdog_enabled": False,
+            "watchdog_age_ms": None,
+            "last_event": 3,
+            "last_event_name": "motion_hold_enter",
+            "last_event_age_ms": 12,
+        },
+        "refuel": {
+            "raw": 0x0103,
+            "names": ["active", "homing", "recovery_hold"],
+            "active": True,
+            "homing": True,
+            "resetting": False,
+            "motion_hold": False,
+            "quiet": False,
+            "stepping": False,
+            "inactive_hold": False,
+            "motion_hold_wdg": False,
+            "recovery_hold": True,
+            "watchdog_enabled": True,
+            "watchdog_age_ms": 42,
+            "last_event": 14,
+            "last_event_name": "step_limit",
+            "last_event_age_ms": None,
+        },
+    }
     assert details["timeout_reason"] == "mcu_reset_report_seen"
     assert details["reset_report"] == {
         "reset_seq32": 4321,
@@ -1538,6 +1600,7 @@ def test_reset_report_during_selftest_is_classified(monkeypatch, tmp_path, capsy
         "fault_stage": 10,
         "watchdog_late_task": 1,
         "active_command": mod.CMD_SELFTEST_START,
+        "regulator_context": expected_regulator_context,
     }
     reset_frames = [frame for frame in details["recent_frames"] if frame["cmd"] == mod.CMD_RESET_REPORT]
     assert reset_frames
@@ -1551,6 +1614,7 @@ def test_reset_report_during_selftest_is_classified(monkeypatch, tmp_path, capsy
     assert events[1]["reset_report"]["reset_seq32"] == 4321
     assert events[1]["reset_report"]["reset_cause"] == 4
     assert events[1]["reset_report"]["watchdog_raw_sr"] == 0x20000000
+    assert events[1]["reset_report"]["regulator_context"] == expected_regulator_context
     assert events[2]["reason"] == "mcu_reset_report_seen"
 
 

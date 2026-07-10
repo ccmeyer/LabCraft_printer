@@ -79,6 +79,7 @@ TAG_RESET_RECOVERY_BOOT = 0x1C
 TAG_RESET_FAULT_STAGE = 0x1D
 TAG_RESET_WATCHDOG_LATE_TASK = 0x1E
 TAG_RESET_ACTIVE_COMMAND = 0x1F
+TAG_RESET_REG_CONTEXT = 0x22
 
 ACK_RESULT_ACCEPTED = 1
 ACK_RESULT_DUPLICATE = 2
@@ -237,6 +238,98 @@ def _tlv_u8(tlv: dict[int, bytes], tag: int) -> int | None:
         return None
     return raw[0]
 
+REGULATOR_TELEMETRY_AGE_UNKNOWN = 0xFFFFFFFF
+REGULATOR_RESET_CONTEXT_WIRE_SIZE = 30
+REGULATOR_TELEMETRY_FLAGS = {
+    0x0001: ("active", "active"),
+    0x0002: ("homing", "homing"),
+    0x0004: ("resetting", "resetting"),
+    0x0008: ("motion_hold", "motion_hold"),
+    0x0010: ("quiet", "quiet"),
+    0x0020: ("stepping", "stepping"),
+    0x0040: ("inactive_hold", "inactive_hold"),
+    0x0080: ("motion_hold_wdg", "motion_hold_wdg"),
+    0x0100: ("recovery_hold", "recovery_hold"),
+}
+REGULATOR_TELEMETRY_EVENTS = {
+    0: "none",
+    1: "start",
+    2: "pause",
+    3: "motion_hold_enter",
+    4: "motion_hold_exit",
+    5: "home_begin",
+    6: "home_end_ok",
+    7: "home_end_fail",
+    8: "reset_begin",
+    9: "reset_end_ok",
+    10: "reset_end_fail",
+    11: "quiet_begin",
+    12: "quiet_end",
+    13: "inner_limit",
+    14: "step_limit",
+    15: "safety_home",
+}
+
+
+def _regulator_age(value: int | None) -> int | None:
+    if value is None or value == REGULATOR_TELEMETRY_AGE_UNKNOWN:
+        return None
+    return value
+
+
+def _decode_regulator_flags(flags: int) -> dict:
+    flags = int(flags or 0)
+    result = {"raw": flags, "names": []}
+    for bit, (key, name) in REGULATOR_TELEMETRY_FLAGS.items():
+        enabled = bool(flags & bit)
+        result[key] = enabled
+        if enabled:
+            result["names"].append(name)
+    return result
+
+
+def _decode_regulator_channel(flags, watchdog_enabled, watchdog_age_ms, last_event, last_event_age_ms):
+    event = int(last_event or 0)
+    decoded = _decode_regulator_flags(flags)
+    decoded.update(
+        {
+            "watchdog_enabled": bool(watchdog_enabled),
+            "watchdog_age_ms": _regulator_age(watchdog_age_ms),
+            "last_event": event,
+            "last_event_name": REGULATOR_TELEMETRY_EVENTS.get(event, f"event_{event}"),
+            "last_event_age_ms": _regulator_age(last_event_age_ms),
+        }
+    )
+    return decoded
+
+
+def decode_regulator_context(raw: bytes | None) -> dict | None:
+    if raw is None:
+        return None
+    if len(raw) != REGULATOR_RESET_CONTEXT_WIRE_SIZE:
+        return {"valid": False, "error": "bad_length", "raw_length": len(raw)}
+    version, valid = raw[0], raw[1]
+    p_flags = int.from_bytes(raw[2:4], "little")
+    r_flags = int.from_bytes(raw[4:6], "little")
+    p_wdg_enabled, r_wdg_enabled = raw[6], raw[7]
+    p_wdg_age_ms = int.from_bytes(raw[8:12], "little")
+    r_wdg_age_ms = int.from_bytes(raw[12:16], "little")
+    p_last_event, r_last_event = raw[16], raw[17]
+    p_last_event_age_ms = int.from_bytes(raw[18:22], "little")
+    r_last_event_age_ms = int.from_bytes(raw[22:26], "little")
+    snapshot_tick_ms = int.from_bytes(raw[26:30], "little")
+    return {
+        "version": version,
+        "valid": bool(valid),
+        "snapshot_tick_ms": snapshot_tick_ms,
+        "print": _decode_regulator_channel(
+            p_flags, p_wdg_enabled, p_wdg_age_ms, p_last_event, p_last_event_age_ms
+        ),
+        "refuel": _decode_regulator_channel(
+            r_flags, r_wdg_enabled, r_wdg_age_ms, r_last_event, r_last_event_age_ms
+        ),
+    }
+
 
 def decode_reset_report(tlv: dict[int, bytes]) -> dict:
     return {
@@ -256,6 +349,7 @@ def decode_reset_report(tlv: dict[int, bytes]) -> dict:
         "fault_stage": _tlv_u8(tlv, TAG_RESET_FAULT_STAGE),
         "watchdog_late_task": _tlv_u8(tlv, TAG_RESET_WATCHDOG_LATE_TASK),
         "active_command": _tlv_u8(tlv, TAG_RESET_ACTIVE_COMMAND),
+        "regulator_context": decode_regulator_context(tlv.get(TAG_RESET_REG_CONTEXT)),
     }
 
 

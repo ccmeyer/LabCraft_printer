@@ -17,6 +17,7 @@ static volatile uint32_t g_bootSummaryLogged = 0u;
 static volatile uint32_t g_watchdogRecoveryBoot = 0u;
 static volatile CrashTaskId g_activeTask = CRASH_TASK_NONE;
 static volatile uint8_t g_activeCommand = 0u;
+static RegulatorTelemetryRetainedContext g_regulatorContext __attribute__((section(".noinit")));
 
 static const uint32_t kCrashLogMagic = 0x43524153u;
 static const uint32_t kCrashLogVersion = 3u;
@@ -92,6 +93,12 @@ static uint32_t CrashLog_FlagsOnly(uint32_t flagsReg)
   return (flagsReg & 0xFFFFu);
 }
 
+static uint32_t CrashLog_ShouldKeepRegulatorContext(CrashResetCause resetCause)
+{
+  return (resetCause != CRASH_RESET_POWER) &&
+         (resetCause != CRASH_RESET_LOW_POWER);
+}
+
 static void CrashLog_ResetStorage(void)
 {
   for (uint32_t i = 0u; i < kCrashLogRegCount; ++i) {
@@ -105,6 +112,7 @@ static void CrashLog_ResetStorage(void)
   CrashLog_Write(CRASHLOG_BKP_FAULT_STAGE, (uint32_t)CRASH_BOOT_STAGE_RESET);
   CrashLog_Write(CRASHLOG_BKP_WATCHDOG_LATE_TASK, (uint32_t)CRASH_TASK_NONE);
   CrashLog_Write(CRASHLOG_BKP_ACTIVE_COMMAND, 0u);
+  RegulatorTelemetry_ClearRetainedContext(&g_regulatorContext);
 }
 
 static uint32_t CrashLog_IsStorageValid(void)
@@ -152,6 +160,11 @@ static void CrashLog_FillSnapshot(CrashLogSnapshot* out)
   out->watchdogLateTask = (CrashTaskId)CrashLog_Read(CRASHLOG_BKP_WATCHDOG_LATE_TASK);
   out->activeCommand = (uint8_t)CrashLog_Read(CRASHLOG_BKP_ACTIVE_COMMAND);
   out->faultTaskName4 = CrashLog_Read(CRASHLOG_BKP_FAULT_TASK_NAME4);
+  RegulatorTelemetry_InitResetContext(&out->regulatorContext);
+  if (CrashLog_ShouldKeepRegulatorContext(out->resetCause) != 0u) {
+    (void)RegulatorTelemetry_ReadRetainedContext(&g_regulatorContext,
+                                                 &out->regulatorContext);
+  }
 }
 
 static void CrashLog_WriteFaultRecord(CrashFaultKind kind,
@@ -199,6 +212,9 @@ void CrashLog_EarlyBootInit(void)
   CrashLog_Write(CRASHLOG_BKP_BOOT_COUNT, bootCount);
   CrashLog_Write(CRASHLOG_BKP_RESET_FLAGS, resetFlags);
   CrashLog_Write(CRASHLOG_BKP_RESET_CAUSE, (uint32_t)resetCause);
+  if (CrashLog_ShouldKeepRegulatorContext(resetCause) == 0u) {
+    RegulatorTelemetry_ClearRetainedContext(&g_regulatorContext);
+  }
   g_watchdogRecoveryBoot = (((flags & CRASHLOG_FLAG_WDT_RECOVERY_PENDING) != 0u) &&
       (resetCause == CRASH_RESET_SOFTWARE)) ? 1u : 0u;
   if (resetCause == CRASH_RESET_IWDG) {
@@ -392,6 +408,19 @@ void CrashLog_ClearWatchdogRecoveryReset(void)
   }
   const uint32_t flags = CrashLog_FlagsOnly(CrashLog_Read(CRASHLOG_BKP_FLAGS));
   CrashLog_Write(CRASHLOG_BKP_FLAGS, CrashLog_FlagsWithVersion((flags & ~CRASHLOG_FLAG_WDT_RECOVERY_PENDING) | CRASHLOG_FLAG_VALID));
+}
+
+void CrashLog_CaptureRegulatorContext(const RegulatorTelemetryResetContext* context)
+{
+#if (LC_CRASHLOG_ENABLE == 0)
+  (void)context;
+  return;
+#endif
+  if (context == NULL) {
+    RegulatorTelemetry_ClearRetainedContext(&g_regulatorContext);
+    return;
+  }
+  RegulatorTelemetry_WriteRetainedContext(&g_regulatorContext, context);
 }
 
 uint32_t CrashLog_IsWatchdogRecoveryBoot(void)

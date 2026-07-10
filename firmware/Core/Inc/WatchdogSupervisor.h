@@ -65,6 +65,8 @@ uint32_t Watchdog_GetTimeoutMs(void);
 uint32_t Watchdog_GetRequiredTaskCount(void);
 uint32_t Watchdog_GetLiveTaskCount(void);
 CrashTaskId Watchdog_GetLateTask(void);
+uint32_t Watchdog_IsTaskEnabled(CrashTaskId taskId);
+uint32_t Watchdog_GetTaskLastSeenAgeMs(CrashTaskId taskId, uint32_t* ageMs);
 
 #ifdef __cplusplus
 }

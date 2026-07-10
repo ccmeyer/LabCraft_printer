@@ -274,7 +274,7 @@ Command payload is TLV-based after `[cmd, seq8]`:
   - Effective max payload accepted by current parser: **62 bytes** (`LEN <= 62`) because the parser stores payload+CRC in `_rxBuf`.
 - TX scratch buffer: `Comm::_txBuf[160]` declared in header (current send path uses local stack buffers in `sendFrame`/`sendAckWithSeq32`).
 - Length field is 1 byte (`uint8_t`), so on-wire payload max representable is 255 bytes, but current RX parser cap is smaller (62).
-- Status payload chunks are built with fixed arrays (`payload[1 + 18*(1+1+4)]` and `payload[1 + 19*(1+1+4)]`) and sent via `sendFrame`.
+- Status payload chunks are built with fixed local arrays (`payload[160]` for chunk 0 and `payload[176]` for chunk 1) and sent via `sendFrame`; both chunks remain below the 255-byte frame length limit.
 
 ### 6.3 Command opcodes (`Orchestrator::CmdType`) and handling
 
@@ -386,6 +386,9 @@ Common parse path for host->MCU commands:
 | `0x1F` | `TAG_RESET_ACTIVE_COMMAND` | 1 | `CrashLogSnapshot.activeCommand` |
 | `0x20` | `TAG_RESET_RCC_FLAGS` | 4 | optional raw `CrashLogSnapshot.resetFlagsRaw`; Python decodes names from `LPWRRSTF`, `WWDGRSTF`, `IWDGRSTF`, `SFTRSTF`, `PORRSTF`, `PINRSTF`, and `BORRSTF` bits |
 | `0x21` | `TAG_RESET_TASK_NAME4` | 4 | optional packed 4-byte prefix of the FreeRTOS task name captured by the stack-overflow hook |
+| `0x22` | `TAG_RESET_REG_CONTEXT` | 30 | optional packed `RegulatorTelemetryResetContext` retained in `.noinit` SRAM for non-power reset reports |
+
+`TAG_RESET_REG_CONTEXT` uses `RegulatorTelemetry.h` flag bits (`active`, `homing`, `resetting`, `motion_hold`, `quiet`, `stepping`, `inactive_hold`, `motion_hold_wdg`, `recovery_hold`) and event codes for start/pause, motion-hold enter/exit, home/reset begin/end, quiet begin/end, inner-limit, step-limit, and safety-home transitions.
 
 Reset-report tags share numeric values with status tags, for example `0x20` / `0x21`, but the tag namespaces are separated by frame opcode (`CMD_RESET_REPORT` vs `CMD_STATUS`).
 
@@ -434,6 +437,9 @@ Reset-report tags share numeric values with status tags, for example `0x20` / `0
 | `0x75` | `TAG_Z_ACCEL` | yes | `Stepper::stepperZ()->accelStepsPerSec2()` |
 | `0x80` | `TAG_GRIP_PULSE` | yes | `Gripper::getPulseDurationMs()` |
 | `0x81` | `TAG_GRIP_REFRESH` | yes | `Gripper::getRefreshPeriodMs()` |
+| `0x90` | `TAG_ORCH_STACK_HWM` | yes | `Orchestrator::getOrchStackHwmWords()` |
+| `0x91` | `TAG_ORCH_STACK_PHASE` | yes | `Orchestrator::getOrchStackPhase()` |
+| `0x92` | `TAG_ORCH_STACK_CMD` | yes | `Orchestrator::getOrchStackCmdNum()` |
 
 ### 6.6 Golden vector opportunities for `tests_host`
 

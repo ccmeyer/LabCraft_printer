@@ -26,6 +26,15 @@ def test_export_reset_debug_bundle_writes_zip_with_manifest_and_snapshots(tmp_pa
         {"schema_version": "host_black_box_v1", "reason": "reset_report"},
     )
     created_at = datetime(2026, 6, 23, 12, 34, 56, tzinfo=timezone.utc)
+    regulator_context = {
+        "valid": True,
+        "refuel": {
+            "names": ["active", "homing", "recovery_hold"],
+            "last_event_name": "step_limit",
+            "watchdog_enabled": True,
+            "watchdog_age_ms": 42,
+        },
+    }
     context = {
         "repo_root": str(tmp_path),
         "reset_report": {
@@ -35,6 +44,7 @@ def test_export_reset_debug_bundle_writes_zip_with_manifest_and_snapshots(tmp_pa
             "seq32": 77,
             "pending": True,
             "sticky": True,
+            "regulator_context": regulator_context,
         },
         "reset_report_log_path": str(board_log),
         "black_box_session_id": "session-abc",
@@ -70,6 +80,9 @@ def test_export_reset_debug_bundle_writes_zip_with_manifest_and_snapshots(tmp_pa
         assert f"{top}/black_box/serial_reader_stopped/serial_reader_stopped.json" in names
         assert f"{top}/black_box/reset_report/reset_report.json" in names
         manifest = json.loads(zf.read(f"{top}/manifest.json").decode("utf-8"))
+        current_reset_report = json.loads(
+            zf.read(f"{top}/reset_report/current_reset_report.json").decode("utf-8")
+        )
 
     assert manifest["schema_version"] == "reset_debug_bundle_v1"
     assert manifest["bundle_kind"] == "reset_report"
@@ -77,6 +90,8 @@ def test_export_reset_debug_bundle_writes_zip_with_manifest_and_snapshots(tmp_pa
     assert manifest["machine"] == {"port": "COM9", "profile": "labcraft_v2"}
     assert manifest["reset"]["reset_cause_name"] == "iwdg"
     assert manifest["reset"]["seq32"] == 77
+    assert manifest["reset"]["regulator_context"] == regulator_context
+    assert current_reset_report["regulator_context"] == regulator_context
     reasons = {entry["reason"] for entry in manifest["black_box_snapshots"]}
     assert reasons == {"serial_reader_stopped", "reset_report"}
     assert all(entry["included"] for entry in manifest["black_box_snapshots"])
