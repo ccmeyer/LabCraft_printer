@@ -61,6 +61,11 @@ class FakeGitRunner:
         release_index_returncode: int = 0,
         release_manifest_returncode: int = 0,
         release_tag_returncode: int = 0,
+        release_tag_list: tuple[str, ...] = (),
+        release_tag_shas: dict[str, str] | None = None,
+        release_manifest_payloads: dict[str, dict] | None = None,
+        release_manifest_returncodes: dict[str, int] | None = None,
+        tag_list_returncode: int = 0,
         release_merge_returncode: int | None = None,
         rollback_release_version: str = "v1.1.1",
         rollback_release_sha: str = ROLLBACK_SHA,
@@ -106,6 +111,11 @@ class FakeGitRunner:
         self.release_index_returncode = release_index_returncode
         self.release_manifest_returncode = release_manifest_returncode
         self.release_tag_returncode = release_tag_returncode
+        self.release_tag_list = release_tag_list
+        self.release_tag_shas = dict(release_tag_shas or {})
+        self.release_manifest_payloads = dict(release_manifest_payloads or {})
+        self.release_manifest_returncodes = dict(release_manifest_returncodes or {})
+        self.tag_list_returncode = tag_list_returncode
         self.release_merge_returncode = pull_returncode if release_merge_returncode is None else release_merge_returncode
         self.rollback_release_version = rollback_release_version
         self.rollback_release_sha = rollback_release_sha
@@ -159,6 +169,17 @@ class FakeGitRunner:
                 return updater.CommandResult(args_tuple, self.fetch_returncode, stderr="network unavailable")
             return updater.CommandResult(args_tuple, 0, stdout="")
 
+        if len(git_args) == 3 and git_args[:2] == ("tag", "--list"):
+            if self.tag_list_returncode:
+                return updater.CommandResult(args_tuple, self.tag_list_returncode, stderr="tag list failed")
+            pattern = git_args[2]
+            if pattern.endswith("*"):
+                prefix = pattern[:-1]
+                tags = [tag for tag in self.release_tag_list if tag.startswith(prefix)]
+            else:
+                tags = [tag for tag in self.release_tag_list if tag == pattern]
+            return updater.CommandResult(args_tuple, 0, stdout="\n".join(tags) + ("\n" if tags else ""))
+
         if git_args in (("rev-parse", updater.OFFLINE_UPDATE_REF), ("rev-parse", offline_target_ref)):
             return updater.CommandResult(args_tuple, 0, stdout=f"{self.offline_ref_sha}\n")
 
@@ -175,6 +196,8 @@ class FakeGitRunner:
 
         if len(git_args) == 2 and git_args[0] == "rev-parse" and git_args[1].endswith("^{commit}"):
             release_tag = git_args[1][: -len("^{commit}")]
+            if release_tag in self.release_tag_shas:
+                return updater.CommandResult(args_tuple, 0, stdout=f"{self.release_tag_shas[release_tag]}\n")
             if release_tag == self.target_release_version:
                 if self.release_tag_returncode:
                     return updater.CommandResult(args_tuple, self.release_tag_returncode, stderr="missing release tag")
@@ -186,6 +209,27 @@ class FakeGitRunner:
             if self.release_tag_returncode:
                 return updater.CommandResult(args_tuple, self.release_tag_returncode or 1, stderr="missing release tag")
             return updater.CommandResult(args_tuple, 1, stderr="missing release tag")
+
+        if len(git_args) == 2 and git_args[0] == "show":
+            ref, sep, path = git_args[1].partition(":")
+            if sep and ref in self.release_tag_shas and path == f"releases/{ref}.json":
+                returncode = self.release_manifest_returncodes.get(ref, 0)
+                if returncode:
+                    return updater.CommandResult(args_tuple, returncode, stderr="missing release manifest")
+                payload = self.release_manifest_payloads.get(ref) or {
+                    "schema_version": updater.RELEASE_MANIFEST_SCHEMA_VERSION,
+                    "version": ref,
+                    "tag": ref,
+                    "channel": "release_candidate",
+                    "release_date": "2026-07-06",
+                    "previous_version": self.rollback_version,
+                    "rollback_version": self.rollback_version,
+                    "requires_firmware": None,
+                    "summary": f"{ref} release candidate.",
+                    "notes": [f"Installs {ref}."],
+                    "validation": ["Focused updater tests pass."],
+                }
+                return updater.CommandResult(args_tuple, 0, stdout=json.dumps(payload) + "\n")
 
         if len(git_args) == 2 and git_args[0] == "show" and git_args[1] == f"{self.target_release_version}:releases/{self.target_release_version}.json":
             if self.release_manifest_returncode:
@@ -226,6 +270,14 @@ class FakeGitRunner:
         if git_args == ("rev-list", "--left-right", "--count", f"HEAD...{self.target_release_sha}"):
             return updater.CommandResult(args_tuple, 0, stdout=f"{self.ahead_count}\t{self.behind_count}\n")
 
+        if (
+            len(git_args) == 4
+            and git_args[:3] == ("rev-list", "--left-right", "--count")
+            and git_args[3].startswith("HEAD...")
+            and git_args[3][len("HEAD...") :] in set(self.release_tag_shas.values())
+        ):
+            return updater.CommandResult(args_tuple, 0, stdout=f"{self.ahead_count}\t{self.behind_count}\n")
+
         if git_args in (
             ("rev-list", "--left-right", "--count", f"HEAD...{updater.OFFLINE_UPDATE_REF}"),
             ("rev-list", "--left-right", "--count", f"HEAD...{offline_target_ref}"),
@@ -235,6 +287,14 @@ class FakeGitRunner:
             return updater.CommandResult(args_tuple, 0, stdout=f"{ahead}\t{behind}\n")
 
         if git_args == ("log", "--oneline", f"HEAD..{self.target_release_version}"):
+            return updater.CommandResult(args_tuple, 0, stdout="\n".join(self.check_commits) + ("\n" if self.check_commits else ""))
+
+        if (
+            len(git_args) == 3
+            and git_args[:2] == ("log", "--oneline")
+            and git_args[2].startswith("HEAD..")
+            and git_args[2][len("HEAD..") :] in self.release_tag_shas
+        ):
             return updater.CommandResult(args_tuple, 0, stdout="\n".join(self.check_commits) + ("\n" if self.check_commits else ""))
 
         if git_args in (
@@ -506,6 +566,7 @@ def test_online_update_target_release_skips_latest_index_lookup(tmp_path):
     calls = [call[0] for call in runner.calls]
     assert result.status == updater.STATUS_UPDATED
     assert ("git", "show", f"origin/main:{updater.RELEASE_INDEX_PATH}") not in calls
+    assert not any(call[:2] == ("git", "tag") for call in calls)
     assert ("git", "merge", "--ff-only", "v1.1.2") in calls
 
 
@@ -1381,7 +1442,9 @@ def test_update_check_clean_up_to_date_returns_up_to_date(tmp_path):
     assert result.upstream == "origin/main"
     assert result.target_release_version == "v1.1.2"
     assert result.target_release_sha == "release789"
-    assert ("git", "fetch", "--prune", "--tags") in [call[0] for call in runner.calls]
+    calls = [call[0] for call in runner.calls]
+    assert ("git", "fetch", "--prune", "--tags") in calls
+    assert not any(call[:2] == ("git", "tag") for call in calls)
 
 
 def test_update_check_behind_upstream_returns_update_available_with_commits(tmp_path):
@@ -1438,6 +1501,184 @@ def test_update_check_release_candidate_channel_reports_candidate_update(tmp_pat
     assert result.release_summary == "Camera refactor release candidate."
     assert result.release_notes == ("Adds the camera refactor release candidate.",)
     assert ("git", "merge", "--ff-only", "v1.2.0-rc.3") not in [call[0] for call in runner.calls]
+
+
+def test_update_check_release_candidate_series_selects_highest_valid_candidate(tmp_path):
+    rc6_sha = "6666666666666666666666666666666666666666"
+    rc7_sha = "7777777777777777777777777777777777777777"
+    runner = FakeGitRunner(
+        tmp_path,
+        ahead_count=0,
+        behind_count=2,
+        check_commits=("def456 Camera refactor RC7", "abc123 Manual refuel checks"),
+        target_release_version="v1.2.0-rc.6",
+        target_release_sha=rc6_sha,
+        target_release_channel="release_candidate",
+        release_tag_list=("v1.2.0-rc.6", "v1.2.0-rc.7", "v1.2.0-rc.beta", "v1.3.0-rc.9"),
+        release_tag_shas={
+            "v1.2.0-rc.6": rc6_sha,
+            "v1.2.0-rc.7": rc7_sha,
+        },
+        release_manifest_payloads={
+            "v1.2.0-rc.7": {
+                "schema_version": updater.RELEASE_MANIFEST_SCHEMA_VERSION,
+                "version": "v1.2.0-rc.7",
+                "tag": "v1.2.0-rc.7",
+                "channel": "release_candidate",
+                "release_date": "2026-07-09",
+                "previous_version": "v1.2.0-rc.6",
+                "rollback_version": "v1.1.17",
+                "requires_firmware": None,
+                "summary": "Camera refactor RC7.",
+                "notes": ["Adds the latest release candidate."],
+                "validation": ["Focused updater tests pass."],
+            },
+        },
+        release_index_payload={
+            "schema_version": updater.RELEASE_INDEX_SCHEMA_VERSION,
+            "stable": "v1.1.17",
+            "release_candidate": "v1.2.0-rc.6",
+            "release_candidate_series": {
+                "tag_prefix": "v1.2.0-rc.",
+                "minimum": "v1.2.0-rc.6",
+            },
+            "releases": ["v1.2.0-rc.6", "v1.1.17"],
+        },
+    )
+
+    result = updater.run_update_check(
+        _config(tmp_path, release_channel="release_candidate"),
+        command_runner=runner,
+    )
+
+    calls = [call[0] for call in runner.calls]
+    assert result.status == updater.STATUS_UPDATE_AVAILABLE
+    assert result.message == "LabCraft v1.2.0-rc.7 is available."
+    assert result.target_release_version == "v1.2.0-rc.7"
+    assert result.target_release_sha == rc7_sha
+    assert result.release_summary == "Camera refactor RC7."
+    assert result.release_notes == ("Adds the latest release candidate.",)
+    assert ("git", "tag", "--list", "v1.2.0-rc.*") in calls
+
+
+def test_update_check_release_candidate_series_skips_invalid_candidates(tmp_path):
+    rc6_sha = "6666666666666666666666666666666666666666"
+    rc7_sha = "7777777777777777777777777777777777777777"
+    rc8_sha = "8888888888888888888888888888888888888888"
+    rc5_sha = "5555555555555555555555555555555555555555"
+    runner = FakeGitRunner(
+        tmp_path,
+        ahead_count=0,
+        behind_count=1,
+        target_release_version="v1.2.0-rc.6",
+        target_release_sha=rc6_sha,
+        target_release_channel="release_candidate",
+        release_tag_list=("v1.2.0-rc.5", "v1.2.0-rc.6", "v1.2.0-rc.7", "v1.2.0-rc.8"),
+        release_tag_shas={
+            "v1.2.0-rc.5": rc5_sha,
+            "v1.2.0-rc.6": rc6_sha,
+            "v1.2.0-rc.7": rc7_sha,
+            "v1.2.0-rc.8": rc8_sha,
+        },
+        release_manifest_returncodes={"v1.2.0-rc.8": 128},
+        release_manifest_payloads={
+            "v1.2.0-rc.7": {
+                "schema_version": updater.RELEASE_MANIFEST_SCHEMA_VERSION,
+                "version": "v1.2.0-rc.7",
+                "tag": "v1.2.0-rc.7",
+                "channel": "stable",
+                "release_date": "2026-07-09",
+                "previous_version": "v1.2.0-rc.6",
+                "rollback_version": "v1.1.17",
+                "requires_firmware": None,
+                "summary": "Wrong channel.",
+                "notes": ["This should be ignored."],
+                "validation": [],
+            },
+        },
+        release_index_payload={
+            "schema_version": updater.RELEASE_INDEX_SCHEMA_VERSION,
+            "stable": "v1.1.17",
+            "release_candidate": "v1.2.0-rc.6",
+            "release_candidate_series": {
+                "tag_prefix": "v1.2.0-rc.",
+                "minimum": "v1.2.0-rc.6",
+            },
+            "releases": ["v1.2.0-rc.6", "v1.1.17"],
+        },
+    )
+
+    result = updater.run_update_check(
+        _config(tmp_path, release_channel="release_candidate"),
+        command_runner=runner,
+    )
+
+    calls = [call[0] for call in runner.calls]
+    assert result.status == updater.STATUS_UPDATE_AVAILABLE
+    assert result.target_release_version == "v1.2.0-rc.6"
+    assert result.target_release_sha == rc6_sha
+    assert ("git", "rev-parse", "v1.2.0-rc.5^{commit}") not in calls
+
+
+def test_update_check_release_candidate_series_falls_back_to_exact_pointer(tmp_path):
+    runner = FakeGitRunner(
+        tmp_path,
+        ahead_count=0,
+        behind_count=1,
+        target_release_version="v1.2.0-rc.6",
+        target_release_sha="6666666666666666666666666666666666666666",
+        target_release_channel="release_candidate",
+        release_tag_list=("v1.2.0-rc.5",),
+        release_index_payload={
+            "schema_version": updater.RELEASE_INDEX_SCHEMA_VERSION,
+            "stable": "v1.1.17",
+            "release_candidate": "v1.2.0-rc.6",
+            "release_candidate_series": {
+                "tag_prefix": "v1.2.0-rc.",
+                "minimum": "v1.2.0-rc.6",
+            },
+            "releases": ["v1.2.0-rc.6", "v1.1.17"],
+        },
+    )
+
+    result = updater.run_update_check(
+        _config(tmp_path, release_channel="release_candidate"),
+        command_runner=runner,
+    )
+
+    calls = [call[0] for call in runner.calls]
+    assert result.status == updater.STATUS_UPDATE_AVAILABLE
+    assert result.target_release_version == "v1.2.0-rc.6"
+    assert ("git", "tag", "--list", "v1.2.0-rc.*") in calls
+    assert ("git", "rev-parse", "v1.2.0-rc.6^{commit}") in calls
+
+
+def test_update_check_release_candidate_series_invalid_metadata_fails_safely(tmp_path):
+    runner = FakeGitRunner(
+        tmp_path,
+        target_release_version="v1.2.0-rc.6",
+        target_release_channel="release_candidate",
+        release_index_payload={
+            "schema_version": updater.RELEASE_INDEX_SCHEMA_VERSION,
+            "stable": "v1.1.17",
+            "release_candidate": "v1.2.0-rc.6",
+            "release_candidate_series": {
+                "tag_prefix": "v1.2.0-rc.",
+                "minimum": "v1.3.0-rc.1",
+            },
+            "releases": ["v1.2.0-rc.6", "v1.1.17"],
+        },
+    )
+
+    result = updater.run_update_check(
+        _config(tmp_path, release_channel="release_candidate"),
+        command_runner=runner,
+    )
+
+    calls = [call[0] for call in runner.calls]
+    assert result.status == updater.STATUS_FETCH_FAILED
+    assert "release_candidate_series minimum" in result.message
+    assert not any(call[:2] == ("git", "merge") for call in calls)
 
 
 def test_update_check_release_candidate_channel_without_candidate_fails_safely(tmp_path):

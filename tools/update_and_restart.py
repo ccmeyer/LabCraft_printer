@@ -59,6 +59,7 @@ RELEASE_INDEX_SCHEMA_VERSION = "labcraft_release_index_v1"
 RELEASE_MANIFEST_SCHEMA_VERSION = "labcraft_release_v1"
 RELEASE_INDEX_PATH = "releases/latest.json"
 RELEASE_VERSION_RE = re.compile(r"v[0-9]+(?:\.[0-9]+){2}(?:-[A-Za-z0-9][A-Za-z0-9.-]*)?")
+RELEASE_CANDIDATE_PREFIX_RE = re.compile(r"v[0-9]+(?:\.[0-9]+){2}-rc\.")
 QT_ENV_VARS_TO_REMOVE_FOR_GUI = (
     "QT_QPA_PLATFORM_PLUGIN_PATH",
     "QT_QPA_FONTDIR",
@@ -455,6 +456,27 @@ def _normalize_release_version(value: object, *, context: str = "release version
     return version
 
 
+def _normalize_release_candidate_prefix(value: object, *, context: str = "release candidate tag_prefix") -> str:
+    if not isinstance(value, str):
+        raise ReleaseMetadataError(f"{context} must be a string.")
+    prefix = value.strip()
+    if not prefix:
+        raise ReleaseMetadataError(f"{context} is empty.")
+    if "/" in prefix or "\\" in prefix or ".." in prefix or not RELEASE_CANDIDATE_PREFIX_RE.fullmatch(prefix):
+        raise ReleaseMetadataError(f"{context} is not a supported LabCraft release-candidate prefix: {prefix}")
+    return prefix
+
+
+def _release_candidate_number(version: str, *, prefix: str) -> int | None:
+    if not version.startswith(prefix):
+        return None
+    suffix = version[len(prefix) :]
+    if not suffix.isdigit():
+        return None
+    number = int(suffix)
+    return number if number > 0 else None
+
+
 def _load_git_json(
     repo_root: Path,
     *,
@@ -514,7 +536,12 @@ def _release_channel_label(channel: str | None) -> str:
     return "stable"
 
 
-def _validate_release_manifest(manifest: dict, *, expected_version: str) -> ReleaseTargetInfo:
+def _validate_release_manifest(
+    manifest: dict,
+    *,
+    expected_version: str,
+    expected_channel: str | None = None,
+) -> ReleaseTargetInfo:
     if manifest.get("schema_version") != RELEASE_MANIFEST_SCHEMA_VERSION:
         raise ReleaseMetadataError("Release manifest has an unsupported schema_version.")
     version = _normalize_release_version(manifest.get("version"), context="release manifest version")
@@ -526,6 +553,8 @@ def _validate_release_manifest(manifest: dict, *, expected_version: str) -> Rele
     channel = str(manifest.get("channel") or "").strip()
     if channel and channel not in RELEASE_CHANNELS:
         raise ReleaseMetadataError("Release manifest channel must be stable or release_candidate.")
+    if expected_channel is not None and channel != expected_channel:
+        raise ReleaseMetadataError(f"Release manifest channel must be {expected_channel}.")
     return ReleaseTargetInfo(
         version=version,
         tag=tag,
@@ -536,36 +565,16 @@ def _validate_release_manifest(manifest: dict, *, expected_version: str) -> Rele
     )
 
 
-def _resolve_release_target(
+def _resolve_release_tag(
     repo_root: Path,
     *,
-    upstream: str,
+    version: str,
     config: UpdaterConfig,
     command_runner: CommandRunner,
     log: _LogBuffer,
     progress_callback: ProgressCallback | None = None,
-    target_release: str | None = None,
+    expected_channel: str | None = None,
 ) -> ReleaseTargetInfo:
-    if target_release:
-        version = _normalize_release_version(target_release, context="target release")
-    else:
-        index = _load_git_json(
-            repo_root,
-            ref=upstream,
-            path=RELEASE_INDEX_PATH,
-            config=config,
-            command_runner=command_runner,
-            log=log,
-            progress_callback=progress_callback,
-        )
-        if index.get("schema_version") != RELEASE_INDEX_SCHEMA_VERSION:
-            raise ReleaseMetadataError("Release index has an unsupported schema_version.")
-        channel = _normalize_release_channel(config.release_channel)
-        raw_version = index.get(channel)
-        if raw_version in (None, ""):
-            raise ReleaseMetadataError(f"Release index does not define a {channel} version.")
-        version = _normalize_release_version(raw_version, context=f"release index {channel} version")
-
     tag = version
     tag_result = _run_git_with_log(
         repo_root,
@@ -588,8 +597,130 @@ def _resolve_release_target(
         log=log,
         progress_callback=progress_callback,
     )
-    info = _validate_release_manifest(manifest, expected_version=version)
+    info = _validate_release_manifest(manifest, expected_version=version, expected_channel=expected_channel)
     return replace(info, sha=sha)
+
+
+def _release_candidate_series_from_index(index: dict) -> tuple[str, str, int] | None:
+    raw_series = index.get("release_candidate_series")
+    if raw_series in (None, ""):
+        return None
+    if not isinstance(raw_series, dict):
+        raise ReleaseMetadataError("Release index release_candidate_series must be an object.")
+    prefix = _normalize_release_candidate_prefix(raw_series.get("tag_prefix"))
+    minimum = _normalize_release_version(raw_series.get("minimum"), context="release_candidate_series minimum")
+    minimum_number = _release_candidate_number(minimum, prefix=prefix)
+    if minimum_number is None:
+        raise ReleaseMetadataError("Release index release_candidate_series minimum must match tag_prefix.")
+    return prefix, minimum, minimum_number
+
+
+def _resolve_release_candidate_series_target(
+    repo_root: Path,
+    *,
+    index: dict,
+    config: UpdaterConfig,
+    command_runner: CommandRunner,
+    log: _LogBuffer,
+    progress_callback: ProgressCallback | None = None,
+) -> ReleaseTargetInfo | None:
+    series = _release_candidate_series_from_index(index)
+    if series is None:
+        return None
+    prefix, _minimum, minimum_number = series
+    tag_result = _run_git_with_log(
+        repo_root,
+        ["tag", "--list", f"{prefix}*"],
+        config,
+        command_runner,
+        log,
+        progress_callback,
+    )
+    if tag_result.returncode != 0:
+        log.add("release_candidate_series: git tag --list failed; falling back to exact release_candidate pointer.")
+        return None
+
+    candidates: list[tuple[int, str]] = []
+    for line in _split_commit_lines(tag_result.stdout):
+        number = _release_candidate_number(line, prefix=prefix)
+        if number is not None and number >= minimum_number:
+            candidates.append((number, line))
+
+    for _number, version in sorted(set(candidates), reverse=True):
+        try:
+            return _resolve_release_tag(
+                repo_root,
+                version=version,
+                config=config,
+                command_runner=command_runner,
+                log=log,
+                progress_callback=progress_callback,
+                expected_channel=RELEASE_CHANNEL_RELEASE_CANDIDATE,
+            )
+        except ReleaseMetadataError as exc:
+            log.add(f"release_candidate_series: skipped {version}: {exc.message}")
+            continue
+    return None
+
+
+def _resolve_release_target(
+    repo_root: Path,
+    *,
+    upstream: str,
+    config: UpdaterConfig,
+    command_runner: CommandRunner,
+    log: _LogBuffer,
+    progress_callback: ProgressCallback | None = None,
+    target_release: str | None = None,
+) -> ReleaseTargetInfo:
+    if target_release:
+        version = _normalize_release_version(target_release, context="target release")
+        return _resolve_release_tag(
+            repo_root,
+            version=version,
+            config=config,
+            command_runner=command_runner,
+            log=log,
+            progress_callback=progress_callback,
+        )
+
+    index = _load_git_json(
+        repo_root,
+        ref=upstream,
+        path=RELEASE_INDEX_PATH,
+        config=config,
+        command_runner=command_runner,
+        log=log,
+        progress_callback=progress_callback,
+    )
+    if index.get("schema_version") != RELEASE_INDEX_SCHEMA_VERSION:
+        raise ReleaseMetadataError("Release index has an unsupported schema_version.")
+    channel = _normalize_release_channel(config.release_channel)
+    if channel == RELEASE_CHANNEL_RELEASE_CANDIDATE:
+        series_target = _resolve_release_candidate_series_target(
+            repo_root,
+            index=index,
+            config=config,
+            command_runner=command_runner,
+            log=log,
+            progress_callback=progress_callback,
+        )
+        if series_target is not None:
+            return series_target
+
+    raw_version = index.get(channel)
+    if raw_version in (None, ""):
+        raise ReleaseMetadataError(f"Release index does not define a {channel} version.")
+    version = _normalize_release_version(raw_version, context=f"release index {channel} version")
+    return _resolve_release_tag(
+        repo_root,
+        version=version,
+        config=config,
+        command_runner=command_runner,
+        log=log,
+        progress_callback=progress_callback,
+        expected_channel=channel,
+    )
 
 
 def _read_worktree_release_version(repo_root: Path) -> str:

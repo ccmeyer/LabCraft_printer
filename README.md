@@ -339,7 +339,7 @@ Expected flow:
 - Click `Check for Updates`.
 - The online check fetches tags, reads the upstream `releases/latest.json`, and compares the local checkout with the latest stable release tag.
 - Leave `Include release candidates` unchecked for normal updates.
-- For support-guided testing only, check `Include release candidates` before clicking `Check for Updates`; the app then targets the `release_candidate` release named in `releases/latest.json`.
+- For support-guided testing only, check `Include release candidates` before clicking `Check for Updates`; the app targets the exact `release_candidate` named in `releases/latest.json`, or the newest valid tag in the optional `release_candidate_series`.
 - Release candidate updates are still applied by a named release tag, and `Update App` remains disabled until a fresh check succeeds.
 - If the app is already current with the selected release, it stays open and reports that no update is available.
 - If an update is available, the app shows the target release version, release summary, release notes, rollback version when defined, and pending commit summaries, then enables `Update App`.
@@ -348,6 +348,18 @@ Expected flow:
 - A `LabCraft Updater` window appears after the main app closes, resolves the same confirmed release, and applies it with a fast-forward merge of the release tag.
 - On success, the updater shows the status, installed release, commit range, installed commit summaries, and log path.
 - Close the updater window, then launch LabCraft again using the normal shortcut or launch command.
+
+Release-candidate series discovery is opt-in metadata. A stable release can allow future RC tags in the same line without knowing the final RC number:
+
+```json
+{
+  "release_candidate": "v1.2.0-rc.6",
+  "release_candidate_series": {
+    "tag_prefix": "v1.2.0-rc.",
+    "minimum": "v1.2.0-rc.6"
+  }
+}
+```
 
 If the update is blocked or fails, the updater window stays open and shows the log path. Support should ask for the path shown in the updater window, usually under:
 
