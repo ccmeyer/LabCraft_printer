@@ -2592,6 +2592,11 @@ CMD_MAP = {
 
 CMD_NAME_BY_CODE = {value: key.lower() for key, value in CMD_MAP.items()}
 
+ABSOLUTE_X_MIN = -500
+ABSOLUTE_X_MAX = 80000
+ABSOLUTE_Y_MIN = 0
+ABSOLUTE_Y_MAX = 60000
+
 REGULATOR_PROFILE_CHANNELS = {
     "print": 0,
     "p": 0,
@@ -6258,10 +6263,14 @@ class Machine(QObject):
         """
         Set absolute X and Y positions.
         """
-        if self.check_param_limits(x,0,80000) and self.check_param_limits(y,0,60000):
+        if self.check_param_limits(x, ABSOLUTE_X_MIN, ABSOLUTE_X_MAX) and self.check_param_limits(y, ABSOLUTE_Y_MIN, ABSOLUTE_Y_MAX):
             return self.add_command_to_queue('ABSOLUTE_XY', x, y, 30000, handler=handler, kwargs=kwargs, manual=manual)
         else:
-            print(f'Absolute X or Y position out of range: X={x}, Y={y}')
+            print(
+                f'Absolute X or Y position out of range: '
+                f'X={x} ({ABSOLUTE_X_MIN}, {ABSOLUTE_X_MAX}), '
+                f'Y={y} ({ABSOLUTE_Y_MIN}, {ABSOLUTE_Y_MAX})'
+            )
             return False
     
     def set_relative_X(self, x, handler=None, kwargs=None, manual=False):
@@ -6274,12 +6283,12 @@ class Machine(QObject):
             return False
     
     def set_absolute_X(self, x, handler=None, kwargs=None, manual=False):
-        if self.check_param_limits(x,0,80000):
+        if self.check_param_limits(x, ABSOLUTE_X_MIN, ABSOLUTE_X_MAX):
             sign = 1 if x >= 0 else 0
             x = abs(x)
             return self.add_command_to_queue('ABSOLUTE_X', sign, x, 30000, handler=handler, kwargs=kwargs, manual=manual)
         else:
-            print(f'Absolute X position {x} out of range (0, 80000)')
+            print(f'Absolute X position {x} out of range ({ABSOLUTE_X_MIN}, {ABSOLUTE_X_MAX})')
             return False
     
     def set_relative_Y(self, y, handler=None, kwargs=None, manual=False):

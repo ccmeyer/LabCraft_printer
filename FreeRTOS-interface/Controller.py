@@ -3640,7 +3640,8 @@ class Controller(QObject):
                 print('Collision detected')
                 return False
         #print(f"Setting absolute XY: {x}, {y}")
-        self.machine.set_absolute_XY(x, y, manual=manual, handler=handler)
+        if self.machine.set_absolute_XY(x, y, manual=manual, handler=handler) is False:
+            return False
         self.update_expected_position(x=x, y=y)
         return True
 
@@ -3651,7 +3652,8 @@ class Controller(QObject):
                 print('Collision detected')
                 return False
         #print(f"Setting absolute X: {x}")
-        self.machine.set_absolute_X(x,manual=manual,handler=handler)
+        if self.machine.set_absolute_X(x,manual=manual,handler=handler) is False:
+            return False
         self.update_expected_position(x=x)
         return True
 
@@ -3662,7 +3664,8 @@ class Controller(QObject):
                 print('Collision detected')
                 return False
         #print(f"Setting absolute Y: {y}")
-        self.machine.set_absolute_Y(y,manual=manual,handler=handler)
+        if self.machine.set_absolute_Y(y,manual=manual,handler=handler) is False:
+            return False
         self.update_expected_position(y=y)
         return True
     
@@ -3673,7 +3676,8 @@ class Controller(QObject):
                 print('Collision detected')
                 return False
         #print(f"Setting absolute Z: {z}")
-        self.machine.set_absolute_Z(z,manual=manual,handler=handler)
+        if self.machine.set_absolute_Z(z,manual=manual,handler=handler) is False:
+            return False
         self.update_expected_position(z=z)
         return True
 
@@ -3800,20 +3804,34 @@ class Controller(QObject):
 
             if axis == 'XY':
                 x_val, y_val = val
-                self.machine.set_absolute_XY(
+                queued = self.machine.set_absolute_XY(
                     x_val, y_val,
                     manual=manual,
                     handler=cb,
                     kwargs=kwargs
                 )
+                if queued is False:
+                    self.update_expected_position(
+                        x=cur['X'],
+                        y=cur['Y'],
+                        z=cur['Z'],
+                    )
+                    return False
                 cur['X'], cur['Y'] = x_val, y_val
             elif axis == 'Z':
-                self.machine.set_absolute_Z(
+                queued = self.machine.set_absolute_Z(
                     val,
                     manual=manual,
                     handler=cb,
                     kwargs=kwargs
                 )
+                if queued is False:
+                    self.update_expected_position(
+                        x=cur['X'],
+                        y=cur['Y'],
+                        z=cur['Z'],
+                    )
+                    return False
                 cur['Z'] = val
             else:
                 raise ValueError(f"Unknown axis {axis}")
