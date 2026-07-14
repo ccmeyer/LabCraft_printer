@@ -6915,6 +6915,10 @@ class Machine(QObject):
         self.homing_completed.emit()
 
     def home_motors(self,handler=None,kwargs=None,manual=False):
+        # A new home invalidates the previous coordinate reference immediately.
+        # Only the final command handler may mark the machine homed again.
+        self.homed = False
+        self.location = 'Unknown'
         if handler == None:
             handler = self.home_motor_handler
         self.add_command_to_queue('HOME_Z',10000,1000,1000,handler=None,kwargs=kwargs,manual=manual)

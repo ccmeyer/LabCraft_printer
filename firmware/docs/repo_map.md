@@ -85,6 +85,7 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
   - `firmware/Core/Inc/TMC2208Driver.h`, `firmware/Core/Src/TMC2208Driver.cpp`
 - Key functions:
   - `Stepper::move`, `Stepper::moveTo`, `Stepper::home`, `Stepper::dispatch`, `Stepper::handleExtiFromIsr`
+  - `Stepper::home` accepts a cooperative cancellation token and returns distinct succeeded, failed, or canceled outcomes; every blocking home phase polls the token and restores home-only motion settings before exit.
   - C wrappers used by orchestrator/main: `MX_STEPPERX_Home`, `MX_STEPPERY_Home`, etc.
   - `Gantry::moveBy`, `Gantry::moveTo`
 
@@ -136,6 +137,7 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
   - `firmware/Core/Inc/DiagnosticResultEmitter.h`, `firmware/Core/Src/DiagnosticResultEmitter.cpp`
   - `firmware/Core/Inc/CrashWatchdogSelfTestPolicy.h`, `firmware/Core/Src/CrashWatchdogSelfTestPolicy.cpp`
   - `firmware/Core/Inc/OrchestratorCompletionPolicy.h`, `firmware/Core/Src/OrchestratorCompletionPolicy.cpp`
+  - `firmware/Core/Inc/HomeInterruptionPolicy.h`, `firmware/Core/Src/HomeInterruptionPolicy.cpp`
   - `firmware/Core/Inc/RegulatorPausePolicy.h`, `firmware/Core/Src/RegulatorPausePolicy.cpp`
   - `firmware/Core/Inc/SelfTestCommandPolicy.h`
   - Functions: `Orchestrator::begin`, `Orchestrator::_run`, `Orchestrator::executeCommand`, `enqueueFromISR`, `startHomeAsync`, `startRegHomeAsync`, `_flashTaskLoop`
@@ -152,6 +154,8 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
   - `SelfTestCommandPolicy` resolves the logical self-test `run_id` and optional timeout TLVs independently from transport `seq32`, keeping HIL self-test compatible with the sliding-window queue-ACK transport.
   - `OrchestratorCompletionPolicy` centralizes the pure “did an interruptible command really finish?” bookkeeping used to decide when executed/retired frontiers may advance after pause-aware waits.
   - `RegulatorPausePolicy` owns the host-tested one-shot active-channel snapshot used to stop pressure regulation for manual pause, restore only previously active channels on resume, and discard restoration state on clear or session shutdown.
+  - `HomeInterruptionPolicy` owns the host-tested, generation-tagged cancel/restart lifecycle. Orchestrator home workers are persistent static tasks: Pause hard-stops active home axes and closes regulator valves, Resume re-runs interrupted autonomous recovery homes before restarting the interrupted opcode, and a genuine failure remains paused and unretired until Clear.
+  - Homing interruption does not add or change any serial opcode, TLV, ACK, or status field; the existing paused flag and non-advancing completion watermark represent a latched failure to the host.
   - Flash session safety lives here: `CMD_INIT_FLASH` / `CMD_STOP_FLASH`, PE8 arm/disarm policy, PE9 output ownership, and fault latch logging (`FLASH_ARMED`, `FLASH_DISARMED`, `FLASH_FAULT`). Active imaging sessions now only hard-fault on `line_high_on_arm`; once armed, duplicate triggers while a flash is already pending are ignored and the task simply waits for PE8 to return low without latching on slow release.
 
   - `Orchestrator::drainAckQueue()` now flushes deferred `CMD_QUEUE_ACK` traffic from both the main loop and interruptible wait loops so `CMD_PAUSE_AFTER_SEQ32` requests can be acknowledged promptly during long move/dispense commands.

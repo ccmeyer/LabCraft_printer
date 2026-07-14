@@ -204,6 +204,36 @@ void Orchestrator::begin() {
   );
 }
 
+void Orchestrator::createHomeWorkers() {
+  if (_taskHomeX != nullptr) {
+    return;
+  }
+  _argsHomeX.stepper = Stepper::stepperX();
+  _argsHomeY.stepper = Stepper::stepperY();
+  _argsHomeZ.stepper = Stepper::stepperZ();
+  _argsHomeX.doneBit = BIT_HOME_X_DONE;
+  _argsHomeY.doneBit = BIT_HOME_Y_DONE;
+  _argsHomeZ.doneBit = BIT_HOME_Z_DONE;
+
+  _taskHomeX = xTaskCreateStatic(_homeTaskEntry, "HomeX", HOME_STACK_WORDS,
+      &_argsHomeX, tskIDLE_PRIORITY + 3, _stackHomeX, &_tcbHomeX);
+  _taskHomeY = xTaskCreateStatic(_homeTaskEntry, "HomeY", HOME_STACK_WORDS,
+      &_argsHomeY, tskIDLE_PRIORITY + 3, _stackHomeY, &_tcbHomeY);
+  _taskHomeZ = xTaskCreateStatic(_homeTaskEntry, "HomeZ", HOME_STACK_WORDS,
+      &_argsHomeZ, tskIDLE_PRIORITY + 3, _stackHomeZ, &_tcbHomeZ);
+
+  _argsHomeP.reg = PressureRegulator::tryGet(0u);
+  _argsHomeP.doneBit = BIT_HOME_P_DONE;
+  _taskHomeP = xTaskCreateStatic(_regHomeTaskEntry, "HomePR_P", REG_HOME_STACK_WORDS,
+      &_argsHomeP, tskIDLE_PRIORITY + 3, _stackHomeP, &_tcbHomeP);
+#if (LC_PRESSURE_PORTS > 1)
+  _argsHomeR.reg = PressureRegulator::tryGet(1u);
+  _argsHomeR.doneBit = BIT_HOME_R_DONE;
+  _taskHomeR = xTaskCreateStatic(_regHomeTaskEntry, "HomePR_R", REG_HOME_STACK_WORDS,
+      &_argsHomeR, tskIDLE_PRIORITY + 3, _stackHomeR, &_tcbHomeR);
+#endif
+}
+
 extern "C" void MX_ORCH_Init()
 {
   static Orchestrator orch;
@@ -368,9 +398,13 @@ BaseType_t Orchestrator::enqueueFromISR(const Command& cmd, BaseType_t* pxHigher
 
 void Orchestrator::pauseCurrent() {
   Logger::instance()->log("pauseCurrent\r\n");
+  cancelActiveHomesForPause();
   Gantry::instance()->pauseXYZMotors();
   Printer::instance()->pauseDispense();
   pausePressureRegulators();
+  if (!waitForHomesSettled(100u)) {
+    latchHomeFailure("cancel_timeout");
+  }
   xEventGroupClearBits(_doneEvents,
       BIT_LED_DONE|BIT_STEPPER1_DONE|BIT_STEPPER2_DONE|
       BIT_STEPPER3_DONE|BIT_PRINTING_DONE|BIT_FLASH_PRINT_DONE|BIT_GRIPPER_DONE);
@@ -428,6 +462,150 @@ void Orchestrator::resumePressureRegulators() {
 
 void Orchestrator::discardPressureRegulatorResume() {
   RegulatorPausePolicy::discard(_regulatorPauseSnapshot);
+}
+
+bool Orchestrator::isHomeCommand(CmdType cmd) {
+  switch (cmd) {
+    case CMD_HOME_X:
+    case CMD_HOME_Y:
+    case CMD_HOME_Z:
+    case CMD_HOME_PRINT:
+    case CMD_HOME_REFUEL:
+    case CMD_HOME_XY:
+    case CMD_HOME_PR_BOTH:
+    case CMD_REFUEL_VACUUM_ENTER:
+      return true;
+    default:
+      return false;
+  }
+}
+
+void Orchestrator::cancelActiveHomesForPause() {
+  auto cancelAxis = [](HomeTaskArgs& args) {
+    if (!args.active) return;
+    args.cancelToken.requested = true;
+    if (args.stepper != nullptr) args.stepper->stop();
+  };
+  cancelAxis(_argsHomeX);
+  cancelAxis(_argsHomeY);
+  cancelAxis(_argsHomeZ);
+
+  if (_argsHomeP.active) {
+    _argsHomeP.cancelToken.requested = true;
+    Stepper::stepperP()->stop();
+    PressureRegulator::regP().closeValve();
+  }
+#if (LC_PRESSURE_PORTS > 1)
+  if (_argsHomeR.active) {
+    _argsHomeR.cancelToken.requested = true;
+    Stepper::stepperR()->stop();
+    PressureRegulator::regR().closeValve();
+  }
+#endif
+
+  (void)PressureRegulator::regP().cancelActiveHome();
+#if (LC_PRESSURE_PORTS > 1)
+  (void)PressureRegulator::regR().cancelActiveHome();
+#endif
+  HomeInterruptionPolicy::requestCancel(_homeLifecycle);
+}
+
+bool Orchestrator::waitForHomesSettled(uint32_t timeoutMs) {
+  const uint32_t startMs = HAL_GetTick();
+  for (;;) {
+    bool active = _argsHomeX.active || _argsHomeY.active || _argsHomeZ.active ||
+                  _argsHomeP.active || PressureRegulator::regP().isHoming();
+#if (LC_PRESSURE_PORTS > 1)
+    active = active || _argsHomeR.active || PressureRegulator::regR().isHoming();
+#endif
+    if (!active) return true;
+    if ((HAL_GetTick() - startMs) >= timeoutMs) return false;
+    Watchdog_CheckIn(CRASH_TASK_ORCH);
+    vTaskDelay(msToAtLeast1Tick(5u));
+  }
+}
+
+bool Orchestrator::restartInterruptedAutonomousHomes() {
+  auto restart = [](PressureRegulator& reg) {
+    if (!reg.hasInterruptedAutonomousHome()) return true;
+    const auto outcome = reg.restartInterruptedAutonomousHome();
+    return outcome == HomeInterruptionPolicy::Outcome::Succeeded;
+  };
+  if (!restart(PressureRegulator::regP())) return false;
+#if (LC_PRESSURE_PORTS > 1)
+  if (!restart(PressureRegulator::regR())) return false;
+#endif
+  return true;
+}
+
+bool Orchestrator::homeCommandSucceeded(CmdType cmd) const {
+  using HomeInterruptionPolicy::Outcome;
+  switch (cmd) {
+    case CMD_HOME_X: return _argsHomeX.outcome == Outcome::Succeeded;
+    case CMD_HOME_Y: return _argsHomeY.outcome == Outcome::Succeeded;
+    case CMD_HOME_Z: return _argsHomeZ.outcome == Outcome::Succeeded;
+    case CMD_HOME_PRINT: return _argsHomeP.outcome == Outcome::Succeeded;
+    case CMD_HOME_REFUEL:
+#if (LC_PRESSURE_PORTS > 1)
+      return _argsHomeR.outcome == Outcome::Succeeded;
+#else
+      return true;
+#endif
+    case CMD_HOME_XY: {
+      const Outcome outcomes[] = {_argsHomeX.outcome, _argsHomeY.outcome};
+      return HomeInterruptionPolicy::allSucceeded(outcomes, 2u);
+    }
+    case CMD_HOME_PR_BOTH: {
+#if (LC_PRESSURE_PORTS > 1)
+      const Outcome outcomes[] = {_argsHomeP.outcome, _argsHomeR.outcome};
+      return HomeInterruptionPolicy::allSucceeded(outcomes, 2u);
+#else
+      return _argsHomeP.outcome == Outcome::Succeeded;
+#endif
+    }
+    case CMD_REFUEL_VACUUM_ENTER:
+#if (LC_PRESSURE_PORTS > 1)
+      return _argsHomeR.outcome == Outcome::Succeeded;
+#else
+      return true;
+#endif
+    default: return false;
+  }
+}
+
+void Orchestrator::latchHomeFailure(const char* reason) {
+  _homeFailureLatched = true;
+  _paused = true;
+  _restartingInterruptedHome = false;
+  _interruptedCommandHome = false;
+  _homeLifecycle.state = HomeInterruptionPolicy::State::FailureLatched;
+  cancelActiveHomesForPause();
+  Gantry::instance()->cancelXYZMotors();
+  Printer::instance()->cancelDispense();
+  PressureRegulator::regP().pause();
+#if (LC_PRESSURE_PORTS > 1)
+  PressureRegulator::regR().pause();
+#endif
+  discardPressureRegulatorResume();
+  Logger::instance()->log("[Home] failure latched reason=%s\r\n", reason != nullptr ? reason : "unknown");
+}
+
+void Orchestrator::discardInterruptedHomes() {
+  PressureRegulator::regP().discardInterruptedHome();
+#if (LC_PRESSURE_PORTS > 1)
+  PressureRegulator::regR().discardInterruptedHome();
+#endif
+  _argsHomeX.cancelToken.requested = false;
+  _argsHomeY.cancelToken.requested = false;
+  _argsHomeZ.cancelToken.requested = false;
+  _argsHomeP.cancelToken.requested = false;
+#if (LC_PRESSURE_PORTS > 1)
+  _argsHomeR.cancelToken.requested = false;
+#endif
+  _interruptedCommandHome = false;
+  _restartingInterruptedHome = false;
+  _homeFailureLatched = false;
+  HomeInterruptionPolicy::clear(_homeLifecycle);
 }
 
 void Orchestrator::_taskEntry(void* pv) {
@@ -587,15 +765,33 @@ void Orchestrator::_run() {
   for (;;) {
 	  Watchdog_CheckIn(CRASH_TASK_ORCH);
 	  drainAckQueue();
+	  if (_autonomousHomeFailureRequested) {
+	    _autonomousHomeFailureRequested = false;
+	    latchHomeFailure("autonomous_home_failed");
+	  }
 	  if (_pauseRequested) {
 		    Logger::instance()->log("Run\r\n");
+	        _interruptedCommandHome = _hasInFlightCommand && isHomeCommand(_inFlight.cmd);
+	        if (_interruptedCommandHome) {
+	          _lastPausedCmd = _inFlight;
+	        }
 	        pauseCurrent();
 	        _paused = true;
 	        _pauseRequested = false;
-	        _lastPausedCmd = _inFlight;    // remember what we were doing
+	        if (_interruptedCommandHome && !_homeFailureLatched) {
+	          HomeInterruptionPolicy::noteOutcome(
+	              _homeLifecycle,
+	              HomeInterruptionPolicy::Outcome::Canceled,
+	              _homeLifecycle.generation);
+	        }
 	      }
 
 	  if (_resumeRequested) {
+		if (_homeFailureLatched) {
+			Logger::instance()->log("[Home] Resume ignored while failure is latched\r\n");
+			_resumeRequested = false;
+			continue;
+		}
 		if (_pauseWatermarkReached) {
 			resumePressureRegulators();
 			_pauseWatermarkReached = false;
@@ -604,8 +800,27 @@ void Orchestrator::_run() {
 			_resumeRequested = false;
 			continue;
 		}
-		resumeCurrent();
 		_paused = false;
+		if (!restartInterruptedAutonomousHomes()) {
+			latchHomeFailure("autonomous_restart_failed");
+			_resumeRequested = false;
+			continue;
+		}
+		if (_interruptedCommandHome) {
+			_restartingInterruptedHome = true;
+			(void)HomeInterruptionPolicy::begin(_homeLifecycle, true);
+			const Command restartCommand = _lastPausedCmd;
+			executeCommand(restartCommand);
+			_restartingInterruptedHome = false;
+			_resumeRequested = false;
+			if (!_homeFailureLatched && !_pauseRequested &&
+			    _lastExecutedCmdNum == _currentCmdNum) {
+				_interruptedCommandHome = false;
+				resumePressureRegulators();
+			}
+			continue;
+		}
+		resumeCurrent();
 		_resumeRequested = false;
 		switch (_lastPausedCmd.cmd) {
 			case CMD_MOVE_X: waitForBit(BIT_STEPPER1_DONE); break;
@@ -639,8 +854,11 @@ void Orchestrator::_run() {
         // Silence status briefly to reduce traffic during reset (optional)
         Comm::instance()->setStatusPaused(true);
 
+        cancelActiveHomesForPause();
+        const bool homesSettled = waitForHomesSettled(100u);
         cancelCurrent();
         discardPressureRegulatorResume();
+        discardInterruptedHomes();
         xQueueReset(_cmdQueue);
         Comm::instance()->resetReceiveState();
 
@@ -649,13 +867,16 @@ void Orchestrator::_run() {
         _pauseWatermarkReached = false;
         _resumeRequested = false;
         _pauseRequested = false;
+        _hasInFlightCommand = false;
 
         xEventGroupClearBits(_doneEvents,
-            BIT_LED_DONE|BIT_STEPPER1_DONE|BIT_STEPPER2_DONE|BIT_STEPPER3_DONE|BIT_PRINTING_DONE|BIT_FLASH_PRINT_DONE|BIT_GRIPPER_DONE);
+            BIT_LED_DONE|BIT_STEPPER1_DONE|BIT_STEPPER2_DONE|BIT_STEPPER3_DONE|BIT_PRINTING_DONE|BIT_FLASH_PRINT_DONE|BIT_GRIPPER_DONE|
+            BIT_HOME_X_DONE|BIT_HOME_Y_DONE|BIT_HOME_Z_DONE|BIT_HOME_P_DONE|BIT_HOME_R_DONE);
 
-        _paused = false;
+        _paused = !homesSettled;
+        _homeFailureLatched = !homesSettled;
         _clearRequested = false;
-        Logger::instance()->log("--Cleared--\r\n");
+        Logger::instance()->log(homesSettled ? "--Cleared--\r\n" : "[Home] Clear left cancellation timeout latched\r\n");
 
         // small grace period then resume status
         vTaskDelay(pdMS_TO_TICKS(20));
@@ -703,6 +924,10 @@ void Orchestrator::_run() {
 /// factor out all your “case CMD_MOVE_X / CMD_LED / etc” into this:
 void Orchestrator::executeCommand(const Command &cmd) {
   bool commandCompleted = true;
+	_hasInFlightCommand = true;
+	if (isHomeCommand(cmd.cmd) && !_restartingInterruptedHome) {
+	  (void)HomeInterruptionPolicy::begin(_homeLifecycle, false);
+	}
 	if (cmd.hasSeq32) {
 		_currentCmdNum = cmd.seq32;
 		_lastSeq8      = cmd.seq8;   // optional: keep for legacy
@@ -1053,14 +1278,16 @@ void Orchestrator::executeCommand(const Command &cmd) {
 		}
         case CMD_HOME_PRINT: {
           xEventGroupClearBits(_doneEvents, BIT_HOME_P_DONE);
-          startRegHomeAsync(&PressureRegulator::regP(), cmd.p1, cmd.p2, cmd.p3, BIT_HOME_P_DONE);
+          startRegHomeAsync(&PressureRegulator::regP(), cmd.p1, cmd.p2, cmd.p3, BIT_HOME_P_DONE,
+                            !_restartingInterruptedHome);
           commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(waitForBit(BIT_HOME_P_DONE));
           break;
         }
         case CMD_HOME_REFUEL: {
 		#if (LC_PRESSURE_PORTS > 1)
 		  xEventGroupClearBits(_doneEvents, BIT_HOME_R_DONE);
-		  startRegHomeAsync(&PressureRegulator::regR(), cmd.p1, cmd.p2, cmd.p3, BIT_HOME_R_DONE);
+		  startRegHomeAsync(&PressureRegulator::regR(), cmd.p1, cmd.p2, cmd.p3, BIT_HOME_R_DONE,
+		                    !_restartingInterruptedHome);
 		  commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(waitForBit(BIT_HOME_R_DONE));
 		#else
 		  Logger::instance()->log("Legacy has no refuel channel");
@@ -1092,14 +1319,17 @@ void Orchestrator::executeCommand(const Command &cmd) {
 
 		#if (LC_PRESSURE_PORTS > 1)
 		  xEventGroupClearBits(_doneEvents, BIT_HOME_P_DONE | BIT_HOME_R_DONE);
-		  startRegHomeAsync(&PressureRegulator::regP(), fastHz, slowHz, backoff, BIT_HOME_P_DONE);
-		  startRegHomeAsync(&PressureRegulator::regR(), fastHz, slowHz, backoff, BIT_HOME_R_DONE);
+		  startRegHomeAsync(&PressureRegulator::regP(), fastHz, slowHz, backoff, BIT_HOME_P_DONE,
+		                    !_restartingInterruptedHome);
+		  startRegHomeAsync(&PressureRegulator::regR(), fastHz, slowHz, backoff, BIT_HOME_R_DONE,
+		                    !_restartingInterruptedHome);
 		  commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(
 		      waitForBits(BIT_HOME_P_DONE | BIT_HOME_R_DONE)
 		  );
 		#else
 		  xEventGroupClearBits(_doneEvents, BIT_HOME_P_DONE);
-		  startRegHomeAsync(&PressureRegulator::regP(), fastHz, slowHz, backoff, BIT_HOME_P_DONE);
+		  startRegHomeAsync(&PressureRegulator::regP(), fastHz, slowHz, backoff, BIT_HOME_P_DONE,
+		                    !_restartingInterruptedHome);
 		  commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(waitForBit(BIT_HOME_P_DONE));
 		#endif
           break;
@@ -1431,11 +1661,22 @@ void Orchestrator::executeCommand(const Command &cmd) {
       	HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
           break;
       }
+  if (commandCompleted && isHomeCommand(cmd.cmd) && !homeCommandSucceeded(cmd.cmd)) {
+      latchHomeFailure("home_attempt_failed");
+      commandCompleted = false;
+  }
   if (!commandCompleted) {
       return;
   }
+  if (isHomeCommand(cmd.cmd)) {
+      HomeInterruptionPolicy::noteOutcome(
+          _homeLifecycle,
+          HomeInterruptionPolicy::Outcome::Succeeded,
+          _homeLifecycle.generation);
+  }
   sampleOrchStack(ORCH_STACK_PHASE_CMD_DONE);
   OrchestratorCompletionPolicy::retireCurrentCommand(_currentCmdNum, _lastExecutedCmdNum, _lastRetiredCmdNum);
+  _hasInFlightCommand = false;
   }
 
 void Orchestrator::performShutdown(uint8_t byeSeq8, uint32_t byeSeq32, bool have32)
@@ -1558,28 +1799,29 @@ void Orchestrator::_homeTaskEntry(void* ctx)
     }
   }
 
-  a->stepper->home(a->fastHz, a->slowHz, a->backoffSteps);
+  for (;;) {
+    (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    if (a == nullptr || a->stepper == nullptr) {
+      continue;
+    }
+    a->outcome = a->stepper->home(
+        a->fastHz,
+        a->slowHz,
+        a->backoffSteps,
+        &a->cancelToken);
 
-  uint16_t hwmWords = 0u;
+    uint16_t hwmWords = 0u;
 #if (INCLUDE_uxTaskGetStackHighWaterMark == 1)
-  const UBaseType_t hwm = uxTaskGetStackHighWaterMark(nullptr);
-  hwmWords = (hwm > 0xFFFFu) ? 0xFFFFu : static_cast<uint16_t>(hwm);
+    const UBaseType_t hwm = uxTaskGetStackHighWaterMark(nullptr);
+    hwmWords = (hwm > 0xFFFFu) ? 0xFFFFu : static_cast<uint16_t>(hwm);
 #endif
-  if (hwmSlot != nullptr) {
-    *hwmSlot = hwmWords;
+    if (hwmSlot != nullptr) {
+      *hwmSlot = hwmWords;
+    }
+    _logHomeTaskStackUsage(taskName, HOME_STACK_WORDS, hwmWords);
+    a->active = false;
+    xEventGroupSetBits(Orchestrator::getDoneEvents(), a->doneBit);
   }
-  _logHomeTaskStackUsage(taskName, HOME_STACK_WORDS, hwmWords);
-
-  xEventGroupSetBits(Orchestrator::getDoneEvents(), a->doneBit);
-
-  // Clear the handle for this bank so a new home can be started later
-  if (orch != nullptr) {
-    if (a->stepper == Stepper::stepperX()) orch->_taskHomeX = nullptr;
-    else if (a->stepper == Stepper::stepperY()) orch->_taskHomeY = nullptr;
-    else if (a->stepper == Stepper::stepperZ()) orch->_taskHomeZ = nullptr;
-  }
-
-  vTaskDelete(nullptr);
 }
 
 void Orchestrator::startHomeAsync(Stepper* s,
@@ -1588,27 +1830,35 @@ void Orchestrator::startHomeAsync(Stepper* s,
                                   uint32_t backoffSteps,
                                   EventBits_t doneBit)
 {
+  createHomeWorkers();
   // Choose a static bank based on which axis we were asked to home
-  StaticTask_t* tcb   = nullptr;
-  StackType_t*  stack = nullptr;
   TaskHandle_t* handle= nullptr;
   HomeTaskArgs* args  = nullptr;
   const char*   name  = "HomeAx";
 
   if (s == Stepper::stepperX()) {
-    tcb = &_tcbHomeX; stack = _stackHomeX; handle = &_taskHomeX; args = &_argsHomeX; name = "HomeX";
+    handle = &_taskHomeX; args = &_argsHomeX; name = "HomeX";
   } else if (s == Stepper::stepperY()) {
-    tcb = &_tcbHomeY; stack = _stackHomeY; handle = &_taskHomeY; args = &_argsHomeY; name = "HomeY";
+    handle = &_taskHomeY; args = &_argsHomeY; name = "HomeY";
   } else if (s == Stepper::stepperZ()) {
-    tcb = &_tcbHomeZ; stack = _stackHomeZ; handle = &_taskHomeZ; args = &_argsHomeZ; name = "HomeZ";
+    handle = &_taskHomeZ; args = &_argsHomeZ; name = "HomeZ";
   } else {
     Logger::instance()->log("[Home] No static bank for this axis; refusing blocking fallback\r\n");
     xEventGroupSetBits(_doneEvents, doneBit);
     return;
   }
 
-  if (*handle != nullptr) {
+  if (*handle == nullptr) {
+    Logger::instance()->log("[Home] Worker unavailable for %s\r\n", name);
+    args->outcome = HomeInterruptionPolicy::Outcome::Failed;
+    xEventGroupSetBits(_doneEvents, doneBit);
+    return;
+  }
+
+  if (args->active) {
     Logger::instance()->log("[Home] %s already running; ignoring duplicate request\r\n", name);
+    args->outcome = HomeInterruptionPolicy::Outcome::Failed;
+    xEventGroupSetBits(_doneEvents, doneBit);
     return;
   }
 
@@ -1618,21 +1868,11 @@ void Orchestrator::startHomeAsync(Stepper* s,
   args->slowHz       = slowHz;
   args->backoffSteps = backoffSteps;
   args->doneBit      = doneBit;
-
-  // Create without touching the heap
-  *handle = xTaskCreateStatic(
-      _homeTaskEntry,
-      name,
-      HOME_STACK_WORDS,
-      (void*)args,
-      tskIDLE_PRIORITY + 3,
-      stack,
-      tcb);
-
-  if (!*handle) {
-    Logger::instance()->log("[Home] xTaskCreateStatic failed for %s\r\n", name);
-    xEventGroupSetBits(_doneEvents, doneBit);
-  }
+  args->cancelToken.requested = false;
+  ++args->cancelToken.generation;
+  args->outcome = HomeInterruptionPolicy::Outcome::Running;
+  args->active = true;
+  xTaskNotifyGive(*handle);
 }
 
 // ---------------- Regulator async homing ----------------
@@ -1656,50 +1896,52 @@ void Orchestrator::_regHomeTaskEntry(void* ctx)
 #endif
   }
 
-  a->reg->homeWithValve(a->fastHz, a->slowHz, a->backoffSteps);
+  for (;;) {
+    (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    if (a == nullptr || a->reg == nullptr) {
+      continue;
+    }
+    a->outcome = a->reg->homeWithValve(
+        a->fastHz,
+        a->slowHz,
+        a->backoffSteps,
+        HomeInterruptionPolicy::Origin::Commanded,
+        &a->cancelToken,
+        a->restoreDispenseOnSuccess);
 
-  uint16_t hwmWords = 0u;
+    uint16_t hwmWords = 0u;
 #if (INCLUDE_uxTaskGetStackHighWaterMark == 1)
-  const UBaseType_t hwm = uxTaskGetStackHighWaterMark(nullptr);
-  hwmWords = (hwm > 0xFFFFu) ? 0xFFFFu : static_cast<uint16_t>(hwm);
+    const UBaseType_t hwm = uxTaskGetStackHighWaterMark(nullptr);
+    hwmWords = (hwm > 0xFFFFu) ? 0xFFFFu : static_cast<uint16_t>(hwm);
 #endif
-  if (hwmSlot != nullptr) {
-    *hwmSlot = hwmWords;
+    if (hwmSlot != nullptr) {
+      *hwmSlot = hwmWords;
+    }
+    _logHomeTaskStackUsage(taskName, REG_HOME_STACK_WORDS, hwmWords);
+    a->active = false;
+    xEventGroupSetBits(Orchestrator::getDoneEvents(), a->doneBit);
   }
-  _logHomeTaskStackUsage(taskName, REG_HOME_STACK_WORDS, hwmWords);
-
-  xEventGroupSetBits(Orchestrator::getDoneEvents(), a->doneBit);
-
-  if ((orch != nullptr) && (a->reg == &PressureRegulator::regP())) {
-    orch->_taskHomeP = nullptr;
-  }
-#if (LC_PRESSURE_PORTS > 1)
-  else if ((orch != nullptr) && (a->reg == &PressureRegulator::regR())) {
-    orch->_taskHomeR = nullptr;
-  }
-#endif
-  vTaskDelete(nullptr);
 }
 
 void Orchestrator::startRegHomeAsync(PressureRegulator* r,
                                      uint32_t fastHz,
                                      uint32_t slowHz,
                                      uint32_t backoffSteps,
-                                     EventBits_t doneBit)
+                                     EventBits_t doneBit,
+                                     bool restoreDispenseOnSuccess)
 {
-  StaticTask_t*    tcb    = nullptr;
-  StackType_t*     stack  = nullptr;
+  createHomeWorkers();
   TaskHandle_t*    handle = nullptr;
   RegHomeTaskArgs* args   = nullptr;
   const char*      name   = "HomePR";
 
   if (r == &PressureRegulator::regP()) {
-    tcb = &_tcbHomeP; stack = _stackHomeP; handle = &_taskHomeP; args = &_argsHomeP; name = "HomePR_P";
+    handle = &_taskHomeP; args = &_argsHomeP; name = "HomePR_P";
   }
 
 #if (LC_PRESSURE_PORTS > 1)
   else if (r == &PressureRegulator::regR()) {
-    tcb = &_tcbHomeR; stack = _stackHomeR; handle = &_taskHomeR; args = &_argsHomeR; name = "HomePR_R";
+    handle = &_taskHomeR; args = &_argsHomeR; name = "HomePR_R";
   }
 #endif
 
@@ -1709,8 +1951,17 @@ void Orchestrator::startRegHomeAsync(PressureRegulator* r,
     return;
   }
 
-  if (*handle != nullptr) {
+  if (*handle == nullptr) {
+    Logger::instance()->log("[HomePR] Worker unavailable for %s\r\n", name);
+    args->outcome = HomeInterruptionPolicy::Outcome::Failed;
+    xEventGroupSetBits(_doneEvents, doneBit);
+    return;
+  }
+
+  if (args->active) {
     Logger::instance()->log("[HomePR] %s already running; ignoring duplicate request\r\n", name);
+    args->outcome = HomeInterruptionPolicy::Outcome::Failed;
+    xEventGroupSetBits(_doneEvents, doneBit);
     return;
   }
 
@@ -1719,20 +1970,12 @@ void Orchestrator::startRegHomeAsync(PressureRegulator* r,
   args->slowHz       = slowHz;
   args->backoffSteps = backoffSteps;
   args->doneBit      = doneBit;
-
-  *handle = xTaskCreateStatic(
-      _regHomeTaskEntry,
-      name,
-      REG_HOME_STACK_WORDS,
-      (void*)args,
-      tskIDLE_PRIORITY + 3,
-      stack,
-      tcb);
-
-  if (!*handle) {
-    Logger::instance()->log("[HomePR] xTaskCreateStatic failed for %s\r\n", name);
-    xEventGroupSetBits(_doneEvents, doneBit);
-  }
+  args->restoreDispenseOnSuccess = restoreDispenseOnSuccess;
+  args->cancelToken.requested = false;
+  ++args->cancelToken.generation;
+  args->outcome = HomeInterruptionPolicy::Outcome::Running;
+  args->active = true;
+  xTaskNotifyGive(*handle);
 }
 
 bool Orchestrator::enterRefuelVacuumModeWithAsyncHome(int32_t targetRaw,
@@ -1745,7 +1988,7 @@ bool Orchestrator::enterRefuelVacuumModeWithAsyncHome(int32_t targetRaw,
   }
 
 #if (LC_PRESSURE_PORTS > 1)
-  if (_taskHomeR != nullptr) {
+  if (_argsHomeR.active) {
     Logger::instance()->log("[PReg] Refuel vacuum enter refused: async home already running\r\n");
     return false;
   }
@@ -1764,6 +2007,10 @@ bool Orchestrator::enterRefuelVacuumModeWithAsyncHome(int32_t targetRaw,
       *homeWaitInterrupted = true;
     }
     Logger::instance()->log("[PReg] Refuel vacuum enter interrupted during async home\r\n");
+    return false;
+  }
+  if (_argsHomeR.outcome != HomeInterruptionPolicy::Outcome::Succeeded) {
+    Logger::instance()->log("[PReg] Refuel vacuum enter home failed\r\n");
     return false;
   }
 

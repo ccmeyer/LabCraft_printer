@@ -117,9 +117,23 @@ public:
 
   bool isActive() const { return _active; }
 
-  /// Perform homing sequence with valve open/close around stepper home
-  void homeWithValve(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps);
-  void homeWithValveFast();
+  /// Perform homing sequence with valve open/close around stepper home.
+  HomeInterruptionPolicy::Outcome homeWithValve(
+      uint32_t fastHz,
+      uint32_t slowHz,
+      uint32_t backoffSteps,
+      HomeInterruptionPolicy::Origin origin = HomeInterruptionPolicy::Origin::Commanded,
+      HomeInterruptionPolicy::CancellationToken* cancelToken = nullptr,
+      bool restoreDispenseOnSuccess = true);
+  HomeInterruptionPolicy::Outcome homeWithValveFast(
+      HomeInterruptionPolicy::Origin origin = HomeInterruptionPolicy::Origin::Commanded,
+      HomeInterruptionPolicy::CancellationToken* cancelToken = nullptr,
+      bool restoreDispenseOnSuccess = true);
+  bool cancelActiveHome();
+  bool isHoming() const { return _homing; }
+  bool hasInterruptedAutonomousHome() const;
+  HomeInterruptionPolicy::Outcome restartInterruptedAutonomousHome();
+  void discardInterruptedHome();
   void requestSafetyHome();
 
   void resetSyringe(CrashTaskId callerWatchdogTaskId = CRASH_TASK_NONE);
@@ -228,6 +242,10 @@ private:
   GPIO_TypeDef*      _valvePort  = nullptr;
   uint16_t           _valvePin   = 0;
   bool               _homing     = false;
+  HomeInterruptionPolicy::Origin _homeOrigin = HomeInterruptionPolicy::Origin::None;
+  HomeInterruptionPolicy::Origin _interruptedHomeOrigin = HomeInterruptionPolicy::Origin::None;
+  HomeInterruptionPolicy::CancellationToken _localHomeCancelToken{};
+  HomeInterruptionPolicy::CancellationToken* _activeHomeCancelToken = nullptr;
   bool				 _resetting	 = false;
   bool               _vacuumMode = false;
   volatile bool      _motionHoldActive = false;

@@ -304,11 +304,33 @@ uint32_t Stepper::recommendedWaitTimeoutMs(uint32_t steps, uint32_t freqHz)
   return (uint32_t)timeoutMs;
 }
 
-bool Stepper::home(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps) {
+HomeInterruptionPolicy::Outcome Stepper::home(
+    uint32_t fastHz,
+    uint32_t slowHz,
+    uint32_t backoffSteps,
+    const HomeInterruptionPolicy::CancellationToken* cancelToken) {
+  using HomeInterruptionPolicy::Outcome;
   _homeDiagnosticSnapshot = HomeDiagnosticSnapshot{};
 
+  auto cancellationRequested = [&]() {
+    if (!HomeInterruptionPolicy::cancellationRequested(cancelToken)) {
+      return false;
+    }
+    stop();
+    xEventGroupClearBits(Orchestrator::getDoneEvents(), _doneBit);
+    Logger::instance()->log("[Home %d] canceled\r\n", (int)_axis);
+    return true;
+  };
+
+  if (cancellationRequested()) {
+    return Outcome::Canceled;
+  }
+
   const bool initialRawLimit = _isLimitAsserted();
-  const LimitStableSample initialLimit = _sampleLimitStable();
+  const LimitStableSample initialLimit = _sampleLimitStable(cancelToken);
+	if (cancellationRequested()) {
+	  return Outcome::Canceled;
+	}
 	Logger::instance()->log(
 	  "[Home %d] lim pin=%u activeHigh=%d initial_raw=%s initial_stable=%s samples=%u/%u\r\n",
 	  (int)_axis, (unsigned)_limPin, (int)_limitActiveHigh,
@@ -330,6 +352,14 @@ bool Stepper::home(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps) {
     _softStopOnLimit = false;
   };
 
+  auto canceledWithRestore = [&]() {
+    if (!cancellationRequested()) {
+      return false;
+    }
+    restoreHomeState();
+    return true;
+  };
+
   struct MoveResult {
     bool completed = false;
     bool limitSeen = false;
@@ -339,6 +369,9 @@ bool Stepper::home(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps) {
 
   auto runMoveAndWait = [&](bool direction, uint32_t steps, uint32_t freqHz) -> MoveResult {
     MoveResult result{};
+    if (canceledWithRestore()) {
+      return result;
+    }
     xEventGroupClearBits(Orchestrator::getDoneEvents(), _doneBit);
     move(direction, steps, freqHz, 0u);
     if (steps == 0u) {
@@ -350,8 +383,11 @@ bool Stepper::home(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps) {
     const bool useHomeLevelPoll = _softStopOnLimit &&
         StepperLimitPolicy::shouldPollHomeLimitLevel(direction, _homeTowardLimitDir);
     const bool moveCompleted = useHomeLevelPoll
-        ? _waitUntilDoneForHomeMove(direction, timeoutMs)
-        : waitUntilDone(timeoutMs);
+        ? _waitUntilDoneForHomeMove(direction, timeoutMs, cancelToken)
+        : waitUntilDone(timeoutMs, cancelToken);
+    if (canceledWithRestore()) {
+      return result;
+    }
     if (moveCompleted) {
       result.completed = true;
       result.limitSeen = _limitSeenThisMove;
@@ -373,9 +409,9 @@ bool Stepper::home(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps) {
   };
 
   if (initialLimit.asserted) {
-    if (!_backOffLimitUntilReleased(releaseChunkSteps, slowHz, releaseGuardSteps, false, "initial release")) {
+    if (!_backOffLimitUntilReleased(releaseChunkSteps, slowHz, releaseGuardSteps, false, "initial release", cancelToken)) {
       restoreHomeState();
-      return false;
+      return cancellationRequested() ? Outcome::Canceled : Outcome::Failed;
     }
   }
 //  // If already pressed, back off in the opposite direction until it releases
@@ -396,7 +432,7 @@ bool Stepper::home(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps) {
   _softStopOnLimit = true;
   const MoveResult coarse = runMoveAndWait(_homeTowardLimitDir, _homeGuardSteps, fastHz);
   if (!coarse.completed) {
-    return false;
+    return cancellationRequested() ? Outcome::Canceled : Outcome::Failed;
   }
   _softStopOnLimit = false;
 
@@ -406,7 +442,7 @@ bool Stepper::home(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps) {
     _softStopOnLimit = true;
     const MoveResult probe = runMoveAndWait(_homeTowardLimitDir, backoffSteps * 4u, slowHz);
     if (!probe.completed) {
-      return false;
+      return cancellationRequested() ? Outcome::Canceled : Outcome::Failed;
     }
     _softStopOnLimit = false;
 
@@ -415,7 +451,7 @@ bool Stepper::home(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps) {
       Logger::instance()->log("[Home] Limit not detected on %d — abort\r\n", (int)_axis);
       _logLimitDebug("limit not detected after probe");
       restoreHomeState();
-      return false;
+      return Outcome::Failed;
     }
   }
 //  // If we arrived without the switch, try a short slow probe; else abort
@@ -436,9 +472,9 @@ bool Stepper::home(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps) {
 //  }
 
   _softstop_accel_override_sps2 = 0.f;
-  if (!_backOffLimitUntilReleased(releaseChunkSteps, slowHz, releaseGuardSteps, true, "pre-fine release")) {
+  if (!_backOffLimitUntilReleased(releaseChunkSteps, slowHz, releaseGuardSteps, true, "pre-fine release", cancelToken)) {
     restoreHomeState();
-    return false;
+    return cancellationRequested() ? Outcome::Canceled : Outcome::Failed;
   }
   _resetMoveLimitState();
 
@@ -447,14 +483,14 @@ bool Stepper::home(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps) {
   _softStopOnLimit = true;
   const MoveResult fine = runMoveAndWait(_homeTowardLimitDir, backoffSteps * 8u, slowHz);
   if (!fine.completed) {
-    return false;
+    return cancellationRequested() ? Outcome::Canceled : Outcome::Failed;
   }
   _softStopOnLimit = false;
   if (!StepperLimitPolicy::fineHomeLimitDetected(true, fine.limitSeen, fine.limitAsserted)) {
     Logger::instance()->log("[Home %d] Fine limit not detected abort\r\n", (int)_axis);
     _logLimitDebug("fine limit not detected");
     restoreHomeState();
-    return false;
+    return Outcome::Failed;
   }
 
   // Zero & move off switch slightly
@@ -462,16 +498,21 @@ bool Stepper::home(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps) {
   _pos = 0;
   _softstop_accel_override_sps2 = 0.f;
   if (!runMoveAndWait(!_homeTowardLimitDir, 100u, slowHz).completed) {
-    return false;
+    return cancellationRequested() ? Outcome::Canceled : Outcome::Failed;
+  }
+  if (canceledWithRestore()) {
+    return Outcome::Canceled;
   }
   _homeDiagnosticSnapshot.finalBackoffPositionSteps = _pos;
   _homeDiagnosticSnapshot.success = true;
 
   restoreHomeState();
-  return true;
+  return Outcome::Succeeded;
 }
 
-bool Stepper::waitUntilDone(uint32_t timeoutMs) {
+bool Stepper::waitUntilDone(
+    uint32_t timeoutMs,
+    const HomeInterruptionPolicy::CancellationToken* cancelToken) {
   if (_togglesRemaining == 0u) {
     return true;
   }
@@ -489,6 +530,11 @@ bool Stepper::waitUntilDone(uint32_t timeoutMs) {
   const TickType_t pollTicks = stepperMsToAtLeast1Tick(kMoveWaitPollMs);
   const uint32_t startMs = HAL_GetTick();
   while (_togglesRemaining != 0u) {
+    if (HomeInterruptionPolicy::cancellationRequested(cancelToken)) {
+      stop();
+      xEventGroupClearBits(Orchestrator::getDoneEvents(), _doneBit);
+      return false;
+    }
     const EventBits_t result = xEventGroupWaitBits(
         Orchestrator::getDoneEvents(),
         _doneBit,
@@ -512,11 +558,16 @@ bool Stepper::waitUntilDone(uint32_t timeoutMs) {
   return true;
 }
 
-Stepper::LimitStableSample Stepper::_sampleLimitStable() const
+Stepper::LimitStableSample Stepper::_sampleLimitStable(
+    const HomeInterruptionPolicy::CancellationToken* cancelToken) const
 {
   LimitStableSample sample{};
   sample.sampleCount = kHomeLimitStableSampleCount;
   for (uint8_t idx = 0u; idx < kHomeLimitStableSampleCount; ++idx) {
+    if (HomeInterruptionPolicy::cancellationRequested(cancelToken)) {
+      sample.sampleCount = idx;
+      return sample;
+    }
     if (_isLimitAsserted()) {
       sample.assertedCount++;
     }
@@ -531,10 +582,13 @@ Stepper::LimitStableSample Stepper::_sampleLimitStable() const
   return sample;
 }
 
-bool Stepper::_waitUntilDoneForHomeMove(bool direction, uint32_t timeoutMs)
+bool Stepper::_waitUntilDoneForHomeMove(
+    bool direction,
+    uint32_t timeoutMs,
+    const HomeInterruptionPolicy::CancellationToken* cancelToken)
 {
   if (!StepperLimitPolicy::shouldPollHomeLimitLevel(direction, _homeTowardLimitDir)) {
-    return waitUntilDone(timeoutMs);
+    return waitUntilDone(timeoutMs, cancelToken);
   }
 
   if (_togglesRemaining == 0u) {
@@ -547,6 +601,11 @@ bool Stepper::_waitUntilDoneForHomeMove(bool direction, uint32_t timeoutMs)
   bool levelPollHandled = false;
 
   while (_togglesRemaining != 0u) {
+    if (HomeInterruptionPolicy::cancellationRequested(cancelToken)) {
+      stop();
+      xEventGroupClearBits(Orchestrator::getDoneEvents(), _doneBit);
+      return false;
+    }
     const EventBits_t result = xEventGroupWaitBits(
         Orchestrator::getDoneEvents(),
         _doneBit,
@@ -638,14 +697,19 @@ bool Stepper::_backOffLimitUntilReleased(uint32_t chunkSteps,
                                          uint32_t freqHz,
                                          uint32_t releaseGuardSteps,
                                          bool alwaysBackOffOnce,
-                                         const char* phaseLabel)
+                                         const char* phaseLabel,
+                                         const HomeInterruptionPolicy::CancellationToken* cancelToken)
 {
   const uint32_t chunk = StepperLimitPolicy::normalizeBackoffSteps(chunkSteps);
   const uint32_t guard = (releaseGuardSteps == 0u) ? chunk : releaseGuardSteps;
   uint32_t moved = 0u;
-  bool shouldMove = alwaysBackOffOnce || _sampleLimitStable().asserted;
+  bool shouldMove = alwaysBackOffOnce || _sampleLimitStable(cancelToken).asserted;
 
   while (shouldMove && moved < guard) {
+    if (HomeInterruptionPolicy::cancellationRequested(cancelToken)) {
+      stop();
+      return false;
+    }
     uint32_t stepThisMove = chunk;
     const uint32_t remainingGuard = guard - moved;
     if (stepThisMove > remainingGuard) {
@@ -658,7 +722,7 @@ bool Stepper::_backOffLimitUntilReleased(uint32_t chunkSteps,
     xEventGroupClearBits(Orchestrator::getDoneEvents(), _doneBit);
     move(!_homeTowardLimitDir, stepThisMove, freqHz, 0u);
     const uint32_t timeoutMs = Stepper::recommendedWaitTimeoutMs(stepThisMove, freqHz);
-    if (!waitUntilDone(timeoutMs)) {
+    if (!waitUntilDone(timeoutMs, cancelToken)) {
       Logger::instance()->log("[Home %d] release move timeout phase=%s steps=%lu hz=%lu\r\n",
                               (int)_axis,
                               (phaseLabel != nullptr) ? phaseLabel : "release",
@@ -668,10 +732,15 @@ bool Stepper::_backOffLimitUntilReleased(uint32_t chunkSteps,
     }
 
     moved += stepThisMove;
-    shouldMove = _sampleLimitStable().asserted;
+    shouldMove = _sampleLimitStable(cancelToken).asserted;
   }
 
-  if (_sampleLimitStable().asserted) {
+  if (HomeInterruptionPolicy::cancellationRequested(cancelToken)) {
+    stop();
+    return false;
+  }
+
+  if (_sampleLimitStable(cancelToken).asserted) {
     Logger::instance()->log("[Home %d] limit release not detected phase=%s after %lu steps\r\n",
                             (int)_axis,
                             (phaseLabel != nullptr) ? phaseLabel : "release",

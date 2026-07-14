@@ -4311,6 +4311,8 @@ class Controller(QObject):
     def home_machine(self):
         """Home the machine."""
         print("Homing machine...")
+        self.model.machine_model.reset_home_status()
+        self.model.machine_model.home_status_signal.emit()
         self.machine.home_motors()
 
     def home_regulators(self):

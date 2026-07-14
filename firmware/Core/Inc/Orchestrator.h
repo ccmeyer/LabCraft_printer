@@ -14,6 +14,7 @@
 #include "FlashCyclePolicy.h"
 #include "PrinterCompletionBits.h"
 #include "RegulatorPausePolicy.h"
+#include "HomeInterruptionPolicy.h"
 
 #include <cstdint>
 #include <cstring>
@@ -227,6 +228,10 @@ public:
       return instance()->_paused;
   }
 
+  static void notifyAutonomousHomeFailure() {
+      if (instance() != nullptr) instance()->_autonomousHomeFailureRequested = true;
+  }
+
   static uint32_t getCurrentCmdNum() {
 	  return instance()->_currentCmdNum;
   }
@@ -273,6 +278,12 @@ public:
 
   volatile bool _paused = false;
   volatile bool _clearing = false;
+  volatile bool _autonomousHomeFailureRequested = false;
+  bool _hasInFlightCommand = false;
+  bool _interruptedCommandHome = false;
+  bool _restartingInterruptedHome = false;
+  bool _homeFailureLatched = false;
+  HomeInterruptionPolicy::Lifecycle _homeLifecycle{};
   RegulatorPausePolicy::Snapshot _regulatorPauseSnapshot{};
 
   struct AckMessage {
@@ -295,6 +306,14 @@ public:
   void pausePressureRegulators();
   void resumePressureRegulators();
   void discardPressureRegulatorResume();
+  static bool isHomeCommand(CmdType cmd);
+  void createHomeWorkers();
+  void cancelActiveHomesForPause();
+  bool waitForHomesSettled(uint32_t timeoutMs);
+  bool restartInterruptedAutonomousHomes();
+  bool homeCommandSucceeded(CmdType cmd) const;
+  void latchHomeFailure(const char* reason);
+  void discardInterruptedHomes();
 
 //  void performShutdown(uint8_t byeSeq);
   void performShutdown(uint8_t byeSeq8, uint32_t byeSeq32, bool have32);
@@ -378,7 +397,8 @@ public:
                          uint32_t fastHz,
                          uint32_t slowHz,
                          uint32_t backoffSteps,
-                         EventBits_t doneBit);
+                         EventBits_t doneBit,
+                         bool restoreDispenseOnSuccess = true);
 
   bool enterRefuelVacuumModeWithAsyncHome(int32_t targetRaw,
                                           uint32_t prepPositionSteps,
@@ -479,6 +499,9 @@ private:
     uint32_t   slowHz;
     uint32_t   backoffSteps;
     EventBits_t doneBit;
+    volatile bool active = false;
+    volatile HomeInterruptionPolicy::Outcome outcome = HomeInterruptionPolicy::Outcome::NotStarted;
+    HomeInterruptionPolicy::CancellationToken cancelToken{};
   };
 
   static void _regHomeTaskEntry(void* ctx);
@@ -488,6 +511,10 @@ private:
     uint32_t           slowHz;
     uint32_t           backoffSteps;
     EventBits_t        doneBit;
+    bool               restoreDispenseOnSuccess = true;
+    volatile bool      active = false;
+    volatile HomeInterruptionPolicy::Outcome outcome = HomeInterruptionPolicy::Outcome::NotStarted;
+    HomeInterruptionPolicy::CancellationToken cancelToken{};
   };
 
   // ---- Static stacks/TCBs for homing tasks (no heap allocation) ----

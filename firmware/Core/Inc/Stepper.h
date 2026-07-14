@@ -9,6 +9,7 @@
 #define INC_STEPPER_H_
 
 #include "BoardConfig.h"
+#include "HomeInterruptionPolicy.h"
 #include "StepperLimitPolicy.h"
 #include "stm32f4xx_hal.h"
 #include "FreeRTOS.h"
@@ -71,12 +72,18 @@ public:
 
   void setSpeedHz(uint32_t freqHz);		/// Change speed on the fly (constant‐rate mode only)
 
-  /// Homing sequence. Returns false if any phase times out.
+  /// Homing sequence with cooperative operator cancellation.
   /// @param fastHz   coarse feed rate
   /// @param slowHz   fine feed rate
   /// @param backoffSteps  number of full steps to back off between phases
-  bool home(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps);
-  bool waitUntilDone(uint32_t timeoutMs = 0u);
+  HomeInterruptionPolicy::Outcome home(
+      uint32_t fastHz,
+      uint32_t slowHz,
+      uint32_t backoffSteps,
+      const HomeInterruptionPolicy::CancellationToken* cancelToken = nullptr);
+  bool waitUntilDone(
+      uint32_t timeoutMs = 0u,
+      const HomeInterruptionPolicy::CancellationToken* cancelToken = nullptr);
   static uint32_t recommendedWaitTimeoutMs(uint32_t steps, uint32_t freqHz);
 
   void setHomeDir(bool toward_limit) { _homeTowardLimitDir = toward_limit; }
@@ -271,14 +278,19 @@ private:
   void _unmaskExtiLine();
   void _onLimitTriggeredFromIsr(BaseType_t* pxHigherPriorityTaskWoken);
   void _prepareForNewMove();
-  LimitStableSample _sampleLimitStable() const;
-  bool _waitUntilDoneForHomeMove(bool direction, uint32_t timeoutMs);
+  LimitStableSample _sampleLimitStable(
+      const HomeInterruptionPolicy::CancellationToken* cancelToken = nullptr) const;
+  bool _waitUntilDoneForHomeMove(
+      bool direction,
+      uint32_t timeoutMs,
+      const HomeInterruptionPolicy::CancellationToken* cancelToken);
   bool _stopHomeMoveFromLevelPoll();
   bool _backOffLimitUntilReleased(uint32_t chunkSteps,
                                   uint32_t freqHz,
                                   uint32_t releaseGuardSteps,
                                   bool alwaysBackOffOnce,
-                                  const char* phaseLabel);
+                                  const char* phaseLabel,
+                                  const HomeInterruptionPolicy::CancellationToken* cancelToken);
   void _resetMoveLimitState();
   void _logLimitDebug(const char* reason) const;
 

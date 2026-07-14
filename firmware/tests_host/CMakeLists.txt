@@ -13,6 +13,7 @@ add_executable(fw_tests
     tests/test_smoke.cpp
     tests/test_comm_codec.cpp
     tests/test_orchestrator_completion_policy.cpp
+    tests/test_home_interruption_policy.cpp
     tests/test_orchestrator_decode.cpp
     tests/test_selftest_command_policy.cpp
     tests/test_nvm_codec.cpp
@@ -46,6 +47,7 @@ add_executable(fw_tests
     ../Core/Src/CommCodec.cpp
     ../Core/Src/DiagnosticResultEmitter.cpp
     ../Core/Src/OrchestratorCompletionPolicy.cpp
+    ../Core/Src/HomeInterruptionPolicy.cpp
     ../Core/Src/OrchestratorDecode.cpp
     ../Core/Src/nvm_codec.c
     ../Core/Src/RegulatorTelemetry.c

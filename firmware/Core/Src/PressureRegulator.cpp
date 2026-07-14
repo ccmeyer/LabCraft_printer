@@ -501,7 +501,9 @@ void PressureRegulator::start() {
 void PressureRegulator::pause() {
   _active = false;
   _holdWatchdog(WatchdogHold::Inactive);
-  if (_taskHandle) vTaskSuspend(_taskHandle);
+  // An autonomous home runs on this task. Let cooperative cancellation unwind
+  // it and close the valve before the task is suspended or left idle.
+  if (_taskHandle && !_homing) vTaskSuspend(_taskHandle);
   if (_stepping) { _stepper->stop(); _stepping = false; }
   _integral = 0;
   _targetTransitionMonitorActive = false;
@@ -747,16 +749,29 @@ void PressureRegulator::closeValve() {
 	HAL_GPIO_WritePin(_valvePort, _valvePin, GPIO_PIN_RESET);
 }
 
-void PressureRegulator::homeWithValve(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps) {
-    // Prevent control loop from issuing new moves
+HomeInterruptionPolicy::Outcome PressureRegulator::homeWithValve(
+    uint32_t fastHz,
+    uint32_t slowHz,
+    uint32_t backoffSteps,
+    HomeInterruptionPolicy::Origin origin,
+    HomeInterruptionPolicy::CancellationToken* cancelToken,
+    bool restoreDispenseOnSuccess) {
+    using HomeInterruptionPolicy::Outcome;
     _homing = true;
+    _homeOrigin = origin;
+    if (cancelToken == nullptr) {
+      _localHomeCancelToken.requested = false;
+      ++_localHomeCancelToken.generation;
+      cancelToken = &_localHomeCancelToken;
+    }
+    _activeHomeCancelToken = cancelToken;
     Printer::instance()->pauseDispense();
     _holdWatchdog(WatchdogHold::Recovery);
     _recordTelemetryEvent(REG_TEL_EVENT_HOME_BEGIN);
     TaskHandle_t me = xTaskGetCurrentTaskHandle();
     const bool calledFromOwnTask = (_taskHandle && me == _taskHandle);
     const bool taskHandlePresent = (_taskHandle != nullptr);
-    bool homeOk = false;
+    Outcome outcome = Outcome::Failed;
 
     // If called externally, keep the control task still while homing owns the stepper.
     if (!calledFromOwnTask && _taskHandle) {
@@ -764,37 +779,100 @@ void PressureRegulator::homeWithValve(uint32_t fastHz, uint32_t slowHz, uint32_t
     }
 
     auto finishHome = [&]() {
-      HAL_GPIO_WritePin(_valvePort, _valvePin, GPIO_PIN_RESET);
+      closeValve();
       _homing = false;
+      _homeOrigin = HomeInterruptionPolicy::Origin::None;
+      _activeHomeCancelToken = nullptr;
       _releaseWatchdog(WatchdogHold::Recovery, true);
-      _recordTelemetryEvent(homeOk ? REG_TEL_EVENT_HOME_END_OK : REG_TEL_EVENT_HOME_END_FAIL);
+      _recordTelemetryEvent(outcome == Outcome::Succeeded
+          ? REG_TEL_EVENT_HOME_END_OK
+          : REG_TEL_EVENT_HOME_END_FAIL);
 
       if (!calledFromOwnTask && _active && taskHandlePresent) {
         vTaskResume(_taskHandle);
       }
 
-      if (homeOk) {
-        Printer::instance()->resumeDispense();
+      if (outcome == Outcome::Succeeded) {
+        if (restoreDispenseOnSuccess) {
+          Printer::instance()->resumeDispense();
+        }
         Logger::instance()->log("homing-complete\r\n");
+      } else if (outcome == Outcome::Canceled) {
+        Printer::instance()->cancelDispense();
+        Logger::instance()->log("[PReg] Homing canceled; dispense remains stopped\r\n");
       } else {
         Printer::instance()->cancelDispense();
         Logger::instance()->log("[PReg] Homing failed or timed out; dispense canceled\r\n");
       }
     };
 
-    // Open valve
-    HAL_GPIO_WritePin(_valvePort, _valvePin, GPIO_PIN_SET);
+    if (HomeInterruptionPolicy::cancellationRequested(cancelToken)) {
+      outcome = Outcome::Canceled;
+      finishHome();
+      return outcome;
+    }
+
+    openValve();
 	Logger::instance()->log("homing-valve open\r\n");
 
     if (_stepping) {
-        _stepper->stop();         // kill the hardware timer
-        _stepping = false;        // clear our flag
-        vTaskDelay(pregMsToAtLeast1Tick(10u)); // give it a moment to settle
+        _stepper->stop();
+        _stepping = false;
+        vTaskDelay(pregMsToAtLeast1Tick(10u));
     }
 
-    // Perform homing on the stepper
-    homeOk = _stepper->home(fastHz, slowHz, backoffSteps);
+    outcome = _stepper->home(fastHz, slowHz, backoffSteps, cancelToken);
+    if (HomeInterruptionPolicy::cancellationRequested(cancelToken)) {
+      outcome = Outcome::Canceled;
+    }
     finishHome();
+    return outcome;
+}
+
+bool PressureRegulator::cancelActiveHome() {
+  if (!_homing || _activeHomeCancelToken == nullptr) {
+    return false;
+  }
+  if (_homeOrigin != HomeInterruptionPolicy::Origin::None &&
+      _homeOrigin != HomeInterruptionPolicy::Origin::Commanded) {
+    _interruptedHomeOrigin = _homeOrigin;
+  }
+  _activeHomeCancelToken->requested = true;
+  if (_stepper != nullptr) {
+    _stepper->stop();
+  }
+  closeValve();
+  return true;
+}
+
+bool PressureRegulator::hasInterruptedAutonomousHome() const {
+  return _interruptedHomeOrigin != HomeInterruptionPolicy::Origin::None;
+}
+
+HomeInterruptionPolicy::Outcome PressureRegulator::restartInterruptedAutonomousHome() {
+  const auto origin = _interruptedHomeOrigin;
+  if (origin == HomeInterruptionPolicy::Origin::None) {
+    return HomeInterruptionPolicy::Outcome::NotStarted;
+  }
+  _interruptedHomeOrigin = HomeInterruptionPolicy::Origin::None;
+  _localHomeCancelToken.requested = false;
+  ++_localHomeCancelToken.generation;
+  const auto outcome = homeWithValve(
+      kHomeFastHzDefault,
+      kHomeSlowHzDefault,
+      kHomeBackoffDefault,
+      origin,
+      &_localHomeCancelToken,
+      false);
+  if (outcome == HomeInterruptionPolicy::Outcome::Canceled) {
+    _interruptedHomeOrigin = origin;
+  }
+  return outcome;
+}
+
+void PressureRegulator::discardInterruptedHome() {
+  _interruptedHomeOrigin = HomeInterruptionPolicy::Origin::None;
+  _localHomeCancelToken.requested = false;
 }
 
 void PressureRegulator::resetSyringe(CrashTaskId callerWatchdogTaskId) {
@@ -1021,8 +1099,17 @@ bool PressureRegulator::exitVacuumMode(int32_t restoreTargetRaw,
     return true;
 }
 
-void PressureRegulator::homeWithValveFast(){
-	homeWithValve(kHomeFastHzDefault, kHomeSlowHzDefault, kHomeBackoffDefault);
+HomeInterruptionPolicy::Outcome PressureRegulator::homeWithValveFast(
+    HomeInterruptionPolicy::Origin origin,
+    HomeInterruptionPolicy::CancellationToken* cancelToken,
+    bool restoreDispenseOnSuccess){
+	return homeWithValve(
+	    kHomeFastHzDefault,
+	    kHomeSlowHzDefault,
+	    kHomeBackoffDefault,
+	    origin,
+	    cancelToken,
+	    restoreDispenseOnSuccess);
 }
 
 void PressureRegulator::requestSafetyHome() {
@@ -1081,13 +1168,19 @@ void PressureRegulator::controlLoop() {
 	  _recordTelemetryEvent(REG_TEL_EVENT_INNER_LIMIT);
 //	  Logger::instance()->log("[PReg] Inner limit tripped → homing now\r\n");
 //	  homeWithValve(kHomeFastHzDefault, kHomeSlowHzDefault, kHomeBackoffDefault);
-	  homeWithValveFast();
+	  const auto outcome = homeWithValveFast(HomeInterruptionPolicy::Origin::InnerLimit);
+	  if (outcome == HomeInterruptionPolicy::Outcome::Failed) {
+	    Orchestrator::notifyAutonomousHomeFailure();
+	  }
 	  // After homing, continue loop; we will re-enter _active flow as usual.
 	}
 	if (notif & NOTIF_SAFETY_HOME) {
 	  Logger::instance()->log("[PReg] Safety home requested\r\n");
 	  _recordTelemetryEvent(REG_TEL_EVENT_SAFETY_HOME);
-	  homeWithValveFast();
+	  const auto outcome = homeWithValveFast(HomeInterruptionPolicy::Origin::Safety);
+	  if (outcome == HomeInterruptionPolicy::Outcome::Failed) {
+	    Orchestrator::notifyAutonomousHomeFailure();
+	  }
 	}
 
     if (!_active) {
@@ -1101,7 +1194,10 @@ void PressureRegulator::controlLoop() {
     if ( (uint32_t)llabs((long long)pos) >= _stepLimit ) {
 //      Logger::instance()->log("[PReg] Position exceeded, auto-reset syringe\r\n");
       _recordTelemetryEvent(REG_TEL_EVENT_STEP_LIMIT);
-      homeWithValveFast();
+      const auto outcome = homeWithValveFast(HomeInterruptionPolicy::Origin::StepLimit);
+      if (outcome == HomeInterruptionPolicy::Outcome::Failed) {
+        Orchestrator::notifyAutonomousHomeFailure();
+      }
       vTaskDelay(period);
       continue;
     }
