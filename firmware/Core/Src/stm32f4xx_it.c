@@ -47,6 +47,12 @@
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN PFP */
+#if defined(__GNUC__) && (LC_CRASHLOG_FAULT_HOOKS_ENABLE != 0)
+void HardFault_Handler(void) __attribute__((naked, noreturn));
+void MemManage_Handler(void) __attribute__((naked, noreturn));
+void BusFault_Handler(void) __attribute__((naked, noreturn));
+void UsageFault_Handler(void) __attribute__((naked, noreturn));
+#endif
 
 /* USER CODE END PFP */
 
@@ -103,13 +109,23 @@ void NMI_Handler(void)
 void HardFault_Handler(void)
 {
   /* USER CODE BEGIN HardFault_IRQn 0 */
-
+#if (LC_CRASHLOG_FAULT_HOOKS_ENABLE != 0)
+  __asm volatile(
+      "tst lr, #4\n"
+      "ite eq\n"
+      "mrseq r0, msp\n"
+      "mrsne r0, psp\n"
+      "mov r1, lr\n"
+      "mrs r2, msp\n"
+      "mrs r3, psp\n"
+      "b CrashLog_RecordHardFaultAndHalt\n");
+#endif
   /* USER CODE END HardFault_IRQn 0 */
   while (1)
   {
     /* USER CODE BEGIN W1_HardFault_IRQn 0 */
 #if (LC_CRASHLOG_FAULT_HOOKS_ENABLE != 0)
-    CrashLog_RecordAndHaltFromHandler(CRASH_FAULT_HARD, CRASH_TASK_NONE);
+    __asm volatile("b .");
 #endif
     /* USER CODE END W1_HardFault_IRQn 0 */
   }
@@ -121,13 +137,23 @@ void HardFault_Handler(void)
 void MemManage_Handler(void)
 {
   /* USER CODE BEGIN MemoryManagement_IRQn 0 */
-
+#if (LC_CRASHLOG_FAULT_HOOKS_ENABLE != 0)
+  __asm volatile(
+      "tst lr, #4\n"
+      "ite eq\n"
+      "mrseq r0, msp\n"
+      "mrsne r0, psp\n"
+      "mov r1, lr\n"
+      "mrs r2, msp\n"
+      "mrs r3, psp\n"
+      "b CrashLog_RecordMemFaultAndHalt\n");
+#endif
   /* USER CODE END MemoryManagement_IRQn 0 */
   while (1)
   {
     /* USER CODE BEGIN W1_MemoryManagement_IRQn 0 */
 #if (LC_CRASHLOG_FAULT_HOOKS_ENABLE != 0)
-    CrashLog_RecordAndHaltFromHandler(CRASH_FAULT_MEM, CRASH_TASK_NONE);
+    __asm volatile("b .");
 #endif
     /* USER CODE END W1_MemoryManagement_IRQn 0 */
   }
@@ -139,13 +165,23 @@ void MemManage_Handler(void)
 void BusFault_Handler(void)
 {
   /* USER CODE BEGIN BusFault_IRQn 0 */
-
+#if (LC_CRASHLOG_FAULT_HOOKS_ENABLE != 0)
+  __asm volatile(
+      "tst lr, #4\n"
+      "ite eq\n"
+      "mrseq r0, msp\n"
+      "mrsne r0, psp\n"
+      "mov r1, lr\n"
+      "mrs r2, msp\n"
+      "mrs r3, psp\n"
+      "b CrashLog_RecordBusFaultAndHalt\n");
+#endif
   /* USER CODE END BusFault_IRQn 0 */
   while (1)
   {
     /* USER CODE BEGIN W1_BusFault_IRQn 0 */
 #if (LC_CRASHLOG_FAULT_HOOKS_ENABLE != 0)
-    CrashLog_RecordAndHaltFromHandler(CRASH_FAULT_BUS, CRASH_TASK_NONE);
+    __asm volatile("b .");
 #endif
     /* USER CODE END W1_BusFault_IRQn 0 */
   }
@@ -157,13 +193,23 @@ void BusFault_Handler(void)
 void UsageFault_Handler(void)
 {
   /* USER CODE BEGIN UsageFault_IRQn 0 */
-
+#if (LC_CRASHLOG_FAULT_HOOKS_ENABLE != 0)
+  __asm volatile(
+      "tst lr, #4\n"
+      "ite eq\n"
+      "mrseq r0, msp\n"
+      "mrsne r0, psp\n"
+      "mov r1, lr\n"
+      "mrs r2, msp\n"
+      "mrs r3, psp\n"
+      "b CrashLog_RecordUsageFaultAndHalt\n");
+#endif
   /* USER CODE END UsageFault_IRQn 0 */
   while (1)
   {
     /* USER CODE BEGIN W1_UsageFault_IRQn 0 */
 #if (LC_CRASHLOG_FAULT_HOOKS_ENABLE != 0)
-    CrashLog_RecordAndHaltFromHandler(CRASH_FAULT_USAGE, CRASH_TASK_NONE);
+    __asm volatile("b .");
 #endif
     /* USER CODE END W1_UsageFault_IRQn 0 */
   }

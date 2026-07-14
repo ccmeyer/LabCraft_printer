@@ -2416,6 +2416,7 @@ TAG_RESET_ACTIVE_COMMAND    = 0x1F
 TAG_RESET_RCC_FLAGS         = 0x20
 TAG_RESET_TASK_NAME4        = 0x21
 TAG_RESET_REG_CONTEXT       = 0x22
+TAG_RESET_FAULT_CONTEXT     = 0x23
 
 ACK_TLV_SEQ32 = 0x10
 ACK_TLV_RESULT = 0x11
@@ -2839,6 +2840,30 @@ REGULATOR_TELEMETRY_EVENTS = {
 
 REGULATOR_TELEMETRY_AGE_UNKNOWN = 0xFFFFFFFF
 REGULATOR_RESET_CONTEXT_WIRE_SIZE = 30
+FAULT_CONTEXT_VERSION = 1
+FAULT_CONTEXT_WIRE_SIZE = 112
+
+FAULT_CONTEXT_FLAG_NAMES = {
+    0x01: "core_frame_valid",
+    0x02: "extended_fpu_frame",
+    0x04: "task_stack_matched",
+    0x08: "mmfar_valid",
+    0x10: "bfar_valid",
+    0x20: "handler_mode",
+    0x40: "stack_pointer_valid",
+}
+
+HOME_PHASE_NAMES = {
+    0: "idle",
+    1: "initial_check",
+    2: "coarse_seek",
+    3: "release",
+    4: "fine_seek",
+    5: "final_backoff",
+    6: "succeeded",
+    7: "canceled",
+    8: "failed",
+}
 
 def _regulator_age(value):
     if value is None or int(value) == REGULATOR_TELEMETRY_AGE_UNKNOWN:
@@ -2899,6 +2924,88 @@ def _decode_regulator_context(raw):
             r_last_event_age_ms,
         ),
     }
+
+def _exception_name(ipsr):
+    names = {
+        0: "thread",
+        2: "nmi",
+        3: "hardfault",
+        4: "memmanage",
+        5: "busfault",
+        6: "usagefault",
+        11: "svcall",
+        12: "debug_monitor",
+        14: "pendsv",
+        15: "systick",
+    }
+    if ipsr in names:
+        return names[ipsr]
+    if ipsr >= 16:
+        return f"irq_{ipsr - 16}"
+    return f"exception_{ipsr}"
+
+def _decode_fault_context(raw):
+    if raw is None or len(raw) != FAULT_CONTEXT_WIRE_SIZE:
+        return None
+    header = struct.unpack_from("<10BH", raw, 0)
+    version = header[0]
+    if version != FAULT_CONTEXT_VERSION:
+        return None
+    flags = header[1]
+    fault_kind = header[2]
+    task_id = header[3]
+    active_command = header[4]
+    phase_values = header[5:10]
+    ipsr = header[10]
+    register_names = (
+        "exc_return", "active_sp", "msp", "psp", "task_stack_low", "task_stack_high",
+        "r0", "r1", "r2", "r3", "r12", "lr", "pc", "xpsr", "cfsr", "hfsr",
+        "dfsr", "afsr", "shcsr", "mmfar", "bfar", "control", "basepri", "primask",
+        "faultmask",
+    )
+    values = struct.unpack_from("<25I", raw, 12)
+    decoded_flags = {name: bool(flags & bit) for bit, name in FAULT_CONTEXT_FLAG_NAMES.items()}
+    phases = {
+        axis: {"value": value, "name": HOME_PHASE_NAMES.get(value, f"phase_{value}")}
+        for axis, value in zip(("x", "y", "z", "p", "r"), phase_values)
+    }
+    result = {
+        "version": version,
+        "flags": flags,
+        "flag_names": [name for bit, name in FAULT_CONTEXT_FLAG_NAMES.items() if flags & bit],
+        **decoded_flags,
+        "fault_kind": fault_kind,
+        "fault_kind_name": CRASH_FAULT_NAMES.get(fault_kind, f"fault_{fault_kind}"),
+        "task_id": task_id,
+        "task_name": CRASH_TASK_NAMES.get(task_id, f"task_{task_id}"),
+        "active_command": active_command,
+        "active_command_name": CMD_NAME_BY_CODE.get(active_command, f"cmd_0x{active_command:02x}"),
+        "home_phases": phases,
+        "ipsr": ipsr,
+        "active_exception_name": _exception_name(ipsr),
+    }
+    result.update(zip(register_names, values))
+    return result
+
+def _fault_context_summary(context):
+    if not context:
+        return ""
+    phases = ",".join(
+        f"{axis.upper()}={phase['name']}"
+        for axis, phase in context["home_phases"].items()
+    )
+    parts = []
+    if context.get("core_frame_valid"):
+        parts.extend((f"PC=0x{context['pc']:08X}", f"LR=0x{context['lr']:08X}"))
+    parts.extend(
+        (
+            f"CFSR=0x{context['cfsr']:08X}",
+            f"task={context['task_name']}",
+            f"active={context['active_exception_name']}",
+            f"phases[{phases}]",
+        )
+    )
+    return " Fault context: " + ", ".join(parts) + "."
 
 def _regulator_context_summary(context):
     if not context or not context.get("valid"):
@@ -3193,6 +3300,7 @@ class SerialReader(QThread):
         watchdog_late_task = _u8(TAG_RESET_WATCHDOG_LATE_TASK)
         active_command = _u8(TAG_RESET_ACTIVE_COMMAND)
         regulator_context = _decode_regulator_context(tlvs.get(TAG_RESET_REG_CONTEXT))
+        fault_context = _decode_fault_context(tlvs.get(TAG_RESET_FAULT_CONTEXT))
         pending = bool(flags & CRASHLOG_FLAG_PENDING)
         sticky = bool(flags & CRASHLOG_FLAG_WDT_ARM_STICKY)
 
@@ -3242,6 +3350,7 @@ class SerialReader(QThread):
         regulator_summary = _regulator_context_summary(regulator_context)
         if regulator_summary and (reset_cause_name in {"iwdg", "wwdg"} or last_fault_name == "wdt"):
             summary += regulator_summary
+        summary += _fault_context_summary(fault_context)
 
         return {
             "seq8": seq8,
@@ -3275,6 +3384,7 @@ class SerialReader(QThread):
             "fault_stage_name": fault_stage_name,
             "recovery_boot": bool(_u8(TAG_RESET_RECOVERY_BOOT)),
             "regulator_context": regulator_context,
+            "fault_context": fault_context,
             "summary": summary,
         }
 

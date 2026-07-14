@@ -62,6 +62,13 @@ def test_ack_and_control_codes_match_firmware_header():
     assert mfr.PAUSE_AFTER_SEQ32 == fw["CMD_PAUSE_AFTER_SEQ32"]
 
 
+def test_fault_context_reset_tag_matches_firmware_header():
+    text = Path("firmware/Core/Inc/Comm.h").read_text(encoding="utf-8")
+    match = re.search(r"TAG_RESET_FAULT_CONTEXT\s*=\s*0[xX]([0-9A-Fa-f]+)", text)
+    assert match is not None
+    assert mfr.TAG_RESET_FAULT_CONTEXT == int(match.group(1), 16)
+
+
 def test_gripper_firmware_does_not_software_trigger_flash_exti():
     text = Path("firmware/Core/Src/Gripper.cpp").read_text(encoding="utf-8")
     for token in (

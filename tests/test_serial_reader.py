@@ -62,6 +62,18 @@ def _regulator_context_payload(
     )
 
 
+def _fault_context_payload(*, version=1) -> bytes:
+    header = (version, 0x7D, 1, 7, mfr.CMD_MAP["HOME_XY"], 2, 3, 0, 5, 7, 16)
+    registers = (
+        0xFFFFFFFD, 0x20001200, 0x20010000, 0x20001200, 0x20001000, 0x20001400,
+        0x00000001, 0x00000002, 0x00000003, 0x00000004, 0x0000000C, 0x08005679,
+        0x08001235, 0x21000010, 0x00008200, 0x40000000, 0x00000002, 0x00000000,
+        0x00070000, 0x20000020, 0x20000024, 0x00000002, 0x00000000, 0x00000001,
+        0x00000000,
+    )
+    return struct.pack("<10BH25I", *header, *registers)
+
+
 class FakeSerial:
     def __init__(self, data: bytes):
         self._buf = bytearray(data)
@@ -403,6 +415,45 @@ def test_serial_reader_marks_bad_regulator_context_invalid(qapp):
     }
 
 
+def test_serial_reader_decodes_fault_context_and_adds_hex_summary(qapp):
+    reset_payload = _reset_report_payload(3) + _tlv(
+        mfr.TAG_RESET_FAULT_CONTEXT, _fault_context_payload()
+    )
+
+    report = mfr.SerialReader._parse_reset_report(reset_payload)
+
+    assert report is not None
+    context = report["fault_context"]
+    assert context["version"] == 1
+    assert context["core_frame_valid"] is True
+    assert context["extended_fpu_frame"] is False
+    assert context["task_stack_matched"] is True
+    assert context["task_name"] == "home_x"
+    assert context["active_exception_name"] == "irq_0"
+    assert context["pc"] == 0x08001235
+    assert context["lr"] == 0x08005679
+    assert context["cfsr"] == 0x00008200
+    assert context["task_stack_low"] == 0x20001000
+    assert context["task_stack_high"] == 0x20001400
+    assert context["home_phases"]["x"] == {"value": 2, "name": "coarse_seek"}
+    assert context["home_phases"]["p"] == {"value": 5, "name": "final_backoff"}
+    assert "PC=0x08001235" in report["summary"]
+    assert "CFSR=0x00008200" in report["summary"]
+    assert "task=home_x" in report["summary"]
+    assert "active=irq_0" in report["summary"]
+    assert "X=coarse_seek" in report["summary"]
+
+
+def test_serial_reader_ignores_malformed_and_unknown_fault_context(qapp):
+    for raw in (b"\x01\x02", _fault_context_payload(version=2)):
+        report = mfr.SerialReader._parse_reset_report(
+            _reset_report_payload(3) + _tlv(mfr.TAG_RESET_FAULT_CONTEXT, raw)
+        )
+        assert report is not None
+        assert report["fault_context"] is None
+        assert "Fault context:" not in report["summary"]
+
+
 def test_serial_reader_accepts_older_reset_report_without_raw_flags(qapp):
     report = mfr.SerialReader._parse_reset_report(_reset_report_payload(1))
 
@@ -413,6 +464,7 @@ def test_serial_reader_accepts_older_reset_report_without_raw_flags(qapp):
     assert report["reset_flag_summary"] == ""
     assert report["fault_task_name4"] is None
     assert report["regulator_context"] is None
+    assert report["fault_context"] is None
 
 
 def test_serial_reader_maps_new_crash_task_ids():

@@ -107,6 +107,16 @@ def _regulator_context_payload() -> bytes:
     )
 
 
+def _fault_context_payload(version: int = 1) -> bytes:
+    header = (version, 0x45, 1, 8, 0x22, 3, 4, 0, 7, 8, 0)
+    registers = (
+        0xFFFFFFFD, 0x20002200, 0x20010000, 0x20002200, 0x20002000, 0x20002400,
+        1, 2, 3, 4, 12, 0x08005679, 0x08001235, 0x21000000, 0x00008200,
+        0x40000000, 2, 0, 0x00070000, 0x20000020, 0x20000024, 2, 0, 1, 0,
+    )
+    return struct.pack("<10BH25I", *header, *registers)
+
+
 def _selftest_result_metrics(mod, test_id: int, name: str, passed: bool, metrics: str) -> bytes:
     payload = bytearray([mod.CMD_SELFTEST_RESULT, 2])
     payload += bytes([mod.TAG_TEST_ID, 2]) + test_id.to_bytes(2, "little")
@@ -1495,6 +1505,20 @@ def test_crash_watchdog_selftest_results_are_recorded_with_metrics(monkeypatch, 
     }
 
 
+def test_selftest_reset_decoder_accepts_v1_and_ignores_bad_fault_context():
+    mod = _load_run_selftest()
+
+    context = mod.decode_fault_context(_fault_context_payload())
+
+    assert context["task_name"] == "home_y"
+    assert context["core_frame_valid"] is True
+    assert context["pc"] == 0x08001235
+    assert context["cfsr"] == 0x00008200
+    assert context["home_phases"]["y"] == {"value": 4, "name": "fine_seek"}
+    assert mod.decode_fault_context(b"\x01") is None
+    assert mod.decode_fault_context(_fault_context_payload(version=2)) is None
+
+
 def test_reset_report_during_selftest_is_classified(monkeypatch, tmp_path, capsys):
     mod = _load_run_selftest()
     clock = FakeClock()
@@ -1601,6 +1625,7 @@ def test_reset_report_during_selftest_is_classified(monkeypatch, tmp_path, capsy
         "watchdog_late_task": 1,
         "active_command": mod.CMD_SELFTEST_START,
         "regulator_context": expected_regulator_context,
+        "fault_context": None,
     }
     reset_frames = [frame for frame in details["recent_frames"] if frame["cmd"] == mod.CMD_RESET_REPORT]
     assert reset_frames

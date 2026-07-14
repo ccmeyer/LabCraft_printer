@@ -2,6 +2,7 @@
 #define INC_CRASHLOG_H_
 
 #include <stdint.h>
+#include "CrashFaultContext.h"
 #include "RegulatorTelemetry.h"
 
 #ifdef __cplusplus
@@ -30,6 +31,14 @@ extern "C" {
 
 #ifndef LC_CRASHLOG_FAULT_HOOKS_ENABLE
 #define LC_CRASHLOG_FAULT_HOOKS_ENABLE 1
+#endif
+
+#if defined(__GNUC__)
+#define CRASHLOG_NORETURN __attribute__((noreturn))
+#elif defined(_MSC_VER)
+#define CRASHLOG_NORETURN __declspec(noreturn)
+#else
+#define CRASHLOG_NORETURN
 #endif
 
 typedef enum {
@@ -117,6 +126,8 @@ typedef struct {
   CrashTaskId watchdogLateTask;
   uint8_t activeCommand;
   uint32_t faultTaskName4;
+  uint8_t faultContextValid;
+  CrashFaultContextV1 faultContext;
   RegulatorTelemetryResetContext regulatorContext;
 } CrashLogSnapshot;
 
@@ -144,6 +155,17 @@ void CrashLog_SetBootStage(CrashBootStage stage);
 CrashBootStage CrashLog_GetBootStage(void);
 void CrashLog_SetActiveContext(CrashTaskId taskId, uint8_t activeCommand);
 void CrashLog_ClearActiveContext(void);
+void CrashLog_RegisterTaskStack(CrashTaskId taskId, const void* stackBase, uint32_t stackBytes);
+void CrashLog_SetHomePhase(CrashHomeAxis axis, CrashHomePhase phase);
+CRASHLOG_NORETURN void CrashLog_RecordHardFaultAndHalt(uint32_t rawSp, uint32_t excReturn,
+                                                       uint32_t msp, uint32_t psp);
+CRASHLOG_NORETURN void CrashLog_RecordMemFaultAndHalt(uint32_t rawSp, uint32_t excReturn,
+                                                      uint32_t msp, uint32_t psp);
+CRASHLOG_NORETURN void CrashLog_RecordBusFaultAndHalt(uint32_t rawSp, uint32_t excReturn,
+                                                      uint32_t msp, uint32_t psp);
+CRASHLOG_NORETURN void CrashLog_RecordUsageFaultAndHalt(uint32_t rawSp, uint32_t excReturn,
+                                                        uint32_t msp, uint32_t psp);
+void CrashLog_TriggerHardFaultForTest(void);
 const char* CrashLog_BootStageName(CrashBootStage stage);
 
 #ifdef __cplusplus

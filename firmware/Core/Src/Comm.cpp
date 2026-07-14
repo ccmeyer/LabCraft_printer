@@ -52,6 +52,20 @@ inline void appendBytes(uint8_t* payload, size_t& idx, uint8_t tag, const uint8_
         payload[idx++] = data[i];
     }
 }
+
+inline bool tryAppendBytes(uint8_t* payload,
+                           size_t capacity,
+                           size_t& idx,
+                           uint8_t tag,
+                           const uint8_t* data,
+                           uint8_t len) {
+    const size_t required = static_cast<size_t>(len) + 2u;
+    if (payload == nullptr || data == nullptr || idx > capacity || required > (capacity - idx)) {
+        return false;
+    }
+    appendBytes(payload, idx, tag, data, len);
+    return true;
+}
 }
 
 
@@ -273,7 +287,13 @@ void Comm::sendResetReport(uint8_t seq8, uint32_t seq32, const CrashLogSnapshot*
       return;
   }
 
-  uint8_t payload[160] = {0};
+  uint8_t payload[255] = {0};
+  constexpr size_t payloadCapacity = sizeof(payload);
+  constexpr size_t resetBasePayloadBytes = 86u;
+  constexpr size_t resetRegulatorTlvBytes = 2u + REG_TEL_RESET_CONTEXT_WIRE_SIZE;
+  constexpr size_t resetFaultTlvBytes = 2u + CRASH_FAULT_CONTEXT_WIRE_SIZE;
+  static_assert(resetBasePayloadBytes + resetRegulatorTlvBytes + resetFaultTlvBytes <= 255u,
+                "Maximum reset report must fit the one-byte protocol length");
   size_t idx = 0;
   payload[idx++] = Orchestrator::CMD_RESET_REPORT;
   payload[idx++] = seq8;
@@ -300,11 +320,26 @@ void Comm::sendResetReport(uint8_t seq8, uint32_t seq32, const CrashLogSnapshot*
       RegulatorTelemetry_PackResetContext(&snap->regulatorContext,
                                           regulatorContext,
                                           sizeof(regulatorContext)) != 0u) {
-    appendBytes(payload,
-                idx,
-                TAG_RESET_REG_CONTEXT,
-                regulatorContext,
-                static_cast<uint8_t>(sizeof(regulatorContext)));
+    (void)tryAppendBytes(payload,
+                         payloadCapacity,
+                         idx,
+                         TAG_RESET_REG_CONTEXT,
+                         regulatorContext,
+                         static_cast<uint8_t>(sizeof(regulatorContext)));
+  }
+  uint8_t faultContext[CRASH_FAULT_CONTEXT_WIRE_SIZE] = {0u};
+  static_assert(CRASH_FAULT_CONTEXT_WIRE_SIZE <= 255u,
+                "Fault context TLV length must fit in one byte");
+  if (snap->faultContextValid != 0u &&
+      CrashFaultContext_Pack(&snap->faultContext,
+                             faultContext,
+                             sizeof(faultContext)) != 0u) {
+    (void)tryAppendBytes(payload,
+                         payloadCapacity,
+                         idx,
+                         TAG_RESET_FAULT_CONTEXT,
+                         faultContext,
+                         static_cast<uint8_t>(sizeof(faultContext)));
   }
   sendFrame(_huart, payload, idx);
 }

@@ -18,6 +18,13 @@ static volatile uint32_t g_watchdogRecoveryBoot = 0u;
 static volatile CrashTaskId g_activeTask = CRASH_TASK_NONE;
 static volatile uint8_t g_activeCommand = 0u;
 static RegulatorTelemetryRetainedContext g_regulatorContext __attribute__((section(".noinit")));
+static CrashFaultContextRetained g_faultContext __attribute__((section(".noinit")));
+static CrashFaultStackRange g_taskStackRanges[CRASH_HOME_AXIS_COUNT];
+static volatile uint8_t g_homePhases[CRASH_HOME_AXIS_COUNT];
+
+extern uint32_t _sdata;
+extern uint32_t _estack;
+extern __IO uint32_t uwTick;
 
 static const uint32_t kCrashLogMagic = 0x43524153u;
 static const uint32_t kCrashLogVersion = 3u;
@@ -99,6 +106,14 @@ static uint32_t CrashLog_ShouldKeepRegulatorContext(CrashResetCause resetCause)
          (resetCause != CRASH_RESET_LOW_POWER);
 }
 
+static void CrashLog_ClearFaultContext(void)
+{
+  g_faultContext.magic = 0u;
+  g_faultContext.version = 0u;
+  g_faultContext.size = 0u;
+  g_faultContext.checksum = 0u;
+}
+
 static void CrashLog_ResetStorage(void)
 {
   for (uint32_t i = 0u; i < kCrashLogRegCount; ++i) {
@@ -113,6 +128,7 @@ static void CrashLog_ResetStorage(void)
   CrashLog_Write(CRASHLOG_BKP_WATCHDOG_LATE_TASK, (uint32_t)CRASH_TASK_NONE);
   CrashLog_Write(CRASHLOG_BKP_ACTIVE_COMMAND, 0u);
   RegulatorTelemetry_ClearRetainedContext(&g_regulatorContext);
+  CrashLog_ClearFaultContext();
 }
 
 static uint32_t CrashLog_IsStorageValid(void)
@@ -160,6 +176,10 @@ static void CrashLog_FillSnapshot(CrashLogSnapshot* out)
   out->watchdogLateTask = (CrashTaskId)CrashLog_Read(CRASHLOG_BKP_WATCHDOG_LATE_TASK);
   out->activeCommand = (uint8_t)CrashLog_Read(CRASHLOG_BKP_ACTIVE_COMMAND);
   out->faultTaskName4 = CrashLog_Read(CRASHLOG_BKP_FAULT_TASK_NAME4);
+  if ((out->flags & CRASHLOG_FLAG_PENDING) != 0u) {
+    out->faultContextValid = (uint8_t)CrashFaultContext_ValidateRetained(
+        &g_faultContext, &out->faultContext);
+  }
   RegulatorTelemetry_InitResetContext(&out->regulatorContext);
   if (CrashLog_ShouldKeepRegulatorContext(out->resetCause) != 0u) {
     (void)RegulatorTelemetry_ReadRetainedContext(&g_regulatorContext,
@@ -214,6 +234,7 @@ void CrashLog_EarlyBootInit(void)
   CrashLog_Write(CRASHLOG_BKP_RESET_CAUSE, (uint32_t)resetCause);
   if (CrashLog_ShouldKeepRegulatorContext(resetCause) == 0u) {
     RegulatorTelemetry_ClearRetainedContext(&g_regulatorContext);
+    CrashLog_ClearFaultContext();
   }
   g_watchdogRecoveryBoot = (((flags & CRASHLOG_FLAG_WDT_RECOVERY_PENDING) != 0u) &&
       (resetCause == CRASH_RESET_SOFTWARE)) ? 1u : 0u;
@@ -410,6 +431,167 @@ void CrashLog_ClearWatchdogRecoveryReset(void)
   CrashLog_Write(CRASHLOG_BKP_FLAGS, CrashLog_FlagsWithVersion((flags & ~CRASHLOG_FLAG_WDT_RECOVERY_PENDING) | CRASHLOG_FLAG_VALID));
 }
 
+static void CrashLog_RecordExceptionCommon(CrashFaultKind kind,
+                                           uint32_t rawSp,
+                                           uint32_t excReturn,
+                                           uint32_t msp,
+                                           uint32_t psp) __attribute__((noreturn));
+
+static void CrashLog_RecordExceptionCommon(CrashFaultKind kind,
+                                           uint32_t rawSp,
+                                           uint32_t excReturn,
+                                           uint32_t msp,
+                                           uint32_t psp)
+{
+  __disable_irq();
+
+#if (LC_CRASHLOG_FAULT_HOOKS_ENABLE != 0)
+  CrashLog_EnableBackupAccess();
+  if (CrashLog_IsStorageValid() == 0u) {
+    CrashLog_ResetStorage();
+  }
+#endif
+
+  g_faultContext.magic = 0u;
+  __DMB();
+
+  CrashFaultContextV1* context = &g_faultContext.context;
+  uint32_t* words = (uint32_t*)context;
+  for (uint32_t i = 0u; i < (sizeof(*context) / sizeof(uint32_t)); ++i) {
+    words[i] = 0u;
+  }
+
+  context->version = CRASH_FAULT_CONTEXT_VERSION;
+  context->faultKind = (uint8_t)kind;
+  context->activeCommand = g_activeCommand;
+  context->homePhaseX = g_homePhases[CRASH_HOME_AXIS_X];
+  context->homePhaseY = g_homePhases[CRASH_HOME_AXIS_Y];
+  context->homePhaseZ = g_homePhases[CRASH_HOME_AXIS_Z];
+  context->homePhaseP = g_homePhases[CRASH_HOME_AXIS_P];
+  context->homePhaseR = g_homePhases[CRASH_HOME_AXIS_R];
+  context->excReturn = excReturn;
+  context->activeSp = rawSp;
+  context->msp = msp;
+  context->psp = psp;
+  context->control = __get_CONTROL();
+  context->basepri = __get_BASEPRI();
+  context->primask = __get_PRIMASK();
+  context->faultmask = __get_FAULTMASK();
+  context->cfsr = SCB->CFSR;
+  context->hfsr = SCB->HFSR;
+  context->dfsr = SCB->DFSR;
+  context->afsr = SCB->AFSR;
+  context->shcsr = SCB->SHCSR;
+  context->mmfar = SCB->MMFAR;
+  context->bfar = SCB->BFAR;
+  if ((excReturn & (1u << 4)) == 0u) {
+    context->flags |= CRASH_FAULT_CONTEXT_FLAG_FP_EXTENDED_FRAME;
+  }
+  if ((excReturn & (1u << 3)) == 0u) {
+    context->flags |= CRASH_FAULT_CONTEXT_FLAG_HANDLER_MODE;
+  }
+  if ((context->cfsr & SCB_CFSR_MMARVALID_Msk) != 0u) {
+    context->flags |= CRASH_FAULT_CONTEXT_FLAG_MMFAR_VALID;
+  }
+  if ((context->cfsr & SCB_CFSR_BFARVALID_Msk) != 0u) {
+    context->flags |= CRASH_FAULT_CONTEXT_FLAG_BFAR_VALID;
+  }
+
+  uint32_t coreFrame = 0u;
+  const uint32_t ramLow = (uint32_t)(uintptr_t)&_sdata;
+  const uint32_t ramHigh = (uint32_t)(uintptr_t)&_estack;
+  if (CrashFaultContext_SelectCoreFrame(rawSp, excReturn, ramLow, ramHigh, &coreFrame) != 0u) {
+    const uint32_t* frame = (const uint32_t*)(uintptr_t)coreFrame;
+    context->flags |= CRASH_FAULT_CONTEXT_FLAG_STACK_POINTER_VALID |
+                      CRASH_FAULT_CONTEXT_FLAG_CORE_FRAME_VALID;
+    context->r0 = frame[0];
+    context->r1 = frame[1];
+    context->r2 = frame[2];
+    context->r3 = frame[3];
+    context->r12 = frame[4];
+    context->lr = frame[5];
+    context->pc = frame[6];
+    context->xpsr = frame[7];
+    context->ipsr = (uint16_t)(context->xpsr & 0x1FFu);
+  }
+
+  uint32_t stackLow = 0u;
+  uint32_t stackHigh = 0u;
+  const uint8_t matchedTask = CrashFaultContext_MatchStack(
+      rawSp, g_taskStackRanges, CRASH_HOME_AXIS_COUNT, &stackLow, &stackHigh);
+  if (matchedTask != 0u) {
+    context->flags |= CRASH_FAULT_CONTEXT_FLAG_TASK_STACK_MATCHED;
+    context->taskId = matchedTask;
+    context->taskStackLow = stackLow;
+    context->taskStackHigh = stackHigh;
+  } else {
+    context->taskId = (uint8_t)g_activeTask;
+  }
+
+  g_faultContext.version = CRASH_FAULT_CONTEXT_VERSION;
+  g_faultContext.size = (uint16_t)sizeof(g_faultContext);
+  g_faultContext.checksum = CrashFaultContext_Checksum(context);
+  __DMB();
+  g_faultContext.magic = CRASH_FAULT_CONTEXT_RETAINED_MAGIC;
+  __DSB();
+  __ISB();
+
+#if (LC_CRASHLOG_FAULT_HOOKS_ENABLE != 0)
+  CrashLog_WriteFaultRecord(kind,
+                            (CrashTaskId)context->taskId,
+                            CRASH_TASK_NONE,
+                            (uint32_t)uwTick,
+                            context->cfsr,
+                            context->hfsr,
+                            context->mmfar,
+                            context->bfar,
+                            0u);
+#endif
+  if (Watchdog_IsArmed() != 0u) {
+    for (;;) {
+    }
+  }
+  NVIC_SystemReset();
+  for (;;) {
+  }
+}
+
+void CrashLog_RecordHardFaultAndHalt(uint32_t rawSp, uint32_t excReturn,
+                                    uint32_t msp, uint32_t psp)
+    __attribute__((section(".text.CrashLog_HardFaultEntry")));
+
+void CrashLog_RecordHardFaultAndHalt(uint32_t rawSp, uint32_t excReturn,
+                                    uint32_t msp, uint32_t psp)
+{
+  CrashLog_RecordExceptionCommon(CRASH_FAULT_HARD, rawSp, excReturn, msp, psp);
+}
+
+void CrashLog_RecordMemFaultAndHalt(uint32_t rawSp, uint32_t excReturn,
+                                   uint32_t msp, uint32_t psp)
+{
+  CrashLog_RecordExceptionCommon(CRASH_FAULT_MEM, rawSp, excReturn, msp, psp);
+}
+
+void CrashLog_RecordBusFaultAndHalt(uint32_t rawSp, uint32_t excReturn,
+                                   uint32_t msp, uint32_t psp)
+{
+  CrashLog_RecordExceptionCommon(CRASH_FAULT_BUS, rawSp, excReturn, msp, psp);
+}
+
+void CrashLog_RecordUsageFaultAndHalt(uint32_t rawSp, uint32_t excReturn,
+                                     uint32_t msp, uint32_t psp)
+{
+  CrashLog_RecordExceptionCommon(CRASH_FAULT_USAGE, rawSp, excReturn, msp, psp);
+}
+
+void CrashLog_TriggerHardFaultForTest(void)
+    __attribute__((used, noinline, section(".text.CrashLog_HardFaultEntry")));
+
+void CrashLog_TriggerHardFaultForTest(void)
+{
+  __asm volatile ("udf #0");
+}
+
 void CrashLog_CaptureRegulatorContext(const RegulatorTelemetryResetContext* context)
 {
 #if (LC_CRASHLOG_ENABLE == 0)
@@ -446,6 +628,7 @@ void CrashLog_MarkBootHealthy(void)
   CrashLog_Write(CRASHLOG_BKP_WATCHDOG_LATE_TASK, (uint32_t)CRASH_TASK_NONE);
   CrashLog_Write(CRASHLOG_BKP_ACTIVE_COMMAND, 0u);
   CrashLog_Write(CRASHLOG_BKP_FAULT_TASK_NAME4, 0u);
+  CrashLog_ClearFaultContext();
 }
 
 void CrashLog_GetSnapshot(CrashLogSnapshot* out)
@@ -521,6 +704,36 @@ void CrashLog_ClearActiveContext(void)
 {
   g_activeTask = CRASH_TASK_NONE;
   g_activeCommand = 0u;
+}
+
+void CrashLog_RegisterTaskStack(CrashTaskId taskId, const void* stackBase, uint32_t stackBytes)
+{
+  if (stackBase == NULL || stackBytes == 0u) {
+    return;
+  }
+  uint32_t slot = CRASH_HOME_AXIS_COUNT;
+  switch (taskId) {
+    case CRASH_TASK_HOME_X: slot = CRASH_HOME_AXIS_X; break;
+    case CRASH_TASK_HOME_Y: slot = CRASH_HOME_AXIS_Y; break;
+    case CRASH_TASK_HOME_Z: slot = CRASH_HOME_AXIS_Z; break;
+    case CRASH_TASK_HOME_P: slot = CRASH_HOME_AXIS_P; break;
+    case CRASH_TASK_HOME_R: slot = CRASH_HOME_AXIS_R; break;
+    default: return;
+  }
+  const uint32_t low = (uint32_t)(uintptr_t)stackBase;
+  if (low > (UINT32_MAX - stackBytes)) {
+    return;
+  }
+  g_taskStackRanges[slot].taskId = (uint8_t)taskId;
+  g_taskStackRanges[slot].low = low;
+  g_taskStackRanges[slot].high = low + stackBytes;
+}
+
+void CrashLog_SetHomePhase(CrashHomeAxis axis, CrashHomePhase phase)
+{
+  if ((uint32_t)axis < CRASH_HOME_AXIS_COUNT) {
+    g_homePhases[(uint32_t)axis] = (uint8_t)phase;
+  }
 }
 
 const char* CrashLog_BootStageName(CrashBootStage stage)

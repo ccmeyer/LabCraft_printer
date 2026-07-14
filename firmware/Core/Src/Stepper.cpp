@@ -9,6 +9,7 @@
 #include "ExtiDebounce.h"
 #include "StepperProfileMath.h"
 #include "Orchestrator.h"          // for getDoneEvents()
+#include "CrashLog.h"
 #include "Logger.h"
 #include "FreeRTOS.h"
 #include "event_groups.h"
@@ -312,6 +313,24 @@ HomeInterruptionPolicy::Outcome Stepper::home(
   using HomeInterruptionPolicy::Outcome;
   _homeDiagnosticSnapshot = HomeDiagnosticSnapshot{};
 
+  CrashHomeAxis crashAxis = CRASH_HOME_AXIS_X;
+  switch (_axis) {
+    case X_AXIS: crashAxis = CRASH_HOME_AXIS_X; break;
+    case Y_AXIS: crashAxis = CRASH_HOME_AXIS_Y; break;
+    case Z_AXIS: crashAxis = CRASH_HOME_AXIS_Z; break;
+    case P_AXIS: crashAxis = CRASH_HOME_AXIS_P; break;
+    case R_AXIS: crashAxis = CRASH_HOME_AXIS_R; break;
+    default: break;
+  }
+  auto finishOutcome = [&](Outcome outcome) {
+    CrashHomePhase phase = CRASH_HOME_PHASE_FAILED;
+    if (outcome == Outcome::Succeeded) phase = CRASH_HOME_PHASE_SUCCEEDED;
+    else if (outcome == Outcome::Canceled) phase = CRASH_HOME_PHASE_CANCELED;
+    CrashLog_SetHomePhase(crashAxis, phase);
+    return outcome;
+  };
+  CrashLog_SetHomePhase(crashAxis, CRASH_HOME_PHASE_INITIAL_CHECK);
+
   auto cancellationRequested = [&]() {
     if (!HomeInterruptionPolicy::cancellationRequested(cancelToken)) {
       return false;
@@ -323,13 +342,13 @@ HomeInterruptionPolicy::Outcome Stepper::home(
   };
 
   if (cancellationRequested()) {
-    return Outcome::Canceled;
+    return finishOutcome(Outcome::Canceled);
   }
 
   const bool initialRawLimit = _isLimitAsserted();
   const LimitStableSample initialLimit = _sampleLimitStable(cancelToken);
 	if (cancellationRequested()) {
-	  return Outcome::Canceled;
+	  return finishOutcome(Outcome::Canceled);
 	}
 	Logger::instance()->log(
 	  "[Home %d] lim pin=%u activeHigh=%d initial_raw=%s initial_stable=%s samples=%u/%u\r\n",
@@ -409,9 +428,10 @@ HomeInterruptionPolicy::Outcome Stepper::home(
   };
 
   if (initialLimit.asserted) {
+    CrashLog_SetHomePhase(crashAxis, CRASH_HOME_PHASE_RELEASE);
     if (!_backOffLimitUntilReleased(releaseChunkSteps, slowHz, releaseGuardSteps, false, "initial release", cancelToken)) {
       restoreHomeState();
-      return cancellationRequested() ? Outcome::Canceled : Outcome::Failed;
+      return finishOutcome(cancellationRequested() ? Outcome::Canceled : Outcome::Failed);
     }
   }
 //  // If already pressed, back off in the opposite direction until it releases
@@ -429,10 +449,11 @@ HomeInterruptionPolicy::Outcome Stepper::home(
   _softstop_floor_hz            = 200u;
 
   // Coarse approach with finite guard
+  CrashLog_SetHomePhase(crashAxis, CRASH_HOME_PHASE_COARSE_SEEK);
   _softStopOnLimit = true;
   const MoveResult coarse = runMoveAndWait(_homeTowardLimitDir, _homeGuardSteps, fastHz);
   if (!coarse.completed) {
-    return cancellationRequested() ? Outcome::Canceled : Outcome::Failed;
+    return finishOutcome(cancellationRequested() ? Outcome::Canceled : Outcome::Failed);
   }
   _softStopOnLimit = false;
 
@@ -442,7 +463,7 @@ HomeInterruptionPolicy::Outcome Stepper::home(
     _softStopOnLimit = true;
     const MoveResult probe = runMoveAndWait(_homeTowardLimitDir, backoffSteps * 4u, slowHz);
     if (!probe.completed) {
-      return cancellationRequested() ? Outcome::Canceled : Outcome::Failed;
+      return finishOutcome(cancellationRequested() ? Outcome::Canceled : Outcome::Failed);
     }
     _softStopOnLimit = false;
 
@@ -451,7 +472,7 @@ HomeInterruptionPolicy::Outcome Stepper::home(
       Logger::instance()->log("[Home] Limit not detected on %d — abort\r\n", (int)_axis);
       _logLimitDebug("limit not detected after probe");
       restoreHomeState();
-      return Outcome::Failed;
+      return finishOutcome(Outcome::Failed);
     }
   }
 //  // If we arrived without the switch, try a short slow probe; else abort
@@ -472,42 +493,45 @@ HomeInterruptionPolicy::Outcome Stepper::home(
 //  }
 
   _softstop_accel_override_sps2 = 0.f;
+  CrashLog_SetHomePhase(crashAxis, CRASH_HOME_PHASE_RELEASE);
   if (!_backOffLimitUntilReleased(releaseChunkSteps, slowHz, releaseGuardSteps, true, "pre-fine release", cancelToken)) {
     restoreHomeState();
-    return cancellationRequested() ? Outcome::Canceled : Outcome::Failed;
+    return finishOutcome(cancellationRequested() ? Outcome::Canceled : Outcome::Failed);
   }
   _resetMoveLimitState();
 
   // Fine approach (short)
+  CrashLog_SetHomePhase(crashAxis, CRASH_HOME_PHASE_FINE_SEEK);
   _softstop_accel_override_sps2 = home_brake_accel;
   _softStopOnLimit = true;
   const MoveResult fine = runMoveAndWait(_homeTowardLimitDir, backoffSteps * 8u, slowHz);
   if (!fine.completed) {
-    return cancellationRequested() ? Outcome::Canceled : Outcome::Failed;
+    return finishOutcome(cancellationRequested() ? Outcome::Canceled : Outcome::Failed);
   }
   _softStopOnLimit = false;
   if (!StepperLimitPolicy::fineHomeLimitDetected(true, fine.limitSeen, fine.limitAsserted)) {
     Logger::instance()->log("[Home %d] Fine limit not detected abort\r\n", (int)_axis);
     _logLimitDebug("fine limit not detected");
     restoreHomeState();
-    return Outcome::Failed;
+    return finishOutcome(Outcome::Failed);
   }
 
   // Zero & move off switch slightly
+  CrashLog_SetHomePhase(crashAxis, CRASH_HOME_PHASE_FINAL_BACKOFF);
   _homeDiagnosticSnapshot.fineLimitPositionSteps = _pos;
   _pos = 0;
   _softstop_accel_override_sps2 = 0.f;
   if (!runMoveAndWait(!_homeTowardLimitDir, 100u, slowHz).completed) {
-    return cancellationRequested() ? Outcome::Canceled : Outcome::Failed;
+    return finishOutcome(cancellationRequested() ? Outcome::Canceled : Outcome::Failed);
   }
   if (canceledWithRestore()) {
-    return Outcome::Canceled;
+    return finishOutcome(Outcome::Canceled);
   }
   _homeDiagnosticSnapshot.finalBackoffPositionSteps = _pos;
   _homeDiagnosticSnapshot.success = true;
 
   restoreHomeState();
-  return Outcome::Succeeded;
+  return finishOutcome(Outcome::Succeeded);
 }
 
 bool Stepper::waitUntilDone(

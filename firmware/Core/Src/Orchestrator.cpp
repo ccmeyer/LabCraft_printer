@@ -221,16 +221,21 @@ void Orchestrator::createHomeWorkers() {
       &_argsHomeY, tskIDLE_PRIORITY + 3, _stackHomeY, &_tcbHomeY);
   _taskHomeZ = xTaskCreateStatic(_homeTaskEntry, "HomeZ", HOME_STACK_WORDS,
       &_argsHomeZ, tskIDLE_PRIORITY + 3, _stackHomeZ, &_tcbHomeZ);
+  CrashLog_RegisterTaskStack(CRASH_TASK_HOME_X, _stackHomeX, sizeof(_stackHomeX));
+  CrashLog_RegisterTaskStack(CRASH_TASK_HOME_Y, _stackHomeY, sizeof(_stackHomeY));
+  CrashLog_RegisterTaskStack(CRASH_TASK_HOME_Z, _stackHomeZ, sizeof(_stackHomeZ));
 
   _argsHomeP.reg = PressureRegulator::tryGet(0u);
   _argsHomeP.doneBit = BIT_HOME_P_DONE;
   _taskHomeP = xTaskCreateStatic(_regHomeTaskEntry, "HomePR_P", REG_HOME_STACK_WORDS,
       &_argsHomeP, tskIDLE_PRIORITY + 3, _stackHomeP, &_tcbHomeP);
+  CrashLog_RegisterTaskStack(CRASH_TASK_HOME_P, _stackHomeP, sizeof(_stackHomeP));
 #if (LC_PRESSURE_PORTS > 1)
   _argsHomeR.reg = PressureRegulator::tryGet(1u);
   _argsHomeR.doneBit = BIT_HOME_R_DONE;
   _taskHomeR = xTaskCreateStatic(_regHomeTaskEntry, "HomePR_R", REG_HOME_STACK_WORDS,
       &_argsHomeR, tskIDLE_PRIORITY + 3, _stackHomeR, &_tcbHomeR);
+  CrashLog_RegisterTaskStack(CRASH_TASK_HOME_R, _stackHomeR, sizeof(_stackHomeR));
 #endif
 }
 

@@ -155,6 +155,7 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
   - `OrchestratorCompletionPolicy` centralizes the pure “did an interruptible command really finish?” bookkeeping used to decide when executed/retired frontiers may advance after pause-aware waits.
   - `RegulatorPausePolicy` owns the host-tested one-shot active-channel snapshot used to stop pressure regulation for manual pause, restore only previously active channels on resume, and discard restoration state on clear or session shutdown.
   - `HomeInterruptionPolicy` owns the host-tested, generation-tagged cancel/restart lifecycle. Orchestrator home workers are persistent static tasks: Pause hard-stops active home axes and closes regulator valves, Resume re-runs interrupted autonomous recovery homes before restarting the interrupted opcode, and a genuine failure remains paused and unretired until Clear.
+  - Each persistent X/Y/Z/P/R home worker registers its static stack bounds with `CrashLog`. `Stepper::home` records only phase transitions (`idle`, `initial_check`, `coarse_seek`, `release`, `fine_seek`, `final_backoff`, `succeeded`, `canceled`, or `failed`), so fault attribution adds no per-step or timer-ISR work and does not alter parallel X/Y or P/R scheduling.
   - Homing interruption does not add or change any serial opcode, TLV, ACK, or status field; the existing paused flag and non-advancing completion watermark represent a latched failure to the host.
   - Flash session safety lives here: `CMD_INIT_FLASH` / `CMD_STOP_FLASH`, PE8 arm/disarm policy, PE9 output ownership, and fault latch logging (`FLASH_ARMED`, `FLASH_DISARMED`, `FLASH_FAULT`). Active imaging sessions now only hard-fault on `line_high_on_arm`; once armed, duplicate triggers while a flash is already pending are ignored and the task simply waits for PE8 to return low without latching on slow release.
 
@@ -393,8 +394,23 @@ Common parse path for host->MCU commands:
 | `0x20` | `TAG_RESET_RCC_FLAGS` | 4 | optional raw `CrashLogSnapshot.resetFlagsRaw`; Python decodes names from `LPWRRSTF`, `WWDGRSTF`, `IWDGRSTF`, `SFTRSTF`, `PORRSTF`, `PINRSTF`, and `BORRSTF` bits |
 | `0x21` | `TAG_RESET_TASK_NAME4` | 4 | optional packed 4-byte prefix of the FreeRTOS task name captured by the stack-overflow hook |
 | `0x22` | `TAG_RESET_REG_CONTEXT` | 30 | optional packed `RegulatorTelemetryResetContext` retained in `.noinit` SRAM for non-power reset reports |
+| `0x23` | `TAG_RESET_FAULT_CONTEXT` | 112 | optional version-1 Cortex-M exception frame, fault registers, task stack bounds, and X/Y/Z/P/R homing phases |
 
 `TAG_RESET_REG_CONTEXT` uses `RegulatorTelemetry.h` flag bits (`active`, `homing`, `resetting`, `motion_hold`, `quiet`, `stepping`, `inactive_hold`, `motion_hold_wdg`, `recovery_hold`) and event codes for start/pause, motion-hold enter/exit, home/reset begin/end, quiet begin/end, inner-limit, step-limit, and safety-home transitions.
+
+### Retained fault context
+
+`CrashLog.c` stores `CrashFaultContextRetained` in the linker `NOLOAD` `.noinit` section. The wrapper contains magic, version, size, and an FNV-1a checksum. Fault entry clears magic first, writes the 112-byte context and checksum, executes a memory barrier, and commits magic last. Boot accepts this context only when the wrapper validates and the RTC crash record is pending; the existing 20-register RTC record remains the fallback. Healthy boot and power/low-power reset classification clear the retained context.
+
+HardFault, MemManage, BusFault, and UsageFault use GCC naked entries in `stm32f4xx_it.c`. Their first instructions select MSP or PSP from `EXC_RETURN` and pass both stack pointers to the non-returning capture path. An extended floating-point frame advances 18 words before reading R0-R3, R12, LR, PC, and xPSR. The stacked xPSR supplies the interrupted IPSR value. Capture also stores CFSR, HFSR, DFSR, AFSR, SHCSR, MMFAR, BFAR, CONTROL, BASEPRI, PRIMASK, and FAULTMASK. Configurable fault enables are unchanged.
+
+The version-1 TLV is little-endian: ten one-byte header fields (version, flags, fault kind, task ID, active command, then X/Y/Z/P/R phases), a two-byte IPSR, followed by 25 four-byte values in the order `EXC_RETURN`, active SP, MSP, PSP, matched stack low/high, R0-R3, R12, LR, PC, xPSR, CFSR, HFSR, DFSR, AFSR, SHCSR, MMFAR, BFAR, CONTROL, BASEPRI, PRIMASK, and FAULTMASK. Flags indicate a valid core frame, extended FPU frame, matched task stack, valid MMFAR/BFAR, handler mode, and a validated stack pointer. Unknown or malformed versions are ignored independently of the rest of the reset report. `INCLUDE_uxTaskGetStackHighWaterMark` remains disabled.
+
+`CrashLog_TriggerHardFaultForTest()` is debugger-only in the sense that it has no protocol, command, or UI entrypoint. On a motion-disabled bench, invoke it from a debugger to execute `udf`, reconnect, and export the reset bundle. Preserve the exact ELF and map used for the flashed binary, then resolve the captured PC with:
+
+```powershell
+arm-none-eabi-addr2line -e firmware/Debug/LabCraft_firmware.elf -f -C 0x08001235
+```
 
 Reset-report tags share numeric values with status tags, for example `0x20` / `0x21`, but the tag namespaces are separated by frame opcode (`CMD_RESET_REPORT` vs `CMD_STATUS`).
 

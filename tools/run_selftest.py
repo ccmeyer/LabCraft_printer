@@ -80,6 +80,7 @@ TAG_RESET_FAULT_STAGE = 0x1D
 TAG_RESET_WATCHDOG_LATE_TASK = 0x1E
 TAG_RESET_ACTIVE_COMMAND = 0x1F
 TAG_RESET_REG_CONTEXT = 0x22
+TAG_RESET_FAULT_CONTEXT = 0x23
 
 ACK_RESULT_ACCEPTED = 1
 ACK_RESULT_DUPLICATE = 2
@@ -240,6 +241,22 @@ def _tlv_u8(tlv: dict[int, bytes], tag: int) -> int | None:
 
 REGULATOR_TELEMETRY_AGE_UNKNOWN = 0xFFFFFFFF
 REGULATOR_RESET_CONTEXT_WIRE_SIZE = 30
+FAULT_CONTEXT_WIRE_SIZE = 112
+CRASH_FAULT_NAMES = {
+    0: "none", 1: "hardfault", 2: "memmanage", 3: "busfault", 4: "usagefault",
+    5: "nmi", 6: "stack_overflow", 7: "assert", 8: "error_handler", 9: "wdt",
+}
+CRASH_TASK_NAMES = {
+    0: "none", 1: "boot", 2: "orchestrator", 3: "status", 4: "pressure",
+    5: "print_regulator", 6: "refuel_regulator", 7: "home_x", 8: "home_y",
+    9: "home_z", 10: "home_print_regulator", 11: "home_refuel_regulator",
+    12: "printer", 13: "gripper", 14: "led", 15: "led_fade", 16: "log_stats",
+    17: "heartbeat", 18: "watchdog", 19: "idle", 20: "timer",
+}
+HOME_PHASE_NAMES = {
+    0: "idle", 1: "initial_check", 2: "coarse_seek", 3: "release",
+    4: "fine_seek", 5: "final_backoff", 6: "succeeded", 7: "canceled", 8: "failed",
+}
 REGULATOR_TELEMETRY_FLAGS = {
     0x0001: ("active", "active"),
     0x0002: ("homing", "homing"),
@@ -331,6 +348,43 @@ def decode_regulator_context(raw: bytes | None) -> dict | None:
     }
 
 
+def decode_fault_context(raw: bytes | None) -> dict | None:
+    if raw is None or len(raw) != FAULT_CONTEXT_WIRE_SIZE or raw[0] != 1:
+        return None
+    header = struct.unpack_from("<10BH", raw, 0)
+    register_names = (
+        "exc_return", "active_sp", "msp", "psp", "task_stack_low", "task_stack_high",
+        "r0", "r1", "r2", "r3", "r12", "lr", "pc", "xpsr", "cfsr", "hfsr",
+        "dfsr", "afsr", "shcsr", "mmfar", "bfar", "control", "basepri", "primask",
+        "faultmask",
+    )
+    flags = header[1]
+    task_id = header[3]
+    result = {
+        "version": header[0],
+        "flags": flags,
+        "core_frame_valid": bool(flags & 0x01),
+        "extended_fpu_frame": bool(flags & 0x02),
+        "task_stack_matched": bool(flags & 0x04),
+        "mmfar_valid": bool(flags & 0x08),
+        "bfar_valid": bool(flags & 0x10),
+        "handler_mode": bool(flags & 0x20),
+        "stack_pointer_valid": bool(flags & 0x40),
+        "fault_kind": header[2],
+        "fault_kind_name": CRASH_FAULT_NAMES.get(header[2], f"fault_{header[2]}"),
+        "task_id": task_id,
+        "task_name": CRASH_TASK_NAMES.get(task_id, f"task_{task_id}"),
+        "active_command": header[4],
+        "home_phases": {
+            axis: {"value": value, "name": HOME_PHASE_NAMES.get(value, f"phase_{value}")}
+            for axis, value in zip(("x", "y", "z", "p", "r"), header[5:10])
+        },
+        "ipsr": header[10],
+    }
+    result.update(zip(register_names, struct.unpack_from("<25I", raw, 12)))
+    return result
+
+
 def decode_reset_report(tlv: dict[int, bytes]) -> dict:
     return {
         "reset_seq32": _tlv_u32(tlv, TAG_RESET_SEQ32),
@@ -350,6 +404,7 @@ def decode_reset_report(tlv: dict[int, bytes]) -> dict:
         "watchdog_late_task": _tlv_u8(tlv, TAG_RESET_WATCHDOG_LATE_TASK),
         "active_command": _tlv_u8(tlv, TAG_RESET_ACTIVE_COMMAND),
         "regulator_context": decode_regulator_context(tlv.get(TAG_RESET_REG_CONTEXT)),
+        "fault_context": decode_fault_context(tlv.get(TAG_RESET_FAULT_CONTEXT)),
     }
 
 
