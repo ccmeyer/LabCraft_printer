@@ -3780,6 +3780,15 @@ class CommandQueue(QObject):
                     self._emit_command_event(cmd, "requeued")
         self.queue_updated.emit()
 
+    def mark_for_gap_repair(self, command_numbers):
+        """Requeue retained nonterminal commands selected for ordered gap repair."""
+        targets = {int(command_number) for command_number in command_numbers}
+        for cmd in self.queue:
+            if cmd.command_number in targets and cmd.status not in {"Completed", "Canceled"}:
+                if cmd.reset_for_resend():
+                    self._emit_command_event(cmd, "requeued")
+        self.queue_updated.emit()
+
     def update_command_status(
         self,
         current_executing_command,
@@ -3914,6 +3923,7 @@ class Machine(QObject):
         self._transport_ready = False
         self._queue_ack_timeout_ms = 200
         self._queue_ack_max_retries = 3
+        self._queue_gap_repair = None
         self._mcu_response_timeout_ms = 2500
         self._mcu_response_check_interval_ms = 250
         self._last_mcu_rx_monotonic_ns = None
@@ -4132,6 +4142,21 @@ class Machine(QObject):
         out["monotonic_ns"] = self._coerce_optional_int(sample.get("monotonic_ns"))
         return out
 
+    def _queue_gap_repair_for_output(self):
+        state = getattr(self, "_queue_gap_repair", None)
+        if not state:
+            return None
+        return {
+            "origin_seq32": self._coerce_optional_int(state.get("origin_seq32")),
+            "cursor_seq32": self._coerce_optional_int(state.get("cursor_seq32")),
+            "high_water_seq32": self._coerce_optional_int(state.get("high_water_seq32")),
+            "repair_seq32s": [int(seq32) for seq32 in state.get("repair_seq32s", [])],
+            "attempts_by_seq32": {
+                str(seq32): int(attempts)
+                for seq32, attempts in state.get("attempts_by_seq32", {}).items()
+            },
+        }
+
     def _black_box_transport_state(self):
         queue = getattr(getattr(self, "command_queue", None), "queue", [])
         completed = getattr(getattr(self, "command_queue", None), "completed", [])
@@ -4146,6 +4171,7 @@ class Machine(QObject):
             "sequence_pause": bool(getattr(self, "_sequence_pause", False)),
             "session_recovery_in_progress": bool(getattr(self, "_session_recovery_in_progress", False)),
             "waiting_for_post_clear_status": bool(getattr(self, "_waiting_for_post_clear_status", False)),
+            "queue_gap_repair": self._queue_gap_repair_for_output(),
             "pending_ack_count": len(pending_acks),
             "pending_ack_keys": [self._ack_key_for_output(key) for key in list(pending_acks.keys())],
             "command_queue_depth": len(queue),
@@ -4319,6 +4345,7 @@ class Machine(QObject):
         }
 
     def _clear_transport_after_unclean_serial_loss(self):
+        self._clear_queue_gap_repair("serial_connection_lost")
         self.command_queue.clear_queue(reset_counter=True)
         self.sent_command = None
         self._cancel_pending_acks()
@@ -4349,6 +4376,7 @@ class Machine(QObject):
         self._stop_mcu_response_watchdog()
 
     def _clear_transport_after_mcu_unresponsive(self):
+        self._clear_queue_gap_repair("mcu_unresponsive")
         self.command_queue.clear_queue(reset_counter=True)
         self.sent_command = None
         self._cancel_pending_acks()
@@ -4591,6 +4619,7 @@ class Machine(QObject):
         """Close current transport before recursive reconnect attempts."""
         self._expect_serial_reader_stop("connection_retry")
         self._stop_mcu_response_watchdog()
+        self._clear_queue_gap_repair("connection_retry")
         try:
             self.stop_reader_thread()
         except Exception:
@@ -4606,6 +4635,7 @@ class Machine(QObject):
         print('Resetting board')
         self._expect_serial_reader_stop("reset_board")
         self._stop_mcu_response_watchdog()
+        self._clear_queue_gap_repair("reset_board")
         self.command_queue.clear_queue(reset_counter=True)
         self._transport_capabilities = 0
         self._transport_ready = False
@@ -4718,6 +4748,7 @@ class Machine(QObject):
             self._invoke_ack_callback(handler, payload)
 
     def _reset_session_state_for_recovery(self):
+        self._clear_queue_gap_repair("session_recovery")
         self.command_queue.clear_queue(reset_counter=True)
         self.sent_command = None
         self._cancel_pending_acks()
@@ -4761,6 +4792,7 @@ class Machine(QObject):
         # self.reset_board()
         self._expect_serial_reader_stop("disconnect_handler")
         self._stop_mcu_response_watchdog()
+        self._clear_queue_gap_repair("disconnect")
         self._record_black_box_event(
             "disconnect_complete",
             {"port": getattr(self, "port", None)},
@@ -4858,6 +4890,7 @@ class Machine(QObject):
 
         self.ser = None
         self.sent_command = None
+        self._clear_queue_gap_repair(str(reason or "external_owner"))
         self._transport_ready = False
         self._tx_paused = True
         self._sequence_pause = False
@@ -4870,6 +4903,7 @@ class Machine(QObject):
             "disconnect_requested",
             {"error": bool(error), "port": getattr(self, "port", None)},
         )
+        self._clear_queue_gap_repair("disconnect_requested")
         if not self.ser:
             self.disconnect_handler()
             return
@@ -5292,15 +5326,6 @@ class Machine(QObject):
                 return command
         return None
 
-    def _lowest_queued_command_number(self):
-        numbers = [
-            self._coerce_optional_int(getattr(command, "command_number", None))
-            for command in list(getattr(self.command_queue, "queue", []))
-            if getattr(command, "status", None) not in {"Completed", "Canceled"}
-        ]
-        numbers = [number for number in numbers if number is not None]
-        return min(numbers) if numbers else None
-
     def _align_command_counter_after_clear(self, last_retired_command):
         last_retired = self._coerce_optional_int(last_retired_command)
         if last_retired is None:
@@ -5578,6 +5603,14 @@ class Machine(QObject):
             last_accepted_command=last_accepted,
             last_retired_command=last_retired,
         )
+        if getattr(self, "_queue_gap_repair", None):
+            frontiers = [
+                self._coerce_optional_int(value)
+                for value in (current_command, last_completed, last_accepted, last_retired)
+            ]
+            accepted_frontiers = [value for value in frontiers if value is not None]
+            if accepted_frontiers:
+                self._advance_queue_gap_repair(max(accepted_frontiers), "status")
 
     def add_command_to_queue(self, command_type, param1, param2, param3, handler=None, kwargs=None, manual=False, trace_metadata=None):
         """Add a command to the queue."""
@@ -5647,14 +5680,243 @@ class Machine(QObject):
             self.error_occurred.emit(msg)
             return False
 
-    def _cancel_queue_ack_waits_from(self, command_number):
-        floor = int(command_number or 0)
+    def _cancel_queue_ack_waits_for(self, command_numbers):
+        targets = {int(command_number) for command_number in command_numbers}
         for key in list(self._pending_acks.keys()):
             ack_code, seq32, _seq8 = key
-            if ack_code != CMD_QUEUE_ACK:
-                continue
-            if seq32 >= floor:
+            if ack_code == CMD_QUEUE_ACK and seq32 in targets:
                 self._cancel_ack_wait_by_key(key)
+
+    def _clear_queue_gap_repair(self, reason=None):
+        state = getattr(self, "_queue_gap_repair", None)
+        if not state:
+            return
+        payload = self._queue_gap_repair_for_output()
+        if reason:
+            payload["reason"] = str(reason)
+            self._record_black_box_event("queue_gap_repair_cleared", payload)
+        self._cancel_queue_ack_waits_for(state.get("repair_seq32s", []))
+        self._queue_gap_repair = None
+
+    def _queue_gap_repair_fault(self, message, reason):
+        payload = self._queue_gap_repair_for_output() or {}
+        payload.update({"reason": str(reason), "message": str(message)})
+        self._record_black_box_event("queue_gap_repair_failed", payload)
+        self._handle_transport_fault(message)
+
+    def _start_queue_gap_repair(self, origin_seq32, expected_seq32):
+        origin_seq32 = int(origin_seq32 or 0)
+        if expected_seq32 is None:
+            self._queue_gap_repair_fault(
+                f"Cannot recover queue gap for command {origin_seq32}: MCU ACK did not include the expected sequence. Clear the queue or reconnect before continuing.",
+                "missing_expected_seq32",
+            )
+            return False
+
+        expected_seq32 = int(expected_seq32)
+        if expected_seq32 >= origin_seq32:
+            self._queue_gap_repair_fault(
+                f"Cannot recover queue gap for command {origin_seq32}: MCU reported inconsistent expected command {expected_seq32}. Clear the queue or reconnect before continuing.",
+                "inconsistent_expected_seq32",
+            )
+            return False
+
+        live_commands = {
+            int(command.command_number): command
+            for command in self.command_queue.queue
+        }
+        expected_command = live_commands.get(expected_seq32)
+        if expected_command is None or expected_command.status in {"Completed", "Canceled"}:
+            lowest_queued = min(live_commands) if live_commands else None
+            if lowest_queued is not None and expected_seq32 < lowest_queued:
+                message = (
+                    f"MCU requested resend from command {expected_seq32}, but earliest local queued command is {lowest_queued}. "
+                    "Clear the queue or reconnect before continuing."
+                )
+            else:
+                message = (
+                    f"MCU requested resend from command {expected_seq32}, but that command is not retained as an active local command. "
+                    "Clear the queue or reconnect before continuing."
+                )
+            self._queue_gap_repair_fault(message, "expected_command_unavailable")
+            return False
+
+        previous_state = getattr(self, "_queue_gap_repair", None)
+        if previous_state:
+            high_water_seq32 = int(previous_state["high_water_seq32"])
+            initial_origin_seq32 = int(previous_state["origin_seq32"])
+            attempts_by_seq32 = dict(previous_state.get("attempts_by_seq32", {}))
+        else:
+            sent_seq32s = [
+                command_number
+                for command_number, command in live_commands.items()
+                if int(getattr(command, "send_attempts", 0) or 0) > 0
+                and command.status not in {"Completed", "Canceled"}
+            ]
+            if origin_seq32 not in sent_seq32s:
+                self._queue_gap_repair_fault(
+                    f"Cannot recover queue gap for command {origin_seq32}: the originating command is not retained in the sent window.",
+                    "origin_command_unavailable",
+                )
+                return False
+            high_water_seq32 = max(sent_seq32s)
+            initial_origin_seq32 = origin_seq32
+            attempts_by_seq32 = {}
+
+        repair_seq32s = list(range(expected_seq32, high_water_seq32 + 1))
+        invalid_seq32s = [
+            seq32
+            for seq32 in repair_seq32s
+            if seq32 not in live_commands
+            or live_commands[seq32].status in {"Completed", "Canceled"}
+        ]
+        if invalid_seq32s:
+            self._queue_gap_repair_fault(
+                f"Cannot recover queue gap from command {expected_seq32}: local commands through {high_water_seq32} are not contiguous and active. Clear the queue or reconnect before continuing.",
+                "noncontiguous_repair_window",
+            )
+            return False
+
+        sent_window_seq32s = [
+            command_number
+            for command_number, command in live_commands.items()
+            if command_number <= high_water_seq32
+            and int(getattr(command, "send_attempts", 0) or 0) > 0
+        ]
+        self._cancel_queue_ack_waits_for(sent_window_seq32s)
+        for command_number, command in live_commands.items():
+            if command_number < expected_seq32 and command.status in {"Added", "Sent"}:
+                self.command_queue.mark_command_accepted(command_number)
+
+        for seq32 in repair_seq32s:
+            attempts_by_seq32.setdefault(seq32, 0)
+        self._queue_gap_repair = {
+            "origin_seq32": initial_origin_seq32,
+            "cursor_seq32": expected_seq32,
+            "high_water_seq32": high_water_seq32,
+            "repair_seq32s": repair_seq32s,
+            "attempts_by_seq32": attempts_by_seq32,
+        }
+        self.command_queue.mark_for_gap_repair(repair_seq32s)
+
+        event_kind = "queue_gap_repair_rebased" if previous_state else "queue_gap_repair_started"
+        payload = self._queue_gap_repair_for_output()
+        payload["gap_ack_seq32"] = origin_seq32
+        payload["expected_seq32"] = expected_seq32
+        self._record_black_box_event(event_kind, payload)
+        self.pump_send_queue()
+        return True
+
+    def _advance_queue_gap_repair(self, accepted_through_seq32, source):
+        state = getattr(self, "_queue_gap_repair", None)
+        if not state:
+            return
+        accepted_through_seq32 = int(accepted_through_seq32 or 0)
+        cursor_seq32 = int(state["cursor_seq32"])
+        if accepted_through_seq32 < cursor_seq32:
+            return
+
+        progressed_seq32s = [
+            seq32
+            for seq32 in state["repair_seq32s"]
+            if cursor_seq32 <= seq32 <= accepted_through_seq32
+        ]
+        self._cancel_queue_ack_waits_for(progressed_seq32s)
+        for seq32 in progressed_seq32s:
+            command = self._find_command_by_number(seq32)
+            if command is not None and command.status in {"Added", "Sent"}:
+                self.command_queue.mark_command_accepted(seq32)
+        remaining_seq32s = [
+            seq32
+            for seq32 in state["repair_seq32s"]
+            if seq32 > accepted_through_seq32
+        ]
+        payload = self._queue_gap_repair_for_output()
+        payload.update(
+            {
+                "source": str(source),
+                "accepted_through_seq32": accepted_through_seq32,
+                "progressed_seq32s": progressed_seq32s,
+            }
+        )
+        self._record_black_box_event("queue_gap_repair_progress", payload)
+
+        if not remaining_seq32s:
+            self._record_black_box_event("queue_gap_repair_completed", payload)
+            self._queue_gap_repair = None
+            self.pump_send_queue()
+            return
+
+        state["cursor_seq32"] = remaining_seq32s[0]
+        self.pump_send_queue()
+
+    def _retry_queue_gap_repair_cursor(self, reason, delay_ms=0):
+        state = getattr(self, "_queue_gap_repair", None)
+        if not state:
+            return False
+        cursor_seq32 = int(state["cursor_seq32"])
+        attempts = int(state["attempts_by_seq32"].get(cursor_seq32, 0) or 0)
+        if attempts >= int(self._queue_ack_max_retries):
+            self._queue_gap_repair_fault(
+                f"Unable to recover queue gap: command {cursor_seq32} failed after {attempts} repair attempts.",
+                f"{reason}_retry_exhausted",
+            )
+            return False
+
+        command = self._find_command_by_number(cursor_seq32)
+        if command is None or command.status in {"Completed", "Canceled"}:
+            self._queue_gap_repair_fault(
+                f"Unable to recover queue gap: repair command {cursor_seq32} is no longer active locally.",
+                "repair_cursor_unavailable",
+            )
+            return False
+        self.command_queue.mark_for_gap_repair([cursor_seq32])
+        payload = self._queue_gap_repair_for_output()
+        payload.update({"reason": str(reason), "delay_ms": int(delay_ms)})
+        self._record_black_box_event("queue_gap_repair_retry", payload)
+        if delay_ms > 0:
+            QtCore.QTimer.singleShot(int(delay_ms), self.pump_send_queue)
+        else:
+            self.pump_send_queue()
+        return True
+
+    def _pump_queue_gap_repair(self):
+        state = getattr(self, "_queue_gap_repair", None)
+        if not state:
+            return
+        cursor_seq32 = int(state["cursor_seq32"])
+        command = self._find_command_by_number(cursor_seq32)
+        if command is None:
+            self._queue_gap_repair_fault(
+                f"Unable to recover queue gap: repair command {cursor_seq32} is not retained locally.",
+                "repair_cursor_missing",
+            )
+            return
+        if command.status in {"Accepted", "Executing", "Completed", "Canceled"}:
+            self._advance_queue_gap_repair(cursor_seq32, "local_status")
+            return
+        if command.status == "Sent":
+            return
+
+        attempts = int(state["attempts_by_seq32"].get(cursor_seq32, 0) or 0)
+        if attempts >= int(self._queue_ack_max_retries):
+            self._queue_gap_repair_fault(
+                f"Unable to recover queue gap: command {cursor_seq32} failed after {attempts} repair attempts.",
+                "send_retry_exhausted",
+            )
+            return
+        if not self.send_command_to_board(command):
+            return
+
+        if command.command_type in ('OPEN_GRIPPER', 'CLOSE_GRIPPER') and not self._gripper_ack_required:
+            self._reset_gripper_idle_timer()
+        state["attempts_by_seq32"][cursor_seq32] = attempts + 1
+        self._mark_command_sent(command)
+        self._start_command_ack_wait(command)
+        payload = self._queue_gap_repair_for_output()
+        payload["sent_seq32"] = cursor_seq32
+        self._record_black_box_event("queue_gap_repair_sent", payload)
+        print(f"Sent gap-repair command: {command.command_type} {command.param1} {command.param2} {command.param3}")
 
     def _mark_command_sent(self, command):
         command.send_attempts += 1
@@ -5666,6 +5928,7 @@ class Machine(QObject):
         self._record_black_box_event("transport_fault", payload)
         self._write_black_box_snapshot("transport_fault", payload)
         self._tx_paused = True
+        self._clear_queue_gap_repair("transport_fault")
         try:
             self.stop_execution_timer()
         except Exception:
@@ -5690,6 +5953,30 @@ class Machine(QObject):
 
         ack_result = str((ack or {}).get("ack_result") or "")
         expected_seq32 = self._coerce_optional_int((ack or {}).get("expected_seq32"))
+        repair_state = getattr(self, "_queue_gap_repair", None)
+
+        if repair_state:
+            cursor_seq32 = int(repair_state["cursor_seq32"])
+            if int(seq32) != cursor_seq32:
+                self._record_black_box_event(
+                    "queue_gap_repair_ack_ignored",
+                    {
+                        "ack_seq32": int(seq32),
+                        "ack_result": ack_result,
+                        "cursor_seq32": cursor_seq32,
+                    },
+                )
+                return
+            if ack_result in {"accepted", "duplicate"}:
+                self.command_queue.mark_command_accepted(seq32)
+                self._advance_queue_gap_repair(seq32, f"ack_{ack_result}")
+                return
+            if ack_result == "gap":
+                self._start_queue_gap_repair(seq32, expected_seq32)
+                return
+            if ack_result == "busy":
+                self._retry_queue_gap_repair_cursor("busy", delay_ms=20)
+                return
 
         if ack_result in {"accepted", "duplicate"}:
             self.command_queue.mark_command_accepted(seq32)
@@ -5697,21 +5984,7 @@ class Machine(QObject):
             return
 
         if ack_result == "gap":
-            resend_from = expected_seq32 if expected_seq32 is not None else seq32
-            lowest_queued = self._lowest_queued_command_number()
-            if lowest_queued is not None and int(resend_from) < int(lowest_queued):
-                self._handle_transport_fault(
-                    f"MCU requested resend from command {resend_from}, but earliest local queued command is {lowest_queued}. Clear the queue or reconnect before continuing."
-                )
-                return
-            if int(getattr(command, "send_attempts", 0) or 0) >= int(self._queue_ack_max_retries):
-                self._handle_transport_fault(
-                    f"Timed out recovering queue gap for command {seq32} after {command.send_attempts} attempts."
-                )
-                return
-            self._cancel_queue_ack_waits_from(resend_from)
-            self.command_queue.mark_for_resend_from(resend_from)
-            self.pump_send_queue()
+            self._start_queue_gap_repair(seq32, expected_seq32)
             return
 
         if ack_result == "busy":
@@ -5739,6 +6012,35 @@ class Machine(QObject):
 
     def _on_queue_ack_timeout(self, seq32):
         command = self._find_command_by_number(seq32)
+        repair_state = getattr(self, "_queue_gap_repair", None)
+        if repair_state:
+            cursor_seq32 = int(repair_state["cursor_seq32"])
+            if int(seq32) != cursor_seq32:
+                return
+            attempts = int(repair_state["attempts_by_seq32"].get(cursor_seq32, 0) or 0)
+            if attempts >= int(self._queue_ack_max_retries):
+                self._record_black_box_event(
+                    "queue_gap_repair_failed",
+                    {
+                        **(self._queue_gap_repair_for_output() or {}),
+                        "reason": "ack_timeout_retry_exhausted",
+                    },
+                )
+                self._handle_mcu_unresponsive(
+                    "ack_timeout",
+                    {
+                        "command_number": cursor_seq32,
+                        "command_type": str(getattr(command, "command_type", "") or ""),
+                        "repair_attempts": attempts,
+                        "message": (
+                            f"Timed out waiting for queue ACK while repairing command {cursor_seq32} "
+                            f"after {attempts} repair attempts."
+                        ),
+                    },
+                )
+                return
+            self._retry_queue_gap_repair_cursor("ack_timeout")
+            return
         if command is None or command.status in {"Completed", "Canceled", "Accepted", "Executing"}:
             return
         if int(getattr(command, "send_attempts", 0) or 0) >= int(self._queue_ack_max_retries):
@@ -5943,6 +6245,9 @@ class Machine(QObject):
             return
         if getattr(self, "_tx_paused", False) or getattr(self, "_sequence_pause", False):
             return
+        if getattr(self, "_queue_gap_repair", None):
+            self._pump_queue_gap_repair()
+            return
 
         while True:
             command = self.command_queue.get_next_command()
@@ -5986,6 +6291,8 @@ class Machine(QObject):
 
     def clear_command_queue(self, handler=None):
         print('Clearing command queue')
+
+        self._clear_queue_gap_repair("queue_clear_requested")
 
         if hasattr(self, 'execution_timer') and self.execution_timer:
             try: self.stop_execution_timer()

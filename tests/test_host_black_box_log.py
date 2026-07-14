@@ -196,7 +196,13 @@ def test_abnormal_serial_reader_stop_writes_snapshot(qapp, test_profile, tmp_pat
     assert any(event["kind"] == "serial_reader_stopped" for event in snapshot["black_box_events"])
 
 
-def test_queue_gap_retry_exhaustion_snapshot_preserves_incident_evidence(qapp, test_profile, tmp_path):
+def test_queue_gap_repair_failure_snapshot_preserves_incident_evidence(
+    qapp,
+    test_profile,
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(mfr.QtCore.QTimer, "singleShot", lambda *_args, **_kwargs: None)
     machine = _make_machine(qapp, test_profile, tmp_path)
     machine._transport_ready = False
     machine._write_frame = Mock()
@@ -216,22 +222,31 @@ def test_queue_gap_retry_exhaustion_snapshot_preserves_incident_evidence(qapp, t
         }
     )
     _deliver_queue_ack(machine, 2859, "accepted")
-    for _ in range(3):
-        _deliver_queue_ack(machine, 2860, "gap", expected_seq32=2859)
+    _deliver_queue_ack(machine, 2860, "gap", expected_seq32=2859)
+    for attempt in range(3):
+        _deliver_queue_ack(machine, 2859, "busy")
+        if attempt < 2:
+            machine.pump_send_queue()
 
     snapshot = _read_single_snapshot(tmp_path)
     assert snapshot["reason"] == "transport_fault"
     assert snapshot["trigger"] == {
-        "message": "Timed out recovering queue gap for command 2860 after 3 attempts."
+        "message": "Unable to recover queue gap: command 2859 failed after 3 repair attempts."
     }
 
     queued = {item["command_number"]: item for item in snapshot["commands"]["queued"]}
     assert queued[2859]["command_type"] == "WAIT"
-    assert queued[2859]["status"] == "Accepted"
-    assert queued[2859]["send_attempts"] == 1
-    assert queued[2860]["status"] == "Sent"
-    assert queued[2860]["send_attempts"] == 3
+    assert queued[2859]["status"] == "Sent"
+    assert queued[2859]["send_attempts"] == 4
+    assert queued[2860]["status"] == "Added"
+    assert queued[2860]["send_attempts"] == 1
     assert commands[2859].command_number == 2859
+
+    repair = snapshot["transport"]["queue_gap_repair"]
+    assert repair["origin_seq32"] == 2860
+    assert repair["cursor_seq32"] == 2859
+    assert repair["repair_seq32s"] == [2859, 2860]
+    assert repair["attempts_by_seq32"] == {"2859": 3, "2860": 0}
 
     latest_status = snapshot["transport"]["latest_status"]
     assert latest_status["Current_command"] == 2859
@@ -244,10 +259,19 @@ def test_queue_gap_retry_exhaustion_snapshot_preserves_incident_evidence(qapp, t
         for event in snapshot["black_box_events"]
         if event["kind"] == "ack" and event["payload"].get("ack_result") == "gap"
     ]
-    assert len(gap_acks) == 3
-    assert all(ack["seq32"] == 2860 for ack in gap_acks)
-    assert all(ack["expected_seq32"] == 2859 for ack in gap_acks)
-    assert all(ack["matched_pending"] is True for ack in gap_acks)
+    assert len(gap_acks) == 1
+    assert gap_acks[0]["seq32"] == 2860
+    assert gap_acks[0]["expected_seq32"] == 2859
+    assert gap_acks[0]["matched_pending"] is True
+    assert any(
+        event["kind"] == "queue_gap_repair_started"
+        for event in snapshot["black_box_events"]
+    )
+    assert any(
+        event["kind"] == "queue_gap_repair_failed"
+        and event["payload"]["reason"] == "busy_retry_exhausted"
+        for event in snapshot["black_box_events"]
+    )
 
 
 def test_unclean_serial_loss_after_established_session_emits_and_clears_state(qapp, test_profile, tmp_path):

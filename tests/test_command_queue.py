@@ -458,14 +458,17 @@ def test_queue_gap_recovers_when_expected_command_is_still_sent(qapp, test_profi
         2859,
         2860,
         2859,
-        2860,
     ]
     assert commands[2859].send_attempts == 2
-    assert commands[2860].send_attempts == 2
+    assert commands[2860].send_attempts == 1
+    assert machine._queue_gap_repair["cursor_seq32"] == 2859
 
-    # A duplicate ACK after retransmission must not create another command or callback.
+    # Stop-and-wait repair sends 2860 only after 2859 is confirmed.
     _deliver_queue_ack(machine, 2859, "duplicate")
+    assert _written_command_numbers(machine, commands)[-1] == 2860
+    assert machine._queue_gap_repair["cursor_seq32"] == 2860
     _deliver_queue_ack(machine, 2860, "accepted")
+    assert machine._queue_gap_repair is None
     machine.command_queue.update_command_status(
         current_executing_command=2860,
         last_completed_command=2860,
@@ -483,75 +486,50 @@ def test_queue_gap_recovers_when_expected_command_is_still_sent(qapp, test_profi
     assert machine._tx_paused is False
 
 
-def test_queue_gap_retry_exhaustion_reproduces_incident_when_expected_is_locally_accepted(
-    qapp,
-    test_profile,
-    tmp_path,
-):
-    machine, commands, _completions = _make_incident_gap_window(
-        test_profile,
-        black_box_log_dir=tmp_path,
-    )
+def test_queue_gap_repairs_incident_when_expected_is_locally_accepted(qapp, test_profile):
+    machine, commands, _completions = _make_incident_gap_window(test_profile)
     errors = []
     machine.error_occurred.connect(errors.append)
 
     _deliver_queue_ack(machine, 2857, "accepted")
     _deliver_queue_ack(machine, 2858, "accepted")
     _deliver_queue_ack(machine, 2859, "accepted")
-    for _ in range(3):
-        _deliver_queue_ack(machine, 2860, "gap", expected_seq32=2859)
-
-    # Current behavior: 2859 is excluded from resend because it is locally Accepted,
-    # so only 2860 is retried until the shared send-attempt limit is exhausted.
-    assert _written_command_numbers(machine, commands) == [
-        2857,
-        2858,
-        2859,
-        2860,
-        2860,
-        2860,
-    ]
-    assert commands[2859].send_attempts == 1
-    assert commands[2860].send_attempts == 3
-    assert machine._tx_paused is True
-    assert errors == ["Timed out recovering queue gap for command 2860 after 3 attempts."]
-
-    # A later stray gap ACK must not create more writes or duplicate the fault.
     _deliver_queue_ack(machine, 2860, "gap", expected_seq32=2859)
-    assert machine._write_frame.call_count == 6
-    assert len(errors) == 1
+
+    assert _written_command_numbers(machine, commands)[-1] == 2859
+    assert commands[2859].send_attempts == 2
+    assert commands[2860].send_attempts == 1
+    assert machine._queue_gap_repair["cursor_seq32"] == 2859
+
+    _deliver_queue_ack(machine, 2859, "duplicate")
+    _deliver_queue_ack(machine, 2860, "accepted")
+
+    assert _written_command_numbers(machine, commands)[-2:] == [2859, 2860]
+    assert machine._queue_gap_repair is None
+    assert machine._tx_paused is False
+    assert errors == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Slice 2 must make a retained Accepted expected command eligible for gap repair",
-)
-def test_queue_gap_should_requeue_locally_accepted_expected_command(qapp, test_profile):
+def test_queue_gap_requeues_locally_accepted_expected_command(qapp, test_profile):
     machine, commands, _completions = _make_incident_gap_window(test_profile)
     _deliver_queue_ack(machine, 2859, "accepted")
 
     _deliver_queue_ack(machine, 2860, "gap", expected_seq32=2859)
 
-    assert _written_command_numbers(machine, commands)[-2:] == [2859, 2860]
+    assert _written_command_numbers(machine, commands)[-1] == 2859
+    assert machine._queue_gap_repair["cursor_seq32"] == 2859
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Slice 2 must make a retained Executing expected command eligible for gap repair",
-)
-def test_queue_gap_should_requeue_locally_executing_expected_command(qapp, test_profile):
+def test_queue_gap_requeues_locally_executing_expected_command(qapp, test_profile):
     machine, commands, _completions = _make_incident_gap_window(test_profile)
     commands[2859].mark_as_executing()
 
     _deliver_queue_ack(machine, 2860, "gap", expected_seq32=2859)
 
-    assert _written_command_numbers(machine, commands)[-2:] == [2859, 2860]
+    assert _written_command_numbers(machine, commands)[-1] == 2859
+    assert machine._queue_gap_repair["cursor_seq32"] == 2859
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Slice 2 must fail closed when a gap ACK omits the MCU expected sequence",
-)
 def test_queue_gap_without_expected_sequence_should_not_resend_later_command(qapp, test_profile):
     machine, commands, _completions = _make_incident_gap_window(test_profile)
     errors = []
@@ -564,6 +542,105 @@ def test_queue_gap_without_expected_sequence_should_not_resend_later_command(qap
     assert machine._tx_paused is True
     assert errors
     assert "expected sequence" in errors[-1].lower()
+
+
+def test_queue_gap_status_frontier_advances_repair_when_ack_is_lost(qapp, test_profile):
+    machine, commands, _completions = _make_incident_gap_window(test_profile)
+    _deliver_queue_ack(machine, 2860, "gap", expected_seq32=2859)
+
+    machine.update_command_numbers(
+        current_command=2859,
+        last_completed=2858,
+        last_accepted=2859,
+        last_retired=2858,
+    )
+
+    assert machine._queue_gap_repair["cursor_seq32"] == 2860
+    assert _written_command_numbers(machine, commands)[-2:] == [2859, 2860]
+
+
+def test_queue_gap_ignores_later_ack_until_repair_cursor_advances(qapp, test_profile):
+    machine, commands, _completions = _make_incident_gap_window(test_profile)
+    _deliver_queue_ack(machine, 2860, "gap", expected_seq32=2859)
+    writes_before_stale_ack = machine._write_frame.call_count
+
+    machine._on_queue_ack(2860, {"ack_result": "accepted"})
+
+    assert machine._write_frame.call_count == writes_before_stale_ack
+    assert machine._queue_gap_repair["cursor_seq32"] == 2859
+    assert commands[2860].status == "Added"
+
+
+def test_queue_gap_repair_attempts_are_independent_of_lifetime_send_attempts(qapp, test_profile):
+    machine, commands, _completions = _make_incident_gap_window(test_profile)
+    commands[2859].send_attempts = 10
+    _deliver_queue_ack(machine, 2860, "gap", expected_seq32=2859)
+
+    machine._on_queue_ack_timeout(2859)
+
+    assert machine._queue_gap_repair["attempts_by_seq32"][2859] == 2
+    assert commands[2859].send_attempts == 12
+    assert machine._tx_paused is False
+    assert _written_command_numbers(machine, commands)[-2:] == [2859, 2859]
+
+
+def test_queue_gap_repair_rebases_to_an_earlier_retained_expectation(qapp, test_profile):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+    machine._transport_ready = False
+    machine._write_frame = Mock()
+    commands = {seq32: machine.wait_ms(10) for seq32 in range(1, 5)}
+    machine._transport_ready = True
+    machine._tx_paused = False
+    machine.pump_send_queue()
+
+    _deliver_queue_ack(machine, 4, "gap", expected_seq32=3)
+    _deliver_queue_ack(machine, 3, "gap", expected_seq32=2)
+
+    assert machine._queue_gap_repair["cursor_seq32"] == 2
+    assert machine._queue_gap_repair["repair_seq32s"] == [2, 3, 4]
+    assert _written_command_numbers(machine, commands)[-2:] == [3, 2]
+
+
+def test_queue_gap_repair_excludes_unsent_tail_until_repair_completes(qapp, test_profile):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+    machine._transport_ready = False
+    machine._write_frame = Mock()
+    commands = {seq32: machine.wait_ms(10) for seq32 in range(1, 7)}
+    machine._transport_ready = True
+    machine._tx_paused = False
+    machine.pump_send_queue()
+    assert _written_command_numbers(machine, commands) == [1, 2, 3, 4]
+
+    _deliver_queue_ack(machine, 4, "gap", expected_seq32=3)
+
+    assert machine._queue_gap_repair["repair_seq32s"] == [3, 4]
+    assert _written_command_numbers(machine, commands)[-1] == 3
+    assert commands[5].send_attempts == 0
+    assert commands[6].send_attempts == 0
+
+    _deliver_queue_ack(machine, 3, "accepted")
+    _deliver_queue_ack(machine, 4, "accepted")
+
+    assert machine._queue_gap_repair is None
+    machine.update_command_numbers(
+        current_command=4,
+        last_completed=4,
+        last_accepted=4,
+        last_retired=4,
+    )
+    machine.pump_send_queue()
+    assert commands[5].send_attempts == 1
+    assert commands[6].send_attempts == 1
+
+
+def test_queue_clear_discards_active_gap_repair_state(qapp, test_profile):
+    machine, _commands, _completions = _make_incident_gap_window(test_profile)
+    _deliver_queue_ack(machine, 2860, "gap", expected_seq32=2859)
+    assert machine._queue_gap_repair is not None
+
+    machine.clear_command_queue()
+
+    assert machine._queue_gap_repair is None
 
 
 def test_queue_busy_resends_are_bounded(qapp, test_profile):
@@ -583,6 +660,28 @@ def test_queue_busy_resends_are_bounded(qapp, test_profile):
 
 class _OpenSerial:
     is_open = True
+
+
+def test_queue_gap_repair_ack_timeouts_are_bounded(qapp, test_profile, tmp_path):
+    machine, _commands, _completions = _make_incident_gap_window(
+        test_profile,
+        black_box_log_dir=tmp_path,
+    )
+    lost_reports = []
+    machine.serial_connection_lost.connect(lost_reports.append)
+    machine.ser = _OpenSerial()
+    machine.port = "COM9"
+    _deliver_queue_ack(machine, 2860, "gap", expected_seq32=2859)
+
+    machine._on_queue_ack_timeout(2859)
+    machine._on_queue_ack_timeout(2859)
+    machine._on_queue_ack_timeout(2859)
+
+    assert len(lost_reports) == 1
+    assert lost_reports[0]["reason"] == "mcu_unresponsive"
+    assert lost_reports[0]["trigger_reason"] == "ack_timeout"
+    assert machine._queue_gap_repair is None
+    assert len(machine.command_queue.queue) == 0
 
 
 def test_queue_ack_timeout_retries_before_transport_loss(qapp, test_profile):
