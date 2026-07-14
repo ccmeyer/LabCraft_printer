@@ -61,7 +61,6 @@ class _LogReaderForRelease(_ReaderForRelease):
     def __init__(self, *, stop_ok=True):
         super().__init__(stop_ok=stop_ok)
         self.lineReceived = _SignalTracker()
-        self.statsUpdated = _SignalTracker()
         self.messageReceived = _SignalTracker()
         self.flashStateChanged = _SignalTracker()
 
@@ -113,7 +112,6 @@ def test_stop_log_thread_uses_reader_wait_for_stop_only(qapp, test_profile):
             self.request_stop_calls = 0
             self.wait_for_stop_calls = []
             self.lineReceived = _SignalTracker()
-            self.statsUpdated = _SignalTracker()
             self.messageReceived = _SignalTracker()
             self.flashStateChanged = _SignalTracker()
 
@@ -150,13 +148,11 @@ def test_stop_log_thread_disconnects_signals_before_stop(qapp, test_profile):
     class _Reader:
         def __init__(self):
             self.lineReceived = _SignalTracker()
-            self.statsUpdated = _SignalTracker()
             self.messageReceived = _SignalTracker()
             self.flashStateChanged = _SignalTracker()
 
         def request_stop(self):
             assert self.lineReceived.disconnected == [machine.on_log_line_received]
-            assert self.statsUpdated.disconnected == [machine.on_stats_updated]
             assert self.messageReceived.disconnected == [machine.on_log_message_received]
             assert self.flashStateChanged.disconnected == [machine.on_flash_state_changed]
 
@@ -183,7 +179,6 @@ def test_stop_log_thread_keeps_reader_reference_when_reader_stop_fails(qapp, tes
             self.request_stop_calls = 0
             self.wait_for_stop_calls = []
             self.lineReceived = _SignalTracker()
-            self.statsUpdated = _SignalTracker()
             self.messageReceived = _SignalTracker()
             self.flashStateChanged = _SignalTracker()
 
@@ -239,7 +234,6 @@ def test_begin_log_thread_replaces_stopped_reader_reference(qapp, monkeypatch):
             self.baud = baud
             self.serial_factory = serial_factory
             self.lineReceived = _SignalTracker()
-            self.statsUpdated = _SignalTracker()
             self.messageReceived = _SignalTracker()
             self.flashStateChanged = _SignalTracker()
             self.start_calls = 0
@@ -324,7 +318,6 @@ def test_reset_board_requests_both_reader_stops_before_waiting(qapp, test_profil
     class _LogReader:
         def __init__(self):
             self.lineReceived = _SignalTracker()
-            self.statsUpdated = _SignalTracker()
             self.messageReceived = _SignalTracker()
             self.flashStateChanged = _SignalTracker()
             self.wait_calls = 0

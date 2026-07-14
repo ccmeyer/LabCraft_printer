@@ -1190,7 +1190,6 @@ class _FirmwareTabMachineModel(view_mod.QtCore.QObject):
 
 
 class _FirmwareTabMachine(view_mod.QtCore.QObject):
-    log_stats_updated = view_mod.QtCore.Signal(object)
     log_message_received = view_mod.QtCore.Signal(str)
 
 
@@ -1215,12 +1214,17 @@ def test_speed_tab_constructs_maintenance_layout_without_speed_controls(qapp):
     tab = SpeedProfilesTab(main_window, model, controller, {"darker_gray": "#222222"})
 
     assert tab.findChild(view_mod.QtWidgets.QWidget, "firmwareMaintenanceActions") is not None
-    assert tab.findChild(view_mod.QtWidgets.QWidget, "firmwareMaintenanceMonitor") is not None
+    monitor = tab.findChild(view_mod.QtWidgets.QWidget, "firmwareMaintenanceMonitor")
+    assert monitor is not None
     assert tab.findChild(view_mod.QtWidgets.QGroupBox, "firmwareUpdateGroup") is not None
     assert tab.findChild(view_mod.QtWidgets.QGroupBox, "applicationUpdateGroup") is not None
     assert tab.findChild(view_mod.QtWidgets.QGroupBox, "serviceGroup") is not None
-    assert tab.findChild(view_mod.QtWidgets.QGroupBox, "logMessagesGroup") is not None
-    assert tab.findChild(view_mod.QtWidgets.QGroupBox, "mcuTaskUsageGroup") is not None
+    logs_group = tab.findChild(view_mod.QtWidgets.QGroupBox, "logMessagesGroup")
+    assert logs_group is not None
+    assert tab.findChild(view_mod.QtWidgets.QGroupBox, "mcuTaskUsageGroup") is None
+    assert monitor.layout().count() == 1
+    assert monitor.layout().itemAt(0).widget() is logs_group
+    assert monitor.layout().stretch(0) == 1
     assert tab.app_update_check_button.text() == "Check Updates"
     assert tab.app_update_offline_button.text() == "Install Bundle"
     assert tab.app_rollback_offline_button.text() == "Offline Restore"
@@ -1232,6 +1236,23 @@ def test_speed_tab_constructs_maintenance_layout_without_speed_controls(qapp):
     assert not hasattr(tab, "_accel_boxes")
 
     tab.close()
+
+
+def test_production_host_has_no_task_usage_ui_or_stats_signal_path():
+    view_source = Path("FreeRTOS-interface/View.py").read_text(encoding="utf-8")
+    machine_source = Path("FreeRTOS-interface/Machine_FreeRTOS.py").read_text(encoding="utf-8")
+
+    for token in ("mcuTaskUsageGroup", "tasks_table", "_on_stats_updated", "log_stats_updated"):
+        assert token not in view_source
+    for token in (
+        "statsUpdated",
+        "log_stats_updated",
+        "on_stats_updated",
+        "get_latest_stats",
+        "get_task_percent",
+        "get_idle_percent",
+    ):
+        assert token not in machine_source
 
 
 def test_speed_tab_formats_current_app_version_label(qapp):

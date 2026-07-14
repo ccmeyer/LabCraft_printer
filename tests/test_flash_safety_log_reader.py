@@ -110,6 +110,40 @@ def test_log_reader_emits_flash_state_updates_from_log_lines(qapp):
     ]
 
 
+def test_log_reader_suppresses_legacy_stats_block_and_resumes_messages(qapp):
+    lines = [
+        "before stats",
+        "===LOG===",
+        "IDLE 12345 98%",
+        "Orchestrator 250 2%",
+        "",
+        "after stats",
+    ]
+
+    class _LineSerial:
+        def __init__(self):
+            self._lines = [f"{line}\n".encode("ascii") for line in lines]
+            self.is_open = True
+
+        def read_until(self, expected=b"\n", size=1024):
+            if not self._lines:
+                self.is_open = False
+                return b""
+            return self._lines.pop(0)
+
+    reader = mfr.LogReader(serial_factory=lambda *_args, **_kwargs: _LineSerial())
+    raw_lines = []
+    messages = []
+    reader.lineReceived.connect(raw_lines.append)
+    reader.messageReceived.connect(messages.append)
+
+    reader.run()
+
+    assert raw_lines == lines
+    assert messages == ["before stats", "after stats"]
+    assert [entry["text"] for entry in reader.get_recent_messages()] == messages
+
+
 def test_log_reader_uses_short_serial_timeout(qapp):
     timeouts = []
 

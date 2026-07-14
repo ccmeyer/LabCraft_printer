@@ -494,7 +494,6 @@ class _MachineModel(QtCore.QObject):
 
 
 class _Machine(QtCore.QObject):
-    log_stats_updated = QtCore.Signal(object)
     log_message_received = QtCore.Signal(str)
 
 

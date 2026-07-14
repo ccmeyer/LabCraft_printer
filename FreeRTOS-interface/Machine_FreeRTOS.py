@@ -3557,25 +3557,17 @@ class SerialReader(QThread):
         return self.wait_for_stop(READER_STOP_FALLBACK_WAIT_MS)
 
 class LogReader(QThread):
-    lineReceived   = Signal(str)     # existing
-    statsUpdated   = Signal(object)  # emits a dict with parsed stats (see below)
+    lineReceived = Signal(str)
     messageReceived = Signal(str)
     flashStateChanged = Signal(object)
     
 
-    def __init__(self, baud=115200, parent=None, log_port="/dev/ttyUSB0", history_len=360, serial_factory=serial.Serial):
+    def __init__(self, baud=115200, parent=None, log_port="/dev/ttyUSB0", serial_factory=serial.Serial):
         super().__init__(parent)
         self.ser = serial_factory(log_port, baud, timeout=LOG_READER_SERIAL_TIMEOUT_S)
         self._running = True
         self._stop_requested = False
-        self._in_stats = False
-        self._stats_block = []
-        self.last_stats = None
-        self.stats_history = deque(maxlen=history_len)  # ~18 minutes if MCU prints every 3s
-        # regex: <task><spaces><time><spaces><percent?> (percent may be absent or have a % sign)
-        self._stats_re = re.compile(
-            r'^\s*(?P<task>.+?)\s+(?P<time>\d+)\s+<?(?P<pct>\d+(?:\.\d+)?)?%?\s*$'
-        )
+        self._discarding_legacy_stats = False
 
         self.message_history = deque(maxlen=2000)  # NEW: keep up to 2000 recent messages
         self._level_re = re.compile(r'^\s*\[(DEBUG|INFO|WARN|WARNING|ERROR|CRITICAL)\]\s*(.*)$', re.I)
@@ -3591,24 +3583,9 @@ class LogReader(QThread):
     def clear_messages(self):
         self.message_history.clear()
 
-    def get_latest_stats(self):
-        """Return the most recently parsed stats dict or None."""
-        return self.last_stats
-
-    def get_task_percent(self, task_name: str):
-        """Convenience helper to fetch a single task's %."""
-        if not self.last_stats:
-            return None
-        entry = self.last_stats["by_task"].get(task_name)
-        return None if not entry else entry["percent"]
-
-    def get_idle_percent(self):
-        """Convenience helper for IDLE %."""
-        return None if not self.last_stats else self.last_stats["idle_percent"]
-
     # ---------- thread loop ----------
     def run(self):
-        """Continuously read lines and emit them + parse stats blocks."""
+        """Continuously read lines and suppress legacy runtime-stat blocks."""
         while self._running and not self.isInterruptionRequested():
             try:
                 if not self.ser or not self.ser.is_open:
@@ -3622,28 +3599,18 @@ class LogReader(QThread):
                 # Always emit raw line for anything else listening
                 self.lineReceived.emit(text)
 
-                # Detect start of a stats block
+                # Older firmware emitted task statistics after this marker. Keep
+                # consuming those blocks so they do not flood the visible log.
                 if text.strip() == "===LOG===":
-                    self._in_stats = True
-                    self._stats_block = []
+                    self._discarding_legacy_stats = True
                     continue
 
-                # Accumulate stats lines until a blank line or next marker
-                if self._in_stats:
-                    if text.strip() == "" or text.strip() == "===LOG===":
-                        # end of block (or a nested marker)
-                        self._finish_stats_block()
-                        # if it was a nested marker, keep collecting a new one
-                        if text.strip() == "===LOG===":
-                            self._in_stats = True
-                            self._stats_block = []
-                        else:
-                            self._in_stats = False
-                    else:
-                        self._stats_block.append(text)
+                if self._discarding_legacy_stats:
+                    if text.strip() == "":
+                        self._discarding_legacy_stats = False
+                    continue
 
-                # Outside of stats: treat as a normal log message
-                elif text.strip():
+                if text.strip():
                     self._record_message(text)
 
             except (serial.SerialException, OSError, TypeError, ValueError):
@@ -3702,54 +3669,6 @@ class LogReader(QThread):
     def stop(self):
         self.request_stop()
         return self.wait_for_stop(READER_STOP_FALLBACK_WAIT_MS)
-
-    # ---------- parsing ----------
-    def _finish_stats_block(self):
-        """Parse the accumulated lines in self._stats_block and emit statsUpdated."""
-        lines = self._stats_block
-        rows = []
-        times = []
-
-        # Common headers/separators to ignore (robust to different FreeRTOS prints)
-        def _is_header_or_sep(s: str) -> bool:
-            s_stripped = s.strip().lower()
-            if not s_stripped:
-                return True
-            if set(s_stripped) <= set("-=|+ "):
-                return True
-            # Typical FreeRTOS header contains 'task' and 'time'
-            if ("task" in s_stripped and "time" in s_stripped) or "%" in s_stripped and "task" in s_stripped:
-                return True
-            return False
-
-        for ln in lines:
-            if _is_header_or_sep(ln):
-                continue
-            m = self._stats_re.match(ln)
-            if not m:
-                # Unrecognized line inside stats block; ignore gracefully
-                continue
-            task = m.group("task").strip()
-            t = int(m.group("time"))
-            pct_str = m.group("pct")
-            pct = float(pct_str) if pct_str is not None else None
-            rows.append({"task": task, "time": t, "percent": pct})
-            times.append(t)
-
-        by_task = {r["task"]: r for r in rows}
-        idle_percent = by_task.get("IDLE", {}).get("percent")
-
-        stats = {
-            "raw": "\n".join(lines),
-            "rows": rows,
-            "by_task": by_task,
-            "idle_percent": idle_percent,
-            "ts": time.time(),
-        }
-
-        self.last_stats = stats
-        self.stats_history.append(stats)
-        self.statsUpdated.emit(stats)
 
     def _record_message(self, text: str):
         level = None
@@ -4078,7 +3997,6 @@ class Machine(QObject):
     transport_faulted = Signal(dict)
     all_calibration_droplets_printed = Signal()  # Signal to emit when all calibration droplets are printed
     require_gripper_confirmation = Signal(str)   # "OPEN" or "CLOSE"
-    log_stats_updated = Signal(object)  # Signal to emit when log stats are updated
     log_message_received = Signal(str)  # Signal to emit when a log message is received
     flash_state_updated = Signal(object)
 
@@ -5293,16 +5211,12 @@ class Machine(QObject):
         try:
             self.log_reader = LogReader(self.baud, serial_factory=self._serial_factory)
             self.log_reader.lineReceived.connect(self.on_log_line_received)
-            self.log_reader.statsUpdated.connect(self.on_stats_updated)
             self.log_reader.messageReceived.connect(self.on_log_message_received)
             self.log_reader.flashStateChanged.connect(self.on_flash_state_changed)
             self.log_reader.start()
         except Exception as e:
             print(f"Could not start log thread: {e}")
             self.log_reader = None
-
-    def on_stats_updated(self, stats: dict):
-        self.log_stats_updated.emit(stats)
 
     def on_log_message_received(self, message: str):
         self.log_message_received.emit(message)
@@ -5323,7 +5237,6 @@ class Machine(QObject):
     def _disconnect_log_reader_signals(self, reader):
         for signal_obj, slot in (
             (getattr(reader, "lineReceived", None), self.on_log_line_received),
-            (getattr(reader, "statsUpdated", None), self.on_stats_updated),
             (getattr(reader, "messageReceived", None), self.on_log_message_received),
             (getattr(reader, "flashStateChanged", None), self.on_flash_state_changed),
         ):
