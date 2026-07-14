@@ -10,6 +10,12 @@ def _firmware_cmd_map():
     return {name: int(hexv, 16) for name, hexv in pairs}
 
 
+def _last_numeric_define(text, name):
+    matches = re.findall(rf"^\s*#define\s+{re.escape(name)}\s+(\d+)\s*$", text, re.MULTILINE)
+    assert matches, f"Missing firmware define: {name}"
+    return int(matches[-1])
+
+
 def test_shared_command_codes_match_firmware_header():
     fw = _firmware_cmd_map()
     shared = {
@@ -86,6 +92,36 @@ def test_maximum_v2_reset_report_fits_one_byte_payload_length():
     maximum_report_bytes = base_report_bytes + regulator_tlv_bytes + fault_context_tlv_bytes
     assert maximum_report_bytes == 252
     assert maximum_report_bytes <= 255
+
+
+def test_periodic_runtime_stats_are_disabled_in_production_firmware():
+    config = Path("firmware/Core/Inc/FreeRTOSConfig.h").read_text(encoding="utf-8")
+    logger = (
+        Path("firmware/Core/Inc/Logger.h").read_text(encoding="utf-8")
+        + Path("firmware/Core/Src/Logger.cpp").read_text(encoding="utf-8")
+    )
+
+    assert _last_numeric_define(config, "configGENERATE_RUN_TIME_STATS") == 0
+    assert _last_numeric_define(config, "configUSE_STATS_FORMATTING_FUNCTIONS") == 0
+    assert _last_numeric_define(config, "configUSE_TRACE_FACILITY") == 1
+    assert _last_numeric_define(config, "INCLUDE_uxTaskGetStackHighWaterMark") == 0
+    for token in ("vTaskGetRunTimeStats", "LogStats", "startRunTimeStatsTask"):
+        assert token not in logger
+
+
+def test_explicit_rtos_memory_selftest_has_bounded_task_capacity():
+    diagnostics = Path("firmware/Core/Src/Diagnostics.cpp").read_text(encoding="utf-8")
+    assert "kSelfTestTaskSnapshotCap = 32u" in diagnostics
+    assert diagnostics.count("uxTaskGetSystemState(") == 1
+    assert 'strcmp(taskName, "LogStats")' not in diagnostics
+
+
+def test_legacy_logstats_crash_task_id_remains_available():
+    crash_log = Path("firmware/Core/Inc/CrashLog.h").read_text(encoding="utf-8")
+    crash_codec = Path("firmware/Core/Src/CrashLogCodec.c").read_text(encoding="utf-8")
+    assert "CRASH_TASK_LOG_STATS" in crash_log
+    assert 'case CRASH_TASK_LOG_STATS: return "logstats";' in crash_codec
+    assert 'strcmp(taskName, "LogStats") == 0' in crash_codec
 
 
 def test_gripper_firmware_does_not_software_trigger_flash_exti():

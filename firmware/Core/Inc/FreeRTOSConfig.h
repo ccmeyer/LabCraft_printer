@@ -57,8 +57,6 @@
   #include <stdint.h>
   extern uint32_t SystemCoreClock;
 /* USER CODE BEGIN 0 */
-  extern void configureTimerForRunTimeStats(void);
-  extern unsigned long getRunTimeCounterValue(void);
 /* USER CODE END 0 */
 #endif
 #define configENABLE_FPU                         0
@@ -161,13 +159,14 @@ standard names. */
 #define xPortSysTickHandler SysTick_Handler
 
 /* USER CODE BEGIN 2 */
-/* Definitions needed when configGENERATE_RUN_TIME_STATS is on */
-#define portCONFIGURE_TIMER_FOR_RUN_TIME_STATS configureTimerForRunTimeStats
-#define portGET_RUN_TIME_COUNTER_VALUE getRunTimeCounterValue
 /* USER CODE END 2 */
 
 /* USER CODE BEGIN Defines */
 /* Section where parameter definitions can be added (for instance, to override default ones in FreeRTOS.h) */
+#undef configGENERATE_RUN_TIME_STATS
+#define configGENERATE_RUN_TIME_STATS            0
+#undef configUSE_STATS_FORMATTING_FUNCTIONS
+#define configUSE_STATS_FORMATTING_FUNCTIONS     0
 #define INCLUDE_uxTaskGetStackHighWaterMark     0
 
 #if (LC_STACK_OVERFLOW_CHECK_ENABLE != 0)

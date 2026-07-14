@@ -1353,20 +1353,6 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-/*
- * Called by FreeRTOS at startup to configure the run-time stats timer.
- */
-void configureTimerForRunTimeStats(void) {
-    // TIM5 was MX_..._Init()ed in main.c by CubeMX already
-    HAL_TIM_Base_Start(&htim5);
-}
-/*
- * Called by FreeRTOS whenever it needs the current clock count.
- */
-unsigned long getRunTimeCounterValue(void) {
-    return __HAL_TIM_GET_COUNTER(&htim5);
-}
-
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
   if (GPIO_Pin == GPIO_PIN_8) {

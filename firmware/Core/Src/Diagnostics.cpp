@@ -6410,7 +6410,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 							  }
 
 						  {
-						    static constexpr size_t kSelfTestTaskSnapshotCap = 16u;
+						    static constexpr size_t kSelfTestTaskSnapshotCap = 32u;
 						    static constexpr uint32_t kSelfTestHeapNowMinBytes = 4096u;
 						    static constexpr uint32_t kSelfTestHeapMinMinBytes = 3072u;
 						    static constexpr uint16_t kSelfTestStackMinWords = 32u;
@@ -6422,7 +6422,6 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 						    bool hasStatus = false;
 						    bool hasPrinter = false;
 						    bool hasPressure = false;
-						    bool hasLogStats = false;
 						    bool hasFlashMon = false;
 						    uint32_t pregCount = 0u;
 						    uint16_t stackMinWords = 0xFFFFu;
@@ -6448,9 +6447,6 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 						      } else if (strcmp(taskName, "Pressure") == 0) {
 						        hasPressure = true;
 						        trackForMin = true;
-						      } else if (strcmp(taskName, "LogStats") == 0) {
-						        hasLogStats = true;
-						        trackForMin = true;
 						      } else if (strcmp(taskName, "FlashMon") == 0) {
 						        hasFlashMon = true;
 						        flashMonHwmWords = taskStats[i].usStackHighWaterMark;
@@ -6470,8 +6466,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 						    const uint32_t coreMissing = (hasOrch ? 0u : 1u) +
 						                                 (hasStatus ? 0u : 1u) +
 						                                 (hasPrinter ? 0u : 1u) +
-						                                 (hasPressure ? 0u : 1u) +
-						                                 (hasLogStats ? 0u : 1u);
+						                                 (hasPressure ? 0u : 1u);
 						    const bool pass = (heapNow >= kSelfTestHeapNowMinBytes) &&
 						                      (heapMin >= kSelfTestHeapMinMinBytes) &&
 						                      (stackMinWords >= kSelfTestStackMinWords) &&
@@ -6482,12 +6477,14 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 						    char metrics[256];
 						    snprintf(metrics,
 						             sizeof(metrics),
-						             "heap_now=%lu;heap_min=%lu;stk_min=%u;stk_task=%s;task_n=%u;core_miss=%lu;preg_n=%lu;trunc=%u;stk_ovf=%lu;prnt_hwm_words=%u;flashmon_hwm_words=%u;flashmon_present=%u",
+						             "heap_now=%lu;heap_min=%lu;stk_min=%u;stk_task=%s;task_n=%u;task_total=%u;task_cap=%u;core_miss=%lu;preg_n=%lu;trunc=%u;stk_ovf=%lu;prnt_hwm_words=%u;flashmon_hwm_words=%u;flashmon_present=%u",
 						             static_cast<unsigned long>(heapNow),
 						             static_cast<unsigned long>(heapMin),
 						             static_cast<unsigned>(stackMinWords),
 						             stackMinTask,
 						             static_cast<unsigned>(captured),
+						             static_cast<unsigned>(taskCount),
+						             static_cast<unsigned>(kSelfTestTaskSnapshotCap),
 						             static_cast<unsigned long>(coreMissing),
 						             static_cast<unsigned long>(pregCount),
 						             trunc ? 1u : 0u,

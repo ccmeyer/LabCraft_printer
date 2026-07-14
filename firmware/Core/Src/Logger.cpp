@@ -6,13 +6,8 @@
  */
 
 #include "Logger.h"
-#include "timers.h"
-#include "stm32f4xx_hal_tim.h"
 
 #include <cstdio>
-#include <cstring>
-#include <vector>
-#include "task.h"
 
 // singleton init
 Logger* Logger::_instance = nullptr;
@@ -133,7 +128,6 @@ void Logger::_dmaComplete() {
 extern "C" void MX_LOGGER_Init(UART_HandleTypeDef* huart1, DMA_HandleTypeDef* hdma_usart1_tx) {
   static Logger logger;
   logger.begin(huart1, hdma_usart1_tx);
-  logger.startRunTimeStatsTask(3000 /* ms */);
 }
 
 extern "C" void MX_LOGGER_Log_entry(const char* fmt) {
@@ -142,64 +136,3 @@ extern "C" void MX_LOGGER_Log_entry(const char* fmt) {
   }
   Logger::instance()->log("%s", fmt);
 }
-
-static void EXTI8_DiagDump(void)
-{
-    uint32_t moder = (GPIOE->MODER  >> (8*2)) & 0x3u; // 0=input, 1=out, 2=AF, 3=analog
-    uint32_t pupd  = (GPIOE->PUPDR  >> (8*2)) & 0x3u; // 0=no,1=PU,2=PD
-    uint32_t idr   = (GPIOE->IDR    >> 8) & 1u;
-
-    // EXTI8 mapping: EXTICR3 bits [3:0]
-    uint32_t exticr3 = SYSCFG->EXTICR[2];
-    uint32_t exti8_port = (exticr3 >> 0) & 0xFu; // 1=PB, 4=PE, 6=PG, etc. (0=PA)
-
-    uint32_t imr  = (EXTI->IMR  >> 8) & 1u;
-    uint32_t rtsr = (EXTI->RTSR >> 8) & 1u;
-    uint32_t ftsr = (EXTI->FTSR >> 8) & 1u;
-    uint32_t pr   = (EXTI->PR   >> 8) & 1u;
-
-    Logger::instance()->log("PE8 MODER=%lu PUPD=%lu IDR=%lu  EXTI8 map=%lu(IMR=%lu,RTSR=%lu,FTSR=%lu,PR=%lu)\r\n",
-                moder, pupd, idr, exti8_port, imr, rtsr, ftsr, pr);
-}
-
-
-void Logger::startRunTimeStatsTask(uint32_t periodMs) {
-    // Keep this diagnostic task lightweight; move large scratch buffers out of task stack.
-    xTaskCreate(
-      statsTaskEntry,
-      "LogStats",
-	  512,
-      reinterpret_cast<void*>(periodMs),
-      tskIDLE_PRIORITY+1,
-      &_statsTaskHandle
-    );
-}
-
-void Logger::statsTaskEntry(void* arg) {
-    uint32_t periodMs = reinterpret_cast<uint32_t>(arg);
-    Logger::instance()->statsTask(periodMs);
-    vTaskDelete(nullptr);
-}
-static const size_t STATS_BUF_SZ = 512;
-
-void Logger::statsTask(uint32_t periodMs) {
-    // Use static storage so runtime-stats formatting does not consume task stack headroom.
-    static char buf[STATS_BUF_SZ];
-    TickType_t ticks = pdMS_TO_TICKS(periodMs);
-    EXTI8_DiagDump();
-
-    for (;;) {
-		HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
-
-        vTaskDelay(ticks);
-
-        // fill buf with a textual table of "<task>    <abs time>   <%>"
-        vTaskGetRunTimeStats(buf);
-        log("===LOG===\n%s\n", buf);
-    }
-}
-
-
-
-
-

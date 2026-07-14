@@ -9,10 +9,9 @@
 #define INC_LOGGER_H_
 
 #include "stm32f4xx_hal.h"
+#include <cstddef>
 #include <cstdarg>
 #include <cstdint>
-#include "FreeRTOS.h"
-#include "task.h"
 
 class Logger {
 public:
@@ -36,9 +35,6 @@ public:
   void _flush();
   void _dmaComplete();
 
-  /// After begin(), call this once to start stats reporting every `periodMs`:
-  void startRunTimeStatsTask(uint32_t periodMs = 1000);
-
 private:
   static Logger* _instance;
 
@@ -46,16 +42,6 @@ private:
   uint8_t   _buf[BUF_SIZE];
   volatile size_t _head = 0, _tail = 0;
   size_t _inflightLen = 0;
-
-  // Task handle so we could suspend/kill it if we ever wanted
-  TaskHandle_t _statsTaskHandle = nullptr;
-
-  // FreeRTOS task entry
-  static void statsTaskEntry(void* arg);
-  void statsTask(uint32_t periodMs);
-
-  // (you need this for vTaskGetRunTimeStats)
-  static constexpr size_t STATS_BUF_SZ = 512;
 
   // HAL will call this when DMA finishes a transfer:
 //  void HAL_DMA_TxCpltCallback(DMA_HandleTypeDef *hdma);

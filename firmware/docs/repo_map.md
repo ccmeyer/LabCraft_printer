@@ -59,7 +59,7 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
 
 - `firmware/Core/Src/freertos.c`
   - Static allocation hooks: `vApplicationGetIdleTaskMemory`, `vApplicationGetTimerTaskMemory`
-  - Runtime stats weak hooks: `configureTimerForRunTimeStats`, `getRunTimeCounterValue` (overridden in `main.c` user code)
+  - Periodic runtime statistics and their TIM5 counter hooks are disabled. `configUSE_TRACE_FACILITY` remains enabled only for explicitly invoked diagnostics such as the SAFE RTOS memory-headroom self-test.
 
 ### ISR/callback entry points
 
@@ -166,7 +166,8 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
 
 - Logging:
   - `firmware/Core/Inc/Logger.h`, `firmware/Core/Src/Logger.cpp`
-  - Functions: `Logger::begin`, `Logger::log`, `Logger::statsTask`
+  - Functions: `Logger::begin`, `Logger::log`
+  - No periodic `LogStats` task is created. The former `vTaskGetRunTimeStats` path was removed because its unbounded formatter overflowed its 512-byte buffer as the task population grew, corrupting adjacent application state and adding periodic scheduler-suspended stack scans.
 - Heartbeat:
   - `firmware/Core/Src/Heartbeat.c` (`for(;;)` blink/task loop)
 - LED indicators:
@@ -181,7 +182,7 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
 - Main integration through callbacks in `main.c` and orchestrator flash task functions.
 - `main.c` now re-applies PE8 as `GPIO_MODE_IT_RISING` + `GPIO_PULLDOWN` in the post-GPIO-init user block and logs `PE8_BIAS ...` after logger startup.
 - PE9 is kept in a safe idle GPIO-low state unless the flash session is explicitly armed; logs emit `PE9_SAFE_IDLE` and `PE9_ARMED_OUTPUT`, while the hot flash-trigger path intentionally avoids per-trigger logging to protect small task stacks.
-- The self-test RTOS task snapshot now reports `prnt_hwm_words`, `flashmon_hwm_words`, and `flashmon_present` so flash-trigger stack headroom can be verified after firmware changes.
+- The explicitly invoked self-test RTOS task snapshot uses a bounded 32-entry array and reports `task_total`, `task_cap`, `prnt_hwm_words`, `flashmon_hwm_words`, and `flashmon_present`. Its stack scan is not run periodically.
 - Hardware requirement: the PE9 flash-driver trigger net must have an external `10 kOhm` pull-down at the flash-driver input side so the output path never floats when the MCU is not actively driving a flash pulse.
 
 ### Non-volatile configuration
