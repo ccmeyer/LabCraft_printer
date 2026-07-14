@@ -13,6 +13,7 @@
 #include "FlashSafety.h"
 #include "FlashCyclePolicy.h"
 #include "PrinterCompletionBits.h"
+#include "RegulatorPausePolicy.h"
 
 #include <cstdint>
 #include <cstring>
@@ -272,6 +273,7 @@ public:
 
   volatile bool _paused = false;
   volatile bool _clearing = false;
+  RegulatorPausePolicy::Snapshot _regulatorPauseSnapshot{};
 
   struct AckMessage {
       uint8_t ackCmd = 0;
@@ -290,6 +292,9 @@ public:
   void pauseCurrent();
   void resumeCurrent();
   void cancelCurrent();
+  void pausePressureRegulators();
+  void resumePressureRegulators();
+  void discardPressureRegulatorResume();
 
 //  void performShutdown(uint8_t byeSeq);
   void performShutdown(uint8_t byeSeq8, uint32_t byeSeq32, bool have32);

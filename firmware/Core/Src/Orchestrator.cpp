@@ -251,6 +251,7 @@ BaseType_t Orchestrator::enqueueFromISR(const Command& cmd, BaseType_t* pxHigher
 			case CMD_HELLO: {
 			  CrashLog_SetBootStage(CRASH_BOOT_STAGE_HELLO_RX);
 			  // Reset any stale state and request HELLO_ACK
+			  discardPressureRegulatorResume();
 			  _paused = false; _pauseRequested = false;
 		  _seqEpoch=0; _lastSeq8=0; _currentCmdNum=0; _lastExecutedCmdNum=0;
 		  _resumeRequested = false; _clearRequested = false;
@@ -369,8 +370,7 @@ void Orchestrator::pauseCurrent() {
   Logger::instance()->log("pauseCurrent\r\n");
   Gantry::instance()->pauseXYZMotors();
   Printer::instance()->pauseDispense();
-//  PressureRegulator::regP().pause();
-//  PressureRegulator::regR().pause();
+  pausePressureRegulators();
   xEventGroupClearBits(_doneEvents,
       BIT_LED_DONE|BIT_STEPPER1_DONE|BIT_STEPPER2_DONE|
       BIT_STEPPER3_DONE|BIT_PRINTING_DONE|BIT_FLASH_PRINT_DONE|BIT_GRIPPER_DONE);
@@ -380,13 +380,54 @@ void Orchestrator::resumeCurrent() {
   Logger::instance()->log("resumeCurrent\r\n");
   Gantry::instance()->resumeXYZMotors();
   Printer::instance()->resumeDispense();
-//  PressureRegulator::regP().start();
-//  PressureRegulator::regR().start();
+  resumePressureRegulators();
 }
 void Orchestrator::cancelCurrent() {
 //  Logger::instance()->log("cancelCurrent\r\n");
   Gantry::instance()->cancelXYZMotors();
   Printer::instance()->cancelDispense();
+}
+
+void Orchestrator::pausePressureRegulators() {
+  PressureRegulator& printRegulator = PressureRegulator::regP();
+  const bool printActive = printRegulator.isActive();
+  bool refuelActive = false;
+#if (LC_PRESSURE_PORTS > 1)
+  PressureRegulator& refuelRegulator = PressureRegulator::regR();
+  refuelActive = refuelRegulator.isActive();
+#endif
+
+  RegulatorPausePolicy::captureOnce(_regulatorPauseSnapshot, printActive, refuelActive);
+
+  if (printActive) {
+    printRegulator.pause();
+  }
+#if (LC_PRESSURE_PORTS > 1)
+  if (refuelActive) {
+    refuelRegulator.pause();
+  }
+#endif
+}
+
+void Orchestrator::resumePressureRegulators() {
+  const RegulatorPausePolicy::Snapshot snapshot =
+      RegulatorPausePolicy::consume(_regulatorPauseSnapshot);
+  if (!snapshot.valid) {
+    return;
+  }
+
+  if (snapshot.printWasActive) {
+    PressureRegulator::regP().start();
+  }
+#if (LC_PRESSURE_PORTS > 1)
+  if (snapshot.refuelWasActive) {
+    PressureRegulator::regR().start();
+  }
+#endif
+}
+
+void Orchestrator::discardPressureRegulatorResume() {
+  RegulatorPausePolicy::discard(_regulatorPauseSnapshot);
 }
 
 void Orchestrator::_taskEntry(void* pv) {
@@ -556,6 +597,7 @@ void Orchestrator::_run() {
 
 	  if (_resumeRequested) {
 		if (_pauseWatermarkReached) {
+			resumePressureRegulators();
 			_pauseWatermarkReached = false;
 			_pauseAfterSeq32 = 0u;
 			_paused = false;
@@ -598,6 +640,7 @@ void Orchestrator::_run() {
         Comm::instance()->setStatusPaused(true);
 
         cancelCurrent();
+        discardPressureRegulatorResume();
         xQueueReset(_cmdQueue);
         Comm::instance()->resetReceiveState();
 
@@ -1421,6 +1464,7 @@ void Orchestrator::performShutdown(uint8_t byeSeq8, uint32_t byeSeq32, bool have
   PressureRegulator::regR().pause();
   PressureRegulator::regR().openValve();
 #endif
+  discardPressureRegulatorResume();
 
   // 4) Gripper off
   MX_GRIPPER_ForceOff();
