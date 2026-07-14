@@ -117,6 +117,22 @@ def _fault_context_payload(version: int = 1) -> bytes:
     return struct.pack("<10BH25I", *header, *registers)
 
 
+def _fault_context_v2_payload(version: int = 2) -> bytes:
+    phases = (3, 4, 0, 7, 8)
+    checkpoints = (4, 5, 0, 6, 8)
+    registers = (
+        0xFFFFFFED, 0x20002200, 0x20010000, 0x20002200, 0x20002000, 0x20002400,
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 0x08005679, 0x08001235,
+        0x21000000, 0x00008200, 0x40000000, 0x20000020, 0x202020F8,
+        0xC0000001, 0x20002100,
+    )
+    return struct.pack(
+        "<4BH14B28I",
+        version, 1, 8, 0x22, 0x0FD7,
+        *phases, *checkpoints, 2, 0, 1, 0, *registers,
+    )
+
+
 def _selftest_result_metrics(mod, test_id: int, name: str, passed: bool, metrics: str) -> bytes:
     payload = bytearray([mod.CMD_SELFTEST_RESULT, 2])
     payload += bytes([mod.TAG_TEST_ID, 2]) + test_id.to_bytes(2, "little")
@@ -1505,7 +1521,7 @@ def test_crash_watchdog_selftest_results_are_recorded_with_metrics(monkeypatch, 
     }
 
 
-def test_selftest_reset_decoder_accepts_v1_and_ignores_bad_fault_context():
+def test_selftest_reset_decoder_accepts_v1_v2_and_ignores_bad_fault_context():
     mod = _load_run_selftest()
 
     context = mod.decode_fault_context(_fault_context_payload())
@@ -1515,8 +1531,16 @@ def test_selftest_reset_decoder_accepts_v1_and_ignores_bad_fault_context():
     assert context["pc"] == 0x08001235
     assert context["cfsr"] == 0x00008200
     assert context["home_phases"]["y"] == {"value": 4, "name": "fine_seek"}
+    context_v2 = mod.decode_fault_context(_fault_context_v2_payload())
+    assert context_v2["version"] == 2
+    assert context_v2["task_name"] == "home_y"
+    assert context_v2["r4"] == 5
+    assert context_v2["r11"] == 12
+    assert context_v2["fpccr"] == 0xC0000001
+    assert context_v2["home_checkpoints"]["x"] == {"value": 4, "name": "waiting_for_move"}
     assert mod.decode_fault_context(b"\x01") is None
-    assert mod.decode_fault_context(_fault_context_payload(version=2)) is None
+    assert mod.decode_fault_context(_fault_context_payload(version=3)) is None
+    assert mod.decode_fault_context(_fault_context_v2_payload(version=3)) is None
 
 
 def test_reset_report_during_selftest_is_classified(monkeypatch, tmp_path, capsys):

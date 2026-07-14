@@ -322,11 +322,15 @@ HomeInterruptionPolicy::Outcome Stepper::home(
     case R_AXIS: crashAxis = CRASH_HOME_AXIS_R; break;
     default: break;
   }
+  auto setHomeCheckpoint = [&](CrashHomeCheckpoint checkpoint) {
+    CrashLog_SetHomeCheckpoint(crashAxis, checkpoint);
+  };
   auto finishOutcome = [&](Outcome outcome) {
     CrashHomePhase phase = CRASH_HOME_PHASE_FAILED;
     if (outcome == Outcome::Succeeded) phase = CRASH_HOME_PHASE_SUCCEEDED;
     else if (outcome == Outcome::Canceled) phase = CRASH_HOME_PHASE_CANCELED;
     CrashLog_SetHomePhase(crashAxis, phase);
+    setHomeCheckpoint(CRASH_HOME_CHECKPOINT_FINISHING);
     return outcome;
   };
   CrashLog_SetHomePhase(crashAxis, CRASH_HOME_PHASE_INITIAL_CHECK);
@@ -336,6 +340,7 @@ HomeInterruptionPolicy::Outcome Stepper::home(
       return false;
     }
     stop();
+    setHomeCheckpoint(CRASH_HOME_CHECKPOINT_BEFORE_EVENT_CLEAR);
     xEventGroupClearBits(Orchestrator::getDoneEvents(), _doneBit);
     Logger::instance()->log("[Home %d] canceled\r\n", (int)_axis);
     return true;
@@ -345,8 +350,10 @@ HomeInterruptionPolicy::Outcome Stepper::home(
     return finishOutcome(Outcome::Canceled);
   }
 
+  setHomeCheckpoint(CRASH_HOME_CHECKPOINT_BEFORE_LIMIT_SAMPLE);
   const bool initialRawLimit = _isLimitAsserted();
   const LimitStableSample initialLimit = _sampleLimitStable(cancelToken);
+	setHomeCheckpoint(CRASH_HOME_CHECKPOINT_AFTER_LIMIT_SAMPLE);
 	if (cancellationRequested()) {
 	  return finishOutcome(Outcome::Canceled);
 	}
@@ -391,26 +398,34 @@ HomeInterruptionPolicy::Outcome Stepper::home(
     if (canceledWithRestore()) {
       return result;
     }
+    setHomeCheckpoint(CRASH_HOME_CHECKPOINT_BEFORE_EVENT_CLEAR);
     xEventGroupClearBits(Orchestrator::getDoneEvents(), _doneBit);
+    setHomeCheckpoint(CRASH_HOME_CHECKPOINT_BEFORE_MOVE);
     move(direction, steps, freqHz, 0u);
     if (steps == 0u) {
       result.completed = true;
+      setHomeCheckpoint(CRASH_HOME_CHECKPOINT_BEFORE_LIMIT_SAMPLE);
       result.limitAsserted = _isLimitAsserted();
+      setHomeCheckpoint(CRASH_HOME_CHECKPOINT_AFTER_LIMIT_SAMPLE);
       return result;
     }
     const uint32_t timeoutMs = Stepper::recommendedWaitTimeoutMs(steps, freqHz);
     const bool useHomeLevelPoll = _softStopOnLimit &&
         StepperLimitPolicy::shouldPollHomeLimitLevel(direction, _homeTowardLimitDir);
+    setHomeCheckpoint(CRASH_HOME_CHECKPOINT_WAITING_FOR_MOVE);
     const bool moveCompleted = useHomeLevelPoll
         ? _waitUntilDoneForHomeMove(direction, timeoutMs, cancelToken)
         : waitUntilDone(timeoutMs, cancelToken);
+    setHomeCheckpoint(CRASH_HOME_CHECKPOINT_AFTER_MOVE);
     if (canceledWithRestore()) {
       return result;
     }
     if (moveCompleted) {
       result.completed = true;
       result.limitSeen = _limitSeenThisMove;
+      setHomeCheckpoint(CRASH_HOME_CHECKPOINT_BEFORE_LIMIT_SAMPLE);
       result.limitAsserted = _isLimitAsserted();
+      setHomeCheckpoint(CRASH_HOME_CHECKPOINT_AFTER_LIMIT_SAMPLE);
       result.limitDroppedAfterLatch = _limitDroppedAfterLatch;
       return result;
     }
@@ -724,10 +739,21 @@ bool Stepper::_backOffLimitUntilReleased(uint32_t chunkSteps,
                                          const char* phaseLabel,
                                          const HomeInterruptionPolicy::CancellationToken* cancelToken)
 {
+  CrashHomeAxis crashAxis = CRASH_HOME_AXIS_X;
+  switch (_axis) {
+    case X_AXIS: crashAxis = CRASH_HOME_AXIS_X; break;
+    case Y_AXIS: crashAxis = CRASH_HOME_AXIS_Y; break;
+    case Z_AXIS: crashAxis = CRASH_HOME_AXIS_Z; break;
+    case P_AXIS: crashAxis = CRASH_HOME_AXIS_P; break;
+    case R_AXIS: crashAxis = CRASH_HOME_AXIS_R; break;
+    default: break;
+  }
   const uint32_t chunk = StepperLimitPolicy::normalizeBackoffSteps(chunkSteps);
   const uint32_t guard = (releaseGuardSteps == 0u) ? chunk : releaseGuardSteps;
   uint32_t moved = 0u;
+  CrashLog_SetHomeCheckpoint(crashAxis, CRASH_HOME_CHECKPOINT_BEFORE_LIMIT_SAMPLE);
   bool shouldMove = alwaysBackOffOnce || _sampleLimitStable(cancelToken).asserted;
+  CrashLog_SetHomeCheckpoint(crashAxis, CRASH_HOME_CHECKPOINT_AFTER_LIMIT_SAMPLE);
 
   while (shouldMove && moved < guard) {
     if (HomeInterruptionPolicy::cancellationRequested(cancelToken)) {
@@ -743,9 +769,12 @@ bool Stepper::_backOffLimitUntilReleased(uint32_t chunkSteps,
       break;
     }
 
+    CrashLog_SetHomeCheckpoint(crashAxis, CRASH_HOME_CHECKPOINT_BEFORE_EVENT_CLEAR);
     xEventGroupClearBits(Orchestrator::getDoneEvents(), _doneBit);
+    CrashLog_SetHomeCheckpoint(crashAxis, CRASH_HOME_CHECKPOINT_BEFORE_MOVE);
     move(!_homeTowardLimitDir, stepThisMove, freqHz, 0u);
     const uint32_t timeoutMs = Stepper::recommendedWaitTimeoutMs(stepThisMove, freqHz);
+    CrashLog_SetHomeCheckpoint(crashAxis, CRASH_HOME_CHECKPOINT_WAITING_FOR_MOVE);
     if (!waitUntilDone(timeoutMs, cancelToken)) {
       Logger::instance()->log("[Home %d] release move timeout phase=%s steps=%lu hz=%lu\r\n",
                               (int)_axis,
@@ -754,9 +783,12 @@ bool Stepper::_backOffLimitUntilReleased(uint32_t chunkSteps,
                               (unsigned long)freqHz);
       return false;
     }
+    CrashLog_SetHomeCheckpoint(crashAxis, CRASH_HOME_CHECKPOINT_AFTER_MOVE);
 
     moved += stepThisMove;
+    CrashLog_SetHomeCheckpoint(crashAxis, CRASH_HOME_CHECKPOINT_BEFORE_LIMIT_SAMPLE);
     shouldMove = _sampleLimitStable(cancelToken).asserted;
+    CrashLog_SetHomeCheckpoint(crashAxis, CRASH_HOME_CHECKPOINT_AFTER_LIMIT_SAMPLE);
   }
 
   if (HomeInterruptionPolicy::cancellationRequested(cancelToken)) {
@@ -764,7 +796,9 @@ bool Stepper::_backOffLimitUntilReleased(uint32_t chunkSteps,
     return false;
   }
 
+  CrashLog_SetHomeCheckpoint(crashAxis, CRASH_HOME_CHECKPOINT_BEFORE_LIMIT_SAMPLE);
   if (_sampleLimitStable(cancelToken).asserted) {
+    CrashLog_SetHomeCheckpoint(crashAxis, CRASH_HOME_CHECKPOINT_AFTER_LIMIT_SAMPLE);
     Logger::instance()->log("[Home %d] limit release not detected phase=%s after %lu steps\r\n",
                             (int)_axis,
                             (phaseLabel != nullptr) ? phaseLabel : "release",
@@ -772,6 +806,7 @@ bool Stepper::_backOffLimitUntilReleased(uint32_t chunkSteps,
     _logLimitDebug("limit release not detected");
     return false;
   }
+  CrashLog_SetHomeCheckpoint(crashAxis, CRASH_HOME_CHECKPOINT_AFTER_LIMIT_SAMPLE);
 
   return true;
 }

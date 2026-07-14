@@ -19,11 +19,17 @@ static volatile CrashTaskId g_activeTask = CRASH_TASK_NONE;
 static volatile uint8_t g_activeCommand = 0u;
 static RegulatorTelemetryRetainedContext g_regulatorContext __attribute__((section(".noinit")));
 static CrashFaultContextRetained g_faultContext __attribute__((section(".noinit")));
+volatile uint32_t g_crashFaultEntryCallee[8] __attribute__((section(".noinit")));
 static CrashFaultStackRange g_taskStackRanges[CRASH_HOME_AXIS_COUNT];
 static volatile uint8_t g_homePhases[CRASH_HOME_AXIS_COUNT];
+static volatile uint8_t g_homeCheckpoints[CRASH_HOME_AXIS_COUNT];
 
 extern uint32_t _sdata;
 extern uint32_t _estack;
+extern uint32_t __flash_exec_start__;
+extern uint32_t __flash_exec_end__;
+extern uint32_t __ram_exec_start__;
+extern uint32_t __ram_exec_end__;
 extern __IO uint32_t uwTick;
 
 static const uint32_t kCrashLogMagic = 0x43524153u;
@@ -443,6 +449,10 @@ static void CrashLog_RecordExceptionCommon(CrashFaultKind kind,
                                            uint32_t msp,
                                            uint32_t psp)
 {
+  const uint8_t faultControl = (uint8_t)__get_CONTROL();
+  const uint8_t faultBasepri = (uint8_t)__get_BASEPRI();
+  const uint8_t faultPrimask = (uint8_t)__get_PRIMASK();
+  const uint8_t faultFaultmask = (uint8_t)__get_FAULTMASK();
   __disable_irq();
 
 #if (LC_CRASHLOG_FAULT_HOOKS_ENABLE != 0)
@@ -455,7 +465,7 @@ static void CrashLog_RecordExceptionCommon(CrashFaultKind kind,
   g_faultContext.magic = 0u;
   __DMB();
 
-  CrashFaultContextV1* context = &g_faultContext.context;
+  CrashFaultContextV2* context = &g_faultContext.context;
   uint32_t* words = (uint32_t*)context;
   for (uint32_t i = 0u; i < (sizeof(*context) / sizeof(uint32_t)); ++i) {
     words[i] = 0u;
@@ -469,21 +479,27 @@ static void CrashLog_RecordExceptionCommon(CrashFaultKind kind,
   context->homePhaseZ = g_homePhases[CRASH_HOME_AXIS_Z];
   context->homePhaseP = g_homePhases[CRASH_HOME_AXIS_P];
   context->homePhaseR = g_homePhases[CRASH_HOME_AXIS_R];
+  context->homeCheckpointX = g_homeCheckpoints[CRASH_HOME_AXIS_X];
+  context->homeCheckpointY = g_homeCheckpoints[CRASH_HOME_AXIS_Y];
+  context->homeCheckpointZ = g_homeCheckpoints[CRASH_HOME_AXIS_Z];
+  context->homeCheckpointP = g_homeCheckpoints[CRASH_HOME_AXIS_P];
+  context->homeCheckpointR = g_homeCheckpoints[CRASH_HOME_AXIS_R];
+  context->flags |= CRASH_FAULT_CONTEXT_FLAG_CHECKPOINTS_VALID;
   context->excReturn = excReturn;
   context->activeSp = rawSp;
   context->msp = msp;
   context->psp = psp;
-  context->control = __get_CONTROL();
-  context->basepri = __get_BASEPRI();
-  context->primask = __get_PRIMASK();
-  context->faultmask = __get_FAULTMASK();
+  context->control = faultControl;
+  context->basepri = faultBasepri;
+  context->primask = faultPrimask;
+  context->faultmask = faultFaultmask;
   context->cfsr = SCB->CFSR;
   context->hfsr = SCB->HFSR;
-  context->dfsr = SCB->DFSR;
-  context->afsr = SCB->AFSR;
-  context->shcsr = SCB->SHCSR;
   context->mmfar = SCB->MMFAR;
   context->bfar = SCB->BFAR;
+  context->fpccr = FPU->FPCCR;
+  context->fpcar = FPU->FPCAR;
+  context->flags |= CRASH_FAULT_CONTEXT_FLAG_FP_STATUS_VALID;
   if ((excReturn & (1u << 4)) == 0u) {
     context->flags |= CRASH_FAULT_CONTEXT_FLAG_FP_EXTENDED_FRAME;
   }
@@ -497,23 +513,15 @@ static void CrashLog_RecordExceptionCommon(CrashFaultKind kind,
     context->flags |= CRASH_FAULT_CONTEXT_FLAG_BFAR_VALID;
   }
 
-  uint32_t coreFrame = 0u;
-  const uint32_t ramLow = (uint32_t)(uintptr_t)&_sdata;
-  const uint32_t ramHigh = (uint32_t)(uintptr_t)&_estack;
-  if (CrashFaultContext_SelectCoreFrame(rawSp, excReturn, ramLow, ramHigh, &coreFrame) != 0u) {
-    const uint32_t* frame = (const uint32_t*)(uintptr_t)coreFrame;
-    context->flags |= CRASH_FAULT_CONTEXT_FLAG_STACK_POINTER_VALID |
-                      CRASH_FAULT_CONTEXT_FLAG_CORE_FRAME_VALID;
-    context->r0 = frame[0];
-    context->r1 = frame[1];
-    context->r2 = frame[2];
-    context->r3 = frame[3];
-    context->r12 = frame[4];
-    context->lr = frame[5];
-    context->pc = frame[6];
-    context->xpsr = frame[7];
-    context->ipsr = (uint16_t)(context->xpsr & 0x1FFu);
-  }
+  context->r4 = g_crashFaultEntryCallee[0];
+  context->r5 = g_crashFaultEntryCallee[1];
+  context->r6 = g_crashFaultEntryCallee[2];
+  context->r7 = g_crashFaultEntryCallee[3];
+  context->r8 = g_crashFaultEntryCallee[4];
+  context->r9 = g_crashFaultEntryCallee[5];
+  context->r10 = g_crashFaultEntryCallee[6];
+  context->r11 = g_crashFaultEntryCallee[7];
+  context->flags |= CRASH_FAULT_CONTEXT_FLAG_CALLEE_SAVED_VALID;
 
   uint32_t stackLow = 0u;
   uint32_t stackHigh = 0u;
@@ -526,6 +534,42 @@ static void CrashLog_RecordExceptionCommon(CrashFaultKind kind,
     context->taskStackHigh = stackHigh;
   } else {
     context->taskId = (uint8_t)g_activeTask;
+    stackLow = (uint32_t)(uintptr_t)&_sdata;
+    stackHigh = (uint32_t)(uintptr_t)&_estack;
+  }
+
+  uint32_t coreFrame = 0u;
+  uint32_t frameWords = 0u;
+  if (CrashFaultContext_SelectCoreFrame(rawSp, excReturn, stackLow, stackHigh,
+                                        &coreFrame, &frameWords) != 0u) {
+    (void)frameWords;
+    const uint32_t* frame = (const uint32_t*)(uintptr_t)coreFrame;
+    context->flags |= CRASH_FAULT_CONTEXT_FLAG_STACK_POINTER_VALID;
+    context->r0 = frame[0];
+    context->r1 = frame[1];
+    context->r2 = frame[2];
+    context->r3 = frame[3];
+    context->r12 = frame[4];
+    context->lr = frame[5];
+    context->pc = frame[6];
+    context->xpsr = frame[7];
+    if (CrashFaultContext_IsExecutablePc(
+            context->pc,
+            (uint32_t)(uintptr_t)&__flash_exec_start__,
+            (uint32_t)(uintptr_t)&__flash_exec_end__,
+            (uint32_t)(uintptr_t)&__ram_exec_start__,
+            (uint32_t)(uintptr_t)&__ram_exec_end__) != 0u) {
+      context->flags |= CRASH_FAULT_CONTEXT_FLAG_PC_EXECUTABLE;
+    }
+    if (CrashFaultContext_HasThumbState(context->xpsr) != 0u) {
+      context->flags |= CRASH_FAULT_CONTEXT_FLAG_XPSR_THUMB;
+    }
+    if ((context->flags & (CRASH_FAULT_CONTEXT_FLAG_PC_EXECUTABLE |
+                           CRASH_FAULT_CONTEXT_FLAG_XPSR_THUMB)) ==
+        (CRASH_FAULT_CONTEXT_FLAG_PC_EXECUTABLE |
+         CRASH_FAULT_CONTEXT_FLAG_XPSR_THUMB)) {
+      context->flags |= CRASH_FAULT_CONTEXT_FLAG_CORE_FRAME_VALID;
+    }
   }
 
   g_faultContext.version = CRASH_FAULT_CONTEXT_VERSION;
@@ -590,6 +634,16 @@ void CrashLog_TriggerHardFaultForTest(void)
 void CrashLog_TriggerHardFaultForTest(void)
 {
   __asm volatile ("udf #0");
+}
+
+void CrashLog_TriggerExtendedFrameHardFaultForTest(void)
+    __attribute__((used, noinline, section(".text.CrashLog_HardFaultEntry")));
+
+void CrashLog_TriggerExtendedFrameHardFaultForTest(void)
+{
+  __asm volatile (
+      "vmov s0, s0\n"
+      "udf #0\n");
 }
 
 void CrashLog_CaptureRegulatorContext(const RegulatorTelemetryResetContext* context)
@@ -733,6 +787,14 @@ void CrashLog_SetHomePhase(CrashHomeAxis axis, CrashHomePhase phase)
 {
   if ((uint32_t)axis < CRASH_HOME_AXIS_COUNT) {
     g_homePhases[(uint32_t)axis] = (uint8_t)phase;
+    g_homeCheckpoints[(uint32_t)axis] = (uint8_t)CRASH_HOME_CHECKPOINT_PHASE_ENTRY;
+  }
+}
+
+void CrashLog_SetHomeCheckpoint(CrashHomeAxis axis, CrashHomeCheckpoint checkpoint)
+{
+  if ((uint32_t)axis < CRASH_HOME_AXIS_COUNT) {
+    g_homeCheckpoints[(uint32_t)axis] = (uint8_t)checkpoint;
   }
 }
 

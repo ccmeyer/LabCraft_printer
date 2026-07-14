@@ -10,23 +10,21 @@ TEST_GROUP(CrashFaultContext)
 {
 };
 
-TEST(CrashFaultContext, WirePackingMatchesGoldenLittleEndianVector)
+TEST(CrashFaultContext, V2WirePackingMatchesGoldenLittleEndianVector)
 {
-    CrashFaultContextV1 context{};
-    context.version = 1u;
-    context.flags = 2u;
-    context.faultKind = 3u;
-    context.taskId = 4u;
-    context.activeCommand = 5u;
-    context.homePhaseX = 6u;
-    context.homePhaseY = 7u;
-    context.homePhaseZ = 8u;
-    context.homePhaseP = 9u;
-    context.homePhaseR = 10u;
-    context.ipsr = 0x0B0Au;
+    CrashFaultContextV2 context{};
+    context.version = 2u;
+    context.faultKind = 1u;
+    context.taskId = 2u;
+    context.activeCommand = 3u;
+    context.flags = 0x0504u;
+    uint8_t* header = &context.homePhaseX;
+    for (uint8_t i = 0u; i < 14u; ++i) {
+        header[i] = static_cast<uint8_t>(6u + i);
+    }
     uint32_t* values = &context.excReturn;
-    for (uint32_t i = 0u; i < 25u; ++i) {
-        const uint32_t byte = 12u + (i * 4u);
+    for (uint32_t i = 0u; i < 28u; ++i) {
+        const uint32_t byte = 20u + (i * 4u);
         values[i] = byte | ((byte + 1u) << 8) | ((byte + 2u) << 16) | ((byte + 3u) << 24);
     }
 
@@ -35,36 +33,85 @@ TEST(CrashFaultContext, WirePackingMatchesGoldenLittleEndianVector)
     for (uint32_t i = 0u; i < CRASH_FAULT_CONTEXT_WIRE_SIZE; ++i) {
         expected[i] = static_cast<uint8_t>(i);
     }
-    expected[0] = 1u;
-    for (uint32_t i = 1u; i < 10u; ++i) {
-        expected[i] = static_cast<uint8_t>(i + 1u);
-    }
+    expected[0] = 2u;
 
     CHECK_TRUE(CrashFaultContext_Pack(&context, actual, sizeof(actual)) != 0u);
     MEMCMP_EQUAL(expected, actual, sizeof(expected));
 }
 
-TEST(CrashFaultContext, SelectsBasicAndExtendedFloatingPointCoreFrames)
+TEST(CrashFaultContext, BasicAndExtendedFramesBothStartAtRawSp)
 {
     uint32_t frame = 0u;
+    uint32_t words = 0u;
     CHECK_TRUE(CrashFaultContext_SelectCoreFrame(0x20000100u, 0xFFFFFFFDu,
-                                                 0x20000000u, 0x20001000u, &frame) != 0u);
+                                                 0x20000000u, 0x20001000u,
+                                                 &frame, &words) != 0u);
     UNSIGNED_LONGS_EQUAL(0x20000100u, frame);
+    UNSIGNED_LONGS_EQUAL(8u, words);
 
     CHECK_TRUE(CrashFaultContext_SelectCoreFrame(0x20000100u, 0xFFFFFFEDu,
-                                                 0x20000000u, 0x20001000u, &frame) != 0u);
-    UNSIGNED_LONGS_EQUAL(0x20000148u, frame);
+                                                 0x20000000u, 0x20001000u,
+                                                 &frame, &words) != 0u);
+    UNSIGNED_LONGS_EQUAL(0x20000100u, frame);
+    UNSIGNED_LONGS_EQUAL(26u, words);
+}
+
+TEST(CrashFaultContext, ValidatesTheCompleteBasicOrExtendedAllocation)
+{
+    CHECK_TRUE(CrashFaultContext_SelectCoreFrame(0x20000FE0u, 0xFFFFFFFDu,
+                                                 0x20000000u, 0x20001000u,
+                                                 nullptr, nullptr) != 0u);
+    CHECK_FALSE(CrashFaultContext_SelectCoreFrame(0x20000FE4u, 0xFFFFFFFDu,
+                                                  0x20000000u, 0x20001000u,
+                                                  nullptr, nullptr) != 0u);
+    CHECK_TRUE(CrashFaultContext_SelectCoreFrame(0x20000F98u, 0xFFFFFFEDu,
+                                                 0x20000000u, 0x20001000u,
+                                                 nullptr, nullptr) != 0u);
+    CHECK_FALSE(CrashFaultContext_SelectCoreFrame(0x20000F9Cu, 0xFFFFFFEDu,
+                                                  0x20000000u, 0x20001000u,
+                                                  nullptr, nullptr) != 0u);
 }
 
 TEST(CrashFaultContext, RejectsMisalignedAndOutOfRangeStackPointers)
 {
-    uint32_t frame = 0u;
     CHECK_FALSE(CrashFaultContext_SelectCoreFrame(0x20000102u, 0xFFFFFFFDu,
-                                                  0x20000000u, 0x20001000u, &frame) != 0u);
+                                                  0x20000000u, 0x20001000u,
+                                                  nullptr, nullptr) != 0u);
     CHECK_FALSE(CrashFaultContext_SelectCoreFrame(0x10000100u, 0xFFFFFFFDu,
-                                                  0x20000000u, 0x20001000u, &frame) != 0u);
-    CHECK_FALSE(CrashFaultContext_SelectCoreFrame(0x20000FF0u, 0xFFFFFFFDu,
-                                                  0x20000000u, 0x20001000u, &frame) != 0u);
+                                                  0x20000000u, 0x20001000u,
+                                                  nullptr, nullptr) != 0u);
+}
+
+TEST(CrashFaultContext, ExecutablePcAcceptsFlashAndRamFunctionRanges)
+{
+    CHECK_TRUE(CrashFaultContext_IsExecutablePc(0x08001234u,
+                                                0x08000000u, 0x08060000u,
+                                                0x20001000u, 0x20001100u) != 0u);
+    CHECK_TRUE(CrashFaultContext_IsExecutablePc(0x20001021u,
+                                                0x08000000u, 0x08060000u,
+                                                0x20001000u, 0x20001100u) != 0u);
+    CHECK_FALSE(CrashFaultContext_IsExecutablePc(0x05000000u,
+                                                 0x08000000u, 0x08060000u,
+                                                 0x20001000u, 0x20001100u) != 0u);
+}
+
+TEST(CrashFaultContext, ThumbStateRequiresTheStackedTBit)
+{
+    CHECK_TRUE(CrashFaultContext_HasThumbState(0x21000000u) != 0u);
+    CHECK_FALSE(CrashFaultContext_HasThumbState(0x20000000u) != 0u);
+}
+
+TEST(CrashFaultContext, HomeCheckpointWireValuesRemainStable)
+{
+    UNSIGNED_LONGS_EQUAL(0u, CRASH_HOME_CHECKPOINT_IDLE);
+    UNSIGNED_LONGS_EQUAL(1u, CRASH_HOME_CHECKPOINT_PHASE_ENTRY);
+    UNSIGNED_LONGS_EQUAL(2u, CRASH_HOME_CHECKPOINT_BEFORE_EVENT_CLEAR);
+    UNSIGNED_LONGS_EQUAL(3u, CRASH_HOME_CHECKPOINT_BEFORE_MOVE);
+    UNSIGNED_LONGS_EQUAL(4u, CRASH_HOME_CHECKPOINT_WAITING_FOR_MOVE);
+    UNSIGNED_LONGS_EQUAL(5u, CRASH_HOME_CHECKPOINT_AFTER_MOVE);
+    UNSIGNED_LONGS_EQUAL(6u, CRASH_HOME_CHECKPOINT_BEFORE_LIMIT_SAMPLE);
+    UNSIGNED_LONGS_EQUAL(7u, CRASH_HOME_CHECKPOINT_AFTER_LIMIT_SAMPLE);
+    UNSIGNED_LONGS_EQUAL(8u, CRASH_HOME_CHECKPOINT_FINISHING);
 }
 
 TEST(CrashFaultContext, MatchesStackRangeAndReturnsBounds)

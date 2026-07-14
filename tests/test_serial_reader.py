@@ -74,6 +74,24 @@ def _fault_context_payload(*, version=1) -> bytes:
     return struct.pack("<10BH25I", *header, *registers)
 
 
+def _fault_context_v2_payload(*, version=2) -> bytes:
+    flags = 0x0FD7
+    phases = (2, 3, 0, 5, 7)
+    checkpoints = (4, 5, 0, 6, 8)
+    special = (2, 0, 1, 0)
+    registers = (
+        0xFFFFFFED, 0x20001200, 0x20010000, 0x20001200, 0x20001000, 0x20001400,
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 0x08005679, 0x08001235,
+        0x21000010, 0x00008200, 0x40000000, 0x20000020, 0x202020F8,
+        0xC0000001, 0x20001100,
+    )
+    return struct.pack(
+        "<4BH14B28I",
+        version, 1, 7, mfr.CMD_MAP["HOME_XY"], flags,
+        *phases, *checkpoints, *special, *registers,
+    )
+
+
 class FakeSerial:
     def __init__(self, data: bytes):
         self._buf = bytearray(data)
@@ -444,8 +462,46 @@ def test_serial_reader_decodes_fault_context_and_adds_hex_summary(qapp):
     assert "X=coarse_seek" in report["summary"]
 
 
+def test_serial_reader_decodes_v2_fault_context_checkpoints_and_callee_registers(qapp):
+    reset_payload = _reset_report_payload(3) + _tlv(
+        mfr.TAG_RESET_FAULT_CONTEXT, _fault_context_v2_payload()
+    )
+
+    report = mfr.SerialReader._parse_reset_report(reset_payload)
+
+    assert report is not None
+    context = report["fault_context"]
+    assert context["version"] == 2
+    assert context["core_frame_valid"] is True
+    assert context["extended_fpu_frame"] is True
+    assert context["callee_saved_valid"] is True
+    assert context["fp_status_valid"] is True
+    assert context["r4"] == 5
+    assert context["r11"] == 12
+    assert context["fpccr"] == 0xC0000001
+    assert context["home_checkpoints"]["x"] == {"value": 4, "name": "waiting_for_move"}
+    assert context["home_checkpoints"]["p"] == {"value": 6, "name": "before_limit_sample"}
+    assert "BFAR=0x202020F8" in report["summary"]
+    assert "X=coarse_seek/waiting_for_move" in report["summary"]
+
+
+def test_serial_reader_suppresses_implausible_v1_core_frame(qapp):
+    raw = bytearray(_fault_context_payload())
+    struct.pack_into("<I", raw, 60, 0x05000000)
+    struct.pack_into("<I", raw, 64, 0x20001200)
+
+    report = mfr.SerialReader._parse_reset_report(
+        _reset_report_payload(3) + _tlv(mfr.TAG_RESET_FAULT_CONTEXT, bytes(raw))
+    )
+
+    assert report is not None
+    assert report["fault_context"]["core_frame_flag_valid"] is True
+    assert report["fault_context"]["core_frame_valid"] is False
+    assert "PC=0x05000000" not in report["summary"]
+
+
 def test_serial_reader_ignores_malformed_and_unknown_fault_context(qapp):
-    for raw in (b"\x01\x02", _fault_context_payload(version=2)):
+    for raw in (b"\x01\x02", _fault_context_payload(version=3), _fault_context_v2_payload(version=3)):
         report = mfr.SerialReader._parse_reset_report(
             _reset_report_payload(3) + _tlv(mfr.TAG_RESET_FAULT_CONTEXT, raw)
         )

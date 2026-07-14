@@ -127,7 +127,7 @@ typedef struct {
   uint8_t activeCommand;
   uint32_t faultTaskName4;
   uint8_t faultContextValid;
-  CrashFaultContextV1 faultContext;
+  CrashFaultContextV2 faultContext;
   RegulatorTelemetryResetContext regulatorContext;
 } CrashLogSnapshot;
 
@@ -157,6 +157,7 @@ void CrashLog_SetActiveContext(CrashTaskId taskId, uint8_t activeCommand);
 void CrashLog_ClearActiveContext(void);
 void CrashLog_RegisterTaskStack(CrashTaskId taskId, const void* stackBase, uint32_t stackBytes);
 void CrashLog_SetHomePhase(CrashHomeAxis axis, CrashHomePhase phase);
+void CrashLog_SetHomeCheckpoint(CrashHomeAxis axis, CrashHomeCheckpoint checkpoint);
 CRASHLOG_NORETURN void CrashLog_RecordHardFaultAndHalt(uint32_t rawSp, uint32_t excReturn,
                                                        uint32_t msp, uint32_t psp);
 CRASHLOG_NORETURN void CrashLog_RecordMemFaultAndHalt(uint32_t rawSp, uint32_t excReturn,
@@ -166,6 +167,7 @@ CRASHLOG_NORETURN void CrashLog_RecordBusFaultAndHalt(uint32_t rawSp, uint32_t e
 CRASHLOG_NORETURN void CrashLog_RecordUsageFaultAndHalt(uint32_t rawSp, uint32_t excReturn,
                                                         uint32_t msp, uint32_t psp);
 void CrashLog_TriggerHardFaultForTest(void);
+void CrashLog_TriggerExtendedFrameHardFaultForTest(void);
 const char* CrashLog_BootStageName(CrashBootStage stage);
 
 #ifdef __cplusplus

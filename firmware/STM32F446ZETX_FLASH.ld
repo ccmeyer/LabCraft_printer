@@ -51,6 +51,8 @@ MEMORY
 /* Sections */
 SECTIONS
 {
+  __flash_exec_start__ = ORIGIN(FLASH);
+
   /* The startup code into "FLASH" Rom type memory */
   .isr_vector :
   {
@@ -74,6 +76,7 @@ SECTIONS
 
     . = ALIGN(4);
     _etext = .;        /* define a global symbols at end of code */
+    __flash_exec_end__ = .;
   } >FLASH
 
   /* Constant data into "FLASH" Rom type memory */
@@ -140,8 +143,10 @@ SECTIONS
     _sdata = .;        /* create a global symbol at data start */
     *(.data)           /* .data sections */
     *(.data*)          /* .data* sections */
+    __ram_exec_start__ = .;
     *(.RamFunc)        /* .RamFunc sections */
     *(.RamFunc*)       /* .RamFunc* sections */
+    __ram_exec_end__ = .;
 
     . = ALIGN(4);
     _edata = .;        /* define a global symbol at data end */

@@ -69,6 +69,25 @@ def test_fault_context_reset_tag_matches_firmware_header():
     assert mfr.TAG_RESET_FAULT_CONTEXT == int(match.group(1), 16)
 
 
+def test_fault_context_v2_version_and_wire_size_match_firmware_header():
+    text = Path("firmware/Core/Inc/CrashFaultContext.h").read_text(encoding="utf-8")
+    version = re.search(r"CRASH_FAULT_CONTEXT_VERSION\s+(\d+)u", text)
+    wire_size = re.search(r"CRASH_FAULT_CONTEXT_WIRE_SIZE\s+(\d+)u", text)
+    assert version is not None
+    assert wire_size is not None
+    assert mfr.FAULT_CONTEXT_VERSION == int(version.group(1))
+    assert mfr.FAULT_CONTEXT_WIRE_SIZE == int(wire_size.group(1))
+
+
+def test_maximum_v2_reset_report_fits_one_byte_payload_length():
+    base_report_bytes = 86
+    regulator_tlv_bytes = 2 + 30
+    fault_context_tlv_bytes = 2 + mfr.FAULT_CONTEXT_WIRE_SIZE
+    maximum_report_bytes = base_report_bytes + regulator_tlv_bytes + fault_context_tlv_bytes
+    assert maximum_report_bytes == 252
+    assert maximum_report_bytes <= 255
+
+
 def test_gripper_firmware_does_not_software_trigger_flash_exti():
     text = Path("firmware/Core/Src/Gripper.cpp").read_text(encoding="utf-8")
     for token in (

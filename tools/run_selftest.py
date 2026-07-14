@@ -241,7 +241,8 @@ def _tlv_u8(tlv: dict[int, bytes], tag: int) -> int | None:
 
 REGULATOR_TELEMETRY_AGE_UNKNOWN = 0xFFFFFFFF
 REGULATOR_RESET_CONTEXT_WIRE_SIZE = 30
-FAULT_CONTEXT_WIRE_SIZE = 112
+FAULT_CONTEXT_V1_WIRE_SIZE = 112
+FAULT_CONTEXT_WIRE_SIZE = 132
 CRASH_FAULT_NAMES = {
     0: "none", 1: "hardfault", 2: "memmanage", 3: "busfault", 4: "usagefault",
     5: "nmi", 6: "stack_overflow", 7: "assert", 8: "error_handler", 9: "wdt",
@@ -256,6 +257,11 @@ CRASH_TASK_NAMES = {
 HOME_PHASE_NAMES = {
     0: "idle", 1: "initial_check", 2: "coarse_seek", 3: "release",
     4: "fine_seek", 5: "final_backoff", 6: "succeeded", 7: "canceled", 8: "failed",
+}
+HOME_CHECKPOINT_NAMES = {
+    0: "idle", 1: "phase_entry", 2: "before_event_clear", 3: "before_move",
+    4: "waiting_for_move", 5: "after_move", 6: "before_limit_sample",
+    7: "after_limit_sample", 8: "finishing",
 }
 REGULATOR_TELEMETRY_FLAGS = {
     0x0001: ("active", "active"),
@@ -348,9 +354,12 @@ def decode_regulator_context(raw: bytes | None) -> dict | None:
     }
 
 
-def decode_fault_context(raw: bytes | None) -> dict | None:
-    if raw is None or len(raw) != FAULT_CONTEXT_WIRE_SIZE or raw[0] != 1:
-        return None
+def _plausible_fault_pc(pc: int) -> bool:
+    address = int(pc) & ~1
+    return (0x08000000 <= address < 0x08060000) or (0x20000000 <= address < 0x20020000)
+
+
+def _decode_fault_context_v1(raw: bytes) -> dict:
     header = struct.unpack_from("<10BH", raw, 0)
     register_names = (
         "exc_return", "active_sp", "msp", "psp", "task_stack_low", "task_stack_high",
@@ -379,10 +388,86 @@ def decode_fault_context(raw: bytes | None) -> dict | None:
             axis: {"value": value, "name": HOME_PHASE_NAMES.get(value, f"phase_{value}")}
             for axis, value in zip(("x", "y", "z", "p", "r"), header[5:10])
         },
+        "home_checkpoints": None,
         "ipsr": header[10],
     }
     result.update(zip(register_names, struct.unpack_from("<25I", raw, 12)))
+    result["core_frame_flag_valid"] = result["core_frame_valid"]
+    result["pc_executable"] = _plausible_fault_pc(result["pc"])
+    result["xpsr_thumb"] = bool(result["xpsr"] & (1 << 24))
+    result["core_frame_valid"] = bool(
+        result["core_frame_flag_valid"] and result["pc_executable"] and result["xpsr_thumb"]
+    )
     return result
+
+
+def _decode_fault_context_v2(raw: bytes) -> dict:
+    version, fault_kind, task_id, active_command = struct.unpack_from("<4B", raw, 0)
+    flags = struct.unpack_from("<H", raw, 4)[0]
+    phase_values = raw[6:11]
+    checkpoint_values = raw[11:16]
+    control, basepri, primask, faultmask = raw[16:20]
+    register_names = (
+        "exc_return", "active_sp", "msp", "psp", "task_stack_low", "task_stack_high",
+        "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9",
+        "r10", "r11", "r12", "lr", "pc", "xpsr", "cfsr", "hfsr", "mmfar",
+        "bfar", "fpccr", "fpcar",
+    )
+    values = struct.unpack_from("<28I", raw, 20)
+    result = {
+        "version": version,
+        "flags": flags,
+        "core_frame_valid": bool(flags & 0x001),
+        "extended_fpu_frame": bool(flags & 0x002),
+        "task_stack_matched": bool(flags & 0x004),
+        "mmfar_valid": bool(flags & 0x008),
+        "bfar_valid": bool(flags & 0x010),
+        "handler_mode": bool(flags & 0x020),
+        "stack_pointer_valid": bool(flags & 0x040),
+        "callee_saved_valid": bool(flags & 0x080),
+        "fp_status_valid": bool(flags & 0x100),
+        "pc_executable": bool(flags & 0x200),
+        "xpsr_thumb": bool(flags & 0x400),
+        "checkpoints_valid": bool(flags & 0x800),
+        "fault_kind": fault_kind,
+        "fault_kind_name": CRASH_FAULT_NAMES.get(fault_kind, f"fault_{fault_kind}"),
+        "task_id": task_id,
+        "task_name": CRASH_TASK_NAMES.get(task_id, f"task_{task_id}"),
+        "active_command": active_command,
+        "home_phases": {
+            axis: {"value": value, "name": HOME_PHASE_NAMES.get(value, f"phase_{value}")}
+            for axis, value in zip(("x", "y", "z", "p", "r"), phase_values)
+        },
+        "home_checkpoints": {
+            axis: {"value": value, "name": HOME_CHECKPOINT_NAMES.get(value, f"checkpoint_{value}")}
+            for axis, value in zip(("x", "y", "z", "p", "r"), checkpoint_values)
+        },
+        "control": control,
+        "basepri": basepri,
+        "primask": primask,
+        "faultmask": faultmask,
+    }
+    result.update(zip(register_names, values))
+    result["ipsr"] = result["xpsr"] & 0x1FF
+    result["core_frame_flag_valid"] = result["core_frame_valid"]
+    result["core_frame_valid"] = bool(
+        result["core_frame_flag_valid"]
+        and result["pc_executable"]
+        and result["xpsr_thumb"]
+        and _plausible_fault_pc(result["pc"])
+        and bool(result["xpsr"] & (1 << 24))
+    )
+    return result
+
+
+def decode_fault_context(raw: bytes | None) -> dict | None:
+    if raw is None or not raw:
+        return None
+    if raw[0] == 1 and len(raw) == FAULT_CONTEXT_V1_WIRE_SIZE:
+        return _decode_fault_context_v1(raw)
+    if raw[0] == 2 and len(raw) == FAULT_CONTEXT_WIRE_SIZE:
+        return _decode_fault_context_v2(raw)
+    return None
 
 
 def decode_reset_report(tlv: dict[int, bytes]) -> dict:
