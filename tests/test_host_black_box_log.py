@@ -1,6 +1,7 @@
 import json
 import time
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import Machine_FreeRTOS as mfr
 
@@ -44,6 +45,19 @@ def _read_single_snapshot(tmp_path):
     files = list(tmp_path.glob("*.json"))
     assert len(files) == 1
     return json.loads(files[0].read_text(encoding="utf-8"))
+
+
+def _deliver_queue_ack(machine, seq32, ack_result, *, expected_seq32=None):
+    machine._on_any_ack(
+        {
+            "ack_cmd": mfr.CMD_QUEUE_ACK,
+            "seq8": int(seq32) & 0xFF,
+            "seq32": int(seq32),
+            "ack_result": ack_result,
+            "expected_seq32": expected_seq32,
+            "capabilities": None,
+        }
+    )
 
 
 def test_orchestrator_stack_status_tlvs_decode_with_phase_name():
@@ -180,6 +194,60 @@ def test_abnormal_serial_reader_stop_writes_snapshot(qapp, test_profile, tmp_pat
     assert snapshot["reason"] == "serial_reader_stopped"
     assert snapshot["trigger"]["reason"] == "exception"
     assert any(event["kind"] == "serial_reader_stopped" for event in snapshot["black_box_events"])
+
+
+def test_queue_gap_retry_exhaustion_snapshot_preserves_incident_evidence(qapp, test_profile, tmp_path):
+    machine = _make_machine(qapp, test_profile, tmp_path)
+    machine._transport_ready = False
+    machine._write_frame = Mock()
+    machine.command_queue.command_number = 2856
+    commands = {seq32: machine.wait_ms(10) for seq32 in range(2857, 2861)}
+    machine._transport_ready = True
+    machine._tx_paused = False
+    machine.pump_send_queue()
+
+    machine.update_status(
+        {
+            "Current_command": 2859,
+            "Last_completed": 2858,
+            "Last_accepted": 2859,
+            "Last_retired": 2858,
+            "cmd_depth": 1,
+        }
+    )
+    _deliver_queue_ack(machine, 2859, "accepted")
+    for _ in range(3):
+        _deliver_queue_ack(machine, 2860, "gap", expected_seq32=2859)
+
+    snapshot = _read_single_snapshot(tmp_path)
+    assert snapshot["reason"] == "transport_fault"
+    assert snapshot["trigger"] == {
+        "message": "Timed out recovering queue gap for command 2860 after 3 attempts."
+    }
+
+    queued = {item["command_number"]: item for item in snapshot["commands"]["queued"]}
+    assert queued[2859]["command_type"] == "WAIT"
+    assert queued[2859]["status"] == "Accepted"
+    assert queued[2859]["send_attempts"] == 1
+    assert queued[2860]["status"] == "Sent"
+    assert queued[2860]["send_attempts"] == 3
+    assert commands[2859].command_number == 2859
+
+    latest_status = snapshot["transport"]["latest_status"]
+    assert latest_status["Current_command"] == 2859
+    assert latest_status["Last_completed"] == 2858
+    assert latest_status["Last_accepted"] == 2859
+    assert latest_status["Last_retired"] == 2858
+
+    gap_acks = [
+        event["payload"]
+        for event in snapshot["black_box_events"]
+        if event["kind"] == "ack" and event["payload"].get("ack_result") == "gap"
+    ]
+    assert len(gap_acks) == 3
+    assert all(ack["seq32"] == 2860 for ack in gap_acks)
+    assert all(ack["expected_seq32"] == 2859 for ack in gap_acks)
+    assert all(ack["matched_pending"] is True for ack in gap_acks)
 
 
 def test_unclean_serial_loss_after_established_session_emits_and_clears_state(qapp, test_profile, tmp_path):

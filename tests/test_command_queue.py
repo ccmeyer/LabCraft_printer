@@ -3,7 +3,53 @@ from unittest.mock import Mock
 
 from types import SimpleNamespace
 
+import pytest
+
 import Machine_FreeRTOS as mfr
+
+
+def _make_incident_gap_window(test_profile, *, black_box_log_dir=None):
+    """Queue the four-command transport window ending at incident seq32=2860."""
+    machine = mfr.Machine(
+        SimpleNamespace(),
+        profile=test_profile,
+        black_box_log_dir=black_box_log_dir,
+    )
+    machine._transport_ready = False
+    machine._write_frame = Mock()
+    machine.command_queue.command_number = 2856
+
+    completions = []
+    commands = {}
+    for seq32 in range(2857, 2861):
+        command = machine.wait_ms(
+            10,
+            handler=lambda completed_seq32=seq32: completions.append(completed_seq32),
+        )
+        commands[seq32] = command
+
+    machine._transport_ready = True
+    machine._tx_paused = False
+    machine.pump_send_queue()
+    return machine, commands, completions
+
+
+def _deliver_queue_ack(machine, seq32, ack_result, *, expected_seq32=None):
+    machine._on_any_ack(
+        {
+            "ack_cmd": mfr.CMD_QUEUE_ACK,
+            "seq8": int(seq32) & 0xFF,
+            "seq32": int(seq32),
+            "ack_result": ack_result,
+            "expected_seq32": expected_seq32,
+            "capabilities": None,
+        }
+    )
+
+
+def _written_command_numbers(machine, commands):
+    command_by_frame = {command.frame: seq32 for seq32, command in commands.items()}
+    return [command_by_frame[call.args[0]] for call in machine._write_frame.call_args_list]
 
 
 def test_command_queue_transitions_and_completion_signal(qapp):
@@ -396,6 +442,128 @@ def test_queue_gap_below_local_queue_faults_instead_of_resending(qapp, test_prof
     assert errors
     assert "earliest local queued command is 10" in errors[-1]
     assert machine._write_frame.call_count == sent_before_gap
+
+
+def test_queue_gap_recovers_when_expected_command_is_still_sent(qapp, test_profile):
+    machine, commands, completions = _make_incident_gap_window(test_profile)
+    assert _written_command_numbers(machine, commands) == [2857, 2858, 2859, 2860]
+
+    _deliver_queue_ack(machine, 2857, "accepted")
+    _deliver_queue_ack(machine, 2858, "accepted")
+    _deliver_queue_ack(machine, 2860, "gap", expected_seq32=2859)
+
+    assert _written_command_numbers(machine, commands) == [
+        2857,
+        2858,
+        2859,
+        2860,
+        2859,
+        2860,
+    ]
+    assert commands[2859].send_attempts == 2
+    assert commands[2860].send_attempts == 2
+
+    # A duplicate ACK after retransmission must not create another command or callback.
+    _deliver_queue_ack(machine, 2859, "duplicate")
+    _deliver_queue_ack(machine, 2860, "accepted")
+    machine.command_queue.update_command_status(
+        current_executing_command=2860,
+        last_completed_command=2860,
+        last_accepted_command=2860,
+        last_retired_command=2860,
+    )
+    machine.command_queue.update_command_status(
+        current_executing_command=2860,
+        last_completed_command=2860,
+        last_accepted_command=2860,
+        last_retired_command=2860,
+    )
+
+    assert completions == [2857, 2858, 2859, 2860]
+    assert machine._tx_paused is False
+
+
+def test_queue_gap_retry_exhaustion_reproduces_incident_when_expected_is_locally_accepted(
+    qapp,
+    test_profile,
+    tmp_path,
+):
+    machine, commands, _completions = _make_incident_gap_window(
+        test_profile,
+        black_box_log_dir=tmp_path,
+    )
+    errors = []
+    machine.error_occurred.connect(errors.append)
+
+    _deliver_queue_ack(machine, 2857, "accepted")
+    _deliver_queue_ack(machine, 2858, "accepted")
+    _deliver_queue_ack(machine, 2859, "accepted")
+    for _ in range(3):
+        _deliver_queue_ack(machine, 2860, "gap", expected_seq32=2859)
+
+    # Current behavior: 2859 is excluded from resend because it is locally Accepted,
+    # so only 2860 is retried until the shared send-attempt limit is exhausted.
+    assert _written_command_numbers(machine, commands) == [
+        2857,
+        2858,
+        2859,
+        2860,
+        2860,
+        2860,
+    ]
+    assert commands[2859].send_attempts == 1
+    assert commands[2860].send_attempts == 3
+    assert machine._tx_paused is True
+    assert errors == ["Timed out recovering queue gap for command 2860 after 3 attempts."]
+
+    # A later stray gap ACK must not create more writes or duplicate the fault.
+    _deliver_queue_ack(machine, 2860, "gap", expected_seq32=2859)
+    assert machine._write_frame.call_count == 6
+    assert len(errors) == 1
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Slice 2 must make a retained Accepted expected command eligible for gap repair",
+)
+def test_queue_gap_should_requeue_locally_accepted_expected_command(qapp, test_profile):
+    machine, commands, _completions = _make_incident_gap_window(test_profile)
+    _deliver_queue_ack(machine, 2859, "accepted")
+
+    _deliver_queue_ack(machine, 2860, "gap", expected_seq32=2859)
+
+    assert _written_command_numbers(machine, commands)[-2:] == [2859, 2860]
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Slice 2 must make a retained Executing expected command eligible for gap repair",
+)
+def test_queue_gap_should_requeue_locally_executing_expected_command(qapp, test_profile):
+    machine, commands, _completions = _make_incident_gap_window(test_profile)
+    commands[2859].mark_as_executing()
+
+    _deliver_queue_ack(machine, 2860, "gap", expected_seq32=2859)
+
+    assert _written_command_numbers(machine, commands)[-2:] == [2859, 2860]
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Slice 2 must fail closed when a gap ACK omits the MCU expected sequence",
+)
+def test_queue_gap_without_expected_sequence_should_not_resend_later_command(qapp, test_profile):
+    machine, commands, _completions = _make_incident_gap_window(test_profile)
+    errors = []
+    machine.error_occurred.connect(errors.append)
+    sent_before_gap = machine._write_frame.call_count
+
+    _deliver_queue_ack(machine, 2860, "gap", expected_seq32=None)
+
+    assert machine._write_frame.call_count == sent_before_gap
+    assert machine._tx_paused is True
+    assert errors
+    assert "expected sequence" in errors[-1].lower()
 
 
 def test_queue_busy_resends_are_bounded(qapp, test_profile):
