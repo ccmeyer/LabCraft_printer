@@ -828,6 +828,33 @@ def test_current_profile_calibrate_pressure_rejects_duplicate_while_camera_move_
     assert box.calibrate_pressure_button.isEnabled()
 
 
+def test_transport_fault_releases_pending_camera_launch_controls(qapp):
+    events = []
+    popups = []
+    controller = _make_controller(events)
+    controller.transport_fault_ui_signal = _SignalStub()
+    box = PressurePlotBox(
+        _make_main_window(CURRENT_PROFILE, popups),
+        _make_model(_FakeMachineModel(), events),
+        controller,
+    )
+    box._set_droplet_imager_launch_pending(True)
+    box._set_refuel_camera_launch_pending(True)
+    box._manual_refuel_check_launch_pending = True
+    box._manual_refuel_check_after_imager_pending = True
+    box._print_profile_apply_pending = True
+
+    controller.transport_fault_ui_signal.emit({"fault_code": "missing_expected_seq32"})
+
+    assert box._droplet_imager_launch_pending is False
+    assert box._refuel_camera_launch_pending is False
+    assert box._manual_refuel_check_launch_pending is False
+    assert box._manual_refuel_check_after_imager_pending is False
+    assert box._print_profile_apply_pending is False
+    assert box.calibrate_pressure_button.isEnabled()
+    assert box.refuel_camera_button.isEnabled()
+
+
 def test_current_profile_calibrate_pressure_allows_relaunch_after_droplet_dialog_cleanup(monkeypatch, qapp):
     events = []
     popups = []

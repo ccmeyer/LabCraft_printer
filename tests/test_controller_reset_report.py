@@ -403,6 +403,86 @@ def test_handle_serial_connection_lost_preserves_mcu_unresponsive_snapshot_reaso
     assert context["black_box_snapshots"][0]["path"] == "logs/machine_black_box/mcu_unresponsive.json"
 
 
+def test_handle_transport_fault_emits_guidance_and_debug_context(tmp_path):
+    popups = []
+    ui_reports = SignalRecorder()
+    controller = Controller.__new__(Controller)
+    controller._repo_root = tmp_path
+    controller.machine = SimpleNamespace(
+        get_debug_bundle_context=lambda: {
+            "port": "COM9",
+            "profile": "current",
+            "black_box_session_id": "session-fault",
+            "black_box_snapshots": [],
+        }
+    )
+    controller.model = SimpleNamespace(
+        machine_model=SimpleNamespace(
+            get_current_position_dict=lambda: {"X": 1, "Y": 2, "Z": 3},
+        )
+    )
+    controller.error_occurred_signal = SimpleNamespace(
+        emit=lambda title, message: popups.append((title, message))
+    )
+    controller.transport_fault_ui_signal = ui_reports
+    controller.expected_position = {"X": 9, "Y": 9, "Z": 9}
+    controller.expected_location = "camera"
+
+    report = {
+        "reason": "transport_fault",
+        "fault_code": "missing_expected_seq32",
+        "summary": "Command transport was paused.",
+        "message": "MCU ACK did not include the expected sequence.",
+        "black_box_reason": "transport_fault",
+        "black_box_log_path": "logs/machine_black_box/transport_fault.json",
+        "black_box_log_error": None,
+    }
+    Controller.handle_transport_fault(controller, report)
+
+    assert controller.expected_position == {"X": 1, "Y": 2, "Z": 3}
+    assert controller.expected_location is None
+    assert ui_reports.calls == [(report,)]
+    assert popups[0][0] == "Command Transport Paused"
+    assert "already accepted by the MCU may still finish" in popups[0][1]
+    assert "use Disconnect, reconnect to the MCU" in popups[0][1]
+    assert "home the motors" in popups[0][1]
+    assert "logs/machine_black_box/transport_fault.json" in popups[0][1]
+    context = controller._last_transport_fault_debug_bundle_context
+    assert context["bundle_kind"] == "connection_loss"
+    assert context["transport_fault_report"] == report
+    assert context["connection_loss_report"] == report
+    assert context["black_box_snapshots"][0]["reason"] == "transport_fault"
+
+
+def test_handle_transport_fault_interrupts_active_array_without_queueing_motion(tmp_path):
+    controller, _events, popups = _make_reset_controller(
+        tmp_path,
+        array_state="running",
+        has_progress=True,
+        remaining=4,
+    )
+
+    Controller.handle_transport_fault(
+        controller,
+        {
+            "fault_code": "unexpected_queue_ack",
+            "summary": "Command transport was paused.",
+        },
+    )
+
+    assert controller.get_array_run_state() == "resume_ready"
+    assert controller._array_context is None
+    assert controller._soft_stop_clear_uncertain is False
+    assert controller.array_state_changed.calls == [("resume_ready",)]
+    assert popups[0][0] == "Command Transport Paused"
+    controller.model.record_experiment_audit_event.assert_called_once()
+    assert controller.model.record_experiment_audit_event.call_args.args[:2] == (
+        "print_array_interrupted_by_transport_fault",
+        "Print array interrupted by command transport fault",
+    )
+    assert controller.model.record_experiment_audit_event.call_args.kwargs["level"] == "error"
+
+
 def test_export_last_connection_loss_debug_bundle_packages_current_context(tmp_path):
     snapshot = tmp_path / "serial_reader_stopped.json"
     snapshot.write_text('{"reason": "serial_reader_stopped"}', encoding="utf-8")

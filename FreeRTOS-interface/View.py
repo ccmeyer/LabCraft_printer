@@ -811,6 +811,9 @@ class MainWindow(QMainWindow):
         if title == "Machine Connection Lost":
             self._popup_machine_connection_lost_message(title, message)
             return
+        if title == "Command Transport Paused":
+            self._popup_transport_fault_message(title, message)
+            return
         msg = QtWidgets.QMessageBox(self)
         msg.setWindowTitle(title)
         msg.setText(message)
@@ -823,6 +826,9 @@ class MainWindow(QMainWindow):
 
     def _popup_machine_connection_lost_message(self, title, message):
         self._popup_debug_bundle_message(title, message, self.controller.export_last_connection_loss_debug_bundle)
+
+    def _popup_transport_fault_message(self, title, message):
+        self._popup_debug_bundle_message(title, message, self.controller.export_last_transport_fault_debug_bundle)
 
     def _popup_debug_bundle_message(self, title, message, export_callback):
         msg = QtWidgets.QMessageBox(self)
@@ -2603,6 +2609,9 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.model.machine_model.machine_state_updated.connect(self.update_regulation_button_state)
         self.model.machine_model.regulation_state_changed.connect(self.update_regulation_button)
         self.model.machine_model.printing_parameters_updated.connect(self.update_printing_controls)
+        transport_fault_signal = getattr(self.controller, "transport_fault_ui_signal", None)
+        if transport_fault_signal is not None:
+            transport_fault_signal.connect(self.handle_transport_fault_ui)
         self.toggle_regulation_requested.connect(self.controller.toggle_regulation)
         # self.update_target_pressure_input.connect(self.controller.set_absolute_pressure)
         # self.update_pulse_width_input.connect(self.controller.set_pulse_width)
@@ -3141,6 +3150,18 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         else:
             self.pressure_regulation_button.setText("Regulate Pressure")
             self.pressure_regulation_button.setStyleSheet(f"background-color: {self.color_dict['light_blue']}; color: white;")
+
+    @QtCore.Slot(object)
+    def handle_transport_fault_ui(self, _report=None):
+        """Release UI actions that were waiting for command-completion callbacks."""
+        self._print_profile_apply_pending = False
+        self._droplet_imager_launch_pending = False
+        self._refuel_camera_launch_pending = False
+        self._manual_refuel_check_launch_pending = False
+        self._manual_refuel_check_after_imager_pending = False
+        self._refresh_droplet_imager_button_state()
+        self._refresh_refuel_camera_button_state()
+        self.update_print_profile_button_state()
 
     def _droplet_imager_launch_is_active(self):
         return bool(

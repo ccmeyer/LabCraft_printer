@@ -766,6 +766,7 @@ class Controller(QObject):
     update_slots_signal = Signal()
     update_volumes_in_view_signal = Signal()
     error_occurred_signal = Signal(str,str)
+    transport_fault_ui_signal = Signal(object)
 
     # DFU signals
     dfu_progress = QtCore.Signal(int)
@@ -855,6 +856,7 @@ class Controller(QObject):
         self._reset_report_log_path = self._repo_root / "logs" / "board_reset_reports.jsonl"
         self._last_reset_debug_bundle_context = None
         self._last_connection_loss_debug_bundle_context = None
+        self._last_transport_fault_debug_bundle_context = None
 
         self._dfu_script = (self._ui_dir / "dfu_update.py").resolve()
         self._cwd = self._repo_root                                 # IMPORTANT: run child from repo root
@@ -895,6 +897,9 @@ class Controller(QObject):
         serial_loss_signal = getattr(self.machine, "serial_connection_lost", None)
         if serial_loss_signal is not None:
             serial_loss_signal.connect(self.handle_serial_connection_lost)
+        transport_fault_signal = getattr(self.machine, "transport_faulted", None)
+        if transport_fault_signal is not None:
+            transport_fault_signal.connect(self.handle_transport_fault)
         self.machine.disconnect_complete_signal.connect(self.reset_board)
         self.machine.flash_state_updated.connect(self.model.update_flash_session_state)
         self.model.machine_model.command_numbers_updated.connect(self.update_command_numbers)
@@ -1321,6 +1326,13 @@ class Controller(QObject):
         destination = Path(output_dir).expanduser() if output_dir is not None else self._resolve_downloads_dir()
         return export_reset_debug_bundle(context, output_dir=destination)
 
+    def export_last_transport_fault_debug_bundle(self, output_dir=None):
+        context = getattr(self, "_last_transport_fault_debug_bundle_context", None)
+        if not context:
+            raise RuntimeError("No command transport-fault debug context is available to export.")
+        destination = Path(output_dir).expanduser() if output_dir is not None else self._resolve_downloads_dir()
+        return export_reset_debug_bundle(context, output_dir=destination)
+
     def handle_serial_connection_lost(self, report: dict):
         report = dict(report or {})
         machine_model = self.model.machine_model
@@ -1344,6 +1356,40 @@ class Controller(QObject):
             "Machine Connection Lost",
             f"{summary}\n\n{guidance}\n\n{log_status}",
         )
+
+    def handle_transport_fault(self, report: dict):
+        report = dict(report or {})
+        machine_model = self.model.machine_model
+        self.expected_position = machine_model.get_current_position_dict()
+        self.expected_location = None
+        self._interrupt_array_after_transport_fault(report)
+
+        context = self._build_connection_loss_debug_bundle_context(report)
+        context["transport_fault_report"] = dict(report)
+        self._last_transport_fault_debug_bundle_context = context
+        self._emit_optional("transport_fault_ui_signal", dict(report))
+
+        summary = report.get("summary") or "Command transport was paused after a synchronization fault."
+        technical_message = str(report.get("message") or "").strip()
+        guidance = (
+            "No additional queued commands will be sent. A command already accepted by the MCU may still finish. "
+            "Keep clear of the machine and wait for motion to stop. Then use Disconnect, reconnect to the MCU, "
+            "inspect the printer and loaded materials, and home the motors before resuming motion or printing."
+        )
+        log_path = report.get("black_box_log_path")
+        log_error = report.get("black_box_log_error")
+        if log_path:
+            log_status = f"Black-box log: {log_path}"
+        elif log_error:
+            log_status = f"Black-box log save failed: {log_error}"
+        else:
+            log_status = "Black-box log: not available"
+
+        sections = [summary]
+        if technical_message and technical_message != summary:
+            sections.append(f"Technical detail: {technical_message}")
+        sections.extend([guidance, log_status])
+        self.error_occurred_signal.emit("Command Transport Paused", "\n\n".join(sections))
 
     def _append_reset_report_log(self, report: dict) -> str:
         path = Path(getattr(self, "_reset_report_log_path", Path("logs") / "board_reset_reports.jsonl"))
@@ -3172,6 +3218,45 @@ class Controller(QObject):
             "Print array interrupted by board reset",
             details=audit_details,
             level="warning",
+        )
+        return next_state
+
+    def _interrupt_array_after_transport_fault(self, report=None):
+        previous_state = self.get_array_run_state()
+        if previous_state not in {"running", "stop_requested"}:
+            return None
+
+        context = getattr(self, "_array_context", None)
+        try:
+            audit_details = self._build_print_array_snapshot(context)
+        except Exception:
+            audit_details = {}
+
+        progress_status = self._get_experiment_progress_status_for_array()
+        has_progress = bool(progress_status.get("has_printed_progress", False))
+        has_remaining = self._array_has_remaining_wells_for_loaded_stock()
+        next_state = "resume_ready" if has_progress and has_remaining is not False else "idle"
+
+        self._array_context = None
+        self._soft_stop_clear_uncertain = False
+        self._set_array_run_state(next_state)
+
+        report = dict(report or {})
+        audit_details.update(
+            {
+                "finalize_reason": "transport_fault",
+                "fault_code": report.get("fault_code"),
+                "previous_array_state": previous_state,
+                "array_state": self.get_array_run_state(),
+                "progress_status": progress_status,
+                "remaining_wells_for_loaded_stock": has_remaining,
+            }
+        )
+        self._record_print_array_audit_event(
+            "print_array_interrupted_by_transport_fault",
+            "Print array interrupted by command transport fault",
+            details=audit_details,
+            level="error",
         )
         return next_state
 

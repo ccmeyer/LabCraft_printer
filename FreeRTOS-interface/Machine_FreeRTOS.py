@@ -3870,6 +3870,7 @@ class Machine(QObject):
     machine_connected_signal = Signal(bool)  # Signal to emit when the machine is connected
     reset_report_received = Signal(dict)
     serial_connection_lost = Signal(dict)
+    transport_faulted = Signal(dict)
     all_calibration_droplets_printed = Signal()  # Signal to emit when all calibration droplets are printed
     require_gripper_confirmation = Signal(str)   # "OPEN" or "CLOSE"
     log_stats_updated = Signal(object)  # Signal to emit when log stats are updated
@@ -3932,6 +3933,7 @@ class Machine(QObject):
         self._mcu_unresponsive_reported = False
         self._handling_mcu_unresponsive = False
         self._command_queue_blocked_reason = None
+        self._transport_fault_report = None
         self._pause_after_ack_timeout_ms = 1000
         self._pause_after_confirm_timeout_ms = 2500
         self._pending_pause_after_requests = {}
@@ -4172,6 +4174,10 @@ class Machine(QObject):
             "session_recovery_in_progress": bool(getattr(self, "_session_recovery_in_progress", False)),
             "waiting_for_post_clear_status": bool(getattr(self, "_waiting_for_post_clear_status", False)),
             "queue_gap_repair": self._queue_gap_repair_for_output(),
+            "transport_fault_active": bool(getattr(self, "_transport_fault_report", None)),
+            "transport_fault_code": str(
+                (getattr(self, "_transport_fault_report", None) or {}).get("fault_code") or ""
+            ),
             "pending_ack_count": len(pending_acks),
             "pending_ack_keys": [self._ack_key_for_output(key) for key in list(pending_acks.keys())],
             "command_queue_depth": len(queue),
@@ -4345,6 +4351,7 @@ class Machine(QObject):
         }
 
     def _clear_transport_after_unclean_serial_loss(self):
+        self._clear_transport_fault_latch("serial_connection_lost")
         self._clear_queue_gap_repair("serial_connection_lost")
         self.command_queue.clear_queue(reset_counter=True)
         self.sent_command = None
@@ -4376,6 +4383,7 @@ class Machine(QObject):
         self._stop_mcu_response_watchdog()
 
     def _clear_transport_after_mcu_unresponsive(self):
+        self._clear_transport_fault_latch("mcu_unresponsive")
         self._clear_queue_gap_repair("mcu_unresponsive")
         self.command_queue.clear_queue(reset_counter=True)
         self.sent_command = None
@@ -4522,6 +4530,18 @@ class Machine(QObject):
             pass
 
     def connect_board(self, port):
+        if getattr(self, "_transport_fault_report", None):
+            message = (
+                "Command transport is paused after an unrecoverable synchronization fault. "
+                "Disconnect the current machine session before reconnecting."
+            )
+            self._record_black_box_event(
+                "transport_fault_reconnect_rejected",
+                {"port": str(port or ""), "message": message},
+            )
+            print(message)
+            self.error_occurred.emit(message)
+            return False
         try:
             if (
                 self.ser is not None
@@ -4577,6 +4597,7 @@ class Machine(QObject):
             return
         if self.profile.has_log_channel:
             self.begin_log_thread()
+        self._clear_transport_fault_latch("clean_hello")
         self._session_recovery_in_progress = False
         self._transport_capabilities = capabilities
         self._transport_ready = True
@@ -4635,6 +4656,7 @@ class Machine(QObject):
         print('Resetting board')
         self._expect_serial_reader_stop("reset_board")
         self._stop_mcu_response_watchdog()
+        self._clear_transport_fault_latch("reset_board")
         self._clear_queue_gap_repair("reset_board")
         self.command_queue.clear_queue(reset_counter=True)
         self._transport_capabilities = 0
@@ -4748,6 +4770,7 @@ class Machine(QObject):
             self._invoke_ack_callback(handler, payload)
 
     def _reset_session_state_for_recovery(self):
+        self._clear_transport_fault_latch("session_recovery")
         self._clear_queue_gap_repair("session_recovery")
         self.command_queue.clear_queue(reset_counter=True)
         self.sent_command = None
@@ -4792,6 +4815,7 @@ class Machine(QObject):
         # self.reset_board()
         self._expect_serial_reader_stop("disconnect_handler")
         self._stop_mcu_response_watchdog()
+        self._clear_transport_fault_latch("disconnect")
         self._clear_queue_gap_repair("disconnect")
         self._record_black_box_event(
             "disconnect_complete",
@@ -4890,6 +4914,7 @@ class Machine(QObject):
 
         self.ser = None
         self.sent_command = None
+        self._clear_transport_fault_latch(str(reason or "external_owner"))
         self._clear_queue_gap_repair(str(reason or "external_owner"))
         self._transport_ready = False
         self._tx_paused = True
@@ -5623,7 +5648,7 @@ class Machine(QObject):
         #         print('Cannot add manual command while commands are in queue')
         #         return False
         blocked_reason = getattr(self, "_command_queue_blocked_reason", None)
-        if blocked_reason and not getattr(self, "_transport_ready", False):
+        if blocked_reason:
             message = (
                 f"Cannot queue {command_type}: machine connection is not trusted after "
                 f"{blocked_reason}. Reconnect to the MCU and home the motors before sending commands."
@@ -5687,6 +5712,27 @@ class Machine(QObject):
             if ack_code == CMD_QUEUE_ACK and seq32 in targets:
                 self._cancel_ack_wait_by_key(key)
 
+    def _cancel_all_queue_ack_waits(self):
+        for key in list(self._pending_acks.keys()):
+            ack_code, _seq32, _seq8 = key
+            if ack_code == CMD_QUEUE_ACK:
+                self._cancel_ack_wait_by_key(key)
+
+    def _clear_transport_fault_latch(self, reason=None):
+        report = getattr(self, "_transport_fault_report", None)
+        if not report:
+            return
+        self._record_black_box_event(
+            "transport_fault_cleared",
+            {
+                "fault_code": str(report.get("fault_code") or "transport_fault"),
+                "reason": str(reason or "session_teardown"),
+            },
+        )
+        self._transport_fault_report = None
+        if getattr(self, "_command_queue_blocked_reason", None) == "transport_fault":
+            self._command_queue_blocked_reason = None
+
     def _clear_queue_gap_repair(self, reason=None):
         state = getattr(self, "_queue_gap_repair", None)
         if not state:
@@ -5702,7 +5748,11 @@ class Machine(QObject):
         payload = self._queue_gap_repair_for_output() or {}
         payload.update({"reason": str(reason), "message": str(message)})
         self._record_black_box_event("queue_gap_repair_failed", payload)
-        self._handle_transport_fault(message)
+        self._handle_transport_fault(
+            message,
+            fault_code=str(reason or "queue_gap_repair_failed"),
+            details={"queue_gap_repair": self._queue_gap_repair_for_output()},
+        )
 
     def _start_queue_gap_repair(self, origin_seq32, expected_seq32):
         origin_seq32 = int(origin_seq32 or 0)
@@ -5923,18 +5973,58 @@ class Machine(QObject):
         if command.mark_as_sent():
             self._record_command_event(command, "sent")
 
-    def _handle_transport_fault(self, message):
-        payload = {"message": str(message)}
+    def _handle_transport_fault(self, message, *, fault_code="transport_fault", details=None):
+        active_report = getattr(self, "_transport_fault_report", None)
+        if active_report:
+            self._record_black_box_event(
+                "transport_fault_suppressed",
+                {
+                    "active_fault_code": str(active_report.get("fault_code") or "transport_fault"),
+                    "suppressed_fault_code": str(fault_code or "transport_fault"),
+                    "message": str(message),
+                },
+            )
+            return dict(active_report)
+
+        repair_state = self._queue_gap_repair_for_output()
+        payload = {
+            "fault_code": str(fault_code or "transport_fault"),
+            "message": str(message),
+            "details": dict(details or {}),
+            "queue_gap_repair": repair_state,
+        }
         self._record_black_box_event("transport_fault", payload)
-        self._write_black_box_snapshot("transport_fault", payload)
+        snapshot_result = self._write_black_box_snapshot("transport_fault", payload)
         self._tx_paused = True
+        self._command_queue_blocked_reason = "transport_fault"
+        self._cancel_all_queue_ack_waits()
+        self._cancel_pending_pause_after_requests()
         self._clear_queue_gap_repair("transport_fault")
         try:
             self.stop_execution_timer()
         except Exception:
             pass
+        report = {
+            "reason": "transport_fault",
+            "fault_code": str(fault_code or "transport_fault"),
+            "summary": "Command transport was paused because the host and MCU command queues could not be synchronized.",
+            "message": str(message),
+            "requested_stop": False,
+            "port": getattr(self, "port", None),
+            "queue_depth": len(getattr(self.command_queue, "queue", [])),
+            "queue_gap_repair": repair_state,
+            "details": dict(details or {}),
+            "requires_disconnect": True,
+            "requires_homing": True,
+            "black_box_reason": "transport_fault",
+            "black_box_log_path": snapshot_result.get("path"),
+            "black_box_log_error": snapshot_result.get("error"),
+        }
+        self._transport_fault_report = dict(report)
+        self._record_black_box_event("transport_fault_reported", report)
         print(message)
-        self.error_occurred.emit(message)
+        self.transport_faulted.emit(dict(report))
+        return dict(report)
 
     def _start_command_ack_wait(self, command):
         seq32 = int(getattr(command, "command_number", 0) or 0)
@@ -5990,7 +6080,9 @@ class Machine(QObject):
         if ack_result == "busy":
             if int(getattr(command, "send_attempts", 0) or 0) >= int(self._queue_ack_max_retries):
                 self._handle_transport_fault(
-                    f"MCU remained busy for command {seq32} after {command.send_attempts} attempts."
+                    f"MCU remained busy for command {seq32} after {command.send_attempts} attempts.",
+                    fault_code="queue_busy_retry_exhausted",
+                    details={"command_number": int(seq32), "send_attempts": int(command.send_attempts)},
                 )
                 return
             self.command_queue.mark_for_resend_from(seq32)
@@ -6002,12 +6094,16 @@ class Machine(QObject):
 
         if ack_result == "watermark_rejected":
             self._handle_transport_fault(
-                f"MCU rejected pause-after watermark for seq32={seq32}."
+                f"MCU rejected pause-after watermark for seq32={seq32}.",
+                fault_code="pause_watermark_rejected",
+                details={"command_number": int(seq32)},
             )
             return
 
         self._handle_transport_fault(
-            f"Unexpected queue ACK result for seq32={seq32}: {ack_result or 'missing'}"
+            f"Unexpected queue ACK result for seq32={seq32}: {ack_result or 'missing'}",
+            fault_code="unexpected_queue_ack",
+            details={"command_number": int(seq32), "ack_result": ack_result or None},
         )
 
     def _on_queue_ack_timeout(self, seq32):
@@ -6243,6 +6339,8 @@ class Machine(QObject):
         """
         if not self._transport_ready:
             return
+        if getattr(self, "_command_queue_blocked_reason", None):
+            return
         if getattr(self, "_tx_paused", False) or getattr(self, "_sequence_pause", False):
             return
         if getattr(self, "_queue_gap_repair", None):
@@ -6367,6 +6465,12 @@ class Machine(QObject):
         Called by UI after the user has manually ensured the gripper is in the requested state.
         This clears the gate, starts the 10-minute timer, and resumes queue transmission.
         """
+        if getattr(self, "_transport_fault_report", None):
+            self._record_black_box_event(
+                "transport_fault_gripper_confirmation_ignored",
+                {"fault_code": self._transport_fault_report.get("fault_code")},
+            )
+            return
         self._gripper_ack_required = False
         self._reset_gripper_idle_timer()
         self._tx_paused = False

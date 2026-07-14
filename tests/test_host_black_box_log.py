@@ -230,9 +230,11 @@ def test_queue_gap_repair_failure_snapshot_preserves_incident_evidence(
 
     snapshot = _read_single_snapshot(tmp_path)
     assert snapshot["reason"] == "transport_fault"
-    assert snapshot["trigger"] == {
-        "message": "Unable to recover queue gap: command 2859 failed after 3 repair attempts."
-    }
+    assert snapshot["trigger"]["message"] == (
+        "Unable to recover queue gap: command 2859 failed after 3 repair attempts."
+    )
+    assert snapshot["trigger"]["fault_code"] == "busy_retry_exhausted"
+    assert snapshot["trigger"]["queue_gap_repair"]["cursor_seq32"] == 2859
 
     queued = {item["command_number"]: item for item in snapshot["commands"]["queued"]}
     assert queued[2859]["command_type"] == "WAIT"

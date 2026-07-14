@@ -418,10 +418,12 @@ def test_request_pause_after_seq32_success_still_invokes_success_callback(qapp, 
     assert failures == []
 
 
-def test_queue_gap_below_local_queue_faults_instead_of_resending(qapp, test_profile):
-    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+def test_queue_gap_below_local_queue_faults_instead_of_resending(qapp, test_profile, tmp_path):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
     errors = []
+    faults = []
     machine.error_occurred.connect(errors.append)
+    machine.transport_faulted.connect(faults.append)
     machine._transport_ready = True
     machine._write_frame = Mock()
     machine.command_queue.command_number = 9
@@ -439,9 +441,19 @@ def test_queue_gap_below_local_queue_faults_instead_of_resending(qapp, test_prof
     )
 
     assert machine._tx_paused is True
-    assert errors
-    assert "earliest local queued command is 10" in errors[-1]
+    assert errors == []
+    assert len(faults) == 1
+    assert faults[0]["fault_code"] == "expected_command_unavailable"
+    assert "earliest local queued command is 10" in faults[0]["message"]
+    assert faults[0]["requires_disconnect"] is True
+    assert faults[0]["requires_homing"] is True
+    assert faults[0]["black_box_log_path"]
+    assert machine._command_queue_blocked_reason == "transport_fault"
+    assert not any(key[0] == mfr.CMD_QUEUE_ACK for key in machine._pending_acks)
     assert machine._write_frame.call_count == sent_before_gap
+
+    machine._handle_transport_fault("later stale failure", fault_code="unexpected_queue_ack")
+    assert len(faults) == 1
 
 
 def test_queue_gap_recovers_when_expected_command_is_still_sent(qapp, test_profile):
@@ -533,15 +545,19 @@ def test_queue_gap_requeues_locally_executing_expected_command(qapp, test_profil
 def test_queue_gap_without_expected_sequence_should_not_resend_later_command(qapp, test_profile):
     machine, commands, _completions = _make_incident_gap_window(test_profile)
     errors = []
+    faults = []
     machine.error_occurred.connect(errors.append)
+    machine.transport_faulted.connect(faults.append)
     sent_before_gap = machine._write_frame.call_count
 
     _deliver_queue_ack(machine, 2860, "gap", expected_seq32=None)
 
     assert machine._write_frame.call_count == sent_before_gap
     assert machine._tx_paused is True
-    assert errors
-    assert "expected sequence" in errors[-1].lower()
+    assert errors == []
+    assert len(faults) == 1
+    assert faults[0]["fault_code"] == "missing_expected_seq32"
+    assert "expected sequence" in faults[0]["message"].lower()
 
 
 def test_queue_gap_status_frontier_advances_repair_when_ack_is_lost(qapp, test_profile):
@@ -646,7 +662,9 @@ def test_queue_clear_discards_active_gap_repair_state(qapp, test_profile):
 def test_queue_busy_resends_are_bounded(qapp, test_profile):
     machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
     errors = []
+    faults = []
     machine.error_occurred.connect(errors.append)
+    machine.transport_faulted.connect(faults.append)
     command = machine.wait_ms(10)
     command.send_attempts = machine._queue_ack_max_retries
     command.mark_as_sent()
@@ -654,8 +672,10 @@ def test_queue_busy_resends_are_bounded(qapp, test_profile):
     machine._on_queue_ack(command.command_number, {"ack_result": "busy"})
 
     assert machine._tx_paused is True
-    assert errors
-    assert "remained busy" in errors[-1]
+    assert errors == []
+    assert len(faults) == 1
+    assert faults[0]["fault_code"] == "queue_busy_retry_exhausted"
+    assert "remained busy" in faults[0]["message"]
 
 
 class _OpenSerial:
@@ -739,3 +759,52 @@ def test_command_queue_rejects_commands_after_untrusted_transport(qapp, test_pro
     assert len(machine.command_queue.queue) == 0
     assert errors
     assert "machine connection is not trusted" in errors[-1]
+
+
+def test_transport_fault_blocks_new_commands_while_serial_transport_is_ready(qapp, test_profile):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+    errors = []
+    machine.error_occurred.connect(errors.append)
+    machine._transport_ready = True
+    machine._write_frame = Mock()
+    machine._handle_transport_fault("queue divergence", fault_code="expected_command_unavailable")
+
+    result = machine.add_command_to_queue("DISABLE_MOTORS", 0, 0, 0)
+
+    assert result is False
+    assert len(machine.command_queue.queue) == 0
+    assert errors
+    assert "machine connection is not trusted" in errors[-1]
+
+    machine.command_queue.add_command("WAIT", 10, 0, 0)
+    machine._tx_paused = False
+    machine.pump_send_queue()
+    machine._write_frame.assert_not_called()
+
+
+def test_transport_fault_refuses_in_place_reconnect(qapp, test_profile):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+    errors = []
+    machine.error_occurred.connect(errors.append)
+    machine.ser = _OpenSerial()
+    machine.port = "COM9"
+    machine._send_hello = Mock()
+    machine._handle_transport_fault("queue divergence", fault_code="unexpected_queue_ack")
+
+    result = machine.connect_board("COM9")
+
+    assert result is False
+    machine._send_hello.assert_not_called()
+    assert errors
+    assert "Disconnect the current machine session" in errors[-1]
+
+
+def test_transport_fault_reset_clears_latch(qapp, test_profile):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+    machine._handle_transport_fault("queue divergence", fault_code="unexpected_queue_ack")
+    assert machine._transport_fault_report is not None
+
+    machine.reset_board()
+
+    assert machine._transport_fault_report is None
+    assert machine._command_queue_blocked_reason is None
