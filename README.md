@@ -334,6 +334,8 @@ Inside `FreeRTOS-interface/Presets`, JSON files are tracked starter templates. O
 
 Operators can update the Python application from the Firmware tab.
 
+Maintainers preparing release tags, release metadata, update bundles, or stable/RC promotions should follow `docs/release_process.md`.
+
 Expected flow:
 
 - Click `Check for Updates`.

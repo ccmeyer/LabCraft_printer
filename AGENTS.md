@@ -102,6 +102,14 @@ When adding or changing test/build tooling:
 
 ---
 
+## Release workflow
+- Before changing `VERSION`, `CHANGELOG.md`, `releases/latest.json`, release manifests, update bundles, or release tags, read `docs/release_process.md`.
+- Never move, delete, or retarget existing release tags.
+- Do not push `stable`, `main`, or release tags unless the user explicitly asks for that release operation.
+- For release metadata changes, run the validation commands listed in `docs/release_process.md` before recommending a tag.
+
+---
+
 ## Git / commits
 - One milestone per commit.
 - Keep commits small and descriptive, e.g.:
