@@ -1914,6 +1914,10 @@ class MotorPositionWidget(QGroupBox):
         self.model.machine_model.step_size_changed.connect(self.update_step_size)
         self.model.machine_model.motor_state_changed.connect(self.update_motor_button)
         self.model.machine_model.machine_state_updated.connect(self.update_motor_button_state)
+        self.model.machine_model.motor_state_changed.connect(self.refresh_location_buttons)
+        self.model.machine_model.machine_state_updated.connect(self.refresh_location_buttons)
+        self.model.machine_model.home_status_signal.connect(self.refresh_location_buttons)
+        self.model.location_model.locations_updated.connect(self.refresh_location_buttons)
 
         # Connect the signals to the controller's slots
         self.home_requested.connect(self.controller.home_machine)  # Connect the signal to the controller's slot
@@ -1923,9 +1927,12 @@ class MotorPositionWidget(QGroupBox):
     def init_ui(self):
         """Initialize the user interface."""
         main_layout = QHBoxLayout()  # Main horizontal layout
+        main_layout.setContentsMargins(0, 11, 0, 11)
+        main_layout.setSpacing(2)
 
         # Create a grid layout for motor positions
         grid_layout = QGridLayout()
+        grid_layout.setHorizontalSpacing(2)
 
         # Add column headers
         motor_label = QLabel('Motor')
@@ -1978,8 +1985,8 @@ class MotorPositionWidget(QGroupBox):
         self.toggle_motor_button.setFixedHeight(fixed_height)  # Set a fixed height
         button_layout.addWidget(self.toggle_motor_button, alignment=Qt.AlignRight)
 
-        # Add Home button
-        self.home_button = QtWidgets.QPushButton("Home")
+        # Add motor homing button
+        self.home_button = QtWidgets.QPushButton("Home Motors")
         self.home_button.clicked.connect(self.request_homing)
         self.home_button.setStyleSheet(f"background-color: {self.color_dict['green']}; color: white;")
         self.home_button.setFixedWidth(fixed_width)  # Set fixed width
@@ -2000,14 +2007,41 @@ class MotorPositionWidget(QGroupBox):
         self.step_size_input.valueChangedByStep.connect(self.change_step_size)
         button_layout.addWidget(self.step_size_input, alignment=Qt.AlignRight)
 
-        # Add grid layout and button layout to the main horizontal layout
+        # Add buttons for the standard saved locations
+        location_button_layout = QVBoxLayout()
+        move_to_label = QtWidgets.QLabel("Move to")
+        move_to_label.setAlignment(Qt.AlignCenter)
+        move_to_label.setFixedWidth(fixed_width)
+        move_to_label.setFixedHeight(fixed_height)
+        location_button_layout.addWidget(move_to_label, alignment=Qt.AlignRight)
+
+        self.location_buttons = {}
+        standard_locations = (
+            ("home", "Home Position"),
+            ("loading", "Loading"),
+            ("camera", "Camera"),
+        )
+        for location_name, button_text in standard_locations:
+            button = QtWidgets.QPushButton(button_text)
+            button.setFocusPolicy(QtCore.Qt.NoFocus)
+            button.setFixedWidth(fixed_width)
+            button.setFixedHeight(fixed_height)
+            button.clicked.connect(
+                lambda _checked=False, name=location_name: self.request_move_to_location(name)
+            )
+            location_button_layout.addWidget(button, alignment=Qt.AlignRight)
+            self.location_buttons[location_name] = button
+
+        # Add grid and button layouts to the main horizontal layout
         main_layout.addLayout(grid_layout)
         main_layout.addLayout(button_layout)
+        main_layout.addLayout(location_button_layout)
 
         self.setLayout(main_layout)
         
         self.update_motor_button(self.model.machine_model.motors_enabled)
         self.update_motor_button_state(self.model.machine_model.is_connected())
+        self.refresh_location_buttons()
 
 
     def update_labels(self):
@@ -2040,6 +2074,37 @@ class MotorPositionWidget(QGroupBox):
     def request_toggle_motors(self):
         """Emit a signal to request toggling the motors."""
         self.toggle_motor_requested.emit()
+
+    def request_move_to_location(self, location_name):
+        """Request a guarded manual move to a standard saved location."""
+        self.main_window.move_to_location(location=location_name, manual=True)
+
+    def refresh_location_buttons(self, *_args):
+        """Refresh standard-location availability from current machine state."""
+        machine_model = self.model.machine_model
+        connected = machine_model.is_connected()
+        motors_enabled = machine_model.motors_are_enabled()
+        motors_homed = machine_model.motors_are_homed()
+        location_names = set(self.model.location_model.get_location_names())
+
+        if not connected:
+            readiness_tooltip = "Connect to the machine before moving to a saved location."
+        elif not motors_enabled:
+            readiness_tooltip = "Enable the motors before moving to a saved location."
+        elif not motors_homed:
+            readiness_tooltip = "Home the motors before moving to a saved location."
+        else:
+            readiness_tooltip = None
+
+        for location_name, button in self.location_buttons.items():
+            location_exists = location_name in location_names
+            button.setEnabled(readiness_tooltip is None and location_exists)
+            if readiness_tooltip is not None:
+                button.setToolTip(readiness_tooltip)
+            elif not location_exists:
+                button.setToolTip(f"Saved location '{location_name}' is not configured.")
+            else:
+                button.setToolTip(f"Move to the saved {location_name} location.")
 
     def update_motor_button_state(self,machine_connected):
         self.toggle_motor_button.setEnabled(machine_connected)
