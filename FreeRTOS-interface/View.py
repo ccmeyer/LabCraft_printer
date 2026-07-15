@@ -4371,7 +4371,7 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         self.start_print_array_button.clicked.connect(self.start_print_array)
         self.bottom_layout.addWidget(self.start_print_array_button)
 
-        self.pause_machine_button = QPushButton("Pause")
+        self.pause_machine_button = QPushButton("Pause Now")
         self.pause_machine_button.setStyleSheet(f"background-color: {self.color_dict['dark_red']}; color: white;")
         self.pause_machine_button.clicked.connect(self.main_window.pause_machine)
         self.bottom_layout.addWidget(self.pause_machine_button)
