@@ -189,6 +189,7 @@ def _make_controller(
             get_target_refuel_pressure=lambda: 0.30,
             transport_paused=False,
             pause_watermark_reached=False,
+            pause_commands=Mock(),
             resume_commands=Mock(),
         ),
         experiment_model=SimpleNamespace(
@@ -215,10 +216,25 @@ def _make_controller(
             ),
         ),
     )
+    dock_reasons = {"after_board_reset"} if reset_dock_required else set()
+    c.model.machine_model._evap_plate_dock_check_reasons = dock_reasons
     c.model.machine_model.evap_plate_dock_check_required_after_reset = bool(reset_dock_required)
-    c.model.machine_model.clear_evap_plate_dock_check_required_after_reset = (
-        lambda: setattr(c.model.machine_model, "evap_plate_dock_check_required_after_reset", False)
-    )
+
+    def _mark_dock_check(reason):
+        dock_reasons.add(str(reason))
+
+    def _clear_dock_checks():
+        dock_reasons.clear()
+        c.model.machine_model.evap_plate_dock_check_required_after_reset = False
+
+    def _clear_reset_dock_check():
+        dock_reasons.discard("after_board_reset")
+        c.model.machine_model.evap_plate_dock_check_required_after_reset = False
+
+    c.model.machine_model.mark_evap_plate_dock_check_required = _mark_dock_check
+    c.model.machine_model.get_evap_plate_dock_check_reasons = lambda: sorted(dock_reasons)
+    c.model.machine_model.clear_evap_plate_dock_check_required = _clear_dock_checks
+    c.model.machine_model.clear_evap_plate_dock_check_required_after_reset = _clear_reset_dock_check
     return c
 
 
@@ -284,6 +300,45 @@ def test_evap_plate_dock_context_requires_after_board_reset_for_start_and_resume
     assert resume_context["required"] is True
 
 
+def test_evap_plate_dock_context_includes_persistent_reasons_for_start_and_resume():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+    )
+    c.model.machine_model.mark_evap_plate_dock_check_required("transport_fault")
+    c.model.machine_model.mark_evap_plate_dock_check_required("array_hard_abort")
+
+    start_context = Controller.get_evap_plate_dock_check_context(c, request_kind="start")
+    resume_context = Controller.get_evap_plate_dock_check_context(c, request_kind="resume")
+
+    assert start_context["reasons"] == ["array_hard_abort", "transport_fault"]
+    assert resume_context["reasons"] == ["array_hard_abort", "transport_fault"]
+    assert start_context["required"] is True
+    assert resume_context["required"] is True
+    assert "aborted" in start_context["message"]
+    assert "transport fault" in start_context["message"]
+
+
+def test_in_place_pause_resume_does_not_latch_dock_check_or_move():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        initial_state="running",
+    )
+
+    Controller.pause_commands(c)
+    Controller.resume_commands(c)
+
+    c.machine.pause_commands.assert_called_once_with()
+    c.model.machine_model.pause_commands.assert_called_once_with()
+    c.machine.resume_commands.assert_called_once_with()
+    c.model.machine_model.resume_commands.assert_called_once_with()
+    assert c.get_array_run_state() == "running"
+    assert c.model.machine_model.get_evap_plate_dock_check_reasons() == []
+    c.move_to_location.assert_not_called()
+    c.model.experiment_model.get_progress_status.assert_not_called()
+
+
 def test_print_array_blocks_when_evap_plate_dock_confirmation_required():
     c = _make_controller(
         well_plate=FakeWellPlate([FakeWell("A1", 5)]),
@@ -310,8 +365,49 @@ def test_print_array_confirmed_after_reset_clears_reset_dock_latch():
     Controller.print_array(c, evap_plate_dock_confirmed=True)
 
     assert c.model.machine_model.evap_plate_dock_check_required_after_reset is False
+    assert c.model.machine_model.get_evap_plate_dock_check_reasons() == []
     c.close_gripper.assert_called_once_with()
     assert c.get_array_run_state() == "running"
+
+
+def test_print_array_confirmed_start_clears_all_persistent_dock_reasons():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+    )
+    c.model.machine_model.mark_evap_plate_dock_check_required("array_hard_abort")
+    c.model.machine_model.mark_evap_plate_dock_check_required("transport_fault")
+
+    Controller.print_array(c, evap_plate_dock_confirmed=True)
+
+    assert c.model.machine_model.get_evap_plate_dock_check_reasons() == []
+    assert c.get_array_run_state() == "running"
+
+
+def test_print_array_preflight_failure_preserves_persistent_dock_reasons():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)], calibration_ok=False),
+        printer_head=_make_printer_head(),
+    )
+    c.model.machine_model.mark_evap_plate_dock_check_required("array_hard_abort")
+
+    Controller.print_array(c, evap_plate_dock_confirmed=True)
+
+    assert c.model.machine_model.get_evap_plate_dock_check_reasons() == ["array_hard_abort"]
+    c.close_gripper.assert_not_called()
+
+
+def test_print_array_empty_run_context_preserves_persistent_dock_reasons():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 0)]),
+        printer_head=_make_printer_head(),
+    )
+    c.model.machine_model.mark_evap_plate_dock_check_required("array_hard_abort")
+
+    Controller.print_array(c, evap_plate_dock_confirmed=True)
+
+    assert c.model.machine_model.get_evap_plate_dock_check_reasons() == ["array_hard_abort"]
+    c.close_gripper.assert_not_called()
 
 
 def test_print_array_blocks_when_plate_not_calibrated():
@@ -1378,6 +1474,7 @@ def test_handle_status_update_soft_stop_clear_and_park_completes_before_resume_r
     assert c.get_array_run_state() == "resume_ready"
     assert c.update_slots_signal.calls == [()]
     assert c.error_occurred_signal.calls == []
+    assert c.model.machine_model.get_evap_plate_dock_check_reasons() == []
 
 
 def test_soft_stop_resumes_paused_transport_after_clear_before_parking():
@@ -1444,6 +1541,61 @@ def test_soft_stop_clear_unconfirmed_warns_and_preserves_resume_ready():
         "Soft Stop Warning",
         "Soft stop reached the watermark, but the queue clear was not confirmed within the grace window after CLEAR_ACK timed out. Preserving resume state without parking.",
     )
+    assert c.model.machine_model.get_evap_plate_dock_check_reasons() == [
+        "soft_stop_clear_unconfirmed"
+    ]
+
+
+def test_soft_stop_clear_exception_latches_dock_check_before_finalize():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        initial_state="stop_requested",
+    )
+    c._array_context = _with_lowered_array_accels(
+        {"soft_stop_pending": True, "soft_stop_phase": "waiting_watermark"}
+    )
+    c.machine.clear_command_queue.side_effect = RuntimeError("clear failed")
+
+    Controller._begin_soft_stop_clear_and_park(c)
+
+    assert c.get_array_run_state() == "resume_ready"
+    assert c.model.machine_model.get_evap_plate_dock_check_reasons() == [
+        "soft_stop_clear_unconfirmed"
+    ]
+    c.move_to_location.assert_not_called()
+
+
+def test_soft_stop_transport_resume_failure_latches_park_check():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        initial_state="stop_requested",
+    )
+    c._array_context = _with_lowered_array_accels(
+        {
+            "soft_stop_pending": True,
+            "soft_stop_phase": "clearing",
+            "soft_stop_transport_was_paused": True,
+        }
+    )
+    c.machine.resume_commands.side_effect = RuntimeError("resume failed")
+
+    Controller._on_soft_stop_queue_cleared(
+        c,
+        {
+            "ack_received": True,
+            "ack_timed_out": False,
+            "status_confirmed": True,
+            "status_timed_out": False,
+        },
+    )
+
+    assert c.get_array_run_state() == "resume_ready"
+    assert c.model.machine_model.get_evap_plate_dock_check_reasons() == [
+        "soft_stop_park_failed"
+    ]
+    c.move_to_location.assert_not_called()
 
 
 def test_soft_stop_park_failure_warns_and_preserves_resume_ready():
@@ -1476,6 +1628,46 @@ def test_soft_stop_park_failure_warns_and_preserves_resume_ready():
         "Soft Stop Warning",
         "Soft stop reached the watermark, but the machine could not be parked. Preserving resume state without parking.",
     )
+    assert c.model.machine_model.get_evap_plate_dock_check_reasons() == [
+        "soft_stop_park_failed"
+    ]
+
+
+def test_normal_array_park_failure_latches_dock_check():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 0)]),
+        printer_head=_make_printer_head(),
+        initial_state="running",
+    )
+    c._array_context = _with_lowered_array_accels({"stock_id": "stock-a"})
+    c.move_to_location = Mock(return_value=False)
+
+    Controller._enqueue_array_finalize(c, "completed")
+
+    assert c.get_array_run_state() == "idle"
+    assert c.model.machine_model.get_evap_plate_dock_check_reasons() == [
+        "array_park_failed"
+    ]
+
+
+def test_resume_array_blocks_when_persistent_dock_confirmation_required():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        initial_state="resume_ready",
+    )
+    c.model.machine_model.mark_evap_plate_dock_check_required("soft_stop_park_failed")
+
+    Controller.print_array(c)
+
+    assert c.error_occurred_signal.calls[-1][0] == "Evaporation Plate Dock Check Required"
+    assert c.get_array_run_state() == "resume_ready"
+    c.machine.resume_commands.assert_not_called()
+    c.close_gripper.assert_not_called()
+    c.move_to_location.assert_not_called()
+    assert c.model.machine_model.get_evap_plate_dock_check_reasons() == [
+        "soft_stop_park_failed"
+    ]
 
 
 def _make_pickup_ready_controller(*, initial_state="resume_ready", transport_paused=False):
@@ -1631,3 +1823,4 @@ def test_clear_command_queue_resets_array_runner_state():
     c.update_expected_with_current.assert_called_once_with()
     assert c.get_array_run_state() == "idle"
     assert c._array_context is None
+    assert c.model.machine_model.get_evap_plate_dock_check_reasons() == ["array_hard_abort"]

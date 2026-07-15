@@ -103,6 +103,35 @@ def test_evap_plate_dock_reset_latch_survives_home_until_cleared(qapp):
     assert machine_model.evap_plate_dock_check_required_after_reset is False
 
 
+def test_evap_plate_dock_reason_latch_is_deduplicated_sorted_and_reset_compatible(qapp):
+    machine_model = MachineModel()
+
+    machine_model.mark_evap_plate_dock_check_required("transport_fault")
+    machine_model.mark_evap_plate_dock_check_required("array_hard_abort")
+    machine_model.mark_evap_plate_dock_check_required("transport_fault")
+    machine_model.mark_evap_plate_dock_check_required_after_reset()
+
+    assert machine_model.get_evap_plate_dock_check_reasons() == [
+        "after_board_reset",
+        "array_hard_abort",
+        "transport_fault",
+    ]
+    assert machine_model.evap_plate_dock_check_required_after_reset is True
+
+    machine_model.clear_evap_plate_dock_check_required_after_reset()
+    assert machine_model.get_evap_plate_dock_check_reasons() == [
+        "array_hard_abort",
+        "transport_fault",
+    ]
+
+    machine_model.evap_plate_dock_check_required_after_reset = True
+    assert "after_board_reset" in machine_model.get_evap_plate_dock_check_reasons()
+
+    machine_model.clear_evap_plate_dock_check_required()
+    assert machine_model.get_evap_plate_dock_check_reasons() == []
+    assert machine_model.evap_plate_dock_check_required_after_reset is False
+
+
 def test_pressure_conversion_and_rolling_buffers(qapp):
     machine_model = MachineModel()
     initial = machine_model.print_pressure_readings.copy()

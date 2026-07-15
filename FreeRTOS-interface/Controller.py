@@ -3226,6 +3226,8 @@ class Controller(QObject):
         if previous_state not in {"running", "stop_requested"}:
             return None
 
+        self._mark_evap_plate_dock_check_required("transport_fault")
+
         context = getattr(self, "_array_context", None)
         try:
             audit_details = self._build_print_array_snapshot(context)
@@ -3602,6 +3604,7 @@ class Controller(QObject):
         except Exception:
             context["soft_stop_phase"] = "done"
             context["soft_stop_pending"] = False
+            self._mark_evap_plate_dock_check_required("soft_stop_clear_unconfirmed")
             self._warn_soft_stop_post_watermark(
                 "Soft stop reached the watermark, but the queued commands could not be cleared. Preserving resume state without parking."
             )
@@ -3622,6 +3625,7 @@ class Controller(QObject):
             self._soft_stop_clear_uncertain = True
             context["skip_array_accel_restore"] = True
             context["soft_stop_phase"] = "done"
+            self._mark_evap_plate_dock_check_required("soft_stop_clear_unconfirmed")
             ack_received = bool(clear_result.get("ack_received"))
             ack_timed_out = bool(clear_result.get("ack_timed_out"))
             if ack_received:
@@ -3656,6 +3660,7 @@ class Controller(QObject):
                 self.resume_commands()
             except Exception:
                 context["soft_stop_phase"] = "done"
+                self._mark_evap_plate_dock_check_required("soft_stop_park_failed")
                 self._warn_soft_stop_post_watermark(
                     "Soft stop reached the watermark and cleared the queue, but transport could not be resumed for parking. Preserving resume state without parking."
                 )
@@ -3673,6 +3678,7 @@ class Controller(QObject):
 
         if self._queue_pause_park_sequence(on_complete=_finish_after_park) is False:
             context["soft_stop_phase"] = "done"
+            self._mark_evap_plate_dock_check_required("soft_stop_park_failed")
             self._warn_soft_stop_post_watermark(
                 "Soft stop reached the watermark, but the machine could not be parked. Preserving resume state without parking."
             )
@@ -5462,12 +5468,16 @@ class Controller(QObject):
             self._complete_array_finalize(reason)
 
         if self._queue_pause_park_sequence(on_complete=_finish_after_park) is False:
+            dock_reason = "soft_stop_park_failed" if reason == "soft_stop" else "array_park_failed"
+            self._mark_evap_plate_dock_check_required(dock_reason)
             self._complete_array_finalize(reason)
             return False
         return True
 
     def _complete_array_finalize(self, reason):
         reason = str(reason or "completed")
+        if reason == "hard_abort":
+            self._mark_evap_plate_dock_check_required("array_hard_abort")
         context = getattr(self, "_array_context", None)
         if isinstance(context, dict) and context.get("array_finalize_after_accel_restore"):
             return
@@ -5788,6 +5798,45 @@ class Controller(QObject):
             "pressure_psi": pressure_psi,
         }
 
+    def _get_evap_plate_dock_check_reasons(self):
+        machine_model = getattr(getattr(self, "model", None), "machine_model", None)
+        getter = getattr(machine_model, "get_evap_plate_dock_check_reasons", None)
+        if callable(getter):
+            try:
+                return sorted({str(reason) for reason in (getter() or []) if str(reason)})
+            except Exception:
+                pass
+
+        reasons = set(getattr(machine_model, "_evap_plate_dock_check_reasons", set()) or set())
+        if bool(getattr(machine_model, "evap_plate_dock_check_required_after_reset", False)):
+            reasons.add("after_board_reset")
+        return sorted(str(reason) for reason in reasons if str(reason))
+
+    def _mark_evap_plate_dock_check_required(self, reason):
+        reason = str(reason or "").strip()
+        if not reason:
+            return
+        machine_model = getattr(getattr(self, "model", None), "machine_model", None)
+        marker = getattr(machine_model, "mark_evap_plate_dock_check_required", None)
+        if callable(marker):
+            marker(reason)
+            return
+
+        reasons = set(getattr(machine_model, "_evap_plate_dock_check_reasons", set()) or set())
+        reasons.add(reason)
+        setattr(machine_model, "_evap_plate_dock_check_reasons", reasons)
+        if reason == "after_board_reset":
+            setattr(machine_model, "evap_plate_dock_check_required_after_reset", True)
+
+    def _clear_evap_plate_dock_check_required(self):
+        machine_model = getattr(getattr(self, "model", None), "machine_model", None)
+        clearer = getattr(machine_model, "clear_evap_plate_dock_check_required", None)
+        if callable(clearer):
+            clearer()
+            return
+        setattr(machine_model, "_evap_plate_dock_check_reasons", set())
+        setattr(machine_model, "evap_plate_dock_check_required_after_reset", False)
+
     def get_evap_plate_dock_check_context(self, request_kind=None):
         """Return whether the operator must confirm the evaporation plate dock state."""
         kind = str(request_kind or "").strip().lower()
@@ -5810,9 +5859,8 @@ class Controller(QObject):
                 if not bool(progress_status.get("has_printed_progress", False)):
                     reasons.append("first_experiment_print")
 
-        machine_model = getattr(getattr(self, "model", None), "machine_model", None)
-        if bool(getattr(machine_model, "evap_plate_dock_check_required_after_reset", False)):
-            reasons.append("after_board_reset")
+        persistent_reasons = self._get_evap_plate_dock_check_reasons()
+        reasons.extend(reason for reason in persistent_reasons if reason not in reasons)
 
         required = bool(reasons)
         message_parts = []
@@ -5825,7 +5873,31 @@ class Controller(QObject):
                 "A board reset occurred since the last print array start or resume. "
                 "Homing does not move the evaporation plate back to the dock."
             )
-        if not message_parts:
+        if "array_hard_abort" in reasons:
+            message_parts.append(
+                "The previous print array was aborted before the evaporation plate could be confirmed parked."
+            )
+        if "soft_stop_clear_unconfirmed" in reasons:
+            message_parts.append(
+                "The previous soft stop could not confirm that queued motion was cleared, so the evaporation plate position is uncertain."
+            )
+        if "soft_stop_park_failed" in reasons:
+            message_parts.append(
+                "The previous soft stop could not complete its evaporation plate parking move."
+            )
+        if "array_park_failed" in reasons:
+            message_parts.append(
+                "The previous print array could not complete its evaporation plate parking move."
+            )
+        if "transport_fault" in reasons:
+            message_parts.append(
+                "A command transport fault interrupted the previous print array before parking was confirmed."
+            )
+        if required and not message_parts:
+            message_parts.append(
+                "A previous operation left the evaporation plate position uncertain."
+            )
+        elif not message_parts:
             message_parts.append("The evaporation plate dock check is not required.")
         message_parts.append(
             "Confirm the evaporation plate is seated in the dock position and the "
@@ -5918,6 +5990,11 @@ class Controller(QObject):
         dock_check = self.get_evap_plate_dock_check_context(
             request_kind="resume" if starting_state == "resume_ready" else "start"
         )
+        persistent_dock_reasons = [
+            reason
+            for reason in (dock_check.get("reasons") or [])
+            if reason != "first_experiment_print"
+        ]
         if bool(dock_check.get("required")) and not bool(evap_plate_dock_confirmed):
             message = str(
                 dock_check.get("message")
@@ -5935,19 +6012,8 @@ class Controller(QObject):
         if not self._start_array_run_context():
             print('Cannot print: No remaining droplets for the loaded stock')
             return
-        if (
-            bool(evap_plate_dock_confirmed)
-            and "after_board_reset" in (dock_check.get("reasons") or [])
-        ):
-            clear_dock_check = getattr(
-                self.model.machine_model,
-                "clear_evap_plate_dock_check_required_after_reset",
-                None,
-            )
-            if callable(clear_dock_check):
-                clear_dock_check()
-            else:
-                self.model.machine_model.evap_plate_dock_check_required_after_reset = False
+        if bool(evap_plate_dock_confirmed) and persistent_dock_reasons:
+            self._clear_evap_plate_dock_check_required()
         self._record_print_array_audit_event(
             "print_array_requested",
             "Print array request accepted",

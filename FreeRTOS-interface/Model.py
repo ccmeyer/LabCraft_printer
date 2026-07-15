@@ -10331,7 +10331,7 @@ class MachineModel(QObject):
         self.last_reset_report = None
         self.last_reset_summary = ""
         self.last_reset_report_active = False
-        self.evap_plate_dock_check_required_after_reset = False
+        self._evap_plate_dock_check_reasons = set()
 
     def update_ports(self, ports):
         self.available_ports = ports
@@ -10389,11 +10389,33 @@ class MachineModel(QObject):
         self.reset_report_updated.emit()
         self.machine_state_updated.emit(self.machine_connected)
 
+    def mark_evap_plate_dock_check_required(self, reason):
+        reason = str(reason or "").strip()
+        if reason:
+            self._evap_plate_dock_check_reasons.add(reason)
+
+    def get_evap_plate_dock_check_reasons(self):
+        return sorted(self._evap_plate_dock_check_reasons)
+
+    def clear_evap_plate_dock_check_required(self):
+        self._evap_plate_dock_check_reasons.clear()
+
+    @property
+    def evap_plate_dock_check_required_after_reset(self):
+        return "after_board_reset" in self._evap_plate_dock_check_reasons
+
+    @evap_plate_dock_check_required_after_reset.setter
+    def evap_plate_dock_check_required_after_reset(self, required):
+        if required:
+            self.mark_evap_plate_dock_check_required("after_board_reset")
+        else:
+            self._evap_plate_dock_check_reasons.discard("after_board_reset")
+
     def mark_evap_plate_dock_check_required_after_reset(self):
-        self.evap_plate_dock_check_required_after_reset = True
+        self.mark_evap_plate_dock_check_required("after_board_reset")
 
     def clear_evap_plate_dock_check_required_after_reset(self):
-        self.evap_plate_dock_check_required_after_reset = False
+        self._evap_plate_dock_check_reasons.discard("after_board_reset")
 
     def connect_balance(self):
         self.balance_connected = True

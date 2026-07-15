@@ -474,6 +474,7 @@ def test_handle_transport_fault_interrupts_active_array_without_queueing_motion(
     assert controller._array_context is None
     assert controller._soft_stop_clear_uncertain is False
     assert controller.array_state_changed.calls == [("resume_ready",)]
+    assert controller._get_evap_plate_dock_check_reasons() == ["transport_fault"]
     assert popups[0][0] == "Command Transport Paused"
     controller.model.record_experiment_audit_event.assert_called_once()
     assert controller.model.record_experiment_audit_event.call_args.args[:2] == (
