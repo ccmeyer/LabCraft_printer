@@ -71,6 +71,29 @@ TEST(ResetReportPolicy, NullSnapshotDoesNotSendReport)
     CHECK_FALSE(ResetReport_ShouldSend(nullptr));
 }
 
+TEST(ResetReportPolicy, DeliveryWaitsForHostHello)
+{
+    const CrashLogSnapshot snap = makeSnapshot(CRASH_RESET_IWDG);
+    CHECK_FALSE(ResetReport_ShouldAttemptDelivery(&snap, false, false));
+}
+
+TEST(ResetReportPolicy, FirstHostHelloAttemptsDelivery)
+{
+    const CrashLogSnapshot snap = makeSnapshot(CRASH_RESET_IWDG);
+    CHECK_TRUE(ResetReport_ShouldAttemptDelivery(&snap, true, false));
+}
+
+TEST(ResetReportPolicy, SuccessfulDeliveryIsNotRepeated)
+{
+    const CrashLogSnapshot snap = makeSnapshot(CRASH_RESET_IWDG);
+    CHECK_FALSE(ResetReport_ShouldAttemptDelivery(&snap, true, true));
+}
+
+TEST(ResetReportPolicy, NullSnapshotIsNeverDelivered)
+{
+    CHECK_FALSE(ResetReport_ShouldAttemptDelivery(nullptr, true, false));
+}
+
 TEST(ResetReportPolicy, InvalidRegulatorContextIsNotIncluded)
 {
     CrashLogSnapshot snap = makeSnapshot(CRASH_RESET_IWDG);

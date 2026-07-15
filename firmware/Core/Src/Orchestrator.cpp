@@ -151,17 +151,14 @@ void runGripperOpenWatchdogCrashTest() {
   }
 }
 
-void maybeSendResetReport(uint8_t seq8, uint32_t seq32) {
-  if (s_resetReportSent) {
-    return;
-  }
+void maybeSendResetReport(uint8_t seq8, uint32_t seq32, bool hostReady) {
   CrashLogSnapshot snap{};
   CrashLog_GetSnapshot(&snap);
-  if (!ResetReport_ShouldSend(&snap)) {
+  if (!ResetReport_ShouldAttemptDelivery(&snap, hostReady, s_resetReportSent)) {
     return;
   }
-  Comm::instance()->sendResetReport(seq8, seq32, &snap, CrashLog_IsWatchdogRecoveryBoot());
-  s_resetReportSent = true;
+  s_resetReportSent = Comm::instance()->sendResetReport(
+      seq8, seq32, &snap, CrashLog_IsWatchdogRecoveryBoot());
 }
 }
 
@@ -406,13 +403,15 @@ void Orchestrator::pauseCurrent() {
   cancelActiveHomesForPause();
   Gantry::instance()->pauseXYZMotors();
   Printer::instance()->pauseDispense();
-  pausePressureRegulators();
+  if (Printer::instance()->hasReachedPauseBoundary()) {
+    pausePressureRegulators();
+    _pressurePauseDeferred = false;
+  } else {
+    _pressurePauseDeferred = true;
+  }
   if (!waitForHomesSettled(100u)) {
     latchHomeFailure("cancel_timeout");
   }
-  xEventGroupClearBits(_doneEvents,
-      BIT_LED_DONE|BIT_STEPPER1_DONE|BIT_STEPPER2_DONE|
-      BIT_STEPPER3_DONE|BIT_PRINTING_DONE|BIT_FLASH_PRINT_DONE|BIT_GRIPPER_DONE);
 }
 
 void Orchestrator::resumeCurrent() {
@@ -734,7 +733,6 @@ void Orchestrator::drainAckQueue() {
       CrashLog_SetBootStage(CRASH_BOOT_STAGE_HELLO_ACK);
       Watchdog_Arm();
       CrashLog_LogBootSummary();
-      maybeSendResetReport(ack.seq8, ack.seq32);
       Comm::instance()->setStatusPaused(false);
     #if LC_HAS_LED_STRIP == 1
       MX_LEDSTRIP_FadeTo(100,500);
@@ -761,12 +759,17 @@ void Orchestrator::drainAckQueue() {
       ack.includeCapabilities,
       ack.capabilities
     );
+    if (ack.ackCmd == CMD_CLEAR_ACK) {
+      Logger::instance()->log("[Clear] ACK attempted\r\n");
+    }
+    if (ack.ackCmd == CMD_HELLO_ACK) {
+      maybeSendResetReport(ack.seq8, ack.seq32, true);
+    }
   }
 }
 
 void Orchestrator::_run() {
   Watchdog_EnableTask(CRASH_TASK_ORCH);
-  maybeSendResetReport(0u, 0u);
   for (;;) {
 	  Watchdog_CheckIn(CRASH_TASK_ORCH);
 	  drainAckQueue();
@@ -777,7 +780,7 @@ void Orchestrator::_run() {
 	  if (_pauseRequested) {
 		    Logger::instance()->log("Run\r\n");
 	        _interruptedCommandHome = _hasInFlightCommand && isHomeCommand(_inFlight.cmd);
-	        if (_interruptedCommandHome) {
+	        if (_hasInFlightCommand) {
 	          _lastPausedCmd = _inFlight;
 	        }
 	        pauseCurrent();
@@ -825,47 +828,82 @@ void Orchestrator::_run() {
 			}
 			continue;
 		}
+		_pressurePauseDeferred = false;
 		resumeCurrent();
 		_resumeRequested = false;
-		switch (_lastPausedCmd.cmd) {
-			case CMD_MOVE_X: waitForBit(BIT_STEPPER1_DONE); break;
-			case CMD_MOVE_Y: waitForBit(BIT_STEPPER2_DONE); break;
-			case CMD_MOVE_Z: waitForBit(BIT_STEPPER3_DONE); break;
-			case CMD_DISPENSE: waitForBit(BIT_PRINTING_DONE); break;
-			case CMD_GRIPPER_OPEN: waitForBit(BIT_GRIPPER_DONE); break;
+		bool resumedCommandCompleted = !_hasInFlightCommand;
+		if (_hasInFlightCommand) {
+		  switch (_lastPausedCmd.cmd) {
+			case CMD_MOVE_X:
+			case CMD_ABS_X:
+			  resumedCommandCompleted = waitForBit(BIT_STEPPER1_DONE);
+			  break;
+			case CMD_MOVE_Y:
+			case CMD_ABS_Y:
+			  resumedCommandCompleted = waitForBit(BIT_STEPPER2_DONE);
+			  break;
+			case CMD_MOVE_Z:
+			case CMD_ABS_Z:
+			  resumedCommandCompleted = waitForBit(BIT_STEPPER3_DONE);
+			  break;
+			case CMD_ABS_XY:
+			  resumedCommandCompleted = waitForBits(BIT_STEPPER1_DONE | BIT_STEPPER2_DONE);
+			  break;
+			case CMD_DISPENSE:
+			case CMD_DISPENSE_PRINT:
+			case CMD_DISPENSE_REFUEL:
+			  resumedCommandCompleted = waitForBit(BIT_PRINTING_DONE);
+			  break;
+			case CMD_GRIPPER_OPEN:
+			case CMD_GRIPPER_CLOSE:
+			  resumedCommandCompleted = waitForBit(BIT_GRIPPER_DONE);
+			  break;
+			case CMD_PR_PRINT:
+			case CMD_PR_PRINT_REL:
+			  resumedCommandCompleted = waitForBit(BIT_PRESSURE_P_READY);
+			  break;
+			case CMD_PR_REFUEL:
+			case CMD_PR_REFUEL_REL:
+			  resumedCommandCompleted = waitForBit(BIT_PRESSURE_R_READY);
+			  break;
 			case CMD_WAIT: {
-			  if (_waitRemainingTicks > 0) {
-			    TickType_t rem = _waitRemainingTicks;
-			    bool completed = pauseAwareDelayTicks(rem);
-			    _waitRemainingTicks = rem;
-
-			    if (completed && _waitRemainingTicks == 0) {
-			      _lastExecutedCmdNum = _currentCmdNum;
-			      _lastRetiredCmdNum = _lastExecutedCmdNum;
-			    }
-			  } else {
-			    _lastExecutedCmdNum = _currentCmdNum;
-			    _lastRetiredCmdNum = _lastExecutedCmdNum;
-			  }
+			  TickType_t rem = _waitRemainingTicks;
+			  resumedCommandCompleted = rem == 0 || pauseAwareDelayTicks(rem);
+			  _waitRemainingTicks = rem;
 			  break;
 			}
 			// … etc …
-			default: {
-
-			}
+			default:
+			  resumedCommandCompleted = false;
+			  break;
 		  }
+		}
+		if (_hasInFlightCommand && resumedCommandCompleted &&
+		    !_pauseRequested && !_clearRequested) {
+		  sampleOrchStack(ORCH_STACK_PHASE_CMD_DONE);
+		  OrchestratorCompletionPolicy::retireCurrentCommand(
+		      _currentCmdNum, _lastExecutedCmdNum, _lastRetiredCmdNum);
+		  _hasInFlightCommand = false;
+		}
 	  }
 	  if (_clearRequested) {
         // Silence status briefly to reduce traffic during reset (optional)
         Comm::instance()->setStatusPaused(true);
+        Logger::instance()->log("[Clear] finalization begin\r\n");
+        _pressurePauseDeferred = false;
 
         cancelActiveHomesForPause();
-        const bool homesSettled = waitForHomesSettled(100u);
         cancelCurrent();
+        const bool homesSettled = waitForHomesSettled(100u);
+        const bool printerSettled = Printer::instance()->waitUntilIdle(pdMS_TO_TICKS(250u));
+        Logger::instance()->log(printerSettled
+            ? "[Clear] printer cancelled\r\n"
+            : "[Clear] printer cancellation timeout\r\n");
         discardPressureRegulatorResume();
         discardInterruptedHomes();
         xQueueReset(_cmdQueue);
         Comm::instance()->resetReceiveState();
+        Logger::instance()->log("[Clear] queues reset\r\n");
 
         retireAcceptedPendingCommands();
         _pauseAfterSeq32 = 0u;
@@ -878,14 +916,18 @@ void Orchestrator::_run() {
             BIT_LED_DONE|BIT_STEPPER1_DONE|BIT_STEPPER2_DONE|BIT_STEPPER3_DONE|BIT_PRINTING_DONE|BIT_FLASH_PRINT_DONE|BIT_GRIPPER_DONE|
             BIT_HOME_X_DONE|BIT_HOME_Y_DONE|BIT_HOME_Z_DONE|BIT_HOME_P_DONE|BIT_HOME_R_DONE);
 
-        _paused = !homesSettled;
+        const bool clearSettled = homesSettled && printerSettled;
+        _paused = !clearSettled;
         _homeFailureLatched = !homesSettled;
         _clearRequested = false;
-        Logger::instance()->log(homesSettled ? "--Cleared--\r\n" : "[Home] Clear left cancellation timeout latched\r\n");
+        Logger::instance()->log(clearSettled
+            ? "--Cleared--\r\n"
+            : "[Clear] cancellation timeout left transport paused\r\n");
 
         // small grace period then resume status
         vTaskDelay(pdMS_TO_TICKS(20));
         Comm::instance()->setStatusPaused(false);
+		Logger::instance()->log("[Clear] status restored\r\n");
 	  }
 
 	// —— SHUTDOWN: do it after BYE_ACK ——
@@ -902,6 +944,10 @@ void Orchestrator::_run() {
 	applyPauseAfterWatermark();
 
 	if (_paused) {
+	  if (_pressurePauseDeferred && Printer::instance()->hasReachedPauseBoundary()) {
+	    pausePressureRegulators();
+	    _pressurePauseDeferred = false;
+	  }
 	  vTaskDelay(pdMS_TO_TICKS(50));
 	  continue;
 	}

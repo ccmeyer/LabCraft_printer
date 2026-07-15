@@ -238,7 +238,15 @@ bool Printer::enqueueWithTimeout(
   if (_queue == nullptr) {
     return false;
   }
-  DispenseCommand cmd{count, rateHz, mode, completionBit, flashOnLast, flashCycleId, gateWaitTimeoutTicks};
+  DispenseCommand cmd{
+      count,
+      rateHz,
+      mode,
+      completionBit,
+      flashOnLast,
+      flashCycleId,
+      gateWaitTimeoutTicks,
+      PrinterControlPolicy::captureCommandGeneration(_control)};
   if (xQueueSend(_queue, &cmd, 0) == pdTRUE) {
     return true;
   }
@@ -290,9 +298,23 @@ void Printer::taskLoop() {
   for (;;) {
     if (xQueueReceive(_queue, &cmd, portMAX_DELAY) == pdTRUE) {
 
+      _commandActive = true;
       _remaining = cmd.count;
-      _cancelRequested = false;              // clear any old cancel
+      bool internalCancelRequested = false;
       PrinterDispenseResult commandResult = PrinterDispenseResult::Completed;
+      auto commandCancelled = [&]() {
+        return internalCancelRequested ||
+               PrinterControlPolicy::isCommandCancelled(_control, cmd.controlGeneration);
+      };
+      auto waitAtDropletBoundary = [&]() {
+        while (PrinterControlPolicy::shouldPauseAtDropletBoundary(
+            _control, cmd.controlGeneration, _remaining)) {
+          PrinterControlPolicy::acknowledgePause(_control, true);
+          (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        }
+        PrinterControlPolicy::acknowledgePause(_control, false);
+        return _remaining > 0 && !commandCancelled();
+      };
 
       // Apply per-command frequency if provided
       if (cmd.rateHz > 0) {
@@ -301,13 +323,43 @@ void Printer::taskLoop() {
 
       // --- wait for any in-flight gripper refresh to finish and
       //             then hold the vacuum window for the entire job.
-      bool printingHoldsGate = Gripper::instance().lockVacuumGate(cmd.gateWaitTimeoutTicks);
+      bool printingHoldsGate = false;
+      const TickType_t gateWaitStart = xTaskGetTickCount();
+      TickType_t gatePollTicks = pdMS_TO_TICKS(10u);
+      if (gatePollTicks == 0u) gatePollTicks = 1u;
+      for (;;) {
+        if (!waitAtDropletBoundary()) {
+          break;
+        }
+        TickType_t waitTicks = gatePollTicks;
+        if (cmd.gateWaitTimeoutTicks != portMAX_DELAY) {
+          const TickType_t elapsed = xTaskGetTickCount() - gateWaitStart;
+          if (elapsed >= cmd.gateWaitTimeoutTicks) {
+            waitTicks = 0u;
+          } else {
+            const TickType_t remainingWait = cmd.gateWaitTimeoutTicks - elapsed;
+            if (waitTicks > remainingWait) waitTicks = remainingWait;
+          }
+        }
+        if (Gripper::instance().lockVacuumGate(waitTicks)) {
+          printingHoldsGate = true;
+          break;
+        }
+        if (cmd.gateWaitTimeoutTicks != portMAX_DELAY &&
+            (xTaskGetTickCount() - gateWaitStart) >= cmd.gateWaitTimeoutTicks) {
+          break;
+        }
+      }
       if (!printingHoldsGate) {
-        recordDispenseResult(PrinterDispenseResult::GateTimeout, cmd.flashCycleId);
+        recordDispenseResult(commandCancelled()
+            ? PrinterDispenseResult::Cancelled
+            : PrinterDispenseResult::GateTimeout,
+            cmd.flashCycleId);
         _remaining = 0;
         if (cmd.completionBit != 0u) {
           xEventGroupSetBits(Orchestrator::getDoneEvents(), cmd.completionBit);
         }
+        _commandActive = false;
         continue;
       }
 
@@ -319,10 +371,19 @@ void Printer::taskLoop() {
       TickType_t nextPhaseTick = xTaskGetTickCount();
       const TickType_t readyPollTicks = pdMS_TO_TICKS(2);
 
-      auto delayUntil = [&](TickType_t targetTick) {
-        TickType_t now = xTaskGetTickCount();
-        if ((int32_t)(targetTick - now) > 0) {
-          vTaskDelay(targetTick - now);
+      auto delayUntil = [&](TickType_t targetTick, bool honorPause) {
+        for (;;) {
+          if (commandCancelled()) {
+            return false;
+          }
+          if (honorPause && _control.pauseRequested) {
+            return false;
+          }
+          const TickType_t now = xTaskGetTickCount();
+          if (static_cast<int32_t>(targetTick - now) <= 0) {
+            return true;
+          }
+          (void)ulTaskNotifyTake(pdTRUE, targetTick - now);
         }
       };
       auto advancePhase = [&](TickType_t stepTicks, bool rebaseOnAnyLate) {
@@ -336,21 +397,35 @@ void Printer::taskLoop() {
         }
       };
 
-      while (_remaining > 0 && !_cancelRequested) {
-        delayUntil(nextPhaseTick);
+      while (_remaining > 0 && !commandCancelled()) {
+        if (!waitAtDropletBoundary()) {
+          break;
+        }
+        if (!delayUntil(nextPhaseTick, true)) {
+          if (commandCancelled()) {
+            break;
+          }
+          continue;
+        }
 
     	// ---------- PRINT PULSE ----------
         if (cmd.mode != PulseMode::REFUEL_ONLY) {
-            const TickType_t readyWaitStart = xTaskGetTickCount();
-		    while (!PressureRegulator::regP().isPressureOk() && !_cancelRequested) {
+            TickType_t readyWaitStart = xTaskGetTickCount();
+		    while (!PressureRegulator::regP().isPressureOk() && !commandCancelled()) {
+              if (_control.pauseRequested) {
+                if (!waitAtDropletBoundary()) {
+                  break;
+                }
+                readyWaitStart = xTaskGetTickCount();
+              }
               if (_diagReadyTimeoutEnabled &&
                   ((xTaskGetTickCount() - readyWaitStart) >= _diagReadyTimeoutTicks)) {
-                _cancelRequested = true;
+                internalCancelRequested = true;
                 break;
               }
 			  vTaskDelay(readyPollTicks);   // cheap wake-up while waiting for pressure ready
 		    }
-		    if (_cancelRequested) break;
+		    if (commandCancelled() || !waitAtDropletBoundary()) break;
             PressureRegulator::DisturbanceEvent disturbance{};
             disturbance.type = PressureRegulator::PulseType::Print;
             disturbance.pulseWidthUs = static_cast<uint16_t>(_printPulseUs);
@@ -381,11 +456,13 @@ void Printer::taskLoop() {
         }
         if (cmd.mode == PulseMode::BOTH) {
           advancePhase(halfPeriodTicks, false);
-          delayUntil(nextPhaseTick);
+          if (!delayUntil(nextPhaseTick, false)) {
+            break;
+          }
         }
 
         // if someone hit “cancel” during the delay…
-		if (_cancelRequested) {
+		if (commandCancelled()) {
 			break;
 		}
 
@@ -393,16 +470,23 @@ void Printer::taskLoop() {
 		if (cmd.mode != PulseMode::PRINT_ONLY) {
 		#if (LC_PRESSURE_PORTS > 1)
           // On dual-channel machines, wait for refuel pressure + pulse refuel
-          const TickType_t readyWaitStart = xTaskGetTickCount();
-          while (!PressureRegulator::regR().isPressureOk() && !_cancelRequested) {
+          TickType_t readyWaitStart = xTaskGetTickCount();
+          while (!PressureRegulator::regR().isPressureOk() && !commandCancelled()) {
+            if (cmd.mode == PulseMode::REFUEL_ONLY && _control.pauseRequested) {
+              if (!waitAtDropletBoundary()) {
+                break;
+              }
+              readyWaitStart = xTaskGetTickCount();
+            }
             if (_diagReadyTimeoutEnabled &&
                 ((xTaskGetTickCount() - readyWaitStart) >= _diagReadyTimeoutTicks)) {
-              _cancelRequested = true;
+              internalCancelRequested = true;
               break;
             }
             vTaskDelay(readyPollTicks);
           }
-          if (_cancelRequested) break;
+          if (commandCancelled() ||
+              (cmd.mode == PulseMode::REFUEL_ONLY && !waitAtDropletBoundary())) break;
 
           PressureRegulator::DisturbanceEvent disturbance{};
           disturbance.type = PressureRegulator::PulseType::Refuel;
@@ -429,7 +513,7 @@ void Printer::taskLoop() {
           advancePhase(periodTicks, true);
         }
 
-        if (_cancelRequested) break;
+        if (commandCancelled()) break;
 
         _totalDispensed++;
         _remaining--;
@@ -437,7 +521,7 @@ void Printer::taskLoop() {
       // --- always release the vacuum window at job end
       Gripper::instance().unlockVacuumGate();
 
-      if (commandResult == PrinterDispenseResult::Completed && _cancelRequested) {
+      if (commandResult == PrinterDispenseResult::Completed && commandCancelled()) {
         commandResult = PrinterDispenseResult::Cancelled;
       }
       if (commandResult != PrinterDispenseResult::Completed) {
@@ -448,30 +532,49 @@ void Printer::taskLoop() {
       if (cmd.completionBit != 0u) {
         xEventGroupSetBits(Orchestrator::getDoneEvents(), cmd.completionBit);
       }
+      PrinterControlPolicy::acknowledgePause(_control, false);
+      _commandActive = false;
     }
   }
 }
 
 void Printer::pauseDispense() {
-  if (_taskHandle)
-    vTaskSuspend(_taskHandle);
+  PrinterControlPolicy::requestPause(_control, _commandActive);
+  if (_taskHandle) {
+    xTaskNotifyGive(_taskHandle);
+  }
 }
 
 void Printer::resumeDispense() {
-  if (_taskHandle)
-    vTaskResume(_taskHandle);
+  PrinterControlPolicy::requestResume(_control);
+  if (_taskHandle) {
+    xTaskNotifyGive(_taskHandle);
+  }
 }
 
 void Printer::cancelDispense() {
-  // 1) request the task to stop
-  _cancelRequested = true;
-  _remaining = 0;
+  PrinterControlPolicy::requestCancel(_control);
 
-  // 2) empty any queued future commands
   if (_queue) xQueueReset(_queue);
 
-  // 3) wake the task so it can see _cancelRequested
-  if (_taskHandle) vTaskResume(_taskHandle);
+  if (_taskHandle) {
+    xTaskNotifyGive(_taskHandle);
+  }
+}
+
+bool Printer::waitUntilIdle(TickType_t timeoutTicks) const {
+  const TickType_t start = xTaskGetTickCount();
+  while (_commandActive) {
+    if ((xTaskGetTickCount() - start) >= timeoutTicks) {
+      return false;
+    }
+    vTaskDelay(1);
+  }
+  return true;
+}
+
+bool Printer::hasReachedPauseBoundary() const {
+  return !_commandActive || _control.pauseAcknowledged;
 }
 
 bool Printer::beginDiagnosticLongPulse(PulseMode mode, uint32_t pulseMs, uint32_t tickUs) {

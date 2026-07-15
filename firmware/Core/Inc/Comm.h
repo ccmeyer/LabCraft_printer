@@ -145,7 +145,7 @@ public:
         bool includeCapabilities = false,
         uint32_t capabilities = 0
     );
-    void sendResetReport(uint8_t seq8, uint32_t seq32, const CrashLogSnapshot* snap, uint32_t recoveryBoot);
+    bool sendResetReport(uint8_t seq8, uint32_t seq32, const CrashLogSnapshot* snap, uint32_t recoveryBoot);
 
     void sendFrame(UART_HandleTypeDef* huart,
                           const uint8_t* payload,

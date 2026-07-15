@@ -282,9 +282,9 @@ void Comm::sendAckWithSeq32(
   xSemaphoreGive(_txMutex);
 }
 
-void Comm::sendResetReport(uint8_t seq8, uint32_t seq32, const CrashLogSnapshot* snap, uint32_t recoveryBoot) {
+bool Comm::sendResetReport(uint8_t seq8, uint32_t seq32, const CrashLogSnapshot* snap, uint32_t recoveryBoot) {
   if (snap == nullptr) {
-      return;
+      return false;
   }
 
   uint8_t payload[255] = {0};
@@ -341,7 +341,15 @@ void Comm::sendResetReport(uint8_t seq8, uint32_t seq32, const CrashLogSnapshot*
                          faultContext,
                          static_cast<uint8_t>(sizeof(faultContext)));
   }
-  sendFrame(_huart, payload, idx);
+  if (xSemaphoreTake(_txMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+    return false;
+  }
+  uint8_t frame[2 + sizeof(payload) + 2] = {0};
+  const size_t frameLen = CommCodec::encodeFrame(
+      payload, static_cast<uint8_t>(idx), frame, sizeof(frame));
+  const bool sent = frameLen > 0u && sendRawFrame(_huart, frame, frameLen, kCommTxTimeoutMs);
+  xSemaphoreGive(_txMutex);
+  return sent;
 }
 
 

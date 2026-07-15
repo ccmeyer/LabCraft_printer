@@ -16,6 +16,7 @@
 #include "queue.h"
 #include "task.h"
 #include "PrinterCompletionBits.h"
+#include "PrinterControlPolicy.h"
 
 // in Printer.h, above class Printer:
 enum class PulseMode : uint8_t {
@@ -35,6 +36,7 @@ public:
     bool flashOnLast = false;
     uint32_t flashCycleId = 0;
     TickType_t gateWaitTimeoutTicks = portMAX_DELAY;
+    uint32_t controlGeneration = 0u;
   };
 
   /// Get the singleton
@@ -96,6 +98,12 @@ public:
   /// Stop & clear the current command entirely
   void cancelDispense();
 
+  /// Wait for the active command to release resources and signal completion.
+  bool waitUntilIdle(TickType_t timeoutTicks) const;
+
+  /// True once a pause request has reached a complete droplet boundary.
+  bool hasReachedPauseBoundary() const;
+
   /// True if currently dispensing
   bool isBusy() const;
 
@@ -151,11 +159,12 @@ private:
   // queue + task
   QueueHandle_t _queue = nullptr;
   TaskHandle_t  _taskHandle = nullptr;
+  PrinterControlState _control{};
 
   // stats
   volatile uint32_t _totalDispensed = 0;
   volatile int32_t _remaining = 0;
-  volatile bool     _cancelRequested = false;
+  volatile bool _commandActive = false;
   bool _diagReadyTimeoutEnabled = false;
   TickType_t _diagReadyTimeoutTicks = 0;
   bool _diagnosticLongPulseActive = false;

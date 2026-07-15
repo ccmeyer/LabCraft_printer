@@ -40,6 +40,7 @@ add_executable(fw_tests
     tests/test_flash_cycle_policy.cpp
     tests/test_flash_output_state.cpp
     tests/test_printer_completion_bits.cpp
+    tests/test_printer_control_policy.cpp
     tests/test_diagnostic_result_emitter.cpp
 
     # Add *selected* firmware sources here (NOT the whole firmware):
@@ -68,6 +69,7 @@ add_executable(fw_tests
     ../Core/Src/CrashWatchdogSelfTestPolicy.cpp
     ../Core/Src/FlashSafety.cpp
     ../Core/Src/FlashCyclePolicy.cpp
+    ../Core/Src/PrinterControlPolicy.cpp
 )
 
 target_include_directories(fw_tests PRIVATE

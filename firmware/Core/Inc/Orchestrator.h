@@ -268,6 +268,7 @@ public:
   uint8_t   _lastSeq8             = 0;
 
   volatile bool _pauseRequested  = false;
+  bool _pressurePauseDeferred = false;
   volatile bool _resumeRequested = false;
   volatile bool _clearRequested  = false;
 	  volatile bool _acknowledgeRequested = false;
