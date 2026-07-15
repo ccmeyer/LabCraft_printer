@@ -1942,6 +1942,18 @@ class MotorPositionWidget(QGroupBox):
         current_label.setAlignment(Qt.AlignCenter)
         target_label.setAlignment(Qt.AlignCenter)
 
+        widest_position_text = "130000"
+        numeric_width = max(
+            current_label.fontMetrics().horizontalAdvance(widest_position_text),
+            target_label.fontMetrics().horizontalAdvance(widest_position_text),
+        )
+        current_column_width = max(current_label.sizeHint().width(), numeric_width)
+        target_column_width = max(target_label.sizeHint().width(), numeric_width)
+        current_label.setFixedWidth(current_column_width)
+        target_label.setFixedWidth(target_column_width)
+        current_label.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
+        target_label.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
+
         grid_layout.addWidget(motor_label, 0, 0)
         grid_layout.addWidget(current_label, 0, 1)
         grid_layout.addWidget(target_label, 0, 2)
@@ -1964,10 +1976,12 @@ class MotorPositionWidget(QGroupBox):
             grid_layout.addWidget(motor_label, row, 0)
             grid_layout.addWidget(positions['current'], row, 1)
             grid_layout.addWidget(positions['target'], row, 2)
-            positions['current'].setAlignment(Qt.AlignCenter)
-            positions['current'].setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
-            positions['target'].setAlignment(Qt.AlignCenter)
-            positions['target'].setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
+            positions['current'].setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            positions['current'].setFixedWidth(current_column_width)
+            positions['current'].setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
+            positions['target'].setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            positions['target'].setFixedWidth(target_column_width)
+            positions['target'].setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
             row += 1
 
         # Create a vertical layout for buttons and spin box
@@ -2046,17 +2060,24 @@ class MotorPositionWidget(QGroupBox):
 
     def update_labels(self):
         """Update the labels with the current motor positions."""
-        self.labels['X']['current'].setText(str(self.model.machine_model.current_x))
-        self.labels['X']['target'].setText(str(self.model.machine_model.target_x))
-        self.labels['Y']['current'].setText(str(self.model.machine_model.current_y))
-        self.labels['Y']['target'].setText(str(self.model.machine_model.target_y))
-        self.labels['Z']['current'].setText(str(self.model.machine_model.current_z))
-        self.labels['Z']['target'].setText(str(self.model.machine_model.target_z))
-        self.labels['P']['current'].setText(str(self.model.machine_model.current_p))
-        self.labels['P']['target'].setText(str(self.model.machine_model.target_p))
+        self._update_position_label('X', 'current', self.model.machine_model.current_x)
+        self._update_position_label('X', 'target', self.model.machine_model.target_x)
+        self._update_position_label('Y', 'current', self.model.machine_model.current_y)
+        self._update_position_label('Y', 'target', self.model.machine_model.target_y)
+        self._update_position_label('Z', 'current', self.model.machine_model.current_z)
+        self._update_position_label('Z', 'target', self.model.machine_model.target_z)
+        self._update_position_label('P', 'current', self.model.machine_model.current_p)
+        self._update_position_label('P', 'target', self.model.machine_model.target_p)
         if not self.legacy_mode:
-            self.labels['R']['current'].setText(str(self.model.machine_model.current_r))
-            self.labels['R']['target'].setText(str(self.model.machine_model.target_r))
+            self._update_position_label('R', 'current', self.model.machine_model.current_r)
+            self._update_position_label('R', 'target', self.model.machine_model.target_r)
+
+    def _update_position_label(self, motor, position_type, value):
+        """Update a position cell without allowing its width to affect the grid."""
+        text = str(value)
+        label = self.labels[motor][position_type]
+        label.setText(text)
+        label.setToolTip(text)
 
     def update_step_size(self, new_step_size):
         """Update the spin box with the new step size."""

@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import Mock, call
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Qt, Signal
 
 from View import MotorPositionWidget
 
@@ -19,6 +19,16 @@ class _FakeMachineModel(QObject):
         self.motors_homed = motors_homed
         self.possible_steps = [10, 50, 250]
         self.step_size = 50
+        self.current_x = 0
+        self.current_y = 0
+        self.current_z = 0
+        self.current_p = 0
+        self.current_r = 0
+        self.target_x = 0
+        self.target_y = 0
+        self.target_z = 0
+        self.target_p = 0
+        self.target_r = 0
 
     def is_connected(self):
         return self.machine_connected
@@ -59,6 +69,7 @@ def _make_widget(
     motors_enabled=False,
     motors_homed=False,
     location_names=("home", "loading", "camera"),
+    profile_name="legacy",
 ):
     machine_model = _FakeMachineModel(
         connected=connected,
@@ -73,7 +84,7 @@ def _make_widget(
             "dark_blue": "#1d4ed8",
             "light_blue": "#60a5fa",
         },
-        profile=SimpleNamespace(name="legacy"),
+        profile=SimpleNamespace(name=profile_name),
         move_to_location=Mock(),
     )
     controller = SimpleNamespace(home_machine=Mock(), toggle_motors=Mock())
@@ -164,3 +175,49 @@ def test_location_buttons_use_guarded_main_window_move_path(qapp):
         call(location="loading", manual=True),
         call(location="camera", manual=True),
     ]
+
+
+def test_position_columns_remain_fixed_as_values_gain_digits(qapp):
+    widget, _main_window, machine_model, _location_model = _make_widget(profile_name="current")
+    widget.resize(432, widget.sizeHint().height())
+    widget.show()
+    qapp.processEvents()
+
+    position_labels = [
+        label
+        for positions in widget.labels.values()
+        for label in positions.values()
+    ]
+    initial_geometry = [
+        (label.geometry().x(), label.geometry().width())
+        for label in position_labels
+    ]
+
+    for label in position_labels:
+        assert label.minimumWidth() == label.maximumWidth()
+        assert label.alignment() & Qt.AlignRight
+
+    for value in (9999, 10000, 130000):
+        machine_model.current_x = value
+        machine_model.current_y = value
+        machine_model.current_z = value
+        machine_model.current_p = value
+        machine_model.current_r = value
+        machine_model.target_x = value
+        machine_model.target_y = value
+        machine_model.target_z = value
+        machine_model.target_p = value
+        machine_model.target_r = value
+
+        widget.update_labels()
+        qapp.processEvents()
+
+        assert [
+            (label.geometry().x(), label.geometry().width())
+            for label in position_labels
+        ] == initial_geometry
+        assert all(label.text() == str(value) for label in position_labels)
+        assert all(label.toolTip() == str(value) for label in position_labels)
+
+    assert widget.minimumSizeHint().width() <= 432
+    widget.close()
