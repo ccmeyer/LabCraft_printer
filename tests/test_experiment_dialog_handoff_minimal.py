@@ -14,7 +14,11 @@ def test_complete_experiment_design_calls_model_load_from_model():
 
     MainWindow.complete_experiment_design(main_window)
 
-    load_mock.assert_called_once_with(plate_name="96well-8x12", load_progress=False)
+    load_mock.assert_called_once_with(
+        plate_name="96well-8x12",
+        load_progress=False,
+        finalize_execution_plan=True,
+    )
 
 
 def test_complete_experiment_design_can_preserve_progress_for_resume():
@@ -27,7 +31,11 @@ def test_complete_experiment_design_can_preserve_progress_for_resume():
 
     MainWindow.complete_experiment_design(main_window, load_progress=True)
 
-    load_mock.assert_called_once_with(plate_name="96well-8x12", load_progress=True)
+    load_mock.assert_called_once_with(
+        plate_name="96well-8x12",
+        load_progress=True,
+        finalize_execution_plan=False,
+    )
 
 
 def _dialog_for_progress_policy(prompt_policy):

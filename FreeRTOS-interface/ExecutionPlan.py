@@ -16,6 +16,7 @@ from typing import Any, Mapping
 
 SCHEMA_NAME = "labcraft.execution_plan"
 SCHEMA_VERSION = 1
+PROGRESS_REFERENCE_SCHEMA_VERSION = 1
 PRINTING_MODES = frozenset({"droplet", "stream"})
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -35,6 +36,59 @@ class ExecutionPlanState(str, Enum):
     ACTIVE = "active"
     COMPLETED = "completed"
     ABORTED = "aborted"
+
+
+@dataclass(frozen=True)
+class ProgressExecutionReference:
+    plan_id: str
+    plan_revision: int
+
+    def __post_init__(self) -> None:
+        plan_id = _require_string(self.plan_id, "progress.__execution__.plan_id")
+        try:
+            parsed_id = uuid.UUID(plan_id)
+        except ValueError as exc:
+            raise _error(
+                "progress.__execution__.plan_id", "must be a valid UUID"
+            ) from exc
+        if str(parsed_id) != plan_id:
+            raise _error(
+                "progress.__execution__.plan_id", "must use canonical UUID form"
+            )
+        _require_int(
+            self.plan_revision,
+            "progress.__execution__.plan_revision",
+            minimum=1,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": PROGRESS_REFERENCE_SCHEMA_VERSION,
+            "plan_id": self.plan_id,
+            "plan_revision": self.plan_revision,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Any) -> "ProgressExecutionReference":
+        obj = _require_fields(
+            payload,
+            fields={"schema_version", "plan_id", "plan_revision"},
+            path="progress.__execution__",
+        )
+        version = _require_int(
+            obj["schema_version"],
+            "progress.__execution__.schema_version",
+            minimum=1,
+        )
+        if version != PROGRESS_REFERENCE_SCHEMA_VERSION:
+            raise _error(
+                "progress.__execution__.schema_version",
+                f"unsupported version {version}",
+            )
+        return cls(
+            plan_id=obj["plan_id"],
+            plan_revision=obj["plan_revision"],
+        )
 
 
 def _error(path: str, message: str) -> ExecutionPlanValidationError:

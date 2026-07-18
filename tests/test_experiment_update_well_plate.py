@@ -314,7 +314,11 @@ def test_reloaded_experiment_applies_saved_progress_to_runtime(experiment_model_
 
     reloaded_model = experiment_model_factory()
     reloaded_em = reloaded_model.experiment_model
-    reloaded_em.load_experiment(source_em.experiment_file_path, source_em.experiment_dir_path)
+    reloaded_em.load_experiment(
+        source_em.experiment_file_path,
+        source_em.experiment_dir_path,
+        progress_reset_confirmed=True,
+    )
     Model.load_experiment_from_model(reloaded_model, load_progress=True)
 
     reloaded_well = reloaded_model.well_plate.get_well(well.well_id)
@@ -345,7 +349,11 @@ def test_load_progress_restores_saved_targets_when_regenerated_target_differs(
 
     reloaded_model = experiment_model_factory()
     reloaded_em = reloaded_model.experiment_model
-    reloaded_em.load_experiment(source_em.experiment_file_path, source_em.experiment_dir_path)
+    reloaded_em.load_experiment(
+        source_em.experiment_file_path,
+        source_em.experiment_dir_path,
+        progress_reset_confirmed=True,
+    )
     Model.load_experiment_from_model(reloaded_model, load_progress=True)
 
     reloaded_well = reloaded_model.well_plate.get_well(well.well_id)
@@ -391,7 +399,11 @@ def test_load_progress_infers_saved_stock_concentration_before_runtime_build(
 
     reloaded_model = experiment_model_factory()
     reloaded_em = reloaded_model.experiment_model
-    reloaded_em.load_experiment(source_em.experiment_file_path, source_em.experiment_dir_path)
+    reloaded_em.load_experiment(
+        source_em.experiment_file_path,
+        source_em.experiment_dir_path,
+        progress_reset_confirmed=True,
+    )
     assert reloaded_em.factors[0].options[0].forced_stock_conc is None
 
     Model.load_experiment_from_model(reloaded_model, load_progress=True)
@@ -491,7 +503,11 @@ def test_explicit_fresh_load_overwrites_saved_progress(experiment_model_factory)
 
     reloaded_model = experiment_model_factory()
     reloaded_em = reloaded_model.experiment_model
-    reloaded_em.load_experiment(source_em.experiment_file_path, source_em.experiment_dir_path)
+    reloaded_em.load_experiment(
+        source_em.experiment_file_path,
+        source_em.experiment_dir_path,
+        progress_reset_confirmed=True,
+    )
     Model.load_experiment_from_model(reloaded_model, load_progress=False)
 
     reloaded_well = reloaded_model.well_plate.get_well(well.well_id)

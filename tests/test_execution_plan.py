@@ -18,6 +18,7 @@ from ExecutionPlan import (
     ExecutionStock,
     ExecutionVolumeBasis,
     ExecutionWell,
+    ProgressExecutionReference,
     canonical_sha256,
     load_execution_plan,
     new_plan_id,
@@ -95,6 +96,35 @@ def test_round_trip_preserves_exact_effective_volume(tmp_path):
     assert loaded.stocks[0].effective_volume_nL == 143.59278258103592
     assert json.loads(path.read_text(encoding="utf-8")) == plan.to_dict()
     assert path.read_text(encoding="utf-8").endswith("\n")
+
+
+def test_progress_execution_reference_round_trip_is_strict():
+    reference = ProgressExecutionReference(PLAN_ID, 3)
+
+    assert ProgressExecutionReference.from_dict(reference.to_dict()) == reference
+    assert reference.to_dict() == {
+        "schema_version": 1,
+        "plan_id": PLAN_ID,
+        "plan_revision": 3,
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation, message",
+    [
+        (lambda payload: payload.update(extra=True), "unknown field"),
+        (lambda payload: payload.update(schema_version=2), "unsupported version"),
+        (lambda payload: payload.update(plan_id="not-a-uuid"), "valid UUID"),
+        (lambda payload: payload.update(plan_revision=0), "at least 1"),
+        (lambda payload: payload.update(plan_revision=True), "must be an integer"),
+    ],
+)
+def test_progress_execution_reference_rejects_invalid_payloads(mutation, message):
+    payload = ProgressExecutionReference(PLAN_ID, 1).to_dict()
+    mutation(payload)
+
+    with pytest.raises(ExecutionPlanValidationError, match=message):
+        ProgressExecutionReference.from_dict(payload)
 
 
 def test_multi_stock_multi_well_serialization_is_stably_sorted():

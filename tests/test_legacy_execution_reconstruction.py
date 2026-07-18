@@ -191,7 +191,7 @@ def test_recorded_execution_reconstructs_without_optimizer_or_writes(tmp_path, m
     assert pure["total_droplets"] == 16
     assert utp["droplet_volume_nL"] == UTP_VOLUME_NL
     assert utp["total_droplets"] == 25
-    assert model.progress_data == progress
+    assert model.progress_data == {"A1": progress["A1"]}
     assert model.experiment_dir_path == str(directory)
     assert model.concentration_key_file_path == str(directory / "concentration_key.csv")
     assert _directory_snapshot(directory) == before

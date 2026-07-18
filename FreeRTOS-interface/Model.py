@@ -38,6 +38,15 @@ import CalibrationClasses
 import importlib
 from CalibrationMemoryStore import CalibrationMemoryStore
 from ExperimentAuditLog import ExperimentAuditLog
+from ExecutionPlan import (
+    ProgressExecutionReference,
+    load_execution_plan,
+    save_execution_plan,
+)
+from InitialExecutionPlan import (
+    build_initial_execution_plan,
+    initial_execution_content_matches,
+)
 from LegacyExecutionPlan import (
     LegacyExecutionClassification,
     LegacyExecutionReconstruction,
@@ -408,6 +417,7 @@ class ExperimentModel(QObject):
         self.concentration_key_file_path: Optional[str] = None
         self.calibration_file_path: Optional[str] = None
         self.experiment_audit_file_path: Optional[str] = None
+        self.execution_plan_file_path: Optional[str] = None
         self.progress_data: Dict[str, Dict] = {}
         self._last_progress_load_warnings: list[dict[str, object]] = []
         self._last_progress_stock_override_warnings: list[dict[str, object]] = []
@@ -415,6 +425,10 @@ class ExperimentModel(QObject):
         self._legacy_execution_reconstruction: LegacyExecutionReconstruction | None = None
         self._reconstructed_execution_plan = None
         self._legacy_execution_read_only: bool = False
+        self._execution_plan_snapshot = None
+        self._execution_plan_source: str | None = None
+        self._execution_plan_finalization_error: str | None = None
+        self._progress_execution_reference: ProgressExecutionReference | None = None
 
         # optional dependency (if you have one); safe to ignore if None
         self._calibration_manager = None
@@ -6757,6 +6771,7 @@ class ExperimentModel(QObject):
         self.progress_file_path     = os.path.join(self.experiment_dir_path, "progress.json")
         self.calibration_file_path  = os.path.join(self.experiment_dir_path, "calibration.json")
         self.experiment_audit_file_path = os.path.join(self.experiment_dir_path, "experiment_audit.jsonl")
+        self.execution_plan_file_path = os.path.join(self.experiment_dir_path, "execution_plan.json")
         self.key_file_path          = os.path.join(self.experiment_dir_path, "key.csv")
         self.concentration_key_file_path = os.path.join(self.experiment_dir_path, "concentration_key.csv")
         if self._calibration_manager is not None and hasattr(self._calibration_manager, "update_calibration_file_path"):
@@ -6800,7 +6815,11 @@ class ExperimentModel(QObject):
         ):
             self._legacy_execution_read_only = True
             self._reconstructed_execution_plan = reconstruction.plan
-            self.progress_data = dict(reconstruction.progress)
+            self._execution_plan_snapshot = reconstruction.plan
+            self._execution_plan_source = "legacy_reconstruction"
+            self.progress_data = self._well_entries_from_progress_payload(
+                reconstruction.progress
+            )
             self.plans_per_option.clear()
             self._unreachable_preview_map.clear()
             self._target_preview_map.clear()
@@ -6837,6 +6856,10 @@ class ExperimentModel(QObject):
         self._legacy_execution_reconstruction = None
         self._reconstructed_execution_plan = None
         self._legacy_execution_read_only = False
+        self._execution_plan_snapshot = None
+        self._execution_plan_source = None
+        self._execution_plan_finalization_error = None
+        self._progress_execution_reference = None
 
     def is_read_only_legacy_execution(self) -> bool:
         return bool(getattr(self, "_legacy_execution_read_only", False))
@@ -6869,6 +6892,110 @@ class ExperimentModel(QObject):
 
     def get_reconstructed_execution_plan(self):
         return getattr(self, "_reconstructed_execution_plan", None)
+
+    def get_execution_plan_snapshot(self):
+        return getattr(self, "_execution_plan_snapshot", None)
+
+    def get_execution_plan_source(self) -> str | None:
+        return getattr(self, "_execution_plan_source", None)
+
+    def get_execution_plan_finalization_error(self) -> str | None:
+        return getattr(self, "_execution_plan_finalization_error", None)
+
+    def set_execution_plan_finalization_error(self, error: object | None) -> None:
+        self._execution_plan_finalization_error = None if error is None else str(error)
+
+    def _execution_progress_reference(self) -> ProgressExecutionReference | None:
+        plan = self.get_execution_plan_snapshot()
+        if plan is None or self.get_execution_plan_source() != "new_finalization":
+            return None
+        return ProgressExecutionReference(
+            plan_id=plan.plan_id,
+            plan_revision=plan.plan_revision,
+        )
+
+    @staticmethod
+    def _well_entries_from_progress_payload(payload: object) -> dict:
+        if not isinstance(payload, dict):
+            return {}
+        return {
+            str(key): value
+            for key, value in payload.items()
+            if not str(key).startswith("__")
+        }
+
+    def get_progress_execution_reference(
+        self,
+        progress_file_path: Optional[str] = None,
+    ) -> ProgressExecutionReference | None:
+        path = progress_file_path or self.progress_file_path
+        if not path:
+            return None
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if not isinstance(payload, dict) or "__execution__" not in payload:
+            return None
+        return ProgressExecutionReference.from_dict(payload["__execution__"])
+
+    def build_initial_execution_plan_from_runtime(self):
+        if self._runtime_well_plate is None or self._runtime_reaction_collection is None:
+            raise RuntimeError("Finalized runtime assignments are unavailable.")
+        if not self.experiment_file_path or not os.path.isfile(self.experiment_file_path):
+            raise RuntimeError(
+                "The finalized experiment design must be saved before creating an execution plan."
+            )
+        with open(self.experiment_file_path, "r", encoding="utf-8") as handle:
+            design_payload = json.load(handle)
+
+        assigned_wells = []
+        for well in self._runtime_well_plate.get_all_wells():
+            reaction = well.get_assigned_reaction()
+            if reaction is None:
+                continue
+            assigned_wells.append(
+                {
+                    "well_id": well.well_id,
+                    "reaction_id": reaction.unique_id,
+                    "target_dispenses": {
+                        stock_id: reagent.get_target_droplets()
+                        for stock_id, reagent in reaction.get_all_reagents().items()
+                    },
+                }
+            )
+        return build_initial_execution_plan(
+            design_payload=design_payload,
+            plate_name=self._runtime_well_plate.get_current_plate_name(),
+            plate_rows=self._runtime_well_plate.get_num_rows(),
+            plate_columns=self._runtime_well_plate.get_num_cols(),
+            stock_rows=self.get_stock_table_rows(include_fill=True),
+            assigned_wells=assigned_wells,
+        )
+
+    def create_or_reuse_initial_execution_plan(self):
+        if not self.execution_plan_file_path:
+            raise RuntimeError("The execution-plan path is unavailable.")
+        candidate = self.build_initial_execution_plan_from_runtime()
+        status = "created"
+        if os.path.exists(self.execution_plan_file_path):
+            existing = load_execution_plan(self.execution_plan_file_path)
+            if not initial_execution_content_matches(existing, candidate):
+                raise RuntimeError(
+                    "An existing execution_plan.json does not match the finalized design and runtime assignments."
+                )
+            plan = existing
+            status = "reused"
+        else:
+            save_execution_plan(self.execution_plan_file_path, candidate)
+            plan = candidate
+        self._execution_plan_snapshot = plan
+        self._execution_plan_source = "new_finalization"
+        self._reconstructed_execution_plan = None
+        self._progress_execution_reference = ProgressExecutionReference(
+            plan_id=plan.plan_id,
+            plan_revision=plan.plan_revision,
+        )
+        self.set_execution_plan_finalization_error(None)
+        return plan, status
 
     def _project_reconstructed_execution_plan(self, plan):
         fill_name = str(self.metadata.get("fill_reagent_name", "Water"))
@@ -6989,6 +7116,10 @@ class ExperimentModel(QObject):
         }
         payload = dict(progress)
         payload["__plate__"] = plate_meta
+        execution_reference = self._execution_progress_reference()
+        if execution_reference is not None:
+            payload["__execution__"] = execution_reference.to_dict()
+            self._progress_execution_reference = execution_reference
         self._atomic_json_dump(self.progress_file_path, payload)
 
     def progress_to_key(self) -> "pd.DataFrame":
@@ -7597,10 +7728,16 @@ class ExperimentModel(QObject):
             with open(progress_file, "r") as f:
                 payload = json.load(f)
                 if isinstance(payload, dict):
-                    # strip metadata envelope key if present
-                    payload.pop("__plate__", None)
-                    # Backward-compatible legacy progress structure
-                    self.progress_data = payload
+                    execution_payload = payload.get("__execution__")
+                    try:
+                        self._progress_execution_reference = (
+                            ProgressExecutionReference.from_dict(execution_payload)
+                            if execution_payload is not None
+                            else None
+                        )
+                    except ValueError:
+                        self._progress_execution_reference = None
+                    self.progress_data = self._well_entries_from_progress_payload(payload)
                 else:
                     self.progress_data = {}
         except (FileNotFoundError, json.JSONDecodeError, OSError):
@@ -7614,8 +7751,7 @@ class ExperimentModel(QObject):
             with open(self.progress_file_path, "r") as f:
                 payload = json.load(f)
                 if isinstance(payload, dict):
-                    payload.pop("__plate__", None)
-                    return payload
+                    return self._well_entries_from_progress_payload(payload)
                 return {}
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return {}
@@ -7666,7 +7802,7 @@ class ExperimentModel(QObject):
         reagent_entry_count = 0
 
         for well_id, entry in payload.items():
-            if well_id == "__plate__" or not isinstance(entry, dict):
+            if str(well_id).startswith("__") or not isinstance(entry, dict):
                 continue
             well_count += 1
             well_added = 0
@@ -7706,6 +7842,7 @@ class ExperimentModel(QObject):
         if path:
             self._atomic_json_dump(path, {})
         self.progress_data = {}
+        self._progress_execution_reference = None
         self._last_progress_load_warnings = []
         self._last_progress_stock_override_warnings = []
         return before
@@ -8191,9 +8328,18 @@ class ExperimentModel(QObject):
         self._last_progress_stock_override_warnings = []
         self.calibration_file_path = None
         self.experiment_audit_file_path = None
+        self.execution_plan_file_path = None
         self.key_file_path = None
+        self.concentration_key_file_path = None
         self._runtime_well_plate = None
         self._runtime_reaction_collection = None
+        self._execution_plan_snapshot = None
+        self._execution_plan_source = None
+        self._reconstructed_execution_plan = None
+        self._legacy_execution_reconstruction = None
+        self._legacy_execution_read_only = False
+        self._execution_plan_finalization_error = None
+        self._progress_execution_reference = None
 
         # clear any uploaded/manual reaction list state
         self._uploaded_reactions = None
@@ -11811,7 +11957,16 @@ class Model(QObject):
 
         return ssm, rc
 
-    def load_experiment_from_model(self, plate_name=None, load_progress=False):
+    def load_experiment_from_model(
+        self,
+        plate_name=None,
+        load_progress=False,
+        finalize_execution_plan=False,
+    ):
+        if finalize_execution_plan and load_progress:
+            raise ValueError(
+                "Initial execution-plan finalization cannot be combined with loading progress."
+            )
         # Bail if nothing was generated
         if self.experiment_model.get_number_of_reactions() == 0:
             print("No reactions in the experiment model.")
@@ -11859,7 +12014,7 @@ class Model(QObject):
                 plate_name=target_plate_name,
             )
 
-        self.clear_experiment()
+        self._clear_runtime_experiment_without_signal()
         self.well_plate.excluded_wells = preserved_exclusions
         if plate_name is not None:
             self.well_plate.set_plate_format(plate_name)
@@ -11941,16 +12096,33 @@ class Model(QObject):
         # Give ExperimentModel a runtime view so it can build progress/key files
         self.experiment_model.set_runtime_context(self.well_plate, self.reaction_collection)
 
-        # Progress/key/concentration key files
-        if load_progress:
-            print("Loading progress in load_experiment_from_model()")
-            self.experiment_model.load_progress()
-        else:
-            print("Creating new progress file from load_experiment_from_model()")
-            self.experiment_model.create_progress_file()
+        execution_plan = None
+        execution_plan_status = None
+        try:
+            if finalize_execution_plan:
+                execution_plan, execution_plan_status = (
+                    self.experiment_model.create_or_reuse_initial_execution_plan()
+                )
 
-        self.experiment_model.create_key_file()
-        self.experiment_model.create_concentration_key_file()
+            # Progress/key/concentration key files
+            if load_progress:
+                print("Loading progress in load_experiment_from_model()")
+                self.experiment_model.load_progress()
+            else:
+                print("Creating new progress file from load_experiment_from_model()")
+                self.experiment_model.create_progress_file()
+
+            self.experiment_model.create_key_file()
+            self.experiment_model.create_concentration_key_file()
+        except Exception as exc:
+            if finalize_execution_plan:
+                self.experiment_model.set_execution_plan_finalization_error(exc)
+                self.experiment_model.set_runtime_context(None, None)
+                self._clear_runtime_experiment_without_signal()
+                raise RuntimeError(
+                    f"Experiment finalization failed before the execution artifacts were ready: {exc}"
+                ) from exc
+            raise
 
         assigned_well_count = sum(
             1
@@ -11967,6 +12139,15 @@ class Model(QObject):
                 "assigned_well_count": int(assigned_well_count),
                 "progress_state": "loaded" if load_progress else "created",
                 "initialized_experiment": bool(initialized_experiment),
+                **(
+                    {
+                        "execution_plan_id": execution_plan.plan_id,
+                        "execution_plan_revision": execution_plan.plan_revision,
+                        "execution_plan_status": execution_plan_status,
+                    }
+                    if execution_plan is not None
+                    else {}
+                ),
             },
         )
         self.experiment_loaded.emit()
@@ -12090,20 +12271,29 @@ class Model(QObject):
 
         self.experiment_loaded.emit()
 
-    def clear_experiment(self):
-        """Clear all experiment data and reset the well plate."""
+    def _clear_runtime_experiment_without_signal(self):
+        """Clear runtime execution state without announcing a successful load."""
         if self.stock_solutions is not None:
             self.stock_solutions.clear_all_stock_solutions()
         if self.reaction_collection is not None:
             self.reaction_collection.clear_all_reactions()
-        
         self.well_plate.clear_all_wells()
-        self.printer_head_manager.clear_all_printer_heads()
-        self.rack_model.clear_all_slots()
+
+        printer_head_manager = getattr(self, "printer_head_manager", None)
+        rack_model = getattr(self, "rack_model", None)
+        if printer_head_manager is not None:
+            printer_head_manager.clear_all_printer_heads()
+        if rack_model is not None:
+            rack_model.clear_all_slots()
+        if printer_head_manager is not None and rack_model is not None:
+            printer_head_manager.create_calibration_chip()
+            calibration_chip = printer_head_manager.get_calibration_chip()
+            printer_head_manager.swap_printer_head(4, calibration_chip)
+
+    def clear_experiment(self):
+        """Clear all experiment data and reset the well plate."""
+        self._clear_runtime_experiment_without_signal()
         self.experiment_loaded.emit()
-        self.printer_head_manager.create_calibration_chip()
-        calibration_chip = self.printer_head_manager.get_calibration_chip()
-        self.printer_head_manager.swap_printer_head(4,calibration_chip)
 
     def assign_printer_heads(self):
         """Assign printer heads to the slots in the rack."""

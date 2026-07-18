@@ -45,6 +45,7 @@ def test_update_all_paths_sets_experiment_audit_path(tmp_path):
     assert em.progress_file_path == str(exp_dir / "progress.json")
     assert em.calibration_file_path == str(exp_dir / "calibration.json")
     assert em.experiment_audit_file_path == str(exp_dir / "experiment_audit.jsonl")
+    assert em.execution_plan_file_path == str(exp_dir / "execution_plan.json")
 
 
 def test_initialize_experiment_sets_audit_path_without_logging(tmp_path):

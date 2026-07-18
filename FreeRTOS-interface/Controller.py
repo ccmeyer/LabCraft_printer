@@ -5926,6 +5926,17 @@ class Controller(QObject):
         required number of droplets for the currently loaded printer head.
         '''
         experiment_model = getattr(self.model, "experiment_model", None)
+        finalization_error_getter = getattr(
+            experiment_model, "get_execution_plan_finalization_error", None
+        )
+        if callable(finalization_error_getter) and finalization_error_getter():
+            message = (
+                "This experiment did not finish creating its execution artifacts. "
+                "Printing is blocked until finalization succeeds or the experiment is reset."
+            )
+            self.error_occurred_signal.emit('Error', message)
+            print(f'Cannot print: {message}')
+            return
         read_only_getter = getattr(experiment_model, "is_read_only_legacy_execution", None)
         if callable(read_only_getter) and read_only_getter():
             message = (

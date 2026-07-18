@@ -2,12 +2,12 @@
 
 ## Purpose
 
-`execution_plan.json` is the future machine-readable snapshot of an experiment's
+`execution_plan.json` is the machine-readable snapshot of an experiment's
 derived execution plan. It is separate from the authored design, progress
 counters, and human-readable CSV exports.
 
-Slice 1 defines and tests this contract only. The application does not yet read
-or write `execution_plan.json`.
+Slice 3 writes the initial prepared plan when a fresh experiment is finalized.
+Authoritative plan loading and calibrated revisions remain later slices.
 
 ## Schema identity
 
@@ -144,5 +144,44 @@ The slice 1 writer:
   unchanged.
 - Uses deterministic sorted-key, two-space-indented JSON with a trailing newline.
 
-Later slices will decide when an experiment creates, revises, loads, or migrates
-this file. Merely opening an experiment must never write one.
+## Initial creation in Slice 3
+
+- **Finish/Apply** creates the initial plan only after reactions have been
+  assigned to their final runtime wells and before progress or key files are
+  generated.
+- Ordinary design saves, optimization previews, initialization, duplication,
+  legacy loading, and merely opening a folder do not create a plan.
+- The initial plan uses a new UUID, revision `1`, state `prepared`, equal
+  creation/update timestamps, null lock fields, and null calibration/head
+  references.
+- The design hash is calculated from the exact parsed payload already persisted
+  in `experiment_design.json`. Wells and targets come from the finalized runtime
+  assignment, while exact concentrations and effective volumes come from the
+  stock plan rather than rounded CSV headers.
+- A valid existing prepared revision-1 plan is reused byte-for-byte only when
+  its design and execution content match. Invalid, active, revised, or
+  conflicting files are never overwritten.
+
+Newly finalized progress files link to their plan with this metadata envelope:
+
+```json
+"__execution__": {
+  "schema_version": 1,
+  "plan_id": "f33cf5d6-2f38-4ca7-86fd-74f73baac81d",
+  "plan_revision": 1
+}
+```
+
+The reference has exactly these three fields. Well-oriented progress readers
+exclude all `__*` metadata keys from reaction iteration.
+
+Initial plan construction and persistence fail closed. A failure prevents a
+successful runtime handoff and printing, clears partially loaded runtime
+assignments, and leaves existing plan files unchanged. If the plan was already
+written before a later progress/key failure, it remains as a prepared snapshot
+and an identical retry reuses it.
+
+Slice 3 does not make persisted plans authoritative on load and does not revise
+plans after calibration. Those behaviors, lifecycle locking, migration, and
+reset semantics remain later slices. Merely opening an experiment never writes
+or migrates `execution_plan.json`.

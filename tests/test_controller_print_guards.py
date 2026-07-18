@@ -1686,6 +1686,23 @@ def test_print_array_blocks_read_only_legacy_execution_before_hardware_actions()
     c.move_to_location.assert_not_called()
 
 
+def test_print_array_blocks_after_execution_plan_finalization_failure():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+    )
+    c.model.experiment_model.get_execution_plan_finalization_error = Mock(
+        return_value="disk unavailable"
+    )
+
+    Controller.print_array(c)
+
+    message = c.error_occurred_signal.calls[0][1]
+    assert "did not finish creating its execution artifacts" in message
+    c.close_gripper.assert_not_called()
+    c.move_to_location.assert_not_called()
+
+
 def _make_pickup_ready_controller(*, initial_state="resume_ready", transport_paused=False):
     c = _make_controller(
         well_plate=FakeWellPlate([FakeWell("A1", 5)]),
