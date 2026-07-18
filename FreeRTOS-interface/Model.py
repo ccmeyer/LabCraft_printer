@@ -38,6 +38,11 @@ import CalibrationClasses
 import importlib
 from CalibrationMemoryStore import CalibrationMemoryStore
 from ExperimentAuditLog import ExperimentAuditLog
+from LegacyExecutionPlan import (
+    LegacyExecutionClassification,
+    LegacyExecutionReconstruction,
+    reconstruct_legacy_execution,
+)
 from RegulatorProfiles import (
     RegulatorProfileStore,
     default_local_profile_path,
@@ -407,6 +412,9 @@ class ExperimentModel(QObject):
         self._last_progress_load_warnings: list[dict[str, object]] = []
         self._last_progress_stock_override_warnings: list[dict[str, object]] = []
         self.unsaved_changes: bool = False
+        self._legacy_execution_reconstruction: LegacyExecutionReconstruction | None = None
+        self._reconstructed_execution_plan = None
+        self._legacy_execution_read_only: bool = False
 
         # optional dependency (if you have one); safe to ignore if None
         self._calibration_manager = None
@@ -1677,6 +1685,13 @@ class ExperimentModel(QObject):
         two_max_refine: int = 30,
         allow_two: bool = True
     ) -> Dict:
+        if self.is_read_only_legacy_execution():
+            return {
+                "best": None,
+                "reason": "Recorded legacy executions are read-only and cannot be re-optimized.",
+                "issues_by_key": {},
+                "read_only": True,
+            }
 
         def _adj_targets(opt) -> List[float]:
             s = float(getattr(opt, "starting_conc", 0.0) or 0.0)
@@ -4855,6 +4870,8 @@ class ExperimentModel(QObject):
 
     def get_plan_for_key(self, key: tuple[str, Optional[str]]) -> dict | None:
         """Ensure plans exist and return plans_per_option[key]."""
+        if self.is_read_only_legacy_execution():
+            return None
         if not self.plans_per_option:
             # Safe: compute plans if caller came in early
             self.optimize_stock_solutions(
@@ -5973,6 +5990,10 @@ class ExperimentModel(QObject):
 
         Returns a small summary dict for UI debug/logging.
         """
+        if self.is_read_only_legacy_execution():
+            raise RuntimeError(
+                "Recorded legacy executions are read-only; calibration cannot change the saved execution."
+            )
         key = (factor_name, option_name)
         plan = self.plans_per_option.get(key)
         if not plan:
@@ -6447,6 +6468,8 @@ class ExperimentModel(QObject):
         """
         import os
 
+        self._clear_legacy_execution_state()
+
         # --- metadata + factors (existing behavior) ---
         self.metadata = d.get("metadata", self.metadata)
         self.stock_prep_state = self._normalize_stock_prep_state(d.get("stock_prep"))
@@ -6744,12 +6767,20 @@ class ExperimentModel(QObject):
     # -----------------------------
     def save_experiment(self):
         """Persist metadata + factors (inputs). Derived plans are recomputed on load."""
+        if self.is_read_only_legacy_execution():
+            raise RuntimeError("Recorded legacy executions are read-only and cannot be saved from the editor.")
         data = self.to_dict()  # you already have to_dict() for v2
         self._atomic_json_dump(self.experiment_file_path, data)
         self.unsaved_changes = False
 
-    def load_experiment(self, filename: str, experiment_dir: str):
-        """Load factors + metadata; recompute plans and grid."""
+    def load_experiment(
+        self,
+        filename: str,
+        experiment_dir: str,
+        *,
+        progress_reset_confirmed: bool = False,
+    ):
+        """Load an unrun design or reconstruct a recorded legacy execution in memory."""
         import json, os
         self.experiment_file_path = filename
         self.experiment_dir_path = experiment_dir
@@ -6761,11 +6792,28 @@ class ExperimentModel(QObject):
         # Rehydrate
         self.from_dict(data)  # resets caches/signals
         
-        # If this design has an uploaded/manual reaction list, make sure a CSV
-        # exists in the experiment directory for the user to re-import later.
-        if self._uploaded_reactions is not None and self.experiment_dir_path:
-            if not self._uploaded_design_source or not os.path.exists(self._uploaded_design_source):
-                self._materialize_uploaded_design_csv()
+        reconstruction = reconstruct_legacy_execution(experiment_dir, data)
+        self._legacy_execution_reconstruction = reconstruction
+        if (
+            reconstruction.classification is LegacyExecutionClassification.RECORDED_EXECUTION
+            and not progress_reset_confirmed
+        ):
+            self._legacy_execution_read_only = True
+            self._reconstructed_execution_plan = reconstruction.plan
+            self.progress_data = dict(reconstruction.progress)
+            self.plans_per_option.clear()
+            self._unreachable_preview_map.clear()
+            self._target_preview_map.clear()
+            if reconstruction.plan is not None:
+                self._project_reconstructed_execution_plan(reconstruction.plan)
+            else:
+                self._stock_rows_cache = []
+                self._fill_row_cache = None
+                self._reactions_df = pd.DataFrame()
+                self._last_worst_nonfill_volume_nL = None
+            return reconstruction
+        if progress_reset_confirmed:
+            self._clear_legacy_execution_state()
 
         # Recompute plans & grid
         res = self.optimize_stock_solutions(
@@ -6783,6 +6831,123 @@ class ExperimentModel(QObject):
         # If a progress file already exists, read it (Model later applies it)
         if os.path.exists(self.progress_file_path):
             self.read_progress_file(self.progress_file_path)
+        return reconstruction
+
+    def _clear_legacy_execution_state(self):
+        self._legacy_execution_reconstruction = None
+        self._reconstructed_execution_plan = None
+        self._legacy_execution_read_only = False
+
+    def is_read_only_legacy_execution(self) -> bool:
+        return bool(getattr(self, "_legacy_execution_read_only", False))
+
+    def get_legacy_execution_classification(self) -> str:
+        reconstruction = getattr(self, "_legacy_execution_reconstruction", None)
+        if reconstruction is None:
+            return LegacyExecutionClassification.UNRUN_DESIGN.value
+        return reconstruction.classification.value
+
+    def get_legacy_execution_issues(self) -> list[dict[str, Any]]:
+        reconstruction = getattr(self, "_legacy_execution_reconstruction", None)
+        if reconstruction is None:
+            return []
+        return [
+            {
+                "severity": issue.severity,
+                "code": issue.code,
+                "message": issue.message,
+                "context": dict(issue.context),
+            }
+            for issue in reconstruction.issues
+        ]
+
+    def get_legacy_execution_source_evidence(self) -> list[dict[str, Any]]:
+        reconstruction = getattr(self, "_legacy_execution_reconstruction", None)
+        if reconstruction is None:
+            return []
+        return [dict(item) for item in reconstruction.source_evidence]
+
+    def get_reconstructed_execution_plan(self):
+        return getattr(self, "_reconstructed_execution_plan", None)
+
+    def _project_reconstructed_execution_plan(self, plan):
+        fill_name = str(self.metadata.get("fill_reagent_name", "Water"))
+        totals: dict[str, int] = {stock.stock_id: 0 for stock in plan.stocks}
+        maxima: dict[str, int] = {stock.stock_id: 0 for stock in plan.stocks}
+        reaction_rows: list[dict[str, Any]] = []
+        stock_by_id = {stock.stock_id: stock for stock in plan.stocks}
+        fill_stock_ids = {
+            stock.stock_id
+            for stock in plan.stocks
+            if stock.reagent_name == fill_name and stock.units == "--"
+        }
+        worst_nonfill = 0.0
+        for index, well in enumerate(plan.wells):
+            nonfill = 0.0
+            fill_drops = 0
+            for dispense in well.dispenses:
+                totals[dispense.stock_id] += int(dispense.target_dispenses)
+                maxima[dispense.stock_id] = max(
+                    maxima[dispense.stock_id], int(dispense.target_dispenses)
+                )
+                volume = (
+                    int(dispense.target_dispenses)
+                    * stock_by_id[dispense.stock_id].effective_volume_nL
+                )
+                if dispense.stock_id in fill_stock_ids:
+                    fill_drops += int(dispense.target_dispenses)
+                else:
+                    nonfill += volume
+            worst_nonfill = max(worst_nonfill, nonfill)
+            reaction_rows.append(
+                {
+                    "well_id": well.well_id,
+                    "reaction_id": well.reaction_id,
+                    "nonfill_volume_nL": nonfill,
+                    "fill_drops": fill_drops,
+                    "expected_printed_volume_nL": well.expected_printed_volume_nL,
+                    "reaction_index": index,
+                    "global_index": index,
+                    "replicate": 0,
+                    "design_source": "legacy_execution",
+                    "additional_condition_label": "",
+                }
+            )
+
+        stock_rows: list[dict[str, Any]] = []
+        fill_row = None
+        final_volume = float(plan.volume_basis.final_reaction_volume_nL)
+        for stock in plan.stocks:
+            total_drops = totals[stock.stock_id]
+            row = {
+                "factor_name": stock.factor_name,
+                "option_name": stock.option_name or "",
+                "stock_concentration": stock.concentration,
+                "delta_per_drop": (
+                    stock.concentration * stock.effective_volume_nL / final_volume
+                    if final_volume > 0
+                    else 0.0
+                ),
+                "units": stock.units,
+                "droplet_volume_nL": stock.effective_volume_nL,
+                "printing_mode": stock.printing_mode,
+                "total_droplets": total_drops,
+                "total_volume_uL": round(total_drops * stock.effective_volume_nL / 1000.0, 3),
+                "max_per_rxn_nL": maxima[stock.stock_id] * stock.effective_volume_nL,
+                "stock_id": stock.stock_id,
+                "reagent_id": None,
+                "reagent_display_name": stock.reagent_name,
+                "intended_head_type_id": None,
+                "intended_head_type_display_name": None,
+            }
+            if stock.stock_id in fill_stock_ids:
+                fill_row = row
+            else:
+                stock_rows.append(row)
+        self._stock_rows_cache = stock_rows
+        self._fill_row_cache = fill_row
+        self._reactions_df = pd.DataFrame(reaction_rows)
+        self._last_worst_nonfill_volume_nL = worst_nonfill
 
     # -----------------------------
     # Progress & Key files
@@ -7342,6 +7507,10 @@ class ExperimentModel(QObject):
         """
         Set the fill droplet size and recompute experiment so all totals refresh.
         """
+        if self.is_read_only_legacy_execution():
+            raise RuntimeError(
+                "Recorded legacy executions are read-only; calibration cannot change the saved execution."
+            )
         metadata = getattr(self, "metadata", {}) or {}
         default_fill_droplet_nL = printing_mode_default_ejection_volume_nl(PRINTING_MODE_DROPLET)
         default_fill_getter = getattr(self, "_default_fill_droplet_volume_nl", None)

@@ -1670,6 +1670,22 @@ def test_resume_array_blocks_when_persistent_dock_confirmation_required():
     ]
 
 
+def test_print_array_blocks_read_only_legacy_execution_before_hardware_actions():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+    )
+    c.model.experiment_model.is_read_only_legacy_execution = Mock(return_value=True)
+
+    Controller.print_array(c)
+
+    message = c.error_occurred_signal.calls[0][1]
+    assert "read-only for analysis" in message
+    assert "resume" in message
+    c.close_gripper.assert_not_called()
+    c.move_to_location.assert_not_called()
+
+
 def _make_pickup_ready_controller(*, initial_state="resume_ready", transport_paused=False):
     c = _make_controller(
         well_plate=FakeWellPlate([FakeWell("A1", 5)]),

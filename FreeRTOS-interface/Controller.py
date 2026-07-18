@@ -5925,6 +5925,16 @@ class Controller(QObject):
         Iterates through all wells with an assigned reaction and prints the 
         required number of droplets for the currently loaded printer head.
         '''
+        experiment_model = getattr(self.model, "experiment_model", None)
+        read_only_getter = getattr(experiment_model, "is_read_only_legacy_execution", None)
+        if callable(read_only_getter) and read_only_getter():
+            message = (
+                "This recorded legacy execution is loaded read-only for analysis. "
+                "Printing and hardware resume are disabled until validated resume support is available."
+            )
+            self.error_occurred_signal.emit('Error', message)
+            print(f'Cannot print: {message}')
+            return
         starting_state = self.get_array_run_state()
         if starting_state in {"running", "stop_requested"}:
             print('Cannot print: Array runner is already active')
