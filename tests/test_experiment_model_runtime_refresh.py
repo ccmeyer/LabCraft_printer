@@ -463,7 +463,9 @@ def test_apply_droplet_volume_for_option_can_switch_printing_mode(
         printer_head=head,
         machine_model=_machine_model_for_calibration(pw_us=1800, pressure_psi=1.80),
     )
-    assert validation["ok"] is True
+    assert reloaded.is_read_only_legacy_execution()
+    assert validation["ok"] is False
+    assert validation["code"] == "context_unavailable"
 
 
 def test_stream_calibration_marks_manual_refuel_check_required(
@@ -608,7 +610,9 @@ def test_manual_refuel_pass_persists_and_revalidates_for_same_stream_calibration
         printer_head=head,
         machine_model=machine,
     )
-    assert reloaded_validation["ok"] is True
+    assert reloaded.is_read_only_legacy_execution()
+    assert reloaded_validation["ok"] is False
+    assert reloaded_validation["code"] == "context_unavailable"
 
 
 def test_new_stream_calibration_marks_existing_manual_refuel_pass_required(
@@ -896,8 +900,10 @@ def test_applied_imaging_calibration_records_serialize_through_save_and_load(
         printer_head=head,
         machine_model=_machine_model_for_calibration(),
     )
-    assert validation["ok"] is True
-    assert validation["record"]["run_id"] == "run-2"
+    assert reloaded.is_read_only_legacy_execution()
+    assert validation["ok"] is False
+    assert validation["code"] == "context_unavailable"
+    assert validation["record"] is None
 
 
 def test_apply_fill_droplet_volume_records_applied_imaging_calibration(

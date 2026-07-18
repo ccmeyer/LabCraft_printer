@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtWidgets import QApplication, QDialog, QVBoxLayout, QLabel, QPushButton, QHBoxLayout, QWidget, QGraphicsEllipseItem, QGraphicsScene, QGraphicsView, QGraphicsRectItem
 from PySide6.QtGui import QShortcut, QKeySequence, QPixmap, QColor, QPen, QBrush, QImage, QPainter, QIcon
-from PySide6.QtCore import Qt, QTimer, Signal, Slot, QSignalBlocker
+from PySide6.QtCore import Qt, QTimer, QThread, Signal, Slot, QSignalBlocker
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
@@ -47,6 +47,7 @@ import CalibrationClasses
 import importlib
 from typing import Mapping, Sequence, Optional, Any, List, Dict, Tuple, Set
 from hardware.profile import CURRENT_PROFILE, HardwareProfile
+from LegacyExecutionMigration import migrate_legacy_execution_copy as migrate_legacy_execution_directory
 
 MassCalibrationDialog = None
 
@@ -68,6 +69,32 @@ PROMPTABLE_MANUAL_REFUEL_CHECK_CODES = {
 
 _VOLUME_INPUT_ERROR_STYLE = "border:1px solid #8a0303;"
 _VOLUME_INPUT_ISSUE_KEY = ("__metadata__", "volumes")
+
+
+class LegacyExecutionMigrationWorker(QThread):
+    succeeded = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, source_dir: str, destination: str | None = None, parent=None):
+        super().__init__(parent)
+        self.source_dir = str(source_dir)
+        self.destination = destination
+        self._cancel_requested = False
+
+    def cancel(self):
+        self._cancel_requested = True
+
+    def run(self):
+        try:
+            result = migrate_legacy_execution_directory(
+                self.source_dir,
+                self.destination,
+                cancel_check=lambda: self._cancel_requested,
+            )
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+        self.succeeded.emit(result)
 
 
 def is_release_candidate_version(version):
@@ -1453,6 +1480,15 @@ class MainWindow(QMainWindow):
         
     def reset_single_array(self):
         """Reset a single array."""
+        experiment_model = getattr(getattr(self, "model", None), "experiment_model", None)
+        can_reset = getattr(experiment_model, "can_reset_array_progress", None)
+        if callable(can_reset) and not can_reset():
+            self.popup_message(
+                "Cannot reset recorded execution",
+                "Recorded dispense counts represent physical history and cannot be reset in place. "
+                "Use Create Editable Copy to start a new execution.",
+            )
+            return
         active_printer_head = self.model.rack_model.get_gripper_printer_head()
         if active_printer_head == None:
             self.popup_message('Cannot reset:','Only resets the array for the loaded printer head')
@@ -1464,6 +1500,15 @@ class MainWindow(QMainWindow):
 
     def reset_all_arrays(self):
         """Reset all arrays."""
+        experiment_model = getattr(getattr(self, "model", None), "experiment_model", None)
+        can_reset = getattr(experiment_model, "can_reset_array_progress", None)
+        if callable(can_reset) and not can_reset():
+            self.popup_message(
+                "Cannot reset recorded execution",
+                "Recorded dispense counts represent physical history and cannot be reset in place. "
+                "Use Create Editable Copy to start a new execution.",
+            )
+            return
         response = self.popup_yes_no('Reset All Arrays','Are you sure you want to reset all arrays?')
         if self._is_yes_response(response):
             self.controller.reset_all_arrays()
@@ -1526,6 +1571,10 @@ class MainWindow(QMainWindow):
             load_progress=load_progress,
             finalize_execution_plan=not load_progress,
         )
+
+    def start_new_experiment_session(self):
+        """Safely detach the current experiment and initialize a fresh design."""
+        return self.controller.start_new_experiment_session()
 
     def activate_authoritative_execution(self):
         """Explicitly project a validated saved execution into the runtime."""
@@ -10314,6 +10363,7 @@ class ExperimentDesignDialog(QDialog):
 
     PROGRESS_POLICY_RESUME = "resume"
     PROGRESS_POLICY_RESET = "reset"
+    PROGRESS_POLICY_COPY = "copy"
     PROGRESS_POLICY_CANCEL = "cancel"
 
     def __init__(self, model: ExperimentModel, main_window):
@@ -10605,9 +10655,14 @@ class ExperimentDesignDialog(QDialog):
         self.new_btn.clicked.connect(self._on_new_experiment)
         controls_col.addWidget(self.new_btn)
 
-        self.duplicate_btn = QPushButton("Duplicate Design...")
+        self.duplicate_btn = QPushButton("Create Editable Copy...")
         self.duplicate_btn.clicked.connect(self._on_duplicate_design)
         controls_col.addWidget(self.duplicate_btn)
+
+        self.migrate_legacy_btn = QPushButton("Migrate Legacy Copy...")
+        self.migrate_legacy_btn.clicked.connect(self._on_migrate_legacy_copy)
+        self.migrate_legacy_btn.setEnabled(False)
+        controls_col.addWidget(self.migrate_legacy_btn)
 
         self.save_btn = QPushButton("Save Design…")
         self.save_btn.clicked.connect(self._on_save_design)
@@ -12228,6 +12283,13 @@ class ExperimentDesignDialog(QDialog):
             )
         elif self.finish_btn.text() == "Activate Execution":
             self.finish_btn.setText("Finish")
+        migrate_button = getattr(self, "migrate_legacy_btn", None)
+        if migrate_button is not None:
+            legacy_getter = getattr(self.model, "is_read_only_legacy_execution", None)
+            migrate_button.setEnabled(
+                bool(callable(legacy_getter) and legacy_getter())
+                and not getattr(self, "_editing_locked_by_gripper", False)
+            )
 
     def _apply_uploaded_design_mode_to_ui(self, active: bool):
         self._uploaded_design_active = bool(active)
@@ -12364,7 +12426,7 @@ class ExperimentDesignDialog(QDialog):
         return (
             "This experiment has saved print progress "
             f"({droplets} droplet(s) recorded across {wells} well(s)). "
-            "The design is view-only unless progress is deleted."
+            "The design is view-only; create an editable copy to make changes."
         )
 
     def _set_progress_protection(self, protected: bool, status: Mapping[str, Any] | None = None):
@@ -12384,17 +12446,17 @@ class ExperimentDesignDialog(QDialog):
         msg.setText(message)
         msg.setInformativeText(
             "Keep Progress / Resume will preserve the saved run state and keep the design read-only. "
-            "Delete Progress and Edit will discard saved progress so the design can be changed."
+            "Create Editable Copy starts a separate design without changing this physical history."
         )
         keep_btn = msg.addButton("Keep Progress / Resume", QMessageBox.AcceptRole)
-        reset_btn = msg.addButton("Delete Progress and Edit", QMessageBox.DestructiveRole)
+        copy_btn = msg.addButton("Create Editable Copy", QMessageBox.ActionRole)
         cancel_btn = msg.addButton(QMessageBox.Cancel)
         msg.setDefaultButton(keep_btn)
         msg.exec()
 
         clicked = msg.clickedButton()
-        if clicked is reset_btn:
-            return self.PROGRESS_POLICY_RESET
+        if clicked is copy_btn:
+            return self.PROGRESS_POLICY_COPY
         if clicked is cancel_btn:
             return self.PROGRESS_POLICY_CANCEL
         return self.PROGRESS_POLICY_RESUME
@@ -12413,6 +12475,9 @@ class ExperimentDesignDialog(QDialog):
             title="Experiment progress exists",
         )
         if policy == self.PROGRESS_POLICY_CANCEL:
+            return False
+        if policy == self.PROGRESS_POLICY_COPY:
+            self._on_duplicate_design()
             return False
         if policy == self.PROGRESS_POLICY_RESET:
             clearer = getattr(self.model, "clear_progress_for_design_edit", None)
@@ -13577,8 +13642,17 @@ class ExperimentDesignDialog(QDialog):
         - Create Experiments/<name>/ with initial files
         - Refresh UI
         """
-        # Prefer the model's own reset if available (keeps your existing behavior)
-        if hasattr(self.model, "reset_experiment_model"):
+        main_window = getattr(self, "main_window", None)
+        if main_window is not None and hasattr(
+            main_window, "start_new_experiment_session"
+        ):
+            try:
+                main_window.start_new_experiment_session()
+            except Exception as e:
+                self._set_status(f"New experiment failed: {e}")
+                QMessageBox.warning(self, "Cannot start new experiment", str(e))
+                return
+        elif hasattr(self.model, "reset_experiment_model"):
             try:
                 self.model.reset_experiment_model()
             except Exception as e:
@@ -13761,6 +13835,70 @@ class ExperimentDesignDialog(QDialog):
 
         self._set_status(f"Duplicated design from: {exp_dir}. New experiment: {new_experiment_path}")
 
+    def _on_migrate_legacy_copy(self):
+        source = getattr(self.model, "experiment_dir_path", None)
+        if not source or not self.model.is_read_only_legacy_execution():
+            self._set_status("Load a recorded legacy execution before migrating it.")
+            return
+        response = self.popup_yes_no(
+            "Migrate Legacy Execution",
+            "Create a full sibling copy with authoritative analysis files? "
+            "The copy will remain permanently hardware-disabled.",
+        )
+        if not self._is_yes_response(response):
+            return
+        progress = QtWidgets.QProgressDialog(
+            "Copying and validating the legacy execution...",
+            "Cancel",
+            0,
+            0,
+            self,
+        )
+        progress.setWindowTitle("Migrate Legacy Execution")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        worker = LegacyExecutionMigrationWorker(source, parent=self)
+        self._legacy_migration_worker = worker
+        self._legacy_migration_progress = progress
+
+        def _cleanup_worker():
+            progress.close()
+            worker.deleteLater()
+            self._legacy_migration_worker = None
+            self._legacy_migration_progress = None
+
+        def _migration_failed(message):
+            if "canceled" in str(message).lower():
+                self._set_status("Legacy migration canceled; the source was unchanged.")
+            else:
+                QMessageBox.warning(self, "Migration failed", str(message))
+                self._set_status(f"Migration failed: {message}")
+
+        def _migration_succeeded(result):
+            try:
+                self.model.open_migrated_legacy_execution_copy(result, source)
+                self._progress_reset_confirmed = False
+                self._set_progress_protection(True)
+                self._uploaded_design_active = self.model.has_uploaded_design()
+                self._load_factors_into_table()
+                self._sync_controls_from_model()
+                self._refresh_stock_table()
+                self._update_summary_labels()
+                self._refresh_all_lock_states()
+                self._set_status(
+                    f"Migrated analysis-only execution opened from: {result.destination}"
+                )
+            except Exception as exc:
+                QMessageBox.warning(self, "Migration open failed", str(exc))
+                self._set_status(f"Migration was published but could not be opened: {exc}")
+
+        progress.canceled.connect(worker.cancel)
+        worker.failed.connect(_migration_failed)
+        worker.succeeded.connect(_migration_succeeded)
+        worker.finished.connect(_cleanup_worker)
+        worker.start()
+        progress.show()
+
     def _on_load_design(self):
         # Default directory = Experiments
         default_dir = None
@@ -13783,27 +13921,12 @@ class ExperimentDesignDialog(QDialog):
             return
 
         progress_path = os.path.join(exp_dir, "progress.json")
-        has_authoritative_plan = os.path.isfile(
-            os.path.join(exp_dir, "execution_plan.json")
-        )
         progress_status = {}
         get_status = getattr(self.model, "get_progress_status", None)
         if callable(get_status):
             progress_status = get_status(progress_file_path=progress_path)
 
         progress_policy = None
-        if progress_status.get("has_printed_progress") and not has_authoritative_plan:
-            progress_policy = self._prompt_progress_policy(
-                progress_status,
-                title="Loaded experiment has saved progress",
-            )
-            if progress_policy == self.PROGRESS_POLICY_CANCEL:
-                self._set_status("Load canceled; current design was left unchanged.")
-                return
-            if progress_policy == self.PROGRESS_POLICY_RESET:
-                clearer = getattr(self.model, "clear_progress_for_design_edit", None)
-                if callable(clearer):
-                    clearer(progress_file_path=progress_path)
 
         # Load an unrun design or reconstruct a recorded execution snapshot.
         self.model.load_experiment(

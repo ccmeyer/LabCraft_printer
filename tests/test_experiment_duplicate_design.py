@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from Model import CURRENT_PROFILE, ExperimentModel
 
@@ -171,3 +172,61 @@ def test_duplicate_design_preserves_uploaded_design_and_well_ids(tmp_path):
     duplicate_design = json.loads((duplicate_dir / "experiment_design.json").read_text(encoding="utf-8"))
     assert duplicate_design["uploaded_design"]["csv_filename"] == "uploaded_design.csv"
     assert duplicate_design["uploaded_design"]["well_ids"] == ["A1", "A2"]
+
+
+def test_editable_copy_restores_intended_dispense_inputs(tmp_path):
+    source = ExperimentModel(prof=CURRENT_PROFILE)
+    _configure_factor_design(source)
+    source.factors[0].options[0].intended_droplet_nL = 10.0
+    source.factors[0].options[0].intended_printing_mode = "droplet"
+    source.factors[0].options[0].droplet_nL = 11.25
+    source.metadata["intended_fill_droplet_volume_nL"] = 9.0
+    source.metadata["intended_fill_printing_mode"] = "droplet"
+    source.metadata["fill_droplet_volume_nL"] = 10.5
+    source_dir = tmp_path / "source_intended"
+    _write_source_artifacts(source, source_dir)
+
+    duplicate = ExperimentModel(prof=CURRENT_PROFILE)
+    destination = tmp_path / "editable"
+    duplicate.create_editable_design_copy(
+        str(source_dir), str(destination), "Editable"
+    )
+
+    payload = json.loads((destination / "experiment_design.json").read_text(encoding="utf-8"))
+    option = payload["factors"][0]["options"][0]
+    assert option["droplet_nL"] == 10.0
+    assert option["printing_mode"] == "droplet"
+    assert "intended_droplet_nL" not in option
+    assert payload["metadata"]["fill_droplet_volume_nL"] == 9.0
+    assert "intended_fill_droplet_volume_nL" not in payload["metadata"]
+
+
+def test_duplicate_optimization_failure_is_transactional(tmp_path, monkeypatch):
+    source = ExperimentModel(prof=CURRENT_PROFILE)
+    _configure_factor_design(source)
+    source_dir = tmp_path / "source_failure"
+    _write_source_artifacts(source, source_dir)
+    destination = tmp_path / "must_not_exist"
+    duplicate = ExperimentModel(prof=CURRENT_PROFILE)
+
+    monkeypatch.setattr(
+        ExperimentModel,
+        "optimize_stock_solutions",
+        lambda self, *args, **kwargs: {"best": None, "reason": "injected failure"},
+    )
+    with pytest.raises(RuntimeError, match="injected failure"):
+        duplicate.duplicate_design_from(
+            str(source_dir / "experiment_design.json"),
+            "FailedCopy",
+            str(destination),
+        )
+
+    assert not destination.exists()
+    assert duplicate.experiment_dir_path is None
+
+
+def test_copy_calibrations_compatibility_argument_is_rejected(tmp_path):
+    model = ExperimentModel(prof=CURRENT_PROFILE)
+    _configure_factor_design(model)
+    with pytest.raises(ValueError, match="Calibration evidence cannot be copied"):
+        model.duplicate_experiment("copy", str(tmp_path / "copy"), copy_calibrations=True)

@@ -3040,6 +3040,13 @@ class Controller(QObject):
         """Return the current array runner state."""
         return str(getattr(self, "_array_state", "idle") or "idle")
 
+    def start_new_experiment_session(self, *, base_dir=None):
+        return self.model.start_new_experiment_session(
+            array_runner_idle=self.get_array_run_state() == "idle",
+            command_queue_empty=bool(self.check_if_all_completed()),
+            base_dir=base_dir,
+        )
+
     def _emit_optional(self, signal_name, *args):
         signal = getattr(self, signal_name, None)
         if signal is None:
@@ -5589,6 +5596,29 @@ class Controller(QObject):
         except Exception:
             audit_details = {}
         audit_details["finalize_reason"] = reason
+        experiment_model = getattr(self.model, "experiment_model", None)
+        try:
+            if reason == "completed":
+                completer = getattr(experiment_model, "try_complete_execution_plan", None)
+                if callable(completer):
+                    terminal_plan = completer(reason="all_frozen_targets_satisfied")
+                    if terminal_plan is not None:
+                        audit_details["terminal_plan_revision"] = terminal_plan.plan_revision
+                        audit_details["terminal_plan_state"] = terminal_plan.state.value
+            elif reason == "hard_abort":
+                transition = getattr(experiment_model, "transition_execution_plan_terminal", None)
+                plan_getter = getattr(experiment_model, "get_execution_plan_snapshot", None)
+                plan = plan_getter() if callable(plan_getter) else None
+                if callable(transition) and plan is not None and getattr(plan.state, "value", None) == "active":
+                    terminal_plan = transition("aborted", "controller_hard_abort")
+                    audit_details["terminal_plan_revision"] = terminal_plan.plan_revision
+                    audit_details["terminal_plan_state"] = terminal_plan.state.value
+        except Exception as exc:
+            audit_details["terminal_transition_error"] = str(exc)
+            self.error_occurred_signal.emit(
+                "Execution synchronization error",
+                f"The array stopped, but its terminal execution state could not be synchronized: {exc}",
+            )
         self._array_context = None
 
         if reason in {"soft_stop", "refill_required"}:
@@ -5666,7 +5696,19 @@ class Controller(QObject):
 
     def reset_single_array(self):
         """Resets the droplet count for all wells in the well plate for the currently loaded stock solution."""
+        experiment_model = getattr(self.model, "experiment_model", None)
+        can_reset = getattr(experiment_model, "can_reset_array_progress", None)
+        if callable(can_reset) and not can_reset():
+            message = (
+                "Recorded dispense counts are physical execution history and cannot be reset in place. "
+                "Create an editable copy and finalize a new execution instead."
+            )
+            self.error_occurred_signal.emit("Cannot reset recorded execution", message)
+            return False
         active_printer_head = self.model.rack_model.get_gripper_printer_head()
+        if active_printer_head is None:
+            self.error_occurred_signal.emit("Cannot reset array", "No printer head is loaded.")
+            return False
         stock_id = active_printer_head.get_stock_id()
         try:
             remaining_before = len(self._get_array_remaining_wells(stock_id))
@@ -5687,9 +5729,19 @@ class Controller(QObject):
             },
             level="warning",
         )
+        return True
 
     def reset_all_arrays(self):
         """Resets the droplet count for all wells in the well plate for all stock solutions."""
+        experiment_model = getattr(self.model, "experiment_model", None)
+        can_reset = getattr(experiment_model, "can_reset_array_progress", None)
+        if callable(can_reset) and not can_reset():
+            message = (
+                "Recorded dispense counts are physical execution history and cannot be reset in place. "
+                "Create an editable copy and finalize a new execution instead."
+            )
+            self.error_occurred_signal.emit("Cannot reset recorded execution", message)
+            return False
         self.model.well_plate.reset_all_wells()
         self.model.experiment_model.create_progress_file()
         self.update_slots_signal.emit()
@@ -5704,6 +5756,7 @@ class Controller(QObject):
             },
             level="warning",
         )
+        return True
 
     def enter_print_mode(self):
         """Enter print mode."""

@@ -2,6 +2,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from Model import Model, ReactionComposition, Reagent, StockSolution
 
 
@@ -246,7 +248,7 @@ def test_progress_status_treats_zero_added_file_as_unstarted(experiment_model_fa
     assert status["total_added_droplets"] == 0
 
 
-def test_progress_status_detects_added_droplets_and_clear_resets_file(
+def test_progress_status_detects_added_droplets_and_clear_is_rejected(
     experiment_model_factory,
 ):
     model = experiment_model_factory()
@@ -263,13 +265,13 @@ def test_progress_status_detects_added_droplets_and_clear_resets_file(
     progress_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     status = em.get_progress_status()
-    before_clear = em.clear_progress_for_design_edit()
+    before = progress_path.read_bytes()
+    with pytest.raises(RuntimeError, match="cannot be deleted"):
+        em.clear_progress_for_design_edit()
 
     assert status["has_printed_progress"] is True
     assert status["total_added_droplets"] == 2
-    assert before_clear["has_printed_progress"] is True
-    assert json.loads(progress_path.read_text(encoding="utf-8")) == {}
-    assert em.progress_data == {}
+    assert progress_path.read_bytes() == before
 
 
 def test_load_progress_skips_unknown_reagent_ids_gracefully(experiment_model_factory):

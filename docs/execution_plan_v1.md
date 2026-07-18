@@ -247,10 +247,10 @@ optimization limit. Progress preserves all added counts while targets and its
 stock optimization. `experiment_design.json` remains byte-identical throughout
 locking, calibration, manual-refuel checks, and retries.
 
-Slice 4 persists only the active lifecycle state. Completed/aborted transitions,
-reset cleanup, and mixed-volume dispense segments remain later work. Legacy
-executions remain non-migrating, read-only snapshots; merely opening any
-experiment never creates or repairs execution artifacts.
+Mixed-volume dispense segments remain later work. Legacy executions remain
+non-migrating, read-only snapshots unless the user explicitly creates the
+analysis-only migration copy described below; merely opening any experiment
+never creates or repairs execution artifacts.
 
 ## Authoritative load and resume in Slice 5
 
@@ -311,3 +311,55 @@ revision before its first dispense. Existing bindings cannot silently change.
 Calibration of an unprinted stock remains available after authoritative
 activation and uses the Slice 4 revision path; stocks with positive added counts
 remain immutable.
+
+## Reset, copies, migration, and terminal states in Slice 6
+
+Recorded dispense counts are physical facts. Progress clearing and the Reset
+Single/All Array actions first classify the folder and fail before changing
+files or runtime objects when it contains positive counts, recorded legacy
+evidence, any finalized plan, or an invalid partial new-format bundle. Editing
+such an experiment always uses **Create Editable Copy**; the original folder is
+never rewritten.
+
+Editable copies are built in a sibling staging directory and published by one
+directory rename only after stock optimization and design validation succeed.
+They retain authored factors, reagent identities, conditions, random/manual
+assignments, and embedded uploaded reactions. Intended dispense volumes and
+printing modes replace calibrated effective values when available. Progress,
+stock-preparation completion, calibration/manual-check evidence, plan history,
+resume state, keys, recordings, and analysis outputs do not transfer. The fresh
+copy contains a normalized design, empty `progress.json`, empty
+`calibration.json`, and a materialized uploaded-design CSV when applicable.
+Calibration-copy requests are rejected because physical evidence cannot grant
+authority to a new execution.
+
+Recorded legacy migration is explicit and always creates a full sibling copy.
+It copies historical files and raw analysis data, preserves
+`experiment_design.json` byte-for-byte, reconstructs normalized progress, and
+persists the deterministic legacy plan as revision 1 and the latest mirror.
+Compatible calibration/manual-check evidence is converted to strict sidecar
+records; incomplete evidence is omitted with a warning rather than fabricated.
+No resume checkpoint is created.
+
+`legacy_migration.json` is strict schema
+`labcraft.legacy_execution_migration`, version 1. It contains the migrated plan
+ID, source folder and canonical design hash, SHA-256 for every relative source
+file, UTC migration time, exact code/message warnings, and the permanent
+`hardware_policy` value `analysis_only`. Unknown, missing, duplicate, or
+malformed fields invalidate the authoritative bundle. A valid manifest always
+overrides otherwise-normal resume eligibility: migrated zero-progress, active,
+completed, and aborted executions can be opened only for analysis.
+
+Active plans may end in one immutable terminal revision. `completed` requires
+every added count to equal its frozen target and a clean checkpoint with no
+pending intent. A refill or successful soft stop remains active. An explicit
+abandonment or Controller hard abort creates `aborted`, retains recorded counts
+and intents, and marks the checkpoint `uncertain`. Terminal transitions cannot
+change stocks, wells, targets, design/plate facts, or first-lock metadata, and
+terminal revisions cannot have successors. Exact retries reuse the immutable
+terminal revision and repair later mirrors without incrementing again.
+
+Starting **New Experiment** is also non-destructive. It requires an idle array
+runner, an empty command queue, and no printer head in the gripper, then detaches
+the previous folder unchanged and clears only in-memory runtime/execution state
+before creating the fresh design folder.

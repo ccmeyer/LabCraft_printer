@@ -421,6 +421,23 @@ def synchronize_checkpoint(
     )
 
 
+def mark_checkpoint_uncertain(
+    document: ExecutionResumeDocument,
+    *,
+    plan_revision: int,
+    progress_wells: Mapping[str, Any],
+    timestamp_utc: str | None = None,
+) -> ExecutionResumeDocument:
+    """Retain all intents while marking a hard-abort command boundary uncertain."""
+    return replace(
+        document,
+        plan_revision=_count(plan_revision, "plan_revision"),
+        state="uncertain",
+        progress_sha256=progress_fingerprint(progress_wells),
+        updated_at_utc=timestamp_utc or utc_now_text(),
+    )
+
+
 def load_execution_resume(path: str | Path) -> ExecutionResumeDocument:
     with Path(path).open("r", encoding="utf-8") as handle:
         return ExecutionResumeDocument.from_dict(

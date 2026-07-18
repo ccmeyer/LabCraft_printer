@@ -24,6 +24,11 @@ from ExecutionResumeStore import (
     load_execution_resume,
     progress_fingerprint,
 )
+from LegacyExecutionMigration import (
+    MANIFEST_FILE_NAME,
+    LegacyMigrationManifest,
+    load_legacy_migration_manifest,
+)
 
 
 @dataclass(frozen=True)
@@ -83,6 +88,7 @@ class AuthoritativeExecutionBundle:
     resume: ExecutionResumeDocument | None
     eligibility: ExecutionResumeEligibility
     issues: tuple[AuthoritativeExecutionIssue, ...]
+    migration_manifest: LegacyMigrationManifest | None = None
 
     @property
     def valid(self) -> bool:
@@ -282,16 +288,18 @@ def inspect_authoritative_execution(
     progress_wells: dict[str, Any] = {}
     calibrations = None
     resume = None
+    migration_manifest = None
     try:
         plan = load_execution_plan(directory / "execution_plan.json")
         if canonical_sha256(design_payload) != plan.design_sha256:
             raise ValueError("experiment_design.json does not match the execution-plan design hash")
-        history = validate_revision_history(
-            directory / "execution_plan_revisions",
-            latest_plan=plan,
-        )
-        if not history:
-            raise ValueError("immutable execution-plan history is missing")
+        migration_path = directory / MANIFEST_FILE_NAME
+        if migration_path.exists():
+            migration_manifest = load_legacy_migration_manifest(migration_path)
+            if migration_manifest.plan_id != plan.plan_id:
+                raise ValueError("legacy_migration.json references a different plan")
+            if migration_manifest.source_design_sha256 != plan.design_sha256:
+                raise ValueError("legacy_migration.json design hash differs from the copied design")
         progress_payload = _load_json(directory / "progress.json")
         progress_wells = _validate_progress(plan, progress_payload)
         calibration_path = directory / "execution_calibrations.json"
@@ -299,15 +307,32 @@ def inspect_authoritative_execution(
             calibrations = load_execution_calibrations(calibration_path)
             if calibrations.plan_id != plan.plan_id:
                 raise ValueError("execution_calibrations.json references a different plan")
+        calibration_ids = set(calibrations.records) if calibrations is not None else set()
+        history = validate_revision_history(
+            directory / "execution_plan_revisions",
+            latest_plan=plan,
+            allow_nonprepared_initial=migration_manifest is not None,
+            calibration_record_ids=calibration_ids,
+        )
+        if not history:
+            raise ValueError("immutable execution-plan history is missing")
         referenced = {
             stock.calibration_record_key
-            for stock in plan.stocks
+            for revision in history
+            for stock in revision.stocks
             if stock.calibration_record_key is not None
         }
         if referenced and calibrations is None:
             raise ValueError("execution calibration sidecar is missing")
         if calibrations is not None and referenced - set(calibrations.records):
             raise ValueError("execution plan references missing calibration records")
+        if calibrations is not None:
+            manual_references = {
+                record.get("calibration_record_id")
+                for record in calibrations.manual_refuel_checks.values()
+            }
+            if set(calibrations.records) - referenced - manual_references:
+                raise ValueError("execution_calibrations.json contains an unreferenced calibration record")
         resume_path = directory / "execution_resume.json"
         if resume_path.exists():
             resume = load_execution_resume(resume_path)
@@ -321,7 +346,12 @@ def inspect_authoritative_execution(
             AuthoritativeExecutionIssue("fatal", "authoritative_bundle_invalid", str(exc), {})
         )
     eligibility = (
-        _eligibility(plan, progress_wells, resume)
+        ExecutionResumeEligibility(
+            "analysis_only", False, False, False,
+            "This migrated legacy execution is permanently analysis-only.",
+        )
+        if plan is not None and not issues and migration_manifest is not None
+        else _eligibility(plan, progress_wells, resume)
         if plan is not None and not issues
         else ExecutionResumeEligibility(
             "blocked", False, False, False,
@@ -337,6 +367,7 @@ def inspect_authoritative_execution(
         resume=resume,
         eligibility=eligibility,
         issues=tuple(issues),
+        migration_manifest=migration_manifest,
     )
 
 

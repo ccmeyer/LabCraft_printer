@@ -56,6 +56,8 @@ def validate_revision_history(
     revision_dir: str | Path,
     *,
     latest_plan: ExecutionPlan | None = None,
+    allow_nonprepared_initial: bool = False,
+    calibration_record_ids: set[str] | None = None,
 ) -> tuple[ExecutionPlan, ...]:
     directory = Path(revision_dir)
     if not directory.exists():
@@ -69,6 +71,11 @@ def validate_revision_history(
     created_at = plans[0].created_at_utc
     plate = plans[0].plate
     volume_basis = plans[0].volume_basis
+    if plans[0].state is not ExecutionPlanState.PREPARED and not allow_nonprepared_initial:
+        raise RuntimeError(
+            "A non-prepared revision 1 requires a valid legacy-migration manifest."
+        )
+    referenced_calibrations: set[str] = set()
     for expected, (path, plan) in enumerate(zip(paths, plans), start=1):
         if path.name != revision_file_name(expected):
             raise RuntimeError(
@@ -84,23 +91,88 @@ def validate_revision_history(
             raise RuntimeError("Execution-plan revision history changes the creation timestamp.")
         if plan.plate != plate or plan.volume_basis != volume_basis:
             raise RuntimeError("Execution-plan revision history changes frozen plate or volume-basis facts.")
+        referenced_calibrations.update(
+            stock.calibration_record_key
+            for stock in plan.stocks
+            if stock.calibration_record_key is not None
+        )
         if expected > 1:
             previous = plans[expected - 2]
+            if previous.state in {ExecutionPlanState.COMPLETED, ExecutionPlanState.ABORTED}:
+                raise RuntimeError("Terminal execution-plan revisions cannot have successors.")
             if previous.state is ExecutionPlanState.PREPARED:
                 if plan.state is not ExecutionPlanState.ACTIVE:
                     raise RuntimeError("Prepared execution plans may transition only to active.")
                 if previous.stocks != plan.stocks or previous.wells != plan.wells:
                     raise RuntimeError("The prepared-to-active lock transition changed execution facts.")
-            elif plan.state is not previous.state:
-                raise RuntimeError("Slice 4 revision history contains an unsupported lifecycle transition.")
+            elif plan.state in {ExecutionPlanState.COMPLETED, ExecutionPlanState.ABORTED}:
+                if previous.state is not ExecutionPlanState.ACTIVE:
+                    raise RuntimeError("Only active execution plans may become terminal.")
+                if previous.stocks != plan.stocks or previous.wells != plan.wells:
+                    raise RuntimeError("A terminal transition changed frozen execution facts.")
+            elif plan.state is not previous.state or plan.state is not ExecutionPlanState.ACTIVE:
+                raise RuntimeError("Execution-plan history contains an unsupported lifecycle transition.")
+            else:
+                _validate_active_revision_transition(previous, plan)
             if previous.locked_at_utc is not None and (
                 plan.locked_at_utc != previous.locked_at_utc
                 or plan.lock_reason != previous.lock_reason
             ):
                 raise RuntimeError("Execution-plan lock metadata changed after the first lock.")
+    if calibration_record_ids is not None and referenced_calibrations - calibration_record_ids:
+        raise RuntimeError("Execution-plan history references missing calibration records.")
     if latest_plan is not None and plans[-1] != latest_plan:
         raise RuntimeError("execution_plan.json does not exactly match the latest immutable revision.")
     return plans
+
+
+def _stock_changes(previous: ExecutionPlan, current: ExecutionPlan) -> list[str]:
+    old = {stock.stock_id: stock for stock in previous.stocks}
+    new = {stock.stock_id: stock for stock in current.stocks}
+    if set(old) != set(new):
+        raise RuntimeError("An active revision changes stock identities.")
+    return [stock_id for stock_id in old if old[stock_id] != new[stock_id]]
+
+
+def _well_target_map(plan: ExecutionPlan) -> dict[str, dict[str, int]]:
+    return {
+        well.well_id: {item.stock_id: item.target_dispenses for item in well.dispenses}
+        for well in plan.wells
+    }
+
+
+def _validate_active_revision_transition(previous: ExecutionPlan, current: ExecutionPlan) -> None:
+    if len(previous.wells) != len(current.wells) or any(
+        old.well_id != new.well_id or old.reaction_id != new.reaction_id
+        for old, new in zip(previous.wells, current.wells)
+    ):
+        raise RuntimeError("An active revision changes frozen well or reaction identities.")
+    changed = _stock_changes(previous, current)
+    if len(changed) != 1:
+        raise RuntimeError("An active revision must change exactly one stock.")
+    stock_id = changed[0]
+    old_stock = next(item for item in previous.stocks if item.stock_id == stock_id)
+    new_stock = next(item for item in current.stocks if item.stock_id == stock_id)
+    if previous.wells == current.wells:
+        if replace(old_stock, printer_head_id=new_stock.printer_head_id) != new_stock:
+            raise RuntimeError("A printer-head binding revision changed unsupported stock fields.")
+        if old_stock.printer_head_id is not None or new_stock.printer_head_id is None:
+            raise RuntimeError("A printer-head binding must bind one previously unbound stock.")
+        return
+    if new_stock.calibration_record_key is None:
+        raise RuntimeError("A calibration revision must reference a calibration record.")
+    old_targets = _well_target_map(previous)
+    new_targets = _well_target_map(current)
+    fill_ids = {stock.stock_id for stock in current.stocks if stock.units == "--"}
+    allowed = {stock_id, *fill_ids}
+    for well_id in old_targets:
+        if set(old_targets[well_id]) != set(new_targets[well_id]):
+            raise RuntimeError("A calibration revision changes well stock identities.")
+        for target_stock_id in old_targets[well_id]:
+            if target_stock_id not in allowed and (
+                old_targets[well_id][target_stock_id] != new_targets[well_id][target_stock_id]
+            ):
+                raise RuntimeError("A calibration revision changes an unrelated stock target.")
 
 
 def build_locked_revision(
@@ -231,4 +303,46 @@ def build_calibrated_revision(
         updated_at_utc=timestamp,
         stocks=stocks,
         wells=tuple(wells),
+    )
+
+
+def build_terminal_revision(
+    plan: ExecutionPlan,
+    *,
+    state: ExecutionPlanState | str,
+    added_counts_by_well: Mapping[str, Mapping[str, int]],
+    has_pending_intents: bool = False,
+    reason: str | None = None,
+    timestamp_utc: str | None = None,
+) -> ExecutionPlan:
+    """Create an immutable active-to-terminal lifecycle revision."""
+    terminal = state if isinstance(state, ExecutionPlanState) else ExecutionPlanState(str(state))
+    if terminal not in {ExecutionPlanState.COMPLETED, ExecutionPlanState.ABORTED}:
+        raise ValueError("Terminal state must be completed or aborted.")
+    if plan.state in {ExecutionPlanState.COMPLETED, ExecutionPlanState.ABORTED}:
+        if plan.state is terminal:
+            return plan
+        raise ValueError("A terminal execution plan cannot transition again.")
+    if plan.state is not ExecutionPlanState.ACTIVE:
+        raise ValueError("Only an active execution plan may become terminal.")
+    expected_wells = {well.well_id for well in plan.wells}
+    if set(added_counts_by_well) != expected_wells:
+        raise ValueError("Terminal progress must contain exactly the execution-plan wells.")
+    if terminal is ExecutionPlanState.COMPLETED:
+        if has_pending_intents:
+            raise ValueError("A completed execution cannot have pending print intents.")
+        for well in plan.wells:
+            expected = {item.stock_id: item.target_dispenses for item in well.dispenses}
+            actual = dict(added_counts_by_well[well.well_id])
+            if set(actual) != set(expected) or any(
+                isinstance(value, bool) or not isinstance(value, int) or value != expected[stock_id]
+                for stock_id, value in actual.items()
+            ):
+                raise ValueError("Every recorded dispense count must exactly equal its frozen target.")
+    timestamp = timestamp_utc or utc_now_text()
+    return replace(
+        plan,
+        plan_revision=plan.plan_revision + 1,
+        state=terminal,
+        updated_at_utc=timestamp,
     )

@@ -31,6 +31,7 @@ import shutil
 import csv
 import math
 import re
+from pathlib import Path
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import matplotlib.pyplot as plt
 from enum import Enum
@@ -53,6 +54,7 @@ from ExecutionPlanRevision import (
     build_calibrated_revision,
     build_locked_revision,
     build_printer_head_binding_revision,
+    build_terminal_revision,
     persist_immutable_revision,
     validate_revision_history,
 )
@@ -65,6 +67,7 @@ from ExecutionResumeStore import (
     attach_command_sequence,
     complete_intent,
     load_execution_resume,
+    mark_checkpoint_uncertain,
     new_resume_document,
     save_execution_resume,
     synchronize_checkpoint,
@@ -80,6 +83,14 @@ from LegacyExecutionPlan import (
     LegacyExecutionClassification,
     LegacyExecutionReconstruction,
     reconstruct_legacy_execution,
+)
+from ExecutionArtifactPolicy import (
+    ExecutionArtifactClassification,
+    inspect_execution_artifacts,
+)
+from LegacyExecutionMigration import (
+    MANIFEST_FILE_NAME,
+    migrate_legacy_execution_copy as migrate_legacy_execution_directory,
 )
 from RegulatorProfiles import (
     RegulatorProfileStore,
@@ -450,6 +461,7 @@ class ExperimentModel(QObject):
         self.execution_plan_revisions_dir_path: Optional[str] = None
         self.execution_calibrations_file_path: Optional[str] = None
         self.execution_resume_file_path: Optional[str] = None
+        self.legacy_migration_file_path: Optional[str] = None
         self.progress_data: Dict[str, Dict] = {}
         self._last_progress_load_warnings: list[dict[str, object]] = []
         self._last_progress_stock_override_warnings: list[dict[str, object]] = []
@@ -6116,12 +6128,16 @@ class ExperimentModel(QObject):
 
         Returns a small summary dict for UI debug/logging.
         """
-        if self.is_read_only_legacy_execution():
+        read_only_getter = getattr(self, "is_read_only_legacy_execution", None)
+        if callable(read_only_getter) and read_only_getter():
             raise RuntimeError(
                 "Recorded legacy executions are read-only; calibration cannot change the saved execution."
             )
-        execution_plan = self.get_execution_plan_snapshot()
-        if execution_plan is not None and self.get_execution_plan_source() != "legacy_reconstruction":
+        plan_getter = getattr(self, "get_execution_plan_snapshot", None)
+        source_getter = getattr(self, "get_execution_plan_source", None)
+        execution_plan = plan_getter() if callable(plan_getter) else None
+        execution_source = source_getter() if callable(source_getter) else None
+        if execution_plan is not None and execution_source != "legacy_reconstruction":
             if not applied_calibration:
                 raise RuntimeError(
                     "A persisted calibration record is required to revise a finalized execution plan."
@@ -6934,6 +6950,9 @@ class ExperimentModel(QObject):
         )
         self.execution_resume_file_path = os.path.join(
             self.experiment_dir_path, "execution_resume.json"
+        )
+        self.legacy_migration_file_path = os.path.join(
+            self.experiment_dir_path, MANIFEST_FILE_NAME
         )
         self.key_file_path          = os.path.join(self.experiment_dir_path, "key.csv")
         self.concentration_key_file_path = os.path.join(self.experiment_dir_path, "concentration_key.csv")
@@ -7825,6 +7844,152 @@ class ExperimentModel(QObject):
             },
         )
         return candidate
+
+    def transition_execution_plan_terminal(
+        self,
+        state: ExecutionPlanState | str,
+        reason: str,
+        *,
+        timestamp_utc: str | None = None,
+    ):
+        terminal = state if isinstance(state, ExecutionPlanState) else ExecutionPlanState(str(state))
+        if terminal not in {ExecutionPlanState.COMPLETED, ExecutionPlanState.ABORTED}:
+            raise ValueError("Terminal execution state must be completed or aborted.")
+        plan = self.get_execution_plan_snapshot()
+        if plan is None:
+            return None
+        if self.get_execution_plan_source() == "legacy_reconstruction":
+            raise RuntimeError("Recorded legacy executions are immutable and analysis-only.")
+        if self.legacy_migration_file_path and os.path.isfile(self.legacy_migration_file_path):
+            raise RuntimeError("Migrated legacy executions are permanently analysis-only.")
+        if (
+            self.get_execution_plan_source() == "persisted_execution_plan"
+            and not self.is_authoritative_execution_runtime_active()
+        ):
+            raise RuntimeError("A read-only authoritative execution cannot change lifecycle state.")
+        try:
+            design_payload = self._validate_plan_design_link(plan)
+            plan = self._recover_persisted_execution_plan_for_transition(plan)
+            if plan.state in {ExecutionPlanState.COMPLETED, ExecutionPlanState.ABORTED}:
+                if plan.state is not terminal:
+                    raise RuntimeError("A terminal execution plan cannot transition again.")
+                self._write_progress_for_execution_plan(plan)
+                resume = (
+                    load_execution_resume(self.execution_resume_file_path)
+                    if self.execution_resume_file_path
+                    and os.path.isfile(self.execution_resume_file_path)
+                    else None
+                )
+                if resume is not None and resume.plan_revision != plan.plan_revision:
+                    updated_resume = (
+                        mark_checkpoint_uncertain(
+                            resume,
+                            plan_revision=plan.plan_revision,
+                            progress_wells=self.progress_data,
+                            timestamp_utc=timestamp_utc,
+                        )
+                        if terminal is ExecutionPlanState.ABORTED
+                        else synchronize_checkpoint(
+                            resume,
+                            plan_revision=plan.plan_revision,
+                            progress_wells=self.progress_data,
+                            timestamp_utc=timestamp_utc,
+                        )
+                    )
+                    save_execution_resume(self.execution_resume_file_path, updated_resume)
+                self._write_execution_plan_exports(plan, design_payload)
+                self._execution_plan_snapshot = plan
+                self._project_reconstructed_execution_plan(plan)
+                self._authoritative_runtime_active = False
+                self.set_execution_plan_sync_error(None)
+                self._refresh_authoritative_execution_bundle()
+                return plan
+
+            bundle = self._refresh_authoritative_execution_bundle()
+            resume = bundle.resume
+            pending = bool(
+                resume is not None
+                and any(intent.status == "pending" for intent in resume.intents)
+            )
+            if terminal is ExecutionPlanState.COMPLETED and (
+                resume is None or resume.state != "clean" or pending
+            ):
+                raise RuntimeError(
+                    "Completion requires a clean durable checkpoint with no pending print intents."
+                )
+            added_counts = {
+                well.well_id: {
+                    dispense.stock_id: int(
+                        self.progress_data[well.well_id]["reagents"][dispense.stock_id].get(
+                            "added_droplets", 0
+                        ) or 0
+                    )
+                    for dispense in well.dispenses
+                }
+                for well in plan.wells
+            }
+            candidate = build_terminal_revision(
+                plan,
+                state=terminal,
+                added_counts_by_well=added_counts,
+                has_pending_intents=pending,
+                reason=reason,
+                timestamp_utc=timestamp_utc,
+            )
+            self._commit_plan_revision(plan, candidate)
+            self._write_progress_for_execution_plan(candidate)
+            if resume is not None:
+                updated_resume = (
+                    mark_checkpoint_uncertain(
+                        resume,
+                        plan_revision=candidate.plan_revision,
+                        progress_wells=self.progress_data,
+                        timestamp_utc=timestamp_utc,
+                    )
+                    if terminal is ExecutionPlanState.ABORTED
+                    else synchronize_checkpoint(
+                        resume,
+                        plan_revision=candidate.plan_revision,
+                        progress_wells=self.progress_data,
+                        timestamp_utc=timestamp_utc,
+                    )
+                )
+                save_execution_resume(self.execution_resume_file_path, updated_resume)
+            self._write_execution_plan_exports(candidate, design_payload)
+            self._execution_plan_snapshot = candidate
+            self._project_reconstructed_execution_plan(candidate)
+            self._authoritative_runtime_active = False
+            self.set_execution_plan_sync_error(None)
+            self._audit_execution_plan_event(
+                "execution_plan_completed" if terminal is ExecutionPlanState.COMPLETED else "execution_plan_abandoned",
+                "Execution completed" if terminal is ExecutionPlanState.COMPLETED else "Execution abandoned",
+                {
+                    "plan_id": candidate.plan_id,
+                    "plan_revision": candidate.plan_revision,
+                    "reason": str(reason or ""),
+                },
+            )
+            self._refresh_authoritative_execution_bundle()
+            return candidate
+        except Exception as exc:
+            self.set_execution_plan_sync_error(exc)
+            raise
+
+    def try_complete_execution_plan(self, *, reason: str = "all_targets_satisfied"):
+        plan = self.get_execution_plan_snapshot()
+        if plan is None or plan.state is not ExecutionPlanState.ACTIVE:
+            return plan if plan is not None and plan.state is ExecutionPlanState.COMPLETED else None
+        for well in plan.wells:
+            progress_well = self.progress_data.get(well.well_id, {})
+            reagents = progress_well.get("reagents", {}) if isinstance(progress_well, dict) else {}
+            for dispense in well.dispenses:
+                details = reagents.get(dispense.stock_id, {}) if isinstance(reagents, dict) else {}
+                if int(details.get("added_droplets", 0) or 0) != dispense.target_dispenses:
+                    return None
+        return self.transition_execution_plan_terminal(
+            ExecutionPlanState.COMPLETED,
+            reason,
+        )
 
     def _execution_calibration_document(self, plan) -> ExecutionCalibrationDocument:
         path = self.execution_calibrations_file_path
@@ -8881,12 +9046,16 @@ class ExperimentModel(QObject):
         """
         Set the fill droplet size and recompute experiment so all totals refresh.
         """
-        if self.is_read_only_legacy_execution():
+        read_only_getter = getattr(self, "is_read_only_legacy_execution", None)
+        if callable(read_only_getter) and read_only_getter():
             raise RuntimeError(
                 "Recorded legacy executions are read-only; calibration cannot change the saved execution."
             )
-        execution_plan = self.get_execution_plan_snapshot()
-        if execution_plan is not None and self.get_execution_plan_source() != "legacy_reconstruction":
+        plan_getter = getattr(self, "get_execution_plan_snapshot", None)
+        source_getter = getattr(self, "get_execution_plan_source", None)
+        execution_plan = plan_getter() if callable(plan_getter) else None
+        execution_source = source_getter() if callable(source_getter) else None
+        if execution_plan is not None and execution_source != "legacy_reconstruction":
             if not applied_calibration:
                 raise RuntimeError(
                     "A persisted calibration record is required to revise a finalized execution plan."
@@ -9146,6 +9315,14 @@ class ExperimentModel(QObject):
         current runtime assignments.
         """
         path = progress_file_path or self.progress_file_path
+        directory = os.path.dirname(os.path.abspath(path)) if path else self.experiment_dir_path
+        policy = inspect_execution_artifacts(directory) if directory else None
+        if policy is not None and not policy.can_clear_progress:
+            self.set_execution_plan_sync_error(policy.reason)
+            raise RuntimeError(
+                f"{policy.reason} Recorded execution data cannot be deleted in place. "
+                "Create an editable copy to change the design."
+            )
         before = self.get_progress_status(path)
         if path:
             self._atomic_json_dump(path, {})
@@ -9154,6 +9331,20 @@ class ExperimentModel(QObject):
         self._last_progress_load_warnings = []
         self._last_progress_stock_override_warnings = []
         return before
+
+    def get_execution_artifact_policy(self, experiment_dir: Optional[str] = None):
+        directory = experiment_dir or self.experiment_dir_path
+        if not directory:
+            return None
+        return inspect_execution_artifacts(directory)
+
+    def can_clear_progress_for_edit(self) -> bool:
+        policy = self.get_execution_artifact_policy()
+        return bool(policy is None or policy.can_clear_progress)
+
+    def can_reset_array_progress(self) -> bool:
+        policy = self.get_execution_artifact_policy()
+        return bool(policy is None or policy.can_reset_array_progress)
 
     @staticmethod
     def _parse_progress_stock_id(stock_id: str):
@@ -9482,15 +9673,31 @@ class ExperimentModel(QObject):
         payload["metadata"] = dict(payload.get("metadata") or {})
         payload["metadata"]["name"] = self.sanitize_experiment_name(new_name)
         if copy_applied_imaging_calibrations:
-            payload["applied_imaging_calibrations"] = self._normalize_applied_imaging_calibrations(
-                payload.get("applied_imaging_calibrations")
+            raise ValueError(
+                "Calibration evidence cannot be copied to a new execution."
             )
-            payload["manual_refuel_checks"] = self._normalize_manual_refuel_checks(
-                payload.get("manual_refuel_checks")
-            )
-        else:
-            payload["applied_imaging_calibrations"] = self._normalize_applied_imaging_calibrations(None)
-            payload["manual_refuel_checks"] = self._normalize_manual_refuel_checks(None)
+        metadata = payload["metadata"]
+        intended_fill = metadata.pop("intended_fill_droplet_volume_nL", None)
+        if intended_fill is not None:
+            metadata["fill_droplet_volume_nL"] = intended_fill
+        intended_fill_mode = metadata.pop("intended_fill_printing_mode", None)
+        if intended_fill_mode is not None:
+            metadata["fill_printing_mode"] = intended_fill_mode
+        for factor in payload.get("factors", []):
+            if not isinstance(factor, dict):
+                continue
+            for option in factor.get("options", []):
+                if not isinstance(option, dict):
+                    continue
+                intended_volume = option.pop("intended_droplet_nL", None)
+                if intended_volume is not None:
+                    option["droplet_nL"] = intended_volume
+                intended_mode = option.pop("intended_printing_mode", None)
+                if intended_mode is not None:
+                    option["printing_mode"] = intended_mode
+        payload["stock_prep"] = self._default_stock_prep_state()
+        payload["applied_imaging_calibrations"] = self._normalize_applied_imaging_calibrations(None)
+        payload["manual_refuel_checks"] = self._normalize_manual_refuel_checks(None)
         return payload
 
     def _write_duplicate_design(
@@ -9501,12 +9708,12 @@ class ExperimentModel(QObject):
         *,
         copy_applied_imaging_calibrations: bool = False,
     ) -> bool:
-        import os
-
         if not new_experiment_path:
             raise ValueError("A destination experiment path is required.")
-        if os.path.exists(new_experiment_path):
-            raise FileExistsError(f"Experiment folder already exists: {new_experiment_path}")
+        destination = Path(new_experiment_path).resolve()
+        if destination.exists():
+            raise FileExistsError(f"Experiment folder already exists: {destination}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
 
         payload = self._duplicate_design_payload(
             data,
@@ -9514,33 +9721,69 @@ class ExperimentModel(QObject):
             copy_applied_imaging_calibrations=copy_applied_imaging_calibrations,
         )
 
-        self.experiment_dir_path = os.path.abspath(new_experiment_path)
-        os.makedirs(self.experiment_dir_path)
-        self.update_all_paths()
-        self.progress_data = {}
-        self._last_progress_load_warnings = []
-        self._last_progress_stock_override_warnings = []
-        self._runtime_well_plate = None
-        self._runtime_reaction_collection = None
+        staging = Path(tempfile.mkdtemp(
+            prefix=f".{destination.name}.staging-", dir=destination.parent
+        )).resolve()
+        if staging.parent != destination.parent.resolve():
+            raise RuntimeError("Editable-copy staging directory escaped the destination parent.")
+        profile = type(
+            "_DuplicateProfile",
+            (),
+            {"name": "legacy" if self.legacy_mode else "current"},
+        )()
+        draft = ExperimentModel(prof=profile)
+        try:
+            draft.experiment_dir_path = str(staging)
+            draft.update_all_paths()
+            draft.from_dict(payload)
+            if draft._uploaded_reactions is not None:
+                draft._materialize_uploaded_design_csv()
+            result = draft.optimize_stock_solutions(
+                quantum=0.1,
+                max_refine=60,
+                two_max_refine=40,
+                allow_two=draft._allow_two_from_metadata(),
+            )
+            if not result.get("best"):
+                raise RuntimeError(f"Optimization failed: {result.get('reason', 'Unknown')}")
+            draft.generate_experiment()
+            draft.save_experiment()
+            draft._atomic_json_dump(draft.progress_file_path, {})
+            draft._atomic_json_dump(draft.calibration_file_path, {})
+            with open(draft.experiment_file_path, "r", encoding="utf-8") as handle:
+                staged_payload = json.load(handle)
+            validator = ExperimentModel(prof=profile)
+            validator.experiment_dir_path = str(staging)
+            validator.update_all_paths()
+            validator.from_dict(staged_payload)
+            validated = validator.optimize_stock_solutions(
+                quantum=0.1,
+                max_refine=60,
+                two_max_refine=40,
+                allow_two=validator._allow_two_from_metadata(),
+            )
+            if not validated.get("best"):
+                raise RuntimeError("The staged editable copy did not validate.")
+            os.replace(staging, destination)
+        except Exception:
+            if staging.exists() and staging.parent == destination.parent.resolve():
+                shutil.rmtree(staging)
+            raise
 
-        self.from_dict(payload)
-
-        if self._uploaded_reactions is not None:
-            self._materialize_uploaded_design_csv()
-
-        res = self.optimize_stock_solutions(
-            quantum=0.1,
-            max_refine=60,
-            two_max_refine=40,
-            allow_two=self._allow_two_from_metadata(),
+        ExperimentAuditLog(
+            audit_path=destination / ExperimentAuditLog.FILE_NAME
+        ).record(
+            "editable_copy_created",
+            "Editable design copy created",
+            details={
+                "source_name": str((data.get("metadata") or {}).get("name") or ""),
+                "new_name": payload["metadata"]["name"],
+            },
         )
-        if not res.get("best"):
-            raise RuntimeError(f"Optimization failed: {res.get('reason', 'Unknown')}")
-        self.generate_experiment()
-
-        self.save_experiment()
-        self.create_progress_file()
-        self._atomic_json_dump(self.calibration_file_path, {})
+        self.load_experiment(
+            str(destination / "experiment_design.json"),
+            str(destination),
+        )
         self.unsaved_changes = False
         return True
 
@@ -9567,6 +9810,10 @@ class ExperimentModel(QObject):
             raise ValueError("A source experiment design path is required.")
         if not os.path.exists(source_design_path):
             raise FileNotFoundError(source_design_path)
+        source_directory = Path(source_design_path).resolve().parent
+        destination = Path(new_experiment_path).resolve()
+        if source_directory in destination.parents:
+            raise ValueError("Editable-copy destination must not be inside the source folder.")
         with open(source_design_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         return self._write_duplicate_design(
@@ -9576,19 +9823,63 @@ class ExperimentModel(QObject):
             copy_applied_imaging_calibrations=False,
         )
 
+    def create_editable_design_copy(
+        self,
+        source_dir: str,
+        destination: str,
+        new_name: str,
+    ) -> bool:
+        return self.duplicate_design_from(
+            str(Path(source_dir) / "experiment_design.json"),
+            new_name,
+            destination,
+        )
+
     def duplicate_experiment(self, new_name: str, new_experiment_path: str, copy_calibrations: bool = False) -> bool:
         """Copy the current design into a new experiment with fresh progress."""
+        if copy_calibrations:
+            raise ValueError(
+                "Calibration evidence cannot be copied to a new execution."
+            )
         ok = self._write_duplicate_design(
             self.to_dict(),
             new_name,
             new_experiment_path,
-            copy_applied_imaging_calibrations=bool(copy_calibrations),
+            copy_applied_imaging_calibrations=False,
         )
-        if copy_calibrations:
-            if self._calibration_manager is not None and hasattr(self._calibration_manager, "save_calibration_data"):
-                self._calibration_manager.update_calibration_file_path(self.calibration_file_path)
-                self._calibration_manager.save_calibration_data(self.calibration_file_path)
         return ok
+
+    def migrate_legacy_execution_copy(
+        self,
+        source_dir: str,
+        destination: Optional[str] = None,
+        *,
+        cancel_check=None,
+    ):
+        result = migrate_legacy_execution_directory(
+            source_dir,
+            destination,
+            cancel_check=cancel_check,
+        )
+        return self.open_migrated_legacy_execution_copy(result, source_dir)
+
+    def open_migrated_legacy_execution_copy(self, result, source_dir: str):
+        """Open an already-published migration result on the model/UI thread."""
+        ExperimentAuditLog(
+            audit_path=result.destination / ExperimentAuditLog.FILE_NAME
+        ).record(
+            "legacy_execution_migrated",
+            "Recorded legacy execution migrated as an analysis-only copy",
+            details={
+                "plan_id": result.plan.plan_id,
+                "source_folder": Path(source_dir).name,
+            },
+        )
+        self.load_experiment(
+            str(result.destination / "experiment_design.json"),
+            str(result.destination),
+        )
+        return result
 
     # -----------------------------
     # Reset (fresh design session)
@@ -9640,6 +9931,7 @@ class ExperimentModel(QObject):
         self.execution_plan_revisions_dir_path = None
         self.execution_calibrations_file_path = None
         self.execution_resume_file_path = None
+        self.legacy_migration_file_path = None
         self.key_file_path = None
         self.concentration_key_file_path = None
         self._runtime_well_plate = None
@@ -13611,6 +13903,27 @@ class Model(QObject):
         """Clear all experiment data and reset the well plate."""
         self._clear_runtime_experiment_without_signal()
         self.experiment_loaded.emit()
+
+    def start_new_experiment_session(
+        self,
+        *,
+        array_runner_idle: bool,
+        command_queue_empty: bool,
+        base_dir: Optional[str] = None,
+    ) -> str:
+        """Detach the prior folder and create a fresh session without editing it."""
+        if not array_runner_idle:
+            raise RuntimeError("A new experiment cannot start while the array runner is active.")
+        if not command_queue_empty:
+            raise RuntimeError("A new experiment cannot start while commands are queued.")
+        if self.rack_model.get_gripper_printer_head() is not None:
+            raise RuntimeError("Remove the printer head from the gripper before starting a new experiment.")
+        self._clear_runtime_experiment_without_signal()
+        self.experiment_model.reset_experiment_model()
+        self.experiment_model.set_calibration_manager(self.calibration_manager)
+        self.experiment_model.initialize_experiment(base_dir=base_dir)
+        self.experiment_loaded.emit()
+        return str(self.experiment_model.experiment_dir_path)
 
     def load_authoritative_execution_runtime(self):
         """Explicitly activate a validated execution bundle without regenerating it."""
