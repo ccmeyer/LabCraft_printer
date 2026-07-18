@@ -6,6 +6,7 @@ from ExecutionPlan import ExecutionPlanState
 from ExecutionPlanRevision import (
     build_calibrated_revision,
     build_locked_revision,
+    build_printer_head_binding_revision,
     persist_immutable_revision,
     validate_revision_history,
 )
@@ -119,6 +120,40 @@ def test_calibrated_revision_can_exceed_design_optimization_limit():
     assert calibrated.plan_revision == 3
     assert calibrated.locked_at_utc == active.locked_at_utc
     assert calibrated.lock_reason == active.lock_reason
+
+
+def test_printer_head_binding_revision_changes_only_one_unbound_stock():
+    active = build_locked_revision(
+        _prepared_plan(),
+        reason="printing_started",
+        timestamp_utc="2026-07-17T12:01:00Z",
+    )
+
+    bound = build_printer_head_binding_revision(
+        active,
+        stock_id="PURE MM_1.00_x",
+        printer_head_id="head-1",
+        timestamp_utc="2026-07-17T12:02:00Z",
+    )
+
+    assert bound.plan_revision == active.plan_revision + 1
+    assert bound.wells == active.wells
+    assert bound.locked_at_utc == active.locked_at_utc
+    changed = [
+        stock for stock in bound.stocks if stock.printer_head_id == "head-1"
+    ]
+    assert [stock.stock_id for stock in changed] == ["PURE MM_1.00_x"]
+    assert build_printer_head_binding_revision(
+        bound,
+        stock_id="PURE MM_1.00_x",
+        printer_head_id="head-1",
+    ) is bound
+    with pytest.raises(ValueError, match="different printer head"):
+        build_printer_head_binding_revision(
+            bound,
+            stock_id="PURE MM_1.00_x",
+            printer_head_id="head-2",
+        )
 
 
 def test_revision_history_is_immutable_contiguous_and_latest_mirrored(tmp_path):

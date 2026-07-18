@@ -208,9 +208,8 @@ of creating another revision.
 
 Loading an active new-format plan validates the design hash, immutable history,
 latest mirror, progress reference and targets, and calibration references. It
-does not rewrite any artifact. Slice 4 projects a valid active plan for editor
-inspection and analysis but deliberately blocks hardware resume and further
-post-reload calibration until authoritative resume validation is implemented.
+does not rewrite any artifact. Slice 5 extends this inspection into the explicit
+activation and resume flow described below.
 
 ## Execution calibration sidecar
 
@@ -249,6 +248,66 @@ stock optimization. `experiment_design.json` remains byte-identical throughout
 locking, calibration, manual-refuel checks, and retries.
 
 Slice 4 persists only the active lifecycle state. Completed/aborted transitions,
-validated hardware resume, reset cleanup, and mixed-volume dispense segments
-remain later work. Legacy executions remain non-migrating, read-only snapshots;
-merely opening any experiment never creates or repairs execution artifacts.
+reset cleanup, and mixed-volume dispense segments remain later work. Legacy
+executions remain non-migrating, read-only snapshots; merely opening any
+experiment never creates or repairs execution artifacts.
+
+## Authoritative load and resume in Slice 5
+
+When `execution_plan.json` exists, the application no longer regenerates an
+experiment from design inputs. It treats the following as one authoritative
+bundle:
+
+- immutable plan revisions and the exact latest-plan mirror define stocks,
+  concentrations, effective volumes, printing modes, wells, reaction IDs, and
+  target counts;
+- `progress.json` defines only the added counts at those frozen targets;
+- `execution_calibrations.json` defines referenced calibration and manual-check
+  evidence; and
+- `execution_resume.json` defines durable command boundaries for hardware
+  restart decisions.
+
+Opening a folder performs strict, non-mutating inspection. It neither creates a
+resume checkpoint nor repairs files. The editor remains locked and offers an
+explicit **Activate Execution** action only when the saved bundle is internally
+consistent. Activation reconstructs runtime objects with the exact saved stock
+IDs, well assignments, targets, and progress, without optimization,
+randomization, or design writes. Derived key CSVs may be regenerated only as an
+explicit activation side effect after the frozen design hash is verified.
+
+Positive progress without `execution_resume.json` is analysis-only because the
+application cannot prove whether a hardware command was in flight when the
+previous process ended. Zero-progress executions may create a clean checkpoint
+during explicit activation. A pending intent is repairable only when persisted
+progress proves the entire commanded count was recorded; otherwise the intent
+is ambiguous and hardware resume fails closed.
+
+### Resume checkpoint schema
+
+`execution_resume.json` uses strict schema `labcraft.execution_resume`, version
+1. Its root records the plan ID/revision, session UUID, state, active stock/head,
+canonical progress hash, intent array, and UTC timestamps. Each intent records
+the exact well, reaction, stock, baseline added count, commanded count, optional
+32-bit command sequence, status, and timestamps. Unknown, missing, malformed,
+duplicate, nonintegral, or inconsistent fields are rejected.
+
+For every new-format well dispense the host:
+
+1. atomically persists a deterministic pending intent before queuing the
+   dispense command;
+2. records the returned command sequence when available;
+3. updates `progress.json` only in the existing command-completion handler; and
+4. marks the intent complete only after that progress write succeeds.
+
+If the process stops between steps, reload classification is conservative.
+Progress that includes the whole intent can repair the checkpoint during the
+next explicit activation. Progress that does not include it cannot distinguish
+"not executed" from "executed but not recorded" and blocks resume.
+
+Before hardware starts, the loaded stock, printing mode, durable printer-head
+identity, and any referenced calibration record must match the latest plan. A
+previously unbound, unprinted stock is bound through a new immutable plan
+revision before its first dispense. Existing bindings cannot silently change.
+Calibration of an unprinted stock remains available after authoritative
+activation and uses the Slice 4 revision path; stocks with positive added counts
+remain immutable.

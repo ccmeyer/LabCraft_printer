@@ -258,6 +258,74 @@ def _with_lowered_array_accels(context, restore_accels=None):
     return context
 
 
+def test_authoritative_array_queue_persists_intent_before_dispense_command():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+    )
+    events = []
+    em = c.model.experiment_model
+    em.uses_durable_execution_checkpoint = Mock(return_value=True)
+    em.begin_execution_print_intent = Mock(
+        side_effect=lambda **kwargs: events.append(("intent", kwargs)) or "intent-1"
+    )
+    em.attach_execution_print_command = Mock(
+        side_effect=lambda intent_id, seq: events.append(("attach", intent_id, seq))
+    )
+    original_print = c.print_droplets.side_effect
+    c.print_droplets.side_effect = (
+        lambda *args, **kwargs: events.append(("dispense", args[0]))
+        or original_print(*args, **kwargs)
+    )
+    assert Controller._start_array_run_context(c)
+
+    assert Controller._queue_next_array_well(c)
+
+    assert [event[0] for event in events] == ["intent", "dispense", "attach"]
+    assert c.print_droplets.call_args.kwargs["kwargs"]["execution_intent_id"] == "intent-1"
+
+
+def test_authoritative_progress_completes_intent_only_after_progress_write():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+    )
+    events = []
+    em = c.model.experiment_model
+    em.create_progress_file.side_effect = lambda: events.append("progress")
+    em.complete_execution_print_intent = Mock(
+        side_effect=lambda intent_id: events.append(("complete", intent_id))
+    )
+
+    Controller._record_array_progress(
+        c,
+        well_id="A1",
+        stock_id="stock-a",
+        target_droplets=5,
+        execution_intent_id="intent-1",
+    )
+
+    assert events == ["progress", ("complete", "intent-1")]
+
+
+def test_authoritative_intent_write_failure_prevents_dispense_queueing():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+    )
+    em = c.model.experiment_model
+    em.uses_durable_execution_checkpoint = Mock(return_value=True)
+    em.begin_execution_print_intent = Mock(side_effect=OSError("checkpoint unavailable"))
+    em.set_execution_plan_sync_error = Mock()
+    assert Controller._start_array_run_context(c)
+
+    assert Controller._queue_next_array_well(c) is False
+
+    c.print_droplets.assert_not_called()
+    em.set_execution_plan_sync_error.assert_called_once()
+    assert "checkpoint unavailable" in c.error_occurred_signal.calls[-1][1]
+
+
 def _restore_calls(restore_accels=None):
     if restore_accels is None:
         restore_accels = (ARRAY_AXIS_ACCEL_DEFAULT, ARRAY_AXIS_ACCEL_DEFAULT, ARRAY_AXIS_ACCEL_DEFAULT)

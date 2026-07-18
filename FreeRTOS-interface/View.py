@@ -1526,6 +1526,16 @@ class MainWindow(QMainWindow):
             load_progress=load_progress,
             finalize_execution_plan=not load_progress,
         )
+
+    def activate_authoritative_execution(self):
+        """Explicitly project a validated saved execution into the runtime."""
+        eligibility = self.model.load_authoritative_execution_runtime() or {}
+        status = str(eligibility.get("status") or "")
+        if status == "ready_to_resume":
+            self.controller._set_array_run_state("resume_ready")
+        else:
+            self.controller._set_array_run_state("idle")
+        return eligibility
     
     def closeEvent(self, event):
         """Handle the window close event."""
@@ -12206,6 +12216,18 @@ class ExperimentDesignDialog(QDialog):
         self._apply_manual_assignment_lock_state()
         self._apply_progress_edit_lock_state()
         self._apply_gripper_edit_lock_state()
+        eligibility_getter = getattr(
+            self.model, "get_execution_resume_eligibility", None
+        )
+        eligibility = eligibility_getter() if callable(eligibility_getter) else None
+        if eligibility is not None:
+            self.finish_btn.setText("Activate Execution")
+            self.finish_btn.setEnabled(
+                bool(eligibility.get("can_activate_runtime"))
+                and not getattr(self, "_editing_locked_by_gripper", False)
+            )
+        elif self.finish_btn.text() == "Activate Execution":
+            self.finish_btn.setText("Finish")
 
     def _apply_uploaded_design_mode_to_ui(self, active: bool):
         self._uploaded_design_active = bool(active)
@@ -13668,6 +13690,8 @@ class ExperimentDesignDialog(QDialog):
         if not exp_dir:
             return
 
+        self.finish_btn.setText("Finish")
+
         path = os.path.join(exp_dir, "experiment_design.json")
         if not os.path.exists(path):
             self._set_status(f"No 'experiment_design.json' found in: {exp_dir}")
@@ -13759,13 +13783,16 @@ class ExperimentDesignDialog(QDialog):
             return
 
         progress_path = os.path.join(exp_dir, "progress.json")
+        has_authoritative_plan = os.path.isfile(
+            os.path.join(exp_dir, "execution_plan.json")
+        )
         progress_status = {}
         get_status = getattr(self.model, "get_progress_status", None)
         if callable(get_status):
             progress_status = get_status(progress_file_path=progress_path)
 
         progress_policy = None
-        if progress_status.get("has_printed_progress"):
+        if progress_status.get("has_printed_progress") and not has_authoritative_plan:
             progress_policy = self._prompt_progress_policy(
                 progress_status,
                 title="Loaded experiment has saved progress",
@@ -13817,10 +13844,23 @@ class ExperimentDesignDialog(QDialog):
                 self.model, "get_execution_plan_sync_error", None
             )
             sync_error = sync_error_getter() if callable(sync_error_getter) else None
-            base_message = "Active execution plan loaded read-only for analysis."
-            self._progress_lock_status_message = (
-                f"{base_message}\n{sync_error}" if sync_error else base_message
+            eligibility_getter = getattr(
+                self.model, "get_execution_resume_eligibility", None
             )
+            eligibility = eligibility_getter() if callable(eligibility_getter) else None
+            reason = str((eligibility or {}).get("reason") or "")
+            status = str((eligibility or {}).get("status") or "")
+            can_activate = bool((eligibility or {}).get("can_activate_runtime"))
+            base_message = (
+                "Execution plan validated. Press Activate Execution to reconstruct the exact saved runtime."
+                if status in {"ready_to_start", "ready_to_resume", "repairable_checkpoint"}
+                else "Execution plan loaded read-only for analysis; hardware activation is blocked."
+            )
+            self._progress_lock_status_message = (
+                "\n".join(item for item in (base_message, reason, sync_error) if item)
+            )
+            self.finish_btn.setText("Activate Execution")
+            self.finish_btn.setEnabled(can_activate)
         elif progress_policy == self.PROGRESS_POLICY_RESUME:
             self._progress_reset_confirmed = False
             self._set_progress_protection(True, progress_status)
@@ -13859,6 +13899,25 @@ class ExperimentDesignDialog(QDialog):
         Optimize & generate, save the design (creating/renaming the folder if needed),
         then close the dialog. Applying to the main app is explicit in this path only.
         """
+        bundle_getter = getattr(self.model, "get_authoritative_execution_bundle", None)
+        bundle = bundle_getter() if callable(bundle_getter) else None
+        if bundle is not None:
+            try:
+                if self.main_window is None or not hasattr(
+                    self.main_window, "activate_authoritative_execution"
+                ):
+                    raise RuntimeError("The execution activation path is unavailable.")
+                eligibility = self.main_window.activate_authoritative_execution()
+                self._apply_requested = True
+                self._set_status(
+                    str((eligibility or {}).get("reason") or "Execution activated.")
+                )
+                self.accept()
+            except Exception as exc:
+                message = str(exc) or "Could not activate the saved execution."
+                self._set_status(message)
+                QMessageBox.warning(self, "Could not activate execution", message)
+            return
         if self._model_execution_is_read_only(self.model):
             self._set_status(
                 "The execution design is locked; it cannot be changed or finalized again."

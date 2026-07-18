@@ -5040,7 +5040,14 @@ class Controller(QObject):
         print('Starting mass stabilization timer...')
         QtCore.QTimer.singleShot(3000, self.model.calibration_model.check_for_final_mass)
 
-    def _record_array_progress(self, well_id=None, stock_id=None, target_droplets=None, update_volume=False):
+    def _record_array_progress(
+        self,
+        well_id=None,
+        stock_id=None,
+        target_droplets=None,
+        update_volume=False,
+        execution_intent_id=None,
+    ):
         target_droplets = int(target_droplets or 0)
         well = self.model.well_plate.get_well(well_id)
         if well is not None:
@@ -5049,7 +5056,37 @@ class Controller(QObject):
             printer_head = self.model.rack_model.get_gripper_printer_head()
             if printer_head is not None:
                 printer_head.record_droplet_volume_lost(target_droplets)
-        self.model.experiment_model.create_progress_file()
+        try:
+            self.model.experiment_model.create_progress_file()
+        except Exception as exc:
+            if execution_intent_id is None:
+                raise
+            setter = getattr(
+                self.model.experiment_model, "set_execution_plan_sync_error", None
+            )
+            if callable(setter):
+                setter(exc)
+            self.error_occurred_signal.emit(
+                "Execution Progress Error",
+                "The dispense completed, but progress could not be saved. Printing is "
+                "blocked because the command boundary is now ambiguous.",
+            )
+            return False
+        try:
+            completer = getattr(
+                self.model.experiment_model, "complete_execution_print_intent", None
+            )
+            if callable(completer):
+                completer(execution_intent_id)
+        except Exception as exc:
+            self.model.experiment_model.set_execution_plan_sync_error(exc)
+            self.error_occurred_signal.emit(
+                "Execution Checkpoint Error",
+                "Progress was saved, but its durable print intent could not be completed. "
+                "Printing is blocked until the checkpoint is repaired.",
+            )
+            return False
+        return True
 
     def _get_array_remaining_wells(self, stock_id):
         if not stock_id:
@@ -5356,6 +5393,28 @@ class Controller(QObject):
         context["pause_departure_pending"] = False
 
         print(f'Printing {target_droplets} droplets to well {well.well_id}')
+        execution_intent_id = None
+        experiment_model = self.model.experiment_model
+        durable_checkpoint = getattr(
+            experiment_model, "uses_durable_execution_checkpoint", None
+        )
+        if callable(durable_checkpoint) and durable_checkpoint():
+            printer_head = self.model.rack_model.get_gripper_printer_head()
+            try:
+                execution_intent_id = experiment_model.begin_execution_print_intent(
+                    well_id=well.well_id,
+                    stock_id=stock_id,
+                    commanded_droplets=target_droplets,
+                    printer_head_id=str(getattr(printer_head, "printer_head_id", None) or ""),
+                )
+            except Exception as exc:
+                experiment_model.set_execution_plan_sync_error(exc)
+                self.error_occurred_signal.emit(
+                    'Print Array Error',
+                    f'Failed to persist a print intent for well {well.well_id}: {exc}',
+                )
+                self._complete_array_finalize("hard_abort")
+                return False
         dispense_command = self.print_droplets(
             target_droplets,
             expected_volume=context.get("expected_volume"),
@@ -5365,12 +5424,32 @@ class Controller(QObject):
                 'stock_id': stock_id,
                 'target_droplets': target_droplets,
                 'update_volume': context.get("update_volume", False),
+                'execution_intent_id': execution_intent_id,
             },
         )
         if dispense_command is None:
             self.error_occurred_signal.emit('Print Array Error', f'Failed to queue dispense for well {well.well_id}')
             self._complete_array_finalize("hard_abort")
             return False
+
+        if execution_intent_id is not None:
+            try:
+                experiment_model.attach_execution_print_command(
+                    execution_intent_id,
+                    int(getattr(dispense_command, "command_number", 0) or 0),
+                )
+            except Exception as exc:
+                setter = getattr(
+                    experiment_model, "set_execution_plan_sync_error", None
+                )
+                if callable(setter):
+                    setter(exc)
+                self.error_occurred_signal.emit(
+                    'Execution Checkpoint Error',
+                    f'The dispense was queued but its command boundary could not be saved: {exc}',
+                )
+                self._complete_array_finalize("hard_abort")
+                return False
 
         context.setdefault("planned_well_ids", set()).add(well.well_id)
         context.setdefault("queued_wells", []).append(
@@ -5425,15 +5504,26 @@ class Controller(QObject):
         self._update_current_array_barrier()
         return removed
 
-    def _handle_array_well_complete(self, well_id=None, stock_id=None, target_droplets=None, update_volume=False):
+    def _handle_array_well_complete(
+        self,
+        well_id=None,
+        stock_id=None,
+        target_droplets=None,
+        update_volume=False,
+        execution_intent_id=None,
+    ):
         context = getattr(self, "_array_context", None) or {}
         self._pop_completed_array_well(well_id)
-        self._record_array_progress(
+        progress_saved = self._record_array_progress(
             well_id=well_id,
             stock_id=stock_id,
             target_droplets=target_droplets,
             update_volume=update_volume,
+            execution_intent_id=execution_intent_id,
         )
+        if progress_saved is False:
+            self._complete_array_finalize("hard_abort")
+            return
 
         if context.get("update_volume") and context.get("expected_volume") is not None and context.get("droplet_volume") is not None:
             context["expected_volume"] -= int(target_droplets or 0) * float(context["droplet_volume"]) / 1000.0
@@ -5963,10 +6053,20 @@ class Controller(QObject):
             print(f'Cannot print: {message}')
             return
         source_getter = getattr(experiment_model, "get_execution_plan_source", None)
-        if callable(source_getter) and source_getter() == "persisted_execution_plan":
+        runtime_active_getter = getattr(
+            experiment_model, "is_authoritative_execution_runtime_active", None
+        )
+        authoritative_runtime_active = bool(
+            callable(runtime_active_getter) and runtime_active_getter()
+        )
+        if (
+            callable(source_getter)
+            and source_getter() == "persisted_execution_plan"
+            and not authoritative_runtime_active
+        ):
             message = (
-                "This active execution was reloaded for analysis only. Hardware resume "
-                "is disabled until validated resume support is available."
+                "This execution has been inspected but not activated. Use the experiment "
+                "editor's explicit activation action before starting hardware."
             )
             self.error_occurred_signal.emit('Error', message)
             print(f'Cannot print: {message}')
@@ -5989,6 +6089,22 @@ class Controller(QObject):
             self.error_occurred_signal.emit('Error','No printer head is loaded')
             print('Cannot print: No printer head is loaded')
             return
+
+        authoritative_preflight = getattr(
+            experiment_model, "validate_authoritative_print_context", None
+        )
+        if callable(authoritative_preflight):
+            validation = authoritative_preflight(
+                self.model.rack_model.get_gripper_printer_head()
+            )
+            if not bool(validation.get("ok")):
+                message = str(
+                    validation.get("message")
+                    or "The authoritative execution context does not match the loaded hardware."
+                )
+                self.error_occurred_signal.emit("Error", message)
+                print(f"Cannot print: {message}")
+                return
         
         if not self.model.machine_model.regulating_print_pressure:
             self.error_occurred_signal.emit('Error','Pressure regulation is not enabled')
@@ -6052,7 +6168,27 @@ class Controller(QObject):
 
         if callable(lock_plan):
             try:
-                lock_plan("printing_started")
+                current_head = self.model.rack_model.get_gripper_printer_head()
+                binding = getattr(
+                    experiment_model, "ensure_execution_printer_head_binding", None
+                )
+                if (
+                    callable(binding)
+                    and experiment_model.get_execution_plan_snapshot() is not None
+                ):
+                    binding(
+                        stock_id=current_head.get_stock_id(),
+                        printer_head_id=str(
+                            getattr(current_head, "printer_head_id", None) or ""
+                        ),
+                    )
+                else:
+                    lock_plan("printing_started")
+                checkpoint_enabled = getattr(
+                    experiment_model, "uses_durable_execution_checkpoint", None
+                )
+                if callable(checkpoint_enabled) and checkpoint_enabled():
+                    experiment_model.ensure_execution_resume_checkpoint()
             except Exception as exc:
                 message = (
                     "Printing did not start because the execution plan could not be "

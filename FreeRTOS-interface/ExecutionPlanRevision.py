@@ -126,6 +126,40 @@ def build_locked_revision(
     )
 
 
+def build_printer_head_binding_revision(
+    plan: ExecutionPlan,
+    *,
+    stock_id: str,
+    printer_head_id: str,
+    timestamp_utc: str | None = None,
+) -> ExecutionPlan:
+    if plan.state is not ExecutionPlanState.ACTIVE:
+        raise ValueError("Printer-head binding requires an active execution plan.")
+    if not isinstance(printer_head_id, str) or not printer_head_id.strip():
+        raise ValueError("Printer-head ID must be a nonempty string.")
+    stock = next((item for item in plan.stocks if item.stock_id == stock_id), None)
+    if stock is None:
+        raise ValueError(f"Execution plan contains no stock {stock_id!r}.")
+    if stock.printer_head_id == printer_head_id:
+        return plan
+    if stock.printer_head_id is not None:
+        raise ValueError(
+            f"Stock {stock_id!r} is already bound to a different printer head."
+        )
+    timestamp = timestamp_utc or utc_now_text()
+    return replace(
+        plan,
+        plan_revision=plan.plan_revision + 1,
+        updated_at_utc=timestamp,
+        stocks=tuple(
+            replace(item, printer_head_id=printer_head_id)
+            if item.stock_id == stock_id
+            else item
+            for item in plan.stocks
+        ),
+    )
+
+
 def build_calibrated_revision(
     plan: ExecutionPlan,
     *,

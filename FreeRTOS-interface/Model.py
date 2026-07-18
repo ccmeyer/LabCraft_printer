@@ -52,8 +52,22 @@ from ExecutionPlanRevision import (
     REVISION_DIRECTORY_NAME,
     build_calibrated_revision,
     build_locked_revision,
+    build_printer_head_binding_revision,
     persist_immutable_revision,
     validate_revision_history,
+)
+from AuthoritativeExecutionLoad import (
+    build_execution_runtime_spec,
+    inspect_authoritative_execution,
+)
+from ExecutionResumeStore import (
+    add_pending_intent,
+    attach_command_sequence,
+    complete_intent,
+    load_execution_resume,
+    new_resume_document,
+    save_execution_resume,
+    synchronize_checkpoint,
 )
 from ExecutionCalibrationStore import (
     ExecutionCalibrationDocument,
@@ -435,6 +449,7 @@ class ExperimentModel(QObject):
         self.execution_plan_file_path: Optional[str] = None
         self.execution_plan_revisions_dir_path: Optional[str] = None
         self.execution_calibrations_file_path: Optional[str] = None
+        self.execution_resume_file_path: Optional[str] = None
         self.progress_data: Dict[str, Dict] = {}
         self._last_progress_load_warnings: list[dict[str, object]] = []
         self._last_progress_stock_override_warnings: list[dict[str, object]] = []
@@ -447,6 +462,8 @@ class ExperimentModel(QObject):
         self._execution_plan_finalization_error: str | None = None
         self._execution_plan_sync_error: str | None = None
         self._execution_plan_reload_read_only: bool = False
+        self._authoritative_execution_bundle = None
+        self._authoritative_runtime_active: bool = False
         self._progress_execution_reference: ProgressExecutionReference | None = None
 
         # optional dependency (if you have one); safe to ignore if None
@@ -6915,6 +6932,9 @@ class ExperimentModel(QObject):
         self.execution_calibrations_file_path = os.path.join(
             self.experiment_dir_path, "execution_calibrations.json"
         )
+        self.execution_resume_file_path = os.path.join(
+            self.experiment_dir_path, "execution_resume.json"
+        )
         self.key_file_path          = os.path.join(self.experiment_dir_path, "key.csv")
         self.concentration_key_file_path = os.path.join(self.experiment_dir_path, "concentration_key.csv")
         if self._calibration_manager is not None and hasattr(self._calibration_manager, "update_calibration_file_path"):
@@ -6951,88 +6971,44 @@ class ExperimentModel(QObject):
 
         # Rehydrate
         self.from_dict(data)  # resets caches/signals
+        self._legacy_execution_reconstruction = None
+        self._reconstructed_execution_plan = None
+        self._legacy_execution_read_only = False
+        self._execution_plan_snapshot = None
+        self._execution_plan_source = None
+        self._execution_plan_sync_error = None
+        self._execution_plan_reload_read_only = False
+        self._authoritative_execution_bundle = None
+        self._authoritative_runtime_active = False
+        self._progress_execution_reference = None
+        self.progress_data = {}
         
         if self.execution_plan_file_path and os.path.isfile(self.execution_plan_file_path):
-            try:
-                persisted_plan = load_execution_plan(self.execution_plan_file_path)
-            except Exception as exc:
-                self._execution_plan_reload_read_only = True
-                self._execution_plan_source = "persisted_execution_plan"
-                self.set_execution_plan_sync_error(
-                    f"The persisted execution plan is invalid: {exc}"
+            self._execution_plan_reload_read_only = True
+            self._execution_plan_source = "persisted_execution_plan"
+            bundle = inspect_authoritative_execution(experiment_dir, data)
+            self._authoritative_execution_bundle = bundle
+            if bundle.plan is not None:
+                self._execution_plan_snapshot = bundle.plan
+                self._reconstructed_execution_plan = bundle.plan
+            if bundle.valid:
+                self.progress_data = dict(bundle.progress_wells)
+                self._progress_execution_reference = ProgressExecutionReference(
+                    plan_id=bundle.plan.plan_id,
+                    plan_revision=bundle.plan.plan_revision,
                 )
-                return None
-            if persisted_plan.state is not ExecutionPlanState.PREPARED:
-                self._execution_plan_reload_read_only = True
-                self._execution_plan_snapshot = persisted_plan
-                self._reconstructed_execution_plan = persisted_plan
-                self._execution_plan_source = "persisted_execution_plan"
-                try:
-                    self._validate_plan_design_link(persisted_plan)
-                    history = validate_revision_history(
-                        self.execution_plan_revisions_dir_path,
-                        latest_plan=persisted_plan,
-                    )
-                    if not history:
-                        raise RuntimeError("The immutable execution-plan history is missing.")
-                    self._validate_execution_calibration_references(persisted_plan)
-                    self._validate_progress_for_execution_transition(
-                        persisted_plan,
-                        allow_stale_revision_repair=False,
-                    )
-                    if not self.progress_file_path or not os.path.isfile(self.progress_file_path):
-                        raise RuntimeError("progress.json is missing for the active execution plan.")
-                    with open(self.progress_file_path, "r", encoding="utf-8") as handle:
-                        progress_payload = json.load(handle)
-                    reference = ProgressExecutionReference.from_dict(
-                        progress_payload.get("__execution__")
-                        if isinstance(progress_payload, dict)
-                        else None
-                    )
-                    if (
-                        reference.plan_id != persisted_plan.plan_id
-                        or reference.plan_revision != persisted_plan.plan_revision
-                    ):
-                        raise RuntimeError(
-                            "progress.json does not reference the latest execution-plan revision."
-                        )
-                    progress_wells = self._well_entries_from_progress_payload(progress_payload)
-                    if set(progress_wells) != {well.well_id for well in persisted_plan.wells}:
-                        raise RuntimeError(
-                            "progress.json well identities do not match the execution plan."
-                        )
-                    for well in persisted_plan.wells:
-                        progress_well = progress_wells[well.well_id]
-                        if str(progress_well.get("reaction_id")) != well.reaction_id:
-                            raise RuntimeError(
-                                f"progress.json reaction identity differs at {well.well_id}."
-                            )
-                        progress_reagents = progress_well.get("reagents") or {}
-                        expected_targets = {
-                            item.stock_id: item.target_dispenses for item in well.dispenses
-                        }
-                        actual_targets = {
-                            str(stock_id): details.get("target_droplets")
-                            for stock_id, details in progress_reagents.items()
-                            if isinstance(details, dict)
-                        }
-                        if actual_targets != expected_targets:
-                            raise RuntimeError(
-                                f"progress.json targets differ at {well.well_id}."
-                            )
-                    self.progress_data = progress_wells
-                    self._progress_execution_reference = reference
-                    self._project_reconstructed_execution_plan(persisted_plan)
-                    self.set_execution_plan_sync_error(None)
-                except Exception as exc:
-                    self.progress_data = {}
-                    self._stock_rows_cache = []
-                    self._fill_row_cache = None
-                    self._reactions_df = pd.DataFrame()
-                    self.set_execution_plan_sync_error(
-                        f"The active execution plan could not be validated for reload: {exc}"
-                    )
-                return None
+                self._project_reconstructed_execution_plan(bundle.plan)
+                self.set_execution_plan_sync_error(None)
+            else:
+                self.progress_data = {}
+                self._stock_rows_cache = []
+                self._fill_row_cache = None
+                self._reactions_df = pd.DataFrame()
+                message = "; ".join(issue.message for issue in bundle.issues)
+                self.set_execution_plan_sync_error(
+                    f"The authoritative execution bundle could not be validated: {message}"
+                )
+            return bundle
 
         reconstruction = reconstruct_legacy_execution(experiment_dir, data)
         self._legacy_execution_reconstruction = reconstruction
@@ -7088,6 +7064,8 @@ class ExperimentModel(QObject):
         self._execution_plan_finalization_error = None
         self._execution_plan_sync_error = None
         self._execution_plan_reload_read_only = False
+        self._authoritative_execution_bundle = None
+        self._authoritative_runtime_active = False
         self._progress_execution_reference = None
 
     def is_read_only_legacy_execution(self) -> bool:
@@ -7127,6 +7105,215 @@ class ExperimentModel(QObject):
 
     def get_execution_plan_source(self) -> str | None:
         return getattr(self, "_execution_plan_source", None)
+
+    def get_authoritative_execution_bundle(self):
+        return getattr(self, "_authoritative_execution_bundle", None)
+
+    def get_execution_resume_eligibility(self) -> dict[str, Any] | None:
+        bundle = self.get_authoritative_execution_bundle()
+        if bundle is None:
+            return None
+        eligibility = bundle.eligibility
+        return {
+            "status": eligibility.status,
+            "can_activate_runtime": eligibility.can_activate_runtime,
+            "can_start_hardware": eligibility.can_start_hardware,
+            "can_resume_hardware": eligibility.can_resume_hardware,
+            "reason": eligibility.reason,
+            "repairable_intent_ids": list(eligibility.repairable_intent_ids),
+            "ambiguous_intent_ids": list(eligibility.ambiguous_intent_ids),
+        }
+
+    def is_authoritative_execution_runtime_active(self) -> bool:
+        return bool(getattr(self, "_authoritative_runtime_active", False))
+
+    def uses_durable_execution_checkpoint(self) -> bool:
+        return bool(
+            self.get_execution_plan_snapshot() is not None
+            and self.get_execution_plan_source() != "legacy_reconstruction"
+            and self._runtime_well_plate is not None
+            and self._runtime_reaction_collection is not None
+            and not (
+                getattr(self, "_execution_plan_reload_read_only", False)
+                and not self.is_authoritative_execution_runtime_active()
+            )
+        )
+
+    def _refresh_authoritative_execution_bundle(self):
+        if not self.experiment_dir_path or not self.experiment_file_path:
+            raise RuntimeError("The authoritative execution paths are unavailable.")
+        with open(self.experiment_file_path, "r", encoding="utf-8") as handle:
+            design_payload = json.load(handle)
+        bundle = inspect_authoritative_execution(self.experiment_dir_path, design_payload)
+        self._authoritative_execution_bundle = bundle
+        if not bundle.valid:
+            message = "; ".join(issue.message for issue in bundle.issues)
+            self.set_execution_plan_sync_error(message)
+            raise RuntimeError(message)
+        self._execution_plan_snapshot = bundle.plan
+        self.progress_data = dict(bundle.progress_wells)
+        self.set_execution_plan_sync_error(None)
+        return bundle
+
+    def ensure_execution_resume_checkpoint(self):
+        """Create or repair a checkpoint only during explicit runtime activation."""
+        bundle = self._refresh_authoritative_execution_bundle()
+        eligibility = bundle.eligibility
+        if not eligibility.can_activate_runtime:
+            raise RuntimeError(eligibility.reason)
+        if eligibility.status.startswith("blocked_"):
+            raise RuntimeError(eligibility.reason)
+        document = bundle.resume
+        try:
+            if document is None:
+                document = new_resume_document(
+                    plan_id=bundle.plan.plan_id,
+                    plan_revision=bundle.plan.plan_revision,
+                    progress_wells=bundle.progress_wells,
+                )
+            elif eligibility.status == "repairable_checkpoint":
+                for intent_id in eligibility.repairable_intent_ids:
+                    document = complete_intent(
+                        document,
+                        intent_id,
+                        progress_wells=bundle.progress_wells,
+                    )
+            if not self.execution_resume_file_path:
+                raise RuntimeError("The execution-resume path is unavailable.")
+            save_execution_resume(self.execution_resume_file_path, document)
+        except Exception as exc:
+            self.set_execution_plan_sync_error(exc)
+            raise RuntimeError(f"Could not synchronize the execution checkpoint: {exc}") from exc
+        return self._refresh_authoritative_execution_bundle().resume
+
+    def begin_execution_print_intent(
+        self,
+        *,
+        well_id: str,
+        stock_id: str,
+        commanded_droplets: int,
+        printer_head_id: str,
+    ) -> str | None:
+        if not self.uses_durable_execution_checkpoint():
+            return None
+        bundle = self._refresh_authoritative_execution_bundle()
+        document = bundle.resume
+        if document is None:
+            raise RuntimeError("The execution checkpoint has not been activated.")
+        progress_well = bundle.progress_wells.get(well_id)
+        if not isinstance(progress_well, dict):
+            raise RuntimeError(f"Unknown authoritative well {well_id!r}.")
+        details = (progress_well.get("reagents") or {}).get(stock_id)
+        if not isinstance(details, dict):
+            raise RuntimeError(f"Stock {stock_id!r} is not assigned to well {well_id!r}.")
+        baseline = int(details.get("added_droplets", 0) or 0)
+        reaction_id = str(progress_well.get("reaction_id"))
+        updated, intent = add_pending_intent(
+            document,
+            well_id=well_id,
+            reaction_id=reaction_id,
+            stock_id=stock_id,
+            baseline_added=baseline,
+            commanded_droplets=int(commanded_droplets),
+            printer_head_id=printer_head_id,
+        )
+        try:
+            save_execution_resume(self.execution_resume_file_path, updated)
+        except Exception as exc:
+            self.set_execution_plan_sync_error(exc)
+            raise
+        return intent.intent_id
+
+    def attach_execution_print_command(self, intent_id: str | None, command_seq32: int) -> None:
+        if intent_id is None:
+            return
+        document = load_execution_resume(self.execution_resume_file_path)
+        updated = attach_command_sequence(document, intent_id, command_seq32)
+        try:
+            save_execution_resume(self.execution_resume_file_path, updated)
+        except Exception as exc:
+            self.set_execution_plan_sync_error(exc)
+            raise
+
+    def complete_execution_print_intent(self, intent_id: str | None) -> None:
+        if intent_id is None:
+            return
+        document = load_execution_resume(self.execution_resume_file_path)
+        updated = complete_intent(
+            document,
+            intent_id,
+            progress_wells=self.progress_data,
+        )
+        try:
+            save_execution_resume(self.execution_resume_file_path, updated)
+        except Exception as exc:
+            self.set_execution_plan_sync_error(exc)
+            raise
+        self._refresh_authoritative_execution_bundle()
+
+    def synchronize_execution_resume_revision(self, plan) -> None:
+        if not self.execution_resume_file_path or not os.path.isfile(self.execution_resume_file_path):
+            return
+        document = load_execution_resume(self.execution_resume_file_path)
+        updated = synchronize_checkpoint(
+            document,
+            plan_revision=plan.plan_revision,
+            progress_wells=self.progress_data,
+        )
+        save_execution_resume(self.execution_resume_file_path, updated)
+
+    def validate_authoritative_print_context(self, printer_head) -> dict[str, Any]:
+        if not self.uses_durable_execution_checkpoint():
+            return {"ok": True, "code": "not_authoritative"}
+        try:
+            bundle = self._refresh_authoritative_execution_bundle()
+            eligibility = bundle.eligibility
+            if not (
+                eligibility.can_start_hardware or eligibility.can_resume_hardware
+            ):
+                raise RuntimeError(eligibility.reason)
+            stock_id = printer_head.get_stock_id()
+            stock = next(
+                (item for item in bundle.plan.stocks if item.stock_id == stock_id),
+                None,
+            )
+            if stock is None:
+                raise RuntimeError("The loaded printer-head stock is absent from the execution plan.")
+            head_id = str(getattr(printer_head, "printer_head_id", None) or "")
+            if not head_id:
+                raise RuntimeError("The loaded printer head has no durable identity.")
+            added = self._added_droplets_for_stock(stock_id)
+            if stock.printer_head_id is not None and stock.printer_head_id != head_id:
+                raise RuntimeError("The loaded printer head differs from the saved execution binding.")
+            if stock.printer_head_id is None and added > 0:
+                raise RuntimeError("Printed progress exists without a saved printer-head binding.")
+            runtime_mode = normalize_printing_mode(printer_head.get_printing_mode())
+            if runtime_mode != stock.printing_mode:
+                raise RuntimeError("The loaded printer-head printing mode differs from the execution plan.")
+            if stock.calibration_record_key is not None:
+                document = bundle.calibrations
+                record = None if document is None else document.records.get(
+                    stock.calibration_record_key
+                )
+                if record is None:
+                    raise RuntimeError("The saved execution calibration record is unavailable.")
+                if (
+                    record.stock_id != stock.stock_id
+                    or record.printer_head_id != head_id
+                    or record.printing_mode != stock.printing_mode
+                    or not math.isclose(
+                        record.effective_volume_nL,
+                        stock.effective_volume_nL,
+                        rel_tol=0.0,
+                        abs_tol=1e-12,
+                    )
+                ):
+                    raise RuntimeError("The loaded head does not match the saved calibration binding.")
+            elif added > 0:
+                raise RuntimeError("Printed progress exists without a saved calibration record.")
+            return {"ok": True, "code": "authoritative_context_valid"}
+        except Exception as exc:
+            return {"ok": False, "code": "authoritative_context_invalid", "message": str(exc)}
 
     def get_execution_plan_finalization_error(self) -> str | None:
         return getattr(self, "_execution_plan_finalization_error", None)
@@ -7591,9 +7778,13 @@ class ExperimentModel(QObject):
                 return None
         if self.get_execution_plan_source() == "legacy_reconstruction":
             raise RuntimeError("Recorded legacy executions cannot be locked or resumed.")
-        if self.get_execution_plan_source() == "persisted_execution_plan":
+        if (
+            self.get_execution_plan_source() == "persisted_execution_plan"
+            and not self.is_authoritative_execution_runtime_active()
+        ):
             raise RuntimeError(
-                "Reloaded active executions are available for analysis only; validated hardware resume is not enabled yet."
+                "The persisted execution is analysis only until it is explicitly activated "
+                "before calibration or printing."
             )
         try:
             self._validate_plan_design_link(plan)
@@ -7605,6 +7796,7 @@ class ExperimentModel(QObject):
             )
             if plan.state is ExecutionPlanState.ACTIVE:
                 self._write_progress_for_execution_plan(plan)
+                self.synchronize_execution_resume_revision(plan)
                 self.set_execution_plan_sync_error(None)
                 return plan
             candidate = build_locked_revision(
@@ -7614,11 +7806,13 @@ class ExperimentModel(QObject):
             )
             self._commit_plan_revision(plan, candidate)
             self._write_progress_for_execution_plan(candidate)
+            self.synchronize_execution_resume_revision(candidate)
         except Exception as exc:
             self.set_execution_plan_sync_error(exc)
             raise RuntimeError(f"Could not durably lock the execution plan: {exc}") from exc
         self._execution_plan_snapshot = candidate
-        self._execution_plan_source = "new_finalization"
+        if self.get_execution_plan_source() != "persisted_execution_plan":
+            self._execution_plan_source = "new_finalization"
         self.set_execution_plan_sync_error(None)
         self._audit_execution_plan_event(
             "execution_plan_locked",
@@ -7642,6 +7836,59 @@ class ExperimentModel(QObject):
                 raise RuntimeError("execution_calibrations.json references a different plan ID.")
             return document
         return ExecutionCalibrationDocument(plan_id=plan.plan_id)
+
+    def ensure_execution_printer_head_binding(
+        self,
+        *,
+        stock_id: str,
+        printer_head_id: str,
+    ):
+        plan = self.lock_execution_plan("printing_started")
+        if plan is None:
+            return None
+        candidate = build_printer_head_binding_revision(
+            plan,
+            stock_id=stock_id,
+            printer_head_id=printer_head_id,
+        )
+        if candidate is plan:
+            if self.get_execution_plan_sync_error():
+                design_payload = self._validate_plan_design_link(plan)
+                try:
+                    self._write_progress_for_execution_plan(plan)
+                    self.synchronize_execution_resume_revision(plan)
+                    self._write_execution_plan_exports(plan, design_payload)
+                    self.set_execution_plan_sync_error(None)
+                except Exception as exc:
+                    self.set_execution_plan_sync_error(exc)
+                    raise RuntimeError(
+                        f"Could not repair the printer-head binding artifacts: {exc}"
+                    ) from exc
+            return plan
+        design_payload = self._validate_plan_design_link(plan)
+        try:
+            self._commit_plan_revision(plan, candidate)
+            self._write_progress_for_execution_plan(candidate)
+            self.synchronize_execution_resume_revision(candidate)
+            self._write_execution_plan_exports(candidate, design_payload)
+        except Exception as exc:
+            self.set_execution_plan_sync_error(exc)
+            raise RuntimeError(f"Could not persist the printer-head binding: {exc}") from exc
+        self._execution_plan_snapshot = candidate
+        self._project_reconstructed_execution_plan(candidate)
+        self.set_execution_plan_sync_error(None)
+        self._audit_execution_plan_event(
+            "execution_plan_printer_head_bound",
+            "Execution printer head bound",
+            {
+                "plan_id": candidate.plan_id,
+                "previous_revision": plan.plan_revision,
+                "plan_revision": candidate.plan_revision,
+                "stock_id": stock_id,
+                "printer_head_id": printer_head_id,
+            },
+        )
+        return candidate
 
     def _added_droplets_for_stock(self, stock_id: str) -> int:
         payload = self.return_progress_data()
@@ -7906,6 +8153,7 @@ class ExperimentModel(QObject):
         ):
             try:
                 self._write_progress_for_execution_plan(plan)
+                self.synchronize_execution_resume_revision(plan)
                 self._write_execution_plan_exports(plan, design_payload)
                 if normalize_printing_mode(printing_mode) == PRINTING_MODE_STREAM:
                     self.mark_manual_refuel_check_required(
@@ -7949,6 +8197,7 @@ class ExperimentModel(QObject):
             save_execution_calibrations(self.execution_calibrations_file_path, document)
             self._commit_plan_revision(plan, candidate)
             self._write_progress_for_execution_plan(candidate)
+            self.synchronize_execution_resume_revision(candidate)
             self._write_execution_plan_exports(candidate, design_payload)
         except Exception as exc:
             self.set_execution_plan_sync_error(exc)
@@ -9390,6 +9639,7 @@ class ExperimentModel(QObject):
         self.execution_plan_file_path = None
         self.execution_plan_revisions_dir_path = None
         self.execution_calibrations_file_path = None
+        self.execution_resume_file_path = None
         self.key_file_path = None
         self.concentration_key_file_path = None
         self._runtime_well_plate = None
@@ -9402,6 +9652,8 @@ class ExperimentModel(QObject):
         self._execution_plan_finalization_error = None
         self._execution_plan_sync_error = None
         self._execution_plan_reload_read_only = False
+        self._authoritative_execution_bundle = None
+        self._authoritative_runtime_active = False
         self._progress_execution_reference = None
 
         # clear any uploaded/manual reaction list state
@@ -13359,6 +13611,111 @@ class Model(QObject):
         """Clear all experiment data and reset the well plate."""
         self._clear_runtime_experiment_without_signal()
         self.experiment_loaded.emit()
+
+    def load_authoritative_execution_runtime(self):
+        """Explicitly activate a validated execution bundle without regenerating it."""
+        bundle = self.experiment_model._refresh_authoritative_execution_bundle()
+        eligibility = bundle.eligibility
+        if not eligibility.can_activate_runtime or eligibility.status.startswith("blocked_"):
+            raise RuntimeError(eligibility.reason)
+        spec = build_execution_runtime_spec(bundle)
+
+        try:
+            plate_data = self.well_plate.get_plate_data_by_name(spec.plate_name)
+        except Exception as exc:
+            raise RuntimeError(
+                f"The saved plate format {spec.plate_name!r} is unavailable."
+            ) from exc
+        if (
+            int(plate_data.get("rows", -1)) != spec.plate_rows
+            or int(plate_data.get("columns", -1)) != spec.plate_columns
+        ):
+            raise RuntimeError("The current plate catalog differs from the saved execution plate.")
+        well_ids = [well.well_id for well in spec.wells]
+        self.well_plate.validate_explicit_well_ids(
+            well_ids,
+            plate_name=spec.plate_name,
+            excluded_wells=set(),
+        )
+
+        stock_manager = StockSolutionManager()
+        stock_specs = {stock.stock_id: stock for stock in spec.stocks}
+        remaining_by_stock = {stock.stock_id: 0 for stock in spec.stocks}
+        for well in spec.wells:
+            for stock_id, target in well.targets.items():
+                remaining_by_stock[stock_id] += max(0, target - well.added[stock_id])
+        for stock in spec.stocks:
+            required_uL = (
+                remaining_by_stock[stock.stock_id] * stock.effective_volume_nL / 1000.0
+            )
+            item = StockSolution(
+                stock.stock_id,
+                stock.reagent_name,
+                stock.concentration,
+                stock.units,
+                required_volume=required_uL,
+            )
+            item.set_printing_mode(stock.printing_mode)
+            stock_manager.stock_solutions[stock.stock_id] = item
+
+        reaction_collection = ReactionCollection()
+        reactions = []
+        for well in spec.wells:
+            reaction = ReactionComposition(well.reaction_id)
+            for stock_id, target in well.targets.items():
+                reaction.add_reagent(stock_manager.get_stock_by_id(stock_id), target)
+                reagent = reaction.get_reagent_by_id(stock_id)
+                reagent.added_droplets = well.added[stock_id]
+                reagent.completed = reagent.added_droplets >= reagent.target_droplets
+            reaction_collection.add_reaction(reaction)
+            reactions.append(reaction)
+
+        # The checkpoint write is an explicit activation side effect. It occurs only
+        # after every saved runtime identity has been validated and built in memory.
+        self.experiment_model.ensure_execution_resume_checkpoint()
+
+        self._clear_runtime_experiment_without_signal()
+        self.well_plate.set_plate_format(spec.plate_name)
+        self.stock_solutions = stock_manager
+        self.reaction_collection = reaction_collection
+        self.well_plate.assign_reactions_to_specific_wells(reactions, well_ids)
+        self.well_plate.apply_calibration_data()
+        self.assign_printer_heads()
+
+        printer_head_manager = getattr(self, "printer_head_manager", None)
+        for printer_head in list(
+            getattr(printer_head_manager, "printer_heads", []) or []
+        ):
+            if getattr(printer_head, "calibration_chip", False):
+                continue
+            saved = stock_specs.get(printer_head.get_stock_id())
+            if saved is None:
+                continue
+            if saved.printer_head_id is not None:
+                printer_head.printer_head_id = saved.printer_head_id
+            printer_head.target_droplet_volume = saved.effective_volume_nL
+
+        self.experiment_model.set_runtime_context(
+            self.well_plate,
+            self.reaction_collection,
+        )
+        self.experiment_model._authoritative_runtime_active = True
+        self.experiment_model._write_execution_plan_exports(
+            bundle.plan,
+            self.experiment_model.to_dict(),
+        )
+        self.record_experiment_audit_event(
+            "authoritative_execution_activated",
+            "Authoritative execution activated in runtime",
+            details={
+                "plan_id": bundle.plan.plan_id,
+                "plan_revision": bundle.plan.plan_revision,
+                "resume_status": eligibility.status,
+                "reaction_count": len(reactions),
+            },
+        )
+        self.experiment_loaded.emit()
+        return self.experiment_model.get_execution_resume_eligibility()
 
     def assign_printer_heads(self):
         """Assign printer heads to the slots in the rack."""
