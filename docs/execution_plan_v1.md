@@ -7,7 +7,8 @@ derived execution plan. It is separate from the authored design, progress
 counters, and human-readable CSV exports.
 
 Slice 3 writes the initial prepared plan when a fresh experiment is finalized.
-Authoritative plan loading and calibrated revisions remain later slices.
+Slice 4 adds immutable revision history, durable execution locking, and
+calibration revisions without modifying the authored design.
 
 ## Schema identity
 
@@ -80,8 +81,8 @@ records must contain exactly the fields documented below.
 
 - `plan_id` is a canonical UUID that remains stable across revisions of one
   finalized execution plan.
-- `plan_revision` is a positive integer. Later slices will increment it when a
-  calibrated execution parameter or future target changes.
+- `plan_revision` is a positive integer. The first durable lock and every
+  distinct applied execution calibration increment it.
 - `state` is one of `prepared`, `active`, `completed`, or `aborted`.
 - A `prepared` plan has null lock fields. Every other state requires a UTC lock
   timestamp and nonempty lock reason.
@@ -181,7 +182,73 @@ assignments, and leaves existing plan files unchanged. If the plan was already
 written before a later progress/key failure, it remains as a prepared snapshot
 and an identical retry reuses it.
 
-Slice 3 does not make persisted plans authoritative on load and does not revise
-plans after calibration. Those behaviors, lifecycle locking, migration, and
-reset semantics remain later slices. Merely opening an experiment never writes
-or migrates `execution_plan.json`.
+## Durable locking and revisions in Slice 4
+
+New finalizations also persist `execution_plan_revisions/revision_000001.json`.
+The directory is immutable history: filenames are zero-padded, revisions are
+contiguous from 1, and an existing revision can only be reused when its parsed
+content is exactly equal. `execution_plan.json` is an exact mirror of the
+latest history entry.
+
+Before an execution-affecting calibration process or an accepted print request
+can issue hardware actions, a prepared plan is durably changed to active:
+
+- revision 1 `prepared` becomes revision 2 `active`;
+- the reason is `calibration_started` or `printing_started`;
+- the first lock timestamp and reason never change in later revisions; and
+- progress is updated to reference the active revision before hardware starts.
+
+Nozzle focus, trajectory, and other non-volume setup do not lock a plan by
+themselves. A failed or stopped calibration does not unlock an already active
+plan. If revision, current-mirror, progress, or sidecar synchronization fails,
+the model retains a blocking synchronization error and hardware actions remain
+disabled. Immutable artifacts that were written before a later failure are
+retained; an exact retry adopts them and repairs the remaining mirrors instead
+of creating another revision.
+
+Loading an active new-format plan validates the design hash, immutable history,
+latest mirror, progress reference and targets, and calibration references. It
+does not rewrite any artifact. Slice 4 projects a valid active plan for editor
+inspection and analysis but deliberately blocks hardware resume and further
+post-reload calibration until authoritative resume validation is implemented.
+
+## Execution calibration sidecar
+
+`execution_calibrations.json` uses schema
+`labcraft.execution_calibrations`, version 1. Its root contains exactly the
+schema identity, `plan_id`, deterministic calibration records, and manual-refuel
+checks. Unknown, missing, malformed, or duplicate fields fail closed.
+
+Calibration-record UUIDs are deterministic UUID5 values derived from the plan,
+stock, printer head, source-result fingerprint, exact effective volume,
+printing mode, pulse width, and pressure. Recording time is preserved but does
+not alter identity. Each calibrated stock points to its record through
+`calibration_record_key`; stream manual-refuel checks point to that same record
+and are stored only in the sidecar.
+
+Applying a distinct calibration creates the next immutable plan revision. It:
+
+- verifies the unchanged `experiment_design.json` hash and frozen execution
+  identities;
+- rejects two-stock option calibration and any selected stock that already has
+  positive printed progress;
+- changes only that stock's exact effective volume, printing mode, printer-head
+  reference, calibration-record reference, and the resulting target maps;
+- requantizes the selected stock with the existing nearest-integral rule while
+  preserving all other non-fill targets;
+- recalculates fill from remaining target printed volume and clamps it to zero
+  when calibrated non-fill volume is already larger; and
+- recomputes exact expected well volumes without applying the design-time
+  tolerance as an execution feasibility limit.
+
+Consequently, a calibrated historical well may legitimately exceed the design
+optimization limit. Progress preserves all added counts while targets and its
+`__execution__` revision reference are atomically replaced. `key.csv` and
+`concentration_key.csv` are regenerated from the committed plan, not by running
+stock optimization. `experiment_design.json` remains byte-identical throughout
+locking, calibration, manual-refuel checks, and retries.
+
+Slice 4 persists only the active lifecycle state. Completed/aborted transitions,
+validated hardware resume, reset cleanup, and mixed-volume dispense segments
+remain later work. Legacy executions remain non-migrating, read-only snapshots;
+merely opening any experiment never creates or repairs execution artifacts.

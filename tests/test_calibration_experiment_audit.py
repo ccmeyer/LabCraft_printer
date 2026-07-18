@@ -346,6 +346,43 @@ def test_non_volume_calibration_process_is_not_audited(tmp_path):
     assert _event_types(mgr) == []
 
 
+def test_volume_calibration_locks_execution_plan_before_recording_or_start(tmp_path):
+    mgr = _make_manager(tmp_path)
+    _seed_open_session(mgr)
+    events = []
+    proc = _FakeVolumeCalibrationProcess()
+    proc.start = lambda: events.append("start")
+    mgr.activeCalibration = proc
+    mgr.model.experiment_model.lock_execution_plan = Mock(
+        side_effect=lambda reason: events.append(("lock", reason))
+    )
+    mgr.clear_pending_process_verdict = Mock()
+    mgr._begin_process_recording = Mock(side_effect=lambda _proc: events.append("record"))
+
+    mgr.start_active_calibration()
+
+    assert events[:3] == [("lock", "calibration_started"), "record", "start"]
+
+
+def test_volume_calibration_lock_failure_prevents_process_start(tmp_path):
+    mgr = _make_manager(tmp_path)
+    _seed_open_session(mgr)
+    proc = _FakeVolumeCalibrationProcess()
+    mgr.activeCalibration = proc
+    mgr.model.experiment_model.lock_execution_plan = Mock(
+        side_effect=OSError("disk unavailable")
+    )
+    mgr.clear_pending_process_verdict = Mock()
+    mgr._begin_process_recording = Mock()
+
+    mgr.start_active_calibration()
+
+    assert proc.started is False
+    mgr._begin_process_recording.assert_not_called()
+    assert mgr.activeCalibration is None
+    assert "durably locked" in mgr.calibrationError.calls[-1][0][0]
+
+
 def test_non_volume_calibration_terminal_event_is_not_audited(tmp_path):
     mgr = _make_manager(tmp_path)
     _seed_open_session(mgr)

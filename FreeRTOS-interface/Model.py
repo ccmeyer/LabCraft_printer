@@ -39,6 +39,7 @@ import importlib
 from CalibrationMemoryStore import CalibrationMemoryStore
 from ExperimentAuditLog import ExperimentAuditLog
 from ExecutionPlan import (
+    ExecutionPlanState,
     ProgressExecutionReference,
     load_execution_plan,
     save_execution_plan,
@@ -46,6 +47,20 @@ from ExecutionPlan import (
 from InitialExecutionPlan import (
     build_initial_execution_plan,
     initial_execution_content_matches,
+)
+from ExecutionPlanRevision import (
+    REVISION_DIRECTORY_NAME,
+    build_calibrated_revision,
+    build_locked_revision,
+    persist_immutable_revision,
+    validate_revision_history,
+)
+from ExecutionCalibrationStore import (
+    ExecutionCalibrationDocument,
+    ExecutionCalibrationRecord,
+    deterministic_calibration_record_id,
+    load_execution_calibrations,
+    save_execution_calibrations,
 )
 from LegacyExecutionPlan import (
     LegacyExecutionClassification,
@@ -418,6 +433,8 @@ class ExperimentModel(QObject):
         self.calibration_file_path: Optional[str] = None
         self.experiment_audit_file_path: Optional[str] = None
         self.execution_plan_file_path: Optional[str] = None
+        self.execution_plan_revisions_dir_path: Optional[str] = None
+        self.execution_calibrations_file_path: Optional[str] = None
         self.progress_data: Dict[str, Dict] = {}
         self._last_progress_load_warnings: list[dict[str, object]] = []
         self._last_progress_stock_override_warnings: list[dict[str, object]] = []
@@ -428,6 +445,8 @@ class ExperimentModel(QObject):
         self._execution_plan_snapshot = None
         self._execution_plan_source: str | None = None
         self._execution_plan_finalization_error: str | None = None
+        self._execution_plan_sync_error: str | None = None
+        self._execution_plan_reload_read_only: bool = False
         self._progress_execution_reference: ProgressExecutionReference | None = None
 
         # optional dependency (if you have one); safe to ignore if None
@@ -1699,10 +1718,10 @@ class ExperimentModel(QObject):
         two_max_refine: int = 30,
         allow_two: bool = True
     ) -> Dict:
-        if self.is_read_only_legacy_execution():
+        if self.is_execution_design_locked():
             return {
                 "best": None,
-                "reason": "Recorded legacy executions are read-only and cannot be re-optimized.",
+                "reason": "The execution design is locked and cannot be re-optimized.",
                 "issues_by_key": {},
                 "read_only": True,
             }
@@ -4884,7 +4903,7 @@ class ExperimentModel(QObject):
 
     def get_plan_for_key(self, key: tuple[str, Optional[str]]) -> dict | None:
         """Ensure plans exist and return plans_per_option[key]."""
-        if self.is_read_only_legacy_execution():
+        if self.is_execution_design_locked() and not self.plans_per_option:
             return None
         if not self.plans_per_option:
             # Safe: compute plans if caller came in early
@@ -5366,6 +5385,13 @@ class ExperimentModel(QObject):
         applied_printing_mode=None,
         save: bool = True,
     ) -> dict:
+        if (
+            self.get_execution_plan_snapshot() is not None
+            and self.get_execution_plan_source() != "legacy_reconstruction"
+        ):
+            raise RuntimeError(
+                "Finalized executions must apply calibration through an execution-plan revision."
+            )
         requested_printing_mode = applied_printing_mode or printing_mode
         context_printing_mode = (
             normalize_printing_mode(requested_printing_mode)
@@ -5486,6 +5512,32 @@ class ExperimentModel(QObject):
         )
         if context is None:
             return None
+        plan = self.get_execution_plan_snapshot()
+        if (
+            plan is not None
+            and self.get_execution_plan_source() != "legacy_reconstruction"
+            and self.execution_calibrations_file_path
+            and os.path.isfile(self.execution_calibrations_file_path)
+        ):
+            stock = next(
+                (item for item in plan.stocks if item.stock_id == context["stock_id"]),
+                None,
+            )
+            if stock is None or stock.calibration_record_key is None:
+                return None
+            document = load_execution_calibrations(self.execution_calibrations_file_path)
+            if document.plan_id != plan.plan_id:
+                self.set_execution_plan_sync_error(
+                    "execution_calibrations.json references a different plan ID."
+                )
+                return None
+            record = document.records.get(stock.calibration_record_key)
+            if record is None:
+                self.set_execution_plan_sync_error(
+                    f"Missing execution calibration record {stock.calibration_record_key}."
+                )
+                return None
+            return record.to_dict()
         key = self._applied_imaging_key(
             context["stock_id"],
             context["printer_head_id"],
@@ -5521,19 +5573,62 @@ class ExperimentModel(QObject):
         )
         if key is None:
             return None
+        plan = self.get_execution_plan_snapshot()
+        if (
+            plan is not None
+            and self.get_execution_plan_source() != "legacy_reconstruction"
+            and self.execution_calibrations_file_path
+            and os.path.isfile(self.execution_calibrations_file_path)
+        ):
+            document = load_execution_calibrations(self.execution_calibrations_file_path)
+            if document.plan_id != plan.plan_id:
+                self.set_execution_plan_sync_error(
+                    "execution_calibrations.json references a different plan ID."
+                )
+                return None
+            record = document.manual_refuel_checks.get(key)
+            return dict(record) if isinstance(record, dict) else None
         state = self._normalize_manual_refuel_checks(getattr(self, "manual_refuel_checks", None))
         record = state.get("records", {}).get(key)
         return dict(record) if isinstance(record, dict) else None
 
     def _store_manual_refuel_check_record(self, key: str, record: dict, *, save: bool = True) -> dict:
+        plan = self.get_execution_plan_snapshot()
+        use_sidecar = bool(
+            plan is not None
+            and self.get_execution_plan_source() != "legacy_reconstruction"
+            and self.execution_calibrations_file_path
+        )
+        stored_record = dict(record)
+        if use_sidecar:
+            stock_id = str(stored_record.get("stock_id") or "")
+            stock = next((item for item in plan.stocks if item.stock_id == stock_id), None)
+            if stock is None:
+                raise RuntimeError("Manual-refuel check stock is absent from the execution plan.")
+            stored_record["calibration_record_id"] = stock.calibration_record_key
+            if save:
+                try:
+                    document = self._execution_calibration_document(plan)
+                    document.manual_refuel_checks[str(key)] = stored_record
+                    save_execution_calibrations(
+                        self.execution_calibrations_file_path,
+                        document,
+                    )
+                    self.set_execution_plan_sync_error(None)
+                except Exception as exc:
+                    self.set_execution_plan_sync_error(exc)
+                    raise RuntimeError(
+                        f"Could not persist the execution manual-refuel check: {exc}"
+                    ) from exc
         state = self._normalize_manual_refuel_checks(getattr(self, "manual_refuel_checks", None))
-        state["records"][str(key)] = dict(record)
+        state["records"][str(key)] = stored_record
         self.manual_refuel_checks = state
-        self.unsaved_changes = True
-        self.manual_refuel_check_changed.emit(dict(record))
-        if save and getattr(self, "experiment_file_path", None):
+        if not use_sidecar:
+            self.unsaved_changes = True
+        self.manual_refuel_check_changed.emit(dict(stored_record))
+        if save and not use_sidecar and getattr(self, "experiment_file_path", None):
             self.save_experiment()
-        return dict(record)
+        return dict(stored_record)
 
     def mark_manual_refuel_check_required(
         self,
@@ -6008,6 +6103,48 @@ class ExperimentModel(QObject):
             raise RuntimeError(
                 "Recorded legacy executions are read-only; calibration cannot change the saved execution."
             )
+        execution_plan = self.get_execution_plan_snapshot()
+        if execution_plan is not None and self.get_execution_plan_source() != "legacy_reconstruction":
+            if not applied_calibration:
+                raise RuntimeError(
+                    "A persisted calibration record is required to revise a finalized execution plan."
+                )
+            matching = [
+                stock
+                for stock in execution_plan.stocks
+                if stock.factor_name == factor_name and stock.option_name == option_name
+            ]
+            if len(matching) != 1:
+                raise RuntimeError("The calibrated design option does not map to exactly one execution stock.")
+            stock = matching[0]
+            printer_head = applied_calibration.get("printer_head")
+            printer_head_id = self._printer_head_identity(printer_head)
+            if not printer_head_id:
+                raise RuntimeError("The calibrated printer-head identity is unavailable.")
+            applied_mode = normalize_printing_mode(printing_mode, fallback=stock.printing_mode)
+            result = self.apply_execution_calibration(
+                stock_id=stock.stock_id,
+                new_effective_volume_nL=float(new_droplet_nL),
+                printing_mode=applied_mode,
+                printer_head_id=printer_head_id,
+                factor_name=factor_name,
+                option_name=option_name,
+                is_fill=False,
+                calibration_payload=dict(applied_calibration),
+            )
+            return {
+                "factor": factor_name,
+                "option": option_name,
+                "stock_concentration": stock.concentration,
+                "units": stock.units,
+                "new_droplet_nL": float(new_droplet_nL),
+                "original_printing_mode": stock.printing_mode,
+                "applied_printing_mode": applied_mode,
+                "saved_experiment": False,
+                "applied_imaging_calibration_recorded": True,
+                "execution_plan_revision": result["plan"].plan_revision,
+                "execution_plan_status": result["status"],
+            }
         key = (factor_name, option_name)
         plan = self.plans_per_option.get(key)
         if not plan:
@@ -6772,6 +6909,12 @@ class ExperimentModel(QObject):
         self.calibration_file_path  = os.path.join(self.experiment_dir_path, "calibration.json")
         self.experiment_audit_file_path = os.path.join(self.experiment_dir_path, "experiment_audit.jsonl")
         self.execution_plan_file_path = os.path.join(self.experiment_dir_path, "execution_plan.json")
+        self.execution_plan_revisions_dir_path = os.path.join(
+            self.experiment_dir_path, REVISION_DIRECTORY_NAME
+        )
+        self.execution_calibrations_file_path = os.path.join(
+            self.experiment_dir_path, "execution_calibrations.json"
+        )
         self.key_file_path          = os.path.join(self.experiment_dir_path, "key.csv")
         self.concentration_key_file_path = os.path.join(self.experiment_dir_path, "concentration_key.csv")
         if self._calibration_manager is not None and hasattr(self._calibration_manager, "update_calibration_file_path"):
@@ -6782,8 +6925,10 @@ class ExperimentModel(QObject):
     # -----------------------------
     def save_experiment(self):
         """Persist metadata + factors (inputs). Derived plans are recomputed on load."""
-        if self.is_read_only_legacy_execution():
-            raise RuntimeError("Recorded legacy executions are read-only and cannot be saved from the editor.")
+        if self.is_execution_design_locked():
+            raise RuntimeError(
+                "The execution design is locked and read-only after calibration or printing begins."
+            )
         data = self.to_dict()  # you already have to_dict() for v2
         self._atomic_json_dump(self.experiment_file_path, data)
         self.unsaved_changes = False
@@ -6807,6 +6952,88 @@ class ExperimentModel(QObject):
         # Rehydrate
         self.from_dict(data)  # resets caches/signals
         
+        if self.execution_plan_file_path and os.path.isfile(self.execution_plan_file_path):
+            try:
+                persisted_plan = load_execution_plan(self.execution_plan_file_path)
+            except Exception as exc:
+                self._execution_plan_reload_read_only = True
+                self._execution_plan_source = "persisted_execution_plan"
+                self.set_execution_plan_sync_error(
+                    f"The persisted execution plan is invalid: {exc}"
+                )
+                return None
+            if persisted_plan.state is not ExecutionPlanState.PREPARED:
+                self._execution_plan_reload_read_only = True
+                self._execution_plan_snapshot = persisted_plan
+                self._reconstructed_execution_plan = persisted_plan
+                self._execution_plan_source = "persisted_execution_plan"
+                try:
+                    self._validate_plan_design_link(persisted_plan)
+                    history = validate_revision_history(
+                        self.execution_plan_revisions_dir_path,
+                        latest_plan=persisted_plan,
+                    )
+                    if not history:
+                        raise RuntimeError("The immutable execution-plan history is missing.")
+                    self._validate_execution_calibration_references(persisted_plan)
+                    self._validate_progress_for_execution_transition(
+                        persisted_plan,
+                        allow_stale_revision_repair=False,
+                    )
+                    if not self.progress_file_path or not os.path.isfile(self.progress_file_path):
+                        raise RuntimeError("progress.json is missing for the active execution plan.")
+                    with open(self.progress_file_path, "r", encoding="utf-8") as handle:
+                        progress_payload = json.load(handle)
+                    reference = ProgressExecutionReference.from_dict(
+                        progress_payload.get("__execution__")
+                        if isinstance(progress_payload, dict)
+                        else None
+                    )
+                    if (
+                        reference.plan_id != persisted_plan.plan_id
+                        or reference.plan_revision != persisted_plan.plan_revision
+                    ):
+                        raise RuntimeError(
+                            "progress.json does not reference the latest execution-plan revision."
+                        )
+                    progress_wells = self._well_entries_from_progress_payload(progress_payload)
+                    if set(progress_wells) != {well.well_id for well in persisted_plan.wells}:
+                        raise RuntimeError(
+                            "progress.json well identities do not match the execution plan."
+                        )
+                    for well in persisted_plan.wells:
+                        progress_well = progress_wells[well.well_id]
+                        if str(progress_well.get("reaction_id")) != well.reaction_id:
+                            raise RuntimeError(
+                                f"progress.json reaction identity differs at {well.well_id}."
+                            )
+                        progress_reagents = progress_well.get("reagents") or {}
+                        expected_targets = {
+                            item.stock_id: item.target_dispenses for item in well.dispenses
+                        }
+                        actual_targets = {
+                            str(stock_id): details.get("target_droplets")
+                            for stock_id, details in progress_reagents.items()
+                            if isinstance(details, dict)
+                        }
+                        if actual_targets != expected_targets:
+                            raise RuntimeError(
+                                f"progress.json targets differ at {well.well_id}."
+                            )
+                    self.progress_data = progress_wells
+                    self._progress_execution_reference = reference
+                    self._project_reconstructed_execution_plan(persisted_plan)
+                    self.set_execution_plan_sync_error(None)
+                except Exception as exc:
+                    self.progress_data = {}
+                    self._stock_rows_cache = []
+                    self._fill_row_cache = None
+                    self._reactions_df = pd.DataFrame()
+                    self.set_execution_plan_sync_error(
+                        f"The active execution plan could not be validated for reload: {exc}"
+                    )
+                return None
+
         reconstruction = reconstruct_legacy_execution(experiment_dir, data)
         self._legacy_execution_reconstruction = reconstruction
         if (
@@ -6859,6 +7086,8 @@ class ExperimentModel(QObject):
         self._execution_plan_snapshot = None
         self._execution_plan_source = None
         self._execution_plan_finalization_error = None
+        self._execution_plan_sync_error = None
+        self._execution_plan_reload_read_only = False
         self._progress_execution_reference = None
 
     def is_read_only_legacy_execution(self) -> bool:
@@ -6905,9 +7134,23 @@ class ExperimentModel(QObject):
     def set_execution_plan_finalization_error(self, error: object | None) -> None:
         self._execution_plan_finalization_error = None if error is None else str(error)
 
+    def get_execution_plan_sync_error(self) -> str | None:
+        return getattr(self, "_execution_plan_sync_error", None)
+
+    def set_execution_plan_sync_error(self, error: object | None) -> None:
+        self._execution_plan_sync_error = None if error is None else str(error)
+
+    def is_execution_design_locked(self) -> bool:
+        if self.is_read_only_legacy_execution() or getattr(
+            self, "_execution_plan_reload_read_only", False
+        ):
+            return True
+        plan = self.get_execution_plan_snapshot()
+        return bool(plan is not None and plan.state is not ExecutionPlanState.PREPARED)
+
     def _execution_progress_reference(self) -> ProgressExecutionReference | None:
         plan = self.get_execution_plan_snapshot()
-        if plan is None or self.get_execution_plan_source() != "new_finalization":
+        if plan is None or self.get_execution_plan_source() == "legacy_reconstruction":
             return None
         return ProgressExecutionReference(
             plan_id=plan.plan_id,
@@ -6974,6 +7217,8 @@ class ExperimentModel(QObject):
     def create_or_reuse_initial_execution_plan(self):
         if not self.execution_plan_file_path:
             raise RuntimeError("The execution-plan path is unavailable.")
+        if not self.execution_plan_revisions_dir_path:
+            raise RuntimeError("The execution-plan revision directory is unavailable.")
         candidate = self.build_initial_execution_plan_from_runtime()
         status = "created"
         if os.path.exists(self.execution_plan_file_path):
@@ -6987,6 +7232,11 @@ class ExperimentModel(QObject):
         else:
             save_execution_plan(self.execution_plan_file_path, candidate)
             plan = candidate
+        persist_immutable_revision(self.execution_plan_revisions_dir_path, plan)
+        validate_revision_history(
+            self.execution_plan_revisions_dir_path,
+            latest_plan=plan,
+        )
         self._execution_plan_snapshot = plan
         self._execution_plan_source = "new_finalization"
         self._reconstructed_execution_plan = None
@@ -6995,7 +7245,751 @@ class ExperimentModel(QObject):
             plan_revision=plan.plan_revision,
         )
         self.set_execution_plan_finalization_error(None)
+        self.set_execution_plan_sync_error(None)
         return plan, status
+
+    def _read_saved_design_payload(self) -> dict:
+        if not self.experiment_file_path or not os.path.isfile(self.experiment_file_path):
+            raise RuntimeError("The frozen experiment design is unavailable.")
+        with open(self.experiment_file_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if not isinstance(payload, dict):
+            raise RuntimeError("The frozen experiment design is not a JSON object.")
+        return payload
+
+    def _validate_plan_design_link(self, plan) -> dict:
+        payload = self._read_saved_design_payload()
+        from ExecutionPlan import canonical_sha256
+
+        if canonical_sha256(payload) != plan.design_sha256:
+            raise RuntimeError(
+                "experiment_design.json no longer matches the frozen execution-plan design hash."
+            )
+        return payload
+
+    def _commit_plan_revision(self, previous_plan, candidate_plan) -> str:
+        if not self.execution_plan_file_path or not self.execution_plan_revisions_dir_path:
+            raise RuntimeError("Execution-plan persistence paths are unavailable.")
+        persist_immutable_revision(self.execution_plan_revisions_dir_path, previous_plan)
+        status = persist_immutable_revision(
+            self.execution_plan_revisions_dir_path, candidate_plan
+        )
+        save_execution_plan(self.execution_plan_file_path, candidate_plan)
+        validate_revision_history(
+            self.execution_plan_revisions_dir_path,
+            latest_plan=candidate_plan,
+        )
+        return status
+
+    def _validate_execution_calibration_references(self, plan) -> None:
+        referenced = {
+            stock.calibration_record_key
+            for stock in plan.stocks
+            if stock.calibration_record_key is not None
+        }
+        if not referenced:
+            return
+        if not self.execution_calibrations_file_path or not os.path.isfile(
+            self.execution_calibrations_file_path
+        ):
+            raise RuntimeError(
+                "The execution plan references calibration records, but execution_calibrations.json is missing."
+            )
+        document = load_execution_calibrations(self.execution_calibrations_file_path)
+        if document.plan_id != plan.plan_id:
+            raise RuntimeError("execution_calibrations.json references a different plan ID.")
+        missing = sorted(referenced - set(document.records))
+        if missing:
+            raise RuntimeError(
+                "The execution plan references missing calibration record(s): "
+                + ", ".join(missing)
+            )
+
+    def _recover_persisted_execution_plan_for_transition(self, fallback_plan):
+        """Adopt durable history after a partial commit and repair only its latest mirror."""
+        if not self.execution_plan_revisions_dir_path or not self.execution_plan_file_path:
+            raise RuntimeError("Execution-plan persistence paths are unavailable.")
+        current = None
+        if os.path.isfile(self.execution_plan_file_path):
+            current = load_execution_plan(self.execution_plan_file_path)
+        history = validate_revision_history(self.execution_plan_revisions_dir_path)
+        latest = history[-1] if history else current or fallback_plan
+        if latest.plan_id != fallback_plan.plan_id:
+            raise RuntimeError("Persisted execution-plan identity does not match the loaded plan.")
+        if latest.design_sha256 != fallback_plan.design_sha256:
+            raise RuntimeError("Persisted execution-plan history changes the frozen design hash.")
+        if history and current != latest:
+            save_execution_plan(self.execution_plan_file_path, latest)
+            current = latest
+        elif not history:
+            persist_immutable_revision(self.execution_plan_revisions_dir_path, latest)
+        validate_revision_history(
+            self.execution_plan_revisions_dir_path,
+            latest_plan=current or latest,
+        )
+        self._validate_execution_calibration_references(latest)
+        self._execution_plan_snapshot = latest
+        return latest
+
+    def _validate_progress_for_execution_transition(
+        self,
+        plan,
+        *,
+        allow_stale_revision_repair: bool,
+    ) -> None:
+        if not self.progress_file_path or not os.path.isfile(self.progress_file_path):
+            raise RuntimeError("progress.json is missing for the finalized execution plan.")
+        with open(self.progress_file_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if not isinstance(payload, dict):
+            raise RuntimeError("progress.json must contain an object.")
+        reference = ProgressExecutionReference.from_dict(payload.get("__execution__"))
+        if reference.plan_id != plan.plan_id:
+            raise RuntimeError("progress.json references a different execution plan.")
+        reference_plan = plan
+        if reference.plan_revision != plan.plan_revision:
+            if not allow_stale_revision_repair or reference.plan_revision > plan.plan_revision:
+                raise RuntimeError(
+                    "progress.json does not reference the latest execution-plan revision."
+                )
+            history = validate_revision_history(self.execution_plan_revisions_dir_path)
+            reference_plan = next(
+                (
+                    item
+                    for item in history
+                    if item.plan_revision == reference.plan_revision
+                ),
+                None,
+            )
+            if reference_plan is None:
+                raise RuntimeError(
+                    "progress.json references an unavailable execution-plan revision."
+                )
+        progress_wells = self._well_entries_from_progress_payload(payload)
+        expected_well_ids = {well.well_id for well in reference_plan.wells}
+        if set(progress_wells) != expected_well_ids:
+            raise RuntimeError("progress.json well identities do not match the execution plan.")
+        for well in reference_plan.wells:
+            entry = progress_wells[well.well_id]
+            if not isinstance(entry, dict) or str(entry.get("reaction_id")) != well.reaction_id:
+                raise RuntimeError(
+                    f"progress.json reaction identity differs at {well.well_id}."
+                )
+            reagents = entry.get("reagents")
+            if not isinstance(reagents, dict):
+                raise RuntimeError(f"progress.json reagents at {well.well_id} must be an object.")
+            expected_targets = {
+                dispense.stock_id: dispense.target_dispenses for dispense in well.dispenses
+            }
+            if set(reagents) != set(expected_targets):
+                raise RuntimeError(
+                    f"progress.json stock identities differ at {well.well_id}."
+                )
+            for stock_id, target in expected_targets.items():
+                details = reagents[stock_id]
+                raw_target = details.get("target_droplets") if isinstance(details, dict) else None
+                if (
+                    isinstance(raw_target, bool)
+                    or not isinstance(raw_target, (int, float))
+                    or not math.isfinite(float(raw_target))
+                    or not float(raw_target).is_integer()
+                    or int(raw_target) < 0
+                    or int(raw_target) != target
+                ):
+                    raise RuntimeError(
+                        f"progress.json target differs at {well.well_id}/{stock_id}."
+                    )
+                added = details.get("added_droplets", 0)
+                if (
+                    isinstance(added, bool)
+                    or not isinstance(added, (int, float))
+                    or not math.isfinite(float(added))
+                    or not float(added).is_integer()
+                    or float(added) < 0
+                ):
+                    raise RuntimeError(
+                        f"progress.json added count is invalid at {well.well_id}/{stock_id}."
+                    )
+
+    def _progress_payload_for_plan(self, plan) -> dict:
+        existing = {}
+        if self.progress_file_path and os.path.isfile(self.progress_file_path):
+            with open(self.progress_file_path, "r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+            if not isinstance(loaded, dict):
+                raise RuntimeError("progress.json must contain an object.")
+            existing = loaded
+        existing_wells = self._well_entries_from_progress_payload(existing)
+        stock_lookup = {stock.stock_id: stock for stock in plan.stocks}
+        payload = {}
+        for well in plan.wells:
+            previous_well = existing_wells.get(well.well_id, {})
+            if previous_well and str(previous_well.get("reaction_id")) != well.reaction_id:
+                raise RuntimeError(
+                    f"progress.json reaction identity for {well.well_id} does not match the execution plan."
+                )
+            previous_reagents = previous_well.get("reagents") or {}
+            if not isinstance(previous_reagents, dict):
+                raise RuntimeError(f"progress.json reagents for {well.well_id} must be an object.")
+            reagents = {}
+            for dispense in well.dispenses:
+                old = previous_reagents.get(dispense.stock_id, {})
+                try:
+                    raw_added = old.get("added_droplets", 0) or 0
+                    if (
+                        isinstance(raw_added, bool)
+                        or not isinstance(raw_added, (int, float))
+                        or not math.isfinite(float(raw_added))
+                        or not float(raw_added).is_integer()
+                    ):
+                        raise ValueError
+                    added = int(raw_added)
+                except (AttributeError, TypeError, ValueError) as exc:
+                    raise RuntimeError(
+                        f"progress.json has an invalid added count for {well.well_id}/{dispense.stock_id}."
+                    ) from exc
+                if added < 0:
+                    raise RuntimeError("Progress added counts cannot be negative.")
+                stock = stock_lookup[dispense.stock_id]
+                reagents[dispense.stock_id] = {
+                    "target_droplets": dispense.target_dispenses,
+                    "added_droplets": added,
+                    **(
+                        {
+                            key: old[key]
+                            for key in ("name", "concentration", "units")
+                            if isinstance(old, dict) and key in old
+                        }
+                    ),
+                }
+                reagents[dispense.stock_id].setdefault("name", stock.reagent_name)
+                reagents[dispense.stock_id].setdefault("concentration", stock.concentration)
+                reagents[dispense.stock_id].setdefault("units", stock.units)
+            payload[well.well_id] = {
+                "reaction_id": well.reaction_id,
+                "reagents": reagents,
+                "completed": all(
+                    details["added_droplets"] >= details["target_droplets"]
+                    for details in reagents.values()
+                ),
+            }
+        payload["__plate__"] = {
+            "name": plan.plate.name,
+            "rows": plan.plate.rows,
+            "columns": plan.plate.columns,
+            "schema_version": 1,
+        }
+        payload["__execution__"] = ProgressExecutionReference(
+            plan_id=plan.plan_id,
+            plan_revision=plan.plan_revision,
+        ).to_dict()
+        return payload
+
+    def _write_progress_for_execution_plan(self, plan) -> dict:
+        if not self.progress_file_path:
+            raise RuntimeError("The progress path is unavailable.")
+        payload = self._progress_payload_for_plan(plan)
+        self._atomic_json_dump(self.progress_file_path, payload)
+        self.progress_data = self._well_entries_from_progress_payload(payload)
+        self._progress_execution_reference = ProgressExecutionReference(
+            plan_id=plan.plan_id,
+            plan_revision=plan.plan_revision,
+        )
+        return payload
+
+    def _write_execution_plan_exports(self, plan, design_payload: dict) -> None:
+        if not self.key_file_path or not self.concentration_key_file_path:
+            raise RuntimeError("Execution export paths are unavailable.")
+        stock_lookup = {stock.stock_id: stock for stock in plan.stocks}
+        key_rows = {}
+        concentration_rows = {}
+        for well in plan.wells:
+            key_row = {}
+            concentration_row = {}
+            for dispense in well.dispenses:
+                stock = stock_lookup[dispense.stock_id]
+                header = f"{stock.stock_id}_{stock.effective_volume_nL:.1f}nL"
+                key_row[header] = dispense.target_dispenses
+                concentration_header = f"{stock.reagent_name}_{stock.units}"
+                contribution = (
+                    stock.concentration
+                    * dispense.target_dispenses
+                    * stock.effective_volume_nL
+                    / plan.volume_basis.final_reaction_volume_nL
+                )
+                concentration_row[concentration_header] = (
+                    concentration_row.get(concentration_header, 0.0) + contribution
+                )
+            present_stock_ids = {dispense.stock_id for dispense in well.dispenses}
+            for factor in self.factors:
+                options = factor.options[:1] if factor.kind == "additive" else factor.options
+                for option in options:
+                    if factor.kind == "choice" and not any(
+                        item.stock_id in present_stock_ids
+                        and item.factor_name == factor.name
+                        and item.option_name == option.name
+                        for item in plan.stocks
+                    ):
+                        continue
+                    starting = float(getattr(option, "starting_conc", 0.0) or 0.0)
+                    if starting == 0.0:
+                        continue
+                    header = f"{option.name}_{option.units}"
+                    concentration_row[header] = concentration_row.get(header, 0.0) + starting
+            key_rows[well.well_id] = key_row
+            concentration_rows[well.well_id] = concentration_row
+        key_df = pd.DataFrame.from_dict(key_rows, orient="index").fillna(0).astype(int)
+        concentration_df = pd.DataFrame.from_dict(
+            concentration_rows, orient="index"
+        ).fillna(0.0)
+        key_df = key_df.reindex(sorted(key_df.columns), axis=1)
+        concentration_df = concentration_df.reindex(
+            sorted(concentration_df.columns), axis=1
+        )
+        self._atomic_dataframe_csv(key_df, self.key_file_path)
+        self._atomic_dataframe_csv(concentration_df, self.concentration_key_file_path)
+
+    @staticmethod
+    def _atomic_dataframe_csv(dataframe, path: str) -> None:
+        parent = os.path.dirname(path) or "."
+        fd, temporary = tempfile.mkstemp(prefix="._tmp_", suffix=".csv", dir=parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+                dataframe.to_csv(handle, index_label="Well ID")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        except Exception:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+            raise
+
+    def _audit_execution_plan_event(self, event_type: str, summary: str, details: dict) -> None:
+        manager = getattr(self, "_calibration_manager", None)
+        owner = getattr(manager, "model", None)
+        recorder = getattr(owner, "record_experiment_audit_event", None)
+        if callable(recorder):
+            recorder(event_type, summary, details=details)
+
+    def lock_execution_plan(
+        self,
+        reason: str,
+        *,
+        timestamp_utc: str | None = None,
+    ):
+        if reason not in {"calibration_started", "printing_started"}:
+            raise ValueError(
+                "Execution-plan lock reason must be calibration_started or printing_started."
+            )
+        plan = self.get_execution_plan_snapshot()
+        if plan is None:
+            if self.execution_plan_file_path and os.path.isfile(self.execution_plan_file_path):
+                plan = load_execution_plan(self.execution_plan_file_path)
+            else:
+                return None
+        if self.get_execution_plan_source() == "legacy_reconstruction":
+            raise RuntimeError("Recorded legacy executions cannot be locked or resumed.")
+        if self.get_execution_plan_source() == "persisted_execution_plan":
+            raise RuntimeError(
+                "Reloaded active executions are available for analysis only; validated hardware resume is not enabled yet."
+            )
+        try:
+            self._validate_plan_design_link(plan)
+            repairing_partial_commit = bool(self.get_execution_plan_sync_error())
+            plan = self._recover_persisted_execution_plan_for_transition(plan)
+            self._validate_progress_for_execution_transition(
+                plan,
+                allow_stale_revision_repair=repairing_partial_commit,
+            )
+            if plan.state is ExecutionPlanState.ACTIVE:
+                self._write_progress_for_execution_plan(plan)
+                self.set_execution_plan_sync_error(None)
+                return plan
+            candidate = build_locked_revision(
+                plan,
+                reason=reason,
+                timestamp_utc=timestamp_utc,
+            )
+            self._commit_plan_revision(plan, candidate)
+            self._write_progress_for_execution_plan(candidate)
+        except Exception as exc:
+            self.set_execution_plan_sync_error(exc)
+            raise RuntimeError(f"Could not durably lock the execution plan: {exc}") from exc
+        self._execution_plan_snapshot = candidate
+        self._execution_plan_source = "new_finalization"
+        self.set_execution_plan_sync_error(None)
+        self._audit_execution_plan_event(
+            "execution_plan_locked",
+            "Execution plan locked",
+            {
+                "plan_id": candidate.plan_id,
+                "previous_revision": plan.plan_revision,
+                "plan_revision": candidate.plan_revision,
+                "lock_reason": candidate.lock_reason,
+            },
+        )
+        return candidate
+
+    def _execution_calibration_document(self, plan) -> ExecutionCalibrationDocument:
+        path = self.execution_calibrations_file_path
+        if not path:
+            raise RuntimeError("The execution-calibration path is unavailable.")
+        if os.path.isfile(path):
+            document = load_execution_calibrations(path)
+            if document.plan_id != plan.plan_id:
+                raise RuntimeError("execution_calibrations.json references a different plan ID.")
+            return document
+        return ExecutionCalibrationDocument(plan_id=plan.plan_id)
+
+    def _added_droplets_for_stock(self, stock_id: str) -> int:
+        payload = self.return_progress_data()
+        total = 0
+        for well in payload.values():
+            if not isinstance(well, dict):
+                continue
+            reagent = (well.get("reagents") or {}).get(stock_id)
+            if not isinstance(reagent, dict):
+                continue
+            try:
+                total += int(reagent.get("added_droplets", 0) or 0)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(f"Invalid progress count for stock {stock_id!r}.") from exc
+        return total
+
+    def _validate_runtime_matches_execution_plan(self, plan) -> None:
+        plate = self._runtime_well_plate
+        reactions = self._runtime_reaction_collection
+        if plate is None or reactions is None:
+            raise RuntimeError("The finalized runtime assignment is unavailable.")
+        if (
+            plate.get_current_plate_name() != plan.plate.name
+            or plate.get_num_rows() != plan.plate.rows
+            or plate.get_num_cols() != plan.plate.columns
+        ):
+            raise RuntimeError("The runtime plate no longer matches the execution plan.")
+        runtime_assignments = {}
+        for well in plate.get_all_wells():
+            reaction = well.get_assigned_reaction()
+            if reaction is not None:
+                runtime_assignments[str(well.well_id)] = str(reaction.unique_id)
+        plan_assignments = {
+            well.well_id: well.reaction_id for well in plan.wells
+        }
+        if runtime_assignments != plan_assignments:
+            raise RuntimeError("Runtime well/reaction assignments no longer match the execution plan.")
+        runtime_reactions = {
+            str(reaction.unique_id): reaction
+            for reaction in reactions.get_all_reactions()
+        }
+        if set(runtime_reactions) != {well.reaction_id for well in plan.wells}:
+            raise RuntimeError("Runtime reaction identities no longer match the execution plan.")
+        plan_stock_ids = {stock.stock_id for stock in plan.stocks}
+        runtime_stock_ids = {
+            str(stock_id)
+            for reaction in runtime_reactions.values()
+            for stock_id in reaction.get_all_reagents()
+        }
+        if runtime_stock_ids != plan_stock_ids:
+            raise RuntimeError("Runtime stock identities no longer match the execution plan.")
+
+    def _calibrated_target_counts(self, plan, stock, new_volume_nL: float) -> dict:
+        key = (stock.factor_name, stock.option_name)
+        option = None
+        for factor in self.factors:
+            if factor.name != stock.factor_name:
+                continue
+            if factor.kind == "additive":
+                option = factor.options[0] if factor.options else None
+            else:
+                option = next((item for item in factor.options if item.name == stock.option_name), None)
+            break
+        fill_stocks = [item for item in plan.stocks if item.units == "--" and item.factor_name == self.get_fill_reagent_name()]
+        if len(fill_stocks) != 1:
+            raise RuntimeError("The execution plan must contain exactly one identifiable fill stock.")
+        fill_stock = fill_stocks[0]
+        stock_volumes = {
+            item.stock_id: (float(new_volume_nL) if item.stock_id == stock.stock_id else item.effective_volume_nL)
+            for item in plan.stocks
+        }
+        run_specs = list(self._iter_reaction_run_specs())
+        reaction_targets = {
+            f"R{index + 1}": spec.get("reaction", {})
+            for index, spec in enumerate(run_specs)
+        }
+        results = {}
+        for well in plan.wells:
+            old_counts = {item.stock_id: item.target_dispenses for item in well.dispenses}
+            counts = dict(old_counts)
+            if stock.stock_id == fill_stock.stock_id:
+                pass
+            else:
+                if option is None:
+                    raise RuntimeError("The calibrated stock cannot be mapped to the frozen design.")
+                reaction = reaction_targets.get(well.reaction_id)
+                if reaction is None:
+                    raise RuntimeError(f"No frozen design reaction matches {well.reaction_id!r}.")
+                target = reaction.get(key)
+                if target is None:
+                    new_count = 0
+                else:
+                    starting = float(getattr(option, "starting_conc", 0.0) or 0.0)
+                    target_add = max(0.0, float(target) - starting)
+                    delta = stock.concentration * float(new_volume_nL) / plan.volume_basis.final_reaction_volume_nL
+                    new_count = max(0, int(round(target_add / delta))) if delta > 0 else 0
+                if new_count > 0 or stock.stock_id in counts:
+                    counts[stock.stock_id] = new_count
+                else:
+                    counts.pop(stock.stock_id, None)
+            nonfill_volume = sum(
+                count * stock_volumes[stock_id]
+                for stock_id, count in counts.items()
+                if stock_id != fill_stock.stock_id
+            )
+            remaining = max(0.0, plan.volume_basis.target_printed_volume_nL - nonfill_volume)
+            fill_volume = stock_volumes[fill_stock.stock_id]
+            fill_count = max(0, int(round(remaining / fill_volume)))
+            if fill_count > 0 or fill_stock.stock_id in counts:
+                counts[fill_stock.stock_id] = fill_count
+            else:
+                counts.pop(fill_stock.stock_id, None)
+            results[well.well_id] = counts
+        return results
+
+    def _apply_plan_targets_to_runtime(self, plan) -> None:
+        reaction_by_id = {}
+        stock_objects = {}
+        rc = self._runtime_reaction_collection
+        if rc is None:
+            return
+        for reaction in rc.get_all_reactions():
+            reaction_by_id[reaction.unique_id] = reaction
+            for stock_id, reagent in reaction.get_all_reagents().items():
+                stock_objects.setdefault(stock_id, reagent.stock_solution)
+        for well in plan.wells:
+            reaction = reaction_by_id.get(well.reaction_id)
+            if reaction is None:
+                continue
+            desired = {item.stock_id: item.target_dispenses for item in well.dispenses}
+            for stock_id, count in desired.items():
+                if not reaction.set_reagent_target_droplets(stock_id, count, preserve_progress=True):
+                    stock_object = stock_objects.get(stock_id)
+                    if stock_object is not None and count > 0:
+                        reaction.add_reagent(stock_object, count)
+            for stock_id, reagent in reaction.get_all_reagents().items():
+                if stock_id not in desired and reagent.added_droplets == 0:
+                    reagent.set_target_droplets(0, preserve_progress=True)
+
+    def apply_execution_calibration(
+        self,
+        *,
+        stock_id: str,
+        new_effective_volume_nL: float,
+        printing_mode: str,
+        printer_head_id: str,
+        factor_name: str,
+        option_name: str | None,
+        is_fill: bool,
+        calibration_payload: dict,
+        timestamp_utc: str | None = None,
+    ) -> dict:
+        printing_mode = normalize_printing_mode(printing_mode)
+        if (
+            self.get_execution_plan_snapshot() is not None
+            and self._added_droplets_for_stock(stock_id) > 0
+        ):
+            raise RuntimeError(
+                f"Stock {stock_id!r} has already dispensed droplets and cannot change calibration."
+            )
+        plan = self.lock_execution_plan("calibration_started", timestamp_utc=timestamp_utc)
+        if plan is None:
+            raise RuntimeError("A finalized execution plan is required for execution calibration.")
+        if self._added_droplets_for_stock(stock_id) > 0:
+            raise RuntimeError(
+                f"Stock {stock_id!r} has already dispensed droplets and cannot change calibration."
+            )
+        design_payload = self._validate_plan_design_link(plan)
+        self._validate_runtime_matches_execution_plan(plan)
+        stocks = {stock.stock_id: stock for stock in plan.stocks}
+        stock = stocks.get(stock_id)
+        if stock is None:
+            raise RuntimeError(f"Execution plan contains no stock {stock_id!r}.")
+        if stock.factor_name != factor_name or stock.option_name != option_name:
+            raise RuntimeError("Calibration stock identity does not match the execution plan.")
+        identity_matches = [
+            item
+            for item in plan.stocks
+            if item.factor_name == stock.factor_name
+            and item.option_name == stock.option_name
+        ]
+        if len(identity_matches) != 1:
+            raise RuntimeError(
+                "Two-stock execution calibration is not supported by this schema slice."
+            )
+        stock_is_fill = bool(
+            stock.factor_name == self.get_fill_reagent_name() and stock.units == "--"
+        )
+        if stock_is_fill != bool(is_fill):
+            raise RuntimeError("Calibration fill identity does not match the execution plan.")
+
+        recorded_at = timestamp_utc or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        raw_pw = calibration_payload.get("pw_us")
+        normalized_pw = None
+        if raw_pw not in (None, ""):
+            try:
+                normalized_pw = int(round(float(raw_pw)))
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("Calibration pulse width is invalid.") from exc
+
+        def _text_or_none(value):
+            return None if value in (None, "") else str(value)
+
+        def _number_or_none(value, label):
+            if value in (None, ""):
+                return None
+            try:
+                return float(value)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(f"Calibration {label} is invalid.") from exc
+
+        source_fingerprint = calibration_payload.get("source_row_fingerprint")
+        if source_fingerprint is not None:
+            if not isinstance(source_fingerprint, (list, tuple)):
+                raise RuntimeError("Calibration source-row fingerprint must be an array.")
+            source_fingerprint = tuple(
+                value.item() if hasattr(value, "item") else value
+                for value in source_fingerprint
+            )
+
+        record_values = {
+            "stock_id": stock_id,
+            "printer_head_id": str(printer_head_id),
+            "factor_name": factor_name,
+            "option_name": option_name,
+            "is_fill": bool(is_fill),
+            "measured_volume_nL": _number_or_none(
+                calibration_payload.get("measured_volume_nL"),
+                "measured volume",
+            ),
+            "effective_volume_nL": float(new_effective_volume_nL),
+            "pw_us": normalized_pw,
+            "pressure_psi": _number_or_none(
+                calibration_payload.get("pressure_psi"),
+                "pressure",
+            ),
+            "run_id": _text_or_none(calibration_payload.get("run_id")),
+            "phase": _text_or_none(calibration_payload.get("phase")),
+            "timestamp": _text_or_none(calibration_payload.get("timestamp")),
+            "source_row_fingerprint": source_fingerprint,
+            "original_printing_mode": normalize_printing_mode(
+                calibration_payload.get("original_printing_mode"),
+                fallback=stock.printing_mode,
+            ),
+            "applied_printing_mode": normalize_printing_mode(printing_mode),
+            "printing_mode": normalize_printing_mode(printing_mode),
+            "applied_design_volume_nL": float(new_effective_volume_nL),
+            "recorded_at": recorded_at,
+            "recorded_at_utc": recorded_at,
+        }
+        record_id = deterministic_calibration_record_id(plan.plan_id, record_values)
+        document = self._execution_calibration_document(plan)
+        record = ExecutionCalibrationRecord(record_id=record_id, **record_values)
+        existing_record = document.records.get(record_id)
+        if existing_record is not None:
+            record = existing_record
+        if (
+            stock.calibration_record_key == record_id
+            and math.isclose(stock.effective_volume_nL, float(new_effective_volume_nL), rel_tol=0.0, abs_tol=1e-12)
+            and stock.printing_mode == printing_mode
+            and stock.printer_head_id == str(printer_head_id)
+        ):
+            try:
+                self._write_progress_for_execution_plan(plan)
+                self._write_execution_plan_exports(plan, design_payload)
+                if normalize_printing_mode(printing_mode) == PRINTING_MODE_STREAM:
+                    self.mark_manual_refuel_check_required(
+                        stock_id=stock_id,
+                        printer_head_id=str(printer_head_id),
+                        printing_mode=printing_mode,
+                        factor_name=factor_name,
+                        option_name=option_name,
+                        is_fill=is_fill,
+                        applied_record=record.to_dict(),
+                        save=True,
+                    )
+            except Exception as exc:
+                self.set_execution_plan_sync_error(exc)
+                raise RuntimeError(
+                    f"Could not synchronize the calibrated execution plan: {exc}"
+                ) from exc
+            self._execution_plan_snapshot = plan
+            self._execution_plan_source = "calibration_revision"
+            self._project_reconstructed_execution_plan(plan)
+            self._apply_plan_targets_to_runtime(plan)
+            self.set_execution_plan_sync_error(None)
+            return {"plan": plan, "record": record.to_dict(), "status": "reused"}
+
+        target_counts = self._calibrated_target_counts(plan, stock, float(new_effective_volume_nL))
+        candidate = build_calibrated_revision(
+            plan,
+            stock_id=stock_id,
+            effective_volume_nL=float(new_effective_volume_nL),
+            printing_mode=printing_mode,
+            printer_head_id=str(printer_head_id),
+            calibration_record_key=record_id,
+            target_counts_by_well=target_counts,
+            timestamp_utc=record.recorded_at_utc,
+        )
+        try:
+            existing_record = document.records.get(record_id)
+            if existing_record is not None and existing_record != record:
+                raise RuntimeError("Calibration record ID collides with different content.")
+            document.records[record_id] = record
+            save_execution_calibrations(self.execution_calibrations_file_path, document)
+            self._commit_plan_revision(plan, candidate)
+            self._write_progress_for_execution_plan(candidate)
+            self._write_execution_plan_exports(candidate, design_payload)
+        except Exception as exc:
+            self.set_execution_plan_sync_error(exc)
+            raise RuntimeError(f"Could not commit calibrated execution-plan revision: {exc}") from exc
+        self._execution_plan_snapshot = candidate
+        self._execution_plan_source = "calibration_revision"
+        self._project_reconstructed_execution_plan(candidate)
+        self._apply_plan_targets_to_runtime(candidate)
+        try:
+            if normalize_printing_mode(printing_mode) == PRINTING_MODE_STREAM:
+                self.mark_manual_refuel_check_required(
+                    stock_id=stock_id,
+                    printer_head_id=str(printer_head_id),
+                    printing_mode=printing_mode,
+                    factor_name=factor_name,
+                    option_name=option_name,
+                    is_fill=is_fill,
+                    applied_record=record.to_dict(),
+                    save=True,
+                )
+        except Exception as exc:
+            self.set_execution_plan_sync_error(exc)
+            raise RuntimeError(
+                f"The calibration revision was committed, but its refuel-check state could not be synchronized: {exc}"
+            ) from exc
+        self.set_execution_plan_sync_error(None)
+        self.applied_imaging_calibration_changed.emit(record.to_dict())
+        self._audit_execution_plan_event(
+            "execution_plan_calibration_revised",
+            "Execution plan calibrated",
+            {
+                "plan_id": candidate.plan_id,
+                "previous_revision": plan.plan_revision,
+                "plan_revision": candidate.plan_revision,
+                "stock_id": stock_id,
+                "calibration_record_id": record_id,
+                "old_effective_volume_nL": stock.effective_volume_nL,
+                "new_effective_volume_nL": float(new_effective_volume_nL),
+            },
+        )
+        return {"plan": candidate, "record": record.to_dict(), "status": "created"}
 
     def _project_reconstructed_execution_plan(self, plan):
         fill_name = str(self.metadata.get("fill_reagent_name", "Water"))
@@ -7642,6 +8636,71 @@ class ExperimentModel(QObject):
             raise RuntimeError(
                 "Recorded legacy executions are read-only; calibration cannot change the saved execution."
             )
+        execution_plan = self.get_execution_plan_snapshot()
+        if execution_plan is not None and self.get_execution_plan_source() != "legacy_reconstruction":
+            if not applied_calibration:
+                raise RuntimeError(
+                    "A persisted calibration record is required to revise a finalized execution plan."
+                )
+            fill_name = self.get_fill_reagent_name()
+            matching = [
+                stock
+                for stock in execution_plan.stocks
+                if stock.factor_name == fill_name and stock.units == "--"
+            ]
+            if len(matching) != 1:
+                raise RuntimeError("The fill reagent does not map to exactly one execution stock.")
+            stock = matching[0]
+            printer_head = applied_calibration.get("printer_head")
+            printer_head_id = self._printer_head_identity(printer_head)
+            if not printer_head_id:
+                raise RuntimeError("The calibrated printer-head identity is unavailable.")
+            applied_mode = normalize_printing_mode(printing_mode, fallback=stock.printing_mode)
+            result = self.apply_execution_calibration(
+                stock_id=stock.stock_id,
+                new_effective_volume_nL=float(new_fill_droplet_nL),
+                printing_mode=applied_mode,
+                printer_head_id=printer_head_id,
+                factor_name=stock.factor_name,
+                option_name=stock.option_name,
+                is_fill=True,
+                calibration_payload=dict(applied_calibration),
+            )
+            previous_fill_total = sum(
+                next(
+                    (
+                        dispense.target_dispenses
+                        for dispense in well.dispenses
+                        if dispense.stock_id == stock.stock_id
+                    ),
+                    0,
+                )
+                for well in execution_plan.wells
+            )
+            next_fill_total = sum(
+                next(
+                    (
+                        dispense.target_dispenses
+                        for dispense in well.dispenses
+                        if dispense.stock_id == stock.stock_id
+                    ),
+                    0,
+                )
+                for well in result["plan"].wells
+            )
+            return {
+                "old_fill_nL": stock.effective_volume_nL,
+                "new_fill_nL": float(new_fill_droplet_nL),
+                "original_printing_mode": stock.printing_mode,
+                "applied_printing_mode": applied_mode,
+                "total_drops_old": previous_fill_total,
+                "total_drops_new": next_fill_total,
+                "total_drops_delta": next_fill_total - previous_fill_total,
+                "saved_experiment": False,
+                "applied_imaging_calibration_recorded": True,
+                "execution_plan_revision": result["plan"].plan_revision,
+                "execution_plan_status": result["status"],
+            }
         metadata = getattr(self, "metadata", {}) or {}
         default_fill_droplet_nL = printing_mode_default_ejection_volume_nl(PRINTING_MODE_DROPLET)
         default_fill_getter = getattr(self, "_default_fill_droplet_volume_nl", None)
@@ -8329,6 +9388,8 @@ class ExperimentModel(QObject):
         self.calibration_file_path = None
         self.experiment_audit_file_path = None
         self.execution_plan_file_path = None
+        self.execution_plan_revisions_dir_path = None
+        self.execution_calibrations_file_path = None
         self.key_file_path = None
         self.concentration_key_file_path = None
         self._runtime_well_plate = None
@@ -8339,6 +9400,8 @@ class ExperimentModel(QObject):
         self._legacy_execution_reconstruction = None
         self._legacy_execution_read_only = False
         self._execution_plan_finalization_error = None
+        self._execution_plan_sync_error = None
+        self._execution_plan_reload_read_only = False
         self._progress_execution_reference = None
 
         # clear any uploaded/manual reaction list state
@@ -11105,6 +12168,7 @@ class Model(QObject):
         self.calibration_manager = CalibrationClasses.CalibrationManager(self)
         # self.experiment_model = ExperimentModel(self.well_plate,self.calibration_manager)
         self.experiment_model = ExperimentModel(prof=self.profile)
+        self.experiment_model.set_calibration_manager(self.calibration_manager)
         self.refuel_camera_model.attach_owner_model(self)
         self.experiment_audit_log = ExperimentAuditLog(model=self)
         self.calibration_memory_store = None
@@ -11129,6 +12193,7 @@ class Model(QObject):
         importlib.reload(CalibrationClasses)
         self.droplet_camera_model = CalibrationClasses.DropletCameraModel(self.pixel_step_conv_path)
         self.calibration_manager = CalibrationClasses.CalibrationManager(self)
+        self.experiment_model.set_calibration_manager(self.calibration_manager)
         self._initialize_calibration_memory_store()
         self.droplet_camera_model.record_metadata_signal.connect(self.record_image_metadata)
 

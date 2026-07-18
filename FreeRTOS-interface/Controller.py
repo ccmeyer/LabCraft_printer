@@ -5937,11 +5937,36 @@ class Controller(QObject):
             self.error_occurred_signal.emit('Error', message)
             print(f'Cannot print: {message}')
             return
+        sync_error_getter = getattr(
+            experiment_model, "get_execution_plan_sync_error", None
+        )
+        lock_plan = getattr(experiment_model, "lock_execution_plan", None)
+        if (
+            callable(sync_error_getter)
+            and sync_error_getter()
+            and not callable(lock_plan)
+        ):
+            message = (
+                "Execution-plan files are not synchronized. Printing is blocked until "
+                "the same operation is retried successfully or the experiment is reset."
+            )
+            self.error_occurred_signal.emit('Error', message)
+            print(f'Cannot print: {message}')
+            return
         read_only_getter = getattr(experiment_model, "is_read_only_legacy_execution", None)
         if callable(read_only_getter) and read_only_getter():
             message = (
                 "This recorded legacy execution is loaded read-only for analysis. "
                 "Printing and hardware resume are disabled until validated resume support is available."
+            )
+            self.error_occurred_signal.emit('Error', message)
+            print(f'Cannot print: {message}')
+            return
+        source_getter = getattr(experiment_model, "get_execution_plan_source", None)
+        if callable(source_getter) and source_getter() == "persisted_execution_plan":
+            message = (
+                "This active execution was reloaded for analysis only. Hardware resume "
+                "is disabled until validated resume support is available."
             )
             self.error_occurred_signal.emit('Error', message)
             print(f'Cannot print: {message}')
@@ -6024,6 +6049,18 @@ class Controller(QObject):
             self.error_occurred_signal.emit("Evaporation Plate Dock Check Required", message)
             print("Cannot print: evaporation plate dock confirmation is required")
             return
+
+        if callable(lock_plan):
+            try:
+                lock_plan("printing_started")
+            except Exception as exc:
+                message = (
+                    "Printing did not start because the execution plan could not be "
+                    f"durably locked: {exc}"
+                )
+                self.error_occurred_signal.emit("Error", message)
+                print(f"Cannot print: {message}")
+                return
 
         transport_resumed = False
         if starting_state == "resume_ready" and self.model.machine_model.transport_paused:

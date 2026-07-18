@@ -1703,6 +1703,56 @@ def test_print_array_blocks_after_execution_plan_finalization_failure():
     c.move_to_location.assert_not_called()
 
 
+def test_print_array_blocks_execution_plan_sync_error_before_hardware_actions():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+    )
+    c.model.experiment_model.get_execution_plan_sync_error = Mock(
+        return_value="progress reference differs"
+    )
+
+    Controller.print_array(c)
+
+    assert "not synchronized" in c.error_occurred_signal.calls[0][1]
+    c.close_gripper.assert_not_called()
+    c.move_to_location.assert_not_called()
+
+
+def test_print_array_durably_locks_before_first_hardware_action():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+    )
+    events = []
+    c.model.experiment_model.lock_execution_plan = Mock(
+        side_effect=lambda reason: events.append(("lock", reason))
+    )
+    c.close_gripper = Mock(side_effect=lambda: events.append(("close_gripper",)))
+    c.move_to_location = Mock(side_effect=lambda *args, **kwargs: events.append(("move",)) or True)
+
+    Controller.print_array(c)
+
+    assert events[0] == ("lock", "printing_started")
+    assert c.model.experiment_model.lock_execution_plan.call_count == 1
+
+
+def test_print_array_lock_failure_prevents_hardware_actions():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+    )
+    c.model.experiment_model.lock_execution_plan = Mock(
+        side_effect=OSError("disk full")
+    )
+
+    Controller.print_array(c)
+
+    assert "durably locked" in c.error_occurred_signal.calls[0][1]
+    c.close_gripper.assert_not_called()
+    c.move_to_location.assert_not_called()
+
+
 def _make_pickup_ready_controller(*, initial_state="resume_ready", transport_paused=False):
     c = _make_controller(
         well_plate=FakeWellPlate([FakeWell("A1", 5)]),

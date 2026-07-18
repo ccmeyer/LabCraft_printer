@@ -3488,6 +3488,23 @@ class CalibrationManager(QObject):
 
     def start_active_calibration(self):
         if self.activeCalibration is not None:
+            if self._is_volume_calibration_audit_process(self.activeCalibration):
+                experiment_model = getattr(self.model, "experiment_model", None)
+                lock_plan = getattr(experiment_model, "lock_execution_plan", None)
+                if callable(lock_plan):
+                    try:
+                        lock_plan("calibration_started")
+                    except Exception as exc:
+                        message = (
+                            "Calibration did not start because the execution plan could not be "
+                            f"durably locked: {exc}"
+                        )
+                        self.calibrationStageChanged.emit(message, "red")
+                        self.calibrationError.emit(message)
+                        self.clear_calibration_queue()
+                        self.activeCalibration = None
+                        self.calibrationQueueCompleted.emit()
+                        return
             self.clear_pending_process_verdict(reason="starting_new_process")
             # Ensure we have an open run to write into
             if self._run_idx is None:

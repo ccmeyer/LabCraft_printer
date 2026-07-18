@@ -11485,10 +11485,7 @@ class ExperimentDesignDialog(QDialog):
             timer.start()
 
     def _recompute_silent(self):
-        read_only_getter = getattr(
-            getattr(self, "model", None), "is_read_only_legacy_execution", None
-        )
-        if callable(read_only_getter) and read_only_getter():
+        if self._model_execution_is_read_only(getattr(self, "model", None)):
             return
         if (
             getattr(self, "_uploaded_design_active", False)
@@ -11501,6 +11498,17 @@ class ExperimentDesignDialog(QDialog):
             busy_message="Updating experiment design... this may take a moment on Raspberry Pi.",
             show_busy_dialog=False,
         )
+
+    @staticmethod
+    def _model_execution_is_read_only(model) -> bool:
+        for getter_name in (
+            "is_execution_design_locked",
+            "is_read_only_legacy_execution",
+        ):
+            getter = getattr(model, getter_name, None)
+            if callable(getter) and getter():
+                return True
+        return False
 
     def _load_factors_into_table(self):
         """Populate the reagent table from the model's current factors (if any)."""
@@ -12878,9 +12886,8 @@ class ExperimentDesignDialog(QDialog):
         busy_message: str | None = None,
         show_busy_dialog: bool = True,
     ) -> tuple[bool, dict | None]:
-        read_only_getter = getattr(self.model, "is_read_only_legacy_execution", None)
-        if callable(read_only_getter) and read_only_getter():
-            message = "Recorded legacy execution loaded read-only; optimization is disabled."
+        if self._model_execution_is_read_only(self.model):
+            message = "The execution design is locked; optimization is disabled."
             self._set_status(message)
             return False, {
                 "best": None,
@@ -13628,9 +13635,8 @@ class ExperimentDesignDialog(QDialog):
         Save the current design (factors + metadata) to Experiments/<name>/experiment_design.json.
         If needed, optimize/generate so stock table is fresh in the preview.
         """
-        read_only_getter = getattr(self.model, "is_read_only_legacy_execution", None)
-        if callable(read_only_getter) and read_only_getter():
-            self._set_status("Recorded legacy execution loaded read-only; saving is disabled.")
+        if self._model_execution_is_read_only(self.model):
+            self._set_status("The execution design is locked; saving is disabled.")
             return
         ok, res = self._run_design_optimization_flow(
             show_failure_dialog=True,
@@ -13780,6 +13786,10 @@ class ExperimentDesignDialog(QDialog):
         )
         read_only_getter = getattr(self.model, "is_read_only_legacy_execution", None)
         legacy_read_only = bool(callable(read_only_getter) and read_only_getter())
+        execution_lock_getter = getattr(self.model, "is_execution_design_locked", None)
+        execution_locked = bool(
+            callable(execution_lock_getter) and execution_lock_getter()
+        )
         if legacy_read_only:
             issues = self.model.get_legacy_execution_issues()
             warning_messages = [
@@ -13799,6 +13809,17 @@ class ExperimentDesignDialog(QDialog):
             self._set_progress_protection(True, progress_status)
             self._progress_lock_status_message = (
                 f"{base_message}\n{detail}" if detail else base_message
+            )
+        elif execution_locked:
+            self._progress_reset_confirmed = False
+            self._set_progress_protection(True, progress_status)
+            sync_error_getter = getattr(
+                self.model, "get_execution_plan_sync_error", None
+            )
+            sync_error = sync_error_getter() if callable(sync_error_getter) else None
+            base_message = "Active execution plan loaded read-only for analysis."
+            self._progress_lock_status_message = (
+                f"{base_message}\n{sync_error}" if sync_error else base_message
             )
         elif progress_policy == self.PROGRESS_POLICY_RESUME:
             self._progress_reset_confirmed = False
@@ -13824,7 +13845,7 @@ class ExperimentDesignDialog(QDialog):
         self._refresh_all_prior_availability()
         self._refresh_all_lock_states()
 
-        if legacy_read_only:
+        if legacy_read_only or execution_locked:
             self._set_status(self._progress_lock_status_message)
         elif progress_policy == self.PROGRESS_POLICY_RESUME:
             self._set_status(self._progress_lock_status_message)
@@ -13838,10 +13859,9 @@ class ExperimentDesignDialog(QDialog):
         Optimize & generate, save the design (creating/renaming the folder if needed),
         then close the dialog. Applying to the main app is explicit in this path only.
         """
-        read_only_getter = getattr(self.model, "is_read_only_legacy_execution", None)
-        if callable(read_only_getter) and read_only_getter():
+        if self._model_execution_is_read_only(self.model):
             self._set_status(
-                "Recorded legacy execution loaded read-only; applying or printing it is disabled in this slice."
+                "The execution design is locked; it cannot be changed or finalized again."
             )
             return
         if self._editing_locked_by_gripper:

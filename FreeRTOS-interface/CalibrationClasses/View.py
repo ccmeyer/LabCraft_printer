@@ -6784,20 +6784,30 @@ class DropletImagingDialog(QtWidgets.QDialog):
         neutral_style = ""
         primary_color = self.color_dict.get("dark_blue", "#063f99")
         primary_style = f"background-color: {primary_color}; color: white;"
+        experiment_model = getattr(self.model, "experiment_model", None)
+        snapshot_getter = getattr(experiment_model, "get_execution_plan_snapshot", None)
+        execution_plan_active = bool(
+            callable(snapshot_getter) and snapshot_getter() is not None
+        )
+        destination = "execution plan" if execution_plan_active else "design"
 
         if state == "ready":
             button.setEnabled(True)
-            button.setText("Apply selected calibration to design")
-            button.setToolTip(str(reason or "Apply this calibration result to the experiment design."))
+            button.setText(f"Apply selected calibration to {destination}")
+            button.setToolTip(
+                str(reason or f"Apply this calibration result to the experiment {destination}.")
+            )
             button.setStyleSheet(primary_style)
         elif state == "applied":
             button.setEnabled(False)
             button.setText("Selected calibration is applied")
-            button.setToolTip(str(reason or "This calibration result is already applied to the design."))
+            button.setToolTip(
+                str(reason or f"This calibration result is already applied to the {destination}.")
+            )
             button.setStyleSheet(neutral_style)
         else:
             button.setEnabled(False)
-            button.setText("Apply selected calibration to design")
+            button.setText(f"Apply selected calibration to {destination}")
             button.setToolTip(str(reason or "Select a usable characterization result to preview a new ejection volume."))
             button.setStyleSheet(neutral_style)
 
@@ -10265,11 +10275,17 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._bridge_refresh_design_labels()
             self.refresh_calibration_memory_recommendation()
             if not bool(settings_result.get("ok")):
+                destination = (
+                    "execution plan"
+                    if callable(getattr(em, "get_execution_plan_snapshot", None))
+                    and em.get_execution_plan_snapshot() is not None
+                    else "design"
+                )
                 QtWidgets.QMessageBox.warning(
                     self,
                     "Settings not changed",
                     (
-                        "Calibration was applied to the design, but the machine settings "
+                        f"Calibration was applied to the {destination}, but the machine settings "
                         f"could not be changed.\n\n{settings_result.get('message', '')}"
                     ),
                 )
@@ -10358,11 +10374,17 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._bridge_refresh_design_labels()
         self.refresh_calibration_memory_recommendation()
         if not bool(settings_result.get("ok")):
+            destination = (
+                "execution plan"
+                if callable(getattr(em, "get_execution_plan_snapshot", None))
+                and em.get_execution_plan_snapshot() is not None
+                else "design"
+            )
             QtWidgets.QMessageBox.warning(
                 self,
                 "Settings not changed",
                 (
-                    "Calibration was applied to the design, but the machine settings "
+                    f"Calibration was applied to the {destination}, but the machine settings "
                     f"could not be changed.\n\n{settings_result.get('message', '')}"
                 ),
             )
