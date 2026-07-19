@@ -66,6 +66,7 @@ from ExecutionResumeStore import (
     add_pending_intent,
     attach_command_sequence,
     complete_intent,
+    discard_pending_intents,
     load_execution_resume,
     mark_checkpoint_uncertain,
     new_resume_document,
@@ -7261,6 +7262,26 @@ class ExperimentModel(QObject):
         updated = complete_intent(
             document,
             intent_id,
+            progress_wells=self.progress_data,
+        )
+        try:
+            save_execution_resume(self.execution_resume_file_path, updated)
+        except Exception as exc:
+            self.set_execution_plan_sync_error(exc)
+            raise
+        self._refresh_authoritative_execution_bundle()
+
+    def discard_execution_print_intents(self, intent_ids) -> None:
+        """Persist removal of commands excluded by a confirmed firmware queue clear."""
+        intent_ids = tuple(intent_id for intent_id in intent_ids if intent_id)
+        if not intent_ids:
+            return
+        if not self.execution_resume_file_path:
+            raise RuntimeError("The execution-resume path is unavailable.")
+        document = load_execution_resume(self.execution_resume_file_path)
+        updated = discard_pending_intents(
+            document,
+            intent_ids,
             progress_wells=self.progress_data,
         )
         try:

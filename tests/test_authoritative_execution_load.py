@@ -262,6 +262,19 @@ def test_explicit_activation_reconstructs_finalized_runtime_without_optimizer(
     assert checkpoint.intents[-1].command_seq32 == 99
     assert checkpoint.intents[-1].status == "completed"
 
+    canceled_intent_id = loaded_em.begin_execution_print_intent(
+        well_id=first_well.well_id,
+        stock_id=fill.stock_id,
+        commanded_droplets=1,
+        printer_head_id="fill-head",
+    )
+    loaded_em.attach_execution_print_command(canceled_intent_id, 100)
+    loaded_em.discard_execution_print_intents([canceled_intent_id])
+    checkpoint = load_execution_resume(loaded_em.execution_resume_file_path)
+    assert checkpoint.state == "paused"
+    assert all(item.intent_id != canceled_intent_id for item in checkpoint.intents)
+    assert loaded_em.get_execution_resume_eligibility()["status"] == "ready_to_resume"
+
     design_bytes = Path(loaded_em.experiment_file_path).read_bytes()
     pure = next(stock for stock in saved_plan.stocks if stock.factor_name == "PURE MM")
     result = loaded_em.apply_execution_calibration(

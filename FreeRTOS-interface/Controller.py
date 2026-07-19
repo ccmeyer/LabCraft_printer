@@ -3409,6 +3409,7 @@ class Controller(QObject):
         self._set_array_run_state("stop_requested")
         context["soft_stop_pending"] = True
         context["soft_stop_phase"] = "waiting_watermark"
+        context["soft_stop_barrier_seq32"] = current_barrier
         context["soft_stop_rejected_barriers"] = set()
         if not self._request_array_pause_after_barrier(current_barrier):
             return False
@@ -3512,6 +3513,7 @@ class Controller(QObject):
         retry_barrier = self._select_array_soft_stop_barrier(context)
         if retry_barrier is not None:
             context["current_barrier_seq32"] = retry_barrier
+            context["soft_stop_barrier_seq32"] = retry_barrier
             context["soft_stop_pending"] = True
             context["soft_stop_phase"] = "waiting_watermark"
             ok = self._request_array_pause_after_barrier(retry_barrier)
@@ -3655,6 +3657,34 @@ class Controller(QObject):
             )
             self._complete_array_finalize("soft_stop")
             return
+
+        barrier_seq32 = self._coerce_positive_seq32(
+            context.get("soft_stop_barrier_seq32")
+        )
+        cleared_intent_ids = []
+        if barrier_seq32 is not None:
+            for well_info in list(context.get("queued_wells") or []):
+                dispense_seq32 = self._coerce_positive_seq32(
+                    well_info.get("dispense_seq32")
+                )
+                intent_id = well_info.get("execution_intent_id")
+                if dispense_seq32 is not None and dispense_seq32 > barrier_seq32 and intent_id:
+                    cleared_intent_ids.append(intent_id)
+        if cleared_intent_ids:
+            experiment_model = getattr(self.model, "experiment_model", None)
+            discard = getattr(experiment_model, "discard_execution_print_intents", None)
+            if callable(discard):
+                try:
+                    discard(cleared_intent_ids)
+                except Exception as exc:
+                    setter = getattr(experiment_model, "set_execution_plan_sync_error", None)
+                    if callable(setter):
+                        setter(exc)
+                    self.error_occurred_signal.emit(
+                        "Execution Checkpoint Error",
+                        "The queue was cleared safely, but the canceled look-ahead "
+                        "print intents could not be synchronized. Resume remains blocked.",
+                    )
 
         try:
             self.update_expected_with_current()
@@ -5464,6 +5494,7 @@ class Controller(QObject):
                 "well_id": well.well_id,
                 "target_droplets": target_droplets,
                 "dispense_seq32": int(getattr(dispense_command, "command_number", 0) or 0),
+                "execution_intent_id": execution_intent_id,
             }
         )
         self._record_last_planned_array_well(context, well)

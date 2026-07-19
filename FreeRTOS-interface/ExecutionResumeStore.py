@@ -398,6 +398,42 @@ def complete_intent(
     )
 
 
+def discard_pending_intents(
+    document: ExecutionResumeDocument,
+    intent_ids: list[str] | tuple[str, ...],
+    *,
+    progress_wells: Mapping[str, Any],
+    timestamp_utc: str | None = None,
+) -> ExecutionResumeDocument:
+    """Discard commands proven not to have executed by a confirmed queue clear."""
+    requested = tuple(intent_ids)
+    if len(requested) != len(set(requested)):
+        raise ValueError("Pending intent IDs must be unique.")
+    if not requested:
+        return document
+    requested_set = set(requested)
+    pending_ids = {
+        intent.intent_id for intent in document.intents if intent.status == "pending"
+    }
+    unavailable = requested_set - pending_ids
+    if unavailable:
+        raise ValueError("Only existing pending intents can be discarded.")
+
+    retained = tuple(
+        intent for intent in document.intents if intent.intent_id not in requested_set
+    )
+    pending = any(intent.status == "pending" for intent in retained)
+    return replace(
+        document,
+        state="printing" if pending else "paused",
+        active_stock_id=document.active_stock_id if pending else None,
+        printer_head_id=document.printer_head_id if pending else None,
+        progress_sha256=progress_fingerprint(progress_wells),
+        intents=retained,
+        updated_at_utc=timestamp_utc or utc_now_text(),
+    )
+
+
 def synchronize_checkpoint(
     document: ExecutionResumeDocument,
     *,

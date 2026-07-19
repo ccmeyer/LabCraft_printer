@@ -8,6 +8,7 @@ from ExecutionResumeStore import (
     add_pending_intent,
     attach_command_sequence,
     complete_intent,
+    discard_pending_intents,
     load_execution_resume,
     new_resume_document,
     save_execution_resume,
@@ -138,5 +139,102 @@ def test_intent_cannot_complete_before_progress_reflects_command():
             document,
             intent.intent_id,
             progress_wells=_progress(),
+            timestamp_utc=NOW,
+        )
+
+
+def test_confirmed_queue_clear_discards_only_selected_pending_intents():
+    document = new_resume_document(
+        plan_id=PLAN_ID,
+        plan_revision=1,
+        progress_wells=_progress(),
+        session_id=SESSION_ID,
+        timestamp_utc=NOW,
+    )
+    document, first = add_pending_intent(
+        document,
+        well_id="A1",
+        reaction_id="R1",
+        stock_id="PURE MM_1.11_x",
+        baseline_added=0,
+        commanded_droplets=16,
+        printer_head_id="head-1",
+        timestamp_utc=NOW,
+    )
+    other_progress = {
+        "A2": {
+            "reaction_id": "R2",
+            "reagents": {
+                "PURE MM_1.11_x": {
+                    "target_droplets": 16,
+                    "added_droplets": 0,
+                }
+            },
+            "completed": False,
+        }
+    }
+    document, second = add_pending_intent(
+        document,
+        well_id="A2",
+        reaction_id="R2",
+        stock_id="PURE MM_1.11_x",
+        baseline_added=0,
+        commanded_droplets=16,
+        printer_head_id="head-1",
+        timestamp_utc=NOW,
+    )
+
+    updated = discard_pending_intents(
+        document,
+        [second.intent_id],
+        progress_wells={**_progress(), **other_progress},
+        timestamp_utc=NOW,
+    )
+
+    assert [intent.intent_id for intent in updated.intents] == [first.intent_id]
+    assert updated.state == "printing"
+
+    paused = discard_pending_intents(
+        updated,
+        [first.intent_id],
+        progress_wells={**_progress(), **other_progress},
+        timestamp_utc=NOW,
+    )
+    assert paused.intents == ()
+    assert paused.state == "paused"
+    assert paused.active_stock_id is None
+    assert paused.printer_head_id is None
+
+
+def test_queue_clear_cannot_discard_completed_or_unknown_intent():
+    document = new_resume_document(
+        plan_id=PLAN_ID,
+        plan_revision=1,
+        progress_wells=_progress(),
+        session_id=SESSION_ID,
+        timestamp_utc=NOW,
+    )
+    document, intent = add_pending_intent(
+        document,
+        well_id="A1",
+        reaction_id="R1",
+        stock_id="PURE MM_1.11_x",
+        baseline_added=0,
+        commanded_droplets=16,
+        printer_head_id="head-1",
+        timestamp_utc=NOW,
+    )
+    completed = complete_intent(
+        document,
+        intent.intent_id,
+        progress_wells=_progress(16),
+        timestamp_utc=NOW,
+    )
+
+    with pytest.raises(ValueError, match="existing pending"):
+        discard_pending_intents(
+            completed,
+            [intent.intent_id],
+            progress_wells=_progress(16),
             timestamp_utc=NOW,
         )

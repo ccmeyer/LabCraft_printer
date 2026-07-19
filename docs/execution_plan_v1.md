@@ -304,6 +304,12 @@ Progress that includes the whole intent can repair the checkpoint during the
 next explicit activation. Progress that does not include it cannot distinguish
 "not executed" from "executed but not recorded" and blocks resume.
 
+A confirmed **Stop After Well** is also a durable command boundary. After the
+pause watermark is reached and the firmware queue is confirmed empty, pending
+look-ahead intents with command sequences beyond that watermark are discarded
+and the checkpoint becomes paused. If queue clearing is not confirmed, those
+intents remain pending and resume continues to fail closed.
+
 Before hardware starts, the loaded stock, printing mode, durable printer-head
 identity, and any referenced calibration record must match the latest plan. A
 previously unbound, unprinted stock is bound through a new immutable plan

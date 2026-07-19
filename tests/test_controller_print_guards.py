@@ -1545,6 +1545,75 @@ def test_handle_status_update_soft_stop_clear_and_park_completes_before_resume_r
     assert c.model.machine_model.get_evap_plate_dock_check_reasons() == []
 
 
+def test_confirmed_soft_stop_clear_retires_only_lookahead_execution_intents():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 0), FakeWell("A2", 5)]),
+        printer_head=_make_printer_head(),
+        initial_state="stop_requested",
+    )
+    c._array_context = _with_lowered_array_accels(
+        {
+            "soft_stop_pending": True,
+            "soft_stop_phase": "waiting_watermark",
+            "soft_stop_barrier_seq32": 101,
+            "queued_wells": [
+                {
+                    "well_id": "A1",
+                    "dispense_seq32": 101,
+                    "execution_intent_id": "current-intent",
+                },
+                {
+                    "well_id": "A2",
+                    "dispense_seq32": 105,
+                    "execution_intent_id": "lookahead-intent",
+                },
+            ],
+        }
+    )
+    c.model.experiment_model.discard_execution_print_intents = Mock()
+    c.move_to_location = Mock(side_effect=_parking_move_side_effect)
+
+    Controller._on_soft_stop_queue_cleared(
+        c,
+        {"status_confirmed": True, "ack_received": True},
+    )
+
+    c.model.experiment_model.discard_execution_print_intents.assert_called_once_with(
+        ["lookahead-intent"]
+    )
+    assert c.get_array_run_state() == "resume_ready"
+
+
+def test_unconfirmed_soft_stop_clear_preserves_pending_execution_intents():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 0), FakeWell("A2", 5)]),
+        printer_head=_make_printer_head(),
+        initial_state="stop_requested",
+    )
+    c._array_context = _with_lowered_array_accels(
+        {
+            "soft_stop_pending": True,
+            "soft_stop_phase": "waiting_watermark",
+            "soft_stop_barrier_seq32": 101,
+            "queued_wells": [
+                {
+                    "well_id": "A2",
+                    "dispense_seq32": 105,
+                    "execution_intent_id": "lookahead-intent",
+                }
+            ],
+        }
+    )
+    c.model.experiment_model.discard_execution_print_intents = Mock()
+
+    Controller._on_soft_stop_queue_cleared(
+        c,
+        {"status_confirmed": False, "ack_timed_out": True},
+    )
+
+    c.model.experiment_model.discard_execution_print_intents.assert_not_called()
+
+
 def test_soft_stop_resumes_paused_transport_after_clear_before_parking():
     c = _make_controller(
         well_plate=FakeWellPlate([FakeWell("A1", 5)]),
