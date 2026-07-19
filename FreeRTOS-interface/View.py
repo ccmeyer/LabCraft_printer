@@ -13840,12 +13840,15 @@ class ExperimentDesignDialog(QDialog):
         if not source or not self.model.is_read_only_legacy_execution():
             self._set_status("Load a recorded legacy execution before migrating it.")
             return
-        response = self.popup_yes_no(
+        response = QMessageBox.question(
+            self,
             "Migrate Legacy Execution",
             "Create a full sibling copy with authoritative analysis files? "
             "The copy will remain permanently hardware-disabled.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
         )
-        if not self._is_yes_response(response):
+        if response != QMessageBox.Yes:
             return
         progress = QtWidgets.QProgressDialog(
             "Copying and validating the legacy execution...",
