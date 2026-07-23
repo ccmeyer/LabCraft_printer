@@ -70,6 +70,51 @@ Slow, insulated offline analysis-pipeline tests are skipped by default. Run them
 .\env\Scripts\python.exe -m pytest -q --run-analysis-pipeline tests\test_plate_reader_analysis.py
 ```
 
+## Safe Application Construction
+
+Slice 3 exposes one programmatic composition seam for the real `Model`,
+`Controller`, and `MainWindow`. Production startup continues through
+`FreeRTOS-interface/App.py`; there is intentionally no simulation command-line
+flag until the dedicated runner is added in Slice 5.
+
+`ApplicationComposition.production_dependencies()` selects the existing
+Machine, serial, camera, log-reader, and legacy balance implementations.
+`simulation_dependencies(run_root, machine_factory=...)` instead requires a
+caller-supplied safe machine factory and creates `config/`, `experiments/`, and
+`calibration-memory/` beneath the supplied run root. It never falls back to
+production hardware if construction fails.
+
+Simulation windows show a persistent
+`SIMULATION — NO HARDWARE CONNECTED` banner. Connection, firmware/DFU, MCU
+reset, physical camera, machine qualification/calibration, balance, and
+application update controls remain visible but disabled. The Controller also
+rejects direct calls to those entry points before port enumeration, worker
+construction, or peripheral access.
+
+Prerequisites for offscreen construction tests:
+
+- the repository `env` virtual environment with real PySide6;
+- `QT_QPA_PLATFORM=offscreen`;
+- a fresh temporary run root;
+- an explicit construction-safe machine implementing the Controller signal
+  surface. The deterministic simulated machine itself is Slice 4 work.
+
+Run the focused construction and safety tests:
+
+```powershell
+$env:QT_QPA_PLATFORM = 'offscreen'
+.\env\Scripts\python.exe -m pytest -q `
+  tests\test_safe_application_construction.py `
+  tests\test_view_window_icon_contract.py `
+  tests\test_local_config.py `
+  tests\test_mainwindow_closeevent.py
+```
+
+Do not use this programmatic seam as a production launcher and do not pass a
+factory that can construct real hardware into `simulation_dependencies`.
+Application-owned configuration and experiment writes are isolated, but the
+API cannot prove that an arbitrary third-party machine factory is safe.
+
 ## Execution Persistence Microbenchmark
 
 The Slice 0/2 persistence tool measures the durable execution path that writes

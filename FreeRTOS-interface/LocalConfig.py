@@ -69,13 +69,18 @@ def _atomic_copy_bytes(source: Path, target: Path):
         raise
 
 
-def get_machine_config_path(filename: str) -> Path:
+def get_machine_config_path(
+    filename: str,
+    *,
+    local_root: str | Path | None = None,
+) -> Path:
     """Return the ignored local machine config path, seeding it from Presets once."""
     if filename not in _EXPECTED_TOP_LEVEL_TYPES:
         supported = ", ".join(sorted(_EXPECTED_TOP_LEVEL_TYPES))
         raise ValueError(f"Unsupported machine config '{filename}'. Supported: {supported}")
 
-    local_path = LOCAL_DIR / filename
+    root = Path(local_root) if local_root is not None else LOCAL_DIR
+    local_path = root / filename
     if local_path.exists():
         _validate_json_file(local_path, filename)
         return local_path
@@ -87,12 +92,19 @@ def get_machine_config_path(filename: str) -> Path:
     return local_path
 
 
-def get_calibration_memory_root() -> Path:
+def get_calibration_memory_root(
+    *,
+    local_root: str | Path | None = None,
+) -> Path:
     """Return the ignored local calibration-memory root, seeding starter JSONs once."""
-    local_root = LOCAL_DIR / "CalibrationMemory"
+    target_root = (
+        Path(local_root)
+        if local_root is not None
+        else LOCAL_DIR / "CalibrationMemory"
+    )
 
     for relative_path, expected_type in _CALIBRATION_MEMORY_SEED_TYPES.items():
-        local_path = local_root / relative_path
+        local_path = target_root / relative_path
         if local_path.exists():
             _validate_json_top_level(local_path, expected_type, relative_path)
             continue
@@ -102,4 +114,4 @@ def get_calibration_memory_root() -> Path:
         _atomic_copy_bytes(template_path, local_path)
         _validate_json_top_level(local_path, expected_type, relative_path)
 
-    return local_root
+    return target_root

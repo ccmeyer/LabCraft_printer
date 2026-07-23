@@ -156,7 +156,7 @@ Before proceeding to the next slice:
 | 0. Baseline, report contract, and safety boundaries | `verified` | Characterize current behavior and freeze interfaces | Reproducible baseline artifacts recorded |
 | 1. Metrics library and Qt event-loop probe | `verified` | Deterministic measurement and JSON reporting | Probe detects injected stalls without hardware |
 | 2. Execution persistence microbenchmark | `verified` | Repeated progress/resume/checkpoint workload | 96/384-well cost and growth reported |
-| 3. Safe application construction seam | `not_started` | Build real app components with explicit safe dependencies | App launches with no hardware access |
+| 3. Safe application construction seam | `verified` | Build real app components with explicit safe dependencies | App launches with no hardware access |
 | 4. In-process simulated machine | `not_started` | Command lifecycle and machine-state simulation | Controller command sequences complete deterministically |
 | 5. Real-UI print-array scenario | `not_started` | End-to-end Qt print workflow with real persistence | 96-well scenario completes with responsiveness report |
 | 6. Regression comparison and performance gates | `not_started` | Baselines, budgets, comparison, exit policy | Stable candidate/baseline classification |
@@ -713,7 +713,7 @@ Completion record:
 
 ## Slice 3: Safe Application Construction Seam
 
-Status: `not_started`
+Status: `verified`
 
 Goal:
 
@@ -730,13 +730,19 @@ Scope:
 - hard-block connection, DFU, GPIO, camera, and updater actions in simulation;
 - preserve normal `App.main()` behavior.
 
-Likely files touched:
+Files in this slice:
 
 - `FreeRTOS-interface/App.py`
-- one small application-composition or simulation configuration module
-- `FreeRTOS-interface/View.py` only if a visible simulation banner is needed
-- focused construction/safety tests
-- `README.md` for exact launch prerequisites/commands when the tooling exists
+- `FreeRTOS-interface/ApplicationComposition.py`
+- `FreeRTOS-interface/Machine_FreeRTOS.py`
+- `FreeRTOS-interface/LocalConfig.py`
+- `FreeRTOS-interface/Model.py`
+- `FreeRTOS-interface/Controller.py`
+- `FreeRTOS-interface/View.py`
+- `tests/test_safe_application_construction.py`
+- `tests/test_view_window_icon_contract.py`
+- `README.md`
+- `docs/virtual_workflow_verification_plan.md`
 
 Focused tests:
 
@@ -765,7 +771,58 @@ Rollback:
 
 Completion record:
 
-- Not started.
+- Started 2026-07-23 from commit
+  `79b9e453bfc38b1fb5791911163a3db699aa2eef` with a clean worktree.
+- Call paths:
+  - production: `App.main()` -> production dependencies -> Model -> production
+    Machine/peripherals -> Controller -> MainWindow;
+  - simulation: explicit temporary roots and safe machine factory -> real Model
+    -> guarded Controller -> bannered MainWindow;
+  - protected action: UI/direct call -> Controller runtime guard -> rejection
+    before serial, camera, GPIO/DFU, balance, or updater access.
+- Fixed file boundary: `App.py`, `ApplicationComposition.py`,
+  `Machine_FreeRTOS.py`, `LocalConfig.py`, `Model.py`, `Controller.py`,
+  `View.py`, focused construction/startup tests, this plan, and `README.md`.
+- Added immutable production/simulation runtime contexts, explicit dependency
+  and storage-root bundles, fail-closed construction, idempotent construction
+  cleanup, and injectable production camera/log-reader factories.
+- `App.main()` retains its existing production-only entry point, application
+  lock, profile/settings behavior, dispenser defaults, legacy balance wiring,
+  splash, theme, watchdog, pending-update display, and event loop while
+  delegating MVC construction through the shared seam.
+- Simulation construction requires an explicit safe machine factory, seeds
+  configuration and calibration memory beneath the supplied run root, owns its
+  experiment root, and never retries with production dependencies.
+- The simulation window has a fixed high-contrast identity banner and title
+  prefix. Physical connection, balance, firmware/DFU, MCU reset, camera,
+  qualification/calibration, and application updater controls are disabled;
+  matching Controller entry points reject direct calls before dependencies are
+  reached.
+- Final focused command:
+  `.\env\Scripts\python.exe -m pytest -q --basetemp tests\.slice3_final_focused_tmp tests\test_safe_application_construction.py tests\test_view_window_icon_contract.py tests\test_app_settings_fallback.py tests\test_local_config.py tests\test_mainwindow_closeevent.py tests\test_connection_widget_disconnect_state.py tests\test_machine_connection_retries.py tests\test_dfu_update_streaming.py tests\test_refuel_camera_controller.py tests\test_app_update_request.py tests\test_update_and_restart.py`;
+  result: 254 passed with 50 existing Qt chart deprecation warnings in 17.47 s.
+- Final full command:
+  `.\env\Scripts\python.exe -m pytest -q --basetemp tests\.slice3_full_final_tmp`;
+  result: 3,350 passed, 24 skipped, and 88 existing Qt deprecation warnings in
+  414.46 s. The first full pass exposed three compatibility assumptions in a
+  monkeypatched log-reader test and partial `Model.__new__` fixtures; those
+  defaults were restored and both focused and full reruns passed.
+- Python 3.13.14, PySide6 6.11.1, Qt 6.11.1, and
+  `QT_QPA_PLATFORM=offscreen` were used. All repository-local pytest temporary
+  directories were removed after validation. Slice 3 produces no retained
+  report artifact.
+- Primary risks are production startup-order drift, production-path
+  redirection, a missed hardware entry point, and leaked Qt workers/timers.
+  Mitigations are lazy production factories, compatible default roots and
+  runtime policy, UI disablement plus Controller backstops, and repeated
+  construction/close tests.
+- Limitations: Slice 3 does not provide the simulated machine or a user-facing
+  launcher. The API cannot prove an arbitrary caller-supplied machine factory
+  is safe; supported simulation callers must use the Slice 4 implementation.
+  Physical legacy balance construction is preserved for production but was not
+  exercised against hardware.
+- Rollback is a single Slice 3 commit revert. No firmware, protocol, motion,
+  pressure, or timing rollback is required.
 
 ## Slice 4: In-Process Simulated Machine
 
@@ -1381,6 +1438,8 @@ scope or threshold change only inside implementation commits.
 | 2026-07-23 | 1 | `in_progress` -> `verified` | Added shared bounded metrics and a hardware-isolated offscreen Qt probe. Focused tests: 44 passed. Real-Qt probe: 20/20 stalls attributed, service-gap p95 13.074 ms, callback p95 0.0207 ms, and all required stacks/cleanup verified. Slice 0 compatibility passed all 384 completions. Full suite: 3,332 passed and 24 skipped. Raw reports remain ignored and D-008 remains open. |
 | 2026-07-23 | 2 | `not_started` -> `in_progress` | Starting commit `9344e3ec5aca6a514a4bb70860178435cfc29239` with a clean worktree. Call path: prepared fixture -> begin intent -> attach sequence -> update runtime/progress -> complete intent -> authoritative validation. Fixed the six-file boundary, three targeted workloads, real fsync/replace observation, per-run quartile policy, informational warning thresholds, focused/full validation, and benchmark artifact inspection. Safety risks are timing-instrumentation distortion and accidental durability weakening; mitigations are observer restoration tests, real durable calls, no production-file changes, and retained ordering assertions. Rollback is limited to the six benchmark/test/documentation files. |
 | 2026-07-23 | 2 | `in_progress` -> `verified` | Added selectable 96x1, compatible 96x4, and 384x1 persistence workloads with real durable-I/O timing, file growth, and per-run quartile warnings. Focused tests: 109 passed. All three same-host reports validated; 96x1 passed, while both 384-completion workloads emitted informational growth warnings without failing. Full suite: 3,340 passed and 24 skipped. Reports remain ignored; no production or firmware file changed. |
+| 2026-07-23 | 3 | `not_started` -> `in_progress` | Starting commit `79b9e453bfc38b1fb5791911163a3db699aa2eef` with a clean worktree. Call paths cover production composition, explicit simulation composition, and Controller rejection before physical dependencies. Fixed the application/composition, peripheral injection, storage-root, Controller/View, focused-test, plan, and README boundary. Risks are production startup drift, unintended production-root changes, missed hardware entry points, and leaked Qt workers/timers; mitigations are compatible defaults, lazy imports, layered safety guards, repeated offscreen close tests, and full-suite validation. Rollback is the Slice 3 commit only. |
+| 2026-07-23 | 3 | `in_progress` -> `verified` | Added the shared production/simulation construction seam, isolated roots, fail-closed hardware factories, persistent simulation identity, disabled hardware/update controls, and Controller safety backstops. Focused tests: 254 passed. Final full suite: 3,350 passed and 24 skipped. Repeated real MVC/MainWindow construction and cleanup passed offscreen; all temporary roots were removed. No firmware or protocol file changed. |
 
 For every update, include:
 
@@ -1396,6 +1455,6 @@ For every update, include:
 
 ## Current Next Action
 
-Slice 2 is verified. The next permitted work is a separately reviewed Slice 3
-safe application construction seam. Do not include the simulated machine from
-Slice 4 or the real-UI scenario from Slice 5 in that construction change.
+Slice 3 is verified. The next permitted work is the separately reviewed Slice 4
+in-process simulated machine. Do not begin the real-UI scenario from Slice 5
+inside Slice 4.

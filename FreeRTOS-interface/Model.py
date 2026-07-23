@@ -99,7 +99,7 @@ from RegulatorProfiles import (
     factory_default_document,
 )
 
-from LocalConfig import get_machine_config_path
+from LocalConfig import get_calibration_memory_root, get_machine_config_path
 from hardware.profile import CURRENT_PROFILE, HardwareProfile
 
 
@@ -391,13 +391,19 @@ class ExperimentModel(QObject):
     applied_imaging_calibration_changed = Signal(dict)
     manual_refuel_check_changed = Signal(dict)
 
-    def __init__(self, prof=None):
+    def __init__(self, prof=None, *, experiments_root=None):
         super().__init__()
         # Factors (additive & choice groups)
         self.factors: List[FactorSpec] = []
         self.additional_conditions: List[AdditionalConditionSpec] = []
 
         self.legacy_mode = prof.name == "legacy" if prof else True
+        default_experiments_root = Path(__file__).resolve().parent / "Experiments"
+        self.experiments_root = str(
+            Path(experiments_root).expanduser().resolve()
+            if experiments_root is not None
+            else default_experiments_root
+        )
 
 
         # Metadata
@@ -6898,8 +6904,11 @@ class ExperimentModel(QObject):
     def initialize_experiment(self, base_dir: Optional[str] = None):
         """Create Experiments/<name> dir and seed files. Only write key CSVs once wells are assigned."""
         import os
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        base_experiment_dir = base_dir or os.path.join(script_dir, "Experiments")
+        base_experiment_dir = (
+            os.fspath(Path(base_dir).expanduser().resolve())
+            if base_dir is not None
+            else self.experiments_root
+        )
         if not os.path.exists(base_experiment_dir):
             os.makedirs(base_experiment_dir)
         temp_name = "Untitled-" + time.strftime("%Y%m%d_%H%M%S")
@@ -9811,9 +9820,7 @@ class ExperimentModel(QObject):
     def rename_experiment(self, new_name: str) -> bool:
         """Rename experiment dir (if it does not already exist)."""
         import os
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        base_experiment_dir = os.path.join(script_dir, "Experiments")
-        new_dir = os.path.join(base_experiment_dir, new_name)
+        new_dir = os.path.join(self.experiments_root, new_name)
         if os.path.exists(new_dir):
             return False
         os.rename(self.experiment_dir_path, new_dir)
@@ -12694,16 +12701,46 @@ class Model(QObject):
     machine_state_updated = Signal()  # Signal to notify the view of state changes
     experiment_loaded = Signal()  # Signal to notify the view of an experiment being loaded
 
-    def __init__(self,profile: HardwareProfile = CURRENT_PROFILE):
+    def __init__(
+        self,
+        profile: HardwareProfile = CURRENT_PROFILE,
+        *,
+        config_root=None,
+        experiments_root=None,
+        calibration_memory_root=None,
+    ):
         super().__init__()
         self.profile = profile
         self.script_dir = os.path.dirname(os.path.abspath(__file__))
-        self.locations_path = str(get_machine_config_path('Locations.json'))
-        self.plates_path = str(get_machine_config_path('Plates.json'))
+        self.config_root = (
+            Path(config_root).expanduser().resolve()
+            if config_root is not None
+            else None
+        )
+        self.experiments_root = (
+            Path(experiments_root).expanduser().resolve()
+            if experiments_root is not None
+            else Path(self.script_dir) / "Experiments"
+        )
+        self.calibration_memory_root = (
+            Path(calibration_memory_root).expanduser().resolve()
+            if calibration_memory_root is not None
+            else None
+        )
+        self.locations_path = str(
+            get_machine_config_path('Locations.json', local_root=self.config_root)
+        )
+        self.plates_path = str(
+            get_machine_config_path('Plates.json', local_root=self.config_root)
+        )
         self.colors_path = os.path.join(self.script_dir, 'Presets','Printer_head_colors.json')
-        self.settings_path = str(get_machine_config_path('Settings.json'))
+        self.settings_path = str(
+            get_machine_config_path('Settings.json', local_root=self.config_root)
+        )
         self.print_profiles_path = os.path.join(self.script_dir, 'Presets','PrintProfiles.json')
-        self.obstacles_path = str(get_machine_config_path('Obstacles.json'))
+        self.obstacles_path = str(
+            get_machine_config_path('Obstacles.json', local_root=self.config_root)
+        )
         self.predictive_model_dir = os.path.join(self.script_dir, 'Presets','Predictive_models')
         self.pixel_step_conv_path = os.path.join(self.script_dir, 'Presets','step_conv_250813.json')
         # self.prediction_model_path = os.path.join(self.script_dir, 'Presets','150um_50per_large_lr_pipeline.pkl')
@@ -12732,7 +12769,10 @@ class Model(QObject):
         self.droplet_camera_model = CalibrationClasses.DropletCameraModel(self.pixel_step_conv_path)
         self.calibration_manager = CalibrationClasses.CalibrationManager(self)
         # self.experiment_model = ExperimentModel(self.well_plate,self.calibration_manager)
-        self.experiment_model = ExperimentModel(prof=self.profile)
+        self.experiment_model = ExperimentModel(
+            prof=self.profile,
+            experiments_root=self.experiments_root,
+        )
         self.experiment_model.set_calibration_manager(self.calibration_manager)
         self.refuel_camera_model.attach_owner_model(self)
         self.experiment_audit_log = ExperimentAuditLog(model=self)
@@ -12768,7 +12808,12 @@ class Model(QObject):
             if isinstance(store, CalibrationMemoryStore):
                 store.set_model(self)
             else:
-                store = CalibrationMemoryStore(model=self)
+                root_dir = None
+                if self.calibration_memory_root is not None:
+                    root_dir = get_calibration_memory_root(
+                        local_root=self.calibration_memory_root
+                    )
+                store = CalibrationMemoryStore(model=self, root_dir=root_dir)
             store.ensure_initialized()
             self.calibration_memory_store = store
         except Exception as e:
@@ -12776,9 +12821,21 @@ class Model(QObject):
             self.calibration_memory_store = None
 
     def _initialize_regulator_profile_store(self):
-        self.regulator_profiles_path = str(default_local_profile_path())
+        config_root = getattr(self, "config_root", None)
+        if config_root is None:
+            self.regulator_profiles_path = str(default_local_profile_path())
+            self.regulator_profile_store = RegulatorProfileStore()
+        else:
+            self.regulator_profiles_path = str(
+                get_machine_config_path(
+                    'RegulatorProfiles.json',
+                    local_root=config_root,
+                )
+            )
+            self.regulator_profile_store = RegulatorProfileStore(
+                path=self.regulator_profiles_path
+            )
         self.regulator_profiles_error = None
-        self.regulator_profile_store = RegulatorProfileStore()
         try:
             self.regulator_profiles = self.regulator_profile_store.load()
             self.regulator_profiles_path = str(self.regulator_profile_store.path)

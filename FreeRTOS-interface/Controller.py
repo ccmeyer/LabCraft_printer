@@ -26,6 +26,7 @@ from hardware.profile import CURRENT_PROFILE, HardwareProfile
 from hardware.null_devices import NullCamera
 from CaptureCoordinator import CaptureCoordinator
 from CaptureTypes import CaptureResult, CaptureSource, CaptureStatus
+from ApplicationComposition import PRODUCTION_RUNTIME_CONTEXT
 
 ARRAY_PAUSE_DEPARTURE_ACCEL = 32000
 ARRAY_PAUSE_DEPARTURE_SETTLE_MS = 200
@@ -816,12 +817,14 @@ class Controller(QObject):
         profile: HardwareProfile = CURRENT_PROFILE,
         monotonic_fn=None,
         timer_factory=None,
+        runtime_context=None,
     ):
         super().__init__()
 
         self.machine = machine
         self.model = model
         self.profile = profile
+        self.runtime_context = runtime_context or PRODUCTION_RUNTIME_CONTEXT
         self._monotonic_fn = monotonic_fn or time.monotonic
         self._timer_factory = timer_factory or (lambda parent: QtCore.QTimer(parent))
         self.balance = None  # to be set for legacy if needed
@@ -941,6 +944,18 @@ class Controller(QObject):
             "bridge_and_pull_y": self._seq_bridge_and_pull_y,
             "bridge_pull_y_3step": self._seq_bridge_pull_y_3step,
         }
+
+    def _reject_physical_action(self, action):
+        runtime_context = getattr(
+            self,
+            "runtime_context",
+            PRODUCTION_RUNTIME_CONTEXT,
+        )
+        if runtime_context.hardware_access_allowed:
+            return None
+        message = runtime_context.blocked_message(action)
+        self.error_occurred_signal.emit("Simulation Mode", message)
+        return message
 
     def connect_droplet_camera_signals(self):
         """Connect the droplet camera signals to the controller."""
@@ -1112,6 +1127,10 @@ class Controller(QObject):
         self.model.machine_model.disconnect_machine()
     
     def update_available_ports(self):
+        if self._reject_physical_action("serial port enumeration") is not None:
+            self._port_info = {}
+            self.model.machine_model.update_ports([])
+            return
         ports = []
         self._port_info = {}
 
@@ -1159,6 +1178,8 @@ class Controller(QObject):
 
     @QtCore.Slot(str)
     def connect_machine(self, port: str):
+        if self._reject_physical_action("machine connection") is not None:
+            return
         kind = self._classify_port(port)
         if kind == "balance":
             self.error_occurred_signal.emit(
@@ -1169,6 +1190,8 @@ class Controller(QObject):
 
     def disconnect_machine(self):
         """Disconnect from the machine."""
+        if self._reject_physical_action("machine disconnection") is not None:
+            return
         self.machine.disconnect_board()
     # @QtCore.Slot()
     # def disconnect_machine(self):
@@ -1182,6 +1205,8 @@ class Controller(QObject):
 
     @QtCore.Slot(str)
     def connect_balance(self, port: str):
+        if self._reject_physical_action("balance connection") is not None:
+            return
         if self.balance is None:
             self.error_occurred_signal.emit("Connection Error","Balance support is not enabled in this build/profile.")
             return
@@ -1197,6 +1222,8 @@ class Controller(QObject):
 
     @QtCore.Slot()
     def disconnect_balance(self):
+        if self._reject_physical_action("balance disconnection") is not None:
+            return
         if self.balance:
             self.balance.close_connection()
         self.model.machine_model.disconnect_balance()
@@ -1424,6 +1451,8 @@ class Controller(QObject):
     #     self.machine.update_firmware(bin_path)
 
     def start_firmware_update(self,manual: bool=False):
+        if self._reject_physical_action("firmware/DFU update") is not None:
+            return
         print("[Controller] Starting firmware update..., manual mode =", manual)
         if self._dfu_thread and self._dfu_thread.isRunning():
             return  # already running
@@ -1509,6 +1538,9 @@ class Controller(QObject):
             return "unknown"
 
     def start_app_update_check(self, command_runner=None, offline_manifest_path=None, release_channel="stable"):
+        blocked = self._reject_physical_action("application update check")
+        if blocked is not None:
+            return False, blocked
         if self.is_app_update_check_running():
             return False, "An update check is already running."
 
@@ -1547,6 +1579,9 @@ class Controller(QObject):
         self.app_update_check_finished.emit(result)
 
     def start_app_rollback_check(self, command_runner=None, offline_manifest_path=None):
+        blocked = self._reject_physical_action("application rollback check")
+        if blocked is not None:
+            return False, blocked
         if self.is_app_update_check_running():
             return False, "An update or rollback check is already running."
 
@@ -1836,6 +1871,9 @@ class Controller(QObject):
         return True, f"Application {operation_label} started."
 
     def launch_app_updater(self, wait_pid, launcher=None):
+        blocked = self._reject_physical_action("application updater launch")
+        if blocked is not None:
+            return False, blocked
         try:
             command = self.build_app_update_command(wait_pid)
         except Exception as exc:
@@ -1848,6 +1886,9 @@ class Controller(QObject):
         )
 
     def launch_app_rollback(self, wait_pid, launcher=None):
+        blocked = self._reject_physical_action("application rollback launch")
+        if blocked is not None:
+            return False, blocked
         try:
             command = self.build_app_rollback_command(wait_pid)
         except Exception as exc:
@@ -1861,6 +1902,16 @@ class Controller(QObject):
 
     def get_app_update_blockers(self):
         blockers = []
+
+        runtime_context = getattr(
+            self,
+            "runtime_context",
+            PRODUCTION_RUNTIME_CONTEXT,
+        )
+        if not runtime_context.hardware_access_allowed:
+            blockers.append(
+                runtime_context.blocked_message("application update or rollback")
+            )
 
         if self.is_app_update_process_running():
             blockers.append("An application update or rollback is already running.")
@@ -2034,6 +2085,8 @@ class Controller(QObject):
         return bool(worker is not None and callable(is_running) and is_running())
 
     def start_qualification_run(self, config):
+        if self._reject_physical_action("machine qualification") is not None:
+            return False
         if self.is_qualification_running():
             return False
 
@@ -2198,6 +2251,8 @@ class Controller(QObject):
             return None
 
     def start_regulator_calibration_run(self, config, trace_worker_factory=None):
+        if self._reject_physical_action("regulator calibration") is not None:
+            return False
         run_config = dict(config or {})
         if self.is_regulator_calibration_batch_running() and not bool(run_config.get("_batch_run")):
             self._emit_regulator_calibration_signal(
@@ -2697,6 +2752,8 @@ class Controller(QObject):
         return state is not None and state.get("prepared_sweep") is not None
 
     def start_regulator_calibration_sweep(self, config, trace_worker_factory=None, analysis_runner=None):
+        if self._reject_physical_action("regulator calibration sweep") is not None:
+            return False
         if self.is_regulator_calibration_batch_running():
             self._emit_regulator_calibration_batch_signal(
                 "regulator_calibration_batch_output",
@@ -2742,6 +2799,8 @@ class Controller(QObject):
         return self.cancel_regulator_calibration_batch()
 
     def start_regulator_calibration_batch(self, config, trace_worker_factory=None, analysis_runner=None):
+        if self._reject_physical_action("regulator calibration batch") is not None:
+            return False
         if self.is_regulator_calibration_batch_running():
             self._emit_regulator_calibration_batch_signal(
                 "regulator_calibration_batch_output",
@@ -3007,6 +3066,8 @@ class Controller(QObject):
 
     def reset_mcu_board(self):
         """Reset the MCU board."""
+        if self._reject_physical_action("MCU/GPIO reset") is not None:
+            return
         self.machine.reset_mcu_board()
         self.machine.reset_board()
 
@@ -6340,6 +6401,8 @@ class Controller(QObject):
         self.machine.disable_print_profile()
     
     def start_refuel_camera(self):
+        if self._reject_physical_action("refuel camera start") is not None:
+            return
         self.machine.start_refuel_camera()
         try:
             self.machine.refuel_led_on()
@@ -6385,10 +6448,19 @@ class Controller(QObject):
         return context
 
     def capture_refuel_image(self):
+        if self._reject_physical_action("refuel camera capture") is not None:
+            return None
         frame, _context = self.capture_refuel_image_with_context(analyze=True)
         return frame
 
     def capture_refuel_image_with_context(self, *, analyze=True, context_overrides=None):
+        blocked = self._reject_physical_action("refuel camera capture")
+        if blocked is not None:
+            return None, {
+                "analysis_started": False,
+                "frame_signature_available": False,
+                "blocked_reason": blocked,
+            }
         capture_start = time.perf_counter()
         frame = self.machine.capture_refuel_image()
         capture_duration_ms = float((time.perf_counter() - capture_start) * 1000.0)
@@ -6470,6 +6542,8 @@ class Controller(QObject):
         return True
 
     def stop_refuel_camera(self):
+        if self._reject_physical_action("refuel camera stop") is not None:
+            return
         stop_error = None
         try:
             self.machine.stop_refuel_camera()
@@ -6485,6 +6559,8 @@ class Controller(QObject):
             raise stop_error
 
     def start_droplet_camera(self):
+        if self._reject_physical_action("droplet camera start") is not None:
+            return
         self.machine.start_droplet_camera()
 
     def _ensure_capture_coordinator(self):
@@ -7086,6 +7162,9 @@ class Controller(QObject):
         Initiates a non-blocking image capture. If a callback is provided,
         it will be invoked with the captured frame once the capture completes.
         """
+        if self._reject_physical_action("droplet camera capture") is not None:
+            self._notify_capture_callback_failed(callback)
+            return False
         self.last_capture_queue_rejection_reason = None
         self.last_capture_queue_rejection_state = None
         self.record_droplet_capture_performance_marker(

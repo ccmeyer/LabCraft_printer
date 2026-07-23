@@ -4007,11 +4007,17 @@ class Machine(QObject):
         serial_factory=serial.Serial,
         *,
         black_box_log_dir=None,
+        refuel_camera_factory=None,
+        droplet_camera_factory=None,
+        log_reader_factory=None,
     ):
         super().__init__()
         self.model = model
         self.profile = profile
         self._serial_factory = serial_factory
+        self._refuel_camera_factory = refuel_camera_factory or RefuelCamera
+        self._droplet_camera_factory = droplet_camera_factory or DropletCamera
+        self._log_reader_factory = log_reader_factory
 
         self.balance_droplets = []   # <-- for legacy Balance simulation queue
 
@@ -4095,7 +4101,7 @@ class Machine(QObject):
         # Cameras (ONLY if profile supports)
         if self.profile.has_refuel_camera:
             try:
-                self.refuel_camera = RefuelCamera()
+                self.refuel_camera = self._refuel_camera_factory()
             except Exception as e:
                 print(f"Error initializing refuel camera: {e}")
                 self.refuel_camera = NullCamera()
@@ -4104,7 +4110,7 @@ class Machine(QObject):
 
         if self.profile.has_droplet_camera:
             try:
-                self.droplet_camera = DropletCamera()
+                self.droplet_camera = self._droplet_camera_factory()
             except Exception as e:
                 print(f"Error initializing droplet camera: {e}")
                 self.droplet_camera = NullCamera()
@@ -5209,7 +5215,11 @@ class Machine(QObject):
             self.log_reader = None
 
         try:
-            self.log_reader = LogReader(self.baud, serial_factory=self._serial_factory)
+            log_reader_factory = self._log_reader_factory or LogReader
+            self.log_reader = log_reader_factory(
+                self.baud,
+                serial_factory=self._serial_factory,
+            )
             self.log_reader.lineReceived.connect(self.on_log_line_received)
             self.log_reader.messageReceived.connect(self.on_log_message_received)
             self.log_reader.flashStateChanged.connect(self.on_flash_state_changed)

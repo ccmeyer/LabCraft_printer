@@ -117,6 +117,9 @@ def test_popup_yes_no_keeps_transparent_icon(monkeypatch):
 def test_app_main_sets_labcraft_icon_before_showing_window():
     app_source = Path("FreeRTOS-interface/App.py").read_text(encoding="utf-8")
     pre_main_source = app_source.split("def main():", 1)[0]
+    composition_source = Path(
+        "FreeRTOS-interface/ApplicationComposition.py"
+    ).read_text(encoding="utf-8")
 
     assert 'APP_DESKTOP_FILE_NAME = "labcraft-printer"' in app_source
     assert "configure_app_identity(app)" in app_source
@@ -124,7 +127,8 @@ def test_app_main_sets_labcraft_icon_before_showing_window():
     assert "app.setWindowIcon(app_icon)" in app_source
     assert "app.processEvents()" in app_source
     assert "from legacy.mass_calibration import MassCalibrationModel, Balance" not in pre_main_source
-    assert "from legacy.mass_calibration import MassCalibrationModel, Balance" in app_source.split("if profile.name == \"legacy\":", 1)[1]
+    assert "from legacy.mass_calibration import Balance" in composition_source
+    assert "from legacy.mass_calibration import MassCalibrationModel" in composition_source
 
 
 def test_app_single_instance_guard_runs_before_hardware_import():
@@ -132,9 +136,9 @@ def test_app_single_instance_guard_runs_before_hardware_import():
     main_source = app_source.split("def main():", 1)[1]
 
     lock_index = main_source.index("app_lock = acquire_single_instance_lock(lock_path)")
-    hardware_import_index = main_source.index("from Machine_FreeRTOS import Machine")
+    composition_import_index = main_source.index("from ApplicationComposition import")
 
-    assert lock_index < hardware_import_index
+    assert lock_index < composition_import_index
 
 
 def test_single_instance_lock_path_uses_app_local_storage(monkeypatch, tmp_path):

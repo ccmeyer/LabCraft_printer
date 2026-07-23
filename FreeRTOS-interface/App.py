@@ -209,60 +209,41 @@ def main():
         # Let the splash paint before heavier module imports and object setup continue.
         app.processEvents()
 
-        from Machine_FreeRTOS import Machine
-        from Model import Model
-        from Controller import Controller
-        from View import MainWindow
+        from ApplicationComposition import (
+            build_application_components,
+            production_dependencies,
+        )
 
         settings = load_settings(get_machine_config_path("Settings.json"))
 
         profile = get_profile(settings.get("HARDWARE_PROFILE", "current"))
 
-
-        # Initialize components
-        model = Model(profile=profile)
-        dispenser_defaults = (
-            settings.get("DISPENSER_TYPES", {})
-            .get(settings.get("DEFAULT_DISPENSER", ""), {})
-        )
-        dispense_frequency_hz = (
-            dispenser_defaults.get("frequency")
-            if isinstance(dispenser_defaults, dict)
-            else None
-        )
-        if dispense_frequency_hz is not None:
-            try:
-                model.machine_model.update_dispense_frequency_hz(dispense_frequency_hz)
-            except (TypeError, ValueError):
-                pass
-
-        machine = Machine(model,profile=profile)
-        controller = Controller(machine, model, profile=profile)
-
-        if profile.name == "legacy":
-            from legacy.mass_calibration import MassCalibrationModel, Balance
-
-            model.calibration_model = MassCalibrationModel(
-                machine_model=model.machine_model,
-                printer_head_manager=model.printer_head_manager,
-                rack_model=model.rack_model,
-                prediction_model_dir=model.predictive_model_dir,
-            )
-
-            controller.balance = Balance(machine=machine, model=model)
-
-            # mass updates -> calibration model
-            controller.balance.balance_mass_updated_signal.connect(model.calibration_model.update_mass)
-            controller.balance.connected_signal.connect(lambda ok: model.machine_model.connect_balance() if ok else model.machine_model.disconnect_balance())
-            # optional: forward balance errors to your existing popup system
-            controller.balance.balance_error_signal.connect(controller.error_occurred_signal.emit)
-        else:
-            # leave your current calibration model untouched
-            # model.calibration_model = CurrentCalibrationModel(...)
-            pass
-
         set_dark_theme(app)
-        view = MainWindow(model,controller, profile=profile)
+
+        def configure_model(model):
+            dispenser_defaults = (
+                settings.get("DISPENSER_TYPES", {})
+                .get(settings.get("DEFAULT_DISPENSER", ""), {})
+            )
+            dispense_frequency_hz = (
+                dispenser_defaults.get("frequency")
+                if isinstance(dispenser_defaults, dict)
+                else None
+            )
+            if dispense_frequency_hz is not None:
+                try:
+                    model.machine_model.update_dispense_frequency_hz(
+                        dispense_frequency_hz
+                    )
+                except (TypeError, ValueError):
+                    pass
+
+        components = build_application_components(
+            profile,
+            production_dependencies(),
+            model_setup=configure_model,
+        )
+        view = components.view
 
         def show_main_window():
             view.show()

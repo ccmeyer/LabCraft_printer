@@ -48,6 +48,7 @@ import importlib
 from typing import Mapping, Sequence, Optional, Any, List, Dict, Tuple, Set
 from hardware.profile import CURRENT_PROFILE, HardwareProfile
 from LegacyExecutionMigration import migrate_legacy_execution_copy as migrate_legacy_execution_directory
+from ApplicationComposition import PRODUCTION_RUNTIME_CONTEXT
 
 MassCalibrationDialog = None
 
@@ -492,11 +493,19 @@ class AuditTimelineWindow(QtWidgets.QDialog):
 class MainWindow(QMainWindow):
     CLOSE_DISCONNECT_TIMEOUT_MS = 5000
 
-    def __init__(self, model, controller, profile: HardwareProfile = CURRENT_PROFILE):
+    def __init__(
+        self,
+        model,
+        controller,
+        profile: HardwareProfile = CURRENT_PROFILE,
+        *,
+        runtime_context=None,
+    ):
         super().__init__()
         self.model = model
         self.controller = controller
         self.profile = profile
+        self.runtime_context = runtime_context or PRODUCTION_RUNTIME_CONTEXT
         self.shortcut_manager = ShortcutManager(self)
         self.setup_shortcuts()
         self.script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -507,8 +516,15 @@ class MainWindow(QMainWindow):
         self._plate_reader_analysis_window = None
         self._app_update_close_requested = False
 
-        self.setWindowTitle("Droplet Printer Interface v1.0.3")
+        base_title = "Droplet Printer Interface v1.0.3"
+        if self.runtime_context.is_simulation:
+            self.setWindowTitle(f"[SIMULATION - NO HARDWARE] {base_title}")
+        else:
+            self.setWindowTitle(base_title)
         self.init_ui()
+        if self.runtime_context.is_simulation:
+            self._add_simulation_banner()
+            self._apply_simulation_ui_safety()
         self.disconnected = False
         self._close_disconnect_pending = False
         self._close_after_disconnect = False
@@ -522,6 +538,53 @@ class MainWindow(QMainWindow):
         self._ensure_close_disconnect_signal_hook()
         self.controller.update_volumes_in_view_signal.connect(self.rack_box.update_all_slots)
         self.controller.machine.require_gripper_confirmation.connect(self.on_require_gripper_confirmation)
+
+    def _add_simulation_banner(self):
+        toolbar = QtWidgets.QToolBar(self.runtime_context.identity_text, self)
+        toolbar.setObjectName("simulationIdentityBanner")
+        toolbar.setMovable(False)
+        toolbar.setFloatable(False)
+        toolbar.setAllowedAreas(QtCore.Qt.TopToolBarArea)
+        toolbar.setContextMenuPolicy(QtCore.Qt.NoContextMenu)
+        toolbar.toggleViewAction().setEnabled(False)
+
+        label = QtWidgets.QLabel(self.runtime_context.identity_text, toolbar)
+        label.setObjectName("simulationIdentityLabel")
+        label.setAlignment(QtCore.Qt.AlignCenter)
+        label.setStyleSheet(
+            "QLabel {"
+            " background-color: #8B0000;"
+            " color: #FFFFFF;"
+            " font-weight: 700;"
+            " font-size: 16px;"
+            " padding: 8px 20px;"
+            " border: 2px solid #FFCC00;"
+            "}"
+        )
+        toolbar.addWidget(label)
+        self.addToolBar(QtCore.Qt.TopToolBarArea, toolbar)
+        self.simulation_identity_banner = toolbar
+        self.simulation_identity_label = label
+
+    @staticmethod
+    def _disable_simulation_control(control):
+        if control is None:
+            return
+        control.setEnabled(False)
+        control.setToolTip(
+            "Unavailable in simulation: this action can access physical hardware "
+            "or modify the installed application."
+        )
+
+    def _apply_simulation_ui_safety(self):
+        controls = (
+            getattr(getattr(self, "pressure_box", None), "refuel_camera_button", None),
+            getattr(getattr(self, "pressure_box", None), "calibrate_pressure_button", None),
+            getattr(self, "start_guided_optics_calibration_button", None),
+            getattr(self, "open_manual_optics_calibration_button", None),
+        )
+        for control in controls:
+            self._disable_simulation_control(control)
 
     def load_colors(self, file_path):
         with open(file_path, 'r') as file:
@@ -1654,6 +1717,13 @@ class ConnectionWidget(QGroupBox):
         )
         self.model = model
         self.controller = controller
+        self.simulation_mode = bool(
+            getattr(
+                getattr(self.main_window, "runtime_context", None),
+                "is_simulation",
+                False,
+            )
+        )
 
         # Decide mode from profile (adjust attribute name to your actual profile)
         prof = getattr(self.main_window, "profile", None)
@@ -1677,7 +1747,7 @@ class ConnectionWidget(QGroupBox):
             self._handle_machine_disconnect_complete
         )
 
-        if self.legacy_mode:
+        if self.legacy_mode and not self.simulation_mode:
             self.model.machine_model.ports_updated.connect(self.on_ports_updated)
             self.model.machine_model.balance_state_updated.connect(self.update_balance_connect_button)
 
@@ -1871,6 +1941,16 @@ class ConnectionWidget(QGroupBox):
     #             f"background-color: {self.color_dict['light_blue']}; color: white;"
     #         )
     def update_machine_connect_button(self, machine_connected: bool):
+        if self.simulation_mode:
+            self.machine_connect_button.setText("Unavailable")
+            self.machine_connect_button.setChecked(False)
+            self.machine_connect_button.setEnabled(False)
+            self.machine_connect_button.setToolTip(
+                "Physical machine connections are disabled in simulation."
+            )
+            if self.legacy_mode:
+                self.machine_port_combo.setEnabled(False)
+            return
         if not machine_connected and self._machine_disconnect_pending:
             self._machine_disconnect_pending = False
 
@@ -1927,6 +2007,15 @@ class ConnectionWidget(QGroupBox):
 
     def update_balance_connect_button(self, balance_connected: bool):
         if not self.legacy_mode:
+            return
+        if self.simulation_mode:
+            self.balance_connect_button.setText("Unavailable")
+            self.balance_connect_button.setChecked(False)
+            self.balance_connect_button.setEnabled(False)
+            self.balance_connect_button.setToolTip(
+                "Physical balance connections are disabled in simulation."
+            )
+            self.balance_port_combo.setEnabled(False)
             return
 
         if balance_connected:
@@ -3321,7 +3410,16 @@ class PressurePlotBox(QtWidgets.QGroupBox):
     def _refresh_droplet_imager_button_state(self):
         button = getattr(self, "calibrate_pressure_button", None)
         if button is not None and not self.legacy_mode:
-            button.setEnabled(not self._droplet_imager_launch_is_active())
+            simulation_mode = bool(
+                getattr(
+                    getattr(self.main_window, "runtime_context", None),
+                    "is_simulation",
+                    False,
+                )
+            )
+            button.setEnabled(
+                not simulation_mode and not self._droplet_imager_launch_is_active()
+            )
 
     def _set_droplet_imager_launch_pending(self, pending):
         self._droplet_imager_launch_pending = bool(pending)
@@ -3361,7 +3459,16 @@ class PressurePlotBox(QtWidgets.QGroupBox):
     def _refresh_refuel_camera_button_state(self):
         button = getattr(self, "refuel_camera_button", None)
         if button is not None and not self.legacy_mode:
-            button.setEnabled(not self._refuel_camera_launch_is_active())
+            simulation_mode = bool(
+                getattr(
+                    getattr(self.main_window, "runtime_context", None),
+                    "is_simulation",
+                    False,
+                )
+            )
+            button.setEnabled(
+                not simulation_mode and not self._refuel_camera_launch_is_active()
+            )
 
     def _set_refuel_camera_launch_pending(self, pending):
         self._refuel_camera_launch_pending = bool(pending)
@@ -5032,6 +5139,13 @@ class SpeedProfilesTab(QtWidgets.QWidget):
         self.model = model
         self.controller = controller
         self.color_dict = color_dict
+        self.simulation_mode = bool(
+            getattr(
+                getattr(self.main_window, "runtime_context", None),
+                "is_simulation",
+                False,
+            )
+        )
         self.setObjectName("SpeedProfilesTab")
         self._dfu_manual_session = False 
         self._qualification_window = None
@@ -5042,9 +5156,33 @@ class SpeedProfilesTab(QtWidgets.QWidget):
 
         self._build_ui()
         self._connect_model_signals()
+        if self.simulation_mode:
+            self._apply_simulation_safety()
 
         # Background to match the rest of the mid-panel
         self.setStyleSheet(f"QWidget#SpeedProfilesTab {{ background-color: {self.color_dict['darker_gray']}; }}")
+
+    def _apply_simulation_safety(self):
+        controls = (
+            self.firmware_update_button,
+            self.app_update_release_candidate_checkbox,
+            self.app_update_check_button,
+            self.app_update_offline_button,
+            self.app_rollback_check_button,
+            self.app_rollback_offline_button,
+            self.app_update_button,
+            self.app_rollback_button,
+            self.machine_qualification_button,
+            self.regulator_calibration_button,
+            self.reset_mcu_button,
+        )
+        for control in controls:
+            control.setEnabled(False)
+            control.setToolTip(
+                "Unavailable in simulation: physical service and update actions are blocked."
+            )
+        self.fw_status.setText("Unavailable in simulation.")
+        self.app_update_status_label.setText("Unavailable in simulation.")
 
     # ---------------- UI ----------------
 
@@ -13752,8 +13890,7 @@ class ExperimentDesignDialog(QDialog):
     def _on_duplicate_design(self):
         default_dir = None
         try:
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            maybe = os.path.join(script_dir, "Experiments")
+            maybe = os.fspath(getattr(self.model, "experiments_root", "") or "")
             default_dir = maybe if os.path.isdir(maybe) else None
         except Exception:
             pass
@@ -13906,8 +14043,7 @@ class ExperimentDesignDialog(QDialog):
         # Default directory = Experiments
         default_dir = None
         try:
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            maybe = os.path.join(script_dir, "Experiments")
+            maybe = os.fspath(getattr(self.model, "experiments_root", "") or "")
             default_dir = maybe if os.path.isdir(maybe) else None
         except Exception:
             pass
