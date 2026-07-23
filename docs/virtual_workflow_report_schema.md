@@ -95,6 +95,44 @@ Slice 0 reports responsiveness as `not_available`, queue behavior as
 `not_applicable`, and resources as `partial`. Slice 1 populates responsiveness
 and resources without changing the envelope.
 
+### Slice 2 persistence values
+
+Slice 2 retains the Slice 0 field names and adds compatible values beneath
+`metrics.persistence.values`:
+
+- `well_total_growth_by_run`: first/last quartile distributions, means,
+  absolute delta, and ratio computed independently for each measured run;
+- `well_total_growth_ratio` and `well_total_growth_delta_ms`: distributions
+  across the per-run growth results;
+- `growth_assessment`: the informational ratio and absolute-delta thresholds,
+  observed medians, candidate-regression decision, and classification effect;
+- `file_growth`: initial/final size, byte growth, and bytes-per-completion slope
+  distributions for `progress.json` and `execution_resume.json`;
+- `durable_io_statistics_ms`: real `fsync` and atomic `os.replace` duration
+  distributions overall and by named persistence phase;
+- `runs[*].file_size_samples_bytes`: initial and post-completion file-size
+  samples;
+- `runs[*].durable_io_samples_ms`: raw real durable-I/O timings grouped by
+  operation and phase; and
+- `runs[*].quartile_growth`: that run's independently calculated growth
+  evidence.
+
+File-size observation occurs outside `well_total` timing. The synchronous I/O
+observer always calls the original `fsync` and `os.replace`, records their
+duration, and restores them after success or failure.
+
+Slice 2 uses three workload IDs:
+
+- `execution_persistence_96_single_v1` for 96 wells and one stock;
+- `execution_persistence_v1` for the original 96 wells and four stocks; and
+- `execution_persistence_384_single_v1` for 384 wells and one stock.
+
+A correct run is an informational `warning` only when the median per-run
+last/first quartile ratio is greater than 1.25 and the median absolute increase
+is greater than 10 ms. That warning retains exit code 0 and is not an
+acceptance gate. Correctness or durability failure is `fail`; performance
+acceptance and baseline comparison remain Slice 6 work.
+
 ### Slice 1 responsiveness values
 
 The Qt event-loop probe writes these keys beneath

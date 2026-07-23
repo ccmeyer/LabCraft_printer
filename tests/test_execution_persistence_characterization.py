@@ -154,6 +154,27 @@ def test_baseline_workload_is_exact_and_serpentine():
     assert workload.well_ids[-3:] == ("D3", "D2", "D1")
 
 
+def test_targeted_workload_catalog_is_exact_and_preserves_default():
+    catalog = characterization.WORKLOAD_CATALOG
+
+    assert set(catalog) == {
+        characterization.WORKLOAD_96_SINGLE_ID,
+        characterization.WORKLOAD_ID,
+        characterization.WORKLOAD_384_SINGLE_ID,
+    }
+    assert catalog[characterization.WORKLOAD_ID] is characterization.BASELINE_WORKLOAD
+
+    single_96 = catalog[characterization.WORKLOAD_96_SINGLE_ID]
+    assert (len(single_96.well_ids), single_96.stock_count) == (96, 1)
+    assert single_96.completion_count == 96
+    assert single_96.well_ids[-3:] == ("D3", "D2", "D1")
+
+    single_384 = catalog[characterization.WORKLOAD_384_SINGLE_ID]
+    assert (len(single_384.well_ids), single_384.stock_count) == (384, 1)
+    assert single_384.completion_count == 384
+    assert single_384.well_ids[383] == "P1"
+
+
 def test_characterization_source_has_no_production_hardware_imports():
     source_path = REPO_ROOT / "tools" / "characterize_execution_persistence.py"
     tree = ast.parse(source_path.read_text(encoding="utf-8"))
@@ -269,6 +290,37 @@ def test_cli_returns_runner_exit_code_and_prints_report(tmp_path, monkeypatch, c
     )
 
     assert exit_code == 2
+    assert capsys.readouterr().out.strip() == str(report_path)
+
+
+def test_cli_selects_requested_workload(tmp_path, monkeypatch, capsys):
+    report_path = tmp_path / "report.json"
+    captured = {}
+
+    def run(**kwargs):
+        captured.update(kwargs)
+        return 0, report_path
+
+    monkeypatch.setattr(characterization, "run_characterization", run)
+
+    exit_code = characterization.main(
+        [
+            "--output-root",
+            str(tmp_path),
+            "--workload",
+            characterization.WORKLOAD_384_SINGLE_ID,
+            "--measured-runs",
+            "1",
+        ]
+    )
+
+    assert exit_code == 0
+    assert (
+        captured["spec"]
+        is characterization.WORKLOAD_CATALOG[
+            characterization.WORKLOAD_384_SINGLE_ID
+        ]
+    )
     assert capsys.readouterr().out.strip() == str(report_path)
 
 

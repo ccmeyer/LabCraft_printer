@@ -56,8 +56,12 @@ from tools.virtual_workflows.metrics import linear_slope, summarize_samples
 SCENARIO_NAME = "execution_persistence"
 SCENARIO_VERSION = "1"
 WORKLOAD_ID = "execution_persistence_v1"
+WORKLOAD_96_SINGLE_ID = "execution_persistence_96_single_v1"
+WORKLOAD_384_SINGLE_ID = "execution_persistence_384_single_v1"
 DEFAULT_OUTPUT_ROOT = Path("verification_reports") / "virtual_workflows"
 KEEP_POLICIES = {"never", "on-failure", "always"}
+GROWTH_RATIO_WARNING_THRESHOLD = 1.25
+GROWTH_DELTA_WARNING_THRESHOLD_MS = 10.0
 PHASE_NAMES = (
     "begin_intent",
     "attach_sequence",
@@ -70,6 +74,80 @@ PHASE_NAMES = (
 
 class WorkloadInvariantError(RuntimeError):
     """Raised when a completed workload violates durable execution invariants."""
+
+
+class PersistenceIoObserver:
+    """Time real durable I/O calls while preserving their original behavior."""
+
+    def __init__(self) -> None:
+        self._active_phase: str | None = None
+        self._installed = False
+        self._samples_ms: dict[str, dict[str, list[float]]] = {
+            "fsync": {},
+            "atomic_replace": {},
+        }
+
+    @contextlib.contextmanager
+    def phase(self, name: str):
+        previous = self._active_phase
+        self._active_phase = str(name)
+        try:
+            yield
+        finally:
+            self._active_phase = previous
+
+    def _record(self, operation: str, elapsed_ms: float) -> None:
+        if self._active_phase is None:
+            return
+        self._samples_ms[operation].setdefault(self._active_phase, []).append(
+            float(elapsed_ms)
+        )
+
+    @contextlib.contextmanager
+    def installed(self):
+        if self._installed:
+            raise RuntimeError("persistence I/O observer is already installed")
+        original_fsync = os.fsync
+        original_replace = os.replace
+
+        def observed_fsync(fd):
+            started = time.perf_counter_ns()
+            try:
+                return original_fsync(fd)
+            finally:
+                self._record(
+                    "fsync",
+                    (time.perf_counter_ns() - started) / 1_000_000.0,
+                )
+
+        def observed_replace(source, destination):
+            started = time.perf_counter_ns()
+            try:
+                return original_replace(source, destination)
+            finally:
+                self._record(
+                    "atomic_replace",
+                    (time.perf_counter_ns() - started) / 1_000_000.0,
+                )
+
+        self._installed = True
+        os.fsync = observed_fsync
+        os.replace = observed_replace
+        try:
+            yield self
+        finally:
+            os.fsync = original_fsync
+            os.replace = original_replace
+            self._installed = False
+
+    def snapshot(self) -> dict[str, dict[str, list[float]]]:
+        return {
+            operation: {
+                phase: list(values)
+                for phase, values in sorted(by_phase.items())
+            }
+            for operation, by_phase in self._samples_ms.items()
+        }
 
 
 @dataclass(frozen=True)
@@ -126,6 +204,30 @@ BASELINE_WORKLOAD = WorkloadSpec(
     stock_count=4,
 )
 
+WORKLOAD_96_SINGLE = WorkloadSpec(
+    plate_name="shallow-384_well_plate",
+    plate_rows=16,
+    plate_columns=24,
+    well_ids=_serpentine_wells(("A", "B", "C", "D"), 24),
+    stock_count=1,
+    workload_id=WORKLOAD_96_SINGLE_ID,
+)
+
+WORKLOAD_384_SINGLE = WorkloadSpec(
+    plate_name="shallow-384_well_plate",
+    plate_rows=16,
+    plate_columns=24,
+    well_ids=_serpentine_wells(tuple("ABCDEFGHIJKLMNOP"), 24),
+    stock_count=1,
+    workload_id=WORKLOAD_384_SINGLE_ID,
+)
+
+WORKLOAD_CATALOG = {
+    WORKLOAD_96_SINGLE.workload_id: WORKLOAD_96_SINGLE,
+    BASELINE_WORKLOAD.workload_id: BASELINE_WORKLOAD,
+    WORKLOAD_384_SINGLE.workload_id: WORKLOAD_384_SINGLE,
+}
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -144,6 +246,39 @@ def _timed(call: Callable[[], Any]) -> tuple[Any, float]:
     result = call()
     elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000.0
     return result, elapsed_ms
+
+
+def _quartile_growth(values: list[float]) -> dict[str, Any]:
+    if not values:
+        raise ValueError("quartile growth requires at least one sample")
+    quartile_count = max(1, len(values) // 4)
+    first = values[:quartile_count]
+    last = values[-quartile_count:]
+    first_mean = statistics.fmean(first)
+    last_mean = statistics.fmean(last)
+    return {
+        "quartile_completion_count": quartile_count,
+        "first_quartile_ms": _distribution(first),
+        "last_quartile_ms": _distribution(last),
+        "first_quartile_mean_ms": first_mean,
+        "last_quartile_mean_ms": last_mean,
+        "last_minus_first_mean_ms": last_mean - first_mean,
+        "last_to_first_mean_ratio": (
+            last_mean / first_mean if first_mean else 0.0
+        ),
+    }
+
+
+def _capture_file_sizes(experiment_dir: Path) -> dict[str, int]:
+    sizes: dict[str, int] = {}
+    for name in ("progress.json", "execution_resume.json"):
+        path = experiment_dir / name
+        if not path.is_file():
+            raise WorkloadInvariantError(
+                f"expected persistence file is unavailable: {name}"
+            )
+        sizes[name] = path.stat().st_size
+    return sizes
 
 
 def _stock_rows(stock_count: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -343,7 +478,12 @@ def _validate_completed_workload(
     }
 
 
-def _execute_workload(spec: WorkloadSpec, experiment_dir: Path) -> dict[str, Any]:
+def _execute_workload(
+    spec: WorkloadSpec,
+    experiment_dir: Path,
+    *,
+    operation_hook: Callable[[str, int, int], None] | None = None,
+) -> dict[str, Any]:
     cpu_started = time.process_time_ns()
     run_started = time.perf_counter_ns()
     _create_prepared_bundle(experiment_dir, spec)
@@ -355,55 +495,89 @@ def _execute_workload(spec: WorkloadSpec, experiment_dir: Path) -> dict[str, Any
 
     samples = {phase: [] for phase in PHASE_NAMES}
     expected_sequences: list[int] = []
+    initial_sizes = _capture_file_sizes(experiment_dir)
+    file_size_samples = {
+        name: [size] for name, size in initial_sizes.items()
+    }
+    io_observer = PersistenceIoObserver()
     sequence = 1
-    for stock_index, stock in enumerate(plan.stocks, start=1):
-        for well_id in spec.well_ids:
-            total_started = time.perf_counter_ns()
-            intent_id, elapsed = _timed(
-                lambda well_id=well_id, stock=stock, stock_index=stock_index: (
-                    experiment.begin_execution_print_intent(
-                        well_id=well_id,
-                        stock_id=stock.stock_id,
-                        commanded_droplets=spec.target_dispenses,
-                        printer_head_id=f"virtual-head-{stock_index}",
+    completion_index = 0
+
+    def timed_phase(name: str, call: Callable[[], Any]) -> tuple[Any, float]:
+        def invoke():
+            if operation_hook is not None:
+                operation_hook(name, completion_index, spec.completion_count)
+            return call()
+
+        with io_observer.phase(name):
+            return _timed(invoke)
+
+    with io_observer.installed():
+        for stock_index, stock in enumerate(plan.stocks, start=1):
+            for well_id in spec.well_ids:
+                completion_index += 1
+                total_started = time.perf_counter_ns()
+                intent_id, elapsed = timed_phase(
+                    "begin_intent",
+                    lambda well_id=well_id, stock=stock, stock_index=stock_index: (
+                        experiment.begin_execution_print_intent(
+                            well_id=well_id,
+                            stock_id=stock.stock_id,
+                            commanded_droplets=spec.target_dispenses,
+                            printer_head_id=f"virtual-head-{stock_index}",
+                        )
+                    ),
+                )
+                samples["begin_intent"].append(elapsed)
+                if not intent_id:
+                    raise WorkloadInvariantError(
+                        "durable execution intent was not created"
                     )
-                )
-            )
-            samples["begin_intent"].append(elapsed)
-            if not intent_id:
-                raise WorkloadInvariantError("durable execution intent was not created")
 
-            _, elapsed = _timed(
-                lambda intent_id=intent_id, sequence=sequence: (
-                    experiment.attach_execution_print_command(intent_id, sequence)
+                _, elapsed = timed_phase(
+                    "attach_sequence",
+                    lambda intent_id=intent_id, sequence=sequence: (
+                        experiment.attach_execution_print_command(intent_id, sequence)
+                    ),
                 )
-            )
-            samples["attach_sequence"].append(elapsed)
-            expected_sequences.append(sequence)
-            sequence += 1
+                samples["attach_sequence"].append(elapsed)
+                expected_sequences.append(sequence)
+                sequence += 1
 
-            well = model.well_plate.get_well(well_id)
-            if well is None:
-                raise WorkloadInvariantError(f"runtime well {well_id!r} is unavailable")
-            _, elapsed = _timed(
-                lambda well=well, stock=stock: well.record_stock_print(
-                    stock.stock_id,
-                    spec.target_dispenses,
+                well = model.well_plate.get_well(well_id)
+                if well is None:
+                    raise WorkloadInvariantError(
+                        f"runtime well {well_id!r} is unavailable"
+                    )
+                _, elapsed = timed_phase(
+                    "update_runtime",
+                    lambda well=well, stock=stock: well.record_stock_print(
+                        stock.stock_id,
+                        spec.target_dispenses,
+                    ),
                 )
-            )
-            samples["update_runtime"].append(elapsed)
+                samples["update_runtime"].append(elapsed)
 
-            _, elapsed = _timed(experiment.create_progress_file)
-            samples["write_progress"].append(elapsed)
-            _, elapsed = _timed(
-                lambda intent_id=intent_id: (
-                    experiment.complete_execution_print_intent(intent_id)
+                _, elapsed = timed_phase(
+                    "write_progress",
+                    experiment.create_progress_file,
                 )
-            )
-            samples["complete_intent"].append(elapsed)
-            samples["well_total"].append(
-                (time.perf_counter_ns() - total_started) / 1_000_000.0
-            )
+                samples["write_progress"].append(elapsed)
+                _, elapsed = timed_phase(
+                    "complete_intent",
+                    lambda intent_id=intent_id: (
+                        experiment.complete_execution_print_intent(intent_id)
+                    ),
+                )
+                samples["complete_intent"].append(elapsed)
+                samples["well_total"].append(
+                    (time.perf_counter_ns() - total_started) / 1_000_000.0
+                )
+
+                # File-size observation is deliberately outside well_total timing.
+                current_sizes = _capture_file_sizes(experiment_dir)
+                for name, size in current_sizes.items():
+                    file_size_samples[name].append(size)
 
     validation = _validate_completed_workload(
         model,
@@ -417,6 +591,9 @@ def _execute_workload(spec: WorkloadSpec, experiment_dir: Path) -> dict[str, Any
         "phase_statistics_ms": {
             phase: _distribution(values) for phase, values in samples.items()
         },
+        "quartile_growth": _quartile_growth(samples["well_total"]),
+        "file_size_samples_bytes": file_size_samples,
+        "durable_io_samples_ms": io_observer.snapshot(),
         "validation": validation,
     }
 
@@ -429,6 +606,85 @@ def _empty_metrics() -> dict[str, dict[str, Any]]:
         "persistence": {"status": "not_available", "values": {}},
         "resources": {"status": "not_available", "values": {}},
     }
+
+
+def _aggregate_file_growth(
+    measured: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    file_names = sorted(
+        {
+            name
+            for run in measured
+            for name in run["file_size_samples_bytes"]
+        }
+    )
+    aggregate: dict[str, dict[str, Any]] = {}
+    for name in file_names:
+        run_rows = []
+        for run in measured:
+            samples = list(run["file_size_samples_bytes"][name])
+            run_rows.append(
+                {
+                    "run_index": run.get("run_index"),
+                    "sample_count": len(samples),
+                    "initial_size_bytes": samples[0],
+                    "final_size_bytes": samples[-1],
+                    "growth_bytes": samples[-1] - samples[0],
+                    "linear_slope_bytes_per_completion": linear_slope(samples),
+                }
+            )
+        aggregate[name] = {
+            "initial_size_bytes": _distribution(
+                [row["initial_size_bytes"] for row in run_rows]
+            ),
+            "final_size_bytes": _distribution(
+                [row["final_size_bytes"] for row in run_rows]
+            ),
+            "growth_bytes": _distribution(
+                [row["growth_bytes"] for row in run_rows]
+            ),
+            "linear_slope_bytes_per_completion": _distribution(
+                [row["linear_slope_bytes_per_completion"] for row in run_rows]
+            ),
+            "runs": run_rows,
+        }
+    return aggregate
+
+
+def _aggregate_durable_io(
+    measured: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    operations = ("fsync", "atomic_replace")
+    aggregate: dict[str, dict[str, Any]] = {}
+    for operation in operations:
+        phases = sorted(
+            {
+                phase
+                for run in measured
+                for phase in run["durable_io_samples_ms"].get(operation, {})
+            }
+        )
+        by_phase = {
+            phase: [
+                sample
+                for run in measured
+                for sample in run["durable_io_samples_ms"]
+                .get(operation, {})
+                .get(phase, [])
+            ]
+            for phase in phases
+        }
+        all_samples = [
+            sample for values in by_phase.values() for sample in values
+        ]
+        aggregate[operation] = {
+            "overall": _distribution(all_samples),
+            "by_phase": {
+                phase: _distribution(values)
+                for phase, values in by_phase.items()
+            },
+        }
+    return aggregate
 
 
 def _aggregate_metrics(
@@ -446,9 +702,37 @@ def _aggregate_metrics(
         for phase in PHASE_NAMES
     }
     well_totals = combined_samples["well_total"]
-    quartile_count = max(1, len(well_totals) // 4)
-    first_quartile = well_totals[:quartile_count]
-    last_quartile = well_totals[-quartile_count:]
+    growth_rows = [
+        {
+            "run_index": run.get("run_index"),
+            **run["quartile_growth"],
+        }
+        for run in measured
+    ]
+    first_quartile = [
+        sample
+        for run in measured
+        for sample in run["samples_ms"]["well_total"][
+            : run["quartile_growth"]["quartile_completion_count"]
+        ]
+    ]
+    last_quartile = [
+        sample
+        for run in measured
+        for sample in run["samples_ms"]["well_total"][
+            -run["quartile_growth"]["quartile_completion_count"] :
+        ]
+    ]
+    growth_ratio = _distribution(
+        [row["last_to_first_mean_ratio"] for row in growth_rows]
+    )
+    growth_delta = _distribution(
+        [row["last_minus_first_mean_ms"] for row in growth_rows]
+    )
+    candidate_regression = bool(
+        growth_ratio["p50"] > GROWTH_RATIO_WARNING_THRESHOLD
+        and growth_delta["p50"] > GROWTH_DELTA_WARNING_THRESHOLD_MS
+    )
     mean_duration = statistics.fmean(duration_values) if duration_values else 0.0
     duration_cv = (
         statistics.pstdev(duration_values) / mean_duration
@@ -488,14 +772,25 @@ def _aggregate_metrics(
                 },
                 "well_total_first_quartile_ms": _distribution(first_quartile),
                 "well_total_last_quartile_ms": _distribution(last_quartile),
-                "well_total_last_to_first_mean_ratio": (
-                    statistics.fmean(last_quartile)
-                    / statistics.fmean(first_quartile)
-                    if first_quartile
-                    and last_quartile
-                    and statistics.fmean(first_quartile)
-                    else 0.0
-                ),
+                "well_total_last_to_first_mean_ratio": growth_ratio["p50"],
+                "well_total_growth_by_run": growth_rows,
+                "well_total_growth_ratio": growth_ratio,
+                "well_total_growth_delta_ms": growth_delta,
+                "growth_assessment": {
+                    "threshold_maturity": "informational",
+                    "ratio_warning_threshold": GROWTH_RATIO_WARNING_THRESHOLD,
+                    "absolute_delta_warning_threshold_ms": (
+                        GROWTH_DELTA_WARNING_THRESHOLD_MS
+                    ),
+                    "observed_median_ratio": growth_ratio["p50"],
+                    "observed_median_delta_ms": growth_delta["p50"],
+                    "candidate_regression": candidate_regression,
+                    "classification_effect": (
+                        "warning" if candidate_regression else "pass"
+                    ),
+                },
+                "file_growth": _aggregate_file_growth(measured),
+                "durable_io_statistics_ms": _aggregate_durable_io(measured),
                 "runs": measured,
             },
         },
@@ -561,14 +856,18 @@ def _base_report(
         "classification": {
             "status": "pass",
             "threshold_maturity": "informational",
-            "reasons": ["characterization completed; no performance gate evaluated"],
+            "reasons": [
+                "persistence benchmark completed without candidate growth warning; "
+                "no acceptance gate evaluated"
+            ],
         },
         "limitations": [
             "No Qt event loop or real widget is exercised.",
             "No Controller, command queue, transport, serial framing, MCU, or hardware is exercised.",
             "The workload is intentionally unpaced and does not model physical dispense time.",
-            "Peak resident memory and operating-system I/O byte counters are not collected in Slice 0.",
-            "A pass means the characterization and durability invariants completed; it is not performance acceptance.",
+            "Peak resident memory and operating-system I/O byte counters are not collected.",
+            "Durable I/O timings include the small overhead of the synchronous observation wrapper.",
+            "A pass or warning means the benchmark and durability invariants completed; it is not performance acceptance.",
         ],
     }
 
@@ -576,10 +875,15 @@ def _base_report(
 def _write_summary(path: Path, report: dict[str, Any]) -> None:
     persistence = report["metrics"]["persistence"]["values"]
     lines = [
-        "LabCraft execution persistence characterization",
+        "LabCraft execution persistence microbenchmark",
         f"Classification: {report['classification']['status']} "
         f"({report['classification']['threshold_maturity']})",
         f"Run ID: {report['run']['run_id']}",
+        f"Workload: {report['workload'].get('workload_id')}",
+        f"Assigned wells / stocks / completions: "
+        f"{report['workload'].get('assigned_wells')} / "
+        f"{report['workload'].get('stock_count')} / "
+        f"{report['workload'].get('lifecycle_completions')}",
         f"Commit: {report['source'].get('git_commit') or 'unavailable'}",
         f"Dirty worktree: {report['source'].get('dirty_worktree')}",
         f"Environment: Python {report['environment']['python_version']}, "
@@ -590,6 +894,7 @@ def _write_summary(path: Path, report: dict[str, Any]) -> None:
     if persistence:
         run_stats = persistence["run_duration_ms"]
         well_stats = persistence["phase_statistics_ms"]["well_total"]
+        growth = persistence.get("growth_assessment", {})
         lines.extend(
             [
                 f"Measured runs: {report['run']['measured_runs']}",
@@ -601,10 +906,27 @@ def _write_summary(path: Path, report: dict[str, Any]) -> None:
                 f"{well_stats['p99']:.3f} / {well_stats['maximum']:.3f}",
                 f"Last/first quartile mean ratio: "
                 f"{persistence['well_total_last_to_first_mean_ratio']:.4f}",
+                f"Median last-first quartile delta ms: "
+                f"{growth.get('observed_median_delta_ms', 0.0):.3f}",
+                f"Candidate growth detected: "
+                f"{growth.get('candidate_regression', False)}",
                 f"Run duration coefficient of variation: "
                 f"{persistence['run_duration_coefficient_of_variation']:.4f}",
             ]
         )
+        durable_io = persistence.get("durable_io_statistics_ms", {})
+        lines.append(
+            "Durable fsync / atomic replace calls: "
+            f"{durable_io.get('fsync', {}).get('overall', {}).get('count', 0)} / "
+            f"{durable_io.get('atomic_replace', {}).get('overall', {}).get('count', 0)}"
+        )
+        for name, values in persistence.get("file_growth", {}).items():
+            growth_bytes = values.get("growth_bytes", {})
+            lines.append(
+                f"{name} median/final growth bytes: "
+                f"{growth_bytes.get('p50', 0.0):.1f} / "
+                f"{values.get('final_size_bytes', {}).get('p50', 0.0):.1f}"
+            )
     for reason in report["classification"]["reasons"]:
         lines.append(f"Reason: {reason}")
     lines.append("This report is informational and does not establish acceptance.")
@@ -618,6 +940,7 @@ def run_characterization(
     measured_runs: int = 5,
     keep_workload_artifacts: str = "on-failure",
     spec: WorkloadSpec = BASELINE_WORKLOAD,
+    operation_hook: Callable[[str, int, int], None] | None = None,
 ) -> tuple[int, Path]:
     if warmup_runs < 0:
         raise ValueError("warmup_runs must be non-negative")
@@ -633,7 +956,7 @@ def run_characterization(
     directory_stamp = started_at.replace("-", "").replace(":", "").replace(".", "")
     directory_stamp = directory_stamp.replace("+0000", "Z")
     short_commit = identity["source"].get("git_short_commit") or "nogit"
-    run_dir = Path(output_root).resolve() / WORKLOAD_ID / (
+    run_dir = Path(output_root).resolve() / spec.workload_id / (
         f"{directory_stamp}_{short_commit}"
     )
     run_dir.mkdir(parents=True, exist_ok=False)
@@ -666,7 +989,14 @@ def run_characterization(
                 # Keep CLI output bounded while preserving the write call itself.
                 with open(os.devnull, "w", encoding="utf-8") as output_sink:
                     with contextlib.redirect_stdout(output_sink):
-                        result = _execute_workload(spec, workload_dir)
+                        if operation_hook is None:
+                            result = _execute_workload(spec, workload_dir)
+                        else:
+                            result = _execute_workload(
+                                spec,
+                                workload_dir,
+                                operation_hook=operation_hook,
+                            )
                 if keep_workload_artifacts == "always":
                     workloads_dir.mkdir(exist_ok=True)
                     retained = workloads_dir / workload_name
@@ -708,6 +1038,23 @@ def run_characterization(
     finally:
         if measured:
             report["metrics"] = _aggregate_metrics(measured, spec)
+            growth = report["metrics"]["persistence"]["values"].get(
+                "growth_assessment",
+                {},
+            )
+            if exit_code == 0 and growth.get("candidate_regression"):
+                report["classification"] = {
+                    "status": "warning",
+                    "threshold_maturity": "informational",
+                    "reasons": [
+                        "candidate persistence growth detected: median last/first "
+                        f"quartile ratio {growth['observed_median_ratio']:.4f} "
+                        f"(>{growth['ratio_warning_threshold']:.2f}) and median "
+                        f"delta {growth['observed_median_delta_ms']:.3f} ms "
+                        f"(>{growth['absolute_delta_warning_threshold_ms']:.1f} ms); "
+                        "no acceptance gate evaluated"
+                    ],
+                }
         if workloads_dir.exists() and not any(workloads_dir.iterdir()):
             workloads_dir.rmdir()
         report["run"]["ended_at_utc"] = _utc_now()
@@ -739,6 +1086,12 @@ def _parser() -> argparse.ArgumentParser:
         default=DEFAULT_OUTPUT_ROOT,
         help="Generated report root (default: verification_reports/virtual_workflows).",
     )
+    parser.add_argument(
+        "--workload",
+        choices=sorted(WORKLOAD_CATALOG),
+        default=WORKLOAD_ID,
+        help=f"Versioned workload ID (default: {WORKLOAD_ID}).",
+    )
     parser.add_argument("--warmup-runs", type=int, default=1)
     parser.add_argument("--measured-runs", type=int, default=5)
     parser.add_argument(
@@ -757,6 +1110,7 @@ def main(argv: list[str] | None = None) -> int:
             warmup_runs=args.warmup_runs,
             measured_runs=args.measured_runs,
             keep_workload_artifacts=args.keep_workload_artifacts,
+            spec=WORKLOAD_CATALOG[args.workload],
         )
     except (OSError, ValueError) as exc:
         print(f"characterization setup failed: {exc}", file=sys.stderr)

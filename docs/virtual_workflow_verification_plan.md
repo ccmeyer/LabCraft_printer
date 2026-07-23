@@ -155,7 +155,7 @@ Before proceeding to the next slice:
 | --- | --- | --- | --- |
 | 0. Baseline, report contract, and safety boundaries | `verified` | Characterize current behavior and freeze interfaces | Reproducible baseline artifacts recorded |
 | 1. Metrics library and Qt event-loop probe | `verified` | Deterministic measurement and JSON reporting | Probe detects injected stalls without hardware |
-| 2. Execution persistence microbenchmark | `not_started` | Repeated progress/resume/checkpoint workload | 96/384-well cost and growth reported |
+| 2. Execution persistence microbenchmark | `verified` | Repeated progress/resume/checkpoint workload | 96/384-well cost and growth reported |
 | 3. Safe application construction seam | `not_started` | Build real app components with explicit safe dependencies | App launches with no hardware access |
 | 4. In-process simulated machine | `not_started` | Command lifecycle and machine-state simulation | Controller command sequences complete deterministically |
 | 5. Real-UI print-array scenario | `not_started` | End-to-end Qt print workflow with real persistence | 96-well scenario completes with responsiveness report |
@@ -577,7 +577,7 @@ Completion record:
 
 ## Slice 2: Execution Persistence Microbenchmark
 
-Status: `not_started`
+Status: `verified`
 
 Goal:
 
@@ -598,12 +598,28 @@ Scope:
 - first/last quartile growth comparison;
 - checkpoint/progress file size reporting.
 
-Likely files touched:
+Files in this slice:
 
-- `tools/virtual_workflows/scenarios.py` or a focused persistence workload module
+- `tools/characterize_execution_persistence.py`
+- `tests/test_execution_persistence_characterization.py`
 - `tests/performance/test_execution_persistence_benchmark.py`
-- fixture data/builders under `tests/performance/`
-- report schema/docs if new metrics are required
+- `docs/virtual_workflow_verification_plan.md`
+- `docs/virtual_workflow_report_schema.md`
+- `README.md`
+
+Implementation decisions:
+
+- retain `tools/characterize_execution_persistence.py` as the supported Slice 0
+  compatibility CLI rather than creating the broader scenario runner early;
+- preserve `execution_persistence_v1` as the default 96-well/four-stock
+  workload and add targeted 96-well/single-stock and
+  384-well/single-stock workloads;
+- keep performance classification informational: candidate growth emits a
+  warning with exit code 0, while correctness and durability failures exit 2;
+- detect candidate growth only when the median per-run last/first quartile
+  ratio exceeds 1.25 and the median absolute increase exceeds 10 ms;
+- keep the report envelope at schema version 1 and add only compatible nested
+  workload and persistence metrics.
 
 Focused tests:
 
@@ -631,7 +647,69 @@ Rollback:
 
 Completion record:
 
-- Not started.
+- Date: 2026-07-23.
+- Files changed:
+  - `tools/characterize_execution_persistence.py`;
+  - `tests/test_execution_persistence_characterization.py`;
+  - `tests/performance/test_execution_persistence_benchmark.py`;
+  - `docs/virtual_workflow_verification_plan.md`;
+  - `docs/virtual_workflow_report_schema.md`;
+  - `README.md`.
+- Implemented three selectable deterministic workloads, per-run quartile
+  growth, progress/resume file-growth series, real `fsync` and atomic-replace
+  observation by phase, and warning-only candidate growth classification.
+  The original `execution_persistence_v1` CLI default and schema-v1 envelope
+  remain compatible.
+- Hardware/durability evidence:
+  - no application or firmware file changed;
+  - the benchmark continues to construct only `Model.__new__`,
+    `ExperimentModel`, and `WellPlate`;
+  - the synchronous observer always calls and restores the original
+    `os.fsync` and `os.replace`, including injected failure;
+  - every measured completion produced one begin-intent, attach-sequence,
+    progress-write, and complete-intent durable write;
+  - all final checkpoints were clean, all command sequences were unique and
+    increasing, targets exactly matched progress, and all authoritative bundles
+    validated.
+- Focused command:
+  `.\env\Scripts\python.exe -m pytest -q --basetemp tests\.slice2_focused_tmp tests\performance\test_execution_persistence_benchmark.py tests\test_execution_persistence_characterization.py tests\test_execution_plan.py tests\test_execution_resume_store.py tests\test_authoritative_execution_load.py tests\test_execution_lifecycle_hardening.py tests\test_initial_execution_plan.py tests\test_initial_execution_plan_integration.py`;
+  result: 109 passed in 4.34 s. The repository-local temporary directory was
+  removed after the run.
+- Same-host environment: Python 3.13.14, real PySide6 6.11.1, and Qt 6.11.1.
+  Each workload used one warm-up and three measured runs:
+  - `execution_persistence_96_single_v1`: pass; 96 completions; mean run
+    1,233.130 ms; per-completion p95 14.723 ms; duration CV 0.0088; median
+    growth ratio 1.4057 and delta 4.139 ms, below the absolute warning floor;
+    artifact
+    `verification_reports/virtual_workflows/execution_persistence_96_single_v1/20260723T205206146265Z_9344e3ec5aca/`;
+  - `execution_persistence_v1`: informational warning; 384 completions; mean
+    run 9,780.238 ms; per-completion p95 34.980 ms; duration CV 0.0080; median
+    growth ratio 2.0284 and delta 17.441 ms; artifact
+    `verification_reports/virtual_workflows/execution_persistence_v1/20260723T205223148285Z_9344e3ec5aca/`;
+  - `execution_persistence_384_single_v1`: informational warning; 384
+    completions; mean run 12,477.742 ms; per-completion p95 41.628 ms; duration
+    CV 0.0051; median growth ratio 1.7214 and delta 17.119 ms; artifact
+    `verification_reports/virtual_workflows/execution_persistence_384_single_v1/20260723T205314942368Z_9344e3ec5aca/`.
+- The 96-completion report recorded 97 file-size samples per file and 1,152
+  observed calls each to `fsync` and atomic replace. Each 384-completion report
+  recorded 385 samples per file and 4,608 calls per operation across its three
+  measured runs. All three reports and summaries were inspected, validate
+  against schema v1, and are ignored by Git.
+- Full command:
+  `.\env\Scripts\python.exe -m pytest -q --basetemp tests\.slice2_full_tmp`;
+  result: 3,340 passed, 24 skipped, and 38 existing Qt deprecation warnings in
+  367.47 s. The repository-local temporary directory was removed afterward.
+- `py_compile`, CLI help, explicit validation of all three reports,
+  `git check-ignore`, and `git diff --check` passed.
+- Limitations: reports were generated from the intentionally dirty Slice 2
+  implementation worktree; their performance evidence is informational and is
+  not a release baseline. The I/O observer adds small synchronous measurement
+  overhead. No Qt event loop, Controller, queue, protocol, MCU, or physical
+  behavior is measured.
+- Rollback: revert these six benchmark/test/documentation files. No application,
+  firmware, protocol, motion, pressure, or timing rollback is required.
+- Next permitted slice: Slice 3, as a separately reviewed application
+  construction change.
 
 ## Slice 3: Safe Application Construction Seam
 
@@ -1301,6 +1379,8 @@ scope or threshold change only inside implementation commits.
 | 2026-07-23 | 0 | `in_progress` -> `verified` | Added the report contract and hardware-isolated persistence characterization. Focused tests: 226 passed. Full suite: 3,306 passed and 24 skipped. Baseline: five measured runs, 106.301 s mean per run, 275.593 ms mean and 361.991 ms p95 per completion, 1.0818 last/first quartile ratio. Raw report remains ignored. |
 | 2026-07-23 | 1 | `not_started` -> `in_progress` | Starting commit `e0c2860fbc7319d796b0f57fe20c1de3c0584b63` with a clean worktree. Fixed the eight-file boundary, hybrid observer, optional psutil sampling, real-Qt requirement, and continued informational threshold policy. |
 | 2026-07-23 | 1 | `in_progress` -> `verified` | Added shared bounded metrics and a hardware-isolated offscreen Qt probe. Focused tests: 44 passed. Real-Qt probe: 20/20 stalls attributed, service-gap p95 13.074 ms, callback p95 0.0207 ms, and all required stacks/cleanup verified. Slice 0 compatibility passed all 384 completions. Full suite: 3,332 passed and 24 skipped. Raw reports remain ignored and D-008 remains open. |
+| 2026-07-23 | 2 | `not_started` -> `in_progress` | Starting commit `9344e3ec5aca6a514a4bb70860178435cfc29239` with a clean worktree. Call path: prepared fixture -> begin intent -> attach sequence -> update runtime/progress -> complete intent -> authoritative validation. Fixed the six-file boundary, three targeted workloads, real fsync/replace observation, per-run quartile policy, informational warning thresholds, focused/full validation, and benchmark artifact inspection. Safety risks are timing-instrumentation distortion and accidental durability weakening; mitigations are observer restoration tests, real durable calls, no production-file changes, and retained ordering assertions. Rollback is limited to the six benchmark/test/documentation files. |
+| 2026-07-23 | 2 | `in_progress` -> `verified` | Added selectable 96x1, compatible 96x4, and 384x1 persistence workloads with real durable-I/O timing, file growth, and per-run quartile warnings. Focused tests: 109 passed. All three same-host reports validated; 96x1 passed, while both 384-completion workloads emitted informational growth warnings without failing. Full suite: 3,340 passed and 24 skipped. Reports remain ignored; no production or firmware file changed. |
 
 For every update, include:
 
@@ -1316,6 +1396,6 @@ For every update, include:
 
 ## Current Next Action
 
-Slice 1 is verified. The next permitted work is a separately approved Slice 2.
-Do not change the production freeze watchdog or begin the simulation
-construction seam in Slice 3 as part of Slice 1.
+Slice 2 is verified. The next permitted work is a separately reviewed Slice 3
+safe application construction seam. Do not include the simulated machine from
+Slice 4 or the real-UI scenario from Slice 5 in that construction change.

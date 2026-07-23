@@ -70,9 +70,9 @@ Slow, insulated offline analysis-pipeline tests are skipped by default. Run them
 .\env\Scripts\python.exe -m pytest -q --run-analysis-pipeline tests\test_plate_reader_analysis.py
 ```
 
-## Execution Persistence Characterization
+## Execution Persistence Microbenchmark
 
-The Slice 0 characterization measures the durable execution path that writes
+The Slice 0/2 persistence tool measures the durable execution path that writes
 print intent, progress, and resume state and then reloads the authoritative
 bundle. It does not launch the UI or construct the Controller, communication
 stack, serial port, cameras, GPIO, balance, MCU, or firmware updater.
@@ -84,8 +84,8 @@ Prerequisites:
   although this Slice 0 workload does not run a Qt event loop;
 - no printer or MCU connection is required.
 
-Run the versioned 384-completion workload with one warm-up and five measured
-runs:
+The default remains the original versioned 384-completion workload (96 wells
+and four stock-array passes) with one warm-up and five measured runs:
 
 ```powershell
 .\env\Scripts\python.exe tools\characterize_execution_persistence.py
@@ -99,8 +99,33 @@ verification_reports/virtual_workflows/execution_persistence_v1/
 
 Each run writes `report.json` and `summary.txt`. Raw reports are local,
 machine-specific, and ignored by Git. A passing Slice 0 result means the
-workload and durability invariants completed; all performance measurements are
-informational and are not acceptance thresholds.
+workload and durability invariants completed. A warning means provisional
+within-run growth was observed, but it is still informational and returns exit
+code 0. Neither result is a performance acceptance threshold.
+
+Select one of the three targeted Slice 2 workloads:
+
+```powershell
+# 96 wells, one stock, 96 lifecycle completions
+.\env\Scripts\python.exe tools\characterize_execution_persistence.py `
+  --workload execution_persistence_96_single_v1
+
+# Original default: 96 wells, four stocks, 384 lifecycle completions
+.\env\Scripts\python.exe tools\characterize_execution_persistence.py `
+  --workload execution_persistence_v1
+
+# Full 384-well plate, one stock, 384 lifecycle completions
+.\env\Scripts\python.exe tools\characterize_execution_persistence.py `
+  --workload execution_persistence_384_single_v1
+```
+
+Each workload has its own directory beneath
+`verification_reports/virtual_workflows/`. Reports include per-phase and
+per-completion timing, per-run first/last-quartile growth, progress/resume file
+growth, real `fsync` and atomic-replace timings, final authoritative validation,
+and process CPU time. Candidate growth is reported only when the median
+last/first ratio is greater than 1.25 and the median absolute increase is
+greater than 10 ms.
 
 Useful options:
 
@@ -121,6 +146,10 @@ virtual environment and verify PySide6 with:
 ```powershell
 .\env\Scripts\python.exe -c "import PySide6; from PySide6.QtCore import qVersion; print(PySide6.__version__, qVersion(), PySide6.__file__)"
 ```
+
+Generate and compare performance evidence only on the same host and compatible
+Python/Qt environment. Raw reports copied from a different computer are
+historical evidence, not an accepted baseline.
 
 ## Qt Event-Loop Verification Probe
 
