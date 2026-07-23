@@ -70,6 +70,58 @@ Slow, insulated offline analysis-pipeline tests are skipped by default. Run them
 .\env\Scripts\python.exe -m pytest -q --run-analysis-pipeline tests\test_plate_reader_analysis.py
 ```
 
+## Execution Persistence Characterization
+
+The Slice 0 characterization measures the durable execution path that writes
+print intent, progress, and resume state and then reloads the authoritative
+bundle. It does not launch the UI or construct the Controller, communication
+stack, serial port, cameras, GPIO, balance, MCU, or firmware updater.
+
+Prerequisites:
+
+- the repository `env` virtual environment and normal application dependencies;
+- real PySide6 is recommended so the report records the representative binding,
+  although this Slice 0 workload does not run a Qt event loop;
+- no printer or MCU connection is required.
+
+Run the versioned 384-completion workload with one warm-up and five measured
+runs:
+
+```powershell
+.\env\Scripts\python.exe tools\characterize_execution_persistence.py
+```
+
+Reports are written beneath:
+
+```text
+verification_reports/virtual_workflows/execution_persistence_v1/
+```
+
+Each run writes `report.json` and `summary.txt`. Raw reports are local,
+machine-specific, and ignored by Git. A passing Slice 0 result means the
+workload and durability invariants completed; all performance measurements are
+informational and are not acceptance thresholds.
+
+Useful options:
+
+```powershell
+.\env\Scripts\python.exe tools\characterize_execution_persistence.py `
+  --output-root verification_reports\virtual_workflows `
+  --warmup-runs 1 `
+  --measured-runs 5 `
+  --keep-workload-artifacts on-failure
+```
+
+Exit codes are `0` for a valid informational run, `2` for a workload,
+durability, or safety failure, and `3` for setup/reporting failure. On failure,
+inspect `failure_traceback.txt` and the retained workload directory named in
+`report.json`. If Qt is reported as `stub` or `missing`, use the repository
+virtual environment and verify PySide6 with:
+
+```powershell
+.\env\Scripts\python.exe -c "import PySide6; from PySide6.QtCore import qVersion; print(PySide6.__version__, qVersion(), PySide6.__file__)"
+```
+
 ## Droplet Imager Optics Calibration
 
 The standard optics-calibration workflow uses a guided load/approach wizard, then reuses the imager `Optics` tab for manual focus, image capture, scale-bar analysis, and applying the micrometer-per-pixel and camera motion-conversion factors. The wizard does not require a printer head, print profile, or regulated pressure, and it does not change firmware or the device protocol.
