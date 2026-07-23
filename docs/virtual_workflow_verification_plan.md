@@ -157,7 +157,7 @@ Before proceeding to the next slice:
 | 1. Metrics library and Qt event-loop probe | `verified` | Deterministic measurement and JSON reporting | Probe detects injected stalls without hardware |
 | 2. Execution persistence microbenchmark | `verified` | Repeated progress/resume/checkpoint workload | 96/384-well cost and growth reported |
 | 3. Safe application construction seam | `verified` | Build real app components with explicit safe dependencies | App launches with no hardware access |
-| 4. In-process simulated machine | `not_started` | Command lifecycle and machine-state simulation | Controller command sequences complete deterministically |
+| 4. In-process simulated machine | `verified` | Command lifecycle and machine-state simulation | Controller command sequences complete deterministically |
 | 5. Real-UI print-array scenario | `not_started` | End-to-end Qt print workflow with real persistence | 96-well scenario completes with responsiveness report |
 | 6. Regression comparison and performance gates | `not_started` | Baselines, budgets, comparison, exit policy | Stable candidate/baseline classification |
 | 7. Target-Pi software-in-the-loop lane | `not_started` | Run the same scenario on Pi CPU/storage | Pi report produced without MCU/hardware setup |
@@ -826,7 +826,7 @@ Completion record:
 
 ## Slice 4: In-Process Simulated Machine
 
-Status: `not_started`
+Status: `verified`
 
 Goal:
 
@@ -890,7 +890,43 @@ Rollback:
 
 Completion record:
 
-- Not started.
+- Implemented the isolated `simulation` package with immutable timing/fault
+  configuration, explicit factory selection, app-shaped state/status payloads,
+  a four-command accepted lookahead window, bounded lifecycle histories, and
+  owned single-shot Qt timers. No production Machine, transport, camera,
+  balance, GPIO, firmware, or protocol module is imported.
+- Supported the initial Controller command surface: simulated connection,
+  motor/home state, pressure targets/regulation, absolute movement,
+  acceleration/speed, print profile, waits, duration-based dispense, gripper,
+  sequence pause, immediate pause/resume, pause-after, confirmed clear,
+  disconnect/reset, and deterministic instance-local faults. Unsupported
+  operations emit stable errors and leave the queue/state unchanged.
+- The official simulator was constructed twice through the real Slice 3
+  composition seam with real Model, Controller, and MainWindow objects. Both
+  runs connected through the `SIMULATED` sentinel and completed representative
+  motor, homing, regulation, absolute-motion, wait, and dispense callbacks.
+- Focused validation passed 182 tests with 70 existing Qt chart deprecation
+  warnings:
+  `tests/test_simulated_machine.py`,
+  `tests/test_safe_application_construction.py`,
+  Controller sequence/array guards, command queue, MachineModel, homing,
+  clear-queue, and absolute-motion regressions.
+- Full offscreen validation passed 3,366 tests with 24 skipped and 108 existing
+  Qt deprecation warnings in 432.44 seconds on Python 3.13.14, PySide6 6.11.1,
+  and Qt 6.11.1.
+- Static and subprocess import checks confirmed that importing the simulator
+  does not load `Machine_FreeRTOS`, serial, RPi/GPIO, or protocol code.
+  `git diff --check` passed, and all repository-local pytest temporary
+  directories were removed after validation. Slice 4 creates no retained
+  report artifacts.
+- Limitations: this simulator verifies the application contract and Qt
+  scheduling only. It does not model firmware frames, motion physics,
+  collision safety, pressure response, camera analysis, balance behavior, or
+  droplet quality. Those claims continue to require protocol simulation or
+  prepared HIL.
+- Rollback is removal of the isolated simulator, focused tests, and
+  documentation additions. The verified Slice 3 construction seam remains
+  usable and no firmware or production-machine rollback is required.
 
 ## Slice 5: Real-UI Print-Array Scenario
 
@@ -1418,7 +1454,7 @@ Mitigation:
 | D-004 | decided | Use both absolute responsiveness and relative same-host regression criteria |
 | D-005 | decided | Run performance-sensitive scenarios on Windows and later on the Pi without an MCU |
 | D-006 | decided | Write generated reports under ignored `verification_reports/virtual_workflows/`; retain them until manually removed, with no automatic deletion |
-| D-007 | open | Exact simulation profile/factory interface |
+| D-007 | decided | Keep `simulation_dependencies` fail-closed and require the explicit official `make_simulated_machine_factory(config)`; use Qt timers with a positive speed multiplier so acceleration retains real event-loop scheduling |
 | D-008 | open | Accepted event-loop latency budgets after characterization |
 | D-009 | decided | Keep raw machine-specific reports local and ignored; commit summarized evidence, and later generate reference reports from a designated commit on the comparison host |
 | D-010 | open | Shared skill location: developer-local skill versus versioned plugin/package |
@@ -1440,6 +1476,8 @@ scope or threshold change only inside implementation commits.
 | 2026-07-23 | 2 | `in_progress` -> `verified` | Added selectable 96x1, compatible 96x4, and 384x1 persistence workloads with real durable-I/O timing, file growth, and per-run quartile warnings. Focused tests: 109 passed. All three same-host reports validated; 96x1 passed, while both 384-completion workloads emitted informational growth warnings without failing. Full suite: 3,340 passed and 24 skipped. Reports remain ignored; no production or firmware file changed. |
 | 2026-07-23 | 3 | `not_started` -> `in_progress` | Starting commit `79b9e453bfc38b1fb5791911163a3db699aa2eef` with a clean worktree. Call paths cover production composition, explicit simulation composition, and Controller rejection before physical dependencies. Fixed the application/composition, peripheral injection, storage-root, Controller/View, focused-test, plan, and README boundary. Risks are production startup drift, unintended production-root changes, missed hardware entry points, and leaked Qt workers/timers; mitigations are compatible defaults, lazy imports, layered safety guards, repeated offscreen close tests, and full-suite validation. Rollback is the Slice 3 commit only. |
 | 2026-07-23 | 3 | `in_progress` -> `verified` | Added the shared production/simulation construction seam, isolated roots, fail-closed hardware factories, persistent simulation identity, disabled hardware/update controls, and Controller safety backstops. Focused tests: 254 passed. Final full suite: 3,350 passed and 24 skipped. Repeated real MVC/MainWindow construction and cleanup passed offscreen; all temporary roots were removed. No firmware or protocol file changed. |
+| 2026-07-23 | 4 | `not_started` -> `in_progress` | Starting commit `c62079214765504529cd9035acc650d95f2e50c0` with a clean worktree; Python 3.13.14, PySide6 6.11.1, and Qt 6.11.1. Call paths cover explicit simulation construction, Controller command lifecycle through Qt timers, and pause-after/clear soft-stop coordination. Fixed the seven-file simulator/test/documentation boundary, explicit factory contract, positive Qt speed multiplier, supported command surface, deterministic fault policy, focused/full validation, and no Slice 5 CLI or full-array scenario. Risks are callback reentrancy, false queue-drain reporting, leaked timers, and simulator/firmware drift; mitigations are exactly-once lifecycle tests, real Controller integration, fail-visible unsupported actions, hardware-import traps, and continued HIL requirements. Rollback removes the isolated simulator, tests, and documentation while retaining Slice 3. |
+| 2026-07-23 | 4 | `in_progress` -> `verified` | Added the explicit protocol-free simulator, deterministic Qt lifecycle/timing, app-shaped status, command lookahead, pause/clear/disconnect controls, and fault configuration. Focused tests: 182 passed. The real MVC/MainWindow and representative Controller sequence passed twice offscreen. Full suite: 3,366 passed and 24 skipped in 432.44 seconds. Import traps and diff checks passed; temporary roots were removed and no reports were generated. |
 
 For every update, include:
 
@@ -1455,6 +1493,6 @@ For every update, include:
 
 ## Current Next Action
 
-Slice 3 is verified. The next permitted work is the separately reviewed Slice 4
-in-process simulated machine. Do not begin the real-UI scenario from Slice 5
-inside Slice 4.
+Slice 4 is verified. The next permitted work is the separately reviewed Slice 5
+real-UI print-array scenario. Do not add regression thresholds or comparison
+gates from Slice 6 inside Slice 5.

@@ -9,6 +9,12 @@ from PySide6 import QtCore
 import ApplicationComposition as composition
 import LocalConfig
 from hardware.profile import CURRENT_PROFILE
+from simulation import (
+    SIMULATED_PORT,
+    SimulationConfig,
+    SimulationTimingPolicy,
+    make_simulated_machine_factory,
+)
 
 
 class _SafeCommandQueue(QtCore.QObject):
@@ -130,6 +136,17 @@ def _assert_beneath(path, root):
     resolved_path = Path(path).resolve()
     resolved_root = Path(root).resolve()
     assert resolved_path == resolved_root or resolved_root in resolved_path.parents
+
+
+def _wait_until(qapp, predicate, timeout_ms=5000):
+    deadline = QtCore.QDeadlineTimer(timeout_ms)
+    while not deadline.hasExpired():
+        qapp.processEvents(QtCore.QEventLoop.AllEvents, 5)
+        if predicate():
+            return
+        QtCore.QThread.msleep(1)
+    qapp.processEvents(QtCore.QEventLoop.AllEvents, 5)
+    assert predicate(), "condition did not become true before timeout"
 
 
 def test_simulation_dependencies_create_contained_roots_and_reject_hardware(tmp_path):
@@ -296,6 +313,62 @@ def test_real_components_construct_close_and_show_simulation_identity(
         components.close()
         components.close()
         assert components._closed is True
+
+
+@pytest.mark.parametrize("iteration", range(2))
+def test_official_simulator_constructs_real_components_and_controller_sequence(
+    qapp,
+    tmp_path,
+    iteration,
+):
+    config = SimulationConfig(
+        timing=SimulationTimingPolicy(speed_multiplier=1000.0)
+    )
+    dependencies = composition.simulation_dependencies(
+        tmp_path / f"official-simulator-{iteration}",
+        machine_factory=make_simulated_machine_factory(config),
+    )
+    components = composition.build_application_components(
+        CURRENT_PROFILE,
+        dependencies,
+    )
+    machine = components.machine
+    controller = components.controller
+    model = components.model
+    callbacks = []
+
+    assert machine.connect_board(SIMULATED_PORT)
+    _wait_until(qapp, lambda: model.machine_model.is_connected())
+
+    controller.toggle_motors()
+    controller.home_machine()
+    _wait_until(qapp, machine.check_if_all_completed)
+    assert model.machine_model.motors_are_enabled()
+    assert model.machine_model.motors_are_homed()
+
+    assert controller.toggle_regulation()
+    _wait_until(qapp, machine.check_if_all_completed)
+    assert model.machine_model.regulating_print_pressure is True
+    assert model.machine_model.regulating_refuel_pressure is True
+
+    assert controller.set_absolute_XY(1200, 3400, override=True) is True
+    assert machine.wait_ms(5)
+    assert controller.print_droplets(
+        3,
+        handler=lambda: callbacks.append("dispensed"),
+    )
+    _wait_until(qapp, machine.check_if_all_completed)
+
+    assert callbacks == ["dispensed"]
+    assert model.machine_model.regulating_print_pressure is True
+    assert model.machine_model.regulating_refuel_pressure is True
+    assert model.machine_model.get_current_position_dict()["X"] == 1200
+    assert model.machine_model.get_current_position_dict()["Y"] == 3400
+    assert machine.state.x == 1200
+    assert machine.state.y == 3400
+    assert machine.ser is None
+
+    components.close()
 
 
 def test_production_runtime_does_not_show_simulation_identity(qapp, tmp_path):

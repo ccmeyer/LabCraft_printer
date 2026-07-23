@@ -96,14 +96,61 @@ Prerequisites for offscreen construction tests:
 - the repository `env` virtual environment with real PySide6;
 - `QT_QPA_PLATFORM=offscreen`;
 - a fresh temporary run root;
-- an explicit construction-safe machine implementing the Controller signal
-  surface. The deterministic simulated machine itself is Slice 4 work.
+- an explicit construction-safe machine factory.
+
+Slice 4 provides the repository-owned, protocol-free implementation. It must
+still be selected explicitly:
+
+```python
+from ApplicationComposition import (
+    build_application_components,
+    simulation_dependencies,
+)
+from hardware.profile import CURRENT_PROFILE
+from simulation import (
+    SIMULATED_PORT,
+    SimulationConfig,
+    SimulationTimingPolicy,
+    make_simulated_machine_factory,
+)
+
+config = SimulationConfig(
+    timing=SimulationTimingPolicy(speed_multiplier=100.0),
+)
+dependencies = simulation_dependencies(
+    temporary_run_root,
+    machine_factory=make_simulated_machine_factory(config),
+)
+components = build_application_components(CURRENT_PROFILE, dependencies)
+components.machine.connect_board(SIMULATED_PORT)
+```
+
+Create a `QApplication` before building the components and drive its event loop
+until the asynchronous connection and command callbacks complete. The
+simulator uses owned single-shot Qt timers: requested waits and calculated
+dispense durations advance simulated time, while `speed_multiplier` reduces
+their wall-clock delay. Even accelerated commands retain at least one Qt event
+loop turn.
+
+The initial simulator supports connection through the literal `SIMULATED`
+sentinel, motor and homing state, absolute motion, print/refuel targets and
+regulation, axis acceleration/speed, print profile, waits, dispensing,
+gripper state, pause/resume, pause-after, clear, disconnect, and deterministic
+fault plans. Relative motion, raw protocol frames, serial transports, physical
+cameras, calibration imaging, balance, GPIO/DFU, firmware updates, and physical
+motion/pressure dynamics are intentionally unsupported and fail visibly.
+
+This is an application-contract simulator. Passing its tests does not verify
+firmware behavior, collision safety, physical motion, pressure response,
+camera analysis, or droplet quality. There remains no simulation CLI or
+complete virtual print-array scenario until Slice 5.
 
 Run the focused construction and safety tests:
 
 ```powershell
 $env:QT_QPA_PLATFORM = 'offscreen'
 .\env\Scripts\python.exe -m pytest -q `
+  tests\test_simulated_machine.py `
   tests\test_safe_application_construction.py `
   tests\test_view_window_icon_contract.py `
   tests\test_local_config.py `
