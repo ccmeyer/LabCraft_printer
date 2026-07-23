@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
-import math
 import os
 import shutil
 import statistics
@@ -51,6 +50,7 @@ from tools.virtual_workflows.report import (
     collect_environment_identity,
     write_report_atomic,
 )
+from tools.virtual_workflows.metrics import linear_slope, summarize_samples
 
 
 SCENARIO_NAME = "execution_persistence"
@@ -131,53 +131,11 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _percentile(values: list[float], percentile: float) -> float:
-    if not values:
-        return 0.0
-    ordered = sorted(values)
-    if len(ordered) == 1:
-        return ordered[0]
-    position = (len(ordered) - 1) * percentile
-    lower = math.floor(position)
-    upper = math.ceil(position)
-    if lower == upper:
-        return ordered[lower]
-    fraction = position - lower
-    return ordered[lower] + (ordered[upper] - ordered[lower]) * fraction
-
-
-def _linear_slope(values: list[float]) -> float:
-    count = len(values)
-    if count < 2:
-        return 0.0
-    mean_x = (count - 1) / 2.0
-    mean_y = statistics.fmean(values)
-    denominator = sum((index - mean_x) ** 2 for index in range(count))
-    if denominator == 0:
-        return 0.0
-    return sum(
-        (index - mean_x) * (value - mean_y)
-        for index, value in enumerate(values)
-    ) / denominator
-
-
 def _distribution(values: list[float]) -> dict[str, float | int]:
-    if not values:
-        return {
-            "count": 0,
-            "mean": 0.0,
-            "p50": 0.0,
-            "p95": 0.0,
-            "p99": 0.0,
-            "maximum": 0.0,
-        }
+    summary = summarize_samples(values, bands_ms=())
     return {
-        "count": len(values),
-        "mean": statistics.fmean(values),
-        "p50": _percentile(values, 0.50),
-        "p95": _percentile(values, 0.95),
-        "p99": _percentile(values, 0.99),
-        "maximum": max(values),
+        key: summary[key]
+        for key in ("count", "mean", "p50", "p95", "p99", "maximum")
     }
 
 
@@ -524,7 +482,7 @@ def _aggregate_metrics(
                 "phase_statistics_ms": {
                     phase: {
                         **_distribution(values),
-                        "linear_slope_ms_per_operation": _linear_slope(values),
+                        "linear_slope_ms_per_operation": linear_slope(values),
                     }
                     for phase, values in combined_samples.items()
                 },

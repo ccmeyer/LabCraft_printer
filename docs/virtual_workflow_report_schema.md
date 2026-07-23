@@ -92,8 +92,66 @@ process CPU time, final durable-file sizes, intent count, and final invariant
 results.
 
 Slice 0 reports responsiveness as `not_available`, queue behavior as
-`not_applicable`, and resources as `partial`. Later slices populate those
-groups without changing the envelope.
+`not_applicable`, and resources as `partial`. Slice 1 populates responsiveness
+and resources without changing the envelope.
+
+### Slice 1 responsiveness values
+
+The Qt event-loop probe writes these keys beneath
+`metrics.responsiveness.values`:
+
+- `heartbeat_interval_ms`, `observer_interval_ms`, and
+  `stack_capture_threshold_ms`: configured intervals;
+- `threshold_bands_ms`: descriptive latency bands, currently 25, 50, 100, 250,
+  and 1000 ms;
+- `event_loop_gap_ms`: callback-to-callback service-gap distribution;
+- `scheduling_lateness_ms`: `max(0, service gap - heartbeat interval)`;
+- `probe_callback_cost_ms`: time spent in the heartbeat callback itself;
+- `stall_events`: service gaps strictly greater than the first threshold band,
+  including the greatest-overlap named phase;
+- `stack_captures`: main-thread Python stacks captured by the observer while a
+  gap is above the stack threshold;
+- `injected_stall_checks`: per-run detection and attribution results for the
+  known probe workload;
+- `runs`: bounded raw samples, phase records, retention counts, shutdown state,
+  and resource results for each measured run.
+
+Each distribution contains `count`, `mean`, `p50`, `p95`, `p99`, `maximum`,
+`linear_slope_per_sample`, and `counts_strictly_above_ms`. Percentiles use
+deterministic linear interpolation. A value exactly equal to a threshold is not
+counted above that threshold.
+
+A service gap measures how long the Qt main thread went without servicing the
+probe timer. Lateness subtracts the requested timer interval and therefore
+estimates scheduling delay. Neither metric is rendering-frame time.
+
+Named phase records contain `name`, monotonic start/end nanoseconds,
+`duration_ms`, thread identity, nesting depth, `outcome` (`ok` or `exception`),
+and scenario metadata. A delayed gap is attributed to the completed phase with
+the greatest time overlap; nesting depth breaks equal-overlap ties.
+
+Stack captures contain the capture monotonic timestamp, observed gap,
+active-phase record, main-thread identity, run index, and a formatted Python
+stack string. The daemon observer polls without calling Qt APIs and captures at
+most once per blocked episode. Raw histories report dropped-sample counts when
+their bounded storage is exceeded.
+
+### Slice 1 resource values
+
+The optional process sampler records:
+
+- process CPU-time delta in milliseconds;
+- peak resident-set size in bytes;
+- process read/write byte deltas;
+- maximum thread count;
+- sample and dropped-sample counts;
+- machine-readable availability reasons; and
+- per-run snapshots in the aggregate report.
+
+The group is `measured` when all counters are available, `partial` when only
+some platform counters are available, and `not_available` when `psutil` or a
+process handle cannot be obtained. Resource limitations never abort the Qt
+probe.
 
 ## Qt Identity
 
@@ -117,8 +175,9 @@ verification_reports/virtual_workflows/<workload-id>/<UTC>_<short-commit>/
 ```
 
 The directory is ignored by Git and has no automatic retention. Successful
-Slice 0 runs contain `report.json` and `summary.txt`. Failed runs also contain a
-traceback and retain the failing temporary experiment by default.
+Slice 0 runs contain `report.json` and `summary.txt`. Slice 1 Qt probe runs
+additionally contain `stall_stacks.txt`. Failed runs also contain a traceback;
+Slice 0 retains the failing temporary experiment by default.
 
 Raw machine-specific baselines are not committed. The verification plan records
 the command, environment, aggregate results, limitations, and local artifact

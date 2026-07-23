@@ -122,6 +122,65 @@ virtual environment and verify PySide6 with:
 .\env\Scripts\python.exe -c "import PySide6; from PySide6.QtCore import qVersion; print(PySide6.__version__, qVersion(), PySide6.__file__)"
 ```
 
+## Qt Event-Loop Verification Probe
+
+The Slice 1 probe launches a real PySide6 event loop with the offscreen Qt
+platform and injects named 50, 100, 250, and 350 ms blocking callbacks. It
+measures timer service gaps, scheduling lateness, probe callback overhead,
+phase attribution, main-thread stack capture, and optional process resources.
+It does not construct the application MVC, communications, MCU, or any physical
+interface.
+
+Prerequisites:
+
+- the repository `env` virtual environment;
+- a real PySide6 installation (stubs are rejected);
+- `psutil` for complete resource metrics; missing or unsupported counters are
+  reported without failing the probe;
+- no display server, printer, or MCU connection.
+
+Run one warm-up and five measured offscreen iterations:
+
+```powershell
+.\env\Scripts\python.exe tools\run_qt_event_loop_probe.py
+```
+
+Reports are written beneath:
+
+```text
+verification_reports/virtual_workflows/qt_event_loop_probe_v1/
+```
+
+Each run writes `report.json`, `summary.txt`, and `stall_stacks.txt`. A passing
+result means every deliberate stall was detected and attributed, the expected
+long-stall stack was captured, and the timer and observer shut down cleanly.
+Latency bands and distributions remain informational; they are not application
+acceptance budgets. The offscreen probe measures Python and Qt event-loop
+service, not compositor/GPU rendering, and it is separate from the production
+freeze watchdog.
+
+Useful options:
+
+```powershell
+.\env\Scripts\python.exe tools\run_qt_event_loop_probe.py `
+  --output-root verification_reports\virtual_workflows `
+  --warmup-runs 1 `
+  --measured-runs 5 `
+  --inject-stall-ms 50 100 250 350 `
+  --heartbeat-ms 10 `
+  --stack-capture-ms 250 `
+  --observer-ms 5 `
+  --resource-ms 100
+```
+
+Exit codes are `0` when injected behavior and cleanup are verified, `2` for a
+probe correctness or cleanup failure, and `3` for environment or reporting
+failure. On failure, inspect `failure_traceback.txt`, `summary.txt`, and
+`report.json`. If Qt is reported as `stub` or `missing`, use the repository
+virtual environment and run the PySide6 identity command in the preceding
+section. If Qt cannot initialize a display plugin, set
+`QT_QPA_PLATFORM=offscreen`; the tool selects that value by default.
+
 ## Droplet Imager Optics Calibration
 
 The standard optics-calibration workflow uses a guided load/approach wizard, then reuses the imager `Optics` tab for manual focus, image capture, scale-bar analysis, and applying the micrometer-per-pixel and camera motion-conversion factors. The wizard does not require a printer head, print profile, or regulated pressure, and it does not change firmware or the device protocol.

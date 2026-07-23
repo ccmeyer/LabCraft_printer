@@ -153,8 +153,8 @@ Before proceeding to the next slice:
 
 | Slice | Status | Scope | Required gate before next slice |
 | --- | --- | --- | --- |
-| 0. Baseline, report contract, and safety boundaries | `planned` | Characterize current behavior and freeze interfaces | Reproducible baseline artifacts recorded |
-| 1. Metrics library and Qt event-loop probe | `not_started` | Deterministic measurement and JSON reporting | Probe detects injected stalls without hardware |
+| 0. Baseline, report contract, and safety boundaries | `verified` | Characterize current behavior and freeze interfaces | Reproducible baseline artifacts recorded |
+| 1. Metrics library and Qt event-loop probe | `verified` | Deterministic measurement and JSON reporting | Probe detects injected stalls without hardware |
 | 2. Execution persistence microbenchmark | `not_started` | Repeated progress/resume/checkpoint workload | 96/384-well cost and growth reported |
 | 3. Safe application construction seam | `not_started` | Build real app components with explicit safe dependencies | App launches with no hardware access |
 | 4. In-process simulated machine | `not_started` | Command lifecycle and machine-state simulation | Controller command sequences complete deterministically |
@@ -446,7 +446,7 @@ Completion record:
 
 ## Slice 1: Metrics Library And Qt Event-Loop Probe
 
-Status: `not_started`
+Status: `verified`
 
 Goal:
 
@@ -463,12 +463,28 @@ Scope:
 - deterministic tests using synthetic samples and deliberately injected Qt
   stalls.
 
-Likely files touched:
+Files in this slice:
 
+- `docs/virtual_workflow_verification_plan.md`
+- `docs/virtual_workflow_report_schema.md`
 - `tools/virtual_workflows/metrics.py`
-- `tools/virtual_workflows/reports.py`
+- `tools/run_qt_event_loop_probe.py`
+- `tools/characterize_execution_persistence.py`
 - `tests/performance/test_virtual_workflow_metrics.py`
-- `pytest.ini` for explicit performance/system markers if needed
+- `pytest.ini`
+- `README.md`
+
+Implementation decisions:
+
+- retain the existing singular `tools/virtual_workflows/report.py` as the
+  versioned report implementation; the earlier provisional `reports.py` name
+  is obsolete;
+- use a 10 ms precise Qt timer for service-gap and lateness samples;
+- use a stoppable observer thread for main-thread stack capture during stalls
+  above 250 ms and named-phase attribution;
+- sample CPU, RSS, I/O, and thread count with `psutil` when available, while
+  reporting unsupported data without failing;
+- keep thresholds informational and leave D-008 open.
 
 Behavior change:
 
@@ -502,7 +518,62 @@ Rollback:
 
 Completion record:
 
-- Not started.
+- Files changed:
+  - `docs/virtual_workflow_verification_plan.md`;
+  - `docs/virtual_workflow_report_schema.md`;
+  - `tools/virtual_workflows/metrics.py`;
+  - `tools/run_qt_event_loop_probe.py`;
+  - `tools/characterize_execution_persistence.py`;
+  - `tests/performance/test_virtual_workflow_metrics.py`;
+  - `pytest.ini`;
+  - `README.md`.
+- Implemented deterministic shared statistics, bounded nested phase timing and
+  overlap attribution, best-effort process resource sampling, and a real-Qt
+  event-loop probe with a stoppable daemon observer.
+- The observer captures the main-thread Python stack at most once per blocked
+  episode and never calls Qt from its background thread. Cleanup requires both
+  an inactive timer and a joined observer.
+- Focused command:
+  `.\env\Scripts\python.exe -m pytest -q tests\performance\test_virtual_workflow_metrics.py tests\test_execution_persistence_characterization.py tests\test_app_freeze_watchdog.py`;
+  result: 44 passed in 6.65 s.
+- Real-Qt command:
+  `.\env\Scripts\python.exe tools\run_qt_event_loop_probe.py`; result: pass
+  with real PySide6 6.7.1 / Qt 6.7.1. All 20 injected stalls across five
+  measured runs were attributed, all five 350 ms phases had a main-thread stack
+  capture, and timer/thread cleanup succeeded.
+- Qt aggregate: 559 heartbeat samples; service-gap p50 10.014 ms, p95
+  13.074 ms, p99 260.559 ms, and maximum 361.097 ms. Probe-callback p50 was
+  0.0091 ms, p95 0.0207 ms, and maximum 0.0659 ms.
+- Resource result: `measured`; mean process CPU delta 143.75 ms per measured
+  run, maximum 171.875 ms, and peak RSS 50,479,104 bytes. These describe the
+  entire injected workload and do not isolate observer overhead.
+- Qt artifact:
+  `verification_reports/virtual_workflows/qt_event_loop_probe_v1/20260723T180304075439Z_e0c2860fbc73/`;
+  `report.json`, `summary.txt`, and `stall_stacks.txt` validate and are ignored.
+- Slice 0 compatibility command:
+  `.\env\Scripts\python.exe tools\characterize_execution_persistence.py --warmup-runs 0 --measured-runs 1`;
+  result: pass with all 384 lifecycle invariants, schema v1 validation, and the
+  original distribution field names. Measured workload duration was
+  47,983.461 ms.
+- Slice 0 compatibility artifact:
+  `verification_reports/virtual_workflows/execution_persistence_v1/20260723T180358668191Z_e0c2860fbc73/`;
+  report and summary validate and are ignored.
+- Full command: `.\env\Scripts\python.exe -m pytest -q`; result: 3,332 passed
+  and 24 skipped in 571.23 s. An earlier invocation displayed one transient
+  failure but was interrupted before its traceback; it did not recur in either
+  a complete fail-fast run or the final exact full-suite run.
+- `py_compile`, both explicit schema validations, `git check-ignore`, and
+  `git diff --check` passed.
+- Limitations: offscreen Qt does not measure compositor/GPU rendering; injected
+  sleeps validate detection rather than application behavior; the MVC,
+  production watchdog, queue, transport, MCU, and hardware remain outside this
+  slice. D-008 remains open and every performance result is informational.
+- Rollback: remove the new metrics/probe/tests, restore Slice 0's private
+  statistics helpers, and revert these documentation and pytest-marker edits.
+  No application, protocol, firmware, motion, pressure, or timing rollback is
+  needed.
+- Next permitted slice: Slice 2 only; do not begin the simulation construction
+  seam or production-UI integration as part of this slice.
 
 ## Slice 2: Execution Persistence Microbenchmark
 
@@ -1228,6 +1299,8 @@ scope or threshold change only inside implementation commits.
 | 2026-07-23 | Plan | created | Added living architecture, slices, safety rules, metrics, gates, risks, and progress protocol. No runtime code changed. |
 | 2026-07-23 | 0 | `planned` -> `in_progress` | Starting commit `acd0c0b3461f140360eb5f26f73062ae908905c9`; worktree contained only this untracked plan. Python 3.12.3, real PySide6 6.7.1, and Qt 6.7.1. Fixed the eight-file slice boundary, workload v1, ignored report location, and same-host reference strategy. |
 | 2026-07-23 | 0 | `in_progress` -> `verified` | Added the report contract and hardware-isolated persistence characterization. Focused tests: 226 passed. Full suite: 3,306 passed and 24 skipped. Baseline: five measured runs, 106.301 s mean per run, 275.593 ms mean and 361.991 ms p95 per completion, 1.0818 last/first quartile ratio. Raw report remains ignored. |
+| 2026-07-23 | 1 | `not_started` -> `in_progress` | Starting commit `e0c2860fbc7319d796b0f57fe20c1de3c0584b63` with a clean worktree. Fixed the eight-file boundary, hybrid observer, optional psutil sampling, real-Qt requirement, and continued informational threshold policy. |
+| 2026-07-23 | 1 | `in_progress` -> `verified` | Added shared bounded metrics and a hardware-isolated offscreen Qt probe. Focused tests: 44 passed. Real-Qt probe: 20/20 stalls attributed, service-gap p95 13.074 ms, callback p95 0.0207 ms, and all required stacks/cleanup verified. Slice 0 compatibility passed all 384 completions. Full suite: 3,332 passed and 24 skipped. Raw reports remain ignored and D-008 remains open. |
 
 For every update, include:
 
@@ -1243,6 +1316,6 @@ For every update, include:
 
 ## Current Next Action
 
-Slice 0 is verified. Begin Slice 1 only after reviewing this baseline and
-listing the exact files for the metrics library and Qt event-loop probe. Do not
-begin the simulation construction seam in Slice 3.
+Slice 1 is verified. The next permitted work is a separately approved Slice 2.
+Do not change the production freeze watchdog or begin the simulation
+construction seam in Slice 3 as part of Slice 1.
