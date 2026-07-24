@@ -293,7 +293,8 @@ OS, CPU, Python executable/version, PySide/Qt versions, and Qt platform must
 match. Git commits may differ. Dirty candidates are labeled and may be used for
 review, but a dirty run can never create an accepted baseline. Cross-Windows/Pi
 or copied reports from another computer are historical evidence, not valid
-comparisons.
+comparisons. Repository-local interpreter paths are normalized relative to the
+repository so the tracked summary does not expose a workstation user path.
 
 Do not overwrite a baseline as part of ordinary collection. An explicit
 reviewed regeneration must repeat the full clean run and pass

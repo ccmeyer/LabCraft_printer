@@ -159,7 +159,7 @@ Before proceeding to the next slice:
 | 3. Safe application construction seam | `verified` | Build real app components with explicit safe dependencies | App launches with no hardware access |
 | 4. In-process simulated machine | `verified` | Command lifecycle and machine-state simulation | Controller command sequences complete deterministically |
 | 5. Real-UI print-array scenario | `verified` | End-to-end Qt print workflow with real persistence | 96-well scenario completes with responsiveness report |
-| 6. Regression comparison and performance gates | `not_started` | Baselines, budgets, comparison, exit policy | Stable candidate/baseline classification |
+| 6. Regression comparison and performance gates | `verified` | Baselines, budgets, comparison, exit policy | Stable candidate/baseline classification |
 | 7. Target-Pi software-in-the-loop lane | `not_started` | Run the same scenario on Pi CPU/storage | Pi report produced without MCU/hardware setup |
 | 8. Protocol-level virtual MCU and fault injection | `deferred` | Real framing, ACK/status, transport faults | Protocol scenarios pass without changing protocol |
 | 9. Expanded workflow scenario catalog | `deferred` | Stop/resume, reset, loading, calibration adapters | Selected workflows produce trustworthy artifacts |
@@ -1054,7 +1054,7 @@ Completion record:
 
 ## Slice 6: Regression Comparison And Performance Gates
 
-Status: `in_progress`
+Status: `verified`
 
 Goal:
 
@@ -1148,6 +1148,46 @@ Completion record:
   failure. Both failure reports were retained; durable writes were not
   weakened, and clean-host baseline collection remains pending after the
   tooling checkpoint.
+- Tooling checkpoint:
+  `ba70d6c544cf02c9cd83178f7ac225727a3c5d88`
+  (`feat: add virtual workflow regression comparison`).
+- Candidate baseline:
+  `tests/performance/baselines/virtual_print_array_96_v1_windows_sil_primary_v1.json`;
+  raw report set:
+  `verification_reports/virtual_workflows/virtual_print_array_96_v1/20260724T010429447759Z_ba70d6c544cf_report_set/report_set.json`.
+  One warm-up plus five measured real-timescale runs completed 96 wells and 96
+  intents each with no starvation. Primary p95/p99 CV was 1.42%/1.67%;
+  service-gap maxima ranged from 121.667 to 189.132 ms; baseline maturity is
+  candidate and its source is the clean tooling checkpoint.
+- Independent normal candidate report set:
+  `verification_reports/virtual_workflows/virtual_print_array_96_v1/20260724T010642351824Z_ba70d6c544cf_report_set/`.
+  It passed compatibility, functional, noise, and every performance rule:
+  scheduling-lateness p95/p99 changed by only +0.624/+0.483 ms, both below the
+  10 ms floor, and duration improved by 112.133 ms.
+- Injected candidate report set:
+  `verification_reports/virtual_workflows/virtual_print_array_96_v1/20260724T010840054476Z_ba70d6c544cf_report_set/`.
+  All five measured runs detected and attributed the requested 300 ms stall,
+  captured nonempty stacks, completed 96 wells, and remained functionally
+  valid. The maximum service gap was 484.114 ms, producing the expected
+  candidate warning and exit 0 while primary p95/p99 remained stable.
+- All 18 baseline/candidate raw reports, report hashes, canonical JSON,
+  summaries, event traces, stacks, and screenshots were inspected. Each run
+  retained four nonempty screenshots and the injected stack artifacts were
+  1,329 bytes. Interpreter and raw-report locations are repository-relative in
+  tracked evidence; raw artifacts remain ignored and machine-specific.
+- Final focused validation: 82 passed with 100 existing Qt chart deprecation
+  warnings in 27.96 s. Full suite:
+  `.\env\Scripts\python.exe -m pytest -q --basetemp=tests\.slice6_full_tmp`;
+  3,396 passed, 24 skipped, and 138 existing deprecation warnings in 448.61 s
+  (7:28). Validated pytest temporary roots were removed; report ignore and
+  diff checks passed.
+- Environment: Windows 11 AMD64, CPython 3.13.14, PySide6 6.11.1, Qt 6.11.1.
+  Candidate thresholds detect regressions but remain warning-only. Promotion
+  to acceptance still requires explicit reviewed baseline replacement.
+- Remaining limitation: accelerated repeated live CLI writes can reproduce the
+  existing Windows atomic-replace contention, while real-timescale baseline,
+  normal candidate, injected candidate, focused tests, and the full suite all
+  completed without weakening durable persistence.
 
 ## Slice 7: Target-Pi Software-In-The-Loop Lane
 
@@ -1562,6 +1602,7 @@ scope or threshold change only inside implementation commits.
 | 2026-07-23 | 5 | `not_started` -> `in_progress` | Starting commit `e211e8b91e409af7365079d803e9992d320012e7` with a clean worktree. Call path: QTest click -> real MainWindow/WellPlateWidget -> Controller array lookahead and durable execution persistence -> explicit SimulatedMachine -> completion callbacks -> Controller progress/checkpoint -> real well-widget updates. Fixed the seven-file tool/fixture/test/documentation boundary, offscreen-by-default real-Qt construction, 96 deterministic A-D serpentine completions, informational-only metrics, failure artifact retention, focused/manual/full validation, and no Slice 6 thresholds. Risks are modal deadlock, callback instrumentation drift, queue-starvation false positives, Qt teardown leaks, and escaped writes; mitigations are allowlisted dialog automation, instance-local wrappers restored in `finally`, signal/file invariant checks, bounded timeout/cleanup, and resolved-root containment. Rollback removes only the Slice 5 runner, fixture, system test, and documentation additions while retaining Slices 0-4. |
 | 2026-07-23 | 5 | `in_progress` -> `verified` | Added the versioned 96-well fixture, real-UI scenario/CLI, real persistence/UI/queue instrumentation, screenshots, injected-stall proof, failure diagnostics, system tests, and documentation without changing production or firmware code. Focused tests: 245 passed. Normal 1x report passed in 16.959 s; the final injected report passed in 10.838 s with a 412.042 ms detected gap and attributed stack. Two retained default-root failures document Windows atomic-replace contention without weakening durability. Full suite: 3,375 passed and 24 skipped in 456.93 s. All reports, summaries, screenshots, ignore rules, cleanup, and diff checks were inspected. |
 | 2026-07-23 | 6 | `not_started` -> `in_progress` | Starting commit `d9381a2f190f2325a41068c54da23feff8cc1e4c` with a clean worktree. Call paths cover repeated Slice 5 collection into validated report sets and same-host baseline/candidate comparison into JSON, Markdown, console classification, and stable exit codes. Fixed the seven-file boundary, candidate-first maturity, one-warm-up/five-measured minimum, exact compatibility identity, robust relative/absolute policy, explicit baseline overwrite protection, focused/manual/full validation, and no production/simulator/firmware/protocol changes. Risks are noisy or cross-environment decisions, hidden per-run outliers, and unreviewed baseline replacement; mitigations are CV/MAD/outlier evidence, exact fingerprints, raw-report hashes, run-boundary aggregation, and explicit reviewed acceptance. |
+| 2026-07-23 | 6 | `in_progress` -> `verified` | Added versioned report sets, compact tracked baselines, exact same-host compatibility, hash validation, candidate/acceptance policy, repeat-run CLI, JSON/Markdown comparison, stable exit codes, tests, and documentation. Tooling checkpoint `ba70d6c544cf`; focused validation 82 passed. The clean candidate baseline had 1.42%/1.67% primary CV. An independent candidate passed with +0.624/+0.483 ms p95/p99 deltas; five injected 300 ms measured runs warned at a 484.114 ms maximum gap with complete stacks and no functional failure. Full suite: 3,396 passed and 24 skipped in 448.61 s. All raw reports/artifacts/hashes and ignore/diff/cleanup checks were inspected; no production, simulator, firmware, or protocol file changed. |
 
 For every update, include:
 
@@ -1577,6 +1618,7 @@ For every update, include:
 
 ## Current Next Action
 
-Slice 6 comparison tooling is in progress. Complete focused tests and the
-clean-host candidate-baseline evidence before enabling or claiming any
-acceptance threshold. Slice 7 remains out of scope.
+Slice 6 is verified at candidate maturity. The next permitted work is the
+separately reviewed Slice 7 target-Pi SIL lane. Do not promote the Windows
+baseline to acceptance or compare it with Pi evidence without an explicit
+reviewed action.

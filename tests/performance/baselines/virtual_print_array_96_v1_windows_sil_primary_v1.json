@@ -1,0 +1,363 @@
+{
+  "baseline_id": "virtual_print_array_96_v1_windows-sil-primary-v1",
+  "classification": {
+    "reasons": [
+      "All baseline functional invariants passed.",
+      "Primary cross-run variation satisfied the candidate noise policy."
+    ],
+    "status": "pass",
+    "threshold_maturity": "candidate"
+  },
+  "compatibility": {
+    "environment": {
+      "architecture": "AMD64",
+      "cpu_identifier": "Intel64 Family 6 Model 198 Stepping 2, GenuineIntel",
+      "operating_system": "Windows",
+      "os_release": "11",
+      "python_executable": "env/Scripts/python.exe",
+      "python_implementation": "CPython",
+      "python_version": "3.13.14",
+      "qt": {
+        "binding": "real",
+        "platform": "offscreen",
+        "pyside_version": "6.11.1",
+        "qt_version": "6.11.1"
+      }
+    },
+    "host_label": "windows-sil-primary-v1",
+    "report_schema_name": "labcraft.virtual_workflow_report",
+    "report_schema_version": 1,
+    "run_mode": "offscreen_windows_sil",
+    "safety": {
+      "hardware_access_allowed": false,
+      "hardware_interfaces": {
+        "GPIO": false,
+        "MCU": false,
+        "balance": false,
+        "camera": false,
+        "firmware_update": false,
+        "serial": false
+      },
+      "simulated_port": "SIMULATED",
+      "simulation": true
+    },
+    "scenario_name": "virtual_print_array",
+    "scenario_version": "1",
+    "timing_policy": "simulated_command_durations_x1",
+    "workload": {
+      "expected_completion_count": 96,
+      "fixture_schema_version": 1,
+      "plate_columns": 24,
+      "plate_name": "shallow-384_well_plate",
+      "plate_rows": 16,
+      "speed_multiplier": 1.0,
+      "stock_id": "Virtual Stock_1.00_x",
+      "target_dispenses_per_well": 1,
+      "timeout_seconds": 180.0,
+      "well_ids": [
+        "A1",
+        "A2",
+        "A3",
+        "A4",
+        "A5",
+        "A6",
+        "A7",
+        "A8",
+        "A9",
+        "A10",
+        "A11",
+        "A12",
+        "A13",
+        "A14",
+        "A15",
+        "A16",
+        "A17",
+        "A18",
+        "A19",
+        "A20",
+        "A21",
+        "A22",
+        "A23",
+        "A24",
+        "B24",
+        "B23",
+        "B22",
+        "B21",
+        "B20",
+        "B19",
+        "B18",
+        "B17",
+        "B16",
+        "B15",
+        "B14",
+        "B13",
+        "B12",
+        "B11",
+        "B10",
+        "B9",
+        "B8",
+        "B7",
+        "B6",
+        "B5",
+        "B4",
+        "B3",
+        "B2",
+        "B1",
+        "C1",
+        "C2",
+        "C3",
+        "C4",
+        "C5",
+        "C6",
+        "C7",
+        "C8",
+        "C9",
+        "C10",
+        "C11",
+        "C12",
+        "C13",
+        "C14",
+        "C15",
+        "C16",
+        "C17",
+        "C18",
+        "C19",
+        "C20",
+        "C21",
+        "C22",
+        "C23",
+        "C24",
+        "D24",
+        "D23",
+        "D22",
+        "D21",
+        "D20",
+        "D19",
+        "D18",
+        "D17",
+        "D16",
+        "D15",
+        "D14",
+        "D13",
+        "D12",
+        "D11",
+        "D10",
+        "D9",
+        "D8",
+        "D7",
+        "D6",
+        "D5",
+        "D4",
+        "D3",
+        "D2",
+        "D1"
+      ],
+      "workload_id": "virtual_print_array_96_v1"
+    }
+  },
+  "created_at_utc": "2026-07-24T01:12:00.316693Z",
+  "host_label": "windows-sil-primary-v1",
+  "metrics": {
+    "metrics.responsiveness.values.event_loop_gap_ms.maximum": {
+      "distribution": {
+        "coefficient_of_variation": 0.20470422349275189,
+        "count": 5,
+        "maximum": 189.1324,
+        "mean": 148.5815,
+        "median": 133.1833,
+        "median_absolute_deviation": 11.516199999999998,
+        "minimum": 121.6671,
+        "q1": 126.0857,
+        "q3": 172.839,
+        "standard_deviation": 30.415260582888315,
+        "tukey_outliers": []
+      }
+    },
+    "metrics.responsiveness.values.phase_timings.duration_by_name_ms.controller.well_completion.p95": {
+      "distribution": {
+        "coefficient_of_variation": 0.008716348646043533,
+        "count": 5,
+        "maximum": 51.4501,
+        "mean": 50.669525,
+        "median": 50.502250000000004,
+        "median_absolute_deviation": 0.05109999999999104,
+        "minimum": 50.3667,
+        "q1": 50.475224999999995,
+        "q3": 50.553349999999995,
+        "standard_deviation": 0.441653245629419,
+        "tukey_outliers": [
+          {
+            "run_index": 4,
+            "value": 51.4501
+          }
+        ]
+      }
+    },
+    "metrics.responsiveness.values.phase_timings.duration_by_name_ms.persistence.complete_intent.p95": {
+      "distribution": {
+        "coefficient_of_variation": 0.013740674924619254,
+        "count": 5,
+        "maximum": 14.8429,
+        "mean": 14.540715,
+        "median": 14.53965,
+        "median_absolute_deviation": 0.16792500000000032,
+        "minimum": 14.35,
+        "q1": 14.371725,
+        "q3": 14.5993,
+        "standard_deviation": 0.19979923798653507,
+        "tukey_outliers": []
+      }
+    },
+    "metrics.responsiveness.values.phase_timings.duration_by_name_ms.persistence.write_progress.p95": {
+      "distribution": {
+        "coefficient_of_variation": 0.3332237691147303,
+        "count": 5,
+        "maximum": 8.645025,
+        "mean": 5.547855,
+        "median": 4.61125,
+        "median_absolute_deviation": 0.4283000000000001,
+        "minimum": 4.18295,
+        "q1": 4.43545,
+        "q3": 5.8646,
+        "standard_deviation": 1.8486771536020021,
+        "tukey_outliers": [
+          {
+            "run_index": 2,
+            "value": 8.645025
+          }
+        ]
+      }
+    },
+    "metrics.responsiveness.values.phase_timings.duration_by_name_ms.ui.well_plate_update.p95": {
+      "distribution": {
+        "coefficient_of_variation": 0.05747364251602653,
+        "count": 5,
+        "maximum": 19.0688,
+        "mean": 18.18271,
+        "median": 18.510849999999998,
+        "median_absolute_deviation": 0.13107499999999916,
+        "minimum": 16.37235,
+        "q1": 18.379775,
+        "q3": 18.581775,
+        "standard_deviation": 1.0450265745125809,
+        "tukey_outliers": [
+          {
+            "run_index": 0,
+            "value": 16.37235
+          },
+          {
+            "run_index": 4,
+            "value": 19.0688
+          }
+        ]
+      }
+    },
+    "metrics.responsiveness.values.scheduling_lateness_ms.p95": {
+      "distribution": {
+        "coefficient_of_variation": 0.01424276843505553,
+        "count": 5,
+        "maximum": 60.568400000000004,
+        "mean": 59.63880700000001,
+        "median": 59.289500000000004,
+        "median_absolute_deviation": 0.5138249999999971,
+        "minimum": 58.77567500000001,
+        "q1": 59.03360000000001,
+        "q3": 60.526860000000006,
+        "standard_deviation": 0.8494217178439688,
+        "tukey_outliers": []
+      }
+    },
+    "metrics.responsiveness.values.scheduling_lateness_ms.p99": {
+      "distribution": {
+        "coefficient_of_variation": 0.0166639618948674,
+        "count": 5,
+        "maximum": 68.14032999999999,
+        "mean": 66.5610696,
+        "median": 66.19009999999999,
+        "median_absolute_deviation": 0.6045999999999907,
+        "minimum": 65.5855,
+        "q1": 65.63522000000002,
+        "q3": 67.25419799999999,
+        "standard_deviation": 1.1091711274960168,
+        "tukey_outliers": []
+      }
+    },
+    "run.duration_ms": {
+      "distribution": {
+        "coefficient_of_variation": 0.0072586527193651065,
+        "count": 5,
+        "maximum": 15868.9484,
+        "mean": 15696.88334,
+        "median": 15665.3394,
+        "median_absolute_deviation": 67.64800000000105,
+        "minimum": 15597.6914,
+        "q1": 15603.3038,
+        "q3": 15749.1337,
+        "standard_deviation": 113.93822494144784,
+        "tukey_outliers": []
+      }
+    }
+  },
+  "noise": {
+    "maximum_primary_cv": 0.3,
+    "noisy_primary_metrics": [],
+    "status": "acceptable"
+  },
+  "policy": {
+    "absolute_failure_lateness_p99_ms": 250.0,
+    "absolute_failure_service_gap_ms": 1000.0,
+    "absolute_warning_service_gap_ms": 250.0,
+    "duration_absolute_noise_floor_ms": 1000.0,
+    "maximum_primary_cv": 0.3,
+    "minimum_measured_runs": 5,
+    "minimum_warmup_runs": 1,
+    "policy_version": "virtual_workflow_policy_v1",
+    "primary_absolute_noise_floor_ms": 10.0,
+    "relative_regression_ratio": 1.25,
+    "robust_noise_multiplier": 3.0,
+    "secondary_absolute_noise_floor_ms": 5.0
+  },
+  "runs": {
+    "measured_count": 5,
+    "raw_reports": [
+      {
+        "path": "verification_reports/virtual_workflows/virtual_print_array_96_v1/20260724T010252870172Z_ba70d6c544cf/report.json",
+        "run_id": "bfb7ea77-dae8-4f4a-b9e3-95884a3edb11",
+        "sha256": "78c1bd47d8d92f03cdaedc0c44c98f2f4789d81457be66bae9c36cc07dfecbe1"
+      },
+      {
+        "path": "verification_reports/virtual_workflows/virtual_print_array_96_v1/20260724T010310096267Z_ba70d6c544cf/report.json",
+        "run_id": "5a4fbbaa-4d24-4309-a28e-d9e3b78a6e03",
+        "sha256": "ba96ff871b716975f85408716c6c9de626894b35f396289e0a86dbfc5d86b2ee"
+      },
+      {
+        "path": "verification_reports/virtual_workflows/virtual_print_array_96_v1/20260724T010326050520Z_ba70d6c544cf/report.json",
+        "run_id": "1f5b394e-fef1-454b-b582-47d70068be07",
+        "sha256": "da77e127b1a3d62411d82bd72ddaec76e8281ac368ea3487fdf78ddac71f5c30"
+      },
+      {
+        "path": "verification_reports/virtual_workflows/virtual_print_array_96_v1/20260724T010341855231Z_ba70d6c544cf/report.json",
+        "run_id": "95f737bb-7557-4e47-bb90-e0d3891ddf6f",
+        "sha256": "8c3f4bfc9da7fd9f40e5c5705eee4a7db393cd398193067c8f757e0ffaf48606"
+      },
+      {
+        "path": "verification_reports/virtual_workflows/virtual_print_array_96_v1/20260724T010357656390Z_ba70d6c544cf/report.json",
+        "run_id": "9e311a97-901f-4027-8f64-4dfef90fc232",
+        "sha256": "b687397e4fbb7704eb60d4c2ce68aecdbc322d2be13c12e6e78e75be44394063"
+      },
+      {
+        "path": "verification_reports/virtual_workflows/virtual_print_array_96_v1/20260724T010413533525Z_ba70d6c544cf/report.json",
+        "run_id": "7bdd6f8f-1444-4db4-9959-376793400df8",
+        "sha256": "cd92f242cea5bc6a8dcdc4d5056bcd40ca5f84eed257bfddaa73e909bc21cbf6"
+      }
+    ],
+    "warmup_count": 1
+  },
+  "schema_name": "labcraft.virtual_workflow_baseline",
+  "schema_version": 1,
+  "source": {
+    "dirty_worktree": false,
+    "git_commit": "ba70d6c544cf02c9cd83178f7ac225727a3c5d88"
+  },
+  "threshold_maturity": "candidate"
+}

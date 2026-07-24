@@ -208,6 +208,9 @@ def _compatibility_identity(
     qt = _require_mapping(environment.get("qt"), "report.environment.qt")
     workload = _require_mapping(report.get("workload"), "report.workload")
     safety = _require_mapping(report.get("safety"), "report.safety")
+    python_executable = environment.get("python_executable")
+    if isinstance(python_executable, str) and python_executable:
+        python_executable = _portable_path(Path(python_executable))
     return {
         "host_label": host_label,
         "report_schema_name": report["schema_name"],
@@ -223,7 +226,7 @@ def _compatibility_identity(
             "cpu_identifier": environment.get("cpu_identifier"),
             "python_version": environment.get("python_version"),
             "python_implementation": environment.get("python_implementation"),
-            "python_executable": environment.get("python_executable"),
+            "python_executable": python_executable,
             "qt": {
                 "binding": qt.get("binding"),
                 "pyside_version": qt.get("pyside_version"),
@@ -1130,7 +1133,8 @@ def comparison_markdown(payload: Mapping[str, Any]) -> str:
         else:
             budget = (
                 rule.get("warning_budget_ms")
-                if rule["decision"] == "warning"
+                if rule.get("warning_budget_ms") is not None
+                and rule["decision"] != "severe"
                 else rule.get("failure_budget_ms")
                 or rule.get("warning_budget_ms")
             )

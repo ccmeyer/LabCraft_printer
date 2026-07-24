@@ -252,7 +252,10 @@ implementation/version/executable, PySide/Qt versions, and Qt platform.
 Different Git commits are permitted because they are the comparison target.
 Dirty candidate reports remain usable review evidence and are labeled
 prominently; dirty reports cannot create an accepted baseline. Raw hashes are
-verified before baseline creation or comparison.
+verified before baseline creation or comparison. An interpreter beneath the
+repository is recorded relative to the repository root so tracked summaries do
+not expose a workstation user directory; an external interpreter retains its
+resolved path.
 
 Policy `virtual_workflow_policy_v1` compares the median of run-level values:
 

@@ -66,7 +66,9 @@ def _report(
             "cpu_identifier": "test-cpu",
             "python_version": python_version,
             "python_implementation": "CPython",
-            "python_executable": "C:/repo/env/Scripts/python.exe",
+            "python_executable": str(
+                (Path.cwd() / "env" / "Scripts" / "python.exe").resolve()
+            ),
             "qt": {
                 "binding": "real",
                 "pyside_version": "6.11.1",
@@ -229,6 +231,10 @@ def test_baseline_is_compact_clean_and_candidate_by_default(tmp_path):
         "git_commit": "a" * 40,
         "dirty_worktree": False,
     }
+    assert (
+        baseline["compatibility"]["environment"]["python_executable"]
+        == "env/Scripts/python.exe"
+    )
 
 
 @pytest.mark.parametrize(
@@ -510,6 +516,7 @@ def test_comparison_markdown_contains_classification_and_rules(tmp_path):
     assert "# Virtual Workflow Comparison" in text
     assert "Threshold maturity: `candidate`" in text
     assert "scheduling_lateness_ms.p95" in text
+    assert "| 250.000 | pass |" in text
 
 
 def test_cli_defaults_preserve_single_run_and_exit_mapping():
