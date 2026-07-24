@@ -134,6 +134,14 @@ Slice 2 retains the Slice 0 field names and adds compatible values beneath
 - `runs[*].quartile_growth`: that run's independently calculated growth
   evidence.
 
+Progress-construction remediation adds a compatible nested
+`progress_snapshot` value. It reports full-rebuild and cached-update counts,
+construction/serialization/atomic-write durations, UTF-8 serialized byte
+counts, total progress duration with observed `fsync` and replace time
+subtracted, per-run raw samples, and observer-restoration state. The existing
+`persistence.write_progress` metric and comparison policy v1 paths remain
+unchanged.
+
 File-size observation occurs outside `well_total` timing. The synchronous I/O
 observer always calls the original `fsync` and `os.replace`, records their
 duration, and restores them after success or failure.
@@ -279,6 +287,12 @@ Slice 2 persistence reports similarly expose aggregated
 `authoritative_read_opens`. Read counts cover only the measured lifecycle;
 final invariant inspection remains outside that observer. Existing report
 envelopes and comparison policy paths are unchanged.
+
+Real-UI reports also expose `metrics.persistence.values.progress_snapshot`
+with the same construction, serialization, write, byte-volume, and
+non-durable-cost evidence. Its observer is instance-local and does not replace
+or nest a second durable-I/O phase, so `authoritative_io` remains the source
+for real `fsync` and atomic-replace attribution.
 
 The scenario writes `report.json`, `summary.txt`, `events.jsonl`,
 `stall_stacks.txt`, retained scenario data, and ready/printing/mid/completed

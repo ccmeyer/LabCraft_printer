@@ -52,6 +52,10 @@ from tools.virtual_workflows.report import (
 )
 from tools.virtual_workflows.metrics import linear_slope, summarize_samples
 from tools.virtual_workflows.persistence_io import PersistenceIoObserver
+from tools.virtual_workflows.progress_snapshot import (
+    ProgressSnapshotObserver,
+    non_durable_progress_samples,
+)
 
 
 SCENARIO_NAME = "execution_persistence"
@@ -443,6 +447,7 @@ def _execute_workload(
         name: [size] for name, size in initial_sizes.items()
     }
     io_observer = PersistenceIoObserver(experiment_dir)
+    progress_observer = ProgressSnapshotObserver(experiment)
     checkpoint_sizes_by_phase = {
         "after_begin": [],
         "after_attach": [],
@@ -472,7 +477,7 @@ def _execute_workload(
         session = experiment._active_authoritative_execution_session
         retained_intents_by_phase[phase].append(len(session.resume.intents))
 
-    with io_observer.installed():
+    with io_observer.installed(), progress_observer.installed():
         for stock_index, stock in enumerate(plan.stocks, start=1):
             for well_id in spec.well_ids:
                 completion_index += 1
@@ -544,6 +549,20 @@ def _execute_workload(
                 for name, size in current_sizes.items():
                     file_size_samples[name].append(size)
 
+    durable_io = io_observer.snapshot()
+    progress_snapshot = progress_observer.snapshot()
+    progress_fsync = durable_io.get("fsync", {}).get("write_progress", [])
+    progress_replace = durable_io.get("atomic_replace", {}).get(
+        "write_progress",
+        [],
+    )
+    progress_snapshot["non_durable_write_samples_ms"] = (
+        non_durable_progress_samples(
+            samples["write_progress"],
+            progress_fsync,
+            progress_replace,
+        )
+    )
     validation = _validate_completed_workload(
         model,
         experiment_dir,
@@ -572,7 +591,8 @@ def _execute_workload(
             "size_bytes_by_phase": checkpoint_sizes_by_phase,
             "retained_intents_by_phase": retained_intents_by_phase,
         },
-        "durable_io_samples_ms": io_observer.snapshot(),
+        "durable_io_samples_ms": durable_io,
+        "progress_snapshot": progress_snapshot,
         "authoritative_read_opens": io_observer.read_snapshot(),
         "validation": validation,
     }
@@ -749,6 +769,81 @@ def _aggregate_authoritative_reads(
     }
 
 
+def _aggregate_progress_snapshots(
+    measured: list[dict[str, Any]],
+) -> dict[str, Any]:
+    modes = ("full_rebuild", "cached_update")
+    phases = ("full_rebuild", "cached_update", "serialization", "atomic_write")
+    runs = []
+    for run in measured:
+        snapshot = run.get(
+            "progress_snapshot",
+            {
+                "mode_counts": {},
+                "duration_samples_ms": {},
+                "serialized_size_bytes": [],
+                "non_durable_write_samples_ms": [],
+                "observer_restored": True,
+            },
+        )
+        runs.append(
+            {
+                "run_index": run.get("run_index"),
+                **snapshot,
+            }
+        )
+    return {
+        "mode_counts": {
+            mode: sum(
+                int(
+                    run.get("progress_snapshot", {})
+                    .get("mode_counts", {})
+                    .get(mode, 0)
+                )
+                for run in measured
+            )
+            for mode in modes
+        },
+        "duration_statistics_ms": {
+            phase: _distribution(
+                [
+                    sample
+                    for run in measured
+                    for sample in run.get("progress_snapshot", {})
+                    .get("duration_samples_ms", {})
+                    .get(phase, [])
+                ]
+            )
+            for phase in phases
+        },
+        "serialized_size_bytes": _distribution(
+            [
+                sample
+                for run in measured
+                for sample in run.get("progress_snapshot", {}).get(
+                    "serialized_size_bytes",
+                    [],
+                )
+            ]
+        ),
+        "non_durable_write_ms": _distribution(
+            [
+                sample
+                for run in measured
+                for sample in run.get("progress_snapshot", {}).get(
+                    "non_durable_write_samples_ms",
+                    [],
+                )
+            ]
+        ),
+        "all_observers_restored": all(
+            bool(run.get("progress_snapshot", {}).get("observer_restored", True))
+            for run in measured
+        ),
+        "runs": runs,
+    }
+
+
 def _aggregate_metrics(
     measured: list[dict[str, Any]],
     spec: WorkloadSpec,
@@ -857,6 +952,7 @@ def _aggregate_metrics(
                 ),
                 "durable_io_statistics_ms": _aggregate_durable_io(measured),
                 "authoritative_read_opens": _aggregate_authoritative_reads(measured),
+                "progress_snapshot": _aggregate_progress_snapshots(measured),
                 "runs": measured,
             },
         },
@@ -998,6 +1094,25 @@ def _write_summary(path: Path, report: dict[str, Any]) -> None:
             "Authoritative hot-path read opens: "
             f"{reads.get('total_count', 0)}; "
             f"observers restored: {reads.get('all_observers_restored', False)}"
+        )
+        snapshot = persistence.get("progress_snapshot", {})
+        modes = snapshot.get("mode_counts", {})
+        non_durable = snapshot.get("non_durable_write_ms", {})
+        serialized = snapshot.get("serialized_size_bytes", {})
+        lines.extend(
+            [
+                "Progress full rebuild / cached update counts: "
+                f"{modes.get('full_rebuild', 0)} / "
+                f"{modes.get('cached_update', 0)}",
+                "Progress non-durable p50/p95 ms: "
+                f"{non_durable.get('p50', 0.0):.3f} / "
+                f"{non_durable.get('p95', 0.0):.3f}",
+                "Progress serialized p50/max bytes: "
+                f"{serialized.get('p50', 0.0):.1f} / "
+                f"{serialized.get('maximum', 0.0):.1f}",
+                "Progress snapshot observers restored: "
+                f"{snapshot.get('all_observers_restored', False)}",
+            ]
         )
         for name, values in persistence.get("file_growth", {}).items():
             growth_bytes = values.get("growth_bytes", {})

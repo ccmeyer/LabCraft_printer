@@ -8706,18 +8706,12 @@ class ExperimentModel(QObject):
     # -----------------------------
     # Progress & Key files
     # -----------------------------
-    def create_progress_file(self, file_name: Optional[str] = None):
-        """Write a `progress.json` snapshot from current well assignments."""
-        if file_name is not None:
-            self.progress_file_path = file_name
-
+    def _build_progress_payload_from_runtime(self) -> Dict[str, Any]:
+        """Construct the schema-v1 progress payload from live well state."""
         if self._runtime_well_plate is None:
-            # No wells assigned yet – write empty structure
-            self._atomic_json_dump(self.progress_file_path, {})
-            self.progress_data = {}
-            return
+            return {}
 
-        progress = {}
+        progress: Dict[str, Any] = {}
         for well in self._runtime_well_plate.get_all_wells():
             rxn = well.get_assigned_reaction()
             if rxn is None:
@@ -8727,33 +8721,84 @@ class ExperimentModel(QObject):
                 "reagents": {
                     stock_id: {
                         "target_droplets": reagent.get_target_droplets(),
-                        "added_droplets": reagent.added_droplets
+                        "added_droplets": reagent.added_droplets,
                     }
                     for stock_id, reagent in rxn.get_all_reagents().items()
                 },
-                "completed": rxn.check_all_complete()
+                "completed": rxn.check_all_complete(),
             }
 
-        self.progress_data = progress
-        plate_meta = {
+        payload = dict(progress)
+        payload["__plate__"] = {
             "name": self._runtime_well_plate.get_current_plate_name(),
             "rows": self._runtime_well_plate.get_num_rows(),
             "columns": self._runtime_well_plate.get_num_cols(),
             "schema_version": 1,
         }
-        payload = dict(progress)
-        payload["__plate__"] = plate_meta
         execution_reference = self._execution_progress_reference()
         if execution_reference is not None:
             payload["__execution__"] = execution_reference.to_dict()
-            self._progress_execution_reference = execution_reference
+        return payload
+
+    def _serialize_progress_payload(self, payload: Dict[str, Any]) -> str:
+        """Serialize progress using the existing schema-v1 byte format."""
+        return json.dumps(
+            payload,
+            indent=4,
+            default=self.convert_to_serializable,
+        )
+
+    def _atomic_write_progress_text(self, serialized: str) -> None:
+        """Durably replace progress.json with already-serialized text."""
+        directory = os.path.dirname(self.progress_file_path) or "."
+        fd, tmp_path = tempfile.mkstemp(
+            prefix="._tmp_",
+            suffix=".json",
+            dir=directory,
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(serialized)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_path, self.progress_file_path)
+        except Exception:
+            try:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+            except Exception:
+                pass
+            raise
+
+    def _write_progress_payload(self, payload: Dict[str, Any]) -> None:
+        serialized = self._serialize_progress_payload(payload)
+        self._atomic_write_progress_text(serialized)
+
+    def create_progress_file(self, file_name: Optional[str] = None):
+        """Write a `progress.json` snapshot from current well assignments."""
+        if file_name is not None:
+            self.progress_file_path = file_name
+
+        payload = self._build_progress_payload_from_runtime()
         session = getattr(self, "_active_authoritative_execution_session", None)
         if session is not None:
             self._guard_authoritative_runtime_session()
-        self._atomic_json_dump(self.progress_file_path, payload)
+        self._write_progress_payload(payload)
         if session is not None:
             self._accept_authoritative_runtime_write("progress.json")
             session.progress_payload = dict(payload)
+
+        self.progress_data = {
+            key: value
+            for key, value in payload.items()
+            if not str(key).startswith("__")
+        }
+        execution_payload = payload.get("__execution__")
+        self._progress_execution_reference = (
+            ProgressExecutionReference.from_dict(execution_payload)
+            if isinstance(execution_payload, dict)
+            else None
+        )
 
     def progress_to_key(self) -> "pd.DataFrame":
         """

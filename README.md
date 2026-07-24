@@ -295,6 +295,15 @@ improved. The bounded resume change does not alter the progress payload or its
 durability call. The warning is retained as storage evidence; it was not
 suppressed by batching, skipping, or weakening `fsync`.
 
+Progress reports now split the same write into full-rebuild or cached-update
+construction, schema-v1 four-space serialization, atomic-write, serialized
+byte-volume, and non-durable timing evidence. The observer is tooling-only,
+restores the real instance methods after every run, and leaves the existing
+`persistence.write_progress`, `fsync`, and atomic-replace measurements intact.
+This instrumentation supports same-host before/after analysis; it does not
+create a new acceptance threshold or make copied cross-environment reports
+comparable.
+
 If Windows reports `WinError 5` while rapidly replacing an execution file,
 retain the failed diagnostics and retry once with a fresh ignored
 repository-local output root, for example:

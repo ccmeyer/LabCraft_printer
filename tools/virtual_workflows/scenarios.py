@@ -41,8 +41,13 @@ from tools.virtual_workflows.metrics import (  # noqa: E402
     NamedPhaseRecorder,
     ProcessResourceSampler,
     QtEventLoopProbe,
+    summarize_samples,
 )
 from tools.virtual_workflows.persistence_io import PersistenceIoObserver  # noqa: E402
+from tools.virtual_workflows.progress_snapshot import (  # noqa: E402
+    ProgressSnapshotObserver,
+    non_durable_progress_samples,
+)
 from tools.virtual_workflows.report import (  # noqa: E402
     REPORT_SCHEMA_NAME,
     REPORT_SCHEMA_VERSION,
@@ -938,6 +943,7 @@ def run_virtual_print_array_scenario(
     components = None
     instrumentation = None
     io_observer = None
+    progress_observer = None
     dialog_timer = None
     paint_filter = None
     app = None
@@ -1200,6 +1206,8 @@ def run_virtual_print_array_scenario(
             io_observer=PersistenceIoObserver(fixture_info["experiment_dir"]),
         )
         io_observer = instrumentation.io_observer
+        progress_observer = ProgressSnapshotObserver(experiment_model)
+        progress_observer.install()
         io_observer.install()
 
         if config.visible:
@@ -1342,6 +1350,8 @@ def run_virtual_print_array_scenario(
                 pass
         if instrumentation is not None:
             instrumentation.restore()
+        if progress_observer is not None:
+            progress_observer.restore()
         if io_observer is not None:
             io_observer.restore()
         if probe_started:
@@ -1403,6 +1413,16 @@ def run_virtual_print_array_scenario(
     probe_snapshot = probe.snapshot()
     resource_snapshot = resources.snapshot()
     durable_io_snapshot = io_observer.snapshot() if io_observer is not None else {}
+    progress_snapshot = (
+        progress_observer.snapshot()
+        if progress_observer is not None
+        else {
+            "mode_counts": {"full_rebuild": 0, "cached_update": 0},
+            "duration_samples_ms": {},
+            "serialized_size_bytes": [],
+            "observer_restored": True,
+        }
+    )
     authoritative_read_snapshot = (
         io_observer.read_snapshot()
         if io_observer is not None
@@ -1437,6 +1457,47 @@ def run_virtual_print_array_scenario(
     )
     phase_duration_values = (
         probe_snapshot.get("phase_timings", {}).get("duration_by_name_ms", {})
+    )
+    progress_total_samples = [
+        float(record["duration_ms"])
+        for record in probe_snapshot.get("phase_timings", {}).get("records", [])
+        if record.get("name") == "persistence.write_progress"
+    ]
+    progress_fsync_samples = durable_io_snapshot.get("fsync", {}).get(
+        "persistence.write_progress",
+        [],
+    )
+    progress_replace_samples = durable_io_snapshot.get(
+        "atomic_replace",
+        {},
+    ).get("persistence.write_progress", [])
+    try:
+        progress_snapshot["non_durable_write_samples_ms"] = (
+            non_durable_progress_samples(
+                progress_total_samples,
+                progress_fsync_samples,
+                progress_replace_samples,
+            )
+        )
+    except ValueError as exc:
+        progress_snapshot["non_durable_write_samples_ms"] = []
+        progress_snapshot["sample_alignment_error"] = str(exc)
+    progress_snapshot["duration_statistics_ms"] = {
+        name: summarize_samples(samples, bands_ms=())
+        for name, samples in progress_snapshot.get(
+            "duration_samples_ms",
+            {},
+        ).items()
+    }
+    progress_snapshot["serialized_size_statistics_bytes"] = (
+        summarize_samples(
+            progress_snapshot.get("serialized_size_bytes", []),
+            bands_ms=(),
+        )
+    )
+    progress_snapshot["non_durable_write_ms"] = summarize_samples(
+        progress_snapshot.get("non_durable_write_samples_ms", []),
+        bands_ms=(),
     )
 
     def durable_count(operation: str, phase: str) -> int:
@@ -1534,6 +1595,11 @@ def run_virtual_print_array_scenario(
         failure_text = (
             "Injected UI stall evidence was incomplete: "
             f"detected={injection_detected}, stack_captured={injection_stack_captured}"
+        )
+    if failure_text is None and progress_snapshot.get("sample_alignment_error"):
+        failure_text = (
+            "Progress snapshot evidence was incomplete: "
+            f"{progress_snapshot['sample_alignment_error']}"
         )
     if (
         failure_text is None
@@ -1709,6 +1775,7 @@ def run_virtual_print_array_scenario(
                     **validation,
                     "phase_timings": phases.snapshot(),
                     "authoritative_io": authoritative_io,
+                    "progress_snapshot": progress_snapshot,
                 },
             },
             "resources": resource_snapshot,
