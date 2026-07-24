@@ -277,6 +277,24 @@ The progress snapshot still grows with the execution and all four durable
 writes per completion remain visible costs; this remediation does not batch or
 weaken them.
 
+The bounded-checkpoint implementation was characterized at commit `48f1e0c`.
+All three Windows persistence workloads retained at most one sequential
+benchmark intent, ended with zero intents, and held the clean resume file at
+499 bytes while preserving every expected durable operation. The accelerated
+real-UI scenario retained at most the Controller's two-well lookahead, ended
+with a clean 499-byte checkpoint, and completed 96/96 wells in 6.002 seconds.
+On the Pi the clean checkpoint was 485 bytes; two independent one-warm-up plus
+five-measured sets passed all functional, safety, boundedness, durability,
+compatibility, and primary responsiveness checks with acceptable noise.
+
+Both Pi sets reported a secondary progress-write warning. Nested evidence
+attributed it to the unchanged progress-phase `fsync` (p95 rose from 9.012 ms
+in the immediately preceding set to 15.212 ms in the first bounded-checkpoint
+set), while atomic replace stayed near 0.070 ms and total scenario duration
+improved. The bounded resume change does not alter the progress payload or its
+durability call. The warning is retained as storage evidence; it was not
+suppressed by batching, skipping, or weakening `fsync`.
+
 If Windows reports `WinError 5` while rapidly replacing an execution file,
 retain the failed diagnostics and retry once with a fresh ignored
 repository-local output root, for example:
