@@ -410,6 +410,15 @@ acceptable primary noise and remains candidate maturity. Independent same-Pi
 comparison crossed only absolute responsiveness warning rules; all relative
 regression rules passed.
 
+The UI repaint remediation candidate at clean commit `3ee0a1906eb7` passed a
+new same-Pi 1+5 collection with acceptable noise. Against that tracked
+pre-remediation baseline, median scheduling-lateness p95 improved from 176.665
+to 68.824 ms, p99 from 251.777 to 118.722 ms, well-widget update p95 from
+50.903 to 0.522 ms, and scenario duration from 28.518 to 18.925 seconds. Every
+relative comparison rule passed. The candidate still warns because its
+287.254 ms maximum event-loop gap exceeds the candidate policy's informational
+250 ms budget; scheduling-lateness p99 now passes the 250 ms absolute rule.
+
 Pi candidates may be compared only with the exact same Pi model, filesystem,
 sandbox method, OS/CPU, Python, PySide/Qt, Qt platform, timing policy, timeout,
 and host label. A Windows/Pi comparison is intentionally rejected as
