@@ -1245,11 +1245,23 @@ class Controller(QObject):
         self._pending_reset_print_settings_restore = self._snapshot_print_settings_for_reset_restore(machine_model)
         self._interrupt_array_after_board_reset(report)
         machine_model.recover_after_board_reset()
+        self.expected_position = machine_model.get_current_position_dict()
+        self.expected_location = None
+
+        host_context = report.get("host_context")
+        if not isinstance(host_context, dict):
+            host_context = {}
+        benign_startup = (
+            host_context.get("connection_phase") == "initial"
+            and host_context.get("classification") == "benign_startup_recovery"
+        )
+        if benign_startup:
+            self._last_reset_debug_bundle_context = None
+            return
+
         update_report = getattr(machine_model, "update_last_reset_report", None)
         if callable(update_report):
             update_report(report)
-        self.expected_position = machine_model.get_current_position_dict()
-        self.expected_location = None
         summary = report.get("summary", "Board reset detected.")
         guidance = (
             "Homing state was cleared. Home the motors before resuming motion. "

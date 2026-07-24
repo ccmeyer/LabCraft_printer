@@ -2725,8 +2725,14 @@ def _validate_regulator_profile_config(config, bounds, bool_fields=()):
         validated[field] = _require_regulator_profile_bool(config, field)
     return validated
 
+CRASHLOG_FLAG_VALID = 0x00000001
 CRASHLOG_FLAG_PENDING = 0x00000002
 CRASHLOG_FLAG_WDT_ARM_STICKY = 0x00000004
+
+HOST_CONNECTION_PHASE_INITIAL = "initial"
+HOST_CONNECTION_PHASE_ESTABLISHED = "established"
+HOST_RESET_CLASSIFICATION_BENIGN_STARTUP = "benign_startup_recovery"
+HOST_RESET_CLASSIFICATION_ACTIONABLE = "actionable"
 
 RESET_CAUSE_NAMES = {
     0: "unknown",
@@ -2754,6 +2760,59 @@ RESET_RCC_FLAG_NAMES = {
     0x04000000: "pin_reset",
     0x02000000: "bor",
 }
+
+RESET_RCC_CAUSE_MASK = sum(RESET_RCC_FLAG_NAMES)
+BENIGN_STARTUP_RCC_FLAGS = 0x10000000 | 0x04000000
+BENIGN_STARTUP_CRASH_FLAGS = CRASHLOG_FLAG_VALID | CRASHLOG_FLAG_WDT_ARM_STICKY
+
+
+def classify_reset_report_for_host(report, *, connection_phase):
+    """Classify reset reports conservatively using host connection context."""
+    if connection_phase != HOST_CONNECTION_PHASE_INITIAL or not isinstance(report, dict):
+        return HOST_RESET_CLASSIFICATION_ACTIONABLE
+
+    required_fields = {
+        "reset_cause",
+        "reset_cause_name",
+        "flags",
+        "reset_flags_raw",
+        "pending",
+        "sticky",
+        "recovery_boot",
+        "last_fault",
+        "last_fault_name",
+        "fault_context",
+        "active_command",
+    }
+    if not required_fields.issubset(report):
+        return HOST_RESET_CLASSIFICATION_ACTIONABLE
+
+    flags = report.get("flags")
+    reset_flags_raw = report.get("reset_flags_raw")
+    reset_cause = report.get("reset_cause")
+    last_fault = report.get("last_fault")
+    active_command = report.get("active_command")
+    integer_fields = (flags, reset_flags_raw, reset_cause, last_fault, active_command)
+    if any(type(value) is not int for value in integer_fields):
+        return HOST_RESET_CLASSIFICATION_ACTIONABLE
+
+    benign = (
+        reset_cause == 3
+        and report.get("reset_cause_name") == "software"
+        and flags == BENIGN_STARTUP_CRASH_FLAGS
+        and (reset_flags_raw & RESET_RCC_CAUSE_MASK) == BENIGN_STARTUP_RCC_FLAGS
+        and report.get("pending") is False
+        and report.get("sticky") is True
+        and report.get("recovery_boot") is True
+        and last_fault == 0
+        and report.get("last_fault_name") == "none"
+        and report.get("fault_context") is None
+        and active_command == 0
+    )
+    if benign:
+        return HOST_RESET_CLASSIFICATION_BENIGN_STARTUP
+    return HOST_RESET_CLASSIFICATION_ACTIONABLE
+
 
 CRASH_FAULT_NAMES = {
     0: "none",
@@ -4063,6 +4122,8 @@ class Machine(QObject):
         self._handling_mcu_unresponsive = False
         self._command_queue_blocked_reason = None
         self._transport_fault_report = None
+        self._ever_transport_ready = False
+        self._hello_connection_phase = HOST_CONNECTION_PHASE_ESTABLISHED
         self._pause_after_ack_timeout_ms = 1000
         self._pause_after_confirm_timeout_ms = 2500
         self._pending_pause_after_requests = {}
@@ -4698,6 +4759,11 @@ class Machine(QObject):
             self.machine_connected_signal.emit(False)
 
     def _send_hello(self):
+        self._hello_connection_phase = (
+            HOST_CONNECTION_PHASE_ESTABLISHED
+            if self._ever_transport_ready
+            else HOST_CONNECTION_PHASE_INITIAL
+        )
         self._transport_ready = False
         self._transport_capabilities = 0
         self._stop_mcu_response_watchdog()
@@ -4730,6 +4796,7 @@ class Machine(QObject):
         self._session_recovery_in_progress = False
         self._transport_capabilities = capabilities
         self._transport_ready = True
+        self._ever_transport_ready = True
         self._command_queue_blocked_reason = None
         self._tx_paused = False
         self._sequence_pause = False
@@ -5139,10 +5206,27 @@ class Machine(QObject):
 
     @Slot(dict)
     def _on_reset_report(self, report):
+        report = dict(report or {})
+        connection_phase = getattr(
+            self,
+            "_hello_connection_phase",
+            HOST_CONNECTION_PHASE_ESTABLISHED,
+        )
+        classification = classify_reset_report_for_host(
+            report,
+            connection_phase=connection_phase,
+        )
+        report["host_context"] = {
+            "connection_phase": connection_phase,
+            "classification": classification,
+        }
         self._mark_mcu_rx("reset_report")
         self._last_reset_report = dict(report)
-        self._record_black_box_event("reset_report", dict(report))
-        self._write_black_box_snapshot("reset_report", {"report": dict(report)})
+        if classification == HOST_RESET_CLASSIFICATION_BENIGN_STARTUP:
+            self._record_black_box_event("benign_startup_reset", dict(report))
+        else:
+            self._record_black_box_event("reset_report", dict(report))
+            self._write_black_box_snapshot("reset_report", {"report": dict(report)})
         self._reset_session_state_for_recovery()
         self._begin_recovery_handshake()
         self.reset_report_received.emit(dict(report))

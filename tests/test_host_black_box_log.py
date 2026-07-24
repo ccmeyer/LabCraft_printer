@@ -60,6 +60,36 @@ def _deliver_queue_ack(machine, seq32, ack_result, *, expected_seq32=None):
     )
 
 
+def _benign_startup_report():
+    return {
+        "summary": "Board restarted after software reset.",
+        "reset_cause": 3,
+        "reset_cause_name": "software",
+        "flags": 5,
+        "reset_flags_raw": 0x14000003,
+        "pending": False,
+        "sticky": True,
+        "recovery_boot": True,
+        "last_fault": 0,
+        "last_fault_name": "none",
+        "fault_context": None,
+        "active_command": 0,
+        "boot_count": 2,
+        "fault_count": 0,
+        "watchdog_reset_count": 0,
+        "watchdog_sticky_count": 2,
+    }
+
+
+def _with_actionable_host_context(report):
+    enriched = dict(report)
+    enriched["host_context"] = {
+        "connection_phase": mfr.HOST_CONNECTION_PHASE_ESTABLISHED,
+        "classification": mfr.HOST_RESET_CLASSIFICATION_ACTIONABLE,
+    }
+    return enriched
+
+
 def test_orchestrator_stack_status_tlvs_decode_with_phase_name():
     payload = bytearray()
     payload.extend([mfr.TAG_ORCH_STACK_HWM, 2])
@@ -137,6 +167,7 @@ def test_reset_report_writes_snapshot_before_recovery_clears_session_state(qapp,
 
     machine._on_reset_report(report)
 
+    expected_report = _with_actionable_host_context(report)
     snapshot = _read_single_snapshot(tmp_path)
     snapshot_history = machine.black_box_recorder.recent_snapshots()
     assert len(snapshot_history) == 1
@@ -144,7 +175,7 @@ def test_reset_report_writes_snapshot_before_recovery_clears_session_state(qapp,
     assert snapshot_history[0]["session_id"] == machine.black_box_recorder.session_id
     assert snapshot["schema_version"] == "host_black_box_v1"
     assert snapshot["reason"] == "reset_report"
-    assert snapshot["last_reset_report"] == report
+    assert snapshot["last_reset_report"] == expected_report
     assert snapshot["flash_state"] == {
         "flash_session_armed": False,
         "flash_fault_latched": True,
@@ -174,8 +205,41 @@ def test_reset_report_writes_snapshot_before_recovery_clears_session_state(qapp,
     assert any(event["event"] == "queued" and event["request_id"] is None for event in snapshot["command_events"])
     assert any(event["kind"] == "ack" and event["payload"]["matched_pending"] for event in snapshot["black_box_events"])
     assert any(event["kind"] == "reset_report" for event in snapshot["black_box_events"])
-    assert emitted == [report]
+    assert emitted == [expected_report]
     assert len(machine.command_queue.queue) == 0
+
+
+def test_benign_startup_reset_keeps_recovery_but_skips_standalone_snapshot(
+    qapp,
+    test_profile,
+    tmp_path,
+):
+    machine = _make_machine(qapp, test_profile, tmp_path)
+    machine._hello_connection_phase = mfr.HOST_CONNECTION_PHASE_INITIAL
+    emitted = []
+    recovery = []
+    machine.reset_report_received.connect(emitted.append)
+    machine._begin_recovery_handshake = lambda: recovery.append("hello")
+    machine.command_queue.add_command("LED_ON", 0, 0, 0)
+    report = _benign_startup_report()
+
+    machine._on_reset_report(report)
+
+    assert list(tmp_path.glob("*.json")) == []
+    assert recovery == ["hello"]
+    assert list(machine.command_queue.queue) == []
+    assert emitted[0]["host_context"] == {
+        "connection_phase": mfr.HOST_CONNECTION_PHASE_INITIAL,
+        "classification": mfr.HOST_RESET_CLASSIFICATION_BENIGN_STARTUP,
+    }
+    assert any(
+        event["kind"] == "benign_startup_reset"
+        for event in machine.black_box_recorder.recent_events()
+    )
+    assert not any(
+        event["kind"] == "black_box_log_written"
+        for event in machine.black_box_recorder.recent_events()
+    )
 
 
 def test_abnormal_serial_reader_stop_writes_snapshot(qapp, test_profile, tmp_path):
@@ -367,7 +431,7 @@ def test_black_box_log_write_failure_does_not_block_reset_recovery(qapp, test_pr
 
     machine._on_reset_report(report)
 
-    assert emitted == [report]
+    assert emitted == [_with_actionable_host_context(report)]
     assert machine._last_black_box_log_result == {"path": None, "error": "disk unavailable"}
     assert len(machine.command_queue.queue) == 0
     assert any(event["kind"] == "black_box_log_write_failed" for event in machine.black_box_recorder.recent_events())
@@ -483,7 +547,7 @@ def test_reset_report_after_mcu_unresponsive_still_writes_reset_snapshot(qapp, t
     ]
     assert [item["reason"] for item in snapshots] == ["mcu_unresponsive", "reset_report"]
     assert lost_reports[0]["reason"] == "mcu_unresponsive"
-    assert reset_reports == [report]
+    assert reset_reports == [_with_actionable_host_context(report)]
 
 
 def test_mcu_unresponsive_write_failure_still_emits_and_clears(qapp, test_profile, tmp_path):

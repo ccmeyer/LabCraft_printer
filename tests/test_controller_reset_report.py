@@ -76,6 +76,61 @@ def _make_reset_controller(tmp_path, *, array_state="idle", has_progress=False, 
     return controller, events, popups
 
 
+def _benign_startup_report():
+    return {
+        "summary": "Board restarted after software reset.",
+        "reset_cause": 3,
+        "reset_cause_name": "software",
+        "flags": 5,
+        "reset_flags_raw": 0x14000003,
+        "pending": False,
+        "sticky": True,
+        "recovery_boot": True,
+        "last_fault": 0,
+        "last_fault_name": "none",
+        "fault_context": None,
+        "active_command": 0,
+        "host_context": {
+            "connection_phase": "initial",
+            "classification": "benign_startup_recovery",
+        },
+    }
+
+
+def test_handle_benign_startup_reset_recovers_without_report_artifacts(tmp_path):
+    controller, events, popups = _make_reset_controller(tmp_path)
+    controller._last_reset_debug_bundle_context = {"stale": True}
+
+    Controller.handle_reset_report(controller, _benign_startup_report())
+
+    assert events == [("recover", None)]
+    assert controller.expected_position == {"X": 1, "Y": 2, "Z": 3}
+    assert controller.expected_location is None
+    assert popups == []
+    assert not controller._reset_report_log_path.exists()
+    assert controller._last_reset_debug_bundle_context is None
+
+
+def test_handle_benign_startup_reset_still_interrupts_active_array(tmp_path):
+    controller, events, popups = _make_reset_controller(
+        tmp_path,
+        array_state="running",
+        has_progress=True,
+        remaining=4,
+    )
+
+    Controller.handle_reset_report(controller, _benign_startup_report())
+
+    assert controller.get_array_run_state() == "resume_ready"
+    assert controller._array_context is None
+    assert controller._soft_stop_clear_uncertain is False
+    assert controller.array_state_changed.calls == [("resume_ready",)]
+    assert events == [("recover", None)]
+    assert popups == []
+    assert not controller._reset_report_log_path.exists()
+    controller.model.record_experiment_audit_event.assert_called_once()
+
+
 def test_handle_reset_report_logs_and_emits_popup(tmp_path):
     events = []
     popups = []
