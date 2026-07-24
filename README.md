@@ -143,7 +143,7 @@ motion/pressure dynamics are intentionally unsupported and fail visibly.
 This is an application-contract simulator. Passing its tests does not verify
 firmware behavior, collision safety, physical motion, pressure response,
 camera analysis, or droplet quality. There remains no simulation CLI or
-complete virtual print-array scenario until Slice 5.
+complete virtual print-array scenario in the Slice 4 API itself.
 
 Run the focused construction and safety tests:
 
@@ -161,6 +161,85 @@ Do not use this programmatic seam as a production launcher and do not pass a
 factory that can construct real hardware into `simulation_dependencies`.
 Application-owned configuration and experiment writes are isolated, but the
 API cannot prove that an arbitrary third-party machine factory is safe.
+
+## Real-UI Virtual Print-Array Workflow
+
+Slice 5 adds a separate verification CLI that constructs the real Model,
+Controller, MainWindow, 16-by-24 well widget tree, and execution persistence
+under explicit simulation dependencies. It connects only to the literal
+`SIMULATED` port and completes 96 wells (rows A-D) through the UI start button.
+No MCU, serial port, camera, GPIO, balance, updater, or manual operator action
+is used.
+
+Prerequisites:
+
+- the repository `env` virtual environment with real PySide6;
+- a writable output root;
+- `QT_QPA_PLATFORM=offscreen` for headless use (set automatically by the CLI
+  unless `--visible` is supplied).
+
+Run the normal one-timescale characterization:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario virtual_print_array_96_v1 `
+  --speed-multiplier 1 `
+  --timeout-seconds 180
+```
+
+Run the accelerated probe self-check, which deliberately blocks the Qt thread
+for 300 ms after well 48 and requires both phase attribution and a captured
+main-thread stack:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario virtual_print_array_96_v1 `
+  --speed-multiplier 100 `
+  --inject-ui-stall-ms 300 `
+  --inject-after-completion 48 `
+  --timeout-seconds 180
+```
+
+Use `--visible` for local visual inspection. If `QT_QPA_PLATFORM=offscreen` is
+already set in the shell, remove it before a visible run.
+
+Reports are retained beneath:
+
+```text
+verification_reports/virtual_workflows/virtual_print_array_96_v1/<UTC>_<commit>/
+```
+
+Each successful run contains the validated JSON report, text summary, bounded
+event trace, stack diagnostics, retained isolated config/experiment/calibration
+roots, and ready/printing/mid-array/completed screenshots. Failed runs retain a
+traceback and failure screenshot when possible. Generated reports are ignored
+by Git and are machine-specific.
+
+If Windows reports `WinError 5` while rapidly replacing an execution file,
+retain the failed diagnostics and retry once with a fresh ignored
+repository-local output root, for example:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario virtual_print_array_96_v1 `
+  --output-root tmp\virtual_workflows
+```
+
+Do not disable atomic replacement or `fsync` to work around host filesystem
+contention. Some minimal PySide6 installations also lack bundled fonts; the
+offscreen screenshots remain diagnostic but may render text as placeholder
+glyphs until system fonts or fontconfig are available.
+
+Exit code `0` means the functional workflow passed, `2` means a workflow,
+safety, persistence, timeout, teardown, or required-artifact failure, and `3`
+means setup/environment/reporting failed. Responsiveness data is informational
+in Slice 5: it is unsuitable for cross-host, cross-Python, or cross-Qt
+comparison, and raw latency cannot fail until Slice 6 defines same-host
+comparison and acceptance rules.
+
+The scenario validates the application-facing workflow only. It does not prove
+firmware protocol behavior, collision safety, physical motion, pressure
+response, camera analysis, balance behavior, or droplet quality.
 
 ## Execution Persistence Microbenchmark
 

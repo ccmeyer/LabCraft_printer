@@ -158,7 +158,7 @@ Before proceeding to the next slice:
 | 2. Execution persistence microbenchmark | `verified` | Repeated progress/resume/checkpoint workload | 96/384-well cost and growth reported |
 | 3. Safe application construction seam | `verified` | Build real app components with explicit safe dependencies | App launches with no hardware access |
 | 4. In-process simulated machine | `verified` | Command lifecycle and machine-state simulation | Controller command sequences complete deterministically |
-| 5. Real-UI print-array scenario | `not_started` | End-to-end Qt print workflow with real persistence | 96-well scenario completes with responsiveness report |
+| 5. Real-UI print-array scenario | `verified` | End-to-end Qt print workflow with real persistence | 96-well scenario completes with responsiveness report |
 | 6. Regression comparison and performance gates | `not_started` | Baselines, budgets, comparison, exit policy | Stable candidate/baseline classification |
 | 7. Target-Pi software-in-the-loop lane | `not_started` | Run the same scenario on Pi CPU/storage | Pi report produced without MCU/hardware setup |
 | 8. Protocol-level virtual MCU and fault injection | `deferred` | Real framing, ACK/status, transport faults | Protocol scenarios pass without changing protocol |
@@ -930,7 +930,7 @@ Completion record:
 
 ## Slice 5: Real-UI Print-Array Scenario
 
-Status: `not_started`
+Status: `verified`
 
 Goal:
 
@@ -1000,7 +1000,57 @@ Rollback:
 
 Completion record:
 
-- Not started.
+- Files changed:
+  - `tools/run_virtual_workflow.py`;
+  - `tools/virtual_workflows/scenarios.py`;
+  - `tools/virtual_workflows/fixtures/virtual_print_array_96_v1.json`;
+  - `tests/system/test_virtual_print_array_workflow.py`;
+  - `docs/virtual_workflow_verification_plan.md`;
+  - `docs/virtual_workflow_report_schema.md`;
+  - `README.md`.
+- Added a strict versioned fixture that expands rows A-D of the real
+  `shallow-384_well_plate` into 96 deterministic serpentine completions. Its
+  prepared 5 nL basis is revised through the real canned 10 nL calibration so
+  the final authoritative target is one droplet per well and the revision is
+  distinguishable from a head-only binding.
+- Added the offscreen-by-default real-UI runner, allowlisted start/dock dialog
+  automation, real MVC construction, simulator readiness, instance-local
+  persistence/UI phase timing, Qt heartbeat/stack/resource evidence, queue
+  starvation checks, milestone screenshots, retained event/failure artifacts,
+  and schema-v1 reporting. No production application or firmware file changed.
+- Focused validation with a repository-local basetemp: 245 passed in 27.46 s.
+  The dedicated Slice 5 system file passed all 9 cases in 21.34 s, including
+  normal completion, a detected and attributed 300 ms UI stall with a captured
+  main-thread stack, failure artifacts, root isolation, and clean timer/thread
+  teardown.
+- Normal one-timescale CLI report:
+  `verification_reports/virtual_workflows/virtual_print_array_96_v1/20260724T001828866102Z_e211e8b91e40/`;
+  informational pass in 16.959 s with 96/96 wells, 96 clean completed intents,
+  one completion signal, no queue starvation, and a 140.578 ms maximum
+  event-loop gap.
+- Injected CLI report:
+  `tmp/virtual_workflows/virtual_print_array_96_v1/20260724T003049865987Z_e211e8b91e40/`;
+  informational pass in 10.838 s with 96/96 wells, no starvation, a detected
+  300 ms named stall, one attributed stack capture, and a 412.042 ms maximum
+  event-loop gap.
+- Two injected attempts under the default report root retained functional
+  failure evidence after Windows denied real atomic progress/resume
+  replacements at wells 55 and 18. File ACLs and cleanup were valid; the same
+  workload passed under pytest roots and the ignored repository-local `tmp`
+  root. This host contention is documented as a limitation; durability and
+  ordering were not weakened and no automatic fallback was added.
+- All six development/manual reports were opened and schema-validated.
+  Summaries, event traces, stack artifacts, and successful ready/completed
+  screenshots were inspected. This PySide6 installation lacks bundled fonts,
+  so offscreen text rendered as placeholder glyphs while layout and well-state
+  changes remained visible.
+- Full suite command:
+  `.\env\Scripts\python.exe -m pytest -q --basetemp=tests\.slice5_full_tmp`;
+  result: 3,375 passed, 24 skipped, and 138 existing deprecation warnings in
+  456.93 s (7:36). Validated temporary pytest roots were removed.
+- Environment: Windows 11 AMD64, CPython 3.13.14, PySide6 6.11.1, Qt 6.11.1.
+  Raw reports remain ignored and machine-specific. Slice 6 thresholds and
+  comparison logic remain intentionally absent.
 
 ## Slice 6: Regression Comparison And Performance Gates
 
@@ -1478,6 +1528,8 @@ scope or threshold change only inside implementation commits.
 | 2026-07-23 | 3 | `in_progress` -> `verified` | Added the shared production/simulation construction seam, isolated roots, fail-closed hardware factories, persistent simulation identity, disabled hardware/update controls, and Controller safety backstops. Focused tests: 254 passed. Final full suite: 3,350 passed and 24 skipped. Repeated real MVC/MainWindow construction and cleanup passed offscreen; all temporary roots were removed. No firmware or protocol file changed. |
 | 2026-07-23 | 4 | `not_started` -> `in_progress` | Starting commit `c62079214765504529cd9035acc650d95f2e50c0` with a clean worktree; Python 3.13.14, PySide6 6.11.1, and Qt 6.11.1. Call paths cover explicit simulation construction, Controller command lifecycle through Qt timers, and pause-after/clear soft-stop coordination. Fixed the seven-file simulator/test/documentation boundary, explicit factory contract, positive Qt speed multiplier, supported command surface, deterministic fault policy, focused/full validation, and no Slice 5 CLI or full-array scenario. Risks are callback reentrancy, false queue-drain reporting, leaked timers, and simulator/firmware drift; mitigations are exactly-once lifecycle tests, real Controller integration, fail-visible unsupported actions, hardware-import traps, and continued HIL requirements. Rollback removes the isolated simulator, tests, and documentation while retaining Slice 3. |
 | 2026-07-23 | 4 | `in_progress` -> `verified` | Added the explicit protocol-free simulator, deterministic Qt lifecycle/timing, app-shaped status, command lookahead, pause/clear/disconnect controls, and fault configuration. Focused tests: 182 passed. The real MVC/MainWindow and representative Controller sequence passed twice offscreen. Full suite: 3,366 passed and 24 skipped in 432.44 seconds. Import traps and diff checks passed; temporary roots were removed and no reports were generated. |
+| 2026-07-23 | 5 | `not_started` -> `in_progress` | Starting commit `e211e8b91e409af7365079d803e9992d320012e7` with a clean worktree. Call path: QTest click -> real MainWindow/WellPlateWidget -> Controller array lookahead and durable execution persistence -> explicit SimulatedMachine -> completion callbacks -> Controller progress/checkpoint -> real well-widget updates. Fixed the seven-file tool/fixture/test/documentation boundary, offscreen-by-default real-Qt construction, 96 deterministic A-D serpentine completions, informational-only metrics, failure artifact retention, focused/manual/full validation, and no Slice 6 thresholds. Risks are modal deadlock, callback instrumentation drift, queue-starvation false positives, Qt teardown leaks, and escaped writes; mitigations are allowlisted dialog automation, instance-local wrappers restored in `finally`, signal/file invariant checks, bounded timeout/cleanup, and resolved-root containment. Rollback removes only the Slice 5 runner, fixture, system test, and documentation additions while retaining Slices 0-4. |
+| 2026-07-23 | 5 | `in_progress` -> `verified` | Added the versioned 96-well fixture, real-UI scenario/CLI, real persistence/UI/queue instrumentation, screenshots, injected-stall proof, failure diagnostics, system tests, and documentation without changing production or firmware code. Focused tests: 245 passed. Normal 1x report passed in 16.959 s; the final injected report passed in 10.838 s with a 412.042 ms detected gap and attributed stack. Two retained default-root failures document Windows atomic-replace contention without weakening durability. Full suite: 3,375 passed and 24 skipped in 456.93 s. All reports, summaries, screenshots, ignore rules, cleanup, and diff checks were inspected. |
 
 For every update, include:
 
@@ -1493,6 +1545,7 @@ For every update, include:
 
 ## Current Next Action
 
-Slice 4 is verified. The next permitted work is the separately reviewed Slice 5
-real-UI print-array scenario. Do not add regression thresholds or comparison
-gates from Slice 6 inside Slice 5.
+Slice 5 is verified. The next permitted work is the separately reviewed Slice
+6 regression comparison and performance-gate implementation. Use compatible
+same-host reports and do not reinterpret Slice 5 informational measurements as
+acceptance thresholds.

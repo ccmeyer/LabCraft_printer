@@ -191,6 +191,39 @@ some platform counters are available, and `not_available` when `psutil` or a
 process handle cannot be obtained. Resource limitations never abort the Qt
 probe.
 
+### Slice 5 real-UI scenario values
+
+The `virtual_print_array_96_v1` workload retains the v1 envelope and adds its
+evidence only beneath the existing workload, metric, and artifact objects. It
+uses the real 16-by-24 `shallow-384_well_plate` widget tree while completing
+the first 96 wells (rows A-D) once in deterministic serpentine order.
+
+`metrics.responsiveness.values` contains the Slice 1 Qt probe snapshot plus:
+
+- `well_plate_paint_event_count`;
+- `phase_timings` for real persistence, Controller completion, and well-widget
+  update callbacks; and
+- `injected_stall_assessment`, including the requested delay, completion
+  position, detection result, stack-capture result, and decision.
+
+`metrics.workflow.values` contains expected/completed wells, the ordered well
+updates, array-state transitions, completion-signal count, observed dialogs,
+errors, and final invariant results. `metrics.queue.values` contains simulator
+lifecycle counts, depth observations, unexpected drain/starvation evidence,
+and teardown state. `metrics.persistence.values` contains the validated clean
+intent count and command sequences, terminal plan state/revision, authoritative
+bundle checks, durable file sizes, and named phase distributions.
+
+The scenario writes `report.json`, `summary.txt`, `events.jsonl`,
+`stall_stacks.txt`, retained scenario data, and ready/printing/mid/completed
+screenshots. A failing run additionally writes `failure_traceback.txt` and a
+failure screenshot when the real window can be captured.
+
+Slice 5 classification remains `informational`. Functional, persistence,
+safety, timeout, teardown, missing injected-stall evidence, or required
+artifact failures use `fail`; raw latency never warns or fails until Slice 6
+defines compatible comparisons and acceptance gates.
+
 ## Qt Identity
 
 `environment.qt.binding` is:
