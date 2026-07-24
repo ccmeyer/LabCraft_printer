@@ -77,6 +77,8 @@ class VirtualPrintArrayScenarioConfig:
     inject_ui_stall_ms: int = 0
     inject_after_completion: int = 48
     run_id: str | None = None
+    pi_preflight_path: Path | None = None
+    pi_hardware_proof_path: Path | None = None
 
     def __post_init__(self):
         output_root = Path(self.output_root).resolve()
@@ -85,6 +87,16 @@ class VirtualPrintArrayScenarioConfig:
         timeout = float(self.timeout_seconds)
         stall = int(self.inject_ui_stall_ms)
         inject_after = int(self.inject_after_completion)
+        pi_preflight_path = (
+            Path(self.pi_preflight_path).resolve()
+            if self.pi_preflight_path is not None
+            else None
+        )
+        pi_hardware_proof_path = (
+            Path(self.pi_hardware_proof_path).resolve()
+            if self.pi_hardware_proof_path is not None
+            else None
+        )
         if not math.isfinite(speed) or speed <= 0:
             raise ValueError("speed_multiplier must be finite and greater than zero")
         if not math.isfinite(timeout) or timeout <= 0:
@@ -93,12 +105,20 @@ class VirtualPrintArrayScenarioConfig:
             raise ValueError("inject_ui_stall_ms must be non-negative")
         if not 1 <= inject_after <= 96:
             raise ValueError("inject_after_completion must be between 1 and 96")
+        if (pi_preflight_path is None) != (pi_hardware_proof_path is None):
+            raise ValueError(
+                "pi_preflight_path and pi_hardware_proof_path must be provided together"
+            )
         object.__setattr__(self, "output_root", output_root)
         object.__setattr__(self, "fixture_path", fixture_path)
         object.__setattr__(self, "speed_multiplier", speed)
         object.__setattr__(self, "timeout_seconds", timeout)
         object.__setattr__(self, "inject_ui_stall_ms", stall)
         object.__setattr__(self, "inject_after_completion", inject_after)
+        object.__setattr__(self, "pi_preflight_path", pi_preflight_path)
+        object.__setattr__(
+            self, "pi_hardware_proof_path", pi_hardware_proof_path
+        )
 
 
 class VirtualWorkflowScenarioError(RuntimeError):
@@ -578,6 +598,7 @@ def _summary_text(report: dict[str, Any]) -> str:
     lines = [
         f"Scenario: {report['run']['scenario_name']} v{report['run']['scenario_version']}",
         f"Workload: {report['workload']['workload_id']}",
+        f"Run mode: {report['run']['run_mode']}",
         f"Classification: {report['classification']['status']}",
         f"Duration: {report['run']['duration_ms']:.3f} ms",
         (
@@ -594,6 +615,14 @@ def _summary_text(report: dict[str, Any]) -> str:
             f"{responsiveness.get('injected_stall_assessment', {}).get('decision', 'not_requested')}"
         ),
     ]
+    pi_sil = report["safety"].get("pi_sil")
+    if isinstance(pi_sil, dict):
+        lines.extend(
+            [
+                f"Pi sandbox: {pi_sil.get('sandbox_method')}",
+                f"Pi hardware proof: {pi_sil.get('proof_sha256')}",
+            ]
+        )
     for reason in report["classification"]["reasons"]:
         lines.append(f"Reason: {reason}")
     return "\n".join(lines) + "\n"
@@ -610,6 +639,50 @@ def run_virtual_print_array_scenario(
         raise VirtualWorkflowScenarioError(
             "the real-UI scenario requires an installed real PySide6 binding"
         )
+    pi_preflight: dict[str, Any] | None = None
+    pi_hardware_proof: dict[str, Any] | None = None
+    pi_environment: dict[str, Any] | None = None
+    pi_safety: dict[str, Any] | None = None
+    if config.pi_preflight_path is not None:
+        from tools.virtual_workflows.pi_sil import (
+            PiSilError,
+            load_and_validate_pi_evidence,
+            pi_report_identity,
+        )
+
+        try:
+            pi_preflight, pi_hardware_proof = load_and_validate_pi_evidence(
+                config.pi_preflight_path,
+                config.pi_hardware_proof_path,
+                expected_qt_platform=str(qt_identity.get("platform")),
+            )
+        except PiSilError as exc:
+            raise VirtualWorkflowScenarioError(
+                f"Pi SIL evidence is invalid: {exc}"
+            ) from exc
+        if identity["source"].get("git_commit") != pi_preflight.get(
+            "source_commit"
+        ):
+            raise VirtualWorkflowScenarioError(
+                "Pi SIL preflight source commit does not match the scenario source"
+            )
+        expected_environment = {
+            "operating_system": pi_preflight.get("operating_system"),
+            "architecture": pi_preflight.get("architecture"),
+            "python_version": pi_preflight.get("python_version"),
+            "python_executable": pi_preflight.get("python_executable"),
+        }
+        for field, expected in expected_environment.items():
+            if identity["environment"].get(field) != expected:
+                raise VirtualWorkflowScenarioError(
+                    f"Pi SIL preflight {field} does not match the scenario process"
+                )
+        pi_environment, pi_safety = pi_report_identity(
+            pi_preflight,
+            pi_hardware_proof,
+            config.pi_hardware_proof_path,
+        )
+        identity["environment"]["target_pi"] = pi_environment
 
     fixture = load_virtual_print_array_fixture(config.fixture_path)
     expected_wells = fixture_well_ids(fixture)
@@ -1155,6 +1228,40 @@ def run_virtual_print_array_scenario(
             ),
         },
     }
+    platform_name = str(qt_identity.get("platform") or "unknown")
+    operating_system = str(identity["environment"].get("operating_system") or "")
+    architecture = str(identity["environment"].get("architecture") or "").lower()
+    is_pi_process = pi_preflight is not None or (
+        operating_system == "Linux" and architecture in {"aarch64", "arm64"}
+    )
+    run_mode = (
+        f"{platform_name}_pi_sil"
+        if is_pi_process
+        else "visible_windows_sil"
+        if config.visible
+        else "offscreen_windows_sil"
+    )
+    safety_values = {
+        "simulation": True,
+        "hardware_access_allowed": False,
+        "hardware_interfaces": {
+            "serial": False,
+            "GPIO": False,
+            "camera": False,
+            "balance": False,
+            "MCU": False,
+            "firmware_update": False,
+        },
+        "simulated_port": "SIMULATED",
+        "scenario_root": str(scenario_root),
+        "root_containment_valid": _resolved_beneath(
+            scenario_root,
+            report_dir,
+        ),
+    }
+    if pi_safety is not None:
+        safety_values["pi_sil"] = pi_safety
+
     report = {
         "schema_name": REPORT_SCHEMA_NAME,
         "schema_version": REPORT_SCHEMA_VERSION,
@@ -1162,9 +1269,7 @@ def run_virtual_print_array_scenario(
             "run_id": run_id,
             "scenario_name": SCENARIO_NAME,
             "scenario_version": SCENARIO_VERSION,
-            "run_mode": (
-                "visible_windows_sil" if config.visible else "offscreen_windows_sil"
-            ),
+            "run_mode": run_mode,
             "timing_policy": (
                 f"simulated_command_durations_x{config.speed_multiplier:g}"
             ),
@@ -1176,24 +1281,7 @@ def run_virtual_print_array_scenario(
         },
         "source": identity["source"],
         "environment": identity["environment"],
-        "safety": {
-            "simulation": True,
-            "hardware_access_allowed": False,
-            "hardware_interfaces": {
-                "serial": False,
-                "GPIO": False,
-                "camera": False,
-                "balance": False,
-                "MCU": False,
-                "firmware_update": False,
-            },
-            "simulated_port": "SIMULATED",
-            "scenario_root": str(scenario_root),
-            "root_containment_valid": _resolved_beneath(
-                scenario_root,
-                report_dir,
-            ),
-        },
+        "safety": safety_values,
         "workload": {
             "workload_id": WORKLOAD_ID,
             "fixture_schema_version": fixture["schema_version"],

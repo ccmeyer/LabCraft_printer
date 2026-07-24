@@ -66,6 +66,19 @@ The Slice 0 runner constructs a deliberately incomplete model using
 `App`, `Controller`, `Machine_FreeRTOS`, a transport, or any physical-device
 object.
 
+Slice 7 Pi reports add compatible nested `safety.pi_sil` evidence:
+
+- `sandbox_method` is `bubblewrap_private_dev_v1`;
+- `private_dev`, `root_read_only`, and `network_unshared` are `true`;
+- `forbidden_access_attempt_count` is zero;
+- `proof_sha256` identifies the validated hardware proof; and
+- `trace_sha256` identifies the traced safety-audit system-call log.
+
+The proof is produced by a separate accelerated run and is not performance
+evidence. Measured Pi runs execute without tracing but inside the same required
+private-device sandbox. A report missing or mismatching its preflight/proof is
+rejected before Qt construction.
+
 ## Metric Groups
 
 `metrics` contains exactly:
@@ -275,6 +288,36 @@ The first Windows workstation baseline is intentionally `candidate`: warnings
 return success while functional failures still fail. Acceptance behavior is
 implemented and tested but requires an explicit reviewed baseline replacement.
 
+### Slice 7 Pi identity and artifact bundles
+
+A validated Pi report uses `offscreen_pi_sil` or `minimal_pi_sil` as
+`run.run_mode`. `environment.target_pi` records:
+
+- lane identifier `raspberry_pi_sil`;
+- exact Raspberry Pi model; and
+- output filesystem type, storage class, and mount source.
+
+Pi comparison compatibility additionally requires exact target-Pi identity and
+the same sandbox method/protection booleans. Proof and trace hashes are retained
+for audit but deliberately excluded from compatibility, since an independent
+candidate is expected to have a different proof file. Windows reports omit
+these fields, so Windows/Pi comparison is explicitly incompatible and never
+reaches performance rules.
+
+Slice 7 adds `labcraft.pi_sil_preflight`,
+`labcraft.pi_sil_hardware_proof`, and
+`labcraft.pi_sil_artifact_bundle`, each at version 1. The bundle manifest
+contains repository-relative file paths, byte counts, SHA-256 hashes, the
+report-set/proof/trace entry points, and exact cleanup roots. Extraction rejects
+absolute or parent-traversal paths, symlinks, unexpected entries, overwrites,
+and hash/size mismatches before validating the report set and raw-report
+references.
+
+The initial Pi baseline is separately generated at candidate maturity on a
+clean designated Pi. Its relative budgets are derived only from that compatible
+Pi. The absolute responsiveness rules remain policy-v1 values; they are not
+relaxed merely because the target is slower.
+
 ## Qt Identity
 
 `environment.qt.binding` is:
@@ -312,6 +355,11 @@ Referenced raw reports must remain available locally for hash validation.
 Replacing that summary is never implicit: the CLI requires both
 `--accept-baseline` and `--replace-accepted-baseline`.
 
+Slice 7 retrieves Pi artifacts into the same ignored root. Remote scenario and
+report-set directories may be deleted only after local bundle/hash/report
+validation and only through manifest-listed cleanup roots. Safety or retrieval
+failures retain remote evidence.
+
 ## Validation Interface
 
 `tools.virtual_workflows.report` exposes:
@@ -331,3 +379,8 @@ atomically replaces the destination.
 - `compare_report_sets(...)`;
 - validators/loaders for all three Slice 6 artifact types; and
 - atomic JSON writers plus the derived Markdown comparison writer.
+
+`tools.virtual_workflows.pi_sil` exposes Pi preflight/proof validation,
+artifact bundling and path-safe extraction, candidate-baseline installation,
+and manifest-bound cleanup. None of these interfaces imports or constructs the
+production machine.

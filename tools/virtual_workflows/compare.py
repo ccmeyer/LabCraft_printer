@@ -211,7 +211,7 @@ def _compatibility_identity(
     python_executable = environment.get("python_executable")
     if isinstance(python_executable, str) and python_executable:
         python_executable = _portable_path(Path(python_executable))
-    return {
+    identity = {
         "host_label": host_label,
         "report_schema_name": report["schema_name"],
         "report_schema_version": report["schema_version"],
@@ -242,6 +242,18 @@ def _compatibility_identity(
         },
         "workload": dict(workload),
     }
+    target_pi = environment.get("target_pi")
+    if isinstance(target_pi, Mapping) and target_pi:
+        identity["environment"]["target_pi"] = dict(target_pi)
+    pi_sil = safety.get("pi_sil")
+    if isinstance(pi_sil, Mapping) and pi_sil:
+        identity["safety"]["pi_sil"] = {
+            "sandbox_method": pi_sil.get("sandbox_method"),
+            "private_dev": pi_sil.get("private_dev"),
+            "root_read_only": pi_sil.get("root_read_only"),
+            "network_unshared": pi_sil.get("network_unshared"),
+        }
+    return identity
 
 
 def _distribution(values: Iterable[float]) -> dict[str, Any]:

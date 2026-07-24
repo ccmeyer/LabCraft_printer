@@ -160,7 +160,7 @@ Before proceeding to the next slice:
 | 4. In-process simulated machine | `verified` | Command lifecycle and machine-state simulation | Controller command sequences complete deterministically |
 | 5. Real-UI print-array scenario | `verified` | End-to-end Qt print workflow with real persistence | 96-well scenario completes with responsiveness report |
 | 6. Regression comparison and performance gates | `verified` | Baselines, budgets, comparison, exit policy | Stable candidate/baseline classification |
-| 7. Target-Pi software-in-the-loop lane | `not_started` | Run the same scenario on Pi CPU/storage | Pi report produced without MCU/hardware setup |
+| 7. Target-Pi software-in-the-loop lane | `in_progress` | Run the same scenario on Pi CPU/storage | Pi report produced without MCU/hardware setup |
 | 8. Protocol-level virtual MCU and fault injection | `deferred` | Real framing, ACK/status, transport faults | Protocol scenarios pass without changing protocol |
 | 9. Expanded workflow scenario catalog | `deferred` | Stop/resume, reset, loading, calibration adapters | Selected workflows produce trustworthy artifacts |
 | 10. Codex skill, AGENTS rules, and automation | `not_started` | Make lane selection repeatable and enforceable | Codex/human instructions invoke repository tooling |
@@ -1191,7 +1191,7 @@ Completion record:
 
 ## Slice 7: Target-Pi Software-In-The-Loop Lane
 
-Status: `not_started`
+Status: `in_progress`
 
 Goal:
 
@@ -1212,10 +1212,15 @@ Scope:
 Likely files touched:
 
 - `tools/run_virtual_workflow.py`
-- a small Pi SIL wrapper if necessary
+- `tools/virtual_workflows/scenarios.py`
+- `tools/virtual_workflows/compare.py`
+- `tools/virtual_workflows/pi_sil.py`
+- `scripts/pi/run_virtual_workflow_sil.sh`
+- `tools/run_pi_virtual_workflow.ps1`
+- `requirements.in` and `requirements-pi.lock`
+- focused Pi lane and comparison tests
 - `README.md` troubleshooting/prerequisites
-- report/compare tooling
-- optional automation script after manual commands are stable
+- this plan and the report-schema documentation
 
 Validation:
 
@@ -1238,7 +1243,31 @@ Rollback:
 
 Completion record:
 
-- Not started.
+- Implementation opened from clean commit
+  `e17b3524fb8fdeb3a2928c1ae8be0368d75b3e81`.
+- Selected a fail-closed Bubblewrap boundary: read-only repository, writable
+  ignored output root, private `/dev`, private process/network namespaces, and
+  no unsandboxed Pi option. A separate accelerated `strace` run supplies
+  device-access evidence without contaminating measured timing.
+- The designated Pi baseline remains candidate-only and is not created until
+  the tooling is committed and an actual compatible Pi completes clean
+  preflight, proof, baseline, and independent candidate collection.
+- Local implementation/validation is in progress. Pi execution and evidence
+  retrieval remain required before this slice may become `verified`.
+- Windows focused validation passed 92 tests in 28.88 s. A separate final
+  Pi/comparison unit pass completed 30 tests in 0.94 s. The accelerated
+  backwards-compatibility CLI smoke report passed all 96 wells in 10.140 s at
+  `verification_reports/virtual_workflows/slice7-local-smoke/`; its report,
+  186,909-byte event trace, four screenshots, safety flags, and summary were
+  inspected.
+- Full pytest passed 3,406 tests with 24 skips and 138 existing deprecation
+  warnings in 450.90 s (7:30). The repository-local pytest roots were removed;
+  report ignore and diff checks passed.
+- Environment: Windows 11 AMD64, CPython 3.13.14, PySide6 6.11.1, Qt 6.11.1.
+  Neither Bash/WSL nor an actual Raspberry Pi is available on this computer.
+  `bash -n`, Pi preflight/private-device proof, at least three Pi scenarios,
+  artifact retrieval, and the candidate Pi baseline therefore remain external
+  completion gates; no Pi baseline has been fabricated.
 
 ## Slice 8: Protocol-Level Virtual MCU And Fault Injection
 
@@ -1574,12 +1603,13 @@ Mitigation:
 | D-003 | decided | First UI scenario uses a prepared experiment and canned calibration rather than full calibration imaging |
 | D-004 | decided | Use both absolute responsiveness and relative same-host regression criteria |
 | D-005 | decided | Run performance-sensitive scenarios on Windows and later on the Pi without an MCU |
-| D-006 | decided | Write generated reports under ignored `verification_reports/virtual_workflows/`; retain them until manually removed, with no automatic deletion |
+| D-006 | decided | Write generated reports under ignored `verification_reports/virtual_workflows/`; retain local evidence until manually removed. Slice 7 may remove only remote Pi run roots named in a validated bundle manifest, and only after complete local retrieval/hash/report validation; failures retain remote evidence. |
 | D-007 | decided | Keep `simulation_dependencies` fail-closed and require the explicit official `make_simulated_machine_factory(config)`; use Qt timers with a positive speed multiplier so acceleration retains real event-loop scheduling |
 | D-008 | decided | Use candidate-first policy v1: warn above a 250 ms maximum service gap; acceptance fails above a 1000 ms service gap, above 250 ms scheduling-lateness p99, or on a same-host p95/p99 regression exceeding both 25% and the robust absolute noise floor. The initial tracked baseline remains candidate until separately reviewed promotion. |
 | D-009 | decided | Keep raw machine-specific reports local and ignored; commit summarized evidence, and later generate reference reports from a designated commit on the comparison host |
 | D-010 | open | Shared skill location: developer-local skill versus versioned plugin/package |
 | D-011 | open | Which CI environment can provide stable enough performance measurements |
+| D-012 | decided | The designated Pi SIL command is fail-closed behind Bubblewrap with a read-only host filesystem, private `/dev`, no network, and only the ignored report root writable. A separate in-sandbox `strace` audit proves prohibited device paths were not opened; traced timings never enter performance sets. |
 
 Add or revise decisions here when evidence changes the plan. Do not hide a
 scope or threshold change only inside implementation commits.
@@ -1603,6 +1633,8 @@ scope or threshold change only inside implementation commits.
 | 2026-07-23 | 5 | `in_progress` -> `verified` | Added the versioned 96-well fixture, real-UI scenario/CLI, real persistence/UI/queue instrumentation, screenshots, injected-stall proof, failure diagnostics, system tests, and documentation without changing production or firmware code. Focused tests: 245 passed. Normal 1x report passed in 16.959 s; the final injected report passed in 10.838 s with a 412.042 ms detected gap and attributed stack. Two retained default-root failures document Windows atomic-replace contention without weakening durability. Full suite: 3,375 passed and 24 skipped in 456.93 s. All reports, summaries, screenshots, ignore rules, cleanup, and diff checks were inspected. |
 | 2026-07-23 | 6 | `not_started` -> `in_progress` | Starting commit `d9381a2f190f2325a41068c54da23feff8cc1e4c` with a clean worktree. Call paths cover repeated Slice 5 collection into validated report sets and same-host baseline/candidate comparison into JSON, Markdown, console classification, and stable exit codes. Fixed the seven-file boundary, candidate-first maturity, one-warm-up/five-measured minimum, exact compatibility identity, robust relative/absolute policy, explicit baseline overwrite protection, focused/manual/full validation, and no production/simulator/firmware/protocol changes. Risks are noisy or cross-environment decisions, hidden per-run outliers, and unreviewed baseline replacement; mitigations are CV/MAD/outlier evidence, exact fingerprints, raw-report hashes, run-boundary aggregation, and explicit reviewed acceptance. |
 | 2026-07-23 | 6 | `in_progress` -> `verified` | Added versioned report sets, compact tracked baselines, exact same-host compatibility, hash validation, candidate/acceptance policy, repeat-run CLI, JSON/Markdown comparison, stable exit codes, tests, and documentation. Tooling checkpoint `ba70d6c544cf`; focused validation 82 passed. The clean candidate baseline had 1.42%/1.67% primary CV. An independent candidate passed with +0.624/+0.483 ms p95/p99 deltas; five injected 300 ms measured runs warned at a 484.114 ms maximum gap with complete stacks and no functional failure. Full suite: 3,396 passed and 24 skipped in 448.61 s. All raw reports/artifacts/hashes and ignore/diff/cleanup checks were inspected; no production, simulator, firmware, or protocol file changed. |
+| 2026-07-23 | 7 | `not_started` -> `in_progress` | Starting commit `e17b3524fb8fdeb3a2928c1ae8be0368d75b3e81` with a clean worktree. Call paths cover a fail-closed Pi preflight and private-device sandbox, the unchanged real-UI/MVC/simulator workflow on Pi CPU/storage, traced hardware-access proof, and manifest-controlled SSH retrieval into same-Pi comparison. The boundary is limited to virtual-workflow tools, Pi wrappers/dependencies, focused tests, a later generated Pi baseline, and documentation; production MVC, simulator, firmware, protocol, motion, pressure, and physical timing remain unchanged. Risks are unavailable user namespaces/offscreen Qt, misleading traced timings, noisy thermal/storage state, unsafe remote paths, and accidental Windows/Pi equivalence. Mitigations are no unsandboxed Pi-run bypass, separate trace evidence, exact environment/filesystem compatibility, hash/path validation, candidate-only Pi maturity, and same-platform comparison. Rollback removes the Slice 7 tooling/evidence commits and retains Windows SIL. |
+| 2026-07-23 | 7 | `in_progress` implementation checkpoint | Added Pi-aware CLI/report identity, exact Pi comparison compatibility, fail-closed preflight/proof/bundle helpers, the Bubblewrap Bash runner, SSH/SCP PowerShell orchestration, hashed `psutil` Pi dependency, traversal/hash/cleanup/hardware-isolation tests, and operator/schema documentation. Focused validation passed 92 tests; final Pi/comparison unit validation passed 30. The accelerated Windows CLI compatibility run passed 96/96 wells in 10.140 s, and full pytest passed 3,406 with 24 skips in 450.90 s. JSON, summary, events, screenshots, ignore rules, diff checks, and temporary-root cleanup were inspected. Bash/WSL and a Pi are unavailable on this workstation, so Pi `bash -n`, private-device trace proof, repeated target runs, remote retrieval, same-Pi comparison, and the candidate baseline remain required. Slice 7 stays `in_progress`; Slice 8 remains out of scope. |
 
 For every update, include:
 
@@ -1618,7 +1650,10 @@ For every update, include:
 
 ## Current Next Action
 
-Slice 6 is verified at candidate maturity. The next permitted work is the
-separately reviewed Slice 7 target-Pi SIL lane. Do not promote the Windows
-baseline to acceptance or compare it with Pi evidence without an explicit
-reviewed action.
+Slice 7 tooling is implemented and locally validated, but the slice remains
+`in_progress`. The next permitted work is to run `bash -n`, preflight, and the
+private-device safety proof on the designated Pi; then collect a clean 1+5
+candidate baseline and an independent 1+5 candidate, retrieve/inspect their
+artifacts, and record same-Pi comparison evidence. Do not fabricate a Pi
+baseline, promote the Windows baseline, treat Windows and Pi as compatible, or
+begin Slice 8.

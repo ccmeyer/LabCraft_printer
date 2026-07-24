@@ -307,6 +307,95 @@ CV/outlier evidence. It is designed to expose host UI/persistence regressions,
 not physical printer behavior. It still does not validate firmware, protocol,
 motion, pressure, cameras, balance, or droplet quality.
 
+## Raspberry Pi Software-In-The-Loop
+
+The target-Pi SIL lane runs the same real-UI workflow on Raspberry Pi CPU and
+storage without exposing printer devices to the process. It does not launch
+`FreeRTOS-interface/App.py`. The designated command uses the explicit
+in-process simulator and additionally requires:
+
+- 64-bit Raspberry Pi OS on a Raspberry Pi;
+- the repository-local `venv`, `.venv`, or `env`;
+- real PySide6/Qt and `psutil` from `requirements-pi.lock`;
+- `bubblewrap`, `strace`, and `findmnt`; and
+- at least 1 GiB free beneath the ignored
+  `verification_reports/virtual_workflows/` root.
+
+Install the two SIL-only system tools once:
+
+```bash
+sudo apt-get install -y bubblewrap strace
+```
+
+The wrapper fails closed if the sandbox cannot start. Bubblewrap presents a
+private `/dev`, mounts the repository read-only, makes only the report root and
+temporary Qt directories writable, and unshares the network. There is no
+unsandboxed Pi option. The output root remains on the Pi's normal filesystem,
+so persistence measurements still exercise its real storage.
+
+Run preflight and the traced safety audit locally on the Pi:
+
+```bash
+bash scripts/pi/run_virtual_workflow_sil.sh preflight \
+  --output-root verification_reports/virtual_workflows/pi-sil \
+  --qt-platform offscreen \
+  --output verification_reports/virtual_workflows/pi-sil/pi-safety/preflight.json
+
+bash scripts/pi/run_virtual_workflow_sil.sh prove \
+  --output-root verification_reports/virtual_workflows/pi-sil \
+  --qt-platform offscreen \
+  --preflight verification_reports/virtual_workflows/pi-sil/pi-safety/preflight.json \
+  --output verification_reports/virtual_workflows/pi-sil/pi-safety/hardware_proof.json
+```
+
+The audit runs one accelerated scenario under `strace`. It fails if the
+private-device process accesses UART/serial, GPIO, camera/video, I2C, or USB/DFU
+paths. Its timings are safety evidence only and are never included in a
+performance report set.
+
+From Windows, the operator-light wrapper performs preflight, proof, one warm-up,
+five measured runs, bundle retrieval, hash/path validation, and optional
+same-Pi comparison:
+
+```powershell
+.\tools\run_pi_virtual_workflow.ps1 `
+  -PiHost <pi-host> `
+  -HostLabel pi5-sil-primary-v1 `
+  -WarmupRuns 1 `
+  -MeasuredRuns 5 `
+  -TimeoutSeconds 600
+```
+
+Use `-PreflightOnly` or `-SafetyProofOnly` for setup diagnosis.
+`-KeepRemoteArtifacts` retains the exact remote run directories; otherwise
+only manifest-listed run roots are removed after local extraction and
+validation. Failures always retain their evidence. The tool never installs
+packages, updates the checkout, changes Pi configuration/groups, or starts the
+production application.
+
+A reviewed clean-host collection may create the candidate Pi baseline:
+
+```powershell
+.\tools\run_pi_virtual_workflow.ps1 `
+  -PiHost <pi-host> `
+  -HostLabel pi5-sil-primary-v1 `
+  -WarmupRuns 1 `
+  -MeasuredRuns 5 `
+  -TimeoutSeconds 600 `
+  -CreateCandidateBaseline `
+  -BaselineDestination `
+    tests\performance\baselines\virtual_print_array_96_v1_pi5_sil_primary_v1.json
+```
+
+The Pi baseline remains candidate maturity until separately reviewed. Pi
+candidates may be compared only with the exact same Pi model, filesystem,
+sandbox method, OS/CPU, Python, PySide/Qt, Qt platform, timing policy, and host
+label. A Windows/Pi comparison is intentionally rejected as incompatible.
+
+Retrieved archives and extracted reports remain ignored. Each archive carries a
+versioned manifest with SHA-256 and size evidence for every raw JSON report,
+event timeline, screenshot, safety trace, and retained scenario file.
+
 ## Execution Persistence Microbenchmark
 
 The Slice 0/2 persistence tool measures the durable execution path that writes
@@ -884,6 +973,9 @@ sudo apt-get install -y dfu-util
 # Build tools (handy for wheels)
 sudo apt-get install -y python3-venv python3-pip
 
+# Target-Pi SIL sandbox and hardware-access trace
+sudo apt-get install -y bubblewrap strace
+
 # Numpy dependent libraries
 sudo apt-get install -y \
   python3-numpy python3-scipy python3-skimage python3-sklearn python3-opencv
@@ -939,7 +1031,8 @@ source venv/bin/activate
 
 python -m pip install -U pip wheel
 pip install pip-tools
-pip-compile --generate-hashes --output-file requirements-pi.lock requirements.in
+pip-compile --extra-index-url https://www.piwheels.org/simple \
+  --generate-hashes --output-file requirements-pi.lock requirements.in
 
 pip-sync requirements-pi.lock
 

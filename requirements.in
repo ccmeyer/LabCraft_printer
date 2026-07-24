@@ -3,6 +3,7 @@ matplotlib-inline
 numpy
 opencv-python
 pandas
+psutil
 pyDOE3
 pyserial
 requests

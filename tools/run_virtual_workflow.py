@@ -39,6 +39,27 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Show the real window using the caller's Qt platform selection.",
     )
+    parser.add_argument(
+        "--qt-platform",
+        choices=("offscreen", "minimal"),
+        default="offscreen",
+        help="Headless Qt platform selected before importing PySide6.",
+    )
+    parser.add_argument(
+        "--target-pi",
+        action="store_true",
+        help="Require validated Pi preflight and private-device safety proof.",
+    )
+    parser.add_argument(
+        "--pi-preflight",
+        type=Path,
+        help="Validated Pi SIL preflight JSON (required with --target-pi).",
+    )
+    parser.add_argument(
+        "--pi-hardware-proof",
+        type=Path,
+        help="Validated traced hardware-isolation proof (required with --target-pi).",
+    )
     parser.add_argument("--inject-ui-stall-ms", type=int, default=0)
     parser.add_argument("--inject-after-completion", type=int, default=48)
     parser.add_argument(
@@ -190,6 +211,19 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--warmup-runs must be >= 0 and --measured-runs must be >= 1")
     if args.replace_accepted_baseline and args.accept_baseline is None:
         parser.error("--replace-accepted-baseline requires --accept-baseline")
+    if args.visible and args.qt_platform != "offscreen":
+        parser.error("--visible and an explicit non-default --qt-platform conflict")
+    if args.target_pi and args.visible:
+        parser.error("--target-pi is headless and cannot be combined with --visible")
+    pi_evidence = (args.pi_preflight, args.pi_hardware_proof)
+    if args.target_pi and any(value is None for value in pi_evidence):
+        parser.error(
+            "--target-pi requires --pi-preflight and --pi-hardware-proof"
+        )
+    if not args.target_pi and any(value is not None for value in pi_evidence):
+        parser.error(
+            "--pi-preflight and --pi-hardware-proof require --target-pi"
+        )
     if args.compare is not None:
         if args.accept_baseline is not None:
             parser.error("--compare and --accept-baseline are mutually exclusive")
@@ -215,9 +249,19 @@ def main(argv: list[str] | None = None) -> int:
             "--accept-baseline requires at least one warm-up and five measured runs"
         )
     if not args.visible:
-        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        os.environ["QT_QPA_PLATFORM"] = args.qt_platform
 
     try:
+        if args.target_pi:
+            from tools.virtual_workflows.pi_sil import (
+                load_and_validate_pi_evidence,
+            )
+
+            load_and_validate_pi_evidence(
+                args.pi_preflight,
+                args.pi_hardware_proof,
+                expected_qt_platform=args.qt_platform,
+            )
         from tools.virtual_workflows.compare import (
             build_report_set,
             create_baseline_summary,
@@ -239,6 +283,8 @@ def main(argv: list[str] | None = None) -> int:
                     timeout_seconds=args.timeout_seconds,
                     inject_ui_stall_ms=args.inject_ui_stall_ms,
                     inject_after_completion=args.inject_after_completion,
+                    pi_preflight_path=args.pi_preflight,
+                    pi_hardware_proof_path=args.pi_hardware_proof,
                 )
             )
 

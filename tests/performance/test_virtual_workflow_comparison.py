@@ -37,6 +37,7 @@ def _report(
     dirty: bool = False,
     injected: bool = False,
     python_version: str = "3.13.14",
+    pi: bool = False,
 ) -> dict:
     report = {
         "schema_name": REPORT_SCHEMA_NAME,
@@ -150,6 +151,35 @@ def _report(
         },
         "limitations": [],
     }
+    if pi:
+        report["run"]["run_mode"] = "offscreen_pi_sil"
+        report["environment"].update(
+            {
+                "operating_system": "Linux",
+                "os_release": "6.12",
+                "architecture": "aarch64",
+                "cpu_identifier": "Cortex-A76",
+                "python_executable": "venv/bin/python",
+                "target_pi": {
+                    "lane": "raspberry_pi_sil",
+                    "pi_model": "Raspberry Pi 5 Model B Rev 1.0",
+                    "filesystem": {
+                        "filesystem_type": "ext4",
+                        "storage_class": "sd",
+                        "mount_source": "/dev/mmcblk0p2",
+                    },
+                },
+            }
+        )
+        report["safety"]["pi_sil"] = {
+            "sandbox_method": "bubblewrap_private_dev_v1",
+            "private_dev": True,
+            "root_read_only": True,
+            "network_unshared": True,
+            "forbidden_access_attempt_count": 0,
+            "proof_sha256": "b" * 64,
+            "trace_sha256": "c" * 64,
+        }
     validate_report_v1(report)
     return report
 
@@ -463,6 +493,30 @@ def test_incompatible_environment_lists_exact_difference(tmp_path):
     assert comparison["classification"]["overall_status"] == "incomplete"
 
 
+def test_windows_and_pi_sets_are_never_performance_compatible(tmp_path):
+    baseline = _baseline(tmp_path)
+    candidate = _report_set(
+        tmp_path,
+        "pi-change",
+        measured_values=[
+            _report(run_id=f"pi-{index}", pi=True)
+            for index in range(5)
+        ],
+        host_label="windows-sil-primary-v1",
+    )
+
+    comparison = compare_report_sets(baseline, candidate)
+
+    assert comparison["compatibility"]["status"] == "incompatible"
+    differences = comparison["compatibility"]["differences"]
+    assert "run_mode" in differences
+    assert "environment.operating_system" in differences
+    assert "environment.target_pi" in differences
+    assert "safety.pi_sil" in differences
+    assert comparison["classification"]["performance_status"] == "not_evaluated"
+    assert _comparison_exit_code(comparison) == 3
+
+
 def test_functional_failure_precedes_performance_classification(tmp_path):
     baseline = _baseline(tmp_path)
     reports = [_report(run_id=f"failed-{index}") for index in range(5)]
@@ -526,6 +580,8 @@ def test_cli_defaults_preserve_single_run_and_exit_mapping():
     assert args.measured_runs == 1
     assert args.host_label is None
     assert args.compare is None
+    assert args.qt_platform == "offscreen"
+    assert args.target_pi is False
     assert _comparison_exit_code(
         {
             "classification": {

@@ -55,6 +55,13 @@ def test_scenario_config_rejects_invalid_controls(field, value, message):
         VirtualPrintArrayScenarioConfig(**values)
 
 
+def test_scenario_config_requires_paired_pi_safety_evidence(tmp_path):
+    with pytest.raises(ValueError, match="must be provided together"):
+        VirtualPrintArrayScenarioConfig(
+            pi_preflight_path=tmp_path / "preflight.json"
+        )
+
+
 def test_real_ui_print_array_completes_and_writes_inspectable_report(qapp, tmp_path):
     report = run_virtual_print_array_scenario(
         VirtualPrintArrayScenarioConfig(
