@@ -533,6 +533,12 @@ accelerated run and emit a standard one-report report set:
 The safety proof remains the short, fixed 96-well workload. The stress run
 uses the same fail-closed Bubblewrap lane and manifest/hash validation, but it
 is not eligible to create or compare against the tracked 96-well baseline.
+On the reviewed Pi 5, an accelerated run durably completed 3,791 of 3,840
+stock/well entries in 20 minutes before an operator-enforced stop, so allow the
+full 30-minute scenario timeout and expect roughly 20–25 minutes on comparable
+storage. Speed acceleration does not shorten JSON serialization, `fsync`, or
+atomic replacement. Always announce and poll this long opt-in command; do not
+include it in routine validation.
 
 Use `-PreflightOnly` or `-SafetyProofOnly` for setup diagnosis.
 `-KeepRemoteArtifacts` retains the exact remote run directories; otherwise
