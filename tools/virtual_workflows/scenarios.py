@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import math
 import os
@@ -9,6 +10,7 @@ import sys
 import time
 import traceback
 import uuid
+from contextlib import contextmanager, nullcontext, redirect_stdout
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -23,8 +25,22 @@ FIXTURE_PATH = (
     / "fixtures"
     / "virtual_print_array_96_v1.json"
 )
+STRESS_FIXTURE_PATH = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "virtual_print_array_384x10_v1.json"
+)
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "verification_reports" / "virtual_workflows"
 WORKLOAD_ID = "virtual_print_array_96_v1"
+STRESS_WORKLOAD_ID = "virtual_print_array_384x10_v1"
+SCENARIO_FIXTURES = {
+    WORKLOAD_ID: FIXTURE_PATH,
+    STRESS_WORKLOAD_ID: STRESS_FIXTURE_PATH,
+}
+SCENARIO_COMPLETION_COUNTS = {
+    WORKLOAD_ID: 96,
+    STRESS_WORKLOAD_ID: 3840,
+}
 SCENARIO_NAME = "virtual_print_array"
 SCENARIO_VERSION = "1"
 EXPECTED_START_DIALOGS = (
@@ -71,12 +87,49 @@ def _resolved_beneath(path: str | Path, root: str | Path) -> bool:
     return candidate == parent or parent in candidate.parents
 
 
+class _BoundedEventLog:
+    """Retain critical events and a bounded sample of verbose command events."""
+
+    def __init__(self, *, limit: int = 50_000, command_sample_rate: int = 20):
+        self.limit = max(1, int(limit))
+        self.command_sample_rate = max(1, int(command_sample_rate))
+        self.events: list[dict[str, Any]] = []
+        self.counts: Counter[str] = Counter()
+        self.dropped_count = 0
+
+    def record(self, kind: str, **values: Any) -> None:
+        kind = str(kind)
+        self.counts[kind] += 1
+        event = {
+            "kind": kind,
+            "monotonic_ns": time.perf_counter_ns(),
+            **values,
+        }
+        retain = kind != "command" or (
+            self.counts[kind] % self.command_sample_rate == 1
+        )
+        if retain and len(self.events) < self.limit:
+            self.events.append(event)
+        else:
+            self.dropped_count += 1
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "retained_count": len(self.events),
+            "dropped_count": self.dropped_count,
+            "counts": dict(sorted(self.counts.items())),
+            "command_sample_rate": self.command_sample_rate,
+            "limit": self.limit,
+        }
+
+
 @dataclass(frozen=True)
 class VirtualPrintArrayScenarioConfig:
     """Runtime controls for the versioned real-UI print-array scenario."""
 
     output_root: Path = DEFAULT_OUTPUT_ROOT
-    fixture_path: Path = FIXTURE_PATH
+    fixture_path: Path | None = None
+    scenario_id: str = WORKLOAD_ID
     visible: bool = False
     speed_multiplier: float = 1.0
     timeout_seconds: float = 180.0
@@ -88,7 +141,14 @@ class VirtualPrintArrayScenarioConfig:
 
     def __post_init__(self):
         output_root = Path(self.output_root).resolve()
-        fixture_path = Path(self.fixture_path).resolve()
+        scenario_id = str(self.scenario_id or "").strip()
+        if scenario_id not in SCENARIO_FIXTURES:
+            raise ValueError(f"unsupported scenario_id: {scenario_id!r}")
+        fixture_path = Path(
+            self.fixture_path
+            if self.fixture_path is not None
+            else SCENARIO_FIXTURES[scenario_id]
+        ).resolve()
         speed = float(self.speed_multiplier)
         timeout = float(self.timeout_seconds)
         stall = int(self.inject_ui_stall_ms)
@@ -109,14 +169,19 @@ class VirtualPrintArrayScenarioConfig:
             raise ValueError("timeout_seconds must be finite and greater than zero")
         if stall < 0:
             raise ValueError("inject_ui_stall_ms must be non-negative")
-        if not 1 <= inject_after <= 96:
-            raise ValueError("inject_after_completion must be between 1 and 96")
+        maximum_completion = SCENARIO_COMPLETION_COUNTS[scenario_id]
+        if not 1 <= inject_after <= maximum_completion:
+            raise ValueError(
+                "inject_after_completion must be between 1 and "
+                f"{maximum_completion}"
+            )
         if (pi_preflight_path is None) != (pi_hardware_proof_path is None):
             raise ValueError(
                 "pi_preflight_path and pi_hardware_proof_path must be provided together"
             )
         object.__setattr__(self, "output_root", output_root)
         object.__setattr__(self, "fixture_path", fixture_path)
+        object.__setattr__(self, "scenario_id", scenario_id)
         object.__setattr__(self, "speed_multiplier", speed)
         object.__setattr__(self, "timeout_seconds", timeout)
         object.__setattr__(self, "inject_ui_stall_ms", stall)
@@ -136,79 +201,139 @@ class VirtualWorkflowScenarioError(RuntimeError):
 
 
 def load_virtual_print_array_fixture(
-    path: str | Path = FIXTURE_PATH,
+    path: str | Path | None = None,
+    *,
+    scenario_id: str = WORKLOAD_ID,
 ) -> dict[str, Any]:
-    """Load and strictly validate the tracked v1 fixture manifest."""
+    """Load and strictly validate a tracked print-array fixture manifest."""
 
-    fixture_path = Path(path)
+    scenario_id = str(scenario_id or "").strip()
+    if scenario_id not in SCENARIO_FIXTURES:
+        raise VirtualWorkflowScenarioError(
+            f"unsupported virtual print-array scenario {scenario_id!r}"
+        )
+    fixture_path = Path(path if path is not None else SCENARIO_FIXTURES[scenario_id])
     try:
         payload = json.loads(fixture_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise VirtualWorkflowScenarioError(
             f"could not load fixture {fixture_path}: {exc}"
         ) from exc
-    expected_top = {
-        "schema_version",
-        "fixture_id",
-        "plate",
-        "workload",
-        "stock",
-        "fill_stock",
-        "printer_head",
-        "simulation",
-    }
-    if not isinstance(payload, dict) or set(payload) != expected_top:
+    if not isinstance(payload, dict):
         raise VirtualWorkflowScenarioError(
             "virtual print-array fixture has an invalid top-level contract"
         )
-    if payload["schema_version"] != 1 or payload["fixture_id"] != WORKLOAD_ID:
+    if payload.get("fixture_id") != scenario_id:
         raise VirtualWorkflowScenarioError(
             "virtual print-array fixture identity/version is unsupported"
         )
+    schema_version = payload.get("schema_version")
+    expected_top = (
+        {
+            "schema_version",
+            "fixture_id",
+            "plate",
+            "workload",
+            "stock",
+            "fill_stock",
+            "printer_head",
+            "simulation",
+        }
+        if schema_version == 1
+        else {
+            "schema_version",
+            "fixture_id",
+            "plate",
+            "workload",
+            "stocks",
+            "fill_stock",
+            "simulation",
+        }
+    )
+    if set(payload) != expected_top or schema_version not in {1, 2}:
+        raise VirtualWorkflowScenarioError(
+            "virtual print-array fixture has an invalid top-level contract"
+        )
     plate = payload["plate"]
+    included_rows = plate.get("included_rows") if isinstance(plate, dict) else None
+    expected_rows = ["A", "B", "C", "D"] if schema_version == 1 else included_rows
     if (
         not isinstance(plate, dict)
         or plate.get("name") != "shallow-384_well_plate"
         or plate.get("rows") != 16
         or plate.get("columns") != 24
-        or plate.get("included_rows") != ["A", "B", "C", "D"]
+        or plate.get("included_rows") != expected_rows
+        or not isinstance(expected_rows, list)
+        or not expected_rows
+        or len(set(expected_rows)) != len(expected_rows)
+        or any(row not in tuple("ABCDEFGHIJKLMNOP") for row in expected_rows)
         or plate.get("serpentine") is not True
     ):
         raise VirtualWorkflowScenarioError("fixture plate contract is invalid")
     workload = payload["workload"]
-    if workload != {
-        "target_dispenses_per_well": 1,
-        "completion_count": 96,
-    }:
+    if schema_version == 1:
+        expected_workload = {
+            "target_dispenses_per_well": 1,
+            "completion_count": 96,
+        }
+        workload_valid = workload == expected_workload
+    else:
+        stock_count = len(payload.get("stocks") or [])
+        well_count = len(expected_rows) * int(plate.get("columns", 0))
+        expected_workload = {
+            "target_dispenses_per_stock_per_well": 1,
+            "well_count": well_count,
+            "stock_count": stock_count,
+            "array_passes": stock_count,
+            "completion_count": well_count * stock_count,
+        }
+        workload_valid = workload == expected_workload
+    if not workload_valid:
         raise VirtualWorkflowScenarioError("fixture workload contract is invalid")
-    stock = payload["stock"]
     fill = payload["fill_stock"]
-    head = payload["printer_head"]
     simulation = payload["simulation"]
+    stock_specs = _fixture_stock_specs(payload)
     if (
-        not isinstance(stock, dict)
-        or stock.get("printing_mode") != "droplet"
-        or float(stock.get("prepared_droplet_volume_nL", -1)) != 5.0
-        or float(stock.get("droplet_volume_nL", -1)) != 10.0
-        or not isinstance(fill, dict)
+        not isinstance(fill, dict)
         or fill.get("factor_name") != "Water"
         or fill.get("units") != "--"
         or fill.get("target_dispenses_per_well") != 0
-        or not isinstance(head, dict)
-        or not str(head.get("printer_head_id") or "")
-        or int(head.get("print_pulse_width_us", 0)) != 1300
-        or float(head.get("print_pressure_psi", -1)) <= 0
-        or float(head.get("initial_volume_uL", -1)) <= 0
         or not isinstance(simulation, dict)
         or int(simulation.get("dispense_frequency_hz", 0)) <= 0
         or int(simulation.get("lookahead_wells", 0)) != 2
     ):
         raise VirtualWorkflowScenarioError("fixture stock/head contract is invalid")
+    stock_ids: set[str] = set()
+    head_ids: set[str] = set()
+    for stock in stock_specs:
+        head = stock["printer_head"]
+        stock_id = _stock_id(stock)
+        head_id = str(head.get("printer_head_id") or "")
+        if (
+            stock.get("printing_mode") != "droplet"
+            or float(stock.get("prepared_droplet_volume_nL", -1)) != 5.0
+            or float(stock.get("droplet_volume_nL", -1)) != 10.0
+            or not head_id
+            or int(head.get("print_pulse_width_us", 0)) <= 0
+            or float(head.get("print_pressure_psi", -1)) <= 0
+            or float(head.get("initial_volume_uL", -1)) <= 0
+            or stock_id in stock_ids
+            or head_id in head_ids
+        ):
+            raise VirtualWorkflowScenarioError("fixture stock/head contract is invalid")
+        stock_ids.add(stock_id)
+        head_ids.add(head_id)
+    if len(stock_specs) != int(
+        workload.get("stock_count", 1)
+    ):
+        raise VirtualWorkflowScenarioError("fixture stock count is invalid")
+    if schema_version == 2 and int(simulation.get("staging_slot", -1)) != 0:
+        raise VirtualWorkflowScenarioError("fixture staging-slot contract is invalid")
     return payload
 
 
 def fixture_well_ids(fixture: dict[str, Any]) -> tuple[str, ...]:
-    """Expand the fixture's four rows into deterministic row-serpentine order."""
+    """Expand included rows into deterministic row-serpentine order."""
 
     columns = int(fixture["plate"]["columns"])
     result: list[str] = []
@@ -217,9 +342,15 @@ def fixture_well_ids(fixture: dict[str, Any]) -> tuple[str, ...]:
         if index % 2:
             values = range(columns, 0, -1)
         result.extend(f"{row}{column}" for column in values)
-    if len(result) != 96 or len(set(result)) != 96:
+    expected_count = int(
+        fixture["workload"].get(
+            "well_count",
+            fixture["workload"]["completion_count"],
+        )
+    )
+    if len(result) != expected_count or len(set(result)) != expected_count:
         raise VirtualWorkflowScenarioError(
-            "fixture expansion did not produce 96 unique wells"
+            "fixture expansion did not produce the expected unique wells"
         )
     return tuple(result)
 
@@ -228,6 +359,32 @@ def _stock_id(spec: dict[str, Any]) -> str:
     return (
         f"{spec['factor_name']}_{float(spec['concentration']):.2f}_"
         f"{spec['units']}"
+    )
+
+
+def _fixture_stock_specs(fixture: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    if fixture.get("schema_version") == 1:
+        return (
+            {
+                **fixture["stock"],
+                "printer_head": dict(fixture["printer_head"]),
+            },
+        )
+    stocks = fixture.get("stocks")
+    if not isinstance(stocks, list) or not stocks:
+        raise VirtualWorkflowScenarioError("fixture stocks must be a nonempty list")
+    if not all(isinstance(stock, dict) for stock in stocks):
+        raise VirtualWorkflowScenarioError("fixture stock entries must be objects")
+    return tuple(dict(stock) for stock in stocks)
+
+
+def _fixture_target_per_stock(fixture: dict[str, Any]) -> int:
+    workload = fixture["workload"]
+    return int(
+        workload.get(
+            "target_dispenses_per_stock_per_well",
+            workload.get("target_dispenses_per_well", 0),
+        )
     )
 
 
@@ -245,20 +402,31 @@ def _create_prepared_fixture(
         )
     experiment_dir.mkdir(parents=True)
     wells = fixture_well_ids(fixture)
-    stock = fixture["stock"]
+    workload_id = str(fixture["fixture_id"])
+    stocks = _fixture_stock_specs(fixture)
     fill = fixture["fill_stock"]
-    stock_id = _stock_id(stock)
+    stock_ids = tuple(_stock_id(stock) for stock in stocks)
     fill_stock_id = _stock_id(fill)
-    droplet_volume = float(stock["droplet_volume_nL"])
-    prepared_droplet_volume = float(stock["prepared_droplet_volume_nL"])
-    target = int(fixture["workload"]["target_dispenses_per_well"])
-    prepared_target = int(round((droplet_volume * target) / prepared_droplet_volume))
+    target = _fixture_target_per_stock(fixture)
+    prepared_targets = {
+        _stock_id(stock): int(
+            round(
+                float(stock["droplet_volume_nL"])
+                * target
+                / float(stock["prepared_droplet_volume_nL"])
+            )
+        )
+        for stock in stocks
+    }
+    reaction_volume = sum(
+        float(stock["droplet_volume_nL"]) * target for stock in stocks
+    )
     design = {
         "schema_version": 2,
         "metadata": {
-            "name": WORKLOAD_ID,
-            "target_reaction_volume_nL": droplet_volume * target,
-            "final_reaction_volume_nL": droplet_volume * target,
+            "name": workload_id,
+            "target_reaction_volume_nL": reaction_volume,
+            "final_reaction_volume_nL": reaction_volume,
             "printed_volume_tolerance_nL": 0.0,
             "fill_reagent_name": fill["factor_name"],
             "fill_droplet_volume_nL": float(fill["droplet_volume_nL"]),
@@ -276,14 +444,22 @@ def _create_prepared_fixture(
                 "options": [
                     {
                         "name": stock["factor_name"],
-                        "targets": [float(stock["concentration"])],
+                        "targets": [
+                            float(
+                                stock.get(
+                                    "target_concentration",
+                                    stock["concentration"],
+                                )
+                            )
+                        ],
                         "units": stock["units"],
-                        "droplet_nL": droplet_volume,
+                        "droplet_nL": float(stock["droplet_volume_nL"]),
                         "printing_mode": stock["printing_mode"],
-                        "intended_droplet_nL": droplet_volume,
+                        "intended_droplet_nL": float(stock["droplet_volume_nL"]),
                     }
                 ],
             }
+            for stock in stocks
         ],
     }
     stock_rows = [
@@ -293,8 +469,11 @@ def _create_prepared_fixture(
             "stock_concentration": float(stock["concentration"]),
             "units": stock["units"],
             "printing_mode": stock["printing_mode"],
-            "droplet_volume_nL": prepared_droplet_volume,
-        },
+            "droplet_volume_nL": float(stock["prepared_droplet_volume_nL"]),
+        }
+        for stock in stocks
+    ]
+    stock_rows.append(
         {
             "factor_name": fill["factor_name"],
             "option_name": None,
@@ -302,14 +481,14 @@ def _create_prepared_fixture(
             "units": fill["units"],
             "printing_mode": fill["printing_mode"],
             "droplet_volume_nL": float(fill["droplet_volume_nL"]),
-        },
-    ]
+        }
+    )
     assigned_wells = [
         {
             "well_id": well_id,
             "reaction_id": f"R{index}",
             "target_dispenses": {
-                stock_id: prepared_target,
+                **prepared_targets,
                 fill_stock_id: int(fill["target_dispenses_per_well"]),
             },
         }
@@ -322,7 +501,7 @@ def _create_prepared_fixture(
         plate_columns=int(fixture["plate"]["columns"]),
         stock_rows=stock_rows,
         assigned_wells=assigned_wells,
-        plan_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"labcraft:{WORKLOAD_ID}")),
+        plan_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"labcraft:{workload_id}")),
         timestamp_utc="2026-07-23T00:00:00Z",
     )
     design_path = experiment_dir / "experiment_design.json"
@@ -360,7 +539,12 @@ def _create_prepared_fixture(
     return {
         "experiment_dir": experiment_dir,
         "design_path": design_path,
-        "stock_id": stock_id,
+        "stock_id": stock_ids[0],
+        "stock_ids": stock_ids,
+        "stock_specs": {
+            _stock_id(stock): stock for stock in stocks
+        },
+        "target_dispenses_per_stock": target,
         "fill_stock_id": fill_stock_id,
         "well_ids": wells,
         "plan_id": plan.plan_id,
@@ -389,6 +573,7 @@ class _InstanceInstrumentation:
         self.checkpoint_observations: list[dict[str, Any]] = []
         self._originals: list[tuple[Any, str, Any]] = []
         self._connected_slots: list[tuple[Any, Any, str, Any, Any]] = []
+        self._suppressed_phases: set[str] = set()
 
     def wrap(
         self,
@@ -402,6 +587,8 @@ class _InstanceInstrumentation:
         original = getattr(obj, method_name)
 
         def measured(*args, **kwargs):
+            if phase_name in self._suppressed_phases:
+                return original(*args, **kwargs)
             with self.phases.phase(phase_name), self.io_observer.phase(phase_name):
                 result = original(*args, **kwargs)
             if observe is not None:
@@ -412,6 +599,19 @@ class _InstanceInstrumentation:
 
         self._originals.append((obj, method_name, original))
         setattr(obj, method_name, measured)
+
+    @contextmanager
+    def suppress_phases(self, *phase_names: str):
+        added = {
+            str(name)
+            for name in phase_names
+            if str(name) not in self._suppressed_phases
+        }
+        self._suppressed_phases.update(added)
+        try:
+            yield
+        finally:
+            self._suppressed_phases.difference_update(added)
 
     def capture_checkpoint(self, experiment_model: Any, phase: str) -> None:
         session = experiment_model._active_authoritative_execution_session
@@ -515,6 +715,7 @@ def _install_instrumentation(
     inject_after_completion: int,
     completed_count: Callable[[], int],
     io_observer: PersistenceIoObserver,
+    pressure_rendered: Callable[[], None] | None = None,
 ) -> _InstanceInstrumentation:
     instrumentation = _InstanceInstrumentation(
         phases,
@@ -608,6 +809,7 @@ def _install_instrumentation(
         pressure_plot_widget,
         "update_pressure",
         "ui.pressure_render",
+        after=pressure_rendered,
     )
     return instrumentation
 
@@ -656,6 +858,7 @@ def _validate_completed_scenario(
     unexpected_dialogs: list[dict[str, Any]],
     starvation_events: list[dict[str, Any]],
     intent_lifecycle: dict[str, Any],
+    pass_terminal_states: list[str],
 ) -> dict[str, Any]:
     from AuthoritativeExecutionLoad import inspect_authoritative_execution
     from ExecutionPlan import ExecutionPlanState, load_execution_plan
@@ -663,13 +866,24 @@ def _validate_completed_scenario(
 
     experiment_dir = Path(fixture_info["experiment_dir"])
     expected_wells = tuple(fixture_info["well_ids"])
-    stock_id = fixture_info["stock_id"]
+    stock_ids = tuple(fixture_info["stock_ids"])
+    target_per_stock = int(fixture_info["target_dispenses_per_stock"])
+    expected_completions = len(expected_wells) * len(stock_ids)
+    expected_pairs = {
+        (stock_id, well_id)
+        for stock_id in stock_ids
+        for well_id in expected_wells
+    }
     checkpoint = load_execution_resume(experiment_model.execution_resume_file_path)
     begins = list(intent_lifecycle.get("begins", ()))
     attachments = list(intent_lifecycle.get("attachments", ()))
     completions = list(intent_lifecycle.get("completions", ()))
     observations = list(intent_lifecycle.get("checkpoint_observations", ()))
     intent_ids = [item.get("intent_id") for item in begins]
+    intent_pairs = {
+        (str(item.get("stock_id")), str(item.get("well_id")))
+        for item in begins
+    }
     attached_ids = [item.get("intent_id") for item in attachments]
     sequences = [item.get("command_seq32") for item in attachments]
     max_retained = max(
@@ -692,33 +906,39 @@ def _validate_completed_scenario(
         "checkpoint_clean": checkpoint.state == "clean",
         "checkpoint_empty": not checkpoint.intents,
         "checkpoint_bounded_to_lookahead": max_retained <= 2,
-        "intent_count_exact": len(intent_ids) == 96,
-        "intent_ids_unique": len(set(intent_ids)) == 96,
+        "intent_count_exact": len(intent_ids) == expected_completions,
+        "intent_ids_unique": len(set(intent_ids)) == expected_completions,
+        "intent_stock_well_pairs_exact": intent_pairs == expected_pairs,
         "intent_attachments_exact": (
-            len(attached_ids) == 96
+            len(attached_ids) == expected_completions
             and Counter(attached_ids) == Counter(intent_ids)
         ),
         "intent_sequences_unique_monotonic": (
-            len(sequences) == 96
+            len(sequences) == expected_completions
             and all(isinstance(value, int) for value in sequences)
             and sequences == sorted(set(sequences))
         ),
         "all_intents_retired": (
-            len(completions) == 96
+            len(completions) == expected_completions
             and Counter(completions) == Counter(intent_ids)
         ),
         "authoritative_bundle_valid": bool(bundle.valid),
         "terminal_plan_completed": terminal_plan.state is ExecutionPlanState.COMPLETED,
-        "array_complete_once": array_complete_count == 1,
-        "ui_running_then_idle": (
-            "running" in array_states
+        "array_complete_per_stock": array_complete_count == len(stock_ids),
+        "ui_running_idle_per_stock": (
+            array_states.count("running") == len(stock_ids)
+            and array_states.count("idle") >= len(stock_ids) + 1
             and array_states[-1] == "idle"
-            and array_states.index("running") < len(array_states) - 1
         ),
+        "plan_completes_only_after_last_stock": pass_terminal_states
+        == (["active"] * (len(stock_ids) - 1) + ["completed"]),
         "well_updates_exact": (
-            len(completed_well_updates) == 96
+            len(completed_well_updates) == expected_completions
             and set(completed_well_updates) == set(expected_wells)
-            and all(count == 1 for count in Counter(completed_well_updates).values())
+            and all(
+                count == len(stock_ids)
+                for count in Counter(completed_well_updates).values()
+            )
         ),
         "no_errors": not errors,
         "no_unexpected_dialogs": not unexpected_dialogs,
@@ -727,12 +947,15 @@ def _validate_completed_scenario(
     targets_match = True
     for well_id in expected_wells:
         entry = bundle.progress_wells.get(well_id, {})
-        reagent = (entry.get("reagents") or {}).get(stock_id, {})
-        if (
-            int(reagent.get("target_droplets", -1)) != 1
-            or int(reagent.get("added_droplets", -1)) != 1
-        ):
-            targets_match = False
+        for stock_id in stock_ids:
+            reagent = (entry.get("reagents") or {}).get(stock_id, {})
+            if (
+                int(reagent.get("target_droplets", -1)) != target_per_stock
+                or int(reagent.get("added_droplets", -1)) != target_per_stock
+            ):
+                targets_match = False
+                break
+        if not targets_match:
             break
     checks["targets_match_progress"] = targets_match
     if not all(checks.values()):
@@ -742,6 +965,9 @@ def _validate_completed_scenario(
         "checks": checks,
         "checkpoint_state": checkpoint.state,
         "intent_count": len(completions),
+        "stock_well_completion_count": len(intent_pairs),
+        "stock_pass_count": len(stock_ids),
+        "pass_terminal_states": list(pass_terminal_states),
         "observed_completed_intent_count": len(completions),
         "checkpoint_retained_intent_count": len(checkpoint.intents),
         "checkpoint_pending_intent_count": sum(
@@ -786,7 +1012,12 @@ def _summary_text(report: dict[str, Any]) -> str:
         (
             "Wells: "
             f"{workflow.get('completed_well_count', 0)}/"
-            f"{workflow.get('expected_well_count', 96)}"
+            f"{workflow.get('expected_well_count', 0)}"
+        ),
+        (
+            "Stock/well completions: "
+            f"{workflow.get('completed_stock_well_count', workflow.get('completed_well_count', 0))}/"
+            f"{workflow.get('expected_stock_well_completion_count', report['workload'].get('expected_completion_count', 0))}"
         ),
         f"Array complete signals: {workflow.get('array_complete_count', 0)}",
         f"Maximum event-loop gap: {gap.get('maximum')} ms",
@@ -831,6 +1062,10 @@ def _summary_text(report: dict[str, Any]) -> str:
         (
             "Injected stall: "
             f"{responsiveness.get('injected_stall_assessment', {}).get('decision', 'not_requested')}"
+        ),
+        (
+            "Stress responsiveness: "
+            f"{responsiveness.get('stress_assessment', {}).get('decision', 'not_applicable')}"
         ),
     ]
     pi_sil = report["safety"].get("pi_sil")
@@ -902,14 +1137,21 @@ def run_virtual_print_array_scenario(
         )
         identity["environment"]["target_pi"] = pi_environment
 
-    fixture = load_virtual_print_array_fixture(config.fixture_path)
+    fixture = load_virtual_print_array_fixture(
+        config.fixture_path,
+        scenario_id=config.scenario_id,
+    )
+    workload_id = str(fixture["fixture_id"])
     expected_wells = fixture_well_ids(fixture)
+    stock_specs = _fixture_stock_specs(fixture)
+    expected_stock_count = len(stock_specs)
+    expected_completions = len(expected_wells) * expected_stock_count
     stamp = _run_stamp()
     short_commit = identity["source"].get("git_short_commit") or "unknown"
     run_id = config.run_id or str(uuid.uuid4())
     report_dir = (
         config.output_root
-        / WORKLOAD_ID
+        / workload_id
         / f"{stamp}_{short_commit}"
     ).resolve()
     report_dir.mkdir(parents=True, exist_ok=False)
@@ -922,24 +1164,33 @@ def run_virtual_print_array_scenario(
 
     started_utc = _utc_now()
     started_ns = time.perf_counter_ns()
-    events: list[dict[str, Any]] = []
+    event_log = _BoundedEventLog()
     errors: list[dict[str, Any]] = []
     dialogs: list[dict[str, Any]] = []
     unexpected_dialogs: list[dict[str, Any]] = []
     well_updates: list[str] = []
     array_states: list[str] = ["idle"]
-    command_events: list[dict[str, Any]] = []
+    command_lifecycle_counts: Counter[str] = Counter()
+    command_event_count = 0
+    minimum_queue_depth: int | None = None
+    maximum_queue_depth: int | None = None
     starvation_events: list[dict[str, Any]] = []
     screenshots: dict[str, Path] = {}
     array_complete_count = 0
     paint_event_count = 0
     pressure_update_signal_count = 0
     pressure_render_interval_ms: int | None = None
+    pressure_render_timestamps_ns: list[int] = []
     pressure_timer_active_after_teardown: bool | None = None
+    pass_terminal_states: list[str] = []
+    stock_passes: list[dict[str, Any]] = []
+    current_pass_index = -1
     fixture_info: dict[str, Any] | None = None
     validation: dict[str, Any] = {}
     failure_text: str | None = None
-    phases = NamedPhaseRecorder(max_records=50_000)
+    phases = NamedPhaseRecorder(
+        max_records=max(50_000, expected_completions * 24)
+    )
     resources = ProcessResourceSampler(max_samples=100_000)
     probe = QtEventLoopProbe(
         heartbeat_interval_ms=10,
@@ -957,6 +1208,8 @@ def run_virtual_print_array_scenario(
     paint_filter = None
     app = None
     probe_started = False
+    application_stdout = io.StringIO()
+    stdout_redirect = None
     machine_cleanup = {
         "command_timer_active": None,
         "connection_timer_active": None,
@@ -1000,7 +1253,7 @@ def run_virtual_print_array_scenario(
                 raise RuntimeError(f"simulation root escaped scenario root: {root}")
 
         fixture_info = _create_prepared_fixture(
-            dependencies.roots.experiments_root / WORKLOAD_ID,
+            dependencies.roots.experiments_root / workload_id,
             fixture,
         )
         components = composition.build_application_components(
@@ -1026,72 +1279,64 @@ def run_virtual_print_array_scenario(
                 f"unexpected execution activation eligibility: {eligibility['status']}"
             )
 
-        stock_id = fixture_info["stock_id"]
-        stock_slot = None
-        for index, slot in enumerate(model.rack_model.slots):
-            head = getattr(slot, "printer_head", None)
-            if head is not None and head.get_stock_id() == stock_id:
-                stock_slot = index
-                break
-        if stock_slot is None:
-            raise RuntimeError("fixture printer head was not assigned to a rack slot")
-        model.rack_model.confirm_slot(stock_slot)
-        model.rack_model.transfer_to_gripper(stock_slot)
-        printer_head = model.rack_model.get_gripper_printer_head()
-        head_spec = fixture["printer_head"]
-        printer_head.set_identity_metadata(
-            printer_head_id=head_spec["printer_head_id"],
-            display_name="Virtual workflow head",
-            tags=["simulation", WORKLOAD_ID],
-        )
-        printer_head.set_absolute_volume(float(head_spec["initial_volume_uL"]))
-        printer_head.target_droplet_volume = float(
-            fixture["stock"]["droplet_volume_nL"]
-        )
-
-        calibration = experiment_model.apply_execution_calibration(
-            stock_id=stock_id,
-            new_effective_volume_nL=float(
-                fixture["stock"]["droplet_volume_nL"]
-            ),
-            printing_mode=fixture["stock"]["printing_mode"],
-            printer_head_id=head_spec["printer_head_id"],
-            factor_name=fixture["stock"]["factor_name"],
-            option_name=None,
-            is_fill=False,
-            calibration_payload={
-                "measured_volume_nL": float(
-                    fixture["stock"]["droplet_volume_nL"]
-                ),
-                "pw_us": int(head_spec["print_pulse_width_us"]),
-                "pressure_psi": float(head_spec["print_pressure_psi"]),
-                "run_id": WORKLOAD_ID,
-                "phase": "canned_virtual_calibration",
-                "timestamp": "2026-07-23T00:00:00Z",
-                "source_row_fingerprint": [
-                    WORKLOAD_ID,
-                    int(head_spec["print_pulse_width_us"]),
-                    float(head_spec["print_pressure_psi"]),
-                ],
-                "original_printing_mode": fixture["stock"]["printing_mode"],
-            },
-            timestamp_utc="2026-07-23T00:00:00Z",
-        )
-        if (
-            calibration["plan"].state is not ExecutionPlanState.ACTIVE
-            or calibration["record"]["printer_head_id"]
-            != head_spec["printer_head_id"]
-        ):
-            raise RuntimeError("canned execution calibration was not activated")
+        heads_by_stock = {
+            head.get_stock_id(): head
+            for head in model.printer_head_manager.printer_heads
+            if not getattr(head, "calibration_chip", False)
+        }
+        calibrated_heads: dict[str, Any] = {}
+        for stock in stock_specs:
+            stock_id = _stock_id(stock)
+            printer_head = heads_by_stock.get(stock_id)
+            if printer_head is None:
+                raise RuntimeError(
+                    f"fixture printer head was not created for stock {stock_id}"
+                )
+            head_spec = stock["printer_head"]
+            printer_head.set_identity_metadata(
+                printer_head_id=head_spec["printer_head_id"],
+                display_name=f"Virtual workflow head {stock['factor_name']}",
+                tags=["simulation", workload_id],
+            )
+            printer_head.set_absolute_volume(float(head_spec["initial_volume_uL"]))
+            printer_head.target_droplet_volume = float(stock["droplet_volume_nL"])
+            calibration = experiment_model.apply_execution_calibration(
+                stock_id=stock_id,
+                new_effective_volume_nL=float(stock["droplet_volume_nL"]),
+                printing_mode=stock["printing_mode"],
+                printer_head_id=head_spec["printer_head_id"],
+                factor_name=stock["factor_name"],
+                option_name=None,
+                is_fill=False,
+                calibration_payload={
+                    "measured_volume_nL": float(stock["droplet_volume_nL"]),
+                    "pw_us": int(head_spec["print_pulse_width_us"]),
+                    "pressure_psi": float(head_spec["print_pressure_psi"]),
+                    "run_id": workload_id,
+                    "phase": "canned_virtual_calibration",
+                    "timestamp": "2026-07-23T00:00:00Z",
+                    "source_row_fingerprint": [
+                        workload_id,
+                        stock_id,
+                        int(head_spec["print_pulse_width_us"]),
+                        float(head_spec["print_pressure_psi"]),
+                    ],
+                    "original_printing_mode": stock["printing_mode"],
+                },
+                timestamp_utc="2026-07-23T00:00:00Z",
+            )
+            if (
+                calibration["plan"].state is not ExecutionPlanState.ACTIVE
+                or calibration["record"]["printer_head_id"]
+                != head_spec["printer_head_id"]
+            ):
+                raise RuntimeError(
+                    f"canned execution calibration was not activated for {stock_id}"
+                )
+            calibrated_heads[stock_id] = printer_head
 
         def record_event(kind: str, **values: Any) -> None:
-            events.append(
-                {
-                    "kind": kind,
-                    "monotonic_ns": time.perf_counter_ns(),
-                    **values,
-                }
-            )
+            event_log.record(kind, **values)
 
         def on_well_update(well_id: str) -> None:
             text = str(well_id)
@@ -1117,8 +1362,17 @@ def run_virtual_print_array_scenario(
             record_event("error", **entry)
 
         def on_command(payload: dict[str, Any]) -> None:
+            nonlocal command_event_count, minimum_queue_depth, maximum_queue_depth
             item = dict(payload)
-            command_events.append(item)
+            command_event_count += 1
+            command_lifecycle_counts[str(item.get("event"))] += 1
+            depth = int(item.get("queue_depth", 0))
+            minimum_queue_depth = (
+                depth if minimum_queue_depth is None else min(minimum_queue_depth, depth)
+            )
+            maximum_queue_depth = (
+                depth if maximum_queue_depth is None else max(maximum_queue_depth, depth)
+            )
             record_event("command", **item)
 
         def on_pressure_update() -> None:
@@ -1139,13 +1393,26 @@ def run_virtual_print_array_scenario(
         machine.command_lifecycle_changed.connect(on_command)
 
         def on_queue_drained() -> None:
-            completed = len(
-                [well for well in well_updates if well in set(expected_wells)]
-            )
             state = controller.get_array_run_state()
-            if state == "running" and completed < len(expected_wells):
+            current = (
+                stock_passes[current_pass_index]
+                if 0 <= current_pass_index < len(stock_passes)
+                else None
+            )
+            completed = (
+                len(well_updates) - int(current["starting_well_update_count"])
+                if current is not None
+                else 0
+            )
+            if (
+                state == "running"
+                and current is not None
+                and completed < len(expected_wells)
+            ):
                 item = {
-                    "completed_wells": completed,
+                    "completed_in_pass": completed,
+                    "pass_index": current_pass_index + 1,
+                    "stock_id": current["stock_id"],
                     "array_state": state,
                 }
                 starvation_events.append(item)
@@ -1203,6 +1470,11 @@ def run_virtual_print_array_scenario(
         completed_count = lambda: len(
             [well for well in well_updates if well in set(expected_wells)]
         )
+
+        def on_pressure_rendered() -> None:
+            if controller.get_array_run_state() == "running":
+                pressure_render_timestamps_ns.append(time.perf_counter_ns())
+
         instrumentation = _install_instrumentation(
             phases,
             experiment_model=experiment_model,
@@ -1213,6 +1485,7 @@ def run_virtual_print_array_scenario(
             inject_after_completion=config.inject_after_completion,
             completed_count=completed_count,
             io_observer=PersistenceIoObserver(fixture_info["experiment_dir"]),
+            pressure_rendered=on_pressure_rendered,
         )
         io_observer = instrumentation.io_observer
         progress_observer = ProgressSnapshotObserver(experiment_model)
@@ -1237,84 +1510,244 @@ def run_virtual_print_array_scenario(
         )
         controller.toggle_motors()
         controller.home_machine()
-        controller.set_print_pulse_width(
-            int(head_spec["print_pulse_width_us"]),
-            update_model=True,
-        )
-        controller.set_absolute_print_pressure(
-            float(head_spec["print_pressure_psi"])
-        )
         controller.set_dispense_frequency_hz(
             int(fixture["simulation"]["dispense_frequency_hz"])
         )
-        controller.toggle_regulation()
         _wait_until(app, machine.check_if_all_completed, 10.0, "machine readiness")
         _wait_until(
             app,
             lambda: (
                 model.machine_model.motors_are_enabled()
                 and model.machine_model.motors_are_homed()
-                and model.machine_model.regulating_print_pressure
             ),
             5.0,
             "ready model state",
         )
-        preflight = controller.get_print_array_imaging_calibration_preflight()
-        if not preflight.get("ok"):
-            raise RuntimeError(
-                "canned imaging-calibration preflight failed: "
-                + str(preflight.get("message") or preflight.get("code"))
+
+        staging_slot = int(fixture["simulation"].get("staging_slot", 0))
+
+        def stage_stock_head(stock_index: int) -> tuple[str, dict[str, Any]]:
+            if controller.get_array_run_state() != "idle":
+                raise RuntimeError("virtual head exchange requires an idle array")
+            if not machine.check_if_all_completed():
+                raise RuntimeError("virtual head exchange requires an empty command queue")
+            stock = stock_specs[stock_index]
+            stock_id = _stock_id(stock)
+            target_head = calibrated_heads[stock_id]
+            rack = model.rack_model
+            suppression = (
+                instrumentation.suppress_phases(
+                    "ui.well_plate_update",
+                    "ui.well_plate_rebuild",
+                    "persistence.guard_bundle",
+                )
+                if instrumentation is not None
+                else nullcontext()
             )
+            with suppression:
+                if rack.get_gripper_printer_head() is not None:
+                    origin = rack.gripper_slot_number
+                    if origin is None:
+                        raise RuntimeError("gripper head has no virtual origin slot")
+                    rack.transfer_from_gripper(origin)
+                    if rack.get_gripper_printer_head() is not None:
+                        raise RuntimeError("could not return the previous virtual head")
+                for slot_index, slot in enumerate(rack.slots):
+                    if slot.printer_head is target_head:
+                        rack.update_slot_with_printer_head(slot_index, None)
+                rack.update_slot_with_printer_head(staging_slot, target_head)
+                rack.confirm_slot(staging_slot)
+                rack.transfer_to_gripper(staging_slot)
+            active = rack.get_gripper_printer_head()
+            if active is not target_head or active.get_stock_id() != stock_id:
+                raise RuntimeError(f"virtual head exchange failed for {stock_id}")
+            head = stock["printer_head"]
+            controller.set_print_pulse_width(
+                int(head["print_pulse_width_us"]),
+                update_model=True,
+            )
+            controller.set_absolute_print_pressure(
+                float(head["print_pressure_psi"])
+            )
+            _wait_until(
+                app,
+                machine.check_if_all_completed,
+                10.0,
+                f"stock {stock_index + 1} print settings",
+            )
+            record_event(
+                "virtual_head_exchange",
+                pass_index=stock_index + 1,
+                stock_id=stock_id,
+                printer_head_id=head["printer_head_id"],
+                staging_slot=staging_slot,
+            )
+            return stock_id, head
+
+        first_stock_id, _first_head = stage_stock_head(0)
+        controller.toggle_regulation()
+        _wait_until(
+            app,
+            lambda: model.machine_model.regulating_print_pressure,
+            5.0,
+            "print-pressure regulation",
+        )
 
         screenshots["ready"] = screenshots_dir / "ready.png"
         _capture_window(view, screenshots["ready"])
-        record_event("milestone", name="ready")
+        record_event("milestone", name="ready", stock_id=first_stock_id)
 
-        QtTest.QTest.mouseClick(
-            view.well_plate_widget.start_print_array_button,
-            QtCore.Qt.MouseButton.LeftButton,
-        )
-        _wait_until(
-            app,
-            lambda: "running" in array_states or bool(errors),
-            10.0,
-            "array running state",
-        )
-        if errors:
-            raise RuntimeError(f"array start emitted an error: {errors[-1]}")
-        screenshots["printing"] = screenshots_dir / "printing.png"
-        _capture_window(view, screenshots["printing"])
-        record_event("milestone", name="printing")
+        midpoint_completion = max(1, expected_completions // 2)
+        midpoint_captured = False
+        stdout_redirect = redirect_stdout(application_stdout)
+        stdout_redirect.__enter__()
+        for stock_index, stock in enumerate(stock_specs):
+            print(
+                f"Starting stock pass {stock_index + 1}/{expected_stock_count}",
+                file=sys.stderr,
+                flush=True,
+            )
+            current_pass_index = stock_index
+            if stock_index == 0:
+                stock_id = first_stock_id
+            else:
+                stock_id, _head = stage_stock_head(stock_index)
+            preflight_suppression = (
+                instrumentation.suppress_phases("persistence.guard_bundle")
+                if instrumentation is not None
+                else nullcontext()
+            )
+            with preflight_suppression:
+                preflight = controller.get_print_array_imaging_calibration_preflight()
+            if not preflight.get("ok"):
+                raise RuntimeError(
+                    "canned imaging-calibration preflight failed: "
+                    + str(preflight.get("message") or preflight.get("code"))
+                )
+            pass_record = {
+                "pass_index": stock_index + 1,
+                "stock_id": stock_id,
+                "starting_well_update_count": len(well_updates),
+                "started_monotonic_ns": time.perf_counter_ns(),
+            }
+            stock_passes.append(pass_record)
+            record_event(
+                "stock_pass_started",
+                pass_index=stock_index + 1,
+                stock_id=stock_id,
+            )
+            _wait_until(
+                app,
+                lambda: (
+                    view.well_plate_widget.start_print_array_button.isVisible()
+                    and view.well_plate_widget.start_print_array_button.isEnabled()
+                ),
+                5.0,
+                f"stock pass {stock_index + 1} start control",
+            )
+            view.activateWindow()
+            view.well_plate_widget.start_print_array_button.setFocus()
+            app.processEvents()
+            QtTest.QTest.mouseClick(
+                view.well_plate_widget.start_print_array_button,
+                QtCore.Qt.MouseButton.LeftButton,
+            )
+            _wait_until(
+                app,
+                lambda: (
+                    array_states.count("running") >= stock_index + 1
+                    or bool(errors)
+                ),
+                10.0,
+                f"stock pass {stock_index + 1} running state",
+            )
+            if errors:
+                raise RuntimeError(f"array start emitted an error: {errors[-1]}")
+            if stock_index == 0:
+                screenshots["printing"] = screenshots_dir / "printing.png"
+                _capture_window(view, screenshots["printing"])
+                record_event("milestone", name="printing", stock_id=stock_id)
 
-        deadline = max(0.1, config.timeout_seconds - 10.0)
-        _wait_until(
-            app,
-            lambda: completed_count() >= 48 or bool(errors),
-            deadline,
-            "48 completed wells",
-        )
-        if errors:
-            raise RuntimeError(f"array execution emitted an error: {errors[-1]}")
-        screenshots["mid_array"] = screenshots_dir / "mid_array.png"
-        _capture_window(view, screenshots["mid_array"])
-        record_event("milestone", name="mid_array", completed=completed_count())
+            elapsed_seconds = (
+                time.perf_counter_ns() - started_ns
+            ) / 1_000_000_000.0
+            remaining_timeout = max(
+                0.1,
+                config.timeout_seconds - elapsed_seconds,
+            )
+            if (
+                not midpoint_captured
+                and (stock_index + 1) * len(expected_wells)
+                >= midpoint_completion
+            ):
+                _wait_until(
+                    app,
+                    lambda: completed_count() >= midpoint_completion
+                    or bool(errors),
+                    remaining_timeout,
+                    f"{midpoint_completion} stock/well completions",
+                )
+                if errors:
+                    raise RuntimeError(
+                        f"array execution emitted an error: {errors[-1]}"
+                    )
+                screenshots["mid_array"] = screenshots_dir / "mid_array.png"
+                _capture_window(view, screenshots["mid_array"])
+                record_event(
+                    "milestone",
+                    name="mid_array",
+                    completed=completed_count(),
+                )
+                midpoint_captured = True
 
-        elapsed_seconds = (time.perf_counter_ns() - started_ns) / 1_000_000_000.0
-        remaining_timeout = max(0.1, config.timeout_seconds - elapsed_seconds)
-        _wait_until(
-            app,
-            lambda: array_complete_count == 1 or bool(errors),
-            remaining_timeout,
-            "array completion",
-        )
-        if errors:
-            raise RuntimeError(f"array completion emitted an error: {errors[-1]}")
-        _wait_until(
-            app,
-            lambda: controller.get_array_run_state() == "idle",
-            5.0,
-            "idle array state",
-        )
+            elapsed_seconds = (
+                time.perf_counter_ns() - started_ns
+            ) / 1_000_000_000.0
+            remaining_timeout = max(
+                0.1,
+                config.timeout_seconds - elapsed_seconds,
+            )
+            _wait_until(
+                app,
+                lambda: array_complete_count >= stock_index + 1
+                or bool(errors),
+                remaining_timeout,
+                f"stock pass {stock_index + 1} completion",
+            )
+            if errors:
+                raise RuntimeError(f"array completion emitted an error: {errors[-1]}")
+            _wait_until(
+                app,
+                lambda: controller.get_array_run_state() == "idle",
+                5.0,
+                f"stock pass {stock_index + 1} idle state",
+            )
+            pass_state = experiment_model.get_execution_plan_snapshot().state.value
+            pass_terminal_states.append(pass_state)
+            pass_record.update(
+                {
+                    "completed_well_updates": (
+                        len(well_updates)
+                        - int(pass_record["starting_well_update_count"])
+                    ),
+                    "ended_monotonic_ns": time.perf_counter_ns(),
+                    "plan_state_after_pass": pass_state,
+                }
+            )
+            record_event(
+                "stock_pass_completed",
+                pass_index=stock_index + 1,
+                stock_id=stock_id,
+                plan_state=pass_state,
+            )
+            print(
+                f"Completed stock pass {stock_index + 1}/{expected_stock_count}",
+                file=sys.stderr,
+                flush=True,
+            )
+        stdout_redirect.__exit__(None, None, None)
+        stdout_redirect = None
+
         _wait_until(
             app,
             lambda: not view.pressure_box._pressure_render_timer.isActive(),
@@ -1340,6 +1773,7 @@ def run_virtual_print_array_scenario(
                 if instrumentation is not None
                 else {}
             ),
+            pass_terminal_states=pass_terminal_states,
         )
     except Exception:
         failure_text = traceback.format_exc()
@@ -1350,6 +1784,9 @@ def run_virtual_print_array_scenario(
             except Exception:
                 failure_text += "\nFailure screenshot error:\n" + traceback.format_exc()
     finally:
+        if stdout_redirect is not None:
+            stdout_redirect.__exit__(None, None, None)
+            stdout_redirect = None
         if dialog_timer is not None:
             dialog_timer.stop()
         if app is not None and paint_filter is not None:
@@ -1421,6 +1858,24 @@ def run_virtual_print_array_scenario(
     duration_ms = (ended_ns - started_ns) / 1_000_000.0
     probe_snapshot = probe.snapshot()
     resource_snapshot = resources.snapshot()
+    resource_values = resource_snapshot.setdefault("values", {})
+    rss_growth_bytes = resource_values.get("rss_growth_bytes")
+    rss_growth_ratio = resource_values.get("rss_growth_ratio")
+    resource_growth_warning = bool(
+        workload_id == STRESS_WORKLOAD_ID
+        and isinstance(rss_growth_bytes, (int, float))
+        and isinstance(rss_growth_ratio, (int, float))
+        and float(rss_growth_bytes) > 100 * 1024 * 1024
+        and float(rss_growth_ratio) > 1.25
+    )
+    resource_values["growth_assessment"] = {
+        "applicable": workload_id == STRESS_WORKLOAD_ID,
+        "absolute_warning_bytes": 100 * 1024 * 1024,
+        "ratio_warning_threshold": 1.25,
+        "observed_growth_bytes": rss_growth_bytes,
+        "observed_growth_ratio": rss_growth_ratio,
+        "decision": "warning" if resource_growth_warning else "pass",
+    }
     durable_io_snapshot = io_observer.snapshot() if io_observer is not None else {}
     progress_snapshot = (
         progress_observer.snapshot()
@@ -1555,12 +2010,6 @@ def run_virtual_print_array_scenario(
     completed_updates = [
         well for well in well_updates if well in set(expected_wells)
     ]
-    lifecycle_counts = Counter(
-        str(event.get("event")) for event in command_events
-    )
-    queue_depths = [
-        int(event.get("queue_depth", 0)) for event in command_events
-    ]
     injected_candidates = [
         event
         for event in probe_snapshot.get("stall_events", [])
@@ -1596,6 +2045,17 @@ def run_virtual_print_array_scenario(
         if pressure_update_signal_count
         else 0.0
     )
+    pressure_render_intervals_ms = [
+        (right - left) / 1_000_000.0
+        for left, right in zip(
+            pressure_render_timestamps_ns,
+            pressure_render_timestamps_ns[1:],
+        )
+    ]
+    pressure_interval_summary = summarize_samples(
+        pressure_render_intervals_ms,
+        bands_ms=(250.0, 1000.0),
+    )
     if (
         failure_text is None
         and injection_requested
@@ -1630,6 +2090,7 @@ def run_virtual_print_array_scenario(
     if failure_text is None and pressure_timer_active_after_teardown:
         failure_text = "pressure render timer remained active after teardown"
     expected_completions = len(expected_wells)
+    expected_completions *= expected_stock_count
     progress_modes = progress_snapshot.get("mode_counts", {})
     progress_durations = progress_snapshot.get("duration_samples_ms", {})
     if failure_text is None and (
@@ -1652,6 +2113,8 @@ def run_virtual_print_array_scenario(
     if failure_text is None and (
         authoritative_io["hot_path_read_count"] != 0
         or authoritative_io["execution_resume_hot_path_disk_load_count"] != 0
+        or authoritative_io["guard_count"]
+        != expected_completions * 4 + max(0, expected_stock_count - 1)
         or authoritative_io["resume_save_fsync_count"] != expected_completions * 3
         or authoritative_io["resume_save_replace_count"] != expected_completions * 3
         or authoritative_io["progress_write_fsync_count"] != expected_completions
@@ -1663,10 +2126,61 @@ def run_virtual_print_array_scenario(
             f"contract: {authoritative_io}"
         )
 
-    status = "fail" if failure_text else "pass"
+    gap_maximum_ms = float(
+        (probe_snapshot.get("event_loop_gap_ms") or {}).get("maximum", 0.0)
+        or 0.0
+    )
+    scheduling_p99_ms = float(
+        (probe_snapshot.get("scheduling_lateness_ms") or {}).get("p99", 0.0)
+        or 0.0
+    )
+    pressure_interval_maximum_ms = float(
+        pressure_interval_summary.get("maximum", 0.0) or 0.0
+    )
+    responsiveness_unacceptable = (
+        workload_id == STRESS_WORKLOAD_ID
+        and (
+            gap_maximum_ms > 1000.0
+            or pressure_interval_maximum_ms > 1000.0
+            or scheduling_p99_ms > 250.0
+        )
+    )
+    responsiveness_warning = (
+        workload_id == STRESS_WORKLOAD_ID
+        and not responsiveness_unacceptable
+        and (
+            gap_maximum_ms > 250.0
+            or pressure_interval_maximum_ms > 250.0
+        )
+    )
+    if failure_text is None and responsiveness_unacceptable:
+        failure_text = (
+            "384x10 responsiveness was unacceptable: "
+            f"event_loop_gap_max={gap_maximum_ms:.3f} ms, "
+            f"pressure_render_interval_max={pressure_interval_maximum_ms:.3f} ms, "
+            f"scheduling_lateness_p99={scheduling_p99_ms:.3f} ms"
+        )
+    stress_warning = responsiveness_warning or resource_growth_warning
+    status = (
+        "fail"
+        if failure_text
+        else "warning"
+        if stress_warning
+        else "pass"
+    )
     reasons = (
         [failure_text.splitlines()[-1] if failure_text else "scenario failed"]
         if failure_text
+        else [
+            "The 384x10 workflow passed, but an event-loop or pressure-render "
+            "interval exceeded the 250 ms warning threshold."
+        ]
+        if responsiveness_warning
+        else [
+            "The 384x10 workflow passed, but process RSS increased by more "
+            "than 100 MiB and 25%."
+        ]
+        if resource_growth_warning
         else ["All functional, persistence, UI, and simulation-safety invariants passed."]
     )
     response_values = {
@@ -1680,6 +2194,28 @@ def run_virtual_print_array_scenario(
             "render_interval_ms": pressure_render_interval_ms,
             "timer_active_after_teardown": pressure_timer_active_after_teardown,
             "duration_ms": pressure_render_summary,
+            "active_render_interval_ms": pressure_interval_summary,
+        },
+        "stress_assessment": {
+            "applicable": workload_id == STRESS_WORKLOAD_ID,
+            "event_loop_gap_warning_ms": 250.0,
+            "active_pressure_render_interval_warning_ms": 250.0,
+            "maximum_service_gap_ms": 1000.0,
+            "maximum_scheduling_lateness_p99_ms": 250.0,
+            "event_loop_gap_maximum_ms": gap_maximum_ms,
+            "active_pressure_render_interval_maximum_ms": (
+                pressure_interval_maximum_ms
+            ),
+            "scheduling_lateness_p99_ms": scheduling_p99_ms,
+            "decision": (
+                "unacceptable"
+                if responsiveness_unacceptable
+                else "warning"
+                if responsiveness_warning
+                else "responsive"
+                if workload_id == STRESS_WORKLOAD_ID
+                else "not_applicable"
+            ),
         },
         "injected_stall_assessment": {
             "requested": injection_requested,
@@ -1751,17 +2287,26 @@ def run_virtual_print_array_scenario(
         "environment": identity["environment"],
         "safety": safety_values,
         "workload": {
-            "workload_id": WORKLOAD_ID,
+            "workload_id": workload_id,
             "fixture_schema_version": fixture["schema_version"],
             "plate_name": fixture["plate"]["name"],
             "plate_rows": fixture["plate"]["rows"],
             "plate_columns": fixture["plate"]["columns"],
             "well_ids": list(expected_wells),
             "stock_id": (
-                fixture_info["stock_id"] if fixture_info else _stock_id(fixture["stock"])
+                fixture_info["stock_id"]
+                if fixture_info
+                else _stock_id(stock_specs[0])
             ),
-            "target_dispenses_per_well": 1,
-            "expected_completion_count": 96,
+            "stock_ids": (
+                list(fixture_info["stock_ids"])
+                if fixture_info
+                else [_stock_id(stock) for stock in stock_specs]
+            ),
+            "stock_count": expected_stock_count,
+            "array_passes": expected_stock_count,
+            "target_dispenses_per_well": _fixture_target_per_stock(fixture),
+            "expected_completion_count": expected_completions,
             "speed_multiplier": config.speed_multiplier,
             "timeout_seconds": config.timeout_seconds,
         },
@@ -1773,12 +2318,16 @@ def run_virtual_print_array_scenario(
             "workflow": {
                 "status": "measured",
                 "values": {
-                    "expected_well_count": 96,
-                    "completed_well_count": len(completed_updates),
+                    "expected_well_count": len(expected_wells),
+                    "completed_well_count": len(set(completed_updates)),
+                    "expected_stock_well_completion_count": expected_completions,
+                    "completed_stock_well_count": len(completed_updates),
                     "completed_well_ids": completed_updates,
                     "well_update_count": len(well_updates),
                     "array_states": array_states,
                     "array_complete_count": array_complete_count,
+                    "stock_passes": stock_passes,
+                    "pass_terminal_states": pass_terminal_states,
                     "dialogs": dialogs,
                     "unexpected_dialogs": unexpected_dialogs,
                     "errors": errors,
@@ -1788,12 +2337,15 @@ def run_virtual_print_array_scenario(
             "queue": {
                 "status": "measured",
                 "values": {
-                    "lifecycle_event_count": len(command_events),
-                    "lifecycle_counts": dict(sorted(lifecycle_counts.items())),
-                    "maximum_queue_depth": max(queue_depths) if queue_depths else 0,
-                    "minimum_queue_depth": min(queue_depths) if queue_depths else 0,
+                    "lifecycle_event_count": command_event_count,
+                    "lifecycle_counts": dict(
+                        sorted(command_lifecycle_counts.items())
+                    ),
+                    "maximum_queue_depth": maximum_queue_depth or 0,
+                    "minimum_queue_depth": minimum_queue_depth or 0,
                     "unexpected_starvation_count": len(starvation_events),
                     "unexpected_starvation_events": starvation_events,
+                    "event_trace_retention": event_log.snapshot(),
                     "simulator_cleanup": machine_cleanup,
                 },
             },
@@ -1804,6 +2356,13 @@ def run_virtual_print_array_scenario(
                     "phase_timings": phases.snapshot(),
                     "authoritative_io": authoritative_io,
                     "progress_snapshot": progress_snapshot,
+                    "cumulative_progress_serialized_bytes": sum(
+                        int(value)
+                        for value in progress_snapshot.get(
+                            "serialized_size_bytes",
+                            [],
+                        )
+                    ),
                 },
             },
             "resources": resource_snapshot,
@@ -1816,6 +2375,7 @@ def run_virtual_print_array_scenario(
             "failure_traceback": (
                 "failure_traceback.txt" if failure_text else None
             ),
+            "application_stdout": "application_stdout.log",
             "scenario_root": _relative(scenario_root, report_dir),
             "screenshots": {
                 name: _relative(path, report_dir)
@@ -1839,7 +2399,11 @@ def run_virtual_print_array_scenario(
     event_path = report_dir / "events.jsonl"
     stack_path = report_dir / "stall_stacks.txt"
     summary_path = report_dir / "summary.txt"
-    _write_event_trace(event_path, events)
+    _write_event_trace(event_path, event_log.events)
+    (report_dir / "application_stdout.log").write_text(
+        application_stdout.getvalue(),
+        encoding="utf-8",
+    )
     stack_path.write_text(
         "\n\n".join(
             str(capture.get("stack") or "")
@@ -1860,6 +2424,8 @@ def run_virtual_print_array_scenario(
 __all__ = [
     "SCENARIO_NAME",
     "SCENARIO_VERSION",
+    "SCENARIO_FIXTURES",
+    "STRESS_WORKLOAD_ID",
     "WORKLOAD_ID",
     "VirtualPrintArrayScenarioConfig",
     "VirtualWorkflowScenarioError",

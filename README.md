@@ -209,6 +209,47 @@ Reports are retained beneath:
 verification_reports/virtual_workflows/virtual_print_array_96_v1/<UTC>_<commit>/
 ```
 
+### Opt-in 384-well by 10-stock stress workflow
+
+`virtual_print_array_384x10_v1` exercises the same real UI, Controller, Model,
+simulator, and authoritative persistence path for ten sequential stock passes
+over all 384 wells. The fixture contains ten calibrated droplet-mode heads and
+3,840 distinct stock/well completions. Between passes, the scenario performs a
+virtual operator head exchange while the command queue is idle; no physical
+head, port, camera, or other hardware dependency is used.
+
+This is an opt-in characterization, not part of routine pytest or the accepted
+96-well comparison baseline:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario virtual_print_array_384x10_v1 `
+  --speed-multiplier 100 `
+  --timeout-seconds 1800
+```
+
+The run requires exactly 3,840 cached progress updates and no full progress
+rebuilds or hot-path authoritative reads. It preserves 11,520 resume and 3,840
+progress `fsync`/atomic-replace calls. Its 15,369 identity guards comprise four
+guards per completion plus one pass-start guard for each of the final nine
+stocks. The final checkpoint must retain zero intents and the terminal
+authoritative bundle must validate.
+
+The report additionally records ten pass transitions, active pressure-render
+intervals, resident-memory growth, bounded event-retention counters, cumulative
+serialized progress bytes, and the final file sizes. Cumulative serialized
+bytes are write volume over the whole run, not simultaneous disk usage.
+Service gaps or active pressure-render intervals above 250 ms produce an
+informational stress warning. A maximum above 1000 ms, or scheduling-lateness
+p99 above 250 ms, is a functional stress failure. These limits apply only to
+this opt-in stress workload and do not change comparison policy v1.
+
+Reports are retained beneath:
+
+```text
+verification_reports/virtual_workflows/virtual_print_array_384x10_v1/<UTC>_<commit>/
+```
+
 Each successful run contains the validated JSON report, text summary, bounded
 event trace, stack diagnostics, retained isolated config/experiment/calibration
 roots, and ready/printing/mid-array/completed screenshots. Failed runs retain a
@@ -473,6 +514,25 @@ same-Pi comparison:
   -MeasuredRuns 5 `
   -TimeoutSeconds 600
 ```
+
+For the opt-in 384-well by 10-stock characterization, collect one measured
+accelerated run and emit a standard one-report report set:
+
+```powershell
+.\tools\run_pi_virtual_workflow.ps1 `
+  -PiHost 192.168.0.33 `
+  -PiUser labcraft `
+  -Scenario virtual_print_array_384x10_v1 `
+  -HostLabel pi5-sil-384x10-v1 `
+  -WarmupRuns 0 `
+  -MeasuredRuns 1 `
+  -SpeedMultiplier 100 `
+  -TimeoutSeconds 1800
+```
+
+The safety proof remains the short, fixed 96-well workload. The stress run
+uses the same fail-closed Bubblewrap lane and manifest/hash validation, but it
+is not eligible to create or compare against the tracked 96-well baseline.
 
 Use `-PreflightOnly` or `-SafetyProofOnly` for setup diagnosis.
 `-KeepRemoteArtifacts` retains the exact remote run directories; otherwise

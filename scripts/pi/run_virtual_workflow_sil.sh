@@ -216,7 +216,6 @@ case "$MODE" in
       exit 3
     fi
     sandbox_exec "$PYTHON_BIN" tools/run_virtual_workflow.py \
-      --scenario virtual_print_array_96_v1 \
       --output-root "$OUTPUT_ROOT" \
       --qt-platform "$QT_PLATFORM" \
       --target-pi \

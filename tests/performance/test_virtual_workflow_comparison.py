@@ -661,3 +661,53 @@ def test_cli_repeated_collection_builds_one_report_set(
     assert payload["runs"]["warmup_count"] == 1
     assert payload["runs"]["measured_count"] == 5
     assert "Report set:" in capsys.readouterr().out
+
+
+def test_cli_can_emit_one_measured_stress_report_set(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    from tools.virtual_workflows import scenarios
+
+    report = _report(run_id="single-stress")
+    report["workload"]["workload_id"] = "virtual_print_array_384x10_v1"
+    report["workload"]["expected_completion_count"] = 3840
+
+    def fake_run(config):
+        assert config.scenario_id == "virtual_print_array_384x10_v1"
+        report_dir = tmp_path / "raw"
+        scenario_root = report_dir / "scenario-root"
+        scenario_root.mkdir(parents=True)
+        report["safety"]["scenario_root"] = str(scenario_root)
+        (report_dir / "report.json").write_text(
+            json.dumps(report, sort_keys=True),
+            encoding="utf-8",
+        )
+        (report_dir / "summary.txt").write_text("synthetic\n", encoding="utf-8")
+        return report
+
+    monkeypatch.setattr(scenarios, "run_virtual_print_array_scenario", fake_run)
+
+    exit_code = main(
+        [
+            "--scenario",
+            "virtual_print_array_384x10_v1",
+            "--output-root",
+            str(tmp_path / "sets"),
+            "--emit-report-set",
+            "--host-label",
+            "pi5-sil-384x10-v1",
+        ]
+    )
+
+    assert exit_code == 0
+    report_sets = list((tmp_path / "sets").rglob("report_set.json"))
+    assert len(report_sets) == 1
+    payload = load_report_set(report_sets[0])
+    assert payload["runs"]["warmup_count"] == 0
+    assert payload["runs"]["measured_count"] == 1
+    assert payload["compatibility"]["workload"]["workload_id"] == (
+        "virtual_print_array_384x10_v1"
+    )
+    assert "Report set:" in capsys.readouterr().out

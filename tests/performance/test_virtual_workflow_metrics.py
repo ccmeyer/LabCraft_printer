@@ -222,6 +222,10 @@ def test_resource_sampler_reports_cpu_rss_io_and_threads():
     snapshot = sampler.snapshot()
     assert snapshot["status"] == "measured"
     assert snapshot["values"]["process_cpu_time_ms_delta"] == 1000
+    assert snapshot["values"]["initial_rss_bytes"] == 100
+    assert snapshot["values"]["final_rss_bytes"] == 150
+    assert snapshot["values"]["rss_growth_bytes"] == 50
+    assert snapshot["values"]["rss_growth_ratio"] == 1.5
     assert snapshot["values"]["peak_rss_bytes"] == 175
     assert snapshot["values"]["read_bytes_delta"] == 800
     assert snapshot["values"]["write_bytes_delta"] == 1000

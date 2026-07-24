@@ -1,0 +1,200 @@
+{
+  "schema_version": 2,
+  "fixture_id": "virtual_print_array_384x10_v1",
+  "plate": {
+    "name": "shallow-384_well_plate",
+    "rows": 16,
+    "columns": 24,
+    "included_rows": [
+      "A",
+      "B",
+      "C",
+      "D",
+      "E",
+      "F",
+      "G",
+      "H",
+      "I",
+      "J",
+      "K",
+      "L",
+      "M",
+      "N",
+      "O",
+      "P"
+    ],
+    "serpentine": true
+  },
+  "workload": {
+    "target_dispenses_per_stock_per_well": 1,
+    "well_count": 384,
+    "stock_count": 10,
+    "array_passes": 10,
+    "completion_count": 3840
+  },
+  "stocks": [
+    {
+      "factor_name": "Virtual Stock 01",
+      "concentration": 10.0,
+      "target_concentration": 1.0,
+      "units": "x",
+      "printing_mode": "droplet",
+      "prepared_droplet_volume_nL": 5.0,
+      "droplet_volume_nL": 10.0,
+      "printer_head": {
+        "printer_head_id": "virtual-head-384x10-01-v1",
+        "initial_volume_uL": 1000.0,
+        "print_pulse_width_us": 1300,
+        "print_pressure_psi": 1.2
+      }
+    },
+    {
+      "factor_name": "Virtual Stock 02",
+      "concentration": 10.0,
+      "target_concentration": 1.0,
+      "units": "x",
+      "printing_mode": "droplet",
+      "prepared_droplet_volume_nL": 5.0,
+      "droplet_volume_nL": 10.0,
+      "printer_head": {
+        "printer_head_id": "virtual-head-384x10-02-v1",
+        "initial_volume_uL": 1000.0,
+        "print_pulse_width_us": 1310,
+        "print_pressure_psi": 1.2
+      }
+    },
+    {
+      "factor_name": "Virtual Stock 03",
+      "concentration": 10.0,
+      "target_concentration": 1.0,
+      "units": "x",
+      "printing_mode": "droplet",
+      "prepared_droplet_volume_nL": 5.0,
+      "droplet_volume_nL": 10.0,
+      "printer_head": {
+        "printer_head_id": "virtual-head-384x10-03-v1",
+        "initial_volume_uL": 1000.0,
+        "print_pulse_width_us": 1320,
+        "print_pressure_psi": 1.2
+      }
+    },
+    {
+      "factor_name": "Virtual Stock 04",
+      "concentration": 10.0,
+      "target_concentration": 1.0,
+      "units": "x",
+      "printing_mode": "droplet",
+      "prepared_droplet_volume_nL": 5.0,
+      "droplet_volume_nL": 10.0,
+      "printer_head": {
+        "printer_head_id": "virtual-head-384x10-04-v1",
+        "initial_volume_uL": 1000.0,
+        "print_pulse_width_us": 1330,
+        "print_pressure_psi": 1.2
+      }
+    },
+    {
+      "factor_name": "Virtual Stock 05",
+      "concentration": 10.0,
+      "target_concentration": 1.0,
+      "units": "x",
+      "printing_mode": "droplet",
+      "prepared_droplet_volume_nL": 5.0,
+      "droplet_volume_nL": 10.0,
+      "printer_head": {
+        "printer_head_id": "virtual-head-384x10-05-v1",
+        "initial_volume_uL": 1000.0,
+        "print_pulse_width_us": 1340,
+        "print_pressure_psi": 1.2
+      }
+    },
+    {
+      "factor_name": "Virtual Stock 06",
+      "concentration": 10.0,
+      "target_concentration": 1.0,
+      "units": "x",
+      "printing_mode": "droplet",
+      "prepared_droplet_volume_nL": 5.0,
+      "droplet_volume_nL": 10.0,
+      "printer_head": {
+        "printer_head_id": "virtual-head-384x10-06-v1",
+        "initial_volume_uL": 1000.0,
+        "print_pulse_width_us": 1350,
+        "print_pressure_psi": 1.2
+      }
+    },
+    {
+      "factor_name": "Virtual Stock 07",
+      "concentration": 10.0,
+      "target_concentration": 1.0,
+      "units": "x",
+      "printing_mode": "droplet",
+      "prepared_droplet_volume_nL": 5.0,
+      "droplet_volume_nL": 10.0,
+      "printer_head": {
+        "printer_head_id": "virtual-head-384x10-07-v1",
+        "initial_volume_uL": 1000.0,
+        "print_pulse_width_us": 1360,
+        "print_pressure_psi": 1.2
+      }
+    },
+    {
+      "factor_name": "Virtual Stock 08",
+      "concentration": 10.0,
+      "target_concentration": 1.0,
+      "units": "x",
+      "printing_mode": "droplet",
+      "prepared_droplet_volume_nL": 5.0,
+      "droplet_volume_nL": 10.0,
+      "printer_head": {
+        "printer_head_id": "virtual-head-384x10-08-v1",
+        "initial_volume_uL": 1000.0,
+        "print_pulse_width_us": 1370,
+        "print_pressure_psi": 1.2
+      }
+    },
+    {
+      "factor_name": "Virtual Stock 09",
+      "concentration": 10.0,
+      "target_concentration": 1.0,
+      "units": "x",
+      "printing_mode": "droplet",
+      "prepared_droplet_volume_nL": 5.0,
+      "droplet_volume_nL": 10.0,
+      "printer_head": {
+        "printer_head_id": "virtual-head-384x10-09-v1",
+        "initial_volume_uL": 1000.0,
+        "print_pulse_width_us": 1380,
+        "print_pressure_psi": 1.2
+      }
+    },
+    {
+      "factor_name": "Virtual Stock 10",
+      "concentration": 10.0,
+      "target_concentration": 1.0,
+      "units": "x",
+      "printing_mode": "droplet",
+      "prepared_droplet_volume_nL": 5.0,
+      "droplet_volume_nL": 10.0,
+      "printer_head": {
+        "printer_head_id": "virtual-head-384x10-10-v1",
+        "initial_volume_uL": 1000.0,
+        "print_pulse_width_us": 1390,
+        "print_pressure_psi": 1.2
+      }
+    }
+  ],
+  "fill_stock": {
+    "factor_name": "Water",
+    "concentration": 1.0,
+    "units": "--",
+    "printing_mode": "droplet",
+    "droplet_volume_nL": 10.0,
+    "target_dispenses_per_well": 0
+  },
+  "simulation": {
+    "dispense_frequency_hz": 20,
+    "lookahead_wells": 2,
+    "staging_slot": 0
+  }
+}

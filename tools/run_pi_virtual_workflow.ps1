@@ -7,6 +7,9 @@ param(
   [string]$RemoteRepo = "/home/labcraft/LabCraft_printer",
   [string]$HostLabel = "pi5-sil-primary-v1",
 
+  [ValidateSet("virtual_print_array_96_v1", "virtual_print_array_384x10_v1")]
+  [string]$Scenario = "virtual_print_array_96_v1",
+
   [ValidateSet("offscreen", "minimal")]
   [string]$QtPlatform = "offscreen",
 
@@ -158,6 +161,7 @@ Write-Host "Pi SIL target: $target"
 Write-Host "Remote repository: $RemoteRepo"
 Write-Host "Collection id: $collectionId"
 Write-Host "Qt platform: $QtPlatform"
+Write-Host "Scenario: $Scenario"
 
 $preflightArgs = @(
   "preflight",
@@ -196,11 +200,13 @@ $collectArgs = @(
   "--preflight", $remotePreflight,
   "--proof", $remoteProof,
   "--",
+  "--scenario", $Scenario,
   "--speed-multiplier", $SpeedMultiplier.ToString([Globalization.CultureInfo]::InvariantCulture),
   "--timeout-seconds", $TimeoutSeconds.ToString([Globalization.CultureInfo]::InvariantCulture),
   "--warmup-runs", $WarmupRuns.ToString([Globalization.CultureInfo]::InvariantCulture),
   "--measured-runs", $MeasuredRuns.ToString([Globalization.CultureInfo]::InvariantCulture),
-  "--host-label", $HostLabel
+  "--host-label", $HostLabel,
+  "--emit-report-set"
 )
 if ($CreateCandidateBaseline.IsPresent) {
   $collectArgs += @(

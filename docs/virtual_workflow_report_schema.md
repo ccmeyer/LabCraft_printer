@@ -299,6 +299,54 @@ show 96 cached updates, zero full rebuilds, and 96 construction,
 serialization, atomic-write, serialized-byte, and non-durable samples. Slice 2
 workloads apply the same requirement per completion and measured run.
 
+### Opt-in 384-well by 10-stock stress values
+
+`virtual_print_array_384x10_v1` retains the report-v1 envelope and the
+comparison-policy-v1 metric paths. Its fixture uses all rows A-P and all 24
+columns of the real `shallow-384_well_plate`, ten droplet-mode stocks, ten
+sequential UI-started passes, and 3,840 unique `(stock_id, well_id)`
+completions. The ordinary 96-well scenario and its tracked baselines are
+unchanged.
+
+Compatible nested evidence includes:
+
+- `workload.stock_ids`, `stock_count`, `pass_count`, and
+  `completion_count`;
+- `metrics.workflow.values.completed_stock_well_count` and ordered
+  `stock_passes`, including each pass's starting and ending completion count
+  and authoritative-plan state;
+- `metrics.responsiveness.values.active_pressure_render_interval_ms` and
+  `stress_assessment`;
+- initial/final resident-set size, absolute growth, and growth ratio beneath
+  the resource snapshot;
+- cumulative serialized progress bytes beneath
+  `metrics.persistence.values.progress_snapshot`;
+- bounded retained-event counts, total observed counts, sampling rate, and
+  dropped-event evidence; and
+- `artifacts.application_stdout`, which retains redirected application output
+  without allowing a long run to flood the controlling terminal.
+
+A successful stress running window requires 3,840 cached progress updates,
+zero full rebuilds, zero hot-path reads/resume loads, 3,840 samples for each
+progress construction/serialization/atomic-write series, 11,520 resume and
+3,840 progress `fsync`/replace calls, and 15,369 identity guards. The guard
+count is `4 * completion_count + (stock_count - 1)`: the final nine passes each
+perform the production pass-start validation in addition to the four durable
+write guards per completion. The final checkpoint retains zero intents and the
+terminal authoritative bundle must validate.
+
+The stress assessment warns when the maximum event-loop service gap or active
+pressure-render interval exceeds 250 ms. It fails when either exceeds 1000 ms
+or scheduling-lateness p99 exceeds 250 ms. These workload-specific limits do
+not alter Slice 5's ordinary classification, comparison policy
+`virtual_workflow_policy_v1`, or accepted 96-well baselines.
+
+One report can be wrapped in
+`labcraft.virtual_workflow_report_set` version 1 using `--emit-report-set`.
+This preserves canonical path and SHA-256 evidence for Pi transfer and review;
+it does not satisfy the five-measured-run requirement for baseline creation or
+performance comparison.
+
 The scenario writes `report.json`, `summary.txt`, `events.jsonl`,
 `stall_stacks.txt`, retained scenario data, and ready/printing/mid/completed
 screenshots. A failing run additionally writes `failure_traceback.txt` and a

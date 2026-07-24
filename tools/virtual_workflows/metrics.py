@@ -412,12 +412,37 @@ class ProcessResourceSampler:
             "sample_count": len(samples),
             "dropped_samples": dropped,
             "process_cpu_time_ms_delta": delta("cpu_time_ms"),
+            "initial_rss_bytes": (
+                int(first["rss_bytes"])
+                if first.get("rss_bytes") is not None
+                else None
+            ),
+            "final_rss_bytes": (
+                int(last["rss_bytes"])
+                if last.get("rss_bytes") is not None
+                else None
+            ),
             "peak_rss_bytes": max(rss_values) if rss_values else None,
             "read_bytes_delta": delta("read_bytes"),
             "write_bytes_delta": delta("write_bytes"),
             "maximum_thread_count": max(thread_values) if thread_values else None,
             "availability_reasons": list(dict.fromkeys(self._errors)),
         }
+        if (
+            values["initial_rss_bytes"] is not None
+            and values["final_rss_bytes"] is not None
+        ):
+            values["rss_growth_bytes"] = (
+                values["final_rss_bytes"] - values["initial_rss_bytes"]
+            )
+            values["rss_growth_ratio"] = (
+                values["final_rss_bytes"] / values["initial_rss_bytes"]
+                if values["initial_rss_bytes"] > 0
+                else None
+            )
+        else:
+            values["rss_growth_bytes"] = None
+            values["rss_growth_ratio"] = None
         complete = all(
             values[key] is not None
             for key in (

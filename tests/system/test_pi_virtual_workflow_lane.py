@@ -478,10 +478,12 @@ def test_remote_wrapper_dry_run_builds_preflight_proof_and_collection_commands()
             str(REMOTE_TOOL),
             "-PiHost",
             "pi-test",
+            "-Scenario",
+            "virtual_print_array_384x10_v1",
             "-WarmupRuns",
-            "1",
+            "0",
             "-MeasuredRuns",
-            "5",
+            "1",
             "-DryRun",
         ],
         cwd=REPO_ROOT,
@@ -495,4 +497,6 @@ def test_remote_wrapper_dry_run_builds_preflight_proof_and_collection_commands()
     assert "'preflight'" in result.stdout
     assert "'prove'" in result.stdout
     assert "'collect'" in result.stdout
+    assert "'virtual_print_array_384x10_v1'" in result.stdout
+    assert "'--emit-report-set'" in result.stdout
     assert "Dry run complete" in result.stdout

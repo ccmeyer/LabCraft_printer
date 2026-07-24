@@ -24,7 +24,10 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--scenario",
-        choices=("virtual_print_array_96_v1",),
+        choices=(
+            "virtual_print_array_96_v1",
+            "virtual_print_array_384x10_v1",
+        ),
         default="virtual_print_array_96_v1",
     )
     parser.add_argument(
@@ -77,6 +80,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--host-label",
         help="Stable, non-secret label required for repeated/comparison evidence.",
+    )
+    parser.add_argument(
+        "--emit-report-set",
+        action="store_true",
+        help=(
+            "Write a report set even for one measured run. This is intended "
+            "for opt-in stress evidence, not accepted baseline creation."
+        ),
     )
     parser.add_argument(
         "--accept-baseline",
@@ -237,7 +248,11 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 3
 
-    repeated = args.warmup_runs > 0 or args.measured_runs > 1
+    repeated = (
+        args.emit_report_set
+        or args.warmup_runs > 0
+        or args.measured_runs > 1
+    )
     if (repeated or args.accept_baseline is not None) and not args.host_label:
         parser.error(
             "--host-label is required for repeated runs or baseline creation"
@@ -277,6 +292,7 @@ def main(argv: list[str] | None = None) -> int:
         def run_once() -> dict[str, object]:
             return run_virtual_print_array_scenario(
                 VirtualPrintArrayScenarioConfig(
+                    scenario_id=args.scenario,
                     output_root=args.output_root,
                     visible=args.visible,
                     speed_multiplier=args.speed_multiplier,
