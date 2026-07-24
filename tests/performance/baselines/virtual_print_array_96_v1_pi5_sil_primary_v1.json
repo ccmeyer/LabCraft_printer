@@ -1,0 +1,379 @@
+{
+  "baseline_id": "virtual_print_array_96_v1_pi5-sil-primary-v1",
+  "classification": {
+    "reasons": [
+      "All baseline functional invariants passed.",
+      "Primary cross-run variation satisfied the candidate noise policy."
+    ],
+    "status": "pass",
+    "threshold_maturity": "candidate"
+  },
+  "compatibility": {
+    "environment": {
+      "architecture": "aarch64",
+      "cpu_identifier": "unknown",
+      "operating_system": "Linux",
+      "os_release": "6.12.20+rpt-rpi-2712",
+      "python_executable": "/usr/bin/python3.11",
+      "python_implementation": "CPython",
+      "python_version": "3.11.2",
+      "qt": {
+        "binding": "real",
+        "platform": "offscreen",
+        "pyside_version": "6.7.1",
+        "qt_version": "6.7.1"
+      },
+      "target_pi": {
+        "filesystem": {
+          "filesystem_type": "ext4",
+          "mount_source": "/dev/nvme0n1p2[/home/labcraft/LabCraft_printer/verification_reports/virtual_workflows/pi-sil]",
+          "storage_class": "nvme"
+        },
+        "lane": "raspberry_pi_sil",
+        "pi_model": "Raspberry Pi 5 Model B Rev 1.0"
+      }
+    },
+    "host_label": "pi5-sil-primary-v1",
+    "report_schema_name": "labcraft.virtual_workflow_report",
+    "report_schema_version": 1,
+    "run_mode": "offscreen_pi_sil",
+    "safety": {
+      "hardware_access_allowed": false,
+      "hardware_interfaces": {
+        "GPIO": false,
+        "MCU": false,
+        "balance": false,
+        "camera": false,
+        "firmware_update": false,
+        "serial": false
+      },
+      "pi_sil": {
+        "network_unshared": true,
+        "private_dev": true,
+        "root_read_only": true,
+        "sandbox_method": "bubblewrap_private_dev_v1"
+      },
+      "simulated_port": "SIMULATED",
+      "simulation": true
+    },
+    "scenario_name": "virtual_print_array",
+    "scenario_version": "1",
+    "timing_policy": "simulated_command_durations_x1",
+    "workload": {
+      "expected_completion_count": 96,
+      "fixture_schema_version": 1,
+      "plate_columns": 24,
+      "plate_name": "shallow-384_well_plate",
+      "plate_rows": 16,
+      "speed_multiplier": 1.0,
+      "stock_id": "Virtual Stock_1.00_x",
+      "target_dispenses_per_well": 1,
+      "timeout_seconds": 600.0,
+      "well_ids": [
+        "A1",
+        "A2",
+        "A3",
+        "A4",
+        "A5",
+        "A6",
+        "A7",
+        "A8",
+        "A9",
+        "A10",
+        "A11",
+        "A12",
+        "A13",
+        "A14",
+        "A15",
+        "A16",
+        "A17",
+        "A18",
+        "A19",
+        "A20",
+        "A21",
+        "A22",
+        "A23",
+        "A24",
+        "B24",
+        "B23",
+        "B22",
+        "B21",
+        "B20",
+        "B19",
+        "B18",
+        "B17",
+        "B16",
+        "B15",
+        "B14",
+        "B13",
+        "B12",
+        "B11",
+        "B10",
+        "B9",
+        "B8",
+        "B7",
+        "B6",
+        "B5",
+        "B4",
+        "B3",
+        "B2",
+        "B1",
+        "C1",
+        "C2",
+        "C3",
+        "C4",
+        "C5",
+        "C6",
+        "C7",
+        "C8",
+        "C9",
+        "C10",
+        "C11",
+        "C12",
+        "C13",
+        "C14",
+        "C15",
+        "C16",
+        "C17",
+        "C18",
+        "C19",
+        "C20",
+        "C21",
+        "C22",
+        "C23",
+        "C24",
+        "D24",
+        "D23",
+        "D22",
+        "D21",
+        "D20",
+        "D19",
+        "D18",
+        "D17",
+        "D16",
+        "D15",
+        "D14",
+        "D13",
+        "D12",
+        "D11",
+        "D10",
+        "D9",
+        "D8",
+        "D7",
+        "D6",
+        "D5",
+        "D4",
+        "D3",
+        "D2",
+        "D1"
+      ],
+      "workload_id": "virtual_print_array_96_v1"
+    }
+  },
+  "created_at_utc": "2026-07-24T05:51:17.551433Z",
+  "host_label": "pi5-sil-primary-v1",
+  "metrics": {
+    "metrics.responsiveness.values.event_loop_gap_ms.maximum": {
+      "distribution": {
+        "coefficient_of_variation": 0.0942261549567478,
+        "count": 5,
+        "maximum": 391.95185,
+        "mean": 354.7022062,
+        "median": 332.545426,
+        "median_absolute_deviation": 3.7872770000000173,
+        "minimum": 328.758149,
+        "q1": 329.650325,
+        "q3": 390.605281,
+        "standard_deviation": 33.42222504490151,
+        "tukey_outliers": []
+      }
+    },
+    "metrics.responsiveness.values.phase_timings.duration_by_name_ms.controller.well_completion.p95": {
+      "distribution": {
+        "coefficient_of_variation": 0.02023912119773853,
+        "count": 5,
+        "maximum": 136.11343025,
+        "mean": 131.50538550000002,
+        "median": 130.18989475,
+        "median_absolute_deviation": 0.3880839999999921,
+        "minimum": 129.80181075000002,
+        "q1": 129.934275,
+        "q3": 131.48751675,
+        "standard_deviation": 2.6615534352898274,
+        "tukey_outliers": [
+          {
+            "run_index": 4,
+            "value": 136.11343025
+          }
+        ]
+      }
+    },
+    "metrics.responsiveness.values.phase_timings.duration_by_name_ms.persistence.complete_intent.p95": {
+      "distribution": {
+        "coefficient_of_variation": 0.07521974424547562,
+        "count": 5,
+        "maximum": 24.39504025,
+        "mean": 21.620847750000003,
+        "median": 21.18136475,
+        "median_absolute_deviation": 0.43934374999999903,
+        "minimum": 20.237859,
+        "q1": 20.742021,
+        "q3": 21.54795375,
+        "standard_deviation": 1.6263146381253673,
+        "tukey_outliers": [
+          {
+            "run_index": 4,
+            "value": 24.39504025
+          }
+        ]
+      }
+    },
+    "metrics.responsiveness.values.phase_timings.duration_by_name_ms.persistence.write_progress.p95": {
+      "distribution": {
+        "coefficient_of_variation": 0.12226700483497184,
+        "count": 5,
+        "maximum": 15.623370000000001,
+        "mean": 12.824552550000002,
+        "median": 12.18475925,
+        "median_absolute_deviation": 0.08738349999999961,
+        "minimum": 11.97052,
+        "q1": 12.097375750000001,
+        "q3": 12.246737750000001,
+        "standard_deviation": 1.5680196286372006,
+        "tukey_outliers": [
+          {
+            "run_index": 1,
+            "value": 15.623370000000001
+          }
+        ]
+      }
+    },
+    "metrics.responsiveness.values.phase_timings.duration_by_name_ms.ui.well_plate_update.p95": {
+      "distribution": {
+        "coefficient_of_variation": 0.006032236635865394,
+        "count": 5,
+        "maximum": 50.990607499999996,
+        "mean": 50.764428450000004,
+        "median": 50.9032725,
+        "median_absolute_deviation": 0.08733499999999594,
+        "minimum": 50.251380250000004,
+        "q1": 50.714987750000006,
+        "q3": 50.96189425,
+        "standard_deviation": 0.30622304509485754,
+        "tukey_outliers": [
+          {
+            "run_index": 0,
+            "value": 50.251380250000004
+          }
+        ]
+      }
+    },
+    "metrics.responsiveness.values.scheduling_lateness_ms.p95": {
+      "distribution": {
+        "coefficient_of_variation": 0.008042038910622249,
+        "count": 5,
+        "maximum": 179.072953,
+        "mean": 177.19665233999999,
+        "median": 176.66490075,
+        "median_absolute_deviation": 1.157210450000008,
+        "minimum": 175.50769029999998,
+        "q1": 176.52993445,
+        "q3": 178.2077832,
+        "standard_deviation": 1.425022372950283,
+        "tukey_outliers": []
+      }
+    },
+    "metrics.responsiveness.values.scheduling_lateness_ms.p99": {
+      "distribution": {
+        "coefficient_of_variation": 0.02335541420108743,
+        "count": 5,
+        "maximum": 261.5128908200002,
+        "mean": 253.94206771599892,
+        "median": 251.7774246999977,
+        "median_absolute_deviation": 3.254607749997888,
+        "minimum": 248.52281694999982,
+        "q1": 248.98211811999818,
+        "q3": 258.9150879899988,
+        "standard_deviation": 5.930922174587747,
+        "tukey_outliers": []
+      }
+    },
+    "run.duration_ms": {
+      "distribution": {
+        "coefficient_of_variation": 0.00393925600906637,
+        "count": 5,
+        "maximum": 28600.40451,
+        "mean": 28474.854872999997,
+        "median": 28518.361533,
+        "median_absolute_deviation": 82.04297700000097,
+        "minimum": 28310.057751,
+        "q1": 28420.258617,
+        "q3": 28525.191954,
+        "standard_deviation": 112.16974316575805,
+        "tukey_outliers": []
+      }
+    }
+  },
+  "noise": {
+    "maximum_primary_cv": 0.3,
+    "noisy_primary_metrics": [],
+    "status": "acceptable"
+  },
+  "policy": {
+    "absolute_failure_lateness_p99_ms": 250.0,
+    "absolute_failure_service_gap_ms": 1000.0,
+    "absolute_warning_service_gap_ms": 250.0,
+    "duration_absolute_noise_floor_ms": 1000.0,
+    "maximum_primary_cv": 0.3,
+    "minimum_measured_runs": 5,
+    "minimum_warmup_runs": 1,
+    "policy_version": "virtual_workflow_policy_v1",
+    "primary_absolute_noise_floor_ms": 10.0,
+    "relative_regression_ratio": 1.25,
+    "robust_noise_multiplier": 3.0,
+    "secondary_absolute_noise_floor_ms": 5.0
+  },
+  "runs": {
+    "measured_count": 5,
+    "raw_reports": [
+      {
+        "path": "verification_reports/virtual_workflows/pi-sil/virtual_print_array_96_v1/20260724T054823603857Z_1f09d022b749/report.json",
+        "run_id": "8a44314e-e133-49c7-bf98-dd6fb848e546",
+        "sha256": "17683790296709a16100ef6c6ed58892375cf02c29ba1d8d2edcabd9548d5c76"
+      },
+      {
+        "path": "verification_reports/virtual_workflows/pi-sil/virtual_print_array_96_v1/20260724T054854705727Z_1f09d022b749/report.json",
+        "run_id": "1c684824-c804-479c-b55d-e1532845c55e",
+        "sha256": "a4ddf307361a73711505b37274f5036a2c4f1e75e231dae9e81d86e45551e864"
+      },
+      {
+        "path": "verification_reports/virtual_workflows/pi-sil/virtual_print_array_96_v1/20260724T054923100775Z_1f09d022b749/report.json",
+        "run_id": "8d42bc1f-3c5a-4448-a883-dc18a70307c1",
+        "sha256": "9bbb19f3ec268a908e5eb817eb38734906b20476a0c696d049cc24bf1558ff63"
+      },
+      {
+        "path": "verification_reports/virtual_workflows/pi-sil/virtual_print_array_96_v1/20260724T054951794907Z_1f09d022b749/report.json",
+        "run_id": "41584a29-06db-4d47-b621-b0a8f19893ac",
+        "sha256": "2bed130281e563cab56d998cbc94b30f963a7dcc4db3b20a5d3dece26ea19d73"
+      },
+      {
+        "path": "verification_reports/virtual_workflows/pi-sil/virtual_print_array_96_v1/20260724T055020300608Z_1f09d022b749/report.json",
+        "run_id": "e96a5743-c163-40d4-9705-ce82bc9a1d5b",
+        "sha256": "04927edcf598a968f12277e1e7627979301af01318666349e3fe8c08d8bc56ec"
+      },
+      {
+        "path": "verification_reports/virtual_workflows/pi-sil/virtual_print_array_96_v1/20260724T055048911792Z_1f09d022b749/report.json",
+        "run_id": "f59f1397-5140-4dfe-8fed-e699da4a96b1",
+        "sha256": "87286ba80f07a93c44203091731ae372da7ccd5fca3d705516b92a01593c5067"
+      }
+    ],
+    "warmup_count": 1
+  },
+  "schema_name": "labcraft.virtual_workflow_baseline",
+  "schema_version": 1,
+  "source": {
+    "dirty_worktree": false,
+    "git_commit": "1f09d022b749afca21a6b9410242acf904a16175"
+  },
+  "threshold_maturity": "candidate"
+}

@@ -387,10 +387,17 @@ A reviewed clean-host collection may create the candidate Pi baseline:
     tests\performance\baselines\virtual_print_array_96_v1_pi5_sil_primary_v1.json
 ```
 
-The Pi baseline remains candidate maturity until separately reviewed. Pi
-candidates may be compared only with the exact same Pi model, filesystem,
-sandbox method, OS/CPU, Python, PySide/Qt, Qt platform, timing policy, and host
-label. A Windows/Pi comparison is intentionally rejected as incompatible.
+The tracked Pi baseline was collected from clean commit `1f09d022b749` on a
+Raspberry Pi 5 using NVMe/ext4, CPython 3.11.2, PySide6/Qt 6.7.1, offscreen Qt,
+speed 1, and the documented 600-second timeout. It passed functionally with
+acceptable primary noise and remains candidate maturity. Independent same-Pi
+comparison crossed only absolute responsiveness warning rules; all relative
+regression rules passed.
+
+Pi candidates may be compared only with the exact same Pi model, filesystem,
+sandbox method, OS/CPU, Python, PySide/Qt, Qt platform, timing policy, timeout,
+and host label. A Windows/Pi comparison is intentionally rejected as
+incompatible.
 
 Retrieved archives and extracted reports remain ignored. Each archive carries a
 versioned manifest with SHA-256 and size evidence for every raw JSON report,

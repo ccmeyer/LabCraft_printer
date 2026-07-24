@@ -14,6 +14,7 @@ from tools.virtual_workflows.compare import (
     compare_report_sets,
     comparison_markdown,
     create_baseline_summary,
+    load_baseline_summary,
     load_report_set,
     write_baseline_summary,
     write_report_set,
@@ -265,6 +266,26 @@ def test_baseline_is_compact_clean_and_candidate_by_default(tmp_path):
         baseline["compatibility"]["environment"]["python_executable"]
         == "env/Scripts/python.exe"
     )
+
+
+def test_compact_baseline_loads_without_historical_raw_reports(tmp_path):
+    baseline = _baseline(tmp_path)
+    path = write_baseline_summary(tmp_path / "baseline.json", baseline)
+    for reference in baseline["runs"]["raw_reports"]:
+        Path(reference["path"]).unlink()
+
+    loaded = load_baseline_summary(path)
+
+    assert loaded["baseline_id"] == baseline["baseline_id"]
+    assert loaded["runs"] == baseline["runs"]
+
+
+def test_compact_baseline_rejects_malformed_raw_report_metadata(tmp_path):
+    baseline = _baseline(tmp_path)
+    baseline["runs"]["raw_reports"][0]["sha256"] = "not-a-sha256"
+
+    with pytest.raises(ComparisonError, match="reference hash"):
+        write_baseline_summary(tmp_path / "baseline.json", baseline)
 
 
 @pytest.mark.parametrize(

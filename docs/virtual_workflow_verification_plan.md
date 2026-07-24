@@ -1249,11 +1249,9 @@ Completion record:
   ignored output root, private `/dev`, private process/network namespaces, and
   no unsandboxed Pi option. A separate accelerated `strace` run supplies
   device-access evidence without contaminating measured timing.
-- The designated Pi baseline remains candidate-only and is not created until
-  the tooling is committed and an actual compatible Pi completes clean
-  preflight, proof, baseline, and independent candidate collection.
-- Local implementation/validation is in progress. Pi execution and evidence
-  retrieval remain required before this slice may become `verified`.
+- The designated Pi baseline remains candidate-only. It was created only after
+  the tooling commit and an actual compatible Pi completed clean preflight,
+  proof, baseline, and independent-candidate collection.
 - Windows focused validation passed 92 tests in 28.88 s. A separate final
   Pi/comparison unit pass completed 30 tests in 0.94 s. The accelerated
   backwards-compatibility CLI smoke report passed all 96 wells in 10.140 s at
@@ -1263,11 +1261,41 @@ Completion record:
 - Full pytest passed 3,406 tests with 24 skips and 138 existing deprecation
   warnings in 450.90 s (7:30). The repository-local pytest roots were removed;
   report ignore and diff checks passed.
-- Environment: Windows 11 AMD64, CPython 3.13.14, PySide6 6.11.1, Qt 6.11.1.
-  Neither Bash/WSL nor an actual Raspberry Pi is available on this computer.
-  `bash -n`, Pi preflight/private-device proof, at least three Pi scenarios,
-  artifact retrieval, and the candidate Pi baseline therefore remain external
-  completion gates; no Pi baseline has been fabricated.
+- Target validation used Raspberry Pi 5 Model B Rev 1.0, aarch64 Debian kernel
+  `6.12.20+rpt-rpi-2712`, NVMe/ext4, CPython 3.11.2, PySide6 6.7.1, Qt 6.7.1,
+  and offscreen Qt. `bash -n` passed. Preflight recorded a private `/dev`,
+  read-only root, unshared network, no visible serial device, and 49.05 C.
+- The accelerated traced audit passed 96/96 wells in 34.187 s with zero matches
+  for serial/UART, GPIO, camera, I2C, or USB/DFU paths. Its timings were
+  excluded from performance evidence.
+- The reviewed 600-second-timeout baseline and independent candidate each
+  completed one warm-up plus five measured runs from clean commit
+  `1f09d022b749`. Both passed functionally with acceptable noise. Baseline
+  p95/p99 scheduling CV was 0.80%/2.34%, and median duration was 28.518 s.
+  The independent comparison was compatible; every relative rule passed.
+  Candidate-only absolute warnings recorded a 380.430 ms maximum service gap
+  and 278.930 ms p99-lateness maximum.
+- Two corrected 5.4 MB evidence bundles were retained locally and remotely.
+  Archive SHA-256 values are
+  `d46159cdefb7fc6baf9b38e7dda89140e918c4d42d02604cbd990036b47004e1`
+  (baseline) and
+  `ac3b6cd29fe4115da56f5367fc83d7b68ab0a4823f3d2c65e6b566abff3e97e4`
+  (candidate). Sidecars, manifests, every member hash/size/path, report sets,
+  proof/trace linkage, 56 nonempty screenshots, and 16,170 JSONL events were
+  validated after retrieval. Remote evidence was intentionally retained.
+- A first 180-second characterization was retained as historical ignored
+  evidence but not tracked because timeout is part of compatibility identity.
+  One report-only SSH orchestration call was delayed before remote execution;
+  rerunning it in a pollable terminal completed immediately. No scenario or
+  full-suite result depended on that delayed call.
+- Final review found that compact tracked baselines incorrectly required their
+  historical raw reports to exist at load/compare time. Baseline creation,
+  report sets, and Pi bundle extraction still verify raw hashes strictly;
+  compact baseline load/write/compare now validate standalone path/hash
+  metadata. Two regression cases were added, and the final focused Pi/comparison
+  run passed 32 tests in 0.97 s. The previously completed full suite predates
+  this small portability fix and was not rerun per operator instruction, so
+  Slice 7 remains `in_progress` with only that completion gate pending.
 
 ## Slice 8: Protocol-Level Virtual MCU And Fault Injection
 
@@ -1635,6 +1663,7 @@ scope or threshold change only inside implementation commits.
 | 2026-07-23 | 6 | `in_progress` -> `verified` | Added versioned report sets, compact tracked baselines, exact same-host compatibility, hash validation, candidate/acceptance policy, repeat-run CLI, JSON/Markdown comparison, stable exit codes, tests, and documentation. Tooling checkpoint `ba70d6c544cf`; focused validation 82 passed. The clean candidate baseline had 1.42%/1.67% primary CV. An independent candidate passed with +0.624/+0.483 ms p95/p99 deltas; five injected 300 ms measured runs warned at a 484.114 ms maximum gap with complete stacks and no functional failure. Full suite: 3,396 passed and 24 skipped in 448.61 s. All raw reports/artifacts/hashes and ignore/diff/cleanup checks were inspected; no production, simulator, firmware, or protocol file changed. |
 | 2026-07-23 | 7 | `not_started` -> `in_progress` | Starting commit `e17b3524fb8fdeb3a2928c1ae8be0368d75b3e81` with a clean worktree. Call paths cover a fail-closed Pi preflight and private-device sandbox, the unchanged real-UI/MVC/simulator workflow on Pi CPU/storage, traced hardware-access proof, and manifest-controlled SSH retrieval into same-Pi comparison. The boundary is limited to virtual-workflow tools, Pi wrappers/dependencies, focused tests, a later generated Pi baseline, and documentation; production MVC, simulator, firmware, protocol, motion, pressure, and physical timing remain unchanged. Risks are unavailable user namespaces/offscreen Qt, misleading traced timings, noisy thermal/storage state, unsafe remote paths, and accidental Windows/Pi equivalence. Mitigations are no unsandboxed Pi-run bypass, separate trace evidence, exact environment/filesystem compatibility, hash/path validation, candidate-only Pi maturity, and same-platform comparison. Rollback removes the Slice 7 tooling/evidence commits and retains Windows SIL. |
 | 2026-07-23 | 7 | `in_progress` implementation checkpoint | Added Pi-aware CLI/report identity, exact Pi comparison compatibility, fail-closed preflight/proof/bundle helpers, the Bubblewrap Bash runner, SSH/SCP PowerShell orchestration, hashed `psutil` Pi dependency, traversal/hash/cleanup/hardware-isolation tests, and operator/schema documentation. Focused validation passed 92 tests; final Pi/comparison unit validation passed 30. The accelerated Windows CLI compatibility run passed 96/96 wells in 10.140 s, and full pytest passed 3,406 with 24 skips in 450.90 s. JSON, summary, events, screenshots, ignore rules, diff checks, and temporary-root cleanup were inspected. Bash/WSL and a Pi are unavailable on this workstation, so Pi `bash -n`, private-device trace proof, repeated target runs, remote retrieval, same-Pi comparison, and the candidate baseline remain required. Slice 7 stays `in_progress`; Slice 8 remains out of scope. |
+| 2026-07-23 | 7 | `in_progress` Pi evidence checkpoint | Designated Pi `192.168.0.33` at clean commit `1f09d022b749` passed Bash syntax, fail-closed preflight, and a traced accelerated 96-well audit with no prohibited device access. A corrected 600-second-identity baseline and independent candidate each passed 1+5 runs with acceptable noise; their same-Pi comparison was compatible and every relative rule passed, with candidate-only absolute responsiveness warnings. Both 5.4 MB bundles and compact baseline were retrieved; archive/manifest/member hashes, reports, summaries, 56 screenshots, and 16,170 events validated. The candidate baseline is tracked at `tests/performance/baselines/virtual_print_array_96_v1_pi5_sil_primary_v1.json`. A compact-baseline portability fix then passed 32 focused tests in 0.97 s. Remote and local ignored evidence were retained. The final full suite was not rerun per operator instruction, so Slice 7 remains `in_progress`; Slice 8 remains deferred. |
 
 For every update, include:
 
@@ -1650,10 +1679,10 @@ For every update, include:
 
 ## Current Next Action
 
-Slice 7 tooling is implemented and locally validated, but the slice remains
-`in_progress`. The next permitted work is to run `bash -n`, preflight, and the
-private-device safety proof on the designated Pi; then collect a clean 1+5
-candidate baseline and an independent 1+5 candidate, retrieve/inspect their
-artifacts, and record same-Pi comparison evidence. Do not fabricate a Pi
-baseline, promote the Windows baseline, treat Windows and Pi as compatible, or
-begin Slice 8.
+Slice 7 Pi execution and evidence gates are complete, but the slice remains
+`in_progress` until the full Python suite validates the final compact-baseline
+portability fix. Do not run that long command without explicit operator
+approval and a fresh ETA. Slice 8 remains `deferred`; do not begin it without a
+separately reviewed implementation plan. Continue treating Windows and Pi
+baselines as incompatible and keep the Pi baseline at candidate maturity until
+a separate review explicitly promotes it.

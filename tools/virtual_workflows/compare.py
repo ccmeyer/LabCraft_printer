@@ -434,13 +434,19 @@ def build_report_set(
     }
 
 
-def _validate_report_reference(reference: Mapping[str, Any]) -> None:
+def _validate_report_reference_metadata(reference: Mapping[str, Any]) -> None:
     path_value = reference.get("path")
     expected_hash = reference.get("sha256")
     if not isinstance(path_value, str) or not path_value:
         raise ComparisonError("raw report reference path is invalid")
     if not isinstance(expected_hash, str) or len(expected_hash) != 64:
         raise ComparisonError("raw report reference hash is invalid")
+
+
+def _validate_report_reference(reference: Mapping[str, Any]) -> None:
+    _validate_report_reference_metadata(reference)
+    path_value = reference["path"]
+    expected_hash = reference["sha256"]
     path = Path(path_value)
     if not path.is_file():
         raise ComparisonIncompleteError(f"referenced raw report is missing: {path}")
@@ -578,12 +584,12 @@ def create_baseline_summary(
             ],
         },
     }
-    validate_baseline_summary(baseline)
+    validate_baseline_summary(baseline, verify_hashes=True)
     return baseline
 
 
 def validate_baseline_summary(
-    payload: Mapping[str, Any], *, verify_hashes: bool = True
+    payload: Mapping[str, Any], *, verify_hashes: bool = False
 ) -> None:
     if payload.get("schema_name") != BASELINE_SCHEMA_NAME:
         raise ComparisonError("unsupported baseline schema_name")
@@ -609,9 +615,11 @@ def validate_baseline_summary(
     for metric_path in ALL_METRICS:
         metric = _require_mapping(metrics.get(metric_path), metric_path)
         _require_mapping(metric.get("distribution"), f"{metric_path}.distribution")
-    if verify_hashes:
-        for reference in references:
-            _validate_report_reference(_require_mapping(reference, "raw report reference"))
+    for reference in references:
+        validated = _require_mapping(reference, "raw report reference")
+        _validate_report_reference_metadata(validated)
+        if verify_hashes:
+            _validate_report_reference(validated)
 
 
 def _distribution_for(
