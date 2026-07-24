@@ -2,7 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import ANY, Mock
 
 from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtTest import QTest
+from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QMessageBox
 
 import View
@@ -331,6 +331,7 @@ def test_pressure_updates_are_coalesced_and_render_latest_values(qapp):
     )
     render = Mock(wraps=box.update_pressure)
     box.update_pressure = render
+    timer_spy = QSignalSpy(box._pressure_render_timer.timeout)
 
     for _ in range(20):
         machine_model.pressure_updated.emit()
@@ -342,8 +343,8 @@ def test_pressure_updates_are_coalesced_and_render_latest_values(qapp):
 
     machine_model.print_pressure_readings = [1.5, 1.75]
     machine_model.refuel_pressure_readings = [0.5, 0.625]
-    QTest.qWait(125)
 
+    assert timer_spy.wait(1000)
     assert render.call_count == 1
     assert box.print_series.count() == 2
     assert box.print_series.at(1).y() == 1.75
