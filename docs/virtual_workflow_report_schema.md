@@ -142,6 +142,28 @@ subtracted, per-run raw samples, and observer-restoration state. The existing
 `persistence.write_progress` metric and comparison policy v1 paths remain
 unchanged.
 
+Compact-progress remediation adds compatible format evidence without changing
+the report envelope:
+
+- `progress_format.schema_version` identifies the authoritative on-disk
+  progress format;
+- `encoded_size_bytes` is the deterministic current-format byte count;
+- `schema_v1_equivalent_size_bytes` is the byte count of the semantically
+  equivalent four-space schema-v1 representation;
+- `encoded_to_v1_ratio` and `size_reduction_fraction` describe the reduction;
+  and
+- `cumulative_progress_serialized_bytes` totals measured complete-snapshot
+  serialization. Slice 2 aggregates this value and per-run format evidence
+  inside `progress_snapshot`; real-UI reports expose the cumulative total and
+  final `progress_format` directly beneath `metrics.persistence.values`.
+
+Schema-v2 `progress.json` is not embedded in the report. Its compact arrays are
+ordered by `well_order`; each stock vector contains an integer where that stock
+is assigned and `null` where it is absent. Targets and descriptive metadata
+remain in the immutable execution plan. Tools decode both v1 and v2 to the
+same canonical `progress_wells` structure before fingerprinting or validating
+resume eligibility.
+
 File-size observation occurs outside `well_total` timing. The synchronous I/O
 observer always calls the original `fsync` and `os.replace`, records their
 duration, and restores them after success or failure.
@@ -319,8 +341,8 @@ Compatible nested evidence includes:
   `stress_assessment`;
 - initial/final resident-set size, absolute growth, and growth ratio beneath
   the resource snapshot;
-- cumulative serialized progress bytes beneath
-  `metrics.persistence.values.progress_snapshot`;
+- cumulative serialized progress bytes and final-format size/reduction
+  evidence beneath `metrics.persistence.values`;
 - bounded retained-event counts, total observed counts, sampling rate, and
   dropped-event evidence; and
 - `artifacts.application_stdout`, which retains redirected application output

@@ -314,9 +314,8 @@ relative comparison rule with acceptable noise. Its median duration was
 write p95 was 14.303 ms. The candidate remains an informational warning because
 one run's 287.122 ms maximum service gap exceeds the 250 ms warning budget.
 These values characterize only the recorded hosts and software identities.
-The progress snapshot still grows with the execution and all four durable
-writes per completion remain visible costs; this remediation does not batch or
-weaken them.
+All four durable writes per completion remain visible costs; this remediation
+does not batch or weaken them.
 
 The bounded-checkpoint implementation was characterized at commit `48f1e0c`.
 All three Windows persistence workloads retained at most one sequential
@@ -336,8 +335,8 @@ improved. The bounded resume change does not alter the progress payload or its
 durability call. The warning is retained as storage evidence; it was not
 suppressed by batching, skipping, or weakening `fsync`.
 
-Progress reports now split the same write into full-rebuild or cached-update
-construction, schema-v1 four-space serialization, atomic-write, serialized
+Progress reports split the same write into full-rebuild or cached-update
+construction, version-specific serialization, atomic-write, serialized
 byte-volume, and non-durable timing evidence. The observer is tooling-only,
 restores the real instance methods after every run, and leaves the existing
 `persistence.write_progress`, `fsync`, and atomic-replace measurements intact.
@@ -360,9 +359,44 @@ The reviewed Pi before/after sets reduced median cached-construction p50 from
 passed. The candidate retains the existing informational maximum-service-gap
 warning. Because copy-on-write preserves optional validated reagent metadata
 that full reconstruction previously omitted, this fixture's median serialized
-snapshot increased from 34,368.5 to 54,624.5 bytes. The schema and four-space
-format remain valid and unchanged; compact serialization or metadata-volume
-changes require a separate review.
+snapshot increased from 34,368.5 to 54,624.5 bytes. That result motivated the
+compact authoritative progress format described below.
+
+New authoritative executions write `progress.json` schema v2. The immutable
+execution plan remains the authority for well/reaction identities, stock
+metadata, targets, plate metadata, and applicability; progress stores only the
+canonical well order and one added-droplet array per stock. An array element is
+an integer where the stock applies to that well and `null` where it does not.
+The file is deterministic compact UTF-8 JSON. It remains a complete atomic
+snapshot: every completion still flushes, `fsync`s, and atomically replaces the
+entire file before its intent can retire.
+
+Schema-v1 progress remains readable. Positive v1 files and any v1 execution
+with a resume checkpoint stay v1, avoiding a silent format change during an
+active or recorded run. A validated zero-progress v1 execution can adopt v2
+only when no resume checkpoint exists. Legacy reconstruction, analysis-only
+executions, editable copies, administrative reset/export paths, and
+non-authoritative progress retain their existing v1 behavior.
+
+Compact files are less convenient to inspect by hand. Use the application’s
+status views, or convert a validated experiment before downgrading to an older
+application:
+
+```powershell
+.\env\Scripts\python.exe tools\convert_execution_progress.py `
+  --experiment-dir <path-to-experiment> `
+  --to-v1
+```
+
+The converter validates the complete authoritative bundle, atomically writes
+the derived v1 snapshot, validates it again, and requires the progress
+fingerprint to remain unchanged. Back up or close the experiment first; this
+is an offline maintenance command and must not race an active print.
+
+Reports expose `progress_format` with the schema version, encoded size,
+schema-v1-equivalent size, ratio, and reduction fraction. They also retain
+cumulative serialized bytes. Report envelopes and comparison policy v1 paths
+are unchanged.
 
 If Windows reports `WinError 5` while rapidly replacing an execution file,
 retain the failed diagnostics and retry once with a fresh ignored
