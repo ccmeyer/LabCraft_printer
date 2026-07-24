@@ -7281,9 +7281,7 @@ class ExperimentModel(QObject):
         return RuntimeError(message)
 
     def _guard_authoritative_runtime_session(self) -> _ActiveAuthoritativeExecutionSession:
-        session = getattr(self, "_active_authoritative_execution_session", None)
-        if session is None:
-            raise RuntimeError("The active authoritative execution checkpoint is unavailable.")
+        session = self._require_authoritative_runtime_session()
         identities, revision_names = self._capture_authoritative_runtime_files()
         if revision_names != session.revision_names:
             raise self._authoritative_runtime_conflict(
@@ -7298,6 +7296,12 @@ class ExperimentModel(QObject):
             raise self._authoritative_runtime_conflict(
                 f"{', '.join(sorted(changed))} changed"
             )
+        return session
+
+    def _require_authoritative_runtime_session(self) -> _ActiveAuthoritativeExecutionSession:
+        session = getattr(self, "_active_authoritative_execution_session", None)
+        if session is None:
+            raise RuntimeError("The active authoritative execution checkpoint is unavailable.")
         return session
 
     def _accept_authoritative_runtime_write(self, changed_name: str) -> None:
@@ -7418,7 +7422,7 @@ class ExperimentModel(QObject):
     ) -> str | None:
         if not self.uses_durable_execution_checkpoint():
             return None
-        session = self._guard_authoritative_runtime_session()
+        session = self._require_authoritative_runtime_session()
         document = session.resume
         progress_well = self.progress_data.get(well_id)
         if not isinstance(progress_well, dict):
@@ -7443,14 +7447,14 @@ class ExperimentModel(QObject):
     def attach_execution_print_command(self, intent_id: str | None, command_seq32: int) -> None:
         if intent_id is None:
             return
-        document = self._guard_authoritative_runtime_session().resume
+        document = self._require_authoritative_runtime_session().resume
         updated = attach_command_sequence(document, intent_id, command_seq32)
         self._save_active_execution_resume(updated)
 
     def complete_execution_print_intent(self, intent_id: str | None) -> None:
         if intent_id is None:
             return
-        document = self._guard_authoritative_runtime_session().resume
+        document = self._require_authoritative_runtime_session().resume
         updated = complete_intent(
             document,
             intent_id,
@@ -7465,7 +7469,7 @@ class ExperimentModel(QObject):
             return
         if not self.execution_resume_file_path:
             raise RuntimeError("The execution-resume path is unavailable.")
-        document = self._guard_authoritative_runtime_session().resume
+        document = self._require_authoritative_runtime_session().resume
         updated = discard_pending_intents(
             document,
             intent_ids,

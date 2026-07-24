@@ -84,10 +84,18 @@ def test_hot_path_uses_cache_and_preserves_four_durable_writes(
     model, experiment_model, well_spec, dispense = _active_runtime(
         experiment_model_factory
     )
-    calls = {"inspect": 0, "load": 0, "save": 0, "fsync": 0, "replace": 0}
+    calls = {
+        "inspect": 0,
+        "load": 0,
+        "save": 0,
+        "guard": 0,
+        "fsync": 0,
+        "replace": 0,
+    }
     original_inspect = model_module.inspect_authoritative_execution
     original_load = model_module.load_execution_resume
     original_save = model_module.save_execution_resume
+    original_guard = experiment_model._guard_authoritative_runtime_session
     original_fsync = os.fsync
     original_replace = os.replace
 
@@ -103,6 +111,10 @@ def test_hot_path_uses_cache_and_preserves_four_durable_writes(
         calls["save"] += 1
         return original_save(*args, **kwargs)
 
+    def observed_guard(*args, **kwargs):
+        calls["guard"] += 1
+        return original_guard(*args, **kwargs)
+
     def observed_fsync(*args, **kwargs):
         calls["fsync"] += 1
         return original_fsync(*args, **kwargs)
@@ -114,6 +126,11 @@ def test_hot_path_uses_cache_and_preserves_four_durable_writes(
     monkeypatch.setattr(model_module, "inspect_authoritative_execution", observed_inspect)
     monkeypatch.setattr(model_module, "load_execution_resume", observed_load)
     monkeypatch.setattr(model_module, "save_execution_resume", observed_save)
+    monkeypatch.setattr(
+        experiment_model,
+        "_guard_authoritative_runtime_session",
+        observed_guard,
+    )
     monkeypatch.setattr(os, "fsync", observed_fsync)
     monkeypatch.setattr(os, "replace", observed_replace)
 
@@ -123,6 +140,7 @@ def test_hot_path_uses_cache_and_preserves_four_durable_writes(
         "inspect": 0,
         "load": 0,
         "save": 3,
+        "guard": 4,
         "fsync": 4,
         "replace": 4,
     }
