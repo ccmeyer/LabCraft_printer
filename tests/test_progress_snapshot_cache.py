@@ -16,6 +16,12 @@ for candidate in (REPO_ROOT, UI_DIR):
         sys.path.insert(0, str(candidate))
 
 from Model import ExperimentModel, Model
+from ExecutionProgressStore import (
+    decode_execution_progress,
+    detect_execution_progress_schema,
+    encode_execution_progress_v1,
+    serialize_execution_progress,
+)
 from tools.virtual_workflows.progress_snapshot import (
     ProgressSnapshotObserver,
     non_durable_progress_samples,
@@ -187,6 +193,83 @@ def _pending_completion(experiment_model_factory):
     return model, experiment, well_spec, dispense, intent_id
 
 
+def _replace_with_v1(experiment, plan, *, positive=False):
+    wells = experiment.return_progress_data()
+    if positive:
+        for well in plan.wells:
+            for dispense in well.dispenses:
+                if dispense.target_dispenses > 0:
+                    wells[well.well_id]["reagents"][dispense.stock_id][
+                        "added_droplets"
+                    ] = 1
+                    wells[well.well_id]["completed"] = all(
+                        details["added_droplets"]
+                        >= details["target_droplets"]
+                        for details in wells[well.well_id][
+                            "reagents"
+                        ].values()
+                    )
+                    break
+            else:
+                continue
+            break
+    payload = encode_execution_progress_v1(plan, wells)
+    Path(experiment.progress_file_path).write_text(
+        serialize_execution_progress(payload),
+        encoding="utf-8",
+    )
+    experiment.progress_data = decode_execution_progress(
+        plan, payload
+    ).progress_wells
+    return payload
+
+
+def test_zero_v1_without_resume_is_eligible_for_v2_adoption(
+    experiment_model_factory,
+):
+    _model, experiment, _well, _dispense = _active_authoritative_runtime(
+        experiment_model_factory
+    )
+    Path(experiment.execution_resume_file_path).unlink()
+    plan = experiment.get_execution_plan_snapshot()
+    _replace_with_v1(experiment, plan)
+
+    payload = experiment._write_progress_for_execution_plan(plan)
+
+    assert detect_execution_progress_schema(payload) == 2
+
+
+def test_positive_v1_remains_v1_without_resume(experiment_model_factory):
+    model = experiment_model_factory()
+    experiment = model.experiment_model
+    _configure_authoritative_design(experiment)
+    Model.load_experiment_from_model(
+        model,
+        load_progress=False,
+        finalize_execution_plan=True,
+    )
+    plan = experiment.get_execution_plan_snapshot()
+    _replace_with_v1(experiment, plan, positive=True)
+
+    rebuilt = experiment._build_progress_payload_from_runtime()
+    payload = experiment._write_progress_for_execution_plan(plan)
+
+    assert detect_execution_progress_schema(rebuilt) == 1
+    assert detect_execution_progress_schema(payload) == 1
+
+
+def test_zero_v1_with_resume_remains_v1(experiment_model_factory):
+    _model, experiment, _well, _dispense = _active_authoritative_runtime(
+        experiment_model_factory
+    )
+    plan = experiment.get_execution_plan_snapshot()
+    _replace_with_v1(experiment, plan)
+
+    payload = experiment._write_progress_for_execution_plan(plan)
+
+    assert detect_execution_progress_schema(payload) == 1
+
+
 def test_cached_candidate_matches_full_rebuild_without_mutating_cache(
     experiment_model_factory,
 ):
@@ -194,8 +277,11 @@ def test_cached_candidate_matches_full_rebuild_without_mutating_cache(
         experiment_model_factory
     )
     session = experiment._active_authoritative_execution_session
+    plan = session.bundle.plan
     cached_payload = session.progress_payload
-    cached_well = cached_payload[well_spec.well_id]
+    cached_well = decode_execution_progress(
+        plan, cached_payload
+    ).progress_wells[well_spec.well_id]
     cached_reagents = cached_well["reagents"]
     cached_reagent = cached_reagents[dispense.stock_id]
 
@@ -203,30 +289,15 @@ def test_cached_candidate_matches_full_rebuild_without_mutating_cache(
     rebuilt = experiment._build_progress_payload_from_runtime()
 
     def completion_projection(payload):
-        return {
-            well_id: {
-                "reaction_id": values["reaction_id"],
-                "reagents": {
-                    stock_id: {
-                        "target_droplets": details["target_droplets"],
-                        "added_droplets": details["added_droplets"],
-                    }
-                    for stock_id, details in values["reagents"].items()
-                },
-                "completed": values["completed"],
-            }
-            for well_id, values in payload.items()
-            if not well_id.startswith("__")
-        }
+        return decode_execution_progress(plan, payload).progress_wells
 
     assert completion_projection(candidate) == completion_projection(rebuilt)
     assert session.progress_payload is cached_payload
     assert candidate is not cached_payload
-    assert candidate[well_spec.well_id] is not cached_well
-    assert candidate[well_spec.well_id]["reagents"] is not cached_reagents
+    assert candidate["added_droplets"] is not cached_payload["added_droplets"]
     assert (
-        candidate[well_spec.well_id]["reagents"][dispense.stock_id]
-        is not cached_reagent
+        candidate["added_droplets"][dispense.stock_id]
+        is not cached_payload["added_droplets"][dispense.stock_id]
     )
     assert cached_reagent["added_droplets"] == 0
 
@@ -248,9 +319,13 @@ def test_authoritative_cached_write_never_enumerates_all_wells(
 
     experiment.create_progress_file(execution_intent_id=intent_id)
 
-    assert experiment._active_authoritative_execution_session.progress_payload[
-        well_spec.well_id
-    ]["reagents"][dispense.stock_id]["added_droplets"] == 1
+    session = experiment._active_authoritative_execution_session
+    assert decode_execution_progress(
+        session.bundle.plan,
+        session.progress_payload,
+    ).progress_wells[well_spec.well_id]["reagents"][dispense.stock_id][
+        "added_droplets"
+    ] == 1
 
 
 def test_argument_free_progress_write_retains_full_rebuild(
@@ -299,9 +374,12 @@ def test_cached_progress_validation_fails_closed(
     if mutation == "unknown_intent":
         candidate_intent_id = "00000000-0000-0000-0000-000000000000"
     elif mutation == "cache_baseline":
-        session.progress_payload[well_spec.well_id]["reagents"][
-            dispense.stock_id
-        ]["added_droplets"] = 2
+        well_index = session.progress_payload["well_order"].index(
+            well_spec.well_id
+        )
+        session.progress_payload["added_droplets"][dispense.stock_id][
+            well_index
+        ] = 2
     elif mutation == "live_count":
         reaction = (
             experiment._runtime_well_plate.get_well(well_spec.well_id)

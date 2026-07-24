@@ -45,6 +45,18 @@ from ExecutionPlan import (
     load_execution_plan,
     save_execution_plan,
 )
+from ExecutionProgressStore import (
+    SCHEMA_VERSION as EXECUTION_PROGRESS_SCHEMA_VERSION,
+    copy_execution_progress_payload,
+    copy_progress_wells_update,
+    decode_execution_progress,
+    detect_execution_progress_schema,
+    encode_execution_progress_v2,
+    execution_progress_added_value,
+    has_positive_execution_progress,
+    progress_reference_from_payload,
+    serialize_execution_progress,
+)
 from InitialExecutionPlan import (
     build_initial_execution_plan,
     initial_execution_content_matches,
@@ -7340,6 +7352,7 @@ class ExperimentModel(QObject):
                 session.bundle,
                 progress_payload=session.progress_payload,
                 resume=session.resume,
+                progress_wells=session.bundle.progress_wells,
             )
         except Exception as exc:
             message = f"Could not reconcile the active execution checkpoint: {exc}"
@@ -7581,10 +7594,49 @@ class ExperimentModel(QObject):
             plan_revision=plan.plan_revision,
         )
 
-    @staticmethod
-    def _well_entries_from_progress_payload(payload: object) -> dict:
+    def _plan_for_progress_payload(self, payload: dict):
+        reference = progress_reference_from_payload(payload)
+        plan = self.get_execution_plan_snapshot()
+        if (
+            plan is not None
+            and plan.plan_id == reference.plan_id
+            and plan.plan_revision == reference.plan_revision
+        ):
+            return plan
+        if self.execution_plan_file_path and os.path.isfile(
+            self.execution_plan_file_path
+        ):
+            persisted = load_execution_plan(self.execution_plan_file_path)
+            if (
+                persisted.plan_id == reference.plan_id
+                and persisted.plan_revision == reference.plan_revision
+            ):
+                return persisted
+        if (
+            self.execution_plan_revisions_dir_path
+            and os.path.isdir(self.execution_plan_revisions_dir_path)
+        ):
+            for candidate in validate_revision_history(
+                self.execution_plan_revisions_dir_path
+            ):
+                if (
+                    candidate.plan_id == reference.plan_id
+                    and candidate.plan_revision == reference.plan_revision
+                ):
+                    return candidate
+        raise RuntimeError(
+            "progress.json references an unavailable execution-plan revision."
+        )
+
+    def _well_entries_from_progress_payload(self, payload: object) -> dict:
         if not isinstance(payload, dict):
             return {}
+        if (
+            "schema_name" in payload
+            or "schema_version" in payload
+        ):
+            plan = self._plan_for_progress_payload(payload)
+            return decode_execution_progress(plan, payload).progress_wells
         return {
             str(key): value
             for key, value in payload.items()
@@ -7600,9 +7652,12 @@ class ExperimentModel(QObject):
             return None
         with open(path, "r", encoding="utf-8") as handle:
             payload = json.load(handle)
-        if not isinstance(payload, dict) or "__execution__" not in payload:
+        if not isinstance(payload, dict) or not payload:
             return None
-        return ProgressExecutionReference.from_dict(payload["__execution__"])
+        try:
+            return progress_reference_from_payload(payload)
+        except ValueError:
+            return None
 
     def build_initial_execution_plan_from_runtime(self):
         if self._runtime_well_plate is None or self._runtime_reaction_collection is None:
@@ -7768,7 +7823,7 @@ class ExperimentModel(QObject):
             payload = json.load(handle)
         if not isinstance(payload, dict):
             raise RuntimeError("progress.json must contain an object.")
-        reference = ProgressExecutionReference.from_dict(payload.get("__execution__"))
+        reference = progress_reference_from_payload(payload)
         if reference.plan_id != plan.plan_id:
             raise RuntimeError("progress.json references a different execution plan.")
         reference_plan = plan
@@ -7790,51 +7845,7 @@ class ExperimentModel(QObject):
                 raise RuntimeError(
                     "progress.json references an unavailable execution-plan revision."
                 )
-        progress_wells = self._well_entries_from_progress_payload(payload)
-        expected_well_ids = {well.well_id for well in reference_plan.wells}
-        if set(progress_wells) != expected_well_ids:
-            raise RuntimeError("progress.json well identities do not match the execution plan.")
-        for well in reference_plan.wells:
-            entry = progress_wells[well.well_id]
-            if not isinstance(entry, dict) or str(entry.get("reaction_id")) != well.reaction_id:
-                raise RuntimeError(
-                    f"progress.json reaction identity differs at {well.well_id}."
-                )
-            reagents = entry.get("reagents")
-            if not isinstance(reagents, dict):
-                raise RuntimeError(f"progress.json reagents at {well.well_id} must be an object.")
-            expected_targets = {
-                dispense.stock_id: dispense.target_dispenses for dispense in well.dispenses
-            }
-            if set(reagents) != set(expected_targets):
-                raise RuntimeError(
-                    f"progress.json stock identities differ at {well.well_id}."
-                )
-            for stock_id, target in expected_targets.items():
-                details = reagents[stock_id]
-                raw_target = details.get("target_droplets") if isinstance(details, dict) else None
-                if (
-                    isinstance(raw_target, bool)
-                    or not isinstance(raw_target, (int, float))
-                    or not math.isfinite(float(raw_target))
-                    or not float(raw_target).is_integer()
-                    or int(raw_target) < 0
-                    or int(raw_target) != target
-                ):
-                    raise RuntimeError(
-                        f"progress.json target differs at {well.well_id}/{stock_id}."
-                    )
-                added = details.get("added_droplets", 0)
-                if (
-                    isinstance(added, bool)
-                    or not isinstance(added, (int, float))
-                    or not math.isfinite(float(added))
-                    or not float(added).is_integer()
-                    or float(added) < 0
-                ):
-                    raise RuntimeError(
-                        f"progress.json added count is invalid at {well.well_id}/{stock_id}."
-                    )
+        decode_execution_progress(reference_plan, payload)
 
     def _progress_payload_for_plan(self, plan) -> dict:
         existing = {}
@@ -7844,7 +7855,34 @@ class ExperimentModel(QObject):
             if not isinstance(loaded, dict):
                 raise RuntimeError("progress.json must contain an object.")
             existing = loaded
-        existing_wells = self._well_entries_from_progress_payload(existing)
+        if existing:
+            reference = progress_reference_from_payload(existing)
+            if reference.plan_id != plan.plan_id:
+                raise RuntimeError(
+                    "progress.json references a different execution plan."
+                )
+            reference_plan = plan
+            if reference.plan_revision != plan.plan_revision:
+                history = validate_revision_history(
+                    self.execution_plan_revisions_dir_path
+                )
+                reference_plan = next(
+                    (
+                        item
+                        for item in history
+                        if item.plan_revision == reference.plan_revision
+                    ),
+                    None,
+                )
+                if reference_plan is None:
+                    raise RuntimeError(
+                        "progress.json references an unavailable execution-plan revision."
+                    )
+            existing_wells = decode_execution_progress(
+                reference_plan, existing
+            ).progress_wells
+        else:
+            existing_wells = {}
         stock_lookup = {stock.stock_id: stock for stock in plan.stocks}
         payload = {}
         for well in plan.wells:
@@ -7908,18 +7946,43 @@ class ExperimentModel(QObject):
             plan_id=plan.plan_id,
             plan_revision=plan.plan_revision,
         ).to_dict()
+        use_v2 = self._should_write_compact_progress(existing)
+        if use_v2:
+            return encode_execution_progress_v2(
+                plan,
+                self._well_entries_from_progress_payload(payload),
+            )
         return payload
+
+    def _should_write_compact_progress(self, existing: dict) -> bool:
+        if not existing:
+            return True
+        schema_version = detect_execution_progress_schema(existing)
+        if schema_version == EXECUTION_PROGRESS_SCHEMA_VERSION:
+            return True
+        resume_exists = bool(
+            self.execution_resume_file_path
+            and os.path.isfile(self.execution_resume_file_path)
+        )
+        return (
+            not resume_exists
+            and not has_positive_execution_progress(existing)
+        )
 
     def _write_progress_for_execution_plan(self, plan) -> dict:
         if not self.progress_file_path:
             raise RuntimeError("The progress path is unavailable.")
         payload = self._progress_payload_for_plan(plan)
-        self._atomic_json_dump(self.progress_file_path, payload)
-        self.progress_data = self._well_entries_from_progress_payload(payload)
-        self._progress_execution_reference = ProgressExecutionReference(
-            plan_id=plan.plan_id,
-            plan_revision=plan.plan_revision,
+        self._atomic_write_text(
+            self.progress_file_path,
+            serialize_execution_progress(
+                payload,
+                default=self.convert_to_serializable,
+            )
         )
+        decoded = decode_execution_progress(plan, payload)
+        self.progress_data = decoded.progress_wells
+        self._progress_execution_reference = decoded.reference
         return payload
 
     def _write_execution_plan_exports(self, plan, design_payload: dict) -> None:
@@ -8707,7 +8770,7 @@ class ExperimentModel(QObject):
     # Progress & Key files
     # -----------------------------
     def _build_progress_payload_from_runtime(self) -> Dict[str, Any]:
-        """Construct the schema-v1 progress payload from live well state."""
+        """Construct progress from live well state, using v2 for authoritative plans."""
         if self._runtime_well_plate is None:
             return {}
 
@@ -8738,19 +8801,52 @@ class ExperimentModel(QObject):
         execution_reference = self._execution_progress_reference()
         if execution_reference is not None:
             payload["__execution__"] = execution_reference.to_dict()
+            plan = self.get_execution_plan_snapshot()
+            if (
+                plan is not None
+                and self.get_execution_plan_source() != "legacy_reconstruction"
+            ):
+                session = getattr(
+                    self, "_active_authoritative_execution_session", None
+                )
+                existing = (
+                    session.progress_payload
+                    if session is not None
+                    else {}
+                )
+                if (
+                    not existing
+                    and self.progress_file_path
+                    and os.path.isfile(self.progress_file_path)
+                ):
+                    with open(
+                        self.progress_file_path, "r", encoding="utf-8"
+                    ) as handle:
+                        loaded = json.load(handle)
+                    if not isinstance(loaded, dict):
+                        raise RuntimeError(
+                            "progress.json must contain an object."
+                        )
+                    existing = loaded
+                if self._should_write_compact_progress(existing):
+                    return encode_execution_progress_v2(plan, progress)
         return payload
 
     def _serialize_progress_payload(self, payload: Dict[str, Any]) -> str:
-        """Serialize progress using the existing schema-v1 byte format."""
-        return json.dumps(
+        """Serialize progress using its version-specific deterministic format."""
+        return serialize_execution_progress(
             payload,
-            indent=4,
             default=self.convert_to_serializable,
         )
 
     def _atomic_write_progress_text(self, serialized: str) -> None:
         """Durably replace progress.json with already-serialized text."""
-        directory = os.path.dirname(self.progress_file_path) or "."
+        self._atomic_write_text(self.progress_file_path, serialized)
+
+    @staticmethod
+    def _atomic_write_text(path: str, serialized: str) -> None:
+        """Durably replace a text file without changing progress observer scope."""
+        directory = os.path.dirname(path) or "."
         fd, tmp_path = tempfile.mkstemp(
             prefix="._tmp_",
             suffix=".json",
@@ -8761,7 +8857,7 @@ class ExperimentModel(QObject):
                 handle.write(serialized)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(tmp_path, self.progress_file_path)
+            os.replace(tmp_path, path)
         except Exception:
             try:
                 if os.path.exists(tmp_path):
@@ -8795,8 +8891,10 @@ class ExperimentModel(QObject):
                 "The authoritative progress intent is no longer pending."
             )
 
-        payload = session.progress_payload
-        cached_well = payload.get(intent.well_id)
+        plan = session.bundle.plan
+        if plan is None:
+            raise RuntimeError("The authoritative execution plan is unavailable.")
+        cached_well = session.bundle.progress_wells.get(intent.well_id)
         if not isinstance(cached_well, dict):
             raise RuntimeError(
                 f"Authoritative progress is missing well {intent.well_id!r}."
@@ -8828,7 +8926,11 @@ class ExperimentModel(QObject):
             )
         frozen_target = int(frozen_reagent.get("target_droplets", -1))
         cached_target = int(cached_reagent.get("target_droplets", -1))
-        cached_added = int(cached_reagent.get("added_droplets", -1))
+        cached_added = execution_progress_added_value(
+            session.progress_payload,
+            well_id=intent.well_id,
+            stock_id=intent.stock_id,
+        )
         if cached_target != frozen_target:
             raise RuntimeError(
                 "The cached progress target does not match the frozen plan."
@@ -8867,31 +8969,13 @@ class ExperimentModel(QObject):
                 "The live reagent count does not match the pending intent."
             )
 
-        candidate_reagent = dict(cached_reagent)
-        candidate_reagent["added_droplets"] = expected_added
-        candidate_reagents = dict(cached_reagents)
-        candidate_reagents[intent.stock_id] = candidate_reagent
-        for stock_id, details in candidate_reagents.items():
-            if not isinstance(details, dict):
-                raise RuntimeError(
-                    f"Authoritative progress stock {stock_id!r} is malformed."
-                )
-            target = int(details.get("target_droplets", -1))
-            added = int(details.get("added_droplets", -1))
-            if target < 0 or added < 0 or added > target:
-                raise RuntimeError(
-                    f"Authoritative progress stock {stock_id!r} has invalid counts."
-                )
-
-        candidate_well = dict(cached_well)
-        candidate_well["reagents"] = candidate_reagents
-        candidate_well["completed"] = all(
-            int(details["added_droplets"]) >= int(details["target_droplets"])
-            for details in candidate_reagents.values()
+        return copy_execution_progress_payload(
+            plan,
+            session.progress_payload,
+            well_id=intent.well_id,
+            stock_id=intent.stock_id,
+            added_droplets=expected_added,
         )
-        candidate = dict(payload)
-        candidate[intent.well_id] = candidate_well
-        return candidate
 
     def create_progress_file(
         self,
@@ -8914,25 +8998,64 @@ class ExperimentModel(QObject):
                     "The authoritative progress checkpoint is unavailable."
                 )
             payload = self._build_cached_progress_payload(execution_intent_id)
+            intent = next(
+                item
+                for item in session.resume.intents
+                if item.intent_id == execution_intent_id
+            )
+            progress_data = copy_progress_wells_update(
+                session.bundle.progress_wells,
+                well_id=intent.well_id,
+                stock_id=intent.stock_id,
+                added_droplets=(
+                    intent.baseline_added + intent.commanded_droplets
+                ),
+            )
+            progress_reference = ProgressExecutionReference(
+                plan_id=session.bundle.plan.plan_id,
+                plan_revision=session.bundle.plan.plan_revision,
+            )
         else:
             payload = self._build_progress_payload_from_runtime()
-        progress_data = {
-            key: value
-            for key, value in payload.items()
-            if not str(key).startswith("__")
-        }
-        execution_payload = payload.get("__execution__")
-        progress_reference = (
-            ProgressExecutionReference.from_dict(execution_payload)
-            if isinstance(execution_payload, dict)
-            else None
-        )
+            plan = self.get_execution_plan_snapshot()
+            if (
+                plan is not None
+                and self.get_execution_plan_source() != "legacy_reconstruction"
+                and payload
+            ):
+                decoded = decode_execution_progress(plan, payload)
+                progress_data = decoded.progress_wells
+                progress_reference = decoded.reference
+            else:
+                progress_data = self._well_entries_from_progress_payload(payload)
+                execution_payload = payload.get("__execution__")
+                progress_reference = (
+                    ProgressExecutionReference.from_dict(execution_payload)
+                    if isinstance(execution_payload, dict)
+                    else None
+                )
         if session is not None:
             self._guard_authoritative_runtime_session()
         self._write_progress_payload(payload)
         if session is not None:
             self._accept_authoritative_runtime_write("progress.json")
             session.progress_payload = dict(payload)
+            try:
+                session.bundle = reconcile_authoritative_execution_runtime(
+                    session.bundle,
+                    progress_payload=session.progress_payload,
+                    progress_wells=progress_data,
+                    resume=session.resume,
+                )
+                self._authoritative_execution_bundle = session.bundle
+            except Exception as exc:
+                message = (
+                    "The durable progress snapshot could not be reconciled; "
+                    "explicit reload is required."
+                )
+                self._invalidate_authoritative_runtime_session()
+                self.set_execution_plan_sync_error(f"{message} {exc}")
+                raise RuntimeError(message) from exc
 
         self.progress_data = progress_data
         self._progress_execution_reference = progress_reference
@@ -9612,11 +9735,10 @@ class ExperimentModel(QObject):
             with open(progress_file, "r") as f:
                 payload = json.load(f)
                 if isinstance(payload, dict):
-                    execution_payload = payload.get("__execution__")
                     try:
                         self._progress_execution_reference = (
-                            ProgressExecutionReference.from_dict(execution_payload)
-                            if execution_payload is not None
+                            progress_reference_from_payload(payload)
+                            if payload
                             else None
                         )
                     except ValueError:
@@ -9685,8 +9807,14 @@ class ExperimentModel(QObject):
         well_count = 0
         reagent_entry_count = 0
 
-        for well_id, entry in payload.items():
-            if str(well_id).startswith("__") or not isinstance(entry, dict):
+        try:
+            progress_wells = self._well_entries_from_progress_payload(payload)
+        except (RuntimeError, ValueError) as exc:
+            status["error"] = str(exc)
+            return status
+
+        for entry in progress_wells.values():
+            if not isinstance(entry, dict):
                 continue
             well_count += 1
             well_added = 0

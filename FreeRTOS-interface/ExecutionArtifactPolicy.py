@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from ExecutionPlan import ExecutionPlanState
+from ExecutionProgressStore import has_positive_execution_progress
 from LegacyExecutionPlan import (
     LegacyExecutionClassification,
     reconstruct_legacy_execution,
@@ -62,6 +63,11 @@ def _has_positive_progress(directory: Path) -> bool:
     except Exception:
         return False
     if not isinstance(payload, Mapping):
+        return False
+    try:
+        if "schema_name" in payload or "schema_version" in payload:
+            return has_positive_execution_progress(payload)
+    except ValueError:
         return False
     for well_id, well in payload.items():
         if str(well_id).startswith("__") or not isinstance(well, Mapping):

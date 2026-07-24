@@ -32,7 +32,12 @@ if str(UI_DIR) not in sys.path:
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from AuthoritativeExecutionLoad import inspect_authoritative_execution
-from ExecutionPlan import ProgressExecutionReference, save_execution_plan
+from ExecutionPlan import save_execution_plan
+from ExecutionProgressStore import (
+    encode_execution_progress_v2,
+    execution_progress_storage_evidence,
+    serialize_execution_progress,
+)
 from ExecutionPlanRevision import persist_immutable_revision
 from ExecutionResumeStore import load_execution_resume
 from InitialExecutionPlan import build_initial_execution_plan
@@ -299,7 +304,7 @@ def _create_prepared_bundle(experiment_dir: Path, spec: WorkloadSpec) -> None:
     design_path.write_text(json.dumps(design, indent=2) + "\n", encoding="utf-8")
     save_execution_plan(experiment_dir / "execution_plan.json", plan)
     persist_immutable_revision(experiment_dir / "execution_plan_revisions", plan)
-    progress = {
+    progress_wells = {
         well.well_id: {
             "reaction_id": well.reaction_id,
             "reagents": {
@@ -313,18 +318,9 @@ def _create_prepared_bundle(experiment_dir: Path, spec: WorkloadSpec) -> None:
         }
         for well in plan.wells
     }
-    progress["__plate__"] = {
-        "name": spec.plate_name,
-        "rows": spec.plate_rows,
-        "columns": spec.plate_columns,
-        "schema_version": 1,
-    }
-    progress["__execution__"] = ProgressExecutionReference(
-        plan.plan_id,
-        plan.plan_revision,
-    ).to_dict()
+    progress = encode_execution_progress_v2(plan, progress_wells)
     (experiment_dir / "progress.json").write_text(
-        json.dumps(progress, indent=2) + "\n",
+        serialize_execution_progress(progress),
         encoding="utf-8",
     )
 
@@ -420,6 +416,10 @@ def _validate_completed_workload(
         "authoritative_bundle_valid": bundle.valid,
         "targets_match_progress": True,
         "file_sizes_bytes": file_sizes,
+        "progress_format": execution_progress_storage_evidence(
+            bundle.plan,
+            bundle.progress_payload,
+        ),
     }
 
 
@@ -809,6 +809,14 @@ def _aggregate_progress_snapshots(
                 **snapshot,
             }
         )
+    serialized_samples = [
+        sample
+        for run in measured
+        for sample in run.get("progress_snapshot", {}).get(
+            "serialized_size_bytes",
+            [],
+        )
+    ]
     return {
         "mode_counts": {
             mode: sum(
@@ -833,16 +841,17 @@ def _aggregate_progress_snapshots(
             )
             for phase in phases
         },
-        "serialized_size_bytes": _distribution(
-            [
-                sample
-                for run in measured
-                for sample in run.get("progress_snapshot", {}).get(
-                    "serialized_size_bytes",
-                    [],
-                )
-            ]
+        "serialized_size_bytes": _distribution(serialized_samples),
+        "cumulative_serialized_bytes": sum(
+            int(sample) for sample in serialized_samples
         ),
+        "progress_formats": [
+            {
+                "run_index": run.get("run_index"),
+                **run.get("validation", {}).get("progress_format", {}),
+            }
+            for run in measured
+        ],
         "non_durable_write_ms": _distribution(
             [
                 sample
@@ -1116,6 +1125,8 @@ def _write_summary(path: Path, report: dict[str, Any]) -> None:
         modes = snapshot.get("mode_counts", {})
         non_durable = snapshot.get("non_durable_write_ms", {})
         serialized = snapshot.get("serialized_size_bytes", {})
+        progress_formats = snapshot.get("progress_formats", [])
+        progress_format = progress_formats[0] if progress_formats else {}
         lines.extend(
             [
                 "Progress full rebuild / cached update counts: "
@@ -1127,6 +1138,12 @@ def _write_summary(path: Path, report: dict[str, Any]) -> None:
                 "Progress serialized p50/max bytes: "
                 f"{serialized.get('p50', 0.0):.1f} / "
                 f"{serialized.get('maximum', 0.0):.1f}",
+                "Progress schema/final bytes/v1 ratio: "
+                f"v{progress_format.get('schema_version', 'unknown')} / "
+                f"{progress_format.get('encoded_size_bytes', 0)} / "
+                f"{progress_format.get('encoded_to_v1_ratio', 0.0):.4f}",
+                "Cumulative progress serialized bytes: "
+                f"{snapshot.get('cumulative_serialized_bytes', 0)}",
                 "Progress snapshot observers restored: "
                 f"{snapshot.get('all_observers_restored', False)}",
             ]

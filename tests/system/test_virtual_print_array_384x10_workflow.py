@@ -8,10 +8,13 @@ from tools.virtual_workflows.report import validate_report_v1
 from tools.virtual_workflows.scenarios import (
     STRESS_WORKLOAD_ID,
     VirtualPrintArrayScenarioConfig,
+    _create_prepared_fixture,
     fixture_well_ids,
     load_virtual_print_array_fixture,
     run_virtual_print_array_scenario,
 )
+from ExecutionPlan import load_execution_plan
+from ExecutionProgressStore import execution_progress_storage_evidence
 
 
 pytestmark = pytest.mark.virtual_workflow
@@ -89,6 +92,27 @@ def test_cli_exposes_stress_scenario_and_single_report_set():
     assert args.measured_runs == 1
 
 
+def test_full_384x10_compact_progress_is_bounded(tmp_path):
+    fixture = load_virtual_print_array_fixture(
+        scenario_id=STRESS_WORKLOAD_ID
+    )
+    prepared = _create_prepared_fixture(tmp_path / "experiment", fixture)
+    plan = load_execution_plan(
+        Path(prepared["experiment_dir"]) / "execution_plan.json"
+    )
+    payload = json.loads(
+        (Path(prepared["experiment_dir"]) / "progress.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    evidence = execution_progress_storage_evidence(plan, payload)
+
+    assert evidence["schema_version"] == 2
+    assert evidence["encoded_size_bytes"] <= 20_000
+    assert evidence["size_reduction_fraction"] >= 0.95
+
+
 def test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order(
     qapp,
     tmp_path,
@@ -106,7 +130,13 @@ def test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order(
     )
     validate_report_v1(report)
 
-    assert report["classification"]["status"] in {"pass", "warning"}
+    assert report["classification"]["status"] in {
+        "pass",
+        "warning",
+    }, {
+        "classification": report["classification"],
+        "errors": report["metrics"]["workflow"]["values"]["errors"],
+    }
     assert report["workload"]["workload_id"] == STRESS_WORKLOAD_ID
     assert report["workload"]["stock_count"] == 2
     assert report["workload"]["expected_completion_count"] == 48
@@ -137,6 +167,8 @@ def test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order(
     assert persistence["progress_snapshot"]["serialized_size_statistics_bytes"][
         "count"
     ] == 48
+    assert persistence["progress_format"]["schema_version"] == 2
+    assert persistence["progress_format"]["size_reduction_fraction"] >= 0.95
 
     authoritative_io = persistence["authoritative_io"]
     assert authoritative_io["hot_path_read_count"] == 0

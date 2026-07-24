@@ -87,6 +87,20 @@ def _resolved_beneath(path: str | Path, root: str | Path) -> bool:
     return candidate == parent or parent in candidate.parents
 
 
+def _progress_format_evidence(experiment_dir: Path) -> dict[str, Any]:
+    from ExecutionPlan import load_execution_plan
+    from ExecutionProgressStore import execution_progress_storage_evidence
+
+    try:
+        plan = load_execution_plan(experiment_dir / "execution_plan.json")
+        payload = json.loads(
+            (experiment_dir / "progress.json").read_text(encoding="utf-8")
+        )
+        return execution_progress_storage_evidence(plan, payload)
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
 class _BoundedEventLog:
     """Retain critical events and a bounded sample of verbose command events."""
 
@@ -392,8 +406,12 @@ def _create_prepared_fixture(
     experiment_dir: Path,
     fixture: dict[str, Any],
 ) -> dict[str, Any]:
-    from ExecutionPlan import ProgressExecutionReference, save_execution_plan
+    from ExecutionPlan import save_execution_plan
     from ExecutionPlanRevision import persist_immutable_revision
+    from ExecutionProgressStore import (
+        encode_execution_progress_v2,
+        serialize_execution_progress,
+    )
     from InitialExecutionPlan import build_initial_execution_plan
 
     if experiment_dir.exists():
@@ -508,7 +526,7 @@ def _create_prepared_fixture(
     design_path.write_text(json.dumps(design, indent=2) + "\n", encoding="utf-8")
     save_execution_plan(experiment_dir / "execution_plan.json", plan)
     persist_immutable_revision(experiment_dir / "execution_plan_revisions", plan)
-    progress = {
+    progress_wells = {
         well.well_id: {
             "reaction_id": well.reaction_id,
             "reagents": {
@@ -522,18 +540,9 @@ def _create_prepared_fixture(
         }
         for well in plan.wells
     }
-    progress["__plate__"] = {
-        "name": fixture["plate"]["name"],
-        "rows": int(fixture["plate"]["rows"]),
-        "columns": int(fixture["plate"]["columns"]),
-        "schema_version": 1,
-    }
-    progress["__execution__"] = ProgressExecutionReference(
-        plan.plan_id,
-        plan.plan_revision,
-    ).to_dict()
+    progress = encode_execution_progress_v2(plan, progress_wells)
     (experiment_dir / "progress.json").write_text(
-        json.dumps(progress, indent=2) + "\n",
+        serialize_execution_progress(progress),
         encoding="utf-8",
     )
     return {
@@ -1058,6 +1067,16 @@ def _summary_text(report: dict[str, Any]) -> str:
         (
             "Progress non-durable p95: "
             f"{persistence.get('progress_snapshot', {}).get('non_durable_write_ms', {}).get('p95', 0.0)} ms"
+        ),
+        (
+            "Progress schema/final bytes/v1 ratio: "
+            f"v{persistence.get('progress_format', {}).get('schema_version', 'unknown')} / "
+            f"{persistence.get('progress_format', {}).get('encoded_size_bytes', 0)} / "
+            f"{persistence.get('progress_format', {}).get('encoded_to_v1_ratio', 0.0):.4f}"
+        ),
+        (
+            "Cumulative progress serialized bytes: "
+            f"{persistence.get('cumulative_progress_serialized_bytes', 0)}"
         ),
         (
             "Injected stall: "
@@ -2362,6 +2381,13 @@ def run_virtual_print_array_scenario(
                             "serialized_size_bytes",
                             [],
                         )
+                    ),
+                    "progress_format": (
+                        _progress_format_evidence(
+                            Path(fixture_info["experiment_dir"])
+                        )
+                        if fixture_info is not None
+                        else {"error": "scenario fixture was not created"}
                     ),
                 },
             },

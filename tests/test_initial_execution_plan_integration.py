@@ -7,6 +7,10 @@ import pytest
 
 import Model as model_module
 from ExecutionPlan import ExecutionPlanState, canonical_sha256, load_execution_plan
+from ExecutionProgressStore import (
+    decode_execution_progress,
+    serialize_execution_progress,
+)
 from ExecutionCalibrationStore import load_execution_calibrations
 from ExecutionPlanRevision import validate_revision_history
 from Model import CURRENT_PROFILE, ExperimentModel, Model
@@ -78,21 +82,20 @@ def test_fresh_finalization_writes_prepared_plan_before_linked_progress(
     assert plan.design_sha256 == canonical_sha256(design_payload)
     assert em.get_execution_plan_snapshot() == plan
     assert em.get_execution_plan_source() == "new_finalization"
-    assert progress["__execution__"] == {
-        "schema_version": 1,
-        "plan_id": plan.plan_id,
-        "plan_revision": 1,
-    }
+    assert progress["schema_name"] == "labcraft.execution_progress"
+    assert progress["schema_version"] == 2
+    assert progress["plan_id"] == plan.plan_id
+    assert progress["plan_revision"] == 1
     assert em.get_progress_execution_reference().plan_id == plan.plan_id
     assert set(em.return_progress_data()) == {well.well_id for well in plan.wells}
     assert em.get_progress_status()["well_count"] == len(plan.wells)
+    decoded_progress = decode_execution_progress(plan, progress).progress_wells
     progress_wells = {
         well_id: {
             stock_id: int(counts["target_droplets"])
             for stock_id, counts in entry["reagents"].items()
         }
-        for well_id, entry in progress.items()
-        if not well_id.startswith("__")
+        for well_id, entry in decoded_progress.items()
     }
     assert progress_wells == _well_targets(plan)
     assert all(stock.printer_head_id is None for stock in plan.stocks)
@@ -172,7 +175,7 @@ def test_lock_and_calibration_revision_preserve_design_and_allow_tolerance_overr
     )
     assert [plan.plan_revision for plan in history] == [1, 2, 3]
     progress = json.loads(Path(em.progress_file_path).read_text(encoding="utf-8"))
-    assert progress["__execution__"]["plan_revision"] == 3
+    assert progress["plan_revision"] == 3
     document = load_execution_calibrations(em.execution_calibrations_file_path)
     calibrated_stock = next(
         stock for stock in calibrated.stocks if stock.stock_id == pure.stock_id
@@ -244,10 +247,11 @@ def test_calibration_rejects_stock_with_printed_progress_without_new_revision(
     active = em.lock_execution_plan("printing_started")
     pure = next(stock for stock in active.stocks if stock.factor_name == "PURE_MM")
     progress = json.loads(Path(em.progress_file_path).read_text(encoding="utf-8"))
-    target_well = next(key for key in progress if not key.startswith("__"))
-    progress[target_well]["reagents"][pure.stock_id]["added_droplets"] = 1
+    stock_values = progress["added_droplets"][pure.stock_id]
+    target_index = next(index for index, value in enumerate(stock_values) if value is not None)
+    stock_values[target_index] = 1
     Path(em.progress_file_path).write_text(
-        json.dumps(progress, indent=2) + "\n",
+        serialize_execution_progress(progress),
         encoding="utf-8",
     )
     em.read_progress_file(em.progress_file_path)

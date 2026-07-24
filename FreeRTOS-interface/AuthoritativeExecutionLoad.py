@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -14,11 +13,11 @@ from ExecutionCalibrationStore import (
 from ExecutionPlan import (
     ExecutionPlan,
     ExecutionPlanState,
-    ProgressExecutionReference,
     canonical_sha256,
     load_execution_plan,
 )
 from ExecutionPlanRevision import validate_revision_history
+from ExecutionProgressStore import decode_execution_progress
 from ExecutionResumeStore import (
     ExecutionResumeDocument,
     load_execution_resume,
@@ -102,71 +101,8 @@ def _load_json(path: Path) -> Any:
         return json.load(handle)
 
 
-def _integral(value: Any, path: str) -> int:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(float(value))
-        or not float(value).is_integer()
-        or int(value) < 0
-    ):
-        raise ValueError(f"{path} must be a nonnegative integer")
-    return int(value)
-
-
 def _validate_progress(plan: ExecutionPlan, payload: Any) -> dict[str, Any]:
-    if not isinstance(payload, dict):
-        raise ValueError("progress.json must contain an object")
-    reference = ProgressExecutionReference.from_dict(payload.get("__execution__"))
-    if reference.plan_id != plan.plan_id or reference.plan_revision != plan.plan_revision:
-        raise ValueError("progress.json does not reference the latest execution plan")
-    plate = payload.get("__plate__")
-    if not isinstance(plate, dict) or (
-        plate.get("name") != plan.plate.name
-        or _integral(plate.get("rows"), "progress.__plate__.rows") != plan.plate.rows
-        or _integral(plate.get("columns"), "progress.__plate__.columns") != plan.plate.columns
-    ):
-        raise ValueError("progress.json plate metadata differs from the execution plan")
-    wells = {str(key): value for key, value in payload.items() if not str(key).startswith("__")}
-    if set(wells) != {well.well_id for well in plan.wells}:
-        raise ValueError("progress.json well identities differ from the execution plan")
-    reaction_ids = [well.reaction_id for well in plan.wells]
-    if len(reaction_ids) != len(set(reaction_ids)):
-        raise ValueError("Authoritative runtime loading requires unique reaction IDs")
-    for well in plan.wells:
-        entry = wells[well.well_id]
-        if not isinstance(entry, dict) or set(entry) != {"reaction_id", "reagents", "completed"}:
-            raise ValueError(f"progress well fields are invalid at {well.well_id}")
-        if entry.get("reaction_id") != well.reaction_id:
-            raise ValueError(f"progress reaction identity differs at {well.well_id}")
-        reagents = entry.get("reagents")
-        targets = {item.stock_id: item.target_dispenses for item in well.dispenses}
-        if not isinstance(reagents, dict) or set(reagents) != set(targets):
-            raise ValueError(f"progress stock identities differ at {well.well_id}")
-        for stock_id, target in targets.items():
-            details = reagents[stock_id]
-            allowed_reagent_fields = {
-                "target_droplets", "added_droplets", "name", "concentration", "units"
-            }
-            if (
-                not isinstance(details, dict)
-                or not {"target_droplets", "added_droplets"}.issubset(details)
-                or set(details) - allowed_reagent_fields
-            ):
-                raise ValueError(f"progress reagent is invalid at {well.well_id}/{stock_id}")
-            if _integral(details.get("target_droplets"), "target_droplets") != target:
-                raise ValueError(f"progress target differs at {well.well_id}/{stock_id}")
-            added = _integral(details.get("added_droplets", 0), "added_droplets")
-            if added > target:
-                raise ValueError(f"progress added count exceeds target at {well.well_id}/{stock_id}")
-        completed = entry.get("completed")
-        if not isinstance(completed, bool) or completed != all(
-            _integral(details.get("added_droplets", 0), "added_droplets")
-            >= targets[stock_id]
-            for stock_id, details in reagents.items()
-        ):
-            raise ValueError(f"progress completion flag differs at {well.well_id}")
-    return wells
+    return decode_execution_progress(plan, payload).progress_wells
 
 
 def _progress_added(progress_wells: Mapping[str, Any], well_id: str, stock_id: str) -> int:
@@ -376,19 +312,24 @@ def reconcile_authoritative_execution_runtime(
     *,
     progress_payload: Mapping[str, Any],
     resume: ExecutionResumeDocument,
+    progress_wells: Mapping[str, Any] | None = None,
 ) -> AuthoritativeExecutionBundle:
     """Revalidate mutable runtime state without rereading immutable bundle files."""
     if not bundle.valid or bundle.plan is None:
         raise ValueError("A valid authoritative execution bundle is required.")
     if bundle.migration_manifest is not None:
         raise ValueError("Migrated legacy executions cannot activate a mutable runtime.")
-    progress_wells = _validate_progress(bundle.plan, progress_payload)
-    _validate_resume_contents(bundle.plan, progress_wells, resume)
-    eligibility = _eligibility(bundle.plan, progress_wells, resume)
+    reconciled_wells = (
+        dict(progress_wells)
+        if progress_wells is not None
+        else _validate_progress(bundle.plan, progress_payload)
+    )
+    _validate_resume_contents(bundle.plan, reconciled_wells, resume)
+    eligibility = _eligibility(bundle.plan, reconciled_wells, resume)
     return replace(
         bundle,
         progress_payload=dict(progress_payload),
-        progress_wells=progress_wells,
+        progress_wells=reconciled_wells,
         resume=resume,
         eligibility=eligibility,
     )
