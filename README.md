@@ -313,6 +313,16 @@ stale, regressing, overflowing, or mismatched state fails closed; it never
 falls back to enumerating every well. Argument-free, initialization, reset,
 export, and non-authoritative writes retain full reconstruction.
 
+The reviewed Pi before/after sets reduced median cached-construction p50 from
+0.7319 ms to 0.0405 ms. Median per-run non-durable progress p95 improved from
+4.9003 ms to 4.7272 ms, while all primary and relative comparison rules
+passed. The candidate retains the existing informational maximum-service-gap
+warning. Because copy-on-write preserves optional validated reagent metadata
+that full reconstruction previously omitted, this fixture's median serialized
+snapshot increased from 34,368.5 to 54,624.5 bytes. The schema and four-space
+format remain valid and unchanged; compact serialization or metadata-volume
+changes require a separate review.
+
 If Windows reports `WinError 5` while rapidly replacing an execution file,
 retain the failed diagnostics and retry once with a fresh ignored
 repository-local output root, for example:
