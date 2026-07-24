@@ -241,6 +241,71 @@ The scenario validates the application-facing workflow only. It does not prove
 firmware protocol behavior, collision safety, physical motion, pressure
 response, camera analysis, balance behavior, or droplet quality.
 
+## Virtual Workflow Baselines and Comparison
+
+Slice 6 repeats the real-UI workflow without blending samples across runs,
+builds same-host report sets, and compares a candidate against compact tracked
+baseline evidence. It retains every canonical Slice 5 report and verifies its
+SHA-256 hash before baseline creation or comparison.
+
+Use a stable, non-secret host label. The initial Windows comparison host uses
+`windows-sil-primary-v1`. Baseline collection requires a clean worktree, one
+warm-up, five measured runs, one source commit, no injected stalls, and
+compatible real PySide6/Qt evidence:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario virtual_print_array_96_v1 `
+  --speed-multiplier 1 `
+  --warmup-runs 1 `
+  --measured-runs 5 `
+  --host-label windows-sil-primary-v1 `
+  --threshold-maturity candidate `
+  --accept-baseline tests\performance\baselines\virtual_print_array_96_v1_windows_sil_primary_v1.json
+```
+
+The command prints the generated `report_set.json` path. A repeated candidate
+uses the same options without `--accept-baseline`. Compare that report set
+without rerunning the scenario:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --compare `
+  tests\performance\baselines\virtual_print_array_96_v1_windows_sil_primary_v1.json `
+  verification_reports\virtual_workflows\virtual_print_array_96_v1\<run>_report_set\report_set.json
+```
+
+The candidate directory receives `comparison.json` and `comparison.md`.
+Classification separates workflow correctness, environment compatibility,
+measurement noise, and performance. The initial tracked baseline is
+`candidate`: relative or absolute performance findings warn but return `0`.
+Exit codes are:
+
+- `0` for pass, improvement, or candidate warning;
+- `2` for workflow, safety, persistence, timeout, or teardown failure;
+- `3` for setup/reporting failure, incompatible identities, missing evidence,
+  tampered/missing raw reports, or excessive primary-metric noise; and
+- `4` for a performance regression against a baseline explicitly reviewed at
+  `acceptance` maturity.
+
+Compatibility is intentionally strict: scenario/workload/timing, host label,
+OS, CPU, Python executable/version, PySide/Qt versions, and Qt platform must
+match. Git commits may differ. Dirty candidates are labeled and may be used for
+review, but a dirty run can never create an accepted baseline. Cross-Windows/Pi
+or copied reports from another computer are historical evidence, not valid
+comparisons.
+
+Do not overwrite a baseline as part of ordinary collection. An explicit
+reviewed regeneration must repeat the full clean run and pass
+`--replace-accepted-baseline`. Raw reports and report sets remain ignored and
+must be retained locally so their hashes can be checked; only the compact
+summary under `tests/performance/baselines/` is tracked.
+
+The candidate policy uses run-level medians, robust MAD-based noise floors, and
+CV/outlier evidence. It is designed to expose host UI/persistence regressions,
+not physical printer behavior. It still does not validate firmware, protocol,
+motion, pressure, cameras, balance, or droplet quality.
+
 ## Execution Persistence Microbenchmark
 
 The Slice 0/2 persistence tool measures the durable execution path that writes

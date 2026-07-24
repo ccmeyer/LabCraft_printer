@@ -1054,7 +1054,7 @@ Completion record:
 
 ## Slice 6: Regression Comparison And Performance Gates
 
-Status: `not_started`
+Status: `in_progress`
 
 Goal:
 
@@ -1076,8 +1076,10 @@ Likely files touched:
 - `tools/virtual_workflows/compare.py`
 - `tools/run_virtual_workflow.py`
 - `tests/performance/test_virtual_workflow_comparison.py`
-- tracked baseline metadata or documented baseline-generation commands
-- report schema/docs
+- `tests/performance/baselines/virtual_print_array_96_v1_windows_sil_primary_v1.json`
+- `docs/virtual_workflow_report_schema.md`
+- `README.md`
+- this plan
 
 Baseline policy:
 
@@ -1116,7 +1118,36 @@ Rollback:
 
 Completion record:
 
-- Not started.
+- Started from clean commit
+  `d9381a2f190f2325a41068c54da23feff8cc1e4c`.
+- Collection call path: CLI -> warm-up scenario runs -> measured Slice 5
+  scenario reports -> report-set aggregation -> candidate baseline/comparison
+  input.
+- Comparison call path: tracked summarized baseline plus candidate report set
+  -> compatibility/noise checks -> absolute and relative rules -> JSON,
+  Markdown, console classification, and stable exit code.
+- Fixed the seven-file tool/test/baseline/documentation boundary. Production
+  MVC, simulator, firmware, protocol, motion, pressure, and physical timing
+  remain unchanged.
+- Candidate-first policy: at least one warm-up and five measured runs; exact
+  same-host/software/workload identity; 25% relative primary regression plus a
+  robust absolute noise floor; 250 ms absolute warning; conservative
+  acceptance-only severe gates; 30% primary CV noise rejection.
+- Planned focused tests, clean-host baseline and normal/injected candidate
+  evidence, full pytest, artifact inspection, ignore checks, and diff checks.
+  Rollback reverts comparison/baseline changes to Slice 5 informational
+  behavior while retaining ignored raw reports.
+- Comparison tooling focused validation: 82 passed with 100 existing Qt chart
+  deprecation warnings in 27.56 s. The 21 comparator cases cover aggregation,
+  clean baseline requirements, exact compatibility, hashes, overwrite
+  protection, candidate/acceptance decisions, noise, functional precedence,
+  missing evidence, Markdown, and repeated CLI orchestration.
+- A live two-run accelerated CLI smoke produced one passing report and then
+  correctly stopped on the documented Windows `[WinError 5]` atomic replace
+  contention. The one permitted retry under an ignored `tmp` root hit the same
+  failure. Both failure reports were retained; durable writes were not
+  weakened, and clean-host baseline collection remains pending after the
+  tooling checkpoint.
 
 ## Slice 7: Target-Pi Software-In-The-Loop Lane
 
@@ -1505,7 +1536,7 @@ Mitigation:
 | D-005 | decided | Run performance-sensitive scenarios on Windows and later on the Pi without an MCU |
 | D-006 | decided | Write generated reports under ignored `verification_reports/virtual_workflows/`; retain them until manually removed, with no automatic deletion |
 | D-007 | decided | Keep `simulation_dependencies` fail-closed and require the explicit official `make_simulated_machine_factory(config)`; use Qt timers with a positive speed multiplier so acceleration retains real event-loop scheduling |
-| D-008 | open | Accepted event-loop latency budgets after characterization |
+| D-008 | decided | Use candidate-first policy v1: warn above a 250 ms maximum service gap; acceptance fails above a 1000 ms service gap, above 250 ms scheduling-lateness p99, or on a same-host p95/p99 regression exceeding both 25% and the robust absolute noise floor. The initial tracked baseline remains candidate until separately reviewed promotion. |
 | D-009 | decided | Keep raw machine-specific reports local and ignored; commit summarized evidence, and later generate reference reports from a designated commit on the comparison host |
 | D-010 | open | Shared skill location: developer-local skill versus versioned plugin/package |
 | D-011 | open | Which CI environment can provide stable enough performance measurements |
@@ -1530,6 +1561,7 @@ scope or threshold change only inside implementation commits.
 | 2026-07-23 | 4 | `in_progress` -> `verified` | Added the explicit protocol-free simulator, deterministic Qt lifecycle/timing, app-shaped status, command lookahead, pause/clear/disconnect controls, and fault configuration. Focused tests: 182 passed. The real MVC/MainWindow and representative Controller sequence passed twice offscreen. Full suite: 3,366 passed and 24 skipped in 432.44 seconds. Import traps and diff checks passed; temporary roots were removed and no reports were generated. |
 | 2026-07-23 | 5 | `not_started` -> `in_progress` | Starting commit `e211e8b91e409af7365079d803e9992d320012e7` with a clean worktree. Call path: QTest click -> real MainWindow/WellPlateWidget -> Controller array lookahead and durable execution persistence -> explicit SimulatedMachine -> completion callbacks -> Controller progress/checkpoint -> real well-widget updates. Fixed the seven-file tool/fixture/test/documentation boundary, offscreen-by-default real-Qt construction, 96 deterministic A-D serpentine completions, informational-only metrics, failure artifact retention, focused/manual/full validation, and no Slice 6 thresholds. Risks are modal deadlock, callback instrumentation drift, queue-starvation false positives, Qt teardown leaks, and escaped writes; mitigations are allowlisted dialog automation, instance-local wrappers restored in `finally`, signal/file invariant checks, bounded timeout/cleanup, and resolved-root containment. Rollback removes only the Slice 5 runner, fixture, system test, and documentation additions while retaining Slices 0-4. |
 | 2026-07-23 | 5 | `in_progress` -> `verified` | Added the versioned 96-well fixture, real-UI scenario/CLI, real persistence/UI/queue instrumentation, screenshots, injected-stall proof, failure diagnostics, system tests, and documentation without changing production or firmware code. Focused tests: 245 passed. Normal 1x report passed in 16.959 s; the final injected report passed in 10.838 s with a 412.042 ms detected gap and attributed stack. Two retained default-root failures document Windows atomic-replace contention without weakening durability. Full suite: 3,375 passed and 24 skipped in 456.93 s. All reports, summaries, screenshots, ignore rules, cleanup, and diff checks were inspected. |
+| 2026-07-23 | 6 | `not_started` -> `in_progress` | Starting commit `d9381a2f190f2325a41068c54da23feff8cc1e4c` with a clean worktree. Call paths cover repeated Slice 5 collection into validated report sets and same-host baseline/candidate comparison into JSON, Markdown, console classification, and stable exit codes. Fixed the seven-file boundary, candidate-first maturity, one-warm-up/five-measured minimum, exact compatibility identity, robust relative/absolute policy, explicit baseline overwrite protection, focused/manual/full validation, and no production/simulator/firmware/protocol changes. Risks are noisy or cross-environment decisions, hidden per-run outliers, and unreviewed baseline replacement; mitigations are CV/MAD/outlier evidence, exact fingerprints, raw-report hashes, run-boundary aggregation, and explicit reviewed acceptance. |
 
 For every update, include:
 
@@ -1545,7 +1577,6 @@ For every update, include:
 
 ## Current Next Action
 
-Slice 5 is verified. The next permitted work is the separately reviewed Slice
-6 regression comparison and performance-gate implementation. Use compatible
-same-host reports and do not reinterpret Slice 5 informational measurements as
-acceptance thresholds.
+Slice 6 comparison tooling is in progress. Complete focused tests and the
+clean-host candidate-baseline evidence before enabling or claiming any
+acceptance threshold. Slice 7 remains out of scope.

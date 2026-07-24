@@ -224,6 +224,54 @@ safety, timeout, teardown, missing injected-stall evidence, or required
 artifact failures use `fail`; raw latency never warns or fails until Slice 6
 defines compatible comparisons and acceptance gates.
 
+### Slice 6 report sets, baselines, and comparisons
+
+Slice 6 does not change the canonical
+`labcraft.virtual_workflow_report` version 1 envelope. It introduces three
+separate versioned JSON artifacts:
+
+- `labcraft.virtual_workflow_report_set` version 1 retains references and
+  SHA-256 hashes for every warm-up and measured canonical report. Warm-up
+  reports are retained but excluded from metric statistics. Every measured
+  report contributes one run-level value to each comparison metric; raw
+  heartbeat samples are never concatenated across run boundaries.
+- `labcraft.virtual_workflow_baseline` version 1 is compact tracked evidence
+  created from at least one warm-up plus five compatible, clean, passing,
+  non-injected measured reports from one commit. It stores environment and
+  workload identity, policy version, distributions, CV/MAD/outlier evidence,
+  and raw-report locations/hashes, but no raw timing arrays, screenshots, or
+  scenario data.
+- `labcraft.virtual_workflow_comparison` version 1 records compatibility,
+  functional, noise, and performance results separately. Each rule includes
+  the metric path, baseline and candidate values, ratio, absolute delta,
+  effective noise floor or absolute budget, maturity, and decision.
+
+Compatibility requires exact scenario/report/workload/timing identity and the
+same explicit host label, OS/release, architecture, CPU identity, Python
+implementation/version/executable, PySide/Qt versions, and Qt platform.
+Different Git commits are permitted because they are the comparison target.
+Dirty candidate reports remain usable review evidence and are labeled
+prominently; dirty reports cannot create an accepted baseline. Raw hashes are
+verified before baseline creation or comparison.
+
+Policy `virtual_workflow_policy_v1` compares the median of run-level values:
+
+- scheduling-lateness p95 and p99 are primary metrics;
+- a primary relative regression requires both a ratio greater than 1.25 and an
+  absolute delta greater than `max(10 ms, 3 x baseline MAD, 3 x candidate
+  MAD)`;
+- Controller well completion, well-widget update, progress write, and intent
+  completion p95 use the same relative rule with a 5 ms floor; scenario
+  duration uses a 1000 ms floor, and these secondary results remain warnings;
+- a maximum event-loop service gap above 250 ms warns;
+- acceptance maturity fails above a 1000 ms service gap, above 250 ms
+  scheduling-lateness p99, or on a primary relative regression; and
+- primary CV above 30% is `noisy`/`incomplete`, not a performance failure.
+
+The first Windows workstation baseline is intentionally `candidate`: warnings
+return success while functional failures still fail. Acceptance behavior is
+implemented and tested but requires an explicit reviewed baseline replacement.
+
 ## Qt Identity
 
 `environment.qt.binding` is:
@@ -255,6 +303,12 @@ the command, environment, aggregate results, limitations, and local artifact
 path. Later regression comparison generates the reference and candidate on the
 same host.
 
+Slice 6 continues to ignore raw canonical reports and report-set artifacts, but
+commits a compact baseline summary beneath `tests/performance/baselines/`.
+Referenced raw reports must remain available locally for hash validation.
+Replacing that summary is never implicit: the CLI requires both
+`--accept-baseline` and `--replace-accepted-baseline`.
+
 ## Validation Interface
 
 `tools.virtual_workflows.report` exposes:
@@ -265,3 +319,12 @@ same host.
 
 The writer validates first, flushes and synchronizes a temporary file, and then
 atomically replaces the destination.
+
+`tools.virtual_workflows.compare` exposes:
+
+- immutable `ComparisonPolicy`;
+- `build_report_set(...)`;
+- `create_baseline_summary(...)`;
+- `compare_report_sets(...)`;
+- validators/loaders for all three Slice 6 artifact types; and
+- atomic JSON writers plus the derived Markdown comparison writer.
