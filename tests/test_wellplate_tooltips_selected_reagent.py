@@ -7,6 +7,7 @@ class _Label:
     def __init__(self):
         self.tooltip = ""
         self.style = ""
+        self.update_calls = 0
 
     def setStyleSheet(self, s):
         self.style = s
@@ -14,10 +15,16 @@ class _Label:
     def setToolTip(self, t):
         self.tooltip = t
 
+    def update(self):
+        self.update_calls += 1
+
 
 class _BatchingWidget:
     _suspend_well_plate_repaints = WellPlateWidget._suspend_well_plate_repaints
     _resume_well_plate_repaints = WellPlateWidget._resume_well_plate_repaints
+    _well_display_context = WellPlateWidget._well_display_context
+    _update_well_label = WellPlateWidget._update_well_label
+    _incremental_well = WellPlateWidget._incremental_well
 
     def __init__(self):
         self._updates_enabled = True
@@ -59,6 +66,116 @@ def test_update_well_colors_batches_qt_repaints():
 
     WellPlateWidget.update_well_colors(widget)
 
+    assert widget.update_enabled_calls == [False, True]
+    assert widget.update_calls == 1
+
+
+def test_update_well_colors_only_touches_named_well():
+    complete = SimpleNamespace(
+        get_target_droplets_for_stock=lambda sid: 7,
+        check_stock_complete=lambda sid: True,
+    )
+    incomplete = SimpleNamespace(
+        get_target_droplets_for_stock=lambda sid: 7,
+        check_stock_complete=lambda sid: False,
+    )
+    wells = {
+        "A1": SimpleNamespace(
+            well_id="A1",
+            row_num=0,
+            col=1,
+            assigned_reaction=complete,
+        ),
+        "A2": SimpleNamespace(
+            well_id="A2",
+            row_num=0,
+            col=2,
+            assigned_reaction=incomplete,
+        ),
+    }
+    widget = _BatchingWidget()
+    widget.well_labels = [[_Label(), _Label()]]
+    widget.reagent_selection = SimpleNamespace(
+        currentIndex=lambda: 0,
+        itemData=lambda i: "ReagentA_1.00_mM",
+    )
+    widget.model = SimpleNamespace(
+        reaction_collection=SimpleNamespace(
+            is_empty=lambda: False,
+            get_max_droplets=lambda sid: 10,
+        ),
+        stock_solutions=SimpleNamespace(
+            get_stock_by_id=lambda _: SimpleNamespace(units="mM"),
+        ),
+        printer_head_manager=SimpleNamespace(
+            get_printer_head_by_id=lambda _: SimpleNamespace(
+                get_color=lambda: "blue"
+            )
+        ),
+        well_plate=SimpleNamespace(
+            get_plate_dimensions=lambda: (16, 24),
+            get_well=lambda well_id: wells.get(well_id),
+            get_all_wells=lambda: (_ for _ in ()).throw(
+                AssertionError("incremental update scanned the whole plate")
+            ),
+        ),
+        get_well_stock_final_concentration=lambda wid, sid: 0.1234,
+    )
+
+    WellPlateWidget.update_well_colors(widget, "A1")
+
+    assert "border: 1px solid white" in widget.well_labels[0][0].style
+    assert widget.well_labels[0][0].update_calls == 1
+    assert widget.well_labels[0][1].style == ""
+    assert widget.well_labels[0][1].update_calls == 0
+    assert widget.update_enabled_calls == []
+    assert widget.update_calls == 0
+
+
+def test_unknown_well_id_falls_back_to_batched_full_refresh():
+    rxn = SimpleNamespace(
+        get_target_droplets_for_stock=lambda sid: 7,
+        check_stock_complete=lambda sid: False,
+    )
+    wells = [
+        SimpleNamespace(
+            well_id=f"A{column}",
+            row_num=0,
+            col=column,
+            assigned_reaction=rxn,
+        )
+        for column in (1, 2)
+    ]
+    widget = _BatchingWidget()
+    widget.well_labels = [[_Label(), _Label()]]
+    widget.reagent_selection = SimpleNamespace(
+        currentIndex=lambda: 0,
+        itemData=lambda i: "ReagentA_1.00_mM",
+    )
+    widget.model = SimpleNamespace(
+        reaction_collection=SimpleNamespace(
+            is_empty=lambda: False,
+            get_max_droplets=lambda sid: 10,
+        ),
+        stock_solutions=SimpleNamespace(
+            get_stock_by_id=lambda _: SimpleNamespace(units="mM"),
+        ),
+        printer_head_manager=SimpleNamespace(
+            get_printer_head_by_id=lambda _: SimpleNamespace(
+                get_color=lambda: "blue"
+            )
+        ),
+        well_plate=SimpleNamespace(
+            get_plate_dimensions=lambda: (16, 24),
+            get_well=lambda _well_id: None,
+            get_all_wells=lambda: wells,
+        ),
+        get_well_stock_final_concentration=lambda wid, sid: 0.1234,
+    )
+
+    WellPlateWidget.update_well_colors(widget, "Z99")
+
+    assert all(label.style for label in widget.well_labels[0])
     assert widget.update_enabled_calls == [False, True]
     assert widget.update_calls == 1
 

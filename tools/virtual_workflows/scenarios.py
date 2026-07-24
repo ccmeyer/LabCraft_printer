@@ -477,7 +477,6 @@ def _install_instrumentation(
     controller: Any,
     well_plate_widget: Any,
     pressure_plot_widget: Any,
-    pressure_updated_signal: Any,
     inject_ms: int,
     inject_after_completion: int,
     completed_count: Callable[[], int],
@@ -511,10 +510,9 @@ def _install_instrumentation(
         "update_grid",
         "ui.well_plate_rebuild",
     )
-    instrumentation.wrap_connected_slot(
+    instrumentation.wrap(
         pressure_plot_widget,
         "update_pressure",
-        pressure_updated_signal,
         "ui.pressure_render",
     )
     return instrumentation
@@ -654,6 +652,7 @@ def _summary_text(report: dict[str, Any]) -> str:
         .get("duration_by_name_ms", {})
         .get("ui.pressure_render", {})
     )
+    pressure_assessment = responsiveness.get("pressure_render_assessment", {})
     lines = [
         f"Scenario: {report['run']['scenario_name']} v{report['run']['scenario_version']}",
         f"Workload: {report['workload']['workload_id']}",
@@ -672,6 +671,12 @@ def _summary_text(report: dict[str, Any]) -> str:
             f"{pressure_render.get('count', 0)}; "
             f"p95 {pressure_render.get('p95')} ms; "
             f"max {pressure_render.get('maximum')} ms"
+        ),
+        (
+            "Pressure updates coalesced: "
+            f"{pressure_assessment.get('coalesced_update_count', 0)}/"
+            f"{pressure_assessment.get('update_signal_count', 0)}; "
+            f"interval {pressure_assessment.get('render_interval_ms')} ms"
         ),
         f"Queue starvation events: {queue.get('unexpected_starvation_count', 0)}",
         f"Execution intents: {persistence.get('intent_count', 0)}",
@@ -780,6 +785,9 @@ def run_virtual_print_array_scenario(
     screenshots: dict[str, Path] = {}
     array_complete_count = 0
     paint_event_count = 0
+    pressure_update_signal_count = 0
+    pressure_render_interval_ms: int | None = None
+    pressure_timer_active_after_teardown: bool | None = None
     fixture_info: dict[str, Any] | None = None
     validation: dict[str, Any] = {}
     failure_text: str | None = None
@@ -854,6 +862,9 @@ def run_virtual_print_array_scenario(
         controller = components.controller
         view = components.view
         experiment_model = model.experiment_model
+        pressure_render_interval_ms = int(
+            view.pressure_box._pressure_render_timer.interval()
+        )
 
         experiment_model.load_experiment(
             str(fixture_info["design_path"]),
@@ -960,7 +971,12 @@ def run_virtual_print_array_scenario(
             command_events.append(item)
             record_event("command", **item)
 
+        def on_pressure_update() -> None:
+            nonlocal pressure_update_signal_count
+            pressure_update_signal_count += 1
+
         model.well_plate.well_state_changed_signal.connect(on_well_update)
+        model.machine_model.pressure_updated.connect(on_pressure_update)
         controller.array_state_changed.connect(on_array_state)
         controller.array_complete.connect(on_array_complete)
         controller.error_occurred_signal.connect(
@@ -1043,7 +1059,6 @@ def run_virtual_print_array_scenario(
             controller=controller,
             well_plate_widget=view.well_plate_widget,
             pressure_plot_widget=view.pressure_box,
-            pressure_updated_signal=model.machine_model.pressure_updated,
             inject_ms=config.inject_ui_stall_ms,
             inject_after_completion=config.inject_after_completion,
             completed_count=completed_count,
@@ -1145,6 +1160,12 @@ def run_virtual_print_array_scenario(
             5.0,
             "idle array state",
         )
+        _wait_until(
+            app,
+            lambda: not view.pressure_box._pressure_render_timer.isActive(),
+            1.0,
+            "final pressure render",
+        )
         app.processEvents()
         screenshots["completed"] = screenshots_dir / "completed.png"
         _capture_window(view, screenshots["completed"])
@@ -1215,6 +1236,21 @@ def run_virtual_print_array_scenario(
             components.close()
         if app is not None:
             app.processEvents()
+            try:
+                app.sendPostedEvents(
+                    None,
+                    QtCore.QEvent.Type.DeferredDelete,
+                )
+                app.processEvents()
+            except (AttributeError, RuntimeError):
+                pass
+        if components is not None:
+            try:
+                pressure_timer_active_after_teardown = bool(
+                    components.view.pressure_box._pressure_render_timer.isActive()
+                )
+            except RuntimeError:
+                pressure_timer_active_after_teardown = False
 
     ended_ns = time.perf_counter_ns()
     ended_utc = _utc_now()
@@ -1250,6 +1286,21 @@ def run_virtual_print_array_scenario(
         >= config.inject_ui_stall_ms * 0.60
     )
     injection_stack_captured = bool(injected_stacks)
+    pressure_render_summary = (
+        probe_snapshot.get("phase_timings", {})
+        .get("duration_by_name_ms", {})
+        .get("ui.pressure_render", {})
+    )
+    pressure_render_count = int(pressure_render_summary.get("count", 0))
+    pressure_coalesced_count = max(
+        0,
+        pressure_update_signal_count - pressure_render_count,
+    )
+    pressure_render_ratio = (
+        pressure_render_count / pressure_update_signal_count
+        if pressure_update_signal_count
+        else 0.0
+    )
     if (
         failure_text is None
         and injection_requested
@@ -1270,6 +1321,14 @@ def run_virtual_print_array_scenario(
         )
     ):
         failure_text = f"simulator teardown left active timers: {machine_cleanup}"
+    if (
+        failure_text is None
+        and pressure_update_signal_count > 0
+        and pressure_render_count == 0
+    ):
+        failure_text = "pressure updates occurred without a pressure render"
+    if failure_text is None and pressure_timer_active_after_teardown:
+        failure_text = "pressure render timer remained active after teardown"
 
     status = "fail" if failure_text else "pass"
     reasons = (
@@ -1280,6 +1339,15 @@ def run_virtual_print_array_scenario(
     response_values = {
         **probe_snapshot,
         "well_plate_paint_event_count": paint_event_count,
+        "pressure_render_assessment": {
+            "update_signal_count": pressure_update_signal_count,
+            "render_count": pressure_render_count,
+            "coalesced_update_count": pressure_coalesced_count,
+            "render_to_signal_ratio": pressure_render_ratio,
+            "render_interval_ms": pressure_render_interval_ms,
+            "timer_active_after_teardown": pressure_timer_active_after_teardown,
+            "duration_ms": pressure_render_summary,
+        },
         "injected_stall_assessment": {
             "requested": injection_requested,
             "requested_duration_ms": config.inject_ui_stall_ms,

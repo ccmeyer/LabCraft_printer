@@ -2820,6 +2820,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
     # update_pulse_width_input = QtCore.Signal(int)
     popup_message_signal = QtCore.Signal(str,str)
     PRINT_PROFILE_PRESSURE_TOLERANCE = 0.005
+    PRESSURE_RENDER_INTERVAL_MS = 100
 
     def __init__(self, main_window, model,controller):
         super().__init__('PRESSURE')
@@ -2838,6 +2839,10 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self._manual_refuel_check_dialog = None
         self._manual_refuel_check_launch_pending = False
         self._manual_refuel_check_after_imager_pending = False
+        self._pressure_render_timer = QTimer(self)
+        self._pressure_render_timer.setSingleShot(True)
+        self._pressure_render_timer.setInterval(self.PRESSURE_RENDER_INTERVAL_MS)
+        self._pressure_render_timer.timeout.connect(lambda: self.update_pressure())
 
         prof = getattr(self.main_window, "profile", None)
         self.legacy_mode = prof.name == "legacy" if prof else True
@@ -3260,7 +3265,9 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.layout.addWidget(self.print_frequency_spinbox, frequency_row, 3, 1, 1)
 
 
-        self.model.machine_model.pressure_updated.connect(self.update_pressure)
+        self.model.machine_model.pressure_updated.connect(
+            self._request_pressure_render
+        )
 
     def handle_target_print_pressure_change(self):
         """Handle changes to the target pressure value."""
@@ -3328,46 +3335,58 @@ class PressurePlotBox(QtWidgets.QGroupBox):
 
         self.update_print_profile_button_state()
 
-    def update_pressure(self):
-        """Update the current pressure label and plot with the new pressure values."""
-        # Clear previous data
-        self.print_series.clear()
-        if not self.legacy_mode:
-            self.refuel_series.clear()
-        self.target_print_pressure_series.clear()
+    def _request_pressure_render(self):
+        """Coalesce frequent pressure updates into a bounded trailing render."""
+        if not self._pressure_render_timer.isActive():
+            self._pressure_render_timer.start()
 
+    def update_pressure(self):
+        """Immediately render the latest pressure values and labels."""
         print_log = self.model.machine_model.get_print_pressure_readings()
         if not self.legacy_mode:
             refuel_log = self.model.machine_model.get_refuel_pressure_readings()
-        
+
         comp_log = list(print_log).copy()
         if not self.legacy_mode:
             comp_log.extend(refuel_log)
 
-        # Append new pressure data
-        for i, pressure in enumerate(print_log):
-            self.print_series.append(i, pressure)
+        self.print_series.replace(
+            [
+                QtCore.QPointF(index, float(pressure))
+                for index, pressure in enumerate(print_log)
+            ]
+        )
 
         if not self.legacy_mode:
-            for i, pressure in enumerate(refuel_log):
-                self.refuel_series.append(i, pressure)
+            self.refuel_series.replace(
+                [
+                    QtCore.QPointF(index, float(pressure))
+                    for index, pressure in enumerate(refuel_log)
+                ]
+            )
 
-        # Get the target pressure and append target line points
         target_print_pressure = self.model.machine_model.get_target_print_pressure()
-        self.target_print_pressure_series.append(0, target_print_pressure)  # Add lower point of target pressure line
-        self.target_print_pressure_series.append(len(print_log) - 1, target_print_pressure)  # Add upper point of target pressure line
+        self.target_print_pressure_series.replace(
+            [
+                QtCore.QPointF(0, float(target_print_pressure)),
+                QtCore.QPointF(
+                    max(0, len(print_log) - 1),
+                    float(target_print_pressure),
+                ),
+            ]
+        )
 
-        # Calculate min and max pressure for y-axis range
         min_pressure = min([*comp_log,target_print_pressure]) - 0.5
         max_pressure = max([*comp_log,target_print_pressure]) + 0.5
-
-        # Update y-axis range with calculated min and max
         self.axisY.setRange(min_pressure, max_pressure)
 
-        # Update the pressure display labels
         self.current_print_pressure_value.setText(f"{print_log[-1]:.3f}")
         if not self.legacy_mode:
             self.current_refuel_pressure_value.setText(f"{refuel_log[-1]:.3f}")
+
+    def closeEvent(self, event):
+        self._pressure_render_timer.stop()
+        super().closeEvent(event)
 
     def request_toggle_regulation(self):
         """Emit a signal to request toggling the motors."""
@@ -4871,14 +4890,13 @@ class WellPlateWidget(QtWidgets.QGroupBox):
             self.update()
         except Exception:
             pass
-    
-    def update_well_colors(self, *_args):
-        """Update the colors of the wells based on the selected reagent's concentration."""
+
+    def _well_display_context(self):
+        """Resolve display values shared by full and incremental well refreshes."""
         rows, cols = self.model.well_plate.get_plate_dimensions()
         enable_tooltips = (rows * cols) <= 384
         stock_id = None
         if not self.model.reaction_collection.is_empty():
-            # Get the current reagent selection
             stock_index = self.reagent_selection.currentIndex()
             item_data = getattr(self.reagent_selection, "itemData", None)
             if callable(item_data):
@@ -4886,8 +4904,7 @@ class WellPlateWidget(QtWidgets.QGroupBox):
             else:
                 stock_formatted = self.reagent_selection.itemText(stock_index)
                 stock_id = self.model.stock_solutions.get_stock_id_from_formatted(stock_formatted)
-            #print(f"Stock ID: {stock_id}, Stock Index: {stock_index}, Stock Formatted: {stock_formatted}")
-            if stock_id == None:
+            if stock_id is None:
                 print('No reagent selected')
                 stock_id = self.model.stock_solutions.get_stock_solution_names()[0]
                 find_data = getattr(self.reagent_selection, "findData", None)
@@ -4897,57 +4914,104 @@ class WellPlateWidget(QtWidgets.QGroupBox):
                     stock_formatted = self.model.stock_solutions.get_formatted_from_stock_id(stock_id)
                     idx = self.reagent_selection.findText(stock_formatted)
                 self.reagent_selection.setCurrentIndex(idx)
-                #print(f'---Using default reagent: {stock_id}---')
             max_concentration = self.model.reaction_collection.get_max_droplets(stock_id)
             printer_head = self.model.printer_head_manager.get_printer_head_by_id(stock_id)
             color = printer_head.get_color()
         else:
             max_concentration = 0
             color = 'grey'
-        
+
+        return {
+            "stock_id": stock_id,
+            "max_concentration": max_concentration,
+            "color": color,
+            "enable_tooltips": enable_tooltips,
+        }
+
+    def _update_well_label(self, well, context):
+        """Apply the current reagent display state to one existing well label."""
+        stock_id = context["stock_id"]
+        max_concentration = context["max_concentration"]
+        color = context["color"]
+        enable_tooltips = context["enable_tooltips"]
+        label = self.well_labels[well.row_num][well.col-1]
+        if well.assigned_reaction:
+            concentration = well.assigned_reaction.get_target_droplets_for_stock(stock_id)
+            final_conc = self.model.get_well_stock_final_concentration(well.well_id, stock_id)
+            state = well.assigned_reaction.check_stock_complete(stock_id)
+            outline = 'white' if state else 'black'
+            if concentration is not None:
+                opacity = 0 if max_concentration == 0 else concentration / max_concentration
+                well_color = QtGui.QColor(color)
+                well_color.setAlphaF(opacity)
+                rgba_color = (
+                    f"rgba({well_color.red()},{well_color.green()},"
+                    f"{well_color.blue()},{well_color.alpha()})"
+                )
+                label.setStyleSheet(
+                    f"background-color: {rgba_color}; border: 1px solid {outline};"
+                )
+            else:
+                label.setStyleSheet(
+                    f"background-color: grey; border: 1px solid {outline};"
+                )
+            if final_conc is None:
+                conc_text = "n/a"
+            else:
+                try:
+                    units = self.model.stock_solutions.get_stock_by_id(stock_id).units
+                except Exception:
+                    units = ""
+                conc_text = f"{final_conc:.4f} {units}".strip()
+            if enable_tooltips:
+                label.setToolTip(
+                    f"Well {well.well_id}\n"
+                    f"Target droplets: {int(concentration or 0)}\n"
+                    f"Final concentration: {conc_text}"
+                )
+            else:
+                label.setToolTip("")
+        else:
+            label.setStyleSheet(
+                "background-color: none; border: 1px solid black;"
+            )
+            if enable_tooltips:
+                label.setToolTip(f"Well {well.well_id}\nNo reaction assigned")
+            else:
+                label.setToolTip("")
+        return label
+
+    def _incremental_well(self, args):
+        if len(args) != 1 or not isinstance(args[0], str):
+            return None
+        well_id = args[0].strip()
+        if not well_id or well_id.lower() == "all":
+            return None
+        getter = getattr(self.model.well_plate, "get_well", None)
+        well = getter(well_id) if callable(getter) else None
+        if well is None:
+            return None
+        try:
+            self.well_labels[well.row_num][well.col - 1]
+        except (IndexError, TypeError):
+            return None
+        return well
+
+    def update_well_colors(self, *_args):
+        """Refresh one changed well when possible, otherwise refresh the plate."""
+        context = self._well_display_context()
+        incremental_well = self._incremental_well(_args)
+        if incremental_well is not None:
+            label = self._update_well_label(incremental_well, context)
+            update = getattr(label, "update", None)
+            if callable(update):
+                update()
+            return
+
         resume_repaints = self._suspend_well_plate_repaints()
         try:
             for well in self.model.well_plate.get_all_wells():
-                label = self.well_labels[well.row_num][well.col-1]
-                if well.assigned_reaction:
-                    concentration = well.assigned_reaction.get_target_droplets_for_stock(stock_id)
-                    final_conc = self.model.get_well_stock_final_concentration(well.well_id, stock_id)
-                    state = well.assigned_reaction.check_stock_complete(stock_id)
-                    if state:
-                        outline = 'white'
-                    else:
-                        outline = 'black'
-                    if concentration is not None:
-                        if max_concentration == 0:
-                            opacity = 0
-                        else:
-                            opacity = concentration / max_concentration
-                        well_color = QtGui.QColor(color)
-                        well_color.setAlphaF(opacity)
-                        rgba_color = f"rgba({well_color.red()},{well_color.green()},{well_color.blue()},{well_color.alpha()})"
-                        label.setStyleSheet(f"background-color: {rgba_color}; border: 1px solid {outline};")
-                    else:
-                        label.setStyleSheet(f"background-color: grey; border: 1px solid {outline};")
-                    if final_conc is None:
-                        conc_text = "n/a"
-                    else:
-                        try:
-                            units = self.model.stock_solutions.get_stock_by_id(stock_id).units
-                        except Exception:
-                            units = ""
-                        conc_text = f"{final_conc:.4f} {units}".strip()
-                    if enable_tooltips:
-                        label.setToolTip(
-                            f"Well {well.well_id}\nTarget droplets: {int(concentration or 0)}\nFinal concentration: {conc_text}"
-                        )
-                    else:
-                        label.setToolTip("")
-                else:
-                    label.setStyleSheet(f"background-color: none; border: 1px solid black;")
-                    if enable_tooltips:
-                        label.setToolTip(f"Well {well.well_id}\nNo reaction assigned")
-                    else:
-                        label.setToolTip("")
+                self._update_well_label(well, context)
         finally:
             self._resume_well_plate_repaints(resume_repaints)
 

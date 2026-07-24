@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import ANY, Mock
 
 from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QMessageBox
 
 import View
@@ -65,6 +66,8 @@ class _FakeMachineModel(QObject):
         self.print_pulse_width = print_pulse_width
         self.refuel_pulse_width = refuel_pulse_width
         self.dispense_frequency_hz = 10
+        self.print_pressure_readings = [1.0, 1.1]
+        self.refuel_pressure_readings = [0.9, 1.0]
 
     def is_connected(self):
         return self.machine_connected
@@ -73,10 +76,10 @@ class _FakeMachineModel(QObject):
         return True
 
     def get_print_pressure_readings(self):
-        return [1.0, 1.1]
+        return list(self.print_pressure_readings)
 
     def get_refuel_pressure_readings(self):
-        return [0.9, 1.0]
+        return list(self.refuel_pressure_readings)
 
     def get_target_print_pressure(self):
         return self.target_print_pressure
@@ -315,6 +318,58 @@ def test_pressure_refresh_does_not_overwrite_frequency_field(qapp):
     box.update_pressure()
 
     assert box.print_frequency_spinbox.value() == 10
+
+
+def test_pressure_updates_are_coalesced_and_render_latest_values(qapp):
+    events = []
+    popups = []
+    machine_model = _FakeMachineModel()
+    box = PressurePlotBox(
+        _make_main_window(CURRENT_PROFILE, popups),
+        _make_model(machine_model, events),
+        _make_controller(events),
+    )
+    render = Mock(wraps=box.update_pressure)
+    box.update_pressure = render
+
+    for _ in range(20):
+        machine_model.pressure_updated.emit()
+
+    assert box._pressure_render_timer.isSingleShot()
+    assert box._pressure_render_timer.interval() == 100
+    assert box._pressure_render_timer.isActive()
+    assert render.call_count == 0
+
+    machine_model.print_pressure_readings = [1.5, 1.75]
+    machine_model.refuel_pressure_readings = [0.5, 0.625]
+    QTest.qWait(125)
+
+    assert render.call_count == 1
+    assert box.print_series.count() == 2
+    assert box.print_series.at(1).y() == 1.75
+    assert box.refuel_series.count() == 2
+    assert box.refuel_series.at(1).y() == 0.625
+    assert box.target_print_pressure_series.count() == 2
+    assert box.current_print_pressure_value.text() == "1.750"
+    assert box.current_refuel_pressure_value.text() == "0.625"
+
+
+def test_pressure_render_timer_stops_when_widget_closes(qapp):
+    events = []
+    popups = []
+    machine_model = _FakeMachineModel()
+    box = PressurePlotBox(
+        _make_main_window(CURRENT_PROFILE, popups),
+        _make_model(machine_model, events),
+        _make_controller(events),
+    )
+
+    machine_model.pressure_updated.emit()
+    assert box._pressure_render_timer.isActive()
+
+    box.close()
+
+    assert not box._pressure_render_timer.isActive()
 
 
 def test_current_profile_frequency_field_sits_below_pulse_width_fields(qapp):

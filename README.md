@@ -219,7 +219,17 @@ The report's responsiveness phase timings include `ui.pressure_render`, the
 count and duration distribution for the real pressure-plot update slot. The
 text summary shows its count, p95, and maximum. This diagnostic covers the
 synchronous pressure-series/label update, not deferred native paint or
-compositor work, and it is not yet a performance gate.
+compositor work, and it is not yet a performance gate. Pressure update signals
+are coalesced through a 100 ms single-shot timer, so the chart redraws at no
+more than approximately 10 Hz while always reading the latest model state.
+`pressure_render_assessment` records incoming signals, actual renders,
+coalesced updates, their ratio, the interval, and timer teardown state.
+
+Individual well-state signals update only the named well label. Experiment
+loads, reagent changes, clears, plate changes, unknown well IDs, and explicit
+`all` notifications retain the batched full-plate refresh. These optimizations
+change only UI work; machine status processing, execution persistence, and
+completion ordering remain unchanged.
 
 If Windows reports `WinError 5` while rapidly replacing an execution file,
 retain the failed diagnostics and retry once with a fresh ignored

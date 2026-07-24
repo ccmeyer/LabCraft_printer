@@ -108,6 +108,18 @@ def test_real_ui_print_array_completes_and_writes_inspectable_report(qapp, tmp_p
     pressure_render = phases["ui.pressure_render"]
     assert pressure_render["count"] > 0
     assert pressure_render["maximum"] >= pressure_render["p95"] >= 0
+    pressure_assessment = report["metrics"]["responsiveness"]["values"][
+        "pressure_render_assessment"
+    ]
+    assert pressure_assessment["render_count"] == pressure_render["count"]
+    assert pressure_assessment["update_signal_count"] > pressure_render["count"]
+    assert pressure_assessment["coalesced_update_count"] == (
+        pressure_assessment["update_signal_count"] - pressure_render["count"]
+    )
+    assert 0 < pressure_assessment["render_to_signal_ratio"] < 1
+    assert pressure_assessment["render_interval_ms"] == 100
+    assert pressure_assessment["timer_active_after_teardown"] is False
+    assert pressure_assessment["duration_ms"] == pressure_render
 
     cleanup = report["metrics"]["queue"]["values"]["simulator_cleanup"]
     assert cleanup == {
@@ -135,6 +147,11 @@ def test_real_ui_print_array_completes_and_writes_inspectable_report(qapp, tmp_p
         f"Pressure renders: {pressure_render['count']}; "
         f"p95 {pressure_render['p95']} ms; "
         f"max {pressure_render['maximum']} ms"
+    ) in summary
+    assert (
+        "Pressure updates coalesced: "
+        f"{pressure_assessment['coalesced_update_count']}/"
+        f"{pressure_assessment['update_signal_count']}; interval 100 ms"
     ) in summary
     assert not (report_dir / "failure_traceback.txt").exists()
     for relative in report["artifacts"]["screenshots"].values():

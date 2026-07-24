@@ -218,16 +218,27 @@ the first 96 wells (rows A-D) once in deterministic serpentine order.
   update callbacks;
 - `phase_timings.duration_by_name_ms.ui.pressure_render`, containing the
   invocation count and duration distribution for the real
-  `PressurePlotBox.update_pressure` slot; and
+  `PressurePlotBox.update_pressure` render;
+- `pressure_render_assessment`, containing the incoming update-signal count,
+  actual render count, coalesced count, render-to-signal ratio, 100 ms render
+  interval, timer teardown state, and the same render-duration distribution;
+  and
 - `injected_stall_assessment`, including the requested delay, completion
   position, detection result, stack-capture result, and decision.
 
-The pressure-render phase wraps the slot already connected to
-`MachineModel.pressure_updated`, calls the unchanged real render method exactly
-once, and restores the original connection during teardown. It measures Python
-and Qt-series update work performed by the slot, but not deferred native paint
-or compositor time. The metric is diagnostic and is not part of policy v1
-comparison gates, preserving compatibility with existing tracked baselines.
+`MachineModel.pressure_updated` requests a trailing render through a
+widget-owned 100 ms single-shot timer. Repeated signals while the timer is
+active are coalesced, and the eventual render reads the latest model arrays.
+The phase wraps that real render method and is restored during scenario
+teardown. It measures Python and Qt-series replacement work, but not deferred
+native paint or compositor time. The metric is diagnostic and is not part of
+policy v1 comparison gates, preserving compatibility with existing tracked
+baselines.
+
+Concrete well-ID notifications update only that well's existing label. Full
+plate refreshes remain batched for non-concrete notifications and UI context
+changes. `ui.well_plate_update` continues to time the same public callback, so
+existing same-host baseline comparisons remain valid across the optimization.
 
 `metrics.workflow.values` contains expected/completed wells, the ordered well
 updates, array-state transitions, completion-signal count, observed dialogs,
