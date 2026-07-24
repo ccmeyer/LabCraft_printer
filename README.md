@@ -215,6 +215,12 @@ roots, and ready/printing/mid-array/completed screenshots. Failed runs retain a
 traceback and failure screenshot when possible. Generated reports are ignored
 by Git and are machine-specific.
 
+The report's responsiveness phase timings include `ui.pressure_render`, the
+count and duration distribution for the real pressure-plot update slot. The
+text summary shows its count, p95, and maximum. This diagnostic covers the
+synchronous pressure-series/label update, not deferred native paint or
+compositor work, and it is not yet a performance gate.
+
 If Windows reports `WinError 5` while rapidly replacing an execution file,
 retain the failed diagnostics and retry once with a fresh ignored
 repository-local output root, for example:

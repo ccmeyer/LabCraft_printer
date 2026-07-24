@@ -22,6 +22,7 @@ from tools.virtual_workflows.report import (
     validate_report_v1,
     write_report_atomic,
 )
+from tools.virtual_workflows.scenarios import _InstanceInstrumentation
 
 
 pytestmark = pytest.mark.virtual_workflow
@@ -37,6 +38,21 @@ class ManualClock:
 
     def advance_ms(self, milliseconds):
         self.value += int(milliseconds * 1_000_000)
+
+
+class FakeSignal:
+    def __init__(self):
+        self.callbacks = []
+
+    def connect(self, callback):
+        self.callbacks.append(callback)
+
+    def disconnect(self, callback):
+        self.callbacks.remove(callback)
+
+    def emit(self):
+        for callback in list(self.callbacks):
+            callback()
 
 
 def test_percentile_handles_empty_singleton_and_interpolation():
@@ -123,6 +139,50 @@ def test_named_phase_records_exception_and_bounded_history():
     ]
     assert snapshot["dropped_records"] == 1
     assert snapshot["records"][0]["outcome"] == "ok"
+
+
+def test_connected_slot_instrumentation_measures_and_restores_original():
+    clock = ManualClock()
+    recorder = NamedPhaseRecorder(clock_ns=clock)
+    signal = FakeSignal()
+
+    class Target:
+        calls = 0
+
+        def update_pressure(self):
+            self.calls += 1
+            clock.advance_ms(7)
+
+    target = Target()
+    original = target.update_pressure
+    signal.connect(original)
+    instrumentation = _InstanceInstrumentation(
+        recorder,
+        inject_ms=0,
+        inject_after_completion=1,
+        completed_count=lambda: 0,
+    )
+
+    instrumentation.wrap_connected_slot(
+        target,
+        "update_pressure",
+        signal,
+        "ui.pressure_render",
+    )
+    signal.emit()
+
+    pressure = recorder.snapshot()["duration_by_name_ms"]["ui.pressure_render"]
+    assert target.calls == 1
+    assert pressure["count"] == 1
+    assert pressure["p95"] == 7
+
+    instrumentation.restore()
+    assert target.update_pressure == original
+    signal.emit()
+    assert target.calls == 2
+    assert recorder.snapshot()["duration_by_name_ms"]["ui.pressure_render"][
+        "count"
+    ] == 1
 
 
 class FakeProcess:

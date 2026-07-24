@@ -376,6 +376,7 @@ class _InstanceInstrumentation:
         self.completed_count = completed_count
         self.injected = False
         self._originals: list[tuple[Any, str, Any]] = []
+        self._connected_slots: list[tuple[Any, Any, str, Any, Any]] = []
 
     def wrap(
         self,
@@ -397,6 +398,38 @@ class _InstanceInstrumentation:
         self._originals.append((obj, method_name, original))
         setattr(obj, method_name, measured)
 
+    def wrap_connected_slot(
+        self,
+        obj: Any,
+        method_name: str,
+        signal: Any,
+        phase_name: str,
+    ) -> None:
+        """Measure a slot already connected before instrumentation was installed."""
+
+        original = getattr(obj, method_name)
+
+        def measured(*args, **kwargs):
+            with self.phases.phase(phase_name):
+                return original(*args, **kwargs)
+
+        try:
+            signal.disconnect(original)
+        except (RuntimeError, TypeError) as exc:
+            raise RuntimeError(
+                f"could not instrument connected slot {method_name}"
+            ) from exc
+        try:
+            setattr(obj, method_name, measured)
+            signal.connect(measured)
+        except Exception:
+            setattr(obj, method_name, original)
+            signal.connect(original)
+            raise
+        self._connected_slots.append(
+            (signal, measured, method_name, obj, original)
+        )
+
     def maybe_inject(self) -> None:
         if (
             self.inject_ms <= 0
@@ -416,6 +449,19 @@ class _InstanceInstrumentation:
             time.sleep(self.inject_ms / 1000.0)
 
     def restore(self) -> None:
+        for signal, measured, name, obj, original in reversed(
+            self._connected_slots
+        ):
+            try:
+                signal.disconnect(measured)
+            except (RuntimeError, TypeError):
+                pass
+            try:
+                setattr(obj, name, original)
+                signal.connect(original)
+            except (RuntimeError, TypeError):
+                pass
+        self._connected_slots.clear()
         for obj, name, original in reversed(self._originals):
             try:
                 setattr(obj, name, original)
@@ -430,6 +476,8 @@ def _install_instrumentation(
     experiment_model: Any,
     controller: Any,
     well_plate_widget: Any,
+    pressure_plot_widget: Any,
+    pressure_updated_signal: Any,
     inject_ms: int,
     inject_after_completion: int,
     completed_count: Callable[[], int],
@@ -462,6 +510,12 @@ def _install_instrumentation(
         well_plate_widget,
         "update_grid",
         "ui.well_plate_rebuild",
+    )
+    instrumentation.wrap_connected_slot(
+        pressure_plot_widget,
+        "update_pressure",
+        pressure_updated_signal,
+        "ui.pressure_render",
     )
     return instrumentation
 
@@ -595,6 +649,11 @@ def _summary_text(report: dict[str, Any]) -> str:
     queue = report["metrics"]["queue"]["values"]
     persistence = report["metrics"]["persistence"]["values"]
     gap = responsiveness.get("event_loop_gap_ms") or {}
+    pressure_render = (
+        responsiveness.get("phase_timings", {})
+        .get("duration_by_name_ms", {})
+        .get("ui.pressure_render", {})
+    )
     lines = [
         f"Scenario: {report['run']['scenario_name']} v{report['run']['scenario_version']}",
         f"Workload: {report['workload']['workload_id']}",
@@ -608,6 +667,12 @@ def _summary_text(report: dict[str, Any]) -> str:
         ),
         f"Array complete signals: {workflow.get('array_complete_count', 0)}",
         f"Maximum event-loop gap: {gap.get('maximum')} ms",
+        (
+            "Pressure renders: "
+            f"{pressure_render.get('count', 0)}; "
+            f"p95 {pressure_render.get('p95')} ms; "
+            f"max {pressure_render.get('maximum')} ms"
+        ),
         f"Queue starvation events: {queue.get('unexpected_starvation_count', 0)}",
         f"Execution intents: {persistence.get('intent_count', 0)}",
         (
@@ -977,6 +1042,8 @@ def run_virtual_print_array_scenario(
             experiment_model=experiment_model,
             controller=controller,
             well_plate_widget=view.well_plate_widget,
+            pressure_plot_widget=view.pressure_box,
+            pressure_updated_signal=model.machine_model.pressure_updated,
             inject_ms=config.inject_ui_stall_ms,
             inject_after_completion=config.inject_after_completion,
             completed_count=completed_count,
@@ -1361,7 +1428,7 @@ def run_virtual_print_array_scenario(
             "The simulator verifies the application-facing contract, not firmware framing or ACK behavior.",
             "No physical motion, collision safety, pressure response, camera analysis, balance behavior, or droplet quality is modeled.",
             "Raw responsiveness measurements are informational until Slice 6 defines compatible baselines and acceptance gates.",
-            "Well-plate update method duration and paint-event counts are observed; native Qt paint dispatch duration is not separately instrumented.",
+            "Well-plate update and pressure-render method durations are observed; native Qt paint dispatch duration is not separately instrumented.",
         ],
     }
     validate_report_v1(report)

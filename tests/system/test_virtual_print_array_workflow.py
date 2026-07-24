@@ -105,6 +105,9 @@ def test_real_ui_print_array_completes_and_writes_inspectable_report(qapp, tmp_p
         "ui.well_plate_update",
     ):
         assert phases[phase]["count"] == 96
+    pressure_render = phases["ui.pressure_render"]
+    assert pressure_render["count"] > 0
+    assert pressure_render["maximum"] >= pressure_render["p95"] >= 0
 
     cleanup = report["metrics"]["queue"]["values"]["simulator_cleanup"]
     assert cleanup == {
@@ -127,6 +130,12 @@ def test_real_ui_print_array_completes_and_writes_inspectable_report(qapp, tmp_p
         "stall_stacks.txt",
     ):
         assert (report_dir / name).is_file()
+    summary = (report_dir / "summary.txt").read_text(encoding="utf-8")
+    assert (
+        f"Pressure renders: {pressure_render['count']}; "
+        f"p95 {pressure_render['p95']} ms; "
+        f"max {pressure_render['maximum']} ms"
+    ) in summary
     assert not (report_dir / "failure_traceback.txt").exists()
     for relative in report["artifacts"]["screenshots"].values():
         screenshot = report_dir / relative

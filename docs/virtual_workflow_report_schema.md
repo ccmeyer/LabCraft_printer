@@ -215,9 +215,19 @@ the first 96 wells (rows A-D) once in deterministic serpentine order.
 
 - `well_plate_paint_event_count`;
 - `phase_timings` for real persistence, Controller completion, and well-widget
-  update callbacks; and
+  update callbacks;
+- `phase_timings.duration_by_name_ms.ui.pressure_render`, containing the
+  invocation count and duration distribution for the real
+  `PressurePlotBox.update_pressure` slot; and
 - `injected_stall_assessment`, including the requested delay, completion
   position, detection result, stack-capture result, and decision.
+
+The pressure-render phase wraps the slot already connected to
+`MachineModel.pressure_updated`, calls the unchanged real render method exactly
+once, and restores the original connection during teardown. It measures Python
+and Qt-series update work performed by the slot, but not deferred native paint
+or compositor time. The metric is diagnostic and is not part of policy v1
+comparison gates, preserving compatibility with existing tracked baselines.
 
 `metrics.workflow.values` contains expected/completed wells, the ordered well
 updates, array-state transitions, completion-signal count, observed dialogs,
