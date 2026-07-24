@@ -121,10 +121,14 @@ Slice 2 retains the Slice 0 field names and adds compatible values beneath
   observed medians, candidate-regression decision, and classification effect;
 - `file_growth`: initial/final size, byte growth, and bytes-per-completion slope
   distributions for `progress.json` and `execution_resume.json`;
+- `resume_checkpoint_bounds`: per-run and aggregate peak/final retained-intent
+  counts plus peak/clean checkpoint-size distributions;
 - `durable_io_statistics_ms`: real `fsync` and atomic `os.replace` duration
   distributions overall and by named persistence phase;
 - `runs[*].file_size_samples_bytes`: initial and post-completion file-size
   samples;
+- `runs[*].resume_checkpoint_samples`: resume size and retained-intent samples
+  captured after begin, attach, and completion, outside the timed phases;
 - `runs[*].durable_io_samples_ms`: raw real durable-I/O timings grouped by
   operation and phase; and
 - `runs[*].quartile_growth`: that run's independently calculated growth
@@ -244,9 +248,12 @@ existing same-host baseline comparisons remain valid across the optimization.
 updates, array-state transitions, completion-signal count, observed dialogs,
 errors, and final invariant results. `metrics.queue.values` contains simulator
 lifecycle counts, depth observations, unexpected drain/starvation evidence,
-and teardown state. `metrics.persistence.values` contains the validated clean
-intent count and command sequences, terminal plan state/revision, authoritative
-bundle checks, durable file sizes, and named phase distributions.
+and teardown state. `metrics.persistence.values` contains the observed
+in-memory intent lifecycle count and command sequences, final/maximum retained
+checkpoint counts, terminal plan state/revision, authoritative bundle checks,
+durable file sizes, and named phase distributions. A successful terminal
+checkpoint is clean and retains zero intents; `intent_count` remains the
+observed completion count for compatibility with existing report consumers.
 
 `metrics.persistence.values.authoritative_io` adds compatible diagnostic
 evidence for the guarded active-runtime checkpoint:

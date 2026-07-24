@@ -67,6 +67,7 @@ from ExecutionResumeStore import (
     ExecutionResumeDocument,
     add_pending_intent,
     attach_command_sequence,
+    compact_completed_intents,
     complete_intent,
     discard_pending_intents,
     load_execution_resume,
@@ -7402,6 +7403,11 @@ class ExperimentModel(QObject):
                         intent_id,
                         progress_wells=bundle.progress_wells,
                     )
+            if document is not None:
+                document = compact_completed_intents(
+                    document,
+                    progress_wells=bundle.progress_wells,
+                )
             if not self.execution_resume_file_path:
                 raise RuntimeError("The execution-resume path is unavailable.")
             save_execution_resume(self.execution_resume_file_path, document)

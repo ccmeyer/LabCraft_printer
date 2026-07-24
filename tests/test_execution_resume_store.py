@@ -7,6 +7,7 @@ from ExecutionResumeStore import (
     ExecutionResumeDocument,
     add_pending_intent,
     attach_command_sequence,
+    compact_completed_intents,
     complete_intent,
     discard_pending_intents,
     load_execution_resume,
@@ -36,7 +37,7 @@ def _progress(added=0):
     }
 
 
-def test_resume_intent_round_trip_tracks_a_clean_command_boundary(tmp_path):
+def test_resume_intent_round_trip_retires_a_clean_command_boundary(tmp_path):
     document = new_resume_document(
         plan_id=PLAN_ID,
         plan_revision=2,
@@ -67,8 +68,115 @@ def test_resume_intent_round_trip_tracks_a_clean_command_boundary(tmp_path):
     loaded = load_execution_resume(path)
     assert loaded == document
     assert loaded.state == "clean"
-    assert loaded.intents[0].status == "completed"
-    assert loaded.intents[0].command_seq32 == 42
+    assert loaded.intents == ()
+
+
+def test_completion_retires_only_the_proven_intent():
+    document = new_resume_document(
+        plan_id=PLAN_ID,
+        plan_revision=2,
+        progress_wells={
+            **_progress(),
+            "A2": {
+                "reaction_id": "R2",
+                "reagents": {
+                    "PURE MM_1.11_x": {
+                        "target_droplets": 16,
+                        "added_droplets": 0,
+                    }
+                },
+                "completed": False,
+            },
+        },
+        session_id=SESSION_ID,
+        timestamp_utc=NOW,
+    )
+    document, first = add_pending_intent(
+        document,
+        well_id="A1",
+        reaction_id="R1",
+        stock_id="PURE MM_1.11_x",
+        baseline_added=0,
+        commanded_droplets=16,
+        printer_head_id="head-1",
+        timestamp_utc=NOW,
+    )
+    document, second = add_pending_intent(
+        document,
+        well_id="A2",
+        reaction_id="R2",
+        stock_id="PURE MM_1.11_x",
+        baseline_added=0,
+        commanded_droplets=16,
+        printer_head_id="head-1",
+        timestamp_utc=NOW,
+    )
+
+    updated = complete_intent(
+        document,
+        first.intent_id,
+        progress_wells={
+            **_progress(16),
+            "A2": {
+                "reaction_id": "R2",
+                "reagents": {
+                    "PURE MM_1.11_x": {
+                        "target_droplets": 16,
+                        "added_droplets": 0,
+                    }
+                },
+                "completed": False,
+            },
+        },
+        timestamp_utc=NOW,
+    )
+
+    assert updated.state == "printing"
+    assert updated.intents == (second,)
+
+
+def test_legacy_completed_intents_compact_only_when_progress_proves_them():
+    document = new_resume_document(
+        plan_id=PLAN_ID,
+        plan_revision=2,
+        progress_wells=_progress(),
+        session_id=SESSION_ID,
+        timestamp_utc=NOW,
+    )
+    document, intent = add_pending_intent(
+        document,
+        well_id="A1",
+        reaction_id="R1",
+        stock_id="PURE MM_1.11_x",
+        baseline_added=0,
+        commanded_droplets=16,
+        printer_head_id="head-1",
+        timestamp_utc=NOW,
+    )
+    legacy = replace(
+        document,
+        state="clean",
+        active_stock_id=None,
+        printer_head_id=None,
+        intents=(
+            replace(intent, status="completed", completed_at_utc=NOW),
+        ),
+    )
+
+    compacted = compact_completed_intents(
+        legacy,
+        progress_wells=_progress(16),
+        timestamp_utc=NOW,
+    )
+
+    assert compacted.state == "clean"
+    assert compacted.intents == ()
+    with pytest.raises(ValueError, match="does not prove"):
+        compact_completed_intents(
+            legacy,
+            progress_wells=_progress(),
+            timestamp_utc=NOW,
+        )
 
 
 def test_resume_schema_rejects_unknown_fields(tmp_path):

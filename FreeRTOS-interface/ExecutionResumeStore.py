@@ -279,6 +279,66 @@ def new_resume_document(
     )
 
 
+def _require_intent_progress_proof(
+    intent: ExecutionPrintIntent,
+    progress_wells: Mapping[str, Any],
+) -> None:
+    try:
+        added = _count(
+            progress_wells[intent.well_id]["reagents"][intent.stock_id].get(
+                "added_droplets", 0
+            ),
+            "progress.added_droplets",
+        )
+    except (AttributeError, KeyError, TypeError) as exc:
+        raise ValueError(
+            "Progress does not contain the execution print intent."
+        ) from exc
+    if added < intent.baseline_added + intent.commanded_droplets:
+        raise ValueError(
+            "Progress does not prove the execution print intent completed."
+        )
+
+
+def compact_completed_intents(
+    document: ExecutionResumeDocument,
+    *,
+    progress_wells: Mapping[str, Any],
+    timestamp_utc: str | None = None,
+) -> ExecutionResumeDocument:
+    """Discard validated legacy completion history from a recovery checkpoint."""
+    completed = tuple(
+        intent for intent in document.intents if intent.status == "completed"
+    )
+    if not completed:
+        return document
+    for intent in completed:
+        _require_intent_progress_proof(intent, progress_wells)
+
+    pending = tuple(
+        intent for intent in document.intents if intent.status == "pending"
+    )
+    state = document.state
+    active_stock_id = document.active_stock_id
+    printer_head_id = document.printer_head_id
+    if pending and state not in {"printing", "uncertain"}:
+        state = "printing"
+    elif not pending and state == "printing":
+        state = "clean"
+        active_stock_id = None
+        printer_head_id = None
+
+    return replace(
+        document,
+        state=state,
+        active_stock_id=active_stock_id,
+        printer_head_id=printer_head_id,
+        progress_sha256=progress_fingerprint(progress_wells),
+        intents=pending,
+        updated_at_utc=timestamp_utc or utc_now_text(),
+    )
+
+
 def add_pending_intent(
     document: ExecutionResumeDocument,
     *,
@@ -357,43 +417,28 @@ def complete_intent(
     timestamp_utc: str | None = None,
 ) -> ExecutionResumeDocument:
     timestamp = timestamp_utc or utc_now_text()
-    found = False
-    intents = []
+    target = None
     for intent in document.intents:
         if intent.intent_id == intent_id:
-            found = True
-            try:
-                added = _count(
-                    progress_wells[intent.well_id]["reagents"][intent.stock_id].get(
-                        "added_droplets", 0
-                    ),
-                    "progress.added_droplets",
-                )
-            except (AttributeError, KeyError, TypeError) as exc:
-                raise ValueError(
-                    "Progress does not contain the execution print intent."
-                ) from exc
-            if added < intent.baseline_added + intent.commanded_droplets:
-                raise ValueError(
-                    "Progress does not prove the execution print intent completed."
-                )
-            intents.append(
-                intent
-                if intent.status == "completed"
-                else replace(intent, status="completed", completed_at_utc=timestamp)
-            )
-        else:
-            intents.append(intent)
-    if not found:
+            target = intent
+            break
+    if target is None:
         raise ValueError("Unknown execution print intent.")
-    pending = any(intent.status == "pending" for intent in intents)
+    _require_intent_progress_proof(target, progress_wells)
+
+    retained = []
+    for intent in document.intents:
+        if intent.intent_id == intent_id:
+            continue
+        retained.append(intent)
+    pending = any(intent.status == "pending" for intent in retained)
     return replace(
         document,
         state="printing" if pending else "clean",
         active_stock_id=document.active_stock_id if pending else None,
         printer_head_id=document.printer_head_id if pending else None,
         progress_sha256=progress_fingerprint(progress_wells),
-        intents=tuple(intents),
+        intents=tuple(retained),
         updated_at_utc=timestamp,
     )
 

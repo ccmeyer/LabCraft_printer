@@ -291,13 +291,26 @@ the exact well, reaction, stock, baseline added count, commanded count, optional
 32-bit command sequence, status, and timestamps. Unknown, missing, malformed,
 duplicate, nonintegral, or inconsistent fields are rejected.
 
+The intent array is a bounded recovery checkpoint, not an execution-history
+log. New runtime writes retain only unresolved pending intents. After
+`progress.json` durably proves a command's entire recorded count, the following
+resume write retires that intent instead of retaining a completed copy. The
+schema continues to accept version-1 `completed` records written by earlier
+releases. Passive inspection validates those records without editing the
+folder; the next explicit activation verifies every record against progress
+and compacts the checkpoint in its existing activation write. If progress does
+not prove a legacy completion, activation fails closed. Completed-command
+history is intentionally not reconstructed elsewhere because progress and the
+immutable execution plan are the authoritative durable result.
+
 For every new-format well dispense the host:
 
 1. atomically persists a deterministic pending intent before queuing the
    dispense command;
 2. records the returned command sequence when available;
 3. updates `progress.json` only in the existing command-completion handler; and
-4. marks the intent complete only after that progress write succeeds.
+4. retires the proven intent in a third atomic resume write only after that
+   progress write succeeds.
 
 If the process stops between steps, reload classification is conservative.
 Progress that includes the whole intent can repair the checkpoint during the

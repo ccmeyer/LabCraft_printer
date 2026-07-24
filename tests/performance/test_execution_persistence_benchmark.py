@@ -48,6 +48,18 @@ def _synthetic_result(values, run_index):
                 200 + (index * 10) for index in range(count + 1)
             ],
         },
+        "resume_checkpoint_samples": {
+            "size_bytes_by_phase": {
+                "after_begin": [600] * count,
+                "after_attach": [610] * count,
+                "after_complete": [500] * count,
+            },
+            "retained_intents_by_phase": {
+                "after_begin": [1] * count,
+                "after_attach": [1] * count,
+                "after_complete": [0] * count,
+            },
+        },
         "durable_io_samples_ms": {
             "fsync": {"write_progress": [1.0] * count},
             "atomic_replace": {"write_progress": [0.5] * count},
@@ -55,6 +67,10 @@ def _synthetic_result(values, run_index):
         "validation": {
             "checkpoint_state": "clean",
             "intent_count": count,
+            "observed_completed_intent_count": count,
+            "checkpoint_retained_intent_count": 0,
+            "checkpoint_pending_intent_count": 0,
+            "checkpoint_max_observed_intent_count": 1,
             "authoritative_bundle_valid": True,
             "targets_match_progress": True,
             "file_sizes_bytes": {
@@ -85,6 +101,12 @@ def test_reduced_workloads_capture_real_durable_io_and_file_growth(
     assert io.open is original_io_open
     assert result["validation"]["checkpoint_state"] == "clean"
     assert result["validation"]["intent_count"] == spec.completion_count
+    assert result["validation"]["observed_completed_intent_count"] == (
+        spec.completion_count
+    )
+    assert result["validation"]["checkpoint_retained_intent_count"] == 0
+    assert result["validation"]["checkpoint_pending_intent_count"] == 0
+    assert result["validation"]["checkpoint_max_observed_intent_count"] == 1
     assert result["validation"]["authoritative_bundle_valid"] is True
     assert result["validation"]["targets_match_progress"] is True
 
@@ -94,6 +116,17 @@ def test_reduced_workloads_capture_real_durable_io_and_file_growth(
     for name, samples in result["file_size_samples_bytes"].items():
         assert len(samples) == spec.completion_count + 1
         assert samples[-1] == result["validation"]["file_sizes_bytes"][name]
+    assert len(set(result["file_size_samples_bytes"]["execution_resume.json"])) == 1
+
+    checkpoint_samples = result["resume_checkpoint_samples"]
+    assert checkpoint_samples["retained_intents_by_phase"] == {
+        "after_begin": [1] * spec.completion_count,
+        "after_attach": [1] * spec.completion_count,
+        "after_complete": [0] * spec.completion_count,
+    }
+    assert max(checkpoint_samples["size_bytes_by_phase"]["after_begin"]) > (
+        checkpoint_samples["size_bytes_by_phase"]["after_complete"][-1]
+    )
 
     durable_io = result["durable_io_samples_ms"]
     for operation in ("fsync", "atomic_replace"):
@@ -169,6 +202,8 @@ def test_quartile_growth_is_computed_within_each_run():
     assert values["well_total_growth_delta_ms"]["p50"] == 6.5
     assert values["well_total_first_quartile_ms"]["count"] == 4
     assert values["well_total_last_quartile_ms"]["count"] == 4
+    assert values["resume_checkpoint_bounds"]["peak_retained_intent_count"] == 1
+    assert values["resume_checkpoint_bounds"]["final_retained_intent_count"] == 0
 
 
 def test_synthetic_no_growth_remains_informational_pass():

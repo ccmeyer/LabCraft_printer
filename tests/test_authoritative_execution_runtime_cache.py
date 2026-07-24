@@ -1,11 +1,17 @@
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 import Model as model_module
-from ExecutionResumeStore import load_execution_resume
+from ExecutionResumeStore import (
+    load_execution_resume,
+    progress_fingerprint,
+    save_execution_resume,
+    utc_now_text,
+)
 from Model import Model
 
 
@@ -145,13 +151,69 @@ def test_hot_path_uses_cache_and_preserves_four_durable_writes(
         "replace": 4,
     }
     checkpoint = load_execution_resume(experiment_model.execution_resume_file_path)
-    intent = next(item for item in checkpoint.intents if item.intent_id == intent_id)
-    assert intent.status == "completed"
+    assert intent_id
+    assert checkpoint.intents == ()
     assert checkpoint.state == "clean"
     assert experiment_model.get_execution_resume_eligibility()["status"] in {
         "ready_to_resume",
         "complete",
     }
+
+
+def test_explicit_activation_compacts_valid_legacy_completed_intents(
+    experiment_model_factory,
+):
+    model, experiment_model, well_spec, dispense = _active_runtime(
+        experiment_model_factory
+    )
+    intent_id = experiment_model.begin_execution_print_intent(
+        well_id=well_spec.well_id,
+        stock_id=dispense.stock_id,
+        commanded_droplets=1,
+        printer_head_id="cache-test-head",
+    )
+    experiment_model.attach_execution_print_command(intent_id, 41)
+    model.well_plate.get_well(well_spec.well_id).record_stock_print(
+        dispense.stock_id,
+        1,
+    )
+    experiment_model.create_progress_file()
+
+    resume_path = Path(experiment_model.execution_resume_file_path)
+    pending = load_execution_resume(resume_path)
+    timestamp = utc_now_text()
+    legacy_completed = replace(
+        pending,
+        state="clean",
+        active_stock_id=None,
+        printer_head_id=None,
+        progress_sha256=progress_fingerprint(experiment_model.progress_data),
+        intents=(
+            replace(
+                pending.intents[0],
+                status="completed",
+                completed_at_utc=timestamp,
+            ),
+        ),
+        updated_at_utc=timestamp,
+    )
+    save_execution_resume(resume_path, legacy_completed)
+
+    inspected = model_module.inspect_authoritative_execution(
+        experiment_model.experiment_dir_path,
+        json.loads(
+            Path(experiment_model.experiment_file_path).read_text(encoding="utf-8")
+        ),
+    )
+    assert inspected.valid
+    assert inspected.resume.intents[0].status == "completed"
+    assert load_execution_resume(resume_path).intents[0].status == "completed"
+
+    experiment_model.ensure_execution_resume_checkpoint()
+
+    compacted = load_execution_resume(resume_path)
+    assert compacted.state == "clean"
+    assert compacted.intents == ()
 
 
 @pytest.mark.parametrize(

@@ -354,7 +354,10 @@ def _build_hardware_isolated_model(experiment_dir: Path) -> Model:
 def _validate_completed_workload(
     model: Model,
     experiment_dir: Path,
+    observed_intent_ids: list[str],
     expected_sequences: list[int],
+    completed_intent_ids: list[str],
+    max_retained_intent_count: int,
 ) -> dict[str, Any]:
     experiment = model.experiment_model
     checkpoint = load_execution_resume(experiment.execution_resume_file_path)
@@ -362,18 +365,23 @@ def _validate_completed_workload(
         raise WorkloadInvariantError(
             f"execution checkpoint ended in {checkpoint.state!r}, not 'clean'"
         )
-    intents = list(checkpoint.intents)
-    if len(intents) != len(expected_sequences):
+    if checkpoint.intents:
         raise WorkloadInvariantError(
-            f"expected {len(expected_sequences)} intents, found {len(intents)}"
+            f"clean checkpoint retained {len(checkpoint.intents)} resolved intents"
         )
-    actual_sequences = [intent.command_seq32 for intent in intents]
-    if actual_sequences != expected_sequences:
+    if (
+        len(observed_intent_ids) != len(expected_sequences)
+        or len(observed_intent_ids) != len(set(observed_intent_ids))
+    ):
+        raise WorkloadInvariantError("execution intent IDs are not unique")
+    if completed_intent_ids != observed_intent_ids:
+        raise WorkloadInvariantError(
+            "completed execution intent order differs from created intent order"
+        )
+    if expected_sequences != sorted(set(expected_sequences)):
         raise WorkloadInvariantError(
             "intent command sequences are not unique and monotonically increasing"
         )
-    if any(intent.status != "completed" for intent in intents):
-        raise WorkloadInvariantError("not every execution intent is completed")
 
     design = json.loads(
         Path(experiment.experiment_file_path).read_text(encoding="utf-8")
@@ -398,7 +406,13 @@ def _validate_completed_workload(
     )
     return {
         "checkpoint_state": checkpoint.state,
-        "intent_count": len(intents),
+        "intent_count": len(completed_intent_ids),
+        "observed_completed_intent_count": len(completed_intent_ids),
+        "checkpoint_retained_intent_count": len(checkpoint.intents),
+        "checkpoint_pending_intent_count": sum(
+            intent.status == "pending" for intent in checkpoint.intents
+        ),
+        "checkpoint_max_observed_intent_count": max_retained_intent_count,
         "authoritative_bundle_valid": bundle.valid,
         "targets_match_progress": True,
         "file_sizes_bytes": file_sizes,
@@ -421,12 +435,24 @@ def _execute_workload(
         raise WorkloadInvariantError("activated execution plan does not match workload")
 
     samples = {phase: [] for phase in PHASE_NAMES}
+    observed_intent_ids: list[str] = []
+    completed_intent_ids: list[str] = []
     expected_sequences: list[int] = []
     initial_sizes = _capture_file_sizes(experiment_dir)
     file_size_samples = {
         name: [size] for name, size in initial_sizes.items()
     }
     io_observer = PersistenceIoObserver(experiment_dir)
+    checkpoint_sizes_by_phase = {
+        "after_begin": [],
+        "after_attach": [],
+        "after_complete": [],
+    }
+    retained_intents_by_phase = {
+        "after_begin": [],
+        "after_attach": [],
+        "after_complete": [],
+    }
     sequence = 1
     completion_index = 0
 
@@ -438,6 +464,13 @@ def _execute_workload(
 
         with io_observer.phase(name):
             return _timed(invoke)
+
+    def capture_checkpoint(phase: str) -> None:
+        checkpoint_sizes_by_phase[phase].append(
+            Path(experiment.execution_resume_file_path).stat().st_size
+        )
+        session = experiment._active_authoritative_execution_session
+        retained_intents_by_phase[phase].append(len(session.resume.intents))
 
     with io_observer.installed():
         for stock_index, stock in enumerate(plan.stocks, start=1):
@@ -460,6 +493,8 @@ def _execute_workload(
                     raise WorkloadInvariantError(
                         "durable execution intent was not created"
                     )
+                observed_intent_ids.append(intent_id)
+                capture_checkpoint("after_begin")
 
                 _, elapsed = timed_phase(
                     "attach_sequence",
@@ -469,6 +504,7 @@ def _execute_workload(
                 )
                 samples["attach_sequence"].append(elapsed)
                 expected_sequences.append(sequence)
+                capture_checkpoint("after_attach")
                 sequence += 1
 
                 well = model.well_plate.get_well(well_id)
@@ -497,6 +533,8 @@ def _execute_workload(
                     ),
                 )
                 samples["complete_intent"].append(elapsed)
+                completed_intent_ids.append(intent_id)
+                capture_checkpoint("after_complete")
                 samples["well_total"].append(
                     (time.perf_counter_ns() - total_started) / 1_000_000.0
                 )
@@ -509,7 +547,17 @@ def _execute_workload(
     validation = _validate_completed_workload(
         model,
         experiment_dir,
+        observed_intent_ids,
         expected_sequences,
+        completed_intent_ids,
+        max(
+            (
+                count
+                for values in retained_intents_by_phase.values()
+                for count in values
+            ),
+            default=0,
+        ),
     )
     return {
         "duration_ms": (time.perf_counter_ns() - run_started) / 1_000_000.0,
@@ -520,6 +568,10 @@ def _execute_workload(
         },
         "quartile_growth": _quartile_growth(samples["well_total"]),
         "file_size_samples_bytes": file_size_samples,
+        "resume_checkpoint_samples": {
+            "size_bytes_by_phase": checkpoint_sizes_by_phase,
+            "retained_intents_by_phase": retained_intents_by_phase,
+        },
         "durable_io_samples_ms": io_observer.snapshot(),
         "authoritative_read_opens": io_observer.read_snapshot(),
         "validation": validation,
@@ -613,6 +665,54 @@ def _aggregate_durable_io(
             },
         }
     return aggregate
+
+
+def _aggregate_resume_checkpoint_bounds(
+    measured: list[dict[str, Any]],
+) -> dict[str, Any]:
+    run_rows = []
+    for run in measured:
+        samples = run["resume_checkpoint_samples"]
+        sizes = samples["size_bytes_by_phase"]
+        retained = samples["retained_intents_by_phase"]
+        all_sizes = [value for values in sizes.values() for value in values]
+        all_retained = [value for values in retained.values() for value in values]
+        run_rows.append(
+            {
+                "run_index": run.get("run_index"),
+                "peak_size_bytes": max(all_sizes, default=0),
+                "clean_size_bytes": (
+                    sizes["after_complete"][-1]
+                    if sizes["after_complete"]
+                    else 0
+                ),
+                "peak_retained_intent_count": max(all_retained, default=0),
+                "final_retained_intent_count": (
+                    retained["after_complete"][-1]
+                    if retained["after_complete"]
+                    else 0
+                ),
+                "size_bytes_by_phase": sizes,
+                "retained_intents_by_phase": retained,
+            }
+        )
+    return {
+        "peak_size_bytes": _distribution(
+            [row["peak_size_bytes"] for row in run_rows]
+        ),
+        "clean_size_bytes": _distribution(
+            [row["clean_size_bytes"] for row in run_rows]
+        ),
+        "peak_retained_intent_count": max(
+            (row["peak_retained_intent_count"] for row in run_rows),
+            default=0,
+        ),
+        "final_retained_intent_count": max(
+            (row["final_retained_intent_count"] for row in run_rows),
+            default=0,
+        ),
+        "runs": run_rows,
+    }
 
 
 def _aggregate_authoritative_reads(
@@ -752,6 +852,9 @@ def _aggregate_metrics(
                     ),
                 },
                 "file_growth": _aggregate_file_growth(measured),
+                "resume_checkpoint_bounds": (
+                    _aggregate_resume_checkpoint_bounds(measured)
+                ),
                 "durable_io_statistics_ms": _aggregate_durable_io(measured),
                 "authoritative_read_opens": _aggregate_authoritative_reads(measured),
                 "runs": measured,
@@ -858,6 +961,7 @@ def _write_summary(path: Path, report: dict[str, Any]) -> None:
         run_stats = persistence["run_duration_ms"]
         well_stats = persistence["phase_statistics_ms"]["well_total"]
         growth = persistence.get("growth_assessment", {})
+        bounds = persistence.get("resume_checkpoint_bounds", {})
         lines.extend(
             [
                 f"Measured runs: {report['run']['measured_runs']}",
@@ -873,6 +977,12 @@ def _write_summary(path: Path, report: dict[str, Any]) -> None:
                 f"{growth.get('observed_median_delta_ms', 0.0):.3f}",
                 f"Candidate growth detected: "
                 f"{growth.get('candidate_regression', False)}",
+                "Resume checkpoint peak/final retained intents: "
+                f"{bounds.get('peak_retained_intent_count', 0)} / "
+                f"{bounds.get('final_retained_intent_count', 0)}",
+                "Resume checkpoint peak/clean p50 bytes: "
+                f"{(bounds.get('peak_size_bytes') or {}).get('p50', 0.0):.1f} / "
+                f"{(bounds.get('clean_size_bytes') or {}).get('p50', 0.0):.1f}",
                 f"Run duration coefficient of variation: "
                 f"{persistence['run_duration_coefficient_of_variation']:.4f}",
             ]

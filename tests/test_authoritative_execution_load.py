@@ -259,8 +259,7 @@ def test_explicit_activation_reconstructs_finalized_runtime_without_optimizer(
     loaded_em.complete_execution_print_intent(intent_id)
     checkpoint = load_execution_resume(loaded_em.execution_resume_file_path)
     assert checkpoint.state == "clean"
-    assert checkpoint.intents[-1].command_seq32 == 99
-    assert checkpoint.intents[-1].status == "completed"
+    assert checkpoint.intents == ()
 
     canceled_intent_id = loaded_em.begin_execution_print_intent(
         well_id=first_well.well_id,
@@ -272,7 +271,7 @@ def test_explicit_activation_reconstructs_finalized_runtime_without_optimizer(
     loaded_em.discard_execution_print_intents([canceled_intent_id])
     checkpoint = load_execution_resume(loaded_em.execution_resume_file_path)
     assert checkpoint.state == "paused"
-    assert all(item.intent_id != canceled_intent_id for item in checkpoint.intents)
+    assert checkpoint.intents == ()
     assert loaded_em.get_execution_resume_eligibility()["status"] == "ready_to_resume"
 
     design_bytes = Path(loaded_em.experiment_file_path).read_bytes()

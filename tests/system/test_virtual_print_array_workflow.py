@@ -91,6 +91,30 @@ def test_real_ui_print_array_completes_and_writes_inspectable_report(qapp, tmp_p
     assert report["metrics"]["workflow"]["values"]["errors"] == []
     assert report["metrics"]["queue"]["values"]["unexpected_starvation_count"] == 0
     assert report["metrics"]["persistence"]["values"]["intent_count"] == 96
+    assert (
+        report["metrics"]["persistence"]["values"][
+            "observed_completed_intent_count"
+        ]
+        == 96
+    )
+    assert (
+        report["metrics"]["persistence"]["values"][
+            "checkpoint_retained_intent_count"
+        ]
+        == 0
+    )
+    assert (
+        report["metrics"]["persistence"]["values"][
+            "checkpoint_pending_intent_count"
+        ]
+        == 0
+    )
+    assert (
+        report["metrics"]["persistence"]["values"][
+            "checkpoint_max_observed_intent_count"
+        ]
+        <= 2
+    )
     assert report["metrics"]["persistence"]["values"]["terminal_plan_state"] == "completed"
     authoritative_io = report["metrics"]["persistence"]["values"]["authoritative_io"]
     assert authoritative_io["hot_path_read_count"] == 0

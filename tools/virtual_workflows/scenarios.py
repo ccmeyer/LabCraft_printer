@@ -378,6 +378,10 @@ class _InstanceInstrumentation:
         self.completed_count = completed_count
         self.io_observer = io_observer or PersistenceIoObserver()
         self.injected = False
+        self.intent_begins: list[dict[str, Any]] = []
+        self.intent_attachments: list[dict[str, Any]] = []
+        self.intent_completions: list[str] = []
+        self.checkpoint_observations: list[dict[str, Any]] = []
         self._originals: list[tuple[Any, str, Any]] = []
         self._connected_slots: list[tuple[Any, Any, str, Any, Any]] = []
 
@@ -388,18 +392,40 @@ class _InstanceInstrumentation:
         phase_name: str,
         *,
         after: Callable[[], None] | None = None,
+        observe: Callable[[tuple[Any, ...], dict[str, Any], Any], None] | None = None,
     ) -> None:
         original = getattr(obj, method_name)
 
         def measured(*args, **kwargs):
             with self.phases.phase(phase_name), self.io_observer.phase(phase_name):
                 result = original(*args, **kwargs)
+            if observe is not None:
+                observe(args, kwargs, result)
             if after is not None:
                 after()
             return result
 
         self._originals.append((obj, method_name, original))
         setattr(obj, method_name, measured)
+
+    def capture_checkpoint(self, experiment_model: Any, phase: str) -> None:
+        session = experiment_model._active_authoritative_execution_session
+        path = Path(experiment_model.execution_resume_file_path)
+        self.checkpoint_observations.append(
+            {
+                "phase": phase,
+                "retained_intent_count": len(session.resume.intents),
+                "size_bytes": path.stat().st_size,
+            }
+        )
+
+    def lifecycle_snapshot(self) -> dict[str, Any]:
+        return {
+            "begins": list(self.intent_begins),
+            "attachments": list(self.intent_attachments),
+            "completions": list(self.intent_completions),
+            "checkpoint_observations": list(self.checkpoint_observations),
+        }
 
     def wrap_connected_slot(
         self,
@@ -492,13 +518,64 @@ def _install_instrumentation(
         completed_count=completed_count,
         io_observer=io_observer,
     )
-    for method, phase in (
-        ("begin_execution_print_intent", "persistence.begin_intent"),
-        ("attach_execution_print_command", "persistence.attach_sequence"),
-        ("create_progress_file", "persistence.write_progress"),
-        ("complete_execution_print_intent", "persistence.complete_intent"),
-    ):
-        instrumentation.wrap(experiment_model, method, phase)
+    def argument(
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        name: str,
+        index: int,
+    ) -> Any:
+        return kwargs[name] if name in kwargs else args[index]
+
+    def observe_begin(args, kwargs, result) -> None:
+        instrumentation.intent_begins.append(
+            {
+                "intent_id": result,
+                "well_id": argument(args, kwargs, "well_id", 0),
+                "stock_id": argument(args, kwargs, "stock_id", 1),
+            }
+        )
+        instrumentation.capture_checkpoint(experiment_model, "after_begin")
+
+    def observe_attach(args, kwargs, _result) -> None:
+        instrumentation.intent_attachments.append(
+            {
+                "intent_id": argument(args, kwargs, "intent_id", 0),
+                "command_seq32": int(
+                    argument(args, kwargs, "command_seq32", 1)
+                ),
+            }
+        )
+        instrumentation.capture_checkpoint(experiment_model, "after_attach")
+
+    def observe_complete(args, kwargs, _result) -> None:
+        instrumentation.intent_completions.append(
+            argument(args, kwargs, "intent_id", 0)
+        )
+        instrumentation.capture_checkpoint(experiment_model, "after_complete")
+
+    instrumentation.wrap(
+        experiment_model,
+        "begin_execution_print_intent",
+        "persistence.begin_intent",
+        observe=observe_begin,
+    )
+    instrumentation.wrap(
+        experiment_model,
+        "attach_execution_print_command",
+        "persistence.attach_sequence",
+        observe=observe_attach,
+    )
+    instrumentation.wrap(
+        experiment_model,
+        "create_progress_file",
+        "persistence.write_progress",
+    )
+    instrumentation.wrap(
+        experiment_model,
+        "complete_execution_print_intent",
+        "persistence.complete_intent",
+        observe=observe_complete,
+    )
     for method, phase in (
         ("_guard_authoritative_runtime_session", "persistence.guard_bundle"),
         ("_save_active_execution_resume", "persistence.save_resume"),
@@ -573,6 +650,7 @@ def _validate_completed_scenario(
     errors: list[dict[str, Any]],
     unexpected_dialogs: list[dict[str, Any]],
     starvation_events: list[dict[str, Any]],
+    intent_lifecycle: dict[str, Any],
 ) -> dict[str, Any]:
     from AuthoritativeExecutionLoad import inspect_authoritative_execution
     from ExecutionPlan import ExecutionPlanState, load_execution_plan
@@ -582,8 +660,21 @@ def _validate_completed_scenario(
     expected_wells = tuple(fixture_info["well_ids"])
     stock_id = fixture_info["stock_id"]
     checkpoint = load_execution_resume(experiment_model.execution_resume_file_path)
-    intents = list(checkpoint.intents)
-    sequences = [intent.command_seq32 for intent in intents]
+    begins = list(intent_lifecycle.get("begins", ()))
+    attachments = list(intent_lifecycle.get("attachments", ()))
+    completions = list(intent_lifecycle.get("completions", ()))
+    observations = list(intent_lifecycle.get("checkpoint_observations", ()))
+    intent_ids = [item.get("intent_id") for item in begins]
+    attached_ids = [item.get("intent_id") for item in attachments]
+    sequences = [item.get("command_seq32") for item in attachments]
+    max_retained = max(
+        (int(item.get("retained_intent_count", 0)) for item in observations),
+        default=0,
+    )
+    peak_checkpoint_size = max(
+        (int(item.get("size_bytes", 0)) for item in observations),
+        default=0,
+    )
     completed_well_updates = [
         well_id for well_id in well_updates if well_id in set(expected_wells)
     ]
@@ -594,14 +685,22 @@ def _validate_completed_scenario(
     terminal_plan = load_execution_plan(experiment_model.execution_plan_file_path)
     checks = {
         "checkpoint_clean": checkpoint.state == "clean",
-        "intent_count_exact": len(intents) == 96,
+        "checkpoint_empty": not checkpoint.intents,
+        "checkpoint_bounded_to_lookahead": max_retained <= 2,
+        "intent_count_exact": len(intent_ids) == 96,
+        "intent_ids_unique": len(set(intent_ids)) == 96,
+        "intent_attachments_exact": (
+            len(attached_ids) == 96
+            and Counter(attached_ids) == Counter(intent_ids)
+        ),
         "intent_sequences_unique_monotonic": (
             len(sequences) == 96
             and all(isinstance(value, int) for value in sequences)
             and sequences == sorted(set(sequences))
         ),
-        "all_intents_completed": all(
-            intent.status == "completed" for intent in intents
+        "all_intents_retired": (
+            len(completions) == 96
+            and Counter(completions) == Counter(intent_ids)
         ),
         "authoritative_bundle_valid": bool(bundle.valid),
         "terminal_plan_completed": terminal_plan.state is ExecutionPlanState.COMPLETED,
@@ -637,7 +736,15 @@ def _validate_completed_scenario(
     return {
         "checks": checks,
         "checkpoint_state": checkpoint.state,
-        "intent_count": len(intents),
+        "intent_count": len(completions),
+        "observed_completed_intent_count": len(completions),
+        "checkpoint_retained_intent_count": len(checkpoint.intents),
+        "checkpoint_pending_intent_count": sum(
+            intent.status == "pending" for intent in checkpoint.intents
+        ),
+        "checkpoint_max_observed_intent_count": max_retained,
+        "checkpoint_peak_size_bytes": peak_checkpoint_size,
+        "checkpoint_observations": observations,
         "intent_command_sequences": sequences,
         "terminal_plan_state": terminal_plan.state.value,
         "terminal_plan_revision": terminal_plan.plan_revision,
@@ -692,6 +799,11 @@ def _summary_text(report: dict[str, Any]) -> str:
         ),
         f"Queue starvation events: {queue.get('unexpected_starvation_count', 0)}",
         f"Execution intents: {persistence.get('intent_count', 0)}",
+        (
+            "Checkpoint retained/max intents: "
+            f"{persistence.get('checkpoint_retained_intent_count', 0)} / "
+            f"{persistence.get('checkpoint_max_observed_intent_count', 0)}"
+        ),
         (
             "Authoritative hot-path reads / resume loads: "
             f"{persistence.get('authoritative_io', {}).get('hot_path_read_count', 0)} / "
@@ -1206,6 +1318,11 @@ def run_virtual_print_array_scenario(
             errors=errors,
             unexpected_dialogs=unexpected_dialogs,
             starvation_events=starvation_events,
+            intent_lifecycle=(
+                instrumentation.lifecycle_snapshot()
+                if instrumentation is not None
+                else {}
+            ),
         )
     except Exception:
         failure_text = traceback.format_exc()

@@ -239,6 +239,16 @@ repeated per-well JSON reload and history-validation work without changing the
 durability contract: each well still performs three atomic, fsynced resume
 writes and one atomic, fsynced progress write in the original order.
 
+The resume file is now a bounded recovery checkpoint rather than a completed
+command history. It contains only unresolved pending intents; after durable
+progress proves a completion, the third resume write removes that intent.
+With the normal two-well lookahead its size is therefore bounded by in-flight
+work instead of total completed wells. Existing schema-v1 files containing
+completed intents remain readable. Passive inspection leaves them untouched,
+and explicit activation validates them against progress before compacting them
+in the activation checkpoint write. No additional history file, journal,
+digest, or migration is created.
+
 If an authoritative file changes outside the running app, printing fails
 closed with an execution synchronization error instead of overwriting the
 change. Reload the experiment, inspect or repair its authoritative bundle, and
@@ -263,8 +273,9 @@ relative comparison rule with acceptable noise. Its median duration was
 write p95 was 14.303 ms. The candidate remains an informational warning because
 one run's 287.122 ms maximum service gap exceeds the 250 ms warning budget.
 These values characterize only the recorded hosts and software identities.
-Growing resume/progress serialization and four durable writes per completion
-remain visible costs; this remediation does not batch or weaken them.
+The progress snapshot still grows with the execution and all four durable
+writes per completion remain visible costs; this remediation does not batch or
+weaken them.
 
 If Windows reports `WinError 5` while rapidly replacing an execution file,
 retain the failed diagnostics and retry once with a fresh ignored
