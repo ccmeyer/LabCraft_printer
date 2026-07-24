@@ -61,8 +61,10 @@ from ExecutionPlanRevision import (
 from AuthoritativeExecutionLoad import (
     build_execution_runtime_spec,
     inspect_authoritative_execution,
+    reconcile_authoritative_execution_runtime,
 )
 from ExecutionResumeStore import (
+    ExecutionResumeDocument,
     add_pending_intent,
     attach_command_sequence,
     complete_intent,
@@ -101,6 +103,26 @@ from RegulatorProfiles import (
 
 from LocalConfig import get_calibration_memory_root, get_machine_config_path
 from hardware.profile import CURRENT_PROFILE, HardwareProfile
+
+
+@dataclass(frozen=True)
+class _AuthoritativeFileIdentity:
+    path: str
+    exists: bool
+    device: int | None
+    inode: int | None
+    size: int | None
+    modified_ns: int | None
+    changed_ns: int | None
+
+
+@dataclass
+class _ActiveAuthoritativeExecutionSession:
+    bundle: Any
+    resume: ExecutionResumeDocument
+    progress_payload: dict[str, Any]
+    file_identities: dict[str, _AuthoritativeFileIdentity]
+    revision_names: tuple[str, ...]
 
 
 def _format_stock_display_sig_figs(value, sig_figs: int = 3) -> str:
@@ -483,6 +505,7 @@ class ExperimentModel(QObject):
         self._execution_plan_reload_read_only: bool = False
         self._authoritative_execution_bundle = None
         self._authoritative_runtime_active: bool = False
+        self._active_authoritative_execution_session = None
         self._progress_execution_reference: ProgressExecutionReference | None = None
 
         # optional dependency (if you have one); safe to ignore if None
@@ -7009,6 +7032,7 @@ class ExperimentModel(QObject):
         self._execution_plan_reload_read_only = False
         self._authoritative_execution_bundle = None
         self._authoritative_runtime_active = False
+        self._active_authoritative_execution_session = None
         self._progress_execution_reference = None
         self.progress_data = {}
         
@@ -7095,6 +7119,7 @@ class ExperimentModel(QObject):
         self._execution_plan_reload_read_only = False
         self._authoritative_execution_bundle = None
         self._authoritative_runtime_active = False
+        self._active_authoritative_execution_session = None
         self._progress_execution_reference = None
 
     def is_read_only_legacy_execution(self) -> bool:
@@ -7168,9 +7193,175 @@ class ExperimentModel(QObject):
             )
         )
 
+    @staticmethod
+    def _authoritative_file_identity(path: str | os.PathLike[str]) -> _AuthoritativeFileIdentity:
+        resolved = Path(path).resolve()
+        try:
+            stat_result = resolved.stat()
+        except FileNotFoundError:
+            return _AuthoritativeFileIdentity(
+                path=str(resolved),
+                exists=False,
+                device=None,
+                inode=None,
+                size=None,
+                modified_ns=None,
+                changed_ns=None,
+            )
+        return _AuthoritativeFileIdentity(
+            path=str(resolved),
+            exists=True,
+            device=int(getattr(stat_result, "st_dev", 0)),
+            inode=int(getattr(stat_result, "st_ino", 0)),
+            size=int(stat_result.st_size),
+            modified_ns=int(
+                getattr(stat_result, "st_mtime_ns", int(stat_result.st_mtime * 1_000_000_000))
+            ),
+            changed_ns=int(
+                getattr(stat_result, "st_ctime_ns", int(stat_result.st_ctime * 1_000_000_000))
+            ),
+        )
+
+    def _capture_authoritative_runtime_files(
+        self,
+    ) -> tuple[dict[str, _AuthoritativeFileIdentity], tuple[str, ...]]:
+        if not self.experiment_dir_path:
+            raise RuntimeError("The authoritative execution directory is unavailable.")
+        fixed_paths = {
+            "experiment_design.json": self.experiment_file_path,
+            "execution_plan.json": self.execution_plan_file_path,
+            "progress.json": self.progress_file_path,
+            "execution_resume.json": self.execution_resume_file_path,
+            "execution_calibrations.json": self.execution_calibrations_file_path,
+            MANIFEST_FILE_NAME: self.legacy_migration_file_path,
+        }
+        if any(path is None for path in fixed_paths.values()):
+            raise RuntimeError("The authoritative execution paths are unavailable.")
+        identities = {
+            name: self._authoritative_file_identity(path)
+            for name, path in fixed_paths.items()
+        }
+        revision_directory = Path(self.execution_plan_revisions_dir_path or "")
+        revision_paths = (
+            tuple(sorted(revision_directory.glob("revision_*.json")))
+            if revision_directory.is_dir()
+            else ()
+        )
+        revision_names = tuple(path.name for path in revision_paths)
+        for path in revision_paths:
+            identities[f"{REVISION_DIRECTORY_NAME}/{path.name}"] = (
+                self._authoritative_file_identity(path)
+            )
+        return identities, revision_names
+
+    def _invalidate_authoritative_runtime_session(self) -> None:
+        self._active_authoritative_execution_session = None
+
+    def _start_authoritative_runtime_session(self, bundle) -> None:
+        if not bundle.valid or bundle.resume is None:
+            raise RuntimeError("A valid execution checkpoint is required for runtime activation.")
+        identities, revision_names = self._capture_authoritative_runtime_files()
+        self._active_authoritative_execution_session = (
+            _ActiveAuthoritativeExecutionSession(
+                bundle=bundle,
+                resume=bundle.resume,
+                progress_payload=dict(bundle.progress_payload),
+                file_identities=identities,
+                revision_names=revision_names,
+            )
+        )
+
+    def _authoritative_runtime_conflict(self, detail: str) -> RuntimeError:
+        message = (
+            "Authoritative execution files changed outside the active runtime "
+            f"({detail}). Reload and explicitly reactivate the execution before printing."
+        )
+        self._invalidate_authoritative_runtime_session()
+        self.set_execution_plan_sync_error(message)
+        return RuntimeError(message)
+
+    def _guard_authoritative_runtime_session(self) -> _ActiveAuthoritativeExecutionSession:
+        session = getattr(self, "_active_authoritative_execution_session", None)
+        if session is None:
+            raise RuntimeError("The active authoritative execution checkpoint is unavailable.")
+        identities, revision_names = self._capture_authoritative_runtime_files()
+        if revision_names != session.revision_names:
+            raise self._authoritative_runtime_conflict(
+                "immutable execution revision history changed"
+            )
+        changed = [
+            name
+            for name, expected in session.file_identities.items()
+            if identities.get(name) != expected
+        ]
+        if changed:
+            raise self._authoritative_runtime_conflict(
+                f"{', '.join(sorted(changed))} changed"
+            )
+        return session
+
+    def _accept_authoritative_runtime_write(self, changed_name: str) -> None:
+        session = getattr(self, "_active_authoritative_execution_session", None)
+        if session is None:
+            raise RuntimeError("The active authoritative execution checkpoint is unavailable.")
+        identities, revision_names = self._capture_authoritative_runtime_files()
+        if revision_names != session.revision_names:
+            raise self._authoritative_runtime_conflict(
+                "immutable execution revision history changed during a durable write"
+            )
+        unexpected = [
+            name
+            for name, expected in session.file_identities.items()
+            if name != changed_name and identities.get(name) != expected
+        ]
+        if unexpected:
+            raise self._authoritative_runtime_conflict(
+                f"{', '.join(sorted(unexpected))} changed during a durable write"
+            )
+        changed_identity = identities.get(changed_name)
+        if changed_identity is None or not changed_identity.exists:
+            raise self._authoritative_runtime_conflict(
+                f"{changed_name} is missing after a durable write"
+            )
+        session.file_identities = identities
+        session.revision_names = revision_names
+
+    def _reconcile_authoritative_runtime_session(self) -> None:
+        session = getattr(self, "_active_authoritative_execution_session", None)
+        if session is None:
+            raise RuntimeError("The active authoritative execution checkpoint is unavailable.")
+        try:
+            bundle = reconcile_authoritative_execution_runtime(
+                session.bundle,
+                progress_payload=session.progress_payload,
+                resume=session.resume,
+            )
+        except Exception as exc:
+            message = f"Could not reconcile the active execution checkpoint: {exc}"
+            self._invalidate_authoritative_runtime_session()
+            self.set_execution_plan_sync_error(message)
+            raise RuntimeError(message) from exc
+        session.bundle = bundle
+        self._authoritative_execution_bundle = bundle
+        self._execution_plan_snapshot = bundle.plan
+        self.progress_data = dict(bundle.progress_wells)
+        self.set_execution_plan_sync_error(None)
+
+    def _save_active_execution_resume(self, document: ExecutionResumeDocument) -> None:
+        session = self._guard_authoritative_runtime_session()
+        try:
+            save_execution_resume(self.execution_resume_file_path, document)
+            self._accept_authoritative_runtime_write("execution_resume.json")
+        except Exception as exc:
+            self.set_execution_plan_sync_error(exc)
+            raise
+        session.resume = document
+        self._reconcile_authoritative_runtime_session()
+
     def _refresh_authoritative_execution_bundle(self):
         if not self.experiment_dir_path or not self.experiment_file_path:
             raise RuntimeError("The authoritative execution paths are unavailable.")
+        self._invalidate_authoritative_runtime_session()
         with open(self.experiment_file_path, "r", encoding="utf-8") as handle:
             design_payload = json.load(handle)
         bundle = inspect_authoritative_execution(self.experiment_dir_path, design_payload)
@@ -7213,7 +7404,9 @@ class ExperimentModel(QObject):
         except Exception as exc:
             self.set_execution_plan_sync_error(exc)
             raise RuntimeError(f"Could not synchronize the execution checkpoint: {exc}") from exc
-        return self._refresh_authoritative_execution_bundle().resume
+        bundle = self._refresh_authoritative_execution_bundle()
+        self._start_authoritative_runtime_session(bundle)
+        return bundle.resume
 
     def begin_execution_print_intent(
         self,
@@ -7225,11 +7418,9 @@ class ExperimentModel(QObject):
     ) -> str | None:
         if not self.uses_durable_execution_checkpoint():
             return None
-        bundle = self._refresh_authoritative_execution_bundle()
-        document = bundle.resume
-        if document is None:
-            raise RuntimeError("The execution checkpoint has not been activated.")
-        progress_well = bundle.progress_wells.get(well_id)
+        session = self._guard_authoritative_runtime_session()
+        document = session.resume
+        progress_well = self.progress_data.get(well_id)
         if not isinstance(progress_well, dict):
             raise RuntimeError(f"Unknown authoritative well {well_id!r}.")
         details = (progress_well.get("reagents") or {}).get(stock_id)
@@ -7246,39 +7437,26 @@ class ExperimentModel(QObject):
             commanded_droplets=int(commanded_droplets),
             printer_head_id=printer_head_id,
         )
-        try:
-            save_execution_resume(self.execution_resume_file_path, updated)
-        except Exception as exc:
-            self.set_execution_plan_sync_error(exc)
-            raise
+        self._save_active_execution_resume(updated)
         return intent.intent_id
 
     def attach_execution_print_command(self, intent_id: str | None, command_seq32: int) -> None:
         if intent_id is None:
             return
-        document = load_execution_resume(self.execution_resume_file_path)
+        document = self._guard_authoritative_runtime_session().resume
         updated = attach_command_sequence(document, intent_id, command_seq32)
-        try:
-            save_execution_resume(self.execution_resume_file_path, updated)
-        except Exception as exc:
-            self.set_execution_plan_sync_error(exc)
-            raise
+        self._save_active_execution_resume(updated)
 
     def complete_execution_print_intent(self, intent_id: str | None) -> None:
         if intent_id is None:
             return
-        document = load_execution_resume(self.execution_resume_file_path)
+        document = self._guard_authoritative_runtime_session().resume
         updated = complete_intent(
             document,
             intent_id,
             progress_wells=self.progress_data,
         )
-        try:
-            save_execution_resume(self.execution_resume_file_path, updated)
-        except Exception as exc:
-            self.set_execution_plan_sync_error(exc)
-            raise
-        self._refresh_authoritative_execution_bundle()
+        self._save_active_execution_resume(updated)
 
     def discard_execution_print_intents(self, intent_ids) -> None:
         """Persist removal of commands excluded by a confirmed firmware queue clear."""
@@ -7287,18 +7465,13 @@ class ExperimentModel(QObject):
             return
         if not self.execution_resume_file_path:
             raise RuntimeError("The execution-resume path is unavailable.")
-        document = load_execution_resume(self.execution_resume_file_path)
+        document = self._guard_authoritative_runtime_session().resume
         updated = discard_pending_intents(
             document,
             intent_ids,
             progress_wells=self.progress_data,
         )
-        try:
-            save_execution_resume(self.execution_resume_file_path, updated)
-        except Exception as exc:
-            self.set_execution_plan_sync_error(exc)
-            raise
-        self._refresh_authoritative_execution_bundle()
+        self._save_active_execution_resume(updated)
 
     def synchronize_execution_resume_revision(self, plan) -> None:
         if not self.execution_resume_file_path or not os.path.isfile(self.execution_resume_file_path):
@@ -7315,7 +7488,12 @@ class ExperimentModel(QObject):
         if not self.uses_durable_execution_checkpoint():
             return {"ok": True, "code": "not_authoritative"}
         try:
-            bundle = self._refresh_authoritative_execution_bundle()
+            session = getattr(self, "_active_authoritative_execution_session", None)
+            bundle = (
+                self._guard_authoritative_runtime_session().bundle
+                if session is not None
+                else self._refresh_authoritative_execution_bundle()
+            )
             eligibility = bundle.eligibility
             if not (
                 eligibility.can_start_hardware or eligibility.can_resume_hardware
@@ -7506,6 +7684,7 @@ class ExperimentModel(QObject):
     def _commit_plan_revision(self, previous_plan, candidate_plan) -> str:
         if not self.execution_plan_file_path or not self.execution_plan_revisions_dir_path:
             raise RuntimeError("Execution-plan persistence paths are unavailable.")
+        self._invalidate_authoritative_runtime_session()
         persist_immutable_revision(self.execution_plan_revisions_dir_path, previous_plan)
         status = persist_immutable_revision(
             self.execution_plan_revisions_dir_path, candidate_plan
@@ -8558,7 +8737,13 @@ class ExperimentModel(QObject):
         if execution_reference is not None:
             payload["__execution__"] = execution_reference.to_dict()
             self._progress_execution_reference = execution_reference
+        session = getattr(self, "_active_authoritative_execution_session", None)
+        if session is not None:
+            self._guard_authoritative_runtime_session()
         self._atomic_json_dump(self.progress_file_path, payload)
+        if session is not None:
+            self._accept_authoritative_runtime_write("progress.json")
+            session.progress_payload = dict(payload)
 
     def progress_to_key(self) -> "pd.DataFrame":
         """
@@ -9974,6 +10159,7 @@ class ExperimentModel(QObject):
         self._execution_plan_reload_read_only = False
         self._authoritative_execution_bundle = None
         self._authoritative_runtime_active = False
+        self._active_authoritative_execution_session = None
         self._progress_execution_reference = None
 
         # clear any uploaded/manual reaction list state

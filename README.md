@@ -231,6 +231,28 @@ loads, reagent changes, clears, plate changes, unknown well IDs, and explicit
 change only UI work; machine status processing, execution persistence, and
 completion ordering remain unchanged.
 
+Active authoritative executions retain their last validated immutable bundle
+and resume document in memory. Before every runtime persistence write, the app
+checks the expected identities of the design, plan, progress, resume,
+calibration/migration files, and immutable revision history. This removes
+repeated per-well JSON reload and history-validation work without changing the
+durability contract: each well still performs three atomic, fsynced resume
+writes and one atomic, fsynced progress write in the original order.
+
+If an authoritative file changes outside the running app, printing fails
+closed with an execution synchronization error instead of overwriting the
+change. Reload the experiment, inspect or repair its authoritative bundle, and
+explicitly reactivate it before continuing. Ordinary save failures leave the
+last coherent in-memory document available for an unambiguous retry.
+
+Real-UI reports expose this evidence beneath
+`metrics.persistence.values.authoritative_io`: hot-path read counts, resume
+disk loads, full-bundle refreshes, guard/reconciliation counts, and phase-bound
+fsync/replace counts. The 96-well scenario requires zero hot-path reads while
+retaining 288 resume and 96 progress durable operations. These fields are
+diagnostic additions; comparison policy v1 and existing baseline metric paths
+are unchanged.
+
 If Windows reports `WinError 5` while rapidly replacing an execution file,
 retain the failed diagnostics and retry once with a fresh ignored
 repository-local output root, for example:

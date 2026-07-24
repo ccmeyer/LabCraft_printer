@@ -42,6 +42,7 @@ from tools.virtual_workflows.metrics import (  # noqa: E402
     ProcessResourceSampler,
     QtEventLoopProbe,
 )
+from tools.virtual_workflows.persistence_io import PersistenceIoObserver  # noqa: E402
 from tools.virtual_workflows.report import (  # noqa: E402
     REPORT_SCHEMA_NAME,
     REPORT_SCHEMA_VERSION,
@@ -369,11 +370,13 @@ class _InstanceInstrumentation:
         inject_ms: int,
         inject_after_completion: int,
         completed_count: Callable[[], int],
+        io_observer: PersistenceIoObserver | None = None,
     ):
         self.phases = phases
         self.inject_ms = int(inject_ms)
         self.inject_after_completion = int(inject_after_completion)
         self.completed_count = completed_count
+        self.io_observer = io_observer or PersistenceIoObserver()
         self.injected = False
         self._originals: list[tuple[Any, str, Any]] = []
         self._connected_slots: list[tuple[Any, Any, str, Any, Any]] = []
@@ -389,7 +392,7 @@ class _InstanceInstrumentation:
         original = getattr(obj, method_name)
 
         def measured(*args, **kwargs):
-            with self.phases.phase(phase_name):
+            with self.phases.phase(phase_name), self.io_observer.phase(phase_name):
                 result = original(*args, **kwargs)
             if after is not None:
                 after()
@@ -410,7 +413,7 @@ class _InstanceInstrumentation:
         original = getattr(obj, method_name)
 
         def measured(*args, **kwargs):
-            with self.phases.phase(phase_name):
+            with self.phases.phase(phase_name), self.io_observer.phase(phase_name):
                 return original(*args, **kwargs)
 
         try:
@@ -480,18 +483,27 @@ def _install_instrumentation(
     inject_ms: int,
     inject_after_completion: int,
     completed_count: Callable[[], int],
+    io_observer: PersistenceIoObserver,
 ) -> _InstanceInstrumentation:
     instrumentation = _InstanceInstrumentation(
         phases,
         inject_ms=inject_ms,
         inject_after_completion=inject_after_completion,
         completed_count=completed_count,
+        io_observer=io_observer,
     )
     for method, phase in (
         ("begin_execution_print_intent", "persistence.begin_intent"),
         ("attach_execution_print_command", "persistence.attach_sequence"),
         ("create_progress_file", "persistence.write_progress"),
         ("complete_execution_print_intent", "persistence.complete_intent"),
+    ):
+        instrumentation.wrap(experiment_model, method, phase)
+    for method, phase in (
+        ("_guard_authoritative_runtime_session", "persistence.guard_bundle"),
+        ("_save_active_execution_resume", "persistence.save_resume"),
+        ("_reconcile_authoritative_runtime_session", "persistence.reconcile_cache"),
+        ("_refresh_authoritative_execution_bundle", "persistence.full_bundle_refresh"),
     ):
         instrumentation.wrap(experiment_model, method, phase)
     instrumentation.wrap(
@@ -681,6 +693,16 @@ def _summary_text(report: dict[str, Any]) -> str:
         f"Queue starvation events: {queue.get('unexpected_starvation_count', 0)}",
         f"Execution intents: {persistence.get('intent_count', 0)}",
         (
+            "Authoritative hot-path reads / resume loads: "
+            f"{persistence.get('authoritative_io', {}).get('hot_path_read_count', 0)} / "
+            f"{persistence.get('authoritative_io', {}).get('execution_resume_hot_path_disk_load_count', 0)}"
+        ),
+        (
+            "Resume/progress fsync counts: "
+            f"{persistence.get('authoritative_io', {}).get('resume_save_fsync_count', 0)} / "
+            f"{persistence.get('authoritative_io', {}).get('progress_write_fsync_count', 0)}"
+        ),
+        (
             "Injected stall: "
             f"{responsiveness.get('injected_stall_assessment', {}).get('decision', 'not_requested')}"
         ),
@@ -803,6 +825,7 @@ def run_virtual_print_array_scenario(
     )
     components = None
     instrumentation = None
+    io_observer = None
     dialog_timer = None
     paint_filter = None
     app = None
@@ -1062,7 +1085,10 @@ def run_virtual_print_array_scenario(
             inject_ms=config.inject_ui_stall_ms,
             inject_after_completion=config.inject_after_completion,
             completed_count=completed_count,
+            io_observer=PersistenceIoObserver(fixture_info["experiment_dir"]),
         )
+        io_observer = instrumentation.io_observer
+        io_observer.install()
 
         if config.visible:
             view.show()
@@ -1199,6 +1225,8 @@ def run_virtual_print_array_scenario(
                 pass
         if instrumentation is not None:
             instrumentation.restore()
+        if io_observer is not None:
+            io_observer.restore()
         if probe_started:
             try:
                 probe.stop()
@@ -1257,6 +1285,86 @@ def run_virtual_print_array_scenario(
     duration_ms = (ended_ns - started_ns) / 1_000_000.0
     probe_snapshot = probe.snapshot()
     resource_snapshot = resources.snapshot()
+    durable_io_snapshot = io_observer.snapshot() if io_observer is not None else {}
+    authoritative_read_snapshot = (
+        io_observer.read_snapshot()
+        if io_observer is not None
+        else {
+            "by_phase": {},
+            "by_path": {},
+            "total_count": 0,
+            "observer_restored": True,
+        }
+    )
+    hot_persistence_phases = {
+        "persistence.begin_intent",
+        "persistence.attach_sequence",
+        "persistence.write_progress",
+        "persistence.complete_intent",
+        "persistence.guard_bundle",
+        "persistence.save_resume",
+        "persistence.reconcile_cache",
+    }
+    hot_path_read_count = sum(
+        int(values.get("count", 0))
+        for phase, paths in authoritative_read_snapshot.get("by_phase", {}).items()
+        if phase in hot_persistence_phases
+        for values in paths.values()
+    )
+    resume_disk_load_count = sum(
+        int(values.get("count", 0))
+        for phase, paths in authoritative_read_snapshot.get("by_phase", {}).items()
+        if phase in hot_persistence_phases
+        for path, values in paths.items()
+        if path == "execution_resume.json"
+    )
+    phase_duration_values = (
+        probe_snapshot.get("phase_timings", {}).get("duration_by_name_ms", {})
+    )
+
+    def durable_count(operation: str, phase: str) -> int:
+        return len(durable_io_snapshot.get(operation, {}).get(phase, []))
+
+    authoritative_io = {
+        "read_opens": authoritative_read_snapshot,
+        "hot_path_read_count": hot_path_read_count,
+        "execution_resume_hot_path_disk_load_count": resume_disk_load_count,
+        "full_bundle_refresh_count": int(
+            phase_duration_values.get(
+                "persistence.full_bundle_refresh",
+                {},
+            ).get("count", 0)
+        ),
+        "guard_count": int(
+            phase_duration_values.get("persistence.guard_bundle", {}).get("count", 0)
+        ),
+        "cache_reconciliation_count": int(
+            phase_duration_values.get(
+                "persistence.reconcile_cache",
+                {},
+            ).get("count", 0)
+        ),
+        "resume_save_fsync_count": durable_count(
+            "fsync",
+            "persistence.save_resume",
+        ),
+        "resume_save_replace_count": durable_count(
+            "atomic_replace",
+            "persistence.save_resume",
+        ),
+        "progress_write_fsync_count": durable_count(
+            "fsync",
+            "persistence.write_progress",
+        ),
+        "progress_write_replace_count": durable_count(
+            "atomic_replace",
+            "persistence.write_progress",
+        ),
+        "durable_io_samples_ms": durable_io_snapshot,
+        "observer_restored": bool(
+            authoritative_read_snapshot.get("observer_restored")
+        ),
+    }
     completed_updates = [
         well for well in well_updates if well in set(expected_wells)
     ]
@@ -1329,6 +1437,20 @@ def run_virtual_print_array_scenario(
         failure_text = "pressure updates occurred without a pressure render"
     if failure_text is None and pressure_timer_active_after_teardown:
         failure_text = "pressure render timer remained active after teardown"
+    expected_completions = len(expected_wells)
+    if failure_text is None and (
+        authoritative_io["hot_path_read_count"] != 0
+        or authoritative_io["execution_resume_hot_path_disk_load_count"] != 0
+        or authoritative_io["resume_save_fsync_count"] != expected_completions * 3
+        or authoritative_io["resume_save_replace_count"] != expected_completions * 3
+        or authoritative_io["progress_write_fsync_count"] != expected_completions
+        or authoritative_io["progress_write_replace_count"] != expected_completions
+        or not authoritative_io["observer_restored"]
+    ):
+        failure_text = (
+            "authoritative persistence I/O evidence violated the cached-runtime "
+            f"contract: {authoritative_io}"
+        )
 
     status = "fail" if failure_text else "pass"
     reasons = (
@@ -1469,6 +1591,7 @@ def run_virtual_print_array_scenario(
                 "values": {
                     **validation,
                     "phase_timings": phases.snapshot(),
+                    "authoritative_io": authoritative_io,
                 },
             },
             "resources": resource_snapshot,

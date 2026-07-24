@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -368,6 +368,29 @@ def inspect_authoritative_execution(
         eligibility=eligibility,
         issues=tuple(issues),
         migration_manifest=migration_manifest,
+    )
+
+
+def reconcile_authoritative_execution_runtime(
+    bundle: AuthoritativeExecutionBundle,
+    *,
+    progress_payload: Mapping[str, Any],
+    resume: ExecutionResumeDocument,
+) -> AuthoritativeExecutionBundle:
+    """Revalidate mutable runtime state without rereading immutable bundle files."""
+    if not bundle.valid or bundle.plan is None:
+        raise ValueError("A valid authoritative execution bundle is required.")
+    if bundle.migration_manifest is not None:
+        raise ValueError("Migrated legacy executions cannot activate a mutable runtime.")
+    progress_wells = _validate_progress(bundle.plan, progress_payload)
+    _validate_resume_contents(bundle.plan, progress_wells, resume)
+    eligibility = _eligibility(bundle.plan, progress_wells, resume)
+    return replace(
+        bundle,
+        progress_payload=dict(progress_payload),
+        progress_wells=progress_wells,
+        resume=resume,
+        eligibility=eligibility,
     )
 
 

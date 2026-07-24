@@ -92,6 +92,14 @@ def test_real_ui_print_array_completes_and_writes_inspectable_report(qapp, tmp_p
     assert report["metrics"]["queue"]["values"]["unexpected_starvation_count"] == 0
     assert report["metrics"]["persistence"]["values"]["intent_count"] == 96
     assert report["metrics"]["persistence"]["values"]["terminal_plan_state"] == "completed"
+    authoritative_io = report["metrics"]["persistence"]["values"]["authoritative_io"]
+    assert authoritative_io["hot_path_read_count"] == 0
+    assert authoritative_io["execution_resume_hot_path_disk_load_count"] == 0
+    assert authoritative_io["resume_save_fsync_count"] == 96 * 3
+    assert authoritative_io["resume_save_replace_count"] == 96 * 3
+    assert authoritative_io["progress_write_fsync_count"] == 96
+    assert authoritative_io["progress_write_replace_count"] == 96
+    assert authoritative_io["observer_restored"] is True
 
     phases = report["metrics"]["persistence"]["values"]["phase_timings"][
         "duration_by_name_ms"
@@ -105,6 +113,9 @@ def test_real_ui_print_array_completes_and_writes_inspectable_report(qapp, tmp_p
         "ui.well_plate_update",
     ):
         assert phases[phase]["count"] == 96
+    assert phases["persistence.guard_bundle"]["count"] == 96 * 7
+    assert phases["persistence.save_resume"]["count"] == 96 * 3
+    assert phases["persistence.reconcile_cache"]["count"] == 96 * 3
     pressure_render = phases["ui.pressure_render"]
     assert pressure_render["count"] > 0
     assert pressure_render["maximum"] >= pressure_render["p95"] >= 0

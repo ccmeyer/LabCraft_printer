@@ -51,6 +51,7 @@ from tools.virtual_workflows.report import (
     write_report_atomic,
 )
 from tools.virtual_workflows.metrics import linear_slope, summarize_samples
+from tools.virtual_workflows.persistence_io import PersistenceIoObserver
 
 
 SCENARIO_NAME = "execution_persistence"
@@ -74,80 +75,6 @@ PHASE_NAMES = (
 
 class WorkloadInvariantError(RuntimeError):
     """Raised when a completed workload violates durable execution invariants."""
-
-
-class PersistenceIoObserver:
-    """Time real durable I/O calls while preserving their original behavior."""
-
-    def __init__(self) -> None:
-        self._active_phase: str | None = None
-        self._installed = False
-        self._samples_ms: dict[str, dict[str, list[float]]] = {
-            "fsync": {},
-            "atomic_replace": {},
-        }
-
-    @contextlib.contextmanager
-    def phase(self, name: str):
-        previous = self._active_phase
-        self._active_phase = str(name)
-        try:
-            yield
-        finally:
-            self._active_phase = previous
-
-    def _record(self, operation: str, elapsed_ms: float) -> None:
-        if self._active_phase is None:
-            return
-        self._samples_ms[operation].setdefault(self._active_phase, []).append(
-            float(elapsed_ms)
-        )
-
-    @contextlib.contextmanager
-    def installed(self):
-        if self._installed:
-            raise RuntimeError("persistence I/O observer is already installed")
-        original_fsync = os.fsync
-        original_replace = os.replace
-
-        def observed_fsync(fd):
-            started = time.perf_counter_ns()
-            try:
-                return original_fsync(fd)
-            finally:
-                self._record(
-                    "fsync",
-                    (time.perf_counter_ns() - started) / 1_000_000.0,
-                )
-
-        def observed_replace(source, destination):
-            started = time.perf_counter_ns()
-            try:
-                return original_replace(source, destination)
-            finally:
-                self._record(
-                    "atomic_replace",
-                    (time.perf_counter_ns() - started) / 1_000_000.0,
-                )
-
-        self._installed = True
-        os.fsync = observed_fsync
-        os.replace = observed_replace
-        try:
-            yield self
-        finally:
-            os.fsync = original_fsync
-            os.replace = original_replace
-            self._installed = False
-
-    def snapshot(self) -> dict[str, dict[str, list[float]]]:
-        return {
-            operation: {
-                phase: list(values)
-                for phase, values in sorted(by_phase.items())
-            }
-            for operation, by_phase in self._samples_ms.items()
-        }
 
 
 @dataclass(frozen=True)
@@ -499,7 +426,7 @@ def _execute_workload(
     file_size_samples = {
         name: [size] for name, size in initial_sizes.items()
     }
-    io_observer = PersistenceIoObserver()
+    io_observer = PersistenceIoObserver(experiment_dir)
     sequence = 1
     completion_index = 0
 
@@ -594,6 +521,7 @@ def _execute_workload(
         "quartile_growth": _quartile_growth(samples["well_total"]),
         "file_size_samples_bytes": file_size_samples,
         "durable_io_samples_ms": io_observer.snapshot(),
+        "authoritative_read_opens": io_observer.read_snapshot(),
         "validation": validation,
     }
 
@@ -685,6 +613,40 @@ def _aggregate_durable_io(
             },
         }
     return aggregate
+
+
+def _aggregate_authoritative_reads(
+    measured: list[dict[str, Any]],
+) -> dict[str, Any]:
+    by_path: dict[str, dict[str, int]] = {}
+    by_run = []
+    for run in measured:
+        snapshot = run.get("authoritative_read_opens", {})
+        by_run.append(
+            {
+                "run_index": run.get("run_index"),
+                "total_count": int(snapshot.get("total_count", 0)),
+                "observer_restored": bool(snapshot.get("observer_restored")),
+                "by_path": dict(snapshot.get("by_path", {})),
+            }
+        )
+        for path, values in snapshot.get("by_path", {}).items():
+            aggregate = by_path.setdefault(
+                path,
+                {"count": 0, "observed_file_size_bytes": 0},
+            )
+            aggregate["count"] += int(values.get("count", 0))
+            aggregate["observed_file_size_bytes"] += int(
+                values.get("observed_file_size_bytes", 0)
+            )
+    return {
+        "by_path": dict(sorted(by_path.items())),
+        "total_count": sum(item["count"] for item in by_path.values()),
+        "all_observers_restored": all(
+            row["observer_restored"] for row in by_run
+        ),
+        "runs": by_run,
+    }
 
 
 def _aggregate_metrics(
@@ -791,6 +753,7 @@ def _aggregate_metrics(
                 },
                 "file_growth": _aggregate_file_growth(measured),
                 "durable_io_statistics_ms": _aggregate_durable_io(measured),
+                "authoritative_read_opens": _aggregate_authoritative_reads(measured),
                 "runs": measured,
             },
         },
@@ -919,6 +882,12 @@ def _write_summary(path: Path, report: dict[str, Any]) -> None:
             "Durable fsync / atomic replace calls: "
             f"{durable_io.get('fsync', {}).get('overall', {}).get('count', 0)} / "
             f"{durable_io.get('atomic_replace', {}).get('overall', {}).get('count', 0)}"
+        )
+        reads = persistence.get("authoritative_read_opens", {})
+        lines.append(
+            "Authoritative hot-path read opens: "
+            f"{reads.get('total_count', 0)}; "
+            f"observers restored: {reads.get('all_observers_restored', False)}"
         )
         for name, values in persistence.get("file_growth", {}).items():
             growth_bytes = values.get("growth_bytes", {})

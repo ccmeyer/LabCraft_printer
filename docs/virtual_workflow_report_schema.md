@@ -248,6 +248,30 @@ and teardown state. `metrics.persistence.values` contains the validated clean
 intent count and command sequences, terminal plan state/revision, authoritative
 bundle checks, durable file sizes, and named phase distributions.
 
+`metrics.persistence.values.authoritative_io` adds compatible diagnostic
+evidence for the guarded active-runtime checkpoint:
+
+- `hot_path_read_count` and
+  `execution_resume_hot_path_disk_load_count`;
+- `full_bundle_refresh_count`, `guard_count`, and
+  `cache_reconciliation_count`;
+- resume and progress `fsync`/atomic-replace counts;
+- real durable-operation timing samples by named phase;
+- root-filtered read-open counts by phase and authoritative relative path; and
+- `observer_restored`, which must be true after success or failure.
+
+For a successful 96-well run, hot-path reads and resume loads are zero, resume
+fsync/replace counts are 288, and progress fsync/replace counts are 96. Full
+bundle inspection remains permitted at activation, explicit repair/reload, and
+terminal lifecycle validation; it is not performed inside per-well intent
+completion. The observer calls the real file, `fsync`, and replace operations
+and is restored in `finally`.
+
+Slice 2 persistence reports similarly expose aggregated
+`authoritative_read_opens`. Read counts cover only the measured lifecycle;
+final invariant inspection remains outside that observer. Existing report
+envelopes and comparison policy paths are unchanged.
+
 The scenario writes `report.json`, `summary.txt`, `events.jsonl`,
 `stall_stacks.txt`, retained scenario data, and ready/printing/mid/completed
 screenshots. A failing run additionally writes `failure_traceback.txt` and a

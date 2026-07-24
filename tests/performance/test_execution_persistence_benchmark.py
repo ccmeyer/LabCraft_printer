@@ -1,6 +1,9 @@
 import json
+import builtins
+import io
 import os
 import time
+from pathlib import Path
 
 import pytest
 
@@ -71,11 +74,15 @@ def test_reduced_workloads_capture_real_durable_io_and_file_growth(
     spec = _spec(stocks=stock_count)
     original_fsync = os.fsync
     original_replace = os.replace
+    original_builtin_open = builtins.open
+    original_io_open = io.open
 
     result = benchmark._execute_workload(spec, tmp_path / f"experiment-{stock_count}")
 
     assert os.fsync is original_fsync
     assert os.replace is original_replace
+    assert builtins.open is original_builtin_open
+    assert io.open is original_io_open
     assert result["validation"]["checkpoint_state"] == "clean"
     assert result["validation"]["intent_count"] == spec.completion_count
     assert result["validation"]["authoritative_bundle_valid"] is True
@@ -100,12 +107,20 @@ def test_reduced_workloads_capture_real_durable_io_and_file_growth(
             "complete_intent",
             "write_progress",
         }
+    assert result["authoritative_read_opens"] == {
+        "by_phase": {},
+        "by_path": {},
+        "total_count": 0,
+        "observer_restored": True,
+    }
 
 
 def test_io_observer_restores_original_functions_after_failure():
     observer = benchmark.PersistenceIoObserver()
     original_fsync = os.fsync
     original_replace = os.replace
+    original_builtin_open = builtins.open
+    original_io_open = io.open
 
     with pytest.raises(RuntimeError, match="injected observer failure"):
         with observer.installed():
@@ -113,6 +128,30 @@ def test_io_observer_restores_original_functions_after_failure():
 
     assert os.fsync is original_fsync
     assert os.replace is original_replace
+    assert builtins.open is original_builtin_open
+    assert io.open is original_io_open
+
+
+def test_io_observer_attributes_real_reads_within_selected_root(tmp_path):
+    observed_path = tmp_path / "execution_resume.json"
+    observed_path.write_text('{"ok": true}\n', encoding="utf-8")
+    outside_path = Path(__file__)
+    observer = benchmark.PersistenceIoObserver(tmp_path)
+
+    with observer.installed(), observer.phase("checkpoint_read"):
+        assert json.loads(observed_path.read_text(encoding="utf-8")) == {"ok": True}
+        outside_path.read_text(encoding="utf-8")
+
+    snapshot = observer.read_snapshot()
+    assert snapshot["total_count"] == 1
+    assert snapshot["by_path"] == {
+        "execution_resume.json": {
+            "count": 1,
+            "observed_file_size_bytes": observed_path.stat().st_size,
+        }
+    }
+    assert snapshot["by_phase"]["checkpoint_read"] == snapshot["by_path"]
+    assert snapshot["observer_restored"] is True
 
 
 def test_quartile_growth_is_computed_within_each_run():
@@ -177,4 +216,3 @@ def test_last_quartile_delay_produces_warning_without_failure(tmp_path):
     assert assessment["candidate_regression"] is True
     assert assessment["observed_median_ratio"] > 1.25
     assert assessment["observed_median_delta_ms"] > 10.0
-
