@@ -260,12 +260,13 @@ evidence for the guarded active-runtime checkpoint:
 - root-filtered read-open counts by phase and authoritative relative path; and
 - `observer_restored`, which must be true after success or failure.
 
-For a successful 96-well run, hot-path reads and resume loads are zero, resume
-fsync/replace counts are 288, and progress fsync/replace counts are 96. Full
-bundle inspection remains permitted at activation, explicit repair/reload, and
-terminal lifecycle validation; it is not performed inside per-well intent
-completion. The observer calls the real file, `fsync`, and replace operations
-and is restored in `finally`.
+For a successful 96-well run, hot-path reads and resume loads are zero,
+`guard_count` is 384 (one pre-write identity guard per durable operation),
+resume fsync/replace counts are 288, and progress fsync/replace counts are 96.
+Full bundle inspection remains permitted at activation, explicit
+repair/reload, and terminal lifecycle validation; it is not performed inside
+per-well intent completion. The observer calls the real file, `fsync`, and
+replace operations and is restored in `finally`.
 
 Slice 2 persistence reports similarly expose aggregated
 `authoritative_read_opens`. Read counts cover only the measured lifecycle;

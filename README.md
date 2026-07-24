@@ -249,9 +249,22 @@ Real-UI reports expose this evidence beneath
 `metrics.persistence.values.authoritative_io`: hot-path read counts, resume
 disk loads, full-bundle refreshes, guard/reconciliation counts, and phase-bound
 fsync/replace counts. The 96-well scenario requires zero hot-path reads while
-retaining 288 resume and 96 progress durable operations. These fields are
+retaining 288 resume and 96 progress durable operations. It also requires 384
+identity guards: one immediately before each durable write. These fields are
 diagnostic additions; comparison policy v1 and existing baseline metric paths
 are unchanged.
+
+The reviewed `ea509c7` remediation evidence completed the accelerated Windows
+scenario in 6.185 seconds with zero hot-path reads, a 99.812 ms maximum
+event-loop gap, and unchanged durability counts. A clean fail-closed Pi 5 set
+of one warm-up plus five measured speed-1 runs passed every functional and
+relative comparison rule with acceptable noise. Its median duration was
+17.286 seconds, scheduling-lateness p95/p99 were 51.057/61.914 ms, and progress
+write p95 was 14.303 ms. The candidate remains an informational warning because
+one run's 287.122 ms maximum service gap exceeds the 250 ms warning budget.
+These values characterize only the recorded hosts and software identities.
+Growing resume/progress serialization and four durable writes per completion
+remain visible costs; this remediation does not batch or weaken them.
 
 If Windows reports `WinError 5` while rapidly replacing an execution file,
 retain the failed diagnostics and retry once with a fresh ignored
