@@ -528,7 +528,9 @@ def _execute_workload(
 
                 _, elapsed = timed_phase(
                     "write_progress",
-                    experiment.create_progress_file,
+                    lambda intent_id=intent_id: experiment.create_progress_file(
+                        execution_intent_id=intent_id,
+                    ),
                 )
                 samples["write_progress"].append(elapsed)
                 _, elapsed = timed_phase(
@@ -563,6 +565,21 @@ def _execute_workload(
             progress_replace,
         )
     )
+    expected = spec.completion_count
+    snapshot_counts = progress_snapshot["mode_counts"]
+    snapshot_durations = progress_snapshot["duration_samples_ms"]
+    if (
+        snapshot_counts.get("cached_update") != expected
+        or snapshot_counts.get("full_rebuild") != 0
+        or len(snapshot_durations.get("serialization", [])) != expected
+        or len(snapshot_durations.get("atomic_write", [])) != expected
+        or len(progress_snapshot["serialized_size_bytes"]) != expected
+        or len(progress_snapshot["non_durable_write_samples_ms"]) != expected
+        or not progress_snapshot.get("observer_restored")
+    ):
+        raise WorkloadInvariantError(
+            "progress snapshot evidence violated the cached-construction contract"
+        )
     validation = _validate_completed_workload(
         model,
         experiment_dir,

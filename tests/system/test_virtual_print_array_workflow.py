@@ -124,6 +124,16 @@ def test_real_ui_print_array_completes_and_writes_inspectable_report(qapp, tmp_p
     assert authoritative_io["progress_write_fsync_count"] == 96
     assert authoritative_io["progress_write_replace_count"] == 96
     assert authoritative_io["observer_restored"] is True
+    snapshot = report["metrics"]["persistence"]["values"]["progress_snapshot"]
+    assert snapshot["mode_counts"] == {
+        "full_rebuild": 0,
+        "cached_update": 96,
+    }
+    assert snapshot["duration_statistics_ms"]["serialization"]["count"] == 96
+    assert snapshot["duration_statistics_ms"]["atomic_write"]["count"] == 96
+    assert snapshot["serialized_size_statistics_bytes"]["count"] == 96
+    assert snapshot["non_durable_write_ms"]["count"] == 96
+    assert snapshot["observer_restored"] is True
 
     phases = report["metrics"]["persistence"]["values"]["phase_timings"][
         "duration_by_name_ms"

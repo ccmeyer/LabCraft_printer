@@ -294,6 +294,11 @@ non-durable-cost evidence. Its observer is instance-local and does not replace
 or nest a second durable-I/O phase, so `authoritative_io` remains the source
 for real `fsync` and atomic-replace attribution.
 
+During a successful 96-well authoritative running window, this evidence must
+show 96 cached updates, zero full rebuilds, and 96 construction,
+serialization, atomic-write, serialized-byte, and non-durable samples. Slice 2
+workloads apply the same requirement per completion and measured run.
+
 The scenario writes `report.json`, `summary.txt`, `events.jsonl`,
 `stall_stacks.txt`, retained scenario data, and ready/printing/mid/completed
 screenshots. A failing run additionally writes `failure_traceback.txt` and a

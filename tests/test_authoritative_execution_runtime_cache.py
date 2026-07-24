@@ -78,7 +78,7 @@ def _complete_one(model, experiment_model, well_spec, dispense, *, command=41):
         dispense.stock_id,
         1,
     )
-    experiment_model.create_progress_file()
+    experiment_model.create_progress_file(execution_intent_id=intent_id)
     experiment_model.complete_execution_print_intent(intent_id)
     return intent_id
 
@@ -361,13 +361,13 @@ def test_progress_write_failure_does_not_advance_cached_progress(
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("progress failed")),
     )
     with pytest.raises(OSError, match="progress failed"):
-        experiment_model.create_progress_file()
+        experiment_model.create_progress_file(execution_intent_id=intent_id)
 
     assert progress_path.read_bytes() == disk_before
     assert json.dumps(session.progress_payload, sort_keys=True) == cached_before
 
     monkeypatch.setattr(experiment_model, "_write_progress_payload", original_write)
-    experiment_model.create_progress_file()
+    experiment_model.create_progress_file(execution_intent_id=intent_id)
     experiment_model.complete_execution_print_intent(intent_id)
     assert experiment_model.get_execution_resume_eligibility()["status"] in {
         "ready_to_resume",

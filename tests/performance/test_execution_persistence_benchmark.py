@@ -146,6 +146,22 @@ def test_reduced_workloads_capture_real_durable_io_and_file_growth(
         "total_count": 0,
         "observer_restored": True,
     }
+    snapshot = result["progress_snapshot"]
+    assert snapshot["mode_counts"] == {
+        "full_rebuild": 0,
+        "cached_update": spec.completion_count,
+    }
+    assert len(snapshot["duration_samples_ms"]["serialization"]) == (
+        spec.completion_count
+    )
+    assert len(snapshot["duration_samples_ms"]["atomic_write"]) == (
+        spec.completion_count
+    )
+    assert len(snapshot["serialized_size_bytes"]) == spec.completion_count
+    assert len(snapshot["non_durable_write_samples_ms"]) == (
+        spec.completion_count
+    )
+    assert snapshot["observer_restored"] is True
 
 
 def test_io_observer_restores_original_functions_after_failure():

@@ -304,6 +304,15 @@ This instrumentation supports same-host before/after analysis; it does not
 create a new acceptance threshold or make copied cross-environment reports
 comparable.
 
+For a durable authoritative completion, the Controller now passes the pending
+intent ID to progress persistence. The model validates that intent against the
+coherent cached payload, frozen target, and live post-command count, then
+copy-on-write replaces only the affected well/reagent before performing the
+same complete-file serialization, flush, `fsync`, and atomic replace. Missing,
+stale, regressing, overflowing, or mismatched state fails closed; it never
+falls back to enumerating every well. Argument-free, initialization, reset,
+export, and non-authoritative writes retain full reconstruction.
+
 If Windows reports `WinError 5` while rapidly replacing an execution file,
 retain the failed diagnostics and retry once with a fresh ignored
 repository-local output root, for example:

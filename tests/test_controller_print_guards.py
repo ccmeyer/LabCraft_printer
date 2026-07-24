@@ -292,7 +292,9 @@ def test_authoritative_progress_completes_intent_only_after_progress_write():
     )
     events = []
     em = c.model.experiment_model
-    em.create_progress_file.side_effect = lambda: events.append("progress")
+    em.create_progress_file.side_effect = (
+        lambda **kwargs: events.append(("progress", kwargs))
+    )
     em.complete_execution_print_intent = Mock(
         side_effect=lambda intent_id: events.append(("complete", intent_id))
     )
@@ -305,7 +307,10 @@ def test_authoritative_progress_completes_intent_only_after_progress_write():
         execution_intent_id="intent-1",
     )
 
-    assert events == ["progress", ("complete", "intent-1")]
+    assert events == [
+        ("progress", {"execution_intent_id": "intent-1"}),
+        ("complete", "intent-1"),
+    ]
 
 
 def test_authoritative_intent_write_failure_prevents_dispense_queueing():

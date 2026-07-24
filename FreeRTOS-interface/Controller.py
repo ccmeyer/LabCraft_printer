@@ -5155,7 +5155,12 @@ class Controller(QObject):
             if printer_head is not None:
                 printer_head.record_droplet_volume_lost(target_droplets)
         try:
-            self.model.experiment_model.create_progress_file()
+            if execution_intent_id is None:
+                self.model.experiment_model.create_progress_file()
+            else:
+                self.model.experiment_model.create_progress_file(
+                    execution_intent_id=execution_intent_id,
+                )
         except Exception as exc:
             if execution_intent_id is None:
                 raise

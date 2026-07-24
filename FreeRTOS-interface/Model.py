@@ -8774,13 +8774,159 @@ class ExperimentModel(QObject):
         serialized = self._serialize_progress_payload(payload)
         self._atomic_write_progress_text(serialized)
 
-    def create_progress_file(self, file_name: Optional[str] = None):
+    def _build_cached_progress_payload(
+        self,
+        execution_intent_id: str,
+    ) -> Dict[str, Any]:
+        """Copy one completed authoritative intent into the cached snapshot."""
+        session = self._require_authoritative_runtime_session()
+        matches = [
+            intent
+            for intent in session.resume.intents
+            if intent.intent_id == execution_intent_id
+        ]
+        if len(matches) != 1:
+            raise RuntimeError(
+                "The authoritative progress intent is missing or duplicated."
+            )
+        intent = matches[0]
+        if intent.status != "pending":
+            raise RuntimeError(
+                "The authoritative progress intent is no longer pending."
+            )
+
+        payload = session.progress_payload
+        cached_well = payload.get(intent.well_id)
+        if not isinstance(cached_well, dict):
+            raise RuntimeError(
+                f"Authoritative progress is missing well {intent.well_id!r}."
+            )
+        if cached_well.get("reaction_id") != intent.reaction_id:
+            raise RuntimeError(
+                "The authoritative progress reaction does not match the intent."
+            )
+        cached_reagents = cached_well.get("reagents")
+        if not isinstance(cached_reagents, dict):
+            raise RuntimeError(
+                "The authoritative progress well has no reagent mapping."
+            )
+        cached_reagent = cached_reagents.get(intent.stock_id)
+        if not isinstance(cached_reagent, dict):
+            raise RuntimeError(
+                "The authoritative progress stock does not match the intent."
+            )
+
+        frozen_well = session.bundle.progress_wells.get(intent.well_id)
+        if not isinstance(frozen_well, dict):
+            raise RuntimeError(
+                "The validated authoritative bundle is missing the intent well."
+            )
+        frozen_reagent = (frozen_well.get("reagents") or {}).get(intent.stock_id)
+        if not isinstance(frozen_reagent, dict):
+            raise RuntimeError(
+                "The validated authoritative bundle is missing the intent stock."
+            )
+        frozen_target = int(frozen_reagent.get("target_droplets", -1))
+        cached_target = int(cached_reagent.get("target_droplets", -1))
+        cached_added = int(cached_reagent.get("added_droplets", -1))
+        if cached_target != frozen_target:
+            raise RuntimeError(
+                "The cached progress target does not match the frozen plan."
+            )
+        if cached_added != intent.baseline_added:
+            raise RuntimeError(
+                "The cached progress baseline does not match the pending intent."
+            )
+
+        expected_added = intent.baseline_added + intent.commanded_droplets
+        if expected_added > frozen_target:
+            raise RuntimeError(
+                "The pending intent would exceed the frozen progress target."
+            )
+        runtime_well = self._runtime_well_plate.get_well(intent.well_id)
+        if runtime_well is None:
+            raise RuntimeError(
+                "The live well for the authoritative progress intent is missing."
+            )
+        reaction = runtime_well.get_assigned_reaction()
+        if reaction is None or reaction.unique_id != intent.reaction_id:
+            raise RuntimeError(
+                "The live reaction does not match the authoritative progress intent."
+            )
+        live_reagent = reaction.get_all_reagents().get(intent.stock_id)
+        if live_reagent is None:
+            raise RuntimeError(
+                "The live reagent does not match the authoritative progress intent."
+            )
+        if int(live_reagent.get_target_droplets()) != frozen_target:
+            raise RuntimeError(
+                "The live reagent target does not match the frozen plan."
+            )
+        if int(live_reagent.added_droplets) != expected_added:
+            raise RuntimeError(
+                "The live reagent count does not match the pending intent."
+            )
+
+        candidate_reagent = dict(cached_reagent)
+        candidate_reagent["added_droplets"] = expected_added
+        candidate_reagents = dict(cached_reagents)
+        candidate_reagents[intent.stock_id] = candidate_reagent
+        for stock_id, details in candidate_reagents.items():
+            if not isinstance(details, dict):
+                raise RuntimeError(
+                    f"Authoritative progress stock {stock_id!r} is malformed."
+                )
+            target = int(details.get("target_droplets", -1))
+            added = int(details.get("added_droplets", -1))
+            if target < 0 or added < 0 or added > target:
+                raise RuntimeError(
+                    f"Authoritative progress stock {stock_id!r} has invalid counts."
+                )
+
+        candidate_well = dict(cached_well)
+        candidate_well["reagents"] = candidate_reagents
+        candidate_well["completed"] = all(
+            int(details["added_droplets"]) >= int(details["target_droplets"])
+            for details in candidate_reagents.values()
+        )
+        candidate = dict(payload)
+        candidate[intent.well_id] = candidate_well
+        return candidate
+
+    def create_progress_file(
+        self,
+        file_name: Optional[str] = None,
+        *,
+        execution_intent_id: str | None = None,
+    ):
         """Write a `progress.json` snapshot from current well assignments."""
+        if execution_intent_id is not None and file_name is not None:
+            raise RuntimeError(
+                "An authoritative progress intent cannot target an alternate file."
+            )
         if file_name is not None:
             self.progress_file_path = file_name
 
-        payload = self._build_progress_payload_from_runtime()
         session = getattr(self, "_active_authoritative_execution_session", None)
+        if execution_intent_id is not None:
+            if session is None:
+                raise RuntimeError(
+                    "The authoritative progress checkpoint is unavailable."
+                )
+            payload = self._build_cached_progress_payload(execution_intent_id)
+        else:
+            payload = self._build_progress_payload_from_runtime()
+        progress_data = {
+            key: value
+            for key, value in payload.items()
+            if not str(key).startswith("__")
+        }
+        execution_payload = payload.get("__execution__")
+        progress_reference = (
+            ProgressExecutionReference.from_dict(execution_payload)
+            if isinstance(execution_payload, dict)
+            else None
+        )
         if session is not None:
             self._guard_authoritative_runtime_session()
         self._write_progress_payload(payload)
@@ -8788,17 +8934,8 @@ class ExperimentModel(QObject):
             self._accept_authoritative_runtime_write("progress.json")
             session.progress_payload = dict(payload)
 
-        self.progress_data = {
-            key: value
-            for key, value in payload.items()
-            if not str(key).startswith("__")
-        }
-        execution_payload = payload.get("__execution__")
-        self._progress_execution_reference = (
-            ProgressExecutionReference.from_dict(execution_payload)
-            if isinstance(execution_payload, dict)
-            else None
-        )
+        self.progress_data = progress_data
+        self._progress_execution_reference = progress_reference
 
     def progress_to_key(self) -> "pd.DataFrame":
         """

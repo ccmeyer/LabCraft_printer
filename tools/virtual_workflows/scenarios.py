@@ -820,6 +820,15 @@ def _summary_text(report: dict[str, Any]) -> str:
             f"{persistence.get('authoritative_io', {}).get('progress_write_fsync_count', 0)}"
         ),
         (
+            "Progress full rebuilds / cached updates: "
+            f"{persistence.get('progress_snapshot', {}).get('mode_counts', {}).get('full_rebuild', 0)} / "
+            f"{persistence.get('progress_snapshot', {}).get('mode_counts', {}).get('cached_update', 0)}"
+        ),
+        (
+            "Progress non-durable p95: "
+            f"{persistence.get('progress_snapshot', {}).get('non_durable_write_ms', {}).get('p95', 0.0)} ms"
+        ),
+        (
             "Injected stall: "
             f"{responsiveness.get('injected_stall_assessment', {}).get('decision', 'not_requested')}"
         ),
@@ -1621,6 +1630,25 @@ def run_virtual_print_array_scenario(
     if failure_text is None and pressure_timer_active_after_teardown:
         failure_text = "pressure render timer remained active after teardown"
     expected_completions = len(expected_wells)
+    progress_modes = progress_snapshot.get("mode_counts", {})
+    progress_durations = progress_snapshot.get("duration_samples_ms", {})
+    if failure_text is None and (
+        progress_modes.get("cached_update") != expected_completions
+        or progress_modes.get("full_rebuild") != 0
+        or len(progress_durations.get("serialization", []))
+        != expected_completions
+        or len(progress_durations.get("atomic_write", []))
+        != expected_completions
+        or len(progress_snapshot.get("serialized_size_bytes", []))
+        != expected_completions
+        or len(progress_snapshot.get("non_durable_write_samples_ms", []))
+        != expected_completions
+        or not progress_snapshot.get("observer_restored")
+    ):
+        failure_text = (
+            "progress snapshot evidence violated the cached-construction "
+            f"contract: {progress_snapshot}"
+        )
     if failure_text is None and (
         authoritative_io["hot_path_read_count"] != 0
         or authoritative_io["execution_resume_hot_path_disk_load_count"] != 0
