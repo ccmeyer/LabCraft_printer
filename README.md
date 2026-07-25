@@ -230,10 +230,10 @@ This is an opt-in characterization, not part of routine pytest or the accepted
 
 The run requires exactly 3,840 cached progress updates and no full progress
 rebuilds or hot-path authoritative reads. It preserves 11,520 resume and 3,840
-progress `fsync`/atomic-replace calls. Its 15,369 identity guards comprise four
-guards per completion plus one pass-start guard for each of the final nine
-stocks. The final checkpoint must retain zero intents and the terminal
-authoritative bundle must validate.
+progress `fsync`/atomic-replace calls. Its 15,380 identity guards comprise four
+guards per completion plus a read-only preflight identity guard and a
+preparation identity guard for each of the ten stocks. The final checkpoint
+must retain zero intents and the terminal authoritative bundle must validate.
 
 The report additionally records ten pass transitions, active pressure-render
 intervals, resident-memory growth, bounded event-retention counters, cumulative
@@ -413,6 +413,24 @@ attempts instead failed closed on the existing `execution_resume.json` atomic
 rename contention. Compact progress therefore solves the serialization-volume
 problem but does not claim to eliminate every large-workload UI stall or
 Windows rename failure.
+
+Pass startup now reuses the guarded authoritative runtime session for
+target-preserving lock and printer-head-binding transitions. Each stock pass
+checks cached file identities and the immutable-revision inventory, then
+either performs a guarded no-op or validates one successor in memory before
+retaining the existing atomic writes. It never silently reloads and overwrites
+an externally changed bundle; a mismatch invalidates the session and requires
+explicit reload/repair. Explicit activation, target-changing calibration,
+recovery, and terminal completion still perform full validation.
+
+On the reviewed Pi 384x10 before/after pair, the ten pass starts fell from a
+2.286-second median (2.592-second maximum) to 0.101 seconds (0.120-second
+maximum). Pass-window immutable-revision reads fell from 492 to zero and full
+bundle refreshes from 21 to zero, while all 11,520 resume and 3,840 progress
+durable writes remained. Guidance rebuilds were at most 104 ms. The optimized
+run still recorded a separate 3.44-second terminal-completion event-loop gap:
+the required terminal recovery/full validation remains synchronous and is a
+separate remediation target.
 
 If Windows reports `WinError 5` while rapidly replacing an execution file,
 retain the failed diagnostics and retry once with a fresh ignored
