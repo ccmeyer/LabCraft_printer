@@ -9065,6 +9065,18 @@ class ExperimentModel(QObject):
         plan = self.get_execution_plan_snapshot()
         if plan is None or plan.state is not ExecutionPlanState.ACTIVE:
             return plan if plan is not None and plan.state is ExecutionPlanState.COMPLETED else None
+        session = getattr(self, "_active_authoritative_execution_session", None)
+        if (
+            session is not None
+            and session.bundle.valid
+            and session.bundle.plan == plan
+        ):
+            if session.bundle.eligibility.status != "complete":
+                return None
+            return self.transition_execution_plan_terminal(
+                ExecutionPlanState.COMPLETED,
+                reason,
+            )
         for well in plan.wells:
             progress_well = self.progress_data.get(well.well_id, {})
             reagents = progress_well.get("reagents", {}) if isinstance(progress_well, dict) else {}

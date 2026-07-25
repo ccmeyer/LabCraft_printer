@@ -189,6 +189,23 @@ def test_cached_completion_writes_once_then_performs_one_full_validation(
     assert bundle.progress_payload == expected_payload
 
 
+def test_cached_completion_uses_derived_eligibility_without_redundant_progress_scan(
+    experiment_model_factory,
+):
+    _model, experiment = _ready_completion(experiment_model_factory)
+    session = experiment._active_authoritative_execution_session
+    assert session.bundle.eligibility.status == "complete"
+
+    class ProgressScanTrap(dict):
+        def get(self, *_args, **_kwargs):
+            raise AssertionError("try_complete_execution_plan rescanned progress_data")
+
+    experiment.progress_data = ProgressScanTrap(experiment.progress_data)
+    completed = experiment.try_complete_execution_plan()
+
+    assert completed.state is ExecutionPlanState.COMPLETED
+
+
 @pytest.mark.parametrize(
     "mutation",
     ("replace", "in_place", "delete", "revision_addition"),
