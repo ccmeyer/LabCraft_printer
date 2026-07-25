@@ -183,6 +183,18 @@ def test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order(
     assert phases["controller.well_completion"]["count"] == 48
     assert phases["ui.well_plate_update"]["count"] == 48
     assert phases["persistence.guard_bundle"]["count"] == 48 * 4 + 1
+    pass_start = persistence["pass_start"]
+    assert pass_start["count"] == 2
+    assert [item["pass_index"] for item in pass_start["records"]] == [1, 2]
+    assert pass_start["total_duration_ms"]["count"] == 2
+    assert "pass_start.total" in pass_start["inclusive_duration_by_name_ms"]
+    assert "pass_start.total" in pass_start[
+        "exclusive_phase_evidence"
+    ]["summary_ms"]
+    assert all(
+        item["io_delta"]["revision_read_count"] >= 1
+        for item in pass_start["records"]
+    )
 
     queue = report["metrics"]["queue"]["values"]
     assert queue["unexpected_starvation_count"] == 0

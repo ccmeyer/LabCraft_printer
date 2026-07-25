@@ -569,20 +569,123 @@ class _InstanceInstrumentation:
         inject_after_completion: int,
         completed_count: Callable[[], int],
         io_observer: PersistenceIoObserver | None = None,
+        pass_context: Callable[[], dict[str, Any] | None] | None = None,
     ):
         self.phases = phases
         self.inject_ms = int(inject_ms)
         self.inject_after_completion = int(inject_after_completion)
         self.completed_count = completed_count
         self.io_observer = io_observer or PersistenceIoObserver()
+        self.pass_context = pass_context or (lambda: None)
         self.injected = False
         self.intent_begins: list[dict[str, Any]] = []
         self.intent_attachments: list[dict[str, Any]] = []
         self.intent_completions: list[str] = []
         self.checkpoint_observations: list[dict[str, Any]] = []
+        self.pass_starts: list[dict[str, Any]] = []
         self._originals: list[tuple[Any, str, Any]] = []
         self._connected_slots: list[tuple[Any, Any, str, Any, Any]] = []
         self._suppressed_phases: set[str] = set()
+
+    def _pass_metadata(self) -> dict[str, Any]:
+        context = self.pass_context()
+        return dict(context or {})
+
+    def _io_totals(self) -> dict[str, int]:
+        reads = self.io_observer.read_snapshot()
+        durable = self.io_observer.snapshot()
+        by_path = reads.get("by_path", {})
+        return {
+            "read_open_count": int(reads.get("total_count", 0)),
+            "read_bytes": sum(
+                int(values.get("observed_file_size_bytes", 0))
+                for values in by_path.values()
+            ),
+            "revision_read_count": sum(
+                int(values.get("count", 0))
+                for path, values in by_path.items()
+                if str(path).startswith("execution_plan_revisions/")
+            ),
+            "revision_read_bytes": sum(
+                int(values.get("observed_file_size_bytes", 0))
+                for path, values in by_path.items()
+                if str(path).startswith("execution_plan_revisions/")
+            ),
+            "fsync_count": sum(
+                len(samples)
+                for samples in durable.get("fsync", {}).values()
+            ),
+            "replace_count": sum(
+                len(samples)
+                for samples in durable.get("atomic_replace", {}).values()
+            ),
+        }
+
+    def wrap_pass_start(self, controller: Any, experiment_model: Any) -> None:
+        original = getattr(controller, "print_array")
+
+        def measured(*args, **kwargs):
+            metadata = self._pass_metadata()
+            before_io = self._io_totals()
+            starting_plan = experiment_model.get_execution_plan_snapshot()
+            started_ns = time.perf_counter_ns()
+            error_type = None
+            try:
+                with self.phases.phase(
+                    "pass_start.total",
+                    metadata,
+                ), self.io_observer.phase("pass_start.total"):
+                    return original(*args, **kwargs)
+            except BaseException as exc:
+                error_type = type(exc).__name__
+                raise
+            finally:
+                ended_ns = time.perf_counter_ns()
+                after_io = self._io_totals()
+                final_plan = experiment_model.get_execution_plan_snapshot()
+                records = self.phases.snapshot().get("records", [])
+                nested = [
+                    record
+                    for record in records
+                    if int(record.get("started_ns", 0)) >= started_ns
+                    and int(record.get("ended_ns", 0)) <= ended_ns
+                ]
+                self.pass_starts.append(
+                    {
+                        **metadata,
+                        "started_monotonic_ns": started_ns,
+                        "ended_monotonic_ns": ended_ns,
+                        "duration_ms": (ended_ns - started_ns) / 1_000_000.0,
+                        "starting_plan_revision": (
+                            None
+                            if starting_plan is None
+                            else int(starting_plan.plan_revision)
+                        ),
+                        "final_plan_revision": (
+                            None
+                            if final_plan is None
+                            else int(final_plan.plan_revision)
+                        ),
+                        "error_type": error_type,
+                        "full_bundle_refresh_count": sum(
+                            record.get("name")
+                            == "persistence.full_bundle_refresh"
+                            for record in nested
+                        ),
+                        "history_validation_count": sum(
+                            record.get("name")
+                            == "pass_start.history_validation"
+                            for record in nested
+                        ),
+                        "io_delta": {
+                            name: after_io[name] - before_io[name]
+                            for name in before_io
+                        },
+                    }
+                )
+
+        self._originals.append((controller, "print_array", original))
+        setattr(controller, "print_array", measured)
 
     def wrap(
         self,
@@ -598,7 +701,16 @@ class _InstanceInstrumentation:
         def measured(*args, **kwargs):
             if phase_name in self._suppressed_phases:
                 return original(*args, **kwargs)
-            with self.phases.phase(phase_name), self.io_observer.phase(phase_name):
+            metadata = (
+                self._pass_metadata()
+                if phase_name.startswith("pass_start.")
+                or phase_name.startswith("ui.experiment_guidance_")
+                else None
+            )
+            with self.phases.phase(
+                phase_name,
+                metadata,
+            ), self.io_observer.phase(phase_name):
                 result = original(*args, **kwargs)
             if observe is not None:
                 observe(args, kwargs, result)
@@ -639,6 +751,7 @@ class _InstanceInstrumentation:
             "attachments": list(self.intent_attachments),
             "completions": list(self.intent_completions),
             "checkpoint_observations": list(self.checkpoint_observations),
+            "pass_starts": list(self.pass_starts),
         }
 
     def wrap_connected_slot(
@@ -720,11 +833,13 @@ def _install_instrumentation(
     controller: Any,
     well_plate_widget: Any,
     pressure_plot_widget: Any,
+    experiment_task_list: Any,
     inject_ms: int,
     inject_after_completion: int,
     completed_count: Callable[[], int],
     io_observer: PersistenceIoObserver,
     pressure_rendered: Callable[[], None] | None = None,
+    pass_context: Callable[[], dict[str, Any] | None] | None = None,
 ) -> _InstanceInstrumentation:
     instrumentation = _InstanceInstrumentation(
         phases,
@@ -732,6 +847,7 @@ def _install_instrumentation(
         inject_after_completion=inject_after_completion,
         completed_count=completed_count,
         io_observer=io_observer,
+        pass_context=pass_context,
     )
     def argument(
         args: tuple[Any, ...],
@@ -796,8 +912,24 @@ def _install_instrumentation(
         ("_save_active_execution_resume", "persistence.save_resume"),
         ("_reconcile_authoritative_runtime_session", "persistence.reconcile_cache"),
         ("_refresh_authoritative_execution_bundle", "persistence.full_bundle_refresh"),
+        ("_recover_persisted_execution_plan_for_transition", "pass_start.plan_recovery"),
+        ("_commit_plan_revision", "pass_start.commit_revision"),
+        ("_write_progress_for_execution_plan", "pass_start.progress_revision_sync"),
+        ("synchronize_execution_resume_revision", "pass_start.resume_revision_sync"),
+        ("_write_execution_plan_exports", "pass_start.exports"),
+        ("lock_execution_plan", "pass_start.plan_lock"),
+        ("ensure_execution_printer_head_binding", "pass_start.head_binding"),
+        ("ensure_execution_resume_checkpoint", "pass_start.checkpoint_activation"),
+        ("validate_authoritative_print_context", "pass_start.authoritative_preflight"),
     ):
         instrumentation.wrap(experiment_model, method, phase)
+    if hasattr(experiment_model, "prepare_authoritative_print_pass"):
+        instrumentation.wrap(
+            experiment_model,
+            "prepare_authoritative_print_pass",
+            "pass_start.prepare_transaction",
+        )
+    instrumentation.wrap_pass_start(controller, experiment_model)
     instrumentation.wrap(
         controller,
         "_handle_array_well_complete",
@@ -819,6 +951,16 @@ def _install_instrumentation(
         "update_pressure",
         "ui.pressure_render",
         after=pressure_rendered,
+    )
+    instrumentation.wrap(
+        experiment_task_list,
+        "_build_guide_snapshot",
+        "ui.experiment_guidance_snapshot",
+    )
+    instrumentation.wrap(
+        experiment_task_list,
+        "_full_rebuild",
+        "ui.experiment_guidance_rebuild",
     )
     return instrumentation
 
@@ -850,6 +992,49 @@ def _write_event_trace(path: Path, events: list[dict[str, Any]]) -> None:
     with path.open("w", encoding="utf-8", newline="\n") as handle:
         for event in events:
             handle.write(json.dumps(event, sort_keys=True, default=str) + "\n")
+
+
+def _exclusive_phase_evidence(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize nested phase time without double-counting child intervals."""
+    samples: dict[str, list[float]] = {}
+    for record in records:
+        started = int(record.get("started_ns", 0))
+        ended = int(record.get("ended_ns", started))
+        depth = int(record.get("depth", 0))
+        child_intervals = sorted(
+            (
+                max(started, int(child.get("started_ns", started))),
+                min(ended, int(child.get("ended_ns", ended))),
+            )
+            for child in records
+            if int(child.get("depth", 0)) > depth
+            and int(child.get("started_ns", 0)) >= started
+            and int(child.get("ended_ns", 0)) <= ended
+        )
+        covered_ns = 0
+        cursor_start = None
+        cursor_end = None
+        for child_start, child_end in child_intervals:
+            if child_end <= child_start:
+                continue
+            if cursor_start is None:
+                cursor_start, cursor_end = child_start, child_end
+            elif child_start <= cursor_end:
+                cursor_end = max(cursor_end, child_end)
+            else:
+                covered_ns += cursor_end - cursor_start
+                cursor_start, cursor_end = child_start, child_end
+        if cursor_start is not None:
+            covered_ns += cursor_end - cursor_start
+        exclusive_ms = max(0, ended - started - covered_ns) / 1_000_000.0
+        samples.setdefault(str(record.get("name")), []).append(exclusive_ms)
+    return {
+        "samples_ms": samples,
+        "summary_ms": {
+            name: summarize_samples(values, bands_ms=())
+            for name, values in sorted(samples.items())
+        },
+    }
 
 
 def _relative(path: Path, report_dir: Path) -> str:
@@ -1077,6 +1262,17 @@ def _summary_text(report: dict[str, Any]) -> str:
         (
             "Cumulative progress serialized bytes: "
             f"{persistence.get('cumulative_progress_serialized_bytes', 0)}"
+        ),
+        (
+            "Pass starts / p95 / max: "
+            f"{persistence.get('pass_start', {}).get('count', 0)} / "
+            f"{persistence.get('pass_start', {}).get('total_duration_ms', {}).get('p95', 0.0)} ms / "
+            f"{persistence.get('pass_start', {}).get('total_duration_ms', {}).get('maximum', 0.0)} ms"
+        ),
+        (
+            "Pass-start history reads / full refreshes: "
+            f"{sum(item.get('io_delta', {}).get('revision_read_count', 0) for item in persistence.get('pass_start', {}).get('records', []))} / "
+            f"{sum(item.get('full_bundle_refresh_count', 0) for item in persistence.get('pass_start', {}).get('records', []))}"
         ),
         (
             "Injected stall: "
@@ -1494,17 +1690,28 @@ def run_virtual_print_array_scenario(
             if controller.get_array_run_state() == "running":
                 pressure_render_timestamps_ns.append(time.perf_counter_ns())
 
+        def current_pass_context() -> dict[str, Any] | None:
+            if not (0 <= current_pass_index < len(stock_passes)):
+                return None
+            current = stock_passes[current_pass_index]
+            return {
+                "pass_index": int(current["pass_index"]),
+                "stock_id": str(current["stock_id"]),
+            }
+
         instrumentation = _install_instrumentation(
             phases,
             experiment_model=experiment_model,
             controller=controller,
             well_plate_widget=view.well_plate_widget,
             pressure_plot_widget=view.pressure_box,
+            experiment_task_list=view.experiment_task_list,
             inject_ms=config.inject_ui_stall_ms,
             inject_after_completion=config.inject_after_completion,
             completed_count=completed_count,
             io_observer=PersistenceIoObserver(fixture_info["experiment_dir"]),
             pressure_rendered=on_pressure_rendered,
+            pass_context=current_pass_context,
         )
         io_observer = instrumentation.io_observer
         progress_observer = ProgressSnapshotObserver(experiment_model)
@@ -1682,6 +1889,7 @@ def run_virtual_print_array_scenario(
             )
             if errors:
                 raise RuntimeError(f"array start emitted an error: {errors[-1]}")
+            pass_record["running_monotonic_ns"] = time.perf_counter_ns()
             if stock_index == 0:
                 screenshots["printing"] = screenshots_dir / "printing.png"
                 _capture_window(view, screenshots["printing"])
@@ -1941,6 +2149,72 @@ def run_virtual_print_array_scenario(
     phase_duration_values = (
         probe_snapshot.get("phase_timings", {}).get("duration_by_name_ms", {})
     )
+    phase_records = list(
+        probe_snapshot.get("phase_timings", {}).get("records", [])
+    )
+    pass_phase_records = [
+        record
+        for record in phase_records
+        if str(record.get("name", "")).startswith("pass_start.")
+        or str(record.get("name", "")).startswith(
+            "ui.experiment_guidance_"
+        )
+    ]
+    pass_start_records = (
+        list(instrumentation.pass_starts)
+        if instrumentation is not None
+        else []
+    )
+    pass_gap_events: list[dict[str, Any]] = []
+    for event in probe_snapshot.get("stall_events", []):
+        phase = event.get("phase") or {}
+        metadata = phase.get("metadata") or {}
+        if (
+            metadata.get("pass_index") is None
+            or not str(phase.get("name") or "").startswith("pass_start.")
+        ):
+            continue
+        pass_gap_events.append(
+            {
+                "pass_index": int(metadata["pass_index"]),
+                "stock_id": str(metadata.get("stock_id") or ""),
+                "event_loop_gap_ms": float(
+                    event.get("event_loop_gap_ms", 0.0)
+                ),
+                "scheduling_lateness_ms": float(
+                    event.get("scheduling_lateness_ms", 0.0)
+                ),
+                "phase_name": str(phase.get("name") or ""),
+            }
+        )
+    pass_start_evidence = {
+        "count": len(pass_start_records),
+        "records": pass_start_records,
+        "total_duration_ms": summarize_samples(
+            [
+                float(record.get("duration_ms", 0.0))
+                for record in pass_start_records
+            ],
+            bands_ms=(250.0, 1000.0),
+        ),
+        "inclusive_duration_by_name_ms": {
+            name: values
+            for name, values in phase_duration_values.items()
+            if name.startswith("pass_start.")
+            or name.startswith("ui.experiment_guidance_")
+        },
+        "exclusive_phase_evidence": _exclusive_phase_evidence(
+            pass_phase_records
+        ),
+        "event_loop_gaps": pass_gap_events,
+        "maximum_correlated_event_loop_gap_ms": max(
+            (
+                float(event["event_loop_gap_ms"])
+                for event in pass_gap_events
+            ),
+            default=0.0,
+        ),
+    }
     progress_total_samples = [
         float(record["duration_ms"])
         for record in probe_snapshot.get("phase_timings", {}).get("records", [])
@@ -2373,6 +2647,7 @@ def run_virtual_print_array_scenario(
                 "values": {
                     **validation,
                     "phase_timings": phases.snapshot(),
+                    "pass_start": pass_start_evidence,
                     "authoritative_io": authoritative_io,
                     "progress_snapshot": progress_snapshot,
                     "cumulative_progress_serialized_bytes": sum(

@@ -305,6 +305,16 @@ repair/reload, and terminal lifecycle validation; it is not performed inside
 per-well intent completion. The observer calls the real file, `fsync`, and
 replace operations and is restored in `finally`.
 
+`metrics.persistence.values.pass_start` records each stock-pass startup as a
+separate transaction. It includes pass/stock identity, starting and final plan
+revisions, total duration, authoritative read and durability deltas, full
+bundle/history-validation counts, nested inclusive phase summaries, and
+exclusive phase time computed from the nested monotonic intervals. Related
+event-loop gaps retain pass metadata and their named phase. Guidance snapshot
+construction and full rebuilds are measured for attribution only; their
+behavior is unchanged. These nested diagnostics do not alter report version 1
+or comparison policy v1.
+
 Slice 2 persistence reports similarly expose aggregated
 `authoritative_read_opens`. Read counts cover only the measured lifecycle;
 final invariant inspection remains outside that observer. Existing report
