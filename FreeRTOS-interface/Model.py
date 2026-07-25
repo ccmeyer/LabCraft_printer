@@ -9066,10 +9066,14 @@ class ExperimentModel(QObject):
         if plan is None or plan.state is not ExecutionPlanState.ACTIVE:
             return plan if plan is not None and plan.state is ExecutionPlanState.COMPLETED else None
         session = getattr(self, "_active_authoritative_execution_session", None)
+        cached_plan = session.bundle.plan if session is not None else None
         if (
             session is not None
             and session.bundle.valid
-            and session.bundle.plan == plan
+            and cached_plan is not None
+            and cached_plan.plan_id == plan.plan_id
+            and cached_plan.plan_revision == plan.plan_revision
+            and cached_plan.state is plan.state
         ):
             if session.bundle.eligibility.status != "complete":
                 return None

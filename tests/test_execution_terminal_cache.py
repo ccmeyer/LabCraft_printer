@@ -206,6 +206,29 @@ def test_cached_completion_uses_derived_eligibility_without_redundant_progress_s
     assert completed.state is ExecutionPlanState.COMPLETED
 
 
+def test_cached_completion_eligibility_does_not_compare_full_plan_structure(
+    experiment_model_factory,
+    monkeypatch,
+):
+    _model, experiment = _ready_completion(experiment_model_factory)
+    plan = experiment.get_execution_plan_snapshot()
+    sentinel = object()
+    monkeypatch.setattr(
+        type(plan),
+        "__eq__",
+        lambda *_args: pytest.fail(
+            "try_complete_execution_plan compared the full execution plan"
+        ),
+    )
+    monkeypatch.setattr(
+        experiment,
+        "transition_execution_plan_terminal",
+        lambda *_args, **_kwargs: sentinel,
+    )
+
+    assert experiment.try_complete_execution_plan() is sentinel
+
+
 @pytest.mark.parametrize(
     "mutation",
     ("replace", "in_place", "delete", "revision_addition"),
