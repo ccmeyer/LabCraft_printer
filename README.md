@@ -432,6 +432,29 @@ run still recorded a separate 3.44-second terminal-completion event-loop gap:
 the required terminal recovery/full validation remains synchronous and is a
 separate remediation target.
 
+Successful terminal completion now advances the same guarded in-memory
+authoritative session. It checks the active checkpoint and file identities,
+constructs and incrementally validates one completed successor, retargets the
+cached progress and resume documents, and preserves the crash-recoverable
+write order: immutable revision, current plan, progress, then resume. It does
+not rewrite CSV exports because completion cannot change wells, stocks, or
+targets. Only after those writes does it perform one synchronous full
+authoritative validation and expose the completed state. Hard abort,
+already-terminal retry, missing-session recovery, and partial-commit repair
+retain the conservative disk path.
+
+The 384x10 Pi evidence reduced the cached terminal transaction from the prior
+multi-second recovery sequence to 549 ms, including a 374 ms full validation,
+with four real `fsync`/replace pairs and one read of each revision. It also
+identified and removed two measurement-path scaling costs: structural
+equality of the full execution plan and copying the observer's complete I/O
+history at the transaction boundary. The observer now uses constant-time
+cumulative counters for live deltas while retaining raw samples for the final
+report. The last Pi report predates that tooling-only observer fix, so its
+1.039-second measured event-loop gap and 1.698-second pressure interval remain
+conservative diagnostic evidence rather than a closing responsiveness pass.
+Windows `execution_resume.json` rename contention remains a separate issue.
+
 If Windows reports `WinError 5` while rapidly replacing an execution file,
 retain the failed diagnostics and retry once with a fresh ignored
 repository-local output root, for example:

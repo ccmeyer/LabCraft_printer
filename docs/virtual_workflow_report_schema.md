@@ -298,9 +298,9 @@ evidence for the guarded active-runtime checkpoint:
 - `observer_restored`, which must be true after success or failure.
 
 For a successful 96-well run, hot-path reads and resume loads are zero,
-`guard_count` is 386: 384 pre-write identity guards for the durable
-per-completion operations plus one preflight guard and one preparation guard
-for the stock pass. Resume fsync/replace counts are 288, and progress
+`guard_count` is 388: 384 pre-write identity guards for the durable
+per-completion operations, one preflight guard, one preparation guard, and
+two terminal-completion guards. Resume fsync/replace counts are 288, and progress
 fsync/replace counts are 96.
 Full bundle inspection remains permitted at activation, explicit
 repair/reload, and terminal lifecycle validation; it is not performed inside
@@ -319,6 +319,24 @@ export phases. Related event-loop gaps retain pass metadata and their named
 phase. Guidance snapshot construction and full rebuilds are measured for
 attribution only; their behavior is unchanged. These nested diagnostics do
 not alter report version 1 or comparison policy v1.
+
+`metrics.persistence.values.terminal_transition` records successful and failed
+terminal lifecycle attempts separately from pass startup. It contains the
+starting/final revision, total and nested inclusive/exclusive timings,
+authoritative read and durability deltas, correlated event-loop gaps, and the
+Model transaction result. A cached successful completion reports
+`cache_path: cached_completion`, exactly two identity guards, four durable
+writes (immutable revision, current plan, progress, and resume), no export
+rewrite, and exactly one `terminal_transition.full_validation`. All
+authoritative JSON reads, including one read of each immutable revision, must
+occur inside that final validation; no pre-commit terminal phase may read
+them. Hard abort and explicit partial-commit recovery retain the conservative
+disk-loaded path.
+
+The persistence observer retains raw samples for final reporting but also
+maintains cumulative read/fsync/replace counters. Pass and terminal boundary
+deltas use those constant-time counters so evidence collection does not copy
+an O(completion-count) sample history on the Qt thread.
 
 Slice 2 persistence reports similarly expose aggregated
 `authoritative_read_opens`. Read counts cover only the measured lifecycle;
