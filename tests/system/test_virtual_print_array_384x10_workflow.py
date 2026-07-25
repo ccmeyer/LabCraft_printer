@@ -197,6 +197,11 @@ def test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order(
     assert pass_start["records"][1]["io_delta"]["revision_read_count"] == 0
     assert pass_start["records"][1]["full_bundle_refresh_count"] == 0
     assert pass_start["records"][1]["preparation"]["cache_path"] == "cached_noop"
+    terminal = persistence["terminal_transition"]
+    assert terminal["count"] == 1
+    assert terminal["records"][0]["state"] == "completed"
+    assert terminal["total_duration_ms"]["count"] == 1
+    assert "terminal_transition.total" in terminal["inclusive_duration_by_name_ms"]
 
     queue = report["metrics"]["queue"]["values"]
     assert queue["unexpected_starvation_count"] == 0

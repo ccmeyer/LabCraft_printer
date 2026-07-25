@@ -583,6 +583,8 @@ class _InstanceInstrumentation:
         self.intent_completions: list[str] = []
         self.checkpoint_observations: list[dict[str, Any]] = []
         self.pass_starts: list[dict[str, Any]] = []
+        self.terminal_transitions: list[dict[str, Any]] = []
+        self._terminal_depth = 0
         self._originals: list[tuple[Any, str, Any]] = []
         self._connected_slots: list[tuple[Any, Any, str, Any, Any]] = []
         self._suppressed_phases: set[str] = set()
@@ -695,6 +697,103 @@ class _InstanceInstrumentation:
         self._originals.append((controller, "print_array", original))
         setattr(controller, "print_array", measured)
 
+    def wrap_terminal_transition(self, experiment_model: Any) -> None:
+        original = getattr(experiment_model, "transition_execution_plan_terminal")
+
+        def measured(state, reason, *args, **kwargs):
+            before_io = self._io_totals()
+            starting_plan = experiment_model.get_execution_plan_snapshot()
+            started_ns = time.perf_counter_ns()
+            error_type = None
+            self._terminal_depth += 1
+            try:
+                with self.phases.phase(
+                    "terminal_transition.total",
+                    {"state": str(getattr(state, "value", state)), "reason": str(reason)},
+                ), self.io_observer.phase("terminal_transition.total"):
+                    return original(state, reason, *args, **kwargs)
+            except BaseException as exc:
+                error_type = type(exc).__name__
+                raise
+            finally:
+                self._terminal_depth -= 1
+                ended_ns = time.perf_counter_ns()
+                after_io = self._io_totals()
+                final_plan = experiment_model.get_execution_plan_snapshot()
+                records = self.phases.snapshot().get("records", [])
+                nested = [
+                    record
+                    for record in records
+                    if int(record.get("started_ns", 0)) >= started_ns
+                    and int(record.get("ended_ns", 0)) <= ended_ns
+                ]
+                self.terminal_transitions.append(
+                    {
+                        "state": str(getattr(state, "value", state)),
+                        "reason": str(reason),
+                        "started_monotonic_ns": started_ns,
+                        "ended_monotonic_ns": ended_ns,
+                        "duration_ms": (ended_ns - started_ns) / 1_000_000.0,
+                        "starting_plan_revision": (
+                            None
+                            if starting_plan is None
+                            else int(starting_plan.plan_revision)
+                        ),
+                        "final_plan_revision": (
+                            None
+                            if final_plan is None
+                            else int(final_plan.plan_revision)
+                        ),
+                        "error_type": error_type,
+                        "full_bundle_refresh_count": sum(
+                            str(record.get("name", "")).endswith("full_validation")
+                            for record in nested
+                        ),
+                        "io_delta": {
+                            name: after_io[name] - before_io[name]
+                            for name in before_io
+                        },
+                        "preparation": dict(
+                            getattr(
+                                experiment_model,
+                                "_last_authoritative_terminal_transition",
+                                None,
+                            )
+                            or {}
+                        ),
+                    }
+                )
+
+        self._originals.append(
+            (experiment_model, "transition_execution_plan_terminal", original)
+        )
+        setattr(experiment_model, "transition_execution_plan_terminal", measured)
+
+    def wrap_contextual(
+        self,
+        obj: Any,
+        method_name: str,
+        normal_phase: str,
+        terminal_phase: str,
+    ) -> None:
+        original = getattr(obj, method_name)
+
+        def measured(*args, **kwargs):
+            phase_name = terminal_phase if self._terminal_depth else normal_phase
+            metadata = (
+                self._pass_metadata()
+                if phase_name.startswith("pass_start.")
+                else None
+            )
+            with self.phases.phase(
+                phase_name,
+                metadata,
+            ), self.io_observer.phase(phase_name):
+                return original(*args, **kwargs)
+
+        self._originals.append((obj, method_name, original))
+        setattr(obj, method_name, measured)
+
     def wrap(
         self,
         obj: Any,
@@ -760,6 +859,7 @@ class _InstanceInstrumentation:
             "completions": list(self.intent_completions),
             "checkpoint_observations": list(self.checkpoint_observations),
             "pass_starts": list(self.pass_starts),
+            "terminal_transitions": list(self.terminal_transitions),
         }
 
     def wrap_connected_slot(
@@ -919,12 +1019,6 @@ def _install_instrumentation(
         ("_guard_authoritative_runtime_session", "persistence.guard_bundle"),
         ("_save_active_execution_resume", "persistence.save_resume"),
         ("_reconcile_authoritative_runtime_session", "persistence.reconcile_cache"),
-        ("_refresh_authoritative_execution_bundle", "persistence.full_bundle_refresh"),
-        ("_recover_persisted_execution_plan_for_transition", "pass_start.plan_recovery"),
-        ("_commit_plan_revision", "pass_start.commit_revision"),
-        ("_write_progress_for_execution_plan", "pass_start.progress_revision_sync"),
-        ("synchronize_execution_resume_revision", "pass_start.resume_revision_sync"),
-        ("_write_execution_plan_exports", "pass_start.exports"),
         ("lock_execution_plan", "pass_start.plan_lock"),
         ("ensure_execution_printer_head_binding", "pass_start.head_binding"),
         ("ensure_execution_resume_checkpoint", "pass_start.checkpoint_activation"),
@@ -946,6 +1040,44 @@ def _install_instrumentation(
         ("_create_authoritative_pass_checkpoint", "pass_start.checkpoint_create"),
     ):
         instrumentation.wrap(experiment_model, method, phase)
+    for method, normal_phase, terminal_phase in (
+        (
+            "_refresh_authoritative_execution_bundle",
+            "persistence.full_bundle_refresh",
+            "terminal_transition.full_validation",
+        ),
+        (
+            "_recover_persisted_execution_plan_for_transition",
+            "pass_start.plan_recovery",
+            "terminal_transition.plan_recovery",
+        ),
+        (
+            "_commit_plan_revision",
+            "pass_start.commit_revision",
+            "terminal_transition.commit_revision",
+        ),
+        (
+            "_write_progress_for_execution_plan",
+            "pass_start.progress_revision_sync",
+            "terminal_transition.progress_revision_sync",
+        ),
+        (
+            "synchronize_execution_resume_revision",
+            "pass_start.resume_revision_sync",
+            "terminal_transition.resume_revision_sync",
+        ),
+        (
+            "_write_execution_plan_exports",
+            "pass_start.exports",
+            "terminal_transition.exports",
+        ),
+    ):
+        instrumentation.wrap_contextual(
+            experiment_model,
+            method,
+            normal_phase,
+            terminal_phase,
+        )
     if hasattr(experiment_model, "prepare_authoritative_print_pass"):
         instrumentation.wrap(
             experiment_model,
@@ -953,6 +1085,12 @@ def _install_instrumentation(
             "pass_start.prepare_transaction",
         )
     instrumentation.wrap_pass_start(controller, experiment_model)
+    instrumentation.wrap_terminal_transition(experiment_model)
+    instrumentation.wrap(
+        controller,
+        "_finish_array_finalize",
+        "terminal_finalize.total",
+    )
     instrumentation.wrap(
         controller,
         "_handle_array_well_complete",
@@ -1296,6 +1434,17 @@ def _summary_text(report: dict[str, Any]) -> str:
             "Pass-start history reads / full refreshes: "
             f"{sum(item.get('io_delta', {}).get('revision_read_count', 0) for item in persistence.get('pass_start', {}).get('records', []))} / "
             f"{sum(item.get('full_bundle_refresh_count', 0) for item in persistence.get('pass_start', {}).get('records', []))}"
+        ),
+        (
+            "Terminal transitions / p95 / max: "
+            f"{persistence.get('terminal_transition', {}).get('count', 0)} / "
+            f"{persistence.get('terminal_transition', {}).get('total_duration_ms', {}).get('p95', 0.0)} ms / "
+            f"{persistence.get('terminal_transition', {}).get('total_duration_ms', {}).get('maximum', 0.0)} ms"
+        ),
+        (
+            "Terminal revision reads / full validations: "
+            f"{sum(item.get('io_delta', {}).get('revision_read_count', 0) for item in persistence.get('terminal_transition', {}).get('records', []))} / "
+            f"{sum(item.get('full_bundle_refresh_count', 0) for item in persistence.get('terminal_transition', {}).get('records', []))}"
         ),
         (
             "Injected stall: "
@@ -2238,6 +2387,58 @@ def run_virtual_print_array_scenario(
             default=0.0,
         ),
     }
+    terminal_records = (
+        list(instrumentation.terminal_transitions)
+        if instrumentation is not None
+        else []
+    )
+    terminal_phase_records = [
+        record
+        for record in phase_records
+        if str(record.get("name", "")).startswith("terminal_transition.")
+        or str(record.get("name", "")).startswith("terminal_finalize.")
+    ]
+    terminal_gap_events = [
+        {
+            "event_loop_gap_ms": float(event.get("event_loop_gap_ms", 0.0)),
+            "scheduling_lateness_ms": float(
+                event.get("scheduling_lateness_ms", 0.0)
+            ),
+            "phase_name": str((event.get("phase") or {}).get("name") or ""),
+        }
+        for event in probe_snapshot.get("stall_events", [])
+        if str((event.get("phase") or {}).get("name") or "").startswith(
+            ("terminal_transition.", "terminal_finalize.")
+        )
+    ]
+    terminal_transition_evidence = {
+        "count": len(terminal_records),
+        "records": terminal_records,
+        "total_duration_ms": summarize_samples(
+            [
+                float(record.get("duration_ms", 0.0))
+                for record in terminal_records
+            ],
+            bands_ms=(250.0, 1000.0),
+        ),
+        "inclusive_duration_by_name_ms": {
+            name: values
+            for name, values in phase_duration_values.items()
+            if name.startswith("terminal_transition.")
+            or name.startswith("terminal_finalize.")
+        },
+        "exclusive_phase_evidence": _exclusive_phase_evidence(
+            terminal_phase_records
+        ),
+        "event_loop_gaps": terminal_gap_events,
+        "maximum_correlated_event_loop_gap_ms": max(
+            (
+                float(event["event_loop_gap_ms"])
+                for event in terminal_gap_events
+            ),
+            default=0.0,
+        ),
+    }
     progress_total_samples = [
         float(record["duration_ms"])
         for record in probe_snapshot.get("phase_timings", {}).get("records", [])
@@ -2290,6 +2491,12 @@ def run_virtual_print_array_scenario(
         "full_bundle_refresh_count": int(
             phase_duration_values.get(
                 "persistence.full_bundle_refresh",
+                {},
+            ).get("count", 0)
+        )
+        + int(
+            phase_duration_values.get(
+                "terminal_transition.full_validation",
                 {},
             ).get("count", 0)
         ),
@@ -2695,6 +2902,7 @@ def run_virtual_print_array_scenario(
                     **validation,
                     "phase_timings": phases.snapshot(),
                     "pass_start": pass_start_evidence,
+                    "terminal_transition": terminal_transition_evidence,
                     "authoritative_io": authoritative_io,
                     "progress_snapshot": progress_snapshot,
                     "cumulative_progress_serialized_bytes": sum(

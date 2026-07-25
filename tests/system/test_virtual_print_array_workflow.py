@@ -124,6 +124,11 @@ def test_real_ui_print_array_completes_and_writes_inspectable_report(qapp, tmp_p
     assert authoritative_io["progress_write_fsync_count"] == 96
     assert authoritative_io["progress_write_replace_count"] == 96
     assert authoritative_io["observer_restored"] is True
+    terminal = report["metrics"]["persistence"]["values"]["terminal_transition"]
+    assert terminal["count"] == 1
+    assert terminal["records"][0]["state"] == "completed"
+    assert terminal["total_duration_ms"]["count"] == 1
+    assert "terminal_transition.total" in terminal["inclusive_duration_by_name_ms"]
     snapshot = report["metrics"]["persistence"]["values"]["progress_snapshot"]
     assert snapshot["mode_counts"] == {
         "full_rebuild": 0,
