@@ -533,6 +533,7 @@ class ExperimentModel(QObject):
         self._active_authoritative_execution_session = None
         self._pending_authoritative_print_preflight = None
         self._last_authoritative_pass_preparation = None
+        self._last_authoritative_terminal_transition = None
         self._progress_execution_reference: ProgressExecutionReference | None = None
 
         # optional dependency (if you have one); safe to ignore if None
@@ -7062,6 +7063,7 @@ class ExperimentModel(QObject):
         self._active_authoritative_execution_session = None
         self._pending_authoritative_print_preflight = None
         self._last_authoritative_pass_preparation = None
+        self._last_authoritative_terminal_transition = None
         self._progress_execution_reference = None
         self.progress_data = {}
         
@@ -7151,6 +7153,7 @@ class ExperimentModel(QObject):
         self._active_authoritative_execution_session = None
         self._pending_authoritative_print_preflight = None
         self._last_authoritative_pass_preparation = None
+        self._last_authoritative_terminal_transition = None
         self._progress_execution_reference = None
 
     def is_read_only_legacy_execution(self) -> bool:
@@ -7364,6 +7367,22 @@ class ExperimentModel(QObject):
         tuple[str, ...],
     ]:
         """Guard one pass-preparation write against out-of-band changes."""
+        return self._guard_authoritative_transition_files(
+            expected_identities=expected_identities,
+            expected_revision_names=expected_revision_names,
+            detail=detail,
+        )
+
+    def _guard_authoritative_transition_files(
+        self,
+        *,
+        expected_identities: dict[str, _AuthoritativeFileIdentity],
+        expected_revision_names: tuple[str, ...],
+        detail: str,
+    ) -> tuple[
+        dict[str, _AuthoritativeFileIdentity],
+        tuple[str, ...],
+    ]:
         identities, revision_names = self._capture_authoritative_runtime_files()
         if revision_names != expected_revision_names:
             raise self._authoritative_runtime_conflict(
@@ -7391,10 +7410,30 @@ class ExperimentModel(QObject):
         dict[str, _AuthoritativeFileIdentity],
         tuple[str, ...],
     ]:
+        return self._accept_authoritative_transition_writes(
+            expected_identities=expected_identities,
+            expected_revision_names=expected_revision_names,
+            changed_names=changed_names,
+            resulting_revision_names=resulting_revision_names,
+            detail="pass preparation",
+        )
+
+    def _accept_authoritative_transition_writes(
+        self,
+        *,
+        expected_identities: dict[str, _AuthoritativeFileIdentity],
+        expected_revision_names: tuple[str, ...],
+        changed_names: set[str],
+        resulting_revision_names: tuple[str, ...],
+        detail: str,
+    ) -> tuple[
+        dict[str, _AuthoritativeFileIdentity],
+        tuple[str, ...],
+    ]:
         identities, revision_names = self._capture_authoritative_runtime_files()
         if revision_names != resulting_revision_names:
             raise self._authoritative_runtime_conflict(
-                "immutable execution revision history changed during pass preparation"
+                f"immutable execution revision history changed during {detail}"
             )
         unexpected = [
             name
@@ -7403,13 +7442,13 @@ class ExperimentModel(QObject):
         ]
         if unexpected:
             raise self._authoritative_runtime_conflict(
-                f"{', '.join(sorted(unexpected))} changed during pass preparation"
+                f"{', '.join(sorted(unexpected))} changed during {detail}"
             )
         for name in changed_names:
             identity = identities.get(name)
             if identity is None or not identity.exists:
                 raise self._authoritative_runtime_conflict(
-                    f"{name} is missing after pass preparation"
+                    f"{name} is missing after {detail}"
                 )
         if expected_revision_names and not set(expected_revision_names).issubset(
             revision_names
@@ -7547,6 +7586,12 @@ class ExperimentModel(QObject):
         return advanced, identities, revision_names
 
     def _persist_authoritative_pass_immutable_revision(self, candidate_plan) -> None:
+        self._persist_authoritative_transition_immutable_revision(candidate_plan)
+
+    def _persist_authoritative_transition_immutable_revision(
+        self,
+        candidate_plan,
+    ) -> None:
         status = persist_immutable_revision(
             self.execution_plan_revisions_dir_path,
             candidate_plan,
@@ -7557,9 +7602,15 @@ class ExperimentModel(QObject):
             )
 
     def _write_authoritative_pass_current_plan(self, candidate_plan) -> None:
+        self._write_authoritative_transition_current_plan(candidate_plan)
+
+    def _write_authoritative_transition_current_plan(self, candidate_plan) -> None:
         save_execution_plan(self.execution_plan_file_path, candidate_plan)
 
     def _write_authoritative_pass_progress(self, progress_payload) -> None:
+        self._write_authoritative_transition_progress(progress_payload)
+
+    def _write_authoritative_transition_progress(self, progress_payload) -> None:
         self._atomic_write_text(
             self.progress_file_path,
             serialize_execution_progress(
@@ -7569,10 +7620,77 @@ class ExperimentModel(QObject):
         )
 
     def _write_authoritative_pass_resume(self, resume) -> None:
+        self._write_authoritative_transition_resume(resume)
+
+    def _write_authoritative_transition_resume(self, resume) -> None:
         save_execution_resume(self.execution_resume_file_path, resume)
 
     @staticmethod
     def _advance_authoritative_pass_bundle(
+        bundle,
+        *,
+        candidate_plan,
+        progress_payload,
+        resume,
+    ):
+        return advance_authoritative_execution_revision(
+            bundle,
+            candidate_plan=candidate_plan,
+            progress_payload=progress_payload,
+            resume=resume,
+        )
+
+    def _guard_authoritative_terminal_files(
+        self,
+        *,
+        expected_identities: dict[str, _AuthoritativeFileIdentity],
+        expected_revision_names: tuple[str, ...],
+    ) -> tuple[
+        dict[str, _AuthoritativeFileIdentity],
+        tuple[str, ...],
+    ]:
+        return self._guard_authoritative_transition_files(
+            expected_identities=expected_identities,
+            expected_revision_names=expected_revision_names,
+            detail="terminal completion persistence",
+        )
+
+    def _accept_authoritative_terminal_writes(
+        self,
+        *,
+        expected_identities: dict[str, _AuthoritativeFileIdentity],
+        expected_revision_names: tuple[str, ...],
+        changed_names: set[str],
+        resulting_revision_names: tuple[str, ...],
+    ) -> tuple[
+        dict[str, _AuthoritativeFileIdentity],
+        tuple[str, ...],
+    ]:
+        return self._accept_authoritative_transition_writes(
+            expected_identities=expected_identities,
+            expected_revision_names=expected_revision_names,
+            changed_names=changed_names,
+            resulting_revision_names=resulting_revision_names,
+            detail="terminal completion persistence",
+        )
+
+    def _persist_authoritative_terminal_immutable_revision(
+        self,
+        candidate_plan,
+    ) -> None:
+        self._persist_authoritative_transition_immutable_revision(candidate_plan)
+
+    def _write_authoritative_terminal_current_plan(self, candidate_plan) -> None:
+        self._write_authoritative_transition_current_plan(candidate_plan)
+
+    def _write_authoritative_terminal_progress(self, progress_payload) -> None:
+        self._write_authoritative_transition_progress(progress_payload)
+
+    def _write_authoritative_terminal_resume(self, resume) -> None:
+        self._write_authoritative_transition_resume(resume)
+
+    @staticmethod
+    def _advance_authoritative_terminal_bundle(
         bundle,
         *,
         candidate_plan,
@@ -8596,6 +8714,213 @@ class ExperimentModel(QObject):
         )
         return candidate
 
+    @staticmethod
+    def _build_authoritative_terminal_candidate(
+        plan,
+        progress_wells,
+        *,
+        reason: str,
+        timestamp_utc: str | None,
+    ):
+        added_counts: dict[str, dict[str, int]] = {}
+        for well in plan.wells:
+            progress_well = progress_wells.get(well.well_id)
+            if not isinstance(progress_well, dict):
+                raise RuntimeError(
+                    f"Authoritative progress is missing well {well.well_id!r}."
+                )
+            progress_reagents = progress_well.get("reagents")
+            if not isinstance(progress_reagents, dict):
+                raise RuntimeError(
+                    f"Authoritative progress for well {well.well_id!r} is malformed."
+                )
+            well_counts: dict[str, int] = {}
+            for dispense in well.dispenses:
+                details = progress_reagents.get(dispense.stock_id)
+                if not isinstance(details, dict):
+                    raise RuntimeError(
+                        "Authoritative progress is missing "
+                        f"{well.well_id!r}/{dispense.stock_id!r}."
+                    )
+                added = int(details.get("added_droplets", 0) or 0)
+                if added != dispense.target_dispenses:
+                    raise RuntimeError(
+                        "Completion requires every frozen target to be satisfied "
+                        f"exactly; {well.well_id!r}/{dispense.stock_id!r} is "
+                        f"{added}/{dispense.target_dispenses}."
+                    )
+                well_counts[dispense.stock_id] = added
+            added_counts[well.well_id] = well_counts
+        return build_terminal_revision(
+            plan,
+            state=ExecutionPlanState.COMPLETED,
+            added_counts_by_well=added_counts,
+            has_pending_intents=False,
+            reason=reason,
+            timestamp_utc=timestamp_utc,
+        )
+
+    @staticmethod
+    def _synchronize_authoritative_terminal_resume(
+        resume: ExecutionResumeDocument,
+        *,
+        candidate_plan,
+        progress_wells,
+        timestamp_utc: str | None,
+    ) -> ExecutionResumeDocument:
+        return synchronize_checkpoint(
+            resume,
+            plan_revision=candidate_plan.plan_revision,
+            progress_wells=progress_wells,
+            timestamp_utc=timestamp_utc,
+        )
+
+    def _install_validated_authoritative_terminal_bundle(self, bundle) -> None:
+        if (
+            not bundle.valid
+            or bundle.plan is None
+            or bundle.plan.state is not ExecutionPlanState.COMPLETED
+        ):
+            raise RuntimeError(
+                "The post-commit authoritative bundle is not a valid completed execution."
+            )
+        self._authoritative_execution_bundle = bundle
+        self._execution_plan_snapshot = bundle.plan
+        self._reconstructed_execution_plan = bundle.plan
+        self.progress_data = dict(bundle.progress_wells)
+        self._progress_execution_reference = ProgressExecutionReference(
+            plan_id=bundle.plan.plan_id,
+            plan_revision=bundle.plan.plan_revision,
+        )
+        self._project_reconstructed_execution_plan(bundle.plan)
+        self._authoritative_runtime_active = False
+        self._invalidate_authoritative_runtime_session()
+        self.set_execution_plan_sync_error(None)
+
+    def _complete_authoritative_execution_cached(
+        self,
+        reason: str,
+        *,
+        timestamp_utc: str | None = None,
+    ):
+        """Commit one completed successor, then fully validate it exactly once."""
+        self._last_authoritative_terminal_transition = None
+        write_started = False
+        starting_revision = None
+        try:
+            session = self._guard_authoritative_runtime_session()
+            bundle = session.bundle
+            plan = bundle.plan
+            if plan is None or plan.state is not ExecutionPlanState.ACTIVE:
+                raise RuntimeError(
+                    "Cached completion requires an active authoritative execution plan."
+                )
+            starting_revision = int(plan.plan_revision)
+            resume = session.resume
+            if resume is None or resume.state != "clean":
+                raise RuntimeError(
+                    "Completion requires a clean durable checkpoint."
+                )
+            if any(intent.status == "pending" for intent in resume.intents):
+                raise RuntimeError(
+                    "Completion requires no pending print intents."
+                )
+
+            candidate = self._build_authoritative_terminal_candidate(
+                plan,
+                bundle.progress_wells,
+                reason=reason,
+                timestamp_utc=timestamp_utc,
+            )
+            progress = retarget_execution_progress_revision(
+                plan,
+                candidate,
+                session.progress_payload,
+            )
+            updated_resume = self._synchronize_authoritative_terminal_resume(
+                resume,
+                candidate_plan=candidate,
+                progress_wells=progress.progress_wells,
+                timestamp_utc=timestamp_utc,
+            )
+            advanced = self._advance_authoritative_terminal_bundle(
+                bundle,
+                candidate_plan=candidate,
+                progress_payload=progress.payload,
+                resume=updated_resume,
+            )
+
+            expected_identities = dict(session.file_identities)
+            expected_revision_names = tuple(session.revision_names)
+            expected_identities, expected_revision_names = (
+                self._guard_authoritative_terminal_files(
+                    expected_identities=expected_identities,
+                    expected_revision_names=expected_revision_names,
+                )
+            )
+            revision_name = revision_file_name(candidate.plan_revision)
+            if revision_name in expected_revision_names:
+                raise self._authoritative_runtime_conflict(
+                    f"{revision_name} unexpectedly already exists"
+                )
+            changed_names = {
+                f"{REVISION_DIRECTORY_NAME}/{revision_name}",
+                "execution_plan.json",
+                "progress.json",
+                "execution_resume.json",
+            }
+            write_started = True
+            self._persist_authoritative_terminal_immutable_revision(candidate)
+            self._write_authoritative_terminal_current_plan(candidate)
+            self._write_authoritative_terminal_progress(progress.payload)
+            self._write_authoritative_terminal_resume(updated_resume)
+            resulting_revision_names = (*expected_revision_names, revision_name)
+            self._accept_authoritative_terminal_writes(
+                expected_identities=expected_identities,
+                expected_revision_names=expected_revision_names,
+                changed_names=changed_names,
+                resulting_revision_names=resulting_revision_names,
+            )
+
+            validated = self._refresh_authoritative_execution_bundle()
+            if (
+                validated.plan != candidate
+                or validated.progress_payload != advanced.progress_payload
+                or validated.progress_wells != advanced.progress_wells
+                or validated.resume != updated_resume
+                or validated.history != advanced.history
+            ):
+                raise RuntimeError(
+                    "The post-commit authoritative validation differs from "
+                    "the cached completed transaction."
+                )
+            self._install_validated_authoritative_terminal_bundle(validated)
+            self._audit_execution_plan_event(
+                "execution_plan_completed",
+                "Execution completed",
+                {
+                    "plan_id": candidate.plan_id,
+                    "plan_revision": candidate.plan_revision,
+                    "reason": str(reason or ""),
+                },
+            )
+            result = {
+                "cache_path": "cached_completion",
+                "starting_plan_revision": starting_revision,
+                "final_plan_revision": candidate.plan_revision,
+                "created_revision": revision_name,
+                "full_validation_count": 1,
+                "exports": "unchanged",
+            }
+            self._last_authoritative_terminal_transition = result
+            return candidate
+        except Exception as exc:
+            if write_started:
+                self._authoritative_runtime_active = False
+                self._invalidate_authoritative_runtime_session()
+            self.set_execution_plan_sync_error(exc)
+            raise
+
     def transition_execution_plan_terminal(
         self,
         state: ExecutionPlanState | str,
@@ -8603,6 +8928,7 @@ class ExperimentModel(QObject):
         *,
         timestamp_utc: str | None = None,
     ):
+        self._last_authoritative_terminal_transition = None
         terminal = state if isinstance(state, ExecutionPlanState) else ExecutionPlanState(str(state))
         if terminal not in {ExecutionPlanState.COMPLETED, ExecutionPlanState.ABORTED}:
             raise ValueError("Terminal execution state must be completed or aborted.")
@@ -8618,6 +8944,15 @@ class ExperimentModel(QObject):
             and not self.is_authoritative_execution_runtime_active()
         ):
             raise RuntimeError("A read-only authoritative execution cannot change lifecycle state.")
+        if (
+            terminal is ExecutionPlanState.COMPLETED
+            and getattr(self, "_active_authoritative_execution_session", None)
+            is not None
+        ):
+            return self._complete_authoritative_execution_cached(
+                reason,
+                timestamp_utc=timestamp_utc,
+            )
         try:
             design_payload = self._validate_plan_design_link(plan)
             plan = self._recover_persisted_execution_plan_for_transition(plan)

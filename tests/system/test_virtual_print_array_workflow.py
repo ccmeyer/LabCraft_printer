@@ -127,8 +127,30 @@ def test_real_ui_print_array_completes_and_writes_inspectable_report(qapp, tmp_p
     terminal = report["metrics"]["persistence"]["values"]["terminal_transition"]
     assert terminal["count"] == 1
     assert terminal["records"][0]["state"] == "completed"
+    assert terminal["records"][0]["full_bundle_refresh_count"] == 1
+    assert terminal["records"][0]["preparation"]["cache_path"] == "cached_completion"
+    assert terminal["records"][0]["preparation"]["exports"] == "unchanged"
+    assert terminal["records"][0]["io_delta"]["fsync_count"] == 4
+    assert terminal["records"][0]["io_delta"]["replace_count"] == 4
     assert terminal["total_duration_ms"]["count"] == 1
     assert "terminal_transition.total" in terminal["inclusive_duration_by_name_ms"]
+    terminal_reads = authoritative_io["read_opens"]["by_phase"][
+        "terminal_transition.full_validation"
+    ]
+    assert terminal_reads["experiment_design.json"]["count"] == 1
+    assert terminal_reads["execution_plan.json"]["count"] == 1
+    assert terminal_reads["progress.json"]["count"] == 1
+    assert terminal_reads["execution_resume.json"]["count"] == 1
+    assert all(
+        phase == "terminal_transition.full_validation"
+        or not phase.startswith("terminal_transition.")
+        for phase in authoritative_io["read_opens"]["by_phase"]
+    )
+    assert all(
+        evidence["count"] == 1
+        for name, evidence in terminal_reads.items()
+        if name.startswith("execution_plan_revisions/")
+    )
     snapshot = report["metrics"]["persistence"]["values"]["progress_snapshot"]
     assert snapshot["mode_counts"] == {
         "full_rebuild": 0,

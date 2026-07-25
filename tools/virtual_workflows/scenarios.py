@@ -1016,7 +1016,6 @@ def _install_instrumentation(
         observe=observe_complete,
     )
     for method, phase in (
-        ("_guard_authoritative_runtime_session", "persistence.guard_bundle"),
         ("_save_active_execution_resume", "persistence.save_resume"),
         ("_reconcile_authoritative_runtime_session", "persistence.reconcile_cache"),
         ("lock_execution_plan", "pass_start.plan_lock"),
@@ -1038,9 +1037,58 @@ def _install_instrumentation(
         ("_write_authoritative_pass_progress", "pass_start.progress_write"),
         ("_write_authoritative_pass_resume", "pass_start.resume_write"),
         ("_create_authoritative_pass_checkpoint", "pass_start.checkpoint_create"),
+        (
+            "_complete_authoritative_execution_cached",
+            "terminal_transition.cached_commit",
+        ),
+        (
+            "_build_authoritative_terminal_candidate",
+            "terminal_transition.candidate_construction",
+        ),
+        (
+            "_synchronize_authoritative_terminal_resume",
+            "terminal_transition.resume_synchronization",
+        ),
+        (
+            "_advance_authoritative_terminal_bundle",
+            "terminal_transition.successor_validation",
+        ),
+        (
+            "_guard_authoritative_terminal_files",
+            "terminal_transition.prewrite_guard",
+        ),
+        (
+            "_persist_authoritative_terminal_immutable_revision",
+            "terminal_transition.immutable_revision_write",
+        ),
+        (
+            "_write_authoritative_terminal_current_plan",
+            "terminal_transition.current_plan_write",
+        ),
+        (
+            "_write_authoritative_terminal_progress",
+            "terminal_transition.progress_write",
+        ),
+        (
+            "_write_authoritative_terminal_resume",
+            "terminal_transition.resume_write",
+        ),
+        (
+            "_accept_authoritative_terminal_writes",
+            "terminal_transition.post_write_acceptance",
+        ),
+        (
+            "_install_validated_authoritative_terminal_bundle",
+            "terminal_transition.cache_deactivation",
+        ),
     ):
         instrumentation.wrap(experiment_model, method, phase)
     for method, normal_phase, terminal_phase in (
+        (
+            "_guard_authoritative_runtime_session",
+            "persistence.guard_bundle",
+            "terminal_transition.initial_guard",
+        ),
         (
             "_refresh_authoritative_execution_bundle",
             "persistence.full_bundle_refresh",
@@ -1090,6 +1138,11 @@ def _install_instrumentation(
         controller,
         "_finish_array_finalize",
         "terminal_finalize.total",
+    )
+    instrumentation.wrap(
+        experiment_model,
+        "try_complete_execution_plan",
+        "terminal_finalize.eligibility",
     )
     instrumentation.wrap(
         controller,
@@ -2514,6 +2567,18 @@ def run_virtual_print_array_scenario(
                 "pass_start.revision_guard",
                 {},
             ).get("count", 0)
+        )
+        + int(
+            phase_duration_values.get(
+                "terminal_transition.initial_guard",
+                {},
+            ).get("count", 0)
+        )
+        + int(
+            phase_duration_values.get(
+                "terminal_transition.prewrite_guard",
+                {},
+            ).get("count", 0)
         ),
         "cache_reconciliation_count": int(
             phase_duration_values.get(
@@ -2640,6 +2705,12 @@ def run_virtual_print_array_scenario(
         )
         if preparation.get("checkpoint_action") == "created":
             expected_pass_start_guards += 1
+    expected_terminal_guards = sum(
+        2
+        for record in terminal_records
+        if (record.get("preparation") or {}).get("cache_path")
+        == "cached_completion"
+    )
     if failure_text is None and (
         progress_modes.get("cached_update") != expected_completions
         or progress_modes.get("full_rebuild") != 0
@@ -2661,7 +2732,11 @@ def run_virtual_print_array_scenario(
         authoritative_io["hot_path_read_count"] != 0
         or authoritative_io["execution_resume_hot_path_disk_load_count"] != 0
         or authoritative_io["guard_count"]
-        != expected_completions * 4 + expected_pass_start_guards
+        != (
+            expected_completions * 4
+            + expected_pass_start_guards
+            + expected_terminal_guards
+        )
         or authoritative_io["resume_save_fsync_count"] != expected_completions * 3
         or authoritative_io["resume_save_replace_count"] != expected_completions * 3
         or authoritative_io["progress_write_fsync_count"] != expected_completions

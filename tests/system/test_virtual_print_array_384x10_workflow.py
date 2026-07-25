@@ -173,7 +173,7 @@ def test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order(
     authoritative_io = persistence["authoritative_io"]
     assert authoritative_io["hot_path_read_count"] == 0
     assert authoritative_io["execution_resume_hot_path_disk_load_count"] == 0
-    assert authoritative_io["guard_count"] == 48 * 4 + 4
+    assert authoritative_io["guard_count"] == 48 * 4 + 6
     assert authoritative_io["resume_save_fsync_count"] == 48 * 3
     assert authoritative_io["resume_save_replace_count"] == 48 * 3
     assert authoritative_io["progress_write_fsync_count"] == 48
@@ -200,6 +200,10 @@ def test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order(
     terminal = persistence["terminal_transition"]
     assert terminal["count"] == 1
     assert terminal["records"][0]["state"] == "completed"
+    assert terminal["records"][0]["full_bundle_refresh_count"] == 1
+    assert terminal["records"][0]["preparation"]["cache_path"] == "cached_completion"
+    assert terminal["records"][0]["io_delta"]["fsync_count"] == 4
+    assert terminal["records"][0]["io_delta"]["replace_count"] == 4
     assert terminal["total_duration_ms"]["count"] == 1
     assert "terminal_transition.total" in terminal["inclusive_duration_by_name_ms"]
 
