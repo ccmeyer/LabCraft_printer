@@ -594,34 +594,7 @@ class _InstanceInstrumentation:
         return dict(context or {})
 
     def _io_totals(self) -> dict[str, int]:
-        reads = self.io_observer.read_snapshot()
-        durable = self.io_observer.snapshot()
-        by_path = reads.get("by_path", {})
-        return {
-            "read_open_count": int(reads.get("total_count", 0)),
-            "read_bytes": sum(
-                int(values.get("observed_file_size_bytes", 0))
-                for values in by_path.values()
-            ),
-            "revision_read_count": sum(
-                int(values.get("count", 0))
-                for path, values in by_path.items()
-                if str(path).startswith("execution_plan_revisions/")
-            ),
-            "revision_read_bytes": sum(
-                int(values.get("observed_file_size_bytes", 0))
-                for path, values in by_path.items()
-                if str(path).startswith("execution_plan_revisions/")
-            ),
-            "fsync_count": sum(
-                len(samples)
-                for samples in durable.get("fsync", {}).values()
-            ),
-            "replace_count": sum(
-                len(samples)
-                for samples in durable.get("atomic_replace", {}).values()
-            ),
-        }
+        return self.io_observer.totals()
 
     def wrap_pass_start(self, controller: Any, experiment_model: Any) -> None:
         original = getattr(controller, "print_array")

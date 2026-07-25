@@ -201,6 +201,14 @@ def test_io_observer_attributes_real_reads_within_selected_root(tmp_path):
     }
     assert snapshot["by_phase"]["checkpoint_read"] == snapshot["by_path"]
     assert snapshot["observer_restored"] is True
+    assert observer.totals() == {
+        "read_open_count": 1,
+        "read_bytes": observed_path.stat().st_size,
+        "revision_read_count": 0,
+        "revision_read_bytes": 0,
+        "fsync_count": 0,
+        "replace_count": 0,
+    }
 
 
 def test_quartile_growth_is_computed_within_each_run():

@@ -25,6 +25,14 @@ class PersistenceIoObserver:
         }
         self._read_counts: dict[str, dict[str, int]] = {}
         self._read_size_bytes: dict[str, dict[str, int]] = {}
+        self._totals: dict[str, int] = {
+            "read_open_count": 0,
+            "read_bytes": 0,
+            "revision_read_count": 0,
+            "revision_read_bytes": 0,
+            "fsync_count": 0,
+            "replace_count": 0,
+        }
 
     @contextlib.contextmanager
     def phase(self, name: str):
@@ -64,12 +72,19 @@ class PersistenceIoObserver:
         self._read_size_bytes.setdefault(phase, {})[relative] = (
             self._read_size_bytes.setdefault(phase, {}).get(relative, 0) + size
         )
+        self._totals["read_open_count"] += 1
+        self._totals["read_bytes"] += size
+        if relative.startswith("execution_plan_revisions/"):
+            self._totals["revision_read_count"] += 1
+            self._totals["revision_read_bytes"] += size
 
     def _record_duration(self, operation: str, elapsed_ms: float) -> None:
         phase = self._active_phase
         if phase is None:
             return
         self._samples_ms[operation].setdefault(phase, []).append(float(elapsed_ms))
+        counter = "fsync_count" if operation == "fsync" else "replace_count"
+        self._totals[counter] += 1
 
     def install(self) -> None:
         if self._installed:
@@ -149,6 +164,10 @@ class PersistenceIoObserver:
             }
             for operation, by_phase in self._samples_ms.items()
         }
+
+    def totals(self) -> dict[str, int]:
+        """Return cumulative counters without copying retained raw samples."""
+        return dict(self._totals)
 
     def read_snapshot(self) -> dict[str, Any]:
         by_phase = {
