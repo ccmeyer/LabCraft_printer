@@ -398,6 +398,22 @@ schema-v1-equivalent size, ratio, and reduction fraction. They also retain
 cumulative serialized bytes. Report envelopes and comparison policy v1 paths
 are unchanged.
 
+The reviewed full Pi 384×10 characterization completed all 3,840 stock/well
+updates with a final 11,082-byte v2 snapshot versus a 590,982-byte equivalent
+v1 snapshot (98.12% smaller). Total progress serialization was 42.55 MB rather
+than the prior 4.088 GB projection. It retained zero hot-path reads and exact
+15,369 guards, 11,520 resume writes, and 3,840 progress writes.
+
+That run still failed the separate stress responsiveness gate: isolated
+event-loop and active pressure-render intervals reached 3.65 and 3.82 seconds,
+although scheduling-lateness p99 was 186.7 ms. Captured stacks implicate
+pass-start execution-plan/history validation and full experiment-guidance UI
+rebuilds as remaining contributors. On Windows, both allowed full-stress
+attempts instead failed closed on the existing `execution_resume.json` atomic
+rename contention. Compact progress therefore solves the serialization-volume
+problem but does not claim to eliminate every large-workload UI stall or
+Windows rename failure.
+
 If Windows reports `WinError 5` while rapidly replacing an execution file,
 retain the failed diagnostics and retry once with a fresh ignored
 repository-local output root, for example:
