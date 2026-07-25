@@ -426,6 +426,37 @@ def update_execution_progress_payload(
     return decode_execution_progress(plan, candidate)
 
 
+def retarget_execution_progress_revision(
+    previous_plan: ExecutionPlan,
+    candidate_plan: ExecutionPlan,
+    payload: Any,
+) -> DecodedExecutionProgress:
+    """Retarget a coherent snapshot across a target-preserving plan revision."""
+    decoded = decode_execution_progress(previous_plan, payload)
+    if previous_plan.plan_id != candidate_plan.plan_id:
+        raise _error("progress", "cannot change execution plan identity")
+    if candidate_plan.plan_revision != previous_plan.plan_revision + 1:
+        raise _error("progress", "candidate plan revision is not the next revision")
+    if previous_plan.plate != candidate_plan.plate:
+        raise _error("progress", "candidate plan changes plate identity")
+    if tuple(stock.stock_id for stock in previous_plan.stocks) != tuple(
+        stock.stock_id for stock in candidate_plan.stocks
+    ):
+        raise _error("progress", "candidate plan changes stock identities")
+    if previous_plan.wells != candidate_plan.wells:
+        raise _error("progress", "candidate plan changes frozen well targets")
+
+    candidate = dict(decoded.payload)
+    if decoded.schema_version == SCHEMA_VERSION:
+        candidate["plan_id"] = candidate_plan.plan_id
+        candidate["plan_revision"] = candidate_plan.plan_revision
+    else:
+        reference = dict(candidate.get("__execution__") or {})
+        reference.update(_plan_reference(candidate_plan).to_dict())
+        candidate["__execution__"] = reference
+    return decode_execution_progress(candidate_plan, candidate)
+
+
 def copy_execution_progress_payload(
     plan: ExecutionPlan,
     payload: Any,

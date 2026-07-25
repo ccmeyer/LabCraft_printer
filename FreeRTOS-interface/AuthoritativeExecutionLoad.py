@@ -16,7 +16,11 @@ from ExecutionPlan import (
     canonical_sha256,
     load_execution_plan,
 )
-from ExecutionPlanRevision import validate_revision_history
+from ExecutionPlanRevision import (
+    revision_file_name,
+    validate_revision_history,
+    validate_revision_successor,
+)
 from ExecutionProgressStore import decode_execution_progress
 from ExecutionResumeStore import (
     ExecutionResumeDocument,
@@ -330,6 +334,52 @@ def reconcile_authoritative_execution_runtime(
         bundle,
         progress_payload=dict(progress_payload),
         progress_wells=reconciled_wells,
+        resume=resume,
+        eligibility=eligibility,
+    )
+
+
+def advance_authoritative_execution_revision(
+    bundle: AuthoritativeExecutionBundle,
+    *,
+    candidate_plan: ExecutionPlan,
+    progress_payload: Mapping[str, Any],
+    resume: ExecutionResumeDocument | None,
+) -> AuthoritativeExecutionBundle:
+    """Advance a validated bundle by one durably persisted plan successor."""
+    if not bundle.valid or bundle.plan is None or not bundle.history:
+        raise ValueError("A valid authoritative execution bundle is required.")
+    if bundle.migration_manifest is not None:
+        raise ValueError("Migrated legacy executions cannot advance.")
+    calibration_ids = (
+        set(bundle.calibrations.records)
+        if bundle.calibrations is not None
+        else set()
+    )
+    history = validate_revision_successor(
+        bundle.history,
+        candidate_plan,
+        candidate_filename=revision_file_name(candidate_plan.plan_revision),
+        calibration_record_ids=calibration_ids,
+    )
+    decoded = decode_execution_progress(candidate_plan, progress_payload)
+    if resume is not None:
+        _validate_resume_contents(
+            candidate_plan,
+            decoded.progress_wells,
+            resume,
+        )
+    eligibility = _eligibility(
+        candidate_plan,
+        decoded.progress_wells,
+        resume,
+    )
+    return replace(
+        bundle,
+        plan=candidate_plan,
+        history=history,
+        progress_payload=dict(decoded.payload),
+        progress_wells=decoded.progress_wells,
         resume=resume,
         eligibility=eligibility,
     )

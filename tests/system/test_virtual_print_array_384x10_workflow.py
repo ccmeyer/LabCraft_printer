@@ -173,7 +173,7 @@ def test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order(
     authoritative_io = persistence["authoritative_io"]
     assert authoritative_io["hot_path_read_count"] == 0
     assert authoritative_io["execution_resume_hot_path_disk_load_count"] == 0
-    assert authoritative_io["guard_count"] == 48 * 4 + 1
+    assert authoritative_io["guard_count"] == 48 * 4 + 4
     assert authoritative_io["resume_save_fsync_count"] == 48 * 3
     assert authoritative_io["resume_save_replace_count"] == 48 * 3
     assert authoritative_io["progress_write_fsync_count"] == 48
@@ -182,7 +182,7 @@ def test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order(
     phases = persistence["phase_timings"]["duration_by_name_ms"]
     assert phases["controller.well_completion"]["count"] == 48
     assert phases["ui.well_plate_update"]["count"] == 48
-    assert phases["persistence.guard_bundle"]["count"] == 48 * 4 + 1
+    assert phases["persistence.guard_bundle"]["count"] == 48 * 4 + 4
     pass_start = persistence["pass_start"]
     assert pass_start["count"] == 2
     assert [item["pass_index"] for item in pass_start["records"]] == [1, 2]
@@ -191,10 +191,12 @@ def test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order(
     assert "pass_start.total" in pass_start[
         "exclusive_phase_evidence"
     ]["summary_ms"]
-    assert all(
-        item["io_delta"]["revision_read_count"] >= 1
-        for item in pass_start["records"]
-    )
+    assert pass_start["records"][0]["io_delta"]["revision_read_count"] == 0
+    assert pass_start["records"][0]["full_bundle_refresh_count"] == 0
+    assert pass_start["records"][0]["preparation"]["cache_path"] == "cached_noop"
+    assert pass_start["records"][1]["io_delta"]["revision_read_count"] == 0
+    assert pass_start["records"][1]["full_bundle_refresh_count"] == 0
+    assert pass_start["records"][1]["preparation"]["cache_path"] == "cached_noop"
 
     queue = report["metrics"]["queue"]["values"]
     assert queue["unexpected_starvation_count"] == 0

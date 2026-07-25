@@ -66,16 +66,16 @@ def validate_revision_history(
     plans = tuple(load_execution_plan(path) for path in paths)
     if not plans:
         return ()
-    plan_id = plans[0].plan_id
-    design_hash = plans[0].design_sha256
-    created_at = plans[0].created_at_utc
-    plate = plans[0].plate
-    volume_basis = plans[0].volume_basis
     if plans[0].state is not ExecutionPlanState.PREPARED and not allow_nonprepared_initial:
         raise RuntimeError(
             "A non-prepared revision 1 requires a valid legacy-migration manifest."
         )
-    referenced_calibrations: set[str] = set()
+    referenced_calibrations: set[str] = {
+        stock.calibration_record_key
+        for stock in plans[0].stocks
+        if stock.calibration_record_key is not None
+    }
+    validated = (plans[0],)
     for expected, (path, plan) in enumerate(zip(paths, plans), start=1):
         if path.name != revision_file_name(expected):
             raise RuntimeError(
@@ -83,47 +83,107 @@ def validate_revision_history(
             )
         if plan.plan_revision != expected:
             raise RuntimeError("Execution-plan revision history is not contiguous from revision 1.")
-        if plan.plan_id != plan_id:
-            raise RuntimeError("Execution-plan revision history contains multiple plan IDs.")
-        if plan.design_sha256 != design_hash:
-            raise RuntimeError("Execution-plan revision history changes the frozen design hash.")
-        if plan.created_at_utc != created_at:
-            raise RuntimeError("Execution-plan revision history changes the creation timestamp.")
-        if plan.plate != plate or plan.volume_basis != volume_basis:
-            raise RuntimeError("Execution-plan revision history changes frozen plate or volume-basis facts.")
-        referenced_calibrations.update(
-            stock.calibration_record_key
-            for stock in plan.stocks
-            if stock.calibration_record_key is not None
-        )
         if expected > 1:
-            previous = plans[expected - 2]
-            if previous.state in {ExecutionPlanState.COMPLETED, ExecutionPlanState.ABORTED}:
-                raise RuntimeError("Terminal execution-plan revisions cannot have successors.")
-            if previous.state is ExecutionPlanState.PREPARED:
-                if plan.state is not ExecutionPlanState.ACTIVE:
-                    raise RuntimeError("Prepared execution plans may transition only to active.")
-                if previous.stocks != plan.stocks or previous.wells != plan.wells:
-                    raise RuntimeError("The prepared-to-active lock transition changed execution facts.")
-            elif plan.state in {ExecutionPlanState.COMPLETED, ExecutionPlanState.ABORTED}:
-                if previous.state is not ExecutionPlanState.ACTIVE:
-                    raise RuntimeError("Only active execution plans may become terminal.")
-                if previous.stocks != plan.stocks or previous.wells != plan.wells:
-                    raise RuntimeError("A terminal transition changed frozen execution facts.")
-            elif plan.state is not previous.state or plan.state is not ExecutionPlanState.ACTIVE:
-                raise RuntimeError("Execution-plan history contains an unsupported lifecycle transition.")
-            else:
-                _validate_active_revision_transition(previous, plan)
-            if previous.locked_at_utc is not None and (
-                plan.locked_at_utc != previous.locked_at_utc
-                or plan.lock_reason != previous.lock_reason
-            ):
-                raise RuntimeError("Execution-plan lock metadata changed after the first lock.")
+            validated = validate_revision_successor(
+                validated,
+                plan,
+                candidate_filename=path.name,
+            )
+            referenced_calibrations.update(
+                stock.calibration_record_key
+                for stock in plan.stocks
+                if stock.calibration_record_key is not None
+            )
     if calibration_record_ids is not None and referenced_calibrations - calibration_record_ids:
         raise RuntimeError("Execution-plan history references missing calibration records.")
     if latest_plan is not None and plans[-1] != latest_plan:
         raise RuntimeError("execution_plan.json does not exactly match the latest immutable revision.")
     return plans
+
+
+def validate_revision_successor(
+    validated_history: tuple[ExecutionPlan, ...],
+    candidate: ExecutionPlan,
+    *,
+    candidate_filename: str | None = None,
+    calibration_record_ids: set[str] | None = None,
+) -> tuple[ExecutionPlan, ...]:
+    """Validate one successor against an already coherent immutable history."""
+    history = tuple(validated_history)
+    if not history:
+        raise RuntimeError("A validated execution-plan history is required.")
+    if not isinstance(candidate, ExecutionPlan):
+        raise RuntimeError("The execution-plan successor is invalid.")
+
+    first = history[0]
+    previous = history[-1]
+    expected = len(history) + 1
+    if candidate_filename is not None and candidate_filename != revision_file_name(
+        expected
+    ):
+        raise RuntimeError(
+            "Execution-plan revision history contains a malformed or noncontiguous filename."
+        )
+    if candidate.plan_revision != expected:
+        raise RuntimeError(
+            "Execution-plan revision history is not contiguous from revision 1."
+        )
+    if candidate.plan_id != first.plan_id:
+        raise RuntimeError("Execution-plan revision history contains multiple plan IDs.")
+    if candidate.design_sha256 != first.design_sha256:
+        raise RuntimeError("Execution-plan revision history changes the frozen design hash.")
+    if candidate.created_at_utc != first.created_at_utc:
+        raise RuntimeError("Execution-plan revision history changes the creation timestamp.")
+    if (
+        candidate.plate != first.plate
+        or candidate.volume_basis != first.volume_basis
+    ):
+        raise RuntimeError(
+            "Execution-plan revision history changes frozen plate or volume-basis facts."
+        )
+    if previous.state in {
+        ExecutionPlanState.COMPLETED,
+        ExecutionPlanState.ABORTED,
+    }:
+        raise RuntimeError("Terminal execution-plan revisions cannot have successors.")
+    if previous.state is ExecutionPlanState.PREPARED:
+        if candidate.state is not ExecutionPlanState.ACTIVE:
+            raise RuntimeError("Prepared execution plans may transition only to active.")
+        if previous.stocks != candidate.stocks or previous.wells != candidate.wells:
+            raise RuntimeError(
+                "The prepared-to-active lock transition changed execution facts."
+            )
+    elif candidate.state in {
+        ExecutionPlanState.COMPLETED,
+        ExecutionPlanState.ABORTED,
+    }:
+        if previous.state is not ExecutionPlanState.ACTIVE:
+            raise RuntimeError("Only active execution plans may become terminal.")
+        if previous.stocks != candidate.stocks or previous.wells != candidate.wells:
+            raise RuntimeError("A terminal transition changed frozen execution facts.")
+    elif (
+        candidate.state is not previous.state
+        or candidate.state is not ExecutionPlanState.ACTIVE
+    ):
+        raise RuntimeError(
+            "Execution-plan history contains an unsupported lifecycle transition."
+        )
+    else:
+        _validate_active_revision_transition(previous, candidate)
+    if previous.locked_at_utc is not None and (
+        candidate.locked_at_utc != previous.locked_at_utc
+        or candidate.lock_reason != previous.lock_reason
+    ):
+        raise RuntimeError("Execution-plan lock metadata changed after the first lock.")
+
+    referenced = {
+        stock.calibration_record_key
+        for stock in candidate.stocks
+        if stock.calibration_record_key is not None
+    }
+    if calibration_record_ids is not None and referenced - calibration_record_ids:
+        raise RuntimeError("Execution-plan history references missing calibration records.")
+    return (*history, candidate)
 
 
 def _stock_changes(previous: ExecutionPlan, current: ExecutionPlan) -> list[str]:

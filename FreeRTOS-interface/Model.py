@@ -55,6 +55,7 @@ from ExecutionProgressStore import (
     execution_progress_added_value,
     has_positive_execution_progress,
     progress_reference_from_payload,
+    retarget_execution_progress_revision,
     serialize_execution_progress,
 )
 from InitialExecutionPlan import (
@@ -68,9 +69,11 @@ from ExecutionPlanRevision import (
     build_printer_head_binding_revision,
     build_terminal_revision,
     persist_immutable_revision,
+    revision_file_name,
     validate_revision_history,
 )
 from AuthoritativeExecutionLoad import (
+    advance_authoritative_execution_revision,
     build_execution_runtime_spec,
     inspect_authoritative_execution,
     reconcile_authoritative_execution_runtime,
@@ -136,6 +139,15 @@ class _ActiveAuthoritativeExecutionSession:
     progress_payload: dict[str, Any]
     file_identities: dict[str, _AuthoritativeFileIdentity]
     revision_names: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _AuthoritativePrintPreflight:
+    bundle: Any
+    file_identities: dict[str, _AuthoritativeFileIdentity]
+    revision_names: tuple[str, ...]
+    stock_id: str
+    printer_head_id: str
 
 
 def _format_stock_display_sig_figs(value, sig_figs: int = 3) -> str:
@@ -519,6 +531,8 @@ class ExperimentModel(QObject):
         self._authoritative_execution_bundle = None
         self._authoritative_runtime_active: bool = False
         self._active_authoritative_execution_session = None
+        self._pending_authoritative_print_preflight = None
+        self._last_authoritative_pass_preparation = None
         self._progress_execution_reference: ProgressExecutionReference | None = None
 
         # optional dependency (if you have one); safe to ignore if None
@@ -7046,6 +7060,8 @@ class ExperimentModel(QObject):
         self._authoritative_execution_bundle = None
         self._authoritative_runtime_active = False
         self._active_authoritative_execution_session = None
+        self._pending_authoritative_print_preflight = None
+        self._last_authoritative_pass_preparation = None
         self._progress_execution_reference = None
         self.progress_data = {}
         
@@ -7133,6 +7149,8 @@ class ExperimentModel(QObject):
         self._authoritative_execution_bundle = None
         self._authoritative_runtime_active = False
         self._active_authoritative_execution_session = None
+        self._pending_authoritative_print_preflight = None
+        self._last_authoritative_pass_preparation = None
         self._progress_execution_reference = None
 
     def is_read_only_legacy_execution(self) -> bool:
@@ -7269,6 +7287,7 @@ class ExperimentModel(QObject):
 
     def _invalidate_authoritative_runtime_session(self) -> None:
         self._active_authoritative_execution_session = None
+        self._pending_authoritative_print_preflight = None
 
     def _start_authoritative_runtime_session(self, bundle) -> None:
         if not bundle.valid or bundle.resume is None:
@@ -7310,6 +7329,95 @@ class ExperimentModel(QObject):
                 f"{', '.join(sorted(changed))} changed"
             )
         return session
+
+    def _guard_authoritative_print_preflight(
+        self,
+        preflight: _AuthoritativePrintPreflight,
+    ) -> tuple[
+        dict[str, _AuthoritativeFileIdentity],
+        tuple[str, ...],
+    ]:
+        identities, revision_names = self._capture_authoritative_runtime_files()
+        if revision_names != preflight.revision_names:
+            raise self._authoritative_runtime_conflict(
+                "immutable execution revision history changed after print preflight"
+            )
+        changed = [
+            name
+            for name, expected in preflight.file_identities.items()
+            if identities.get(name) != expected
+        ]
+        if changed:
+            raise self._authoritative_runtime_conflict(
+                f"{', '.join(sorted(changed))} changed after print preflight"
+            )
+        return identities, revision_names
+
+    def _guard_authoritative_pass_files(
+        self,
+        *,
+        expected_identities: dict[str, _AuthoritativeFileIdentity],
+        expected_revision_names: tuple[str, ...],
+        detail: str,
+    ) -> tuple[
+        dict[str, _AuthoritativeFileIdentity],
+        tuple[str, ...],
+    ]:
+        """Guard one pass-preparation write against out-of-band changes."""
+        identities, revision_names = self._capture_authoritative_runtime_files()
+        if revision_names != expected_revision_names:
+            raise self._authoritative_runtime_conflict(
+                f"immutable execution revision history changed before {detail}"
+            )
+        changed = [
+            name
+            for name, expected in expected_identities.items()
+            if identities.get(name) != expected
+        ]
+        if changed:
+            raise self._authoritative_runtime_conflict(
+                f"{', '.join(sorted(changed))} changed before {detail}"
+            )
+        return identities, revision_names
+
+    def _accept_authoritative_pass_writes(
+        self,
+        *,
+        expected_identities: dict[str, _AuthoritativeFileIdentity],
+        expected_revision_names: tuple[str, ...],
+        changed_names: set[str],
+        resulting_revision_names: tuple[str, ...],
+    ) -> tuple[
+        dict[str, _AuthoritativeFileIdentity],
+        tuple[str, ...],
+    ]:
+        identities, revision_names = self._capture_authoritative_runtime_files()
+        if revision_names != resulting_revision_names:
+            raise self._authoritative_runtime_conflict(
+                "immutable execution revision history changed during pass preparation"
+            )
+        unexpected = [
+            name
+            for name, expected in expected_identities.items()
+            if name not in changed_names and identities.get(name) != expected
+        ]
+        if unexpected:
+            raise self._authoritative_runtime_conflict(
+                f"{', '.join(sorted(unexpected))} changed during pass preparation"
+            )
+        for name in changed_names:
+            identity = identities.get(name)
+            if identity is None or not identity.exists:
+                raise self._authoritative_runtime_conflict(
+                    f"{name} is missing after pass preparation"
+                )
+        if expected_revision_names and not set(expected_revision_names).issubset(
+            revision_names
+        ):
+            raise self._authoritative_runtime_conflict(
+                "an existing immutable execution revision disappeared"
+            )
+        return identities, revision_names
 
     def _require_authoritative_runtime_session(self) -> _ActiveAuthoritativeExecutionSession:
         session = getattr(self, "_active_authoritative_execution_session", None)
@@ -7375,6 +7483,157 @@ class ExperimentModel(QObject):
             raise
         session.resume = document
         self._reconcile_authoritative_runtime_session()
+
+    def _commit_authoritative_pass_revision(
+        self,
+        *,
+        bundle,
+        identities: dict[str, _AuthoritativeFileIdentity],
+        revision_names: tuple[str, ...],
+        candidate_plan,
+    ):
+        """Persist and cache one target-preserving lock/binding successor."""
+        previous_plan = bundle.plan
+        if previous_plan is None:
+            raise RuntimeError("The authoritative execution plan is unavailable.")
+        progress = retarget_execution_progress_revision(
+            previous_plan,
+            candidate_plan,
+            bundle.progress_payload,
+        )
+        updated_resume = (
+            synchronize_checkpoint(
+                bundle.resume,
+                plan_revision=candidate_plan.plan_revision,
+                progress_wells=progress.progress_wells,
+            )
+            if bundle.resume is not None
+            else None
+        )
+        advanced = self._advance_authoritative_pass_bundle(
+            bundle,
+            candidate_plan=candidate_plan,
+            progress_payload=progress.payload,
+            resume=updated_resume,
+        )
+        identities, revision_names = self._guard_authoritative_pass_files(
+            expected_identities=identities,
+            expected_revision_names=revision_names,
+            detail=f"revision {candidate_plan.plan_revision} persistence",
+        )
+        revision_name = revision_file_name(candidate_plan.plan_revision)
+        if revision_name in revision_names:
+            raise self._authoritative_runtime_conflict(
+                f"{revision_name} unexpectedly already exists"
+            )
+        changed_names = {
+            f"{REVISION_DIRECTORY_NAME}/{revision_name}",
+            "execution_plan.json",
+            "progress.json",
+        }
+        self._persist_authoritative_pass_immutable_revision(candidate_plan)
+        self._write_authoritative_pass_current_plan(candidate_plan)
+        self._write_authoritative_pass_progress(progress.payload)
+        if updated_resume is not None:
+            self._write_authoritative_pass_resume(updated_resume)
+            changed_names.add("execution_resume.json")
+        resulting_names = (*revision_names, revision_name)
+        identities, revision_names = self._accept_authoritative_pass_writes(
+            expected_identities=identities,
+            expected_revision_names=revision_names,
+            changed_names=changed_names,
+            resulting_revision_names=resulting_names,
+        )
+        return advanced, identities, revision_names
+
+    def _persist_authoritative_pass_immutable_revision(self, candidate_plan) -> None:
+        status = persist_immutable_revision(
+            self.execution_plan_revisions_dir_path,
+            candidate_plan,
+        )
+        if status != "created":
+            raise self._authoritative_runtime_conflict(
+                "the candidate immutable execution revision already exists"
+            )
+
+    def _write_authoritative_pass_current_plan(self, candidate_plan) -> None:
+        save_execution_plan(self.execution_plan_file_path, candidate_plan)
+
+    def _write_authoritative_pass_progress(self, progress_payload) -> None:
+        self._atomic_write_text(
+            self.progress_file_path,
+            serialize_execution_progress(
+                progress_payload,
+                default=self.convert_to_serializable,
+            ),
+        )
+
+    def _write_authoritative_pass_resume(self, resume) -> None:
+        save_execution_resume(self.execution_resume_file_path, resume)
+
+    @staticmethod
+    def _advance_authoritative_pass_bundle(
+        bundle,
+        *,
+        candidate_plan,
+        progress_payload,
+        resume,
+    ):
+        return advance_authoritative_execution_revision(
+            bundle,
+            candidate_plan=candidate_plan,
+            progress_payload=progress_payload,
+            resume=resume,
+        )
+
+    def _create_authoritative_pass_checkpoint(
+        self,
+        *,
+        bundle,
+        identities: dict[str, _AuthoritativeFileIdentity],
+        revision_names: tuple[str, ...],
+    ):
+        if bundle.resume is not None:
+            return bundle, identities, revision_names, False
+        identities, revision_names = self._guard_authoritative_pass_files(
+            expected_identities=identities,
+            expected_revision_names=revision_names,
+            detail="checkpoint creation",
+        )
+        document = new_resume_document(
+            plan_id=bundle.plan.plan_id,
+            plan_revision=bundle.plan.plan_revision,
+            progress_wells=bundle.progress_wells,
+        )
+        reconciled = reconcile_authoritative_execution_runtime(
+            bundle,
+            progress_payload=bundle.progress_payload,
+            resume=document,
+            progress_wells=bundle.progress_wells,
+        )
+        self._write_authoritative_pass_resume(document)
+        identities, revision_names = self._accept_authoritative_pass_writes(
+            expected_identities=identities,
+            expected_revision_names=revision_names,
+            changed_names={"execution_resume.json"},
+            resulting_revision_names=revision_names,
+        )
+        return reconciled, identities, revision_names, True
+
+    def _restore_authoritative_session_after_full_revision(self) -> bool:
+        """Fully validate a target-changing revision before caching it again."""
+        if (
+            not self.execution_resume_file_path
+            or not os.path.isfile(self.execution_resume_file_path)
+        ):
+            return False
+        bundle = self._refresh_authoritative_execution_bundle()
+        if bundle.resume is None:
+            raise RuntimeError(
+                "The validated execution revision has no resume checkpoint."
+            )
+        self._start_authoritative_runtime_session(bundle)
+        return True
 
     def _refresh_authoritative_execution_bundle(self):
         if not self.experiment_dir_path or not self.experiment_file_path:
@@ -7508,15 +7767,21 @@ class ExperimentModel(QObject):
         save_execution_resume(self.execution_resume_file_path, updated)
 
     def validate_authoritative_print_context(self, printer_head) -> dict[str, Any]:
+        self._pending_authoritative_print_preflight = None
         if not self.uses_durable_execution_checkpoint():
             return {"ok": True, "code": "not_authoritative"}
         try:
             session = getattr(self, "_active_authoritative_execution_session", None)
-            bundle = (
-                self._guard_authoritative_runtime_session().bundle
-                if session is not None
-                else self._refresh_authoritative_execution_bundle()
-            )
+            if session is not None:
+                session = self._guard_authoritative_runtime_session()
+                bundle = session.bundle
+                identities = dict(session.file_identities)
+                revision_names = tuple(session.revision_names)
+            else:
+                bundle = self._refresh_authoritative_execution_bundle()
+                identities, revision_names = (
+                    self._capture_authoritative_runtime_files()
+                )
             eligibility = bundle.eligibility
             if not (
                 eligibility.can_start_hardware or eligibility.can_resume_hardware
@@ -7561,9 +7826,213 @@ class ExperimentModel(QObject):
                     raise RuntimeError("The loaded head does not match the saved calibration binding.")
             elif added > 0:
                 raise RuntimeError("Printed progress exists without a saved calibration record.")
+            self._pending_authoritative_print_preflight = (
+                _AuthoritativePrintPreflight(
+                    bundle=bundle,
+                    file_identities=identities,
+                    revision_names=revision_names,
+                    stock_id=str(stock_id),
+                    printer_head_id=head_id,
+                )
+            )
             return {"ok": True, "code": "authoritative_context_valid"}
         except Exception as exc:
+            self._pending_authoritative_print_preflight = None
             return {"ok": False, "code": "authoritative_context_invalid", "message": str(exc)}
+
+    def prepare_authoritative_print_pass(
+        self,
+        *,
+        stock_id: str,
+        printer_head_id: str,
+    ) -> dict[str, Any]:
+        """Prepare one print pass without rereading an unchanged validated history."""
+        preflight = getattr(
+            self,
+            "_pending_authoritative_print_preflight",
+            None,
+        )
+        self._pending_authoritative_print_preflight = None
+        self._last_authoritative_pass_preparation = None
+        if not self.uses_durable_execution_checkpoint():
+            result = {
+                "cache_path": "not_authoritative",
+                "created_revisions": [],
+                "checkpoint_action": "not_applicable",
+            }
+            self._last_authoritative_pass_preparation = result
+            return result
+        if preflight is None:
+            raise RuntimeError(
+                "The authoritative print preflight is missing or stale."
+            )
+        stock_id = str(stock_id)
+        printer_head_id = str(printer_head_id)
+        if (
+            preflight.stock_id != stock_id
+            or preflight.printer_head_id != printer_head_id
+        ):
+            raise RuntimeError(
+                "The loaded printer head changed after authoritative preflight."
+            )
+
+        existing_session = getattr(
+            self,
+            "_active_authoritative_execution_session",
+            None,
+        )
+        created_revisions: list[dict[str, Any]] = []
+        binding_created = False
+        try:
+            if existing_session is not None:
+                session = self._guard_authoritative_runtime_session()
+                bundle = session.bundle
+                identities = dict(session.file_identities)
+                revision_names = tuple(session.revision_names)
+                cache_path = "cached_noop"
+            else:
+                identities, revision_names = (
+                    self._guard_authoritative_print_preflight(preflight)
+                )
+                bundle = preflight.bundle
+                cache_path = "bootstrap"
+
+            plan = bundle.plan
+            if plan is None:
+                raise RuntimeError("The authoritative execution plan is unavailable.")
+            if plan.state is ExecutionPlanState.PREPARED:
+                candidate = build_locked_revision(
+                    plan,
+                    reason="printing_started",
+                )
+                bundle, identities, revision_names = (
+                    self._commit_authoritative_pass_revision(
+                        bundle=bundle,
+                        identities=identities,
+                        revision_names=revision_names,
+                        candidate_plan=candidate,
+                    )
+                )
+                created_revisions.append(
+                    {
+                        "kind": "lock",
+                        "plan_revision": candidate.plan_revision,
+                    }
+                )
+                self._audit_execution_plan_event(
+                    "execution_plan_locked",
+                    "Execution plan locked",
+                    {
+                        "plan_id": candidate.plan_id,
+                        "previous_revision": plan.plan_revision,
+                        "plan_revision": candidate.plan_revision,
+                        "lock_reason": candidate.lock_reason,
+                    },
+                )
+                plan = candidate
+                cache_path = (
+                    "cached_revision"
+                    if existing_session is not None
+                    else "bootstrap_revision"
+                )
+
+            candidate = build_printer_head_binding_revision(
+                plan,
+                stock_id=stock_id,
+                printer_head_id=printer_head_id,
+            )
+            if candidate is not plan:
+                bundle, identities, revision_names = (
+                    self._commit_authoritative_pass_revision(
+                        bundle=bundle,
+                        identities=identities,
+                        revision_names=revision_names,
+                        candidate_plan=candidate,
+                    )
+                )
+                created_revisions.append(
+                    {
+                        "kind": "printer_head_binding",
+                        "plan_revision": candidate.plan_revision,
+                    }
+                )
+                self._write_execution_plan_exports(candidate, {})
+                self._audit_execution_plan_event(
+                    "execution_plan_printer_head_bound",
+                    "Execution printer head bound",
+                    {
+                        "plan_id": candidate.plan_id,
+                        "previous_revision": plan.plan_revision,
+                        "plan_revision": candidate.plan_revision,
+                        "stock_id": stock_id,
+                        "printer_head_id": printer_head_id,
+                    },
+                )
+                plan = candidate
+                binding_created = True
+                cache_path = (
+                    "cached_revision"
+                    if existing_session is not None
+                    else "bootstrap_revision"
+                )
+
+            (
+                bundle,
+                identities,
+                revision_names,
+                checkpoint_created,
+            ) = self._create_authoritative_pass_checkpoint(
+                bundle=bundle,
+                identities=identities,
+                revision_names=revision_names,
+            )
+            if bundle.resume is None:
+                raise RuntimeError(
+                    "Pass preparation did not produce a durable checkpoint."
+                )
+
+            self._active_authoritative_execution_session = (
+                _ActiveAuthoritativeExecutionSession(
+                    bundle=bundle,
+                    resume=bundle.resume,
+                    progress_payload=dict(bundle.progress_payload),
+                    file_identities=identities,
+                    revision_names=revision_names,
+                )
+            )
+            self._authoritative_execution_bundle = bundle
+            self._execution_plan_snapshot = bundle.plan
+            self.progress_data = dict(bundle.progress_wells)
+            self._progress_execution_reference = ProgressExecutionReference(
+                plan_id=bundle.plan.plan_id,
+                plan_revision=bundle.plan.plan_revision,
+            )
+            self._authoritative_runtime_active = True
+            if binding_created:
+                self._project_reconstructed_execution_plan(bundle.plan)
+            if (
+                self.get_execution_plan_source() != "persisted_execution_plan"
+                and created_revisions
+            ):
+                self._execution_plan_source = "new_finalization"
+            self.set_execution_plan_sync_error(None)
+            result = {
+                "cache_path": cache_path,
+                "created_revisions": created_revisions,
+                "checkpoint_action": (
+                    "created" if checkpoint_created else "already_current"
+                ),
+                "starting_plan_revision": preflight.bundle.plan.plan_revision,
+                "final_plan_revision": bundle.plan.plan_revision,
+            }
+            self._last_authoritative_pass_preparation = result
+            return result
+        except Exception as exc:
+            self._invalidate_authoritative_runtime_session()
+            self.set_execution_plan_sync_error(exc)
+            raise RuntimeError(
+                f"Could not prepare the authoritative print pass: {exc}"
+            ) from exc
 
     def get_execution_plan_finalization_error(self) -> str | None:
         return getattr(self, "_execution_plan_finalization_error", None)
@@ -8622,6 +9091,7 @@ class ExperimentModel(QObject):
             self._execution_plan_source = "calibration_revision"
             self._project_reconstructed_execution_plan(plan)
             self._apply_plan_targets_to_runtime(plan)
+            self._restore_authoritative_session_after_full_revision()
             self.set_execution_plan_sync_error(None)
             return {"plan": plan, "record": record.to_dict(), "status": "reused"}
 
@@ -8670,6 +9140,7 @@ class ExperimentModel(QObject):
             raise RuntimeError(
                 f"The calibration revision was committed, but its refuel-check state could not be synchronized: {exc}"
             ) from exc
+        self._restore_authoritative_session_after_full_revision()
         self.set_execution_plan_sync_error(None)
         self.applied_imaging_calibration_changed.emit(record.to_dict())
         self._audit_execution_plan_event(
@@ -10480,6 +10951,8 @@ class ExperimentModel(QObject):
         self._authoritative_execution_bundle = None
         self._authoritative_runtime_active = False
         self._active_authoritative_execution_session = None
+        self._pending_authoritative_print_preflight = None
+        self._last_authoritative_pass_preparation = None
         self._progress_execution_reference = None
 
         # clear any uploaded/manual reaction list state

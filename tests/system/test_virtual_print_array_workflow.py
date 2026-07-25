@@ -147,7 +147,7 @@ def test_real_ui_print_array_completes_and_writes_inspectable_report(qapp, tmp_p
         "ui.well_plate_update",
     ):
         assert phases[phase]["count"] == 96
-    assert phases["persistence.guard_bundle"]["count"] == 96 * 4
+    assert phases["persistence.guard_bundle"]["count"] == 96 * 4 + 2
     assert phases["persistence.save_resume"]["count"] == 96 * 3
     assert phases["persistence.reconcile_cache"]["count"] == 96 * 3
     pressure_render = phases["ui.pressure_render"]

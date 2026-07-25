@@ -681,6 +681,14 @@ class _InstanceInstrumentation:
                             name: after_io[name] - before_io[name]
                             for name in before_io
                         },
+                        "preparation": dict(
+                            getattr(
+                                experiment_model,
+                                "_last_authoritative_pass_preparation",
+                                None,
+                            )
+                            or {}
+                        ),
                     }
                 )
 
@@ -921,6 +929,21 @@ def _install_instrumentation(
         ("ensure_execution_printer_head_binding", "pass_start.head_binding"),
         ("ensure_execution_resume_checkpoint", "pass_start.checkpoint_activation"),
         ("validate_authoritative_print_context", "pass_start.authoritative_preflight"),
+        ("_guard_authoritative_print_preflight", "pass_start.preflight_guard"),
+        ("_guard_authoritative_pass_files", "pass_start.revision_guard"),
+        ("_commit_authoritative_pass_revision", "pass_start.cached_revision_commit"),
+        ("_advance_authoritative_pass_bundle", "pass_start.history_validation"),
+        (
+            "_persist_authoritative_pass_immutable_revision",
+            "pass_start.immutable_revision_write",
+        ),
+        (
+            "_write_authoritative_pass_current_plan",
+            "pass_start.current_plan_write",
+        ),
+        ("_write_authoritative_pass_progress", "pass_start.progress_write"),
+        ("_write_authoritative_pass_resume", "pass_start.resume_write"),
+        ("_create_authoritative_pass_checkpoint", "pass_start.checkpoint_create"),
     ):
         instrumentation.wrap(experiment_model, method, phase)
     if hasattr(experiment_model, "prepare_authoritative_print_pass"):
@@ -2272,6 +2295,18 @@ def run_virtual_print_array_scenario(
         ),
         "guard_count": int(
             phase_duration_values.get("persistence.guard_bundle", {}).get("count", 0)
+        )
+        + int(
+            phase_duration_values.get(
+                "pass_start.preflight_guard",
+                {},
+            ).get("count", 0)
+        )
+        + int(
+            phase_duration_values.get(
+                "pass_start.revision_guard",
+                {},
+            ).get("count", 0)
         ),
         "cache_reconciliation_count": int(
             phase_duration_values.get(
@@ -2386,6 +2421,18 @@ def run_virtual_print_array_scenario(
     expected_completions *= expected_stock_count
     progress_modes = progress_snapshot.get("mode_counts", {})
     progress_durations = progress_snapshot.get("duration_samples_ms", {})
+    expected_pass_start_guards = 0
+    for record in pass_start_records:
+        preparation = record.get("preparation") or {}
+        cache_path = str(preparation.get("cache_path", ""))
+        expected_pass_start_guards += (
+            1 if cache_path.startswith("bootstrap") else 2
+        )
+        expected_pass_start_guards += len(
+            preparation.get("created_revisions") or ()
+        )
+        if preparation.get("checkpoint_action") == "created":
+            expected_pass_start_guards += 1
     if failure_text is None and (
         progress_modes.get("cached_update") != expected_completions
         or progress_modes.get("full_rebuild") != 0
@@ -2407,7 +2454,7 @@ def run_virtual_print_array_scenario(
         authoritative_io["hot_path_read_count"] != 0
         or authoritative_io["execution_resume_hot_path_disk_load_count"] != 0
         or authoritative_io["guard_count"]
-        != expected_completions * 4 + max(0, expected_stock_count - 1)
+        != expected_completions * 4 + expected_pass_start_guards
         or authoritative_io["resume_save_fsync_count"] != expected_completions * 3
         or authoritative_io["resume_save_replace_count"] != expected_completions * 3
         or authoritative_io["progress_write_fsync_count"] != expected_completions

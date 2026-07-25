@@ -6331,26 +6331,43 @@ class Controller(QObject):
         if callable(lock_plan):
             try:
                 current_head = self.model.rack_model.get_gripper_printer_head()
-                binding = getattr(
-                    experiment_model, "ensure_execution_printer_head_binding", None
+                stock_id = current_head.get_stock_id()
+                printer_head_id = str(
+                    getattr(current_head, "printer_head_id", None) or ""
                 )
-                if (
-                    callable(binding)
-                    and experiment_model.get_execution_plan_snapshot() is not None
-                ):
-                    binding(
-                        stock_id=current_head.get_stock_id(),
-                        printer_head_id=str(
-                            getattr(current_head, "printer_head_id", None) or ""
-                        ),
-                    )
-                else:
-                    lock_plan("printing_started")
                 checkpoint_enabled = getattr(
                     experiment_model, "uses_durable_execution_checkpoint", None
                 )
-                if callable(checkpoint_enabled) and checkpoint_enabled():
-                    experiment_model.ensure_execution_resume_checkpoint()
+                pass_preparer = getattr(
+                    experiment_model,
+                    "prepare_authoritative_print_pass",
+                    None,
+                )
+                if (
+                    callable(pass_preparer)
+                    and callable(checkpoint_enabled)
+                    and checkpoint_enabled()
+                ):
+                    pass_preparer(
+                        stock_id=stock_id,
+                        printer_head_id=printer_head_id,
+                    )
+                else:
+                    binding = getattr(
+                        experiment_model, "ensure_execution_printer_head_binding", None
+                    )
+                    if (
+                        callable(binding)
+                        and experiment_model.get_execution_plan_snapshot() is not None
+                    ):
+                        binding(
+                            stock_id=stock_id,
+                            printer_head_id=printer_head_id,
+                        )
+                    else:
+                        lock_plan("printing_started")
+                    if callable(checkpoint_enabled) and checkpoint_enabled():
+                        experiment_model.ensure_execution_resume_checkpoint()
             except Exception as exc:
                 message = (
                     "Printing did not start because the execution plan could not be "
