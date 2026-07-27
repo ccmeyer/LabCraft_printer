@@ -285,6 +285,24 @@ durable file sizes, and named phase distributions. A successful terminal
 checkpoint is clean and retains zero intents; `intent_count` remains the
 observed completion count for compatibility with existing report consumers.
 
+The SIL hardening action extraction adds three compatible nested values beneath
+`metrics.workflow.values`; it does not change the report-v1 envelope:
+
+- `action_results` is the ordered action ledger. Each entry contains a stable
+  `action_id`, `pass`/`fail` status, monotonic timing, bounded JSON evidence,
+  and nullable failure stage/type/message fields.
+- `lifecycle_milestones` is the ordered list of named UI screenshots and
+  bounded milestone evidence. Screenshot paths remain relative to the report
+  directory.
+- `cleanup_results` records every deterministic teardown phase, including
+  phases attempted after an earlier cleanup failure. Each entry contains its
+  phase name, status, and nullable failure type/message.
+
+All actions share one scenario deadline. Local waits may shorten but never
+extend it. Teardown is deadline-independent, attempts every cleanup phase, and
+records one `scenario.teardown` action result. These additions are diagnostic;
+existing classification and comparison-policy meanings are unchanged.
+
 `metrics.persistence.values.authoritative_io` adds compatible diagnostic
 evidence for the guarded active-runtime checkpoint:
 

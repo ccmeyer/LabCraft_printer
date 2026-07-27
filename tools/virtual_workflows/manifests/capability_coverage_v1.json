@@ -328,7 +328,7 @@
       "suite_ids": ["host_regression", "pi_primary"],
       "supported_platforms": ["windows_sil", "pi_sil"],
       "timeout_seconds": 180,
-      "action_ids": ["legacy.print_array.prepare", "legacy.print_array.start", "legacy.print_array.wait_terminal", "legacy.print_array.inject_stall", "legacy.print_array.teardown"],
+      "action_ids": ["fixture.prepare_authoritative", "app.launch_simulated", "machine.connect_ready", "head.stage_virtual", "pressure.enable_regulation", "array.start_via_ui", "array.wait_for_completions", "array.wait_for_state", "artifact.capture_milestone", "validation.terminal_bundle", "scenario.teardown"],
       "assertion_ids": ["sil.host_hardware_disabled", "sil.pi_evidence_valid", "ui.real_app_constructed", "execution.expected_completions", "execution.no_queue_starvation", "execution.intent_durability_exact", "execution.terminal_bundle_valid", "artifacts.required_present", "ui.injected_stall_detected", "ui.responsiveness_metrics_present"],
       "capability_ids": ["sil.hardware_isolation.host", "sil.hardware_isolation.pi", "ui.real_app_construction", "execution.array_happy_path", "execution.lookahead_no_starvation", "execution.intent_durability", "execution.terminal_bundle", "ui.event_loop_stall_detection", "ui.sustained_responsiveness.windows", "ui.sustained_responsiveness.pi"],
       "required_artifacts": ["report_json", "summary_text", "event_trace", "stall_stacks", "screenshots", "scenario_root"],
@@ -348,7 +348,7 @@
       "suite_ids": ["host_stress", "pi_stress"],
       "supported_platforms": ["windows_sil", "pi_sil"],
       "timeout_seconds": 1800,
-      "action_ids": ["legacy.print_array.prepare", "legacy.print_array.start", "legacy.print_array.exchange_heads", "legacy.print_array.wait_terminal", "legacy.print_array.teardown"],
+      "action_ids": ["fixture.prepare_authoritative", "app.launch_simulated", "machine.connect_ready", "head.stage_virtual", "pressure.enable_regulation", "array.start_via_ui", "array.wait_for_completions", "array.wait_for_state", "artifact.capture_milestone", "validation.terminal_bundle", "scenario.teardown"],
       "assertion_ids": ["sil.host_hardware_disabled", "sil.pi_evidence_valid", "execution.expected_completions", "execution.no_queue_starvation", "execution.intent_durability_exact", "execution.terminal_bundle_valid", "execution.multi_stock_head_exchange", "artifacts.required_present", "ui.responsiveness_metrics_present", "resources.metrics_present"],
       "capability_ids": ["sil.hardware_isolation.host", "sil.hardware_isolation.pi", "execution.array_happy_path", "execution.lookahead_no_starvation", "execution.intent_durability", "execution.terminal_bundle", "execution.multi_stock_head_exchange", "ui.sustained_responsiveness.windows", "ui.sustained_responsiveness.pi", "resources.sustained_growth.windows", "resources.sustained_growth.pi"],
       "required_artifacts": ["report_json", "summary_text", "event_trace", "stall_stacks", "screenshots", "scenario_root"],
@@ -467,34 +467,59 @@
     "coverage_join_status": "deferred_to_slice_6",
     "action_catalog": [
       {
-        "id": "legacy.print_array.prepare",
-        "implementation_status": "embedded",
-        "source_path": "tools/virtual_workflows/scenarios.py"
+        "id": "fixture.prepare_authoritative",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
       },
       {
-        "id": "legacy.print_array.start",
-        "implementation_status": "embedded",
-        "source_path": "tools/virtual_workflows/scenarios.py"
+        "id": "app.launch_simulated",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
       },
       {
-        "id": "legacy.print_array.wait_terminal",
-        "implementation_status": "embedded",
-        "source_path": "tools/virtual_workflows/scenarios.py"
+        "id": "machine.connect_ready",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
       },
       {
-        "id": "legacy.print_array.inject_stall",
-        "implementation_status": "embedded",
-        "source_path": "tools/virtual_workflows/scenarios.py"
+        "id": "head.stage_virtual",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
       },
       {
-        "id": "legacy.print_array.exchange_heads",
-        "implementation_status": "embedded",
-        "source_path": "tools/virtual_workflows/scenarios.py"
+        "id": "pressure.enable_regulation",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
       },
       {
-        "id": "legacy.print_array.teardown",
-        "implementation_status": "embedded",
-        "source_path": "tools/virtual_workflows/scenarios.py"
+        "id": "array.start_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
+      },
+      {
+        "id": "array.wait_for_completions",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
+      },
+      {
+        "id": "array.wait_for_state",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
+      },
+      {
+        "id": "artifact.capture_milestone",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
+      },
+      {
+        "id": "validation.terminal_bundle",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
+      },
+      {
+        "id": "scenario.teardown",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
       }
     ],
     "assertion_catalog": [

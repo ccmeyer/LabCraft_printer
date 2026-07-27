@@ -210,6 +210,25 @@ credentials or machine-local paths, and do not mark a capability `covered`
 without an active assertion-backed scenario. This validation is read-only and
 does not launch Qt, a workflow, physical hardware, or a remote Pi operation.
 
+Reusable scenario actions live in `tools/virtual_workflows/actions.py`. The
+legacy scenario adapter now composes those actions through one per-run context
+and global deadline while preserving the two registered IDs, fixtures, CLI,
+report-v1 envelope, and comparison behavior. Each report records ordered
+action, milestone, and cleanup evidence beneath
+`metrics.workflow.values`. Validate the action contracts without launching a
+workflow with:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q `
+  tests\test_virtual_workflow_actions.py `
+  tests\test_virtual_workflow_manifest.py `
+  tests\test_virtual_workflow_contract_freeze.py
+```
+
+The reusable layer lazily imports Qt only for UI operations, accepts only the
+literal simulated machine path supplied by the existing adapter, and always
+attempts the full cleanup sequence even after timeout or failure.
+
 Run the normal one-timescale characterization:
 
 ```powershell

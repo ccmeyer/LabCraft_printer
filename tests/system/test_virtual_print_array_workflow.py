@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from tools.virtual_workflows.actions import ACTION_IDS
 from tools.virtual_workflows.report import validate_report_v1
 from tools.virtual_workflows.scenarios import (
     WORKLOAD_ID,
@@ -89,6 +90,18 @@ def test_real_ui_print_array_completes_and_writes_inspectable_report(qapp, tmp_p
     ] == ["Start Print Array", "Evaporation Plate Dock Check"]
     assert report["metrics"]["workflow"]["values"]["unexpected_dialogs"] == []
     assert report["metrics"]["workflow"]["values"]["errors"] == []
+    actions = report["metrics"]["workflow"]["values"]["action_results"]
+    assert {item["action_id"] for item in actions} == ACTION_IDS
+    assert {item["status"] for item in actions} == {"pass"}
+    assert [
+        item["name"]
+        for item in report["metrics"]["workflow"]["values"][
+            "lifecycle_milestones"
+        ]
+    ] == ["ready", "printing", "mid_array", "completed"]
+    cleanup_results = report["metrics"]["workflow"]["values"]["cleanup_results"]
+    assert len(cleanup_results) == 11
+    assert {item["status"] for item in cleanup_results} == {"pass"}
     assert report["metrics"]["queue"]["values"]["unexpected_starvation_count"] == 0
     assert report["metrics"]["persistence"]["values"]["intent_count"] == 96
     assert (
@@ -284,6 +297,14 @@ def test_timeout_failure_retains_diagnostics_and_failure_screenshot(qapp, tmp_pa
     assert report["classification"]["status"] == "fail"
     assert report["classification"]["threshold_maturity"] == "informational"
     assert report["metrics"]["workflow"]["values"]["completed_well_count"] < 96
+    workflow = report["metrics"]["workflow"]["values"]
+    assert any(
+        item["status"] == "fail" and item["failure_stage"]
+        for item in workflow["action_results"]
+    )
+    assert workflow["action_results"][-1]["action_id"] == "scenario.teardown"
+    assert workflow["action_results"][-1]["status"] == "pass"
+    assert {item["status"] for item in workflow["cleanup_results"]} == {"pass"}
     report_dir = _report_dir(report)
     assert (report_dir / "failure_traceback.txt").is_file()
     assert (report_dir / "screenshots" / "failure.png").is_file()
@@ -292,12 +313,11 @@ def test_timeout_failure_retains_diagnostics_and_failure_screenshot(qapp, tmp_pa
 
 
 def test_scenario_source_has_no_production_machine_or_device_construction():
-    source = (
-        Path(__file__).resolve().parents[2]
-        / "tools"
-        / "virtual_workflows"
-        / "scenarios.py"
-    ).read_text(encoding="utf-8")
+    tools_root = Path(__file__).resolve().parents[2] / "tools" / "virtual_workflows"
+    source = "\n".join(
+        (tools_root / name).read_text(encoding="utf-8")
+        for name in ("scenarios.py", "actions.py")
+    )
 
     for forbidden in (
         "Machine_FreeRTOS",

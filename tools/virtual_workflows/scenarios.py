@@ -59,6 +59,23 @@ from tools.virtual_workflows.metrics import (  # noqa: E402
     QtEventLoopProbe,
     summarize_samples,
 )
+from tools.virtual_workflows.actions import (  # noqa: E402
+    ScenarioContext,
+    capture_failure_screenshot,
+    capture_milestone,
+    connect_machine_ready,
+    enable_pressure_regulation,
+    install_dialog_handler,
+    launch_simulated_application,
+    prepare_authoritative_fixture,
+    stage_virtual_head,
+    start_array_via_ui,
+    teardown_scenario,
+    validate_terminal_bundle,
+    wait_for_array_state,
+    wait_for_completions,
+    wait_until,
+)
 from tools.virtual_workflows.persistence_io import PersistenceIoObserver  # noqa: E402
 from tools.virtual_workflows.progress_snapshot import (  # noqa: E402
     ProgressSnapshotObserver,
@@ -1152,29 +1169,6 @@ def _install_instrumentation(
     return instrumentation
 
 
-def _wait_until(app: Any, predicate: Callable[[], bool], timeout_s: float, label: str):
-    from PySide6 import QtCore
-
-    deadline = time.perf_counter() + float(timeout_s)
-    while time.perf_counter() < deadline:
-        app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 10)
-        if predicate():
-            return
-        QtCore.QThread.msleep(1)
-    app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 10)
-    if not predicate():
-        raise RuntimeError(f"timed out waiting for {label}")
-
-
-def _capture_window(view: Any, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    image = view.grab()
-    if image.isNull() or not image.save(str(path), "PNG"):
-        raise RuntimeError(f"could not capture screenshot {path.name}")
-    if not path.is_file() or path.stat().st_size <= 0:
-        raise RuntimeError(f"screenshot {path.name} is empty")
-
-
 def _write_event_trace(path: Path, events: list[dict[str, Any]]) -> None:
     with path.open("w", encoding="utf-8", newline="\n") as handle:
         for event in events:
@@ -1578,17 +1572,26 @@ def run_virtual_print_array_scenario(
     started_utc = _utc_now()
     started_ns = time.perf_counter_ns()
     event_log = _BoundedEventLog()
-    errors: list[dict[str, Any]] = []
-    dialogs: list[dict[str, Any]] = []
-    unexpected_dialogs: list[dict[str, Any]] = []
+    context = ScenarioContext(
+        scenario_id=SCENARIO_NAME,
+        workload_id=workload_id,
+        report_dir=report_dir,
+        scenario_root=scenario_root,
+        screenshots_dir=screenshots_dir,
+        timeout_seconds=config.timeout_seconds,
+        record_event=event_log.record,
+    )
+    errors = context.errors
+    dialogs = context.dialogs
+    unexpected_dialogs = context.unexpected_dialogs
     well_updates: list[str] = []
-    array_states: list[str] = ["idle"]
+    array_states = context.array_states
     command_lifecycle_counts: Counter[str] = Counter()
     command_event_count = 0
     minimum_queue_depth: int | None = None
     maximum_queue_depth: int | None = None
     starvation_events: list[dict[str, Any]] = []
-    screenshots: dict[str, Path] = {}
+    screenshots = context.screenshots
     array_complete_count = 0
     paint_event_count = 0
     pressure_update_signal_count = 0
@@ -1613,11 +1616,11 @@ def run_virtual_print_array_scenario(
         phase_recorder=phases,
         resource_sampler=resources,
     )
+    context.probe = probe
     components = None
     instrumentation = None
     io_observer = None
     progress_observer = None
-    dialog_timer = None
     paint_filter = None
     app = None
     probe_started = False
@@ -1630,7 +1633,7 @@ def run_virtual_print_array_scenario(
     }
 
     try:
-        from PySide6 import QtCore, QtTest, QtWidgets
+        from PySide6 import QtCore, QtWidgets
         import ApplicationComposition as composition
         from ExecutionPlan import ExecutionPlanState
         from hardware.profile import CURRENT_PROFILE
@@ -1645,34 +1648,71 @@ def run_virtual_print_array_scenario(
         if app is None:
             app = QtWidgets.QApplication(["labcraft-virtual-workflow"])
         app.setQuitOnLastWindowClosed(False)
+        context.app = app
+        context.qt_core = QtCore
 
-        simulation_config = SimulationConfig(
-            timing=SimulationTimingPolicy(
-                speed_multiplier=config.speed_multiplier,
-            ),
-            completed_history_limit=512,
-            event_history_limit=4096,
-        )
-        dependencies = composition.simulation_dependencies(
-            scenario_root,
-            machine_factory=make_simulated_machine_factory(simulation_config),
-        )
-        for root in (
-            dependencies.roots.config_root,
-            dependencies.roots.experiments_root,
-            dependencies.roots.calibration_memory_root,
-        ):
-            if not _resolved_beneath(root, scenario_root):
-                raise RuntimeError(f"simulation root escaped scenario root: {root}")
+        def prepare_fixture() -> dict[str, Any]:
+            simulation_config = SimulationConfig(
+                timing=SimulationTimingPolicy(
+                    speed_multiplier=config.speed_multiplier,
+                ),
+                completed_history_limit=512,
+                event_history_limit=4096,
+            )
+            context.dependencies = composition.simulation_dependencies(
+                scenario_root,
+                machine_factory=make_simulated_machine_factory(simulation_config),
+            )
+            for root in (
+                context.dependencies.roots.config_root,
+                context.dependencies.roots.experiments_root,
+                context.dependencies.roots.calibration_memory_root,
+            ):
+                if not _resolved_beneath(root, scenario_root):
+                    raise RuntimeError(f"simulation root escaped scenario root: {root}")
+            context.fixture_info = _create_prepared_fixture(
+                context.dependencies.roots.experiments_root / workload_id,
+                fixture,
+            )
+            return {
+                "experiment_dir": context.fixture_info["experiment_dir"],
+                "design_path": context.fixture_info["design_path"],
+            }
 
-        fixture_info = _create_prepared_fixture(
-            dependencies.roots.experiments_root / workload_id,
-            fixture,
-        )
-        components = composition.build_application_components(
-            CURRENT_PROFILE,
-            dependencies,
-        )
+        prepare_authoritative_fixture(context, prepare_fixture)
+        dependencies = context.dependencies
+        fixture_info = context.fixture_info
+        assert fixture_info is not None
+
+        def launch_application() -> dict[str, Any]:
+            context.components = composition.build_application_components(
+                CURRENT_PROFILE,
+                dependencies,
+            )
+            context.model = context.components.model
+            context.machine = context.components.machine
+            context.controller = context.components.controller
+            context.view = context.components.view
+            context.experiment_model = context.model.experiment_model
+            context.experiment_model.load_experiment(
+                str(fixture_info["design_path"]),
+                str(fixture_info["experiment_dir"]),
+            )
+            eligibility = context.model.load_authoritative_execution_runtime()
+            if eligibility["status"] not in {"ready_to_start", "ready_to_resume"}:
+                raise RuntimeError(
+                    "unexpected execution activation eligibility: "
+                    f"{eligibility['status']}"
+                )
+            context.view.show()
+            app.processEvents()
+            return {
+                "eligibility": eligibility["status"],
+                "visible": bool(config.visible),
+            }
+
+        launch_simulated_application(context, launch_application)
+        components = context.components
         model = components.model
         machine = components.machine
         controller = components.controller
@@ -1681,16 +1721,6 @@ def run_virtual_print_array_scenario(
         pressure_render_interval_ms = int(
             view.pressure_box._pressure_render_timer.interval()
         )
-
-        experiment_model.load_experiment(
-            str(fixture_info["design_path"]),
-            str(fixture_info["experiment_dir"]),
-        )
-        eligibility = model.load_authoritative_execution_runtime()
-        if eligibility["status"] not in {"ready_to_start", "ready_to_resume"}:
-            raise RuntimeError(
-                f"unexpected execution activation eligibility: {eligibility['status']}"
-            )
 
         heads_by_stock = {
             head.get_stock_id(): head
@@ -1847,38 +1877,8 @@ def run_virtual_print_array_scenario(
 
         paint_filter = PaintFilter(app)
         app.installEventFilter(paint_filter)
-
-        handled_dialogs: set[int] = set()
-
-        def inspect_dialogs() -> None:
-            for widget in app.topLevelWidgets():
-                if not isinstance(widget, QtWidgets.QMessageBox) or not widget.isVisible():
-                    continue
-                identifier = id(widget)
-                if identifier in handled_dialogs:
-                    continue
-                handled_dialogs.add(identifier)
-                entry = {
-                    "title": widget.windowTitle(),
-                    "text": widget.text(),
-                }
-                dialogs.append(entry)
-                record_event("dialog", **entry)
-                if entry["title"] in EXPECTED_START_DIALOGS:
-                    button = widget.button(QtWidgets.QMessageBox.StandardButton.Yes)
-                    if button is not None:
-                        QtTest.QTest.mouseClick(
-                            button,
-                            QtCore.Qt.MouseButton.LeftButton,
-                        )
-                        continue
-                unexpected_dialogs.append(entry)
-                widget.reject()
-
-        dialog_timer = QtCore.QTimer(app)
-        dialog_timer.setInterval(5)
-        dialog_timer.timeout.connect(inspect_dialogs)
-        dialog_timer.start()
+        context.paint_filter = paint_filter
+        install_dialog_handler(context, EXPECTED_START_DIALOGS)
 
         completed_count = lambda: len(
             [well for well in well_updates if well in set(expected_wells)]
@@ -1915,116 +1915,47 @@ def run_virtual_print_array_scenario(
         progress_observer = ProgressSnapshotObserver(experiment_model)
         progress_observer.install()
         io_observer.install()
+        context.instrumentation = instrumentation
+        context.io_observer = io_observer
+        context.progress_observer = progress_observer
 
-        if config.visible:
-            view.show()
-        else:
-            view.show()
-        app.processEvents()
         probe.start(app)
         probe_started = True
+        context.probe_started = True
 
-        if machine.connect_board(SIMULATED_PORT) is False:
-            raise RuntimeError("simulator rejected the sentinel port")
-        _wait_until(
-            app,
-            lambda: model.machine_model.is_connected(),
-            5.0,
-            "simulated connection",
-        )
-        controller.toggle_motors()
-        controller.home_machine()
-        controller.set_dispense_frequency_hz(
-            int(fixture["simulation"]["dispense_frequency_hz"])
-        )
-        _wait_until(app, machine.check_if_all_completed, 10.0, "machine readiness")
-        _wait_until(
-            app,
-            lambda: (
-                model.machine_model.motors_are_enabled()
-                and model.machine_model.motors_are_homed()
+        connect_machine_ready(
+            context,
+            simulated_port=SIMULATED_PORT,
+            dispense_frequency_hz=int(
+                fixture["simulation"]["dispense_frequency_hz"]
             ),
-            5.0,
-            "ready model state",
         )
 
         staging_slot = int(fixture["simulation"].get("staging_slot", 0))
 
         def stage_stock_head(stock_index: int) -> tuple[str, dict[str, Any]]:
-            if controller.get_array_run_state() != "idle":
-                raise RuntimeError("virtual head exchange requires an idle array")
-            if not machine.check_if_all_completed():
-                raise RuntimeError("virtual head exchange requires an empty command queue")
-            stock = stock_specs[stock_index]
-            stock_id = _stock_id(stock)
-            target_head = calibrated_heads[stock_id]
-            rack = model.rack_model
-            suppression = (
-                instrumentation.suppress_phases(
-                    "ui.well_plate_update",
-                    "ui.well_plate_rebuild",
-                    "persistence.guard_bundle",
-                )
-                if instrumentation is not None
-                else nullcontext()
-            )
-            with suppression:
-                if rack.get_gripper_printer_head() is not None:
-                    origin = rack.gripper_slot_number
-                    if origin is None:
-                        raise RuntimeError("gripper head has no virtual origin slot")
-                    rack.transfer_from_gripper(origin)
-                    if rack.get_gripper_printer_head() is not None:
-                        raise RuntimeError("could not return the previous virtual head")
-                for slot_index, slot in enumerate(rack.slots):
-                    if slot.printer_head is target_head:
-                        rack.update_slot_with_printer_head(slot_index, None)
-                rack.update_slot_with_printer_head(staging_slot, target_head)
-                rack.confirm_slot(staging_slot)
-                rack.transfer_to_gripper(staging_slot)
-            active = rack.get_gripper_printer_head()
-            if active is not target_head or active.get_stock_id() != stock_id:
-                raise RuntimeError(f"virtual head exchange failed for {stock_id}")
-            head = stock["printer_head"]
-            controller.set_print_pulse_width(
-                int(head["print_pulse_width_us"]),
-                update_model=True,
-            )
-            controller.set_absolute_print_pressure(
-                float(head["print_pressure_psi"])
-            )
-            _wait_until(
-                app,
-                machine.check_if_all_completed,
-                10.0,
-                f"stock {stock_index + 1} print settings",
-            )
-            record_event(
-                "virtual_head_exchange",
-                pass_index=stock_index + 1,
-                stock_id=stock_id,
-                printer_head_id=head["printer_head_id"],
+            return stage_virtual_head(
+                context,
+                stock_index=stock_index,
+                stock_specs=stock_specs,
+                calibrated_heads=calibrated_heads,
                 staging_slot=staging_slot,
+                stock_id_for=_stock_id,
             )
-            return stock_id, head
 
         first_stock_id, _first_head = stage_stock_head(0)
-        controller.toggle_regulation()
-        _wait_until(
-            app,
-            lambda: model.machine_model.regulating_print_pressure,
-            5.0,
-            "print-pressure regulation",
+        enable_pressure_regulation(context)
+        capture_milestone(
+            context,
+            "ready",
+            evidence={"stock_id": first_stock_id},
         )
-
-        screenshots["ready"] = screenshots_dir / "ready.png"
-        _capture_window(view, screenshots["ready"])
-        record_event("milestone", name="ready", stock_id=first_stock_id)
 
         midpoint_completion = max(1, expected_completions // 2)
         midpoint_captured = False
         stdout_redirect = redirect_stdout(application_stdout)
         stdout_redirect.__enter__()
+        context.stdout_redirect = stdout_redirect
         for stock_index, stock in enumerate(stock_specs):
             print(
                 f"Starting stock pass {stock_index + 1}/{expected_stock_count}",
@@ -2060,38 +1991,17 @@ def run_virtual_print_array_scenario(
                 pass_index=stock_index + 1,
                 stock_id=stock_id,
             )
-            _wait_until(
-                app,
-                lambda: (
-                    view.well_plate_widget.start_print_array_button.isVisible()
-                    and view.well_plate_widget.start_print_array_button.isEnabled()
-                ),
-                5.0,
-                f"stock pass {stock_index + 1} start control",
+            start_array_via_ui(
+                context,
+                expected_running_count=stock_index + 1,
             )
-            view.activateWindow()
-            view.well_plate_widget.start_print_array_button.setFocus()
-            app.processEvents()
-            QtTest.QTest.mouseClick(
-                view.well_plate_widget.start_print_array_button,
-                QtCore.Qt.MouseButton.LeftButton,
-            )
-            _wait_until(
-                app,
-                lambda: (
-                    array_states.count("running") >= stock_index + 1
-                    or bool(errors)
-                ),
-                10.0,
-                f"stock pass {stock_index + 1} running state",
-            )
-            if errors:
-                raise RuntimeError(f"array start emitted an error: {errors[-1]}")
             pass_record["running_monotonic_ns"] = time.perf_counter_ns()
             if stock_index == 0:
-                screenshots["printing"] = screenshots_dir / "printing.png"
-                _capture_window(view, screenshots["printing"])
-                record_event("milestone", name="printing", stock_id=stock_id)
+                capture_milestone(
+                    context,
+                    "printing",
+                    evidence={"stock_id": stock_id},
+                )
 
             elapsed_seconds = (
                 time.perf_counter_ns() - started_ns
@@ -2105,23 +2015,17 @@ def run_virtual_print_array_scenario(
                 and (stock_index + 1) * len(expected_wells)
                 >= midpoint_completion
             ):
-                _wait_until(
-                    app,
-                    lambda: completed_count() >= midpoint_completion
-                    or bool(errors),
-                    remaining_timeout,
-                    f"{midpoint_completion} stock/well completions",
+                wait_for_completions(
+                    context,
+                    completed_count=completed_count,
+                    target_count=midpoint_completion,
+                    timeout_seconds=remaining_timeout,
+                    label=f"{midpoint_completion} stock/well completions",
                 )
-                if errors:
-                    raise RuntimeError(
-                        f"array execution emitted an error: {errors[-1]}"
-                    )
-                screenshots["mid_array"] = screenshots_dir / "mid_array.png"
-                _capture_window(view, screenshots["mid_array"])
-                record_event(
-                    "milestone",
-                    name="mid_array",
-                    completed=completed_count(),
+                capture_milestone(
+                    context,
+                    "mid_array",
+                    evidence={"completed": completed_count()},
                 )
                 midpoint_captured = True
 
@@ -2132,20 +2036,18 @@ def run_virtual_print_array_scenario(
                 0.1,
                 config.timeout_seconds - elapsed_seconds,
             )
-            _wait_until(
-                app,
-                lambda: array_complete_count >= stock_index + 1
-                or bool(errors),
-                remaining_timeout,
-                f"stock pass {stock_index + 1} completion",
+            wait_for_completions(
+                context,
+                completed_count=lambda: array_complete_count,
+                target_count=stock_index + 1,
+                timeout_seconds=remaining_timeout,
+                label=f"stock pass {stock_index + 1} completion",
             )
-            if errors:
-                raise RuntimeError(f"array completion emitted an error: {errors[-1]}")
-            _wait_until(
-                app,
-                lambda: controller.get_array_run_state() == "idle",
-                5.0,
-                f"stock pass {stock_index + 1} idle state",
+            wait_for_array_state(
+                context,
+                state="idle",
+                timeout_seconds=5.0,
+                label=f"stock pass {stock_index + 1} idle state",
             )
             pass_state = experiment_model.get_execution_plan_snapshot().state.value
             pass_terminal_states.append(pass_state)
@@ -2172,111 +2074,60 @@ def run_virtual_print_array_scenario(
             )
         stdout_redirect.__exit__(None, None, None)
         stdout_redirect = None
+        context.stdout_redirect = None
 
-        _wait_until(
-            app,
+        wait_until(
+            context,
             lambda: not view.pressure_box._pressure_render_timer.isActive(),
             1.0,
             "final pressure render",
+            action_id="artifact.capture_milestone",
         )
         app.processEvents()
-        screenshots["completed"] = screenshots_dir / "completed.png"
-        _capture_window(view, screenshots["completed"])
-        record_event("milestone", name="completed")
+        capture_milestone(context, "completed")
 
-        validation = _validate_completed_scenario(
-            experiment_model=experiment_model,
-            fixture_info=fixture_info,
-            well_updates=well_updates,
-            array_states=array_states,
-            array_complete_count=array_complete_count,
-            errors=errors,
-            unexpected_dialogs=unexpected_dialogs,
-            starvation_events=starvation_events,
-            intent_lifecycle=(
-                instrumentation.lifecycle_snapshot()
-                if instrumentation is not None
-                else {}
+        validation = validate_terminal_bundle(
+            context,
+            lambda: _validate_completed_scenario(
+                experiment_model=experiment_model,
+                fixture_info=fixture_info,
+                well_updates=well_updates,
+                array_states=array_states,
+                array_complete_count=array_complete_count,
+                errors=errors,
+                unexpected_dialogs=unexpected_dialogs,
+                starvation_events=starvation_events,
+                intent_lifecycle=(
+                    instrumentation.lifecycle_snapshot()
+                    if instrumentation is not None
+                    else {}
+                ),
+                pass_terminal_states=pass_terminal_states,
             ),
-            pass_terminal_states=pass_terminal_states,
         )
     except Exception:
         failure_text = traceback.format_exc()
-        if components is not None and app is not None:
+        if context.view is not None and context.app is not None:
             try:
-                screenshots["failure"] = screenshots_dir / "failure.png"
-                _capture_window(components.view, screenshots["failure"])
+                capture_failure_screenshot(context)
             except Exception:
                 failure_text += "\nFailure screenshot error:\n" + traceback.format_exc()
     finally:
-        if stdout_redirect is not None:
-            stdout_redirect.__exit__(None, None, None)
-            stdout_redirect = None
-        if dialog_timer is not None:
-            dialog_timer.stop()
-        if app is not None and paint_filter is not None:
-            try:
-                app.removeEventFilter(paint_filter)
-            except RuntimeError:
-                pass
-        if instrumentation is not None:
-            instrumentation.restore()
-        if progress_observer is not None:
-            progress_observer.restore()
-        if io_observer is not None:
-            io_observer.restore()
-        if probe_started:
-            try:
-                probe.stop()
-            except Exception:
-                cleanup_failure = "Probe cleanup error:\n" + traceback.format_exc()
-                failure_text = (
-                    f"{failure_text}\n{cleanup_failure}"
-                    if failure_text
-                    else cleanup_failure
-                )
-        if components is not None:
-            machine = components.machine
-            try:
-                machine.disconnect_board()
-            except Exception:
-                cleanup_failure = "Machine cleanup error:\n" + traceback.format_exc()
-                failure_text = (
-                    f"{failure_text}\n{cleanup_failure}"
-                    if failure_text
-                    else cleanup_failure
-                )
-            machine_cleanup = {
-                "command_timer_active": bool(
-                    getattr(machine, "_command_timer", None)
-                    and machine._command_timer.isActive()
-                ),
-                "connection_timer_active": bool(
-                    getattr(machine, "_connection_timer", None)
-                    and machine._connection_timer.isActive()
-                ),
-                "deferred_timer_count": len(
-                    getattr(machine, "_deferred_timers", set())
-                ),
-            }
-            components.close()
-        if app is not None:
-            app.processEvents()
-            try:
-                app.sendPostedEvents(
-                    None,
-                    QtCore.QEvent.Type.DeferredDelete,
-                )
-                app.processEvents()
-            except (AttributeError, RuntimeError):
-                pass
-        if components is not None:
-            try:
-                pressure_timer_active_after_teardown = bool(
-                    components.view.pressure_box._pressure_render_timer.isActive()
-                )
-            except RuntimeError:
-                pressure_timer_active_after_teardown = False
+        context.stdout_redirect = stdout_redirect
+        try:
+            teardown_scenario(context)
+        except Exception:
+            cleanup_failure = "Scenario cleanup error:\n" + traceback.format_exc()
+            failure_text = (
+                f"{failure_text}\n{cleanup_failure}"
+                if failure_text
+                else cleanup_failure
+            )
+        stdout_redirect = None
+        machine_cleanup = context.machine_cleanup
+        pressure_timer_active_after_teardown = (
+            context.pressure_timer_active_after_teardown
+        )
 
     ended_ns = time.perf_counter_ns()
     ended_utc = _utc_now()
@@ -2927,6 +2778,9 @@ def run_virtual_print_array_scenario(
                     "unexpected_dialogs": unexpected_dialogs,
                     "errors": errors,
                     "validation_checks": validation.get("checks", {}),
+                    "action_results": list(context.action_results),
+                    "lifecycle_milestones": list(context.milestones),
+                    "cleanup_results": list(context.cleanup_results),
                 },
             },
             "queue": {

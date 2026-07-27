@@ -1035,20 +1035,66 @@ Next permitted action:
 
 ### Slice 2: Action/context extraction
 
+Status: `verified`
+
+Starting state:
+
+- commit: `9304fe6a04f6187452c59c35e910d747331325ca`;
+- tracked worktree: clean;
+- six pre-existing inaccessible execution-cache directories remain untouched;
+- pre-edit focused registry/contract/96/384x10/comparison/Pi baseline: 83
+  passed with 40 existing Qt chart deprecation warnings in 16.89 seconds;
+- no production, simulator, firmware, protocol, fixture, baseline, Pi
+  orchestration, or performance-remediation change is permitted.
+
+Frozen action path:
+
+`registry -> public scenario adapter -> ScenarioContext/actions -> existing MainWindow/Controller/Model/SimulatedMachine -> unchanged callbacks -> report/comparison/Pi evidence`
+
 Goal:
 
 - extract reusable context, actions, waits, dialog handling, milestone capture,
   and teardown from the existing runner;
 - retain compatibility adapter behavior.
 
-Likely files:
+Files:
 
+- `README.md`;
+- `docs/virtual_workflow_report_schema.md`;
+- this document;
 - `tools/virtual_workflows/actions.py`;
 - `tools/virtual_workflows/scenarios.py`;
-- action tests;
-- existing 96/384 system tests;
-- report-schema documentation if nested evidence is added;
-- this document.
+- `tools/virtual_workflows/manifests/capability_coverage_v1.json`;
+- `tests/test_virtual_workflow_actions.py`;
+- `tests/system/test_virtual_print_array_workflow.py`;
+- `tests/system/test_virtual_print_array_384x10_workflow.py`.
+
+Implementation:
+
+- Added a test-owned per-run `ScenarioContext`, one monotonic
+  `ScenarioDeadline`, bounded JSON action evidence, explicit
+  precondition/operation/timeout failure stages, and an ordered action ledger.
+- Extracted eleven stable actions for fixture preparation, simulated
+  application launch, machine readiness, virtual head staging, pressure
+  regulation, real UI array start, completion/state waits, milestone capture,
+  terminal validation, and teardown.
+- Kept Qt imports lazy in the reusable module and retained the adapter's
+  explicit `SIMULATED` dependency construction. Import/source guards cover both
+  the adapter and action module.
+- Reused the existing dialog allowlist, real Qt controls, Controller APIs,
+  authoritative fixture preparation, instrumentation, callbacks, and
+  validation. Actions add no retry or production-only hook.
+- Made all waits use the single scenario deadline; local timeouts may shorten
+  but never extend it. Teardown ignores an exhausted scenario deadline,
+  attempts all eleven cleanup phases in deterministic order, aggregates
+  failures, and is idempotent.
+- Added compatible `action_results`, `lifecycle_milestones`, and
+  `cleanup_results` beneath `metrics.workflow.values`. The report-v1 envelope,
+  classifications, comparison paths/policy, and existing artifact paths are
+  unchanged.
+- Replaced the manifest's embedded legacy action placeholders with the eleven
+  reusable IDs. No capability status, suite membership, schedule, scenario,
+  fixture, assertion, or coverage-join claim changed.
 
 Gate:
 
@@ -1058,6 +1104,59 @@ Gate:
 - report-v1, report-set, comparison, artifact, and safety assertions remain
   valid;
 - source/import guards show no production machine or device construction.
+
+Verification record (2026-07-26):
+
+- Slice 2 started as `in_progress` at the commit and worktree state above and
+  is now `verified`.
+- The reusable action unit suite covers catalog identity, additive
+  serialization, precondition and operation failures, global/local timeout
+  behavior, head-exchange safety, allowlisted/unexpected dialogs, contained
+  nonempty milestone screenshots, cleanup continuation, expired-deadline
+  teardown, idempotence, closed-context rejection, and application/Qt-free
+  import.
+- The 96-well system scenario passes through the extracted action path and
+  reports all eleven action IDs, four lifecycle milestones, and eleven
+  successful cleanup phases. Its forced timeout retains a failed action,
+  failure screenshot/trace, and successful full teardown.
+- The reduced two-stock scenario passes through two head-stage and two real-UI
+  start actions, retains durable completion order, and reports successful
+  milestones and cleanup. The full 384x10 workload was not launched.
+- The final focused action/manifest/contract/96/384x10/comparison/Pi suite
+  passed 97 tests with 40 existing Qt chart deprecation warnings.
+- All three retained reports passed report-v1 validation with classifications
+  unchanged: Windows 96-well `pass`, Windows 384x10 `fail`, and Pi 384x10
+  `fail`. Both tracked baseline summaries loaded and retained distinct
+  `offscreen_windows_sil` and `offscreen_pi_sil` identities.
+- With only the six pre-existing inaccessible cache directories explicitly
+  ignored, the final full Python suite passed 3,537 tests, skipped 24, and
+  reported 148 existing deprecation warnings.
+- No standalone scenario characterization, scheduled stress/Pi run,
+  performance collection/remediation, production MVC behavior change,
+  simulator behavior change, fixture/baseline change, firmware/protocol
+  change, hardware operation, or Pi orchestration change was made.
+
+Risks and rollback:
+
+- The action layer intentionally owns private Qt/widget and simulator details
+  already used by the legacy adapter. Future application refactors may require
+  corresponding test-tool updates, but failures now identify the stable action
+  and stage rather than timing out opaquely.
+- Action evidence is additive and bounded, but is diagnostic rather than a new
+  classification or comparison gate. Assertion/capability result joins remain
+  deferred to Slice 6.
+- Rollback restores the legacy runner's inline orchestration, removes
+  `actions.py` and its tests, restores the embedded manifest action catalog,
+  removes the additive nested report fields and documentation, and retains the
+  Slice 0/1 compatibility and manifest work. No application data, production,
+  simulator, fixture, baseline, firmware, protocol, hardware, or Pi rollback
+  is required.
+
+Next permitted action:
+
+- Slice 3, standard smoke tier. Do not combine it with lifecycle scenarios,
+  scheduled stress/Pi automation, coverage-result joins, performance
+  remediation, or production behavior changes.
 
 ### Slice 3: Standard smoke tier
 

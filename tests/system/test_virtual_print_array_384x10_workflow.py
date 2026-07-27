@@ -153,6 +153,18 @@ def test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order(
     ]
     assert workflow["errors"] == []
     assert workflow["unexpected_dialogs"] == []
+    action_results = workflow["action_results"]
+    assert sum(
+        item["action_id"] == "head.stage_virtual" for item in action_results
+    ) == 2
+    assert sum(
+        item["action_id"] == "array.start_via_ui" for item in action_results
+    ) == 2
+    assert {item["status"] for item in action_results} == {"pass"}
+    assert [
+        item["name"] for item in workflow["lifecycle_milestones"]
+    ] == ["ready", "printing", "mid_array", "completed"]
+    assert {item["status"] for item in workflow["cleanup_results"]} == {"pass"}
 
     persistence = report["metrics"]["persistence"]["values"]
     assert persistence["intent_count"] == 48
@@ -230,12 +242,11 @@ def test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order(
 
 
 def test_stress_scenario_source_stays_hardware_isolated():
-    source = (
-        Path(__file__).resolve().parents[2]
-        / "tools"
-        / "virtual_workflows"
-        / "scenarios.py"
-    ).read_text(encoding="utf-8")
+    tools_root = Path(__file__).resolve().parents[2] / "tools" / "virtual_workflows"
+    source = "\n".join(
+        (tools_root / name).read_text(encoding="utf-8")
+        for name in ("scenarios.py", "actions.py")
+    )
 
     for forbidden in (
         "Machine_FreeRTOS",
