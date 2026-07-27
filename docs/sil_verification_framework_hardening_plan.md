@@ -1462,7 +1462,7 @@ Next permitted action:
 
 #### Slice 4.2: Prepared rename and refinalize
 
-Status: `in_progress`
+Status: `verified`
 
 Call path:
 
@@ -1485,14 +1485,26 @@ Implementation:
   and reload invariants, and post-rename failure-state capture. A successful
   implementation may replace, revise, or re-identify the prepared plan as
   long as the final persisted bundle is internally consistent.
-- Added the scenario to the registry and manifest as `planned`. It remains
-  absent from the active lifecycle suite, and
-  `experiment.prepared_rename_refinalize` remains `planned`.
+- Added a transactional prepared-rename reconciliation in
+  `ExperimentModel.rename_experiment`. A name-only rename of an untouched
+  `PREPARED`, revision-1, `ready_to_start` execution now stages the renamed
+  design, replaces the prepared plan and its immutable revision, rewrites
+  zero-progress and exported key artifacts against the replacement identity,
+  records the superseded prepared plan and audit event, validates the staged
+  authoritative bundle, and publishes the renamed directory atomically.
+- The same implementation rejects a started, resumed, calibrated,
+  progressed, invalid, or non-name-only execution without mutating the
+  authoritative source bundle. Integration tests cover successful persisted
+  reload plus rejection and reconciliation rollback.
+- Activated the scenario in the registry and manifest, appended it to the
+  active lifecycle suite, and advanced
+  `experiment.prepared_rename_refinalize` to `partial`. It remains partial
+  until Slice 4.3 proves the post-start edit-lock and editable-copy boundary.
 - Added exact fixture, action, registry/CLI, synthetic failure-policy, and
-  composed expected-success tests. The expected-success test is intentionally
-  a failing gate while the production regression remains; it is not `xfail`.
+  composed expected-success tests. The expected-success test remains a strict
+  passing gate and was not weakened or converted to `xfail`.
 
-Verification record (2026-07-26):
+Initial regression-gate verification record (2026-07-26):
 
 - Started at commit `adbb5b86a11222e48b592ef45728451edc17f97b`
   with a clean tracked worktree and the six pre-existing inaccessible
@@ -1537,20 +1549,55 @@ Verification record (2026-07-26):
 - No production, simulator, firmware, protocol, performance, baseline, Pi, or
   hardware behavior changed.
 
-Failure disposition, risks, and rollback:
+Resolution and final verification record (2026-07-27):
 
-- Slice 4.2 remains `in_progress`; the scenario and capability remain
-  `planned`, and the active lifecycle suite remains Slice 4.1 only.
-- The next permitted action is a separately scoped MVC defect covering
-  `_ensure_experiment_dir -> rename_experiment -> save_experiment ->
-  complete_experiment_design -> create_or_reuse_initial_execution_plan`.
-  Slice 4.3 does not begin until the defect is fixed and this gate passes.
-- Do not accept the warning, weaken the final invariants, delete the retained
-  conflict, or modify the test into an `xfail`.
-- Rollback removes the Slice 4.2 fixture, actions, runner/registry/manifest
-  entries, tests, and documentation while preserving verified Slices 0-4.1.
-  No application data, production, firmware, protocol, hardware, baseline, or
-  Pi rollback is required.
+- The separately scoped MVC defect fix was committed as `2a8b365` and merged
+  into the font-hardened main worktree as `4bff994`. The automatic
+  `editor_scenarios.py` merge retained both the SIL font-validation gate and
+  the cross-platform authoritative-plan path normalization.
+- Before validation, the ignored `FreeRTOS-interface/Experiments` corpus was
+  restored from external backup. All 312 `frames.jsonl` and `events.jsonl`
+  files referenced by the 156-run gravimetric validation manifest were present
+  and nonempty before the test run and remained so afterward. Both files for
+  the additional affected run `run_20260408_104206_ffe2616e` were also
+  restored and nonempty.
+- The complete focused lifecycle selection passed 126 tests with 50 existing
+  Qt chart deprecation warnings in 10.75 seconds. This included the real
+  create/finalize and rename/refinalize workflows, retained failure-evidence
+  paths, manifest activation, authoritative reload, and the SIL font gate.
+- A direct CLI execution of
+  `experiment_editor_prestart_rename_refinalize_v1` classified `pass` in
+  2,322.511 ms with all nine assertions passing and no hardware access:
+  `verification_reports/virtual_workflows/experiment_editor_prestart_rename_refinalize_v1/20260727T043740214843Z_4bff9945882f/report.json`.
+- With only the six pre-existing inaccessible execution-cache directories
+  ignored, the full default Python suite passed 3,574 tests, skipped 32, and
+  reported 118 existing warnings in 431.14 seconds.
+- `git diff --check` passed, the defect worktree was clean, and the main
+  worktree had no tracked changes after the merge and validation.
+- No remote Pi operation, stress workload, performance collection, baseline
+  regeneration, firmware/protocol change, simulator behavior change, or
+  hardware access occurred.
+
+Final disposition, risks, and rollback:
+
+- Slice 4.2 is `verified`; its scenario is active, the lifecycle suite contains
+  both editor scenarios, and `experiment.prepared_rename_refinalize` is
+  intentionally `partial` pending Slice 4.3.
+- The production correction is deliberately narrow: only a name-only change
+  to an untouched prepared execution is reconciled in place. Started,
+  progressed, resumed, calibrated, invalid, or otherwise edited executions
+  remain fail-closed.
+- Rollback reverts merge commit `4bff994`, returns the scenario and capability
+  manifest entries to their planned state, and restores the original Slice 4.2
+  failure disposition. No firmware, protocol, hardware, baseline, or Pi
+  rollback is required.
+
+Next permitted action:
+
+- Slice 4.3, post-start edit locking and safe editable-copy behavior. Keep
+  pause/resume, authoritative partial reload/resume, head exchange,
+  disconnect, scheduled automation, performance remediation, firmware,
+  protocol, Pi, and hardware behavior out of that milestone.
 
 ### Slice 5: Suites and scheduling contracts
 
