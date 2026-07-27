@@ -730,6 +730,18 @@ def start_array_via_ui(
                 "enabled": bool(button.isEnabled()),
             },
         )
+        wait_until(
+            context,
+            context.controller.check_if_all_completed,
+            5.0,
+            "array start command queue",
+            action_id="array.start_via_ui",
+            evidence=lambda: {
+                "queue_drained": bool(
+                    context.controller.check_if_all_completed()
+                ),
+            },
+        )
         context.view.activateWindow()
         button.setFocus()
         context.app.processEvents()

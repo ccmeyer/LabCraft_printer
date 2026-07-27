@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 
+import copy
 from dataclasses import dataclass, field
 from math import gcd
 from functools import reduce
@@ -6713,7 +6714,10 @@ class ExperimentModel(QObject):
         self._clear_legacy_execution_state()
 
         # --- metadata + factors (existing behavior) ---
-        self.metadata = d.get("metadata", self.metadata)
+        # Loading may normalize or add metadata defaults. Keep those mutations
+        # owned by this model so callers can continue using the exact persisted
+        # payload for authoritative design-hash validation.
+        self.metadata = copy.deepcopy(d.get("metadata", self.metadata))
         self.stock_prep_state = self._normalize_stock_prep_state(d.get("stock_prep"))
         self.additional_conditions = self._normalize_additional_conditions(
             d.get("additional_conditions")

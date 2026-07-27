@@ -357,14 +357,15 @@ scenario root. The first session reaches a clean paused checkpoint and tears
 down. The second opens the real Experiment Editor, selects the persisted
 folder, and attempts `Activate Execution` before a real UI resume.
 
-The scenario is currently registered as `planned`, not active in the
-lifecycle suite. Its strict run exposes a production editor-load defect:
-the disk design hash still matches the execution plan and validates as
-`ready_to_resume`, but the editor-loaded in-memory design hash differs and
-activation is blocked. The failed report retains both session identities,
-the passing first-session cleanup, disk/model/plan hashes, exact status text,
-traceback, and editor screenshot. Do not treat this expected investigation
-state as capability coverage or bypass the editor with a direct model call.
+The scenario is active in the lifecycle suite. The persisted design is loaded
+through the real editor without changing its authoritative disk identity,
+`Activate Execution` reconstructs the exact partial runtime, and the real
+`Resume Print` path completes A1-A24 without replaying any pair completed by
+the first session. A passing report contains eight ordered screenshots, both
+session cleanup records, disk/model/plan identity evidence, per-session
+command-sequence evidence, and exact combined intent reconciliation. This
+proves a fresh MVC/simulator composition within one SIL process; it is not an
+operating-system restart or physical-hardware resume.
 
 Lifecycle scenarios are single-run functional evidence. They reject Pi
 evidence, injected-stall controls, report-set repetition, and baseline

@@ -1874,7 +1874,7 @@ Final disposition, risks, and rollback:
 
 #### Slice 4.5: Authoritative reload and resume
 
-Status: `in_progress`
+Status: `verified`
 
 Call path:
 
@@ -1945,28 +1945,65 @@ Strict scenario result and defect evidence:
   existing warnings in 417.97 seconds after ignoring only the six known
   inaccessible cache directories.
 
+MVC defect correction and verified rerun:
+
+- The defect correction started from committed HEAD
+  `0a5e46b636a5895972eb1d922e12d867fab81fc7`. The retained failure above
+  remains the discovery evidence.
+- Root cause was an ownership error in `ExperimentModel.from_dict`: assigning
+  the parsed `metadata` mapping directly allowed
+  `_ensure_well_selection_metadata` to add a default to the same payload that
+  `load_experiment` subsequently passed to authoritative hash inspection.
+  The persisted file and execution plan matched, but inspection saw the
+  mutated in-memory payload.
+- `from_dict` now deep-copies persisted metadata before normalization. Focused
+  regressions prove caller-owned JSON remains unchanged, the model still
+  receives normalized defaults, and a minimal authoritative design without
+  `well_selection` remains valid and activatable without any file rewrite.
+- The unchanged real editor load now reports `ready_to_resume`, leaves
+  authoritative files byte-identical, enables `Activate Execution`, and
+  reconstructs the exact seven-completion partial runtime.
+- Completing the previously unreachable two-session evidence path also
+  restored its intended queue-drained click precondition, session-attributed
+  lifecycle merge, per-simulator command-sequence monotonicity, combined
+  pass/terminal accounting, and conditional accounting for an activation
+  checkpoint rewrite. No functional, persistence, or no-replay invariant was
+  weakened.
+- The passing direct report is:
+  `verification_reports/virtual_workflows/authoritative_reload_resume_24_v1/20260727T074222212574Z_0a5e46b636a5/report.json`.
+  It is report-v1 valid, classifies `pass` in 7,101.735 ms, completes all 24
+  stock/well pairs exactly once, retains the original plan identity, passes
+  all 12 assertions and both cleanup sets, and contains all eight required
+  screenshots.
+- The complete focused lifecycle selection passed 275 tests with 110 existing
+  Qt chart deprecation warnings in 27.85 seconds. Default collection passed
+  the fixture contract and skipped the opt-in composed scenario
+  (`1 passed, 1 skipped`).
+- The 96-well/comparison/local Pi-contract selection passed 40 tests and
+  skipped 3 remote-only cases. The original failure report, new passing
+  report, three retained compatibility reports, and both tracked baselines
+  validate.
+- The full default Python suite passed 3,617 tests and skipped 37 with 118
+  existing warnings in 416.11 seconds after ignoring only the six known
+  inaccessible cache directories.
+
 Disposition, risk, and rollback:
 
-- Slice 4.5 remains `in_progress`; the registry entry is directly executable,
-  but its manifest scenario and
-  `execution.authoritative_reload_resume` capability remain `planned` and it
-  is absent from the active lifecycle suite.
-- The separately scoped MVC defect path is:
-  `ExperimentDesignDialog._on_load_design -> ExperimentModel.load_experiment/from_dict -> inspect_authoritative_execution`.
-  The fix must preserve the persisted design identity during authoritative
-  editor loading, then rerun this unchanged scenario through activation,
-  resume, and terminal reconciliation.
-- Rollback removes only the Slice 4.5 fixture, session/reload framework
-  additions, tests, registry/manifest entry, and documentation while
-  preserving verified Slices 0-4.4. No application-data, production,
-  firmware, protocol, hardware, baseline, performance, or Pi rollback is
-  required.
+- Slice 4.5 is `verified`;
+  `authoritative_reload_resume_24_v1` is active in `lifecycle`, all 12
+  declared assertions pass, and `execution.authoritative_reload_resume` is
+  `covered` with a two-day evidence age.
+- The evidence proves a fresh MVC/simulator composition inside one
+  process-wide `QApplication`. It does not prove an operating-system restart,
+  firmware behavior, physical transport recovery, or droplet delivery.
+- Rollback reverts the metadata-ownership correction, its focused regression
+  tests, evidence-path completion, and manifest/documentation promotion. The
+  retained initial failure remains available. No application-data, firmware,
+  protocol, hardware, baseline, performance, or Pi rollback is required.
 
 Next permitted action:
 
-- Open a separately scoped MVC defect for the authoritative editor-load
-  in-memory design-hash divergence. Slice 4.6 must not begin until Slice 4.5
-  passes and is promoted.
+- Slice 4.6, `print_array_multi_stock_24x2_v1`.
 
 ### Slice 5: Suites and scheduling contracts
 
@@ -2346,12 +2383,7 @@ The effort is complete when:
 
 ## Current Next Action
 
-Open a separately scoped MVC defect for the authoritative editor-load
-in-memory design-hash divergence exposed by
-`authoritative_reload_resume_24_v1`. Preserve the strict two-session scenario
-and failure evidence unchanged while correcting
-`ExperimentDesignDialog._on_load_design -> ExperimentModel.load_experiment/from_dict`.
-After the fix, rerun and promote Slice 4.5 only if activation, no-replay
-resume, terminal reconciliation, focused tests, and the full suite pass. Do
-not begin Slice 4.6 or combine this work with refill resume, performance,
-firmware, protocol, Pi, or hardware changes.
+Create the concrete implementation plan for Slice 4.6,
+`print_array_multi_stock_24x2_v1`. Preserve the verified Slice 4.5
+authoritative reload/resume scenario and do not combine the next slice with
+refill resume, performance, firmware, protocol, Pi, or hardware changes.

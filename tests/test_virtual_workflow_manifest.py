@@ -109,6 +109,7 @@ def test_tracked_manifest_validates_and_describes_current_truth():
         "experiment_editor_prestart_rename_refinalize_v1",
         "experiment_editor_post_start_lock_v1",
         "print_array_soft_stop_resume_24_v1",
+        AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
     ]
     rename_scenario = _row(
         payload,
@@ -139,8 +140,8 @@ def test_tracked_manifest_validates_and_describes_current_truth():
         "scenarios",
         AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
     )
-    assert authoritative_reload["status"] == "planned"
-    assert authoritative_reload["suite_ids"] == []
+    assert authoritative_reload["status"] == "active"
+    assert authoritative_reload["suite_ids"] == ["lifecycle"]
     assert authoritative_reload["registry_id"] == (
         AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID
     )
@@ -168,13 +169,19 @@ def test_tracked_manifest_validates_and_describes_current_truth():
     assert capabilities["execution.soft_stop_resume"]["status"] == "covered"
     assert (
         capabilities["execution.authoritative_reload_resume"]["status"]
-        == "planned"
+        == "covered"
     )
     assert (
         capabilities["execution.authoritative_reload_resume"][
             "active_scenario_ids"
         ]
-        == []
+        == [AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID]
+    )
+    assert (
+        capabilities["execution.authoritative_reload_resume"][
+            "max_evidence_age_days"
+        ]
+        == 2
     )
     assert (
         capabilities["execution.soft_stop_resume"]["max_evidence_age_days"]

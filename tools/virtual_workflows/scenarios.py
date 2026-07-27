@@ -164,12 +164,28 @@ def _file_inventory(root: str | Path) -> dict[str, dict[str, Any]]:
 
 def _merge_session_lifecycles(
     sessions: tuple[tuple[str, dict[str, Any]], ...],
-) -> dict[str, list[dict[str, Any]]]:
+) -> dict[str, list[Any]]:
     keys = {
         key
         for _session_id, snapshot in sessions
         for key in snapshot
     }
+    merged: dict[str, list[Any]] = {}
+    for key in sorted(keys):
+        values: list[Any] = []
+        for session_id, snapshot in sessions:
+            for item in snapshot.get(key, ()):
+                if isinstance(item, dict):
+                    attributed = dict(item)
+                    attributed.setdefault(
+                        "application_session_id",
+                        session_id,
+                    )
+                    values.append(attributed)
+                else:
+                    values.append(item)
+        merged[key] = values
+    return merged
 
 
 def _merge_progress_snapshots(
@@ -1788,6 +1804,14 @@ def _validate_soft_stop_completed_scenario(
     completed_ids = list(completions)
     attached_ids = [item.get("intent_id") for item in attachments]
     sequences = [item.get("command_seq32") for item in attachments]
+    sequences_by_session: dict[str, list[Any]] = {}
+    for item in attachments:
+        session_id = str(
+            item.get("application_session_id") or "single_session"
+        )
+        sequences_by_session.setdefault(session_id, []).append(
+            item.get("command_seq32")
+        )
     completed_pairs = [
         (
             str(begin_by_id[intent_id].get("stock_id")),
@@ -1859,7 +1883,11 @@ def _validate_soft_stop_completed_scenario(
             )
         ),
         "attachments_exact": Counter(attached_ids) == Counter(begun_ids),
-        "sequences_unique_monotonic": sequences == sorted(set(sequences)),
+        "sequences_unique_monotonic": all(
+            session_sequences
+            == sorted(set(session_sequences))
+            for session_sequences in sequences_by_session.values()
+        ),
         "terminal_intent_partition_exact": (
             Counter(retired) == Counter(begun_ids)
             and all(
@@ -1939,6 +1967,7 @@ def _validate_soft_stop_completed_scenario(
         "paused_boundary": paused_validation,
         "quiescence": quiescence,
         "intent_command_sequences": sequences,
+        "intent_command_sequences_by_session": sequences_by_session,
     }
 
 
@@ -3400,6 +3429,10 @@ def run_virtual_print_array_scenario(
         if instrumentation is not None
         else []
     )
+    if is_authoritative_reload_resume and terminal_lifecycle:
+        pass_start_records = list(
+            terminal_lifecycle.get("pass_starts", ())
+        )
     pass_gap_events: list[dict[str, Any]] = []
     for event in probe_snapshot.get("stall_events", []):
         phase = event.get("phase") or {}
@@ -3455,6 +3488,10 @@ def run_virtual_print_array_scenario(
         if instrumentation is not None
         else []
     )
+    if is_authoritative_reload_resume and terminal_lifecycle:
+        terminal_records = list(
+            terminal_lifecycle.get("terminal_transitions", ())
+        )
     terminal_phase_records = [
         record
         for record in phase_records
@@ -3742,12 +3779,26 @@ def run_virtual_print_array_scenario(
         len(batch.get("intent_ids", ()))
         for batch in lifecycle_snapshot.get("discard_batches", ())
     )
+    activation_changed_paths = set(
+        authoritative_reload_evidence.get(
+            "session_2_activation",
+            {},
+        ).get("changed_paths", ())
+    )
+    activation_checkpoint_sync_count = (
+        1
+        if (
+            is_authoritative_reload_resume
+            and "execution_resume.json" in activation_changed_paths
+        )
+        else 0
+    )
     expected_resume_saves = (
         lifecycle_begin_count
         + lifecycle_attachment_count
         + lifecycle_completion_count
         + lifecycle_discard_batch_count
-        + (1 if is_authoritative_reload_resume else 0)
+        + activation_checkpoint_sync_count
     )
     expected_guard_count = (
         expected_completions * 4

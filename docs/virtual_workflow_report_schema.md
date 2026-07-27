@@ -463,13 +463,18 @@ field. The scenario uses one process-wide `QApplication`; application-session
 identity means a separately constructed Model/Controller/MainWindow/simulator
 composition, not an operating-system process restart.
 
-The current strict failure stops at `session_2_loaded`: the byte-identical
-disk design still matches the plan, while the editor-loaded in-memory design
-hash differs and eligibility is `blocked`. The report therefore marks the
-reload assertion `fail` and later activation/resume assertions `incomplete`,
-and retains `session_2_load_failed.png` plus the traceback. These fields
-remain compatible when the defect is fixed and the later evidence becomes
-populated.
+A passing run retains the byte-identical disk design through Session 1
+teardown and the Session 2 editor load. `session_2_loaded` records
+`ready_to_resume` with an inactive runtime, `session_2_activation` records the
+single activation audit event and any allowlisted persistence changes, and
+`resume_reconciliation` merges session-attributed intent evidence. Command
+sequences are checked for uniqueness and monotonicity within each fresh
+simulator session. `terminal` requires 24 exact completions, no replay of
+Session 1 pairs, an empty checkpoint, the original plan identity, and a
+`COMPLETED` terminal plan. The ordered screenshots are `session_1_ready`,
+`session_1_printing`, `session_1_stop_requested`, `session_1_stopped`,
+`session_2_loaded`, `session_2_activated`, `session_2_resumed`, and
+`completed`.
 
 `metrics.persistence.values.authoritative_io` adds compatible diagnostic
 evidence for the guarded active-runtime checkpoint:

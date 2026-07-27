@@ -59,7 +59,7 @@ def test_authoritative_reload_resume_fixture_contract_is_exact():
 
 
 @pytest.mark.sil_lifecycle
-def test_authoritative_reload_retains_strict_editor_failure_evidence(
+def test_authoritative_reload_resume_composed_report_passes(
     qapp,
     tmp_path,
 ):
@@ -73,7 +73,7 @@ def test_authoritative_reload_retains_strict_editor_failure_evidence(
     )
 
     validate_report_v1(report)
-    assert report["classification"]["status"] == "fail"
+    assert report["classification"]["status"] == "pass"
     assert report["run"]["scenario_name"] == "authoritative_reload_resume"
     workflow = report["metrics"]["workflow"]["values"]
     actions = workflow["action_results"]
@@ -95,53 +95,78 @@ def test_authoritative_reload_retains_strict_editor_failure_evidence(
         if item["action_id"] == "app.close_simulated_session"
     )["status"] == "pass"
 
-    failed_load = next(
+    loaded = next(
         item
         for item in actions
         if item["action_id"] == "experiment.load_authoritative_via_ui"
     )
-    assert failed_load["status"] == "fail"
-    assert failed_load["application_session_id"] == "session_2"
-    evidence = failed_load["evidence"]
-    assert evidence["eligibility"]["status"] == "blocked"
+    assert loaded["status"] == "pass"
+    assert loaded["application_session_id"] == "session_2"
+    evidence = loaded["evidence"]
+    assert evidence["eligibility"]["status"] == "ready_to_resume"
     assert evidence["checks"]["runtime_inactive"]
     assert evidence["checks"]["name_matches"]
-    assert not evidence["checks"]["eligibility_ready_to_resume"]
+    assert evidence["checks"]["eligibility_ready_to_resume"]
+    assert evidence["checks"]["finish_enabled"]
+    assert evidence["checks"]["read_only_guidance"]
     identity = evidence["design_identity"]
     assert identity["disk_design_sha256"] == identity["plan_design_sha256"]
-    assert identity["model_design_sha256"] != identity["plan_design_sha256"]
+    assert next(
+        item
+        for item in actions
+        if item["action_id"] == "experiment.activate_authoritative_via_ui"
+    )["status"] == "pass"
 
     assertions = {
         item["assertion_id"]: item["decision"]
         for item in workflow["assertion_results"]
     }
-    assert assertions["ui.real_app_constructed"] == "pass"
-    assert assertions["ui.fresh_application_session_constructed"] == "pass"
-    assert assertions["execution.first_session_paused"] == "pass"
-    assert assertions["execution.first_session_teardown_clean"] == "pass"
-    assert assertions["execution.authoritative_reload_valid"] == "fail"
-    assert assertions["execution.authoritative_runtime_rehydrated"] == (
-        "incomplete"
-    )
-    assert assertions["execution.reload_resume_exactly_once"] == "incomplete"
+    assert len(assertions) == 12
+    assert set(assertions.values()) == {"pass"}
 
     assert [item["name"] for item in workflow["lifecycle_milestones"]] == [
         "session_1_ready",
         "session_1_printing",
         "session_1_stop_requested",
         "session_1_stopped",
-        "session_2_load_failed",
+        "session_2_loaded",
+        "session_2_activated",
+        "session_2_resumed",
+        "completed",
     ]
+    persistence = report["metrics"]["persistence"]["values"][
+        "authoritative_reload_resume"
+    ]
+    assert persistence["between_sessions"]["byte_identical"]
+    assert persistence["session_2_loaded"]["checks"][
+        "authoritative_files_byte_identical"
+    ]
+    assert persistence["resume_reconciliation"][
+        "session_1_completed_pairs_not_replayed"
+    ]
+    assert persistence["terminal"]["completion_count"] == 24
+    assert persistence["terminal"]["plan_state"] == "completed"
+    assert set(persistence["terminal"]["checks"].values()) == {True}
+    assert {item["status"] for item in workflow["cleanup_results"]} == {
+        "pass"
+    }
+
     report_dir = Path(report["safety"]["scenario_root"]).parent
-    failure_image = report["artifacts"]["screenshots"][
-        "session_2_load_failed"
-    ]
-    assert (report_dir / failure_image).stat().st_size > 0
-    assert report["artifacts"]["failure_traceback"] == "failure_traceback.txt"
-    traceback_text = (
-        report_dir / report["artifacts"]["failure_traceback"]
-    ).read_text(encoding="utf-8")
-    assert "loaded authoritative editor state is invalid" in traceback_text
+    screenshots = report["artifacts"]["screenshots"]
+    assert set(screenshots) == {
+        "session_1_ready",
+        "session_1_printing",
+        "session_1_stop_requested",
+        "session_1_stopped",
+        "session_2_loaded",
+        "session_2_activated",
+        "session_2_resumed",
+        "completed",
+    }
+    assert all(
+        (report_dir / relative_path).stat().st_size > 0
+        for relative_path in screenshots.values()
+    )
     assert json.loads(
         (report_dir / "report.json").read_text(encoding="utf-8")
-    )["classification"]["status"] == "fail"
+    )["classification"]["status"] == "pass"

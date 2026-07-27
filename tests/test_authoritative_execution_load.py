@@ -1,5 +1,6 @@
 import hashlib
 import json
+from copy import deepcopy
 from pathlib import Path
 
 from AuthoritativeExecutionLoad import (
@@ -110,6 +111,58 @@ def test_authoritative_inspection_is_nonmutating_and_builds_exact_runtime(tmp_pa
     assert runtime.stocks[0].effective_volume_nL == 143.59278258103592
     assert runtime.wells[0].targets == {plan.stocks[0].stock_id: 16}
     assert runtime.wells[0].added == {plan.stocks[0].stock_id: 0}
+
+
+def test_experiment_deserialization_does_not_mutate_caller_payload(
+    experiment_model_factory,
+):
+    em = experiment_model_factory().experiment_model
+    payload = {
+        "schema_version": 2,
+        "metadata": {
+            "name": "caller-owned-design",
+            "fill_droplet_volume_nL": 10.0,
+        },
+        "factors": [],
+    }
+    original = deepcopy(payload)
+
+    em.from_dict(payload)
+
+    assert payload == original
+    assert em.metadata is not payload["metadata"]
+    assert "well_selection" not in payload["metadata"]
+    assert em.metadata["well_selection"] == {
+        "mode": "start_offset",
+        "included_wells": None,
+    }
+
+
+def test_authoritative_load_hashes_exact_persisted_design_before_normalization(
+    experiment_model_factory,
+    tmp_path,
+):
+    design, plan = _write_bundle(tmp_path)
+    design_path = tmp_path / "experiment_design.json"
+    loaded = experiment_model_factory()
+    before = _hashes(tmp_path)
+
+    bundle = loaded.experiment_model.load_experiment(
+        str(design_path),
+        str(tmp_path),
+    )
+
+    assert bundle.valid
+    assert bundle.eligibility.status == "ready_to_start"
+    assert bundle.eligibility.can_activate_runtime
+    assert canonical_sha256(design) == plan.design_sha256
+    assert json.loads(design_path.read_text(encoding="utf-8")) == design
+    assert _hashes(tmp_path) == before
+    assert "well_selection" not in design["metadata"]
+    assert loaded.experiment_model.metadata["well_selection"] == {
+        "mode": "start_offset",
+        "included_wells": None,
+    }
 
 
 def test_positive_progress_without_checkpoint_is_analysis_only(tmp_path):
