@@ -88,6 +88,12 @@ _SCENARIO_DEFINITIONS = {
         fixture_path=_FIXTURE_ROOT / "virtual_print_array_384x10_v1.json",
         expected_completion_count=3840,
     ),
+    "virtual_print_array_24_v1": ScenarioDefinition(
+        registry_id="virtual_print_array_24_v1",
+        workload_id="virtual_print_array_24_v1",
+        fixture_path=_FIXTURE_ROOT / "virtual_print_array_24_v1.json",
+        expected_completion_count=24,
+    ),
 }
 REGISTERED_SCENARIOS: Mapping[str, ScenarioDefinition] = MappingProxyType(
     _SCENARIO_DEFINITIONS
@@ -347,7 +353,7 @@ def validate_capability_manifest(payload: Mapping[str, Any]) -> None:
             "manifest.policy.standard_forbidden_tiers",
         )
     )
-    if not forbidden_tiers <= _TIERS or "stress" not in forbidden_tiers:
+    if forbidden_tiers != {"lifecycle", "regression", "stress"}:
         raise ManifestValidationError("standard forbidden tiers are invalid")
     pi_required = tuple(
         _require_string_list(
@@ -778,10 +784,10 @@ def validate_capability_manifest(payload: Mapping[str, Any]) -> None:
                     f"suite {suite_id} platform is unsupported by {scenario_id}"
                 )
             if kind == "standard" and (
-                scenario["tier"] in forbidden_tiers or platform == "pi_sil"
+                scenario["tier"] != "smoke" or platform == "pi_sil"
             ):
                 raise ManifestValidationError(
-                    f"suite {suite_id} cannot select stress or Pi scenarios"
+                    f"suite {suite_id} can select only Windows smoke scenarios"
                 )
             if kind == "stress" and scenario["tier"] != "stress":
                 raise ManifestValidationError(

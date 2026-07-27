@@ -26,6 +26,7 @@ from tools.virtual_workflows.registry import (
 from tools.virtual_workflows.scenarios import (
     SCENARIO_COMPLETION_COUNTS,
     SCENARIO_FIXTURES,
+    SMOKE_WORKLOAD_ID,
     STRESS_WORKLOAD_ID,
     WORKLOAD_ID,
     VirtualPrintArrayScenarioConfig,
@@ -50,9 +51,13 @@ def _row(payload: dict[str, object], section: str, row_id: str) -> dict[str, obj
 
 def test_registry_preserves_legacy_default_order_fixtures_and_counts():
     assert DEFAULT_SCENARIO_ID == WORKLOAD_ID
-    assert registered_scenario_ids() == (WORKLOAD_ID, STRESS_WORKLOAD_ID)
+    assert registered_scenario_ids() == (
+        WORKLOAD_ID,
+        STRESS_WORKLOAD_ID,
+        SMOKE_WORKLOAD_ID,
+    )
 
-    for scenario_id in (WORKLOAD_ID, STRESS_WORKLOAD_ID):
+    for scenario_id in (WORKLOAD_ID, STRESS_WORKLOAD_ID, SMOKE_WORKLOAD_ID):
         definition = get_registered_scenario(scenario_id)
         fixture = load_virtual_print_array_fixture(scenario_id=scenario_id)
 
@@ -83,8 +88,17 @@ def test_tracked_manifest_validates_and_describes_current_truth():
 
     standard = _row(payload, "suites", "standard")
     lifecycle = _row(payload, "suites", "lifecycle")
-    assert standard["status"] == lifecycle["status"] == "planned"
-    assert standard["scenario_ids"] == lifecycle["scenario_ids"] == []
+    assert standard["status"] == "active"
+    assert standard["scenario_ids"] == ["print_array_smoke_24_v1"]
+    assert lifecycle["status"] == "planned"
+    assert lifecycle["scenario_ids"] == []
+
+    smoke = _row(payload, "scenarios", "print_array_smoke_24_v1")
+    assert smoke["registry_id"] == SMOKE_WORKLOAD_ID
+    assert smoke["tier"] == "smoke"
+    assert smoke["suite_ids"] == ["standard"]
+    assert smoke["supported_platforms"] == ["windows_sil"]
+    assert smoke["pi_safety_evidence"] == []
 
     capabilities = {
         capability["id"]: capability for capability in payload["capabilities"]
@@ -115,9 +129,15 @@ def test_cli_scenario_surface_is_registry_driven_and_legacy_compatible():
     assert parser.parse_args(
         ["--scenario", STRESS_WORKLOAD_ID]
     ).scenario == STRESS_WORKLOAD_ID
+    assert parser.parse_args(
+        ["--scenario", SMOKE_WORKLOAD_ID]
+    ).scenario == SMOKE_WORKLOAD_ID
 
 
-@pytest.mark.parametrize("scenario_id", [WORKLOAD_ID, STRESS_WORKLOAD_ID])
+@pytest.mark.parametrize(
+    "scenario_id",
+    [WORKLOAD_ID, STRESS_WORKLOAD_ID, SMOKE_WORKLOAD_ID],
+)
 def test_registry_dispatch_uses_existing_config_and_runner(
     scenario_id,
     tmp_path,
@@ -151,8 +171,11 @@ def test_registry_dispatch_uses_existing_config_and_runner(
     assert config.timeout_seconds == 90
 
 
-@pytest.mark.parametrize("scenario_id", [WORKLOAD_ID, STRESS_WORKLOAD_ID])
-def test_cli_dispatches_each_legacy_id_through_registry(
+@pytest.mark.parametrize(
+    "scenario_id",
+    [WORKLOAD_ID, STRESS_WORKLOAD_ID, SMOKE_WORKLOAD_ID],
+)
+def test_cli_dispatches_each_registered_id_through_registry(
     scenario_id,
     tmp_path,
     monkeypatch,
@@ -328,6 +351,13 @@ def _stress_in_standard(payload):
     standard["scenario_ids"].append(stress["id"])
 
 
+def _regression_in_standard(payload):
+    regression = _row(payload, "scenarios", "print_array_regression_96_v1")
+    standard = _row(payload, "suites", "standard")
+    regression["suite_ids"].append("standard")
+    standard["scenario_ids"].append(regression["id"])
+
+
 def _pi_suite_without_proof(payload):
     suite = _row(payload, "suites", "pi_primary")
     suite["requires_pi_safety_evidence"] = ["preflight"]
@@ -371,6 +401,7 @@ def _uri_credentials(payload):
         ),
         (_capability_scenario_membership_drift, "scenario membership drifted"),
         (_stress_in_standard, "cannot join standard"),
+        (_regression_in_standard, "cannot join standard"),
         (_pi_suite_without_proof, "Pi safety evidence is inconsistent"),
         (_schedule_with_unknown_suite, "references unknown suite"),
         (_secret_like_field, "secret-like field"),

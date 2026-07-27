@@ -113,6 +113,7 @@ def test_full_384x10_compact_progress_is_bounded(tmp_path):
     assert evidence["size_reduction_fraction"] >= 0.95
 
 
+@pytest.mark.sil_stress
 def test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order(
     qapp,
     tmp_path,

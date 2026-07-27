@@ -132,18 +132,66 @@ def pytest_addoption(parser):
         default=False,
         help="Run slow, insulated offline analysis-pipeline tests.",
     )
+    parser.addoption(
+        "--run-sil-lifecycle",
+        action="store_true",
+        default=False,
+        help="Run targeted SIL lifecycle scenarios.",
+    )
+    parser.addoption(
+        "--run-sil-regression",
+        action="store_true",
+        default=False,
+        help="Run extended SIL regression scenarios.",
+    )
+    parser.addoption(
+        "--run-sil-stress",
+        action="store_true",
+        default=False,
+        help="Run local SIL stress scenarios.",
+    )
 
 
 def pytest_collection_modifyitems(config, items):
-    if config.getoption("--run-analysis-pipeline"):
-        return
-
     skip_analysis = pytest.mark.skip(
         reason="analysis pipeline tests are skipped by default; pass --run-analysis-pipeline to run them"
     )
+    sil_tiers = (
+        (
+            "sil_lifecycle",
+            "--run-sil-lifecycle",
+            "targeted SIL lifecycle scenarios",
+        ),
+        (
+            "sil_regression",
+            "--run-sil-regression",
+            "extended SIL regression scenarios",
+        ),
+        (
+            "sil_stress",
+            "--run-sil-stress",
+            "local SIL stress scenarios",
+        ),
+    )
     for item in items:
-        if item.get_closest_marker("analysis_pipeline"):
+        if (
+            item.get_closest_marker("analysis_pipeline")
+            and not config.getoption("--run-analysis-pipeline")
+        ):
             item.add_marker(skip_analysis)
+        for marker_name, option_name, description in sil_tiers:
+            if (
+                item.get_closest_marker(marker_name)
+                and not config.getoption(option_name)
+            ):
+                item.add_marker(
+                    pytest.mark.skip(
+                        reason=(
+                            f"{description} are skipped by default; "
+                            f"pass {option_name} to run them"
+                        )
+                    )
+                )
 
 
 if "numpy" in sys.modules:

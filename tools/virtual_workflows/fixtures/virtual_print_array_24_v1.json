@@ -1,0 +1,50 @@
+{
+  "schema_version": 2,
+  "fixture_id": "virtual_print_array_24_v1",
+  "plate": {
+    "name": "shallow-384_well_plate",
+    "rows": 16,
+    "columns": 24,
+    "included_rows": [
+      "A"
+    ],
+    "serpentine": true
+  },
+  "workload": {
+    "target_dispenses_per_stock_per_well": 1,
+    "well_count": 24,
+    "stock_count": 1,
+    "array_passes": 1,
+    "completion_count": 24
+  },
+  "stocks": [
+    {
+      "factor_name": "Virtual Smoke Stock",
+      "concentration": 1.0,
+      "target_concentration": 1.0,
+      "units": "x",
+      "printing_mode": "droplet",
+      "prepared_droplet_volume_nL": 5.0,
+      "droplet_volume_nL": 10.0,
+      "printer_head": {
+        "printer_head_id": "virtual-head-24-v1",
+        "initial_volume_uL": 1000.0,
+        "print_pulse_width_us": 1300,
+        "print_pressure_psi": 1.2
+      }
+    }
+  ],
+  "fill_stock": {
+    "factor_name": "Water",
+    "concentration": 1.0,
+    "units": "--",
+    "printing_mode": "droplet",
+    "droplet_volume_nL": 10.0,
+    "target_dispenses_per_well": 0
+  },
+  "simulation": {
+    "dispense_frequency_hz": 20,
+    "lookahead_wells": 2,
+    "staging_slot": 0
+  }
+}

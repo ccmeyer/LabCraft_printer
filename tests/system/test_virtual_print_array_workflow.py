@@ -63,6 +63,7 @@ def test_scenario_config_requires_paired_pi_safety_evidence(tmp_path):
         )
 
 
+@pytest.mark.sil_regression
 def test_real_ui_print_array_completes_and_writes_inspectable_report(qapp, tmp_path):
     report = run_virtual_print_array_scenario(
         VirtualPrintArrayScenarioConfig(
@@ -248,6 +249,7 @@ def test_real_ui_print_array_completes_and_writes_inspectable_report(qapp, tmp_p
     )
 
 
+@pytest.mark.sil_regression
 def test_injected_ui_stall_is_detected_attributed_and_captures_stack(qapp, tmp_path):
     report = run_virtual_print_array_scenario(
         VirtualPrintArrayScenarioConfig(
@@ -284,6 +286,7 @@ def test_injected_ui_stall_is_detected_attributed_and_captures_stack(qapp, tmp_p
     ).read_text(encoding="utf-8")
 
 
+@pytest.mark.sil_regression
 def test_timeout_failure_retains_diagnostics_and_failure_screenshot(qapp, tmp_path):
     report = run_virtual_print_array_scenario(
         VirtualPrintArrayScenarioConfig(

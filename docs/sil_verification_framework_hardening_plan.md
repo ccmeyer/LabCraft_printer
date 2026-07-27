@@ -1160,22 +1160,74 @@ Next permitted action:
 
 ### Slice 3: Standard smoke tier
 
+Status: `verified`
+
+Starting state:
+
+- commit: `c72832e8d264d402e7ed4ffde049d4c2e42202a1`;
+- tracked worktree: clean;
+- six pre-existing inaccessible execution-cache directories remain untouched;
+- pre-edit focused action/manifest/contract/96/384x10/comparison/Pi baseline:
+  97 passed with 40 existing Qt chart deprecation warnings in 16.70 seconds;
+- no production, simulator, firmware, protocol, baseline, Pi orchestration, or
+  performance-remediation change is permitted.
+
+Frozen smoke path:
+
+`standard pytest or direct scenario ID -> registry -> VirtualPrintArrayScenarioConfig -> reusable actions -> real MainWindow/Controller/Model/authoritative files -> SimulatedMachine -> completion callbacks -> report-v1 evidence`
+
 Goal:
 
 - add the 24-well workload and smoke scenario;
 - make it the only default composed real-UI SIL run;
 - preserve existing fixture contract tests.
 
-Likely files:
+Files:
 
-- new 24-well fixture;
-- scenario registry and manifest;
+- `tools/virtual_workflows/fixtures/virtual_print_array_24_v1.json`;
+- `tools/virtual_workflows/scenarios.py`;
+- `tools/virtual_workflows/registry.py`;
+- `tools/virtual_workflows/manifests/capability_coverage_v1.json`;
 - `tests/system/test_virtual_workflow_smoke.py`;
-- existing real-UI tests where framework checks move to the smaller workload;
+- `tests/system/test_virtual_print_array_workflow.py`;
+- `tests/system/test_virtual_print_array_384x10_workflow.py`;
+- `tests/system/test_pi_virtual_workflow_lane.py`;
+- `tests/test_virtual_workflow_manifest.py`;
 - `pytest.ini`;
 - `tests/conftest.py`;
 - `README.md`;
 - this document.
+
+Implementation:
+
+- Added schema-v2 workload `virtual_print_array_24_v1`: real
+  `shallow-384_well_plate` geometry, selected row A1-A24, one printable 1x
+  virtual stock, one virtual head, one completion per well, two-well
+  lookahead, and staging slot zero.
+- Appended the smoke workload to the registry without reordering or changing
+  the two legacy IDs. The direct CLI remains scenario-ID based and keeps
+  `virtual_print_array_96_v1` as its compatibility default.
+- Activated `print_array_smoke_24_v1` as the sole member of the manifest's
+  `standard` suite. Standard membership rejects lifecycle, regression, and
+  stress tiers. The smoke backs the existing host-isolation, real-UI,
+  completion, queue, intent-durability, terminal-bundle, and artifact
+  capabilities with existing report-v1 assertions.
+- Added bounded launch-action evidence for the simulation banner and real
+  plate-widget dimensions. This is additive nested action evidence and does
+  not change report-v1 identity or classification.
+- Added one fast fixture/config contract and one composed real-UI smoke test.
+  The composed test proves exact completion/durability counts, queue and
+  cleanup state, simulation identity, the 16x24 widget, allowlisted dialogs,
+  milestones, screenshots, artifact presence, containment, and report-v1
+  validity.
+- Added `sil_smoke`, `sil_lifecycle`, `sil_regression`, `sil_stress`, and
+  `sil_pi_contract` markers. Smoke and fast local Pi contract tests remain in
+  standard pytest. Lifecycle, regression, and stress are independently
+  opt-in through `--run-sil-lifecycle`, `--run-sil-regression`, and
+  `--run-sil-stress`; analysis-pipeline selection remains independent.
+- Marked the three existing composed 96-well paths as regression and the
+  reduced two-stock path as stress. Fixture, source, registry, comparison,
+  report, and Pi safety-contract tests remain fast default coverage.
 
 Gate:
 
@@ -1185,6 +1237,70 @@ Gate:
 - standard pytest selection does not include lifecycle, regression, stress, or
   remote Pi execution;
 - full Python suite passes.
+
+Verification record (2026-07-26):
+
+- Slice 3 started at the commit and worktree state above and is now
+  `verified`.
+- The isolated smoke suite passed 2 tests with 10 existing Qt chart
+  deprecation warnings in 3.47 seconds. During implementation, its first
+  execution revealed that a one-stock 10x/1x composition produced no running
+  transition at the intended reaction volume; changing only the new fixture
+  to the established 1x/1x one-stock composition produced the intended 24
+  completions.
+- The final default focused framework/system selection passed 98 tests,
+  skipped the three composed regression tests and one composed stress test,
+  and reported 10 existing warnings in 7.07 seconds.
+- The opt-in 96-well regression file passed 10 tests with 30 existing warnings
+  in 11.88 seconds. The opt-in reduced two-stock stress file passed 5 tests
+  with 10 existing warnings in 4.79 seconds. The full 384x10 workload was not
+  launched.
+- Running the 96-well file with only `--run-analysis-pipeline` passed 7 fast
+  tests and skipped all 3 regression tests, proving that unrelated opt-in
+  controls do not enable a SIL tier.
+- A direct CLI smoke completed with classification `pass`, 24 of 24
+  stock/well completions, zero queue starvation, and a validated report-v1
+  bundle in 3,066.462 ms:
+  `verification_reports/virtual_workflows/virtual_print_array_24_v1/20260727T011808653165Z_c72832e8d264/report.json`.
+- That smoke report and the three retained compatibility reports passed
+  report-v1 validation. Classifications were smoke `pass`, Windows 96-well
+  `pass`, Windows 384x10 `fail`, and Pi 384x10 `fail`; historical stress
+  classifications remain review evidence rather than Slice 3 gates.
+- Both tracked 96-well baseline summaries loaded and retained distinct
+  `offscreen_windows_sil` and `offscreen_pi_sil` identities.
+- With only the six pre-existing inaccessible cache directories explicitly
+  ignored, the full default Python suite passed 3,538 tests, skipped 28, and
+  reported 118 existing deprecation warnings in 415.76 seconds.
+- No lifecycle scenario, full stress workload, performance collection,
+  remote Pi operation, production behavior change, simulator behavior change,
+  firmware/protocol change, baseline change, or Pi orchestration change was
+  made.
+
+Risks and rollback:
+
+- Marker omissions on a future composed scenario could put it in the default
+  lane. Registry/manifest policy, marker documentation, and default-selection
+  validation make the intended tier visible, but new scenarios still require
+  review.
+- The 30-second smoke gate is a functional budget, not a performance baseline.
+  It must not be used to compare Windows and Pi timing populations or to
+  authorize performance remediation.
+- The smoke uses real private widget/action surfaces already covered by the
+  SIL adapter. UI refactors may require test-tool updates, while a failure
+  remains bounded to test code and retained evidence.
+- Rollback removes the 24-well fixture and smoke test, removes its registry and
+  manifest entries, removes the additive launch evidence and tier gates,
+  restores the 96/reduced tests to default selection, and removes the Slice 3
+  README/plan additions. No application data, production, simulator, baseline,
+  firmware, protocol, hardware, or Pi rollback is required.
+
+Next permitted action:
+
+- Slice 4's first independently reviewed milestone: create and finalize an
+  experiment through the editor. Do not combine it with prepared rename,
+  post-start locking, pause/resume, reload/resume, head exchange, disconnect,
+  scheduled automation, coverage-result joins, performance remediation, or
+  production behavior changes.
 
 ### Slice 4: Lifecycle portfolio
 

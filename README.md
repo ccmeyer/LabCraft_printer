@@ -180,20 +180,23 @@ Prerequisites:
 
 ### SIL scenario registry and capability manifest
 
-The existing 96-well and 384x10 IDs are registered in
+The 24-well smoke, existing 96-well regression, and 384x10 stress IDs are
+registered in
 `tools/virtual_workflows/registry.py`. The CLI obtains its `--scenario`
 choices from that registry, but continues to construct the existing
 `VirtualPrintArrayScenarioConfig` and execute the existing scenario runner.
-The default remains `virtual_print_array_96_v1`.
+For compatibility, the CLI default remains `virtual_print_array_96_v1`;
+suite selection is not a CLI feature yet.
 
 The tracked current-truth portfolio is
 `tools/virtual_workflows/manifests/capability_coverage_v1.json`, with schema
 identity `labcraft.sil_capability_coverage` version 1. It records capabilities,
 registered scenarios, planned/active suites, intended schedules, embedded
 action/assertion IDs, limitations, and freshness policy. Generated reports do
-not rewrite it. The `standard` and `lifecycle` suites are intentionally planned
-and empty until their later framework slices; suite/capability CLI selection
-is not available yet.
+not rewrite it. The `standard` suite is active and selects only
+`print_array_smoke_24_v1`. The `lifecycle` suite remains planned and empty
+until its scenarios are implemented; suite/capability CLI selection is not
+available yet.
 
 Validate registry/fixture drift, manifest references, portable paths, test
 nodes, Pi safety requirements, and current capability claims with:
@@ -228,6 +231,41 @@ workflow with:
 The reusable layer lazily imports Qt only for UI operations, accepts only the
 literal simulated machine path supplied by the existing adapter, and always
 attempts the full cleanup sequence even after timeout or failure.
+
+### SIL pytest tiers
+
+The standard Python test selection runs one composed real-UI SIL scenario:
+`virtual_print_array_24_v1`, covering A1 through A24 with one virtual stock.
+It constructs the real MainWindow, Controller, Model, 16-by-24 plate widget,
+authoritative execution files, and simulated machine. It must complete within
+30 seconds and retain the normal report-v1 evidence and four named
+screenshots.
+
+Run the standard smoke directly with:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q `
+  tests\system\test_virtual_workflow_smoke.py
+```
+
+Longer composed SIL tiers are opt-in:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q --run-sil-regression `
+  tests\system\test_virtual_print_array_workflow.py
+
+.\env\Scripts\python.exe -m pytest -q --run-sil-stress `
+  tests\system\test_virtual_print_array_384x10_workflow.py
+
+.\env\Scripts\python.exe -m pytest -q --run-sil-lifecycle
+```
+
+The last command becomes operative as lifecycle scenarios are added. Without
+these flags, tests marked `sil_lifecycle`, `sil_regression`, or `sil_stress`
+are collected but skipped. Fast fixture, registry, manifest, report,
+comparison, and local Pi safety-contract tests continue to run normally.
+The `sil_pi_contract` marker never launches a remote Pi operation; remote Pi
+execution remains an explicit, separately authorized command.
 
 Run the normal one-timescale characterization:
 

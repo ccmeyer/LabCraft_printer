@@ -34,6 +34,8 @@ from tools.virtual_workflows.report import (
     validate_report_v1,
 )
 
+pytestmark = pytest.mark.sil_pi_contract
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PI_SHELL = REPO_ROOT / "scripts" / "pi" / "run_virtual_workflow_sil.sh"

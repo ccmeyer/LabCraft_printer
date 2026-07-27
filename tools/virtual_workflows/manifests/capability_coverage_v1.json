@@ -9,7 +9,7 @@
       "owner_role": "verification maintainers",
       "status": "covered",
       "required_verification_layers": ["contract", "host_sil"],
-      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1"],
+      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1", "print_array_smoke_24_v1"],
       "required_assertion_ids": ["sil.host_hardware_disabled"],
       "related_source_areas": ["tools/virtual_workflows/scenarios.py", "FreeRTOS-interface/App.py"],
       "limitations": ["In-process isolation does not prove firmware or physical-device behavior."],
@@ -33,7 +33,7 @@
       "owner_role": "application verification maintainers",
       "status": "covered",
       "required_verification_layers": ["host_sil"],
-      "active_scenario_ids": ["print_array_regression_96_v1"],
+      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_smoke_24_v1"],
       "required_assertion_ids": ["ui.real_app_constructed"],
       "related_source_areas": ["FreeRTOS-interface/App.py", "FreeRTOS-interface/View.py"],
       "limitations": ["Offscreen Qt composition does not validate a native compositor."],
@@ -45,7 +45,7 @@
       "owner_role": "execution verification maintainers",
       "status": "covered",
       "required_verification_layers": ["host_sil"],
-      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1"],
+      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1", "print_array_smoke_24_v1"],
       "required_assertion_ids": ["execution.expected_completions"],
       "related_source_areas": ["FreeRTOS-interface/Controller.py", "FreeRTOS-interface/Model.py"],
       "limitations": ["Completion is simulated and does not prove physical dispensing."],
@@ -57,7 +57,7 @@
       "owner_role": "execution verification maintainers",
       "status": "covered",
       "required_verification_layers": ["host_sil"],
-      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1"],
+      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1", "print_array_smoke_24_v1"],
       "required_assertion_ids": ["execution.no_queue_starvation"],
       "related_source_areas": ["FreeRTOS-interface/Controller.py", "tools/virtual_workflows/scenarios.py"],
       "limitations": ["The in-process simulator does not reproduce serial or firmware queue timing."],
@@ -69,7 +69,7 @@
       "owner_role": "execution persistence maintainers",
       "status": "covered",
       "required_verification_layers": ["host_sil"],
-      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1"],
+      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1", "print_array_smoke_24_v1"],
       "required_assertion_ids": ["execution.intent_durability_exact"],
       "related_source_areas": ["FreeRTOS-interface/Model.py", "tools/virtual_workflows/persistence_io.py"],
       "limitations": ["Host filesystem durability evidence does not characterize power-loss hardware."],
@@ -81,7 +81,7 @@
       "owner_role": "execution persistence maintainers",
       "status": "covered",
       "required_verification_layers": ["host_sil"],
-      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1"],
+      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1", "print_array_smoke_24_v1"],
       "required_assertion_ids": ["execution.terminal_bundle_valid"],
       "related_source_areas": ["FreeRTOS-interface/Model.py", "FreeRTOS-interface/Controller.py"],
       "limitations": ["Terminal validation covers isolated scenario data only."],
@@ -356,15 +356,35 @@
       "limitations": ["Stress findings are verification evidence and do not authorize production optimization."],
       "test_node_ids": ["tests/system/test_virtual_print_array_384x10_workflow.py::test_tracked_384x10_fixture_is_exact_and_serpentine", "tests/system/test_virtual_print_array_384x10_workflow.py::test_cli_exposes_stress_scenario_and_single_report_set", "tests/system/test_virtual_print_array_384x10_workflow.py::test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order", "tests/system/test_virtual_print_array_384x10_workflow.py::test_stress_scenario_source_stays_hardware_isolated"],
       "pi_safety_evidence": ["preflight", "hardware_proof"]
+    },
+    {
+      "id": "print_array_smoke_24_v1",
+      "version": 1,
+      "status": "active",
+      "registry_id": "virtual_print_array_24_v1",
+      "workload_fixture_id": "virtual_print_array_24_v1",
+      "workload_fixture_path": "tools/virtual_workflows/fixtures/virtual_print_array_24_v1.json",
+      "tier": "smoke",
+      "suite_ids": ["standard"],
+      "supported_platforms": ["windows_sil"],
+      "timeout_seconds": 60,
+      "action_ids": ["fixture.prepare_authoritative", "app.launch_simulated", "machine.connect_ready", "head.stage_virtual", "pressure.enable_regulation", "array.start_via_ui", "array.wait_for_completions", "array.wait_for_state", "artifact.capture_milestone", "validation.terminal_bundle", "scenario.teardown"],
+      "assertion_ids": ["sil.host_hardware_disabled", "ui.real_app_constructed", "execution.expected_completions", "execution.no_queue_starvation", "execution.intent_durability_exact", "execution.terminal_bundle_valid", "artifacts.required_present"],
+      "capability_ids": ["sil.hardware_isolation.host", "ui.real_app_construction", "execution.array_happy_path", "execution.lookahead_no_starvation", "execution.intent_durability", "execution.terminal_bundle"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "stall_stacks", "screenshots", "scenario_root"],
+      "expected_outcome": "pass",
+      "limitations": ["The standard smoke proves application-facing SIL correctness, not sustained performance, firmware, or physical printing."],
+      "test_node_ids": ["tests/system/test_virtual_workflow_smoke.py::test_smoke_fixture_contract_is_exact", "tests/system/test_virtual_workflow_smoke.py::test_standard_smoke_completes_with_required_evidence"],
+      "pi_safety_evidence": []
     }
   ],
   "suites": [
     {
       "id": "standard",
-      "status": "planned",
+      "status": "active",
       "kind": "standard",
       "platform": "windows_sil",
-      "scenario_ids": [],
+      "scenario_ids": ["print_array_smoke_24_v1"],
       "requires_pi_safety_evidence": []
     },
     {
@@ -460,7 +480,7 @@
   ],
   "policy": {
     "default_registry_id": "virtual_print_array_96_v1",
-    "standard_forbidden_tiers": ["stress"],
+    "standard_forbidden_tiers": ["lifecycle", "regression", "stress"],
     "pi_required_evidence": ["preflight", "hardware_proof"],
     "path_policy": "repository_relative_posix",
     "generated_evidence_updates_manifest": false,
@@ -527,7 +547,7 @@
         "id": "sil.host_hardware_disabled",
         "evidence_kind": "report_path",
         "evidence_path": "safety.hardware_interfaces",
-        "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_scenario_source_has_no_production_machine_or_device_construction", "tests/system/test_virtual_print_array_384x10_workflow.py::test_stress_scenario_source_stays_hardware_isolated"]
+        "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_scenario_source_has_no_production_machine_or_device_construction", "tests/system/test_virtual_print_array_384x10_workflow.py::test_stress_scenario_source_stays_hardware_isolated", "tests/system/test_virtual_workflow_smoke.py::test_standard_smoke_completes_with_required_evidence"]
       },
       {
         "id": "sil.pi_evidence_valid",
@@ -539,31 +559,31 @@
         "id": "ui.real_app_constructed",
         "evidence_kind": "pytest",
         "evidence_path": null,
-        "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_real_ui_print_array_completes_and_writes_inspectable_report"]
+        "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_real_ui_print_array_completes_and_writes_inspectable_report", "tests/system/test_virtual_workflow_smoke.py::test_standard_smoke_completes_with_required_evidence"]
       },
       {
         "id": "execution.expected_completions",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.workflow.values.completed_stock_well_count",
-        "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_real_ui_print_array_completes_and_writes_inspectable_report", "tests/system/test_virtual_print_array_384x10_workflow.py::test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order"]
+        "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_real_ui_print_array_completes_and_writes_inspectable_report", "tests/system/test_virtual_print_array_384x10_workflow.py::test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order", "tests/system/test_virtual_workflow_smoke.py::test_standard_smoke_completes_with_required_evidence"]
       },
       {
         "id": "execution.no_queue_starvation",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.queue.values.unexpected_starvation_count",
-        "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_real_ui_print_array_completes_and_writes_inspectable_report", "tests/system/test_virtual_print_array_384x10_workflow.py::test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order"]
+        "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_real_ui_print_array_completes_and_writes_inspectable_report", "tests/system/test_virtual_print_array_384x10_workflow.py::test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order", "tests/system/test_virtual_workflow_smoke.py::test_standard_smoke_completes_with_required_evidence"]
       },
       {
         "id": "execution.intent_durability_exact",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.authoritative_io",
-        "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_real_ui_print_array_completes_and_writes_inspectable_report", "tests/system/test_virtual_print_array_384x10_workflow.py::test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order"]
+        "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_real_ui_print_array_completes_and_writes_inspectable_report", "tests/system/test_virtual_print_array_384x10_workflow.py::test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order", "tests/system/test_virtual_workflow_smoke.py::test_standard_smoke_completes_with_required_evidence"]
       },
       {
         "id": "execution.terminal_bundle_valid",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.terminal_plan_state",
-        "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_real_ui_print_array_completes_and_writes_inspectable_report", "tests/system/test_virtual_print_array_384x10_workflow.py::test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order"]
+        "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_real_ui_print_array_completes_and_writes_inspectable_report", "tests/system/test_virtual_print_array_384x10_workflow.py::test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order", "tests/system/test_virtual_workflow_smoke.py::test_standard_smoke_completes_with_required_evidence"]
       },
       {
         "id": "execution.multi_stock_head_exchange",
@@ -575,7 +595,7 @@
         "id": "artifacts.required_present",
         "evidence_kind": "report_path",
         "evidence_path": "artifacts",
-        "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_real_ui_print_array_completes_and_writes_inspectable_report"]
+        "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_real_ui_print_array_completes_and_writes_inspectable_report", "tests/system/test_virtual_workflow_smoke.py::test_standard_smoke_completes_with_required_evidence"]
       },
       {
         "id": "ui.injected_stall_detected",

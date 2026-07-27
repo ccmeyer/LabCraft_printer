@@ -25,6 +25,11 @@ FIXTURE_PATH = (
     / "fixtures"
     / "virtual_print_array_96_v1.json"
 )
+SMOKE_FIXTURE_PATH = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "virtual_print_array_24_v1.json"
+)
 STRESS_FIXTURE_PATH = (
     Path(__file__).resolve().parent
     / "fixtures"
@@ -32,14 +37,17 @@ STRESS_FIXTURE_PATH = (
 )
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "verification_reports" / "virtual_workflows"
 WORKLOAD_ID = "virtual_print_array_96_v1"
+SMOKE_WORKLOAD_ID = "virtual_print_array_24_v1"
 STRESS_WORKLOAD_ID = "virtual_print_array_384x10_v1"
 SCENARIO_FIXTURES = {
     WORKLOAD_ID: FIXTURE_PATH,
     STRESS_WORKLOAD_ID: STRESS_FIXTURE_PATH,
+    SMOKE_WORKLOAD_ID: SMOKE_FIXTURE_PATH,
 }
 SCENARIO_COMPLETION_COUNTS = {
     WORKLOAD_ID: 96,
     STRESS_WORKLOAD_ID: 3840,
+    SMOKE_WORKLOAD_ID: 24,
 }
 SCENARIO_NAME = "virtual_print_array"
 SCENARIO_VERSION = "1"
@@ -201,6 +209,8 @@ class VirtualPrintArrayScenarioConfig:
         if stall < 0:
             raise ValueError("inject_ui_stall_ms must be non-negative")
         maximum_completion = SCENARIO_COMPLETION_COUNTS[scenario_id]
+        if scenario_id == SMOKE_WORKLOAD_ID and inject_after == 48:
+            inject_after = maximum_completion // 2
         if not 1 <= inject_after <= maximum_completion:
             raise ValueError(
                 "inject_after_completion must be between 1 and "
@@ -1706,9 +1716,31 @@ def run_virtual_print_array_scenario(
                 )
             context.view.show()
             app.processEvents()
+            banner = getattr(context.view, "simulation_identity_banner", None)
+            banner_label = getattr(
+                context.view,
+                "simulation_identity_label",
+                None,
+            )
+            well_labels = context.view.well_plate_widget.well_labels
             return {
                 "eligibility": eligibility["status"],
                 "visible": bool(config.visible),
+                "simulation_banner": {
+                    "present": banner is not None,
+                    "visible": bool(banner is not None and banner.isVisible()),
+                    "object_name": (
+                        banner.objectName() if banner is not None else None
+                    ),
+                    "text": (
+                        banner_label.text() if banner_label is not None else None
+                    ),
+                },
+                "plate_widget": {
+                    "rows": len(well_labels),
+                    "columns": len(well_labels[0]) if well_labels else 0,
+                    "well_label_count": sum(len(row) for row in well_labels),
+                },
             }
 
         launch_simulated_application(context, launch_application)
@@ -2883,6 +2915,7 @@ __all__ = [
     "SCENARIO_NAME",
     "SCENARIO_VERSION",
     "SCENARIO_FIXTURES",
+    "SMOKE_WORKLOAD_ID",
     "STRESS_WORKLOAD_ID",
     "WORKLOAD_ID",
     "VirtualPrintArrayScenarioConfig",
